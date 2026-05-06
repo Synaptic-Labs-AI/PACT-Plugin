@@ -242,9 +242,17 @@ def _validate_handoff_schema(handoff: object) -> str | None:
     return None
 
 
-def evaluate_lifecycle(input_data: dict) -> list[str]:
-    """Return list of advisory strings. Empty list → ALLOW silently."""
-    advisories: list[str] = []
+def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
+    """Return list of (rule, message) advisory tuples. Empty list → ALLOW
+    silently.
+
+    The ``rule`` element is a behavioral identifier (e.g.
+    ``"teachback_addblocks_missing"``, ``"self_completion"``) used in
+    journal events; the ``message`` element is the human-readable
+    advisory text emitted via additionalContext. F-row labels from the
+    #662 failure-mode inventory are retained in code comments only.
+    """
+    advisories: list[tuple[str, str]] = []
     tool_name = input_data.get("tool_name", "")
     tool_input = input_data.get("tool_input") or {}
     tool_response = input_data.get("tool_response") or input_data.get("tool_output") or {}
@@ -268,22 +276,24 @@ def evaluate_lifecycle(input_data: dict) -> list[str]:
             owner = ""
 
         if "TEACHBACK" in subject_upper and not tool_input.get("addBlocks"):
-            advisories.append(
-                "PACT task_lifecycle_gate F8: Teachback Task created "
-                "without addBlocks=[<work_task_id>]. Teachback gate must "
-                "block the work task (per pact-completion-authority)."
-            )
+            advisories.append((
+                "teachback_addblocks_missing",
+                "PACT task_lifecycle_gate: Teachback Task created without "
+                "addBlocks=[<work_task_id>]. The teachback gate must block "
+                "the work task (per pact-completion-authority).",
+            ))
 
         if (
             "TEACHBACK" not in subject_upper
             and owner.startswith("pact-")
             and not tool_input.get("addBlockedBy")
         ):
-            advisories.append(
-                f"PACT task_lifecycle_gate F9: pact-* Task created "
+            advisories.append((
+                "work_addblockedby_missing",
+                f"PACT task_lifecycle_gate: pact-* Task created "
                 f"(owner={owner!r}) without addBlockedBy=[<teachback_id>]. "
-                "Work tasks must block on teachback acceptance."
-            )
+                "Work tasks must block on teachback acceptance.",
+            ))
 
     # ③ F10 / F11 / F12 / F13 (TaskUpdate to status=completed)
     if tool_name == "TaskUpdate" and tool_input.get("status") == "completed":
@@ -313,28 +323,31 @@ def evaluate_lifecycle(input_data: dict) -> list[str]:
         if is_work_task:
             handoff = metadata.get("handoff")
             if not handoff:
-                advisories.append(
-                    f"PACT task_lifecycle_gate F11: Task {task_id} "
+                advisories.append((
+                    "handoff_missing",
+                    f"PACT task_lifecycle_gate: Task {task_id} "
                     f"(owner={owner!r}) marked completed without "
-                    "metadata.handoff. HANDOFF synthesis missed."
-                )
+                    "metadata.handoff. HANDOFF synthesis was missed.",
+                ))
             else:
                 schema_problem = _validate_handoff_schema(handoff)
                 if schema_problem:
-                    advisories.append(
-                        f"PACT task_lifecycle_gate F13: Task {task_id} "
-                        f"metadata.handoff schema invalid — {schema_problem}."
-                    )
+                    advisories.append((
+                        "handoff_schema_invalid",
+                        f"PACT task_lifecycle_gate: Task {task_id} "
+                        f"metadata.handoff schema is invalid — {schema_problem}.",
+                    ))
 
         # F10 — teachback completion requires paired wake-SendMessage to owner
         if "TEACHBACK" in subject_upper and owner:
             if not _has_paired_sendmessage(owner, PAIRED_SENDMESSAGE_WINDOW_S):
-                advisories.append(
-                    f"PACT task_lifecycle_gate F10: Teachback Task {task_id} "
-                    f"completed without paired wake-SendMessage to {owner!r} "
-                    f"in last {PAIRED_SENDMESSAGE_WINDOW_S}s. "
-                    "blockedBy is pull-only; teammate idles indefinitely."
-                )
+                advisories.append((
+                    "completion_no_paired_send",
+                    f"PACT task_lifecycle_gate: Teachback Task {task_id} "
+                    f"completed without a paired wake-SendMessage to "
+                    f"{owner!r} in the last {PAIRED_SENDMESSAGE_WINDOW_S}s. "
+                    "blockedBy is pull-only; teammate idles indefinitely.",
+                ))
 
         # F12 — teammate self-completion
         actor = trustworthy_actor_name(input_data)
@@ -345,14 +358,15 @@ def evaluate_lifecycle(input_data: dict) -> list[str]:
             and owner not in SELF_COMPLETE_EXEMPT_AGENTS
             and not is_self_complete_exempt(task)
         ):
-            advisories.append(
-                f"PACT task_lifecycle_gate F12: teammate {actor!r} "
+            advisories.append((
+                "self_completion",
+                f"PACT task_lifecycle_gate: teammate {actor!r} "
                 f"self-completed Task {task_id} without carve-out. "
                 "Lead-only completion authority — see "
                 "pact-completion-authority.md. Task marked "
                 "metadata.completion_disputed=true; lead must re-complete "
-                "intentionally to clear."
-            )
+                "intentionally to clear.",
+            ))
             _writeback_dispute(task_id)
 
     return advisories
@@ -361,16 +375,25 @@ def evaluate_lifecycle(input_data: dict) -> list[str]:
 # ─── F23 journal emit ────────────────────────────────────────────────────────
 
 
-def _journal_lifecycle_decision(input_data: dict, advisories: list[str]) -> None:
+def _journal_lifecycle_decision(
+    input_data: dict, advisories: list[tuple[str, str]]
+) -> None:
     """Emit a free-form 'lifecycle_decision' journal event. Best-effort —
     fail-open if journal append fails (matches existing append_event policy).
+
+    Each advisory is a (rule, message) tuple; the journal records both the
+    behavioral rule identifiers and the human-readable messages so
+    downstream tooling can group by rule without parsing prose.
     """
     try:
+        rules = [rule for rule, _ in advisories]
+        messages = [msg for _, msg in advisories]
         event = make_event(
             "lifecycle_decision",
             tool_name=input_data.get("tool_name", ""),
             advisories_count=len(advisories),
-            advisories=advisories,
+            rules=rules,
+            advisories=messages,
             verdict="advisory" if advisories else "allow",
         )
         append_event(event)
@@ -418,7 +441,7 @@ def main() -> None:
     output = {
         "hookSpecificOutput": {
             "hookEventName": "PostToolUse",
-            "additionalContext": "\n\n".join(advisories),
+            "additionalContext": "\n\n".join(msg for _, msg in advisories),
         }
     }
     print(json.dumps(output))

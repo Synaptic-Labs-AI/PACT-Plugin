@@ -15,7 +15,7 @@ F-row coverage (architect §6 mapping):
   F14 — name already in team config members                     → DENY
   F15 — plugin_root agents/ missing                             → DENY
   F21 — runtime gate-logic exception fail-closed                → DENY (covered via subprocess in smoke)
-  F23 — every decision (ALLOW + WARN + DENY) emits journal event with f_row + verdict
+  F23 — every decision (ALLOW + WARN + DENY) emits journal event with rule + verdict
   F26 — prompt redaction at journal-write boundary
   Carve-outs — SOLO_EXEMPT / non-pact-* subagent_type           → ALLOW
   Anti-sprawl — single evaluate_dispatch composition (auditor §11 YELLOW)
@@ -23,8 +23,9 @@ F-row coverage (architect §6 mapping):
 Disciplines applied:
   - PR #660 R2: never pop shared.* from sys.modules in this test process.
     Subprocess sabotage (F21) lives in the smoke file using PYTHONSAFEPATH.
-  - #638 cardinality: each rule's deny is asserted by f_row tag, not deny
-    string equality, so wording iterations don't cause test churn.
+  - #638 cardinality: each rule's deny is asserted by behavioral rule
+    identifier (e.g. ``"name_required"``, ``"long_inline_mission"``), not
+    deny string equality, so wording iterations don't cause test churn.
   - feedback_no_planning_artifact_test_names: F-row references are
     functional categories, not provenance — kept; no T#/issue# prefixes.
   - F26 secret literals are split via Python adjacent-string-literal
@@ -213,7 +214,8 @@ def test_f1_or_f3_deny_when_name_is_empty_or_whitespace(
     assert hso["hookEventName"] == "PreToolUse"
     assert hso["permissionDecision"] == "deny"
     reason = hso["permissionDecisionReason"]
-    assert ("F1" in reason) or ("F3" in reason)
+    assert ("name_required" in reason) or ("name= parameter is required" in reason) \
+        or ("name_invalid_regex" in reason) or ("must match" in reason)
 
 
 def test_f1_deny_when_name_key_missing(tmp_path, monkeypatch, capsys):
@@ -223,7 +225,7 @@ def test_f1_deny_when_name_key_missing(tmp_path, monkeypatch, capsys):
     del payload["tool_input"]["name"]
     code, out = _run_main(payload, capsys)
     assert code == 2
-    assert "F1" in out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "name= parameter is required" in out["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 # =============================================================================
@@ -238,7 +240,7 @@ def test_f2_deny_when_team_name_key_missing(tmp_path, monkeypatch, capsys):
     del payload["tool_input"]["team_name"]
     code, out = _run_main(payload, capsys)
     assert code == 2
-    assert "F2" in out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "team_name= parameter is required" in out["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 # =============================================================================
@@ -253,7 +255,7 @@ def test_f3_deny_when_name_exceeds_64_char_cap(tmp_path, monkeypatch, capsys):
     code, out = _run_main(_make_input(name=long_name), capsys)
     assert code == 2
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "F3" in reason
+    assert "exceeds limit" in reason
     assert "length" in reason.lower()
 
 
@@ -273,7 +275,10 @@ def test_f3_allows_name_at_64_char_boundary(tmp_path, monkeypatch, capsys):
     # Either ALLOW (F3 passed, all other rules pass) or some unrelated DENY,
     # but NOT a F3 length DENY — that's the load-bearing assertion.
     if code == 2:
-        assert "F3" not in out["hookSpecificOutput"]["permissionDecisionReason"]
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "exceeds limit" not in reason
+        assert "must match" not in reason
+        assert "reserved-token" not in reason
     else:
         assert code == 0
 
@@ -309,11 +314,12 @@ def test_f3_deny_invalid_name_chars(bad_name, tmp_path, monkeypatch, capsys):
         # Regex ^[a-z0-9-]+$ accepts trailing dash; this case should ALLOW
         # (or fail another rule, but not F3 regex). Skip the deny assertion.
         if code == 2:
-            assert "F3" not in out["hookSpecificOutput"]["permissionDecisionReason"]
+            reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+            assert "must match" not in reason
         return
     assert code == 2
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "F3" in reason
+    assert "must match" in reason
 
 
 def test_f3_deny_fullwidth_lookalike_after_nfkc(tmp_path, monkeypatch, capsys):
@@ -352,8 +358,7 @@ def test_f3_deny_reserved_token(reserved, tmp_path, monkeypatch, capsys):
     code, out = _run_main(_make_input(name=reserved), capsys)
     assert code == 2
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "F3" in reason
-    assert "reserved" in reason.lower()
+    assert "reserved-token" in reason
 
 
 # =============================================================================
@@ -367,8 +372,7 @@ def test_f4_deny_when_subagent_type_not_in_registry(tmp_path, monkeypatch, capsy
     code, out = _run_main(_make_input(subagent_type="pact-nonexistent"), capsys)
     assert code == 2
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "F4" in reason
-    assert "registered" in reason.lower()
+    assert "not a registered PACT specialist" in reason
 
 
 # =============================================================================
@@ -382,7 +386,7 @@ def test_f5_deny_when_team_name_mismatch(tmp_path, monkeypatch, capsys):
     code, out = _run_main(_make_input(team_name="wrong-team"), capsys)
     assert code == 2
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "F5" in reason
+    assert "does not match current session team" in reason
 
 
 def test_f5_deny_when_session_team_unavailable(tmp_path, monkeypatch, capsys):
@@ -401,7 +405,7 @@ def test_f5_deny_when_session_team_unavailable(tmp_path, monkeypatch, capsys):
     code, out = _run_main(_make_input(team_name=_TEAM), capsys)
     assert code == 2
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "F5" in reason
+    assert "session team_name is unavailable" in reason
 
 
 # =============================================================================
@@ -415,7 +419,7 @@ def test_f6_deny_when_no_task_for_owner(tmp_path, monkeypatch, capsys):
     code, out = _run_main(_make_input(), capsys)
     assert code == 2
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "F6" in reason
+    assert "no Task assigned" in reason
 
 
 def test_f6_deny_when_task_owner_differs(tmp_path, monkeypatch, capsys):
@@ -424,7 +428,7 @@ def test_f6_deny_when_task_owner_differs(tmp_path, monkeypatch, capsys):
     code, out = _run_main(_make_input(), capsys)
     assert code == 2
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "F6" in reason
+    assert "no Task assigned" in reason
 
 
 def test_f6_deny_when_task_completed_only(tmp_path, monkeypatch, capsys):
@@ -434,7 +438,7 @@ def test_f6_deny_when_task_completed_only(tmp_path, monkeypatch, capsys):
     _full_setup(monkeypatch, tmp_path, tasks=((_NAME, "completed"),))
     code, out = _run_main(_make_input(), capsys)
     assert code == 2
-    assert "F6" in out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "no Task assigned" in out["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 # =============================================================================
@@ -458,7 +462,8 @@ def test_f7_warn_when_prompt_lacks_task_reference(tmp_path, monkeypatch, capsys)
     hso = out["hookSpecificOutput"]
     assert hso["hookEventName"] == "PreToolUse"
     assert "additionalContext" in hso
-    assert "F7" in hso["additionalContext"]
+    assert "prompt is long" in hso["additionalContext"] \
+        or "lacks a TaskList reference" in hso["additionalContext"]
 
 
 def test_f7_warn_when_prompt_exceeds_800_chars(tmp_path, monkeypatch, capsys):
@@ -472,7 +477,8 @@ def test_f7_warn_when_prompt_exceeds_800_chars(tmp_path, monkeypatch, capsys):
     assert code == 0
     hso = out["hookSpecificOutput"]
     assert "additionalContext" in hso
-    assert "F7" in hso["additionalContext"]
+    assert "prompt is long" in hso["additionalContext"] \
+        or "lacks a TaskList reference" in hso["additionalContext"]
 
 
 def test_f7_deny_in_deny_mode(tmp_path, monkeypatch, capsys):
@@ -485,7 +491,8 @@ def test_f7_deny_in_deny_mode(tmp_path, monkeypatch, capsys):
     assert code == 2
     hso = out["hookSpecificOutput"]
     assert hso["permissionDecision"] == "deny"
-    assert "F7" in hso["permissionDecisionReason"]
+    assert "prompt is long" in hso["permissionDecisionReason"] \
+        or "lacks a TaskList reference" in hso["permissionDecisionReason"]
 
 
 def test_f7_silent_allow_in_shadow_mode(tmp_path, monkeypatch, capsys):
@@ -500,9 +507,10 @@ def test_f7_silent_allow_in_shadow_mode(tmp_path, monkeypatch, capsys):
     code, out = _run_main(_make_input(prompt="No reference."), capsys)
     assert code == 0
     assert out == _SUPPRESS_EXPECTED
-    # Journal sees the F7 trigger.
+    # Journal sees the long-inline-mission trigger.
     assert any(
-        e.get("type") == "dispatch_decision" and e.get("f_row") == "F7"
+        e.get("type") == "dispatch_decision"
+        and e.get("rule") == "long_inline_mission"
         for e in captured
     )
 
@@ -523,7 +531,7 @@ def test_f14_deny_when_name_already_in_team_members(tmp_path, monkeypatch, capsy
     code, out = _run_main(_make_input(), capsys)
     assert code == 2
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "F14" in reason
+    assert "is already a live member" in reason
 
 
 def test_f14_allows_unique_name_when_other_members_present(
@@ -555,7 +563,7 @@ def test_f15_deny_when_plugin_agents_missing(tmp_path, monkeypatch, capsys):
     code, out = _run_main(_make_input(), capsys)
     assert code == 2
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "F15" in reason
+    assert "plugin agents/ directory is unavailable" in reason
 
 
 # =============================================================================
@@ -610,8 +618,8 @@ def test_f23_journal_emit_on_allow(tmp_path, monkeypatch, capsys):
     assert last["decision"] == "ALLOW"
 
 
-def test_f23_journal_emit_on_deny_carries_f_row(tmp_path, monkeypatch, capsys):
-    """DENY journal event carries the f_row tag (F1 here)."""
+def test_f23_journal_emit_on_deny_carries_rule(tmp_path, monkeypatch, capsys):
+    """DENY journal event carries the rule identifier (name_required here)."""
     captured = _capture_journal(monkeypatch)
     _full_setup(monkeypatch, tmp_path)
     _run_main(_make_input(name=""), capsys)
@@ -621,11 +629,11 @@ def test_f23_journal_emit_on_deny_carries_f_row(tmp_path, monkeypatch, capsys):
         if e.get("type") == "dispatch_decision" and e.get("decision") == "DENY"
     ]
     assert deny_events
-    assert deny_events[-1]["f_row"] == "F1"
+    assert deny_events[-1]["rule"] == "name_required"
 
 
 def test_f23_journal_emit_on_warn_carries_f7(tmp_path, monkeypatch, capsys):
-    """WARN (F7 default mode) journal event records f_row='F7'."""
+    """WARN (F7 default mode) journal event records rule='long_inline_mission'."""
     import dispatch_gate
 
     monkeypatch.setattr(dispatch_gate, "F7_MODE", "warn")
@@ -638,7 +646,7 @@ def test_f23_journal_emit_on_warn_carries_f7(tmp_path, monkeypatch, capsys):
         if e.get("type") == "dispatch_decision" and e.get("decision") == "WARN"
     ]
     assert warn_events
-    assert warn_events[-1]["f_row"] == "F7"
+    assert warn_events[-1]["rule"] == "long_inline_mission"
 
 
 # =============================================================================
@@ -708,7 +716,7 @@ def test_evaluate_dispatch_is_single_composition_function():
     per-row handlers.
 
     Asserts: dispatch_gate exposes ONE function with `evaluate_` prefix
-    that returns a 3-tuple (decision, reason, f_row). No per-F-row
+    that returns a 3-tuple (decision, reason, rule). No per-F-row
     public functions snuck in.
     """
     import dispatch_gate

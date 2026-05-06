@@ -79,7 +79,7 @@ def test_f8_silent_when_teachback_carries_addblocks(pact_context):
         "tool_response": {},
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert not any("F8" in a for a in advisories), (
+    assert not any(rule == "teachback_addblocks_missing" for rule, _ in advisories), (
         f"expected silent (F8 satisfied), got: {advisories}"
     )
 
@@ -101,7 +101,7 @@ def test_f9_silent_when_work_task_carries_addblockedby(pact_context):
         "tool_response": {},
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert not any("F9" in a for a in advisories)
+    assert not any(rule == "work_addblockedby_missing" for rule, _ in advisories)
 
 
 def test_f9_silent_when_owner_is_not_pact_specialist(pact_context):
@@ -116,7 +116,7 @@ def test_f9_silent_when_owner_is_not_pact_specialist(pact_context):
         "tool_response": {},
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert not any("F9" in a for a in advisories)
+    assert not any(rule == "work_addblockedby_missing" for rule, _ in advisories)
 
 
 # =============================================================================
@@ -180,7 +180,7 @@ def test_f10_silent_when_paired_sendmessage_within_window(
         },
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert not any("F10" in a for a in advisories), (
+    assert not any(rule == "completion_no_paired_send" for rule, _ in advisories), (
         f"expected silent within 120s window, got: {advisories}"
     )
 
@@ -205,7 +205,7 @@ def test_f10_silent_at_119s_boundary(tmp_path, monkeypatch, pact_context):
         },
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert not any("F10" in a for a in advisories)
+    assert not any(rule == "completion_no_paired_send" for rule, _ in advisories)
 
 
 def test_f10_advisory_at_121s_boundary(tmp_path, monkeypatch, pact_context):
@@ -228,7 +228,7 @@ def test_f10_advisory_at_121s_boundary(tmp_path, monkeypatch, pact_context):
         },
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert any("F10" in a for a in advisories), (
+    assert any(rule == "completion_no_paired_send" for rule, _ in advisories), (
         f"expected F10 outside window, got: {advisories}"
     )
 
@@ -253,7 +253,7 @@ def test_f10_advisory_when_inbox_empty(tmp_path, monkeypatch, pact_context):
         },
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert any("F10" in a for a in advisories)
+    assert any(rule == "completion_no_paired_send" for rule, _ in advisories)
 
 
 # =============================================================================
@@ -286,8 +286,8 @@ def test_f11_silent_when_handoff_well_formed(pact_context):
         },
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert not any("F11" in a for a in advisories)
-    assert not any("F13" in a for a in advisories)
+    assert not any(rule == "handoff_missing" for rule, _ in advisories)
+    assert not any(rule == "handoff_schema_invalid" for rule, _ in advisories)
 
 
 # =============================================================================
@@ -333,11 +333,11 @@ def test_f13_advisory_for_each_missing_required_field(missing_field, pact_contex
         },
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert any("F13" in a for a in advisories), (
+    assert any(rule == "handoff_schema_invalid" for rule, _ in advisories), (
         f"expected F13 advisory for missing {missing_field}, got: {advisories}"
     )
     # F11 must NOT also fire — disjoint per impl §289 / lead clarification.
-    assert not any("F11" in a for a in advisories)
+    assert not any(rule == "handoff_missing" for rule, _ in advisories)
 
 
 def test_f13_advisory_when_handoff_is_non_dict(pact_context):
@@ -356,7 +356,7 @@ def test_f13_advisory_when_handoff_is_non_dict(pact_context):
         },
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert any("F13" in a for a in advisories)
+    assert any(rule == "handoff_schema_invalid" for rule, _ in advisories)
 
 
 # =============================================================================
@@ -390,7 +390,7 @@ def test_f12_silent_when_secretary_self_completes(pact_context):
         },
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert not any("F12" in a for a in advisories)
+    assert not any(rule == "self_completion" for rule, _ in advisories)
 
 
 def test_f12_silent_when_signal_task_self_completes(pact_context):
@@ -424,7 +424,7 @@ def test_f12_silent_when_signal_task_self_completes(pact_context):
         },
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert not any("F12" in a for a in advisories)
+    assert not any(rule == "self_completion" for rule, _ in advisories)
 
 
 def test_f12_skips_when_actor_unresolvable_documents_architect_5_3_deviation(
@@ -467,7 +467,7 @@ def test_f12_skips_when_actor_unresolvable_documents_architect_5_3_deviation(
     }
     advisories = tlg.evaluate_lifecycle(payload)
     # Architect §5.3 would expect F12; current impl skips. Assert SKIP.
-    assert not any("F12" in a for a in advisories), (
+    assert not any(rule == "self_completion" for rule, _ in advisories), (
         "If F12 fired here, the gate has been changed to match architect "
         "§5.3 (advisory-emit on unresolvable actor). Confirm the change "
         "was intentional and update this test + close the follow-up issue."
@@ -505,7 +505,7 @@ def test_f12_silent_when_lead_completes_teammates_task(pact_context):
         },
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert not any("F12" in a for a in advisories)
+    assert not any(rule == "self_completion" for rule, _ in advisories)
 
 
 # =============================================================================

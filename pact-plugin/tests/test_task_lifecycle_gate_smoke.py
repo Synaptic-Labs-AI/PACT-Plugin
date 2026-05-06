@@ -65,7 +65,7 @@ def test_s1_f8_teachback_create_without_addblocks(pact_context, capsys):
         "tool_response": {},
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert any("F8" in a for a in advisories), (
+    assert any(rule == "teachback_addblocks_missing" for rule, _ in advisories), (
         f"expected F8 advisory, got: {advisories}"
     )
 
@@ -85,7 +85,7 @@ def test_s2_f9_work_task_create_without_addblockedby(pact_context, capsys):
         "tool_response": {},
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert any("F9" in a for a in advisories), (
+    assert any(rule == "work_addblockedby_missing" for rule, _ in advisories), (
         f"expected F9 advisory, got: {advisories}"
     )
 
@@ -108,11 +108,11 @@ def test_s3_f11_work_task_completed_without_handoff(pact_context, capsys):
         },
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert any("F11" in a for a in advisories), (
+    assert any(rule == "handoff_missing" for rule, _ in advisories), (
         f"expected F11 advisory, got: {advisories}"
     )
     # F13 must NOT also fire — disjoint per lead clarification.
-    assert not any("F13" in a for a in advisories)
+    assert not any(rule == "handoff_schema_invalid" for rule, _ in advisories)
 
 
 # ─── S4: F12 — teammate self-completes → advisory + FS writeback ──────────
@@ -159,7 +159,7 @@ def test_s4_f12_self_completion_writeback(tmp_path, monkeypatch, pact_context):
         },
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert any("F12" in a for a in advisories), (
+    assert any(rule == "self_completion" for rule, _ in advisories), (
         f"expected F12 advisory, got: {advisories}"
     )
 

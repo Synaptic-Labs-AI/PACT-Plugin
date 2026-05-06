@@ -154,7 +154,7 @@ def test_f1_deny_empty_name(tmp_path, monkeypatch, capsys):
     hso = out["hookSpecificOutput"]
     assert hso["hookEventName"] == "PreToolUse"
     assert hso["permissionDecision"] == "deny"
-    assert "F1" in hso["permissionDecisionReason"]
+    assert "name= parameter is required" in hso["permissionDecisionReason"]
 
 
 def test_f2_deny_empty_team_name(tmp_path, monkeypatch, capsys):
@@ -167,7 +167,7 @@ def test_f2_deny_empty_team_name(tmp_path, monkeypatch, capsys):
     hso = out["hookSpecificOutput"]
     assert hso["hookEventName"] == "PreToolUse"
     assert hso["permissionDecision"] == "deny"
-    assert "F2" in hso["permissionDecisionReason"]
+    assert "team_name= parameter is required" in hso["permissionDecisionReason"]
 
 
 def test_f3_deny_reserved_name(tmp_path, monkeypatch, capsys):
@@ -181,8 +181,7 @@ def test_f3_deny_reserved_name(tmp_path, monkeypatch, capsys):
     hso = out["hookSpecificOutput"]
     assert hso["hookEventName"] == "PreToolUse"
     assert hso["permissionDecision"] == "deny"
-    assert "F3" in hso["permissionDecisionReason"]
-    assert "reserved" in hso["permissionDecisionReason"].lower()
+    assert "reserved-token" in hso["permissionDecisionReason"]
 
 
 def test_solo_exempt_carve_out(tmp_path, monkeypatch, capsys):

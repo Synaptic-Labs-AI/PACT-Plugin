@@ -216,11 +216,14 @@ def _team_member_names(team_name: str) -> set[str]:
 # ─── pure rule-eval composition (testable without stdin/stdout) ────────────
 
 def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
-    """Single composition function. Returns ``(decision, reason, f_row)``.
+    """Single composition function. Returns ``(decision, reason, rule)``.
 
     decision ∈ {``"ALLOW"``, ``"DENY"``, ``"WARN"``}.
     reason: human-readable explanation (None for ALLOW).
-    f_row: which F-row fired (e.g. ``"F1"``); None for ALLOW or carve-out.
+    rule: behavioral rule identifier (e.g. ``"name_required"``,
+        ``"long_inline_mission"``); None for ALLOW or carve-out. Values
+        describe what the rule checks, not the F-row index from #662.
+        F-row cross-references for maintainers stay in code comments.
 
     Cheapest-rule-first ordering with short-circuit on first non-ALLOW.
     Pure function — no stdin/stdout, no FS writes, no exceptions raised
@@ -247,15 +250,14 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
     # ③ F1, F2 — string presence (mandatory protocol fields).
     if not isinstance(name, str) or not name:
         return ("DENY",
-                "PACT dispatch_gate F1: pact-* specialist requires name=. "
-                "Use Agent(subagent_type='pact-*', name='<role>', "
-                "team_name='<session-team>', ...). See pact-orchestrator §11.",
-                "F1")
+                "PACT dispatch_gate: name= parameter is required for "
+                "pact-* specialist spawns. See orchestrator persona §11.",
+                "name_required")
     if not isinstance(team_name, str) or not team_name:
         return ("DENY",
-                "PACT dispatch_gate F2: pact-* specialist requires team_name=. "
-                "Use the team name listed in CLAUDE.md §Current Session.",
-                "F2")
+                "PACT dispatch_gate: team_name= parameter is required for "
+                "pact-* specialist spawns.",
+                "team_name_required")
 
     # ④ F3 — name validation. Length cap FIRST (cheap), then NFKC
     # normalization (defends against fullwidth/lookalike unicode that
@@ -263,22 +265,23 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
     # then reserved-token check on the normalized form.
     if len(name) > NAME_MAX_LENGTH:
         return ("DENY",
-                f"PACT dispatch_gate F3: name length={len(name)} > "
-                f"{NAME_MAX_LENGTH}. Names must be ≤{NAME_MAX_LENGTH} chars.",
-                "F3")
+                f"PACT dispatch_gate: name length {len(name)} exceeds "
+                f"limit {NAME_MAX_LENGTH}.",
+                "name_too_long")
     normalized_name = unicodedata.normalize("NFKC", name)
     if not NAME_REGEX.match(normalized_name):
         return ("DENY",
-                f"PACT dispatch_gate F3: name={name!r} violates "
-                r"^[a-z0-9-]+$ (after NFKC normalization). "
-                "Names must be lowercase ASCII alphanumeric + hyphen.",
-                "F3")
+                f"PACT dispatch_gate: name {name!r} must match "
+                r"^[a-z0-9-]+$ (lowercase alphanumerics + hyphens, "
+                "checked after NFKC normalization).",
+                "name_invalid_regex")
     if normalized_name in RESERVED_NAMES:
         return ("DENY",
-                f"PACT dispatch_gate F3: name={name!r} is reserved "
-                "(would collide with PACT routing literal or schema "
-                "resolver type). Choose a unique role-descriptive name.",
-                "F3")
+                f"PACT dispatch_gate: name {name!r} is in the "
+                "reserved-token set (would collide with a PACT routing "
+                "literal or schema resolver type). Choose a unique "
+                "role-descriptive name.",
+                "name_reserved_token")
 
     # ⑤ F15 — plugin agents/ presence (cheap stat). Caught BEFORE F4 so
     # a missing plugin install gets the more actionable "plugin broken"
@@ -286,18 +289,18 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
     plugin_root = pact_context.get_plugin_root()
     if not plugin_root or not (Path(plugin_root) / "agents").is_dir():
         return ("DENY",
-                "PACT dispatch_gate F15: plugin agents/ directory "
+                "PACT dispatch_gate: plugin agents/ directory is "
                 "unavailable. Plugin install may be broken; check "
                 "pact-session-context.json plugin_root field.",
-                "F15")
+                "plugin_agents_missing")
     # F4 — subagent_type registered. Empty registry (which would also
     # trigger F15 above) is fail-closed by is_registered_pact_specialist.
     if not is_registered_pact_specialist(subagent_type):
         return ("DENY",
-                f"PACT dispatch_gate F4: subagent_type={subagent_type!r} "
-                "is not a registered PACT specialist. See "
-                "pact-plugin/agents/pact-*.md for the canonical list.",
-                "F4")
+                f"PACT dispatch_gate: subagent_type {subagent_type!r} "
+                "is not a registered PACT specialist (no matching "
+                "agents/pact-*.md).",
+                "specialist_not_registered")
 
     # ⑥ F5 — session-team match with empty-source fail-closed (decision h).
     # Adversary passing team_name='' would equal an empty session_team if
@@ -306,34 +309,34 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
     session_team = pact_context.get_team_name()
     if not session_team:
         return ("DENY",
-                "PACT dispatch_gate F5: session team_name unavailable. "
-                "pact-session-context.json missing or unreadable; "
-                "fail-closed. Re-run /PACT:bootstrap to restore session "
-                "context.",
-                "F5")
+                "PACT dispatch_gate: session team_name is unavailable "
+                "(pact-session-context.json missing or unreadable). "
+                "Re-run /PACT:bootstrap to restore session context.",
+                "team_name_unavailable")
     if team_name.lower() != session_team:
         return ("DENY",
-                f"PACT dispatch_gate F5: team_name={team_name!r} doesn't "
-                f"match session team {session_team!r}. Use the team name "
-                "listed in CLAUDE.md §Current Session.",
-                "F5")
+                f"PACT dispatch_gate: team_name {team_name!r} does not "
+                f"match current session team {session_team!r}. Use the "
+                "team name listed in CLAUDE.md §Current Session.",
+                "team_name_mismatch")
 
     # ⑦ F14 — uniqueness against live team members.
     members = _team_member_names(team_name)
     if name in members:
         return ("DENY",
-                f"PACT dispatch_gate F14: name={name!r} is already a "
-                f"live member of team {team_name!r}. Use a unique name "
+                f"PACT dispatch_gate: name {name!r} is already a live "
+                f"member of team {team_name!r}. Use a unique name "
                 "(append a numeric suffix or role-descriptor variant).",
-                "F14")
+                "name_not_unique")
 
     # ⑧ F6 — TaskCreate before Agent spawn.
     if not has_task_assigned(team_name, name):
         return ("DENY",
-                f"PACT dispatch_gate F6: no Task in team {team_name!r} "
-                f"with owner={name!r}. TaskCreate(owner={name!r}) "
-                "before Agent spawn so the teammate has work on arrival.",
-                "F6")
+                f"PACT dispatch_gate: no Task assigned to owner={name!r} "
+                f"in team {team_name!r}. Create Task A (teachback) + "
+                "Task B (work) before spawn so the teammate has work on "
+                "arrival.",
+                "no_task_assigned")
 
     # ⑨ F7 — prompt heuristic. Mode controlled by
     # PACT_DISPATCH_INLINE_MISSION_MODE env-var (warn|deny|shadow; default
@@ -342,28 +345,34 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
     # frequency without WARN-noise.
     if (len(prompt) > PROMPT_MAX_LENGTH
             or not any(phrase in prompt for phrase in TASK_REFERENCE_PHRASES)):
-        msg = (f"PACT dispatch_gate F7: prompt length={len(prompt)} "
-               f"(>{PROMPT_MAX_LENGTH}) or no TaskList reference. "
-               "Mission belongs in the Task description, not the spawn "
-               "prompt. WARN means STOP and re-dispatch correctly: put "
-               "the mission in TaskCreate(description=...) and let the "
-               "teammate read it via TaskList/TaskGet.")
+        msg = (f"PACT dispatch_gate: prompt is long ({len(prompt)} "
+               f"chars, threshold {PROMPT_MAX_LENGTH}) or lacks a "
+               "TaskList reference. Mission belongs in the Task "
+               "description, not the spawn prompt. WARN means STOP and "
+               "re-dispatch correctly: put the mission in "
+               "TaskCreate(description=...) and let the teammate read "
+               "it via TaskList/TaskGet. See orchestrator persona §11.")
         if F7_MODE == "deny":
-            return ("DENY", msg, "F7")
+            return ("DENY", msg, "long_inline_mission")
         if F7_MODE == "shadow":
-            # Journal sees F7 fired; caller treats as ALLOW (no advisory).
-            return ("ALLOW", msg, "F7")
-        return ("WARN", msg, "F7")
+            # Journal sees the rule fired; caller treats as ALLOW (no advisory).
+            return ("ALLOW", msg, "long_inline_mission")
+        return ("WARN", msg, "long_inline_mission")
 
     return ("ALLOW", None, None)
 
 
 # ─── main ──────────────────────────────────────────────────────────────────
 
-def _journal_decision(decision: str, reason: str | None, f_row: str | None,
+def _journal_decision(decision: str, reason: str | None, rule: str | None,
                        tool_input: dict) -> None:
     """F23: emit one journal event per gate decision. Best-effort sink —
     errors are swallowed so the gate's primary decision always stands.
+
+    The ``rule`` field carries a behavioral identifier (e.g.
+    ``"name_required"``, ``"long_inline_mission"``), not the F-row index
+    from the #662 failure-mode inventory. F-row labels are retained in
+    code comments and runbook context but never in journaled values.
 
     Note: ``"dispatch_decision"`` is not registered in
     ``_REQUIRED_FIELDS_BY_TYPE`` in shared/session_journal.py, so the
@@ -378,7 +387,7 @@ def _journal_decision(decision: str, reason: str | None, f_row: str | None,
         event = make_event(
             "dispatch_decision",
             decision=decision,
-            f_row=f_row,
+            rule=rule,
             subagent_type=tool_input.get("subagent_type") if isinstance(tool_input, dict) else None,
             name=tool_input.get("name") if isinstance(tool_input, dict) else None,
             team_name=tool_input.get("team_name") if isinstance(tool_input, dict) else None,
@@ -416,14 +425,14 @@ def main() -> None:
     tool_input = input_data.get("tool_input", {}) or {}
 
     try:
-        decision, reason, f_row = evaluate_dispatch(tool_input)
+        decision, reason, rule = evaluate_dispatch(tool_input)
     except Exception as e:
         # F25 (runtime fail-closed): runtime exception in the rule logic
         # is the same defect class as #658 — must DENY, must include
         # hookEventName.
         _emit_load_failure_deny("runtime", e)
 
-    _journal_decision(decision, reason, f_row, tool_input)
+    _journal_decision(decision, reason, rule, tool_input)
 
     if decision == "ALLOW":
         print(_SUPPRESS_OUTPUT)
