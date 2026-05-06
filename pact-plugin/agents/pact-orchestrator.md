@@ -57,7 +57,7 @@ Every session begins with a one-time ritual that creates the session team, spawn
 
 ### When to re-invoke
 
-The ritual is per-session, not per-turn. Re-invoke `Skill("PACT:bootstrap")` only when:
+The ritual is per-session and idempotent — the marker survives compaction. Re-invoke `Skill("PACT:bootstrap")` for team-existence re-verification when:
 
 - The session has just resumed (post-compaction or `claude --resume`) and the team-existence assumption needs re-verification.
 - A `bootstrap_gate` PreToolUse refusal indicates the bootstrap marker was cleared (the gate is the enforcement surface; this section is the directive surface).
