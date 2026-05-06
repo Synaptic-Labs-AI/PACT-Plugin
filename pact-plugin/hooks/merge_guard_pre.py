@@ -617,8 +617,10 @@ def main():
         error = check_merge_authorization(command)
 
         if error:
+            # hookEventName is required by the harness; missing it silently fails open
             output = {
                 "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
                     "permissionDecision": "deny",
                     "permissionDecisionReason": error,
                 }
@@ -633,8 +635,10 @@ def main():
         # Security guard fails closed — block on unexpected errors
         print(f"Hook error (merge_guard_pre): {e}", file=sys.stderr)
         try:
+            # hookEventName is required by the harness; missing it silently fails open
             output = {
                 "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
                     "permissionDecision": "deny",
                     "permissionDecisionReason": (
                         "Merge guard internal error — blocking for safety. "

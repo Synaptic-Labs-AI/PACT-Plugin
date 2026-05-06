@@ -573,6 +573,9 @@ class TestPreMainEntryPoint:
         output = json.loads(captured.out)
         assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "AskUserQuestion" in output["hookSpecificOutput"]["permissionDecisionReason"]
+        # Issue #658: hookEventName is required by the harness schema; missing
+        # it causes silent rejection and the deny fails open.
+        assert output["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
 
     def test_main_exits_0_on_dangerous_with_valid_token(self, tmp_path, capsys):
         from merge_guard_pre import main
@@ -2165,6 +2168,9 @@ class TestPreMainEdgeCases:
         assert hook_output["permissionDecision"] == "deny"
         assert isinstance(hook_output["permissionDecisionReason"], str)
         assert len(hook_output["permissionDecisionReason"]) > 0
+        # Issue #658: hookEventName is the load-bearing schema field; without
+        # it the harness silently rejects the deny block and merges proceed.
+        assert hook_output["hookEventName"] == "PreToolUse"
 
 
 # =============================================================================
@@ -2285,6 +2291,9 @@ class TestTokenSecurity:
         output = json.loads(captured.out)
         assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "internal error" in output["hookSpecificOutput"]["permissionDecisionReason"].lower()
+        # Issue #658: fail-closed path also requires hookEventName, otherwise
+        # the harness silently rejects the deny and the merge proceeds.
+        assert output["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
 
 
 # =============================================================================
@@ -4579,6 +4588,8 @@ class TestFailClosed:
         captured = capsys.readouterr()
         output = json.loads(captured.out)
         assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+        # Issue #658: fail-closed deny must include hookEventName.
+        assert output["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
 
     def test_fail_closed_stderr_includes_error(self, capsys):
         """Fail-closed error is logged to stderr for debugging."""
