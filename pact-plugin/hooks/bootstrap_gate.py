@@ -43,6 +43,8 @@ Output: JSON with hookSpecificOutput.permissionDecision (deny case)
 """
 
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 
@@ -72,6 +74,73 @@ _DENY_REASON = (
 )
 
 
+def is_marker_set(session_dir: Path | None) -> bool:
+    """Public predicate: does a real bootstrap-complete marker exist?
+
+    Returns True iff `<session_dir>/<BOOTSTRAP_MARKER_NAME>` exists as a
+    REGULAR FILE (not a symlink, not a directory) AND no ancestor of the
+    session_dir is a symlink. False on any of:
+      - session_dir is None or falsy
+      - marker path is a symlink (S2 defense: planted symlink at the
+        marker would otherwise satisfy `Path.exists()` since exists()
+        follows symlinks)
+      - marker path is a directory or other non-regular file
+      - marker path does not exist
+      - any ancestor of session_dir is a symlink (S4 defense: a planted
+        symlink at e.g. ~/.claude redirecting to attacker-controlled
+        directory would otherwise allow attacker to plant a regular-file
+        marker satisfying the leaf-only check)
+      - any OSError on stat (treated as marker-absent → fail-closed for
+        the gate-bypass class; gate stays armed)
+
+    The plan §High-Risk-TDD-Specs Q4 names this as a 7-method TDD target;
+    extracting it as a public callable closes the plan-vs-implementation
+    gap (architect-review Findings #1 + #14). Callers (current:
+    `_check_tool_allowed`; future: any session-end audit, sibling hooks)
+    use this single entry point for the safe-marker-check contract.
+
+    Security rationale:
+      - S2 (security-engineer-review): `marker_path.exists()` follows
+        symlinks → attacker with same-user write access plants a symlink
+        at <session_dir>/bootstrap-complete pointing to any existing
+        file (e.g., /etc/hostname) → gate falsely satisfied → tool
+        block bypassed. Replaced with `os.lstat()` + `stat.S_ISREG()`
+        which checks the leaf without following symlinks.
+      - S4: leaf-only is_symlink() does not detect ancestor symlinks
+        (e.g., ~/.claude itself being a symlink to attacker-controlled
+        /tmp/evil/.claude). `Path.resolve(strict=False)` walks every
+        ancestor; comparing to the unresolved path detects any
+        ancestor-link rewrite.
+    """
+    if not session_dir:
+        return False
+    session_dir = Path(session_dir)
+
+    # S4: ancestor-symlink defense. Path.resolve() follows ALL symlinks
+    # in the path; if the resolved path differs from the input path
+    # (modulo absolute-form), some ancestor was a symlink. strict=False
+    # so we don't raise if the marker file itself doesn't exist yet.
+    try:
+        resolved = session_dir.resolve(strict=False)
+    except OSError:
+        return False
+    if resolved != session_dir.absolute():
+        return False
+
+    marker_path = session_dir / BOOTSTRAP_MARKER_NAME
+
+    # S2: lstat (does NOT follow symlinks) + S_ISREG (regular file only).
+    # The marker is a sentinel file whose CONTENT is not consumed; the
+    # contract is "regular file at this exact path". A symlink at the
+    # marker path is rejected even if it points to a regular file
+    # elsewhere (the link-target is attacker-chosen).
+    try:
+        st = os.lstat(str(marker_path))
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode)
+
+
 def _check_tool_allowed(input_data: dict) -> str | None:
     """Determine whether a tool call should be denied.
 
@@ -80,13 +149,13 @@ def _check_tool_allowed(input_data: dict) -> str | None:
     """
     pact_context.init(input_data)
 
-    # Fast path: marker exists → allow everything
+    # Fast path: marker exists (as a regular non-symlink file) → allow
+    # everything. See `is_marker_set` for S2/S4 defense rationale.
     session_dir = pact_context.get_session_dir()
     if not session_dir:
         return None
 
-    marker_path = Path(session_dir) / BOOTSTRAP_MARKER_NAME
-    if marker_path.exists():
+    if is_marker_set(Path(session_dir)):
         return None
 
     # Teammate detection

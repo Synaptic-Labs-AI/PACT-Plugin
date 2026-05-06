@@ -397,20 +397,30 @@ class TestFailOpen:
         captured = capsys.readouterr()
         assert json.loads(captured.out.strip()) == _SUPPRESS_EXPECTED
 
-    def test_oserror_in_marker_check(self, monkeypatch, tmp_path, capsys):
-        """OSError when checking marker → fail-open via outer except."""
+    def test_oserror_in_marker_check_treats_marker_absent(self, monkeypatch, tmp_path, capsys):
+        """OSError when checking marker → marker treated as absent → blocked
+        tool denied (gate stays armed). Behavior change from pre-S2 fix:
+        previously `Path.exists()` raises propagated to the outer except
+        and fell open with suppressOutput. Now `is_marker_set` catches
+        OSError internally and returns False — the conservative choice
+        per S2 trust-boundary rationale ('don't claim the marker is set
+        when we can't verify it'). The OUTER fail-open contract (any
+        raisable path → suppressOutput) still holds for genuine
+        programmer errors above the marker-check layer."""
         from bootstrap_gate import main
 
         _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
 
-        with patch("bootstrap_gate.Path.exists", side_effect=OSError("disk error")):
+        with patch("os.lstat", side_effect=OSError("disk error")):
             with patch("sys.stdin", io.StringIO(json.dumps(_make_input("Edit")))):
                 with pytest.raises(SystemExit) as exc_info:
                     main()
 
-        assert exc_info.value.code == 0
+        # Edit is a blocked tool + marker absent → exit 2 (deny).
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
-        assert json.loads(captured.out.strip()) == _SUPPRESS_EXPECTED
+        output = json.loads(captured.out.strip())
+        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 # =============================================================================
@@ -603,3 +613,101 @@ class TestMarkerNameConsistency:
         )
         content = bootstrap_md.read_text(encoding="utf-8")
         assert f"touch \"<path>/{BOOTSTRAP_MARKER_NAME}\"" in content
+
+
+# =============================================================================
+# is_marker_set — public helper (Arch-M1 + S2 + S4 defense)
+# =============================================================================
+
+
+class TestIsMarkerSet:
+    """Public predicate `is_marker_set(session_dir)` — does a real marker
+    exist? Defends S2 (symlink-planted bypass) + S4 (ancestor symlink).
+    Plan §High-Risk-TDD-Specs Q4 names this as a 7-method TDD target.
+    """
+
+    def test_returns_false_when_session_dir_none(self):
+        from bootstrap_gate import is_marker_set
+
+        assert is_marker_set(None) is False
+
+    def test_returns_false_when_session_dir_empty(self):
+        from bootstrap_gate import is_marker_set
+
+        assert is_marker_set(Path("")) is False
+
+    def test_returns_false_when_marker_absent(self, tmp_path):
+        from bootstrap_gate import is_marker_set
+
+        assert is_marker_set(tmp_path) is False
+
+    def test_returns_true_when_marker_present_as_regular_file(self, tmp_path):
+        from bootstrap_gate import is_marker_set
+
+        (tmp_path / BOOTSTRAP_MARKER_NAME).touch()
+        assert is_marker_set(tmp_path) is True
+
+    def test_returns_false_when_marker_is_symlink(self, tmp_path):
+        """S2 attack chain: planted symlink at the marker path pointing
+        at ANY existing file falsely satisfies `Path.exists()` (which
+        follows symlinks). The defense uses `os.lstat() + S_ISREG`
+        which checks the leaf without following the link.
+
+        Reproducer for the bypass-without-defense:
+            ln -s /etc/hostname <session_dir>/bootstrap-complete
+            → Path.exists() returns True → gate would allow → BYPASS
+
+        With defense:
+            os.lstat() returns the symlink's own stat → S_ISLNK, not
+            S_ISREG → returns False → gate stays armed.
+        """
+        from bootstrap_gate import is_marker_set
+
+        # Plant a real file outside the session dir.
+        target = tmp_path / "decoy_target"
+        target.touch()
+        # Plant the marker as a symlink to the decoy.
+        marker = tmp_path / BOOTSTRAP_MARKER_NAME
+        marker.symlink_to(target)
+        assert marker.exists() is True  # Path.exists follows symlinks
+        assert is_marker_set(tmp_path) is False  # but is_marker_set rejects
+
+    def test_returns_false_when_marker_is_directory(self, tmp_path):
+        """S2 corollary: a directory at the marker path is also rejected
+        (S_ISREG False)."""
+        from bootstrap_gate import is_marker_set
+
+        (tmp_path / BOOTSTRAP_MARKER_NAME).mkdir()
+        assert is_marker_set(tmp_path) is False
+
+    def test_returns_false_when_ancestor_is_symlink(self, tmp_path):
+        """S4 attack chain: planted symlink at any ancestor of the
+        session_dir (e.g., ~/.claude itself being a symlink to attacker-
+        controlled /tmp/evil/.claude) lets the attacker plant a regular
+        file marker satisfying the leaf-only check.
+
+        Reproducer:
+            ln -s /tmp/evil ~/.claude
+            mkdir -p /tmp/evil/pact-sessions/{slug}/{session_id}
+            touch /tmp/evil/pact-sessions/{slug}/{session_id}/bootstrap-complete
+            → leaf is_symlink() returns False → leaf-only gate would allow
+
+        Defense: Path.resolve(strict=False) follows ALL ancestor symlinks
+        in the path; if the resolved path differs from the absolute input
+        path, an ancestor was a symlink → reject.
+        """
+        from bootstrap_gate import is_marker_set
+
+        # Real session_dir target.
+        real_dir = tmp_path / "real_session_dir"
+        real_dir.mkdir()
+        (real_dir / BOOTSTRAP_MARKER_NAME).touch()
+        # Symlink the parent directory to the real one.
+        link_dir = tmp_path / "linked_session_dir"
+        link_dir.symlink_to(real_dir)
+        # The marker IS a real file (via the symlink path) but the path
+        # has a symlink ancestor → defense rejects.
+        assert (link_dir / BOOTSTRAP_MARKER_NAME).exists() is True
+        assert is_marker_set(link_dir) is False
+        # Sanity: the real path (no ancestor symlink) IS accepted.
+        assert is_marker_set(real_dir) is True
