@@ -2115,6 +2115,98 @@ class TestExtractPrevSessionDirDualLocation:
         assert _validate_under_pact_sessions(sibling) is None
 
 
+class TestExtractPrevSessionDirReadSideLock:
+    """R2-B4: _extract_prev_session_dir must acquire the same sidecar
+    file_lock that update_session_info uses for write — otherwise a
+    concurrent write could surface as a torn read here.
+
+    Verifies the lock-acquisition contract via monkeypatch + lock-state
+    assertion (more deterministic than threading-based concurrent-write
+    tests, which are timing-fragile)."""
+
+    def test_acquires_file_lock_before_reading(self, tmp_path, monkeypatch):
+        """The read at L389 must be wrapped in file_lock(claude_md).
+        Verify by monkeypatching file_lock to record entry/exit + the
+        read_text call, then asserting the order: lock-enter → read →
+        lock-exit."""
+        from session_init import _extract_prev_session_dir
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        claude_md = project_dir / "CLAUDE.md"
+        claude_md.write_text(
+            "<!-- SESSION_START -->\n"
+            "- Session dir: `~/.claude/pact-sessions/project/abc12345`\n"
+            "<!-- SESSION_END -->\n",
+            encoding="utf-8",
+        )
+
+        # Track ordering events via the patched file_lock.
+        events = []
+        from contextlib import contextmanager
+        import session_init as si_module
+
+        @contextmanager
+        def tracking_lock(target):
+            events.append(("lock_enter", target))
+            try:
+                yield
+            finally:
+                events.append(("lock_exit", target))
+
+        original_read_text = Path.read_text
+
+        def tracking_read(self, *args, **kwargs):
+            if self == claude_md:
+                events.append(("read", self))
+            return original_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(si_module, "file_lock", tracking_lock)
+        monkeypatch.setattr(Path, "read_text", tracking_read)
+
+        _extract_prev_session_dir(str(project_dir))
+
+        # Assert ordering: lock-enter strictly before read; read strictly
+        # before lock-exit. The single-call sequence guarantees the
+        # serialization contract — a concurrent writer holding the lock
+        # would have blocked the read, not interleaved with it.
+        kinds = [k for k, _ in events]
+        assert kinds == ["lock_enter", "read", "lock_exit"], (
+            f"unexpected ordering: {events}"
+        )
+
+    def test_timeout_returns_none_fail_open(self, tmp_path, monkeypatch):
+        """When file_lock raises TimeoutError (5s deadline expired due
+        to a stuck-holder writer), _extract_prev_session_dir must
+        fail-open by returning None — the resume-context recovery
+        gracefully degrades to the new-session path rather than
+        propagating the lock timeout up the session_init main()."""
+        from session_init import _extract_prev_session_dir
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        claude_md = project_dir / "CLAUDE.md"
+        claude_md.write_text(
+            "<!-- SESSION_START -->\n"
+            "- Session dir: `~/.claude/pact-sessions/project/abc12345`\n"
+            "<!-- SESSION_END -->\n",
+            encoding="utf-8",
+        )
+
+        from contextlib import contextmanager
+        import session_init as si_module
+
+        @contextmanager
+        def timeout_lock(target):
+            raise TimeoutError("simulated stuck-holder")
+            yield  # unreachable
+
+        monkeypatch.setattr(si_module, "file_lock", timeout_lock)
+
+        result = _extract_prev_session_dir(str(project_dir))
+        assert result is None
+
+
 # =============================================================================
 # CLAUDE_PLUGIN_ROOT env-set wiring tests (M6)
 # =============================================================================

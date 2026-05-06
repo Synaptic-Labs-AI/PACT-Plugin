@@ -386,7 +386,22 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
         if source == "new_default":
             return None
 
-        content = claude_md.read_text(encoding="utf-8")
+        # R2-B4 (backend-coder-review-r2): acquire the same sidecar
+        # file_lock that update_session_info uses for its read-mutate-
+        # write pass. A concurrent write (e.g., from another session_init
+        # invocation racing the WRITE step at L1148) could otherwise
+        # produce a torn read here, surfacing as either a corrupted
+        # Session-dir match or a fallback-regex hit on a half-written
+        # SESSION_START block. The lock serializes against the writer.
+        # Re-entrancy verified safe: this read at step 5a runs AFTER
+        # strip_orphan_routing_markers (step 3c) released its lock, and
+        # BEFORE update_session_info (step 5b) acquires its own. No
+        # nesting; fail-open on TimeoutError per file_lock contract.
+        try:
+            with file_lock(claude_md):
+                content = claude_md.read_text(encoding="utf-8")
+        except TimeoutError:
+            return None
 
         # Primary: match "- Session dir: `<path>`" in the Current Session block.
         match = re.search(r'- Session dir:\s*`([^`]+)`', content)
