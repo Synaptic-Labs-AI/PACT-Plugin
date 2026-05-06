@@ -8,6 +8,14 @@ informs the fallback-ladder trigger criteria evaluation across sessions
 (the lazy-load fidelity dogfooding signal cannot be CI-tested; runbook
 data is the substitute).
 
+## 662-dispatch-gate.md
+
+| Run date (UTC) | Operator | Plugin version | Sections passed | F7 mode | Notes / counter-test outcomes |
+| -------------- | -------- | -------------- | --------------- | ------- | ------------------------------- |
+| _pending — execute post-merge in fresh session_ | | 4.2.0 | /8 | warn (default) | F22 (§1+§1.1) PASS/FAIL · F18 (§2+§2.1) PASS/FAIL · F7 advisory injection (§3) WARN-visible / WARN-dropped → flipped to deny · F7 shadow (§3.1) PASS/FAIL · F7 deny (§3.2) PASS/FAIL · F25 sabotaged-import (§4) PASS/FAIL. |
+
+Sections-passed denominator is 8 per runbook §5 (§1, §1.1, §2, §2.1, §3, §3.1, §3.2, §4). F7 mode column records whether the empirical observation kept the production default at `warn` or motivated a flip to `deny`. If a section fails, file a follow-up issue and link it in the Notes column.
+
 ## v4.0.0-launch-and-isolation.md
 
 | Run date (UTC) | Operator | Plugin version | Sections passed | Notes / fallback-ladder signals |

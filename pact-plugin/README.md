@@ -1,6 +1,6 @@
 # PACT — Orchestration Harness for Claude Code
 
-> **Version**: 4.1.2
+> **Version**: 4.2.0
 
 Turn a single Claude Code session into a managed team of specialist AI agents that prepare, design, build, and test your code systematically.
 
@@ -67,6 +67,14 @@ Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/Syna
 - **Lazy-load protocols**: Persona body cross-references protocols on demand instead of bootstrapping them all up front, reducing baseline token cost
 - **Restored session-start ritual** (v4.1): Scaled-down `/PACT:bootstrap` command + `bootstrap_gate.py` injection re-establish the first-turn ritual under the new delivery model
 - **Communication Charter**: Async-at-idle-boundary delivery model formalized for inter-agent SendMessage mechanics
+
+## Configuration
+
+Environment variables that tune hook behavior:
+
+| Variable | Default | Allowed values | Effect |
+|---|---|---|---|
+| `PACT_DISPATCH_F7_MODE` | `warn` | `warn` / `deny` / `shadow` | Dispatch-gate F7 prompt-heuristic disposition. `warn` emits an advisory `additionalContext`; `deny` blocks the spawn (flip after the F22 counter-test in `tests/runbooks/662-dispatch-gate.md` confirms `additionalContext` is silently dropped under PreToolUse); `shadow` journals only — F7 trigger is observable but neither WARNs nor DENYs (calibration / first-session safety net). F1-F6, F14, F15 are unaffected. Unknown values fall back to `warn`. |
 
 ## Full Documentation
 

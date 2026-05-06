@@ -29,6 +29,18 @@ patterns) so credentials accidentally pasted into a prompt never persist
 to disk; the in-memory ``permissionDecisionReason`` keeps the verbatim
 prompt-fragment for the user-facing error.
 
+Configuration:
+  ``PACT_DISPATCH_F7_MODE`` env-var (default ``"warn"``) controls the F7
+  prompt-heuristic disposition. Allowed values:
+    ``"warn"``   advisory ``additionalContext`` (default)
+    ``"deny"``   blocking deny — flip after the F22 counter-test in
+                 ``tests/runbooks/662-dispatch-gate.md`` confirms
+                 ``additionalContext`` is silently dropped under
+                 PreToolUse
+    ``"shadow"`` journal-only; F7 trigger is observable in the session
+                 journal but does not WARN or DENY (calibration mode).
+  Unknown values fall back to ``"warn"``. F1-F6/F14/F15 are unaffected.
+
 Input: JSON from stdin (tool_name, tool_input, agent_id, etc.)
 Output: stdout JSON per harness contract.
 """
@@ -118,12 +130,24 @@ TASK_REFERENCE_PHRASES = (
     "check your tasks",
 )
 
-# F7 mode. ``"warn"`` emits additionalContext (best-effort visibility);
-# ``"deny"`` promotes to a blocking deny. Default ``"warn"``; runbook
-# (Commit 4 — out of scope here) flips to ``"deny"`` if the post-merge
-# F22 counter-test confirms additionalContext is silently dropped under
-# PreToolUse. Architect §7(a).
-F7_MODE = "warn"
+# F7 mode. Read at module-load from ``PACT_DISPATCH_F7_MODE`` env-var.
+# Allowed values:
+#   ``"warn"``   — emit additionalContext (advisory, default; behavior
+#                  unchanged from initial Commit 2 implementation).
+#   ``"deny"``   — promote F7 to a blocking deny. Flip to this if the
+#                  post-merge F22 counter-test confirms additionalContext
+#                  is silently dropped under PreToolUse (architect §7(a),
+#                  runbook 662-dispatch-gate.md §F7).
+#   ``"shadow"`` — F7 emits a journal event but neither WARNs nor DENYs
+#                  (first-session safety net for calibration; the gate
+#                  observes without intervening). DENY decisions from
+#                  F1-F6/F14/F15 still fire normally; only F7 is muted.
+# Unknown values fall back to ``"warn"`` so a typo never disables the
+# gate's other rules. Default ``"warn"`` preserves Commit 2 behavior.
+_ALLOWED_F7_MODES = frozenset({"warn", "deny", "shadow"})
+F7_MODE = os.environ.get("PACT_DISPATCH_F7_MODE", "warn")
+if F7_MODE not in _ALLOWED_F7_MODES:
+    F7_MODE = "warn"
 
 # F26 redaction patterns. Applied to the journal-written prompt only;
 # the in-memory ``permissionDecisionReason`` keeps the verbatim prompt
@@ -304,9 +328,10 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
                 "before Agent spawn so the teammate has work on arrival.",
                 "F6")
 
-    # ⑨ F7 — prompt heuristic. WARN by default (advisory); runbook may
-    # flip F7_MODE to 'deny' if additionalContext silently dropped under
-    # PreToolUse. Both code paths exposed for runbook flip.
+    # ⑨ F7 — prompt heuristic. Mode controlled by PACT_DISPATCH_F7_MODE
+    # env-var (warn|deny|shadow; default warn). Shadow is a calibration
+    # mode: F7 fires the journal event but returns ALLOW so first-session
+    # operators can observe trigger frequency without WARN-noise.
     if (len(prompt) > PROMPT_MAX_LENGTH
             or not any(phrase in prompt for phrase in TASK_REFERENCE_PHRASES)):
         msg = (f"PACT dispatch_gate F7: prompt length={len(prompt)} "
@@ -317,6 +342,9 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
                "teammate read it via TaskList/TaskGet.")
         if F7_MODE == "deny":
             return ("DENY", msg, "F7")
+        if F7_MODE == "shadow":
+            # Journal sees F7 fired; caller treats as ALLOW (no advisory).
+            return ("ALLOW", msg, "F7")
         return ("WARN", msg, "F7")
 
     return ("ALLOW", None, None)
