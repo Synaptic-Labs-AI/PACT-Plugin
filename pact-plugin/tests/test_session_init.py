@@ -3235,54 +3235,93 @@ class TestSourceAwareness:
         assert 'Do not evaluate whether it is needed.' in additional
         assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in additional
 
-    def test_resume_no_team_anomalous(self, monkeypatch, tmp_path):
-        """resume + no team: anomalous — should create team with warning.
-        Full 4-sentence directive must still fire (LOW 1: independent
-        verification on each anomalous path)."""
+    def test_resume_no_team_anomalous_informational(self, monkeypatch, tmp_path):
+        """R2-B3: resume + no team is anomalous-but-LEGITIMATE (e.g., user
+        ran /clear with no team or compact fired before a team was ever
+        created). Post-R2-B3 this branch emits an INFORMATIONAL note
+        without WARNING tone — the recovery hint stays. Full 4-sentence
+        directive must still fire (LOW 1)."""
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="resume", team_exists=False
         )
 
         assert 'TeamCreate(team_name="pact-aabb1122")' in additional
-        assert "WARNING" in additional
+        # R2-B3: WARNING tone removed for known-source + no-team case.
+        assert "WARNING" not in additional
+        assert 'creating fresh team' in additional
+        assert "TaskList" in additional
         # 4-sentence directive verbatim.
         assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
         assert 'Do this before anything else.' in additional
         assert 'Do not evaluate whether it is needed.' in additional
         assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in additional
 
-    def test_compact_no_team_anomalous(self, monkeypatch, tmp_path):
-        """compact + no team: anomalous — should create team with warning.
-        Full 4-sentence directive must still fire (LOW 1: independent
-        verification on each anomalous path)."""
+    def test_compact_no_team_anomalous_informational(self, monkeypatch, tmp_path):
+        """R2-B3: compact + no team — informational note, no WARNING tone."""
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="compact", team_exists=False
         )
 
         assert 'TeamCreate(team_name="pact-aabb1122")' in additional
-        assert "WARNING" in additional
-        assert "team not found" in additional.lower()
+        assert "WARNING" not in additional
+        assert 'creating fresh team' in additional
         # 4-sentence directive verbatim.
         assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
         assert 'Do this before anything else.' in additional
         assert 'Do not evaluate whether it is needed.' in additional
         assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in additional
 
-    def test_clear_no_team_anomalous(self, monkeypatch, tmp_path):
-        """clear + no team: anomalous — should create team with warning.
-        Full 4-sentence directive must still fire (LOW 1: independent
-        verification on each anomalous path)."""
+    def test_clear_no_team_anomalous_informational(self, monkeypatch, tmp_path):
+        """R2-B3: clear + no team — informational note, no WARNING tone."""
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="clear", team_exists=False
         )
 
         assert 'TeamCreate(team_name="pact-aabb1122")' in additional
-        assert "WARNING" in additional
+        assert "WARNING" not in additional
+        assert 'creating fresh team' in additional
         # 4-sentence directive verbatim.
         assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
         assert 'Do this before anything else.' in additional
         assert 'Do not evaluate whether it is needed.' in additional
         assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in additional
+
+    @pytest.mark.parametrize(
+        "raw_source",
+        ["weird", "manual_invoke", "unknown-xyz", "compact1"],
+    )
+    def test_unknown_source_no_team_warns_and_emits_stderr(
+        self, raw_source, monkeypatch, tmp_path, capfd
+    ):
+        """R2-B3: unrecognized source value + no team — emit WARNING in
+        additionalContext AND stderr observability for debug logs.
+
+        Pre-fix: known-source no-team and unknown-source no-team both
+        produced the same generic WARNING. Post-fix: unknown source is
+        differentiated as the malformed-stdin signal class (legitimate
+        recovery scenarios use the in-KNOWN_SOURCES informational
+        branch); stderr makes the malformation observable to debug-log
+        readers.
+
+        Note: session_init normalizes any non-`_VALID_SOURCES` raw_source
+        to the literal `"unknown"` (cannot inject arbitrary text into
+        additionalContext). So the message + stderr show `"unknown"`,
+        not the raw stdin source value. The parametrize covers the
+        normalization-class spectrum (different raw inputs all collapse
+        to the same `"unknown"` post-normalization)."""
+        additional, _, _ = self._run_main_with_source(
+            monkeypatch, tmp_path, source=raw_source, team_exists=False
+        )
+
+        # WARNING tone preserved for malformed-stdin signal class.
+        assert "WARNING" in additional
+        assert "Unrecognized" in additional
+        # Post-normalization the source string is literal "unknown".
+        assert '"unknown"' in additional
+        # Stderr observability marker.
+        captured = capfd.readouterr()
+        assert "session_init: unknown source value:" in captured.err
+        assert "'unknown'" in captured.err
 
     # --- Edge cases ---
 

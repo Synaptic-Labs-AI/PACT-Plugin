@@ -1106,14 +1106,39 @@ def main():
                 f'reusing team. Run TaskList to check current state.'
             ))
         else:
-            # Anomalous: context reset but no team (e.g., compact/clear + no team)
-            # or unknown source without team — create team with warning
-            context_parts.insert(0, (
-                f'{_team_create} '
-                f'WARNING: Session source "{source}" but team not found — '
-                f'previous session state may be lost. '
-                f'Check TaskList for recovery context.'
-            ))
+            # R2-B3 (backend-coder-review-r2): differentiate the no-team
+            # branch by whether `source` is a recognized lifecycle value.
+            # Pre-fix: a single WARNING for both cases, conflating the
+            # legitimate-but-anomalous scenario (e.g., user runs /clear
+            # with no team, or compact fires before a team was ever
+            # created) with the truly-malformed scenario (stdin source
+            # is not in the platform's documented set).
+            #
+            # Post-fix:
+            #   - known source + no team → informational (recovery hint
+            #     stays; WARNING tone removed). Legitimate first-session-
+            #     after-stale-CLAUDE.md class.
+            #   - unknown source + no team → keep WARNING in
+            #     additionalContext AND emit stderr for observability
+            #     (debug logs surface the malformed-stdin signal).
+            _KNOWN_SOURCES = {"startup", "resume", "compact", "clear"}
+            if source in _KNOWN_SOURCES:
+                context_parts.insert(0, (
+                    f'{_team_create} '
+                    f'Session source "{source}" without team — '
+                    f'creating fresh team. Run TaskList to check current state.'
+                ))
+            else:
+                print(
+                    f"session_init: unknown source value: {source!r}",
+                    file=sys.stderr,
+                )
+                context_parts.insert(0, (
+                    f'{_team_create} '
+                    f'WARNING: Unrecognized session source "{source}" — '
+                    f'previous session state may be lost. '
+                    f'Check TaskList for recovery context.'
+                ))
 
         # 5a. Capture the PREVIOUS session's dir from project CLAUDE.md
         # before step 5b overwrites the Current Session block with THIS
