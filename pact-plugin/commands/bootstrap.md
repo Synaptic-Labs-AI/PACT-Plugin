@@ -19,6 +19,8 @@ Read `team_name` from the **Current Session** block in the project's `CLAUDE.md`
 
 Spawn `pact-secretary` as the session secretary. It delivers the session briefing at spawn, answers memory queries during the session, and processes HANDOFFs at workflow boundaries. Memory queries from any other agent are blocked until the secretary is alive.
 
+Spawn the secretary once per session — reuse the existing instance on subsequent re-invocations of this command rather than spawning a duplicate.
+
 ## Step 3 — Surface paused state
 
 If `~/.claude/teams/{team_name}/paused-state.json` exists, read it and surface its contents to the user. **Do not silently resume.** Ask the user to confirm whether to continue the paused workflow or start fresh; their choice drives next-step dispatch.
