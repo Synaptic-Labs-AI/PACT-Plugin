@@ -75,7 +75,7 @@ with open(marker, "w", encoding="utf-8") as f:
 PY
 ```
 
-The marker is a JSON sentinel `{"v": 1, "sid": <session_id>, "sig": SHA256("<sid>|<plugin_root>|<plugin_version>|<v>")}` (F24, #662). The marker name `bootstrap-complete` is the load-bearing literal that `bootstrap_gate.is_marker_set` checks; do not rename it. The signature binds the marker to `(session_id, plugin_root, plugin_version)` so a bare `Bash("touch <path>/bootstrap-complete")` cannot satisfy the gate (closes the F18 Bash-bypass; this is what was previously a single-line `touch` invocation).
+The marker is a JSON sentinel `{"v": 1, "sid": <session_id>, "sig": SHA256("<sid>|<plugin_root>|<plugin_version>|<v>")}` (F24, #662). The marker name `bootstrap-complete` is the load-bearing literal that `bootstrap_gate.is_marker_set` checks; do not rename it. The signature is a marker-content fingerprint that closes the trivial `Bash("touch <path>/bootstrap-complete")` bypass (the F18 single-`touch` exploit). It is NOT cryptographic provenance: all four signature inputs are readable from the same-user filesystem, so a same-user attacker with Python execution can recompute the digest. F24 raises attacker effort and creates a detection surface; it does not make the marker unforgeable.
 
 <!-- Coupling: marker name "bootstrap-complete" must match shared.BOOTSTRAP_MARKER_NAME
      in pact-plugin/hooks/shared/__init__.py.

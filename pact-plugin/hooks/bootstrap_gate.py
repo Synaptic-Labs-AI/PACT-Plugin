@@ -183,9 +183,21 @@ def is_marker_set(session_dir: "Path | None") -> bool:
       - F18/F24 (#662): `Bash("touch <path>/bootstrap-complete")` previously
         defeated the gate because file PRESENCE was the only check.
         F24 verifies marker CONTENT bound to (session_id, plugin_root,
-        plugin_version) so an attacker without those would-be secrets
-        (plugin_root specifically is harness-set in pact-session-context.json,
-        write-once at SessionStart, 0o600) cannot forge a valid stamp.
+        plugin_version, marker_version) — a marker-content provenance
+        check that closes the trivial Bash-touch bypass.
+
+        F24 is NOT cryptographic provenance. All four signature inputs
+        are readable from the same-user filesystem (session_id and
+        plugin_root from pact-session-context.json, plugin_version from
+        plugin.json, marker_version from this module's
+        F24_MARKER_VERSION constant), so a same-user attacker with
+        Python execution and read access to those files can recompute
+        the digest. F24 is a fingerprint that raises attacker effort
+        from a one-line `touch` to a multi-line script-AND-read
+        sequence and creates a detection surface (the digest is
+        deterministic, so a forgery that races plugin-version bumps
+        is observable). It is not a MAC; treat any future hardening
+        that would require unforgeability as a separate threat model.
     """
     if not session_dir:
         return False
