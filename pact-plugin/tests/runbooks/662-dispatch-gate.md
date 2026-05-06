@@ -35,7 +35,7 @@ Implementation references:
 
 ## Prerequisites
 
-1. #662 PR is squash-merged to `main` and the new plugin version (≥ 4.2.0)
+1. #662 PR is squash-merged to `main` and the new plugin version (≥ 4.1.3)
    is installed at `~/.claude/plugins/cache/pact-plugin/PACT/<version>/`.
 2. Start a **fresh** session in a project that has the plugin installed.
    Do not reuse the session that authored the merge — its hook
