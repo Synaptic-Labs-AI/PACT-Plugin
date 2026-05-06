@@ -5,9 +5,11 @@ Pipes synthesized stdin payloads through the emitter via subprocess and
 asserts:
 - hookEventName="PostToolUse" present on all directive emits (REQUIRED;
   silent platform rejection without it).
-- 0->1 active-task transition emits Arm; 1->0 emits Teardown.
-- Non-status TaskUpdate, Task/Agent spawn, and TaskCreate at non-zero
-  pre-state are no-ops.
+- TaskCreate with post-count >= 1 emits Arm; 1->0 TaskUpdate emits
+  Teardown. PACT:watch-inbox idempotency absorbs redundant Arm emits
+  on subsequent TaskCreates within the same active window.
+- Non-status TaskUpdate, Task/Agent spawn, and TaskCreate at zero
+  post-count are no-ops.
 - Fail-open exit-0 + suppressOutput sentinel on malformed stdin /
   missing team_name / unexpected exception.
 - hooks.json registers the emitter under PostToolUse with matcher
@@ -18,6 +20,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -268,20 +271,6 @@ def test_teardown_directive_contains_precondition_phrase(tmp_path):
         "tool_response": {"id": "1", "status": "completed"},
     }, home)
     assert "Last active teammate task completed" in out["hookSpecificOutput"]["additionalContext"]
-
-
-def test_no_op_on_second_active_task_create(tmp_path):
-    home = tmp_path / "home"; home.mkdir()
-    sid = "s"; pdir = "/tmp/p"; team = "t"
-    _write_session_context(home, sid, pdir, team)
-    # Pre-existing active task + just-created task → 1->2 transition.
-    _write_task(home, team, "existing", status="in_progress", owner="x")
-    _write_task(home, team, "new", status="in_progress", owner="y")
-    out = _emit_output({
-        "tool_name": "TaskCreate", "session_id": sid, "cwd": pdir,
-        "tool_input": {"taskId": "new"}, "tool_response": {"task": {"id": "new"}},
-    }, home)
-    assert out == {"suppressOutput": True}
 
 
 def test_no_op_on_create_of_signal_task(tmp_path):
@@ -591,8 +580,8 @@ def test_count_active_tasks_called_on_terminal_status_taskupdate():
 
 
 def test_count_active_tasks_called_on_taskcreate():
-    """TaskCreate path also requires the count (to detect 0->1
-    transition). Mirror of the terminal-status sanity test."""
+    """TaskCreate path also requires the count (positive-bound Arm
+    predicate). Mirror of the terminal-status sanity test."""
     sys.path.insert(0, str(HOOK_DIR))
     import wake_lifecycle_emitter as emitter
 
@@ -684,6 +673,18 @@ _REQUIRED_META_FIELDS = {
     "issue_ref",
 }
 
+# Enum of permitted capture_method values. `logging-shim` /
+# `manual-stdin-redirect` are lossless captures; `synthesized` is
+# hand-reconstructed and may be lossy (notes MUST disclose the source
+# fixture); `legacy` is hand-constructed for backward-compat backstops
+# only. README at fixtures/wake_lifecycle/README.md is the SSOT.
+_PERMITTED_CAPTURE_METHODS = frozenset({
+    "logging-shim",
+    "manual-stdin-redirect",
+    "synthesized",
+    "legacy",
+})
+
 
 def test_all_wake_lifecycle_fixtures_carry_meta_provenance():
     """Convention enforcement for `tests/fixtures/wake_lifecycle/`: every
@@ -718,6 +719,12 @@ def test_all_wake_lifecycle_fixtures_carry_meta_provenance():
         assert not missing, (
             f"{fixture_path.name}: `_meta` missing required fields: {missing}. "
             f"Required: {_REQUIRED_META_FIELDS}."
+        )
+        method = meta["capture_method"]
+        assert method in _PERMITTED_CAPTURE_METHODS, (
+            f"{fixture_path.name}: capture_method={method!r} is not in "
+            f"the permitted enum {_PERMITTED_CAPTURE_METHODS}. See "
+            f"{FIXTURES_DIR.name}/README.md for the convention."
         )
 
 
@@ -865,3 +872,588 @@ def test_arm_emitted_on_captured_production_taskcreate_payload(tmp_path):
     )
     assert hso["hookEventName"] == "PostToolUse"
     assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+
+
+# ---------- Arm directive on parallel-TaskCreate race (#637) ----------
+
+
+class TestArmDirectiveOnParallelTaskCreateRace:
+    """Pin the positive-bound TaskCreate Arm threshold against the
+    parallel-batch race.
+
+    A parallel TaskCreate batch lands all task files before either
+    PostToolUse hook reads `count_active_tasks`. Under a strict-equality
+    predicate (`count == 1`) every fire rejects because the post-state
+    count is already N >= 2; the Arm directive never emits and the
+    inbox-watch Monitor is never armed. Under the positive-bound
+    predicate (`count >= 1`) every fire emits Arm and PACT:watch-inbox
+    idempotency (no-op when a valid STATE_FILE is on disk) absorbs the
+    redundant emits within the active window.
+
+    The two race-coupled tests below are the counter-test-by-revert
+    targets: revert pact-plugin/hooks/wake_lifecycle_emitter.py to the
+    strict-equality form and they fail; the four no-regression tests
+    still pass. Cardinality {2 fail, 4 pass} is the falsifiable signature
+    that the regression is actually exercised.
+
+    Fixture provenance for the parallel-burst shape lives in the
+    `_meta` blocks of `task_create_parallel_burst_first.json` and
+    `task_create_parallel_burst_second.json` — that's the right surface
+    for the issue cite per the no-issue-refs-in-test-names axiom.
+    """
+
+    @staticmethod
+    def _load_fixture(name: str) -> dict:
+        data = json.loads((FIXTURES_DIR / name).read_text(encoding="utf-8"))
+        data.pop("_meta", None)
+        return data
+
+    def _setup_session(self, tmp_path: Path, fixture: dict, team: str = "team-race"):
+        home = tmp_path / "home"
+        home.mkdir()
+        sid = fixture["session_id"]
+        pdir = fixture["cwd"]
+        _write_session_context(home, sid, pdir, team)
+        return home, team
+
+    def test_arm_emits_on_parallel_burst_first_fire(self, tmp_path):
+        """Race-coupled test #1. Pre-write tasks 10 and 11 (post-batch
+        filesystem state); pipe the FIRST burst fixture through the hook.
+        Strict-equality reverts FAIL here (count_active_tasks == 2);
+        positive-bound passes."""
+        fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, team = self._setup_session(tmp_path, fixture)
+        _write_task(home, team, "10", status="pending", owner="backend-coder")
+        _write_task(home, team, "11", status="pending", owner="test-engineer")
+
+        out = _emit_output(fixture, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Arm directive on parallel-burst first fire; "
+            f"got {out!r}. If `out == {{'suppressOutput': True}}` the "
+            f"TaskCreate threshold is strict-equality (== 1) and rejects "
+            f"on the post-batch count of 2 — see #637."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+
+    def test_arm_emits_on_parallel_burst_second_fire(self, tmp_path):
+        """Race-coupled test #2. Same post-batch filesystem state as
+        burst-first; pipe the SECOND burst fixture. The contract is
+        'both fires must emit; PACT:watch-inbox idempotency handles the
+        redundant emit at the skill layer.' Strict-equality reverts FAIL
+        here for the same reason as burst-first."""
+        fixture = self._load_fixture("task_create_parallel_burst_second.json")
+        home, team = self._setup_session(tmp_path, fixture)
+        _write_task(home, team, "10", status="pending", owner="backend-coder")
+        _write_task(home, team, "11", status="pending", owner="test-engineer")
+
+        out = _emit_output(fixture, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Arm directive on parallel-burst second fire; "
+            f"got {out!r}."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+
+    def test_arm_emits_on_sequential_first_create(self, tmp_path):
+        """No-regression sentinel for the original sequential 0->1 path.
+        Only task 10 is pre-written; count_active_tasks returns 1.
+        Passes under both strict-equality (== 1) and positive-bound
+        (>= 1) predicates. Would FAIL only if a future edit broke the
+        positive-bound path entirely (e.g., a typo flipping to `> 1`)."""
+        fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, team = self._setup_session(tmp_path, fixture)
+        _write_task(home, team, "10", status="pending", owner="backend-coder")
+
+        out = _emit_output(fixture, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Arm directive on sequential 0->1 TaskCreate; "
+            f"got {out!r}."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+
+    def test_teardown_emits_on_terminal_update_to_zero(self, tmp_path):
+        """No-regression guard for the Teardown threshold (count == 0).
+        This PR explicitly does NOT change Teardown; the test must pass
+        under both the reverted strict-equality Arm and the relaxed
+        positive-bound Arm."""
+        home = tmp_path / "home"
+        home.mkdir()
+        sid = "pact-2877fe69"
+        pdir = "/Users/mj/Sites/collab/PACT-prompt"
+        team = "team-race"
+        _write_session_context(home, sid, pdir, team)
+        _write_task(home, team, "10", status="completed", owner="backend-coder")
+
+        out = _emit_output({
+            "tool_name": "TaskUpdate",
+            "session_id": sid,
+            "cwd": pdir,
+            "tool_input": {"taskId": "10", "status": "completed"},
+            "tool_response": {"id": "10", "status": "completed"},
+        }, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, f"Expected Teardown; got {out!r}."
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]
+
+    def test_teardown_no_emit_on_terminal_update_with_residual(self, tmp_path):
+        """No-regression guard against accidentally relaxing Teardown
+        symmetrically with the Arm change. With one residual active task
+        on disk, the terminal-status TaskUpdate for a different task
+        leaves count > 0 and Teardown must NOT emit (suppressOutput
+        sentinel). Passes under both revert and fix."""
+        home = tmp_path / "home"
+        home.mkdir()
+        sid = "pact-2877fe69"
+        pdir = "/Users/mj/Sites/collab/PACT-prompt"
+        team = "team-race"
+        _write_session_context(home, sid, pdir, team)
+        _write_task(home, team, "10", status="completed", owner="backend-coder")
+        _write_task(home, team, "11", status="in_progress", owner="test-engineer")
+
+        out = _emit_output({
+            "tool_name": "TaskUpdate",
+            "session_id": sid,
+            "cwd": pdir,
+            "tool_input": {"taskId": "10", "status": "completed"},
+            "tool_response": {"id": "10", "status": "completed"},
+        }, home)
+        assert out == {"suppressOutput": True}, (
+            f"Expected suppressOutput sentinel (residual active task "
+            f"keeps count > 0; Teardown must not emit); got {out!r}."
+        )
+
+    def test_no_emit_on_zero_active_count_taskcreate(self, tmp_path):
+        """Lower-bound guard for the relaxed predicate. Pipe a
+        TaskCreate fixture but write NO task files; count_active_tasks
+        returns 0 and `>= 1` rejects. Pins the rule that zero must
+        remain a no-op even after the threshold relaxation."""
+        fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, _ = self._setup_session(tmp_path, fixture)
+        # Deliberately do NOT write task 10's file. The hook's
+        # _extract_task_id will still parse the id from tool_response,
+        # but count_active_tasks reads the tasks dir and returns 0.
+
+        out = _emit_output(fixture, home)
+        assert out == {"suppressOutput": True}, (
+            f"Expected suppressOutput sentinel (zero active count must "
+            f"not emit Arm under the positive-bound predicate); "
+            f"got {out!r}."
+        )
+
+    @pytest.mark.parametrize("burst_size", [1, 2, 3], ids=["N=1", "N=2", "N=3"])
+    def test_arm_emits_for_parametrized_burst_size(self, tmp_path, burst_size):
+        """Parametrized verification across burst sizes N in {1, 2, 3}.
+        For each N, pre-write N task files (ids 10..10+N-1) and pipe the
+        first-burst fixture through the hook. Positive-bound predicate
+        emits Arm for every N >= 1. Strict-equality revert FAILS for
+        N >= 2, expanding the cardinality of failing tests under revert
+        beyond the two race-coupled cases above."""
+        fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, team = self._setup_session(tmp_path, fixture)
+        for offset in range(burst_size):
+            _write_task(
+                home, team, str(10 + offset),
+                status="pending",
+                owner=f"agent-{offset}",
+            )
+
+        out = _emit_output(fixture, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Arm directive on parametrized burst (N={burst_size}); "
+            f"got {out!r}."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+
+    def test_teardown_sequence_after_parallel_burst_arm(self, tmp_path):
+        """Lifecycle-symmetric guard for the Teardown side of the race
+        window. Sequence: parallel burst raises count 0->2 (Arm fires) ->
+        first task completes 2->1 (Teardown must NOT fire; residual
+        active remains) -> second task completes 1->0 (Teardown fires).
+        Pins that the Teardown threshold (count == 0) is unaffected by
+        the relaxed Arm threshold, and that a parallel-burst-then-drain
+        lifecycle terminates cleanly."""
+        first_fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, team = self._setup_session(tmp_path, first_fixture)
+        sid = first_fixture["session_id"]
+        pdir = first_fixture["cwd"]
+
+        # State after parallel burst: both task files on disk, in_progress.
+        _write_task(home, team, "10", status="in_progress", owner="backend-coder")
+        _write_task(home, team, "11", status="in_progress", owner="test-engineer")
+
+        # First completion 2 -> 1: residual active task remains; no Teardown.
+        _write_task(home, team, "10", status="completed", owner="backend-coder")
+        out_first_complete = _emit_output({
+            "tool_name": "TaskUpdate",
+            "session_id": sid,
+            "cwd": pdir,
+            "tool_input": {"taskId": "10", "status": "completed"},
+            "tool_response": {"id": "10", "status": "completed"},
+        }, home)
+        assert out_first_complete == {"suppressOutput": True}, (
+            f"Expected suppressOutput when residual active task remains "
+            f"(2 -> 1 transition); got {out_first_complete!r}. If this "
+            f"emits Teardown, the Teardown threshold has been relaxed "
+            f"symmetrically with the Arm change — see #637 review TE-1."
+        )
+
+        # Second completion 1 -> 0: Teardown fires.
+        _write_task(home, team, "11", status="completed", owner="test-engineer")
+        out_final = _emit_output({
+            "tool_name": "TaskUpdate",
+            "session_id": sid,
+            "cwd": pdir,
+            "tool_input": {"taskId": "11", "status": "completed"},
+            "tool_response": {"id": "11", "status": "completed"},
+        }, home)
+        hso = out_final.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Teardown directive on terminal 1 -> 0 transition "
+            f"after parallel-burst Arm; got {out_final!r}."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]
+
+    def test_arm_emits_when_parallel_burst_includes_signal_task(self, tmp_path):
+        """Predicate-invariance under the count_active_tasks signal-task
+        filter. Parallel burst is (signal-task, real-task). The signal-
+        task is filtered by count_active_tasks; the predicate sees only
+        the lifecycle-relevant count (1, from the real task). Arm fires
+        for the real-task fire on the post-filter count, demonstrating
+        that the relaxed `>= 1` threshold composes correctly with the
+        carve-out filter rather than bypassing it."""
+        fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, team = self._setup_session(tmp_path, fixture)
+
+        # Pre-write a signal-task (filtered) and a real lifecycle-relevant
+        # task (not filtered). Post-filter count == 1.
+        _write_task(
+            home, team, "sig",
+            status="in_progress",
+            owner="x",
+            metadata={"completion_type": "signal", "type": "blocker"},
+        )
+        _write_task(home, team, "10", status="pending", owner="backend-coder")
+
+        out = _emit_output(fixture, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Arm directive when burst is (signal-task, real-task) "
+            f"and post-filter count == 1; got {out!r}. If suppressOutput, "
+            f"the signal-task filter is being bypassed by the relaxed "
+            f"predicate — predicate-invariance broken."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+
+    def test_arm_emits_when_parallel_burst_includes_exempt_owner(self, tmp_path):
+        """Predicate-invariance under the count_active_tasks self-
+        complete-exempt-owner filter. Parallel burst is (secretary-task,
+        real-task). The secretary-owned task is filtered; predicate sees
+        post-filter count == 1 from the real task. Arm fires on the
+        real-task fire, demonstrating composition with the exempt-owner
+        carve-out matches composition with the signal-task carve-out."""
+        fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, team = self._setup_session(tmp_path, fixture)
+
+        # Pre-write a secretary-owned task (filtered) and a real
+        # lifecycle-relevant task (not filtered). Post-filter count == 1.
+        _write_task(home, team, "sec", status="in_progress", owner="secretary")
+        _write_task(home, team, "10", status="pending", owner="backend-coder")
+
+        out = _emit_output(fixture, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Arm directive when burst is (secretary-task, "
+            f"real-task) and post-filter count == 1; got {out!r}. If "
+            f"suppressOutput, the exempt-owner filter is being bypassed."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+
+
+# ---------- STATE_FILE freshness short-circuit (Future-1) ----------
+
+
+def _write_state_file(
+    home: Path,
+    team_name: str,
+    *,
+    armed_at: str | None = "FRESH",
+    v: object = 1,
+    raw_bytes: bytes | None = None,
+    extra: dict | None = None,
+    omit_armed_at: bool = False,
+) -> Path:
+    """Write a watch-inbox STATE_FILE under the synthesized HOME for tests
+    that need to exercise the freshness-short-circuit path.
+
+    Helper conveniences (only one is load-bearing per call):
+    - `armed_at="FRESH"` (default) → now-60s, well within window.
+    - `armed_at="STALE"` → now-700s, outside the 600s window.
+    - `armed_at="FUTURE"` → now+60s, simulates clock skew.
+    - `armed_at=<str>` → use literal value (e.g., for malformed cases).
+    - `omit_armed_at=True` → write STATE_FILE without the field.
+    - `raw_bytes=<bytes>` → bypass JSON encoding entirely (for malformed-
+      JSON cases). Other kwargs are ignored when this is set.
+    - `v=<value>` → override schema version (use `v=2` to test forward-
+      compat fall-through).
+    - `extra=<dict>` → merge additional keys into the payload.
+    """
+    state_dir = home / ".claude" / "teams" / team_name
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / "inbox-wake-state.json"
+    if raw_bytes is not None:
+        path.write_bytes(raw_bytes)
+        return path
+    payload: dict = {
+        "v": v,
+        "monitor_task_id": "fixture-monitor-id",
+        "armed_by_session_id": "fixture-session-id",
+    }
+    if not omit_armed_at:
+        if armed_at == "FRESH":
+            ts = datetime.now(timezone.utc) - timedelta(seconds=60)
+            payload["armed_at"] = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+        elif armed_at == "STALE":
+            ts = datetime.now(timezone.utc) - timedelta(seconds=700)
+            payload["armed_at"] = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+        elif armed_at == "FUTURE":
+            ts = datetime.now(timezone.utc) + timedelta(seconds=60)
+            payload["armed_at"] = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+        else:
+            payload["armed_at"] = armed_at
+    if extra:
+        payload.update(extra)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+class TestStatefileFreshnessShortCircuit:
+    """Pin the STATE_FILE freshness-window short-circuit on the
+    TaskCreate Arm path.
+
+    Contract (architect §3.1.3 / `_decide_directive`):
+      `count_active_tasks(team_name) >= 1 AND NOT _statefile_is_fresh(team_name)`
+    emits Arm. When STATE_FILE is present + parses as v=1 + carries an
+    armed_at timestamp within `_STATEFILE_FRESHNESS_WINDOW_SECS` (600s)
+    of the current UTC clock, the hook short-circuits (returns None →
+    suppressOutput). Every other branch (absent / malformed / wrong
+    schema / missing armed_at / unparseable / clock skew / OS error)
+    fail-opens to emit (helper returns False, caller emits as if
+    Future-1 were not in play).
+
+    Counter-test-by-revert: revert just `_statefile_is_fresh` and the
+    call site at the TaskCreate branch. The fresh-STATE_FILE test moves
+    from suppressOutput-asserting to Arm-asserting; cardinality on this
+    class is {1 fail [the short-circuit case], rest pass}.
+    """
+
+    @staticmethod
+    def _load_fixture(name: str) -> dict:
+        data = json.loads((FIXTURES_DIR / name).read_text(encoding="utf-8"))
+        data.pop("_meta", None)
+        return data
+
+    def _setup_session(self, tmp_path: Path, fixture: dict, team: str = "team-fresh"):
+        home = tmp_path / "home"
+        home.mkdir()
+        sid = fixture["session_id"]
+        pdir = fixture["cwd"]
+        _write_session_context(home, sid, pdir, team)
+        return home, team
+
+    def test_short_circuit_on_fresh_statefile(self, tmp_path):
+        """The load-bearing positive case. Fresh STATE_FILE present
+        (armed_at = now - 60s); count_active_tasks == 1 from the
+        pre-written task. Hook short-circuits — suppressOutput sentinel,
+        no Arm emit. Counter-test-by-revert: removing _statefile_is_fresh
+        flips this to an Arm-emit assertion failure."""
+        fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, team = self._setup_session(tmp_path, fixture)
+        _write_task(home, team, "10", status="pending", owner="backend-coder")
+        _write_state_file(home, team, armed_at="FRESH")
+
+        out = _emit_output(fixture, home)
+        assert out == {"suppressOutput": True}, (
+            f"Expected suppressOutput on fresh STATE_FILE short-circuit; "
+            f"got {out!r}. If hookSpecificOutput is present, the "
+            f"_statefile_is_fresh gate is missing or returning False."
+        )
+
+    def test_emit_on_stale_statefile(self, tmp_path):
+        """Periodic re-arm trigger. STATE_FILE is present but armed_at
+        is past the 600s window (now - 700s). Hook emits Arm,
+        guaranteeing a bounded periodic re-arm occasion."""
+        fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, team = self._setup_session(tmp_path, fixture)
+        _write_task(home, team, "10", status="pending", owner="backend-coder")
+        _write_state_file(home, team, armed_at="STALE")
+
+        out = _emit_output(fixture, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Arm on stale STATE_FILE (past 600s window); "
+            f"got {out!r}. The freshness window appears to extend past "
+            f"600s, which would defeat the periodic re-arm trigger."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+
+    def test_emit_on_absent_statefile(self, tmp_path):
+        """Cold-start regression guard. No STATE_FILE on disk; helper
+        fail-opens to False; hook emits Arm. Pins that Future-1 does
+        not break the original 0->1 (or post-Teardown re-arm) path."""
+        fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, team = self._setup_session(tmp_path, fixture)
+        _write_task(home, team, "10", status="pending", owner="backend-coder")
+        # Deliberately do NOT write a STATE_FILE.
+
+        out = _emit_output(fixture, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Arm when STATE_FILE is absent (cold-start path); "
+            f"got {out!r}. Future-1 must fail-open to emit when no "
+            f"STATE_FILE exists, otherwise the cold-start Arm is lost."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+
+    def test_emit_on_malformed_json_statefile(self, tmp_path):
+        """Fail-open on STATE_FILE that exists but is not valid JSON.
+        Helper catches json.JSONDecodeError → returns False → hook emits.
+        Pins the pure-never-raises contract on the JSON parse failure
+        path."""
+        fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, team = self._setup_session(tmp_path, fixture)
+        _write_task(home, team, "10", status="pending", owner="backend-coder")
+        _write_state_file(home, team, raw_bytes=b"{not valid json")
+
+        out = _emit_output(fixture, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Arm (fail-open) on malformed STATE_FILE JSON; "
+            f"got {out!r}."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+
+    def test_emit_on_wrong_schema_version(self, tmp_path):
+        """Forward-compat fall-through. STATE_FILE has v=2 (a future
+        schema bump); current Future-1 helper returns False so hook
+        emits. Pins the v != 1 fail-through path so a future schema
+        migration doesn't accidentally land both old + new helpers
+        treating v=2 as fresh."""
+        fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, team = self._setup_session(tmp_path, fixture)
+        _write_task(home, team, "10", status="pending", owner="backend-coder")
+        _write_state_file(home, team, armed_at="FRESH", v=2)
+
+        out = _emit_output(fixture, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Arm (fall-through) on STATE_FILE with v=2; "
+            f"got {out!r}. The v != 1 branch must not short-circuit."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+
+    def test_emit_on_missing_armed_at_field(self, tmp_path):
+        """Fail-open on STATE_FILE with v=1 but no armed_at. Helper
+        returns False on missing-field; hook emits. Pins the discipline
+        that 'present and parseable' is necessary but not sufficient
+        for short-circuit — armed_at must exist AND be parseable AND
+        be within window."""
+        fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, team = self._setup_session(tmp_path, fixture)
+        _write_task(home, team, "10", status="pending", owner="backend-coder")
+        _write_state_file(home, team, omit_armed_at=True)
+
+        out = _emit_output(fixture, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Arm (fail-open) on STATE_FILE missing armed_at; "
+            f"got {out!r}."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+
+    def test_emit_on_clock_skew_future_armed_at(self, tmp_path):
+        """Fail-open on negative-age (clock skew). armed_at is 60s in
+        the future relative to the current clock. Helper detects
+        age_secs < 0 and returns False; hook emits. Pins the discipline
+        that a future-dated armed_at is treated as not-fresh rather
+        than as 'extremely fresh' (which would silently extend the
+        short-circuit indefinitely on a misconfigured clock)."""
+        fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, team = self._setup_session(tmp_path, fixture)
+        _write_task(home, team, "10", status="pending", owner="backend-coder")
+        _write_state_file(home, team, armed_at="FUTURE")
+
+        out = _emit_output(fixture, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Arm (fail-open) on future-dated armed_at "
+            f"(clock skew); got {out!r}. If suppressOutput, the helper "
+            f"is treating negative age as fresh — which silently "
+            f"extends short-circuit indefinitely on a misconfigured "
+            f"clock."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+
+    def test_no_emit_on_zero_count_regardless_of_statefile(self, tmp_path):
+        """Lower-bound regression guard. Even with a fresh STATE_FILE,
+        TaskCreate at count==0 must NOT emit Arm — the short-circuit
+        does not bypass the count-positive predicate. Pins the
+        composition order: count check first, freshness check second."""
+        fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, team = self._setup_session(tmp_path, fixture)
+        # Deliberately do NOT write a task file (count == 0).
+        _write_state_file(home, team, armed_at="FRESH")
+
+        out = _emit_output(fixture, home)
+        assert out == {"suppressOutput": True}, (
+            f"Expected suppressOutput when count == 0 (regardless of "
+            f"STATE_FILE freshness); got {out!r}. The lower-bound "
+            f"count check must dominate the freshness-short-circuit."
+        )
+
+    def test_teardown_unaffected_by_fresh_statefile(self, tmp_path):
+        """Teardown side regression guard. TaskUpdate(terminal-status)
+        at count==0 must still emit Teardown regardless of STATE_FILE
+        presence/freshness — Future-1 gates only the TaskCreate branch.
+        Pins that the freshness short-circuit does not leak into the
+        Teardown predicate."""
+        home = tmp_path / "home"
+        home.mkdir()
+        sid = "pact-2877fe69"
+        pdir = "/Users/mj/Sites/collab/PACT-prompt"
+        team = "team-fresh"
+        _write_session_context(home, sid, pdir, team)
+        _write_task(home, team, "10", status="completed", owner="backend-coder")
+        _write_state_file(home, team, armed_at="FRESH")
+
+        out = _emit_output({
+            "tool_name": "TaskUpdate",
+            "session_id": sid,
+            "cwd": pdir,
+            "tool_input": {"taskId": "10", "status": "completed"},
+            "tool_response": {"id": "10", "status": "completed"},
+        }, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Teardown on terminal-status TaskUpdate at "
+            f"count==0 even with fresh STATE_FILE; got {out!r}. The "
+            f"freshness short-circuit must not gate the Teardown path."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]

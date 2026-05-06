@@ -7,15 +7,18 @@ Used by: hooks.json PostToolUse hook with matcher
          `TaskCreate|TaskUpdate`.
 
 Lifecycle automation:
-- On TaskCreate that transitions the team's active-task count from 0 to
-  1, emit a watch-inbox directive instructing the lead to invoke
+- On TaskCreate that lands while the team has at least one
+  lifecycle-relevant active task AND the watch-inbox STATE_FILE
+  is absent, malformed, or older than the freshness window, emit
+  a watch-inbox directive instructing the lead to invoke
   Skill("PACT:watch-inbox").
-- On TaskUpdate(status in {completed, deleted}) that transitions the
-  team's active-task count from 1 to 0, emit an unwatch-inbox directive
-  instructing the lead to invoke Skill("PACT:unwatch-inbox"). Both
-  terminal statuses end active work and are treated symmetrically.
+- On TaskUpdate(status in {completed, deleted}) that drives the
+  team's lifecycle-relevant active-task count to zero, emit an
+  unwatch-inbox directive instructing the lead to invoke
+  Skill("PACT:unwatch-inbox"). Both terminal statuses end active
+  work and are treated symmetrically.
 - On any other tool fire (TaskUpdate without a terminal-status
-  transition, TaskCreate at non-zero pre-state, terminal-status
+  transition, TaskCreate when the count is zero, terminal-status
   TaskUpdate leaving residual active tasks): no directive emitted.
 
 Transition detection (post-only):
@@ -23,15 +26,25 @@ Transition detection (post-only):
   effect is on disk. count_active_tasks already filters out signal-
   tasks and self-complete-exempt agents, so post is the lifecycle-
   relevant count.
-- TaskCreate + post == 1 → emit Arm (a TaskCreate that lifts the count
-  to 1 must have been the first lifecycle-relevant task; carve-out
-  creations leave post unchanged at 0).
+- TaskCreate + post >= 1 + STATE_FILE freshness expired (or absent /
+  malformed) → emit Arm. The freshness window
+  (_STATEFILE_FRESHNESS_WINDOW_SECS) bounds the per-TaskCreate
+  redundant-emit cost: when the watch-inbox STATE_FILE was armed
+  recently, the hook short-circuits (no directive emitted) since the
+  orchestrator would only invoke an idempotent skill no-op. After
+  the freshness window expires, the next TaskCreate emits Arm
+  regardless of STATE_FILE presence, providing a bounded periodic
+  re-arm trigger.
 - TaskUpdate(status in {completed, deleted}) + post == 0 → emit
   Teardown. Skill's Teardown is idempotent (no-op if STATE_FILE absent),
   so over-eager emission on edge cases (terminal-status update of a
   never-counted signal-task while post==0) is benign.
-- Any other tool fire (non-status TaskUpdate, TaskCreate at post != 1,
+- Any other tool fire (non-status TaskUpdate, TaskCreate at post == 0,
   terminal-status TaskUpdate at post > 0): no-op.
+
+The Arm threshold (post >= 1) and `session_init.py`'s SessionStart
+Arm threshold (active_count > 0) apply the same minimum-positive-count
+gate at both Arm sites, so a single mental model covers both surfaces.
 
 Output schema (load-bearing):
 {
@@ -58,6 +71,7 @@ Output: hookSpecificOutput with additionalContext on transitions;
 
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +93,22 @@ _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 # comfortably under 1MB. A larger payload is a defense-in-depth
 # rejection signal (parser amplification / memory-exhaustion vector).
 _MAX_PAYLOAD_BYTES = 1024 * 1024
+
+# STATE_FILE freshness window (seconds). When the watch-inbox
+# STATE_FILE's armed_at is within this window, the hook short-circuits
+# (no Arm directive emitted) — the orchestrator's per-TaskCreate
+# context-budget tax of reading the directive prose is avoided. After
+# the window expires, the next TaskCreate emits Arm regardless of
+# STATE_FILE presence, providing a bounded periodic re-arm trigger.
+#
+# 600s = 10 min:
+#   >= 5x the Monitor's MAX_DELAY ceiling (120s, see watch-inbox.md
+#     §Monitor Block audit anchor) so freshness does not expire under
+#     normal sustained-traffic emit cadence.
+#   >= typical PACT phase duration so a single CODE/TEST work unit
+#     does not trip the periodic re-arm.
+#   <= user-perceived staleness threshold for "Monitor probably died."
+_STATEFILE_FRESHNESS_WINDOW_SECS = 600
 
 # Directive prose — verbatim text emitted via additionalContext on
 # transitions. Imperative voice; references the canonical command-pair
@@ -206,6 +236,64 @@ def _extract_task_id(input_data: dict[str, Any]) -> str | None:
     return None
 
 
+def _statefile_is_fresh(team_name: str) -> bool:
+    """
+    Return True iff the watch-inbox STATE_FILE is present, parses with
+    v=1, carries an armed_at timestamp, and that timestamp is within
+    _STATEFILE_FRESHNESS_WINDOW_SECS of the current UTC clock.
+
+    Used by _decide_directive to short-circuit the Arm emit path when
+    the Monitor was recently armed; the per-TaskCreate context-budget
+    tax of redundant directive emission is the cost being avoided.
+
+    Pure-never-raises contract: returns False on any failure mode
+    (file missing, unreadable, malformed JSON, missing fields, wrong
+    schema version, unparseable timestamp, clock skew yielding negative
+    age, OS error). Fail-open to "not fresh" preserves the emit
+    behavior on any unexpected condition; the redundant-emit cost is
+    the only thing on the line, so fail-open here is strictly correct
+    (no silent-death masking, no missed Arm on a genuinely needed
+    cold-start).
+    """
+    try:
+        if not team_name or not is_safe_path_component(team_name):
+            return False
+        path = (
+            Path.home()
+            / ".claude"
+            / "teams"
+            / team_name
+            / "inbox-wake-state.json"
+        )
+        if not path.exists():
+            return False
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return False
+        if data.get("v") != 1:
+            return False
+        armed_at_raw = data.get("armed_at")
+        if not isinstance(armed_at_raw, str):
+            return False
+        # ISO-8601 'Z' suffix is the watch-inbox WriteStateFile format.
+        # datetime.fromisoformat handles +HH:MM but not 'Z' before
+        # Python 3.11; shim the suffix and require an aware datetime.
+        armed_at = datetime.fromisoformat(
+            armed_at_raw.replace("Z", "+00:00")
+        )
+        if armed_at.tzinfo is None:
+            return False
+        age_secs = (datetime.now(timezone.utc) - armed_at).total_seconds()
+        if age_secs < 0:
+            # Clock skew: armed_at is in the future. Treat as not-fresh
+            # so the next TaskCreate re-evaluates after the clock
+            # converges.
+            return False
+        return age_secs <= _STATEFILE_FRESHNESS_WINDOW_SECS
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return False
+
+
 _TERMINAL_STATUSES = ("completed", "deleted")
 
 
@@ -256,16 +344,28 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     Return the directive prose to emit, or None for no-op.
 
     Post-only transition detection:
-    - TaskCreate + post == 1 → Arm.
+    - TaskCreate + post >= 1 + STATE_FILE freshness expired (or absent
+      / malformed) → Arm.
     - TaskUpdate(status in {completed, deleted}) + post == 0 → Teardown.
 
     count_active_tasks already filters carve-outs (signal-tasks,
-    self-complete-exempt owners), so post == 1 after a TaskCreate
-    means the create added the first lifecycle-relevant task, and
+    self-complete-exempt owners), so post >= 1 after a TaskCreate
+    means at least one lifecycle-relevant task is active, and
     post == 0 after a terminal-status TaskUpdate means the team
-    has no remaining lifecycle-relevant work. The skill's Arm and
-    Teardown are both idempotent, so any over-eager emit on edge
-    cases is benign.
+    has no remaining lifecycle-relevant work. The Arm threshold
+    accepts any positive count and the freshness gate
+    (_statefile_is_fresh) short-circuits redundant emits when the
+    watch-inbox STATE_FILE was armed within
+    _STATEFILE_FRESHNESS_WINDOW_SECS; once the window expires the
+    next TaskCreate emits Arm regardless of STATE_FILE presence,
+    bounding the redundant-emit cost while preserving a periodic
+    re-arm trigger. Both Arm and Teardown are idempotent in the
+    skill layer, so any over-eager emit on edge cases is benign.
+
+    Test coverage pins the Arm predicate to the equivalent forms
+    >= 1 and > 0: the lower-bound zero-count no-emit case and the
+    sequential-first-create emit case together rule out predicates
+    above (e.g. > 1) and below (e.g. >= 0).
     """
     if not _is_lead_session(input_data, team_name):
         return None
@@ -284,9 +384,11 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     # transitions on a typical task lifecycle; gating the I/O on the
     # terminal-status check eliminates ~9k wasted reads/session.
     if tool_name == "TaskCreate":
-        if count_active_tasks(team_name) == 1:
-            return _ARM_DIRECTIVE
-        return None
+        if count_active_tasks(team_name) < 1:
+            return None
+        if _statefile_is_fresh(team_name):
+            return None
+        return _ARM_DIRECTIVE
 
     # tool_name == "TaskUpdate"
     if not _is_terminal_status_update(input_data):
