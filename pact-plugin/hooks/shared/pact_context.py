@@ -147,19 +147,16 @@ def init(input_data: dict) -> None:
     session_id = ""
     raw_id = input_data.get("session_id")
     if raw_id:
-        # R2-S-r2-1 (security-engineer-review-r2): apply the SAME
-        # allowlist-substitute regex as the slug producer (one site
-        # below) so session_id and slug share one safe-path-component
-        # contract. The Cycle-2 fix used the narrower control-chars-
-        # only strip (SESSION_ID_CONTROL_CHARS_RE), which left shell
-        # metacharacters (`$`, backtick, `;`, `(`, `)`, etc.) admissible
-        # in session_id — they would survive the strip and reach the
-        # disclosed PACT_SESSION_DIR= path interpolated into
-        # bootstrap.md's shell command body. Symmetric defense per
-        # memory patterns_symmetric_sanitization.md: every interpolation
-        # sink shares the same allowlist regex `[^A-Za-z0-9_-]`, so
-        # asymmetric strip sets across sinks cannot become an
-        # attacker entry point.
+        # Apply the SAME allowlist-substitute regex as the slug producer
+        # (one site below) so session_id and slug share one safe-path-
+        # component contract. Symmetric defense per memory
+        # patterns_symmetric_sanitization.md: every interpolation sink
+        # shares the same allowlist regex `[^A-Za-z0-9_-]`, so asymmetric
+        # strip sets across sinks cannot become an attacker entry point.
+        # session_id reaches the disclosed PACT_SESSION_DIR= path
+        # interpolated into bootstrap.md's shell command body, so shell
+        # metacharacters (`$`, backtick, `;`, `(`, `)`, etc.) MUST be
+        # substituted, not just control chars stripped.
         # Sanitize-substitute (NOT reject) so malformed stdin doesn't
         # crash the hook; cleaned id forms a single segment.
         session_id = _UNSAFE_SLUG_CHARS_RE.sub("_", str(raw_id))

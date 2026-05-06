@@ -2747,7 +2747,7 @@ class TestExtractManagedRegion:
 
 
 class _StripOrphanBlockTestBase:
-    """Shared mixin for SUNSET-BEFORE-v4.x.y orphan-block strippers.
+    """Shared mixin for SUNSET-BEFORE-v5.0.0 orphan-block strippers.
 
     Subclasses configure:
       - START_MARKER, END_MARKER (the marker pair the stripper hunts)
@@ -2783,7 +2783,7 @@ class _StripOrphanBlockTestBase:
 
 
 class TestStripOrphanKernelBlock(_StripOrphanBlockTestBase):
-    """SUNSET-BEFORE-v4.x.y migration helper: strips the obsolete v3.x
+    """SUNSET-BEFORE-v5.0.0 migration helper: strips the obsolete v3.x
     PACT_START/PACT_END block from ~/.claude/CLAUDE.md.
 
     Uses the _StripOrphanBlockTestBase mixin to share the behavior matrix

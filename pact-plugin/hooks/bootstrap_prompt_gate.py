@@ -33,7 +33,7 @@ _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 _BOOTSTRAP_INSTRUCTION_TEMPLATE = (
     "REQUIRED: Before responding to this message, invoke "
     'Skill("PACT:bootstrap"). Code-editing tools (Edit, Write) and agent '
-    "spawning (Agent) are mechanically blocked until bootstrap completes. "
+    "dispatch (Task) are mechanically blocked until bootstrap completes. "
     "This loads your operating instructions, governance policy, and "
     "workflow protocols."
     "{session_dir_hint}"
@@ -59,14 +59,11 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
         # No session dir → non-PACT session or uninitialized context → no-op
         return None
 
-    # R2-B1 / R2-M1 / R2-S-A2 (3-reviewer convergence): use the same
-    # safe-marker-check helper as the sibling bootstrap_gate.py to close
-    # the defense-asymmetry. The helper enforces S2 (planted-symlink-at-
-    # marker rejection via os.lstat + S_ISREG) + S4 (ancestor-symlink
-    # rejection via Path.resolve containment). A bare `Path.exists()`
-    # check here would have admitted a planted symlink that the sibling
-    # gate would correctly reject, leaving prompt-gate as the weaker
-    # surface. Single safe-check contract across both enforcement points.
+    # Use the same safe-marker-check helper as the sibling
+    # bootstrap_gate.py so both enforcement points share one safe-check
+    # contract. The helper enforces S2 (planted-symlink-at-marker
+    # rejection via os.lstat + S_ISREG) + S4 (ancestor-symlink rejection
+    # via Path.resolve containment).
     if is_marker_set(Path(session_dir)):
         # Bootstrap already done → suppress (zero tokens)
         return None

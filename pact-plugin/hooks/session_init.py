@@ -386,17 +386,17 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
         if source == "new_default":
             return None
 
-        # R2-B4 (backend-coder-review-r2): acquire the same sidecar
-        # file_lock that update_session_info uses for its read-mutate-
-        # write pass. A concurrent write (e.g., from another session_init
-        # invocation racing the WRITE step at L1148) could otherwise
-        # produce a torn read here, surfacing as either a corrupted
-        # Session-dir match or a fallback-regex hit on a half-written
-        # SESSION_START block. The lock serializes against the writer.
-        # Re-entrancy verified safe: this read at step 5a runs AFTER
-        # strip_orphan_routing_markers (step 3c) released its lock, and
-        # BEFORE update_session_info (step 5b) acquires its own. No
-        # nesting; fail-open on TimeoutError per file_lock contract.
+        # Acquire the same sidecar file_lock that update_session_info
+        # uses for its read-mutate-write pass. A concurrent write (e.g.,
+        # from another session_init invocation racing the WRITE step at
+        # L1148) could otherwise produce a torn read here, surfacing as
+        # either a corrupted Session-dir match or a fallback-regex hit
+        # on a half-written SESSION_START block. The lock serializes
+        # against the writer. Re-entrancy is safe: this read at step 5a
+        # runs AFTER strip_orphan_routing_markers (step 3c) released
+        # its lock, and BEFORE update_session_info (step 5b) acquires
+        # its own. No nesting; fail-open on TimeoutError per file_lock
+        # contract.
         try:
             with file_lock(claude_md):
                 content = claude_md.read_text(encoding="utf-8")
@@ -762,7 +762,7 @@ def main():
         if orphan_strip_msg:
             context_parts.append(orphan_strip_msg)
 
-        # 3d. SUNSET BEFORE v4.x.y: strip the obsolete PACT_START/PACT_END
+        # 3d. SUNSET BEFORE v5.0.0: strip the obsolete PACT_START/PACT_END
         # kernel block from ~/.claude/CLAUDE.md (v3.x kernel-in-home-dir
         # architecture; replaced by --agent flag in v4.0). Idempotent no-op
         # once stripped. "Migration skipped: ..." status routes to
@@ -1121,21 +1121,14 @@ def main():
                 f'reusing team. Run TaskList to check current state.'
             ))
         else:
-            # R2-B3 (backend-coder-review-r2): differentiate the no-team
-            # branch by whether `source` is a recognized lifecycle value.
-            # Pre-fix: a single WARNING for both cases, conflating the
-            # legitimate-but-anomalous scenario (e.g., user runs /clear
-            # with no team, or compact fires before a team was ever
-            # created) with the truly-malformed scenario (stdin source
-            # is not in the platform's documented set).
-            #
-            # Post-fix:
-            #   - known source + no team → informational (recovery hint
-            #     stays; WARNING tone removed). Legitimate first-session-
+            # Differentiate the no-team branch by whether `source` is a
+            # recognized lifecycle value:
+            #   - known source + no team → informational note (recovery
+            #     hint stays; no WARNING tone). Legitimate first-session-
             #     after-stale-CLAUDE.md class.
-            #   - unknown source + no team → keep WARNING in
-            #     additionalContext AND emit stderr for observability
-            #     (debug logs surface the malformed-stdin signal).
+            #   - unknown source + no team → emit WARNING in
+            #     additionalContext AND stderr for observability (debug
+            #     logs surface the malformed-stdin signal).
             _KNOWN_SOURCES = {"startup", "resume", "compact", "clear"}
             if source in _KNOWN_SOURCES:
                 context_parts.insert(0, (

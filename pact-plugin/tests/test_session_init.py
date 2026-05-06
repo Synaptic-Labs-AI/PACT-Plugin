@@ -3380,7 +3380,7 @@ class TestSourceAwareness:
 
     @pytest.mark.parametrize(
         "raw_source",
-        ["weird", "manual_invoke", "unknown-xyz", "compact1"],
+        ["weird", "manual_invoke", "unknown-xyz", "compact_typo"],
     )
     def test_unknown_source_no_team_warns_and_emits_stderr(
         self, raw_source, monkeypatch, tmp_path, capfd
