@@ -8,6 +8,11 @@ Used by: hooks.json SubagentStart hook (matcher: pact-* agent types)
 Replaces the manual pattern of listing peer names in task descriptions.
 Agents automatically know who else is on the team.
 
+SACROSANCT: every raisable path in main() is wrapped in try/except that
+defaults to passthrough (exit 0 with suppressOutput). A hook bug must
+never block a SubagentStart event. Mirrors the fail-open contract
+documented in bootstrap_gate.py and bootstrap_prompt_gate.py.
+
 Input: JSON from stdin with agent_id, agent_type
 Output: JSON with hookSpecificOutput.additionalContext
 """
@@ -185,27 +190,37 @@ def get_peer_context(
 def main():
     try:
         input_data = json.load(sys.stdin)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, ValueError):
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
-    pact_context.init(input_data)
-    agent_type = input_data.get("agent_type", "")
-    # Only accept agent_name here. agent_id is a UUID and team members are
-    # registered in the team config under their canonical names, not UUIDs —
-    # falling back to agent_id would make the self-exclusion filter in
-    # get_peer_context() fail to match anything, and the intended agentType
-    # fallback (which excludes ALL peers of the same type) would become
-    # unreachable. Leave agent_name empty when absent so get_peer_context's
-    # agentType fallback fires as originally designed.
-    agent_name = input_data.get("agent_name", "")
-    team_name = get_team_name()
+    try:
+        # input_data may not be a dict (e.g., parseable JSON `123` or `[]`);
+        # downstream pact_context.init + .get() raise AttributeError on
+        # non-dict input. The outer except below catches any such raise
+        # and falls open with suppressOutput, mirroring the SACROSANCT
+        # fail-open pattern in bootstrap_gate.py and bootstrap_prompt_gate.py.
+        pact_context.init(input_data)
+        agent_type = input_data.get("agent_type", "")
+        # Only accept agent_name here. agent_id is a UUID and team members are
+        # registered in the team config under their canonical names, not UUIDs —
+        # falling back to agent_id would make the self-exclusion filter in
+        # get_peer_context() fail to match anything, and the intended agentType
+        # fallback (which excludes ALL peers of the same type) would become
+        # unreachable. Leave agent_name empty when absent so get_peer_context's
+        # agentType fallback fires as originally designed.
+        agent_name = input_data.get("agent_name", "")
+        team_name = get_team_name()
 
-    context = get_peer_context(
-        agent_type=agent_type,
-        team_name=team_name,
-        agent_name=agent_name,
-    )
+        context = get_peer_context(
+            agent_type=agent_type,
+            team_name=team_name,
+            agent_name=agent_name,
+        )
+    except Exception:
+        # Any exception in the build path → fail-open with suppressOutput.
+        print(_SUPPRESS_OUTPUT)
+        sys.exit(0)
 
     if context:
         output = {
