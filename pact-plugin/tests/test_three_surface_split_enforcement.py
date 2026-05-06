@@ -174,18 +174,27 @@ class TestBootstrapCommandExcludesGovernanceDirectives:
     ):
         """Each governance keyword names a persona-body-owned section.
         Its presence in bootstrap.md indicates governance leaking into
-        the mechanics surface."""
-        assert keyword not in bootstrap_text, (
+        the mechanics surface.
+
+        Case-insensitive substring check: a future contributor lowercasing
+        a section heading (e.g., `## sacrosanct non-negotiables`) or
+        mixing case (`Mission:`) would bypass a case-sensitive guard.
+        Lowercase BOTH sides before comparing so all case variants are
+        rejected.
+        """
+        bootstrap_lower = bootstrap_text.lower()
+        keyword_lower = keyword.lower()
+        assert keyword_lower not in bootstrap_lower, (
             f"commands/bootstrap.md contains governance keyword "
-            f"{keyword!r}; that content belongs in the --agent-delivered "
-            f"persona body, not the per-session ritual command. "
-            f"Re-locate to pact-orchestrator.md or remove."
+            f"{keyword!r} (case-insensitive); that content belongs in "
+            f"the --agent-delivered persona body, not the per-session "
+            f"ritual command. Re-locate to pact-orchestrator.md or remove."
         )
 
     def test_bootstrap_md_no_mandatory_imperative_outside_step_sections(
         self, bootstrap_text
     ):
-        """The `**You MUST ...**` pattern (or `**you MUST`, case-insensitive)
+        """The `**You MUST ...**` pattern (any case variant of MUST/must/Must)
         is the signature of persona-body imperative directive prose. It is
         legitimate INSIDE `## Step N — ...` sections (mechanics naturally
         use mandatory voice, e.g., "**Substitute `<path>` with ...**") but
@@ -195,8 +204,11 @@ class TestBootstrapCommandExcludesGovernanceDirectives:
         Walks the document section-by-section. Each section starts at a
         `## ` heading and ends at the next `## ` heading or EOF. A section
         is a "Step section" iff its heading matches `## Step N — ...`.
-        Non-Step sections are scanned for `**You MUST` (case-insensitive)
-        and any match fails the test.
+        Non-Step sections are scanned for `**You (MUST|must|Must)` and any
+        match fails the test. The triple-form variant catches all three
+        common-case forms (all-caps mandate, lowercase imperative, leading-
+        cap stylized) without false-firing on substring matches like
+        `Mustard` (`\\b` boundary).
         """
         # Split into sections by `## ` heading lines
         section_starts = [
@@ -213,9 +225,9 @@ class TestBootstrapCommandExcludesGovernanceDirectives:
             # Step sections are mechanics-allowed
             if re.match(r"## Step \d+\b", heading):
                 continue
-            # Non-Step section: check for **You MUST pattern
+            # Non-Step section: check for **You (MUST|must|Must) pattern
             for match in re.finditer(
-                r"\*\*[Yy]ou\s+MUST\b",
+                r"\*\*[Yy]ou\s+(?:MUST|must|Must)\b",
                 section,
             ):
                 offenders.append(
