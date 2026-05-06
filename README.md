@@ -242,6 +242,7 @@ PACT is built on the **Viable System Model** (VSM), a cybernetics framework for 
 | Hook | Trigger | Purpose |
 |------|---------|---------|
 | `session_init.py` | Session start | Initialize PACT environment, generate team |
+| `bootstrap_gate.py` | UserPromptSubmit + PreToolUse | Inject session-start ritual directive on first turn |
 | `phase_completion.py` | Session stop | Remind about decision logs |
 | `validate_handoff.py` | Agent handoff | Verify output quality |
 | `track_files.py` | File edit/write | Track files for memory graph |
@@ -594,6 +595,7 @@ PACT v4.0 is a **breaking change**. The orchestrator persona delivery model migr
 | **Invocation** | Plain `claude` in a PACT project (CLAUDE.md routing did the work) | `claude --agent PACT:pact-orchestrator` (or settings.json / `pact` script convention) |
 | **Bootstrap mechanics** | Multi-step skill chain loaded protocol files at runtime | Persona body inline at session start; protocols loaded lazily on demand |
 | **CLAUDE.md routing block** | Required (`PACT_ROUTING` block injected by `session_init`) | Removed — block is stripped on session start during the v4.0.x and v4.1.x deprecation window |
+| **Session-start ritual** | Bundled into the bootstrap skill chain (loaded protocols + ran ritual together) | Restored as a ritual-only `/PACT:bootstrap` command + `bootstrap_gate.py` injection (persona delivery is now via `--agent`; the command performs the ritual only) |
 
 ### What you need to do
 

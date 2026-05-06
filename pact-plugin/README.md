@@ -4,7 +4,7 @@
 
 Turn a single Claude Code session into a managed team of specialist AI agents that prepare, design, build, and test your code systematically.
 
-> **Breaking change in v3.0:** PACT now uses [Agent Teams](https://code.claude.com/docs/en/agent-teams) instead of subagents. You must [enable Agent Teams](https://github.com/Synaptic-Labs-AI/PACT-Plugin#enabling-agent-teams) in your `settings.json`. See the [upgrade guide](https://github.com/Synaptic-Labs-AI/PACT-Plugin#upgrading-from-v2x-to-v30) for details.
+> **Breaking change in v4.0:** PACT now delivers the orchestrator persona via the `--agent PACT:pact-orchestrator` flag (or settings.json / `pact` script convention) instead of CLAUDE.md routing. See the [v4.0 upgrade guide](https://github.com/Synaptic-Labs-AI/PACT-Plugin#upgrading-from-v3x-to-v40) for details — also requires [Agent Teams enabled](https://github.com/Synaptic-Labs-AI/PACT-Plugin#enabling-agent-teams) per v3.0+.
 
 ## Install in 30 Seconds
 
@@ -43,7 +43,7 @@ Then add `~/.claude/teams` and `~/.claude/pact-sessions` to your `additionalDire
 
 > **Note:** Bash allow rules are intentionally omitted — they are [fragile](https://docs.anthropic.com/en/docs/claude-code/settings#permission-settings) for commands with arguments. When agents run `mkdir` or `rm` in `~/.claude/` paths, select **"Yes, and always allow from this project"** to add the rule automatically.
 
-Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/Synaptic-Labs-AI/PACT-Plugin#enabling-agent-teams).
+Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/Synaptic-Labs-AI/PACT-Plugin#enabling-agent-teams) and the `--agent` flag wired up — see [Loading PACT at session start](https://github.com/Synaptic-Labs-AI/PACT-Plugin#upgrading-from-v3x-to-v40) for the three convenience patterns (per-project `.claude/settings.json`, the `pact` shell wrapper, or manual `claude --agent PACT:pact-orchestrator`).
 
 ## What You Get
 
@@ -61,11 +61,12 @@ Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/Syna
 /PACT:plan-mode <task>            # Strategic planning before implementation
 ```
 
-## What's New in v3.0+
+## What's New in v4.0+
 
-- **Agent Teams**: Specialists run as coordinated Claude Code instances with shared tasks and direct messaging
-- **Persistent Teammates**: Completed-phase agents remain available as consultants
-- **Conversation Theory**: Teachback protocols ensure shared understanding between agents
+- **`--agent` flag persona delivery**: Orchestrator persona ships at the system-prompt tier via `--agent PACT:pact-orchestrator`, durable under context compaction (replaces v3.x CLAUDE.md routing)
+- **Lazy-load protocols**: Persona body cross-references protocols on demand instead of bootstrapping them all up front, reducing baseline token cost
+- **Restored session-start ritual** (v4.1): Scaled-down `/PACT:bootstrap` command + `bootstrap_gate.py` injection re-establish the first-turn ritual under the new delivery model
+- **Communication Charter**: Async-at-idle-boundary delivery model formalized for inter-agent SendMessage mechanics
 
 ## Full Documentation
 
@@ -76,6 +77,11 @@ For installation options, detailed features, examples, and technical reference:
 
 - [Protocols](protocols/) — Coordination, scope detection, algedonic signals
 - [Algedonic Signals](protocols/algedonic.md) — Emergency escalation protocol
+- [Communication Charter](protocols/pact-communication-charter.md) — Async-at-idle-boundary inter-agent delivery model
+- [Completion Authority](protocols/pact-completion-authority.md) — Lead-only completion + Task A+B dispatch shape
+- [State Recovery](protocols/pact-state-recovery.md) — Resume + recovery semantics across sessions
+- [S5 Policy](protocols/pact-s5-policy.md) — Non-negotiable rules layer (security, quality, ethics)
+- [S4 Tension](protocols/pact-s4-tension.md) — Strategic-vs-operational tension management
 - [VSM Glossary](reference/vsm-glossary.md) — Viable System Model terminology in PACT context
 
 ## License
