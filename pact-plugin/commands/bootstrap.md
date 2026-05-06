@@ -27,7 +27,7 @@ If `~/.claude/teams/{team_name}/paused-state.json` exists, read it and surface i
 
 ## Step 4 — Plugin banner
 
-Render a single-line banner showing the installed plugin version + plugin root, e.g. `PACT plugin: <version> (root: ~/.claude/plugins/cache/pact-marketplace/PACT/<version>)`. The `format_plugin_banner()` helper in `hooks/shared/plugin_manifest.py` is the canonical formatter (it reads the live version from `plugin.json`); `peer_inject` and `session_init` already deliver it on their own surfaces. The `<version>` placeholder above is illustrative — do not substitute it manually; let `format_plugin_banner()` produce the rendered banner.
+Surface the plugin banner — a single line of the form `PACT plugin: <version> (root: ~/.claude/plugins/cache/pact-marketplace/PACT/<version>)` — in the bootstrap-confirmation reply. The banner is pre-rendered by the `format_plugin_banner()` helper in `hooks/shared/plugin_manifest.py` (reading the live version from `plugin.json`) and delivered through the `session_init` SessionStart system reminder + the per-prompt `peer_inject` surface; no manual composition is needed — echo what the hook already produced. If the session-start system reminder has been dropped (post-compaction), fall back in order: (a) read the `- Plugin root:` line in CLAUDE.md's Current Session block (the path embeds the version), then (b) read `plugin.json["version"]` directly. The `<version>` placeholder above is illustrative — do not substitute it manually.
 
 ---
 
