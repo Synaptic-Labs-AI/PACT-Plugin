@@ -201,12 +201,13 @@ class TestPreResponseChannelCheckGate:
 
     def test_lead_gate_appears_before_communication(self):
         lead = self.ORCHESTRATION_PATH.read_text(encoding="utf-8")
-        # Architect's §1-§12 numbered hierarchy: Pre-Response Channel Check
-        # is §1; Communication is §6. The pre-response gate must precede the
-        # Communication section so the agent reads the channel-check rules
-        # before reading the SendMessage discipline.
-        assert lead.index("## 1. Pre-Response Channel Check") < lead.index("## 6. Communication"), \
-            "pact-orchestrator agent body: Pre-Response Channel Check (§1) must appear before Communication (§6)"
+        # Architect's §1-§13 numbered hierarchy: Pre-Response Channel Check
+        # is §1; Communication is §7 (post #628 §2 Session-Start Ritual
+        # insertion + §2-§12 → §3-§13 renumber). The pre-response gate
+        # must precede the Communication section so the agent reads the
+        # channel-check rules before reading the SendMessage discipline.
+        assert lead.index("## 1. Pre-Response Channel Check") < lead.index("## 7. Communication"), \
+            "pact-orchestrator agent body: Pre-Response Channel Check (§1) must appear before Communication (§7)"
 
 
 _ALL_SKILL_FILES = sorted(SKILLS_DIR.glob("*/SKILL.md"))

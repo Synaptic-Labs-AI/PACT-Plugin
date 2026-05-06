@@ -1,6 +1,6 @@
 {
   "name": "PACT",
-  "version": "4.0.1",
+  "version": "4.1.0",
   "description": "Orchestration harness that turns Claude Code into a coordinated team of specialist AI agents",
   "author": {
     "name": "Synaptic-Labs-AI",
@@ -25,6 +25,7 @@
     "conversation-theory"
   ],
   "commands": [
+    "./commands/bootstrap.md",
     "./commands/orchestrate.md",
     "./commands/comPACT.md",
     "./commands/rePACT.md",

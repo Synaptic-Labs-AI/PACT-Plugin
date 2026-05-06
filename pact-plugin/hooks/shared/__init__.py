@@ -31,6 +31,7 @@ from .claude_md_manager import (
     migrate_to_managed_structure,
     extract_managed_region,
     match_project_claude_md,
+    strip_orphan_kernel_block,
     MANAGED_START_MARKER,
     MANAGED_END_MARKER,
     MEMORY_START_MARKER,
@@ -67,6 +68,7 @@ from .constants import PACT_AGENTS, SYSTEM_TASK_PREFIXES
 from .intentional_wait import wait_stale
 from .session_state import (
     SAFE_PATH_COMPONENT_RE,
+    SESSION_ID_CONTROL_CHARS_RE,
     is_safe_path_component,
 )
 
@@ -86,6 +88,12 @@ from pin_caps import (  # noqa: E402
     OVERRIDE_RATIONALE_MAX,
     OVERRIDE_COMMENT_RE,
 )
+
+# Bootstrap gate marker — the session-scoped file whose presence signals that
+# Skill("PACT:bootstrap") has been invoked and the tool gate can self-disable.
+# Used by bootstrap_gate.py, bootstrap_prompt_gate.py, and session_init.py.
+# Also referenced (as a string literal) in commands/bootstrap.md.
+BOOTSTRAP_MARKER_NAME = "bootstrap-complete"
 
 # Convenience re-exports for the public API. Hooks import directly from
 # shared.pact_context, but these re-exports allow `from shared import get_team_name`.
@@ -111,6 +119,7 @@ __all__ = [
     "migrate_to_managed_structure",
     "extract_managed_region",
     "match_project_claude_md",
+    "strip_orphan_kernel_block",
     "MANAGED_START_MARKER",
     "MANAGED_END_MARKER",
     "MEMORY_START_MARKER",
@@ -134,12 +143,14 @@ __all__ = [
     "SYSTEM_TASK_PREFIXES",
     "wait_stale",
     "SAFE_PATH_COMPONENT_RE",
+    "SESSION_ID_CONTROL_CHARS_RE",
     "is_safe_path_component",
     "PIN_COUNT_CAP",
     "PIN_SIZE_CAP",
     "PIN_STALE_BLOCK_THRESHOLD",
     "OVERRIDE_RATIONALE_MAX",
     "OVERRIDE_COMMENT_RE",
+    "BOOTSTRAP_MARKER_NAME",
     "build_session_path",
     "get_pact_context",
     "get_team_name",

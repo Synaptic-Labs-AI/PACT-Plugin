@@ -12,10 +12,24 @@ See: docs/architecture/pact-context-module.md for full design rationale.
 
 import json
 import os
+import re
 import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+from .session_state import SESSION_ID_CONTROL_CHARS_RE
+
+# Slug sanitizer: collapse any character outside the safe-path-component
+# allowlist into "_". The slug derives from CLAUDE_PROJECT_DIR's basename
+# and flows into shell-quoted command bodies (bootstrap.md's `mkdir -p
+# "<path>" && touch "<path>/bootstrap-complete"` interpolation), so a
+# project-dir basename containing shell metacharacters (`"`, `$`, backtick,
+# `;`, `&&`, `|`) would shell-inject without producer-side sanitization.
+# S3 (security-engineer-review) defense: producer-side sanitize-substitute
+# before the slug ever reaches the path tree. Sibling defense for session_id
+# is the SESSION_ID_CONTROL_CHARS_RE strip applied below in init().
+_UNSAFE_SLUG_CHARS_RE = re.compile(r"[^A-Za-z0-9_-]+")
 
 # Session-scoped context file path, set by init().
 # When None, get_pact_context() returns _EMPTY_CONTEXT (no file to read).
@@ -54,9 +68,18 @@ def _build_session_path(slug: str, session_id: str) -> Path:
     like "../../etc" would resolve outside the expected tree — fall back
     to a sanitized basename. Fail-closed: if the validation itself
     raises, return a slug-only path (no session_id component).
+
+    S3 defense (security-engineer-review): the slug derives from
+    CLAUDE_PROJECT_DIR's basename and ends up interpolated into a
+    shell-quoted command body in commands/bootstrap.md. Sanitize at the
+    producer (here) so any non-allowlist character (shell metachars,
+    control chars, whitespace) is collapsed to "_" before the slug
+    reaches any downstream consumer. Sanitize-substitute (NOT reject)
+    so sessions with unusual project-dir names still proceed.
     """
+    safe_slug = _UNSAFE_SLUG_CHARS_RE.sub("_", slug) if slug else slug
     sessions_root = Path.home() / ".claude" / "pact-sessions"
-    candidate = sessions_root / slug / session_id
+    candidate = sessions_root / safe_slug / session_id
     try:
         sessions_root_resolved = sessions_root.resolve()
         resolved = candidate.resolve(strict=False)
@@ -64,11 +87,11 @@ def _build_session_path(slug: str, session_id: str) -> Path:
             return candidate
         basename = Path(session_id).name
         if basename in ("", ".", "..") or "/" in basename:
-            candidate = sessions_root / slug
+            candidate = sessions_root / safe_slug
         else:
-            candidate = sessions_root / slug / basename
+            candidate = sessions_root / safe_slug / basename
     except (OSError, ValueError):
-        candidate = sessions_root / slug
+        candidate = sessions_root / safe_slug
     return candidate
 
 
@@ -124,7 +147,19 @@ def init(input_data: dict) -> None:
     session_id = ""
     raw_id = input_data.get("session_id")
     if raw_id:
-        session_id = str(raw_id)
+        # Apply the SAME allowlist-substitute regex as the slug producer
+        # (one site below) so session_id and slug share one safe-path-
+        # component contract. Symmetric defense per memory
+        # patterns_symmetric_sanitization.md: every interpolation sink
+        # shares the same allowlist regex `[^A-Za-z0-9_-]`, so asymmetric
+        # strip sets across sinks cannot become an attacker entry point.
+        # session_id reaches the disclosed PACT_SESSION_DIR= path
+        # interpolated into bootstrap.md's shell command body, so shell
+        # metacharacters (`$`, backtick, `;`, `(`, `)`, etc.) MUST be
+        # substituted, not just control chars stripped.
+        # Sanitize-substitute (NOT reject) so malformed stdin doesn't
+        # crash the hook; cleaned id forms a single segment.
+        session_id = _UNSAFE_SLUG_CHARS_RE.sub("_", str(raw_id))
 
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
 

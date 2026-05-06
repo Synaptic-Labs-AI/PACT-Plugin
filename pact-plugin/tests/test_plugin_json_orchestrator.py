@@ -2,10 +2,12 @@
 plugin.json structural invariants for the PACT plugin.
 
 Pins the 13-entry alphabetized `agents` array (12 teammates + orchestrator)
-and the absence of the removed bootstrap commands (`bootstrap.md` and
-`teammate-bootstrap.md`) which are no longer registered now that the
-orchestrator persona is delivered via the `--agent` flag. Cross-file
-version-consistency is owned by sibling test_plugin_version_bump.py.
+and the absence of the removed `teammate-bootstrap.md` command (replaced by
+teammate frontmatter delivery). The session-start ritual command
+`bootstrap.md` IS registered: it is the per-session ritual surface invoked
+by the orchestrator persona's §2 Session-Start Ritual via
+`Skill("PACT:bootstrap")`. Cross-file version-consistency is owned by
+sibling test_plugin_version_bump.py.
 """
 import json
 from pathlib import Path
@@ -34,7 +36,6 @@ EXPECTED_AGENTS = {
 }
 
 REMOVED_COMMANDS = {
-    "./commands/bootstrap.md",
     "./commands/teammate-bootstrap.md",
 }
 
@@ -76,10 +77,21 @@ def test_plugin_json_agents_alphabetized(plugin_json):
     )
 
 
-def test_plugin_json_drops_bootstrap_commands(plugin_json):
-    """Bootstrap commands are not registered; orchestrator persona is delivered via --agent."""
+def test_plugin_json_drops_removed_commands(plugin_json):
+    """Removed commands stay deregistered (teammate-bootstrap.md absorbed into
+    teammate frontmatter); the session-start ritual command bootstrap.md IS
+    registered (separate concern — covered by sibling test below)."""
     commands = set(plugin_json.get("commands", []))
     leaked = REMOVED_COMMANDS & commands
     assert not leaked, (
-        f"plugin.json must not register removed bootstrap commands: {leaked}"
+        f"plugin.json must not register removed commands: {leaked}"
+    )
+
+
+def test_plugin_json_registers_bootstrap_command(plugin_json):
+    """The session-start ritual command must be registered so the orchestrator
+    persona's `Skill("PACT:bootstrap")` invocation resolves."""
+    commands = set(plugin_json.get("commands", []))
+    assert "./commands/bootstrap.md" in commands, (
+        "plugin.json must register ./commands/bootstrap.md in `commands` array"
     )

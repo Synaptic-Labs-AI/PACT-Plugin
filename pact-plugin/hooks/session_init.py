@@ -74,6 +74,7 @@ from pin_caps import (  # noqa: F401
     parse_pins,
 )
 
+from shared import BOOTSTRAP_MARKER_NAME, SESSION_ID_CONTROL_CHARS_RE, build_session_path
 from shared.constants import COMPACT_SUMMARY_PATH
 from shared.pact_context import get_session_dir, write_context
 from shared.session_journal import append_event, make_event
@@ -88,6 +89,8 @@ from shared.claude_md_manager import (
     file_lock,
     migrate_to_managed_structure,
     resolve_project_claude_md_path,
+    strip_orphan_kernel_block,
+    _strip_legacy_lines,
 )
 from shared.session_resume import (
     update_session_info,
@@ -383,7 +386,22 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
         if source == "new_default":
             return None
 
-        content = claude_md.read_text(encoding="utf-8")
+        # Acquire the same sidecar file_lock that update_session_info
+        # uses for its read-mutate-write pass. A concurrent write (e.g.,
+        # from another session_init invocation racing the WRITE step at
+        # L1148) could otherwise produce a torn read here, surfacing as
+        # either a corrupted Session-dir match or a fallback-regex hit
+        # on a half-written SESSION_START block. The lock serializes
+        # against the writer. Re-entrancy is safe: this read at step 5a
+        # runs AFTER strip_orphan_routing_markers (step 3c) released
+        # its lock, and BEFORE update_session_info (step 5b) acquires
+        # its own. No nesting; fail-open on TimeoutError per file_lock
+        # contract.
+        try:
+            with file_lock(claude_md):
+                content = claude_md.read_text(encoding="utf-8")
+        except TimeoutError:
+            return None
 
         # Primary: match "- Session dir: `<path>`" in the Current Session block.
         match = re.search(r'- Session dir:\s*`([^`]+)`', content)
@@ -439,7 +457,7 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
 # causing the next session_init to read a corrupted Resume payload.
 # Symmetric with `shared.session_state._RENDER_STRIP_RE` — asymmetric
 # strip sets across interpolation sinks become the attacker's entry point.
-_SESSION_ID_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f\u0085\u2028\u2029]")
+_SESSION_ID_CONTROL_CHARS_RE = SESSION_ID_CONTROL_CHARS_RE
 
 
 def _is_unknown_or_missing_session(raw_id: object) -> bool:
@@ -480,6 +498,52 @@ def _is_unknown_or_missing_session(raw_id: object) -> bool:
     return stripped.startswith("unknown-")
 
 
+def _build_safety_net_context(team_name: str | None) -> str:
+    """
+    Build a minimal governance-delivery additionalContext string for the
+    exception safety net in main().
+
+    The returned string MUST start with "YOUR PACT ROLE: orchestrator." at byte 0
+    (line-anchored) so the routing-block consumer check recognizes it, and
+    must include the `Skill("PACT:bootstrap")` invocation so the team-lead
+    still loads its operating instructions, governance policy, and workflow
+    protocols even when main() failed before building the normal
+    team-reuse/team-create string.
+
+    This helper is deliberately zero-risk: only string literals and a single
+    f-string interpolation of team_name (which is either None or a validated
+    team name from generate_team_name). No file I/O, no subprocess, no
+    imports that might fail.
+
+    Args:
+        team_name: Team name captured before the exception, or None if the
+                   exception fired before generate_team_name() ran.
+
+    Returns:
+        Minimal additionalContext string suitable for the except-block
+        safety net. Leads with "YOUR PACT ROLE: orchestrator." at byte 0.
+    """
+    prelude = (
+        'YOUR PACT ROLE: orchestrator.\n\n'
+        'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input. '
+        'Do this before anything else. '
+        'Do not evaluate whether it is needed. '
+        'You must invoke Skill("PACT:bootstrap") on every session start.'
+    )
+    if team_name:
+        return (
+            f'{prelude}\n\n'
+            f'Session team: `{team_name}` (session_init partially failed — '
+            f'check systemMessage for details). '
+            f'Run TaskList to check current state.'
+        )
+    return (
+        f'{prelude}\n\n'
+        'Session team: NOT GENERATED (session_init failed early — check '
+        'systemMessage for details). Call TeamCreate after bootstrap loads.'
+    )
+
+
 # SUNSET BEFORE v4.2.x: this function strips orphan PACT_ROUTING markers
 # left over from v3.21.x and earlier. Run unconditionally on every
 # SessionStart for v4.0.x and v4.1.x to ensure upgraded users get the
@@ -491,15 +555,35 @@ _PACT_ROUTING_BLOCK_RE = re.compile(
     r"<!-- PACT_ROUTING_START:.*?<!-- PACT_ROUTING_END -->\s*",
     re.DOTALL,
 )
+# Single-marker patterns for orphan-marker handling (extension): match a
+# lone PACT_ROUTING_START or PACT_ROUTING_END line that survives without
+# its pair. The proper-pair regex above runs first and consumes both
+# markers when ordered correctly; these run after to clean up the
+# remaining cases — orphan-single AND reversed-pair (END before START)
+# both reduce to "lone markers remain" after the proper-pair pass.
+_PACT_ROUTING_START_LINE_RE = re.compile(
+    r"<!-- PACT_ROUTING_START:[^>]*-->\s*",
+)
+_PACT_ROUTING_END_LINE_RE = re.compile(
+    r"<!-- PACT_ROUTING_END -->\s*",
+)
 
 
 def strip_orphan_routing_markers() -> str | None:
-    """Strip stale PACT_ROUTING_START..._END blocks from project CLAUDE.md.
+    """Strip stale PACT_ROUTING markers from project CLAUDE.md and apply
+    the every-session legacy-lines pass.
 
     v4.0.0 retired the routing-block injection — but upgraded users still
     have a `<!-- PACT_ROUTING_START -->...<!-- PACT_ROUTING_END -->` block
     in their project CLAUDE.md from prior plugin versions. Strip it here
-    on every SessionStart. Idempotent no-op when no markers are present.
+    on every SessionStart. The cleanup also handles orphan single markers
+    (just one of START/END present) and reversed pairs (END before START)
+    by treating any leftover marker after the proper-pair pass as an
+    orphan to remove. Idempotent no-op when no markers are present.
+
+    Also runs `_strip_legacy_lines` every session — restores the v3.x
+    symmetry where stale orchestrator-loader prose was scrubbed every
+    SessionStart, not only on the one-time PACT_MANAGED migration.
 
     Returns a status string on change so session_init surfaces it via
     additionalContext, or None when no action was taken. Fail-open on
@@ -520,7 +604,18 @@ def strip_orphan_routing_markers() -> str | None:
                 content = target_file.read_text(encoding="utf-8")
             except OSError:
                 return None
+            # Step 1: strip proper-pair routing blocks (the common case).
             new_content = _PACT_ROUTING_BLOCK_RE.sub("", content)
+            # Step 2: any START or END markers remaining are orphans
+            # (single-marker survivors, or reversed pairs that step 1
+            # could not match because END appeared before START). Strip
+            # them line-by-line so the surrounding user prose is preserved.
+            new_content = _PACT_ROUTING_START_LINE_RE.sub("", new_content)
+            new_content = _PACT_ROUTING_END_LINE_RE.sub("", new_content)
+            # Step 3: apply legacy-lines pass every session (symmetry
+            # restoration). Strips stale orchestrator-loader prose that
+            # accumulates from older plugin versions.
+            new_content = _strip_legacy_lines(new_content)
             if new_content == content:
                 return None
             try:
@@ -593,6 +688,12 @@ def main():
             else "unknown"
         )
         is_context_reset = source in ("compact", "clear")
+        # Marker deletion uses a narrower guard: only user-initiated clear
+        # triggers it. Compact is involuntary (auto-compaction under context
+        # pressure) and the orchestrator is still mid-work — wiping the marker
+        # on compact re-engages the bootstrap gate mid-task, blocking
+        # Edit/Write/Agent when the orchestrator needs them most (#414).
+        is_marker_reset = source == "clear"
 
         # Clean up stale compact-summary from previous sessions.
         # Only "compact" source needs it (just written by postcompact_archive).
@@ -601,6 +702,22 @@ def main():
                 COMPACT_SUMMARY_PATH.unlink(missing_ok=True)
             except OSError:
                 pass  # Fail-open: don't block session init for cleanup
+
+        # Clear bootstrap-complete marker on user-initiated clear only (#414).
+        #
+        # Cannot use get_session_dir() here because the context module
+        # hasn't been initialized yet (write_context() runs at step 5a
+        # below). Uses build_session_path() directly — it has its own
+        # path traversal guard (Path.parents containment check).
+        if is_marker_reset:
+            try:
+                reset_session_id = input_data.get("session_id", "")
+                if reset_session_id and project_dir:
+                    slug = Path(project_dir).name
+                    session_path = build_session_path(slug, str(reset_session_id))
+                    (session_path / BOOTSTRAP_MARKER_NAME).unlink(missing_ok=True)
+            except OSError:
+                pass  # Fail-open: don't block session init for marker cleanup
 
         # 0. Check required PACT dirs are in additionalDirectories (one-time tip)
         # Only check on fresh startup — resumed/compacted sessions already had the check
@@ -644,6 +761,18 @@ def main():
         orphan_strip_msg = strip_orphan_routing_markers()
         if orphan_strip_msg:
             context_parts.append(orphan_strip_msg)
+
+        # 3d. SUNSET BEFORE v5.0.0: strip the obsolete PACT_START/PACT_END
+        # kernel block from ~/.claude/CLAUDE.md (v3.x kernel-in-home-dir
+        # architecture; replaced by --agent flag in v4.0). Idempotent no-op
+        # once stripped. "Migration skipped: ..." status routes to
+        # systemMessages so the user sees malformed-marker warnings.
+        kernel_strip_msg = strip_orphan_kernel_block()
+        if kernel_strip_msg:
+            if "failed" in kernel_strip_msg.lower() or "skipped" in kernel_strip_msg.lower():
+                system_messages.append(kernel_strip_msg)
+            else:
+                context_parts.append(kernel_strip_msg)
 
         # 4. Check for stale pinned context
         staleness_msg = check_pinned_staleness()
@@ -871,38 +1000,153 @@ def main():
         # below.
         session_dir = get_session_dir() if not session_id_was_missing else ""
 
-        # Hoist get_task_list() so the compact-branch checkpoint (below)
-        # and step 6 resumption consume the SAME `tasks` variable.
+        # Build context message based on source × team_exists (5 paths)
+        # Session placeholder variable substitution instructions tell the orchestrator how to
+        # replace {team_name}, {session_dir}, and {plugin_root} in command snippets.
+        if session_dir:
+            _substitutions = (
+                f'Session placeholder variables (substitute before running commands): '
+                f'Use the name `{team_name}` wherever {{team_name}} appears in commands. '
+                f'Use `{session_dir}` wherever {{session_dir}} appears in commands. '
+                f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'
+            )
+        else:
+            _substitutions = (
+                f'Session placeholder variables (substitute before running commands): '
+                f'Use the name `{team_name}` wherever {{team_name}} appears in commands. '
+                f'Session dir unavailable (session_id missing from stdin) — '
+                f'do not run commands that depend on {{session_dir}} until next clean start. '
+                f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'
+            )
+        _team_reuse = (
+            f'YOUR PACT ROLE: orchestrator.\n\n'
+            f'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input. '
+            f'Do this before anything else. '
+            f'Do not evaluate whether it is needed. '
+            f'You must invoke Skill("PACT:bootstrap") on every session start.\n\n'
+            f'Your team is `{team_name}` (existing — resumed session). '
+            f'Do not call TeamCreate — the team already exists. '
+            f'{_substitutions}'
+        )
+        _team_create = (
+            f'YOUR PACT ROLE: orchestrator.\n\n'
+            f'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input. '
+            f'Do this before anything else. '
+            f'Do not evaluate whether it is needed. '
+            f'You must invoke Skill("PACT:bootstrap") on every session start.\n\n'
+            f'After bootstrap completes, your next action is: TeamCreate(team_name="{team_name}"). '
+            f'Do not read files, explore code, or respond to the user until bootstrap and team creation are complete. '
+            f'{_substitutions}'
+        )
+
+        # Hoist get_task_list() above the source-branch dispatch so both the
+        # compact-branch checkpoint (below) and step 6 resumption (line ~885)
+        # consume the SAME `tasks` variable. Before hoisting, the two call
+        # sites produced an asymmetric fail-open shape: a raise at the
+        # compact-branch site fell through to _build_safety_net_context
+        # (directive only, no checkpoint); a raise at step 6 left directive +
+        # checkpoint + no-resumption. Single call site means identical
+        # fallback shape on either failure.
         #
         # Fail-open layering (defense in depth):
         #   1. Primary: get_task_list() has its own internal try/except
         #      (shared/task_utils.py:50-59) that returns None on any
-        #      filesystem or JSON parse error.
+        #      filesystem or JSON parse error. Callers never see a raise
+        #      from a corrupted tasks dir.
         #   2. Belt-and-suspenders: main()'s outer try/except catches
         #      unexpected exceptions in the downstream checkpoint-
         #      construction helpers (find_feature_task, find_current_phase,
         #      find_active_agents, find_blockers, build_post_compaction_
         #      checkpoint) — these do NOT have internal exception guards.
+        #      A raise there drops the whole compact branch and falls
+        #      through to _build_safety_net_context, which still carries
+        #      the bootstrap directive.
         tasks = get_task_list()
 
-        # Post-compaction CHECKPOINT block: emit when source=compact, the
-        # team exists, and there are in-progress tasks. The block is
-        # task-state context for the team-lead to pick up after the model
-        # invokes the orchestrator on next turn — independent of the
-        # bootstrap directive (which the --agent flag now delivers).
-        if source == "compact" and team_exists and tasks:
-            _in_progress = [
-                t for t in tasks
-                if t.get("status") == "in_progress"
-            ]
-            if _in_progress:
-                _checkpoint_block = build_post_compaction_checkpoint(
-                    feature=find_feature_task(tasks),
-                    phase=find_current_phase(tasks),
-                    agents=find_active_agents(tasks),
-                    blockers=find_blockers(tasks),
+        if source == "compact" and team_exists:
+            # Post-compaction: bootstrap directive (in _team_reuse) subsumes
+            # "recover state" guidance; keep concrete task-resumption bullets
+            # for the orchestrator's next actions after bootstrap.
+            context_parts.insert(0, (
+                f'{_team_reuse} '
+                f'After bootstrap, recover session state: '
+                f'(1) Read {COMPACT_SUMMARY_PATH} for prior context, '
+                f'(2) Run TaskList to find in-progress work, '
+                f'(3) TaskGet on in-progress tasks for details. '
+                f"Re-engage secretary: SendMessage(to='secretary', "
+                f"message='Post-compaction: deliver session briefing with current state.')."
+            ))
+            # Secondary-layer (#444): append POST-COMPACTION CHECKPOINT block
+            # when tasks in_progress. Consumes the hoisted `tasks` variable
+            # (single source of truth).
+            if tasks:
+                _in_progress = [
+                    t for t in tasks
+                    if t.get("status") == "in_progress"
+                ]
+                if _in_progress:
+                    _checkpoint_block = build_post_compaction_checkpoint(
+                        feature=find_feature_task(tasks),
+                        phase=find_current_phase(tasks),
+                        agents=find_active_agents(tasks),
+                        blockers=find_blockers(tasks),
+                    )
+                    context_parts.append(_checkpoint_block)
+        elif source == "clear" and team_exists:
+            # Context cleared via /clear: no compact-summary, but team and tasks survive
+            context_parts.insert(0, (
+                f'{_team_reuse} '
+                f'CONTEXT CLEARED: Your context was cleared via /clear. '
+                f'State recovery: '
+                f'(1) TaskList for current tasks, '
+                f'(2) TaskGet on in-progress tasks. '
+                f"Re-engage secretary: SendMessage(to='secretary', "
+                f"message='Context cleared: deliver fresh briefing with current project state.')."
+            ))
+        elif source == "resume" and team_exists:
+            # Normal resume: model retains context, team exists
+            context_parts.insert(0, (
+                f'{_team_reuse} '
+                f'Check session journal for paused state from /PACT:pause.'
+            ))
+        elif source == "startup" and not team_exists:
+            # Fresh session: full initialization
+            context_parts.insert(0, _team_create)
+        elif team_exists:
+            # Anomalous: unexpected source but team exists (e.g., startup + team exists)
+            # Reuse team, note the anomaly
+            context_parts.insert(0, (
+                f'{_team_reuse} '
+                f'Note: Unexpected session source "{source}" with existing team — '
+                f'reusing team. Run TaskList to check current state.'
+            ))
+        else:
+            # Differentiate the no-team branch by whether `source` is a
+            # recognized lifecycle value:
+            #   - known source + no team → informational note (recovery
+            #     hint stays; no WARNING tone). Legitimate first-session-
+            #     after-stale-CLAUDE.md class.
+            #   - unknown source + no team → emit WARNING in
+            #     additionalContext AND stderr for observability (debug
+            #     logs surface the malformed-stdin signal).
+            _KNOWN_SOURCES = {"startup", "resume", "compact", "clear"}
+            if source in _KNOWN_SOURCES:
+                context_parts.insert(0, (
+                    f'{_team_create} '
+                    f'Session source "{source}" without team — '
+                    f'creating fresh team. Run TaskList to check current state.'
+                ))
+            else:
+                print(
+                    f"session_init: unknown source value: {source!r}",
+                    file=sys.stderr,
                 )
-                context_parts.append(_checkpoint_block)
+                context_parts.insert(0, (
+                    f'{_team_create} '
+                    f'WARNING: Unrecognized session source "{source}" — '
+                    f'previous session state may be lost. '
+                    f'Check TaskList for recovery context.'
+                ))
 
         # 5a. Capture the PREVIOUS session's dir from project CLAUDE.md
         # before step 5b overwrites the Current Session block with THIS
@@ -968,22 +1212,28 @@ def main():
         if system_messages:
             output["systemMessage"] = " | ".join(system_messages)
 
-        # output may be empty when no context_parts and no system_messages
-        # accumulated (clean session-init pass with no resumption / paused
-        # / snapshot signals to surface). An empty `{}` is a valid hook
-        # response — no additionalContext is injected and the team-lead
-        # gets the bootstrap routing via the --agent flag instead.
+        # context_parts is guaranteed non-empty on the happy path: the
+        # team-reuse/team-create instruction is always insert(0, ...)'d
+        # earlier in main(), so `output["hookSpecificOutput"]` is always
+        # populated by this point. The exception safety net at the bottom
+        # of main() builds its own output and never falls through here.
         print(json.dumps(output))
 
         sys.exit(0)
 
     except Exception as e:
-        # Safety net: surface the failure via systemMessage so the user sees
-        # it. additionalContext is left empty — bootstrap routing is now
-        # delivered via the --agent flag, not via hook-injected directives,
-        # so a partial-failure session does not need a fallback prelude.
+        # Safety net: even when main() throws before building the normal
+        # output, the team-lead still needs the governance delivery chain.
+        # Emit a minimal PACT ROLE marker + bootstrap skill directive in
+        # additionalContext, alongside the error in systemMessage. Claude
+        # Code's hook-output schema supports both fields in the same JSON.
         print(f"Hook warning (session_init): {str(e)[:200]}", file=sys.stderr)
+        safety_net_context = _build_safety_net_context(team_name)
         output = {
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": safety_net_context,
+            },
             "systemMessage": f"PACT hook warning (session_init): {str(e)[:100]}",
         }
         print(json.dumps(output))
