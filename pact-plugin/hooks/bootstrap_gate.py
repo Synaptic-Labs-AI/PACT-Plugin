@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/bootstrap_gate.py
-Summary: PreToolUse hook that blocks code-editing and agent-spawning tools
-         (Edit, Write, Agent, NotebookEdit) until the bootstrap-complete
+Summary: PreToolUse hook that blocks code-editing and agent-dispatch tools
+         (Edit, Write, Task, NotebookEdit) until the bootstrap-complete
          marker exists.
 Used by: hooks.json PreToolUse hook (no matcher — fires for all hookable tools)
 
@@ -11,14 +11,17 @@ call, checks the session-scoped bootstrap-complete marker:
   - Marker exists → suppressOutput (sub-ms fast path)
   - Non-PACT session → suppressOutput (no-op)
   - Teammate → suppressOutput (no-op)
-  - Code-editing/agent tool (Edit, Write, Agent, NotebookEdit) → deny
+  - Code-editing/agent-dispatch tool (Edit, Write, Task, NotebookEdit) → deny
   - Operational/exploration tool (Read, Glob, Grep, Bash, WebFetch,
     WebSearch, AskUserQuestion, ExitPlanMode, any MCP tool) → allow
 
 Tool classification rationale:
   - Blocked tools are structured code modification (Edit, Write) and agent
-    spawning (Agent, NotebookEdit) actions that shouldn't run before
-    governance is loaded.
+    dispatch (Task, NotebookEdit) actions that shouldn't run before
+    governance is loaded. The agent-dispatch tool name is `Task` — the
+    canonical platform name for sub-agent spawning, confirmed by the
+    matcher='Task' entries in hooks.json (PreToolUse team_guard +
+    PostToolUse auditor_reminder).
   - Bash is ALLOWED because the bootstrap marker-write mechanism itself is
     a Bash command in bootstrap.md — blocking Bash would create a circular
     dependency where the gate can never self-disable.
@@ -26,8 +29,10 @@ Tool classification rationale:
     compaction.
   - MCP tools are always allowed — they're external integrations that may
     be needed for context gathering.
-  - Non-hookable tools (Skill, ToolSearch, Task*, SendMessage) never reach
-    this hook because they don't fire PreToolUse events.
+  - Non-hookable tools (Skill, ToolSearch, TaskList/TaskGet/TaskUpdate,
+    SendMessage) never reach this hook because they don't fire PreToolUse
+    events. Note: TaskList/TaskGet/TaskUpdate are PACT plugin task-system
+    tools, distinct from the agent-dispatch `Task` tool that IS blocked.
 
 SACROSANCT: every raisable path is wrapped in try/except that defaults to
 allow (exit 0 with suppressOutput). A gate bug must never block a tool call.
@@ -46,20 +51,23 @@ from shared import BOOTSTRAP_MARKER_NAME
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
-# Code-editing and agent-spawning tools blocked until bootstrap completes.
+# Code-editing and agent-dispatch tools blocked until bootstrap completes.
 # Bash is intentionally NOT blocked — the marker-write mechanism in
 # bootstrap.md is a Bash command, so blocking Bash would prevent the gate
-# from ever self-disabling (circular dependency).
+# from ever self-disabling (circular dependency). The agent-dispatch tool
+# is `Task` (the canonical platform tool name); cross-evidence in
+# hooks.json: PreToolUse team_guard + PostToolUse auditor_reminder both
+# use matcher='Task' and fire correctly in production.
 _BLOCKED_TOOLS = frozenset({
     "Edit",
     "Write",
-    "Agent",
+    "Task",
     "NotebookEdit",
 })
 
 _DENY_REASON = (
     "PACT bootstrap required. Invoke Skill(\"PACT:bootstrap\") first. "
-    "Code-editing tools (Edit, Write) and agent spawning (Agent) are blocked "
+    "Code-editing tools (Edit, Write) and agent dispatch (Task) are blocked "
     "until bootstrap completes. Bash, Read, Glob, Grep are available."
 )
 

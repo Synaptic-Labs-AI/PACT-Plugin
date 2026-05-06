@@ -1,6 +1,6 @@
 """
 Tests for bootstrap_gate.py — PreToolUse hook that blocks code-editing and
-agent-spawning tools until the bootstrap-complete marker exists.
+agent-dispatch tools until the bootstrap-complete marker exists.
 
 Tests cover:
 
@@ -8,7 +8,7 @@ _check_tool_allowed() unit tests:
 1. Marker exists → None for any tool (fast path)
 2. No marker + blocked tool (Edit) → deny reason string
 3. No marker + blocked tool (Write) → deny reason string
-4. No marker + blocked tool (Agent) → deny reason string
+4. No marker + blocked tool (Task) → deny reason string
 5. No marker + blocked tool (NotebookEdit) → deny reason string
 6. No marker + allowed tool (Read) → None
 7. No marker + allowed tool (Glob) → None
@@ -138,7 +138,7 @@ class TestCheckToolAllowed:
 
     # --- Marker exists: fast path ---
 
-    @pytest.mark.parametrize("tool_name", ["Edit", "Write", "Agent", "NotebookEdit", "Read", "Bash"])
+    @pytest.mark.parametrize("tool_name", ["Edit", "Write", "Task", "NotebookEdit", "Read", "Bash"])
     def test_marker_exists_allows_any_tool(self, monkeypatch, tmp_path, tool_name):
         """Marker exists → None for any tool (including normally-blocked ones)."""
         from bootstrap_gate import _check_tool_allowed
@@ -150,7 +150,7 @@ class TestCheckToolAllowed:
 
     # --- No marker: blocked tools ---
 
-    @pytest.mark.parametrize("tool_name", ["Edit", "Write", "Agent", "NotebookEdit"])
+    @pytest.mark.parametrize("tool_name", ["Edit", "Write", "Task", "NotebookEdit"])
     def test_blocked_tools_return_deny_reason(self, monkeypatch, tmp_path, tool_name):
         """No marker + blocked tool → deny reason string."""
         from bootstrap_gate import _check_tool_allowed
@@ -484,10 +484,16 @@ class TestBlockedToolSet:
         assert len(_BLOCKED_TOOLS) == 4
 
     def test_blocked_set_exact_members(self):
-        """Blocked set contains exactly Edit, Write, Agent, NotebookEdit."""
+        """Blocked set contains exactly Edit, Write, Task, NotebookEdit.
+
+        The agent-dispatch tool name is `Task` (the canonical platform
+        tool). Cross-evidence: hooks.json PreToolUse team_guard +
+        PostToolUse auditor_reminder both use matcher='Task' and fire
+        correctly in production.
+        """
         from bootstrap_gate import _BLOCKED_TOOLS
 
-        assert _BLOCKED_TOOLS == frozenset({"Edit", "Write", "Agent", "NotebookEdit"})
+        assert _BLOCKED_TOOLS == frozenset({"Edit", "Write", "Task", "NotebookEdit"})
 
     def test_bash_not_blocked(self):
         """Bash must NOT be in blocked set (circular dependency)."""
@@ -570,7 +576,7 @@ class TestMarkerLifecycle:
 
         _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
 
-        for tool in ["Edit", "Write", "Agent"]:
+        for tool in ["Edit", "Write", "Task"]:
             ctx_module._cache = None
 
             exit_code, output = _run_main(_make_input(tool), capsys)
