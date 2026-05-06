@@ -584,6 +584,14 @@ class TestMarkerNameConsistencyEncodingTolerant:
                 rf'(?:^|[\s;&])>\s*"[^"]*/'
                 rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
             ),
+            (
+                "tee with discard stdin",
+                rf'tee\s+"[^"]*/{re.escape(BOOTSTRAP_MARKER_NAME)}".*</dev/null',
+            ),
+            (
+                "dd argument-form",
+                rf'dd\s+of="[^"]*/{re.escape(BOOTSTRAP_MARKER_NAME)}".*if=/dev/null',
+            ),
         ],
     )
     def test_at_least_one_marker_write_encoding_matches(
@@ -633,6 +641,8 @@ class TestMarkerNameConsistencyEncodingTolerant:
             rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
             rf'(?:^|[\s;&])>\s*"[^"]*/'
             rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
+            rf'tee\s+"[^"]*/{re.escape(BOOTSTRAP_MARKER_NAME)}".*</dev/null',
+            rf'dd\s+of="[^"]*/{re.escape(BOOTSTRAP_MARKER_NAME)}".*if=/dev/null',
         ]
         matched = [
             p for p in encodings
