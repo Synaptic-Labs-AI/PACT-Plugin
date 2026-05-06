@@ -1,0 +1,27 @@
+{
+  "_meta": {
+    "capture_session_id": "pact-2877fe69",
+    "capture_date": "2026-05-05",
+    "capture_method": "synthesized-from-production-shape",
+    "issue_ref": "#637",
+    "notes": "TaskCreate PostToolUse stdin for the SECOND task in a parallel-batch fire. Companion to task_create_parallel_burst_first.json. Both task files (id 10 and id 11) are pre-written before the hook is invoked, so count_active_tasks returns 2 when this fixture's PostToolUse hook reads the filesystem. Under positive-bound predicate (count >= 1) the hook emits Arm; PACT:watch-inbox idempotency absorbs the redundant emit when STATE_FILE is already on disk from the companion's earlier fire. Under the strict-equality predicate (count == 1) this fixture rejects."
+  },
+  "tool_name": "TaskCreate",
+  "session_id": "pact-2877fe69",
+  "cwd": "/Users/mj/Sites/collab/PACT-prompt",
+  "tool_input": {
+    "subject": "Second task in parallel-batch dispatch",
+    "description": "Companion task in the same parallel TaskCreate batch.",
+    "activeForm": "Working on second parallel task"
+  },
+  "tool_response": {
+    "task": {
+      "id": "11",
+      "subject": "Second task in parallel-batch dispatch",
+      "status": "pending",
+      "owner": "test-engineer",
+      "blockedBy": [],
+      "blocks": []
+    }
+  }
+}

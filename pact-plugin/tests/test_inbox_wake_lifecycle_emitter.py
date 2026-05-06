@@ -869,3 +869,202 @@ def test_arm_emitted_on_captured_production_taskcreate_payload(tmp_path):
     )
     assert hso["hookEventName"] == "PostToolUse"
     assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+
+
+# ---------- Arm directive on parallel-TaskCreate race (#637) ----------
+
+
+class TestArmDirectiveOnParallelTaskCreateRace:
+    """Pin the positive-bound TaskCreate Arm threshold against the
+    parallel-batch race.
+
+    A parallel TaskCreate batch lands all task files before either
+    PostToolUse hook reads `count_active_tasks`. Under a strict-equality
+    predicate (`count == 1`) every fire rejects because the post-state
+    count is already N >= 2; the Arm directive never emits and the
+    inbox-watch Monitor is never armed. Under the positive-bound
+    predicate (`count >= 1`) every fire emits Arm and PACT:watch-inbox
+    idempotency (no-op when a valid STATE_FILE is on disk) absorbs the
+    redundant emits within the active window.
+
+    The two race-coupled tests below are the counter-test-by-revert
+    targets: revert pact-plugin/hooks/wake_lifecycle_emitter.py to the
+    strict-equality form and they fail; the four no-regression tests
+    still pass. Cardinality {2 fail, 4 pass} is the falsifiable signature
+    that the regression is actually exercised.
+
+    Fixture provenance for the parallel-burst shape lives in the
+    `_meta` blocks of `task_create_parallel_burst_first.json` and
+    `task_create_parallel_burst_second.json` — that's the right surface
+    for the issue cite per the no-issue-refs-in-test-names axiom.
+    """
+
+    @staticmethod
+    def _load_fixture(name: str) -> dict:
+        data = json.loads((FIXTURES_DIR / name).read_text(encoding="utf-8"))
+        data.pop("_meta", None)
+        return data
+
+    def _setup_session(self, tmp_path: Path, fixture: dict, team: str = "team-race"):
+        home = tmp_path / "home"
+        home.mkdir()
+        sid = fixture["session_id"]
+        pdir = fixture["cwd"]
+        _write_session_context(home, sid, pdir, team)
+        return home, team
+
+    def test_arm_emits_on_parallel_burst_first_fire(self, tmp_path):
+        """Race-coupled test #1. Pre-write tasks 10 and 11 (post-batch
+        filesystem state); pipe the FIRST burst fixture through the hook.
+        Strict-equality reverts FAIL here (count_active_tasks == 2);
+        positive-bound passes."""
+        fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, team = self._setup_session(tmp_path, fixture)
+        _write_task(home, team, "10", status="pending", owner="backend-coder")
+        _write_task(home, team, "11", status="pending", owner="test-engineer")
+
+        out = _emit_output(fixture, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Arm directive on parallel-burst first fire; "
+            f"got {out!r}. If `out == {{'suppressOutput': True}}` the "
+            f"TaskCreate threshold is strict-equality (== 1) and rejects "
+            f"on the post-batch count of 2 — see #637."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+
+    def test_arm_emits_on_parallel_burst_second_fire(self, tmp_path):
+        """Race-coupled test #2. Same post-batch filesystem state as
+        burst-first; pipe the SECOND burst fixture. The contract is
+        'both fires must emit; PACT:watch-inbox idempotency handles the
+        redundant emit at the skill layer.' Strict-equality reverts FAIL
+        here for the same reason as burst-first."""
+        fixture = self._load_fixture("task_create_parallel_burst_second.json")
+        home, team = self._setup_session(tmp_path, fixture)
+        _write_task(home, team, "10", status="pending", owner="backend-coder")
+        _write_task(home, team, "11", status="pending", owner="test-engineer")
+
+        out = _emit_output(fixture, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Arm directive on parallel-burst second fire; "
+            f"got {out!r}."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+
+    def test_arm_emits_on_sequential_first_create(self, tmp_path):
+        """No-regression sentinel for the original sequential 0->1 path.
+        Only task 10 is pre-written; count_active_tasks returns 1.
+        Passes under both strict-equality (== 1) and positive-bound
+        (>= 1) predicates. Would FAIL only if a future edit broke the
+        positive-bound path entirely (e.g., a typo flipping to `> 1`)."""
+        fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, team = self._setup_session(tmp_path, fixture)
+        _write_task(home, team, "10", status="pending", owner="backend-coder")
+
+        out = _emit_output(fixture, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Arm directive on sequential 0->1 TaskCreate; "
+            f"got {out!r}."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+
+    def test_teardown_emits_on_terminal_update_to_zero(self, tmp_path):
+        """No-regression guard for the Teardown threshold (count == 0).
+        This PR explicitly does NOT change Teardown; the test must pass
+        under both the reverted strict-equality Arm and the relaxed
+        positive-bound Arm."""
+        home = tmp_path / "home"
+        home.mkdir()
+        sid = "pact-2877fe69"
+        pdir = "/Users/mj/Sites/collab/PACT-prompt"
+        team = "team-race"
+        _write_session_context(home, sid, pdir, team)
+        _write_task(home, team, "10", status="completed", owner="backend-coder")
+
+        out = _emit_output({
+            "tool_name": "TaskUpdate",
+            "session_id": sid,
+            "cwd": pdir,
+            "tool_input": {"taskId": "10", "status": "completed"},
+            "tool_response": {"id": "10", "status": "completed"},
+        }, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, f"Expected Teardown; got {out!r}."
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]
+
+    def test_teardown_no_emit_on_terminal_update_with_residual(self, tmp_path):
+        """No-regression guard against accidentally relaxing Teardown
+        symmetrically with the Arm change. With one residual active task
+        on disk, the terminal-status TaskUpdate for a different task
+        leaves count > 0 and Teardown must NOT emit (suppressOutput
+        sentinel). Passes under both revert and fix."""
+        home = tmp_path / "home"
+        home.mkdir()
+        sid = "pact-2877fe69"
+        pdir = "/Users/mj/Sites/collab/PACT-prompt"
+        team = "team-race"
+        _write_session_context(home, sid, pdir, team)
+        _write_task(home, team, "10", status="completed", owner="backend-coder")
+        _write_task(home, team, "11", status="in_progress", owner="test-engineer")
+
+        out = _emit_output({
+            "tool_name": "TaskUpdate",
+            "session_id": sid,
+            "cwd": pdir,
+            "tool_input": {"taskId": "10", "status": "completed"},
+            "tool_response": {"id": "10", "status": "completed"},
+        }, home)
+        assert out == {"suppressOutput": True}, (
+            f"Expected suppressOutput sentinel (residual active task "
+            f"keeps count > 0; Teardown must not emit); got {out!r}."
+        )
+
+    def test_no_emit_on_zero_active_count_taskcreate(self, tmp_path):
+        """Lower-bound guard for the relaxed predicate. Pipe a
+        TaskCreate fixture but write NO task files; count_active_tasks
+        returns 0 and `>= 1` rejects. Pins the rule that zero must
+        remain a no-op even after the threshold relaxation."""
+        fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, _team = self._setup_session(tmp_path, fixture)
+        # Deliberately do NOT write task 10's file. The hook's
+        # _extract_task_id will still parse the id from tool_response,
+        # but count_active_tasks reads the tasks dir and returns 0.
+
+        out = _emit_output(fixture, home)
+        assert out == {"suppressOutput": True}, (
+            f"Expected suppressOutput sentinel (zero active count must "
+            f"not emit Arm under the positive-bound predicate); "
+            f"got {out!r}."
+        )
+
+    @pytest.mark.parametrize("burst_size", [1, 2, 3], ids=["N=1", "N=2", "N=3"])
+    def test_arm_emits_for_parametrized_burst_size(self, tmp_path, burst_size):
+        """Parametrized verification across burst sizes N in {1, 2, 3}.
+        For each N, pre-write N task files (ids 10..10+N-1) and pipe the
+        first-burst fixture through the hook. Positive-bound predicate
+        emits Arm for every N >= 1. Strict-equality revert FAILS for
+        N >= 2, expanding the cardinality of failing tests under revert
+        beyond the two race-coupled cases above."""
+        fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, team = self._setup_session(tmp_path, fixture)
+        for offset in range(burst_size):
+            _write_task(
+                home, team, str(10 + offset),
+                status="pending",
+                owner=f"agent-{offset}",
+            )
+
+        out = _emit_output(fixture, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Arm directive on parametrized burst (N={burst_size}); "
+            f"got {out!r}."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]

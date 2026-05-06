@@ -1,0 +1,27 @@
+{
+  "_meta": {
+    "capture_session_id": "pact-2877fe69",
+    "capture_date": "2026-05-05",
+    "capture_method": "synthesized-from-production-shape",
+    "issue_ref": "#637",
+    "notes": "TaskCreate PostToolUse stdin for the FIRST task in a parallel-batch fire. The companion fixture task_create_parallel_burst_second.json represents the second fire in the same batch. Both task files (id 10 and id 11) are pre-written to the team tasks dir before the hook is invoked, simulating the race window where both files land before either PostToolUse hook reads the filesystem. Under the strict-equality predicate (count == 1) both fires reject and Arm is never emitted; under the positive-bound predicate (count >= 1) both fires emit Arm and PACT:watch-inbox idempotency absorbs the redundant emit."
+  },
+  "tool_name": "TaskCreate",
+  "session_id": "pact-2877fe69",
+  "cwd": "/Users/mj/Sites/collab/PACT-prompt",
+  "tool_input": {
+    "subject": "First task in parallel-batch dispatch",
+    "description": "Initial task in a parallel TaskCreate batch.",
+    "activeForm": "Working on first parallel task"
+  },
+  "tool_response": {
+    "task": {
+      "id": "10",
+      "subject": "First task in parallel-batch dispatch",
+      "status": "pending",
+      "owner": "backend-coder",
+      "blockedBy": [],
+      "blocks": []
+    }
+  }
+}
