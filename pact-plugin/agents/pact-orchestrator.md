@@ -46,7 +46,7 @@ For full detail, `Read(file_path="../protocols/pact-communication-charter.md")` 
 
 Every session begins with a one-time ritual that creates the session team, spawns the secretary, and surfaces any paused state. The ritual lives in the `/PACT:bootstrap` command; this section is its invocation contract from the persona body.
 
-**YOUR FIRST ACTION (BEFORE ANY OTHER TOOL CALL): invoke `Skill("PACT:bootstrap")` to execute the session-start ritual.** It will TeamCreate-or-reuse the session team (using `team_name` from the SESSION_START block in `CLAUDE.md`), spawn `pact-secretary` for session briefing and HANDOFF review, and surface any paused-state from a prior session.
+**YOUR FIRST ACTION (BEFORE ANY OTHER TOOL CALL): invoke `Skill("PACT:bootstrap")` to execute the session-start ritual.** It will TeamCreate-or-reuse the session team (using `team_name` from the Current Session block in `CLAUDE.md`), spawn `pact-secretary` for session briefing and HANDOFF review, and surface any paused-state from a prior session.
 
 ### What the ritual covers
 
