@@ -43,7 +43,7 @@ top-level keys).
 | --------------------- | -------- | -------------------------------------------------------------------------- |
 | `capture_session_id`  | Yes      | PACT session ID where the payload was captured (e.g., `pact-56ce3a2a`).    |
 | `capture_date`        | Yes      | ISO-8601 date of capture (e.g., `2026-05-02`).                             |
-| `capture_method`      | Yes      | How it was captured: `logging-shim`, `manual-stdin-redirect`, or `legacy`. |
+| `capture_method`      | Yes      | How it was captured: `logging-shim`, `manual-stdin-redirect`, `synthesized`, or `legacy`. |
 | `issue_ref`           | Yes      | Issue or PR that justifies preserving this fixture (e.g., `#612`).         |
 | `notes`               | No       | Free-form notes (e.g., "preserved as regression backstop").                |
 
@@ -55,6 +55,12 @@ top-level keys).
 - `manual-stdin-redirect` — payload was captured by tee-ing the hook's
   stdin into a file during a real PACT session. Equivalent fidelity to
   logging-shim; noted separately for traceability.
+- `synthesized` — payload was hand-reconstructed (typically derived from
+  an existing logging-shim shape with id/subject/owner re-parameterized
+  for a new scenario). May be lossy relative to a live production payload;
+  use ONLY when the scenario being modeled cannot be observed in
+  production (e.g., a race window that requires controlled timing). Notes
+  field MUST disclose the source fixture the shape was derived from.
 - `legacy` — payload predates the convention and was hand-constructed.
   Permitted ONLY for backward-compat regression backstops (i.e., tests that
   intentionally assert behavior on the broken pre-fix shape). Never use

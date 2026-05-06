@@ -272,22 +272,6 @@ def test_teardown_directive_contains_precondition_phrase(tmp_path):
     assert "Last active teammate task completed" in out["hookSpecificOutput"]["additionalContext"]
 
 
-def test_arm_emits_on_second_active_task_create(tmp_path):
-    home = tmp_path / "home"; home.mkdir()
-    sid = "s"; pdir = "/tmp/p"; team = "t"
-    _write_session_context(home, sid, pdir, team)
-    # Pre-existing active task + just-created task → post-count >= 1.
-    # Positive-bound predicate emits Arm; PACT:watch-inbox idempotency
-    # absorbs the redundant emit when STATE_FILE is already on disk.
-    _write_task(home, team, "existing", status="in_progress", owner="x")
-    _write_task(home, team, "new", status="in_progress", owner="y")
-    out = _emit_output({
-        "tool_name": "TaskCreate", "session_id": sid, "cwd": pdir,
-        "tool_input": {"taskId": "new"}, "tool_response": {"task": {"id": "new"}},
-    }, home)
-    assert "First active teammate task created" in out["hookSpecificOutput"]["additionalContext"]
-
-
 def test_no_op_on_create_of_signal_task(tmp_path):
     """Signal-tasks don't count toward lifecycle-relevant tally."""
     home = tmp_path / "home"; home.mkdir()
@@ -688,6 +672,18 @@ _REQUIRED_META_FIELDS = {
     "issue_ref",
 }
 
+# Enum of permitted capture_method values. `logging-shim` /
+# `manual-stdin-redirect` are lossless captures; `synthesized` is
+# hand-reconstructed and may be lossy (notes MUST disclose the source
+# fixture); `legacy` is hand-constructed for backward-compat backstops
+# only. README at fixtures/wake_lifecycle/README.md is the SSOT.
+_PERMITTED_CAPTURE_METHODS = frozenset({
+    "logging-shim",
+    "manual-stdin-redirect",
+    "synthesized",
+    "legacy",
+})
+
 
 def test_all_wake_lifecycle_fixtures_carry_meta_provenance():
     """Convention enforcement for `tests/fixtures/wake_lifecycle/`: every
@@ -722,6 +718,12 @@ def test_all_wake_lifecycle_fixtures_carry_meta_provenance():
         assert not missing, (
             f"{fixture_path.name}: `_meta` missing required fields: {missing}. "
             f"Required: {_REQUIRED_META_FIELDS}."
+        )
+        method = meta["capture_method"]
+        assert method in _PERMITTED_CAPTURE_METHODS, (
+            f"{fixture_path.name}: capture_method={method!r} is not in "
+            f"the permitted enum {_PERMITTED_CAPTURE_METHODS}. See "
+            f"{FIXTURES_DIR.name}/README.md for the convention."
         )
 
 
@@ -1065,6 +1067,113 @@ class TestArmDirectiveOnParallelTaskCreateRace:
         assert hso is not None, (
             f"Expected Arm directive on parametrized burst (N={burst_size}); "
             f"got {out!r}."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+
+    def test_teardown_sequence_after_parallel_burst_arm(self, tmp_path):
+        """Lifecycle-symmetric guard for the Teardown side of the race
+        window. Sequence: parallel burst raises count 0->2 (Arm fires) ->
+        first task completes 2->1 (Teardown must NOT fire; residual
+        active remains) -> second task completes 1->0 (Teardown fires).
+        Pins that the Teardown threshold (count == 0) is unaffected by
+        the relaxed Arm threshold, and that a parallel-burst-then-drain
+        lifecycle terminates cleanly."""
+        first_fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, team = self._setup_session(tmp_path, first_fixture)
+        sid = first_fixture["session_id"]
+        pdir = first_fixture["cwd"]
+
+        # State after parallel burst: both task files on disk, in_progress.
+        _write_task(home, team, "10", status="in_progress", owner="backend-coder")
+        _write_task(home, team, "11", status="in_progress", owner="test-engineer")
+
+        # First completion 2 -> 1: residual active task remains; no Teardown.
+        _write_task(home, team, "10", status="completed", owner="backend-coder")
+        out_first_complete = _emit_output({
+            "tool_name": "TaskUpdate",
+            "session_id": sid,
+            "cwd": pdir,
+            "tool_input": {"taskId": "10", "status": "completed"},
+            "tool_response": {"id": "10", "status": "completed"},
+        }, home)
+        assert out_first_complete == {"suppressOutput": True}, (
+            f"Expected suppressOutput when residual active task remains "
+            f"(2 -> 1 transition); got {out_first_complete!r}. If this "
+            f"emits Teardown, the Teardown threshold has been relaxed "
+            f"symmetrically with the Arm change — see #637 review TE-1."
+        )
+
+        # Second completion 1 -> 0: Teardown fires.
+        _write_task(home, team, "11", status="completed", owner="test-engineer")
+        out_final = _emit_output({
+            "tool_name": "TaskUpdate",
+            "session_id": sid,
+            "cwd": pdir,
+            "tool_input": {"taskId": "11", "status": "completed"},
+            "tool_response": {"id": "11", "status": "completed"},
+        }, home)
+        hso = out_final.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Teardown directive on terminal 1 -> 0 transition "
+            f"after parallel-burst Arm; got {out_final!r}."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]
+
+    def test_arm_emits_when_parallel_burst_includes_signal_task(self, tmp_path):
+        """Predicate-invariance under the count_active_tasks signal-task
+        filter. Parallel burst is (signal-task, real-task). The signal-
+        task is filtered by count_active_tasks; the predicate sees only
+        the lifecycle-relevant count (1, from the real task). Arm fires
+        for the real-task fire on the post-filter count, demonstrating
+        that the relaxed `>= 1` threshold composes correctly with the
+        carve-out filter rather than bypassing it."""
+        fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, team = self._setup_session(tmp_path, fixture)
+
+        # Pre-write a signal-task (filtered) and a real lifecycle-relevant
+        # task (not filtered). Post-filter count == 1.
+        _write_task(
+            home, team, "sig",
+            status="in_progress",
+            owner="x",
+            metadata={"completion_type": "signal", "type": "blocker"},
+        )
+        _write_task(home, team, "10", status="pending", owner="backend-coder")
+
+        out = _emit_output(fixture, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Arm directive when burst is (signal-task, real-task) "
+            f"and post-filter count == 1; got {out!r}. If suppressOutput, "
+            f"the signal-task filter is being bypassed by the relaxed "
+            f"predicate — predicate-invariance broken."
+        )
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+
+    def test_arm_emits_when_parallel_burst_includes_exempt_owner(self, tmp_path):
+        """Predicate-invariance under the count_active_tasks self-
+        complete-exempt-owner filter. Parallel burst is (secretary-task,
+        real-task). The secretary-owned task is filtered; predicate sees
+        post-filter count == 1 from the real task. Arm fires on the
+        real-task fire, demonstrating composition with the exempt-owner
+        carve-out matches composition with the signal-task carve-out."""
+        fixture = self._load_fixture("task_create_parallel_burst_first.json")
+        home, team = self._setup_session(tmp_path, fixture)
+
+        # Pre-write a secretary-owned task (filtered) and a real
+        # lifecycle-relevant task (not filtered). Post-filter count == 1.
+        _write_task(home, team, "sec", status="in_progress", owner="secretary")
+        _write_task(home, team, "10", status="pending", owner="backend-coder")
+
+        out = _emit_output(fixture, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Expected Arm directive when burst is (secretary-task, "
+            f"real-task) and post-filter count == 1; got {out!r}. If "
+            f"suppressOutput, the exempt-owner filter is being bypassed."
         )
         assert hso["hookEventName"] == "PostToolUse"
         assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
