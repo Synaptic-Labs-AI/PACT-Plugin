@@ -27,7 +27,7 @@ If `~/.claude/teams/{team_name}/paused-state.json` exists, read it and surface i
 
 ## Step 4 — Plugin banner
 
-Render a single-line banner showing the installed plugin version + plugin root, e.g. `PACT plugin: 4.1.0 (root: ~/.claude/plugins/cache/pact-marketplace/PACT/4.1.0)`. The `format_plugin_banner()` helper in `hooks/shared/plugin_manifest.py` is the canonical formatter; `peer_inject` and `session_init` already deliver it on their own surfaces.
+Render a single-line banner showing the installed plugin version + plugin root, e.g. `PACT plugin: 4.1.1 (root: ~/.claude/plugins/cache/pact-marketplace/PACT/4.1.1)`. The `format_plugin_banner()` helper in `hooks/shared/plugin_manifest.py` is the canonical formatter; `peer_inject` and `session_init` already deliver it on their own surfaces.
 
 ---
 

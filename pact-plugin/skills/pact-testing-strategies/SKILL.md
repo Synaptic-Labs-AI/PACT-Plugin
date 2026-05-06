@@ -455,6 +455,22 @@ Before completing TEST phase:
 
 ---
 
+## Counter-test-by-revert methodology
+
+A counter-test-by-revert pass falsifies a regression-coverage test by reverting the production fix and asserting that the targeted tests fail with the expected cardinality. Use it whenever you ship a regression test alongside a fix and need evidence that the test is actually coupled to the regression rather than an independent assertion that happens to pass.
+
+Restore-mechanism rules (crash-atomic — survives an interrupted session without losing the original tree):
+
+- **Prefer `git revert -n -- <paths>`** when the target commit can be cleanly reverted in isolation. `-n` (`--no-commit`) leaves the inverse change staged; `git restore --staged --worktree -- <paths>` drops it after measuring cardinality.
+- **Use `git stash push -- <paths>`** for an in-place edit when the target commit bundles consequential test or fixture edits that revert can't isolate, or when you are reverting a hand-edit that was never committed. `git stash pop` re-applies atomically.
+- **Never** in-place-edit a tracked file and rely on `cp` from a `/tmp` copy or hand-typed restoration. A crash mid-measurement leaves the working tree in a corrupt half-edited state with no atomic recovery primitive.
+
+After restore, re-run the test scope and confirm the original tree is byte-identical: `git diff --quiet -- <paths>` exits 0, `git status --porcelain -- <paths>` prints nothing.
+
+Document the expected cardinality (`{N fail, M pass}`) in the design or test docstring so a future verifier can check the assertion without re-deriving it.
+
+---
+
 ## Detailed References
 
 For comprehensive testing guidance:

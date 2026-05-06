@@ -7,15 +7,16 @@ Used by: hooks.json PostToolUse hook with matcher
          `TaskCreate|TaskUpdate`.
 
 Lifecycle automation:
-- On TaskCreate that transitions the team's active-task count from 0 to
-  1, emit a watch-inbox directive instructing the lead to invoke
-  Skill("PACT:watch-inbox").
-- On TaskUpdate(status in {completed, deleted}) that transitions the
-  team's active-task count from 1 to 0, emit an unwatch-inbox directive
-  instructing the lead to invoke Skill("PACT:unwatch-inbox"). Both
-  terminal statuses end active work and are treated symmetrically.
+- On TaskCreate that lands while the team has at least one
+  lifecycle-relevant active task, emit a watch-inbox directive
+  instructing the lead to invoke Skill("PACT:watch-inbox").
+- On TaskUpdate(status in {completed, deleted}) that drives the
+  team's lifecycle-relevant active-task count to zero, emit an
+  unwatch-inbox directive instructing the lead to invoke
+  Skill("PACT:unwatch-inbox"). Both terminal statuses end active
+  work and are treated symmetrically.
 - On any other tool fire (TaskUpdate without a terminal-status
-  transition, TaskCreate at non-zero pre-state, terminal-status
+  transition, TaskCreate when the count is zero, terminal-status
   TaskUpdate leaving residual active tasks): no directive emitted.
 
 Transition detection (post-only):
@@ -23,17 +24,20 @@ Transition detection (post-only):
   effect is on disk. count_active_tasks already filters out signal-
   tasks and self-complete-exempt agents, so post is the lifecycle-
   relevant count.
-- TaskCreate + post >= 1 → emit Arm. PACT:watch-inbox is idempotent
-  (no-op when a valid STATE_FILE is on disk), so emitting on every
-  TaskCreate while count is positive is benign and race-immune to
-  parallel TaskCreate batches that land multiple task files before
-  any PostToolUse hook reads the filesystem.
+- TaskCreate + post >= 1 → emit Arm. The Arm threshold accepts any
+  positive count of lifecycle-relevant tasks; PACT:watch-inbox is
+  idempotent (no-op when a valid STATE_FILE is on disk), so emitting
+  on every TaskCreate while the count is positive is benign.
 - TaskUpdate(status in {completed, deleted}) + post == 0 → emit
   Teardown. Skill's Teardown is idempotent (no-op if STATE_FILE absent),
   so over-eager emission on edge cases (terminal-status update of a
   never-counted signal-task while post==0) is benign.
 - Any other tool fire (non-status TaskUpdate, TaskCreate at post == 0,
   terminal-status TaskUpdate at post > 0): no-op.
+
+The Arm threshold (post >= 1) and `session_init.py`'s SessionStart
+Arm threshold (active_count > 0) apply the same minimum-positive-count
+gate at both Arm sites, so a single mental model covers both surfaces.
 
 Output schema (load-bearing):
 {
@@ -265,14 +269,16 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     self-complete-exempt owners), so post >= 1 after a TaskCreate
     means at least one lifecycle-relevant task is active, and
     post == 0 after a terminal-status TaskUpdate means the team
-    has no remaining lifecycle-relevant work. The Arm threshold is
-    positive-bound (not strict-equality) so a parallel TaskCreate
-    batch that lands N >= 2 task files before any PostToolUse hook
-    reads the filesystem still emits Arm; the skill's idempotency
-    absorbs the redundant emits on subsequent TaskCreates within
-    the same active window. Both Arm and Teardown are idempotent
-    in the skill layer, so any over-eager emit on edge cases is
-    benign.
+    has no remaining lifecycle-relevant work. The Arm threshold
+    accepts any positive count and the skill's idempotency absorbs
+    the redundant emits on subsequent TaskCreates within the same
+    active window. Both Arm and Teardown are idempotent in the
+    skill layer, so any over-eager emit on edge cases is benign.
+
+    Test coverage pins the Arm predicate to the equivalent forms
+    >= 1 and > 0: the lower-bound zero-count no-emit case and the
+    sequential-first-create emit case together rule out predicates
+    above (e.g. > 1) and below (e.g. >= 0).
     """
     if not _is_lead_session(input_data, team_name):
         return None
