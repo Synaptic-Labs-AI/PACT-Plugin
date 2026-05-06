@@ -440,6 +440,7 @@ def main():
         sys.exit(0)
 
     if deny_reason:
+        # hookEventName is required by the harness; missing it silently fails open
         output = {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",

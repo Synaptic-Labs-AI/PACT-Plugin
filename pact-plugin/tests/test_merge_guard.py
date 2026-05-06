@@ -573,6 +573,9 @@ class TestPreMainEntryPoint:
         output = json.loads(captured.out)
         assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "AskUserQuestion" in output["hookSpecificOutput"]["permissionDecisionReason"]
+        # Issue #658: hookEventName is required by the harness schema; missing
+        # it causes silent rejection and the deny fails open.
+        assert output["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
 
     def test_main_exits_0_on_dangerous_with_valid_token(self, tmp_path, capsys):
         from merge_guard_pre import main
@@ -2165,6 +2168,9 @@ class TestPreMainEdgeCases:
         assert hook_output["permissionDecision"] == "deny"
         assert isinstance(hook_output["permissionDecisionReason"], str)
         assert len(hook_output["permissionDecisionReason"]) > 0
+        # Issue #658: hookEventName is the load-bearing schema field; without
+        # it the harness silently rejects the deny block and merges proceed.
+        assert hook_output["hookEventName"] == "PreToolUse"
 
 
 # =============================================================================
@@ -2285,6 +2291,9 @@ class TestTokenSecurity:
         output = json.loads(captured.out)
         assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "internal error" in output["hookSpecificOutput"]["permissionDecisionReason"].lower()
+        # Issue #658: fail-closed path also requires hookEventName, otherwise
+        # the harness silently rejects the deny and the merge proceeds.
+        assert output["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
 
 
 # =============================================================================
@@ -4579,6 +4588,8 @@ class TestFailClosed:
         captured = capsys.readouterr()
         output = json.loads(captured.out)
         assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+        # Issue #658: fail-closed deny must include hookEventName.
+        assert output["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
 
     def test_fail_closed_stderr_includes_error(self, capsys):
         """Fail-closed error is logged to stderr for debugging."""
@@ -7007,6 +7018,8 @@ class TestGhPrClosePreHookE2E:
         captured = capsys.readouterr()
         output = json.loads(captured.out)
         assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+        # Issue #658: deny-emit must include hookEventName uniformity polish.
+        assert output["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
 
     def test_pre_hook_allows_bare_gh_pr_close(self, tmp_path, capsys):
         """Pre-hook main() allows bare gh pr close (no --delete-branch) — exits 0."""
@@ -8432,3 +8445,158 @@ class TestGitGlobalFlagBypass:
         assert _token_matches_command(
             token, "git --git-dir=/tmp/.git branch --delete --force feature"
         )
+
+
+# =============================================================================
+# Module-load fail-closed wrapper (Issue #658 / PR #660 Future #5)
+# =============================================================================
+
+
+class TestModuleLoadFailClosed:
+    """Tests for the module-load fail-closed wrapper in merge_guard_pre.
+
+    Verifies that if module-level imports or pattern compilations fail at
+    import time, the harness sees a structured deny output (with the
+    required `hookEventName`) on stdout BEFORE the process exits — instead
+    of an empty stdout that would fail open.
+    """
+
+    def _reload_with_broken_import(self, broken_module_name, monkeypatch, capsys):
+        """Helper: reload merge_guard_pre with a forced ImportError on
+        ``broken_module_name``. Returns (exit_code, stdout, stderr).
+
+        Pops only ``merge_guard_pre`` from sys.modules (so its body re-runs)
+        and restores it on teardown. Does NOT pop ``shared.*`` modules: the
+        patched ``builtins.__import__`` raises on the broken name regardless
+        of sys.modules cache state, and popping ``shared.*`` would orphan
+        function references already imported by other test modules
+        (e.g. ``shared.task_utils`` keeps a stale ``get_session_id`` ref to
+        a popped-and-replaced ``shared.pact_context`` — observed as
+        cross-file test pollution).
+        """
+        import importlib
+
+        _missing = object()
+        original_mgp = sys.modules.get("merge_guard_pre", _missing)
+        sys.modules.pop("merge_guard_pre", None)
+
+        real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __builtins__.__import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == broken_module_name or name.startswith(broken_module_name + "."):
+                raise ImportError(f"simulated load failure for {broken_module_name}")
+            return real_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.setattr("builtins.__import__", fake_import)
+
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                importlib.import_module("merge_guard_pre")
+            captured = capsys.readouterr()
+            return exc_info.value.code, captured.out, captured.err
+        finally:
+            sys.modules.pop("merge_guard_pre", None)
+            if original_mgp is not _missing:
+                sys.modules["merge_guard_pre"] = original_mgp
+
+    def test_module_load_failure_emits_deny_with_hookEventName(self, monkeypatch, capsys):
+        """If shared.pact_context fails to import, the wrapper emits a
+        deny output with `hookEventName: PreToolUse` and exits 2.
+
+        Issue #658 audit anchor: hookEventName must be present in any deny
+        output, including the module-load fail-closed path. Without this,
+        the harness silently fails open on a broken module.
+        """
+        exit_code, stdout, stderr = self._reload_with_broken_import(
+            "shared.pact_context", monkeypatch, capsys,
+        )
+
+        assert exit_code == 2
+        output = json.loads(stdout)
+        assert output["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "Merge guard failed to load" in output["hookSpecificOutput"]["permissionDecisionReason"]
+        # Stderr must explain the cause for operator debugging.
+        assert "merge_guard_pre" in stderr
+        assert "simulated load failure" in stderr
+
+    def test_module_load_failure_in_merge_guard_common_emits_deny(self, monkeypatch, capsys):
+        """If shared.merge_guard_common fails to import, the wrapper still
+        emits a fail-closed deny with hookEventName.
+        """
+        exit_code, stdout, stderr = self._reload_with_broken_import(
+            "shared.merge_guard_common", monkeypatch, capsys,
+        )
+
+        assert exit_code == 2
+        output = json.loads(stdout)
+        assert output["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_pattern_compile_failure_emits_deny(self, monkeypatch, capsys):
+        """If a regex compilation fails at module load, the pattern-compile
+        wrapper emits a fail-closed deny with hookEventName.
+
+        Simulates a malformed regex by patching ``re.compile`` to raise
+        ``re.error`` during reload.
+        """
+        import importlib
+        import re as _re
+
+        _missing = object()
+        original_mgp = sys.modules.get("merge_guard_pre", _missing)
+        sys.modules.pop("merge_guard_pre", None)
+
+        def _restore_modules():
+            sys.modules.pop("merge_guard_pre", None)
+            if original_mgp is not _missing:
+                sys.modules["merge_guard_pre"] = original_mgp
+
+        real_compile = _re.compile
+        compile_calls = {"n": 0}
+
+        def fake_compile(pattern, flags=0):
+            # Allow imports of shared.* modules to succeed (they call re.compile
+            # internally). Only fail compiles invoked from merge_guard_pre's
+            # module body — those happen after shared imports complete and
+            # build up DANGEROUS_PATTERNS. We trip the second batch of compiles
+            # by failing all calls once shared modules are loaded.
+            if "shared.merge_guard_common" in sys.modules and "shared.pact_context" in sys.modules:
+                compile_calls["n"] += 1
+                if compile_calls["n"] >= 1:
+                    raise _re.error("simulated bad pattern")
+            return real_compile(pattern, flags)
+
+        monkeypatch.setattr("re.compile", fake_compile)
+
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                importlib.import_module("merge_guard_pre")
+
+            captured = capsys.readouterr()
+            assert exc_info.value.code == 2
+            output = json.loads(captured.out)
+            assert output["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+            assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+            assert "merge_guard_pre" in captured.err
+        finally:
+            _restore_modules()
+
+    def test_load_failure_audit_anchor_comment_present(self):
+        """The fail-closed emit site carries the Issue #658 audit anchor.
+
+        Audit-anchor discipline: any deny-emit site must reference the
+        load-bearing schema field (`hookEventName`) in a comment so future
+        edits don't silently regress it.
+        """
+        hook_path = Path(__file__).parent.parent / "hooks" / "merge_guard_pre.py"
+        source = hook_path.read_text()
+
+        # The shared emit helper must reference Issue #658 + hookEventName.
+        assert "_emit_load_failure_deny" in source
+        # Audit-anchor must be present in the helper's docstring/comments.
+        def_idx = source.index("def _emit_load_failure_deny")
+        # Inspect the helper body (next ~1200 chars covers docstring + body).
+        helper_body = source[def_idx:def_idx + 1200]
+        assert "Issue #658" in helper_body or "PR #660" in helper_body
+        assert "hookEventName" in helper_body

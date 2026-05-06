@@ -132,6 +132,7 @@ def main():
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
+        # hookEventName is required by the harness; missing it silently fails open
         output = {
             "hookSpecificOutput": {
                 "hookEventName": "PostToolUse",

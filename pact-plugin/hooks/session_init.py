@@ -1204,6 +1204,7 @@ def main():
         output = {}
 
         if context_parts or system_messages:
+            # hookEventName is required by the harness; missing it silently fails open
             output["hookSpecificOutput"] = {
                 "hookEventName": "SessionStart",
                 "additionalContext": " | ".join(context_parts) if context_parts else "Success"
@@ -1229,6 +1230,7 @@ def main():
         # Code's hook-output schema supports both fields in the same JSON.
         print(f"Hook warning (session_init): {str(e)[:200]}", file=sys.stderr)
         safety_net_context = _build_safety_net_context(team_name)
+        # hookEventName is required by the harness; missing it silently fails open
         output = {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
