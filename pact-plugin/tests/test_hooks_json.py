@@ -274,6 +274,88 @@ class TestMatcherPatterns:
                 errors.append(f"{event_type}: matcher ends with '|': '{matcher}'")
         assert errors == [], f"Invalid matcher patterns:\n" + "\n".join(errors)
 
+    def test_subagent_start_covers_all_agent_types(self, hooks_config):
+        """SubagentStart matcher must include all SPAWNABLE PACT agent types
+        from agents/ directory.
+
+        pact-orchestrator.md is excluded: it is delivered via the
+        `claude --agent PACT:pact-orchestrator` flag for the team-lead
+        session ONLY and never spawns through SubagentStart, so the
+        peer_inject hook does not need to fire for it.
+        """
+        # Read expected agent names from disk (spawnable teammates only)
+        expected_agents = set()
+        for agent_file in AGENTS_DIR.glob("pact-*.md"):
+            if agent_file.stem == "pact-orchestrator":
+                continue
+            expected_agents.add(agent_file.stem)
+
+        assert len(expected_agents) > 0, "No spawnable agent files found in agents/ directory"
+
+        # Extract the SubagentStart matcher
+        subagent_start_entries = hooks_config["hooks"].get("SubagentStart", [])
+        matcher_agents = set()
+        for entry in subagent_start_entries:
+            if "matcher" in entry:
+                matcher_agents.update(entry["matcher"].split("|"))
+
+        # Every spawnable agent definition should appear in the matcher
+        missing = expected_agents - matcher_agents
+        assert missing == set(), (
+            f"SubagentStart matcher is missing agent types: {sorted(missing)}. "
+            f"Matcher has: {sorted(matcher_agents)}. "
+            f"Expected from agents/ (excluding pact-orchestrator): "
+            f"{sorted(expected_agents)}"
+        )
+
+
+class TestBootstrapGateInvariants:
+    """Structural invariants for bootstrap gate hooks."""
+
+    def test_bootstrap_gate_has_no_matcher(self, hooks_config):
+        """bootstrap_gate.py PreToolUse entry must have NO matcher (fires for all tools)."""
+        pre_tool_entries = hooks_config["hooks"].get("PreToolUse", [])
+        for entry in pre_tool_entries:
+            for hook in entry.get("hooks", []):
+                if "bootstrap_gate.py" in hook.get("command", ""):
+                    assert "matcher" not in entry, (
+                        "bootstrap_gate.py must NOT have a matcher — "
+                        "it must fire for ALL hookable tools to enforce the gate"
+                    )
+
+    def test_bootstrap_prompt_gate_registered(self, hooks_config):
+        """bootstrap_prompt_gate.py must be registered as a UserPromptSubmit
+        hook so the bootstrap-required directive is injected on every prompt
+        until the marker exists."""
+        user_prompt_entries = hooks_config["hooks"].get("UserPromptSubmit", [])
+        commands = []
+        for entry in user_prompt_entries:
+            for hook in entry.get("hooks", []):
+                commands.append(hook.get("command", ""))
+        assert any(
+            "bootstrap_prompt_gate.py" in cmd for cmd in commands
+        ), (
+            "bootstrap_prompt_gate.py must be registered under "
+            "UserPromptSubmit. Commands found: "
+            f"{commands}"
+        )
+
+    def test_bootstrap_gate_registered(self, hooks_config):
+        """bootstrap_gate.py must be registered as a PreToolUse hook so the
+        gate fires before any code-modification tool call."""
+        pre_tool_entries = hooks_config["hooks"].get("PreToolUse", [])
+        commands = []
+        for entry in pre_tool_entries:
+            for hook in entry.get("hooks", []):
+                commands.append(hook.get("command", ""))
+        assert any(
+            "bootstrap_gate.py" in cmd for cmd in commands
+        ), (
+            "bootstrap_gate.py must be registered under PreToolUse. "
+            f"Commands found: {commands}"
+        )
+
+
 class TestSessionStartCardinality:
     """Post-#444 SessionStart registration invariant.
 

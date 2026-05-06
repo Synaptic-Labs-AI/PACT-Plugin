@@ -1,5 +1,15 @@
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/bootstrap_prompt_gate.py\""
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [
@@ -31,6 +41,14 @@
       }
     ],
     "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/bootstrap_gate.py\""
+          }
+        ]
+      },
       {
         "matcher": "Bash",
         "hooks": [
@@ -77,6 +95,17 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/validate_handoff.py\""
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "pact-preparer|pact-architect|pact-backend-coder|pact-frontend-coder|pact-database-engineer|pact-devops-engineer|pact-n8n|pact-test-engineer|pact-security-engineer|pact-qa-engineer|pact-auditor|pact-secretary",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/peer_inject.py\""
           }
         ]
       }
