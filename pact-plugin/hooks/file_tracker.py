@@ -188,8 +188,10 @@ def main():
 
     # Warn if conflict
     if conflict:
+        # hookEventName is required by the harness; missing it silently fails open
         output = {
             "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
                 "additionalContext": f"\u26a0\ufe0f {conflict}"
             }
         }

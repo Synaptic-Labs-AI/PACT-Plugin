@@ -276,3 +276,6 @@ class TestMainEntryPoint:
         output = json.loads(captured.out)
         assert "additionalContext" in output["hookSpecificOutput"]
         assert "conflict" in output["hookSpecificOutput"]["additionalContext"].lower()
+        # Issue #658: hookEventName is required by the harness schema; missing
+        # it causes the harness to silently fail open (additionalContext dropped).
+        assert output["hookSpecificOutput"]["hookEventName"] == "PostToolUse"

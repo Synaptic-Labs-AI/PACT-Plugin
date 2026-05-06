@@ -331,6 +331,9 @@ class TestMainEntryPoint:
         output = json.loads(captured.out)
         assert "additionalContext" in output["hookSpecificOutput"]
         assert "frontend-coder" in output["hookSpecificOutput"]["additionalContext"]
+        # Issue #658: hookEventName is required by the harness schema; missing
+        # it causes the harness to silently fail open (additionalContext dropped).
+        assert output["hookSpecificOutput"]["hookEventName"] == "SubagentStart"
 
     def test_main_exits_0_on_invalid_json(self, pact_context):
         from peer_inject import main

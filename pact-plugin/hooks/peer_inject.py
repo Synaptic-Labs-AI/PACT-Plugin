@@ -223,8 +223,10 @@ def main():
         sys.exit(0)
 
     if context:
+        # hookEventName is required by the harness; missing it silently fails open
         output = {
             "hookSpecificOutput": {
+                "hookEventName": "SubagentStart",
                 "additionalContext": context
             }
         }
