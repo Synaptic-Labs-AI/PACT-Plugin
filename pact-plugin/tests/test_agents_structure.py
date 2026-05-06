@@ -124,25 +124,32 @@ class TestAgentBody:
 
 
 class TestNoSkillInvocationOnFirstAction:
-    """Negative-invariant fossilization guard: no agent body may instruct
-    the agent to invoke `Skill("PACT:teammate-bootstrap")` (or any other
-    bootstrap skill) as its first action.
+    """Negative-invariant fossilization guard: no TEAMMATE agent body may
+    instruct the agent to invoke `Skill("PACT:teammate-bootstrap")` (deleted
+    skill) or `Skill("PACT:bootstrap")` (orchestrator-only ritual command).
 
-    Under v4.0.0 the team protocol, teachback rules, and algedonic content
-    arrive via the spawn-time skills: frontmatter (preload at Task() spawn).
-    A fossil `Skill("PACT:teammate-bootstrap")` directive in an agent body
-    points at a now-deleted command and would cost the agent a wasted
-    tool-call cycle if it tried to honor the directive.
+    The team protocol, teachback rules, and algedonic content arrive via the
+    spawn-time skills: frontmatter (preload at Task() spawn). A fossil
+    `Skill("PACT:teammate-bootstrap")` directive in any agent body points at
+    a permanently removed command. A `Skill("PACT:bootstrap")` directive in a
+    teammate body points at the orchestrator-only session-start ritual; only
+    pact-orchestrator.md may carry it (in §2 Session-Start Ritual).
 
     The class also keeps the canonical skills-frontmatter-baseline guard
-    (every teammate carries pact-agent-teams + pact-teachback). That
-    invariant holds pre- and post-v4.0.0 — the lazy-load convention layered
-    cross-references on top of the same baseline.
+    (every teammate carries pact-agent-teams + pact-teachback).
     """
 
-    FOSSIL_SKILL_INVOCATIONS = (
+    # teammate-bootstrap.md was permanently removed; no agent (orchestrator
+    # included) may reference it.
+    FOSSIL_SKILL_INVOCATIONS_ALL_AGENTS = (
         'Skill("PACT:teammate-bootstrap")',
         "Skill('PACT:teammate-bootstrap')",
+    )
+
+    # bootstrap.md is the orchestrator-only ritual command. Teammate bodies
+    # must not invoke it; pact-orchestrator.md is exempt (§2 Session-Start
+    # Ritual relies on this invocation).
+    ORCHESTRATOR_ONLY_SKILL_INVOCATIONS = (
         'Skill("PACT:bootstrap")',
         "Skill('PACT:bootstrap')",
     )
@@ -150,11 +157,20 @@ class TestNoSkillInvocationOnFirstAction:
     def test_no_bootstrap_skill_invocation_in_any_agent(self, agent_files):
         for f in agent_files:
             text = f.read_text(encoding="utf-8")
-            for fossil in self.FOSSIL_SKILL_INVOCATIONS:
+            for fossil in self.FOSSIL_SKILL_INVOCATIONS_ALL_AGENTS:
                 assert fossil not in text, (
-                    f"{f.name}: contains v3.x fossil skill invocation "
-                    f"{fossil!r}. The bootstrap commands were deleted in C9; "
-                    f"agents must not instruct invocation of removed skills."
+                    f"{f.name}: contains permanently-removed skill "
+                    f"invocation {fossil!r}. teammate-bootstrap.md was "
+                    f"deleted; agents must not instruct invocation of "
+                    f"removed skills."
+                )
+            if f.name == "pact-orchestrator.md":
+                continue
+            for fossil in self.ORCHESTRATOR_ONLY_SKILL_INVOCATIONS:
+                assert fossil not in text, (
+                    f"{f.name}: contains orchestrator-only skill invocation "
+                    f"{fossil!r}. /PACT:bootstrap is the session-start "
+                    f"ritual; only pact-orchestrator.md may invoke it."
                 )
 
     @staticmethod
