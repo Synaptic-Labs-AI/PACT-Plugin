@@ -60,4 +60,6 @@ mkdir -p "<path>" && touch "<path>/bootstrap-complete"
 Substitute `<path>` with the value from `PACT_SESSION_DIR=`. The marker name `bootstrap-complete` is the load-bearing literal that `bootstrap_gate.is_marker_set` checks; do not rename it.
 
 <!-- Coupling: marker name "bootstrap-complete" must match shared.BOOTSTRAP_MARKER_NAME
-     in pact-plugin/hooks/shared/__init__.py -->
+     in pact-plugin/hooks/shared/__init__.py.
+     Pattern: convention-must-be-enforced-not-just-documented (test_three_surface_split_enforcement.py
+     pins the persona §2 / bootstrap.md split; this comment pins the marker-name SSOT). -->
