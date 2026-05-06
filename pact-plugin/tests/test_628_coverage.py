@@ -458,7 +458,7 @@ class TestTeachbackReminderCrossFileConsistency:
         """Import the private constant from peer_inject and assert it
         contains the canonical metadata key. Private-name import is
         acceptable in tests (per lead's Q3 confirmation)."""
-        from peer_inject import _TEACHBACK_REMINDER
+        from peer_inject import _TEACHBACK_REMINDER  # pyright: ignore[reportMissingImports]
         assert self.CANONICAL_KEY in _TEACHBACK_REMINDER, (
             f"peer_inject._TEACHBACK_REMINDER must mention "
             f"{self.CANONICAL_KEY!r} so spawned teammates know where "
@@ -480,7 +480,7 @@ class TestTeachbackReminderCrossFileConsistency:
         """Cross-file consistency assertion: drift on either side fails
         this test. If the reminder gets reworded to a different key (or
         the skill is renamed), the divergence surfaces immediately."""
-        from peer_inject import _TEACHBACK_REMINDER
+        from peer_inject import _TEACHBACK_REMINDER  # pyright: ignore[reportMissingImports]
         skill_text = self.SKILL_PATH.read_text(encoding="utf-8")
         in_reminder = self.CANONICAL_KEY in _TEACHBACK_REMINDER
         in_skill = self.CANONICAL_KEY in skill_text
