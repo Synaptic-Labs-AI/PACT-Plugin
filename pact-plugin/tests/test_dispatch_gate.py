@@ -369,12 +369,14 @@ def test_deny_fullwidth_lookalike_after_nfkc(tmp_path, monkeypatch, capsys):
         "peer",
         "unknown",
         "solo",
-        # Self-completion-exempt names. Spawning under either of these
-        # would let the spawned teammate self-complete tasks without
-        # triggering the lead-only-completion advisory in
-        # task_lifecycle_gate (the advisory short-circuits on owner ∈
-        # SELF_COMPLETE_EXEMPT_AGENTS). Reserving them at spawn time
-        # closes that confused-deputy bypass.
+        # Defense-in-depth name perimeter for the self-completion
+        # carve-out. Post-#682 the carve-out keys on team-config
+        # agentType (member.agentType ∈ SELF_COMPLETE_EXEMPT_AGENT_TYPES)
+        # rather than owner name, so owner-name spoofing alone cannot
+        # bypass the lead-only-completion advisory. These names remain
+        # reserved as canonical role-identifiers for the legitimate
+        # session-secretary spawn and as belt-and-suspenders against
+        # future privilege classes that might key on owner name again.
         "secretary",
         "pact-secretary",
     ],
@@ -388,40 +390,64 @@ def test_deny_reserved_token(reserved, tmp_path, monkeypatch, capsys):
     assert "reserved-token" in reason
 
 
-def test_self_complete_exempt_agents_are_all_reserved():
-    """Cross-module subset invariant.
+def test_self_complete_exempt_agent_types_subset_specialist_registry(
+    tmp_path, monkeypatch
+):
+    """Cross-module categorical invariant (post-#682).
 
-    Every agent name that the lifecycle gate allows to self-complete
-    MUST also be in dispatch_gate.RESERVED_NAMES, so a dispatch can
-    never spawn under one of those names. If a future change adds an
-    agent to the exempt set without also adding it to RESERVED_NAMES,
-    this test fails — closing the confused-deputy bypass before it
-    ships.
+    Every agentType token in SELF_COMPLETE_EXEMPT_AGENT_TYPES MUST
+    correspond to a registered PACT specialist (a file at
+    `agents/pact-*.md`). A typo in the agentType token (e.g.
+    `pact-secratary`) would silently drop the carve-out without surfacing
+    as a runtime failure — secretaries would no longer self-complete and
+    every memory-save would fail the lead-only-completion advisory. This
+    test catches typos at PR time.
 
-    Categorical pattern. This exempt-vs-reserved pairing is a specific
-    instance of a general rule: any future privilege class keyed on
-    owner-name (audit-only, signing-authority, telemetry-immune,
-    quota-exempt, anything else that gates an action by matching a
-    teammate name) MUST (a) live in a shared module so the privilege
-    membership is the single source of truth, and (b) carry its own
-    ⊆ RESERVED_NAMES subset assertion so a dispatch can never spawn
-    under one of those names. The lifecycle gate's
-    SELF_COMPLETE_EXEMPT_AGENTS is the first such class; this test is
-    the template for any future ones. Adding a new privilege class
-    without the subset assertion re-opens the same defect class
-    (spawn-under-privileged-name → confused-deputy bypass).
+    Categorical pattern. Any future privilege class keyed on agentType
+    (audit-only, signing-authority, quota-exempt, etc.) MUST (a) live in
+    a shared module so the privilege membership is the single source of
+    truth, and (b) carry its own ⊆ _specialist_registry() subset
+    assertion so a privileged-but-unregistered agentType cannot ship as
+    dead code. SELF_COMPLETE_EXEMPT_AGENT_TYPES is the first such class;
+    this test is the template for any future ones.
+    """
+    _full_setup(monkeypatch, tmp_path, agents=("pact-secretary", "pact-architect"))
+    from shared.dispatch_helpers import _specialist_registry
+    from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENT_TYPES
+
+    missing = SELF_COMPLETE_EXEMPT_AGENT_TYPES - _specialist_registry()
+    assert not missing, (
+        f"SELF_COMPLETE_EXEMPT_AGENT_TYPES contains agentType tokens "
+        f"with no matching agents/pact-*.md file: {sorted(missing)}. "
+        "Either the tokens are typos or the agent files are missing — "
+        "both produce silent loss of the self-completion carve-out."
+    )
+
+
+def test_secretary_names_remain_reserved_for_defense_in_depth():
+    """Doc-anchor regression test for the post-#682 RESERVED_NAMES
+    rationale rewrite.
+
+    The names `secretary` and `pact-secretary` remain in
+    dispatch_gate.RESERVED_NAMES even though the self-completion
+    carve-out no longer keys on owner name (it keys on team-config
+    agentType post-#682). The names are retained as:
+      (a) canonical role-identifiers for the legitimate
+          session-secretary spawn — the harness writes
+          name=session-secretary, agentType=pact-secretary; teammate
+          dispatches that try to claim the canonical names directly are
+          rejected;
+      (b) belt-and-suspenders against future privilege classes that
+          might key on owner name again.
+
+    Removing this test (or the names) without re-evaluating the rationale
+    re-opens the future name-collision surface area. See the comment
+    block above RESERVED_NAMES for full reasoning.
     """
     import dispatch_gate
-    from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENTS
 
-    missing = SELF_COMPLETE_EXEMPT_AGENTS - dispatch_gate.RESERVED_NAMES
-    assert not missing, (
-        f"SELF_COMPLETE_EXEMPT_AGENTS contains names not in "
-        f"dispatch_gate.RESERVED_NAMES: {sorted(missing)}. Spawning "
-        "under any of these would let the spawned teammate "
-        "self-complete tasks without triggering the lead-only-completion "
-        "advisory. Add them to RESERVED_NAMES to close the bypass."
-    )
+    assert "secretary" in dispatch_gate.RESERVED_NAMES
+    assert "pact-secretary" in dispatch_gate.RESERVED_NAMES
 
 
 # =============================================================================

@@ -125,15 +125,26 @@ RESERVED_NAMES = frozenset({
     "peer",
     "unknown",
     "solo",
-    # Self-completion-exempt names. The task_lifecycle_gate
-    # short-circuits the lead-only-completion advisory when a teammate's
-    # owner matches one of these names. If a dispatch were allowed to
-    # spawn under one of these names, the spawned teammate could
-    # self-complete tasks without triggering the advisory — bypassing
-    # lead-only completion authority via name choice. Reject the names
-    # at spawn time to close that confused-deputy chain. Mirrors
-    # shared.intentional_wait.SELF_COMPLETE_EXEMPT_AGENTS; the
-    # cross-module subset invariant is asserted by a regression test.
+    # Defense-in-depth name perimeter for the self-completion carve-out.
+    # Post-#682 the task_lifecycle_gate carve-out keys on team-config
+    # agentType (member.agentType ∈
+    # shared.intentional_wait.SELF_COMPLETE_EXEMPT_AGENT_TYPES, looked up
+    # via the team config) — NOT on owner name. Owner-name spoofing
+    # alone therefore cannot bypass the lead-only-completion advisory.
+    # These names are RETAINED in RESERVED_NAMES for two reasons:
+    #   (1) they are canonical role-identifiers reserved for the
+    #       legitimate session-secretary spawn (and any future
+    #       name-perimeter consumer);
+    #   (2) belt-and-suspenders against future privilege classes that
+    #       might key on owner name again. Removing the names has zero
+    #       benefit and re-opens future name-collision surface area.
+    # The cross-module categorical invariant
+    # `SELF_COMPLETE_EXEMPT_AGENT_TYPES ⊆ _specialist_registry()` lives
+    # in test_dispatch_gate.py to guard against typos in the agentType
+    # token set. See:
+    #   - shared/intentional_wait.SELF_COMPLETE_EXEMPT_AGENT_TYPES
+    #   - shared/intentional_wait._is_exempt_agent_type
+    #   - tests/test_dispatch_gate.py categorical-invariant test.
     "secretary",
     "pact-secretary",
 })
