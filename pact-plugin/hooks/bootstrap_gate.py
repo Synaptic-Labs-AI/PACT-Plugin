@@ -27,14 +27,17 @@ Tool classification rationale:
     was based on a misread of production matchers — those matchers were
     silently NOT firing on spawn events, mistaken for "production
     evidence". Resolved in #662.
-  - Bash is ALLOWED because the bootstrap marker-write mechanism itself is
-    a Bash command in bootstrap.md — blocking Bash would create a circular
-    dependency where the gate can never self-disable. To prevent the
-    Bash-marker-bypass (a single `touch bootstrap-complete` against an
-    empty file would otherwise satisfy any presence check), is_marker_set
-    verifies marker CONTENT via a SHA256 fingerprint over (session_id,
-    plugin_root, plugin_version, schema_version), not just file presence
-    — `touch bootstrap-complete` no longer satisfies the gate.
+  - Bash is ALLOWED because the orchestrator legitimately needs it during
+    the bootstrap window — before the marker exists — for git status,
+    plugin-version reads, project-state probing, and other read-only
+    investigation that the bootstrap ritual itself depends on. The marker
+    is now written by the `bootstrap_marker_writer` UserPromptSubmit hook
+    (no Bash heredoc), so the historical "blocking Bash would prevent the
+    gate from self-disabling" framing no longer applies. Bash bypass is
+    defended at the verifier instead: `is_marker_set` checks marker
+    CONTENT via a SHA256 fingerprint over (session_id, plugin_root,
+    plugin_version, schema_version), so neither `touch bootstrap-complete`
+    nor a `Bash`-driven echo of a malformed JSON satisfies the gate.
   - Exploration tools are read-only and needed for state recovery after
     compaction.
   - MCP tools are always allowed — they're external integrations that may
@@ -106,16 +109,18 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 # Code-editing and agent-dispatch tools blocked until bootstrap completes.
-# Bash is intentionally NOT blocked — the marker-write mechanism in
-# bootstrap.md is a Bash command, so blocking Bash would prevent the gate
-# from ever self-disabling (circular dependency). To prevent the
-# Bash-marker-bypass exploit (a single `touch bootstrap-complete`),
-# is_marker_set verifies marker CONTENT via a SHA256 fingerprint over
-# (session_id, plugin_root, plugin_version, schema_version), not just
-# file presence. The agent-dispatch tool
-# is `Agent` — the canonical Claude Code platform name (#662 corrects
-# 4c286c1f's incorrect rename direction). hooks.json matcher='Agent'
-# entries fire on Agent invocations.
+# Bash is intentionally NOT blocked — the orchestrator needs it during the
+# bootstrap window for read-only investigation (git status, plugin-version
+# reads, project-state probing) that the bootstrap ritual itself depends
+# on. Marker write is a hook (#664 bootstrap_marker_writer), no longer a
+# Bash heredoc, so the older "blocking Bash would prevent self-disable"
+# framing no longer applies. Bypass is defended at the verifier:
+# is_marker_set checks marker CONTENT via a SHA256 fingerprint over
+# (session_id, plugin_root, plugin_version, schema_version), so neither
+# `touch bootstrap-complete` nor a Bash-driven echo of a malformed JSON
+# satisfies the gate. The agent-dispatch tool is `Agent` — the canonical
+# Claude Code platform name (#662 corrects 4c286c1f's incorrect rename
+# direction). hooks.json matcher='Agent' entries fire on Agent invocations.
 _BLOCKED_TOOLS = frozenset({
     "Edit",
     "Write",
