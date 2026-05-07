@@ -120,7 +120,7 @@ def _write_f24_marker(session_dir: Path, plugin_root: Path,
     """Write a properly-stamped marker. Override fields to forge invalid
     variants for negative tests.
     """
-    from bootstrap_gate import MARKER_SCHEMA_VERSION
+    from shared.marker_schema import MARKER_SCHEMA_VERSION
 
     real_sid = sid if sid is not None else session_dir.name
     real_sig_input = (
