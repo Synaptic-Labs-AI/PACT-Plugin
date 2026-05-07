@@ -168,7 +168,7 @@ Every specialist dispatch creates **two tasks**, not one:
 - **Task A** — TEACHBACK gate. `subject = "{specialist}: TEACHBACK for {sub-task}"`, owner = teammate. Description: teachback expectations + dispatch context.
 - **Task B** — primary work. `subject = "{specialist}: {sub-task}"`, owner = teammate, `blockedBy = [<Task A id>]`.
 
-Both are created BEFORE the `Task(...)` spawn call so the teammate sees them on first `TaskList`. The teammate claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review)). On accept, the teammate wakes to claim B.
+Both are created BEFORE the `Agent(...)` spawn call so the teammate sees them on first `TaskList`. The teammate claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review)). On accept, the teammate wakes to claim B.
 
 **Dispatch sequence (replaces single-task dispatch)**:
 
@@ -190,10 +190,10 @@ B_id = TaskCreate(subject="{specialist}: {sub-task}", description="<full mission
 TaskUpdate(B_id, owner="{specialist-name}", addBlockedBy=[A_id])
 TaskUpdate(A_id, addBlocks=[B_id])
 
-# 3. Spawn the teammate via the canonical Task() form (shown in §Invocation below).
+# 3. Spawn the teammate via the canonical Agent() form (shown in §Invocation below).
 ```
 
-The `Task()` `prompt` does NOT change shape — the two-task dispatch is encoded in the surrounding TaskCreate sequence, not in the `Task()` call.
+The `Agent()` `prompt` does NOT change shape — the two-task dispatch is encoded in the surrounding TaskCreate sequence, not in the `Agent()` call.
 
 **Carve-outs** — single-task dispatch still applies for:
 
@@ -225,7 +225,7 @@ JSON
 4. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({specialist-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter):
 
 ```
-Task(
+Agent(
   name="{specialist-name}",
   team_name="{team_name}",
   subagent_type="pact-{specialist-type}",
@@ -233,7 +233,7 @@ Task(
 )
 ```
 
-Spawn all specialists in parallel (multiple `Task` calls in one response).
+Spawn all specialists in parallel (multiple `Agent` calls in one response).
 
 **Progress monitoring**: For parallel dispatch or novel domains, include "Send progress signals per the agent-teams skill Progress Signals section" in each specialist's dispatch prompt.
 
@@ -263,7 +263,7 @@ JSON
 4. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({specialist-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter):
 
 ```
-Task(
+Agent(
   name="{specialist-name}",
   team_name="{team_name}",
   subagent_type="pact-{specialist-type}",

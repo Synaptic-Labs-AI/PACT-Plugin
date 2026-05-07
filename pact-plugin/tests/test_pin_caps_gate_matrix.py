@@ -789,7 +789,7 @@ class TestPinCapsGate_Matrix_Passthrough:
 
     @pytest.mark.parametrize(
         "tool_name",
-        ["Read", "Bash", "Grep", "Glob", "Task", "NotebookEdit", "TodoWrite"],
+        ["Read", "Bash", "Grep", "Glob", "Agent", "NotebookEdit", "TodoWrite"],
     )
     def test_non_gated_tools_allow(self, gate_env, tool_name):
         env = gate_env(pin_count=3)

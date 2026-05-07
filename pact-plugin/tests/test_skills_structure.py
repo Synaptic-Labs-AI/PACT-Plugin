@@ -213,6 +213,49 @@ class TestPreResponseChannelCheckGate:
 _ALL_SKILL_FILES = sorted(SKILLS_DIR.glob("*/SKILL.md"))
 
 
+# =============================================================================
+# F20 — pact-*.md agent files must declare pact-agent-teams in skills frontmatter
+# =============================================================================
+
+# Per architect §6 / §7(b)+(f), every spawned PACT teammate must preload the
+# pact-agent-teams skill so the team-protocol body is in the agent's context
+# at first turn. pact-orchestrator is delivered via `claude --agent` rather
+# than spawned, so its frontmatter shape differs (no `skills:` block) and is
+# carved out.
+PACT_AGENTS_DIR = SKILLS_DIR.parent / "agents"
+F20_CARVE_OUT_FILES = frozenset({"pact-orchestrator"})
+_PACT_AGENT_FILES = sorted(PACT_AGENTS_DIR.glob("pact-*.md"))
+
+
+@pytest.mark.parametrize(
+    "agent_path",
+    _PACT_AGENT_FILES,
+    ids=[p.stem for p in _PACT_AGENT_FILES],
+)
+def test_f20_pact_agent_declares_pact_agent_teams_skill(agent_path):
+    """F20 pre-merge audit: each pact-*.md teammate file must list
+    `pact-agent-teams` under its skills: frontmatter block. Without the
+    skill preload, spawned teammates never see TaskList / SendMessage /
+    completion-authority protocol — the original #662 trigger surface.
+
+    Carve-out: pact-orchestrator is delivered via `claude --agent` and has
+    no skills: block at all. Documented in F20_CARVE_OUT_FILES.
+    """
+    if agent_path.stem in F20_CARVE_OUT_FILES:
+        pytest.skip(
+            f"{agent_path.stem} is carved out from F20 — orchestrator "
+            "persona delivered via --agent flag, not spawn"
+        )
+    text = agent_path.read_text(encoding="utf-8")
+    fm = parse_frontmatter(text)
+    assert fm is not None, f"{agent_path.name} has no frontmatter"
+    skills_value = fm.get("skills", "")
+    assert "pact-agent-teams" in skills_value, (
+        f"{agent_path.name} skills frontmatter missing pact-agent-teams. "
+        "Spawned teammates would lack the team-protocol body — see #662 F20."
+    )
+
+
 class TestNoFirstActionFossilInSkillBodies:
     """Negative-invariant fossilization guard: skill bodies must not contain
     the v3.x FIRST-ACTION + Skill("PACT:teammate-bootstrap") + peer_inject

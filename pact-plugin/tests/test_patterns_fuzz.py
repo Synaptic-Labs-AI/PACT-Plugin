@@ -22,7 +22,7 @@ from refresh.patterns import (
     CONTEXT_EXTRACTORS,
     PENDING_ACTION_PATTERNS,
     PACT_AGENT_PATTERN,
-    TASK_TOOL_PATTERN,
+    SPAWN_TOOL_PATTERN,
     SUBAGENT_TYPE_PATTERN,
     is_termination_signal,
     extract_context_value,
@@ -227,7 +227,7 @@ class TestAgentPatternsEdgeCases:
     @pytest.mark.parametrize("content", EDGE_CASE_INPUTS)
     def test_task_tool_pattern_no_crash(self, content: str):
         """Test Task tool pattern doesn't crash on edge cases."""
-        result = TASK_TOOL_PATTERN.search(content)
+        result = SPAWN_TOOL_PATTERN.search(content)
         assert result is None or hasattr(result, 'group')
 
     @pytest.mark.parametrize("content", EDGE_CASE_INPUTS)
@@ -268,7 +268,7 @@ class TestPathologicalInputs:
                 pattern.search(content)
 
             PACT_AGENT_PATTERN.search(content)
-            TASK_TOOL_PATTERN.search(content)
+            SPAWN_TOOL_PATTERN.search(content)
             SUBAGENT_TYPE_PATTERN.search(content)
 
             elapsed = time.time() - start_time

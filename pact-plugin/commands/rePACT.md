@@ -220,9 +220,9 @@ Each specialist dispatch creates **two tasks**, not one:
 - **Task A** — TEACHBACK gate. `subject = "{scope-prefixed-name}: TEACHBACK for {sub-task}"`, owner = specialist.
 - **Task B** — primary work. `subject = "{scope-prefixed-name}: implement {sub-task}"`, owner = specialist, `blockedBy = [<Task A id>]`.
 
-Both are created BEFORE the `Task(...)` spawn call. The specialist claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review)). On accept, the specialist wakes to claim B.
+Both are created BEFORE the `Agent(...)` spawn call. The specialist claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review)). On accept, the specialist wakes to claim B.
 
-Nested PACT cycles' inner-cycle dispatches follow the same A+B shape recursively. The `Task()` `prompt` does NOT change shape.
+Nested PACT cycles' inner-cycle dispatches follow the same A+B shape recursively. The `Agent()` `prompt` does NOT change shape.
 
 ```
 A_id = TaskCreate(
@@ -248,7 +248,7 @@ For each specialist needed — apply the shape above:
 3. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({scope-prefixed-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter):
 
 ```
-Task(
+Agent(
   name="{scope-prefixed-name}",
   team_name="{team_name}",
   subagent_type="pact-{specialist-type}",

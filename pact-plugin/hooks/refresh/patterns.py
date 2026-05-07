@@ -8,8 +8,15 @@ for each PACT workflow type as specified in the refresh plan.
 Configuration constants are imported from constants.py for maintainability.
 
 Supports both dispatch models for backward compatibility:
-- Background Task agent: Task(subagent_type="pact-*", run_in_background=true)
-- Agent Teams teammate: Task(name="pact-*", team_name="pact-{session_hash}", subagent_type="pact-*")
+- Background Agent agent: Agent(subagent_type="pact-*", run_in_background=true)
+- Agent Teams teammate: Agent(name="pact-*", team_name="pact-{session_hash}", subagent_type="pact-*")
+
+Dual-token transcript carve-out (#662): historical session transcripts
+recorded the spawn tool as "Task"; current platform writes "Agent". The
+transcript-parsing surface (this module + transcript_parser.py) is the
+ONE place where both literals are accepted, so old transcripts remain
+parseable. Dispatch code (bootstrap_gate, hooks.json matchers, persona,
+commands, skills, protocols) is clean Agent only — no dual-naming.
 """
 
 import re
@@ -40,7 +47,7 @@ __all__ = [
     "STEP_MARKERS",
     "TERMINATION_SIGNALS",
     "PACT_AGENT_PATTERN",
-    "TASK_TOOL_PATTERN",
+    "SPAWN_TOOL_PATTERN",
     "SUBAGENT_TYPE_PATTERN",
     "CONTEXT_EXTRACTORS",
     "PENDING_ACTION_PATTERNS",
@@ -164,15 +171,20 @@ TERMINATION_SIGNALS = {
     ],
 }
 
-# Agent type patterns (for detecting Task tool calls to PACT agents)
+# Agent type patterns (for detecting spawn-tool calls to PACT agents)
 PACT_AGENT_PATTERN = re.compile(r"\bpact-(preparer|architect|backend-coder|frontend-coder|database-engineer|devops-engineer|n8n|test-engineer|security-engineer|qa-engineer|auditor|secretary)(?![\w-])")
 
 # Tool call patterns - support both dispatch models:
-# - Background Task agent: Task(subagent_type="pact-*", run_in_background=true)
-# - Agent Teams teammate: Task(name="pact-*", team_name="pact-{session_hash}", subagent_type="pact-*")
+# - Background Agent agent: Agent(subagent_type="pact-*", run_in_background=true)
+# - Agent Teams teammate: Agent(name="pact-*", team_name="pact-{session_hash}", subagent_type="pact-*")
 #   where team_name is session-unique (e.g., "pact-0001639f")
 # Both include subagent_type, so SUBAGENT_TYPE_PATTERN matches either model.
-TASK_TOOL_PATTERN = re.compile(r'"name":\s*"Task"', re.IGNORECASE)
+#
+# Dual-token (#662): the spawn-tool literal in transcripts is either "Task"
+# (historical, pre-#662) or "Agent" (current, post-#662). This pattern is
+# the dual-token carve-out — transcript-parsing accepts both so old session
+# fixtures remain parseable; dispatch code uses the clean "Agent" form only.
+SPAWN_TOOL_PATTERN = re.compile(r'"name":\s*"(?:Task|Agent)"', re.IGNORECASE)
 SUBAGENT_TYPE_PATTERN = re.compile(r'"subagent_type":\s*"([^"]+)"')
 
 # Context extraction patterns (for building rich checkpoint context)
@@ -202,7 +214,7 @@ PENDING_ACTION_PATTERNS = {
 CONFIDENCE_WEIGHTS = {
     "clear_trigger": 0.4,      # Found explicit /PACT:* command
     "step_marker": 0.2,        # Found step marker in content
-    "agent_invocation": 0.2,   # Found Task call to PACT agent
+    "agent_invocation": 0.2,   # Found Agent (or historical Task) call to PACT agent
     "pending_action": 0.1,     # Found pending action indicator
     "context_richness": 0.1,   # Found context elements (PR#, task summary)
 }

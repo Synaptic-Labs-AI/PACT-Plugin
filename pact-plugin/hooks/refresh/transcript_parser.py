@@ -75,14 +75,18 @@ class Turn:
 
     def has_task_to_pact_agent(self) -> bool:
         """
-        Check if this turn has a Task call to a PACT agent.
+        Check if this turn has a spawn-tool call to a PACT agent.
 
         Supports both dispatch models:
-        - Background Task agent: subagent_type contains "pact-"
+        - Background Agent agent: subagent_type contains "pact-"
         - Agent Teams teammate: name field contains "pact-" (with team_name)
+
+        Dual-token (#662): historical transcripts recorded the spawn tool
+        as ``"Task"``; current platform writes ``"Agent"``. Both literals
+        are accepted here so old session fixtures remain parseable.
         """
         for tc in self.tool_calls:
-            if tc.name == "Task":
+            if tc.name in ("Task", "Agent"):
                 # Check subagent_type (present in both dispatch models)
                 subagent = tc.input_data.get("subagent_type", "")
                 if "pact-" in subagent:
@@ -340,12 +344,15 @@ def find_task_calls_to_agent(turns: list[Turn], agent_pattern: str) -> list[tupl
         agent_pattern: Pattern to match in subagent_type or name (e.g., "pact-")
 
     Returns:
-        List of (Turn, ToolCall) tuples for matching Task calls
+        List of (Turn, ToolCall) tuples for matching spawn-tool calls.
+
+    Dual-token (#662): both ``"Task"`` (historical) and ``"Agent"`` (current)
+    spawn-tool literals are accepted so old session fixtures remain parseable.
     """
     results = []
     for turn in turns:
         for tc in turn.tool_calls:
-            if tc.name == "Task":
+            if tc.name in ("Task", "Agent"):
                 # Check subagent_type (present in both dispatch models)
                 subagent = tc.input_data.get("subagent_type", "")
                 if agent_pattern in subagent:

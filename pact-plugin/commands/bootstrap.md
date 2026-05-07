@@ -53,15 +53,36 @@ Command files use `{team_name}`, `{session_dir}`, and `{plugin_root}` as literal
 
 This step unlocks code-editing tools (`Edit`, `Write`) and agent spawning (`Agent`, `NotebookEdit`), which are blocked by the `bootstrap_gate` PreToolUse hook until the bootstrap-complete marker exists.
 
-Find the `PACT_SESSION_DIR=<path>` line in your context (injected by `bootstrap_prompt_gate` at every prompt while the marker is absent). Run:
+Find the `PACT_SESSION_DIR=<path>` line in your context (injected by `bootstrap_prompt_gate` at every prompt while the marker is absent). Run the marker-write command below, substituting `<path>` with the `PACT_SESSION_DIR=` value and `<plugin_root>` with the `{plugin_root}` value (from the Current Session block):
 
 ```
-mkdir -p "<path>" && touch "<path>/bootstrap-complete"
+mkdir -p "<path>" && python3 - "<path>" "<plugin_root>" <<'PY'
+import hashlib, json, os, sys
+session_dir = sys.argv[1].rstrip("/")
+plugin_root = sys.argv[2].rstrip("/")
+sid = os.path.basename(session_dir)
+plugin_version = json.loads(
+    open(os.path.join(plugin_root, ".claude-plugin", "plugin.json"),
+         encoding="utf-8").read()
+)["version"]
+v = 1
+sig = hashlib.sha256(
+    f"{sid}|{plugin_root}|{plugin_version}|{v}".encode("utf-8")
+).hexdigest()
+marker = os.path.join(session_dir, "bootstrap-complete")
+with open(marker, "w", encoding="utf-8") as f:
+    f.write(json.dumps({"v": v, "sid": sid, "sig": sig}))
+PY
 ```
 
-Substitute `<path>` with the value from `PACT_SESSION_DIR=`. The marker name `bootstrap-complete` is the load-bearing literal that `bootstrap_gate.is_marker_set` checks; do not rename it.
+The marker is a JSON sentinel `{"v": 1, "sid": <session_id>, "sig": SHA256("<sid>|<plugin_root>|<plugin_version>|<v>")}` (#662). The marker name `bootstrap-complete` is the load-bearing literal that `bootstrap_gate.is_marker_set` checks; do not rename it. The signature is a marker-content fingerprint that closes the trivial `Bash("touch <path>/bootstrap-complete")` bypass. It is NOT cryptographic provenance: all four signature inputs are readable from the same-user filesystem, so a same-user attacker with Python execution can recompute the digest. The fingerprint raises attacker effort and creates a detection surface; it does not make the marker unforgeable.
 
 <!-- Coupling: marker name "bootstrap-complete" must match shared.BOOTSTRAP_MARKER_NAME
      in pact-plugin/hooks/shared/__init__.py.
+     Marker schema (v=1, keys {v,sid,sig}, signature input order
+     "sid|plugin_root|plugin_version|v") must match the verifier in
+     pact-plugin/hooks/bootstrap_gate.py::is_marker_set + the
+     MARKER_SCHEMA_VERSION constant. Bumping the schema version requires
+     updating BOTH this producer AND the verifier in lockstep.
      Pattern: convention-must-be-enforced-not-just-documented (test_three_surface_split_enforcement.py
      pins the persona §2 / bootstrap.md split; this comment pins the marker-name SSOT). -->

@@ -996,7 +996,7 @@ class TestAuditorReminderSuppressOutput:
         from auditor_reminder import main
 
         input_data = json.dumps({
-            "tool_name": "Task",
+            "tool_name": "Agent",
             "tool_input": {"subagent_type": "pact-test-engineer"},
         })
         with patch("sys.stdin", io.StringIO(input_data)):

@@ -197,7 +197,7 @@ class TestMain:
         """Outputs systemMessage JSON when reminder needed."""
         _write_team_config(teams_dir, "test-team", [])
         stdin_data = json.dumps({
-            "tool_name": "Task",
+            "tool_name": "Agent",
             "tool_input": {
                 "subagent_type": "pact-backend-coder",
                 "team_name": "test-team",
@@ -217,7 +217,7 @@ class TestMain:
     def test_non_coder_silent(self, capsys):
         """No output for non-coder agent types."""
         stdin_data = json.dumps({
-            "tool_name": "Task",
+            "tool_name": "Agent",
             "tool_input": {
                 "subagent_type": "pact-test-engineer",
                 "team_name": "test-team",
@@ -242,7 +242,7 @@ class TestMain:
     def test_exception_fail_open(self, capsys):
         """Exits 0 and emits error JSON on unexpected exception."""
         stdin_data = json.dumps({
-            "tool_name": "Task",
+            "tool_name": "Agent",
             "tool_input": {
                 "subagent_type": "pact-backend-coder",
                 "team_name": "test-team",

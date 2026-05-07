@@ -66,7 +66,7 @@ If `TaskGet` returns no metadata or the referenced task doesn't exist, proceed w
 
 The teachback protocol lives in the separate `pact-teachback` skill. It is
 preloaded into your context via the `skills:` frontmatter on your agent
-file at `Task()` subagent spawn. See [pact-teachback/SKILL.md](../pact-teachback/SKILL.md)
+file at `Agent()` subagent spawn. See [pact-teachback/SKILL.md](../pact-teachback/SKILL.md)
 for format, rules, and ordering requirements.
 
 Teachback is a **gate**: send it BEFORE any implementation work. Store

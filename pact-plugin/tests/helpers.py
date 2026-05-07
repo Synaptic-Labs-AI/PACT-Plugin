@@ -181,7 +181,7 @@ def make_tool_use_block(
     Create a tool_use content block for assistant messages.
 
     Args:
-        name: Tool name (e.g., "Task", "Read", "Write")
+        name: Tool name (e.g., "Agent", "Read", "Write")
         input_data: Tool input parameters
         tool_use_id: Unique ID for the tool call
 
@@ -310,6 +310,43 @@ def make_team_task_call(
     """
     return make_tool_use_block(
         name="Task",
+        input_data={
+            "name": name,
+            "team_name": team_name,
+            "subagent_type": subagent_type,
+            "prompt": prompt,
+        },
+        tool_use_id=tool_use_id,
+    )
+
+
+def make_team_agent_call(
+    name: str,
+    team_name: str,
+    subagent_type: str,
+    prompt: str = "You are joining the team. Check TaskList for tasks assigned to you.",
+    tool_use_id: str = "teamagent-123",
+) -> dict[str, Any]:
+    """
+    Create an Agent tool call block with team_name for Agent Teams dispatch (#662).
+
+    The current Claude Code platform spawn-tool name is ``Agent``. This factory
+    produces test fixtures matching the canonical post-#662 dispatch shape.
+    The historical sibling ``make_team_task_call`` is preserved so the
+    dual-token transcript parser can be exercised against pre-#662 transcripts.
+
+    Args:
+        name: Teammate name (e.g., "preparer", "backend-coder")
+        team_name: Team to join (e.g., "pact-a1b2c3d4")
+        subagent_type: Agent type (e.g., "pact-backend-coder")
+        prompt: Thin prompt directing agent to check TaskList
+        tool_use_id: Unique ID for the tool call
+
+    Returns:
+        Dict representing an Agent tool_use content block with team_name
+    """
+    return make_tool_use_block(
+        name="Agent",
         input_data={
             "name": name,
             "team_name": team_name,

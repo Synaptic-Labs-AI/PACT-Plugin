@@ -62,39 +62,53 @@ def _run_main(input_data, capsys):
     return exc_info.value.code, json.loads(captured.out.strip())
 
 
-def _setup_pact_session(monkeypatch, tmp_path, with_marker=False):
+def _setup_pact_session(monkeypatch, tmp_path, with_marker=False,
+                        plugin_version="9.9.9"):
     """Set up a PACT session context with session dir under tmp_path.
 
     Monkeypatches Path.home to tmp_path so get_session_dir() returns a
     path under tmp_path. Writes a context file and patches pact_context
-    module state.
+    module state. When ``with_marker=True``, writes a properly-stamped
+    properly-stamped marker (post-#662); empty `touch` markers no longer satisfy the
+    gate.
 
     Returns the session_dir path.
     """
+    import hashlib
     import shared.pact_context as ctx_module
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-    # Build session dir path matching what get_session_dir() will compute
     session_dir = tmp_path / ".claude" / "pact-sessions" / _SLUG / _SESSION_ID
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write context file in the session dir
+    plugin_root = tmp_path / "plugin"
+    (plugin_root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"version": plugin_version}), encoding="utf-8"
+    )
+
     context_file = session_dir / "pact-session-context.json"
     context_file.write_text(json.dumps({
         "team_name": "",
         "session_id": _SESSION_ID,
         "project_dir": _PROJECT_DIR,
-        "plugin_root": "",
+        "plugin_root": str(plugin_root),
         "started_at": "2026-01-01T00:00:00Z",
     }), encoding="utf-8")
 
-    # Patch pact_context module to use this context file
     monkeypatch.setattr(ctx_module, "_context_path", context_file)
     monkeypatch.setattr(ctx_module, "_cache", None)
 
     if with_marker:
-        (session_dir / BOOTSTRAP_MARKER_NAME).touch()
+        sid = session_dir.name
+        sig = hashlib.sha256(
+            f"{sid}|{str(plugin_root).rstrip('/')}|{plugin_version}|1".encode()
+        ).hexdigest()
+        (session_dir / BOOTSTRAP_MARKER_NAME).write_text(
+            json.dumps({"v": 1, "sid": sid, "sig": sig}),
+            encoding="utf-8",
+        )
 
     return session_dir
 
@@ -302,14 +316,12 @@ class TestFailOpen:
         self, monkeypatch, tmp_path, capsys
     ):
         """OSError on the marker check is now caught INSIDE
-        `is_marker_set` (post R2-B1 / commit 5b12f805) and treated as
-        marker-absent → bootstrap directive injected, gate stays armed.
-        Pre-R2-B1: `Path.exists()` raise propagated to the outer except
-        and produced suppressOutput. Post-R2-B1: bootstrap_prompt_gate
-        delegates to bootstrap_gate.is_marker_set, which has the same
-        conservative-fail-closed semantics as the sibling gate (the
-        Cycle-2 S2 fix established this contract for the gate; R2-B1
-        propagates the same contract to the prompt-gate).
+        `is_marker_set` and treated as marker-absent → bootstrap directive
+        injected, gate stays armed. Previously, `Path.exists()` raises
+        propagated to the outer except and produced suppressOutput. The
+        current contract: bootstrap_prompt_gate delegates to
+        bootstrap_gate.is_marker_set, which has the same
+        conservative-fail-closed semantics as the sibling gate.
 
         The OUTER fail-open contract still holds for genuine programmer
         errors above the marker-check layer; this test pins the marker-
@@ -390,17 +402,26 @@ class TestMarkerLifecycle:
     """P3: Marker creation → gate self-disable → idempotent suppress."""
 
     def test_gate_transitions_on_marker_creation(self, monkeypatch, tmp_path, capsys):
-        """Before marker: inject. After marker: suppress."""
+        """Before marker: inject. After marker stamp: suppress."""
+        import hashlib
         import shared.pact_context as ctx_module
 
         session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        plugin_root = tmp_path / "plugin"
 
         # Before marker — should inject
         _, output_before = _run_main(_make_input(), capsys)
         assert "hookSpecificOutput" in output_before
 
-        # Create marker
-        (session_dir / BOOTSTRAP_MARKER_NAME).touch()
+        # Stamp a properly-formed marker (post-#662)
+        sid = session_dir.name
+        sig = hashlib.sha256(
+            f"{sid}|{str(plugin_root).rstrip('/')}|9.9.9|1".encode()
+        ).hexdigest()
+        (session_dir / BOOTSTRAP_MARKER_NAME).write_text(
+            json.dumps({"v": 1, "sid": sid, "sig": sig}),
+            encoding="utf-8",
+        )
 
         # Reset cache for second call
         ctx_module._cache = None

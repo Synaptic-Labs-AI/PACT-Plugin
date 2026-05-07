@@ -12,28 +12,71 @@ message, checks for the session-scoped bootstrap-complete marker file:
   - Non-PACT session (no context file) → no-op passthrough
   - Teammate (resolve_agent_name non-empty) → no-op passthrough
 
-SACROSANCT: every raisable path is wrapped in try/except that defaults to
-allow (exit 0 with suppressOutput). A gate bug must never block a user prompt.
+SACROSANCT (post-#662 module-load fail-closed retrofit): module-load
+failures emit an advisory `additionalContext` block at exit 0 —
+UserPromptSubmit cannot
+DENY the prompt itself, so the strongest signal we can send is to surface
+the load-failure to the LLM via additionalContext so the user is informed
+and the orchestrator persona can react. Runtime exceptions in gate logic
+remain fail-OPEN (suppressOutput) because injecting bootstrap-required
+text on a hook-side bug would mislead a healthy session into rebooting.
 
 Input: JSON from stdin with hook_event_name, session_id, prompt, etc.
 Output: JSON with hookSpecificOutput.additionalContext (inject case)
         or {"suppressOutput": true} (fast path / passthrough)
 """
 
+# ─── stdlib first (used by _emit_load_failure_advisory BEFORE wrapped imports) ─
 import json
 import sys
-from pathlib import Path
+from typing import NoReturn
 
-import shared.pact_context as pact_context
-from bootstrap_gate import is_marker_set
-from shared import BOOTSTRAP_MARKER_NAME
+
+def _emit_load_failure_advisory(stage: str, error: BaseException) -> NoReturn:
+    """Emit fail-closed advisory for module-load failure.
+
+    UserPromptSubmit cannot DENY the prompt; the strongest available signal
+    is `additionalContext` injection. Uses ONLY stdlib (json, sys) so it
+    remains functional even when every wrapped import below fails. Audit
+    anchor: hookEventName must be present in any structured output.
+    """
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": (
+                f"PACT bootstrap_prompt_gate {stage} failure — the hook "
+                f"could not verify bootstrap state. {type(error).__name__}: "
+                f"{error}. Until this is resolved, you should invoke "
+                'Skill("PACT:bootstrap") before any code-editing or agent '
+                "dispatch action; the companion `bootstrap_gate` PreToolUse "
+                "will block those tools fail-closed."
+            ),
+        }
+    }))
+    print(
+        f"Hook load error (bootstrap_prompt_gate / {stage}): {error}",
+        file=sys.stderr,
+    )
+    sys.exit(0)
+
+
+# ─── fail-closed wrapper around cross-package imports ───────────────────────
+try:
+    from pathlib import Path
+
+    import shared.pact_context as pact_context
+    from bootstrap_gate import is_marker_set
+    from shared import BOOTSTRAP_MARKER_NAME
+except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
+    _emit_load_failure_advisory("module imports", _module_load_error)
+
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 _BOOTSTRAP_INSTRUCTION_TEMPLATE = (
     "REQUIRED: Before responding to this message, invoke "
     'Skill("PACT:bootstrap"). Code-editing tools (Edit, Write) and agent '
-    "dispatch (Task) are mechanically blocked until bootstrap completes. "
+    "dispatch (Agent) are mechanically blocked until bootstrap completes. "
     "This loads your operating instructions, governance policy, and "
     "workflow protocols."
     "{session_dir_hint}"
@@ -61,9 +104,8 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
 
     # Use the same safe-marker-check helper as the sibling
     # bootstrap_gate.py so both enforcement points share one safe-check
-    # contract. The helper enforces S2 (planted-symlink-at-marker
-    # rejection via os.lstat + S_ISREG) + S4 (ancestor-symlink rejection
-    # via Path.resolve containment).
+    # contract. The helper enforces leaf-symlink, ancestor-symlink, and
+    # marker-content fingerprint defenses (post-#662).
     if is_marker_set(Path(session_dir)):
         # Bootstrap already done → suppress (zero tokens)
         return None
@@ -90,7 +132,10 @@ def main():
     try:
         instruction = _check_bootstrap_needed(input_data)
     except Exception:
-        # Any exception in gate logic → fail-open
+        # Runtime exception in gate logic → fail-OPEN: injecting
+        # bootstrap-required text on a hook-side bug would mislead a healthy
+        # session. Module-load failures are handled separately (advisory) by
+        # the module-load wrapper above.
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
