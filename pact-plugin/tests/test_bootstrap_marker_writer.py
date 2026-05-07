@@ -239,8 +239,6 @@ class TestWriteMarkerAtomicity:
         session_dir = tmp_path / "sd"
         session_dir.mkdir()
 
-        original_replace = os.replace
-
         def boom(*_args, **_kwargs):
             raise OSError("simulated replace failure")
 
@@ -257,9 +255,6 @@ class TestWriteMarkerAtomicity:
         assert leftovers == [], (
             f"temp file should be unlinked on replace failure; found: {leftovers}"
         )
-
-        # Restore for downstream tests in the same process.
-        monkeypatch.setattr(os, "replace", original_replace)
 
 
 # =============================================================================
