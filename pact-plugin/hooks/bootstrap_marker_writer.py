@@ -95,7 +95,10 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
     _emit_load_failure_advisory("module imports", _module_load_error)
 
 
-_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+_SUPPRESS_OUTPUT = json.dumps({
+    "suppressOutput": True,
+    "hookSpecificOutput": {"hookEventName": "UserPromptSubmit"},
+})
 
 _SECRETARY_NAME = "secretary"
 

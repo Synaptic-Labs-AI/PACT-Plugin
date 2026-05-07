@@ -65,7 +65,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from shared import BOOTSTRAP_MARKER_NAME
 from shared.marker_schema import MARKER_SCHEMA_VERSION
 
-_SUPPRESS_EXPECTED = {"suppressOutput": True}
+_SUPPRESS_EXPECTED = {
+    "suppressOutput": True,
+    "hookSpecificOutput": {"hookEventName": "UserPromptSubmit"},
+}
 
 _SESSION_ID = "test-session"
 _PROJECT_DIR = "/test/project"
@@ -477,10 +480,12 @@ class TestCapturedFixtureRoundTrip:
 
 
 class TestAuditAnchorCompliance:
-    """Architect §8.12. Module-load failure is the only path that emits
-    structured output — assert hookEventName is on it. The suppressOutput
-    paths use a flat {"suppressOutput": true} envelope by design (no
-    hookSpecificOutput needed)."""
+    """Architect §8.12. Every JSON output path — the module-load advisory
+    AND the suppressOutput envelope — carries
+    hookSpecificOutput.hookEventName == "UserPromptSubmit". Missing the
+    field silently fails open at the platform layer (per pinned context).
+    The shape pin in test_suppress_output_carries_hook_event_name covers
+    the suppress envelope; this test covers the advisory path."""
 
     def test_module_load_advisory_carries_hook_event_name(self, capsys):
         from bootstrap_marker_writer import _emit_load_failure_advisory
@@ -494,3 +499,13 @@ class TestAuditAnchorCompliance:
         assert hso["hookEventName"] == "UserPromptSubmit"
         assert "additionalContext" in hso
         assert "bootstrap_marker_writer" in hso["additionalContext"]
+
+    def test_suppress_output_carries_hook_event_name(self):
+        """Every suppressOutput emit path carries the audit anchor —
+        the constant is the single source so all 3 emit sites in
+        bootstrap_marker_writer.main inherit the field."""
+        from bootstrap_marker_writer import _SUPPRESS_OUTPUT
+
+        out = json.loads(_SUPPRESS_OUTPUT)
+        assert out["suppressOutput"] is True
+        assert out["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
