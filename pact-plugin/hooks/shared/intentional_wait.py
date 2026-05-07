@@ -37,7 +37,7 @@ Public surface:
 from datetime import datetime, timezone
 from typing import Any
 
-from shared.pact_context import _iter_members
+import shared.pact_context as pact_context
 
 
 # Reason vocabulary — frozenset, not Enum, so teammates can include custom
@@ -111,7 +111,13 @@ def _is_exempt_agent_type(
 
     NOT a hook predicate — pure helper for shared.intentional_wait.
     is_self_complete_exempt and shared.wake_lifecycle._lifecycle_relevant.
-    Mirrors the auditor_reminder._team_has_auditor precedent.
+    Mirrors the auditor_reminder._team_has_auditor precedent in
+    parameter shape (owner-or-role + team_name + teams_dir override) and
+    in upstream-config-read delegation, BUT inverts the error semantics:
+    `_team_has_auditor` fail-OPENs (returns True on missing/malformed
+    config to suppress a noisy reminder), whereas this helper fail-
+    CLOSEs (returns False to deny exemption). Both choices are
+    conservative for their own consumer — see the docstring header.
 
     Args:
         owner: Task owner name (matched against member.name).
@@ -123,7 +129,7 @@ def _is_exempt_agent_type(
         return False
     if not isinstance(team_name, str) or not team_name:
         return False
-    for member in _iter_members(team_name, teams_dir):
+    for member in pact_context._iter_members(team_name, teams_dir):
         if member.get("name") == owner:
             agent_type = member.get("agentType")
             return (

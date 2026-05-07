@@ -80,8 +80,10 @@ def _lifecycle_relevant(task: Any, team_name: str = "") -> bool:
         corrupted metadata is still exempt — symmetric with
         shared.intentional_wait.is_self_complete_exempt. With
         `team_name=""` (default) this carve-out short-circuits to False
-        (fail-closed): the upstream `_iter_members` returns `[]` on
-        empty team_name, which surfaces here as "not exempt → count it".
+        (fail-closed): `_is_exempt_agent_type`'s own empty-team_name
+        guard (intentional_wait.py:124) returns False BEFORE
+        `_iter_members` is reached, so the consumer-level outcome here
+        is "not exempt → count it" without any team-config read.
       - Signal-task pattern: metadata.completion_type == "signal" AND
         metadata.type in {"blocker", "algedonic"}.
     """
@@ -96,6 +98,15 @@ def _lifecycle_relevant(task: Any, team_name: str = "") -> bool:
     # is still exempt — symmetric with shared.intentional_wait.
     # is_self_complete_exempt. The owner-shape check inside
     # _is_exempt_agent_type fail-closes on non-string owner.
+    #
+    # ASYMMETRIC CONSUMER SEMANTIC: the same `_is_exempt_agent_type(owner,
+    # team_name)` call also runs at intentional_wait.py:280 inside
+    # `is_self_complete_exempt`, but the consumer-level outcomes are
+    # opposite — there a True return ALLOWS teammate self-completion,
+    # whereas here a True return EXCLUDES the task from the wake-mechanism
+    # tally. Both directions are conservative for their own consumer:
+    # exempt agentTypes don't need the lead's wake (here) and don't
+    # require the lead's completion gate (there).
     owner = task.get("owner")
     if isinstance(owner, str) and _is_exempt_agent_type(owner, team_name):
         return False
