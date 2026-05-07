@@ -161,9 +161,6 @@ INLINE_MISSION_MODE = os.environ.get(
 if INLINE_MISSION_MODE not in _ALLOWED_INLINE_MISSION_MODES:
     INLINE_MISSION_MODE = "warn"
 
-# Backwards-compatible alias for tests that monkeypatch the constant.
-F7_MODE = INLINE_MISSION_MODE
-
 # Credential redaction patterns. Applied to the journal-written prompt
 # only; the in-memory ``permissionDecisionReason`` keeps the verbatim
 # prompt for the dispatcher's debugging.
@@ -363,9 +360,9 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
                "re-dispatch correctly: put the mission in "
                "TaskCreate(description=...) and let the teammate read "
                "it via TaskList/TaskGet. See orchestrator persona §11.")
-        if F7_MODE == "deny":
+        if INLINE_MISSION_MODE == "deny":
             return ("DENY", msg, "long_inline_mission")
-        if F7_MODE == "shadow":
+        if INLINE_MISSION_MODE == "shadow":
             # Journal sees the rule fired; caller treats as ALLOW (no advisory).
             return ("ALLOW", msg, "long_inline_mission")
         return ("WARN", msg, "long_inline_mission")

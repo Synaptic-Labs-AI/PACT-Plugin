@@ -110,7 +110,7 @@ def _seed_team(home: Path, team_name=_TEAM, members=(), tasks=()):
     config.json under ``HOME/.claude/teams/{team_name}/`` (read by
     ``_team_member_names``); tasks under ``HOME/.claude/tasks/{team_name}/``
     (the canonical store per ``shared/task_utils.py``, read by
-    ``has_task_assigned`` after the #663 B1 path-alignment fix).
+    ``has_task_assigned`` after the path-alignment fix).
     """
     team_dir = home / ".claude" / "teams" / team_name
     team_dir.mkdir(parents=True, exist_ok=True)

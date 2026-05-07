@@ -137,7 +137,7 @@ def _seed_team(home: Path, team_name=_TEAM, members=(), tasks=()):
     ``_team_member_names`` read path). Task files live under
     ``HOME/.claude/tasks/{team_name}/`` (the canonical task store per
     ``shared/task_utils.py``, which is what ``has_task_assigned`` reads
-    after the #663 B1 path-alignment fix).
+    after the path-alignment fix).
     """
     team_dir = home / ".claude" / "teams" / team_name
     team_dir.mkdir(parents=True, exist_ok=True)
@@ -456,12 +456,12 @@ def test_deny_when_task_completed_only(tmp_path, monkeypatch, capsys):
 
 def test_warn_when_prompt_lacks_task_reference(tmp_path, monkeypatch, capsys):
     """Default mode is 'warn' → ALLOW with additionalContext advisory.
-    F7_MODE was read at module-load BEFORE this test — we don't override
-    it here; default is 'warn' unless a prior test set the env var.
+    INLINE_MISSION_MODE was read at module-load BEFORE this test — we don't
+    override it here; default is 'warn' unless a prior test set the env var.
     """
     import dispatch_gate
 
-    monkeypatch.setattr(dispatch_gate, "F7_MODE", "warn")
+    monkeypatch.setattr(dispatch_gate, "INLINE_MISSION_MODE", "warn")
     _full_setup(monkeypatch, tmp_path)
     short_no_taskref = "Do the thing."
     code, out = _run_main(_make_input(prompt=short_no_taskref), capsys)
@@ -478,7 +478,7 @@ def test_warn_when_prompt_exceeds_800_chars(tmp_path, monkeypatch, capsys):
     """Long prompt + TaskList reference still WARNs (length-or-no-ref)."""
     import dispatch_gate
 
-    monkeypatch.setattr(dispatch_gate, "F7_MODE", "warn")
+    monkeypatch.setattr(dispatch_gate, "INLINE_MISSION_MODE", "warn")
     _full_setup(monkeypatch, tmp_path)
     long_prompt = "x" * 801 + " Check TaskList for tasks assigned to you."
     code, out = _run_main(_make_input(prompt=long_prompt), capsys)
@@ -493,7 +493,7 @@ def test_deny_in_deny_mode(tmp_path, monkeypatch, capsys):
     """Mode='deny' promotes WARN → DENY."""
     import dispatch_gate
 
-    monkeypatch.setattr(dispatch_gate, "F7_MODE", "deny")
+    monkeypatch.setattr(dispatch_gate, "INLINE_MISSION_MODE", "deny")
     _full_setup(monkeypatch, tmp_path)
     code, out = _run_main(_make_input(prompt="No reference here."), capsys)
     assert code == 2
@@ -509,7 +509,7 @@ def test_silent_allow_in_shadow_mode(tmp_path, monkeypatch, capsys):
     """
     import dispatch_gate
 
-    monkeypatch.setattr(dispatch_gate, "F7_MODE", "shadow")
+    monkeypatch.setattr(dispatch_gate, "INLINE_MISSION_MODE", "shadow")
     captured = _capture_journal(monkeypatch)
     _full_setup(monkeypatch, tmp_path)
     code, out = _run_main(_make_input(prompt="No reference."), capsys)
@@ -644,7 +644,7 @@ def test_journal_emit_on_warn_carries_f7(tmp_path, monkeypatch, capsys):
     """WARN (default inline-mission mode) journal event records rule='long_inline_mission'."""
     import dispatch_gate
 
-    monkeypatch.setattr(dispatch_gate, "F7_MODE", "warn")
+    monkeypatch.setattr(dispatch_gate, "INLINE_MISSION_MODE", "warn")
     captured = _capture_journal(monkeypatch)
     _full_setup(monkeypatch, tmp_path)
     _run_main(_make_input(prompt="No reference."), capsys)

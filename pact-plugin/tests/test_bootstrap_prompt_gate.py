@@ -316,14 +316,12 @@ class TestFailOpen:
         self, monkeypatch, tmp_path, capsys
     ):
         """OSError on the marker check is now caught INSIDE
-        `is_marker_set` (post R2-B1 / commit 5b12f805) and treated as
-        marker-absent → bootstrap directive injected, gate stays armed.
-        Pre-R2-B1: `Path.exists()` raise propagated to the outer except
-        and produced suppressOutput. Post-R2-B1: bootstrap_prompt_gate
-        delegates to bootstrap_gate.is_marker_set, which has the same
-        conservative-fail-closed semantics as the sibling gate (the
-        Cycle-2 S2 fix established this contract for the gate; R2-B1
-        propagates the same contract to the prompt-gate).
+        `is_marker_set` and treated as marker-absent → bootstrap directive
+        injected, gate stays armed. Previously, `Path.exists()` raises
+        propagated to the outer except and produced suppressOutput. The
+        current contract: bootstrap_prompt_gate delegates to
+        bootstrap_gate.is_marker_set, which has the same
+        conservative-fail-closed semantics as the sibling gate.
 
         The OUTER fail-open contract still holds for genuine programmer
         errors above the marker-check layer; this test pins the marker-
