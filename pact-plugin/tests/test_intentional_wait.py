@@ -626,6 +626,74 @@ class TestIsSelfCompleteExemptMalformedTaskShapes:
         task = {"owner": "session-secretary", "metadata": None}
         assert is_self_complete_exempt(task, "test-team", teams_dir) is True
 
+    def test_self_completion_with_corrupted_metadata_for_secretary(self, teams_dir):
+        """Pin the asymmetric carve-out hoist behavior between
+        is_self_complete_exempt and _lifecycle_relevant.
+
+        The two predicates handle "secretary task with corrupted (non-dict
+        truthy) metadata" differently because they hoist the agentType
+        carve-out at different points relative to the metadata-shape gate:
+
+        - `_lifecycle_relevant` (wake_lifecycle.py): hoists agentType
+          check ABOVE the metadata-shape gate. A secretary task with
+          `metadata="garbage"` returns False (carve-out applied → not
+          counted toward wake-arming). Correct behavior.
+
+        - `is_self_complete_exempt` (intentional_wait.py): metadata-shape
+          gate fires FIRST. Same input returns False (NOT exempt → the
+          self_completion advisory will fire). False-positive: the
+          advisory is noisy for a secretary task.
+
+        Operationally: a secretary task with corrupted metadata is rare
+        (metadata is harness-written; corruption requires explicit
+        teammate action or disk corruption). The asymmetry leans
+        CONSERVATIVE in is_self_complete_exempt (false-positive advisory
+        is noisy, not unsafe) and the advisory is non-blocking.
+
+        This test PINS the current asymmetric behavior so a future
+        predicate refactor (e.g., aligning the hoist to mirror
+        _lifecycle_relevant) cannot silently change it without updating
+        this test alongside the refactor. If the hoist is later aligned,
+        update this test's expected result from False to True and add a
+        cross-reference to the alignment commit.
+
+        Code-side hoist alignment is a separate consideration outside
+        #682's scope and tracked via SendMessage to review-backend-coder
+        rather than implemented here.
+        """
+        from shared.intentional_wait import is_self_complete_exempt
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "session-secretary", "agentType": "pact-secretary"},
+        ])
+        # Non-dict-truthy metadata: bypasses the `metadata = ... or {}`
+        # coalescion (because "garbage" is truthy) but fails the
+        # subsequent isinstance(metadata, dict) gate. The agentType
+        # lookup is never reached.
+        task = {"owner": "session-secretary", "metadata": "garbage"}
+        assert is_self_complete_exempt(task, "test-team", teams_dir) is False, (
+            "Pinned current behavior: is_self_complete_exempt returns False "
+            "(NOT exempt) for a secretary task with non-dict-truthy "
+            "metadata, because the metadata-shape gate fires before the "
+            "agentType lookup. If a future refactor aligns the hoist to "
+            "mirror _lifecycle_relevant (agentType check ABOVE metadata "
+            "gate), update this test's expected result and add a "
+            "cross-reference to the alignment commit."
+        )
+        # Confirm the asymmetry is real by comparing with the sibling
+        # predicate _lifecycle_relevant on identical input.
+        import shared.wake_lifecycle as wl
+        # _lifecycle_relevant requires Path.home()-rooted teams_dir to
+        # find the team config. Use a minimal monkeypatch-free approach
+        # by construct the full path lookup. Skip: the asymmetry pin
+        # via is_self_complete_exempt alone is sufficient regression
+        # coverage; cross-predicate equivalence is a separate concern
+        # belonging to wake_lifecycle's own test suite. The wake-side
+        # behavior is already pinned by
+        # test_lifecycle_relevant_exempt_agenttype_with_corrupted_metadata
+        # in test_inbox_wake_lifecycle_helper.py.
+        _ = wl  # keep import to make divergence-target explicit in test source
+
     def test_owner_none_returns_false(self):
         from shared.intentional_wait import is_self_complete_exempt
 
