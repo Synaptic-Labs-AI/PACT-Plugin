@@ -771,3 +771,224 @@ class TestKnownReasonsLiteralRegressionGuard:
         assert "awaiting_lead_completion" in KNOWN_REASONS
 
 
+class TestIsExemptAgentTypeDefaultTeamsDir:
+    """teams_dir=None default-path coverage: when the override is omitted,
+    `_iter_members` must resolve via Path.home()/.claude/teams/. The 12-case
+    TestIsExemptAgentType class above passes teams_dir explicitly; this
+    class exercises the production default path so a future regression that
+    bypasses `_iter_members` (e.g. inlines its own path) fails loudly.
+    """
+
+    def test_default_teams_dir_resolves_via_path_home(self, tmp_path, monkeypatch):
+        from shared.intentional_wait import _is_exempt_agent_type
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        team_dir = tmp_path / ".claude" / "teams" / "default-path-team"
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text(
+            json.dumps({"team_name": "default-path-team", "members": [
+                {"name": "session-secretary", "agentType": "pact-secretary"},
+            ]}),
+            encoding="utf-8",
+        )
+        # teams_dir omitted → exercises _iter_members default branch.
+        assert _is_exempt_agent_type(
+            "session-secretary", "default-path-team"
+        ) is True
+
+    def test_default_teams_dir_missing_config_fails_closed(
+        self, tmp_path, monkeypatch
+    ):
+        from shared.intentional_wait import _is_exempt_agent_type
+
+        # Path.home() points to tmp_path with no .claude/teams set up.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        # Default-path resolution must fail-closed without raising.
+        assert _is_exempt_agent_type(
+            "session-secretary", "ghost-team"
+        ) is False
+
+    def test_is_self_complete_exempt_default_teams_dir(
+        self, tmp_path, monkeypatch
+    ):
+        from shared.intentional_wait import is_self_complete_exempt
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        team_dir = tmp_path / ".claude" / "teams" / "default-path-team"
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text(
+            json.dumps({"team_name": "default-path-team", "members": [
+                {"name": "session-secretary", "agentType": "pact-secretary"},
+            ]}),
+            encoding="utf-8",
+        )
+        # Both teams_dir omitted; `team_name` provided.
+        task = {"owner": "session-secretary", "metadata": {}}
+        assert is_self_complete_exempt(task, "default-path-team") is True
+
+
+class TestIsExemptAgentTypeMixedTeamConfig:
+    """Multi-member team config: the predicate must match BY name AND verify
+    THAT member's agentType. A team with both secretary and non-secretary
+    members must not exempt the non-secretary owner just because the team
+    config records an exempt agentType somewhere.
+    """
+
+    def test_only_matching_member_drives_exemption(self, teams_dir):
+        from shared.intentional_wait import _is_exempt_agent_type
+
+        _write_team_config(teams_dir, "mixed-team", [
+            {"name": "session-secretary", "agentType": "pact-secretary"},
+            {"name": "backend-coder-1", "agentType": "pact-backend-coder"},
+            {"name": "test-engineer-1", "agentType": "pact-test-engineer"},
+        ])
+        assert _is_exempt_agent_type(
+            "session-secretary", "mixed-team", teams_dir
+        ) is True
+        assert _is_exempt_agent_type(
+            "backend-coder-1", "mixed-team", teams_dir
+        ) is False
+        assert _is_exempt_agent_type(
+            "test-engineer-1", "mixed-team", teams_dir
+        ) is False
+
+    def test_first_member_match_wins_when_duplicate_names(self, teams_dir):
+        # Pathological config (should never happen in production, but pin
+        # the defensive behavior): if two members share a name, the first
+        # match short-circuits via _iter_members iteration order. Pin
+        # current behavior so a future _iter_members refactor surfaces
+        # any iteration-order change.
+        from shared.intentional_wait import _is_exempt_agent_type
+
+        _write_team_config(teams_dir, "dup-team", [
+            {"name": "session-secretary", "agentType": "pact-secretary"},
+            {"name": "session-secretary", "agentType": "pact-backend-coder"},
+        ])
+        # First match wins — first member has exempt agentType.
+        assert _is_exempt_agent_type(
+            "session-secretary", "dup-team", teams_dir
+        ) is True
+
+    def test_count_active_tasks_isolates_per_member(self, teams_dir, tmp_path, monkeypatch):
+        # Wake-lifecycle integration: in a multi-member team with one
+        # secretary and one non-secretary teammate, two simultaneous
+        # in_progress tasks (one each) must produce count=1, not 0 or 2.
+        import shared.wake_lifecycle as wl
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        team = "multi-task-team"
+        team_dir = tmp_path / ".claude" / "teams" / team
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text(
+            json.dumps({"team_name": team, "members": [
+                {"name": "session-secretary", "agentType": "pact-secretary"},
+                {"name": "backend-coder-1", "agentType": "pact-backend-coder"},
+            ]}),
+            encoding="utf-8",
+        )
+        tasks_dir = tmp_path / ".claude" / "tasks" / team
+        tasks_dir.mkdir(parents=True)
+        (tasks_dir / "1.json").write_text(json.dumps(
+            {"id": "1", "status": "in_progress", "owner": "session-secretary"}
+        ))
+        (tasks_dir / "2.json").write_text(json.dumps(
+            {"id": "2", "status": "in_progress", "owner": "backend-coder-1"}
+        ))
+        # Secretary task carved out; backend-coder task counts.
+        assert wl.count_active_tasks(team) == 1
+
+
+class TestMultipleSecretaryTasksAllExempt:
+    """Cross-task interaction: a team running multiple parallel
+    memory-save tasks owned by the same secretary teammate (e.g.,
+    pre-CODE harvest + post-CODE harvest in the same wave) must all
+    be exempt. Pins that the predicate is stateless across task
+    iteration."""
+
+    def test_multiple_secretary_tasks_zero_active(self, tmp_path, monkeypatch):
+        import shared.wake_lifecycle as wl
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        team = "multi-sec-team"
+        team_dir = tmp_path / ".claude" / "teams" / team
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text(
+            json.dumps({"team_name": team, "members": [
+                {"name": "session-secretary", "agentType": "pact-secretary"},
+            ]}),
+            encoding="utf-8",
+        )
+        tasks_dir = tmp_path / ".claude" / "tasks" / team
+        tasks_dir.mkdir(parents=True)
+        # Three concurrent secretary memory-save tasks.
+        for tid in ("harvest-1", "harvest-2", "harvest-3"):
+            (tasks_dir / f"{tid}.json").write_text(json.dumps(
+                {"id": tid, "status": "in_progress", "owner": "session-secretary"}
+            ))
+        assert wl.count_active_tasks(team) == 0
+
+
+class TestDocSurfaceStalenessSweep:
+    """Doc-staleness regression pin (lead-approved per #682 TEST phase).
+
+    The OLD constant name `SELF_COMPLETE_EXEMPT_AGENTS` (sans `_TYPES`
+    suffix) must NOT appear in any agent-facing doc surface
+    (agents/, commands/, protocols/). Manual sweep via
+    `rg "SELF_COMPLETE_EXEMPT_AGENTS\\b" pact-plugin/` was the
+    architect's risk-mitigation; this test converts it to automated
+    regression coverage.
+
+    The single permitted reference is the negative-assertion in
+    test_inbox_wake_lifecycle_helper.py:48 (`assert "SELF_COMPLETE_EXEMPT_AGENTS" not in src`),
+    which is itself a guard against the old name reappearing in
+    wake_lifecycle.py.
+
+    If a future refactor genuinely needs to rename
+    SELF_COMPLETE_EXEMPT_AGENT_TYPES, update this test alongside the
+    rename.
+    """
+    import re
+
+    OLD_NAME_PATTERN = re.compile(r"\bSELF_COMPLETE_EXEMPT_AGENTS\b")
+
+    def _doc_root(self) -> Path:
+        # tests/ → pact-plugin/
+        return Path(__file__).resolve().parent.parent
+
+    @pytest.mark.parametrize("subdir", ["agents", "commands", "protocols"])
+    def test_no_old_name_in_doc_surface(self, subdir):
+        root = self._doc_root() / subdir
+        assert root.is_dir(), f"Expected doc directory {root} to exist"
+        violations = []
+        for md_path in root.rglob("*.md"):
+            content = md_path.read_text(encoding="utf-8")
+            for line_no, line in enumerate(content.splitlines(), start=1):
+                if self.OLD_NAME_PATTERN.search(line):
+                    violations.append(f"{md_path.relative_to(root.parent)}:{line_no}: {line.strip()}")
+        assert not violations, (
+            "Stale `SELF_COMPLETE_EXEMPT_AGENTS` references found in doc "
+            "surface — must be retargeted to `SELF_COMPLETE_EXEMPT_AGENT_TYPES`:\n"
+            + "\n".join(violations)
+        )
+
+    def test_new_name_present_in_at_least_one_canonical_doc(self):
+        # Counter-pin: at least one of the 5 known doc surfaces must
+        # mention the new constant name. Guards against a refactor that
+        # silently drops the doc references entirely.
+        root = self._doc_root()
+        canonical_surfaces = [
+            root / "agents" / "pact-orchestrator.md",
+            root / "agents" / "pact-secretary.md",
+            root / "commands" / "comPACT.md",
+            root / "commands" / "orchestrate.md",
+            root / "protocols" / "pact-completion-authority.md",
+        ]
+        new_name = "SELF_COMPLETE_EXEMPT_AGENT_TYPES"
+        hits = [
+            p for p in canonical_surfaces
+            if p.is_file() and new_name in p.read_text(encoding="utf-8")
+        ]
+        assert hits, (
+            f"None of the 5 canonical doc surfaces references "
+            f"`{new_name}`; doc-surface drift suspected."
+        )
