@@ -27,7 +27,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 from shared import BOOTSTRAP_MARKER_NAME
 
-_SUPPRESS_EXPECTED = {"suppressOutput": True}
+_SUPPRESS_EXPECTED = {
+    "suppressOutput": True,
+    "hookSpecificOutput": {"hookEventName": "UserPromptSubmit"},
+}
 
 # Session identity constants used across all tests
 _SESSION_ID = "test-session"
@@ -440,3 +443,49 @@ class TestMarkerLifecycle:
             ctx_module._cache = None
             _, output = _run_main(_make_input(), capsys)
             assert output == _SUPPRESS_EXPECTED
+
+
+# =============================================================================
+# Audit-anchor parity (mirror of writer's emit-shape invariant)
+# =============================================================================
+
+
+class TestAuditAnchorParity:
+    """Every JSON output path bootstrap_prompt_gate produces MUST carry
+    hookSpecificOutput.hookEventName == "UserPromptSubmit". Missing the
+    field silently fails open at the platform layer (per pinned context).
+    The invariant is parametrized over the two distinct emit shapes:
+
+    - "advisory": _emit_load_failure_advisory module-load advisory
+      (additionalContext path)
+    - "suppress": every other exit path via the _SUPPRESS_OUTPUT constant
+
+    Both MUST carry the audit anchor — parametrizing pins the invariant
+    so no future emit path can be added without it. Mirrors
+    bootstrap_marker_writer's test_every_emit_shape_carries_hook_event_name
+    so all three bootstrap-related hooks share one parity contract.
+    """
+
+    @pytest.mark.parametrize("shape", ["advisory", "suppress"])
+    def test_every_emit_shape_carries_hook_event_name(self, shape, capsys):
+        if shape == "advisory":
+            from bootstrap_prompt_gate import _emit_load_failure_advisory
+            with pytest.raises(SystemExit):
+                _emit_load_failure_advisory("module imports", RuntimeError("x"))
+            captured = capsys.readouterr()
+            out = json.loads(captured.out.strip())
+        elif shape == "suppress":
+            from bootstrap_prompt_gate import _SUPPRESS_OUTPUT
+            out = json.loads(_SUPPRESS_OUTPUT)
+        else:  # pragma: no cover
+            pytest.fail(f"unknown shape param: {shape}")
+
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"shape={shape} emit MUST carry hookSpecificOutput; missing "
+            f"the field silently fails open at the platform layer."
+        )
+        assert hso.get("hookEventName") == "UserPromptSubmit", (
+            f"shape={shape} emit MUST carry hookEventName=='UserPromptSubmit'; "
+            f"got {hso!r}"
+        )

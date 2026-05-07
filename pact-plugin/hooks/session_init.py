@@ -628,6 +628,26 @@ def strip_orphan_routing_markers() -> str | None:
         return None
 
 
+def _clear_bootstrap_marker(session_path: Path) -> None:
+    """Unlink the bootstrap-complete marker at ``session_path``.
+
+    Scope is intentionally narrow: ONLY the marker file is removed. The
+    team config (``~/.claude/teams/{team_name}/config.json``) is NOT
+    touched here and persists across ``/clear``. Consequence: the
+    ``bootstrap_marker_writer`` UserPromptSubmit hook re-creates the
+    marker on the next prompt without orchestrator intervention, because
+    the writer's pre-conditions (team config + secretary in members[])
+    are still observable on disk.
+
+    Fail-open: any ``OSError`` is swallowed so session init does not
+    block on cleanup.
+    """
+    try:
+        (session_path / BOOTSTRAP_MARKER_NAME).unlink(missing_ok=True)
+    except OSError:
+        pass  # Fail-open: don't block session init for marker cleanup
+
+
 def main():
     """
     Main entry point for the SessionStart hook.
@@ -709,15 +729,16 @@ def main():
         # hasn't been initialized yet (write_context() runs at step 5a
         # below). Uses build_session_path() directly — it has its own
         # path traversal guard (Path.parents containment check).
+        #
+        # Scope: ONLY the marker is removed; team config persists. The
+        # writer hook self-heals the marker on the next prompt as long as
+        # team config + secretary remain on disk. See _clear_bootstrap_marker.
         if is_marker_reset:
-            try:
-                reset_session_id = input_data.get("session_id", "")
-                if reset_session_id and project_dir:
-                    slug = Path(project_dir).name
-                    session_path = build_session_path(slug, str(reset_session_id))
-                    (session_path / BOOTSTRAP_MARKER_NAME).unlink(missing_ok=True)
-            except OSError:
-                pass  # Fail-open: don't block session init for marker cleanup
+            reset_session_id = input_data.get("session_id", "")
+            if reset_session_id and project_dir:
+                slug = Path(project_dir).name
+                session_path = build_session_path(slug, str(reset_session_id))
+                _clear_bootstrap_marker(session_path)
 
         # 0. Check required PACT dirs are in additionalDirectories (one-time tip)
         # Only check on fresh startup — resumed/compacted sessions already had the check

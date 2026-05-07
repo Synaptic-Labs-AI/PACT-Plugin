@@ -1,0 +1,8 @@
+{
+  "_comment": "TODO(#672): replace this synthetic fixture with a captured-from-production UserPromptSubmit stdin per the capture procedure documented in #672. The procedure requires a separate scratch branch + fresh-startup PACT session and is incompatible with this PR's session. Synthetic shape below matches the platform schema documented in tests/test_bootstrap_prompt_gate.py (_make_input).",
+  "hook_event_name": "UserPromptSubmit",
+  "session_id": "fixture-session-id",
+  "prompt": "begin",
+  "source": "startup",
+  "transcript_path": "/tmp/fixture-transcript.jsonl"
+}

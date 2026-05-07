@@ -77,7 +77,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 from shared import BOOTSTRAP_MARKER_NAME
 
-_SUPPRESS_EXPECTED = {"suppressOutput": True}
+_SUPPRESS_EXPECTED = {
+    "suppressOutput": True,
+    "hookSpecificOutput": {"hookEventName": "PreToolUse"},
+}
 
 # Session identity constants
 _SESSION_ID = "test-session"
@@ -120,7 +123,7 @@ def _write_f24_marker(session_dir: Path, plugin_root: Path,
     """Write a properly-stamped marker. Override fields to forge invalid
     variants for negative tests.
     """
-    from bootstrap_gate import MARKER_SCHEMA_VERSION
+    from shared.marker_schema import MARKER_SCHEMA_VERSION
 
     real_sid = sid if sid is not None else session_dir.name
     real_sig_input = (
@@ -519,13 +522,20 @@ class TestErrorSuppressMutualExclusivity:
         assert "hookSpecificOutput" in output
         assert "suppressOutput" not in output
 
-    def test_allow_path_no_hook_specific_output(self, monkeypatch, tmp_path, capsys):
-        """Allow path → suppressOutput, NOT hookSpecificOutput."""
+    def test_allow_path_carries_audit_anchor_only(self, monkeypatch, tmp_path, capsys):
+        """Allow path → suppressOutput + hookSpecificOutput.hookEventName only,
+        NO permissionDecision. The audit-anchor parity retrofit aligns the
+        suppress envelope with bootstrap_marker_writer's pattern (the writer
+        was the role model; both gates now match)."""
         _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
 
         _, output = _run_main(_make_input("Read"), capsys)
-        assert "suppressOutput" in output
-        assert "hookSpecificOutput" not in output
+        assert output.get("suppressOutput") is True
+        hso = output.get("hookSpecificOutput")
+        assert hso == {"hookEventName": "PreToolUse"}, (
+            f"Allow envelope should be exactly suppressOutput + audit-anchor "
+            f"hookEventName, no permissionDecision. Got: {output!r}"
+        )
 
 
 # =============================================================================
@@ -856,3 +866,60 @@ class TestIsMarkerSet:
         }), encoding="utf-8")
         ctx_module._cache = None
         assert is_marker_set(session_dir) is False
+
+
+# =============================================================================
+# Audit-anchor parity (mirror of writer's emit-shape invariant)
+# =============================================================================
+
+
+class TestAuditAnchorParity:
+    """Every JSON output path bootstrap_gate produces MUST carry
+    hookSpecificOutput.hookEventName == "PreToolUse". Missing the field
+    silently fails open at the platform layer (per pinned context). The
+    invariant is parametrized over the three distinct emit shapes:
+
+    - "deny-load-failure": _emit_load_failure_deny advisory
+    - "deny-runtime": runtime-exception deny via _emit_load_failure_deny
+    - "suppress": every other exit path via the _SUPPRESS_OUTPUT constant
+
+    All three MUST carry the audit anchor — parametrizing pins the
+    invariant so no future emit path can be added without it. Mirrors
+    bootstrap_marker_writer's test_every_emit_shape_carries_hook_event_name
+    so all three bootstrap-related hooks share one parity contract.
+    """
+
+    @pytest.mark.parametrize("shape", ["deny-load-failure", "deny-runtime", "suppress"])
+    def test_every_emit_shape_carries_hook_event_name(self, shape, capsys):
+        if shape == "deny-load-failure":
+            from bootstrap_gate import _emit_load_failure_deny
+            with pytest.raises(SystemExit):
+                _emit_load_failure_deny("module imports", RuntimeError("x"))
+            captured = capsys.readouterr()
+            out = json.loads(captured.out.strip())
+        elif shape == "deny-runtime":
+            from bootstrap_gate import main
+            with patch(
+                "bootstrap_gate._check_tool_allowed",
+                side_effect=RuntimeError("boom"),
+            ):
+                with patch("sys.stdin", io.StringIO(json.dumps(_make_input()))):
+                    with pytest.raises(SystemExit):
+                        main()
+            captured = capsys.readouterr()
+            out = json.loads(captured.out.strip())
+        elif shape == "suppress":
+            from bootstrap_gate import _SUPPRESS_OUTPUT
+            out = json.loads(_SUPPRESS_OUTPUT)
+        else:  # pragma: no cover
+            pytest.fail(f"unknown shape param: {shape}")
+
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"shape={shape} emit MUST carry hookSpecificOutput; missing "
+            f"the field silently fails open at the platform layer."
+        )
+        assert hso.get("hookEventName") == "PreToolUse", (
+            f"shape={shape} emit MUST carry hookEventName=='PreToolUse'; "
+            f"got {hso!r}"
+        )

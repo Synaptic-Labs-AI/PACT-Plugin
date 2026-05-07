@@ -170,36 +170,71 @@ class TestBootstrapMarkerClearAcrossSources:
     def test_marker_unlink_call_is_inside_clear_branch(
         self, session_init_text
     ):
-        """The unlink(missing_ok=True) call on the bootstrap marker must
-        be inside the `if is_marker_reset:` branch. A drift here (e.g.,
-        unindented unlink, or guarded by a different predicate) breaks
-        the contract."""
-        # Find the BOOTSTRAP_MARKER_NAME unlink call
-        unlink_match = re.search(
-            r'\(session_path / BOOTSTRAP_MARKER_NAME\)\.unlink',
+        """The bootstrap-marker cleanup must be invoked only inside the
+        `if is_marker_reset:` branch, and the helper that performs the
+        cleanup must do exactly the marker unlink (no broader scope).
+        A drift in either direction breaks the persona §2 contract:
+        - Unconditional invocation defeats the per-session ritual
+          invariant (marker zapped on every session).
+        - Helper that touches more than the marker (e.g., team config)
+          contradicts the persona §2 self-healing claim.
+        """
+        # The clear branch must call the named cleanup helper.
+        helper_call_match = re.search(
+            r'_clear_bootstrap_marker\(\s*session_path\s*\)',
             session_init_text,
         )
-        assert unlink_match is not None, (
-            "session_init.py must call "
-            "(session_path / BOOTSTRAP_MARKER_NAME).unlink(...) — the "
-            "marker-unlink invocation that fires on /clear."
+        assert helper_call_match is not None, (
+            "session_init.py must invoke `_clear_bootstrap_marker(session_path)` "
+            "— the named helper that performs the /clear marker cleanup."
         )
 
-        # Walk backward from the unlink to find the nearest enclosing
-        # `if is_marker_reset:` line. The line index of the if-guard
-        # must precede the unlink and there must be no intervening
-        # de-dent that breaks containment.
-        before = session_init_text[: unlink_match.start()]
+        # The invocation must sit inside an `if is_marker_reset:` branch.
+        before = session_init_text[: helper_call_match.start()]
         guard_match = re.search(
             r'^(\s*)if\s+is_marker_reset:\s*$',
             before,
             re.MULTILINE,
         )
         assert guard_match is not None, (
-            "The marker-unlink call is not inside an "
+            "_clear_bootstrap_marker is not invoked inside an "
             "`if is_marker_reset:` branch. Without this guard, the "
             "marker would be unlinked on every session source — "
             "defeating the per-session ritual invariant."
+        )
+
+        # The helper itself must perform the marker unlink (and nothing
+        # broader). Pin both halves of the persona §2 contract.
+        helper_def_match = re.search(
+            r'def\s+_clear_bootstrap_marker\s*\([^)]*\)\s*->\s*None\s*:\s*'
+            r'(?P<body>(?:.|\n)+?)(?=\n\ndef\s|\nclass\s|\Z)',
+            session_init_text,
+        )
+        assert helper_def_match is not None, (
+            "session_init.py must define `def _clear_bootstrap_marker(...)`."
+        )
+        body = helper_def_match.group("body")
+        # Strip the leading triple-quoted docstring before scanning for
+        # operations — docstrings legitimately reference team-config /
+        # config.json by name to explain the scope.
+        body_no_docstring = re.sub(
+            r'^\s*("""(?:.|\n)*?"""|\'\'\'(?:.|\n)*?\'\'\')',
+            "",
+            body,
+            count=1,
+        )
+        assert "BOOTSTRAP_MARKER_NAME" in body_no_docstring and ".unlink(" in body_no_docstring, (
+            "_clear_bootstrap_marker must perform the bootstrap-marker "
+            "unlink — the body lost the cleanup it was extracted to own."
+        )
+        # Persona §2 self-healing claim: the helper must NOT touch the
+        # team config. Pin operationally — any new filesystem reference
+        # to teams/ or config.json in the implementation would broaden
+        # the helper's scope and break the persona claim.
+        assert "teams" not in body_no_docstring and "config.json" not in body_no_docstring, (
+            "_clear_bootstrap_marker must NOT touch team config; the "
+            "persona §2 self-healing claim depends on team config "
+            "persisting across /clear."
         )
 
 
@@ -498,29 +533,18 @@ class TestTeachbackReminderCrossFileConsistency:
         )
 
 
-# =============================================================================
-# Y2 (auditor YELLOW-2): TestMarkerNameConsistency parametrized variant
-# =============================================================================
-
-
 class TestMarkerNameConsistencyEncodingTolerant:
-    """Auditor YELLOW-2 resolution. The existing
-    TestMarkerNameConsistency.test_bootstrap_md_references_same_marker
-    asserts the literal substring `touch "<path>/{BOOTSTRAP_MARKER_NAME}"`
-    appears in commands/bootstrap.md. That byte-equal pin is correct
-    for the current encoding but brittle to legitimate encoding
-    refactors (assignment style, heredoc, multi-line shell with
-    intervening comments, backslash-continued commands).
+    """Cross-file consistency check: the marker name literal
+    `bootstrap-complete` must appear in commands/bootstrap.md.
 
-    This parametrized variant tests cross-file consistency on marker
-    SEMANTICS rather than syntax — for each of N supported encodings,
-    the marker-name substring must be present in commands/bootstrap.md
-    under at least one of the expected shell idioms.
-
-    Per lead's confirmation: keep the existing byte-literal test
-    untouched; this is an ADDITIVE sibling that catches drift if the
-    bootstrap.md author refactors the touch invocation while keeping
-    the marker name correct.
+    Post-#664 the marker is written by the
+    `bootstrap_marker_writer.py` UserPromptSubmit hook rather than an
+    LLM-executed heredoc; commands/bootstrap.md retains a brief
+    "Marker (hook-managed)" acknowledgment paragraph that mentions
+    the marker by name so the LLM reading bootstrap.md end-to-end
+    has an in-context pointer to the producer. The shell-encoding
+    siblings of this test (which pinned the heredoc shape) were
+    deleted with the heredoc itself.
     """
 
     BOOTSTRAP_MD = COMMANDS_DIR / "bootstrap.md"
@@ -531,129 +555,9 @@ class TestMarkerNameConsistencyEncodingTolerant:
 
     def test_marker_name_appears_in_bootstrap_md(self, bootstrap_text):
         """The marker name itself must appear textually somewhere in
-        the body — independent of which shell encoding is used."""
+        the body — preserved by the post-#664 acknowledgment paragraph."""
         assert BOOTSTRAP_MARKER_NAME in bootstrap_text, (
             f"commands/bootstrap.md must reference the marker name "
             f"{BOOTSTRAP_MARKER_NAME!r} verbatim; without it, the "
-            f"marker-write step is silently nameless."
-        )
-
-    @pytest.mark.parametrize(
-        "encoding_label,pattern",
-        [
-            (
-                "f-string-style direct touch",
-                rf'touch\s+"[^"]*/{re.escape(BOOTSTRAP_MARKER_NAME)}"',
-            ),
-            (
-                "assignment-style + indirection",
-                rf'(MARKER|MARKER_PATH|BOOTSTRAP_MARKER)\s*=\s*"[^"]*/'
-                rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
-            ),
-            (
-                "heredoc style",
-                rf'<<.*\n[\s\S]*?{re.escape(BOOTSTRAP_MARKER_NAME)}'
-                rf'[\s\S]*?\n.*$',
-            ),
-            (
-                "multi-line touch with comments",
-                rf'touch\s+(?:#[^\n]*\n\s*)*"[^"]*/'
-                rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
-            ),
-            (
-                "backslash-continued touch",
-                rf'touch\s+\\\s*\n\s*"[^"]*/'
-                rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
-            ),
-            (
-                "printf-create",
-                rf'printf\s+"[^"]*"\s*>\s*"[^"]*/'
-                rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
-            ),
-            (
-                "no-op redirect-create",
-                rf':\s*>\s*"[^"]*/{re.escape(BOOTSTRAP_MARKER_NAME)}"',
-            ),
-            (
-                "echo-no-output redirect-create",
-                rf'echo\s+-n[^>]*>\s*"[^"]*/'
-                rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
-            ),
-            (
-                "bare redirect-create",
-                rf'(?:^|[\s;&])>\s*"[^"]*/'
-                rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
-            ),
-            (
-                "tee with discard stdin",
-                rf'tee\s+"[^"]*/{re.escape(BOOTSTRAP_MARKER_NAME)}".*</dev/null',
-            ),
-            (
-                "dd argument-form",
-                rf'dd\s+of="[^"]*/{re.escape(BOOTSTRAP_MARKER_NAME)}".*if=/dev/null',
-            ),
-        ],
-    )
-    def test_at_least_one_marker_write_encoding_matches(
-        self, bootstrap_text, encoding_label, pattern
-    ):
-        """Cross-file consistency on marker-write SEMANTICS: assert
-        that AT LEAST ONE of the supported encodings is present in
-        commands/bootstrap.md. The class-level oracle (collect-all
-        + assert-any) lives in test_any_supported_encoding_matches;
-        this parametrized variant gives per-encoding diagnostic signal
-        when an authored encoding doesn't match its expected shape.
-        """
-        # This per-row test is INFORMATIONAL — at least one matching
-        # is required, but not every row must match. We assert it as
-        # a soft check via skip if the encoding isn't the chosen one.
-        # The hard cross-file consistency is in
-        # test_any_supported_encoding_matches.
-        if not re.search(pattern, bootstrap_text, re.MULTILINE):
-            pytest.skip(
-                f"encoding {encoding_label!r} not used in bootstrap.md "
-                f"(other supported encodings may match)"
-            )
-        # If we matched, the marker name was present in the matched form.
-        match = re.search(pattern, bootstrap_text, re.MULTILINE)
-        assert BOOTSTRAP_MARKER_NAME in match.group(0)
-
-    def test_any_supported_encoding_matches(self, bootstrap_text):
-        """Hard cross-file consistency: at least ONE of the supported
-        marker-write encodings must match. This is the test that fails
-        if the bootstrap.md author refactors the touch invocation into
-        a shape that NO supported encoding recognizes — i.e., a true
-        loss of marker-write semantics in the file."""
-        encodings = [
-            rf'touch\s+"[^"]*/{re.escape(BOOTSTRAP_MARKER_NAME)}"',
-            rf'(MARKER|MARKER_PATH|BOOTSTRAP_MARKER)\s*=\s*"[^"]*/'
-            rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
-            rf'<<.*\n[\s\S]*?{re.escape(BOOTSTRAP_MARKER_NAME)}'
-            rf'[\s\S]*?\n.*$',
-            rf'touch\s+(?:#[^\n]*\n\s*)*"[^"]*/'
-            rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
-            rf'touch\s+\\\s*\n\s*"[^"]*/'
-            rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
-            rf'printf\s+"[^"]*"\s*>\s*"[^"]*/'
-            rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
-            rf':\s*>\s*"[^"]*/{re.escape(BOOTSTRAP_MARKER_NAME)}"',
-            rf'echo\s+-n[^>]*>\s*"[^"]*/'
-            rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
-            rf'(?:^|[\s;&])>\s*"[^"]*/'
-            rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
-            rf'tee\s+"[^"]*/{re.escape(BOOTSTRAP_MARKER_NAME)}".*</dev/null',
-            rf'dd\s+of="[^"]*/{re.escape(BOOTSTRAP_MARKER_NAME)}".*if=/dev/null',
-        ]
-        matched = [
-            p for p in encodings
-            if re.search(p, bootstrap_text, re.MULTILINE)
-        ]
-        assert matched, (
-            f"commands/bootstrap.md does not contain a marker-write "
-            f"invocation in any supported shell encoding. The marker "
-            f"name {BOOTSTRAP_MARKER_NAME!r} appears in the file (per "
-            f"test_marker_name_appears_in_bootstrap_md) but not in a "
-            f"shape that semantically writes the marker. Either restore "
-            f"the marker-write step OR add the new encoding to the "
-            f"`encodings` list above + the parametrize list."
+            f"acknowledgment paragraph is silently nameless."
         )

@@ -27,14 +27,17 @@ Tool classification rationale:
     was based on a misread of production matchers — those matchers were
     silently NOT firing on spawn events, mistaken for "production
     evidence". Resolved in #662.
-  - Bash is ALLOWED because the bootstrap marker-write mechanism itself is
-    a Bash command in bootstrap.md — blocking Bash would create a circular
-    dependency where the gate can never self-disable. To prevent the
-    Bash-marker-bypass (a single `touch bootstrap-complete` against an
-    empty file would otherwise satisfy any presence check), is_marker_set
-    verifies marker CONTENT via a SHA256 fingerprint over (session_id,
-    plugin_root, plugin_version, schema_version), not just file presence
-    — `touch bootstrap-complete` no longer satisfies the gate.
+  - Bash is ALLOWED because the orchestrator legitimately needs it during
+    the bootstrap window — before the marker exists — for git status,
+    plugin-version reads, project-state probing, and other read-only
+    investigation that the bootstrap ritual itself depends on. The marker
+    is now written by the `bootstrap_marker_writer` UserPromptSubmit hook
+    (no Bash heredoc), so the historical "blocking Bash would prevent the
+    gate from self-disabling" framing no longer applies. Bash bypass is
+    defended at the verifier instead: `is_marker_set` checks marker
+    CONTENT via a SHA256 fingerprint over (session_id, plugin_root,
+    plugin_version, schema_version), so neither `touch bootstrap-complete`
+    nor a `Bash`-driven echo of a malformed JSON satisfies the gate.
   - Exploration tools are read-only and needed for state recovery after
     compaction.
   - MCP tools are always allowed — they're external integrations that may
@@ -88,30 +91,39 @@ def _emit_load_failure_deny(stage: str, error: BaseException) -> NoReturn:
 
 # ─── fail-closed wrapper around cross-package imports + risky module work ─────
 try:
-    import hashlib
     import hmac
     import stat
     from pathlib import Path
 
     import shared.pact_context as pact_context
     from shared import BOOTSTRAP_MARKER_NAME
+    from shared.marker_schema import (
+        MARKER_MAX_BYTES,
+        MARKER_SCHEMA_VERSION,
+        expected_marker_signature,
+    )
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_deny("module imports", _module_load_error)
 
 
-_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+_SUPPRESS_OUTPUT = json.dumps({
+    "suppressOutput": True,
+    "hookSpecificOutput": {"hookEventName": "PreToolUse"},
+})
 
 # Code-editing and agent-dispatch tools blocked until bootstrap completes.
-# Bash is intentionally NOT blocked — the marker-write mechanism in
-# bootstrap.md is a Bash command, so blocking Bash would prevent the gate
-# from ever self-disabling (circular dependency). To prevent the
-# Bash-marker-bypass exploit (a single `touch bootstrap-complete`),
-# is_marker_set verifies marker CONTENT via a SHA256 fingerprint over
-# (session_id, plugin_root, plugin_version, schema_version), not just
-# file presence. The agent-dispatch tool
-# is `Agent` — the canonical Claude Code platform name (#662 corrects
-# 4c286c1f's incorrect rename direction). hooks.json matcher='Agent'
-# entries fire on Agent invocations.
+# Bash is intentionally NOT blocked — the orchestrator needs it during the
+# bootstrap window for read-only investigation (git status, plugin-version
+# reads, project-state probing) that the bootstrap ritual itself depends
+# on. Marker write is a hook (#664 bootstrap_marker_writer), no longer a
+# Bash heredoc, so the older "blocking Bash would prevent self-disable"
+# framing no longer applies. Bypass is defended at the verifier:
+# is_marker_set checks marker CONTENT via a SHA256 fingerprint over
+# (session_id, plugin_root, plugin_version, schema_version), so neither
+# `touch bootstrap-complete` nor a Bash-driven echo of a malformed JSON
+# satisfies the gate. The agent-dispatch tool is `Agent` — the canonical
+# Claude Code platform name (#662 corrects 4c286c1f's incorrect rename
+# direction). hooks.json matcher='Agent' entries fire on Agent invocations.
 _BLOCKED_TOOLS = frozenset({
     "Edit",
     "Write",
@@ -119,15 +131,10 @@ _BLOCKED_TOOLS = frozenset({
     "NotebookEdit",
 })
 
-# Marker schema version. Bump if marker JSON shape changes; verifier
-# rejects unknown versions. Producer (commands/bootstrap.md) must emit a
-# matching `v` field.
-MARKER_SCHEMA_VERSION = 1
-
-# Marker file size cap (bytes). The marker JSON is a small fixed schema
-# ({v, sid, sig}); a content larger than this is rejected to defend against
-# pathological reads.
-_MARKER_MAX_BYTES = 256
+# Marker schema constants (MARKER_SCHEMA_VERSION, MARKER_MAX_BYTES) and
+# the signature function (expected_marker_signature) live in
+# shared/marker_schema.py — the SSOT shared by producer
+# (bootstrap_marker_writer.py) and this verifier. Imported above.
 
 _DENY_REASON = (
     "PACT bootstrap required. Invoke Skill(\"PACT:bootstrap\") first. "
@@ -136,33 +143,17 @@ _DENY_REASON = (
 )
 
 
-def _expected_marker_signature(session_id: str, plugin_root: str,
-                                plugin_version: str, marker_version: int) -> str:
-    """Compute the expected SHA256 marker signature.
-
-    Inputs are joined with `|` separators in a fixed order so the producer
-    in commands/bootstrap.md and this verifier compute the same digest:
-
-        sha256(f"{session_id}|{plugin_root}|{plugin_version}|{marker_version}")
-
-    The `marker_version` is part of the digest so a format-version bump
-    invalidates pre-bump markers automatically.
-    """
-    payload = f"{session_id}|{plugin_root}|{plugin_version}|{marker_version}"
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
 def is_marker_set(session_dir: "Path | None") -> bool:
     """Public predicate: does a properly-stamped bootstrap-complete marker exist?
 
     Returns True iff `<session_dir>/<BOOTSTRAP_MARKER_NAME>` exists as a
     REGULAR FILE (not a symlink, not a directory) AND no ancestor of the
     session_dir is a symlink AND its content is a valid stamp:
-      - file size ≤ ``_MARKER_MAX_BYTES``
+      - file size ≤ ``MARKER_MAX_BYTES``
       - parses as JSON object with EXACTLY keys {"v", "sid", "sig"}
       - ``v`` is integer == ``MARKER_SCHEMA_VERSION``
       - ``sid`` equals ``session_dir.name`` (binds marker to its session)
-      - ``sig`` matches ``_expected_marker_signature`` via
+      - ``sig`` matches ``expected_marker_signature`` via
         ``hmac.compare_digest`` (constant-time compare)
 
     Returns False on any of:
@@ -195,8 +186,8 @@ def is_marker_set(session_dir: "Path | None") -> bool:
         The signature is NOT cryptographic provenance. All four
         signature inputs are readable from the same-user filesystem
         (session_id and plugin_root from pact-session-context.json,
-        plugin_version from plugin.json, marker_version from this
-        module's MARKER_SCHEMA_VERSION constant), so a same-user attacker
+        plugin_version from plugin.json, marker_version from
+        shared.marker_schema.MARKER_SCHEMA_VERSION), so a same-user attacker
         with Python execution and read access to those files can
         recompute the digest. The signature is a fingerprint that
         raises attacker effort from a one-line `touch` to a multi-line
@@ -233,7 +224,7 @@ def is_marker_set(session_dir: "Path | None") -> bool:
 
     # Verify marker CONTENT (#662 — closes the Bash-touch bypass).
     try:
-        if st.st_size <= 0 or st.st_size > _MARKER_MAX_BYTES:
+        if st.st_size <= 0 or st.st_size > MARKER_MAX_BYTES:
             return False
         content = marker_path.read_text(encoding="utf-8").strip()
         parsed = json.loads(content)
@@ -259,7 +250,7 @@ def is_marker_set(session_dir: "Path | None") -> bool:
             return False
         if not plugin_version:
             return False
-        expected = _expected_marker_signature(
+        expected = expected_marker_signature(
             parsed["sid"], plugin_root, plugin_version, parsed["v"]
         )
         if not hmac.compare_digest(parsed["sig"], expected):
