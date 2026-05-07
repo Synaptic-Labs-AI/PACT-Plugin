@@ -208,6 +208,11 @@ def _try_write_marker(input_data: dict) -> None:
     """
     pact_context.init(input_data)
 
+    # Trust boundary: session_dir comes from pact_context.get_session_dir(),
+    # which derives it via shared.build_session_path's path-traversal guard
+    # (Path.parents containment check). The writer trusts that upstream
+    # validation rather than re-validating here; downstream filesystem
+    # operations (mkstemp/os.replace) operate within that vetted directory.
     session_dir_str = pact_context.get_session_dir()
     if not session_dir_str:
         return

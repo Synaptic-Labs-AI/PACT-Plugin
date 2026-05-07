@@ -4650,3 +4650,84 @@ class TestStripOrphanRoutingMarkers:
         new_content = self.target_file.read_text(encoding="utf-8")
         assert legacy_line not in new_content
         assert "user content" in new_content
+
+
+class TestClearBootstrapMarker:
+    """Pin the normative claim in persona §2: `_clear_bootstrap_marker`
+    removes ONLY the bootstrap-complete marker; the team config persists.
+    Future code changes that broaden the scope (e.g., also unlinking
+    ~/.claude/teams/{team_name}/config.json) would invalidate the
+    persona's self-healing claim and must fail this test."""
+
+    def _setup(self, tmp_path):
+        from shared import BOOTSTRAP_MARKER_NAME
+
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+        marker_path = session_dir / BOOTSTRAP_MARKER_NAME
+        marker_path.write_text("stamped", encoding="utf-8")
+
+        team_name = "pact-test1234"
+        team_dir = tmp_path / ".claude" / "teams" / team_name
+        team_dir.mkdir(parents=True)
+        team_config = team_dir / "config.json"
+        team_config.write_text(
+            json.dumps({"members": [{"id": "a", "name": "secretary"}]}),
+            encoding="utf-8",
+        )
+
+        return session_dir, marker_path, team_config
+
+    def test_unlinks_marker_only(self, tmp_path):
+        from session_init import _clear_bootstrap_marker
+
+        session_dir, marker_path, team_config = self._setup(tmp_path)
+        assert marker_path.exists()
+        assert team_config.exists()
+
+        _clear_bootstrap_marker(session_dir)
+
+        assert not marker_path.exists(), (
+            "_clear_bootstrap_marker MUST remove the marker file"
+        )
+        assert team_config.exists(), (
+            "_clear_bootstrap_marker MUST NOT touch the team config — "
+            "the persona §2 self-healing claim depends on team config "
+            "persisting across /clear"
+        )
+        # Team config content unchanged.
+        assert (
+            json.loads(team_config.read_text(encoding="utf-8"))["members"][0]["name"]
+            == "secretary"
+        )
+
+    def test_missing_marker_is_noop(self, tmp_path):
+        """Idempotent: calling on a session without a marker is a clean no-op."""
+        from session_init import _clear_bootstrap_marker
+        from shared import BOOTSTRAP_MARKER_NAME
+
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+        marker_path = session_dir / BOOTSTRAP_MARKER_NAME
+        assert not marker_path.exists()
+
+        _clear_bootstrap_marker(session_dir)  # must not raise
+
+        assert not marker_path.exists()
+
+    def test_oserror_swallowed_fail_open(self, tmp_path, monkeypatch):
+        """Fail-open contract: any OSError from unlink is swallowed so
+        session init does not block on cleanup."""
+        from pathlib import Path as _Path
+        from session_init import _clear_bootstrap_marker
+
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+
+        def boom(self, missing_ok=False):
+            raise OSError("simulated unlink failure")
+
+        monkeypatch.setattr(_Path, "unlink", boom)
+
+        # Must not raise.
+        _clear_bootstrap_marker(session_dir)

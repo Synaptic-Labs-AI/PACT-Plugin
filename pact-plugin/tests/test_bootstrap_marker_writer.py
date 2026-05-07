@@ -208,17 +208,30 @@ class TestWriteMarkerAtomicity:
         assert mode == 0o600
 
     def test_session_dir_created_with_user_only_perms_when_absent(self, tmp_path):
+        """Architect §8.2 requires session_dir mode 0o700 exactly. Setting
+        os.umask(0) at test entry ensures the mkdir's mode argument is the
+        sole determinant of the final mode bits — the prior `mode & 0o700`
+        bitmask-AND assertion silently accepted default-mode mkdir under
+        permissive umasks, leaving the explicit mode= kwarg as a false-pin.
+        Pin the exact mode so a revert from `mkdir(..., mode=0o700)` to
+        `mkdir(...)` (default 0o777) fails the assertion."""
         from bootstrap_marker_writer import _write_marker
 
         session_dir = tmp_path / "new-sd"
         # not created by test
-        _write_marker(session_dir, "sid", "/plug", "1.0")
+        old_umask = os.umask(0)
+        try:
+            _write_marker(session_dir, "sid", "/plug", "1.0")
+        finally:
+            os.umask(old_umask)
         mode = stat.S_IMODE(os.lstat(session_dir).st_mode)
-        # mkdir may be subject to umask but the explicit mode argument
-        # is what we asserted in the architect's spec; assert at least
-        # the upper bits are 7 (user-rwx) and group/other are <= what
-        # the umask permits.
-        assert mode & 0o700 == 0o700
+        assert mode == 0o700, (
+            f"session_dir mode must be exactly 0o700 (architect §8.2); "
+            f"got {oct(mode)}. Under permissive umask + default mkdir() "
+            f"this would silently produce 0o777 — the bitmask-AND form "
+            f"of this assertion would pass anyway. The explicit mode= "
+            f"kwarg in _write_marker must be the determinant."
+        )
 
     def test_temp_file_unlinked_on_replace_failure(self, tmp_path, monkeypatch):
         from bootstrap_marker_writer import _write_marker
@@ -310,6 +323,16 @@ class TestVerifyAndRefuse:
     def test_no_op_when_marker_already_valid(
         self, monkeypatch, tmp_path, capsys,
     ):
+        """Architect §6 fast-path contract: when is_marker_set returns True,
+        _write_marker MUST NOT be called. Spying on _write_marker pins the
+        early-return semantic directly. The prior bytes-equality form was
+        a false-pin: the digest is deterministic over identical inputs, so
+        a revert of the `if is_marker_set(...): return` early-out would
+        re-stamp byte-identical content and the bytes oracle would still
+        pass. Counter-test cardinality under that revert: this strengthened
+        form fails {1} (assert_not_called)."""
+        import bootstrap_marker_writer as bmw
+
         members = [{"id": "a-1", "name": "secretary"}]
         session_dir, _ = _setup_session(
             monkeypatch, tmp_path,
@@ -317,10 +340,27 @@ class TestVerifyAndRefuse:
         )
         marker = session_dir / BOOTSTRAP_MARKER_NAME
         before = marker.read_bytes()
+
+        write_calls = []
+        original_write = bmw._write_marker
+
+        def spy_write(*args, **kwargs):
+            write_calls.append((args, kwargs))
+            return original_write(*args, **kwargs)
+
+        monkeypatch.setattr(bmw, "_write_marker", spy_write)
+
         code, out = _run_main(_make_input(), capsys)
         assert code == 0
         assert out == _SUPPRESS_EXPECTED
-        # Byte-unchanged (fast path skips write).
+        assert write_calls == [], (
+            f"_write_marker must NOT be called when marker is already valid "
+            f"(architect §6 fast path). Got {len(write_calls)} call(s). "
+            f"Reverting the `if is_marker_set(...): return` early-out would "
+            f"re-stamp byte-identical content (deterministic digest) — the "
+            f"prior bytes-equality assertion was a false-pin."
+        )
+        # Marker still byte-unchanged (defensive secondary check).
         assert marker.read_bytes() == before
 
     def test_teammate_session_skips_writer(self, monkeypatch, tmp_path, capsys):
@@ -572,27 +612,43 @@ class TestAdversarialTeamConfig:
         from bootstrap_marker_writer import _team_has_secretary
         assert _team_has_secretary(_TEAM_NAME) is False
 
-    def test_non_object_top_level_returns_false(self, monkeypatch, tmp_path):
-        """Top-level JSON array (not object). The helper's L125 .get() call
-        would raise AttributeError on a list; pin the expected behavior so
-        a future change can decide whether to harden with isinstance(data,
-        dict) at the parse boundary. Today's behavior: AttributeError
-        propagates → _try_write_marker's outer try/except in main()
-        suppresses to suppressOutput. The unit-test asserts _team_has_secretary
-        returns False OR raises AttributeError; either is acceptable as
-        long as no marker is written."""
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        self._write_team_config(tmp_path, '["not", "an", "object"]')
-        from bootstrap_marker_writer import _team_has_secretary
-        try:
-            result = _team_has_secretary(_TEAM_NAME)
-            assert result is False
-        except AttributeError:
-            # Acceptable: the outer main() try/except will swallow it.
-            # If a future hardening adds an isinstance(data, dict) guard,
-            # this branch will never execute and the assert above pins
-            # the False return value.
-            pass
+    def test_non_object_top_level_no_marker_written(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """Top-level JSON array (not object) in team_config.json. The
+        architect-§6 invariant is the verify-and-refuse contract: under
+        any adversarial team_config shape, no marker may land on disk.
+        The prior form of this test asserted a behavioral disjunction
+        (`_team_has_secretary` returns False OR raises AttributeError),
+        which pinned an implementation detail rather than the contract
+        — under any future hardening it would silently switch branches.
+
+        This reshape calls `main()` end-to-end and asserts the contract
+        directly: clean exit 0 + suppressOutput envelope + no marker
+        file on disk. The outer main() try/except absorbs whatever the
+        helper raises (AttributeError today; nothing if hardened with
+        isinstance(data, dict)) — both implementations satisfy the
+        single contract."""
+        members_unused = [{"name": "secretary"}]
+        session_dir, _ = _setup_session(
+            monkeypatch, tmp_path, with_team_config=False,
+        )
+        # Overwrite team_config.json with a top-level JSON array.
+        team_dir = tmp_path / ".claude" / "teams" / _TEAM_NAME
+        team_dir.mkdir(parents=True, exist_ok=True)
+        (team_dir / "config.json").write_text(
+            '["not", "an", "object"]', encoding="utf-8",
+        )
+
+        code, out = _run_main(_make_input(), capsys)
+        assert code == 0
+        assert out == _SUPPRESS_EXPECTED
+        assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists(), (
+            "verify-and-refuse contract: under top-level non-object "
+            "team_config.json, NO marker may land on disk regardless of "
+            "whether _team_has_secretary returns False or raises "
+            "AttributeError. The architect-§6 contract is end-to-end."
+        )
 
     def test_members_key_absent_returns_false(self, monkeypatch, tmp_path):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -1199,27 +1255,30 @@ class TestFixtureShapeParity:
 
 
 # =============================================================================
-# /clear path interaction: writer self-heals or refuses based on team-config state
+# Marker-absent path interaction: writer self-heals or refuses based on team-config state
 # =============================================================================
 
 
 class TestClearPathInteraction:
-    """Architect §13 risk #6 + persona §2 Re-invoke clause. The writer's
-    self-healing promise covers two distinct /clear-related states:
+    """Persona §2 Re-invoke clause. The writer's self-healing promise
+    covers two distinct marker-absent states:
 
-    1. Marker zapped, team config preserved → next-prompt writer rewrites
-       (steady-state self-heal). This is the path that survives the rare
-       case where a user removes the marker without /clear.
-    2. Marker zapped AND team config zapped (the full /clear semantic per
-       session_init.py:712-720) → writer refuses (verify-and-refuse silent
-       path) until TeamCreate runs again. The persona §2 Re-invoke clause
-       directs the orchestrator to re-execute the bootstrap ritual."""
+    1. Marker absent, team config preserved → next-prompt writer rewrites
+       (steady-state self-heal). This IS the path /clear takes:
+       `session_init._clear_bootstrap_marker` removes ONLY the marker;
+       team config persists. No orchestrator action required.
+    2. Marker AND team config both absent (independent removal of team
+       config; NOT a /clear semantic) → writer refuses (verify-and-refuse
+       silent path) until TeamCreate runs again. The persona §2 Re-invoke
+       clause directs the orchestrator to re-execute the bootstrap ritual
+       in that case."""
 
     def test_marker_only_zap_self_heals_on_next_prompt(
         self, monkeypatch, tmp_path, capsys,
     ):
-        """Steady-state path: team config intact, marker deleted. Writer
-        rewrites a valid marker on the next prompt without orchestrator
+        """Steady-state path (also the actual /clear path): team config
+        intact, marker deleted. Writer rewrites a valid marker on the next
+        prompt without orchestrator
         intervention."""
         members = [{"name": "secretary"}]
         session_dir, _ = _setup_session(
@@ -1236,12 +1295,13 @@ class TestClearPathInteraction:
         # Self-heal: marker rewritten without manual orchestrator action.
         assert marker.exists()
 
-    def test_full_clear_zap_refuses_silently(
+    def test_team_config_absent_refuses_silently(
         self, monkeypatch, tmp_path, capsys,
     ):
-        """Full /clear: marker AND team config gone. Writer refuses
-        (verify-and-refuse silent path); persona §2 Re-invoke directive
-        owns the orchestrator-driven TeamCreate re-execution."""
+        """Team config absent (independent removal — NOT a /clear semantic):
+        marker AND team config both gone. Writer refuses (verify-and-refuse
+        silent path); persona §2 Re-invoke directive owns the
+        orchestrator-driven TeamCreate re-execution."""
         session_dir, _ = _setup_session(
             monkeypatch, tmp_path, with_team_config=False,
         )
