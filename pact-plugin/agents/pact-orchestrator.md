@@ -471,7 +471,7 @@ Both calls are required. Skipping the SendMessage leaves the teammate idle on `a
 
 Both calls are required. 3+ rejection cycles on the same task is an imPACT META-BLOCK signal.
 
-Teammate self-completion carve-outs (predicate-witnessed): signal-tasks (`metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}`); secretary memory-save (owner in `SELF_COMPLETE_EXEMPT_AGENTS`). Canonical predicate: `is_self_complete_exempt(task)` in `shared/intentional_wait.py`. Separate path: imPACT force-termination (`metadata.terminated == true`) is team-lead-driven.
+Teammate self-completion carve-outs (predicate-witnessed): signal-tasks (`metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}`); secretary memory-save (owner's team-config `agentType` ∈ `SELF_COMPLETE_EXEMPT_AGENT_TYPES` — currently `{pact-secretary}`; resolved via team-config lookup, so the carve-out applies regardless of spawn name). Canonical predicate: `is_self_complete_exempt(task, team_name)` in `shared/intentional_wait.py`. Separate path: imPACT force-termination (`metadata.terminated == true`) is team-lead-driven.
 
 **TaskGet metadata-blindness reminder**: `TaskGet` does NOT surface `metadata.handoff`. Read directly via `cat ~/.claude/tasks/{team_name}/{taskId}.json | jq .metadata.handoff`; do NOT mark completed if missing or empty.
 
