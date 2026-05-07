@@ -1142,24 +1142,22 @@ class TestSubprocessIntegration:
 
 
 class TestConstantsRelocationRegression:
-    """Pin that the constants-relocation step (commit A: 17cb9d11) leaves
-    only the expected sources defining MARKER_SCHEMA_VERSION /
-    MARKER_MAX_BYTES / expected_marker_signature.
+    """Pin that shared/marker_schema.py is the SOLE source of truth for
+    MARKER_SCHEMA_VERSION / MARKER_MAX_BYTES / expected_marker_signature.
 
     Expected sources today:
-    - shared/marker_schema.py — the SSOT (this PR's new home).
-    - shared/dispatch_helpers.py:79-81 — parallel constant. Out-of-scope
-      for this PR; tracked as FOLLOW-UP #2 in the coder handoff and as
-      an independent YELLOW finding from the auditor. This test pins the
-      surface area so the follow-up issue lands on a measurable target.
+    - shared/marker_schema.py — the SSOT.
 
-    A new file defining MARKER_SCHEMA_VERSION = N or MARKER_MAX_BYTES = N
-    inside hooks/ should make this test fail until the new definition is
-    justified (and added to the expected set) or removed."""
+    The earlier parallel constant in shared/dispatch_helpers.py:79-81 was
+    removed in the #673 cleanup; the test now enforces the single-source
+    invariant strictly. A new file defining MARKER_SCHEMA_VERSION = N or
+    MARKER_MAX_BYTES = N inside hooks/ should make this test fail until
+    the new definition is justified (and added to the expected set) or
+    removed."""
 
     HOOKS_ROOT = Path(__file__).parent.parent / "hooks"
 
-    def test_marker_schema_version_defined_only_in_expected_sources(self):
+    def test_marker_schema_version_defined_only_in_marker_schema(self):
         import re
         pat = re.compile(r"^MARKER_SCHEMA_VERSION\s*=\s*\d+", re.MULTILINE)
         offenders = []
@@ -1168,15 +1166,12 @@ class TestConstantsRelocationRegression:
             if pat.search(text):
                 offenders.append(str(py.relative_to(self.HOOKS_ROOT)))
         offenders_str = sorted(offenders)
-        assert offenders_str == [
-            "shared/dispatch_helpers.py",
-            "shared/marker_schema.py",
-        ], (
+        assert offenders_str == ["shared/marker_schema.py"], (
             f"Unexpected MARKER_SCHEMA_VERSION definitions in hooks/: "
-            f"{offenders_str}. The SSOT lives in shared/marker_schema.py; "
-            f"shared/dispatch_helpers.py:79-81 is the known parallel "
-            f"constant tracked as a follow-up issue (auditor YELLOW). "
-            f"Any other definition is a regression."
+            f"{offenders_str}. shared/marker_schema.py is the SSOT; any "
+            f"other definition (including a return of the old "
+            f"shared/dispatch_helpers.py parallel constant removed in "
+            f"the #673 cleanup) is a regression."
         )
 
     def test_marker_max_bytes_defined_only_in_marker_schema(self):
