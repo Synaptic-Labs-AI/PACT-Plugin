@@ -509,3 +509,741 @@ class TestAuditAnchorCompliance:
         out = json.loads(_SUPPRESS_OUTPUT)
         assert out["suppressOutput"] is True
         assert out["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+
+
+# =============================================================================
+# Adversarial team_config.json shapes
+# =============================================================================
+
+
+class TestAdversarialTeamConfig:
+    """Adversarial inputs at the team-config-read surface. _team_has_secretary
+    must return False (silent — the sibling bootstrap_prompt_gate owns the
+    user-visible advisory) on every malformed shape, and the writer must
+    NOT raise. Architect §13 risk #2 (members[] shape change upstream) is
+    mitigated by the lookup catching shape drift; these tests pin the
+    concrete shapes that count as "drift" today."""
+
+    def _write_team_config(self, tmp_path, body):
+        team_dir = tmp_path / ".claude" / "teams" / _TEAM_NAME
+        team_dir.mkdir(parents=True, exist_ok=True)
+        (team_dir / "config.json").write_text(body, encoding="utf-8")
+
+    def test_malformed_json_returns_false(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        self._write_team_config(tmp_path, "{ this is not json")
+        from bootstrap_marker_writer import _team_has_secretary
+        assert _team_has_secretary(_TEAM_NAME) is False
+
+    def test_non_object_top_level_returns_false(self, monkeypatch, tmp_path):
+        """Top-level JSON array (not object). The helper's L125 .get() call
+        would raise AttributeError on a list; pin the expected behavior so
+        a future change can decide whether to harden with isinstance(data,
+        dict) at the parse boundary. Today's behavior: AttributeError
+        propagates → _try_write_marker's outer try/except in main()
+        suppresses to suppressOutput. The unit-test asserts _team_has_secretary
+        returns False OR raises AttributeError; either is acceptable as
+        long as no marker is written."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        self._write_team_config(tmp_path, '["not", "an", "object"]')
+        from bootstrap_marker_writer import _team_has_secretary
+        try:
+            result = _team_has_secretary(_TEAM_NAME)
+            assert result is False
+        except AttributeError:
+            # Acceptable: the outer main() try/except will swallow it.
+            # If a future hardening adds an isinstance(data, dict) guard,
+            # this branch will never execute and the assert above pins
+            # the False return value.
+            pass
+
+    def test_members_key_absent_returns_false(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        self._write_team_config(tmp_path, json.dumps({"name": _TEAM_NAME}))
+        from bootstrap_marker_writer import _team_has_secretary
+        assert _team_has_secretary(_TEAM_NAME) is False
+
+    def test_members_not_a_list_returns_false(self, monkeypatch, tmp_path):
+        """members is a dict instead of a list — the L126-127 isinstance
+        guard rejects, returning False."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        self._write_team_config(
+            tmp_path, json.dumps({"members": {"name": "secretary"}})
+        )
+        from bootstrap_marker_writer import _team_has_secretary
+        assert _team_has_secretary(_TEAM_NAME) is False
+
+    def test_member_entry_not_a_dict_skipped(self, monkeypatch, tmp_path):
+        """members[] contains non-dict entries (str, int, None) interleaved
+        with dicts; non-dicts are skipped via L129 isinstance(member, dict)
+        guard, then the dict member with name=='secretary' is matched."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        self._write_team_config(tmp_path, json.dumps({
+            "members": ["string-entry", 42, None, {"name": "secretary"}]
+        }))
+        from bootstrap_marker_writer import _team_has_secretary
+        assert _team_has_secretary(_TEAM_NAME) is True
+
+    def test_member_without_name_key_skipped(self, monkeypatch, tmp_path):
+        """The lookup is name-keyed, NOT agentType-keyed. A member with
+        only agentType=='secretary' but no 'name' field is NOT matched.
+        Documents the brittleness flagged in the coder handoff
+        open_questions: if the secretary's name field is renamed but
+        agentType is preserved, the writer refuses silently."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        self._write_team_config(tmp_path, json.dumps({
+            "members": [{"id": "a-1"}, {"id": "a-2", "agentType": "secretary"}]
+        }))
+        from bootstrap_marker_writer import _team_has_secretary
+        assert _team_has_secretary(_TEAM_NAME) is False
+
+    def test_member_name_non_string_returns_false(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        self._write_team_config(tmp_path, json.dumps({
+            "members": [{"name": 12345}, {"name": ["secretary"]}]
+        }))
+        from bootstrap_marker_writer import _team_has_secretary
+        # Non-string name fails the equality check against the literal
+        # "secretary"; helper returns False without raising.
+        assert _team_has_secretary(_TEAM_NAME) is False
+
+    def test_team_config_unreadable_returns_false(self, monkeypatch, tmp_path):
+        """Permission-denied on read → caught by the OSError clause."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        team_dir = tmp_path / ".claude" / "teams" / _TEAM_NAME
+        team_dir.mkdir(parents=True, exist_ok=True)
+        cfg = team_dir / "config.json"
+        cfg.write_text(json.dumps({"members": [{"name": "secretary"}]}),
+                       encoding="utf-8")
+        os.chmod(cfg, 0o000)
+        try:
+            from bootstrap_marker_writer import _team_has_secretary
+            assert _team_has_secretary(_TEAM_NAME) is False
+        finally:
+            # Restore so tmp_path teardown succeeds.
+            os.chmod(cfg, 0o600)
+
+
+# =============================================================================
+# Adversarial plugin.json shapes (writer's _read_plugin_version)
+# =============================================================================
+
+
+class TestAdversarialPluginJson:
+    """The writer reads plugin.json's `version` field to compute the
+    fingerprint. Adversarial shapes must yield empty-string ('') so
+    _try_write_marker short-circuits at L231-232 and no marker is written."""
+
+    def test_plugin_root_empty_returns_empty_version(self):
+        from bootstrap_marker_writer import _read_plugin_version
+        assert _read_plugin_version("") == ""
+
+    def test_plugin_json_missing_returns_empty_version(self, tmp_path):
+        from bootstrap_marker_writer import _read_plugin_version
+        plugin_root = tmp_path / "plugin"
+        # No .claude-plugin/ dir → plugin.json doesn't exist.
+        assert _read_plugin_version(str(plugin_root)) == ""
+
+    def test_plugin_json_malformed_returns_empty_version(self, tmp_path):
+        from bootstrap_marker_writer import _read_plugin_version
+        plugin_root = tmp_path / "plugin"
+        (plugin_root / ".claude-plugin").mkdir(parents=True)
+        (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+            "{ malformed", encoding="utf-8"
+        )
+        assert _read_plugin_version(str(plugin_root)) == ""
+
+    def test_plugin_json_without_version_key_returns_empty(self, tmp_path):
+        from bootstrap_marker_writer import _read_plugin_version
+        plugin_root = tmp_path / "plugin"
+        (plugin_root / ".claude-plugin").mkdir(parents=True)
+        (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "pact"}), encoding="utf-8"
+        )
+        assert _read_plugin_version(str(plugin_root)) == ""
+
+    def test_plugin_json_version_empty_string_short_circuits_write(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """Empty version string → _try_write_marker's L231-232 short-circuit
+        fires before _write_marker. No marker on disk."""
+        members = [{"name": "secretary"}]
+        session_dir, plugin_root = _setup_session(
+            monkeypatch, tmp_path, with_team_config=True, members=members,
+        )
+        # Overwrite plugin.json with an empty version string.
+        (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"version": ""}), encoding="utf-8"
+        )
+        code, out = _run_main(_make_input(), capsys)
+        assert code == 0
+        assert out == _SUPPRESS_EXPECTED
+        assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists()
+
+
+# =============================================================================
+# Pre-condition edge cases
+# =============================================================================
+
+
+class TestPreConditionEdgeCases:
+    """Edge cases the coder's smoke suite touches but doesn't fully pin."""
+
+    def test_team_name_empty_string_returns_false(self):
+        """L116-117: empty team_name short-circuits before file read."""
+        from bootstrap_marker_writer import _team_has_secretary
+        assert _team_has_secretary("") is False
+
+    def test_team_name_missing_directory_returns_false(self, monkeypatch, tmp_path):
+        """team_name set but ~/.claude/teams/{name}/config.json doesn't
+        exist → OSError on read → False."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        from bootstrap_marker_writer import _team_has_secretary
+        assert _team_has_secretary("nonexistent-team") is False
+
+    def test_session_dir_unresolvable_skips_write(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """pact_context.get_session_dir() returns falsy → L208-210 returns
+        without proceeding. No marker, no exception."""
+        import shared.pact_context as ctx_module
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        # Force pact_context to return empty session_dir.
+        monkeypatch.setattr(ctx_module, "get_session_dir", lambda: "")
+        monkeypatch.setattr(ctx_module, "init", lambda _input: None)
+        code, out = _run_main(_make_input(), capsys)
+        assert code == 0
+        assert out == _SUPPRESS_EXPECTED
+
+
+# =============================================================================
+# Symlink regression: pin os.replace stdlib semantic on the marker target
+# =============================================================================
+
+
+class TestSymlinkRegression:
+    """Pin current behavior at the symlink/marker boundary. Architect §13
+    does NOT list symlink hardening as a writer-side concern; the verifier
+    (bootstrap_gate.is_marker_set) has S2/S4 defenses that reject markers
+    living under symlinked ancestors or symlinked leaves. These tests
+    document the producer-side stdlib semantics so a future change to
+    either surface is visible in the test diff.
+
+    NOT a hardening test — a regression-pin test. Out-of-scope for this
+    PR per team-lead's clarification on the teachback's symlink judgment
+    call (most_likely_wrong)."""
+
+    def test_os_replace_clobbers_symlink_target_with_regular_file(self, tmp_path):
+        """When the marker target is a pre-existing symlink to elsewhere,
+        os.replace(tmp, target) atomically substitutes the symlink with a
+        regular file — the original symlink-pointed-to file is unchanged.
+        This is the cross-platform stdlib semantic per `os.replace` docs.
+
+        Consequence for the writer: a same-user attacker who plants a
+        symlink at <session_dir>/bootstrap-complete pointing to /etc/hosts
+        does NOT get /etc/hosts overwritten; the writer's os.replace just
+        clobbers the symlink. The verifier's S2 defense
+        (bootstrap_gate.is_marker_set lstat + S_ISREG) is moot for the
+        leaf after this PR's writer runs — the file is regular by
+        construction. S4 (ancestor symlink) is still the verifier's
+        defense and is unaffected by this PR."""
+        from bootstrap_marker_writer import _write_marker
+
+        session_dir = tmp_path / "sd"
+        session_dir.mkdir()
+
+        # Plant a pre-existing symlink at the marker path.
+        external_target = tmp_path / "external.txt"
+        external_target.write_text("DO NOT OVERWRITE", encoding="utf-8")
+        marker_path = session_dir / BOOTSTRAP_MARKER_NAME
+        marker_path.symlink_to(external_target)
+        assert marker_path.is_symlink()
+
+        _write_marker(session_dir, "sid", "/plug", "1.0")
+
+        # Symlink replaced with regular file; external file untouched.
+        assert not marker_path.is_symlink()
+        assert marker_path.is_file()
+        assert external_target.read_text(encoding="utf-8") == "DO NOT OVERWRITE"
+        body = json.loads(marker_path.read_text(encoding="utf-8"))
+        assert body["sid"] == "sid"
+
+    def test_verifier_rejects_marker_under_ancestor_symlink(
+        self, monkeypatch, tmp_path,
+    ):
+        """S4 defense: if any ancestor of session_dir is a symlink,
+        is_marker_set returns False even if the marker is bit-perfect.
+        Pins this behavior survives the constants relocation in this PR
+        (the verifier still imports MARKER_SCHEMA_VERSION/expected_marker_signature
+        from shared.marker_schema after the relocation)."""
+        from bootstrap_gate import is_marker_set
+        from bootstrap_marker_writer import _write_marker
+
+        real_root = tmp_path / "real"
+        real_root.mkdir()
+        session_dir = real_root / _SESSION_ID
+        session_dir.mkdir()
+
+        plugin_root = tmp_path / "plugin"
+        (plugin_root / ".claude-plugin").mkdir(parents=True)
+        (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"version": _PLUGIN_VERSION}), encoding="utf-8"
+        )
+
+        _write_marker(session_dir, _SESSION_ID, str(plugin_root),
+                      _PLUGIN_VERSION)
+
+        import shared.pact_context as ctx_module
+        ctx_module._cache = {
+            "plugin_root": str(plugin_root),
+            "session_id": _SESSION_ID,
+            "session_dir": str(session_dir),
+            "team_name": _TEAM_NAME,
+            "project_dir": _PROJECT_DIR,
+        }
+
+        # Direct access — verifier accepts.
+        assert is_marker_set(session_dir) is True
+        # Through ancestor symlink — verifier rejects per S4.
+        sym_root = tmp_path / "sym"
+        sym_root.symlink_to(real_root)
+        symlinked_session = sym_root / _SESSION_ID
+        assert is_marker_set(symlinked_session) is False
+
+
+# =============================================================================
+# Oversized marker payload
+# =============================================================================
+
+
+class TestOversizedMarker:
+    """The MARKER_MAX_BYTES=256 cap is enforced inside _write_marker before
+    write. A future schema growth that outpaces the cap raises ValueError
+    pre-write so no malformed marker lands on disk."""
+
+    def test_oversized_payload_raises_value_error(self, tmp_path, monkeypatch):
+        from bootstrap_marker_writer import _write_marker
+        import bootstrap_marker_writer as bmw
+        import shared.marker_schema as ms
+
+        # Patch BOTH the SSOT module and the writer's bound reference
+        # (the writer imported the symbol at module-load time).
+        monkeypatch.setattr(ms, "MARKER_MAX_BYTES", 32)
+        monkeypatch.setattr(bmw, "MARKER_MAX_BYTES", 32)
+
+        session_dir = tmp_path / "sd"
+        session_dir.mkdir()
+        with pytest.raises(ValueError, match="exceeds MARKER_MAX_BYTES"):
+            _write_marker(session_dir, "long-" * 20, "/plug", "1.0")
+
+        # No partial marker on disk.
+        assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists()
+        # No leftover temp files either.
+        leftovers = [
+            p for p in session_dir.iterdir()
+            if p.name.startswith(".bootstrap-complete-")
+        ]
+        assert leftovers == []
+
+    def test_main_swallows_oversized_into_suppress(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """When _write_marker raises, main()'s outer try/except converts
+        to suppressOutput (runtime fail-OPEN per architect §6)."""
+        members = [{"name": "secretary"}]
+        session_dir, _ = _setup_session(
+            monkeypatch, tmp_path, with_team_config=True, members=members,
+        )
+        import bootstrap_marker_writer as bmw
+        import shared.marker_schema as ms
+        monkeypatch.setattr(ms, "MARKER_MAX_BYTES", 8)
+        monkeypatch.setattr(bmw, "MARKER_MAX_BYTES", 8)
+
+        code, out = _run_main(_make_input(), capsys)
+        assert code == 0
+        assert out == _SUPPRESS_EXPECTED
+        assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists()
+
+
+# =============================================================================
+# Tampered-marker recovery: writer overwrites invalid markers next prompt
+# =============================================================================
+
+
+class TestTamperedMarkerRecovery:
+    """A marker tampered post-write fails verification; on the next
+    UserPromptSubmit, the writer re-runs is_marker_set, sees False, and
+    re-stamps a fresh valid marker. This is the steady-state self-heal
+    promise of the writer-FIRST hook design (architect §10 + persona §2
+    Re-invoke clause)."""
+
+    @pytest.mark.parametrize("mutation", [
+        "wrong_v",
+        "wrong_sid",
+        "missing_sig",
+        "extra_key",
+        "non_object",
+        "empty_object",
+    ])
+    def test_invalid_marker_overwritten_on_next_prompt(
+        self, mutation, monkeypatch, tmp_path, capsys,
+    ):
+        members = [{"name": "secretary"}]
+        session_dir, plugin_root = _setup_session(
+            monkeypatch, tmp_path,
+            with_team_config=True, members=members,
+        )
+        import shared.pact_context as ctx_module
+
+        marker = session_dir / BOOTSTRAP_MARKER_NAME
+
+        sid = session_dir.name
+        valid_sig = hashlib.sha256(
+            f"{sid}|{str(plugin_root).rstrip('/')}|{_PLUGIN_VERSION}|1".encode()
+        ).hexdigest()
+
+        if mutation == "wrong_v":
+            marker.write_text(
+                json.dumps({"v": 999, "sid": sid, "sig": valid_sig}),
+                encoding="utf-8",
+            )
+        elif mutation == "wrong_sid":
+            marker.write_text(
+                json.dumps({"v": 1, "sid": "wrong-sid", "sig": valid_sig}),
+                encoding="utf-8",
+            )
+        elif mutation == "missing_sig":
+            marker.write_text(json.dumps({"v": 1, "sid": sid}),
+                              encoding="utf-8")
+        elif mutation == "extra_key":
+            marker.write_text(
+                json.dumps({"v": 1, "sid": sid, "sig": valid_sig,
+                            "extra": "hi"}),
+                encoding="utf-8",
+            )
+        elif mutation == "non_object":
+            marker.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+        elif mutation == "empty_object":
+            marker.write_text(json.dumps({}), encoding="utf-8")
+
+        # Confirm verifier rejects the planted invalid marker.
+        from bootstrap_gate import is_marker_set
+        ctx_module._cache = None
+        ctx_module.init({"session_id": _SESSION_ID})
+        assert is_marker_set(session_dir) is False, (
+            f"baseline: verifier should reject mutation={mutation}"
+        )
+
+        # Run the writer; it should overwrite with a valid marker.
+        ctx_module._cache = None
+        code, out = _run_main(_make_input(), capsys)
+        assert code == 0
+        assert out == _SUPPRESS_EXPECTED
+
+        # Marker is now valid.
+        ctx_module._cache = None
+        ctx_module.init({"session_id": _SESSION_ID})
+        assert is_marker_set(session_dir) is True
+
+
+# =============================================================================
+# Subprocess integration: 1 happy-path round-trip
+# =============================================================================
+
+
+class TestSubprocessIntegration:
+    """One subprocess test for the happy path. In-process tests via import
+    + monkeypatch can mask sys.path / module-load issues that only surface
+    when the platform spawns the hook as a fresh process. Per team-lead
+    teachback acceptance: 1 test is the right scope; the bulk stays
+    in-process."""
+
+    def test_subprocess_happy_path_writes_marker(self, tmp_path):
+        import subprocess
+
+        home = tmp_path
+        slug = "testproj"
+        session_id = "subproc-session-id"
+        team_name = "pact-subproc01"
+        plugin_version = "9.9.9-subproc"
+
+        session_dir = home / ".claude" / "pact-sessions" / slug / session_id
+        session_dir.mkdir(parents=True)
+
+        plugin_root = home / "plugin"
+        (plugin_root / ".claude-plugin").mkdir(parents=True)
+        (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"version": plugin_version}), encoding="utf-8"
+        )
+
+        team_dir = home / ".claude" / "teams" / team_name
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text(
+            json.dumps({"members": [{"id": "a-1", "name": "secretary"}]}),
+            encoding="utf-8",
+        )
+
+        ctx = session_dir / "pact-session-context.json"
+        ctx.write_text(json.dumps({
+            "team_name": team_name,
+            "session_id": session_id,
+            "project_dir": f"/tmp/{slug}",
+            "plugin_root": str(plugin_root),
+            "started_at": "2026-01-01T00:00:00Z",
+        }), encoding="utf-8")
+
+        hook_path = (
+            Path(__file__).parent.parent / "hooks" /
+            "bootstrap_marker_writer.py"
+        )
+        assert hook_path.exists(), f"writer hook missing at {hook_path}"
+
+        stdin_payload = json.dumps({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": session_id,
+            "prompt": "first real prompt",
+            "source": "startup",
+        })
+
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        # pact_context.init reads CLAUDE_PROJECT_DIR to compute the slug
+        # that the session_dir lives under (~/.claude/pact-sessions/{slug}/
+        # {session_id}). Without it, get_session_dir() returns '' and the
+        # writer silently no-ops at L208-210.
+        env["CLAUDE_PROJECT_DIR"] = f"/tmp/{slug}"
+
+        result = subprocess.run(
+            [sys.executable, str(hook_path)],
+            input=stdin_payload,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(home),
+            timeout=10,
+        )
+        assert result.returncode == 0, (
+            f"subprocess exit non-zero. stderr={result.stderr!r} "
+            f"stdout={result.stdout!r}"
+        )
+        # suppressOutput envelope (post-audit-fix shape includes
+        # hookSpecificOutput.hookEventName).
+        out = json.loads(result.stdout.strip())
+        assert out["suppressOutput"] is True
+        assert out["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+
+        marker = session_dir / BOOTSTRAP_MARKER_NAME
+        assert marker.exists(), "marker should be written via subprocess"
+        body = json.loads(marker.read_text(encoding="utf-8"))
+        assert body["v"] == 1
+        assert body["sid"] == session_id
+        expected_sig = hashlib.sha256(
+            f"{session_id}|{plugin_root}|{plugin_version}|1".encode()
+        ).hexdigest()
+        assert body["sig"] == expected_sig
+
+
+# =============================================================================
+# Constants relocation regression sweep
+# =============================================================================
+
+
+class TestConstantsRelocationRegression:
+    """Pin that the constants-relocation step (commit A: 17cb9d11) leaves
+    only the expected sources defining MARKER_SCHEMA_VERSION /
+    MARKER_MAX_BYTES / expected_marker_signature.
+
+    Expected sources today:
+    - shared/marker_schema.py — the SSOT (this PR's new home).
+    - shared/dispatch_helpers.py:79-81 — parallel constant. Out-of-scope
+      for this PR; tracked as FOLLOW-UP #2 in the coder handoff and as
+      an independent YELLOW finding from the auditor. This test pins the
+      surface area so the follow-up issue lands on a measurable target.
+
+    A new file defining MARKER_SCHEMA_VERSION = N or MARKER_MAX_BYTES = N
+    inside hooks/ should make this test fail until the new definition is
+    justified (and added to the expected set) or removed."""
+
+    HOOKS_ROOT = Path(__file__).parent.parent / "hooks"
+
+    def test_marker_schema_version_defined_only_in_expected_sources(self):
+        import re
+        pat = re.compile(r"^MARKER_SCHEMA_VERSION\s*=\s*\d+", re.MULTILINE)
+        offenders = []
+        for py in self.HOOKS_ROOT.rglob("*.py"):
+            text = py.read_text(encoding="utf-8")
+            if pat.search(text):
+                offenders.append(str(py.relative_to(self.HOOKS_ROOT)))
+        offenders_str = sorted(offenders)
+        assert offenders_str == [
+            "shared/dispatch_helpers.py",
+            "shared/marker_schema.py",
+        ], (
+            f"Unexpected MARKER_SCHEMA_VERSION definitions in hooks/: "
+            f"{offenders_str}. The SSOT lives in shared/marker_schema.py; "
+            f"shared/dispatch_helpers.py:79-81 is the known parallel "
+            f"constant tracked as a follow-up issue (auditor YELLOW). "
+            f"Any other definition is a regression."
+        )
+
+    def test_marker_max_bytes_defined_only_in_marker_schema(self):
+        import re
+        pat = re.compile(r"^MARKER_MAX_BYTES\s*=\s*\d+", re.MULTILINE)
+        offenders = []
+        for py in self.HOOKS_ROOT.rglob("*.py"):
+            text = py.read_text(encoding="utf-8")
+            if pat.search(text):
+                offenders.append(str(py.relative_to(self.HOOKS_ROOT)))
+        offenders_str = sorted(offenders)
+        assert offenders_str == ["shared/marker_schema.py"], (
+            f"Unexpected MARKER_MAX_BYTES definitions in hooks/: "
+            f"{offenders_str}. Only shared/marker_schema.py is permitted."
+        )
+
+    def test_expected_marker_signature_defined_only_in_marker_schema(self):
+        import re
+        pat = re.compile(r"^def\s+expected_marker_signature\s*\(", re.MULTILINE)
+        offenders = []
+        for py in self.HOOKS_ROOT.rglob("*.py"):
+            text = py.read_text(encoding="utf-8")
+            if pat.search(text):
+                offenders.append(str(py.relative_to(self.HOOKS_ROOT)))
+        offenders_str = sorted(offenders)
+        assert offenders_str == ["shared/marker_schema.py"], (
+            f"Unexpected expected_marker_signature definitions: "
+            f"{offenders_str}. Only shared/marker_schema.py is permitted."
+        )
+
+
+# =============================================================================
+# Captured-fixture parity: synthetic shape contains documented platform fields
+# =============================================================================
+
+
+class TestFixtureShapeParity:
+    """The synthetic fixture is replaced post-merge with a real captured-
+    from-production stdin (architect §8.7). Until then, the synthetic
+    must include the documented platform fields so a partial regression
+    of the platform schema is visible at fixture-replacement time.
+
+    Pinned shape: hook_event_name, session_id, prompt, source. These are
+    the fields the writer's main() and pact_context.init() actually read."""
+
+    FIXTURE = (
+        Path(__file__).parent / "fixtures" /
+        "userpromptsubmit_stdin_post_bootstrap.json"
+    )
+
+    def test_fixture_contains_documented_platform_fields(self):
+        data = json.loads(self.FIXTURE.read_text(encoding="utf-8"))
+        # _comment is the synthetic-fixture marker; strip before checking.
+        data.pop("_comment", None)
+        for required in ("hook_event_name", "session_id", "prompt", "source"):
+            assert required in data, (
+                f"fixture missing platform field {required!r}; the "
+                f"synthetic placeholder must mirror the documented "
+                f"UserPromptSubmit stdin shape until the captured-from-"
+                f"production version replaces it (architect §8.7)."
+            )
+        assert data["hook_event_name"] == "UserPromptSubmit"
+
+    def test_fixture_synthetic_marker_present(self):
+        """The _comment field marks the fixture as synthetic. When the
+        captured-from-production version lands, this test should be
+        DELETED (not updated) — the synthetic-marker check is intentionally
+        scoped to the synthetic placeholder phase."""
+        data = json.loads(self.FIXTURE.read_text(encoding="utf-8"))
+        assert "_comment" in data, (
+            "synthetic-fixture _comment field absent; if you've replaced "
+            "with a real captured fixture, also delete this test "
+            "(per the test docstring)."
+        )
+        assert "TODO" in data["_comment"]
+
+
+# =============================================================================
+# /clear path interaction: writer self-heals or refuses based on team-config state
+# =============================================================================
+
+
+class TestClearPathInteraction:
+    """Architect §13 risk #6 + persona §2 Re-invoke clause. The writer's
+    self-healing promise covers two distinct /clear-related states:
+
+    1. Marker zapped, team config preserved → next-prompt writer rewrites
+       (steady-state self-heal). This is the path that survives the rare
+       case where a user removes the marker without /clear.
+    2. Marker zapped AND team config zapped (the full /clear semantic per
+       session_init.py:712-720) → writer refuses (verify-and-refuse silent
+       path) until TeamCreate runs again. The persona §2 Re-invoke clause
+       directs the orchestrator to re-execute the bootstrap ritual."""
+
+    def test_marker_only_zap_self_heals_on_next_prompt(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """Steady-state path: team config intact, marker deleted. Writer
+        rewrites a valid marker on the next prompt without orchestrator
+        intervention."""
+        members = [{"name": "secretary"}]
+        session_dir, _ = _setup_session(
+            monkeypatch, tmp_path,
+            with_team_config=True, members=members, with_marker=True,
+        )
+        marker = session_dir / BOOTSTRAP_MARKER_NAME
+        assert marker.exists()
+        marker.unlink()
+
+        code, out = _run_main(_make_input(), capsys)
+        assert code == 0
+        assert out == _SUPPRESS_EXPECTED
+        # Self-heal: marker rewritten without manual orchestrator action.
+        assert marker.exists()
+
+    def test_full_clear_zap_refuses_silently(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """Full /clear: marker AND team config gone. Writer refuses
+        (verify-and-refuse silent path); persona §2 Re-invoke directive
+        owns the orchestrator-driven TeamCreate re-execution."""
+        session_dir, _ = _setup_session(
+            monkeypatch, tmp_path, with_team_config=False,
+        )
+        code, out = _run_main(_make_input(), capsys)
+        assert code == 0
+        assert out == _SUPPRESS_EXPECTED
+        assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists()
+
+
+# =============================================================================
+# Atomicity: temp-file location is in same dir as target (cross-FS-safe replace)
+# =============================================================================
+
+
+class TestAtomicityTempFileLocation:
+    """Architect §5: tempfile.mkstemp(dir=session_dir) ensures os.replace
+    is atomic. A cross-FS replace degrades to copy+unlink, breaking the
+    atomicity contract. Pin the same-dir invariant by spying on mkstemp."""
+
+    def test_tempfile_created_in_session_dir(self, tmp_path, monkeypatch):
+        from bootstrap_marker_writer import _write_marker
+        import bootstrap_marker_writer as bmw
+
+        session_dir = tmp_path / "sd"
+        session_dir.mkdir()
+
+        captured = {}
+        original_mkstemp = bmw.tempfile.mkstemp
+
+        def spy_mkstemp(*args, **kwargs):
+            captured["dir"] = kwargs.get("dir")
+            captured["prefix"] = kwargs.get("prefix")
+            captured["suffix"] = kwargs.get("suffix")
+            return original_mkstemp(*args, **kwargs)
+
+        monkeypatch.setattr(bmw.tempfile, "mkstemp", spy_mkstemp)
+
+        _write_marker(session_dir, "sid", "/plug", "1.0")
+
+        assert captured["dir"] == str(session_dir)
+        assert captured["prefix"] == ".bootstrap-complete-"
+        assert captured["suffix"] == ".tmp"
