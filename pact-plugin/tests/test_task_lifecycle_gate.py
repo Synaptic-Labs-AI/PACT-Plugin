@@ -296,6 +296,48 @@ def test_silent_when_handoff_well_formed(pact_context):
     assert not any(rule == "handoff_schema_invalid" for rule, _ in advisories)
 
 
+@pytest.mark.parametrize(
+    "metadata_shape",
+    [
+        {},  # absent metadata.handoff
+        {"handoff": {}},  # empty-dict metadata.handoff
+        {"handoff": None},  # explicit-null metadata.handoff
+    ],
+    ids=["absent", "empty_dict", "null"],
+)
+def test_advisory_when_pact_work_task_completes_without_handoff(
+    metadata_shape, pact_context,
+):
+    """A pact-* work Task that transitions to status=completed without a
+    metadata.handoff payload fires the handoff_missing advisory. Covers
+    three variants of "no handoff": absent key, empty dict, explicit
+    null. The schema-invalid rule must NOT also fire — handoff_missing
+    and handoff_schema_invalid are disjoint per the gate contract.
+    """
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "42", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "42",
+                "subject": "implement foo",
+                "owner": "pact-backend-coder",
+                "metadata": metadata_shape,
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(rule == "handoff_missing" for rule, _ in advisories), (
+        f"expected handoff_missing advisory for {metadata_shape}, "
+        f"got: {advisories}"
+    )
+    assert not any(rule == "handoff_schema_invalid" for rule, _ in advisories), (
+        "handoff_missing and handoff_schema_invalid must be disjoint; "
+        f"both fired for {metadata_shape}"
+    )
+
+
 # =============================================================================
 # handoff_schema_invalid — handoff present but schema malformed (disjoint from handoff_missing)
 # =============================================================================

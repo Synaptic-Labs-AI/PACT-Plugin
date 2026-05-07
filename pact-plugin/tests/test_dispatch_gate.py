@@ -296,7 +296,10 @@ def test_allows_name_at_64_char_boundary(tmp_path, monkeypatch, capsys):
         "BadName",  # uppercase
         "has space",  # space
         "has_underscore",  # underscore
-        "trailing-",  # trailing dash that still matches but reserved? regex allows it
+        "trailing-",  # degenerate: trailing hyphen
+        "-leading",  # degenerate: leading hyphen
+        "--",  # degenerate: only hyphens
+        "-",  # degenerate: single hyphen
         "(parens)",  # parens
         "with\nnewline",  # newline
         "наме",  # Cyrillic — fails regex even after NFKC
@@ -306,7 +309,10 @@ def test_allows_name_at_64_char_boundary(tmp_path, monkeypatch, capsys):
         "uppercase",
         "space",
         "underscore",
-        "trailing_dash",  # trailing dash regex-passes; mark below if needed
+        "trailing_dash",
+        "leading_dash",
+        "only_hyphens",
+        "single_hyphen",
         "parens",
         "newline",
         "cyrillic",
@@ -314,16 +320,14 @@ def test_allows_name_at_64_char_boundary(tmp_path, monkeypatch, capsys):
     ],
 )
 def test_deny_invalid_name_chars(bad_name, tmp_path, monkeypatch, capsys):
-    """NFKC normalize then regex check — none of these survive."""
+    """NFKC normalize then regex check — none of these survive.
+
+    The regex requires at least one alphanumeric and forbids leading or
+    trailing hyphens; degenerate names like "-", "--", "-foo", "foo-"
+    are rejected by name_invalid_regex.
+    """
     _full_setup(monkeypatch, tmp_path)
     code, out = _run_main(_make_input(name=bad_name), capsys)
-    if bad_name == "trailing-":
-        # Regex ^[a-z0-9-]+$ accepts trailing dash; this case should ALLOW
-        # (or fail another rule, but not the name-regex rule). Skip the deny assertion.
-        if code == 2:
-            reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-            assert "must match" not in reason
-        return
     assert code == 2
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
     assert "must match" in reason
@@ -393,6 +397,19 @@ def test_self_complete_exempt_agents_are_all_reserved():
     agent to the exempt set without also adding it to RESERVED_NAMES,
     this test fails — closing the confused-deputy bypass before it
     ships.
+
+    Categorical pattern. This exempt-vs-reserved pairing is a specific
+    instance of a general rule: any future privilege class keyed on
+    owner-name (audit-only, signing-authority, telemetry-immune,
+    quota-exempt, anything else that gates an action by matching a
+    teammate name) MUST (a) live in a shared module so the privilege
+    membership is the single source of truth, and (b) carry its own
+    ⊆ RESERVED_NAMES subset assertion so a dispatch can never spawn
+    under one of those names. The lifecycle gate's
+    SELF_COMPLETE_EXEMPT_AGENTS is the first such class; this test is
+    the template for any future ones. Adding a new privilege class
+    without the subset assertion re-opens the same defect class
+    (spawn-under-privileged-name → confused-deputy bypass).
     """
     import dispatch_gate
     from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENTS
@@ -707,11 +724,30 @@ def test_journal_emit_on_warn_carries_f7(tmp_path, monkeypatch, capsys):
         # Adjacent-string-literal concatenation defeats the repo-root
         # pre-commit secret-scanner regex while preserving runtime value.
         "sk" "-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+        "sk" "-ant-" "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+        "sk" "-ant-" "api03-" "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
         "xoxb" "-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
         "ghp" "_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+        "gho" "_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+        "ghu" "_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+        "ghs" "_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+        "ghr" "_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
         "AKIA" "ABCDEFGHIJKLMNOP",
+        "AIza" "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
     ],
-    ids=["openai", "slack", "github_pat", "aws"],
+    ids=[
+        "openai",
+        "anthropic_basic",
+        "anthropic_api03",
+        "slack",
+        "github_pat",
+        "github_oauth",
+        "github_user",
+        "github_server",
+        "github_refresh",
+        "aws",
+        "google",
+    ],
 )
 def test_redacts_credential_patterns_in_journal(
     secret_token, tmp_path, monkeypatch, capsys
@@ -749,6 +785,33 @@ def test_redacts_jwt_shape_in_journal(tmp_path, monkeypatch, capsys):
     journaled = captured[-1].get("prompt_redacted", "")
     assert "[REDACTED]" in journaled
     assert fake_jwt not in journaled
+
+
+def test_redacts_pem_private_key_block_in_journal(tmp_path, monkeypatch, capsys):
+    """A multi-line PEM-encoded private-key block is fully redacted at
+    the journal-write boundary, so accidentally pasting a key into a
+    spawn prompt never persists to disk.
+    """
+    captured = _capture_journal(monkeypatch)
+    _full_setup(monkeypatch, tmp_path)
+    # Adjacent-string-literal concatenation so the repo-root pre-commit
+    # secret-scanner does not flag this fixture as a real key. Runtime
+    # value matches the joined literal.
+    fake_pem = (
+        "-----BEGIN " "RSA PRIVATE KEY" "-----\n"
+        "MIIEowIBAAKCAQEA0Z8ZLfaketestkeyforredaction0123456789ABCDEFGH\n"
+        "moarbase64andthensome+/abcdefghijklmnopqrstuvwxyzABCDEFGHIJKL\n"
+        "-----END " "RSA PRIVATE KEY" "-----"
+    )
+    _run_main(
+        _make_input(prompt=f"Pasted key follows:\n{fake_pem}\nCheck TaskList."),
+        capsys,
+    )
+    assert captured
+    journaled = captured[-1].get("prompt_redacted", "")
+    assert "[REDACTED]" in journaled
+    assert "MIIEowIBAAKCAQEA" not in journaled
+    assert "RSA PRIVATE KEY" not in journaled
 
 
 # =============================================================================
@@ -886,3 +949,41 @@ def test_canonical_path_aligns_with_task_utils(tmp_path, monkeypatch):
 
     assert has_task_assigned(_TEAM, _NAME) is True
     assert read_task_json("1", _TEAM).get("owner") == _NAME
+
+
+# =============================================================================
+# team_name case-sensitivity normalization
+# =============================================================================
+
+
+def test_mixed_case_team_name_normalizes_consistently(tmp_path, monkeypatch, capsys):
+    """A spawn under a mixed-case team_name behaves identically to its
+    lowercase form across the session-equality, member-uniqueness, and
+    task-assigned rules.
+
+    Without normalization at the entry of evaluate_dispatch, the
+    session-equality check would lowercase its operand while the
+    filesystem reads (member-roster + task-store) used the raw value.
+    On a case-sensitive filesystem the spawn would slip past the
+    equality check yet read the wrong directories, producing
+    inconsistent verdicts.
+
+    The fixture seeds tasks + members under the canonical lowercase team
+    directory (which is what session_team returns); the spawn input
+    passes the same name in mixed case. Expect ALLOW, matching the
+    pure-lowercase happy path.
+    """
+    plugin_root = _full_setup(
+        monkeypatch,
+        tmp_path,
+        members=("someone-else",),
+        tasks=((_NAME, "pending"),),
+    )
+    assert plugin_root  # used to ensure setup completes
+
+    mixed = _TEAM.upper()  # e.g. "PACT-TEST"
+    code, out = _run_main(_make_input(team_name=mixed), capsys)
+    assert code == 0, (
+        f"Mixed-case team_name should normalize and ALLOW (canonical "
+        f"lowercase form passes all rules); got code={code} out={out}"
+    )

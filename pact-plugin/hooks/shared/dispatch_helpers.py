@@ -62,6 +62,7 @@ try:
     import functools
     from pathlib import Path
     import shared.pact_context as pact_context
+    from shared.task_utils import iter_team_task_jsons
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_deny("module imports", _module_load_error)
 
@@ -117,35 +118,23 @@ def has_task_assigned(team_name: str, name: str) -> bool:
     """True iff at least one task in ``team_name``'s task store has
     ``owner==name`` AND ``status in {"pending", "in_progress"}``.
 
-    Reads ``~/.claude/tasks/{team_name}/*.json`` directly — the canonical
-    task store per ``shared/task_utils.py`` (read_task_json,
-    iter_team_tasks). TaskList is a harness tool unavailable in subprocess
-    context — direct FS read is the only viable channel. Tolerant parsing:
-    malformed JSON or missing fields → skip that file (False contribution).
-    Path traversal is defended upstream (the name-regex rule on name;
-    the session-team-equality rule on team_name) — by the time this
-    runs, both have passed validation.
+    Delegates path construction and per-file reading to
+    ``shared.task_utils.iter_team_task_jsons``, the single source of truth
+    for per-team task iteration. That helper enforces the canonical
+    ``~/.claude/tasks/{team_name}/*.json`` layout and applies path-traversal
+    + symlink-escape defenses; centralizing the path here prevents the
+    layout duplication that previously caused this gate to read the wrong
+    directory. TaskList is a harness tool unavailable in subprocess
+    context, so direct FS read via the helper is the only viable channel.
     """
     if not isinstance(team_name, str) or not team_name:
         return False
     if not isinstance(name, str) or not name:
         return False
-    tasks_dir = Path.home() / ".claude" / "tasks" / team_name
-    try:
-        task_files = list(tasks_dir.glob("*.json"))
-    except OSError:
-        return False
-    for path in task_files:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(data, dict):
-            continue
+    for data in iter_team_task_jsons(team_name):
         if data.get("owner") != name:
             continue
-        status = data.get("status")
-        if status in ("pending", "in_progress"):
+        if data.get("status") in ("pending", "in_progress"):
             return True
     return False
 

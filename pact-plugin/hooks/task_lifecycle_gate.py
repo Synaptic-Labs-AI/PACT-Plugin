@@ -78,7 +78,10 @@ try:
 
     import shared.pact_context as pact_context
     from shared.dispatch_helpers import trustworthy_actor_name
-    from shared.intentional_wait import is_self_complete_exempt
+    from shared.intentional_wait import (
+        SELF_COMPLETE_EXEMPT_AGENTS,
+        is_self_complete_exempt,
+    )
     from shared.session_journal import append_event, make_event
     from shared.task_utils import read_task_json
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
@@ -91,9 +94,10 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
 # rule. Per architect §7 / plan: 120s.
 PAIRED_SENDMESSAGE_WINDOW_S = 120
 
-# Owner-name carve-out for the self-completion rule (mirrors
-# shared.intentional_wait.SELF_COMPLETE_EXEMPT_AGENTS).
-SELF_COMPLETE_EXEMPT_AGENTS = frozenset({"secretary", "pact-secretary"})
+# Owner-name carve-out for the self-completion rule is imported from
+# shared.intentional_wait (the single source of truth). The dispatch_gate
+# RESERVED_NAMES set holds the same names so a teammate can never spawn
+# under one of these — see test_self_complete_exempt_agents_are_all_reserved.
 
 # Required handoff schema fields (advisory if present-but-malformed).
 _HANDOFF_REQUIRED_FIELDS = (

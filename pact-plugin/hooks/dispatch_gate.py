@@ -103,7 +103,11 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
 
 # Name validation. Order: length cap → NFKC normalize → regex → reserved.
 # NFKC defends against fullwidth/lookalike chars that pass naive regex.
-NAME_REGEX = re.compile(r"^[a-z0-9-]+$")
+# The regex requires at least one alphanumeric and forbids leading or
+# trailing hyphens, so degenerate names like "-", "--", "-foo", "foo-"
+# are rejected. Internal hyphens are permitted; the single-character
+# form must itself be alphanumeric.
+NAME_REGEX = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 NAME_MAX_LENGTH = 64
 
 # Reserved tokens (per Task #25 description / security HANDOFF). Names
@@ -176,12 +180,30 @@ if INLINE_MISSION_MODE not in _ALLOWED_INLINE_MISSION_MODES:
 # only; the in-memory ``permissionDecisionReason`` keeps the verbatim
 # prompt for the dispatcher's debugging.
 REDACTION_PATTERNS = (
+    # Anthropic API keys, including the sk-ant-api03-... family. Matched
+    # before the generic sk- prefix so the longer, more specific shape
+    # is captured cleanly.
+    re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"),
+    # OpenAI-style sk- keys.
     re.compile(r"sk-[A-Za-z0-9]{20,}"),
     re.compile(r"xoxb-[A-Za-z0-9-]{20,}"),
-    re.compile(r"ghp_[A-Za-z0-9]{20,}"),
+    # GitHub tokens: personal-access (ghp_), OAuth (gho_), user-server
+    # (ghu_), server-to-server (ghs_), refresh (ghr_).
+    re.compile(r"gh[oprsu]_[A-Za-z0-9]{20,}"),
+    # AWS access key id.
     re.compile(r"AKIA[A-Z0-9]{16}"),
+    # Google API keys (39-char total: AIza prefix + 35 chars).
+    re.compile(r"AIza[A-Za-z0-9_-]{35}"),
     # JWT shape: three base64url segments joined with dots.
     re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
+    # PEM private-key blocks (any flavor: RSA, EC, OPENSSH, plain
+    # PRIVATE KEY, ENCRYPTED PRIVATE KEY). DOTALL so the body across
+    # newlines is consumed by the redactor; non-greedy to stop at the
+    # first END line.
+    re.compile(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+        re.DOTALL,
+    ),
 )
 
 
@@ -275,6 +297,14 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
                 "pact-* specialist spawns.",
                 "team_name_required")
 
+    # Normalize team_name to its canonical form (lowercase, stripped) once
+    # and reuse it for the session-equality check, the team-config read,
+    # and the task-store read. Without this, the session-equality check
+    # would compare against a lowercased copy while the filesystem reads
+    # used the raw value, producing inconsistent behavior on
+    # case-sensitive filesystems.
+    team_name = team_name.strip().lower()
+
     # ④ Name validation. Length cap FIRST (cheap), then NFKC normalization
     # (defends against fullwidth/lookalike unicode that would otherwise
     # pass the regex), then regex on the NORMALIZED form, then
@@ -331,7 +361,7 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
                 "(pact-session-context.json missing or unreadable). "
                 "Re-run /PACT:bootstrap to restore session context.",
                 "team_name_unavailable")
-    if team_name.lower() != session_team:
+    if team_name != session_team:
         return ("DENY",
                 f"PACT dispatch_gate: team_name {team_name!r} does not "
                 f"match current session team {session_team!r}. Use the "
