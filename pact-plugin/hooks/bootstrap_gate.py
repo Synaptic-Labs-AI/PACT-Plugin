@@ -106,7 +106,10 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
     _emit_load_failure_deny("module imports", _module_load_error)
 
 
-_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+_SUPPRESS_OUTPUT = json.dumps({
+    "suppressOutput": True,
+    "hookSpecificOutput": {"hookEventName": "PreToolUse"},
+})
 
 # Code-editing and agent-dispatch tools blocked until bootstrap completes.
 # Bash is intentionally NOT blocked — the orchestrator needs it during the
