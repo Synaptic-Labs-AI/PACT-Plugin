@@ -28,7 +28,7 @@ Implementation references:
 - `pact-plugin/hooks/task_lifecycle_gate.py` — PostToolUse `matcher='TaskCreate|TaskUpdate'`
 - `pact-plugin/hooks/bootstrap_gate.py::is_marker_set` — SHA256 marker-content verifier
 - `pact-plugin/hooks/hooks.json` — hook registration matchers
-- `pact-plugin/hooks/shared/dispatch_helpers.py` — registry + task-assigned helpers + `F24_MARKER_VERSION`
+- `pact-plugin/hooks/shared/dispatch_helpers.py` — registry + task-assigned helpers + `MARKER_SCHEMA_VERSION`
 - Architect: `docs/architecture/662-dispatch-protocol.md` §7(a) (inline-mission mode rationale), §10 (marker-content verifier)
 
 ---
@@ -131,7 +131,7 @@ rejected by `is_marker_set`'s SHA256 content-fingerprint check.
    fires on `_BLOCKED_TOOLS`; an `Agent()` call is sufficient).
 4. Expect: gate STILL denies because the marker file content is empty —
    The verifier (`is_marker_set`) requires a JSON body with
-   `v == F24_MARKER_VERSION`, valid SHA256 sentinel bound to
+   `v == MARKER_SCHEMA_VERSION`, valid SHA256 sentinel bound to
    `(session_id, plugin_root, version)`.
 
 **Pass criteria**:
@@ -156,7 +156,7 @@ remainder of the runbook.
 
 Repeat with the marker file containing the literal string `not-json` (or
 a JSON object with `v=999`). Expect rejection — the verifier enforces both schema
-shape and `v == F24_MARKER_VERSION`.
+shape and `v == MARKER_SCHEMA_VERSION`.
 
 ---
 

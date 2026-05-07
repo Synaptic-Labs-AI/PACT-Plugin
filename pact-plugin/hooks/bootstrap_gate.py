@@ -122,12 +122,12 @@ _BLOCKED_TOOLS = frozenset({
 # Marker schema version. Bump if marker JSON shape changes; verifier
 # rejects unknown versions. Producer (commands/bootstrap.md) must emit a
 # matching `v` field.
-F24_MARKER_VERSION = 1
+MARKER_SCHEMA_VERSION = 1
 
 # Marker file size cap (bytes). The marker JSON is a small fixed schema
 # ({v, sid, sig}); a content larger than this is rejected to defend against
 # pathological reads.
-_F24_MARKER_MAX_BYTES = 256
+_MARKER_MAX_BYTES = 256
 
 _DENY_REASON = (
     "PACT bootstrap required. Invoke Skill(\"PACT:bootstrap\") first. "
@@ -158,9 +158,9 @@ def is_marker_set(session_dir: "Path | None") -> bool:
     Returns True iff `<session_dir>/<BOOTSTRAP_MARKER_NAME>` exists as a
     REGULAR FILE (not a symlink, not a directory) AND no ancestor of the
     session_dir is a symlink AND its content is a valid stamp:
-      - file size ≤ ``_F24_MARKER_MAX_BYTES``
+      - file size ≤ ``_MARKER_MAX_BYTES``
       - parses as JSON object with EXACTLY keys {"v", "sid", "sig"}
-      - ``v`` is integer == ``F24_MARKER_VERSION``
+      - ``v`` is integer == ``MARKER_SCHEMA_VERSION``
       - ``sid`` equals ``session_dir.name`` (binds marker to its session)
       - ``sig`` matches ``_expected_marker_signature`` via
         ``hmac.compare_digest`` (constant-time compare)
@@ -196,7 +196,7 @@ def is_marker_set(session_dir: "Path | None") -> bool:
         signature inputs are readable from the same-user filesystem
         (session_id and plugin_root from pact-session-context.json,
         plugin_version from plugin.json, marker_version from this
-        module's F24_MARKER_VERSION constant), so a same-user attacker
+        module's MARKER_SCHEMA_VERSION constant), so a same-user attacker
         with Python execution and read access to those files can
         recompute the digest. The signature is a fingerprint that
         raises attacker effort from a one-line `touch` to a multi-line
@@ -233,7 +233,7 @@ def is_marker_set(session_dir: "Path | None") -> bool:
 
     # Verify marker CONTENT (#662 — closes the Bash-touch bypass).
     try:
-        if st.st_size <= 0 or st.st_size > _F24_MARKER_MAX_BYTES:
+        if st.st_size <= 0 or st.st_size > _MARKER_MAX_BYTES:
             return False
         content = marker_path.read_text(encoding="utf-8").strip()
         parsed = json.loads(content)
@@ -241,7 +241,7 @@ def is_marker_set(session_dir: "Path | None") -> bool:
             return False
         if set(parsed.keys()) != {"v", "sid", "sig"}:
             return False
-        if not isinstance(parsed["v"], int) or parsed["v"] != F24_MARKER_VERSION:
+        if not isinstance(parsed["v"], int) or parsed["v"] != MARKER_SCHEMA_VERSION:
             return False
         if not isinstance(parsed["sid"], str) or parsed["sid"] != session_dir.name:
             return False

@@ -82,7 +82,7 @@ The marker is a JSON sentinel `{"v": 1, "sid": <session_id>, "sig": SHA256("<sid
      Marker schema (v=1, keys {v,sid,sig}, signature input order
      "sid|plugin_root|plugin_version|v") must match the verifier in
      pact-plugin/hooks/bootstrap_gate.py::is_marker_set + the
-     F24_MARKER_VERSION constant. Bumping the schema version requires
+     MARKER_SCHEMA_VERSION constant. Bumping the schema version requires
      updating BOTH this producer AND the verifier in lockstep.
      Pattern: convention-must-be-enforced-not-just-documented (test_three_surface_split_enforcement.py
      pins the persona §2 / bootstrap.md split; this comment pins the marker-name SSOT). -->

@@ -120,7 +120,7 @@ def _write_f24_marker(session_dir: Path, plugin_root: Path,
     """Write a properly-stamped marker. Override fields to forge invalid
     variants for negative tests.
     """
-    from bootstrap_gate import F24_MARKER_VERSION
+    from bootstrap_gate import MARKER_SCHEMA_VERSION
 
     real_sid = sid if sid is not None else session_dir.name
     real_sig_input = (
@@ -133,9 +133,9 @@ def _write_f24_marker(session_dir: Path, plugin_root: Path,
     marker = session_dir / BOOTSTRAP_MARKER_NAME
     marker.write_text(json.dumps(payload), encoding="utf-8")
     # Sanity: caller using default args should produce a valid stamp
-    # for the current F24_MARKER_VERSION constant.
+    # for the current MARKER_SCHEMA_VERSION constant.
     if marker_version == 1:
-        assert F24_MARKER_VERSION == 1
+        assert MARKER_SCHEMA_VERSION == 1
     return marker
 
 
@@ -775,7 +775,7 @@ class TestIsMarkerSet:
         assert is_marker_set(session_dir) is False
 
     def test_rejects_wrong_version(self, monkeypatch, tmp_path):
-        """Marker with v != F24_MARKER_VERSION rejected."""
+        """Marker with v != MARKER_SCHEMA_VERSION rejected."""
         from bootstrap_gate import is_marker_set
 
         session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=False)

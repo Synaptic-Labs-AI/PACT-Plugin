@@ -11,7 +11,7 @@ Exposes:
   - trustworthy_actor_name(input_data) — actor resolution for the
     task_lifecycle_gate self-completion rule
   - SOLO_EXEMPT — research/exploration agents that bypass dispatch_gate
-  - F24_MARKER_VERSION — bootstrap marker schema version
+  - MARKER_SCHEMA_VERSION — bootstrap marker schema version
 
 Module-load discipline (architect §5.6):
   Stdlib imports (json/sys/os) AND _emit_load_failure_deny defined BEFORE
@@ -75,9 +75,9 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
 SOLO_EXEMPT = frozenset({"general-purpose", "Explore", "Plan"})
 
 # Bootstrap marker schema version. Mirror constant from bootstrap_gate.py; bump
-# here AND in bootstrap_gate.F24_MARKER_VERSION if marker JSON shape ever
+# here AND in bootstrap_gate.MARKER_SCHEMA_VERSION if marker JSON shape ever
 # changes. Producer (commands/bootstrap.md) reads this same value.
-F24_MARKER_VERSION = 1
+MARKER_SCHEMA_VERSION = 1
 
 
 # ─── specialist registry ───────────────────────────────────────────────────
