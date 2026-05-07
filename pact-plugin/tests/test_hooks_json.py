@@ -355,6 +355,59 @@ class TestBootstrapGateInvariants:
             f"Commands found: {commands}"
         )
 
+    def test_bootstrap_marker_writer_registered(self, hooks_config):
+        """bootstrap_marker_writer.py must be registered as a
+        UserPromptSubmit hook so the marker is written once the ritual's
+        pre-conditions are observable on disk."""
+        user_prompt_entries = hooks_config["hooks"].get("UserPromptSubmit", [])
+        commands = []
+        for entry in user_prompt_entries:
+            for hook in entry.get("hooks", []):
+                commands.append(hook.get("command", ""))
+        assert any(
+            "bootstrap_marker_writer.py" in cmd for cmd in commands
+        ), (
+            "bootstrap_marker_writer.py must be registered under "
+            "UserPromptSubmit. Commands found: "
+            f"{commands}"
+        )
+
+    def test_bootstrap_marker_writer_registered_before_prompt_gate(
+        self, hooks_config,
+    ):
+        """Registration order = invocation order. The writer must run
+        BEFORE bootstrap_prompt_gate so on prompt 2 of a fresh session
+        the marker exists by the time the gate evaluates whether to
+        emit its bootstrap-required advisory — avoiding a spurious
+        same-turn advisory."""
+        user_prompt_entries = hooks_config["hooks"].get("UserPromptSubmit", [])
+        commands_in_order = []
+        for entry in user_prompt_entries:
+            for hook in entry.get("hooks", []):
+                commands_in_order.append(hook.get("command", ""))
+
+        writer_idx = next(
+            (i for i, c in enumerate(commands_in_order)
+             if "bootstrap_marker_writer.py" in c),
+            None,
+        )
+        gate_idx = next(
+            (i for i, c in enumerate(commands_in_order)
+             if "bootstrap_prompt_gate.py" in c),
+            None,
+        )
+        assert writer_idx is not None, (
+            "bootstrap_marker_writer.py not registered under UserPromptSubmit"
+        )
+        assert gate_idx is not None, (
+            "bootstrap_prompt_gate.py not registered under UserPromptSubmit"
+        )
+        assert writer_idx < gate_idx, (
+            f"bootstrap_marker_writer.py (idx {writer_idx}) must precede "
+            f"bootstrap_prompt_gate.py (idx {gate_idx}) in the "
+            f"UserPromptSubmit array. Order: {commands_in_order}"
+        )
+
 
 class TestSessionStartCardinality:
     """Post-#444 SessionStart registration invariant.
