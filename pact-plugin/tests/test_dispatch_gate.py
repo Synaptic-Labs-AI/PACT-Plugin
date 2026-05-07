@@ -778,21 +778,21 @@ def test_non_agent_tool_no_op(tmp_path, monkeypatch, capsys):
 
 
 # =============================================================================
-# B1 path-alignment regression — has_task_assigned reads the canonical
+# Path-alignment regression — has_task_assigned reads the canonical
 # task store at ~/.claude/tasks/{team_name}/, NOT the legacy
-# ~/.claude/teams/{team_name}/tasks/. Counter-test discipline (#638):
-# reverting the L128 path in shared/dispatch_helpers.py back to the legacy
-# layout makes test_b1_canonical_only flip from PASS to FAIL.
+# ~/.claude/teams/{team_name}/tasks/. Counter-test cardinality:
+# reverting the path in shared/dispatch_helpers.py back to the legacy
+# layout makes these regression tests flip from PASS to FAIL.
 # =============================================================================
 
 
-def test_b1_canonical_only_satisfies_f6(tmp_path, monkeypatch):
+def test_canonical_path_satisfies_no_task_assigned(tmp_path, monkeypatch):
     """has_task_assigned MUST read ~/.claude/tasks/{team_name}/.
 
     Seed a task ONLY at the canonical path; leave the legacy path empty.
-    The fixed implementation returns True. The buggy pre-fix implementation
-    (which read the legacy path) would return False — that's the
-    counter-test cardinality.
+    The fixed implementation returns True. An implementation that read
+    the legacy path would return False — that's the counter-test
+    cardinality.
     """
     from shared.dispatch_helpers import has_task_assigned
 
@@ -809,7 +809,7 @@ def test_b1_canonical_only_satisfies_f6(tmp_path, monkeypatch):
     assert has_task_assigned(_TEAM, _NAME) is True
 
 
-def test_b1_legacy_path_alone_does_not_satisfy_f6(tmp_path, monkeypatch):
+def test_legacy_path_alone_does_not_satisfy_no_task_assigned(tmp_path, monkeypatch):
     """A task at ONLY the legacy ~/.claude/teams/{team}/tasks/ path must NOT
     satisfy has_task_assigned. This pins the path the implementation reads
     so a future regression to the legacy layout flips this assertion.
@@ -829,7 +829,7 @@ def test_b1_legacy_path_alone_does_not_satisfy_f6(tmp_path, monkeypatch):
     assert has_task_assigned(_TEAM, _NAME) is False
 
 
-def test_b1_canonical_path_aligns_with_task_utils(tmp_path, monkeypatch):
+def test_canonical_path_aligns_with_task_utils(tmp_path, monkeypatch):
     """The path has_task_assigned reads must be the same root that
     task_utils.read_task_json uses. If task_utils ever moves, this test
     surfaces the divergence at the dispatch-gate layer.
