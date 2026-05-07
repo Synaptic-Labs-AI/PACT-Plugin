@@ -170,36 +170,71 @@ class TestBootstrapMarkerClearAcrossSources:
     def test_marker_unlink_call_is_inside_clear_branch(
         self, session_init_text
     ):
-        """The unlink(missing_ok=True) call on the bootstrap marker must
-        be inside the `if is_marker_reset:` branch. A drift here (e.g.,
-        unindented unlink, or guarded by a different predicate) breaks
-        the contract."""
-        # Find the BOOTSTRAP_MARKER_NAME unlink call
-        unlink_match = re.search(
-            r'\(session_path / BOOTSTRAP_MARKER_NAME\)\.unlink',
+        """The bootstrap-marker cleanup must be invoked only inside the
+        `if is_marker_reset:` branch, and the helper that performs the
+        cleanup must do exactly the marker unlink (no broader scope).
+        A drift in either direction breaks the persona §2 contract:
+        - Unconditional invocation defeats the per-session ritual
+          invariant (marker zapped on every session).
+        - Helper that touches more than the marker (e.g., team config)
+          contradicts the persona §2 self-healing claim.
+        """
+        # The clear branch must call the named cleanup helper.
+        helper_call_match = re.search(
+            r'_clear_bootstrap_marker\(\s*session_path\s*\)',
             session_init_text,
         )
-        assert unlink_match is not None, (
-            "session_init.py must call "
-            "(session_path / BOOTSTRAP_MARKER_NAME).unlink(...) — the "
-            "marker-unlink invocation that fires on /clear."
+        assert helper_call_match is not None, (
+            "session_init.py must invoke `_clear_bootstrap_marker(session_path)` "
+            "— the named helper that performs the /clear marker cleanup."
         )
 
-        # Walk backward from the unlink to find the nearest enclosing
-        # `if is_marker_reset:` line. The line index of the if-guard
-        # must precede the unlink and there must be no intervening
-        # de-dent that breaks containment.
-        before = session_init_text[: unlink_match.start()]
+        # The invocation must sit inside an `if is_marker_reset:` branch.
+        before = session_init_text[: helper_call_match.start()]
         guard_match = re.search(
             r'^(\s*)if\s+is_marker_reset:\s*$',
             before,
             re.MULTILINE,
         )
         assert guard_match is not None, (
-            "The marker-unlink call is not inside an "
+            "_clear_bootstrap_marker is not invoked inside an "
             "`if is_marker_reset:` branch. Without this guard, the "
             "marker would be unlinked on every session source — "
             "defeating the per-session ritual invariant."
+        )
+
+        # The helper itself must perform the marker unlink (and nothing
+        # broader). Pin both halves of the persona §2 contract.
+        helper_def_match = re.search(
+            r'def\s+_clear_bootstrap_marker\s*\([^)]*\)\s*->\s*None\s*:\s*'
+            r'(?P<body>(?:.|\n)+?)(?=\n\ndef\s|\nclass\s|\Z)',
+            session_init_text,
+        )
+        assert helper_def_match is not None, (
+            "session_init.py must define `def _clear_bootstrap_marker(...)`."
+        )
+        body = helper_def_match.group("body")
+        # Strip the leading triple-quoted docstring before scanning for
+        # operations — docstrings legitimately reference team-config /
+        # config.json by name to explain the scope.
+        body_no_docstring = re.sub(
+            r'^\s*("""(?:.|\n)*?"""|\'\'\'(?:.|\n)*?\'\'\')',
+            "",
+            body,
+            count=1,
+        )
+        assert "BOOTSTRAP_MARKER_NAME" in body_no_docstring and ".unlink(" in body_no_docstring, (
+            "_clear_bootstrap_marker must perform the bootstrap-marker "
+            "unlink — the body lost the cleanup it was extracted to own."
+        )
+        # Persona §2 self-healing claim: the helper must NOT touch the
+        # team config. Pin operationally — any new filesystem reference
+        # to teams/ or config.json in the implementation would broaden
+        # the helper's scope and break the persona claim.
+        assert "teams" not in body_no_docstring and "config.json" not in body_no_docstring, (
+            "_clear_bootstrap_marker must NOT touch team config; the "
+            "persona §2 self-healing claim depends on team config "
+            "persisting across /clear."
         )
 
 
