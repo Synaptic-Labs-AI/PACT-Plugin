@@ -4717,15 +4717,27 @@ class TestClearBootstrapMarker:
 
     def test_oserror_swallowed_fail_open(self, tmp_path, monkeypatch):
         """Fail-open contract: any OSError from unlink is swallowed so
-        session init does not block on cleanup."""
+        session init does not block on cleanup.
+
+        Name-guarded patch: a previous shape replaced `Path.unlink`
+        globally, which could affect any teardown / fixture cleanup that
+        happened to call `.unlink()` on any Path during the patched
+        scope. Restrict the simulated failure to the marker path only —
+        non-marker `.unlink()` calls fall through to the real method so
+        teardown remains unaffected."""
         from pathlib import Path as _Path
         from session_init import _clear_bootstrap_marker
+        from shared import BOOTSTRAP_MARKER_NAME
 
         session_dir = tmp_path / "session"
         session_dir.mkdir()
 
+        original_unlink = _Path.unlink
+
         def boom(self, missing_ok=False):
-            raise OSError("simulated unlink failure")
+            if self.name == BOOTSTRAP_MARKER_NAME:
+                raise OSError("simulated unlink failure")
+            return original_unlink(self, missing_ok=missing_ok)
 
         monkeypatch.setattr(_Path, "unlink", boom)
 

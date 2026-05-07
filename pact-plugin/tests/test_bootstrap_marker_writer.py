@@ -624,7 +624,6 @@ class TestAdversarialTeamConfig:
         helper raises (AttributeError today; nothing if hardened with
         isinstance(data, dict)) — both implementations satisfy the
         single contract."""
-        members_unused = [{"name": "secretary"}]
         session_dir, _ = _setup_session(
             monkeypatch, tmp_path, with_team_config=False,
         )
