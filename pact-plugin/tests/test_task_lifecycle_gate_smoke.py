@@ -44,7 +44,8 @@ def _capture_main(payload: dict, capsys) -> tuple[int, dict | None]:
     with patch.object(sys, "stdin", _stdin(payload)):
         with pytest.raises(SystemExit) as exc:
             tlg.main()
-    code = exc.value.code if exc.value.code is not None else 0
+    raw_code = exc.value.code if exc.value.code is not None else 0
+    code = int(raw_code) if isinstance(raw_code, int) else 0
     out = capsys.readouterr().out.strip()
     parsed = json.loads(out) if out else None
     return code, parsed
@@ -172,7 +173,7 @@ def test_self_completion_writeback(tmp_path, monkeypatch, pact_context):
 # ─── S5: self_completion recursion-marker self-skip ─────────────────────────────
 
 
-def test_s5_recursion_marker_self_skip(pact_context):
+def test_recursion_marker_self_skip(pact_context):
     pact_context(team_name="test-team", session_id="test-session")
     payload = {
         "tool_name": "TaskUpdate",
@@ -201,7 +202,7 @@ def test_s5_recursion_marker_self_skip(pact_context):
 # ─── S6: Module-load fail-closed-as-advisory simulation ─────────────────────────
 
 
-def test_s6_load_failure_emits_advisory_exit_0(capsys):
+def test_load_failure_emits_advisory_exit_0(capsys):
     err = ImportError("simulated cross-package import failure")
     with pytest.raises(SystemExit) as exc:
         tlg._emit_load_failure_advisory("module imports", err)

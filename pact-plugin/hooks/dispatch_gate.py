@@ -121,6 +121,17 @@ RESERVED_NAMES = frozenset({
     "peer",
     "unknown",
     "solo",
+    # Self-completion-exempt names. The task_lifecycle_gate
+    # short-circuits the lead-only-completion advisory when a teammate's
+    # owner matches one of these names. If a dispatch were allowed to
+    # spawn under one of these names, the spawned teammate could
+    # self-complete tasks without triggering the advisory — bypassing
+    # lead-only completion authority via name choice. Reject the names
+    # at spawn time to close that confused-deputy chain. Mirrors
+    # shared.intentional_wait.SELF_COMPLETE_EXEMPT_AGENTS; the
+    # cross-module subset invariant is asserted by a regression test.
+    "secretary",
+    "pact-secretary",
 })
 
 # Inline-mission heuristic. Long inline mission OR no TaskList reference

@@ -357,7 +357,23 @@ def test_deny_fullwidth_lookalike_after_nfkc(tmp_path, monkeypatch, capsys):
 
 @pytest.mark.parametrize(
     "reserved",
-    ["team-lead", "lead", "user", "external", "peer", "unknown", "solo"],
+    [
+        "team-lead",
+        "lead",
+        "user",
+        "external",
+        "peer",
+        "unknown",
+        "solo",
+        # Self-completion-exempt names. Spawning under either of these
+        # would let the spawned teammate self-complete tasks without
+        # triggering the lead-only-completion advisory in
+        # task_lifecycle_gate (the advisory short-circuits on owner ∈
+        # SELF_COMPLETE_EXEMPT_AGENTS). Reserving them at spawn time
+        # closes that confused-deputy bypass.
+        "secretary",
+        "pact-secretary",
+    ],
 )
 def test_deny_reserved_token(reserved, tmp_path, monkeypatch, capsys):
     """Reserved tokens DENY even though they pass the regex."""
@@ -366,6 +382,29 @@ def test_deny_reserved_token(reserved, tmp_path, monkeypatch, capsys):
     assert code == 2
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
     assert "reserved-token" in reason
+
+
+def test_self_complete_exempt_agents_are_all_reserved():
+    """Cross-module subset invariant.
+
+    Every agent name that the lifecycle gate allows to self-complete
+    MUST also be in dispatch_gate.RESERVED_NAMES, so a dispatch can
+    never spawn under one of those names. If a future change adds an
+    agent to the exempt set without also adding it to RESERVED_NAMES,
+    this test fails — closing the confused-deputy bypass before it
+    ships.
+    """
+    import dispatch_gate
+    from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENTS
+
+    missing = SELF_COMPLETE_EXEMPT_AGENTS - dispatch_gate.RESERVED_NAMES
+    assert not missing, (
+        f"SELF_COMPLETE_EXEMPT_AGENTS contains names not in "
+        f"dispatch_gate.RESERVED_NAMES: {sorted(missing)}. Spawning "
+        "under any of these would let the spawned teammate "
+        "self-complete tasks without triggering the lead-only-completion "
+        "advisory. Add them to RESERVED_NAMES to close the bypass."
+    )
 
 
 # =============================================================================
