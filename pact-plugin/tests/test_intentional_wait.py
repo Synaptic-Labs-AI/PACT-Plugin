@@ -869,6 +869,48 @@ class TestIsExemptAgentTypeMixedTeamConfig:
             "session-secretary", "dup-team", teams_dir
         ) is True
 
+    def test_silent_first_wins_symmetric_under_reverse_order(self, teams_dir):
+        """Silent-first-wins adversarial counter-test (TE-M3).
+
+        Sibling of test_first_member_match_wins_when_duplicate_names.
+        That test pins the secretary-first ordering produces True. This
+        test pins the SYMMETRIC case: with the SAME pair of duplicate
+        names but with the non-secretary entry FIRST, the predicate
+        returns False — proving the behavior is genuinely
+        first-match-wins, not "any-match-wins".
+
+        Without this counter-test, an alternative-but-incorrect
+        implementation that returned True if ANY duplicate matched the
+        exempt set would pass the secretary-first test and silently
+        permit non-secretary teammates to self-complete by colliding on
+        a privileged name. The pair of tests together pin the
+        order-sensitivity of `_iter_members` iteration as a
+        load-bearing invariant.
+
+        Pathological config (should never happen in production); this
+        pins defensive behavior so a future _iter_members refactor that
+        normalizes/dedupes member entries (e.g., a `set()` collapse)
+        surfaces as an explicit test failure rather than silent
+        privilege drift.
+        """
+        from shared.intentional_wait import _is_exempt_agent_type
+
+        # Reverse order: non-secretary first, secretary second. Same
+        # name on both. First match wins → predicate returns False
+        # (first member's agentType is NOT in the exempt set).
+        _write_team_config(teams_dir, "dup-team-reversed", [
+            {"name": "session-secretary", "agentType": "pact-backend-coder"},
+            {"name": "session-secretary", "agentType": "pact-secretary"},
+        ])
+        assert _is_exempt_agent_type(
+            "session-secretary", "dup-team-reversed", teams_dir
+        ) is False, (
+            "Reverse-order duplicate-name config should resolve to the "
+            "FIRST member's agentType (pact-backend-coder, NOT exempt). "
+            "If this returns True, the predicate is doing 'any-match-wins' "
+            "rather than 'first-match-wins' — a privilege-drift defect."
+        )
+
     def test_count_active_tasks_isolates_per_member(self, teams_dir, tmp_path, monkeypatch):
         # Wake-lifecycle integration: in a multi-member team with one
         # secretary and one non-secretary teammate, two simultaneous
@@ -933,15 +975,35 @@ class TestDocSurfaceStalenessSweep:
 
     The OLD constant name `SELF_COMPLETE_EXEMPT_AGENTS` (sans `_TYPES`
     suffix) must NOT appear in any agent-facing doc surface
-    (agents/, commands/, protocols/). Manual sweep via
-    `rg "SELF_COMPLETE_EXEMPT_AGENTS\\b" pact-plugin/` was the
-    architect's risk-mitigation; this test converts it to automated
-    regression coverage.
+    (agents/, commands/, protocols/) AS A LIVE INSTRUCTIONAL REFERENCE.
+    Manual sweep via `rg "SELF_COMPLETE_EXEMPT_AGENTS\\b" pact-plugin/`
+    was the architect's risk-mitigation; this test converts it to
+    automated regression coverage.
 
-    The single permitted reference is the negative-assertion in
-    test_inbox_wake_lifecycle_helper.py:48 (`assert "SELF_COMPLETE_EXEMPT_AGENTS" not in src`),
-    which is itself a guard against the old name reappearing in
-    wake_lifecycle.py.
+    Three context exclusions are honored so legitimate deprecation
+    notices and historical references don't false-positive:
+
+    1. Markdown blockquote deprecation marker — a line beginning with
+       `> Deprecated:` (with surrounding whitespace tolerated).
+       Documents intentional historical references like
+       `> Deprecated: see SELF_COMPLETE_EXEMPT_AGENTS in v3.x`.
+    2. HTML comment with `old name:` prefix — anywhere in the line.
+       Allows `<!-- old name: SELF_COMPLETE_EXEMPT_AGENTS -->` style
+       cross-reference annotations.
+    3. Inside fenced code blocks — content between ```...``` fences
+       (any language hint). Snippets quoting old code are documentation,
+       not live instruction.
+
+    Counter-tested by both directions:
+    - `test_genuine_staleness_pattern_caught` — bare-prose mention DOES fire.
+    - `test_deprecation_blockquote_skipped` — `> Deprecated:` line does NOT.
+    - `test_old_name_html_comment_skipped` — `<!-- old name: ... -->` does NOT.
+    - `test_fenced_code_block_skipped` — content inside ```...``` does NOT.
+
+    The single permitted reference outside doc surfaces is the
+    negative-assertion in test_inbox_wake_lifecycle_helper.py:48
+    (`assert "SELF_COMPLETE_EXEMPT_AGENTS" not in src`), which is itself
+    a guard against the old name reappearing in wake_lifecycle.py.
 
     If a future refactor genuinely needs to rename
     SELF_COMPLETE_EXEMPT_AGENT_TYPES, update this test alongside the
@@ -950,10 +1012,31 @@ class TestDocSurfaceStalenessSweep:
     import re
 
     OLD_NAME_PATTERN = re.compile(r"\bSELF_COMPLETE_EXEMPT_AGENTS\b")
+    # `> Deprecated:` blockquote marker, leading whitespace tolerated.
+    DEPRECATION_BLOCKQUOTE_PATTERN = re.compile(r"^\s*>\s*Deprecated:")
+    # `<!-- old name:` HTML comment marker (case-insensitive on `old name`),
+    # may appear anywhere in the line; handles `<!--old name:` (no space) too.
+    OLD_NAME_COMMENT_PATTERN = re.compile(r"<!--\s*old name:", re.IGNORECASE)
+    # Markdown fenced-code-block delimiter — three+ backticks at line start
+    # (after optional whitespace), with optional language hint.
+    FENCE_PATTERN = re.compile(r"^\s*```")
 
     def _doc_root(self) -> Path:
         # tests/ → pact-plugin/
         return Path(__file__).resolve().parent.parent
+
+    def _skipped_line(self, line: str, in_fence: bool) -> bool:
+        """Return True iff this line should be skipped for staleness
+        detection — fenced-code-block content, deprecation blockquote,
+        or HTML `old name:` cross-reference comment.
+        """
+        if in_fence:
+            return True
+        if self.DEPRECATION_BLOCKQUOTE_PATTERN.search(line):
+            return True
+        if self.OLD_NAME_COMMENT_PATTERN.search(line):
+            return True
+        return False
 
     @pytest.mark.parametrize("subdir", ["agents", "commands", "protocols"])
     def test_no_old_name_in_doc_surface(self, subdir):
@@ -962,7 +1045,17 @@ class TestDocSurfaceStalenessSweep:
         violations = []
         for md_path in root.rglob("*.md"):
             content = md_path.read_text(encoding="utf-8")
+            in_fence = False
             for line_no, line in enumerate(content.splitlines(), start=1):
+                # Track fenced-code-block state. A line that IS a fence
+                # delimiter toggles the state; that line itself is treated
+                # as inside-fence (snippets like ```python with the OLD
+                # constant in the same line shouldn't false-positive).
+                if self.FENCE_PATTERN.search(line):
+                    in_fence = not in_fence
+                    continue
+                if self._skipped_line(line, in_fence):
+                    continue
                 if self.OLD_NAME_PATTERN.search(line):
                     violations.append(f"{md_path.relative_to(root.parent)}:{line_no}: {line.strip()}")
         assert not violations, (
@@ -970,6 +1063,111 @@ class TestDocSurfaceStalenessSweep:
             "surface — must be retargeted to `SELF_COMPLETE_EXEMPT_AGENT_TYPES`:\n"
             + "\n".join(violations)
         )
+
+    # ---- B1 narrowed-regex counter-tests ----
+
+    def _scan_lines(self, lines: list[str]) -> list[int]:
+        """Replicate the production scan logic on an in-memory line list.
+        Returns the 1-indexed line numbers that would be flagged as
+        violations (i.e., live OLD-name references not skipped by a
+        context-exclusion rule).
+        """
+        violations: list[int] = []
+        in_fence = False
+        for line_no, line in enumerate(lines, start=1):
+            if self.FENCE_PATTERN.search(line):
+                in_fence = not in_fence
+                continue
+            if self._skipped_line(line, in_fence):
+                continue
+            if self.OLD_NAME_PATTERN.search(line):
+                violations.append(line_no)
+        return violations
+
+    def test_genuine_staleness_pattern_caught(self):
+        # Bare prose mention of OLD constant in a plain doc line MUST fire.
+        lines = [
+            "## Self-completion carve-out",
+            "",
+            "Owners listed in SELF_COMPLETE_EXEMPT_AGENTS bypass the advisory.",
+        ]
+        assert self._scan_lines(lines) == [3]
+
+    def test_deprecation_blockquote_skipped(self):
+        # `> Deprecated:` blockquote referencing the OLD name is a
+        # legitimate historical pointer — must NOT fire.
+        lines = [
+            "## Self-completion carve-out",
+            "",
+            "> Deprecated: SELF_COMPLETE_EXEMPT_AGENTS (v3.x). See "
+            "SELF_COMPLETE_EXEMPT_AGENT_TYPES below.",
+            "",
+            "Carve-out is keyed on agentType.",
+        ]
+        assert self._scan_lines(lines) == []
+
+    def test_old_name_html_comment_skipped(self):
+        # `<!-- old name: ... -->` HTML cross-reference annotation is
+        # legitimate — must NOT fire.
+        lines = [
+            "## Self-completion carve-out",
+            "",
+            "<!-- old name: SELF_COMPLETE_EXEMPT_AGENTS, retired in #682 -->",
+            "",
+            "Carve-out is keyed on agentType.",
+        ]
+        assert self._scan_lines(lines) == []
+
+    def test_fenced_code_block_skipped(self):
+        # Content inside ```...``` fences quoting old code is
+        # documentation, not live instruction — must NOT fire.
+        lines = [
+            "## Migration",
+            "",
+            "Pre-#682 the carve-out was keyed on owner name:",
+            "",
+            "```python",
+            "if owner in SELF_COMPLETE_EXEMPT_AGENTS:",
+            "    return True",
+            "```",
+            "",
+            "Post-#682 it keys on team-config agentType.",
+        ]
+        assert self._scan_lines(lines) == []
+
+    def test_fence_state_toggles_correctly(self):
+        # Two separate fenced blocks; OLD name only inside the first.
+        # No live mention before/between/after — must NOT fire.
+        lines = [
+            "```",
+            "SELF_COMPLETE_EXEMPT_AGENTS",
+            "```",
+            "Outside.",
+            "```",
+            "another snippet",
+            "```",
+        ]
+        assert self._scan_lines(lines) == []
+
+    def test_live_mention_after_closed_fence_caught(self):
+        # If a fenced block closes and a later line has a bare mention,
+        # the fence-state must be False by then; the mention MUST fire.
+        lines = [
+            "```",
+            "old code",
+            "```",
+            "Live: SELF_COMPLETE_EXEMPT_AGENTS still mentioned in prose.",
+        ]
+        assert self._scan_lines(lines) == [4]
+
+    def test_skip_predicates_do_not_mask_new_name_baseline(self):
+        # Sanity: a doc line containing ONLY the NEW name (no exclusion
+        # context) must not be flagged. Guards against an inverted
+        # predicate accidentally suppressing the NEW name.
+        lines = [
+            "Reference SELF_COMPLETE_EXEMPT_AGENT_TYPES in shared module.",
+        ]
+        assert self._scan_lines(lines) == []
 
     def test_new_name_present_in_at_least_one_canonical_doc(self):
         # Counter-pin: at least one of the 5 known doc surfaces must

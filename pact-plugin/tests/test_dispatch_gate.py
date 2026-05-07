@@ -393,7 +393,8 @@ def test_deny_reserved_token(reserved, tmp_path, monkeypatch, capsys):
 def test_self_complete_exempt_agent_types_subset_specialist_registry(
     tmp_path, monkeypatch
 ):
-    """Cross-module categorical invariant (post-#682).
+    """Cross-module categorical invariant (post-#682), tested against
+    the LIVE plugin agent registry.
 
     Every agentType token in SELF_COMPLETE_EXEMPT_AGENT_TYPES MUST
     correspond to a registered PACT specialist (a file at
@@ -410,12 +411,61 @@ def test_self_complete_exempt_agent_types_subset_specialist_registry(
     assertion so a privileged-but-unregistered agentType cannot ship as
     dead code. SELF_COMPLETE_EXEMPT_AGENT_TYPES is the first such class;
     this test is the template for any future ones.
+
+    TE-M1 (cycle-2): the predecessor of this test seeded the registry
+    fixture with `("pact-secretary", "pact-architect")` — a
+    hand-picked agent set that exactly matched the constant. That made
+    the assertion `SELF_COMPLETE_EXEMPT_AGENT_TYPES - _specialist_registry()`
+    vacuously empty unless the constant ALONE was mutated; a future PR
+    that grew the constant AND simultaneously updated the seeded agents
+    list would silently produce green even on typos. The fix: point
+    pact_context at the REAL plugin root so `_specialist_registry()`
+    globs the live `pact-plugin/agents/pact-*.md` files. The constant
+    is then asserted against the actual deployed agent set, not a
+    cargo-cult fixture.
+
+    Per architect doc OQ-3 / arch §Risks: if the live registry isn't
+    loadable from the test side cleanly (e.g., import-time hooks fail
+    in test runner), the lead-authorized fallback is Option (ii) —
+    a doc-anchor test on RESERVED_NAMES retention. This test does NOT
+    fall back; the live load is straightforward (point plugin_root at
+    the worktree's pact-plugin/ dir).
     """
-    _full_setup(monkeypatch, tmp_path, agents=("pact-secretary", "pact-architect"))
+    # tests/ → pact-plugin/ (the live plugin root containing agents/).
+    real_plugin_root = Path(__file__).resolve().parent.parent
+    real_agents_dir = real_plugin_root / "agents"
+    assert (real_agents_dir / "pact-secretary.md").is_file(), (
+        f"Live plugin agents/ dir at {real_agents_dir} is missing "
+        f"pact-secretary.md — test cannot validate categorical invariant "
+        f"against the deployed agent set. If the agent file legitimately "
+        f"moved, update this test's path resolution alongside."
+    )
+
+    # Wire pact_context to the LIVE plugin root, NOT a tmp_path fixture
+    # with hand-seeded agents. _specialist_registry() globs
+    # plugin_root/agents/pact-*.md; we want it to see the real set.
+    _setup_session(monkeypatch, tmp_path, real_plugin_root)
+
     from shared.dispatch_helpers import _specialist_registry
     from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENT_TYPES
 
-    missing = SELF_COMPLETE_EXEMPT_AGENT_TYPES - _specialist_registry()
+    live_registry = _specialist_registry()
+    # Sanity check: the live registry must be non-empty AND contain at
+    # least one well-known agent. If empty, the path resolution is
+    # broken and the subsequent invariant check would be vacuously
+    # green (defect masking). Fail loudly.
+    assert live_registry, (
+        f"Live _specialist_registry() returned empty at "
+        f"plugin_root={real_plugin_root}. The categorical invariant "
+        f"cannot be validated against an empty registry."
+    )
+    assert "pact-architect" in live_registry, (
+        f"Live registry missing well-known agent 'pact-architect'; "
+        f"path resolution may be reading the wrong agents/ dir. "
+        f"Got: {sorted(live_registry)}"
+    )
+
+    missing = SELF_COMPLETE_EXEMPT_AGENT_TYPES - live_registry
     assert not missing, (
         f"SELF_COMPLETE_EXEMPT_AGENT_TYPES contains agentType tokens "
         f"with no matching agents/pact-*.md file: {sorted(missing)}. "
