@@ -311,16 +311,64 @@ def resolve_agent_name(
     return ""
 
 
+def _iter_members(
+    team_name: str,
+    teams_dir: str | None = None,
+) -> list[dict]:
+    """Read and validate the members[] list from a team config file.
+
+    Returns a list of dict members from
+    ``~/.claude/teams/{team_name}/config.json``, with non-dict entries
+    filtered out so callers can safely apply ``member.get(...)`` predicates
+    without per-call ``isinstance`` guards.
+
+    Returns ``[]`` silently on any of:
+        - empty team_name
+        - missing config file (FileNotFoundError)
+        - I/O error (OSError, including PermissionError)
+        - malformed JSON (json.JSONDecodeError, ValueError)
+        - non-object top-level JSON (AttributeError on .get())
+        - missing or non-list ``members`` key
+        - any unexpected TypeError during validation
+
+    Silent-on-error is intentional: callers (writer's
+    ``_team_has_secretary``, lookup's ``_lookup_agent_in_team_config``)
+    use the empty result as the "team config not usable" signal and
+    own their own user-visible advisory if any. This consolidates the
+    JSON-shape validation that previously lived inline in two places.
+
+    Args:
+        team_name: Team name for config path. Empty string returns [].
+        teams_dir: Override teams directory (for testing).
+    """
+    if not team_name:
+        return []
+    if teams_dir:
+        config_path = Path(teams_dir) / team_name / "config.json"
+    else:
+        config_path = (
+            Path.home() / ".claude" / "teams" / team_name / "config.json"
+        )
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        members = data.get("members")
+    except (OSError, json.JSONDecodeError, ValueError, AttributeError, TypeError):
+        return []
+    if not isinstance(members, list):
+        return []
+    return [m for m in members if isinstance(m, dict)]
+
+
 def _lookup_agent_in_team_config(
     agent_id: str,
     team_name: str,
     teams_dir: str | None = None,
 ) -> str:
     """
-    Look up agent name from team config file.
+    Look up agent name from team config file by agent id.
 
-    Reads ~/.claude/teams/{team_name}/config.json and scans the members[]
-    array for an entry where member["id"] == agent_id.
+    Scans ``_iter_members(team_name, teams_dir)`` for an entry where
+    ``member["id"] == agent_id`` and returns its name.
 
     Args:
         agent_id: The agent UUID to look up
@@ -330,34 +378,10 @@ def _lookup_agent_in_team_config(
     Returns:
         Agent name if found, empty string otherwise
     """
-    try:
-        if teams_dir:
-            config_path = Path(teams_dir) / team_name / "config.json"
-        else:
-            config_path = (
-                Path.home() / ".claude" / "teams" / team_name / "config.json"
-            )
-
-        data = json.loads(config_path.read_text(encoding="utf-8"))
-        members = data.get("members", [])
-        if not isinstance(members, list):
-            return ""
-
-        for member in members:
-            if isinstance(member, dict) and member.get("id") == agent_id:
-                return str(member.get("name", ""))
-
-        return ""
-    except FileNotFoundError:
-        # Normal fall-back path in resolve_agent_name (step 3 of 5);
-        # silent because team config is not always present.
-        return ""
-    except (OSError, json.JSONDecodeError, ValueError, TypeError) as e:
-        print(
-            f"pact_context: could not read team config: {e}",
-            file=sys.stderr,
-        )
-        return ""
+    for member in _iter_members(team_name, teams_dir):
+        if member.get("id") == agent_id:
+            return str(member.get("name", ""))
+    return ""
 
 
 def write_context(

@@ -104,32 +104,23 @@ _SECRETARY_NAME = "secretary"
 
 
 def _team_has_secretary(team_name: str) -> bool:
-    """Return True iff ~/.claude/teams/{team_name}/config.json exists and
-    contains a member with name == "secretary".
+    """Return True iff the team config contains a member with
+    ``name == "secretary"``.
 
-    Pre-condition for marker write. Returns False on any I/O error,
-    malformed JSON, or missing-secretary case (silent — the sibling
-    bootstrap_prompt_gate owns the user-visible advisory).
+    Pre-condition for marker write. Returns False silently on any I/O
+    error, malformed JSON, or missing-secretary case — the sibling
+    bootstrap_prompt_gate owns the user-visible advisory.
 
-    Distinct from shared.pact_context._lookup_agent_in_team_config: that
-    helper is id-keyed (looks up by member["id"]); this one is name-keyed
-    (scans for a member whose name matches the canonical secretary
-    literal).
+    Built on the shared ``pact_context._iter_members`` helper, so the
+    JSON-shape adversarial-input semantics (missing config, malformed
+    JSON, non-list members, non-dict member entries, missing keys)
+    match those of the id-keyed
+    ``pact_context._lookup_agent_in_team_config`` consumer
+    byte-for-byte. The predicate stays distinct: this one filters on
+    the member ``name`` field; the lookup filters on member ``id``.
     """
-    if not team_name:
-        return False
-    config_path = (
-        Path.home() / ".claude" / "teams" / team_name / "config.json"
-    )
-    try:
-        data = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    members = data.get("members")
-    if not isinstance(members, list):
-        return False
-    for member in members:
-        if isinstance(member, dict) and member.get("name") == _SECRETARY_NAME:
+    for member in pact_context._iter_members(team_name):
+        if member.get("name") == _SECRETARY_NAME:
             return True
     return False
 
