@@ -7,29 +7,29 @@ post-merge of the #662 PR.
 
 The runbook validates four enforcement surfaces:
 
-- **F22 hook-registration fidelity** — `matcher='Agent'` actually fires
+- **Hook-registration fidelity (matcher mutation)** — `matcher='Agent'` actually fires
   on `Agent()` invocations.
-- **F18 Bash-marker-bypass** — `bootstrap_gate.is_marker_set` rejects an
+- **Bash-marker-bypass closure** — `bootstrap_gate.is_marker_set` rejects an
   empty/forged `bootstrap-complete` file.
-- **F7 advisory injection** — does PreToolUse `additionalContext` reach
+- **Inline-mission advisory injection** — does PreToolUse `additionalContext` reach
   the dispatching agent's next turn? (Empirical; informs `PACT_DISPATCH_INLINE_MISSION_MODE`
   flip from `warn` → `deny`.)
-- **F25 sabotaged-import** — runtime gate-logic exception fail-closes
+- **Sabotaged-import fail-closed** — runtime gate-logic exception fail-closes
   with `hookEventName="PreToolUse"`.
 
 After each execution, append a row to
 [`RUNBOOK_RUN_DATES.md`](RUNBOOK_RUN_DATES.md) (`## 662-dispatch-gate.md`
 section) with the date, operator, plugin version, sections passed,
-F7-mode setting in effect, and any per-section observations.
+inline-mission mode setting in effect, and any per-section observations.
 
 Implementation references:
 
 - `pact-plugin/hooks/dispatch_gate.py` — PreToolUse `matcher='Agent'`
 - `pact-plugin/hooks/task_lifecycle_gate.py` — PostToolUse `matcher='TaskCreate|TaskUpdate'`
-- `pact-plugin/hooks/bootstrap_gate.py::is_marker_set` — F24 SHA256 marker verifier
+- `pact-plugin/hooks/bootstrap_gate.py::is_marker_set` — SHA256 marker-content verifier
 - `pact-plugin/hooks/hooks.json` — hook registration matchers
-- `pact-plugin/hooks/shared/dispatch_helpers.py` — F4/F6 helpers + `F24_MARKER_VERSION`
-- Architect: `docs/architecture/662-dispatch-protocol.md` §7(a) (F7 mode rationale), §10 (F24 verifier)
+- `pact-plugin/hooks/shared/dispatch_helpers.py` — registry + task-assigned helpers + `F24_MARKER_VERSION`
+- Architect: `docs/architecture/662-dispatch-protocol.md` §7(a) (inline-mission mode rationale), §10 (marker-content verifier)
 
 ---
 
@@ -55,7 +55,7 @@ Implementation references:
 
 ---
 
-## Section 1 — F22 hook-registration fidelity (`matcher='Agent'`)
+## Section 1 — Hook-registration fidelity (`matcher='Agent'`)
 
 **Goal**: confirm `dispatch_gate.py` actually fires when the harness
 processes an `Agent()` tool call.
@@ -63,10 +63,10 @@ processes an `Agent()` tool call.
 **Steps**:
 
 1. In a fresh session with `/PACT:bootstrap` complete (so a team is
-   resident), provoke a F1-trip dispatch — `Agent(subagent_type="pact-backend-coder")`
+   resident), provoke a name_required-trip dispatch — `Agent(subagent_type="pact-backend-coder")`
    with no `name=` and no `team_name=`.
 2. Expect: tool call denied with `permissionDecisionReason` mentioning
-   `"PACT dispatch_gate F1"` and the cheatsheet hint
+   `"PACT dispatch_gate: name= parameter is required"` and the cheatsheet hint
    `Agent(subagent_type='pact-*', name='<role>', team_name='<session-team>', ...)`.
 3. Inspect the session journal:
    ```
@@ -75,11 +75,11 @@ processes an `Agent()` tool call.
        [print(json.dumps(json.loads(l), indent=2)) for l in sys.stdin if "dispatch_decision" in l]'
    ```
 4. Expect: at least one event with `type="dispatch_decision"`,
-   `decision="DENY"`, `f_row="F1"`.
+   `decision="DENY"`, `rule="name_required"`.
 
 **Pass criteria**:
 
-- [ ] Spawn rejected with F1 message in `permissionDecisionReason`.
+- [ ] Spawn rejected with name_required message in `permissionDecisionReason`.
 - [ ] Journal records `dispatch_decision` event matching the deny.
 - [ ] `hookSpecificOutput.hookEventName == "PreToolUse"` in the deny
       payload (visible in transcript JSONL if available).
@@ -96,7 +96,7 @@ some other registration).
    edit the PreToolUse `matcher: "Agent"` block to `"WrongName"`.
 2. Start ANOTHER fresh session (cache lives across sessions; the edit
    takes effect at the next process start).
-3. Repeat the F1-trip dispatch from §1.
+3. Repeat the name_required-trip dispatch from §1.
 4. Expect: spawn proceeds (or fails for unrelated reasons — the gate
    does not fire because the matcher does not bind).
 5. Inspect journal — no `dispatch_decision` entry for the failed dispatch.
@@ -109,10 +109,10 @@ proceeding to Section 2 (otherwise §2-§4 produce no signal). Verify with
 
 ---
 
-## Section 2 — F18 Bash-marker-bypass (bootstrap_gate F24)
+## Section 2 — Bash-marker-bypass closure (bootstrap_gate marker fingerprint)
 
 **Goal**: confirm an empty / forged `bootstrap-complete` marker is
-rejected by `is_marker_set`'s F24 SHA256 sentinel check.
+rejected by `is_marker_set`'s SHA256 content-fingerprint check.
 
 **Steps**:
 
@@ -123,14 +123,14 @@ rejected by `is_marker_set`'s F24 SHA256 sentinel check.
    ```
    (Run from `pact-plugin/hooks/` with `PYTHONPATH` set; or just note
    the path emitted in the bootstrap_gate's deny message.)
-2. Forge an empty marker via Bash (the F18 attack surface):
+2. Forge an empty marker via Bash (the Bash-touch attack surface):
    ```
    touch ~/.claude/pact-sessions/<project>/<sid>/bootstrap-complete
    ```
 3. Run any command that would route through bootstrap_gate (the gate
    fires on `_BLOCKED_TOOLS`; an `Agent()` call is sufficient).
 4. Expect: gate STILL denies because the marker file content is empty —
-   F24 verifier (`is_marker_set`) requires a JSON body with
+   The verifier (`is_marker_set`) requires a JSON body with
    `v == F24_MARKER_VERSION`, valid SHA256 sentinel bound to
    `(session_id, plugin_root, version)`.
 
@@ -141,7 +141,7 @@ rejected by `is_marker_set`'s F24 SHA256 sentinel check.
       verification failure).
 - [ ] Marker remains on disk; session is not silently elevated.
 
-**Failure signals**: forged marker is accepted (regression — F24 broken
+**Failure signals**: forged marker is accepted (regression — content-fingerprint check broken
 or `is_marker_set` reduced to file-presence check); session proceeds as
 if bootstrap completed.
 
@@ -155,12 +155,12 @@ remainder of the runbook.
 ### 2.1 Variant — malformed JSON
 
 Repeat with the marker file containing the literal string `not-json` (or
-a JSON object with `v=999`). Expect rejection — F24 enforces both schema
+a JSON object with `v=999`). Expect rejection — the verifier enforces both schema
 shape and `v == F24_MARKER_VERSION`.
 
 ---
 
-## Section 3 — F7 advisory injection (empirical)
+## Section 3 — Inline-mission advisory injection (empirical)
 
 **Goal**: observe whether PreToolUse `additionalContext` actually
 reaches the dispatcher's next turn. This is the calibration input for
@@ -168,21 +168,21 @@ flipping `PACT_DISPATCH_INLINE_MISSION_MODE` from `warn` (default) to `deny`.
 
 **Steps**:
 
-1. With `PACT_DISPATCH_INLINE_MISSION_MODE` unset (default `warn`), provoke an F7
+1. With `PACT_DISPATCH_INLINE_MISSION_MODE` unset (default `warn`), provoke an inline-mission
    trip — dispatch a properly-named teammate but with a long inline
    prompt (≥ 800 chars) AND no `TaskList` / `task list` /
    `tasks assigned` / `check your tasks` phrase in the prompt.
-2. Expect: tool call SUCCEEDS (F7 returns `WARN`, not `DENY`). The gate
+2. Expect: tool call SUCCEEDS (inline-mission returns `WARN`, not `DENY`). The gate
    emits `additionalContext` per the harness contract.
 3. Observe the dispatcher's next turn — does the dispatcher quote /
-   reference / acknowledge the F7 advisory text?
+   reference / acknowledge the inline-mission advisory text?
 4. Inspect the journal for the `dispatch_decision` event with
-   `decision="WARN"`, `f_row="F7"`.
+   `decision="WARN"`, `rule="long_inline_mission"`.
 
 **Pass criteria** (advisory works):
 
 - [ ] Spawn succeeds.
-- [ ] Journal records `WARN` with `f_row="F7"`.
+- [ ] Journal records `WARN` with `rule="long_inline_mission"`.
 - [ ] Dispatcher's next turn references the advisory text (verbatim or
       paraphrased) — proves `additionalContext` was injected.
 
@@ -198,12 +198,12 @@ flipping `PACT_DISPATCH_INLINE_MISSION_MODE` from `warn` (default) to `deny`.
 export PACT_DISPATCH_INLINE_MISSION_MODE=shadow
 ```
 
-Restart session. Repeat the F7-trip dispatch.
+Restart session. Repeat the inline-mission-trip dispatch.
 
 **Pass criteria**:
 
 - [ ] Spawn succeeds with no `additionalContext`.
-- [ ] Journal still records `dispatch_decision` with `f_row="F7"`,
+- [ ] Journal still records `dispatch_decision` with `rule="long_inline_mission"`,
       decision `"ALLOW"` (the shadow path returns ALLOW so caller
       treats it as a normal allow; the journal entry is the calibration
       data).
@@ -214,19 +214,19 @@ Restart session. Repeat the F7-trip dispatch.
 export PACT_DISPATCH_INLINE_MISSION_MODE=deny
 ```
 
-Restart session. Repeat the F7-trip dispatch.
+Restart session. Repeat the inline-mission-trip dispatch.
 
 **Pass criteria**:
 
 - [ ] Spawn DENIED.
-- [ ] `permissionDecisionReason` references F7 message.
-- [ ] Journal records `decision="DENY"`, `f_row="F7"`.
+- [ ] `permissionDecisionReason` references the inline-mission message.
+- [ ] Journal records `decision="DENY"`, `rule="long_inline_mission"`.
 
 **Revert**: `unset PACT_DISPATCH_INLINE_MISSION_MODE` for subsequent sections.
 
 ---
 
-## Section 4 — F25 sabotaged-import counter-test
+## Section 4 — Sabotaged-import fail-closed counter-test
 
 **Goal**: confirm runtime gate-logic exception fail-closes with the
 correct `hookEventName`.
@@ -253,7 +253,7 @@ correct `hookEventName`.
 - [ ] CI test passes.
 - [ ] No new sabotage attempts performed against the live install.
 
-**Failure signals**: CI test failure indicates F21/F25 regression — file
+**Failure signals**: CI test failure indicates module-load or runtime fail-closed regression — file
 a follow-up issue and block the runbook run.
 
 ---
@@ -264,7 +264,7 @@ A successful run hits Sections 1, 1.1, 2, 2.1, 3 (mode-default), 3.1,
 3.2, 4 — eight discrete checks. Append the result row to
 `RUNBOOK_RUN_DATES.md` per the section header below.
 
-If F7 §3 fails (advisory silently dropped), the mitigation is a config
+If §3 fails (advisory silently dropped), the mitigation is a config
 change, not a code regression: set `PACT_DISPATCH_INLINE_MISSION_MODE=deny` in the
 project / user shell environment until the platform behavior changes.
 File a tracking issue against the platform repo (not the plugin).
@@ -289,7 +289,7 @@ remediated in-place:
      hooks list to `[team_guard.py]` only; revert PostToolUse
      `matcher='TaskCreate|TaskUpdate'` to `[wake_lifecycle_emitter.py]`
      only)
-   - `pact-plugin/hooks/bootstrap_gate.py` (revert F24 + F25 hardening
+   - `pact-plugin/hooks/bootstrap_gate.py` (revert marker-fingerprint + module-load fail-closed hardening
      from Commit 1)
 3. Re-run this runbook against the patched version to confirm the
    surface is back to pre-#662 behavior. The expected result is that

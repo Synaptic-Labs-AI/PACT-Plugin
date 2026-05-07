@@ -8,7 +8,7 @@ Used by: hooks.json PreToolUse hook (no matcher — fires for all hookable tools
 
 Layer 3 of the four-layer bootstrap gate enforcement (#401). On each tool
 call, checks the session-scoped bootstrap-complete marker:
-  - Marker exists AND is properly stamped (F24) → suppressOutput (sub-ms fast path)
+  - Marker exists AND its content is a valid stamp → suppressOutput (sub-ms fast path)
   - Non-PACT session → suppressOutput (no-op)
   - Teammate → suppressOutput (no-op)
   - Code-editing/agent-dispatch tool (Edit, Write, Agent, NotebookEdit) → deny
@@ -29,10 +29,12 @@ Tool classification rationale:
     evidence". Resolved in #662.
   - Bash is ALLOWED because the bootstrap marker-write mechanism itself is
     a Bash command in bootstrap.md — blocking Bash would create a circular
-    dependency where the gate can never self-disable. To prevent F18
-    Bash-marker-bypass exploitation, is_marker_set verifies marker CONTENT
-    (F24 SHA256 sentinel), not just file presence — `touch bootstrap-complete`
-    no longer satisfies the gate.
+    dependency where the gate can never self-disable. To prevent the
+    Bash-marker-bypass (a single `touch bootstrap-complete` against an
+    empty file would otherwise satisfy any presence check), is_marker_set
+    verifies marker CONTENT via a SHA256 fingerprint over (session_id,
+    plugin_root, plugin_version, schema_version), not just file presence
+    — `touch bootstrap-complete` no longer satisfies the gate.
   - Exploration tools are read-only and needed for state recovery after
     compaction.
   - MCP tools are always allowed — they're external integrations that may
@@ -84,7 +86,7 @@ def _emit_load_failure_deny(stage: str, error: BaseException) -> NoReturn:
     sys.exit(2)
 
 
-# ─── F25: fail-closed wrapper around cross-package imports + risky module work ─
+# ─── fail-closed wrapper around cross-package imports + risky module work ─────
 try:
     import hashlib
     import hmac
@@ -102,9 +104,11 @@ _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 # Code-editing and agent-dispatch tools blocked until bootstrap completes.
 # Bash is intentionally NOT blocked — the marker-write mechanism in
 # bootstrap.md is a Bash command, so blocking Bash would prevent the gate
-# from ever self-disabling (circular dependency). To prevent F18
-# Bash-marker-bypass exploitation, is_marker_set verifies marker CONTENT
-# (F24 SHA256 sentinel), not just file presence. The agent-dispatch tool
+# from ever self-disabling (circular dependency). To prevent the
+# Bash-marker-bypass exploit (a single `touch bootstrap-complete`),
+# is_marker_set verifies marker CONTENT via a SHA256 fingerprint over
+# (session_id, plugin_root, plugin_version, schema_version), not just
+# file presence. The agent-dispatch tool
 # is `Agent` — the canonical Claude Code platform name (#662 corrects
 # 4c286c1f's incorrect rename direction). hooks.json matcher='Agent'
 # entries fire on Agent invocations.
@@ -115,12 +119,12 @@ _BLOCKED_TOOLS = frozenset({
     "NotebookEdit",
 })
 
-# F24 marker schema version. Bump if marker JSON shape changes; verifier
+# Marker schema version. Bump if marker JSON shape changes; verifier
 # rejects unknown versions. Producer (commands/bootstrap.md) must emit a
 # matching `v` field.
 F24_MARKER_VERSION = 1
 
-# F24 marker file size cap (bytes). The marker JSON is a small fixed schema
+# Marker file size cap (bytes). The marker JSON is a small fixed schema
 # ({v, sid, sig}); a content larger than this is rejected to defend against
 # pathological reads.
 _F24_MARKER_MAX_BYTES = 256
@@ -134,7 +138,7 @@ _DENY_REASON = (
 
 def _expected_marker_signature(session_id: str, plugin_root: str,
                                 plugin_version: str, marker_version: int) -> str:
-    """Compute the expected SHA256 marker signature (F24).
+    """Compute the expected SHA256 marker signature.
 
     Inputs are joined with `|` separators in a fixed order so the producer
     in commands/bootstrap.md and this verifier compute the same digest:
@@ -153,7 +157,7 @@ def is_marker_set(session_dir: "Path | None") -> bool:
 
     Returns True iff `<session_dir>/<BOOTSTRAP_MARKER_NAME>` exists as a
     REGULAR FILE (not a symlink, not a directory) AND no ancestor of the
-    session_dir is a symlink AND its content is a valid F24 stamp:
+    session_dir is a symlink AND its content is a valid stamp:
       - file size ≤ ``_F24_MARKER_MAX_BYTES``
       - parses as JSON object with EXACTLY keys {"v", "sid", "sig"}
       - ``v`` is integer == ``F24_MARKER_VERSION``
@@ -167,11 +171,12 @@ def is_marker_set(session_dir: "Path | None") -> bool:
       - marker path is a directory or other non-regular file (S2 corollary)
       - any ancestor of session_dir is a symlink (S4 defense)
       - any OSError on stat (treated as marker-absent)
-      - F24 content fails any of size cap / JSON parse / key set / version /
+      - marker content fails any of size cap / JSON parse / key set / version /
         sid match / signature match
       - missing plugin context (cannot compute expected signature)
 
-    Security rationale (S2 + S4 unchanged from pre-#662; F24 added):
+    Security rationale (symlink defenses unchanged from pre-#662;
+    content fingerprint added):
       - S2 (security-engineer-review): `marker_path.exists()` follows
         symlinks → attacker plants a symlink at the marker path → gate
         falsely satisfied → tool block bypassed. Defense: `os.lstat()` +
@@ -180,24 +185,26 @@ def is_marker_set(session_dir: "Path | None") -> bool:
         (e.g., ~/.claude itself being a symlink). `Path.resolve(strict=False)`
         walks every ancestor; comparing to the unresolved path detects any
         ancestor-link rewrite.
-      - F18/F24 (#662): `Bash("touch <path>/bootstrap-complete")` previously
-        defeated the gate because file PRESENCE was the only check.
-        F24 verifies marker CONTENT bound to (session_id, plugin_root,
-        plugin_version, marker_version) — a marker-content provenance
-        check that closes the trivial Bash-touch bypass.
+      - Bash-marker-bypass defense (#662): `Bash("touch <path>/bootstrap-complete")`
+        previously defeated the gate because file PRESENCE was the only
+        check. The verifier now verifies marker CONTENT bound to
+        (session_id, plugin_root, plugin_version, marker_version) — a
+        marker-content provenance check that closes the trivial
+        Bash-touch bypass.
 
-        F24 is NOT cryptographic provenance. All four signature inputs
-        are readable from the same-user filesystem (session_id and
-        plugin_root from pact-session-context.json, plugin_version from
-        plugin.json, marker_version from this module's
-        F24_MARKER_VERSION constant), so a same-user attacker with
-        Python execution and read access to those files can recompute
-        the digest. F24 is a fingerprint that raises attacker effort
-        from a one-line `touch` to a multi-line script-AND-read
-        sequence and creates a detection surface (the digest is
-        deterministic, so a forgery that races plugin-version bumps
-        is observable). It is not a MAC; treat any future hardening
-        that would require unforgeability as a separate threat model.
+        The signature is NOT cryptographic provenance. All four
+        signature inputs are readable from the same-user filesystem
+        (session_id and plugin_root from pact-session-context.json,
+        plugin_version from plugin.json, marker_version from this
+        module's F24_MARKER_VERSION constant), so a same-user attacker
+        with Python execution and read access to those files can
+        recompute the digest. The signature is a fingerprint that
+        raises attacker effort from a one-line `touch` to a multi-line
+        script-AND-read sequence and creates a detection surface (the
+        digest is deterministic, so a forgery that races plugin-version
+        bumps is observable). It is not a MAC; treat any future
+        hardening that would require unforgeability as a separate
+        threat model.
     """
     if not session_dir:
         return False
@@ -224,7 +231,7 @@ def is_marker_set(session_dir: "Path | None") -> bool:
     if not stat.S_ISREG(st.st_mode):
         return False
 
-    # F24: verify marker CONTENT (#662 — closes F18 Bash-touch bypass).
+    # Verify marker CONTENT (#662 — closes the Bash-touch bypass).
     try:
         if st.st_size <= 0 or st.st_size > _F24_MARKER_MAX_BYTES:
             return False
@@ -270,8 +277,9 @@ def _check_tool_allowed(input_data: dict) -> str | None:
     """
     pact_context.init(input_data)
 
-    # Fast path: marker exists (as a properly-stamped F24 regular file) →
-    # allow everything. See `is_marker_set` for S2/S4/F24 defense rationale.
+    # Fast path: marker exists (as a properly-stamped regular file with
+    # valid content fingerprint) → allow everything. See `is_marker_set`
+    # for symlink and bypass defense rationale.
     session_dir = pact_context.get_session_dir()
     if not session_dir:
         return None
@@ -313,7 +321,7 @@ def main():
     try:
         deny_reason = _check_tool_allowed(input_data)
     except Exception as e:
-        # F25: fail-CLOSED — runtime gate-logic failure must DENY (#658
+        # Runtime fail-CLOSED — gate-logic exception must DENY (#658
         # sibling defect class). Pre-#662 this path was fail-OPEN.
         _emit_load_failure_deny("runtime", e)
 

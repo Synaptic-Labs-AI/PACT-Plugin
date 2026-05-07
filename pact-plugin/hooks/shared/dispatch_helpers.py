@@ -4,9 +4,12 @@ Location: pact-plugin/hooks/shared/dispatch_helpers.py
 Summary: Shared helpers for #662 dispatch_gate.py and task_lifecycle_gate.py.
 
 Exposes:
-  - is_registered_pact_specialist(subagent_type) — F4 registry check
-  - has_task_assigned(team_name, name) — F6 task-assigned check
-  - trustworthy_actor_name(input_data) — F12 actor resolution
+  - is_registered_pact_specialist(subagent_type) — registry check (one
+    of the dispatch_gate rules; rejects unregistered pact-* spawns)
+  - has_task_assigned(team_name, name) — task-assigned check (one of
+    the dispatch_gate rules; rejects spawn before TaskCreate)
+  - trustworthy_actor_name(input_data) — actor resolution for the
+    task_lifecycle_gate self-completion rule
   - SOLO_EXEMPT — research/exploration agents that bypass dispatch_gate
   - F24_MARKER_VERSION — bootstrap marker schema version
 
@@ -54,7 +57,7 @@ def _emit_load_failure_deny(stage: str, error: BaseException) -> NoReturn:
     sys.exit(2)
 
 
-# ─── F21: fail-closed wrapper around cross-package imports ─────────────────
+# ─── fail-closed wrapper around cross-package imports ─────────────────────
 try:
     import functools
     from pathlib import Path
@@ -67,17 +70,17 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
 
 # Research/exploration agents that legitimately spawn WITHOUT name/team_name
 # (per pinned-memory feedback_direct_agent_calls.md). These bypass the
-# dispatch_gate entirely. F4 registry stays simple — these are caught at
+# dispatch_gate entirely. The specialist registry stays simple — these are caught at
 # step ① of evaluate_dispatch in dispatch_gate.py.
 SOLO_EXEMPT = frozenset({"general-purpose", "Explore", "Plan"})
 
-# F24 marker schema version. Mirror constant from bootstrap_gate.py; bump
+# Bootstrap marker schema version. Mirror constant from bootstrap_gate.py; bump
 # here AND in bootstrap_gate.F24_MARKER_VERSION if marker JSON shape ever
 # changes. Producer (commands/bootstrap.md) reads this same value.
 F24_MARKER_VERSION = 1
 
 
-# ─── F4 registry ───────────────────────────────────────────────────────────
+# ─── specialist registry ───────────────────────────────────────────────────
 
 @functools.lru_cache(maxsize=1)
 def _specialist_registry() -> frozenset[str]:
@@ -85,11 +88,11 @@ def _specialist_registry() -> frozenset[str]:
 
     Hook subprocesses are short-lived (per-tool-call); the cache is rebuilt
     on every dispatch evaluation. Empty plugin_root or missing agents/
-    directory → empty registry → every pact-* dispatch is DENIED (F4
-    fail-closed). pact-orchestrator.md IS in the glob set; the
-    "orchestrator is the persona, not a dispatchable specialist" semantic
-    is enforced at a different layer (system-prompt --agent flag at
-    session start), not at registry/F4.
+    directory → empty registry → every pact-* dispatch is DENIED
+    (registry fail-closed). pact-orchestrator.md IS in the glob set;
+    the "orchestrator is the persona, not a dispatchable specialist"
+    semantic is enforced at a different layer (system-prompt --agent
+    flag at session start), not at the registry.
     """
     plugin_root = pact_context.get_plugin_root()
     if not plugin_root:
@@ -108,7 +111,7 @@ def is_registered_pact_specialist(subagent_type: str) -> bool:
     return subagent_type in _specialist_registry()
 
 
-# ─── F6 task-assigned check ────────────────────────────────────────────────
+# ─── task-assigned check ───────────────────────────────────────────────────
 
 def has_task_assigned(team_name: str, name: str) -> bool:
     """True iff at least one task in ``team_name``'s task store has
@@ -119,9 +122,9 @@ def has_task_assigned(team_name: str, name: str) -> bool:
     iter_team_tasks). TaskList is a harness tool unavailable in subprocess
     context — direct FS read is the only viable channel. Tolerant parsing:
     malformed JSON or missing fields → skip that file (False contribution).
-    Path traversal is defended upstream (F3 regex on name; F5
-    session-equality on team_name) — by the time this runs, both have
-    passed validation.
+    Path traversal is defended upstream (the name-regex rule on name;
+    the session-team-equality rule on team_name) — by the time this
+    runs, both have passed validation.
     """
     if not isinstance(team_name, str) or not team_name:
         return False
@@ -147,14 +150,14 @@ def has_task_assigned(team_name: str, name: str) -> bool:
     return False
 
 
-# ─── F12 actor resolution ──────────────────────────────────────────────────
+# ─── actor resolution (for the self-completion rule) ──────────────────────
 
 def trustworthy_actor_name(input_data: dict) -> str | None:
     """Extract actor name from harness-trustworthy ``agent_id`` ONLY.
 
     Bypasses ``resolve_agent_name``'s Step 1 (agent_name) and Step 4
     (agent_type) fallbacks because they are not strong enough trust
-    signals for the F12 self-completion check (architect §5.3 / PREPARE
+    signals for the self-completion check (architect §5.3 / PREPARE
     §10).
 
     Trust contract: ``agent_id`` is harness-set and lives at the top
@@ -163,8 +166,9 @@ def trustworthy_actor_name(input_data: dict) -> str | None:
     ``"name@team_name"``.
 
     Returns the ``name`` portion, or None if ``agent_id`` is missing or
-    malformed (no ``@``). Caller (task_lifecycle_gate F12) treats None as
-    "actor unresolvable — DO NOT exempt from F12".
+    malformed (no ``@``). Caller (task_lifecycle_gate self-completion
+    rule) treats None as "actor unresolvable — DO NOT exempt from the
+    self-completion advisory".
 
     Pure function: no FS, no I/O, no exceptions.
     """

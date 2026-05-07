@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/dispatch_gate.py
-Summary: PreToolUse hook (matcher='Agent') enforcing PACT specialist
-         dispatch-protocol invariants F1-F7, F14, F15, F21, F23, F26.
+Summary: PreToolUse hook (matcher='Agent') validating PACT specialist
+         spawns: required name + team_name, name regex/length/reserved
+         tokens, registered specialist type, session-team match, member
+         uniqueness, task assignment, and prompt heuristics.
 Used by: hooks.json PreToolUse matcher='Agent' (sibling of team_guard.py).
 
 Closes #662 silent-failure surface: spawning pact-* specialists without
 name/team_name, with malformed names, against unregistered subagent_types,
 into the wrong team, before TaskCreate, with long inline missions.
 
-Safety: F21 fail-closed on module-load failure AND on runtime gate-logic
+Safety: fail-closed on module-load failure AND on runtime gate-logic
 exception (mirrors PR #660 ``_emit_load_failure_deny`` and the
 bootstrap_gate analogue). hookEventName always emitted (#658 invariant).
 DENY → exit 2 + permissionDecision; ALLOW → suppressOutput + exit 0;
@@ -17,31 +19,31 @@ WARN → additionalContext + exit 0 (advisory; runbook validates injection
 empirically per architect §7(a) / tests/runbooks/662-dispatch-gate.md).
 
 Cheapest-rule-first ordering with short-circuit on first non-ALLOW:
-  ① SOLO_EXEMPT carve-out          ⑥ F5 session-team match (decision h)
-  ② non-pact-* carve-out            ⑦ F14 uniqueness in team members
-  ③ F1/F2 string-presence           ⑧ F6 task assigned
-  ④ F3 length/NFKC/regex/reserved   ⑨ F7 prompt heuristic (WARN)
-  ⑤ F15 plugin_root + F4 registry
+  ① SOLO_EXEMPT carve-out          ⑥ session-team match (decision h)
+  ② non-pact-* carve-out            ⑦ member-name uniqueness in team
+  ③ name + team_name presence       ⑧ task-assigned check
+  ④ name length/NFKC/regex/reserved ⑨ prompt heuristic (WARN)
+  ⑤ plugin agents/ + specialist registry
 
-F23: every gate decision (ALLOW/DENY/WARN) is journaled. F26: prompt
-text is redacted at the journal-write boundary (sk-/xoxb-/ghp_/AKIA/JWT
+Every gate decision (ALLOW/DENY/WARN) is journaled. Prompt text is
+redacted at the journal-write boundary (sk-/xoxb-/ghp_/AKIA/JWT
 patterns) so credentials accidentally pasted into a prompt never persist
 to disk; the in-memory ``permissionDecisionReason`` keeps the verbatim
 prompt-fragment for the user-facing error.
 
 Configuration:
   ``PACT_DISPATCH_INLINE_MISSION_MODE`` env-var (default ``"warn"``)
-  controls the F7 prompt-heuristic disposition (the heuristic that flags
-  dispatchers inlining mission text into ``prompt=`` instead of using the
-  canonical "check TaskList" form). Allowed values:
+  controls the inline-mission heuristic disposition (the heuristic that
+  flags dispatchers inlining mission text into ``prompt=`` instead of
+  using the canonical "check TaskList" form). Allowed values:
     ``"warn"``   advisory ``additionalContext`` (default)
-    ``"deny"``   blocking deny — flip after the F22 counter-test in
-                 ``tests/runbooks/662-dispatch-gate.md`` confirms
-                 ``additionalContext`` is silently dropped under
+    ``"deny"``   blocking deny — flip after the matcher-fidelity
+                 counter-test in ``tests/runbooks/662-dispatch-gate.md``
+                 confirms ``additionalContext`` is silently dropped under
                  PreToolUse
-    ``"shadow"`` journal-only; F7 trigger is observable in the session
+    ``"shadow"`` journal-only; the trigger is observable in the session
                  journal but does not WARN or DENY (calibration mode).
-  Unknown values fall back to ``"warn"``. F1-F6/F14/F15 are unaffected.
+  Unknown values fall back to ``"warn"``. The other rules are unaffected.
 
 Input: JSON from stdin (tool_name, tool_input, agent_id, etc.)
 Output: stdout JSON per harness contract.
@@ -80,7 +82,7 @@ def _emit_load_failure_deny(stage: str, error: BaseException) -> NoReturn:
     sys.exit(2)
 
 
-# ─── F21: fail-closed wrapper on cross-package imports ─────────────────────
+# ─── fail-closed wrapper on cross-package imports ──────────────────────────
 try:
     import re
     import unicodedata
@@ -99,7 +101,7 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
 
 # ─── constants ─────────────────────────────────────────────────────────────
 
-# F3 name validation. Order: length cap → NFKC normalize → regex → reserved.
+# Name validation. Order: length cap → NFKC normalize → regex → reserved.
 # NFKC defends against fullwidth/lookalike chars that pass naive regex.
 NAME_REGEX = re.compile(r"^[a-z0-9-]+$")
 NAME_MAX_LENGTH = 64
@@ -121,7 +123,7 @@ RESERVED_NAMES = frozenset({
     "solo",
 })
 
-# F7 prompt heuristic. Long inline mission OR no TaskList reference
+# Inline-mission heuristic. Long inline mission OR no TaskList reference
 # suggests the dispatcher embedded the mission in the prompt instead of
 # the task description (defeats the harvest pipeline).
 PROMPT_MAX_LENGTH = 800
@@ -132,33 +134,39 @@ TASK_REFERENCE_PHRASES = (
     "check your tasks",
 )
 
-# Inline-mission mode (F7). Read at module-load from
+# Inline-mission mode. Read at module-load from
 # ``PACT_DISPATCH_INLINE_MISSION_MODE`` env-var. The internal Python
 # identifier is named after the behavior the heuristic checks (whether the
 # dispatcher inlined mission text into ``prompt=`` rather than using the
-# canonical "check TaskList" form); the F7 reference in the comment is a
-# back-pointer to the failure-mode index from #662, retained for traceability.
+# canonical "check TaskList" form).
 # Allowed values:
 #   ``"warn"``   — emit additionalContext (advisory, default; behavior
 #                  unchanged from initial Commit 2 implementation).
 #   ``"deny"``   — promote to a blocking deny. Flip to this if the
-#                  post-merge F22 counter-test confirms additionalContext
-#                  is silently dropped under PreToolUse (architect §7(a),
-#                  runbook 662-dispatch-gate.md §F7).
+#                  post-merge matcher-fidelity counter-test confirms
+#                  additionalContext is silently dropped under PreToolUse
+#                  (architect §7(a), runbook 662-dispatch-gate.md
+#                  inline-mission section).
 #   ``"shadow"`` — emit a journal event but neither WARN nor DENY
 #                  (first-session safety net for calibration; the gate
-#                  observes without intervening). DENY decisions from
-#                  F1-F6/F14/F15 still fire normally; only F7 is muted.
+#                  observes without intervening). DENY decisions from the
+#                  other rules still fire normally; only the inline-mission
+#                  heuristic is muted.
 # Unknown values fall back to ``"warn"`` so a typo never disables the
 # gate's other rules. Default ``"warn"`` preserves Commit 2 behavior.
 _ALLOWED_INLINE_MISSION_MODES = frozenset({"warn", "deny", "shadow"})
-F7_MODE = os.environ.get("PACT_DISPATCH_INLINE_MISSION_MODE", "warn")
-if F7_MODE not in _ALLOWED_INLINE_MISSION_MODES:
-    F7_MODE = "warn"
+INLINE_MISSION_MODE = os.environ.get(
+    "PACT_DISPATCH_INLINE_MISSION_MODE", "warn",
+)
+if INLINE_MISSION_MODE not in _ALLOWED_INLINE_MISSION_MODES:
+    INLINE_MISSION_MODE = "warn"
 
-# F26 redaction patterns. Applied to the journal-written prompt only;
-# the in-memory ``permissionDecisionReason`` keeps the verbatim prompt
-# for the dispatcher's debugging.
+# Backwards-compatible alias for tests that monkeypatch the constant.
+F7_MODE = INLINE_MISSION_MODE
+
+# Credential redaction patterns. Applied to the journal-written prompt
+# only; the in-memory ``permissionDecisionReason`` keeps the verbatim
+# prompt for the dispatcher's debugging.
 REDACTION_PATTERNS = (
     re.compile(r"sk-[A-Za-z0-9]{20,}"),
     re.compile(r"xoxb-[A-Za-z0-9-]{20,}"),
@@ -172,7 +180,7 @@ REDACTION_PATTERNS = (
 # ─── helpers ───────────────────────────────────────────────────────────────
 
 def _redact(prompt: str) -> str:
-    """F26: scrub credential patterns BEFORE journal write.
+    """Scrub credential patterns BEFORE journal write.
 
     Applied at the journal-write boundary, not at gate-decision boundary
     — the user-facing ``permissionDecisionReason`` keeps the verbatim
@@ -188,13 +196,14 @@ def _redact(prompt: str) -> str:
 
 
 def _team_member_names(team_name: str) -> set[str]:
-    """F14 helper. Read ``~/.claude/teams/{team_name}/config.json`` and
-    return the set of currently-live member names. Tolerant: any error
+    """Member-roster reader. Read ``~/.claude/teams/{team_name}/config.json``
+    and return the set of currently-live member names. Tolerant: any error
     returns ``set()`` (no collision detected).
 
-    Private to dispatch_gate (only F14 uses it). The architect §5
-    contract intentionally did NOT include this in dispatch_helpers.py
-    because task_lifecycle_gate has no need for the member roster.
+    Private to dispatch_gate (only the uniqueness rule uses it). The
+    architect §5 contract intentionally did NOT include this in
+    dispatch_helpers.py because task_lifecycle_gate has no need for the
+    member roster.
     """
     cfg_path = Path.home() / ".claude" / "teams" / team_name / "config.json"
     try:
@@ -222,13 +231,12 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
     reason: human-readable explanation (None for ALLOW).
     rule: behavioral rule identifier (e.g. ``"name_required"``,
         ``"long_inline_mission"``); None for ALLOW or carve-out. Values
-        describe what the rule checks, not the F-row index from #662.
-        F-row cross-references for maintainers stay in code comments.
+        describe what the rule checks.
 
     Cheapest-rule-first ordering with short-circuit on first non-ALLOW.
     Pure function — no stdin/stdout, no FS writes, no exceptions raised
     to caller. ALL exceptions escape to ``main()`` which routes them
-    through ``_emit_load_failure_deny`` (F25 runtime fail-closed).
+    through ``_emit_load_failure_deny`` (runtime fail-closed).
     """
     if not isinstance(tool_input, dict):
         tool_input = {}
@@ -247,7 +255,7 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
     if not isinstance(subagent_type, str) or not subagent_type.startswith("pact-"):
         return ("ALLOW", None, None)
 
-    # ③ F1, F2 — string presence (mandatory protocol fields).
+    # ③ Required string presence on name + team_name.
     if not isinstance(name, str) or not name:
         return ("DENY",
                 "PACT dispatch_gate: name= parameter is required for "
@@ -259,10 +267,10 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
                 "pact-* specialist spawns.",
                 "team_name_required")
 
-    # ④ F3 — name validation. Length cap FIRST (cheap), then NFKC
-    # normalization (defends against fullwidth/lookalike unicode that
-    # would otherwise pass the regex), then regex on the NORMALIZED form,
-    # then reserved-token check on the normalized form.
+    # ④ Name validation. Length cap FIRST (cheap), then NFKC normalization
+    # (defends against fullwidth/lookalike unicode that would otherwise
+    # pass the regex), then regex on the NORMALIZED form, then
+    # reserved-token check on the normalized form.
     if len(name) > NAME_MAX_LENGTH:
         return ("DENY",
                 f"PACT dispatch_gate: name length {len(name)} exceeds "
@@ -283,9 +291,9 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
                 "role-descriptive name.",
                 "name_reserved_token")
 
-    # ⑤ F15 — plugin agents/ presence (cheap stat). Caught BEFORE F4 so
-    # a missing plugin install gets the more actionable "plugin broken"
-    # message rather than "specialist not registered".
+    # ⑤ Plugin agents/ presence (cheap stat). Caught BEFORE the registry
+    # check so a missing plugin install gets the more actionable
+    # "plugin broken" message rather than "specialist not registered".
     plugin_root = pact_context.get_plugin_root()
     if not plugin_root or not (Path(plugin_root) / "agents").is_dir():
         return ("DENY",
@@ -293,8 +301,9 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
                 "unavailable. Plugin install may be broken; check "
                 "pact-session-context.json plugin_root field.",
                 "plugin_agents_missing")
-    # F4 — subagent_type registered. Empty registry (which would also
-    # trigger F15 above) is fail-closed by is_registered_pact_specialist.
+    # subagent_type registered in the agent registry. Empty registry
+    # (which would also trigger the plugin_agents_missing rule above) is
+    # fail-closed by is_registered_pact_specialist.
     if not is_registered_pact_specialist(subagent_type):
         return ("DENY",
                 f"PACT dispatch_gate: subagent_type {subagent_type!r} "
@@ -302,10 +311,11 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
                 "agents/pact-*.md).",
                 "specialist_not_registered")
 
-    # ⑥ F5 — session-team match with empty-source fail-closed (decision h).
-    # Adversary passing team_name='' would equal an empty session_team if
-    # we didn't reject empty session_team upfront — F2 already caught
-    # explicit empty team_name on the spawn-input side.
+    # ⑥ Session-team match with empty-source fail-closed (decision h).
+    # An adversary passing team_name='' would equal an empty session_team
+    # if we didn't reject empty session_team upfront — the team_name=
+    # presence rule above already caught explicit empty team_name on the
+    # spawn-input side.
     session_team = pact_context.get_team_name()
     if not session_team:
         return ("DENY",
@@ -320,7 +330,7 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
                 "team name listed in CLAUDE.md §Current Session.",
                 "team_name_mismatch")
 
-    # ⑦ F14 — uniqueness against live team members.
+    # ⑦ Name uniqueness against live team members.
     members = _team_member_names(team_name)
     if name in members:
         return ("DENY",
@@ -329,7 +339,8 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
                 "(append a numeric suffix or role-descriptor variant).",
                 "name_not_unique")
 
-    # ⑧ F6 — TaskCreate before Agent spawn.
+    # ⑧ Task assignment — TaskCreate must precede Agent spawn so the
+    # teammate has work on arrival.
     if not has_task_assigned(team_name, name):
         return ("DENY",
                 f"PACT dispatch_gate: no Task assigned to owner={name!r} "
@@ -338,11 +349,11 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
                 "arrival.",
                 "no_task_assigned")
 
-    # ⑨ F7 — prompt heuristic. Mode controlled by
+    # ⑨ Inline-mission heuristic. Mode controlled by
     # PACT_DISPATCH_INLINE_MISSION_MODE env-var (warn|deny|shadow; default
-    # warn). Shadow is a calibration mode: F7 fires the journal event but
-    # returns ALLOW so first-session operators can observe trigger
-    # frequency without WARN-noise.
+    # warn). Shadow is a calibration mode: the rule fires the journal
+    # event but returns ALLOW so first-session operators can observe
+    # trigger frequency without WARN-noise.
     if (len(prompt) > PROMPT_MAX_LENGTH
             or not any(phrase in prompt for phrase in TASK_REFERENCE_PHRASES)):
         msg = (f"PACT dispatch_gate: prompt is long ({len(prompt)} "
@@ -366,21 +377,19 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
 
 def _journal_decision(decision: str, reason: str | None, rule: str | None,
                        tool_input: dict) -> None:
-    """F23: emit one journal event per gate decision. Best-effort sink —
+    """Emit one journal event per gate decision. Best-effort sink —
     errors are swallowed so the gate's primary decision always stands.
 
     The ``rule`` field carries a behavioral identifier (e.g.
-    ``"name_required"``, ``"long_inline_mission"``), not the F-row index
-    from the #662 failure-mode inventory. F-row labels are retained in
-    code comments and runbook context but never in journaled values.
+    ``"name_required"``, ``"long_inline_mission"``).
 
     Note: ``"dispatch_decision"`` is not registered in
     ``_REQUIRED_FIELDS_BY_TYPE`` in shared/session_journal.py, so the
     schema validator passes via the unknown-type opt-in pass-through
     (validator L317-L320). If a future change registers this type with
     required fields, update both this call site AND the validator
-    declaration in tandem. F26 redaction applied to the prompt fragment
-    BEFORE the journal write so credentials never persist.
+    declaration in tandem. Credential redaction applied to the prompt
+    fragment BEFORE the journal write so credentials never persist.
     """
     try:
         prompt = tool_input.get("prompt", "") if isinstance(tool_input, dict) else ""
@@ -427,8 +436,8 @@ def main() -> None:
     try:
         decision, reason, rule = evaluate_dispatch(tool_input)
     except Exception as e:
-        # F25 (runtime fail-closed): runtime exception in the rule logic
-        # is the same defect class as #658 — must DENY, must include
+        # Runtime fail-closed: a runtime exception in the rule logic is
+        # the same defect class as #658 — must DENY, must include
         # hookEventName.
         _emit_load_failure_deny("runtime", e)
 

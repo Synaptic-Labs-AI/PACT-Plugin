@@ -12,8 +12,9 @@ message, checks for the session-scoped bootstrap-complete marker file:
   - Non-PACT session (no context file) → no-op passthrough
   - Teammate (resolve_agent_name non-empty) → no-op passthrough
 
-SACROSANCT (post-#662 F25 sibling retrofit): module-load failures emit an
-advisory `additionalContext` block at exit 0 — UserPromptSubmit cannot
+SACROSANCT (post-#662 module-load fail-closed retrofit): module-load
+failures emit an advisory `additionalContext` block at exit 0 —
+UserPromptSubmit cannot
 DENY the prompt itself, so the strongest signal we can send is to surface
 the load-failure to the LLM via additionalContext so the user is informed
 and the orchestrator persona can react. Runtime exceptions in gate logic
@@ -32,7 +33,7 @@ from typing import NoReturn
 
 
 def _emit_load_failure_advisory(stage: str, error: BaseException) -> NoReturn:
-    """Emit fail-closed advisory for module-load failure (F25 sibling).
+    """Emit fail-closed advisory for module-load failure.
 
     UserPromptSubmit cannot DENY the prompt; the strongest available signal
     is `additionalContext` injection. Uses ONLY stdlib (json, sys) so it
@@ -59,7 +60,7 @@ def _emit_load_failure_advisory(stage: str, error: BaseException) -> NoReturn:
     sys.exit(0)
 
 
-# ─── F25 sibling retrofit: fail-closed wrapper around cross-package imports ──
+# ─── fail-closed wrapper around cross-package imports ───────────────────────
 try:
     from pathlib import Path
 
@@ -103,7 +104,8 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
 
     # Use the same safe-marker-check helper as the sibling
     # bootstrap_gate.py so both enforcement points share one safe-check
-    # contract. The helper enforces S2 + S4 + F24 (post-#662) defenses.
+    # contract. The helper enforces leaf-symlink, ancestor-symlink, and
+    # marker-content fingerprint defenses (post-#662).
     if is_marker_set(Path(session_dir)):
         # Bootstrap already done → suppress (zero tokens)
         return None
@@ -133,7 +135,7 @@ def main():
         # Runtime exception in gate logic → fail-OPEN: injecting
         # bootstrap-required text on a hook-side bug would mislead a healthy
         # session. Module-load failures are handled separately (advisory) by
-        # the F25 wrapper above.
+        # the module-load wrapper above.
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 

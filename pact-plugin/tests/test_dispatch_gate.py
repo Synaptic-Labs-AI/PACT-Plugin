@@ -2,35 +2,42 @@
 Comprehensive coverage for dispatch_gate.py — #662 PreToolUse hook.
 
 Sibling to test_dispatch_gate_smoke.py (the 7 minimum-viable cases).
-This file expands every F-row landed in the gate into a behavioral matrix.
+This file expands every rule landed in the gate into a behavioral matrix.
 
-F-row coverage (architect §6 mapping):
-  F1  — name= missing/empty/whitespace                          → DENY
-  F2  — team_name= empty                                        → DENY
-  F3  — name regex / NFKC / length / reserved tokens            → DENY
-  F4  — subagent_type not registered                            → DENY
-  F5  — team_name mismatch / empty session source               → DENY
-  F6  — no Task with owner=name                                 → DENY
-  F7  — long inline mission / no TaskList ref / mode tri-state  → WARN | DENY | ALLOW(shadow)
-  F14 — name already in team config members                     → DENY
-  F15 — plugin_root agents/ missing                             → DENY
-  F21 — runtime gate-logic exception fail-closed                → DENY (covered via subprocess in smoke)
-  F23 — every decision (ALLOW + WARN + DENY) emits journal event with rule + verdict
-  F26 — prompt redaction at journal-write boundary
-  Carve-outs — SOLO_EXEMPT / non-pact-* subagent_type           → ALLOW
-  Anti-sprawl — single evaluate_dispatch composition (auditor §11 YELLOW)
+Rule coverage:
+  - name_required — name= missing/empty/whitespace → DENY
+  - team_name_required — team_name= empty → DENY
+  - name_too_long / name_invalid_regex / name_reserved_token — name
+    length/NFKC/regex/reserved-token violations → DENY
+  - specialist_not_registered — subagent_type not in agent registry → DENY
+  - team_name_mismatch / team_name_unavailable — team mismatch or empty
+    session source → DENY
+  - no_task_assigned — no Task with owner=name → DENY
+  - long_inline_mission — long inline mission OR no TaskList reference,
+    disposition controlled by PACT_DISPATCH_INLINE_MISSION_MODE
+    (warn|deny|shadow) → WARN | DENY | ALLOW(shadow)
+  - name_not_unique — name already in team config members → DENY
+  - plugin_agents_missing — plugin_root agents/ directory missing → DENY
+  - Runtime gate-logic exception → fail-closed DENY (covered via
+    subprocess in smoke)
+  - Journal: every decision (ALLOW + WARN + DENY) emits a
+    dispatch_decision event with rule + verdict
+  - Prompt redaction at the journal-write boundary
+  - Carve-outs — SOLO_EXEMPT / non-pact-* subagent_type → ALLOW
+  - Anti-sprawl — single evaluate_dispatch composition
 
 Disciplines applied:
   - PR #660 R2: never pop shared.* from sys.modules in this test process.
-    Subprocess sabotage (F21) lives in the smoke file using PYTHONSAFEPATH.
+    Subprocess sabotage for runtime fail-closed lives in the smoke file
+    using PYTHONSAFEPATH.
   - #638 cardinality: each rule's deny is asserted by behavioral rule
     identifier (e.g. ``"name_required"``, ``"long_inline_mission"``), not
     deny string equality, so wording iterations don't cause test churn.
-  - feedback_no_planning_artifact_test_names: F-row references are
-    functional categories, not provenance — kept; no T#/issue# prefixes.
-  - F26 secret literals are split via Python adjacent-string-literal
-    concatenation so the repo-root pre-commit secret-scanner does not
-    false-positive on this fixture.
+  - feedback_no_planning_artifact_test_names: rule names describe
+    behavior, not provenance.
+  - Credential literals in redaction tests are split via Python
+    adjacent-string-literal concatenation so the repo-root pre-commit
+    secret-scanner does not false-positive on this fixture.
 """
 
 import io
@@ -187,7 +194,7 @@ def _capture_journal(monkeypatch):
 
 
 # =============================================================================
-# F1 — name= absent / empty / whitespace
+# name_required — name= absent / empty / whitespace
 # =============================================================================
 
 
@@ -195,15 +202,15 @@ def _capture_journal(monkeypatch):
     "name_input",
     [
         "",  # empty string
-        "   ",  # whitespace-only — also fails F3 regex
+        "   ",  # whitespace-only — also fails the regex rule
         "\t",  # tab-only
     ],
     ids=["empty_string", "whitespace_only", "tab_only"],
 )
-def test_f1_or_f3_deny_when_name_is_empty_or_whitespace(
+def test_or_regex_deny_when_name_is_empty_or_whitespace(
     name_input, tmp_path, monkeypatch, capsys
 ):
-    """F1 (empty) or F3 (whitespace fails regex) both DENY. Either tag is
+    """name_required (empty) or name_invalid_regex (whitespace fails regex) both DENY. Either rule is
     acceptable — the load-bearing invariant is that an unusable name is
     rejected with hookEventName=PreToolUse and exit 2.
     """
@@ -218,8 +225,8 @@ def test_f1_or_f3_deny_when_name_is_empty_or_whitespace(
         or ("name_invalid_regex" in reason) or ("must match" in reason)
 
 
-def test_f1_deny_when_name_key_missing(tmp_path, monkeypatch, capsys):
-    """tool_input lacks the name key entirely — gate treats as empty → F1."""
+def test_deny_when_name_key_missing(tmp_path, monkeypatch, capsys):
+    """tool_input lacks the name key entirely — gate treats as empty → name_required DENY."""
     _full_setup(monkeypatch, tmp_path)
     payload = _make_input()
     del payload["tool_input"]["name"]
@@ -229,12 +236,12 @@ def test_f1_deny_when_name_key_missing(tmp_path, monkeypatch, capsys):
 
 
 # =============================================================================
-# F2 — team_name= empty
+# team_name_required — team_name= empty
 # =============================================================================
 
 
-def test_f2_deny_when_team_name_key_missing(tmp_path, monkeypatch, capsys):
-    """tool_input lacks team_name → F2 (caught BEFORE F5 session-team check)."""
+def test_deny_when_team_name_key_missing(tmp_path, monkeypatch, capsys):
+    """tool_input lacks team_name → team_name_required DENY (caught BEFORE the session-team check)."""
     _full_setup(monkeypatch, tmp_path)
     payload = _make_input()
     del payload["tool_input"]["team_name"]
@@ -244,11 +251,11 @@ def test_f2_deny_when_team_name_key_missing(tmp_path, monkeypatch, capsys):
 
 
 # =============================================================================
-# F3 — name regex / length cap / NFKC / reserved tokens
+# name validation — regex / length cap / NFKC / reserved tokens
 # =============================================================================
 
 
-def test_f3_deny_when_name_exceeds_64_char_cap(tmp_path, monkeypatch, capsys):
+def test_deny_when_name_exceeds_64_char_cap(tmp_path, monkeypatch, capsys):
     """Length cap fires BEFORE regex (cheap-first ordering)."""
     _full_setup(monkeypatch, tmp_path)
     long_name = "a" * 65
@@ -259,9 +266,9 @@ def test_f3_deny_when_name_exceeds_64_char_cap(tmp_path, monkeypatch, capsys):
     assert "length" in reason.lower()
 
 
-def test_f3_allows_name_at_64_char_boundary(tmp_path, monkeypatch, capsys):
-    """64 chars is the max permitted (boundary <=). Combined with F6 below
-    we need a task with owner=long_name OR confirm the F3 check itself
+def test_allows_name_at_64_char_boundary(tmp_path, monkeypatch, capsys):
+    """64 chars is the max permitted (boundary <=). Combined with the no_task_assigned check below
+    we need a task with owner=long_name OR confirm the name-length check itself
     passes. Use a 64-char name + seed task with that owner.
     """
     long_name = "a" * 64
@@ -272,8 +279,8 @@ def test_f3_allows_name_at_64_char_boundary(tmp_path, monkeypatch, capsys):
         tasks=((long_name, "pending"),),
     )
     code, out = _run_main(_make_input(name=long_name), capsys)
-    # Either ALLOW (F3 passed, all other rules pass) or some unrelated DENY,
-    # but NOT a F3 length DENY — that's the load-bearing assertion.
+    # Either ALLOW (name validation passed, all other rules pass) or some unrelated DENY,
+    # but NOT a name-length DENY — that's the load-bearing assertion.
     if code == 2:
         reason = out["hookSpecificOutput"]["permissionDecisionReason"]
         assert "exceeds limit" not in reason
@@ -306,13 +313,13 @@ def test_f3_allows_name_at_64_char_boundary(tmp_path, monkeypatch, capsys):
         "zero_width",
     ],
 )
-def test_f3_deny_invalid_name_chars(bad_name, tmp_path, monkeypatch, capsys):
+def test_deny_invalid_name_chars(bad_name, tmp_path, monkeypatch, capsys):
     """NFKC normalize then regex check — none of these survive."""
     _full_setup(monkeypatch, tmp_path)
     code, out = _run_main(_make_input(name=bad_name), capsys)
     if bad_name == "trailing-":
         # Regex ^[a-z0-9-]+$ accepts trailing dash; this case should ALLOW
-        # (or fail another rule, but not F3 regex). Skip the deny assertion.
+        # (or fail another rule, but not the name-regex rule). Skip the deny assertion.
         if code == 2:
             reason = out["hookSpecificOutput"]["permissionDecisionReason"]
             assert "must match" not in reason
@@ -322,16 +329,16 @@ def test_f3_deny_invalid_name_chars(bad_name, tmp_path, monkeypatch, capsys):
     assert "must match" in reason
 
 
-def test_f3_deny_fullwidth_lookalike_after_nfkc(tmp_path, monkeypatch, capsys):
+def test_deny_fullwidth_lookalike_after_nfkc(tmp_path, monkeypatch, capsys):
     """Fullwidth digits/letters NFKC-normalize to ASCII, but the regex check
     runs on the NORMALIZED form. We want to assert that the LOOKALIKE shape
-    is rejected by SOME rule — either F3 (if NFKC produces non-regex chars)
+    is rejected by SOME rule — either name validation (if NFKC produces non-regex chars)
     or another rule. The load-bearing invariant: a name with fullwidth chars
     cannot smuggle through.
 
     Implementation note: dispatch_gate normalizes BEFORE regex. ｔｅｓｔ
     (fullwidth) NFKC-normalizes to "test", which IS valid ASCII. Per the
-    impl, this name is therefore ACCEPTED at F3. That is acceptable
+    impl, this name is therefore ACCEPTED by name validation. That is acceptable
     behavior — fullwidth lookalikes that legitimately normalize to a
     safe lowercase ASCII identifier are not security-sensitive. This test
     pins the empirical observation rather than an idealized expectation.
@@ -344,7 +351,7 @@ def test_f3_deny_fullwidth_lookalike_after_nfkc(tmp_path, monkeypatch, capsys):
     fullwidth = "ｔｅｓｔ"
     code, _out = _run_main(_make_input(name=fullwidth), capsys)
     # Either accepted (NFKC → "test" matches regex, has task) or denied for
-    # an unrelated rule. Never F3-regex denied since NFKC produces ASCII.
+    # an unrelated rule. Never name-regex denied since NFKC produces ASCII.
     assert code in (0, 2)
 
 
@@ -352,7 +359,7 @@ def test_f3_deny_fullwidth_lookalike_after_nfkc(tmp_path, monkeypatch, capsys):
     "reserved",
     ["team-lead", "lead", "user", "external", "peer", "unknown", "solo"],
 )
-def test_f3_deny_reserved_token(reserved, tmp_path, monkeypatch, capsys):
+def test_deny_reserved_token(reserved, tmp_path, monkeypatch, capsys):
     """Reserved tokens DENY even though they pass the regex."""
     _full_setup(monkeypatch, tmp_path)
     code, out = _run_main(_make_input(name=reserved), capsys)
@@ -362,12 +369,12 @@ def test_f3_deny_reserved_token(reserved, tmp_path, monkeypatch, capsys):
 
 
 # =============================================================================
-# F4 — subagent_type not registered
+# specialist_not_registered — subagent_type not in registry
 # =============================================================================
 
 
-def test_f4_deny_when_subagent_type_not_in_registry(tmp_path, monkeypatch, capsys):
-    """pact-nonexistent doesn't appear in agents/ glob → F4 DENY."""
+def test_deny_when_subagent_type_not_in_registry(tmp_path, monkeypatch, capsys):
+    """pact-nonexistent doesn't appear in agents/ glob → specialist_not_registered DENY."""
     _full_setup(monkeypatch, tmp_path, agents=("pact-architect",))
     code, out = _run_main(_make_input(subagent_type="pact-nonexistent"), capsys)
     assert code == 2
@@ -376,12 +383,12 @@ def test_f4_deny_when_subagent_type_not_in_registry(tmp_path, monkeypatch, capsy
 
 
 # =============================================================================
-# F5 — team_name mismatch / empty session source
+# team_name_mismatch / team_name_unavailable — team_name mismatch or empty session source
 # =============================================================================
 
 
-def test_f5_deny_when_team_name_mismatch(tmp_path, monkeypatch, capsys):
-    """Spawn passes team_name='wrong-team' but session is 'pact-test' → F5."""
+def test_deny_when_team_name_mismatch(tmp_path, monkeypatch, capsys):
+    """Spawn passes team_name='wrong-team' but session is 'pact-test' → team_name_mismatch DENY."""
     _full_setup(monkeypatch, tmp_path)
     code, out = _run_main(_make_input(team_name="wrong-team"), capsys)
     assert code == 2
@@ -389,13 +396,14 @@ def test_f5_deny_when_team_name_mismatch(tmp_path, monkeypatch, capsys):
     assert "does not match current session team" in reason
 
 
-def test_f5_deny_when_session_team_unavailable(tmp_path, monkeypatch, capsys):
+def test_deny_when_session_team_unavailable(tmp_path, monkeypatch, capsys):
     """Empty-source decision (architect §7(h)): when session context has
     empty team_name, fail-closed — adversary passing team_name='' would
     otherwise equal the empty session value.
 
-    F2 catches the explicit empty team_name on the spawn-input side
-    BEFORE F5 runs, so we exercise this with a non-empty spawn team_name
+    The team_name_required rule catches the explicit empty team_name on
+    the spawn-input side BEFORE this rule runs, so we exercise this with a
+    non-empty spawn team_name
     against an empty session team_name.
     """
     plugin_root = tmp_path / "plugin"
@@ -409,12 +417,12 @@ def test_f5_deny_when_session_team_unavailable(tmp_path, monkeypatch, capsys):
 
 
 # =============================================================================
-# F6 — spawn before TaskCreate
+# no_task_assigned — spawn before TaskCreate
 # =============================================================================
 
 
-def test_f6_deny_when_no_task_for_owner(tmp_path, monkeypatch, capsys):
-    """No task exists with owner=tester → F6."""
+def test_deny_when_no_task_for_owner(tmp_path, monkeypatch, capsys):
+    """No task exists with owner=tester → no_task_assigned DENY."""
     _full_setup(monkeypatch, tmp_path, tasks=())  # zero tasks
     code, out = _run_main(_make_input(), capsys)
     assert code == 2
@@ -422,8 +430,8 @@ def test_f6_deny_when_no_task_for_owner(tmp_path, monkeypatch, capsys):
     assert "no Task assigned" in reason
 
 
-def test_f6_deny_when_task_owner_differs(tmp_path, monkeypatch, capsys):
-    """Task exists but for a different owner → F6 (still no task for tester)."""
+def test_deny_when_task_owner_differs(tmp_path, monkeypatch, capsys):
+    """Task exists but for a different owner → no_task_assigned DENY (still no task for tester)."""
     _full_setup(monkeypatch, tmp_path, tasks=(("other-agent", "pending"),))
     code, out = _run_main(_make_input(), capsys)
     assert code == 2
@@ -431,7 +439,7 @@ def test_f6_deny_when_task_owner_differs(tmp_path, monkeypatch, capsys):
     assert "no Task assigned" in reason
 
 
-def test_f6_deny_when_task_completed_only(tmp_path, monkeypatch, capsys):
+def test_deny_when_task_completed_only(tmp_path, monkeypatch, capsys):
     """Only completed tasks count as 'no active task'. has_task_assigned
     requires status in {pending, in_progress}.
     """
@@ -442,11 +450,11 @@ def test_f6_deny_when_task_completed_only(tmp_path, monkeypatch, capsys):
 
 
 # =============================================================================
-# F7 — long inline mission / no TaskList ref / mode tri-state
+# long_inline_mission — long inline mission / no TaskList ref / mode tri-state
 # =============================================================================
 
 
-def test_f7_warn_when_prompt_lacks_task_reference(tmp_path, monkeypatch, capsys):
+def test_warn_when_prompt_lacks_task_reference(tmp_path, monkeypatch, capsys):
     """Default mode is 'warn' → ALLOW with additionalContext advisory.
     F7_MODE was read at module-load BEFORE this test — we don't override
     it here; default is 'warn' unless a prior test set the env var.
@@ -466,7 +474,7 @@ def test_f7_warn_when_prompt_lacks_task_reference(tmp_path, monkeypatch, capsys)
         or "lacks a TaskList reference" in hso["additionalContext"]
 
 
-def test_f7_warn_when_prompt_exceeds_800_chars(tmp_path, monkeypatch, capsys):
+def test_warn_when_prompt_exceeds_800_chars(tmp_path, monkeypatch, capsys):
     """Long prompt + TaskList reference still WARNs (length-or-no-ref)."""
     import dispatch_gate
 
@@ -481,7 +489,7 @@ def test_f7_warn_when_prompt_exceeds_800_chars(tmp_path, monkeypatch, capsys):
         or "lacks a TaskList reference" in hso["additionalContext"]
 
 
-def test_f7_deny_in_deny_mode(tmp_path, monkeypatch, capsys):
+def test_deny_in_deny_mode(tmp_path, monkeypatch, capsys):
     """Mode='deny' promotes WARN → DENY."""
     import dispatch_gate
 
@@ -495,9 +503,9 @@ def test_f7_deny_in_deny_mode(tmp_path, monkeypatch, capsys):
         or "lacks a TaskList reference" in hso["permissionDecisionReason"]
 
 
-def test_f7_silent_allow_in_shadow_mode(tmp_path, monkeypatch, capsys):
+def test_silent_allow_in_shadow_mode(tmp_path, monkeypatch, capsys):
     """Mode='shadow' returns ALLOW silently — no advisory, no deny — but
-    the journal still records the F7 trigger for calibration.
+    the journal still records the long_inline_mission trigger for calibration.
     """
     import dispatch_gate
 
@@ -516,12 +524,12 @@ def test_f7_silent_allow_in_shadow_mode(tmp_path, monkeypatch, capsys):
 
 
 # =============================================================================
-# F14 — name uniqueness vs live team members
+# name_not_unique — uniqueness vs live team members
 # =============================================================================
 
 
-def test_f14_deny_when_name_already_in_team_members(tmp_path, monkeypatch, capsys):
-    """Member 'tester' already lives in team.config.json → F14 DENY."""
+def test_deny_when_name_already_in_team_members(tmp_path, monkeypatch, capsys):
+    """Member 'tester' already lives in team.config.json → name_not_unique DENY."""
     _full_setup(
         monkeypatch,
         tmp_path,
@@ -534,10 +542,10 @@ def test_f14_deny_when_name_already_in_team_members(tmp_path, monkeypatch, capsy
     assert "is already a live member" in reason
 
 
-def test_f14_allows_unique_name_when_other_members_present(
+def test_allows_unique_name_when_other_members_present(
     tmp_path, monkeypatch, capsys
 ):
-    """Different live member doesn't trigger F14 for an incoming new name."""
+    """Different live member doesn't trigger the uniqueness rule for an incoming new name."""
     _full_setup(
         monkeypatch,
         tmp_path,
@@ -550,11 +558,11 @@ def test_f14_allows_unique_name_when_other_members_present(
 
 
 # =============================================================================
-# F15 — plugin_root agents/ missing
+# plugin_agents_missing — plugin_root agents/ directory missing
 # =============================================================================
 
 
-def test_f15_deny_when_plugin_agents_missing(tmp_path, monkeypatch, capsys):
+def test_deny_when_plugin_agents_missing(tmp_path, monkeypatch, capsys):
     """plugin_root resolves to a path whose agents/ subdir doesn't exist."""
     plugin_root = tmp_path / "broken-plugin"
     plugin_root.mkdir()  # exists but no agents/ subdir
@@ -579,7 +587,7 @@ def test_solo_exempt_allows_without_name_or_team(
     carve_out_type, tmp_path, monkeypatch, capsys
 ):
     """Research-tier subagents legitimately spawn solo. ALLOW even with
-    name='' and team_name='' (which would otherwise trip F1/F2).
+    name='' and team_name='' (which would otherwise trip name_required/team_name_required).
     """
     _full_setup(monkeypatch, tmp_path)
     code, out = _run_main(
@@ -602,11 +610,11 @@ def test_non_pact_subagent_type_passes_through(tmp_path, monkeypatch, capsys):
 
 
 # =============================================================================
-# F23 — journal emit on every gate decision
+# journal emit on every gate decision
 # =============================================================================
 
 
-def test_f23_journal_emit_on_allow(tmp_path, monkeypatch, capsys):
+def test_journal_emit_on_allow(tmp_path, monkeypatch, capsys):
     """Happy-path ALLOW still emits a dispatch_decision journal event."""
     captured = _capture_journal(monkeypatch)
     _full_setup(monkeypatch, tmp_path)
@@ -618,7 +626,7 @@ def test_f23_journal_emit_on_allow(tmp_path, monkeypatch, capsys):
     assert last["decision"] == "ALLOW"
 
 
-def test_f23_journal_emit_on_deny_carries_rule(tmp_path, monkeypatch, capsys):
+def test_journal_emit_on_deny_carries_rule(tmp_path, monkeypatch, capsys):
     """DENY journal event carries the rule identifier (name_required here)."""
     captured = _capture_journal(monkeypatch)
     _full_setup(monkeypatch, tmp_path)
@@ -632,8 +640,8 @@ def test_f23_journal_emit_on_deny_carries_rule(tmp_path, monkeypatch, capsys):
     assert deny_events[-1]["rule"] == "name_required"
 
 
-def test_f23_journal_emit_on_warn_carries_f7(tmp_path, monkeypatch, capsys):
-    """WARN (F7 default mode) journal event records rule='long_inline_mission'."""
+def test_journal_emit_on_warn_carries_f7(tmp_path, monkeypatch, capsys):
+    """WARN (default inline-mission mode) journal event records rule='long_inline_mission'."""
     import dispatch_gate
 
     monkeypatch.setattr(dispatch_gate, "F7_MODE", "warn")
@@ -650,7 +658,7 @@ def test_f23_journal_emit_on_warn_carries_f7(tmp_path, monkeypatch, capsys):
 
 
 # =============================================================================
-# F26 — prompt redaction at journal-write boundary
+# prompt redaction at journal-write boundary
 # =============================================================================
 
 
@@ -666,7 +674,7 @@ def test_f23_journal_emit_on_warn_carries_f7(tmp_path, monkeypatch, capsys):
     ],
     ids=["openai", "slack", "github_pat", "aws"],
 )
-def test_f26_redacts_credential_patterns_in_journal(
+def test_redacts_credential_patterns_in_journal(
     secret_token, tmp_path, monkeypatch, capsys
 ):
     """Each credential pattern is scrubbed BEFORE journal write. Verbatim
@@ -682,7 +690,7 @@ def test_f26_redacts_credential_patterns_in_journal(
     assert secret_token not in journaled
 
 
-def test_f26_redacts_jwt_shape_in_journal(tmp_path, monkeypatch, capsys):
+def test_redacts_jwt_shape_in_journal(tmp_path, monkeypatch, capsys):
     """JWT three-segment base64url shape is also redacted."""
     captured = _capture_journal(monkeypatch)
     _full_setup(monkeypatch, tmp_path)

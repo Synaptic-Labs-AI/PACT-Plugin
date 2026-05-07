@@ -1,19 +1,19 @@
 """
 Smoke tests for task_lifecycle_gate.py — PostToolUse hook enforcing
-PACT lifecycle invariants F8-F13 (#662 Commit 3).
+PACT lifecycle rules (#662 Commit 3).
 
 NOT comprehensive coverage — that is TEST-phase scope. These cases lock
 the load-bearing decisions in place so a future regression surfaces fast:
 
-  S1. F8 advisory: TEACHBACK Task created without addBlocks
-  S2. F9 advisory: pact-* Task created without addBlockedBy
-  S3. F11 advisory: pact-* work-Task completed with empty metadata.handoff
-  S4. F12 advisory + writeback: teammate self-completes; assert
+  S1. teachback_addblocks_missing advisory: TEACHBACK Task created without addBlocks
+  S2. work_addblockedby_missing advisory: pact-* Task created without addBlockedBy
+  S3. handoff_missing advisory: pact-* work-Task completed with empty metadata.handoff
+  S4. self_completion advisory + writeback: teammate self-completes; assert
       metadata.completion_disputed=True AND gate_writeback=True written
       to disk
-  S5. F12 recursion-marker self-skip: tool_input.metadata.gate_writeback
+  S5. self_completion recursion-marker self-skip: tool_input.metadata.gate_writeback
       already True → no advisories, no writeback (counter-test)
-  S6. F21 fail-closed counter-test: simulate cross-package import failure
+  S6. Module-load fail-closed counter-test: simulate cross-package import failure
       via the public _emit_load_failure_advisory helper → advisory emitted
       with hookEventName + exit 0
 """
@@ -50,10 +50,10 @@ def _capture_main(payload: dict, capsys) -> tuple[int, dict | None]:
     return code, parsed
 
 
-# ─── S1: F8 — TEACHBACK Task created without addBlocks ────────────────────
+# ─── S1: teachback_addblocks_missing — TEACHBACK Task created without addBlocks ─
 
 
-def test_s1_f8_teachback_create_without_addblocks(pact_context, capsys):
+def test_teachback_create_without_addblocks(pact_context, capsys):
     pact_context(team_name="test-team", session_id="test-session")
     payload = {
         "tool_name": "TaskCreate",
@@ -66,14 +66,14 @@ def test_s1_f8_teachback_create_without_addblocks(pact_context, capsys):
     }
     advisories = tlg.evaluate_lifecycle(payload)
     assert any(rule == "teachback_addblocks_missing" for rule, _ in advisories), (
-        f"expected F8 advisory, got: {advisories}"
+        f"expected teachback_addblocks_missing advisory, got: {advisories}"
     )
 
 
-# ─── S2: F9 — pact-* Task created without addBlockedBy ────────────────────
+# ─── S2: work_addblockedby_missing — pact-* Task created without addBlockedBy ───
 
 
-def test_s2_f9_work_task_create_without_addblockedby(pact_context, capsys):
+def test_work_task_create_without_addblockedby(pact_context, capsys):
     pact_context(team_name="test-team", session_id="test-session")
     payload = {
         "tool_name": "TaskCreate",
@@ -86,14 +86,14 @@ def test_s2_f9_work_task_create_without_addblockedby(pact_context, capsys):
     }
     advisories = tlg.evaluate_lifecycle(payload)
     assert any(rule == "work_addblockedby_missing" for rule, _ in advisories), (
-        f"expected F9 advisory, got: {advisories}"
+        f"expected work_addblockedby_missing advisory, got: {advisories}"
     )
 
 
-# ─── S3: F11 — pact-* work-Task completed without metadata.handoff ────────
+# ─── S3: handoff_missing — pact-* work-Task completed without metadata.handoff ──
 
 
-def test_s3_f11_work_task_completed_without_handoff(pact_context, capsys):
+def test_work_task_completed_without_handoff(pact_context, capsys):
     pact_context(team_name="test-team", session_id="test-session")
     payload = {
         "tool_name": "TaskUpdate",
@@ -109,16 +109,16 @@ def test_s3_f11_work_task_completed_without_handoff(pact_context, capsys):
     }
     advisories = tlg.evaluate_lifecycle(payload)
     assert any(rule == "handoff_missing" for rule, _ in advisories), (
-        f"expected F11 advisory, got: {advisories}"
+        f"expected handoff_missing advisory, got: {advisories}"
     )
-    # F13 must NOT also fire — disjoint per lead clarification.
+    # handoff_schema_invalid must NOT also fire — disjoint per lead clarification.
     assert not any(rule == "handoff_schema_invalid" for rule, _ in advisories)
 
 
-# ─── S4: F12 — teammate self-completes → advisory + FS writeback ──────────
+# ─── S4: self_completion — teammate self-completes → advisory + FS writeback ────
 
 
-def test_s4_f12_self_completion_writeback(tmp_path, monkeypatch, pact_context):
+def test_self_completion_writeback(tmp_path, monkeypatch, pact_context):
     pact_context(team_name="test-team", session_id="test-session")
 
     # Stage a fake task on disk under HOME/.claude/tasks/test-team/.
@@ -146,7 +146,7 @@ def test_s4_f12_self_completion_writeback(tmp_path, monkeypatch, pact_context):
                 "subject": "implement foo",
                 "owner": "backend-coder-3",
                 "metadata": {
-                    "handoff": {  # well-formed so F11/F13 don't also fire
+                    "handoff": {  # well-formed so handoff_missing/handoff_schema_invalid don't also fire
                         "produced": "x",
                         "decisions": "x",
                         "reasoning_chain": "x",
@@ -160,7 +160,7 @@ def test_s4_f12_self_completion_writeback(tmp_path, monkeypatch, pact_context):
     }
     advisories = tlg.evaluate_lifecycle(payload)
     assert any(rule == "self_completion" for rule, _ in advisories), (
-        f"expected F12 advisory, got: {advisories}"
+        f"expected self_completion advisory, got: {advisories}"
     )
 
     # Writeback must have landed on disk with both markers.
@@ -169,7 +169,7 @@ def test_s4_f12_self_completion_writeback(tmp_path, monkeypatch, pact_context):
     assert written["metadata"]["gate_writeback"] is True
 
 
-# ─── S5: F12 recursion-marker self-skip ───────────────────────────────────
+# ─── S5: self_completion recursion-marker self-skip ─────────────────────────────
 
 
 def test_s5_recursion_marker_self_skip(pact_context):
@@ -198,7 +198,7 @@ def test_s5_recursion_marker_self_skip(pact_context):
     )
 
 
-# ─── S6: F21 fail-closed-as-advisory on simulated module-load failure ─────
+# ─── S6: Module-load fail-closed-as-advisory simulation ─────────────────────────
 
 
 def test_s6_load_failure_emits_advisory_exit_0(capsys):

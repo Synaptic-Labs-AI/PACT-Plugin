@@ -69,7 +69,7 @@ def _setup_pact_session(monkeypatch, tmp_path, with_marker=False,
     Monkeypatches Path.home to tmp_path so get_session_dir() returns a
     path under tmp_path. Writes a context file and patches pact_context
     module state. When ``with_marker=True``, writes a properly-stamped
-    F24 marker (post-#662); empty `touch` markers no longer satisfy the
+    properly-stamped marker (post-#662); empty `touch` markers no longer satisfy the
     gate.
 
     Returns the session_dir path.
@@ -404,7 +404,7 @@ class TestMarkerLifecycle:
     """P3: Marker creation → gate self-disable → idempotent suppress."""
 
     def test_gate_transitions_on_marker_creation(self, monkeypatch, tmp_path, capsys):
-        """Before marker: inject. After F24 marker stamp: suppress."""
+        """Before marker: inject. After marker stamp: suppress."""
         import hashlib
         import shared.pact_context as ctx_module
 
@@ -415,7 +415,7 @@ class TestMarkerLifecycle:
         _, output_before = _run_main(_make_input(), capsys)
         assert "hookSpecificOutput" in output_before
 
-        # Stamp a properly-formed F24 marker (post-#662)
+        # Stamp a properly-formed marker (post-#662)
         sid = session_dir.name
         sig = hashlib.sha256(
             f"{sid}|{str(plugin_root).rstrip('/')}|9.9.9|1".encode()

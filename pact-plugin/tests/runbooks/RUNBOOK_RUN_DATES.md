@@ -10,11 +10,11 @@ data is the substitute).
 
 ## 662-dispatch-gate.md
 
-| Run date (UTC) | Operator | Plugin version | Sections passed | F7 mode | Notes / counter-test outcomes |
+| Run date (UTC) | Operator | Plugin version | Sections passed | inline-mission mode | Notes / counter-test outcomes |
 | -------------- | -------- | -------------- | --------------- | ------- | ------------------------------- |
-| _pending — execute post-merge in fresh session_ | | 4.1.3 | /8 | warn (default) | F22 (§1+§1.1) PASS/FAIL · F18 (§2+§2.1) PASS/FAIL · F7 advisory injection (§3) WARN-visible / WARN-dropped → flipped to deny · F7 shadow (§3.1) PASS/FAIL · F7 deny (§3.2) PASS/FAIL · F25 sabotaged-import (§4) PASS/FAIL. |
+| _pending — execute post-merge in fresh session_ | | 4.1.3 | /8 | warn (default) | matcher-fidelity (§1+§1.1) PASS/FAIL · Bash-touch bypass (§2+§2.1) PASS/FAIL · inline-mission advisory injection (§3) WARN-visible / WARN-dropped → flipped to deny · inline-mission shadow (§3.1) PASS/FAIL · inline-mission deny (§3.2) PASS/FAIL · sabotaged-import fail-closed (§4) PASS/FAIL. |
 
-Sections-passed denominator is 8 per runbook §5 (§1, §1.1, §2, §2.1, §3, §3.1, §3.2, §4). F7 mode column records whether the empirical observation kept the production default at `warn` or motivated a flip to `deny`. If a section fails, file a follow-up issue and link it in the Notes column.
+Sections-passed denominator is 8 per runbook §5 (§1, §1.1, §2, §2.1, §3, §3.1, §3.2, §4). The inline-mission mode column records whether the empirical observation kept the production default at `warn` or motivated a flip to `deny`. If a section fails, file a follow-up issue and link it in the Notes column.
 
 ## v4.0.0-launch-and-isolation.md
 

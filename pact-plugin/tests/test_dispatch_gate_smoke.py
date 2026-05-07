@@ -7,17 +7,18 @@ gate's structural contract:
 
   1. Happy-path ALLOW (registered specialist, valid name, matching team,
      task assigned, short prompt with TaskList reference)
-  2. F1 DENY: empty name=
-  3. F2 DENY: empty team_name=
-  4. F3 DENY: reserved name (`team-lead`)
+  2. name_required DENY: empty name=
+  3. team_name_required DENY: empty team_name=
+  4. name_reserved_token DENY: reserved name (`team-lead`)
   5. SOLO_EXEMPT carve-out: subagent_type='general-purpose' → ALLOW
-  6. F21 fail-closed counter-test: subprocess invocation with PYTHONPATH
-     manipulated so shared.dispatch_helpers raises ImportError → DENY
-     output includes hookEventName + exit 2
+  6. Module-load fail-closed counter-test: subprocess invocation with
+     PYTHONPATH manipulated so shared.dispatch_helpers raises
+     ImportError → DENY output includes hookEventName + exit 2
 
-F21 counter-test uses subprocess+PYTHONPATH per PR #660 R2 discipline:
-NEVER pop shared.* from sys.modules in the test process. Sabotage runs
-in a subprocess so the test process's import state stays clean.
+The fail-closed counter-test uses subprocess+PYTHONPATH per PR #660 R2
+discipline: NEVER pop shared.* from sys.modules in the test process.
+Sabotage runs in a subprocess so the test process's import state stays
+clean.
 """
 
 import io
@@ -144,7 +145,7 @@ def test_allow_happy_path(tmp_path, monkeypatch, capsys):
     assert out == _SUPPRESS_EXPECTED
 
 
-def test_f1_deny_empty_name(tmp_path, monkeypatch, capsys):
+def test_deny_empty_name(tmp_path, monkeypatch, capsys):
     plugin_root = tmp_path / "plugin"
     _seed_plugin(plugin_root)
     _setup_session(monkeypatch, tmp_path, plugin_root)
@@ -157,7 +158,7 @@ def test_f1_deny_empty_name(tmp_path, monkeypatch, capsys):
     assert "name= parameter is required" in hso["permissionDecisionReason"]
 
 
-def test_f2_deny_empty_team_name(tmp_path, monkeypatch, capsys):
+def test_deny_empty_team_name(tmp_path, monkeypatch, capsys):
     plugin_root = tmp_path / "plugin"
     _seed_plugin(plugin_root)
     _setup_session(monkeypatch, tmp_path, plugin_root)
@@ -170,7 +171,7 @@ def test_f2_deny_empty_team_name(tmp_path, monkeypatch, capsys):
     assert "team_name= parameter is required" in hso["permissionDecisionReason"]
 
 
-def test_f3_deny_reserved_name(tmp_path, monkeypatch, capsys):
+def test_deny_reserved_name(tmp_path, monkeypatch, capsys):
     """Reserved name 'team-lead' would shadow the routing literal — DENY."""
     plugin_root = tmp_path / "plugin"
     _seed_plugin(plugin_root)
@@ -200,8 +201,8 @@ def test_solo_exempt_carve_out(tmp_path, monkeypatch, capsys):
     assert out == _SUPPRESS_EXPECTED
 
 
-def test_f21_fail_closed_module_load(tmp_path):
-    """F21 counter-test: sabotage shared.dispatch_helpers via PYTHONPATH
+def test_fail_closed_module_load(tmp_path):
+    """Module-load fail-closed counter-test: sabotage shared.dispatch_helpers via PYTHONPATH
     so its import raises, then invoke dispatch_gate.py as a subprocess.
     Expect: exit 2, stdout JSON with hookEventName + permissionDecision='deny'.
 
@@ -263,13 +264,13 @@ def test_f21_fail_closed_module_load(tmp_path):
         or "module imports" in hso["permissionDecisionReason"].lower()
 
 
-def test_f26_redaction_in_journal(tmp_path, monkeypatch, capsys):
-    """F26 verification: prompt containing a credential pattern is
+def test_redaction_in_journal(tmp_path, monkeypatch, capsys):
+    """Credential redaction verification: prompt containing a credential pattern is
     redacted in the journal-written form. The user-facing
     permissionDecisionReason is unaffected (verbatim prompt fragment is
     kept for dispatcher debugging).
 
-    We trigger F2 (empty team_name) so the gate DENIES, then read the
+    We trigger team_name_required (empty team_name) so the gate DENIES, then read the
     captured journal event to confirm prompt_redacted contains
     [REDACTED] and NOT the original sk-... token.
     """

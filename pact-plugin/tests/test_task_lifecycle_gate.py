@@ -2,29 +2,35 @@
 Comprehensive coverage for task_lifecycle_gate.py — #662 PostToolUse hook.
 
 Sibling to test_task_lifecycle_gate_smoke.py (the 6 minimum-viable cases).
-This file expands every F-row landed in the gate.
+This file expands every rule landed in the gate.
 
-F-row coverage (architect §6 + impl reality):
-  F8  — TaskCreate TEACHBACK without addBlocks=[B_id]            → advisory
-  F9  — TaskCreate pact-* non-TEACHBACK without addBlockedBy     → advisory
-  F10 — TaskUpdate(completed) Task A without paired SendMessage  → advisory
+Rule coverage:
+  - teachback_addblocks_missing — TaskCreate TEACHBACK without
+    addBlocks=[<work_task_id>] → advisory
+  - work_addblockedby_missing — TaskCreate pact-* non-TEACHBACK
+    without addBlockedBy → advisory
+  - completion_no_paired_send — TaskUpdate(completed) teachback
+    Task without paired SendMessage → advisory
         Boundary tested at 119s (silent) and 121s (advisory).
-  F11 — TaskUpdate(completed) pact-* Task B without metadata.handoff → advisory
-  F12 — Teammate self-completes Task → advisory + writeback
+  - handoff_missing — TaskUpdate(completed) pact-* work Task
+    without metadata.handoff → advisory
+  - self_completion — Teammate self-completes Task → advisory +
+    completion_disputed writeback
         Carve-outs: secretary self-complete (SELF_COMPLETE_EXEMPT_AGENTS),
         signal task (metadata.completion_type=signal — exempt via the
         is_self_complete_exempt predicate), recursion-marker skip.
         Sketch-A: actor unresolvable → CURRENT skip behavior; encoded with
         explicit deviation-documenting test referencing architect §5.3.
-  F13 — TaskUpdate(completed) with malformed metadata.handoff → advisory
-        (disjoint from F11 — handoff present but schema-incomplete).
-  F21 — module-load failure → advisory + hookEventName=PostToolUse + exit 0
+  - handoff_schema_invalid — TaskUpdate(completed) with malformed
+    metadata.handoff → advisory (disjoint from handoff_missing —
+    handoff present but schema-incomplete).
+  - module-load failure → advisory + hookEventName=PostToolUse + exit 0
   Anti-sprawl — single evaluate_lifecycle composition.
 
 Disciplines applied:
   - PR #660 R2: never pop shared.* from sys.modules in this test process.
-  - F-row references = functional categories per architect §6, not
-    provenance — kept per `feedback_no_planning_artifact_test_names`.
+  - Rule names describe behavior, not provenance — per
+    `feedback_no_planning_artifact_test_names`.
 """
 
 import io
@@ -63,11 +69,11 @@ def _capture_main(payload: dict, capsys) -> tuple[int, dict | None]:
 
 
 # =============================================================================
-# F8 — TEACHBACK Task without addBlocks=[B_id]
+# teachback_addblocks_missing — TEACHBACK Task without addBlocks=[<work_task_id>]
 # =============================================================================
 
 
-def test_f8_silent_when_teachback_carries_addblocks(pact_context):
+def test_silent_when_teachback_carries_addblocks(pact_context):
     pact_context(team_name="test-team", session_id="test-session")
     payload = {
         "tool_name": "TaskCreate",
@@ -80,16 +86,16 @@ def test_f8_silent_when_teachback_carries_addblocks(pact_context):
     }
     advisories = tlg.evaluate_lifecycle(payload)
     assert not any(rule == "teachback_addblocks_missing" for rule, _ in advisories), (
-        f"expected silent (F8 satisfied), got: {advisories}"
+        f"expected silent (teachback_addblocks_missing satisfied), got: {advisories}"
     )
 
 
 # =============================================================================
-# F9 — pact-* non-TEACHBACK Task without addBlockedBy=[A_id]
+# work_addblockedby_missing — pact-* non-TEACHBACK Task without addBlockedBy=[<teachback_id>]
 # =============================================================================
 
 
-def test_f9_silent_when_work_task_carries_addblockedby(pact_context):
+def test_silent_when_work_task_carries_addblockedby(pact_context):
     pact_context(team_name="test-team", session_id="test-session")
     payload = {
         "tool_name": "TaskCreate",
@@ -104,8 +110,8 @@ def test_f9_silent_when_work_task_carries_addblockedby(pact_context):
     assert not any(rule == "work_addblockedby_missing" for rule, _ in advisories)
 
 
-def test_f9_silent_when_owner_is_not_pact_specialist(pact_context):
-    """Non-pact-* owner doesn't trigger F9 even without addBlockedBy."""
+def test_silent_when_owner_is_not_pact_specialist(pact_context):
+    """Non-pact-* owner doesn't trigger work_addblockedby_missing even without addBlockedBy."""
     pact_context(team_name="test-team", session_id="test-session")
     payload = {
         "tool_name": "TaskCreate",
@@ -120,7 +126,7 @@ def test_f9_silent_when_owner_is_not_pact_specialist(pact_context):
 
 
 # =============================================================================
-# F10 — Teachback completion without paired SendMessage (120s window)
+# completion_no_paired_send — teachback completion without paired SendMessage (120s window)
 # =============================================================================
 
 
@@ -158,10 +164,10 @@ def _setup_team_inbox(
     )
 
 
-def test_f10_silent_when_paired_sendmessage_within_window(
+def test_silent_when_paired_sendmessage_within_window(
     tmp_path, monkeypatch, pact_context
 ):
-    """Paired SendMessage 30s ago (well within 120s) → no F10 advisory."""
+    """Paired SendMessage 30s ago (well within 120s) → no completion_no_paired_send advisory."""
     pact_context(team_name="test-team", session_id="test-session")
     _setup_team_inbox(
         tmp_path, monkeypatch, owner="preparer", team_name="test-team",
@@ -185,7 +191,7 @@ def test_f10_silent_when_paired_sendmessage_within_window(
     )
 
 
-def test_f10_silent_at_119s_boundary(tmp_path, monkeypatch, pact_context):
+def test_silent_at_119s_boundary(tmp_path, monkeypatch, pact_context):
     """119s ago is still within the 120s window → silent."""
     pact_context(team_name="test-team", session_id="test-session")
     _setup_team_inbox(
@@ -208,8 +214,8 @@ def test_f10_silent_at_119s_boundary(tmp_path, monkeypatch, pact_context):
     assert not any(rule == "completion_no_paired_send" for rule, _ in advisories)
 
 
-def test_f10_advisory_at_121s_boundary(tmp_path, monkeypatch, pact_context):
-    """121s ago is outside the 120s window → F10 fires."""
+def test_advisory_at_121s_boundary(tmp_path, monkeypatch, pact_context):
+    """121s ago is outside the 120s window → completion_no_paired_send fires."""
     pact_context(team_name="test-team", session_id="test-session")
     _setup_team_inbox(
         tmp_path, monkeypatch, owner="preparer", team_name="test-team",
@@ -229,12 +235,12 @@ def test_f10_advisory_at_121s_boundary(tmp_path, monkeypatch, pact_context):
     }
     advisories = tlg.evaluate_lifecycle(payload)
     assert any(rule == "completion_no_paired_send" for rule, _ in advisories), (
-        f"expected F10 outside window, got: {advisories}"
+        f"expected completion_no_paired_send outside window, got: {advisories}"
     )
 
 
-def test_f10_advisory_when_inbox_empty(tmp_path, monkeypatch, pact_context):
-    """No paired SendMessage at all → F10 fires."""
+def test_advisory_when_inbox_empty(tmp_path, monkeypatch, pact_context):
+    """No paired SendMessage at all → completion_no_paired_send fires."""
     pact_context(team_name="test-team", session_id="test-session")
     _setup_team_inbox(
         tmp_path, monkeypatch, owner="preparer", team_name="test-team",
@@ -257,12 +263,12 @@ def test_f10_advisory_when_inbox_empty(tmp_path, monkeypatch, pact_context):
 
 
 # =============================================================================
-# F11 — pact-* work-Task completed with empty metadata.handoff
+# handoff_missing — pact-* work-Task completed with empty metadata.handoff
 # =============================================================================
 
 
-def test_f11_silent_when_handoff_well_formed(pact_context):
-    """Valid handoff schema → no F11 and no F13."""
+def test_silent_when_handoff_well_formed(pact_context):
+    """Valid handoff schema → no handoff_missing and no handoff_schema_invalid."""
     pact_context(team_name="test-team", session_id="test-session")
     payload = {
         "tool_name": "TaskUpdate",
@@ -291,7 +297,7 @@ def test_f11_silent_when_handoff_well_formed(pact_context):
 
 
 # =============================================================================
-# F13 — handoff present but schema malformed (disjoint from F11)
+# handoff_schema_invalid — handoff present but schema malformed (disjoint from handoff_missing)
 # =============================================================================
 
 
@@ -306,9 +312,9 @@ def test_f11_silent_when_handoff_well_formed(pact_context):
         "open_questions",
     ],
 )
-def test_f13_advisory_for_each_missing_required_field(missing_field, pact_context):
-    """Handoff present but missing one required field → F13. Disjoint
-    from F11 — F11 fires only on missing/empty handoff payload entirely.
+def test_advisory_for_each_missing_required_field(missing_field, pact_context):
+    """Handoff present but missing one required field → handoff_schema_invalid. Disjoint
+    from handoff_missing — handoff_missing fires only on missing/empty handoff payload entirely.
     """
     pact_context(team_name="test-team", session_id="test-session")
     full_handoff = {
@@ -334,14 +340,14 @@ def test_f13_advisory_for_each_missing_required_field(missing_field, pact_contex
     }
     advisories = tlg.evaluate_lifecycle(payload)
     assert any(rule == "handoff_schema_invalid" for rule, _ in advisories), (
-        f"expected F13 advisory for missing {missing_field}, got: {advisories}"
+        f"expected handoff_schema_invalid advisory for missing {missing_field}, got: {advisories}"
     )
-    # F11 must NOT also fire — disjoint per impl §289 / lead clarification.
+    # handoff_missing must NOT also fire — disjoint per impl / lead clarification.
     assert not any(rule == "handoff_missing" for rule, _ in advisories)
 
 
-def test_f13_advisory_when_handoff_is_non_dict(pact_context):
-    """metadata.handoff is a string instead of a dict → F13 advisory."""
+def test_advisory_when_handoff_is_non_dict(pact_context):
+    """metadata.handoff is a string instead of a dict → handoff_schema_invalid advisory."""
     pact_context(team_name="test-team", session_id="test-session")
     payload = {
         "tool_name": "TaskUpdate",
@@ -360,11 +366,11 @@ def test_f13_advisory_when_handoff_is_non_dict(pact_context):
 
 
 # =============================================================================
-# F12 carve-outs — secretary, signal task, recursion marker, unresolvable actor
+# self_completion carve-outs — secretary, signal task, recursion marker, unresolvable actor
 # =============================================================================
 
 
-def test_f12_silent_when_secretary_self_completes(pact_context):
+def test_silent_when_secretary_self_completes(pact_context):
     """Secretary owner is in SELF_COMPLETE_EXEMPT_AGENTS → no advisory."""
     pact_context(team_name="test-team", session_id="test-session")
     payload = {
@@ -393,7 +399,7 @@ def test_f12_silent_when_secretary_self_completes(pact_context):
     assert not any(rule == "self_completion" for rule, _ in advisories)
 
 
-def test_f12_silent_when_signal_task_self_completes(pact_context):
+def test_silent_when_signal_task_self_completes(pact_context):
     """Signal task (metadata.completion_type='signal' AND
     metadata.type in {'blocker','algedonic'}) is exempted by
     is_self_complete_exempt(task) per shared.intentional_wait L201-L204.
@@ -427,20 +433,22 @@ def test_f12_silent_when_signal_task_self_completes(pact_context):
     assert not any(rule == "self_completion" for rule, _ in advisories)
 
 
-def test_f12_skips_when_actor_unresolvable_documents_architect_5_3_deviation(
+def test_skips_when_actor_unresolvable(
     pact_context,
 ):
-    """Sketch-A deviation: architect §5.3 specifies that when
-    trustworthy_actor_name returns None (no agent_id, or no '@' in
-    agent_id), the gate should still emit an F12 advisory.
+    """Documents an intentional deviation from architect §5.3: that
+    spec says when ``trustworthy_actor_name`` returns None (no
+    agent_id, or no ``@`` in agent_id), the gate should still emit a
+    self-completion advisory.
 
-    The CURRENT implementation (task_lifecycle_gate.py L341 condition
-    `actor is not None`) skips the advisory in that case.
+    The CURRENT implementation (task_lifecycle_gate.py condition
+    ``actor is not None``) skips the advisory in that case.
 
     This test encodes the CURRENT skip behavior so a future change
-    surfaces the deviation deliberately. Resolution tracked in a follow-up
-    issue (filed at stage-ready). DO NOT 'fix' the gate to satisfy this
-    test — fix the test only if the architect §5.3 reconciliation lands.
+    surfaces the deviation deliberately. Resolution tracked in a
+    follow-up issue (filed at stage-ready). DO NOT 'fix' the gate to
+    satisfy this test — fix the test only if the architect §5.3
+    reconciliation lands.
     """
     pact_context(team_name="test-team", session_id="test-session")
     payload = {
@@ -466,21 +474,21 @@ def test_f12_skips_when_actor_unresolvable_documents_architect_5_3_deviation(
         },
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    # Architect §5.3 would expect F12; current impl skips. Assert SKIP.
+    # Architect §5.3 would expect a self_completion advisory; current impl skips. Assert SKIP.
     assert not any(rule == "self_completion" for rule, _ in advisories), (
-        "If F12 fired here, the gate has been changed to match architect "
+        "If self_completion fired here, the gate has been changed to match architect "
         "§5.3 (advisory-emit on unresolvable actor). Confirm the change "
         "was intentional and update this test + close the follow-up issue."
     )
 
 
 # =============================================================================
-# F12 — lead-driven completion is silent (actor != owner)
+# self_completion — lead-driven completion is silent (actor != owner)
 # =============================================================================
 
 
-def test_f12_silent_when_lead_completes_teammates_task(pact_context):
-    """team-lead@test-team completing a teammate's task → not F12."""
+def test_silent_when_lead_completes_teammates_task(pact_context):
+    """team-lead@test-team completing a teammate's task → not self_completion."""
     pact_context(team_name="test-team", session_id="test-session")
     payload = {
         "tool_name": "TaskUpdate",
@@ -509,11 +517,11 @@ def test_f12_silent_when_lead_completes_teammates_task(pact_context):
 
 
 # =============================================================================
-# F21 — module-load advisory contract (smoke covers the full helper invoke)
+# module-load advisory contract (smoke covers the full helper invoke)
 # =============================================================================
 
 
-def test_f21_runtime_advisory_carries_post_tool_use_event_name(capsys):
+def test_runtime_advisory_carries_post_tool_use_event_name(capsys):
     """Direct invocation of _emit_load_failure_advisory under simulated
     runtime exception → exit 0 (PostToolUse cannot DENY) + hookEventName
     'PostToolUse' in the output. Mirrors smoke S6 with broader assertion.

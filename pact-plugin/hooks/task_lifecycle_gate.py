@@ -2,27 +2,34 @@
 """
 Location: pact-plugin/hooks/task_lifecycle_gate.py
 Summary: PostToolUse hook (matcher='TaskCreate|TaskUpdate') enforcing PACT
-         lifecycle invariants F8-F13. Cannot DENY (post-action); emits
-         structural advisory via additionalContext + F12 metadata writeback
-         for self-completion violations.
+         lifecycle invariants. Cannot DENY (post-action); emits structural
+         advisory via additionalContext, plus a metadata writeback for
+         self-completion violations.
 Used by: hooks.json PostToolUse matcher='TaskCreate|TaskUpdate' (#662)
 
-Recursion mitigation (F12): metadata writeback marks
-metadata.gate_writeback=true. Gate's first check skips on this marker so the
-gate's own write does not re-trigger F12 on itself.
+Self-completion writeback recursion mitigation: the metadata writeback marks
+metadata.gate_writeback=true. The gate's first check skips on this marker
+so the gate's own write does not re-trigger the self-completion advisory
+on itself.
 
-Safety: F21 fail-closed-as-advisory on module-load failure (PR #660 pattern,
+Safety: fail-closed-as-advisory on module-load failure (PR #660 pattern,
 adapted for PostToolUse — cannot DENY, emits advisory + exit 0).
 hookEventName always emitted (#658 defense).
 
-F-row coverage:
-  F8  — Task A (TEACHBACK) created without addBlocks=[B_id]
-  F9  — pact-* Task B created without addBlockedBy=[A_id]
-  F10 — Teachback Task completed without paired SendMessage to owner ≤120s
-  F11 — pact-* work-Task completed without metadata.handoff payload
-  F12 — Teammate self-completes a Task without carve-out → advisory + writeback
-  F13 — metadata.handoff present but malformed schema (disjoint with F11)
-  F23 — Every gate decision emits a session_journal lifecycle_decision event
+Rule coverage:
+  - teachback_addblocks_missing — Teachback Task created without
+    addBlocks=[<work_task_id>]
+  - work_addblockedby_missing — pact-* work Task created without
+    addBlockedBy=[<teachback_id>]
+  - completion_no_paired_send — Teachback Task completed without paired
+    wake-SendMessage to owner within the configured window
+  - handoff_missing — pact-* work Task completed without
+    metadata.handoff payload
+  - self_completion — Teammate self-completed a Task without carve-out
+    → advisory + completion_disputed writeback
+  - handoff_schema_invalid — metadata.handoff present but malformed
+    (disjoint with handoff_missing)
+  - Every gate decision emits a session_journal lifecycle_decision event
 """
 
 # ─── stdlib first (used by _emit_load_failure_advisory BEFORE wrapped imports) ─
@@ -47,8 +54,8 @@ def _emit_load_failure_advisory(stage: str, error: BaseException) -> NoReturn:
         "hookSpecificOutput": {
             "hookEventName": "PostToolUse",
             "additionalContext": (
-                f"PACT task_lifecycle_gate {stage} failure — F-rule "
-                f"enforcement skipped this turn. "
+                f"PACT task_lifecycle_gate {stage} failure — lifecycle "
+                f"rule enforcement skipped this turn. "
                 f"{type(error).__name__}: {error}. Investigate hook "
                 "installation and shared module availability."
             ),
@@ -62,7 +69,7 @@ def _emit_load_failure_advisory(stage: str, error: BaseException) -> NoReturn:
     sys.exit(0)
 
 
-# ─── F25-style fail-closed wrapper around cross-package imports ────────────────
+# ─── fail-closed wrapper around cross-package imports ─────────────────────────
 try:
     import re
     import time
@@ -80,13 +87,15 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
 
 # ─── constants ────────────────────────────────────────────────────────────────
 
-# F10 paired-SendMessage time window (seconds). Per architect §7 / plan: 120s.
+# Paired-SendMessage time window (seconds) for the teachback-completion
+# rule. Per architect §7 / plan: 120s.
 PAIRED_SENDMESSAGE_WINDOW_S = 120
 
-# F12 owner-name carve-out (mirrors shared.intentional_wait.SELF_COMPLETE_EXEMPT_AGENTS).
+# Owner-name carve-out for the self-completion rule (mirrors
+# shared.intentional_wait.SELF_COMPLETE_EXEMPT_AGENTS).
 SELF_COMPLETE_EXEMPT_AGENTS = frozenset({"secretary", "pact-secretary"})
 
-# F13 required handoff schema fields (advisory if present-but-malformed).
+# Required handoff schema fields (advisory if present-but-malformed).
 _HANDOFF_REQUIRED_FIELDS = (
     "produced",
     "decisions",
@@ -97,7 +106,7 @@ _HANDOFF_REQUIRED_FIELDS = (
 )
 
 
-# ─── F10 paired-SendMessage check ────────────────────────────────────────────
+# ─── paired-SendMessage check (for teachback completion) ─────────────────────
 
 
 def _has_paired_sendmessage(owner: str, window_s: int) -> bool:
@@ -166,7 +175,7 @@ def _has_paired_sendmessage(owner: str, window_s: int) -> bool:
     return False
 
 
-# ─── F12 metadata.completion_disputed writeback (direct FS) ──────────────────
+# ─── metadata.completion_disputed writeback (direct FS) ──────────────────────
 
 
 def _writeback_dispute(task_id: str) -> bool:
@@ -182,8 +191,8 @@ def _writeback_dispute(task_id: str) -> bool:
     gate's step ① recursion check will skip it.
 
     Fail-OPEN by design: any IOError swallowed and returns False — advisory
-    is still emitted by the caller (architect §4 'failure mode'). F23 logs
-    via journal event.
+    is still emitted by the caller (architect §4 'failure mode'). Logged
+    via lifecycle_decision journal event.
 
     Returns True iff the writeback succeeded.
     """
@@ -249,8 +258,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
     The ``rule`` element is a behavioral identifier (e.g.
     ``"teachback_addblocks_missing"``, ``"self_completion"``) used in
     journal events; the ``message`` element is the human-readable
-    advisory text emitted via additionalContext. F-row labels from the
-    #662 failure-mode inventory are retained in code comments only.
+    advisory text emitted via additionalContext.
     """
     advisories: list[tuple[str, str]] = []
     tool_name = input_data.get("tool_name", "")
@@ -261,13 +269,14 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
     if not isinstance(tool_response, dict):
         tool_response = {}
 
-    # ① Recursion guard (F12 self-trigger): skip silently if THIS update is
-    # the gate's own writeback. Checked FIRST before any F-rule.
+    # ① Recursion guard (self-completion writeback self-trigger): skip
+    # silently if THIS update is the gate's own writeback. Checked FIRST
+    # before any other rule.
     incoming_metadata = tool_input.get("metadata") or {}
     if isinstance(incoming_metadata, dict) and incoming_metadata.get("gate_writeback") is True:
         return []
 
-    # ② F8 / F9 (TaskCreate)
+    # ② TaskCreate rules — teachback addBlocks + work-task addBlockedBy
     if tool_name == "TaskCreate":
         subject = (tool_input.get("subject") or "")
         subject_upper = subject.upper() if isinstance(subject, str) else ""
@@ -295,7 +304,8 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                 "Work tasks must block on teachback acceptance.",
             ))
 
-    # ③ F10 / F11 / F12 / F13 (TaskUpdate to status=completed)
+    # ③ TaskUpdate-to-completed rules — paired-send, handoff presence,
+    # handoff schema, self-completion
     if tool_name == "TaskUpdate" and tool_input.get("status") == "completed":
         task_id = tool_input.get("taskId", "") or ""
         # Final post-state — prefer tool_response.task; fallback to bare dict.
@@ -316,9 +326,12 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
         raw_metadata = task.get("metadata")
         metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
 
-        # F11 / F13 — disjoint per lead clarification:
-        #   F11: handoff missing/empty → advisory, skip F13 (no payload).
-        #   F13: handoff present but schema malformed → advisory.
+        # handoff_missing vs handoff_schema_invalid are disjoint per lead
+        # clarification:
+        #   handoff missing/empty → handoff_missing advisory, skip schema
+        #     check (no payload to validate).
+        #   handoff present but schema malformed → handoff_schema_invalid
+        #     advisory.
         is_work_task = "TEACHBACK" not in subject_upper and owner.startswith("pact-")
         if is_work_task:
             handoff = metadata.get("handoff")
@@ -338,7 +351,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                         f"metadata.handoff schema is invalid — {schema_problem}.",
                     ))
 
-        # F10 — teachback completion requires paired wake-SendMessage to owner
+        # Teachback completion requires a paired wake-SendMessage to owner
         if "TEACHBACK" in subject_upper and owner:
             if not _has_paired_sendmessage(owner, PAIRED_SENDMESSAGE_WINDOW_S):
                 advisories.append((
@@ -349,7 +362,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                     "blockedBy is pull-only; teammate idles indefinitely.",
                 ))
 
-        # F12 — teammate self-completion
+        # Teammate self-completion check
         actor = trustworthy_actor_name(input_data)
         if (
             actor is not None
@@ -372,7 +385,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
     return advisories
 
 
-# ─── F23 journal emit ────────────────────────────────────────────────────────
+# ─── journal emit ────────────────────────────────────────────────────────────
 
 
 def _journal_lifecycle_decision(
