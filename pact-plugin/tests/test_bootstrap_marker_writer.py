@@ -510,6 +510,43 @@ class TestAuditAnchorCompliance:
         assert out["suppressOutput"] is True
         assert out["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
 
+    @pytest.mark.parametrize("shape", ["advisory", "suppress"])
+    def test_every_emit_shape_carries_hook_event_name(self, shape, capsys):
+        """Architect §8.12 parametrized over both distinct emit shapes.
+
+        The hook produces exactly two JSON output shapes:
+
+        - "advisory": load-failure path via _emit_load_failure_advisory
+          (line 61-72) — hookSpecificOutput with additionalContext.
+        - "suppress": every other exit path via the _SUPPRESS_OUTPUT
+          constant (line 98-101) — hookSpecificOutput with no other keys.
+
+        Both MUST carry hookSpecificOutput.hookEventName == "UserPromptSubmit"
+        — missing the field silently fails open at the platform layer per
+        the pinned context. Parametrizing pins the invariant that no
+        future emit path can be added without the audit anchor."""
+        if shape == "advisory":
+            from bootstrap_marker_writer import _emit_load_failure_advisory
+            with pytest.raises(SystemExit):
+                _emit_load_failure_advisory("module imports", RuntimeError("x"))
+            captured = capsys.readouterr()
+            out = json.loads(captured.out.strip())
+        elif shape == "suppress":
+            from bootstrap_marker_writer import _SUPPRESS_OUTPUT
+            out = json.loads(_SUPPRESS_OUTPUT)
+        else:  # pragma: no cover
+            pytest.fail(f"unknown shape param: {shape}")
+
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"shape={shape} emit MUST carry hookSpecificOutput; missing "
+            f"the field silently fails open at the platform layer."
+        )
+        assert hso.get("hookEventName") == "UserPromptSubmit", (
+            f"shape={shape} emit MUST carry hookEventName=='UserPromptSubmit'; "
+            f"got {hso!r}"
+        )
+
 
 # =============================================================================
 # Adversarial team_config.json shapes
