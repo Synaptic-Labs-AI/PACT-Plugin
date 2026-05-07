@@ -1,5 +1,6 @@
 """
-Tests for shared.intentional_wait — validate_wait, wait_stale, canonical_since.
+Tests for shared.intentional_wait — validate_wait, wait_stale, canonical_since,
+SELF_COMPLETE_EXEMPT_AGENT_TYPES, _is_exempt_agent_type, is_self_complete_exempt.
 
 Coverage targets:
 - validate_wait: non-dict inputs, missing/empty required keys, malformed since,
@@ -8,7 +9,13 @@ Coverage targets:
 - wait_stale: fresh / stale / boundary / missing / malformed / future-dated,
   custom threshold, non-UTC offset age parity.
 - canonical_since: shape and round-trip through validate_wait + wait_stale.
+- SELF_COMPLETE_EXEMPT_AGENT_TYPES: shape, immutability, expected membership.
+- _is_exempt_agent_type: positive match by team-config agentType lookup,
+  fail-closed on every error path.
+- is_self_complete_exempt: surface 1 (team-config agentType, requires
+  team_name) and surface 2 (signal-task pattern, independent of team_name).
 """
+import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +39,28 @@ def _fresh_wait(**overrides):
     }
     payload.update(overrides)
     return payload
+
+
+def _write_team_config(teams_dir, team_name, members):
+    """Mirror of the auditor_reminder fixture pattern. Writes a minimal
+    team config with the given members[] list and returns the teams_dir
+    path as a string for passing to _is_exempt_agent_type / is_self_complete_exempt.
+    """
+    team_dir = Path(teams_dir) / team_name
+    team_dir.mkdir(parents=True, exist_ok=True)
+    (team_dir / "config.json").write_text(
+        json.dumps({"team_name": team_name, "members": members}),
+        encoding="utf-8",
+    )
+    return str(teams_dir)
+
+
+@pytest.fixture
+def teams_dir(tmp_path):
+    """Per-test temp teams directory; mirrors test_auditor_reminder.teams_dir."""
+    d = tmp_path / "teams"
+    d.mkdir()
+    return str(d)
 
 
 # --- validate_wait ---------------------------------------------------------
@@ -335,37 +364,194 @@ class TestKnownReasonsCompletionAddition:
         assert validate_wait(payload) is True
 
 
-class TestSelfCompleteExemptAgentsConstant:
+class TestSelfCompleteExemptAgentTypesConstant:
     def test_is_frozenset(self):
-        from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENTS
+        from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENT_TYPES
 
-        assert isinstance(SELF_COMPLETE_EXEMPT_AGENTS, frozenset)
+        assert isinstance(SELF_COMPLETE_EXEMPT_AGENT_TYPES, frozenset)
 
-    def test_contains_secretary_aliases(self):
-        from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENTS
+    def test_contains_pact_secretary(self):
+        from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENT_TYPES
 
-        assert "pact-secretary" in SELF_COMPLETE_EXEMPT_AGENTS
-        assert "secretary" in SELF_COMPLETE_EXEMPT_AGENTS
+        # Single canonical agentType — `secretary` was a name-alias and is
+        # no longer canonical; the carve-out keys on team-config agentType.
+        assert "pact-secretary" in SELF_COMPLETE_EXEMPT_AGENT_TYPES
 
     def test_does_not_contain_auditor(self):
-        # Auditor exemption is signal-task pattern, NOT agent-type.
-        from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENTS
+        # Auditor exemption is signal-task pattern, NOT agentType.
+        from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENT_TYPES
 
-        assert "auditor" not in SELF_COMPLETE_EXEMPT_AGENTS
-        assert "pact-auditor" not in SELF_COMPLETE_EXEMPT_AGENTS
+        assert "auditor" not in SELF_COMPLETE_EXEMPT_AGENT_TYPES
+        assert "pact-auditor" not in SELF_COMPLETE_EXEMPT_AGENT_TYPES
+
+
+class TestIsExemptAgentType:
+    """Direct unit tests on _is_exempt_agent_type — the shared helper that
+    backs both is_self_complete_exempt (surface 1) and
+    wake_lifecycle._lifecycle_relevant (carve-out 2).
+    """
+
+    def test_owner_with_pact_secretary_agenttype_is_exempt(self, teams_dir):
+        from shared.intentional_wait import _is_exempt_agent_type
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "session-secretary", "agentType": "pact-secretary"},
+        ])
+        assert _is_exempt_agent_type("session-secretary", "test-team", teams_dir) is True
+
+    def test_owner_with_arbitrary_spawn_name_is_exempt(self, teams_dir):
+        # Spawn-name freedom: any name reaches the carve-out as long as
+        # the team config records its agentType. This is the central
+        # behavioral change of #682.
+        from shared.intentional_wait import _is_exempt_agent_type
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "secretary-from-mars", "agentType": "pact-secretary"},
+        ])
+        assert _is_exempt_agent_type("secretary-from-mars", "test-team", teams_dir) is True
+
+    def test_owner_with_non_secretary_agenttype_not_exempt(self, teams_dir):
+        from shared.intentional_wait import _is_exempt_agent_type
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "backend-coder-1", "agentType": "pact-backend-coder"},
+        ])
+        assert _is_exempt_agent_type("backend-coder-1", "test-team", teams_dir) is False
+
+    def test_owner_not_in_team_config_not_exempt(self, teams_dir):
+        from shared.intentional_wait import _is_exempt_agent_type
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "session-secretary", "agentType": "pact-secretary"},
+        ])
+        # Different owner — no member match, fail-closed.
+        assert _is_exempt_agent_type("ghost-agent", "test-team", teams_dir) is False
+
+    def test_empty_team_name_returns_false(self, teams_dir):
+        from shared.intentional_wait import _is_exempt_agent_type
+
+        # Fail-closed when team_name is empty — surface 1 cannot resolve.
+        assert _is_exempt_agent_type("session-secretary", "", teams_dir) is False
+
+    def test_empty_owner_returns_false(self, teams_dir):
+        from shared.intentional_wait import _is_exempt_agent_type
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "session-secretary", "agentType": "pact-secretary"},
+        ])
+        assert _is_exempt_agent_type("", "test-team", teams_dir) is False
+
+    def test_non_string_owner_returns_false(self, teams_dir):
+        from shared.intentional_wait import _is_exempt_agent_type
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "session-secretary", "agentType": "pact-secretary"},
+        ])
+        for bad in (None, 42, [], {}, True):
+            assert _is_exempt_agent_type(bad, "test-team", teams_dir) is False  # type: ignore[arg-type]
+
+    def test_non_string_team_name_returns_false(self, teams_dir):
+        from shared.intentional_wait import _is_exempt_agent_type
+
+        for bad in (None, 42, [], {}, True):
+            assert _is_exempt_agent_type("session-secretary", bad, teams_dir) is False  # type: ignore[arg-type]
+
+    def test_missing_team_config_fails_closed(self, teams_dir):
+        from shared.intentional_wait import _is_exempt_agent_type
+
+        # No config written — _iter_members returns []; no match; fail-closed.
+        assert _is_exempt_agent_type("session-secretary", "ghost-team", teams_dir) is False
+
+    def test_malformed_team_config_fails_closed(self, teams_dir):
+        from shared.intentional_wait import _is_exempt_agent_type
+
+        team_dir = Path(teams_dir) / "bad-team"
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text("not valid json {{{", encoding="utf-8")
+        assert _is_exempt_agent_type("session-secretary", "bad-team", teams_dir) is False
+
+    def test_missing_agenttype_field_fails_closed(self, teams_dir):
+        from shared.intentional_wait import _is_exempt_agent_type
+
+        # Member entry without agentType key — fail-closed.
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "session-secretary"},
+        ])
+        assert _is_exempt_agent_type("session-secretary", "test-team", teams_dir) is False
+
+    def test_empty_agenttype_value_fails_closed(self, teams_dir):
+        from shared.intentional_wait import _is_exempt_agent_type
+
+        # agentType="" is not in SELF_COMPLETE_EXEMPT_AGENT_TYPES → False.
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "session-secretary", "agentType": ""},
+        ])
+        assert _is_exempt_agent_type("session-secretary", "test-team", teams_dir) is False
+
+    def test_non_string_agenttype_fails_closed(self, teams_dir):
+        from shared.intentional_wait import _is_exempt_agent_type
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "session-secretary", "agentType": 42},
+        ])
+        assert _is_exempt_agent_type("session-secretary", "test-team", teams_dir) is False
 
 
 class TestIsSelfCompleteExempt:
-    def test_secretary_owner_is_exempt(self):
+    def test_owner_with_pact_secretary_agenttype_is_exempt(self, teams_dir):
         from shared.intentional_wait import is_self_complete_exempt
 
-        assert is_self_complete_exempt({"owner": "secretary", "metadata": {}}) is True
-        assert is_self_complete_exempt({"owner": "pact-secretary", "metadata": {}}) is True
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "session-secretary", "agentType": "pact-secretary"},
+        ])
+        task = {"owner": "session-secretary", "metadata": {}}
+        assert is_self_complete_exempt(task, "test-team", teams_dir) is True
 
-    def test_backend_coder_is_not_exempt(self):
+    def test_secretary_spawn_name_freedom(self, teams_dir):
+        # The behavioral change of #682: spawn name no longer determines
+        # exemption — agentType in team config does.
         from shared.intentional_wait import is_self_complete_exempt
 
-        assert is_self_complete_exempt({"owner": "backend-coder-1", "metadata": {}}) is False
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "team-secretary", "agentType": "pact-secretary"},
+        ])
+        task = {"owner": "team-secretary", "metadata": {}}
+        assert is_self_complete_exempt(task, "test-team", teams_dir) is True
+
+    def test_backend_coder_is_not_exempt(self, teams_dir):
+        from shared.intentional_wait import is_self_complete_exempt
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "backend-coder-1", "agentType": "pact-backend-coder"},
+        ])
+        task = {"owner": "backend-coder-1", "metadata": {}}
+        assert is_self_complete_exempt(task, "test-team", teams_dir) is False
+
+    def test_owner_named_secretary_without_agenttype_not_exempt(self, teams_dir):
+        # Critical behavioral change: a teammate spoofing owner="secretary"
+        # cannot self-promote without the team config recording the
+        # privileged agentType. Fail-closed on missing-from-config.
+        from shared.intentional_wait import is_self_complete_exempt
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "backend-coder-1", "agentType": "pact-backend-coder"},
+        ])
+        task = {"owner": "secretary", "metadata": {}}
+        assert is_self_complete_exempt(task, "test-team", teams_dir) is False
+
+    def test_missing_team_name_falls_through_surface_1(self, teams_dir):
+        # team_name="" short-circuits surface 1 to False (fail-closed),
+        # but surface 2 (signal-task) still evaluates.
+        from shared.intentional_wait import is_self_complete_exempt
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "session-secretary", "agentType": "pact-secretary"},
+        ])
+        task = {"owner": "session-secretary", "metadata": {}}
+        assert is_self_complete_exempt(task) is False  # team_name="" default
+        # Surface 2 still works without team_name.
+        sig = {"owner": "anyone", "metadata": {"completion_type": "signal", "type": "blocker"}}
+        assert is_self_complete_exempt(sig) is True
 
     def test_signal_task_blocker_is_exempt(self):
         from shared.intentional_wait import is_self_complete_exempt
@@ -428,11 +614,17 @@ class TestIsSelfCompleteExemptMalformedTaskShapes:
         # Owner is non-exempt → returns False.
         assert is_self_complete_exempt({"owner": "backend-coder", "metadata": None}) is False
 
-    def test_metadata_none_with_secretary_owner_still_exempt(self):
+    def test_metadata_none_with_exempt_agenttype_still_exempt(self, teams_dir):
         from shared.intentional_wait import is_self_complete_exempt
 
-        # Surface 1 (owner) still triggers even with metadata=None.
-        assert is_self_complete_exempt({"owner": "secretary", "metadata": None}) is True
+        # Surface 1 (team-config agentType) still triggers even with
+        # metadata=None — the predicate guards against non-dict metadata
+        # before the agentType lookup.
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "session-secretary", "agentType": "pact-secretary"},
+        ])
+        task = {"owner": "session-secretary", "metadata": None}
+        assert is_self_complete_exempt(task, "test-team", teams_dir) is True
 
     def test_owner_none_returns_false(self):
         from shared.intentional_wait import is_self_complete_exempt
@@ -440,80 +632,98 @@ class TestIsSelfCompleteExemptMalformedTaskShapes:
         # owner=None is not a string → isinstance check fails → no exemption.
         assert is_self_complete_exempt({"owner": None, "metadata": {}}) is False
 
-    def test_owner_empty_string_returns_false(self):
+    def test_owner_empty_string_returns_false(self, teams_dir):
         from shared.intentional_wait import is_self_complete_exempt
 
-        # Empty string is not in SELF_COMPLETE_EXEMPT_AGENTS → no exemption.
-        assert is_self_complete_exempt({"owner": "", "metadata": {}}) is False
+        # Empty string fails the owner-shape check inside _is_exempt_agent_type.
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "session-secretary", "agentType": "pact-secretary"},
+        ])
+        task = {"owner": "", "metadata": {}}
+        assert is_self_complete_exempt(task, "test-team", teams_dir) is False
 
 
 class TestIsSelfCompleteExemptDualCarveOutIndependence:
     """Both exemption surfaces must work independently AND together.
 
-    Surface 1: SELF_COMPLETE_EXEMPT_AGENTS membership (by agent type).
-    Surface 2: signal-task pattern (completion_type=signal + type in {blocker, algedonic}).
+    Surface 1: SELF_COMPLETE_EXEMPT_AGENT_TYPES membership via team-config
+               agentType lookup (requires team_name).
+    Surface 2: signal-task pattern (completion_type=signal + type in
+               {blocker, algedonic}). Independent of team_name.
 
     Reverting EITHER surface in production must surface as independent test failures.
     """
 
-    def test_only_signal_task_path_no_exempt_agent(self):
-        # Auditor signal-task: agent NOT in exempt set, but signal pattern exempts.
+    def test_only_signal_task_path_no_exempt_agenttype(self, teams_dir):
+        # Auditor signal-task: agentType NOT exempt, but signal pattern exempts.
         from shared.intentional_wait import is_self_complete_exempt
 
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "pact-auditor", "agentType": "pact-auditor"},
+        ])
         task = {
             "owner": "pact-auditor",
             "metadata": {"completion_type": "signal", "type": "algedonic"},
         }
-        assert is_self_complete_exempt(task) is True
+        assert is_self_complete_exempt(task, "test-team", teams_dir) is True
 
-    def test_only_exempt_agent_path_no_signal_task(self):
-        # Secretary memory-save: agent in exempt set, no signal-task metadata.
+    def test_only_exempt_agenttype_path_no_signal_task(self, teams_dir):
+        # Secretary memory-save: agentType in exempt set, no signal-task metadata.
         from shared.intentional_wait import is_self_complete_exempt
 
-        task = {"owner": "secretary", "metadata": {"completion_type": "regular"}}
-        assert is_self_complete_exempt(task) is True
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "session-secretary", "agentType": "pact-secretary"},
+        ])
+        task = {"owner": "session-secretary", "metadata": {"completion_type": "regular"}}
+        assert is_self_complete_exempt(task, "test-team", teams_dir) is True
 
-    def test_both_paths_match_still_exempt(self):
+    def test_both_paths_match_still_exempt(self, teams_dir):
         # Defense-in-depth: secretary on a signal-task is exempt via either surface.
         from shared.intentional_wait import is_self_complete_exempt
 
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "session-secretary", "agentType": "pact-secretary"},
+        ])
         task = {
-            "owner": "secretary",
+            "owner": "session-secretary",
             "metadata": {"completion_type": "signal", "type": "blocker"},
         }
-        assert is_self_complete_exempt(task) is True
+        assert is_self_complete_exempt(task, "test-team", teams_dir) is True
 
-    def test_neither_path_matches_not_exempt(self):
+    def test_neither_path_matches_not_exempt(self, teams_dir):
         # Backend-coder doing regular work is NOT exempt via either surface.
         from shared.intentional_wait import is_self_complete_exempt
 
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "backend-coder-1", "agentType": "pact-backend-coder"},
+        ])
         task = {
-            "owner": "backend-coder",
+            "owner": "backend-coder-1",
             "metadata": {"completion_type": "regular", "type": "feature"},
         }
-        assert is_self_complete_exempt(task) is False
+        assert is_self_complete_exempt(task, "test-team", teams_dir) is False
 
 
-class TestSelfCompleteExemptAgentsImmutability:
+class TestSelfCompleteExemptAgentTypesImmutability:
     """frozenset chosen specifically to prevent accidental mutation; pin that."""
 
     def test_add_raises_attribute_error(self):
-        from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENTS
+        from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENT_TYPES
 
         with pytest.raises(AttributeError):
-            SELF_COMPLETE_EXEMPT_AGENTS.add("new-agent")
+            SELF_COMPLETE_EXEMPT_AGENT_TYPES.add("new-agent-type")
 
     def test_remove_raises_attribute_error(self):
-        from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENTS
+        from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENT_TYPES
 
         with pytest.raises(AttributeError):
-            SELF_COMPLETE_EXEMPT_AGENTS.remove("secretary")
+            SELF_COMPLETE_EXEMPT_AGENT_TYPES.remove("pact-secretary")
 
     def test_clear_raises_attribute_error(self):
-        from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENTS
+        from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENT_TYPES
 
         with pytest.raises(AttributeError):
-            SELF_COMPLETE_EXEMPT_AGENTS.clear()
+            SELF_COMPLETE_EXEMPT_AGENT_TYPES.clear()
 
     def test_known_reasons_immutable(self):
         # KNOWN_REASONS must also be frozen — same accidental-mutation concern.

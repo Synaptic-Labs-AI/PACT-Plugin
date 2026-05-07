@@ -3,7 +3,7 @@ Location: pact-plugin/hooks/shared/wake_lifecycle.py
 Summary: Shared helper for inbox-wake lifecycle hooks. Counts active teammate
          tasks under a team, applying carve-out filters that match the lead-only
          completion-authority model (signal-tasks and self-complete-exempt
-         agents do not count toward the wake-mechanism's "any active work"
+         agentTypes do not count toward the wake-mechanism's "any active work"
          signal).
 Used by: pact-plugin/hooks/wake_lifecycle_emitter.py (PostToolUse hook on
          TaskCreate / TaskUpdate), and
@@ -13,8 +13,10 @@ Used by: pact-plugin/hooks/wake_lifecycle_emitter.py (PostToolUse hook on
 Public surface:
 - count_active_tasks(team_name) -> int
     Counts tasks in ~/.claude/tasks/{team_name}/*.json where
-    _lifecycle_relevant returns True.
-- _lifecycle_relevant(task) -> bool
+    _lifecycle_relevant returns True. `team_name` is threaded through
+    to `_lifecycle_relevant` so the agentType carve-out can resolve via
+    team config.
+- _lifecycle_relevant(task, team_name="") -> bool
     Predicate. True iff the task counts toward the active-work tally that
     arms/tears down the wake mechanism.
 
@@ -31,14 +33,17 @@ and the inline-literal signal-task pattern at agent_handoff_emitter.py):
    metadata.type in {"blocker", "algedonic"}. These self-complete
    without team-lead-as-completion-gate; they do not represent
    teammate work the wake mechanism needs to surface.
-2. Self-complete-exempt agents: task.owner in
-   SELF_COMPLETE_EXEMPT_AGENTS (currently {secretary, pact-secretary}).
-   These also self-complete; they do not require the lead's wake.
+2. Self-complete-exempt agentTypes: the task owner's team-config
+   agentType is in SELF_COMPLETE_EXEMPT_AGENT_TYPES (currently
+   {pact-secretary}). Resolution happens via
+   `_is_exempt_agent_type(owner, team_name)`, so a secretary spawned
+   under any name (`session-secretary`, etc.) reaches the carve-out as
+   long as the team config records its agentType.
 """
 
 from typing import Any
 
-from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENTS
+from shared.intentional_wait import _is_exempt_agent_type
 from shared.task_utils import iter_team_task_jsons
 
 # Signal-task types — inline literal mirrors the convention at
@@ -55,7 +60,7 @@ _SIGNAL_TASK_TYPES = ("blocker", "algedonic")
 _ACTIVE_STATUSES = ("pending", "in_progress")
 
 
-def _lifecycle_relevant(task: Any) -> bool:
+def _lifecycle_relevant(task: Any, team_name: str = "") -> bool:
     """
     Return True iff this task counts toward the active-work tally that
     arms/tears down the wake mechanism.
@@ -68,9 +73,15 @@ def _lifecycle_relevant(task: Any) -> bool:
     Other statuses (completed, deleted, blocked) do not count.
 
     Carve-outs (apply only on top of a passing status check):
-      - Self-complete-exempt owner: owner in SELF_COMPLETE_EXEMPT_AGENTS.
-        Evaluated before the metadata-shape check so that owner-based
-        exemption holds even on corrupted metadata.
+      - Self-complete-exempt agentType: owner's team-config agentType is
+        in SELF_COMPLETE_EXEMPT_AGENT_TYPES, resolved via
+        `_is_exempt_agent_type(owner, team_name)`. Evaluated before the
+        metadata-shape check so that an exempt-agentType task with
+        corrupted metadata is still exempt — symmetric with
+        shared.intentional_wait.is_self_complete_exempt. With
+        `team_name=""` (default) this carve-out short-circuits to False
+        (fail-closed): the upstream `_iter_members` returns `[]` on
+        empty team_name, which surfaces here as "not exempt → count it".
       - Signal-task pattern: metadata.completion_type == "signal" AND
         metadata.type in {"blocker", "algedonic"}.
     """
@@ -80,12 +91,13 @@ def _lifecycle_relevant(task: Any) -> bool:
     if task.get("status") not in _ACTIVE_STATUSES:
         return False
 
-    # Self-complete-exempt agent carve-out. Hoisted above the metadata
-    # shape check so that a secretary-owned task with corrupted metadata
+    # Self-complete-exempt agentType carve-out. Hoisted above the metadata
+    # shape check so that an exempt-agentType task with corrupted metadata
     # is still exempt — symmetric with shared.intentional_wait.
-    # is_self_complete_exempt, which fail-closes on owner alone.
+    # is_self_complete_exempt. The owner-shape check inside
+    # _is_exempt_agent_type fail-closes on non-string owner.
     owner = task.get("owner")
-    if isinstance(owner, str) and owner in SELF_COMPLETE_EXEMPT_AGENTS:
+    if isinstance(owner, str) and _is_exempt_agent_type(owner, team_name):
         return False
 
     metadata = task.get("metadata") or {}
@@ -112,8 +124,15 @@ def count_active_tasks(team_name: str) -> int:
     unreadable / unparseable task files are skipped silently; the count
     reflects only successfully-parsed lifecycle-relevant tasks.
 
+    `team_name` is threaded through to `_lifecycle_relevant` so the
+    agentType carve-out can resolve via team config.
+
     Pure function; never raises. Fail-open as "no active tasks" — the
     wake mechanism degrades to baseline idle-poll on read failure rather
     than crashing the calling hook (livelock-safety > observability).
     """
-    return sum(1 for task in iter_team_task_jsons(team_name) if _lifecycle_relevant(task))
+    return sum(
+        1
+        for task in iter_team_task_jsons(team_name)
+        if _lifecycle_relevant(task, team_name)
+    )

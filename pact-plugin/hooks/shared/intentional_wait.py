@@ -20,17 +20,24 @@ Public surface:
 - KNOWN_REASONS / KNOWN_RESOLVERS — vocabulary hints (free-form strings
   still accepted by validate_wait).
 - DEFAULT_THRESHOLD_MINUTES — staleness horizon (30 min).
-- SELF_COMPLETE_EXEMPT_AGENTS — agent names whose tasks may self-complete
-  (memory-save, etc.). Companion predicate: is_self_complete_exempt.
+- SELF_COMPLETE_EXEMPT_AGENT_TYPES — agentType tokens whose owners may
+  self-complete (memory-save, etc.). Companion predicate:
+  is_self_complete_exempt. Resolution is via team-config lookup
+  (member.agentType), NOT owner name — secretaries spawned under any
+  name (e.g. session-secretary) reach the carve-out as long as their
+  agentType is in this set.
 - canonical_since() — ISO-8601 UTC timestamp helper for the `since` field.
 - validate_wait(wait_metadata) — True iff the flag is well-formed.
 - wait_stale(wait_metadata) — True iff the flag has aged past threshold.
-- is_self_complete_exempt(task) — True iff the task is exempt from the
-  team-lead-only-completion rule (by agent type or signal-task pattern).
+- is_self_complete_exempt(task, team_name="", teams_dir=None) — True iff
+  the task is exempt from the team-lead-only-completion rule (by
+  team-config-resolved agentType, or signal-task pattern).
 """
 
 from datetime import datetime, timezone
 from typing import Any
+
+from shared.pact_context import _iter_members
 
 
 # Reason vocabulary — frozenset, not Enum, so teammates can include custom
@@ -52,8 +59,8 @@ KNOWN_RESOLVERS = frozenset({"lead", "peer", "user", "external"})
 DEFAULT_THRESHOLD_MINUTES = 30
 
 
-# Agents whose tasks may be self-completed because the team-lead has no
-# acceptance criteria to judge. Exemption is narrow by design: each
+# AgentType tokens whose owners may self-complete because the team-lead
+# has no acceptance criteria to judge. Exemption is narrow by design: each
 # entry must have a documented rationale.
 #
 # `pact-secretary` (memory-save tasks): purely internal bookkeeping.
@@ -62,16 +69,68 @@ DEFAULT_THRESHOLD_MINUTES = 30
 #   secretary's domain. Lead-as-gate would add 12-18 transitions per
 #   session with zero quality signal.
 #
+# Resolution is by team-config agentType lookup (see
+# `_is_exempt_agent_type` below + `_iter_members` upstream), NOT owner
+# name. A secretary spawned under any name (`session-secretary`,
+# `team-secretary`, etc.) still reaches the carve-out as long as the
+# team-config records its agentType as `pact-secretary`.
+#
 # Auditor signal-tasks are NOT in this set — they self-complete via
 # `metadata.completion_type == "signal"` + `metadata.type in {"blocker",
 # "algedonic"}` (the inline-literal pattern at task_utils.py:184 /
 # session_resume.py:525). Two distinct exemption surfaces:
-# - SELF_COMPLETE_EXEMPT_AGENTS: by agent type, declared at dispatch.
+# - SELF_COMPLETE_EXEMPT_AGENT_TYPES: by team-config agentType lookup.
 # - signal-task pattern: by task metadata, applies to any agent.
-SELF_COMPLETE_EXEMPT_AGENTS: frozenset = frozenset({
+SELF_COMPLETE_EXEMPT_AGENT_TYPES: frozenset = frozenset({
     "pact-secretary",
-    "secretary",
 })
+
+
+def _is_exempt_agent_type(
+    owner: str,
+    team_name: str,
+    teams_dir: str | None = None,
+) -> bool:
+    """Return True iff the team-config member matching `owner` has an
+    agentType in SELF_COMPLETE_EXEMPT_AGENT_TYPES.
+
+    Fail-closed: returns False on every error path (empty owner, empty
+    team_name, missing/malformed config, member not found, missing or
+    empty agentType field, non-string inputs). Conservative posture —
+    never silently exempt. This matches the existing predicate semantics
+    on malformed input: a non-exempt teammate that gets falsely exempted
+    via a corrupt config could self-complete tasks the lead needed to
+    inspect, exactly the failure mode lead-only-completion authority
+    defends against.
+
+    Pure-after-I/O. Reads the team config via `_iter_members`, which is
+    itself fail-open `[]` on every error path (missing file, OSError,
+    JSONDecodeError, non-dict members, etc.). The fail-open of the
+    upstream becomes fail-closed for this predicate because we require
+    a positive match.
+
+    NOT a hook predicate — pure helper for shared.intentional_wait.
+    is_self_complete_exempt and shared.wake_lifecycle._lifecycle_relevant.
+    Mirrors the auditor_reminder._team_has_auditor precedent.
+
+    Args:
+        owner: Task owner name (matched against member.name).
+        team_name: Team name for config path. Empty string returns False.
+        teams_dir: Override teams directory (for testing). When omitted,
+                   _iter_members uses ``~/.claude/teams/``.
+    """
+    if not isinstance(owner, str) or not owner:
+        return False
+    if not isinstance(team_name, str) or not team_name:
+        return False
+    for member in _iter_members(team_name, teams_dir):
+        if member.get("name") == owner:
+            agent_type = member.get("agentType")
+            return (
+                isinstance(agent_type, str)
+                and agent_type in SELF_COMPLETE_EXEMPT_AGENT_TYPES
+            )
+    return False
 
 
 def canonical_since() -> str:
@@ -157,17 +216,27 @@ def wait_stale(
     return age_minutes >= threshold_minutes
 
 
-def is_self_complete_exempt(task: Any) -> bool:
+def is_self_complete_exempt(
+    task: Any,
+    team_name: str = "",
+    teams_dir: str | None = None,
+) -> bool:
     """
     Return True iff this task is exempt from the team-lead-only-completion rule.
 
     Two exemption surfaces (OR-combined):
-    1. By owner: task.owner in SELF_COMPLETE_EXEMPT_AGENTS. Lead-declared
-       at dispatch time via the agent's owner field.
+    1. By team-config agentType: task.owner names a team member whose
+       agentType is in SELF_COMPLETE_EXEMPT_AGENT_TYPES. Resolution
+       happens via `_is_exempt_agent_type(owner, team_name, teams_dir)`,
+       which reads the team config (harness-managed SSOT). Secretaries
+       spawned under any name (`session-secretary`, `team-secretary`,
+       etc.) reach this surface as long as their agentType matches.
+       Requires `team_name`; with `team_name=""` (the default) this
+       surface short-circuits to False (fail-closed).
     2. By signal-task metadata: task.metadata.completion_type == "signal" AND
        task.metadata.type in {"blocker", "algedonic"}. Mirrors the inline
        literal at agent_handoff_emitter.py / task_utils.py:184 /
-       session_resume.py:525.
+       session_resume.py:525. Independent of `team_name`.
 
     Pure function; never raises on plain dicts (PACT task representation
     via json.loads); defaults to False on missing or malformed fields
@@ -178,13 +247,26 @@ def is_self_complete_exempt(task: Any) -> bool:
     and future consumers. Hooks must use the inline-literal mirror to avoid
     reintroducing livelock-capable hook surface.
 
-    TRUST BOUNDARY: `owner` is teammate-writable via TaskUpdate(owner=...).
-    The carve-out is bounded by SELF_COMPLETE_EXEMPT_AGENTS being a curated
-    short list (currently `secretary` / `pact-secretary` only); a non-exempt
-    teammate cannot self-promote without writing one of those curated names.
-    No in-plugin consumer reads this predicate at runtime — instructions and
-    audit tooling are the defense. Future extensions adding new agents to
-    SELF_COMPLETE_EXEMPT_AGENTS must re-evaluate this boundary.
+    TRUST BOUNDARY: `owner` is teammate-writable via TaskUpdate(owner=...),
+    BUT exemption now requires the team config to record that owner with
+    a privileged agentType — the team config is harness-managed and never
+    teammate-writable. The carve-out is bounded by both
+    SELF_COMPLETE_EXEMPT_AGENT_TYPES being a curated short list
+    (currently `pact-secretary` only) AND the team-config-as-SSOT
+    requirement. A non-exempt teammate cannot self-promote by spoofing
+    `owner`: the team-config lookup must independently confirm the
+    privileged agentType. No in-plugin consumer reads this predicate at
+    runtime — instructions and audit tooling are the defense. Future
+    extensions adding new agentTypes to SELF_COMPLETE_EXEMPT_AGENT_TYPES
+    must re-evaluate this boundary.
+
+    Args:
+        task: Task dict (from json.loads of a task record).
+        team_name: Team name used for the agentType lookup. Empty string
+                   (default) short-circuits surface 1 to False; surface 2
+                   still applies.
+        teams_dir: Override teams directory (for testing). Threaded to
+                   `_iter_members`.
     """
     if not isinstance(task, dict):
         return False
@@ -193,9 +275,9 @@ def is_self_complete_exempt(task: Any) -> bool:
     if not isinstance(metadata, dict):
         return False
 
-    # Surface 1: owner in curated exempt set.
+    # Surface 1: owner's team-config agentType is in the exempt set.
     owner = task.get("owner")
-    if isinstance(owner, str) and owner in SELF_COMPLETE_EXEMPT_AGENTS:
+    if isinstance(owner, str) and _is_exempt_agent_type(owner, team_name, teams_dir):
         return True
 
     # Surface 2: signal-task pattern (inline-literal mirror).

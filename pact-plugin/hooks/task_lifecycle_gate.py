@@ -78,10 +78,7 @@ try:
 
     import shared.pact_context as pact_context
     from shared.dispatch_helpers import trustworthy_actor_name
-    from shared.intentional_wait import (
-        SELF_COMPLETE_EXEMPT_AGENTS,
-        is_self_complete_exempt,
-    )
+    from shared.intentional_wait import is_self_complete_exempt
     from shared.session_journal import append_event, make_event
     from shared.task_utils import read_task_json
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
@@ -94,10 +91,14 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
 # rule. Per architect §7 / plan: 120s.
 PAIRED_SENDMESSAGE_WINDOW_S = 120
 
-# Owner-name carve-out for the self-completion rule is imported from
-# shared.intentional_wait (the single source of truth). The dispatch_gate
-# RESERVED_NAMES set holds the same names so a teammate can never spawn
-# under one of these — see test_self_complete_exempt_agents_are_all_reserved.
+# Self-completion carve-out resolution is delegated entirely to
+# is_self_complete_exempt(task, team_name) in shared.intentional_wait
+# (the SSOT). The predicate now keys on team-config agentType rather
+# than owner name; team_name is resolved via pact_context at the call
+# site below. The dispatch_gate RESERVED_NAMES set still reserves the
+# `secretary`/`pact-secretary` literals as a defense-in-depth name
+# perimeter — see dispatch_gate.RESERVED_NAMES comment block for the
+# post-#682 rationale.
 
 # Required handoff schema fields (advisory if present-but-malformed).
 _HANDOFF_REQUIRED_FIELDS = (
@@ -312,14 +313,17 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
     # handoff schema, self-completion
     if tool_name == "TaskUpdate" and tool_input.get("status") == "completed":
         task_id = tool_input.get("taskId", "") or ""
+        # Resolve team_name from pact_context once for use by both the
+        # disk-fallback read and the self-completion carve-out predicate
+        # (is_self_complete_exempt now keys on team-config agentType).
+        try:
+            team_name = pact_context.get_pact_context().get("team_name", "")
+        except Exception:
+            team_name = ""
         # Final post-state — prefer tool_response.task; fallback to bare dict.
         task = tool_response.get("task") if isinstance(tool_response, dict) else None
         if not isinstance(task, dict):
             # Fall back to disk if harness output didn't include the task.
-            try:
-                team_name = pact_context.get_pact_context().get("team_name", "")
-            except Exception:
-                team_name = ""
             task = read_task_json(task_id, team_name) if team_name else {}
 
         subject = task.get("subject") or ""
@@ -366,14 +370,15 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                     "blockedBy is pull-only; teammate idles indefinitely.",
                 ))
 
-        # Teammate self-completion check
+        # Teammate self-completion check. Carve-out is a single boolean
+        # via is_self_complete_exempt(task, team_name) — the predicate is
+        # the SSOT for both surfaces (team-config agentType + signal-task).
         actor = trustworthy_actor_name(input_data)
         if (
             actor is not None
             and owner
             and owner == actor
-            and owner not in SELF_COMPLETE_EXEMPT_AGENTS
-            and not is_self_complete_exempt(task)
+            and not is_self_complete_exempt(task, team_name)
         ):
             advisories.append((
                 "self_completion",
