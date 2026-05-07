@@ -60,7 +60,7 @@ Every session begins with a one-time ritual that creates the session team, spawn
 The ritual is per-session and idempotent — the marker survives compaction. Re-invoke `Skill("PACT:bootstrap")` when:
 
 - The session has just resumed (post-compaction or `claude --resume`) and the team-existence assumption needs re-verification.
-- A `bootstrap_gate` PreToolUse refusal indicates the bootstrap marker was cleared (the gate is the enforcement surface; this section is the directive surface).
+- A `/clear` has zapped the team config and marker. (Steady-state marker-clears self-heal: the `bootstrap_marker_writer` UserPromptSubmit hook re-creates the marker on the next prompt as long as team config + secretary are still on disk. Manual re-invocation is required only after `/clear`, which deletes both the marker and the team config — see `session_init.py:712-720`.)
 
 For full detail, `Read(file_path="../commands/bootstrap.md")` when you need the full Session Placeholder Variables table, source-precedence rules, or per-field fallback behavior — those mechanics live in the command file, not in this persona body.
 
