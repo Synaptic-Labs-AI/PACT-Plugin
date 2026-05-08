@@ -365,12 +365,12 @@ For full detail, `Read(file_path="../protocols/pact-variety.md")` when calibrati
 
 **Dispatch pattern (canonical five-step sequence)** — also called the **Two-Task Dispatch Shape** in command files:
 
-Every specialist dispatch is a Task A (teachback) + Task B (primary work, `blockedBy=[A]`) pair. Both tasks must exist with the teammate as owner BEFORE the `Agent()` spawn — `dispatch_gate` rule ⑧ (`has_task_assigned`) refuses spawn otherwise. The mission lives in Task B's `description`, never in the spawn prompt — `dispatch_gate` rule ⑨ (`long_inline_mission`) WARNs at >800 chars or when no `TaskList` reference is present.
+Every specialist dispatch is a Task A (teachback) + Task B (primary work, `blockedBy=[A]`) pair. Both tasks must exist with the teammate as owner BEFORE the `Agent()` spawn. The mission lives in Task B's `description`, never in the spawn prompt.
 
 1. `TaskCreate(subject="{name}: TEACHBACK for {topic}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — create Task A (teachback gate).
 2. `TaskCreate(subject="{name}: {primary work subject}", description="<full mission: CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES per §13 Recommended Agent Prompting Structure>")` — create Task B (primary work).
 3. `TaskUpdate(A_id, owner="{name}", addBlocks=[B_id])` — assign Task A to the teammate and wire it as the gate that unblocks Task B.
-4. `TaskUpdate(B_id, owner="{name}", addBlockedBy=[A_id])` — assign Task B to the same teammate and explicitly mirror the block edge (auto-mirror is verified, but the both-sides spec is the documented convention). Do NOT pre-set `status="in_progress"` on either task — the teammate self-claims on arrival.
+4. `TaskUpdate(B_id, owner="{name}", addBlockedBy=[A_id])` — assign Task B to the same teammate and explicitly mirror the block edge. Do NOT pre-set `status="in_progress"` on either task — the teammate self-claims on arrival.
 5. `Agent(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", prompt="YOUR PACT ROLE: teammate ({name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you.")` — spawn the teammate. Keep the prompt ≤ 800 chars and include the literal `TaskList` reference (or one of: `task list`, `tasks assigned`, `check your tasks`); the teammate reads the mission via `TaskGet(B_id)`, not from the prompt.
 
 #### First-spawn verification (HARD-RULE)
@@ -465,14 +465,14 @@ You — the team-lead — are the **only** actor who marks teammate-owned tasks 
 1. `SendMessage(to=<teammate>, "[team-lead→<teammate>] Task #<id> accepted...", summary="Task accepted")`
 2. `TaskUpdate(taskId, status="completed")`
 
-Both calls are required, in this order. SendMessage must precede TaskUpdate so the lifecycle gate's PostToolUse scan finds the wake on disk; reversed ordering produces same-batch `_has_paired_sendmessage` races and false-positive `completion_no_paired_send` WARNs (see CLAUDE.md memory `#674`). Skipping the SendMessage entirely leaves the teammate idle on `awaiting_lead_completion`; `blockedBy` resolution is invisible without the wake.
+Both calls are required, in this order. SendMessage must precede TaskUpdate. Skipping the SendMessage leaves the teammate idle on `awaiting_lead_completion`; `blockedBy` resolution is invisible without the wake.
 
 **Rejection — two-call atomic pair (BOTH required, SendMessage FIRST)**
 
 1. `SendMessage(to=<teammate>, "[team-lead→<teammate>] Rejected on Task #<id>. See metadata...; revise.")`
 2. `TaskUpdate(taskId, metadata={"teachback_rejection": {...}})` OR `metadata={"handoff_rejection": {...}}` — payload `{reason, corrections, since, revision_number}`
 
-Both calls are required, in this order. SendMessage must precede TaskUpdate for the same lifecycle-gate reason as Acceptance. 3+ rejection cycles on the same task is an imPACT META-BLOCK signal.
+Both calls are required, in this order. SendMessage must precede TaskUpdate. 3+ rejection cycles on the same task is an imPACT META-BLOCK signal.
 
 Teammate self-completion carve-outs (predicate-witnessed): signal-tasks (`metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}`); secretary memory-save (owner's team-config `agentType` ∈ `SELF_COMPLETE_EXEMPT_AGENT_TYPES` — currently `{pact-secretary}`; resolved via team-config lookup, so the carve-out applies regardless of spawn name). Canonical predicate: `is_self_complete_exempt(task, team_name)` in `shared/intentional_wait.py`. Separate path: imPACT force-termination (`metadata.terminated == true`) is team-lead-driven.
 
