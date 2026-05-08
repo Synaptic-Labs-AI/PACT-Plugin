@@ -363,11 +363,15 @@ For full detail, `Read(file_path="../protocols/pact-variety.md")` when calibrati
 >
 > ⚠️ **NEVER** use plain `Agent(subagent_type=...)` without `name` and `team_name` for specialist agents. This bypasses team coordination, task tracking, and `SendMessage` communication.
 
-**Dispatch pattern**:
+**Dispatch pattern (canonical five-step sequence)**:
 
-1. `TaskCreate(subject, description)` — create the tracking task with full mission
-2. `TaskUpdate(taskId, owner="{name}")` — assign ownership
-3. `Agent(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", prompt="YOUR PACT ROLE: teammate ({name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you.")` — spawn the teammate
+Every specialist dispatch is a Task A (teachback) + Task B (primary work, `blockedBy=[A]`) pair. Both tasks must exist with the teammate as owner BEFORE the `Agent()` spawn — `dispatch_gate` rule ⑧ (`has_task_assigned`) refuses spawn otherwise. The mission lives in Task B's `description`, never in the spawn prompt — `dispatch_gate` rule ⑨ (`long_inline_mission`) WARNs at >800 chars or when no `TaskList` reference is present.
+
+1. `TaskCreate(subject="{name}: TEACHBACK for {topic}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — create Task A (teachback gate).
+2. `TaskCreate(subject="{name}: {primary work subject}", description="<full mission: CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES per §13 Recommended Agent Prompting Structure>")` — create Task B (primary work).
+3. `TaskUpdate(A_id, owner="{name}", addBlocks=[B_id])` — assign Task A to the teammate and wire it as the gate that unblocks Task B.
+4. `TaskUpdate(B_id, owner="{name}")` — assign Task B to the same teammate. (Do NOT pre-set `status="in_progress"` on either task — the teammate self-claims on arrival.)
+5. `Agent(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", prompt="YOUR PACT ROLE: teammate ({name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you.")` — spawn the teammate. Keep the prompt ≤ 800 chars and include the literal `TaskList` reference (or one of: `task list`, `tasks assigned`, `check your tasks`); the teammate reads the mission via `TaskGet(B_id)`, not from the prompt.
 
 > ⚠️ **`{name}` constraint (SECURITY)**: the `name=` parameter you pass to `Agent()` is interpolated verbatim into the `YOUR PACT ROLE: teammate ({name}).` marker line. To prevent marker spoofing via injected newlines or close-parens, the `name` value MUST match the pattern `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses. Examples of valid names: `backend-coder-1`, `review-test-engineer-7`, `secretary`. Examples of invalid names: `backend coder 1` (spaces), `backend-coder)evil` (close-paren), any name containing newlines.
 
@@ -427,10 +431,11 @@ Use the same iterate-by-name pattern for any other team-lead-to-many signal (gra
 
 | Event | Task Operation |
 |-------|----------------|
-| Before dispatching agent | `TaskCreate(subject, description, activeForm)` |
-| After dispatching agent | `TaskUpdate(taskId, status: "in_progress", addBlocks: [PARENT_TASK_ID])` |
-| Agent completes (handoff) | `TaskUpdate(taskId, status: "completed")` |
-| Reading agent's full HANDOFF | `TaskGet(taskId).metadata.handoff` (on-demand, not automatic) |
+| Before dispatching agent | TaskCreate Task A (teachback) + Task B (work); `TaskUpdate(A, owner=name, addBlocks=[B])` + `TaskUpdate(B, owner=name)` — see §11 Dispatch pattern |
+| After dispatching agent | Teammate self-claims via `TaskUpdate(taskId, status="in_progress")`; the team-lead does NOT pre-set `in_progress` |
+| Teachback submitted (Task A) | Read raw JSON `metadata.teachback_submit`, validate per §12 Teachback Review, then Acceptance two-call atomic pair (§12) auto-unblocks Task B |
+| HANDOFF submitted (Task B) | Read raw JSON `metadata.handoff` (TaskGet is metadata-blind), then Acceptance two-call atomic pair (§12) — `TaskUpdate(taskId, status="completed")` + paired wake-`SendMessage` |
+| Reading agent's full HANDOFF | `cat ~/.claude/tasks/{team_name}/{taskId}.json \| jq .metadata.handoff` (on-demand, raw JSON; `TaskGet` does NOT surface metadata.handoff) |
 | Creating downstream phase task | Include upstream task IDs in description for chain-read |
 | Agent reports blocker | `TaskCreate(subject: "BLOCKER: ...", metadata={"type": "blocker"})` then `TaskUpdate(agent_taskId, addBlockedBy: [blocker_taskId])`. **`metadata.type` is required** — `agent_handoff_emitter.py` inline-checks `metadata.type in ("blocker", "algedonic")` and SUPPRESSES journal emission for signal tasks; `shared/task_utils.py` and `shared/session_resume.py` use the same literal to CATEGORIZE signal tasks for recovery display. The subject prefix has no special meaning. |
 | Agent reports algedonic signal | `TaskCreate(subject: "[HALT\|ALERT]: ...", metadata={"type": "algedonic", "level": "halt"\|"alert", "category": "..."})` then amplify scope via `addBlockedBy` on phase/feature task. |
@@ -479,7 +484,7 @@ Teammate self-completion carve-outs (predicate-witnessed): signal-tasks (`metada
 
 ### Teachback Review
 
-Each specialist dispatch creates a Task A (teachback) + Task B (primary work) pair with `blockedBy=[A]`. Teammate claims A, writes `metadata.teachback_submit` (4 fields per [pact-teachback](../skills/pact-teachback/SKILL.md)), idles on `awaiting_lead_completion`. Read the payload via raw JSON (TaskGet is metadata-blind), apply Validating Incoming Teachbacks below, then accept via the Acceptance two-call atomic pair above; acceptance auto-unblocks Task B. Do NOT mark Task B `completed` or `pending` yourself — the teammate claims on wake.
+Each specialist dispatch is a Task A (teachback) + Task B (work) pair with `blockedBy=[A]` — see §11 for the canonical sequence. Teammate claims A, writes `metadata.teachback_submit` (4 fields per [pact-teachback](../skills/pact-teachback/SKILL.md)), idles on `awaiting_lead_completion`. Read the payload via raw JSON (TaskGet is metadata-blind), apply Validating Incoming Teachbacks below, then accept via the Acceptance two-call atomic pair above; acceptance auto-unblocks Task B. Do NOT mark Task B `completed` or `pending` yourself — the teammate claims on wake.
 
 #### Validating Incoming Teachbacks
 
