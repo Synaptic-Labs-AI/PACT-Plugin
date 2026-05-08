@@ -149,7 +149,7 @@ Each reviewer dispatch creates **two tasks**, not one:
 - **Task A** — TEACHBACK gate. `subject = "{reviewer-type}: TEACHBACK for review of {feature}"`, owner = reviewer. Description: state which review angle the reviewer is taking (consistency check vs adversarial vs design coherence) before reading the diff.
 - **Task B** — primary review work. `subject = "{reviewer-type}: review {feature}"`, owner = reviewer, `blockedBy = [<Task A id>]`.
 
-Both are created BEFORE the `Agent(...)` spawn call. The reviewer claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review the teachback (does it state the review angle clearly?), accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review)). On accept, the reviewer wakes to claim B and read the diff.
+Both are created BEFORE the `Agent(...)` spawn call. The reviewer claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review the teachback (does it state the review angle clearly?), then accept via the two-call atomic pair: `SendMessage(to=reviewer, ...)` FIRST, then `TaskUpdate(A, status="completed")` — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review) for the rationale. On accept, the reviewer wakes to claim B and read the diff.
 
 ```
 A_id = TaskCreate(
@@ -173,9 +173,9 @@ The `Agent()` `prompt` does NOT change shape — the two-task dispatch is encode
 **Dispatch reviewers** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above per reviewer:
 
 For each reviewer:
-1. `TaskCreate(subject="{reviewer-type}: review {feature}", description="Review this PR. Focus: [domain-specific review criteria]...")`
-2. `TaskUpdate(taskId, owner="{reviewer-name}")`
-3. Spawn the reviewer with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({reviewer-name})` marker on its own line so routing detects the teammate spawn (team protocol + teachback content arrive via spawn-time skills frontmatter, not a per-prompt directive):
+
+1. Apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above (Task A teachback + Task B work, owners assigned BEFORE spawn). Task B's `description` carries the review mission: "Review this PR. Focus: [domain-specific review criteria]…" Task A's subject is `"{reviewer-type}: TEACHBACK for review of {feature}"` per the canonical shape.
+2. Spawn the reviewer with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({reviewer-name})` marker on its own line so routing detects the teammate spawn (team protocol + teachback content arrive via spawn-time skills frontmatter, not a per-prompt directive):
 
 ```
 Agent(
@@ -186,7 +186,7 @@ Agent(
 )
 ```
 
-> ⚠️ **`{reviewer-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `YOUR PACT ROLE: teammate ({reviewer-name}).` marker line. `name` MUST match `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses — to prevent marker spoofing.
+> ⚠️ **`{reviewer-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `YOUR PACT ROLE: teammate ({reviewer-name}).` marker line. `name` MUST match `^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$` — lowercase alphanumerics with optional internal hyphens; must start and end with an alphanumeric, checked after NFKC normalization — to prevent marker spoofing.
 
 Spawn all reviewers in parallel (multiple `Task` calls in one response).
 

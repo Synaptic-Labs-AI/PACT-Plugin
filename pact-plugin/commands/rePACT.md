@@ -220,7 +220,7 @@ Each specialist dispatch creates **two tasks**, not one:
 - **Task A** — TEACHBACK gate. `subject = "{scope-prefixed-name}: TEACHBACK for {sub-task}"`, owner = specialist.
 - **Task B** — primary work. `subject = "{scope-prefixed-name}: implement {sub-task}"`, owner = specialist, `blockedBy = [<Task A id>]`.
 
-Both are created BEFORE the `Agent(...)` spawn call. The specialist claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review)). On accept, the specialist wakes to claim B.
+Both are created BEFORE the `Agent(...)` spawn call. The specialist claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair: `SendMessage(to=specialist, ...)` FIRST, then `TaskUpdate(A, status="completed")` — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review) for the rationale. On accept, the specialist wakes to claim B.
 
 Nested PACT cycles' inner-cycle dispatches follow the same A+B shape recursively. The `Agent()` `prompt` does NOT change shape.
 
@@ -241,11 +241,10 @@ TaskUpdate(A_id, addBlocks=[B_id])
 
 ---
 
-For each specialist needed — apply the shape above:
+For each specialist needed:
 
-1. `TaskCreate(subject="{scope-prefixed-name}: implement {sub-task}", description="[full CONTEXT/MISSION/INSTRUCTIONS/GUIDELINES]")`
-2. `TaskUpdate(taskId, owner="{scope-prefixed-name}")`
-3. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({scope-prefixed-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter):
+1. Apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above (Task A teachback + Task B work, owners assigned BEFORE spawn). Task B's `description` carries the implementation mission: "[full CONTEXT/MISSION/INSTRUCTIONS/GUIDELINES]". Task B subject is `"{scope-prefixed-name}: implement {sub-task}"` per the canonical shape; Task A subject is `"{scope-prefixed-name}: TEACHBACK for {sub-task}"`.
+2. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({scope-prefixed-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter):
 
 ```
 Agent(
@@ -256,7 +255,7 @@ Agent(
 )
 ```
 
-> ⚠️ **`{scope-prefixed-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `YOUR PACT ROLE: teammate ({scope-prefixed-name}).` marker line. `name` MUST match `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses — to prevent marker spoofing.
+> ⚠️ **`{scope-prefixed-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `YOUR PACT ROLE: teammate ({scope-prefixed-name}).` marker line. `name` MUST match `^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$` — lowercase alphanumerics with optional internal hyphens; must start and end with an alphanumeric, checked after NFKC normalization — to prevent marker spoofing.
 
 For multi-domain: spawn multiple specialists in parallel.
 Apply S2 coordination if parallel work.

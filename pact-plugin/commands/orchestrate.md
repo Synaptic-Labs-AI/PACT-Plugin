@@ -55,7 +55,7 @@ Agent(
 )
 ```
 
-> ⚠️ **`{teammate-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `YOUR PACT ROLE: teammate ({teammate-name}).` marker line. `name` MUST match `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses — to prevent marker spoofing via injected newlines or close-parens. Examples: `backend-coder-1`, `review-test-engineer-7`, `secretary`.
+> ⚠️ **`{teammate-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `YOUR PACT ROLE: teammate ({teammate-name}).` marker line. `name` MUST match `^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$` — lowercase alphanumerics with optional internal hyphens; must start and end with an alphanumeric, checked after NFKC normalization — to prevent marker spoofing via injected newlines or close-parens. Examples: `backend-coder-1`, `review-test-engineer-7`, `secretary`.
 
 > **Why store agent_id?** Enables `resume` for blocker recovery — see [Blocker Recovery](#blocker-recovery-resume-vs-fresh-spawn).
 
@@ -66,7 +66,7 @@ Every specialist dispatch creates **two tasks**, not one:
 - **Task A** — TEACHBACK gate. `subject = "{role}: TEACHBACK for {feature}"`, owner = teammate. Description: teachback expectations + dispatch context.
 - **Task B** — primary work. `subject = "{role}: {mission}"`, owner = teammate, `blockedBy = [<Task A id>]`.
 
-Both are created BEFORE the `Agent(...)` spawn call so the teammate sees them on first `TaskList`. The teammate claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review the teachback, accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review)), and the teammate wakes to claim B.
+Both are created BEFORE the `Agent(...)` spawn call so the teammate sees them on first `TaskList`. The teammate claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review the teachback, then accept via the two-call atomic pair: `SendMessage(to=teammate, ...)` FIRST, then `TaskUpdate(A, status="completed")` — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review) for the rationale. The teammate wakes to claim B.
 
 **Dispatch sequence (replaces single-task dispatch)**:
 
@@ -446,12 +446,10 @@ When a phase is skipped but a coder encounters a decision that would have been h
 - "Preparation Phase"
 - "Open Questions > Require Further Research"
 
-**Dispatch `pact-preparer`** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above. Task A subject: `"preparer: TEACHBACK for {feature}"`. Task B is the research mission below:
+**Dispatch `pact-preparer`** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above. Task A subject: `"preparer: TEACHBACK for {feature}"`. Task B subject: `"preparer: research {feature}"`. Task B's `description` carries the research mission below:
 
-1. `TaskCreate(subject="preparer: research {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
-   - Include task description, plan sections (if any), and "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
-2. `TaskUpdate(taskId, owner="preparer")`
-3. **Journal event**: Write `agent_dispatch` before spawning:
+1. Apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above (Task A teachback + Task B work, owners assigned BEFORE spawn). Task B's `description` is "CONTEXT: …\nMISSION: …\nINSTRUCTIONS: …\nGUIDELINES: …" — include task description, plan sections (if any), and "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
+2. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
@@ -460,7 +458,7 @@ When a phase is skipped but a coder encounters a decision that would have been h
    {"agent": "preparer", "task_id": "{taskId}", "phase": "PREPARE", "scope": []}
 JSON
    ```
-4. Spawn the preparer with the canonical dispatch form:
+3. Spawn the preparer with the canonical dispatch form:
 
 ```
 Agent(
@@ -537,13 +535,8 @@ When detection fires (score >= threshold), follow the evaluation response protoc
 
 **Dispatch `pact-architect`** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above. Task A subject: `"architect: TEACHBACK for {feature}"`. Task B is the design mission below:
 
-1. `TaskCreate(subject="architect: design {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
-   - Include task description, where to find PREPARE outputs (e.g., "Read `docs/preparation/{feature}.md`"), plan sections (if any), and plan reference.
-   - Include upstream task reference: "Preparer task: #{taskId} — read via `TaskGet` for research decisions and context."
-   - Do not read phase output files yourself or paste their content into the task description.
-   - If PREPARE was skipped: pass the plan's Preparation Phase section instead.
-2. `TaskUpdate(taskId, owner="architect")`
-3. **Journal event**: Write `agent_dispatch` before spawning:
+1. Apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above (Task A teachback + Task B work, owners assigned BEFORE spawn). Task B subject is `"architect: design {feature}"`; Task B's `description` is "CONTEXT: …\nMISSION: …\nINSTRUCTIONS: …\nGUIDELINES: …" — include task description, where to find PREPARE outputs (e.g., "Read `docs/preparation/{feature}.md`"), plan sections (if any), plan reference, and upstream task reference: "Preparer task: #{taskId} — read via `TaskGet` for research decisions and context." Do not read phase output files yourself or paste their content into the task description. If PREPARE was skipped: pass the plan's Preparation Phase section instead.
+2. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
@@ -552,7 +545,7 @@ When detection fires (score >= threshold), follow the evaluation response protoc
    {"agent": "architect", "task_id": "{taskId}", "phase": "ARCHITECT", "scope": []}
 JSON
    ```
-4. Spawn the architect with the canonical dispatch form:
+3. Spawn the architect with the canonical dispatch form:
 
 ```
 Agent(
@@ -658,15 +651,16 @@ JSON
 **Dispatch coder(s)** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above for each coder. Task A subject: `"{coder-type}: TEACHBACK for {scope}"`. Task B is the implementation mission below:
 
 For each coder needed:
-1. `TaskCreate(subject="{coder-type}: implement {scope}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
-   - Include task description, where to find ARCHITECT outputs (e.g., "Read `docs/architecture/{feature}.md`"), plan sections (if any), plan reference.
-   - Include upstream task references: "Architect task: #{taskId} — read via `TaskGet` for design decisions." If multiple coders are dispatched concurrently, include peer names: "Your peers on this phase: {other-coder-names}."
+
+1. Apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above (Task A teachback + Task B work, owners assigned BEFORE spawn). Task B subject is `"{coder-type}: implement {scope}"`; Task B's `description` carries the implementation mission with the structure below:
+   - CONTEXT, MISSION, INSTRUCTIONS, GUIDELINES sections.
+   - Where to find ARCHITECT outputs (e.g., "Read `docs/architecture/{feature}.md`"), plan sections (if any), plan reference.
+   - Upstream task references: "Architect task: #{taskId} — read via `TaskGet` for design decisions." If multiple coders are dispatched concurrently, include peer names: "Your peers on this phase: {other-coder-names}."
    - Do not read phase output files yourself or paste their content into the task description.
    - If ARCHITECT was skipped: pass the plan's Architecture Phase section instead.
    - If PREPARE/ARCHITECT were skipped, include: "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the handoff so it can be validated. Major decisions affecting other components are blockers—don't implement, escalate."
-   - Include: "Smoke Testing: Run the test suite before completing. If your changes break existing tests, fix them. Your tests are verification tests—enough to confirm your implementation works. Comprehensive coverage (edge cases, integration, E2E, adversarial) is TEST phase work."
-2. `TaskUpdate(taskId, owner="{coder-name}")`
-3. **Journal event**: Write `agent_dispatch` before spawning each coder:
+   - "Smoke Testing: Run the test suite before completing. If your changes break existing tests, fix them. Your tests are verification tests—enough to confirm your implementation works. Comprehensive coverage (edge cases, integration, E2E, adversarial) is TEST phase work."
+2. **Journal event**: Write `agent_dispatch` before spawning each coder:
    ```bash
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
@@ -675,7 +669,7 @@ For each coder needed:
    {"agent": "{coder-name}", "task_id": "{taskId}", "phase": "CODE", "scope": ["{assigned_paths}"]}
 JSON
    ```
-4. Spawn each coder with the canonical dispatch form:
+3. Spawn each coder with the canonical dispatch form:
 
 ```
 Agent(
@@ -789,11 +783,8 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
 
 **Dispatch `pact-test-engineer`** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above. Task A subject: `"test-engineer: TEACHBACK for {feature}"`. Task B is the testing mission below:
 
-1. `TaskCreate(subject="test-engineer: test {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
-   - Include task description, coder task references (e.g., "Coder tasks: #{id1}, #{id2} — read via `TaskGet` for implementation decisions and flagged uncertainties"), plan sections (if any), plan reference.
-   - Include: "You own ALL substantive testing: unit tests, integration, E2E, edge cases."
-2. `TaskUpdate(taskId, owner="test-engineer")`
-3. **Journal event**: Write `agent_dispatch` before spawning:
+1. Apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above (Task A teachback + Task B work, owners assigned BEFORE spawn). Task B subject is `"test-engineer: test {feature}"`; Task B's `description` is "CONTEXT: …\nMISSION: …\nINSTRUCTIONS: …\nGUIDELINES: …" — include task description, coder task references (e.g., "Coder tasks: #{id1}, #{id2} — read via `TaskGet` for implementation decisions and flagged uncertainties"), plan sections (if any), plan reference, and "You own ALL substantive testing: unit tests, integration, E2E, edge cases."
+2. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
@@ -802,7 +793,7 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
    {"agent": "test-engineer", "task_id": "{taskId}", "phase": "TEST", "scope": []}
 JSON
    ```
-4. Spawn the test engineer with the canonical dispatch form:
+3. Spawn the test engineer with the canonical dispatch form:
 
 ```
 Agent(

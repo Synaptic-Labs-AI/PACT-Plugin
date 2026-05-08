@@ -194,7 +194,7 @@ Each consultant dispatch creates **two tasks**, not one:
 - **Task A** — TEACHBACK gate. `subject = "{specialist}: TEACHBACK for plan consultation on {feature}"`, owner = consultant. Description: lightweight understanding-confirm of the consultation scope.
 - **Task B** — primary consultation. `subject = "{specialist}: plan consultation for {feature}"`, owner = consultant, `blockedBy = [<Task A id>]`.
 
-Both are created BEFORE the `Agent(...)` spawn call. The consultant claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review)). On accept, the consultant wakes to claim B and produce the consultation HANDOFF.
+Both are created BEFORE the `Agent(...)` spawn call. The consultant claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair: `SendMessage(to=consultant, ...)` FIRST, then `TaskUpdate(A, status="completed")` — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review) for the rationale. On accept, the consultant wakes to claim B and produce the consultation HANDOFF.
 
 ```
 A_id = TaskCreate(
@@ -215,12 +215,7 @@ The teachback gate is lightweight ("understanding-confirm" with no implementatio
 
 ---
 
-**Dispatch each consultant** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above per consultant:
-
-1. `TaskCreate(subject="{specialist}: plan consultation for {feature}", description="PLANNING CONSULTATION ONLY — No implementation.\n\nTask: {task description}\n\n[full template content from above]")`
-   - Add to description: "Send a teachback to team-lead restating your understanding of the consultation task before providing your analysis. If upstream context is referenced, read it via `TaskGet` first."
-2. `TaskUpdate(taskId, owner="{specialist-name}")`
-3. Spawn the consultant with the canonical dispatch form:
+**Dispatch each consultant** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above per consultant (Task A teachback + Task B work, owners assigned BEFORE spawn). Then spawn the consultant with the canonical dispatch form:
 
 ```
 Agent(
@@ -231,7 +226,7 @@ Agent(
 )
 ```
 
-Spawn all consultants in parallel.
+Spawn all consultants in parallel. Task B's `description` carries the planning-consultation mission (PLANNING CONSULTATION ONLY — no implementation; full template content from the shape above; teachback expectation; upstream-context cross-ref via `TaskGet`).
 
 ### Phase 2: Orchestrator Synthesis
 
