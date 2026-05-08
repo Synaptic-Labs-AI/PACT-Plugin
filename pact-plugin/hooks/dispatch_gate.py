@@ -150,7 +150,21 @@ RESERVED_NAMES = frozenset({
 # Inline-mission heuristic. Long inline mission OR no TaskList reference
 # suggests the dispatcher embedded the mission in the prompt instead of
 # the task description (defeats the harvest pipeline).
+#
+# Audit: the 800-char threshold is duplicated as prose in
+# `agents/pact-orchestrator.md` §Agent Teams Dispatch (rule ⑨ description).
+# The duplication is intentional — the agent-reader-primary axiom prefers
+# inline values over cross-refs because LLM readers under token pressure
+# don't follow cross-refs reliably. There is currently no source-side
+# enforcement that the prose stays in sync; update both surfaces if
+# changing this threshold.
 PROMPT_MAX_LENGTH = 800
+# Audit: this tuple is duplicated as prose in `agents/pact-orchestrator.md`
+# §Agent Teams Dispatch (the spawn-prompt example commentary lists these
+# accepted phrases). The duplication is intentional per the
+# agent-reader-primary axiom (see PROMPT_MAX_LENGTH audit anchor above);
+# update both surfaces together if changing the accepted phrases. Order
+# does not matter — the heuristic uses `any(... in prompt ...)`.
 TASK_REFERENCE_PHRASES = (
     "TaskList",
     "task list",
@@ -327,7 +341,9 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
     if not NAME_REGEX.match(normalized_name):
         return ("DENY",
                 f"PACT dispatch_gate: name {name!r} must match "
-                r"^[a-z0-9-]+$ (lowercase alphanumerics + hyphens, "
+                r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$ "
+                "(lowercase alphanumerics with optional internal hyphens; "
+                "must start and end with an alphanumeric, "
                 "checked after NFKC normalization).",
                 "name_invalid_regex")
     if normalized_name in RESERVED_NAMES:
