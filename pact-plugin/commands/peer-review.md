@@ -186,8 +186,6 @@ Agent(
 )
 ```
 
-> ⚠️ **`{reviewer-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `YOUR PACT ROLE: teammate ({reviewer-name}).` marker line. `name` MUST match `^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$` — lowercase alphanumerics with optional internal hyphens; must start and end with an alphanumeric, checked after NFKC normalization — to prevent marker spoofing.
-
 Spawn all reviewers in parallel (multiple `Task` calls in one response).
 
 **Journal event**: After dispatching all reviewers, write a `review_dispatch` event:

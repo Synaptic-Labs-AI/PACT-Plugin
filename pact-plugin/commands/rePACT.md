@@ -255,8 +255,6 @@ Agent(
 )
 ```
 
-> ⚠️ **`{scope-prefixed-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `YOUR PACT ROLE: teammate ({scope-prefixed-name}).` marker line. `name` MUST match `^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$` — lowercase alphanumerics with optional internal hyphens; must start and end with an alphanumeric, checked after NFKC normalization — to prevent marker spoofing.
-
 For multi-domain: spawn multiple specialists in parallel.
 Apply S2 coordination if parallel work.
 Output: Code + HANDOFF in task metadata (summary via `SendMessage` to team-lead).

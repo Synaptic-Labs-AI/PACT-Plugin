@@ -55,8 +55,6 @@ Agent(
 )
 ```
 
-> ⚠️ **`{teammate-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `YOUR PACT ROLE: teammate ({teammate-name}).` marker line. `name` MUST match `^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$` — lowercase alphanumerics with optional internal hyphens; must start and end with an alphanumeric, checked after NFKC normalization — to prevent marker spoofing via injected newlines or close-parens. Examples: `backend-coder-1`, `review-test-engineer-7`, `secretary`.
-
 > **Why store agent_id?** Enables `resume` for blocker recovery — see [Blocker Recovery](#blocker-recovery-resume-vs-fresh-spawn).
 
 ### Two-Task Dispatch Shape (TEACHBACK + WORK)
