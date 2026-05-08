@@ -446,7 +446,7 @@ When a phase is skipped but a coder encounters a decision that would have been h
 
 **Dispatch `pact-preparer`** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work):
 
-1. Create Task A (teachback) and Task B (work), and then assign both to their owner (BEFORE spawn). Task A's `subject` is `"preparer: TEACHBACK for {feature}"`. Task B's `subject` is `"preparer: research {feature}"`. Task B's `description` is "CONTEXT: …\nMISSION: …\nINSTRUCTIONS: …\nGUIDELINES: …" — include task description, plan sections (if any), and "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
+1. Create Task A (teachback) and Task B (work), and then assign both to their owner (BEFORE spawn). Task A's `subject` is "preparer: TEACHBACK for {feature}". Task B's `subject` is "preparer: research {feature}". Task B's `description` is "CONTEXT: …\nMISSION: …\nINSTRUCTIONS: …\nGUIDELINES: …" — include task description, plan sections (if any), and "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
 2. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
    set -e
@@ -533,7 +533,7 @@ When detection fires (score >= threshold), follow the evaluation response protoc
 
 **Dispatch `pact-architect`** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work):
 
-1. Create Task A (teachback) and Task B (work), and then assign both to their owner (BEFORE spawn). Task A's `subject` is `"architect: TEACHBACK for {feature}"`. Task B's `subject` is `"architect: design {feature}"`. Task B's `description` is "CONTEXT: …\nMISSION: …\nINSTRUCTIONS: …\nGUIDELINES: …" — include task description, where to find PREPARE outputs (e.g., "Read `docs/preparation/{feature}.md`"), plan sections (if any), plan reference, and upstream task reference: "Preparer task: #{taskId} — read via `TaskGet` for research decisions and context." Do not read phase output files yourself or paste their content into the task description. If PREPARE was skipped: pass the plan's Preparation Phase section instead.
+1. Create Task A (teachback) and Task B (work), and then assign both to their owner (BEFORE spawn). Task A's `subject` is "architect: TEACHBACK for {feature}". Task B's `subject` is "architect: design {feature}". Task B's `description` is "CONTEXT: …\nMISSION: …\nINSTRUCTIONS: …\nGUIDELINES: …" — include task description, where to find PREPARE outputs (e.g., "Read `docs/preparation/{feature}.md`"), plan sections (if any), plan reference, and upstream task reference: "Preparer task: #{taskId} — read via `TaskGet` for research decisions and context." Do not read phase output files yourself or paste their content into the task description. If PREPARE was skipped: pass the plan's Preparation Phase section instead.
 2. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
    set -e
@@ -648,7 +648,7 @@ JSON
 
 **Dispatch coder(s)** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) for each coder needed:
 
-1. Create Task A (teachback) and Task B (work), and then assign both to their owner (BEFORE spawn). Task A's `subject` is `"{coder-type}: TEACHBACK for {scope}"`. Task B's `subject` is `"{coder-type}: implement {scope}"`. Task B's `description` carries the implementation mission with the structure below:
+1. Create Task A (teachback) and Task B (work), and then assign both to their owner (BEFORE spawn). Task A's `subject` is "{coder-type}: TEACHBACK for {scope}". Task B's `subject` is "{coder-type}: implement {scope}". Task B's `description` carries the implementation mission with the structure below:
     - CONTEXT, MISSION, INSTRUCTIONS, GUIDELINES sections.
     - Where to find ARCHITECT outputs (e.g., "Read `docs/architecture/{feature}.md`"), plan sections (if any), plan reference. (NOTE: Do not read the phase output files yourself or paste their content into the task description.)
     - Upstream task references: "Architect task: #{taskId} — read via `TaskGet` for design decisions." If multiple coders are dispatched concurrently, include peer names: "Your peers on this phase: {other-coder-names}."
@@ -778,7 +778,7 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
 
 **Dispatch `pact-test-engineer`** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work):
 
-1. Create Task A (teachback) and Task B (work), and then assign both to their owner (BEFORE spawn). Task A's `subject` is `"test-engineer: TEACHBACK for {feature}"`. Task B's `subject` is `"test-engineer: test {feature}"`. Task B's `description` is "CONTEXT: …\nMISSION: …\nINSTRUCTIONS: …\nGUIDELINES: …" — include task description, coder task references (e.g., "Coder tasks: #{id1}, #{id2} — read via `TaskGet` for implementation decisions and flagged uncertainties"), plan sections (if any), plan reference, and "You own ALL substantive testing: unit tests, integration, E2E, edge cases."
+1. Create Task A (teachback) and Task B (work), and then assign both to their owner (BEFORE spawn). Task A's `subject` is "test-engineer: TEACHBACK for {feature}". Task B's `subject` is "test-engineer: test {feature}". Task B's `description` is "CONTEXT: …\nMISSION: …\nINSTRUCTIONS: …\nGUIDELINES: …" — include task description, coder task references (e.g., "Coder tasks: #{id1}, #{id2} — read via `TaskGet` for implementation decisions and flagged uncertainties"), plan sections (if any), plan reference, and "You own ALL substantive testing: unit tests, integration, E2E, edge cases."
 2. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
    set -e
