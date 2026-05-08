@@ -215,7 +215,10 @@ The teachback gate is lightweight ("understanding-confirm" with no implementatio
 
 ---
 
-**Dispatch each consultant** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above per consultant (Task A teachback + Task B work, owners assigned BEFORE spawn). Then spawn the consultant with the canonical dispatch form:
+**Dispatch each consultant** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) for each consultant:
+
+1. Create Task A (teachback) and Task B (work), and then assign both to their owner (BEFORE spawn). Task B's `subject` is `"{specialist}: plan consultation for {feature}"`. Task B's `description` is `"PLANNING CONSULTATION ONLY — No implementation.\n\nTask: {task description}\n\n[full template content from above]\n\nIf upstream context is referenced, read it first by using TaskGet tool."`.
+2. Spawn the consultant with the canonical dispatch form:
 
 ```
 Agent(
@@ -226,7 +229,7 @@ Agent(
 )
 ```
 
-Spawn all consultants in parallel. Task B's `description` carries the planning-consultation mission (PLANNING CONSULTATION ONLY — no implementation; full template content from the shape above; teachback expectation; upstream-context cross-ref via `TaskGet`).
+NOTE: Spawn all consultants in parallel.
 
 ### Phase 2: Orchestrator Synthesis
 
