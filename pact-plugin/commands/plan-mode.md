@@ -217,7 +217,7 @@ The teachback gate is lightweight ("understanding-confirm" with no implementatio
 
 **Dispatch each consultant** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) for each consultant:
 
-1. Create Task A (teachback) and Task B (work), and then assign both to their owner (BEFORE spawn). Task B's `subject` is `"{specialist}: plan consultation for {feature}"`. Task B's `description` is `"PLANNING CONSULTATION ONLY — No implementation.\n\nTask: {task description}\n\n[full template content from above]\n\nIf upstream context is referenced, read it first by using TaskGet tool."`.
+1. Create Task A (teachback) and Task B (work), and then assign both to their owner (BEFORE spawn). Task B's `subject` is "{specialist}: plan consultation for {feature}". Task B's `description` is "PLANNING CONSULTATION ONLY — No implementation.\n\nTask: {task description}\n\n[full template content from above]\n\nIf upstream context is referenced, read it first by using TaskGet tool.".
 2. Spawn the consultant with the canonical dispatch form:
 
 ```
