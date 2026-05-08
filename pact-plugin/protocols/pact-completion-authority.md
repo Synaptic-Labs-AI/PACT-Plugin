@@ -31,9 +31,9 @@ Both calls are **required**. Skipping the SendMessage leaves the teammate idle o
 | Carve-out | Trigger | Rule |
 |---|---|---|
 | Signal-tasks | `metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}` | Auditor + algedonic-emitting agents self-complete; the task IS the signal, no HANDOFF to judge. |
-| Memory-save | Owner is `secretary` (or `pact-secretary`) | Secretary self-completes memory-save tasks; team-lead has no acceptance criteria for memory bookkeeping. |
+| Memory-save | Owner's team-config `agentType` ∈ `SELF_COMPLETE_EXEMPT_AGENT_TYPES` (currently `{pact-secretary}`) | Secretary self-completes memory-save tasks; team-lead has no acceptance criteria for memory bookkeeping. Resolved via team-config lookup on `member.agentType`, so the carve-out applies regardless of spawn name (`session-secretary`, etc.). |
 
-The canonical predicate `is_self_complete_exempt(task)` in `shared/intentional_wait.py` witnesses ONLY these two surfaces — pure function for your TaskGet inspection and audit tooling. No hook reads it.
+The canonical predicate `is_self_complete_exempt(task, team_name)` in `shared/intentional_wait.py` witnesses ONLY these two surfaces — pure function for your TaskGet inspection and audit tooling. No hook reads it. Pass `team_name` (read from session context) to get accurate exemption signal for surface 1; surface 2 is independent of `team_name`.
 
 **Lead-driven force-completion (separate path, not predicate-witnessed)**:
 

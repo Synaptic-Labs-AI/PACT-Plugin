@@ -125,18 +125,27 @@ RESERVED_NAMES = frozenset({
     "peer",
     "unknown",
     "solo",
-    # Self-completion-exempt names. The task_lifecycle_gate
-    # short-circuits the lead-only-completion advisory when a teammate's
-    # owner matches one of these names. If a dispatch were allowed to
-    # spawn under one of these names, the spawned teammate could
-    # self-complete tasks without triggering the advisory — bypassing
-    # lead-only completion authority via name choice. Reject the names
-    # at spawn time to close that confused-deputy chain. Mirrors
-    # shared.intentional_wait.SELF_COMPLETE_EXEMPT_AGENTS; the
-    # cross-module subset invariant is asserted by a regression test.
-    "secretary",
-    "pact-secretary",
 })
+# `secretary` / `pact-secretary` are NOT reserved here. The session
+# secretary is canonically spawned with `name="secretary"` (see
+# bootstrap_marker_writer._SECRETARY_NAME and commands/bootstrap.md
+# Step 2), and the dispatch sites that re-assign housekeeping work to
+# the secretary use `TaskUpdate(owner="secretary")` literally. Reserving
+# the name would block the legitimate ritual.
+#
+# The previous reservation existed as a defense-in-depth name perimeter
+# against a confused-deputy attack on the self-completion carve-out
+# (when the carve-out was keyed on owner name). Post-#682 the
+# task_lifecycle_gate carve-out keys on team-config `agentType`
+# (member.agentType ∈ shared.intentional_wait.SELF_COMPLETE_EXEMPT_AGENT_TYPES,
+# looked up via the harness-managed team config) — NOT on owner name.
+# Owner-name spoofing alone therefore cannot bypass the
+# lead-only-completion advisory; the agentType-keyed predicate is the
+# load-bearing defense, and that defense is independent of which names
+# RESERVED_NAMES holds. See:
+#   - shared/intentional_wait.SELF_COMPLETE_EXEMPT_AGENT_TYPES
+#   - shared/intentional_wait._is_exempt_agent_type
+#   - shared/intentional_wait.is_self_complete_exempt (TRUST BOUNDARY block)
 
 # Inline-mission heuristic. Long inline mission OR no TaskList reference
 # suggests the dispatcher embedded the mission in the prompt instead of

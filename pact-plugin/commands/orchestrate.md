@@ -106,7 +106,7 @@ The `Agent()` `prompt` does NOT change shape — the two-task dispatch is encode
 **Carve-outs** — single-task dispatch still applies for:
 
 - **Auditor signal-tasks** (`metadata.completion_type="signal"`): no teachback, no Task B. The auditor IS observing; their task IS the signal.
-- **Secretary memory-save tasks**: secretary self-completes; the standard On Completion flow applies via the `SELF_COMPLETE_EXEMPT_AGENTS` set in `shared/intentional_wait.py`.
+- **Secretary memory-save tasks**: secretary self-completes; the standard On Completion flow applies via the team-config-keyed `SELF_COMPLETE_EXEMPT_AGENT_TYPES` set in `shared/intentional_wait.py` (resolved on `member.agentType`, so the carve-out applies regardless of spawn name).
 - **imPACT force-termination**: `TaskStop` + team-lead-set `metadata.terminated=true` is its own out-of-band path. See [imPACT.md](imPACT.md).
 
 **Skipped phases**: Mark directly `completed` (no `in_progress` — no work occurs):

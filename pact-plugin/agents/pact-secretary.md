@@ -210,7 +210,7 @@ When the team-lead sends a consolidation request (typically during `/PACT:wrap-u
 
 ## Task Completion Signal (memory-save self-complete carve-out)
 
-You are exempt from the team-lead-only-completion rule for memory-save tasks. The team-lead has no acceptance criteria for memory bookkeeping — judging memory-save quality is your domain. The carve-out is encoded as `pact-secretary` in `SELF_COMPLETE_EXEMPT_AGENTS` (`shared/intentional_wait.py`); see [pact-completion-authority.md](../protocols/pact-completion-authority.md).
+You are exempt from the team-lead-only-completion rule for memory-save tasks. The team-lead has no acceptance criteria for memory bookkeeping — judging memory-save quality is your domain. The carve-out is encoded as `pact-secretary` in `SELF_COMPLETE_EXEMPT_AGENT_TYPES` (`shared/intentional_wait.py`) and resolved via team-config lookup on `member.agentType` — so the carve-out attaches to your agentType, not your spawn name. The canonical spawn name is `secretary` (used by `bootstrap_marker_writer` and the housekeeping dispatch sites' `TaskUpdate(owner="secretary")` literal); a spawn under any other name still reaches the carve-out as long as the team config records your `agentType`. See [pact-completion-authority.md](../protocols/pact-completion-authority.md).
 
 > Memory-save self-complete bypasses the team-lead inspection window by design — judging memory-save quality is the secretary's domain (per pact-completion-authority.md carve-out rationale).
 

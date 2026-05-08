@@ -16,9 +16,11 @@ Rule coverage:
     without metadata.handoff → advisory
   - self_completion — Teammate self-completes Task → advisory +
     completion_disputed writeback
-        Carve-outs: secretary self-complete (SELF_COMPLETE_EXEMPT_AGENTS),
-        signal task (metadata.completion_type=signal — exempt via the
-        is_self_complete_exempt predicate), recursion-marker skip.
+        Carve-outs: secretary self-complete (team-config agentType in
+        SELF_COMPLETE_EXEMPT_AGENT_TYPES, resolved via the
+        is_self_complete_exempt predicate), signal task
+        (metadata.completion_type=signal — also via the predicate),
+        recursion-marker skip.
         Sketch-A: actor unresolvable → CURRENT skip behavior; encoded with
         explicit deviation-documenting test referencing architect §5.3.
   - handoff_schema_invalid — TaskUpdate(completed) with malformed
@@ -412,18 +414,33 @@ def test_advisory_when_handoff_is_non_dict(pact_context):
 # =============================================================================
 
 
-def test_silent_when_secretary_self_completes(pact_context):
-    """Secretary owner is in SELF_COMPLETE_EXEMPT_AGENTS → no advisory."""
+def test_silent_when_secretary_self_completes(tmp_path, monkeypatch, pact_context):
+    """Secretary's team-config agentType is in SELF_COMPLETE_EXEMPT_AGENT_TYPES
+    → no advisory. Spawn name is `session-secretary` (production shape);
+    the carve-out resolves via team config, not owner-name match."""
+    # Wire pact_context to read tmp_path-rooted team config.
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
+    team_dir = tmp_path / ".claude" / "teams" / "test-team"
+    team_dir.mkdir(parents=True)
+    (team_dir / "config.json").write_text(
+        json.dumps({
+            "team_name": "test-team",
+            "members": [
+                {"name": "session-secretary", "agentType": "pact-secretary"},
+            ],
+        }),
+        encoding="utf-8",
+    )
     payload = {
         "tool_name": "TaskUpdate",
-        "agent_id": "secretary@test-team",
+        "agent_id": "session-secretary@test-team",
         "tool_input": {"taskId": "5", "status": "completed"},
         "tool_response": {
             "task": {
                 "id": "5",
                 "subject": "save institutional memory",
-                "owner": "secretary",
+                "owner": "session-secretary",
                 "metadata": {
                     "handoff": {
                         "produced": "x",
@@ -439,6 +456,44 @@ def test_silent_when_secretary_self_completes(pact_context):
     }
     advisories = tlg.evaluate_lifecycle(payload)
     assert not any(rule == "self_completion" for rule, _ in advisories)
+
+
+def test_advisory_when_owner_named_secretary_without_agenttype(
+    tmp_path, monkeypatch, pact_context
+):
+    """Trust-boundary defense: a teammate spoofing owner='secretary'
+    without the team config recording the privileged agentType DOES
+    trigger the self-completion advisory. Pre-#682 this test would have
+    been silent (owner-name carve-out); post-#682 the carve-out keys on
+    team-config agentType, so the spoof is caught."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    team_dir = tmp_path / ".claude" / "teams" / "test-team"
+    team_dir.mkdir(parents=True)
+    (team_dir / "config.json").write_text(
+        json.dumps({
+            "team_name": "test-team",
+            "members": [
+                {"name": "backend-coder-1", "agentType": "pact-backend-coder"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "agent_id": "secretary@test-team",
+        "tool_input": {"taskId": "9", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "9",
+                "subject": "spoof attempt",
+                "owner": "secretary",
+                "metadata": {},
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(rule == "self_completion" for rule, _ in advisories)
 
 
 def test_silent_when_signal_task_self_completes(pact_context):

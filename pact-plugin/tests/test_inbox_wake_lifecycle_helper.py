@@ -2,8 +2,8 @@
 Behavioral invariants for pact-plugin/hooks/shared/wake_lifecycle.py.
 
 Direct-import tests of count_active_tasks() and _lifecycle_relevant().
-Pin the carve-out semantics (signal-tasks, exempt agents) to the
-SELF_COMPLETE_EXEMPT_AGENTS frozenset reuse from shared.intentional_wait
+Pin the carve-out semantics (signal-tasks, team-config exempt agentTypes)
+to the shared helper _is_exempt_agent_type from shared.intentional_wait
 (no duplicate literal). Pure-never-raises property pins the contract so
 the redundant try/except in session_init.py:728-730 can be removed in
 future cleanup.
@@ -17,23 +17,37 @@ import pytest
 
 # Hooks dir is added to sys.path by conftest.
 import shared.wake_lifecycle as wl
-from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENTS
+from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENT_TYPES
+
+
+def _write_team_config(tmp_path, team_name, members):
+    """Write a team config under tmp_path/.claude/teams/<team_name>/config.json,
+    mirroring the harness path that _iter_members reads when teams_dir
+    override is omitted (Path.home() resolves to tmp_path via monkeypatch).
+    """
+    team_dir = tmp_path / ".claude" / "teams" / team_name
+    team_dir.mkdir(parents=True, exist_ok=True)
+    (team_dir / "config.json").write_text(
+        json.dumps({"team_name": team_name, "members": members}),
+        encoding="utf-8",
+    )
 
 
 # ---------- Source-level structural invariants ----------
 
-def test_helper_imports_exempt_set_from_intentional_wait():
-    """No duplicate frozenset literal — the helper must reuse the
-    canonical set from shared.intentional_wait."""
+def test_helper_imports_shared_helper_from_intentional_wait():
+    """No duplicate carve-out logic — the helper must reuse the canonical
+    _is_exempt_agent_type from shared.intentional_wait."""
     src = (
         Path(__file__).resolve().parent.parent
         / "hooks" / "shared" / "wake_lifecycle.py"
     ).read_text(encoding="utf-8")
-    assert "from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENTS" in src
-    # No re-declaration: the literal must not appear with a curly-brace
-    # set syntax in the helper itself.
-    assert "frozenset({\"secretary\"" not in src
-    assert "frozenset({'secretary'" not in src
+    assert "from shared.intentional_wait import _is_exempt_agent_type" in src
+    # No re-declaration: a literal exempt set in the helper would diverge
+    # from intentional_wait. Belt-and-suspenders: stale post-#682 import.
+    assert "SELF_COMPLETE_EXEMPT_AGENTS" not in src
+    assert "frozenset({\"pact-secretary\"" not in src
+    assert "frozenset({'pact-secretary'" not in src
 
 
 def test_helper_documented_pure_never_raises():
@@ -59,10 +73,53 @@ def test_lifecycle_relevant_status_gate(task, expected):
     assert wl._lifecycle_relevant(task) is expected
 
 
-@pytest.mark.parametrize("agent", sorted(SELF_COMPLETE_EXEMPT_AGENTS))
-def test_lifecycle_relevant_excludes_exempt_agents(agent):
-    task = {"status": "in_progress", "owner": agent}
-    assert wl._lifecycle_relevant(task) is False
+@pytest.mark.parametrize("agent_type", sorted(SELF_COMPLETE_EXEMPT_AGENT_TYPES))
+def test_lifecycle_relevant_excludes_exempt_agenttypes(agent_type, tmp_path, monkeypatch):
+    """Exempt agentTypes resolved via team-config lookup do not count
+    toward the active-work tally. The owner name is arbitrary — the
+    team-config agentType is what matters (#682)."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    team = "team-exempt"
+    _write_team_config(tmp_path, team, [
+        {"name": "session-secretary", "agentType": agent_type},
+    ])
+    task = {"status": "in_progress", "owner": "session-secretary"}
+    assert wl._lifecycle_relevant(task, team) is False
+
+
+def test_lifecycle_relevant_exempt_owner_arbitrary_name(tmp_path, monkeypatch):
+    """Spawn-name freedom: any name reaches the exempt-agentType
+    carve-out as long as the team config records its agentType."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    team = "team-arbitrary-name"
+    _write_team_config(tmp_path, team, [
+        {"name": "secretary-from-mars", "agentType": "pact-secretary"},
+    ])
+    task = {"status": "in_progress", "owner": "secretary-from-mars"}
+    assert wl._lifecycle_relevant(task, team) is False
+
+
+def test_lifecycle_relevant_owner_named_secretary_without_agenttype_counts(tmp_path, monkeypatch):
+    """A teammate spoofing owner='secretary' without the privileged
+    agentType in team config is NOT exempt — the carve-out fail-closes
+    on missing-from-config (#682 trust-boundary defense)."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    team = "team-spoof"
+    _write_team_config(tmp_path, team, [
+        {"name": "backend-coder-1", "agentType": "pact-backend-coder"},
+    ])
+    task = {"status": "in_progress", "owner": "secretary"}
+    # Not exempt → counts toward active tally.
+    assert wl._lifecycle_relevant(task, team) is True
+
+
+def test_lifecycle_relevant_empty_team_name_counts_secretary(tmp_path, monkeypatch):
+    """team_name="" short-circuits the agentType carve-out to fail-closed.
+    A secretary task with no resolvable team_name therefore counts
+    (conservative: better to over-arm wake than miss real work)."""
+    task = {"status": "in_progress", "owner": "session-secretary"}
+    assert wl._lifecycle_relevant(task, "") is True
+    assert wl._lifecycle_relevant(task) is True  # default team_name=""
 
 
 @pytest.mark.parametrize("metadata,expected", [
@@ -92,24 +149,36 @@ def test_lifecycle_relevant_counts_under_malformed_metadata():
     assert wl._lifecycle_relevant(task) is True
 
 
-@pytest.mark.parametrize("agent", sorted(SELF_COMPLETE_EXEMPT_AGENTS))
-def test_lifecycle_relevant_exempt_owner_with_corrupted_metadata(agent):
-    """Owner-check hoist (be-M1): a self-complete-exempt agent (e.g.
-    secretary) with non-dict metadata must STILL be exempt — return
-    False. Pre-hoist behavior was True because the metadata-shape gate
-    short-circuited to conservative-count BEFORE checking the owner
-    carve-out, so corrupted metadata accidentally promoted exempt agents
-    to lifecycle-relevant tasks. This is the inverse asymmetry of the
-    sibling test_lifecycle_relevant_counts_under_malformed_metadata: a
-    NON-exempt owner with corrupted metadata stays True (count it
-    conservatively); an EXEMPT owner with corrupted metadata flips to
-    False (the carve-out is owner-shape, not metadata-shape).
+@pytest.mark.parametrize("agent_type", sorted(SELF_COMPLETE_EXEMPT_AGENT_TYPES))
+def test_lifecycle_relevant_exempt_agenttype_with_corrupted_metadata(
+    agent_type, tmp_path, monkeypatch
+):
+    """AgentType-carve-out hoist: an exempt-agentType task (e.g. secretary)
+    with non-dict metadata must STILL be exempt — return False.
+    Pre-hoist behavior was True because the metadata-shape gate
+    short-circuited to conservative-count BEFORE checking the
+    agentType carve-out, so corrupted metadata accidentally promoted
+    exempt agents to lifecycle-relevant tasks. This is the inverse
+    asymmetry of the sibling
+    test_lifecycle_relevant_counts_under_malformed_metadata: a
+    NON-exempt agent with corrupted metadata stays True (count it
+    conservatively); an EXEMPT agentType with corrupted metadata flips
+    to False (the carve-out is agentType-keyed, not metadata-shape).
 
-    Counter-test-by-revert: reverting the owner carve-out below the
+    Counter-test-by-revert: reverting the agentType carve-out below the
     metadata-shape gate would flip this test RED."""
-    task = {"status": "in_progress", "owner": agent, "metadata": "not-a-dict"}
-    assert wl._lifecycle_relevant(task) is False, (
-        f"Exempt owner {agent!r} with corrupted metadata must remain "
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    team = "team-corrupt-meta"
+    _write_team_config(tmp_path, team, [
+        {"name": "session-secretary", "agentType": agent_type},
+    ])
+    task = {
+        "status": "in_progress",
+        "owner": "session-secretary",
+        "metadata": "not-a-dict",
+    }
+    assert wl._lifecycle_relevant(task, team) is False, (
+        f"Exempt agentType {agent_type!r} with corrupted metadata must remain "
         f"exempt; pre-hoist behavior was True."
     )
 
@@ -148,13 +217,44 @@ def test_count_active_tasks_counts_pending_and_in_progress(tmp_path, monkeypatch
 def test_count_active_tasks_skips_signal_and_exempt(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     team = "team-carveouts"
+    # Team config records session-secretary with the privileged agentType.
+    _write_team_config(tmp_path, team, [
+        {"name": "session-secretary", "agentType": "pact-secretary"},
+    ])
     _stage_task(tmp_path, team, "real", status="in_progress", owner="x")
     _stage_task(
         tmp_path, team, "sig",
         status="in_progress", owner="y",
         metadata={"completion_type": "signal", "type": "blocker"},
     )
-    _stage_task(tmp_path, team, "sec", status="in_progress", owner="secretary")
+    _stage_task(tmp_path, team, "sec", status="in_progress", owner="session-secretary")
+    assert wl.count_active_tasks(team) == 1
+
+
+def test_count_active_tasks_session_secretary_does_not_count(tmp_path, monkeypatch):
+    """Production-shape parity case: a session-secretary owned task is
+    excluded from the active tally regardless of spawn name, as long as
+    the team config records its agentType (#682)."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    team = "team-prod-shape"
+    _write_team_config(tmp_path, team, [
+        {"name": "session-secretary", "agentType": "pact-secretary"},
+    ])
+    _stage_task(tmp_path, team, "memo", status="in_progress", owner="session-secretary")
+    assert wl.count_active_tasks(team) == 0
+
+
+def test_count_active_tasks_secretary_owner_without_agenttype_counts(tmp_path, monkeypatch):
+    """Trust-boundary defense: owner='secretary' alone is not enough to
+    trigger the carve-out — the team config must record the privileged
+    agentType. A teammate spoofing owner='secretary' without team-config
+    backing counts toward the active tally (#682)."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    team = "team-spoof"
+    _write_team_config(tmp_path, team, [
+        {"name": "backend-coder-1", "agentType": "pact-backend-coder"},
+    ])
+    _stage_task(tmp_path, team, "spoof", status="in_progress", owner="secretary")
     assert wl.count_active_tasks(team) == 1
 
 

@@ -369,14 +369,6 @@ def test_deny_fullwidth_lookalike_after_nfkc(tmp_path, monkeypatch, capsys):
         "peer",
         "unknown",
         "solo",
-        # Self-completion-exempt names. Spawning under either of these
-        # would let the spawned teammate self-complete tasks without
-        # triggering the lead-only-completion advisory in
-        # task_lifecycle_gate (the advisory short-circuits on owner ∈
-        # SELF_COMPLETE_EXEMPT_AGENTS). Reserving them at spawn time
-        # closes that confused-deputy bypass.
-        "secretary",
-        "pact-secretary",
     ],
 )
 def test_deny_reserved_token(reserved, tmp_path, monkeypatch, capsys):
@@ -388,39 +380,87 @@ def test_deny_reserved_token(reserved, tmp_path, monkeypatch, capsys):
     assert "reserved-token" in reason
 
 
-def test_self_complete_exempt_agents_are_all_reserved():
-    """Cross-module subset invariant.
+def test_self_complete_exempt_agent_types_subset_specialist_registry(
+    tmp_path, monkeypatch
+):
+    """Cross-module categorical invariant (post-#682), tested against
+    the LIVE plugin agent registry.
 
-    Every agent name that the lifecycle gate allows to self-complete
-    MUST also be in dispatch_gate.RESERVED_NAMES, so a dispatch can
-    never spawn under one of those names. If a future change adds an
-    agent to the exempt set without also adding it to RESERVED_NAMES,
-    this test fails — closing the confused-deputy bypass before it
-    ships.
+    Every agentType token in SELF_COMPLETE_EXEMPT_AGENT_TYPES MUST
+    correspond to a registered PACT specialist (a file at
+    `agents/pact-*.md`). A typo in the agentType token (e.g.
+    `pact-secratary`) would silently drop the carve-out without surfacing
+    as a runtime failure — secretaries would no longer self-complete and
+    every memory-save would fail the lead-only-completion advisory. This
+    test catches typos at PR time.
 
-    Categorical pattern. This exempt-vs-reserved pairing is a specific
-    instance of a general rule: any future privilege class keyed on
-    owner-name (audit-only, signing-authority, telemetry-immune,
-    quota-exempt, anything else that gates an action by matching a
-    teammate name) MUST (a) live in a shared module so the privilege
-    membership is the single source of truth, and (b) carry its own
-    ⊆ RESERVED_NAMES subset assertion so a dispatch can never spawn
-    under one of those names. The lifecycle gate's
-    SELF_COMPLETE_EXEMPT_AGENTS is the first such class; this test is
-    the template for any future ones. Adding a new privilege class
-    without the subset assertion re-opens the same defect class
-    (spawn-under-privileged-name → confused-deputy bypass).
+    Categorical pattern. Any future privilege class keyed on agentType
+    (audit-only, signing-authority, quota-exempt, etc.) MUST (a) live in
+    a shared module so the privilege membership is the single source of
+    truth, and (b) carry its own ⊆ _specialist_registry() subset
+    assertion so a privileged-but-unregistered agentType cannot ship as
+    dead code. SELF_COMPLETE_EXEMPT_AGENT_TYPES is the first such class;
+    this test is the template for any future ones.
+
+    TE-M1 (cycle-2): the predecessor of this test seeded the registry
+    fixture with `("pact-secretary", "pact-architect")` — a
+    hand-picked agent set that exactly matched the constant. That made
+    the assertion `SELF_COMPLETE_EXEMPT_AGENT_TYPES - _specialist_registry()`
+    vacuously empty unless the constant ALONE was mutated; a future PR
+    that grew the constant AND simultaneously updated the seeded agents
+    list would silently produce green even on typos. The fix: point
+    pact_context at the REAL plugin root so `_specialist_registry()`
+    globs the live `pact-plugin/agents/pact-*.md` files. The constant
+    is then asserted against the actual deployed agent set, not a
+    cargo-cult fixture.
+
+    Per architect doc OQ-3 / arch §Risks: if the live registry isn't
+    loadable from the test side cleanly (e.g., import-time hooks fail
+    in test runner), the lead-authorized fallback is Option (ii) —
+    a doc-anchor test on RESERVED_NAMES retention. This test does NOT
+    fall back; the live load is straightforward (point plugin_root at
+    the worktree's pact-plugin/ dir).
     """
-    import dispatch_gate
-    from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENTS
+    # tests/ → pact-plugin/ (the live plugin root containing agents/).
+    real_plugin_root = Path(__file__).resolve().parent.parent
+    real_agents_dir = real_plugin_root / "agents"
+    assert (real_agents_dir / "pact-secretary.md").is_file(), (
+        f"Live plugin agents/ dir at {real_agents_dir} is missing "
+        f"pact-secretary.md — test cannot validate categorical invariant "
+        f"against the deployed agent set. If the agent file legitimately "
+        f"moved, update this test's path resolution alongside."
+    )
 
-    missing = SELF_COMPLETE_EXEMPT_AGENTS - dispatch_gate.RESERVED_NAMES
+    # Wire pact_context to the LIVE plugin root, NOT a tmp_path fixture
+    # with hand-seeded agents. _specialist_registry() globs
+    # plugin_root/agents/pact-*.md; we want it to see the real set.
+    _setup_session(monkeypatch, tmp_path, real_plugin_root)
+
+    from shared.dispatch_helpers import _specialist_registry
+    from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENT_TYPES
+
+    live_registry = _specialist_registry()
+    # Sanity check: the live registry must be non-empty AND contain at
+    # least one well-known agent. If empty, the path resolution is
+    # broken and the subsequent invariant check would be vacuously
+    # green (defect masking). Fail loudly.
+    assert live_registry, (
+        f"Live _specialist_registry() returned empty at "
+        f"plugin_root={real_plugin_root}. The categorical invariant "
+        f"cannot be validated against an empty registry."
+    )
+    assert "pact-architect" in live_registry, (
+        f"Live registry missing well-known agent 'pact-architect'; "
+        f"path resolution may be reading the wrong agents/ dir. "
+        f"Got: {sorted(live_registry)}"
+    )
+
+    missing = SELF_COMPLETE_EXEMPT_AGENT_TYPES - live_registry
     assert not missing, (
-        f"SELF_COMPLETE_EXEMPT_AGENTS contains names not in "
-        f"dispatch_gate.RESERVED_NAMES: {sorted(missing)}. Spawning "
-        "under any of these would let the spawned teammate "
-        "self-complete tasks without triggering the lead-only-completion "
-        "advisory. Add them to RESERVED_NAMES to close the bypass."
+        f"SELF_COMPLETE_EXEMPT_AGENT_TYPES contains agentType tokens "
+        f"with no matching agents/pact-*.md file: {sorted(missing)}. "
+        "Either the tokens are typos or the agent files are missing — "
+        "both produce silent loss of the self-completion carve-out."
     )
 
 

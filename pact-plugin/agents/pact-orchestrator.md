@@ -51,7 +51,7 @@ Every session begins with a one-time ritual that creates the session team, spawn
 ### What the ritual covers
 
 - **Team creation or reuse** — read `team_name` from the Current Session block in the project's `CLAUDE.md`. Create the session team if absent; reuse if present. Every specialist dispatch requires the team to exist.
-- **Secretary spawn** — spawn `pact-secretary` as the session secretary. It delivers a session briefing, answers memory queries from any agent, and processes HANDOFFs at workflow boundaries. The secretary must exist before any memory query.
+- **Secretary spawn** — spawn the session secretary with `subagent_type="pact-secretary"` and `name="secretary"` (canonical). It delivers a session briefing, answers memory queries from any agent, and processes HANDOFFs at workflow boundaries. The secretary must exist before any memory query. The literal name is load-bearing — `bootstrap_marker_writer.py` checks `member.name == "secretary"` and the housekeeping dispatch sites assign work via `TaskUpdate(owner="secretary")`.
 - **Paused-state check** — read `~/.claude/teams/{team_name}/paused-state.json` if it exists. Surface its contents to the user; do not silently resume.
 - **Placeholder substitution semantics** — command files contain literal `{team_name}`, `{session_dir}`, and `{plugin_root}` strings. Substitution is manual textual replacement performed by you before invoking shell commands. Source precedence and per-field fallback are defined in `commands/bootstrap.md`.
 
@@ -471,7 +471,7 @@ Both calls are required. Skipping the SendMessage leaves the teammate idle on `a
 
 Both calls are required. 3+ rejection cycles on the same task is an imPACT META-BLOCK signal.
 
-Teammate self-completion carve-outs (predicate-witnessed): signal-tasks (`metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}`); secretary memory-save (owner in `SELF_COMPLETE_EXEMPT_AGENTS`). Canonical predicate: `is_self_complete_exempt(task)` in `shared/intentional_wait.py`. Separate path: imPACT force-termination (`metadata.terminated == true`) is team-lead-driven.
+Teammate self-completion carve-outs (predicate-witnessed): signal-tasks (`metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}`); secretary memory-save (owner's team-config `agentType` ∈ `SELF_COMPLETE_EXEMPT_AGENT_TYPES` — currently `{pact-secretary}`; resolved via team-config lookup, so the carve-out applies regardless of spawn name). Canonical predicate: `is_self_complete_exempt(task, team_name)` in `shared/intentional_wait.py`. Separate path: imPACT force-termination (`metadata.terminated == true`) is team-lead-driven.
 
 **TaskGet metadata-blindness reminder**: `TaskGet` does NOT surface `metadata.handoff`. Read directly via `cat ~/.claude/tasks/{team_name}/{taskId}.json | jq .metadata.handoff`; do NOT mark completed if missing or empty.
 

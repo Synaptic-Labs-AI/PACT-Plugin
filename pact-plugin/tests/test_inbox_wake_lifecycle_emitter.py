@@ -59,7 +59,15 @@ def _pact_session_env(tmp_path: Path) -> dict:
     return {"HOME": str(home)}
 
 
-def _write_session_context(home: Path, session_id: str, project_dir: str, team_name: str, *, lead_session_id: str | None = None) -> None:
+def _write_session_context(
+    home: Path,
+    session_id: str,
+    project_dir: str,
+    team_name: str,
+    *,
+    lead_session_id: str | None = None,
+    members: list[dict] | None = None,
+) -> None:
     # Match the resolution path used by pact_context._resolve_context_path:
     # ~/.claude/pact-sessions/<basename(project_dir)>/<session_id>/pact-session-context.json
     slug = Path(project_dir).name
@@ -79,11 +87,17 @@ def _write_session_context(home: Path, session_id: str, project_dir: str, team_n
     # behavior: caller's session_id IS the lead (the standard test
     # framing for these tests, which exercise lead-side behavior). Pass
     # `lead_session_id="some-other-id"` to simulate a teammate session.
+    # `members` defaults to [] (empty team config); pass a list of
+    # {"name", "agentType"} dicts to exercise the team-config agentType
+    # carve-out resolved by shared.intentional_wait._is_exempt_agent_type.
     team_dir = home / ".claude" / "teams" / team_name
     team_dir.mkdir(parents=True, exist_ok=True)
     effective_lead = lead_session_id if lead_session_id is not None else session_id
+    config_data: dict = {"leadSessionId": effective_lead}
+    if members:
+        config_data["members"] = list(members)
     (team_dir / "config.json").write_text(
-        json.dumps({"leadSessionId": effective_lead}),
+        json.dumps(config_data),
         encoding="utf-8",
     )
 
@@ -294,8 +308,13 @@ def test_no_op_on_create_of_signal_task(tmp_path):
 def test_no_op_on_create_owned_by_exempt_agent(tmp_path):
     home = tmp_path / "home"; home.mkdir()
     sid = "s"; pdir = "/tmp/p"; team = "t"
-    _write_session_context(home, sid, pdir, team)
-    _write_task(home, team, "sec-1", status="in_progress", owner="secretary")
+    # Team config records session-secretary with the privileged agentType
+    # (#682 — carve-out resolves via team-config agentType lookup).
+    _write_session_context(
+        home, sid, pdir, team,
+        members=[{"name": "session-secretary", "agentType": "pact-secretary"}],
+    )
+    _write_task(home, team, "sec-1", status="in_progress", owner="session-secretary")
     out = _emit_output({
         "tool_name": "TaskCreate", "session_id": sid, "cwd": pdir,
         "tool_input": {"taskId": "sec-1"}, "tool_response": {"task": {"id": "sec-1"}},
@@ -1156,17 +1175,30 @@ class TestArmDirectiveOnParallelTaskCreateRace:
 
     def test_arm_emits_when_parallel_burst_includes_exempt_owner(self, tmp_path):
         """Predicate-invariance under the count_active_tasks self-
-        complete-exempt-owner filter. Parallel burst is (secretary-task,
-        real-task). The secretary-owned task is filtered; predicate sees
+        complete-exempt-agentType filter. Parallel burst is
+        (secretary-task, real-task). The secretary-owned task is filtered
+        via team-config agentType lookup (#682); predicate sees
         post-filter count == 1 from the real task. Arm fires on the
-        real-task fire, demonstrating composition with the exempt-owner
+        real-task fire, demonstrating composition with the exempt-agentType
         carve-out matches composition with the signal-task carve-out."""
         fixture = self._load_fixture("task_create_parallel_burst_first.json")
-        home, team = self._setup_session(tmp_path, fixture)
+        # Override _setup_session to wire the team config with the
+        # secretary's privileged agentType (#682 — name alone is
+        # insufficient; the team config must record the agentType).
+        home = tmp_path / "home"
+        home.mkdir()
+        sid = fixture["session_id"]
+        pdir = fixture["cwd"]
+        team = "team-race"
+        _write_session_context(
+            home, sid, pdir, team,
+            members=[{"name": "session-secretary", "agentType": "pact-secretary"}],
+        )
 
-        # Pre-write a secretary-owned task (filtered) and a real
-        # lifecycle-relevant task (not filtered). Post-filter count == 1.
-        _write_task(home, team, "sec", status="in_progress", owner="secretary")
+        # Pre-write a session-secretary-owned task (filtered via
+        # team-config agentType) and a real lifecycle-relevant task
+        # (not filtered). Post-filter count == 1.
+        _write_task(home, team, "sec", status="in_progress", owner="session-secretary")
         _write_task(home, team, "10", status="pending", owner="backend-coder")
 
         out = _emit_output(fixture, home)
