@@ -469,6 +469,32 @@ After restore, re-run the test scope and confirm the original tree is byte-ident
 
 Document the expected cardinality (`{N fail, M pass}`) in the design or test docstring so a future verifier can check the assertion without re-deriving it.
 
+### Bundled-commit cardinality: source-only revert vs whole-commit revert
+
+When a commit bundles new source AND the new tests that exercise it (a common pattern for refactors that can't be split without a transient broken-import state), `git revert -n <sha>` reverts BOTH halves at once — the inverted source is reapplied without the test that detects the regression, so the failure cardinality collapses to the small number of pre-existing tests that happened to cover the surface. This **masks** the protection the new tests actually provide.
+
+For bundled commits, measure cardinality via **source-only revert** instead:
+
+```sh
+# Restore source files to their pre-commit shape; leave the new tests in place.
+git checkout <sha>^ -- <source-file-1> <source-file-2> ...
+
+# Run the affected test scope and record cardinality.
+pytest <scope> -x
+
+# Restore atomically.
+git checkout <sha> -- <source-file-1> <source-file-2> ...
+git diff --quiet -- <source-file-1> <source-file-2>  # exits 0
+```
+
+The two cardinalities are not interchangeable. Empirical example from PR #683 commit `a84ef650b8` (bundled predicate refactor + retargeted tests): `git revert -n` produced `{1 fail}` (only the pre-existing categorical-invariant test broke); source-only revert produced `{33 fail + 1 collection error}` — the 33 retargeted tests are the protection, and only the source-only technique surfaces them.
+
+**Rule for Verification Matrices**: when documenting the expected cardinality for a bundled commit, specify the technique and the expected count. Example row:
+
+> `Counter-test (source-only revert of <sha>): pytest <scope> → {33 fail + 1 collection error}. Source-only because <sha> bundles new tests with the source they exercise; `git revert -n` would mask to {1 fail}.`
+
+Whole-commit revert is still correct for commits that ship source-only (or tests-only); the bundled distinction only applies when both move together.
+
 ---
 
 ## Detailed References
