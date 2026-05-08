@@ -17,7 +17,9 @@ Read `team_name` from the **Current Session** block in the project's `CLAUDE.md`
 
 ## Step 2 — Spawn `pact-secretary`
 
-Spawn `pact-secretary` as the session secretary. It delivers the session briefing at spawn, answers memory queries during the session, and processes HANDOFFs at workflow boundaries. Memory queries from any other agent are blocked until the secretary is alive.
+Spawn the session secretary with `subagent_type="pact-secretary"` and the canonical `name="secretary"`. The literal name is load-bearing: `bootstrap_marker_writer.py` checks `member.name == "secretary"` as a marker pre-condition, and the housekeeping dispatch sites assign work via `TaskUpdate(owner="secretary")`. Use the canonical name unless you have a specific reason to override it.
+
+The secretary delivers the session briefing at spawn, answers memory queries during the session, and processes HANDOFFs at workflow boundaries. Memory queries from any other agent are blocked until the secretary is alive.
 
 Spawn the secretary once per session — reuse the existing instance on subsequent re-invocations of this command rather than spawning a duplicate.
 

@@ -369,16 +369,6 @@ def test_deny_fullwidth_lookalike_after_nfkc(tmp_path, monkeypatch, capsys):
         "peer",
         "unknown",
         "solo",
-        # Defense-in-depth name perimeter for the self-completion
-        # carve-out. Post-#682 the carve-out keys on team-config
-        # agentType (member.agentType ∈ SELF_COMPLETE_EXEMPT_AGENT_TYPES)
-        # rather than owner name, so owner-name spoofing alone cannot
-        # bypass the lead-only-completion advisory. These names remain
-        # reserved as canonical role-identifiers for the legitimate
-        # session-secretary spawn and as belt-and-suspenders against
-        # future privilege classes that might key on owner name again.
-        "secretary",
-        "pact-secretary",
     ],
 )
 def test_deny_reserved_token(reserved, tmp_path, monkeypatch, capsys):
@@ -472,32 +462,6 @@ def test_self_complete_exempt_agent_types_subset_specialist_registry(
         "Either the tokens are typos or the agent files are missing — "
         "both produce silent loss of the self-completion carve-out."
     )
-
-
-def test_secretary_names_remain_reserved_for_defense_in_depth():
-    """Doc-anchor regression test for the post-#682 RESERVED_NAMES
-    rationale rewrite.
-
-    The names `secretary` and `pact-secretary` remain in
-    dispatch_gate.RESERVED_NAMES even though the self-completion
-    carve-out no longer keys on owner name (it keys on team-config
-    agentType post-#682). The names are retained as:
-      (a) canonical role-identifiers for the legitimate
-          session-secretary spawn — the harness writes
-          name=session-secretary, agentType=pact-secretary; teammate
-          dispatches that try to claim the canonical names directly are
-          rejected;
-      (b) belt-and-suspenders against future privilege classes that
-          might key on owner name again.
-
-    Removing this test (or the names) without re-evaluating the rationale
-    re-opens the future name-collision surface area. See the comment
-    block above RESERVED_NAMES for full reasoning.
-    """
-    import dispatch_gate
-
-    assert "secretary" in dispatch_gate.RESERVED_NAMES
-    assert "pact-secretary" in dispatch_gate.RESERVED_NAMES
 
 
 # =============================================================================

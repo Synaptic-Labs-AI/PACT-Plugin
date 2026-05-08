@@ -51,7 +51,7 @@ Every session begins with a one-time ritual that creates the session team, spawn
 ### What the ritual covers
 
 - **Team creation or reuse** — read `team_name` from the Current Session block in the project's `CLAUDE.md`. Create the session team if absent; reuse if present. Every specialist dispatch requires the team to exist.
-- **Secretary spawn** — spawn `pact-secretary` as the session secretary. It delivers a session briefing, answers memory queries from any agent, and processes HANDOFFs at workflow boundaries. The secretary must exist before any memory query.
+- **Secretary spawn** — spawn the session secretary with `subagent_type="pact-secretary"` and `name="secretary"` (canonical). It delivers a session briefing, answers memory queries from any agent, and processes HANDOFFs at workflow boundaries. The secretary must exist before any memory query. The literal name is load-bearing — `bootstrap_marker_writer.py` checks `member.name == "secretary"` and the housekeeping dispatch sites assign work via `TaskUpdate(owner="secretary")`.
 - **Paused-state check** — read `~/.claude/teams/{team_name}/paused-state.json` if it exists. Surface its contents to the user; do not silently resume.
 - **Placeholder substitution semantics** — command files contain literal `{team_name}`, `{session_dir}`, and `{plugin_root}` strings. Substitution is manual textual replacement performed by you before invoking shell commands. Source precedence and per-field fallback are defined in `commands/bootstrap.md`.
 

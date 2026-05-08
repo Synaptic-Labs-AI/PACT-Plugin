@@ -125,29 +125,27 @@ RESERVED_NAMES = frozenset({
     "peer",
     "unknown",
     "solo",
-    # Defense-in-depth name perimeter for the self-completion carve-out.
-    # Post-#682 the task_lifecycle_gate carve-out keys on team-config
-    # agentType (member.agentType ∈
-    # shared.intentional_wait.SELF_COMPLETE_EXEMPT_AGENT_TYPES, looked up
-    # via the team config) — NOT on owner name. Owner-name spoofing
-    # alone therefore cannot bypass the lead-only-completion advisory.
-    # These names are RETAINED in RESERVED_NAMES for two reasons:
-    #   (1) they are canonical role-identifiers reserved for the
-    #       legitimate session-secretary spawn (and any future
-    #       name-perimeter consumer);
-    #   (2) belt-and-suspenders against future privilege classes that
-    #       might key on owner name again. Removing the names has zero
-    #       benefit and re-opens future name-collision surface area.
-    # The cross-module categorical invariant
-    # `SELF_COMPLETE_EXEMPT_AGENT_TYPES ⊆ _specialist_registry()` lives
-    # in test_dispatch_gate.py to guard against typos in the agentType
-    # token set. See:
-    #   - shared/intentional_wait.SELF_COMPLETE_EXEMPT_AGENT_TYPES
-    #   - shared/intentional_wait._is_exempt_agent_type
-    #   - tests/test_dispatch_gate.py categorical-invariant test.
-    "secretary",
-    "pact-secretary",
 })
+# `secretary` / `pact-secretary` are NOT reserved here. The session
+# secretary is canonically spawned with `name="secretary"` (see
+# bootstrap_marker_writer._SECRETARY_NAME and commands/bootstrap.md
+# Step 2), and the dispatch sites that re-assign housekeeping work to
+# the secretary use `TaskUpdate(owner="secretary")` literally. Reserving
+# the name would block the legitimate ritual.
+#
+# The previous reservation existed as a defense-in-depth name perimeter
+# against a confused-deputy attack on the self-completion carve-out
+# (when the carve-out was keyed on owner name). Post-#682 the
+# task_lifecycle_gate carve-out keys on team-config `agentType`
+# (member.agentType ∈ shared.intentional_wait.SELF_COMPLETE_EXEMPT_AGENT_TYPES,
+# looked up via the harness-managed team config) — NOT on owner name.
+# Owner-name spoofing alone therefore cannot bypass the
+# lead-only-completion advisory; the agentType-keyed predicate is the
+# load-bearing defense, and that defense is independent of which names
+# RESERVED_NAMES holds. See:
+#   - shared/intentional_wait.SELF_COMPLETE_EXEMPT_AGENT_TYPES
+#   - shared/intentional_wait._is_exempt_agent_type
+#   - shared/intentional_wait.is_self_complete_exempt (TRUST BOUNDARY block)
 
 # Inline-mission heuristic. Long inline mission OR no TaskList reference
 # suggests the dispatcher embedded the mission in the prompt instead of
