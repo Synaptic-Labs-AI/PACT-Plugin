@@ -172,8 +172,12 @@ The `Agent()` `prompt` does NOT change shape — the two-task dispatch is encode
 
 **Dispatch reviewers** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) for each reviewer:
 
-1. Create Task A (teachback) and Task B (work), and then assign both to their owner (BEFORE spawn). Task B's `description` carries the review mission: "Review this PR. Focus: [domain-specific review criteria]…" Task A's `subject` is "{reviewer-type}: TEACHBACK for review of {feature}", as per the canonical shape.
-2. Spawn the reviewer with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({reviewer-name})` marker on its own line so routing detects the teammate spawn (team protocol + teachback content arrive via spawn-time skills frontmatter, not a per-prompt directive):
+1. `TaskCreate(subject="{reviewer-type}: TEACHBACK for review of {feature}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
+2. `TaskCreate(subject="{reviewer-type}: review {feature}", description=<see below>)` — Task B.
+   - Task B's `description` carries the review mission: "Review this PR. Focus: [domain-specific review criteria]…"
+3. `TaskUpdate(A_id, owner="{reviewer-name}", addBlocks=[B_id])`
+4. `TaskUpdate(B_id, owner="{reviewer-name}", addBlockedBy=[A_id])`
+5. Spawn the reviewer with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({reviewer-name})` marker on its own line so routing detects the teammate spawn (team protocol + teachback content arrive via spawn-time skills frontmatter, not a per-prompt directive):
 
 ```
 Agent(

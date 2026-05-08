@@ -243,8 +243,12 @@ TaskUpdate(A_id, addBlocks=[B_id])
 
 For each specialist needed — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work):
 
-1. Create Task A (teachback) and Task B (work), and then assign both to their owner (BEFORE spawn). Task B's `description` carries the implementation mission: "[full CONTEXT/MISSION/INSTRUCTIONS/GUIDELINES]". Task B's `subject` is "{scope-prefixed-name}: implement {sub-task}", as per the canonical shape. Task A's `subject` is "{scope-prefixed-name}: TEACHBACK for {sub-task}".
-2. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({scope-prefixed-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter):
+1. `TaskCreate(subject="{scope-prefixed-name}: TEACHBACK for {sub-task}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
+2. `TaskCreate(subject="{scope-prefixed-name}: implement {sub-task}", description=<see below>)` — Task B.
+   - Task B's `description` carries the implementation mission: "[full CONTEXT/MISSION/INSTRUCTIONS/GUIDELINES]"
+3. `TaskUpdate(A_id, owner="{scope-prefixed-name}", addBlocks=[B_id])`
+4. `TaskUpdate(B_id, owner="{scope-prefixed-name}", addBlockedBy=[A_id])`
+5. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({scope-prefixed-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter):
 
 ```
 Agent(

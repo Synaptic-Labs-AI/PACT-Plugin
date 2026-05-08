@@ -217,8 +217,12 @@ The teachback gate is lightweight ("understanding-confirm" with no implementatio
 
 **Dispatch each consultant** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) for each consultant:
 
-1. Create Task A (teachback) and Task B (work), and then assign both to their owner (BEFORE spawn). Task B's `subject` is "{specialist}: plan consultation for {feature}". Task B's `description` is "PLANNING CONSULTATION ONLY — No implementation.\n\nTask: {task description}\n\n[full template content from above]\n\nIf upstream context is referenced, read it first by using TaskGet tool.".
-2. Spawn the consultant with the canonical dispatch form:
+1. `TaskCreate(subject="{specialist}: TEACHBACK for plan consultation on {feature}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
+2. `TaskCreate(subject="{specialist}: plan consultation for {feature}", description=<see below>)` — Task B.
+   - Task B's `description` is "PLANNING CONSULTATION ONLY — No implementation.\n\nTask: {task description}\n\n[full template content from above]\n\nIf upstream context is referenced, read it first by using TaskGet tool."
+3. `TaskUpdate(A_id, owner="{specialist-name}", addBlocks=[B_id])`
+4. `TaskUpdate(B_id, owner="{specialist-name}", addBlockedBy=[A_id])`
+5. Spawn the consultant with the canonical dispatch form:
 
 ```
 Agent(
