@@ -74,6 +74,12 @@ the marker; marker-fingerprint regressions are diagnosed in
 **Goal**: confirm the orchestrator's bootstrap secretary-spawn produces
 zero `dispatch_gate` refusals and zero `long_inline_mission` WARNs.
 
+**Verification surface**: §1 inspects `session-journal.jsonl` because
+`dispatch_decision` events are the structural pin for the
+gate-fired-correctly assertion; §2-§4 inspect on-disk task and inbox
+files which are the canonical ground truth for structural shape and
+acceptance pair.
+
 **Steps**:
 
 1. In the fresh session, allow the orchestrator to execute its first
@@ -114,9 +120,10 @@ zero `dispatch_gate` refusals and zero `long_inline_mission` WARNs.
   pattern (Task B not pre-created before spawn) OR the bootstrap.md
   Step 2 sequence drifted to omit the prerequisite tasks.
 - A `dispatch_decision` event with `rule="long_inline_mission"` (any
-  decision): persona §11 example prompt exceeds 800 chars OR omits the
-  `TaskList` reference phrase. The mission is leaking into the spawn
-  prompt instead of `TaskCreate(description=...)`.
+  decision): the persona's Agent Teams Dispatch section example prompt
+  exceeds 800 chars OR omits the `TaskList` reference phrase. The
+  mission is leaking into the spawn prompt instead of
+  `TaskCreate(description=...)`.
 
 If either signal fires, do NOT proceed to Section 2 — the bootstrap
 ritual is mis-aligned with the gates and the regression is the runbook's
@@ -132,11 +139,15 @@ correct blocking edge before any acceptance happens.
 **Steps**:
 
 1. Immediately after the secretary spawn (before Task A acceptance),
-   inspect the team's task list:
+   inspect the team's task list. Task IDs are the JSON filenames
+   (basename without `.json`); map each ID to its subject with:
    ```
    ls ~/.claude/tasks/{team_name}/
+   for f in ~/.claude/tasks/{team_name}/*.json; do echo "$(basename $f .json): $(jq -r .subject $f)"; done
    ```
-   Two task JSON files should be present (Task A teachback + Task B work).
+   Two task JSON files should be present (Task A teachback + Task B
+   work). Use the Task A and Task B IDs in the steps below as
+   `<A_id>` / `<B_id>`.
 2. Read both task files:
    ```
    cat ~/.claude/tasks/{team_name}/<A_id>.json | python3 -m json.tool
@@ -332,6 +343,12 @@ runbook [662-dispatch-gate.md](662-dispatch-gate.md) §3.1 covers shadow
 mode in detail.
 
 ### 6.5 Hook registration stale (in-session author)
+
+Hooks load at session start, not on file change — Claude Code reads
+`pact-plugin/hooks/*.py` once when the session begins, so a session that
+authored the merge of #692 will be running the OLD hook code (per pinned
+CLAUDE.md memory `4fa2311 → 27aa95e`). Re-running this runbook in that
+same session will produce a phantom-green result.
 
 If you authored the #691 merge in this session, your hook registrations
 are stale and the gates may not fire even if the persona/bootstrap.md
