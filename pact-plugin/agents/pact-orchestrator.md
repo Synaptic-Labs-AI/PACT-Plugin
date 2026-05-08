@@ -431,7 +431,7 @@ Use the same iterate-by-name pattern for any other team-lead-to-many signal (gra
 
 | Event | Task Operation |
 |-------|----------------|
-| Before dispatching agent | TaskCreate Task A (teachback) + Task B (work); `TaskUpdate(A, owner=name, addBlocks=[B])` + `TaskUpdate(B, owner=name)` — see §11 Dispatch pattern |
+| Before dispatching agent | TaskCreate Task A (teachback) + Task B (work); `TaskUpdate(A, owner=name, addBlocks=[B])` + `TaskUpdate(B, owner=name, addBlockedBy=[A])` — see §11 Dispatch pattern |
 | After dispatching agent | Teammate self-claims via `TaskUpdate(taskId, status="in_progress")`; the team-lead does NOT pre-set `in_progress` |
 | Teachback submitted (Task A) | Read raw JSON `metadata.teachback_submit`, validate per §12 Teachback Review, then Acceptance two-call atomic pair (§12) auto-unblocks Task B |
 | HANDOFF submitted (Task B) | Read raw JSON `metadata.handoff` (TaskGet is metadata-blind), then Acceptance two-call atomic pair (§12) — paired wake-`SendMessage` + `TaskUpdate(taskId, status="completed")` (SendMessage FIRST per the lifecycle-gate ordering invariant) |
