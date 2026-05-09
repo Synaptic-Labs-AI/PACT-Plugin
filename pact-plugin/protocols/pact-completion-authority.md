@@ -1,12 +1,8 @@
-# Completion Authority Protocol
+## Completion Authority
 
 > **Purpose**: Lead-only completion of teammate-owned tasks. Acceptance is a two-call atomic pair (wake-signal SendMessage FIRST, then status flip); rejection is dual-channel (wake-signal SendMessage FIRST, then metadata write).
 >
 > **Audience**: PACT team-lead (orchestrator). Teammate-side rules live in [pact-agent-teams §On Completion](../skills/pact-agent-teams/SKILL.md#on-completion--handoff-required) and [pact-agent-teams §On Rejection](../skills/pact-agent-teams/SKILL.md#on-rejection-wake-signal-receipt).
-
----
-
-## Completion Authority
 
 You — the team-lead — are the **only** actor who marks teammate-owned tasks `completed`. Teammates write HANDOFFs to `metadata.handoff`, idle on `intentional_wait{reason=awaiting_lead_completion}`, and wait for your acceptance. The `TaskUpdate(status="completed")` flip is the load-bearing approval action; the paired wake-signal SendMessage is the load-bearing wake.
 
@@ -161,3 +157,5 @@ TaskUpdate(B_id, metadata={"handoff_rejection": {
 5. Lead reviews; either accepts (per [Completion Authority](#completion-authority)) or rejects again (revision_number = N+1).
 
 > **Cycle limit**: 3+ rejection cycles on the same task is an imPACT META-BLOCK signal. See [imPACT.md](../commands/imPACT.md).
+
+---
