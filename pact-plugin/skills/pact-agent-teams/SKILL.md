@@ -240,7 +240,7 @@ output (even zero-content) blocks the next inbox delivery.
 - **Idle-waiting for a protocol-defined resolution** (teachback, team-lead commit,
   peer reply, user decision)? Use the `intentional_wait` task metadata per
   the Intentional Waiting section below.
-- **Awaiting lead completion?** SET `intentional_wait{reason=awaiting_lead_completion, expected_resolver=lead, since=<canonical_since() output>}` after storing your HANDOFF or teachback metadata. Do NOT poll TaskList while idle — you cannot self-wake to do so. The team-lead's wake-signal SendMessage is the resolver.
+- **Awaiting lead completion?** SET `intentional_wait{reason=awaiting_lead_completion, expected_resolver=lead, since=<canonical_since() output>}` after storing your HANDOFF or teachback metadata AND sending the notify SendMessage to the team-lead. **Ordering invariant** (audit anchor, lead-side mirror): metadata write FIRST → notify SendMessage SECOND → intentional_wait SET THIRD. This ordering exists because the team-lead must wait for teammate's wake-signal SendMessage before treating their raw `cat ~/.claude/tasks/.../{id}.json | jq .metadata.{handoff,teachback_submit}` read as authoritative — see [pact-completion-authority §Read-Trigger Precondition](../../protocols/pact-completion-authority.md#read-trigger-precondition). Sending the SendMessage before the metadata write lands produces false-empty raw reads on the lead side; going idle before the SendMessage strands the lead silently. Do NOT poll TaskList while idle — you cannot self-wake to do so. The team-lead's wake-signal SendMessage is the resolver.
 - **Genuinely stuck**? Follow the On Blocker section.
 
 If you have nothing to say that advances the work, say nothing.

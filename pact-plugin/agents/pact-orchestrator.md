@@ -482,7 +482,7 @@ Teammate self-completion carve-outs (predicate-witnessed): signal-tasks (`metada
 
 ### Teachback Review
 
-Each specialist dispatch is a Task A (TEACHBACK) + Task B (work) pair with `blockedBy=[A]` — see §11 for the canonical sequence. Teammate claims A, writes `metadata.teachback_submit` (4 fields per [pact-teachback](../skills/pact-teachback/SKILL.md)), idles on `awaiting_lead_completion`. Read the payload via raw JSON (TaskGet is metadata-blind), apply Validating Incoming Teachbacks below, then accept via the Acceptance two-call atomic pair above; acceptance auto-unblocks Task B. Do NOT mark Task B `completed` or `pending` yourself — the teammate claims on wake.
+Each specialist dispatch is a Task A (TEACHBACK) + Task B (work) pair with `blockedBy=[A]` — see §11 for the canonical sequence. Teammate claims A, writes `metadata.teachback_submit` (4 fields per [pact-teachback](../skills/pact-teachback/SKILL.md)), idles on `awaiting_lead_completion`. **Read-Trigger Precondition**: wait for teammate's wake-signal SendMessage BEFORE the raw JSON read — see [pact-completion-authority §Read-Trigger Precondition](../protocols/pact-completion-authority.md#read-trigger-precondition) for the 4-point rule (Monitor `INBOX_GREW` is alarm-clock not content marker; raw read MUST follow SendMessage receipt; mitigation for residual race). Then read the payload via raw JSON (TaskGet is metadata-blind), apply Validating Incoming Teachbacks below, then accept via the Acceptance two-call atomic pair above; acceptance auto-unblocks Task B. Do NOT mark Task B `completed` or `pending` yourself — the teammate claims on wake.
 
 #### Validating Incoming Teachbacks
 
@@ -490,7 +490,7 @@ When an agent sends a TEACHBACK, **compare it against the task as you dispatched
 
 #### Expected Agent HANDOFF Format
 
-Every agent delivers a structured HANDOFF (6 fields: `produced`, `decisions`, `reasoning_chain`, `uncertainty`, `integration`, `open_questions`) stored in `metadata.handoff`. See [pact-agent-teams §HANDOFF Format](../skills/pact-agent-teams/SKILL.md#handoff-format) for the full schema. If `validate_handoff` warns about a missing HANDOFF, extract available context from the agent's response and update the task. On receipt, inspect `metadata.handoff` (raw JSON read; `TaskGet` is metadata-blind) and follow the Completion Authority two-call atomic pair. Do NOT dispatch downstream phases against a teammate-owned task you have not yet marked completed.
+Every agent delivers a structured HANDOFF (6 fields: `produced`, `decisions`, `reasoning_chain`, `uncertainty`, `integration`, `open_questions`) stored in `metadata.handoff`. See [pact-agent-teams §HANDOFF Format](../skills/pact-agent-teams/SKILL.md#handoff-format) for the full schema. If `validate_handoff` warns about a missing HANDOFF, extract available context from the agent's response and update the task. On receipt, **wait for teammate's wake-signal SendMessage** (per [pact-completion-authority §Read-Trigger Precondition](../protocols/pact-completion-authority.md#read-trigger-precondition)) before treating the raw `metadata.handoff` read as authoritative — `TaskGet` is metadata-blind AND raw reads racing the platform-side write produce false-empty responses that have triggered false-positive HANDOFF rejection cycles. Then inspect `metadata.handoff` (raw JSON read) and follow the Completion Authority two-call atomic pair. Do NOT dispatch downstream phases against a teammate-owned task you have not yet marked completed.
 
 ### Intentional Waiting (orchestrator responsibilities)
 

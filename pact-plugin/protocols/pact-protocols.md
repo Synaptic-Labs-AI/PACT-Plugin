@@ -2015,6 +2015,17 @@ Read `metadata.teachback_submit` directly:
 cat ~/.claude/tasks/{team_name}/{A_id}.json | jq .metadata.teachback_submit
 ```
 
+### Read-Trigger Precondition
+
+Before the raw JSON read above is load-bearing, you MUST wait for teammate's wake-signal SendMessage. The 4-point rule:
+
+1. **Wake-signal SendMessage is the load-bearing content-arrival signal.** The teammate's notify SendMessage (sent immediately after their `metadata.teachback_submit` write per [pact-teachback Step 2](../skills/pact-teachback/SKILL.md)) is the only durable signal that the metadata write has landed on disk. Acting on a raw JSON read before that SendMessage arrives risks reading empty or stale metadata mid-write.
+2. **Monitor `INBOX_GREW` is an alarm-clock, not a content marker.** When the inbox-watch Monitor fires `INBOX_GREW`, that ends your turn at the next between-tool-call boundary so the platform can deliver the queued SendMessage — but the wake event itself contains no content. See [watch-inbox.md L10+L18](../commands/watch-inbox.md) for the canonical alarm-clock-not-mailbox principle. Do NOT skip ahead to a raw JSON read on `INBOX_GREW`; wait for the SendMessage payload itself to surface in your context.
+3. **Raw read MUST follow SendMessage receipt, not precede it.** The ordering is: teammate writes `metadata.teachback_submit` → teammate sends notify SendMessage → Monitor fires `INBOX_GREW` (or platform delivers opportunistically) → your turn opens with the SendMessage in context → THEN you read `cat ~/.claude/tasks/{team_name}/{A_id}.json | jq .metadata.teachback_submit`. Reversing this order produces false-empty reads that have triggered false-positive rejection cycles (see CLAUDE.md pin "Read-after-write race on TaskUpdate metadata writes").
+4. **Mitigation for residual race.** If your raw read returns empty `{}` immediately after the wake-signal SendMessage receipt, the metadata write may still be in flight on the platform side. Mitigations (any one suffices): (a) brief 1-2s delay before re-reading; (b) read twice with a short interval and only treat empty as authoritative if both reads agree; (c) trust the SendMessage's GREEN/RED summary as primary and treat the raw read as audit-only. Do NOT reject a teachback or HANDOFF on a single empty raw read.
+
+The symmetric rule applies to HANDOFF inspection (the raw `cat ... | jq .metadata.handoff` read in §Completion Authority above): wait for teammate's wake-signal SendMessage there too before treating the raw read as authoritative.
+
 Compare against the dispatched task description. Apply the validation discipline from [Validating Incoming Teachbacks](#validating-incoming-teachbacks) — check for both misstatements AND omissions.
 
 **Optional audit step** — write a `teachback_resolution` record before flipping status:
