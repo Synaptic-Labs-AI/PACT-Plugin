@@ -193,7 +193,7 @@ TaskUpdate(A_id, addBlocks=[B_id])
 # 3. Spawn the teammate via the canonical Agent() form (shown in §Invocation below).
 ```
 
-The `Agent()` `prompt` does NOT change shape — the two-task dispatch is encoded in the surrounding TaskCreate sequence, not in the `Agent()` call.
+The `Agent()` `prompt` does NOT change shape — the Teachback-Gated Dispatch is encoded in the surrounding TaskCreate sequence, not in the `Agent()` call.
 
 **Carve-outs** — single-task dispatch still applies for:
 

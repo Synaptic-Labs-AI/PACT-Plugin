@@ -166,7 +166,7 @@ TaskUpdate(B_id, owner="{reviewer-name}", addBlockedBy=[A_id])
 TaskUpdate(A_id, addBlocks=[B_id])
 ```
 
-The `Agent()` `prompt` does NOT change shape — the two-task dispatch is encoded in the surrounding TaskCreate sequence.
+The `Agent()` `prompt` does NOT change shape — the Teachback-Gated Dispatch is encoded in the surrounding TaskCreate sequence.
 
 ---
 

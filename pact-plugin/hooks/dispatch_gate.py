@@ -152,7 +152,7 @@ RESERVED_NAMES = frozenset({
 # the task description (defeats the harvest pipeline).
 #
 # Audit: the 800-char threshold is duplicated as prose in
-# `agents/pact-orchestrator.md` §Agent Teams Dispatch (rule ⑨ description).
+# `agents/pact-orchestrator.md` §Agent Teams Dispatch.
 # The duplication is intentional — the agent-reader-primary axiom prefers
 # inline values over cross-refs because LLM readers under token pressure
 # don't follow cross-refs reliably. There is currently no source-side
@@ -342,9 +342,8 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
         return ("DENY",
                 f"PACT dispatch_gate: name {name!r} must match "
                 r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$ "
-                "(lowercase alphanumerics with optional internal hyphens; "
-                "must start and end with an alphanumeric, "
-                "checked after NFKC normalization).",
+                "(lowercase alphanumerics, with hyphens permitted only "
+                "between alphanumerics, checked after NFKC normalization).",
                 "name_invalid_regex")
     if normalized_name in RESERVED_NAMES:
         return ("DENY",
