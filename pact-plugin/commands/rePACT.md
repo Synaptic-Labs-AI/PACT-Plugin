@@ -241,7 +241,7 @@ TaskUpdate(A_id, addBlocks=[B_id])
 
 ---
 
-For each specialist needed — apply the [Teachback-Gated Dispatch](#teachback-gated-dispatch):
+For each specialist needed, follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
 1. `TaskCreate(subject="{scope-prefixed-name}: TEACHBACK for {sub-task}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
 2. `TaskCreate(subject="{scope-prefixed-name}: implement {sub-task}", description=<see below>)` — Task B.

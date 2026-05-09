@@ -170,7 +170,7 @@ The `Agent()` `prompt` does NOT change shape — the two-task dispatch is encode
 
 ---
 
-**Dispatch reviewers** — apply the [Teachback-Gated Dispatch](#teachback-gated-dispatch) for each reviewer:
+**Dispatch reviewers** — for each reviewer, follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
 1. `TaskCreate(subject="{reviewer-type}: TEACHBACK for review of {feature}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
 2. `TaskCreate(subject="{reviewer-type}: review {feature}", description=<see below>)` — Task B.

@@ -215,7 +215,7 @@ The teachback gate is lightweight ("understanding-confirm" with no implementatio
 
 ---
 
-**Dispatch each consultant** — apply the [Teachback-Gated Dispatch](#teachback-gated-dispatch) for each consultant:
+**Dispatch each consultant** — for each consultant, follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
 1. `TaskCreate(subject="{specialist}: TEACHBACK for plan consultation on {feature}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
 2. `TaskCreate(subject="{specialist}: plan consultation for {feature}", description=<see below>)` — Task B.

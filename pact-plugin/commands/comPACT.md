@@ -206,7 +206,7 @@ The `Agent()` `prompt` does NOT change shape — the two-task dispatch is encode
 
 ### Multiple Specialists Concurrently (Default)
 
-When the task contains multiple independent items, invoke multiple specialists together with boundary context. Apply the [Teachback-Gated Dispatch](#teachback-gated-dispatch) for each specialist needed:
+When the task contains multiple independent items, invoke multiple specialists together with boundary context. For each specialist needed, follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
 1. `TaskCreate(subject="{specialist-name}: TEACHBACK for {sub-task}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
 2. `TaskCreate(subject="{specialist-name}: {sub-task}", description=<see below>)` — Task B.
@@ -250,7 +250,7 @@ Use a single specialist agent only when:
 - Sub-tasks have dependencies on each other
 - Conventions haven't been established yet (run one first to set patterns)
 
-**Dispatch the specialist** — apply the [Teachback-Gated Dispatch](#teachback-gated-dispatch):
+**Dispatch the specialist** — follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
 1. `TaskCreate(subject="{specialist-name}: TEACHBACK for {task}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
 2. `TaskCreate(subject="{specialist-name}: {task}", description=<see below>)` — Task B.
