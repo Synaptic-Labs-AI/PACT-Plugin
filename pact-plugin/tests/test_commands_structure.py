@@ -205,7 +205,7 @@ class TestPactRoleTeammateInConsumerCommandsByComponent:
 
     Diagnostic axis = WHICH COMPONENT of the canonical dispatch form leaked.
     For each canonical-form component (PACT ROLE marker, team-join note,
-    two-task anchor, addBlockedBy call), assert it appears in at least one
+    Teachback-Gated Dispatch anchor, addBlockedBy call), assert it appears in at least one
     consumer command. Together with Class A (file axis), Class A failures
     isolate the file while Class B failures isolate the component —
     independent diagnostic signal.

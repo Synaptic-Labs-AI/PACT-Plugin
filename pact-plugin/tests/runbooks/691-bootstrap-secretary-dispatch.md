@@ -1,8 +1,9 @@
 # Bootstrap Secretary-Dispatch Runbook (#691)
 
 End-to-end operator runbook for a fresh-session bootstrap, focused on the
-gate-enforced two-task secretary spawn (Task A teachback + Task B work,
-`blockedBy=[A]`). Use this to verify that the orchestrator persona's
+Teachback-Gated Dispatch for the secretary spawn (gate-enforced; Task A
+teachback + Task B work, `blockedBy=[A]`). Use this to verify that the
+orchestrator persona's
 Agent Teams Dispatch section and the bootstrap command's secretary-spawn
 step stay aligned with what `dispatch_gate.py` and `task_lifecycle_gate.py`
 actually enforce. A regression in either document re-introduces friction
@@ -11,8 +12,8 @@ runbook is the structural net.
 
 The runbook validates four assertions on the secretary spawn:
 
-- Zero `dispatch_gate` refusals (rule ⑧ `has_task_assigned` satisfied —
-  Task A and Task B both pre-exist with `owner="secretary"`).
+- Zero `dispatch_gate` refusals with `rule="no_task_assigned"` (rule ⑧
+  satisfied — Task A and Task B both pre-exist with `owner="secretary"`).
 - Zero `long_inline_mission` WARNs (rule ⑨ — mission lives in
   `TaskCreate(description=...)`; the spawn prompt stays terse and
   references `TaskList`).
@@ -91,7 +92,7 @@ acceptance pair.
    1. `TaskCreate(subject="Secretary teachback: ...", ...)` — Task A
    2. `TaskCreate(subject="Session briefing + ...", description=...)` — Task B (mission lives here)
    3. `TaskUpdate(taskId=A, owner="secretary", addBlocks=[B])`
-   4. `TaskUpdate(taskId=B, owner="secretary")`
+   4. `TaskUpdate(taskId=B, owner="secretary", addBlockedBy=[A])`
    5. `Agent(name="secretary", team_name=<team>, subagent_type="pact-secretary", prompt="YOUR PACT ROLE: teammate (secretary).\n\nYou are joining team <team>. Check `TaskList` for tasks assigned to you.")`
 3. Inspect the session journal for any `dispatch_decision` event:
    ```
@@ -106,8 +107,10 @@ acceptance pair.
       `"PACT dispatch_gate: no Task assigned to owner='secretary'"` in
       the orchestrator's tool call output (rule ⑧ did not deny).
 - [ ] No `permissionDecisionReason` or `additionalContext` containing
-      `"PACT dispatch_gate: prompt is long"` /
-      `"long_inline_mission"` (rule ⑨ did not WARN or DENY).
+      `"PACT dispatch_gate: prompt is long"` (the user-visible WARN
+      message text from rule ⑨).
+- [ ] No `dispatch_decision` journal event with `rule="long_inline_mission"`
+      (rule ⑨ did not WARN or DENY at the journal level).
 - [ ] Either no `dispatch_decision` events in the journal for the
       secretary spawn, OR the events present are
       `decision="ALLOW"` only.
@@ -192,9 +195,10 @@ that Task B becomes claimable.
 1. The orchestrator should detect the secretary's
    `metadata.teachback_submit` write (delivered in the secretary's first
    turn) and apply the Acceptance two-call atomic pair documented in
-   the persona's Completion Authority section:
-   1. `TaskUpdate(taskId=<A_id>, status="completed")`
-   2. `SendMessage(to="secretary", "[team-lead→secretary] Task accepted...", summary="Task accepted")`
+   the persona's Completion Authority section (SendMessage FIRST per
+   the lifecycle-gate ordering invariant):
+   1. `SendMessage(to="secretary", "[team-lead→secretary] Task accepted...", summary="Task accepted")`
+   2. `TaskUpdate(taskId=<A_id>, status="completed")`
 2. Inspect Task A on disk after acceptance:
    ```
    cat ~/.claude/tasks/{team_name}/<A_id>.json | python3 -c \
@@ -317,7 +321,7 @@ turn 2. Section 4 records this as a soft signal, not a hard fail.
 If the team already exists on disk
 (`~/.claude/teams/{team_name}/config.json` present), the
 bootstrap-ritual reuses the team and skips `TeamCreate`. The secretary
-spawn still proceeds through the five-step dispatch sequence — Section 1
+spawn still proceeds through the Teachback-Gated Dispatch sequence — Section 1
 still applies. Confirm via the orchestrator's tool calls that the
 sequence executed regardless of team-create vs reuse path.
 
