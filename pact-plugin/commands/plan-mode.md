@@ -200,7 +200,7 @@ Both are created BEFORE the `Agent(...)` spawn call. The consultant claims A, su
 A_id = TaskCreate(
     subject="{specialist}: TEACHBACK for plan consultation on {feature}",
     description="DOGFOOD TEACHBACK GATE.\n\n"
-                "Submit teachback by writing metadata.teachback_submit (per pact-teachback skill). "
+                "Submit TEACHBACK by writing metadata.teachback_submit (per pact-teachback skill). "
                 "SET intentional_wait{reason=awaiting_lead_completion}. Idle. "
                 "DO NOT mark this task completed — team-lead-only completion.\n\n"
                 "Mission for Task B: see Task #{B_id}."

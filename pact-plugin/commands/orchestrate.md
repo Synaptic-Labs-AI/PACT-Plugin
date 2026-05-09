@@ -64,7 +64,7 @@ Every specialist dispatch creates **two tasks**, not one:
 - **Task A** — TEACHBACK gate. `subject = "{role}: TEACHBACK for {feature}"`, owner = teammate. Description: teachback expectations + dispatch context.
 - **Task B** — primary work. `subject = "{role}: {mission}"`, owner = teammate, `blockedBy = [<Task A id>]`.
 
-Both are created BEFORE the `Agent(...)` spawn call so the teammate sees them on first `TaskList`. The teammate claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review the teachback, then accept via the two-call atomic pair: `SendMessage(to=teammate, ...)` FIRST, then `TaskUpdate(A, status="completed")` — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review) for the rationale. The teammate wakes to claim B.
+Both are created BEFORE the `Agent(...)` spawn call so the teammate sees them on first `TaskList`. The teammate claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review the TEACHBACK, then accept via the two-call atomic pair: `SendMessage(to=teammate, ...)` FIRST, then `TaskUpdate(A, status="completed")` — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review) for the rationale. The teammate wakes to claim B.
 
 **Dispatch sequence (replaces single-task dispatch)**:
 
@@ -73,11 +73,11 @@ Both are created BEFORE the `Agent(...)` spawn call so the teammate sees them on
 A_id = TaskCreate(
     subject="{role}: TEACHBACK for {feature}",
     description="DOGFOOD TEACHBACK GATE for {feature}.\n\n"
-                "Submit teachback by writing metadata.teachback_submit (per pact-teachback skill). "
+                "Submit TEACHBACK by writing metadata.teachback_submit (per pact-teachback skill). "
                 "SET intentional_wait{reason=awaiting_lead_completion, expected_resolver=team-lead}. Idle. "
                 "DO NOT mark this task completed — team-lead-only completion. Lead will mark completed "
                 "after teachback acceptance, then send a wake-SendMessage confirming Task B is claimable. "
-                "If teachback is rejected, team-lead writes metadata.teachback_rejection and sends a "
+                "If TEACHBACK is rejected, team-lead writes metadata.teachback_rejection and sends a "
                 "wake-SendMessage with corrections; revise on this same task.\n\n"
                 "Mission for Task B: see Task #{B_id}."
 )
@@ -103,7 +103,7 @@ The `Agent()` `prompt` does NOT change shape — the two-task dispatch is encode
 
 **Carve-outs** — single-task dispatch still applies for:
 
-- **Auditor signal-tasks** (`metadata.completion_type="signal"`): no teachback, no Task B. The auditor IS observing; their task IS the signal.
+- **Auditor signal-tasks** (`metadata.completion_type="signal"`): no TEACHBACK, no Task B. The auditor IS observing; their task IS the signal.
 - **Secretary memory-save tasks**: secretary self-completes; the standard On Completion flow applies via the team-config-keyed `SELF_COMPLETE_EXEMPT_AGENT_TYPES` set in `shared/intentional_wait.py` (resolved on `member.agentType`, so the carve-out applies regardless of spawn name).
 - **imPACT force-termination**: `TaskStop` + team-lead-set `metadata.terminated=true` is its own out-of-band path. See [imPACT.md](imPACT.md).
 
@@ -425,14 +425,14 @@ When a phase is skipped but a coder encounters a decision that would have been h
 | Decision Scope | Examples | Action |
 |----------------|----------|--------|
 | **Minor** | Naming conventions, local file structure, error message wording | Coder decides, documents in commit message |
-| **Moderate** | Interface shape within your module, error handling pattern, internal component boundaries | Coder decides and implements, but flags decision with rationale in handoff; orchestrator validates before next phase |
+| **Moderate** | Interface shape within your module, error handling pattern, internal component boundaries | Coder decides and implements, but flags decision with rationale in HANDOFF; orchestrator validates before next phase |
 | **Major** | New module needed, cross-module contract, architectural pattern affecting multiple components | Blocker → `/PACT:imPACT` → may need to run skipped phase |
 
 **Boundary heuristic**: If a decision affects files outside the current specialist's scope, treat it as Major.
 
 **Coder instruction when phases were skipped**:
 
-> "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the handoff so it can be validated. Major decisions affecting other components are blockers—don't implement, escalate."
+> "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the HANDOFF so it can be validated. Major decisions affecting other components are blockers—don't implement, escalate."
 
 ---
 
@@ -479,7 +479,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 
 **Before next phase**:
 - [ ] Outputs exist in `docs/preparation/`
-- [ ] Specialist handoff received
+- [ ] Specialist HANDOFF received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable? Optionally query secretary for S4 pattern check (variety 7+). See [pact-orchestrator §Memory Management](../agents/pact-orchestrator.md#memory-management).
 
@@ -574,7 +574,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 
 **Before next phase**:
 - [ ] Outputs exist in `docs/architecture/`
-- [ ] Specialist handoff received
+- [ ] Specialist HANDOFF received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
 
@@ -658,7 +658,7 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
 JSON
 ```
 
-**Include worktree path in all agent prompts**: "You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree. Note: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead."
+**Include worktree path in all agent prompts**: "You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree. Note: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your HANDOFF instead."
 
 **Progress monitoring**: For tasks where mid-flight visibility matters (variety 7+, parallel execution, novel domains), include in the agent prompt: "Send progress signals per the agent-teams skill Progress Signals section."
 
@@ -672,7 +672,7 @@ JSON
      - INSTRUCTIONS: "Architect task: #{taskId} — read via `TaskGet` for design decisions." If multiple coders are dispatched concurrently, include peer names: "Your peers on this phase: {other-coder-names}."
      - GUIDELINES:
        - If ARCHITECT was skipped: pass the plan's Architecture Phase section instead.
-       - If PREPARE/ARCHITECT were skipped, include: "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the handoff so it can be validated. Major decisions affecting other components are blockers—don't implement, escalate."
+       - If PREPARE/ARCHITECT were skipped, include: "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the HANDOFF so it can be validated. Major decisions affecting other components are blockers—don't implement, escalate."
        - "Smoke Testing: Run the test suite before completing. If your changes break existing tests, fix them. Your tests are verification tests—enough to confirm your implementation works. Comprehensive coverage (edge cases, integration, E2E, adversarial) is TEST phase work."
 3. `TaskUpdate(A_id, owner="{coder-name}", addBlocks=[B_id])`
 4. `TaskUpdate(B_id, owner="{coder-name}", addBlockedBy=[A_id])`
@@ -729,7 +729,7 @@ The auditor stores its final signal as `metadata.audit_summary` via `TaskUpdate`
 **Before next phase**:
 - [ ] Implementation complete
 - [ ] All tests passing (full test suite; fix any tests your changes break)
-- [ ] Specialist handoff(s) received
+- [ ] Specialist HANDOFF(s) received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment). Lead owns commits; specialists stage + SendMessage "stage-ready" and wait. A staging specialist should SET the `intentional_wait` task metadata (reason `awaiting_lead_commit`, resolver `lead`) before the stage-ready notify so TeammateIdle hooks do not nag while the team-lead works through the commit sequence; CLEAR on the team-lead's commit confirmation. See the "Intentional Waiting" section in `pact-agent-teams/SKILL.md` for the SET/CLEAR contract.
 - [ ] **Journal event**: After each commit, write a `commit` event:
@@ -830,7 +830,7 @@ Agent(
 
 **Before completing**:
 - [ ] All tests passing
-- [ ] Specialist handoff received
+- [ ] Specialist HANDOFF received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **Agreement verification (L2)**: Before creating PR, verify implementation fulfills original purpose. `SendMessage` to test engineer to verify: "Does the tested implementation match the original requirements?" Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **Create atomic commit(s)** of TEST phase work (preserves work before strategic re-assessment)

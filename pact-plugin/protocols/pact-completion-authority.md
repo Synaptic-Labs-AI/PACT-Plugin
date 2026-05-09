@@ -55,12 +55,12 @@ Inspect the HANDOFF before flipping status. If `metadata.handoff` is missing or 
 
 The Task A + Task B dispatch shape gates implementation work behind teachback approval. When dispatching, you create:
 
-- **Task A**: `subject="<role>: TEACHBACK for <feature>"`, owner = teammate. Description states: "Submit teachback via `metadata.teachback_submit`. SET `intentional_wait{reason=awaiting_lead_completion}`. Do NOT begin Task B."
+- **Task A**: `subject="<role>: TEACHBACK for <feature>"`, owner = teammate. Description states: "Submit TEACHBACK via `metadata.teachback_submit`. SET `intentional_wait{reason=awaiting_lead_completion}`. Do NOT begin Task B."
 - **Task B**: `subject="<role>: <primary mission>"`, owner = teammate, `blockedBy=[<Task A id>]`.
 
 Both tasks are created at dispatch time; the teammate receives both in their initial TaskList view, with B greyed out by `blockedBy`.
 
-**Reviewing the teachback**:
+**Reviewing the TEACHBACK**:
 
 Read `metadata.teachback_submit` directly:
 
@@ -81,7 +81,7 @@ TaskUpdate(A_id, metadata={"teachback_resolution": {
 
 This write is optional but recommended for audit. It is NOT one of the required calls below.
 
-**Approving the teachback — two-call atomic pair (BOTH required, SendMessage FIRST)**:
+**Approving the TEACHBACK — two-call atomic pair (BOTH required, SendMessage FIRST)**:
 
 ```
 SendMessage(
@@ -97,13 +97,13 @@ TaskUpdate(A_id, status="completed")
 
 The status flip is the load-bearing approval action; the SendMessage is the load-bearing wake. Ordering is load-bearing for the same reason as the top-of-file Acceptance pair — SendMessage-first ensures the lifecycle gate's PostToolUse scan sees the wake on disk before the status flip fires.
 
-**Rejecting the teachback** — see [Rejection Flow](#rejection-flow) below.
+**Rejecting the TEACHBACK** — see [Rejection Flow](#rejection-flow) below.
 
 > ⚠️ DO NOT mark Task B `completed` and DO NOT mark Task B `pending`. Task B stays `pending` (its initial state) until the teammate claims it (`status=in_progress`) after wake. Your acceptance affects Task A only; Task B's lifecycle is the teammate's to drive (claim → work → submit HANDOFF → idle for your HANDOFF acceptance).
 
 ### Validating Incoming Teachbacks
 
-When an agent sends a teachback, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase. Once decided, follow the [Acceptance or Rejection two-call atomic pair](#completion-authority).
+When an agent sends a TEACHBACK, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase. Once decided, follow the [Acceptance or Rejection two-call atomic pair](#completion-authority).
 
 ---
 

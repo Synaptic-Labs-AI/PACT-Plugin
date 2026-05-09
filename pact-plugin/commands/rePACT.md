@@ -160,7 +160,7 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
 | "Starting mini-PREPARE phase for the nested cycle..." | (just do it) |
 | "The nested cycle has completed successfully..." | `rePACT complete. Continuing parent.` |
 
-**Multi-scope aggregation**: When the parent orchestrator runs multiple rePACT sub-scopes, each sub-scope's handoff feeds into parent-level aggregation. The sub-scope should keep its handoff self-contained (no references to sibling state). The parent orchestrator is responsible for comparing fulfillment sections across sub-scopes during the consolidate phase.
+**Multi-scope aggregation**: When the parent orchestrator runs multiple rePACT sub-scopes, each sub-scope's HANDOFF feeds into parent-level aggregation. The sub-scope should keep its HANDOFF self-contained (no references to sibling state). The parent orchestrator is responsible for comparing fulfillment sections across sub-scopes during the consolidate phase.
 
 ---
 
@@ -176,7 +176,7 @@ Branch behavior depends on whether rePACT is invoked with a scope contract:
 **With scope contract** (from ATOMIZE phase):
 - **Receives worktree path** from the parent orchestrator (created by parent via `/PACT:worktree-setup`)
 - **Operates in isolated worktree** on a suffix branch (e.g., `feature-X--{scope_id}`)
-- **Pass worktree path to all agent prompts**: Include "You are working in a git worktree at [worktree_path]. Note: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead." in specialist dispatches, consistent with orchestrate.md
+- **Pass worktree path to all agent prompts**: Include "You are working in a git worktree at [worktree_path]. Note: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your HANDOFF instead." in specialist dispatches, consistent with orchestrate.md
 - All commits stay on the suffix branch within the worktree
 - Branch merges back to the feature branch during the CONSOLIDATE phase
 
@@ -228,7 +228,7 @@ Nested PACT cycles' inner-cycle dispatches follow the same A+B shape recursively
 A_id = TaskCreate(
     subject="{scope-prefixed-name}: TEACHBACK for {sub-task}",
     description="DOGFOOD TEACHBACK GATE.\n\n"
-                "Submit teachback by writing metadata.teachback_submit (per pact-teachback skill). "
+                "Submit TEACHBACK by writing metadata.teachback_submit (per pact-teachback skill). "
                 "SET intentional_wait{reason=awaiting_lead_completion}. Idle. "
                 "DO NOT mark this task completed — team-lead-only completion.\n\n"
                 "Mission for Task B: see Task #{B_id}."
@@ -268,7 +268,7 @@ Output: Code + HANDOFF in task metadata (summary via `SendMessage` to team-lead)
 Verify the sub-component:
 - Smoke tests for the sub-component
 - Verify integration with parent components
-- Output: Test results in handoff
+- Output: Test results in HANDOFF
 
 ### Phase 5: Integration
 
@@ -308,7 +308,7 @@ When the parent orchestrator invokes rePACT with a **scope contract** (from scop
 3. **Interfaces**: Use `imports` to understand what sibling scopes provide; use `exports` to ensure this scope exposes what siblings expect
 4. **Shared files constraint**: Do NOT modify files listed in the contract's `shared_files` — these are owned by sibling scopes. Communicate this constraint to all dispatched specialists.
 5. **Conventions**: Apply any `conventions` from the contract in addition to inherited parent conventions
-6. **Handoff**: Include a Contract Fulfillment section in the completion handoff (see After Completion below)
+6. **Handoff**: Include a Contract Fulfillment section in the completion HANDOFF (see After Completion below)
 
 **When no scope contract is provided:** Standard rePACT behavior. No scope-aware naming, no contract fulfillment tracking, no shared file constraints.
 
@@ -418,7 +418,7 @@ When nested cycle completes:
 
 **Handoff format**: Use the standard handoff structure (Produced, Key decisions, Reasoning chain [recommended], Areas of uncertainty, Integration points, Open questions — 5 required fields, 1 recommended).
 
-**Contract-aware handoff** (when scope contract was provided): Append a Contract Fulfillment section after the standard handoff:
+**Contract-aware handoff** (when scope contract was provided): Append a Contract Fulfillment section after the standard HANDOFF:
 
 ```
 Contract Fulfillment:

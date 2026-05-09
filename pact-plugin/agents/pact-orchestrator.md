@@ -365,7 +365,7 @@ For full detail, `Read(file_path="../protocols/pact-variety.md")` when calibrati
 
 **Teachback-Gated Dispatch**:
 
-Every specialist dispatch is a Task A (teachback) + Task B (primary work, `blockedBy=[A]`) pair. Both tasks must exist with the teammate as owner BEFORE the `Agent()` spawn. The mission lives in Task B's `description`, never in the spawn prompt.
+Every specialist dispatch is a Task A (TEACHBACK) + Task B (primary work, `blockedBy=[A]`) pair. Both tasks must exist with the teammate as owner BEFORE the `Agent()` spawn. The mission lives in Task B's `description`, never in the spawn prompt.
 
 1. `TaskCreate(subject="{name}: TEACHBACK for {topic}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — create Task A (teachback gate).
 2. `TaskCreate(subject="{name}: {primary work subject}", description="<full mission: CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES per §13 Recommended Agent Prompting Structure>")` — create Task B (primary work).
@@ -429,7 +429,7 @@ Use the same iterate-by-name pattern for any other team-lead-to-many signal (gra
 
 | Event | Task Operation |
 |-------|----------------|
-| Before dispatching agent | TaskCreate Task A (teachback) + Task B (work); `TaskUpdate(A, owner=name, addBlocks=[B])` + `TaskUpdate(B, owner=name, addBlockedBy=[A])` — see §11 Dispatch pattern |
+| Before dispatching agent | TaskCreate Task A (TEACHBACK) + Task B (work); `TaskUpdate(A, owner=name, addBlocks=[B])` + `TaskUpdate(B, owner=name, addBlockedBy=[A])` — see §11 Dispatch pattern |
 | After dispatching agent | Teammate self-claims via `TaskUpdate(taskId, status="in_progress")`; the team-lead does NOT pre-set `in_progress` |
 | Teachback submitted (Task A) | Read raw JSON `metadata.teachback_submit`, validate per §12 Teachback Review, then Acceptance two-call atomic pair (§12) auto-unblocks Task B |
 | HANDOFF submitted (Task B) | Read raw JSON `metadata.handoff` (TaskGet is metadata-blind), then Acceptance two-call atomic pair (§12) — paired wake-`SendMessage` + `TaskUpdate(taskId, status="completed")` (SendMessage FIRST per the lifecycle-gate ordering invariant) |
@@ -478,15 +478,15 @@ Teammate self-completion carve-outs (predicate-witnessed): signal-tasks (`metada
 
 **TaskGet metadata-blindness reminder**: `TaskGet` does NOT surface `metadata.handoff`. Read directly via `cat ~/.claude/tasks/{team_name}/{taskId}.json | jq .metadata.handoff`; do NOT mark completed if missing or empty.
 
-**You MUST `Read(file_path="../protocols/pact-completion-authority.md")` before answering** whenever you detect a teachback or HANDOFF arrival, a rejection cycle, or any teammate idle on `awaiting_lead_completion`.
+**You MUST `Read(file_path="../protocols/pact-completion-authority.md")` before answering** whenever you detect a TEACHBACK or HANDOFF arrival, a rejection cycle, or any teammate idle on `awaiting_lead_completion`.
 
 ### Teachback Review
 
-Each specialist dispatch is a Task A (teachback) + Task B (work) pair with `blockedBy=[A]` — see §11 for the canonical sequence. Teammate claims A, writes `metadata.teachback_submit` (4 fields per [pact-teachback](../skills/pact-teachback/SKILL.md)), idles on `awaiting_lead_completion`. Read the payload via raw JSON (TaskGet is metadata-blind), apply Validating Incoming Teachbacks below, then accept via the Acceptance two-call atomic pair above; acceptance auto-unblocks Task B. Do NOT mark Task B `completed` or `pending` yourself — the teammate claims on wake.
+Each specialist dispatch is a Task A (TEACHBACK) + Task B (work) pair with `blockedBy=[A]` — see §11 for the canonical sequence. Teammate claims A, writes `metadata.teachback_submit` (4 fields per [pact-teachback](../skills/pact-teachback/SKILL.md)), idles on `awaiting_lead_completion`. Read the payload via raw JSON (TaskGet is metadata-blind), apply Validating Incoming Teachbacks below, then accept via the Acceptance two-call atomic pair above; acceptance auto-unblocks Task B. Do NOT mark Task B `completed` or `pending` yourself — the teammate claims on wake.
 
 #### Validating Incoming Teachbacks
 
-When an agent sends a teachback, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase.
+When an agent sends a TEACHBACK, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase.
 
 #### Expected Agent HANDOFF Format
 
@@ -679,7 +679,7 @@ Use this structure in the `prompt` field to ensure agents have adequate context:
 1. [Step 1]
 2. [Step 2 - explicit skill usage if needed, e.g., "Use pact-security-patterns"]
 3. [Step 3]
-4. **REQUIRED**: Send a teachback to team-lead restating your understanding of the task **before doing any work**. If upstream task references are provided, read them via `TaskGet` first. (See agent-teams skill for format)
+4. **REQUIRED**: Send a TEACHBACK to team-lead restating your understanding of the task **before doing any work**. If upstream task references are provided, read them via `TaskGet` first. (See agent-teams skill for format)
 
 **GUIDELINES**
 
@@ -689,4 +689,4 @@ A list of things that include the following:
 - [Best Practices]
 - [Wisdom from lessons learned]
 - Standard for all dispatches: tell specialists they can query the secretary directly via `SendMessage` (no orchestrator routing).
-- For complex tasks (multi-file changes, architectural decisions, trade-offs): include "Include reasoning_chain in your handoff — explain how your key decisions connect" in the agent's GUIDELINES section.
+- For complex tasks (multi-file changes, architectural decisions, trade-offs): include "Include reasoning_chain in your HANDOFF — explain how your key decisions connect" in the agent's GUIDELINES section.
