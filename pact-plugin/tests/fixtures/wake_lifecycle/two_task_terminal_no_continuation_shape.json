@@ -1,0 +1,22 @@
+{
+  "_meta": {
+    "capture_session_id": "pact-8159e827",
+    "capture_date": "2026-05-09",
+    "capture_method": "synthesized",
+    "issue_ref": "TBD-wake-lifecycle-teachback-rearm",
+    "notes": "Synthesized PostToolUse stdin for the lead's TaskUpdate(status='completed') on a single-task dispatch (no paired Task B). This is the negative case for defer-Teardown: completed task has empty blocks/addBlocks (or blocks pointing only to different-teammate or non-lifecycle-relevant tasks), so has_same_teammate_continuation returns False and Teardown emits when count==0. Pairs with two_task_continuation_completion_shape.json (P0.2(b)/(c) coverage). Source: synthesized scenario where lead completes a one-shot teammate task with no follow-on; the typical 'last work item' pattern at the end of a workflow. Predicate must NOT defer here — Teardown is correct."
+  },
+  "tool_name": "TaskUpdate",
+  "session_id": "8159e827-ac41-4e77-84dd-6d804ac6c633",
+  "cwd": "/Users/mj/Sites/collab/PACT-prompt",
+  "tool_input": {
+    "taskId": "100",
+    "status": "completed"
+  },
+  "tool_response": {
+    "id": "100",
+    "subject": "backend-coder: standalone work item (no continuation)",
+    "status": "completed",
+    "owner": "backend-coder"
+  }
+}
