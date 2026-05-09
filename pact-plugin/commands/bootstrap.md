@@ -17,7 +17,7 @@ Read `team_name` from the **Current Session** block in the project's `CLAUDE.md`
 
 ## Step 2 — Spawn `pact-secretary`
 
-Spawn the session secretary using the canonical five-step dispatch sequence below (See persona §Agent Teams Dispatch for the canonical sequence applied to other dispatches):
+Spawn the session secretary using the Teachback-Gated Dispatch below (See persona §Agent Teams Dispatch for the canonical pattern applied to other dispatches):
 
 1. `TaskCreate(subject="secretary: Secretary teachback: session briefing", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A
 2. `TaskCreate(subject="secretary: Session briefing + HANDOFF readiness", description="<full mission: deliver session briefing on spawn, answer memory queries during the session, process HANDOFFs at workflow boundaries; CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES per the orchestrator persona §13 Recommended Agent Prompting Structure>")` — Task B
