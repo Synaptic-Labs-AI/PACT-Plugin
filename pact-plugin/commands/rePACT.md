@@ -160,7 +160,7 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
 | "Starting mini-PREPARE phase for the nested cycle..." | (just do it) |
 | "The nested cycle has completed successfully..." | `rePACT complete. Continuing parent.` |
 
-**Multi-scope aggregation**: When the parent orchestrator runs multiple rePACT sub-scopes, each sub-scope's handoff feeds into parent-level aggregation. The sub-scope should keep its handoff self-contained (no references to sibling state). The parent orchestrator is responsible for comparing fulfillment sections across sub-scopes during the consolidate phase.
+**Multi-scope aggregation**: When the parent orchestrator runs multiple rePACT sub-scopes, each sub-scope's HANDOFF feeds into parent-level aggregation. The sub-scope should keep its HANDOFF self-contained (no references to sibling state). The parent orchestrator is responsible for comparing fulfillment sections across sub-scopes during the consolidate phase.
 
 ---
 
@@ -176,7 +176,7 @@ Branch behavior depends on whether rePACT is invoked with a scope contract:
 **With scope contract** (from ATOMIZE phase):
 - **Receives worktree path** from the parent orchestrator (created by parent via `/PACT:worktree-setup`)
 - **Operates in isolated worktree** on a suffix branch (e.g., `feature-X--{scope_id}`)
-- **Pass worktree path to all agent prompts**: Include "You are working in a git worktree at [worktree_path]. Note: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead." in specialist dispatches, consistent with orchestrate.md
+- **Pass worktree path to all agent prompts**: Include "You are working in a git worktree at [worktree_path]. Note: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your HANDOFF instead." in specialist dispatches, consistent with orchestrate.md
 - All commits stay on the suffix branch within the worktree
 - Branch merges back to the feature branch during the CONSOLIDATE phase
 
@@ -213,14 +213,14 @@ Implement the sub-component:
 
 **Verify session team exists**: The `{team_name}` team should already exist from session start. If not, create it now: `TeamCreate(team_name="{team_name}")`.
 
-**Two-Task Dispatch Shape (TEACHBACK + WORK)**
+**Teachback-Gated Dispatch**
 
 Each specialist dispatch creates **two tasks**, not one:
 
 - **Task A** — TEACHBACK gate. `subject = "{scope-prefixed-name}: TEACHBACK for {sub-task}"`, owner = specialist.
 - **Task B** — primary work. `subject = "{scope-prefixed-name}: implement {sub-task}"`, owner = specialist, `blockedBy = [<Task A id>]`.
 
-Both are created BEFORE the `Agent(...)` spawn call. The specialist claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review)). On accept, the specialist wakes to claim B.
+Both are created BEFORE the `Agent(...)` spawn call. The specialist claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair: `SendMessage(to=specialist, ...)` FIRST, then `TaskUpdate(A, status="completed")` — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review) for the rationale. On accept, the specialist wakes to claim B.
 
 Nested PACT cycles' inner-cycle dispatches follow the same A+B shape recursively. The `Agent()` `prompt` does NOT change shape.
 
@@ -228,7 +228,7 @@ Nested PACT cycles' inner-cycle dispatches follow the same A+B shape recursively
 A_id = TaskCreate(
     subject="{scope-prefixed-name}: TEACHBACK for {sub-task}",
     description="DOGFOOD TEACHBACK GATE.\n\n"
-                "Submit teachback by writing metadata.teachback_submit (per pact-teachback skill). "
+                "Submit TEACHBACK by writing metadata.teachback_submit (per pact-teachback skill). "
                 "SET intentional_wait{reason=awaiting_lead_completion}. Idle. "
                 "DO NOT mark this task completed — team-lead-only completion.\n\n"
                 "Mission for Task B: see Task #{B_id}."
@@ -241,11 +241,14 @@ TaskUpdate(A_id, addBlocks=[B_id])
 
 ---
 
-For each specialist needed — apply the shape above:
+For each specialist needed, follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
-1. `TaskCreate(subject="{scope-prefixed-name}: implement {sub-task}", description="[full CONTEXT/MISSION/INSTRUCTIONS/GUIDELINES]")`
-2. `TaskUpdate(taskId, owner="{scope-prefixed-name}")`
-3. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({scope-prefixed-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter):
+1. `TaskCreate(subject="{scope-prefixed-name}: TEACHBACK for {sub-task}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
+2. `TaskCreate(subject="{scope-prefixed-name}: implement {sub-task}", description=<see below>)` — Task B.
+   - Task B's `description` carries the implementation mission: "[full CONTEXT/MISSION/INSTRUCTIONS/GUIDELINES]"
+3. `TaskUpdate(A_id, owner="{scope-prefixed-name}", addBlocks=[B_id])`
+4. `TaskUpdate(B_id, owner="{scope-prefixed-name}", addBlockedBy=[A_id])`
+5. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({scope-prefixed-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter):
 
 ```
 Agent(
@@ -256,8 +259,6 @@ Agent(
 )
 ```
 
-> ⚠️ **`{scope-prefixed-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `YOUR PACT ROLE: teammate ({scope-prefixed-name}).` marker line. `name` MUST match `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses — to prevent marker spoofing.
-
 For multi-domain: spawn multiple specialists in parallel.
 Apply S2 coordination if parallel work.
 Output: Code + HANDOFF in task metadata (summary via `SendMessage` to team-lead).
@@ -267,13 +268,13 @@ Output: Code + HANDOFF in task metadata (summary via `SendMessage` to team-lead)
 Verify the sub-component:
 - Smoke tests for the sub-component
 - Verify integration with parent components
-- Output: Test results in handoff
+- Output: Test results in HANDOFF
 
 ### Phase 5: Integration
 
 Complete the nested cycle:
 1. **Verify**: Sub-component works within parent context
-2. **Handoff**: Return control to parent orchestration with summary
+2. **HANDOFF**: Return control to parent orchestration with summary
 3. **Agreement verification**: Parent orchestrator verifies understanding of nested results before reintegrating into parent scope.
    - `SendMessage` to each contributing specialist to confirm: "Confirming my understanding of the nested results: [restates key deliverables and decisions]. Correct?"
    - Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
@@ -307,7 +308,7 @@ When the parent orchestrator invokes rePACT with a **scope contract** (from scop
 3. **Interfaces**: Use `imports` to understand what sibling scopes provide; use `exports` to ensure this scope exposes what siblings expect
 4. **Shared files constraint**: Do NOT modify files listed in the contract's `shared_files` — these are owned by sibling scopes. Communicate this constraint to all dispatched specialists.
 5. **Conventions**: Apply any `conventions` from the contract in addition to inherited parent conventions
-6. **Handoff**: Include a Contract Fulfillment section in the completion handoff (see After Completion below)
+6. **HANDOFF**: Include a Contract Fulfillment section in the completion HANDOFF (see After Completion below)
 
 **When no scope contract is provided:** Standard rePACT behavior. No scope-aware naming, no contract fulfillment tracking, no shared file constraints.
 
@@ -417,7 +418,7 @@ When nested cycle completes:
 
 **Handoff format**: Use the standard handoff structure (Produced, Key decisions, Reasoning chain [recommended], Areas of uncertainty, Integration points, Open questions — 5 required fields, 1 recommended).
 
-**Contract-aware handoff** (when scope contract was provided): Append a Contract Fulfillment section after the standard handoff:
+**Contract-aware HANDOFF** (when scope contract was provided): Append a Contract Fulfillment section after the standard HANDOFF:
 
 ```
 Contract Fulfillment:

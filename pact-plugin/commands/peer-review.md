@@ -111,7 +111,7 @@ This trigger fires only when remediation occurred and changed things. Skip if no
 | Fixes span a different domain | **Spawn** domain specialist (reviewer stays for consultation) |
 | Multiple independent fixes in parallel | **Spawn** additional agents alongside reused reviewer |
 
-> **Worktree scope reminder**: When reusing a reviewer as a fixer or spawning a new fixer, include the worktree path and `CLAUDE.md` scope note in the fix task: "`CLAUDE.md` is gitignored and does not exist in worktrees — do not edit it. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead."
+> **Worktree scope reminder**: When reusing a reviewer as a fixer or spawning a new fixer, include the worktree path and `CLAUDE.md` scope note in the fix task: "`CLAUDE.md` is gitignored and does not exist in worktrees — do not edit it. If your task mentions updating `CLAUDE.md`, flag it in your HANDOFF instead."
 
 > **Remediation stage-ready wait**: Reviewers acting as fixers stage remediation changes and notify the team-lead, then wait for the team-lead to commit the fix. Instruct the reviewer to SET the `intentional_wait` task metadata (reason `awaiting_amendment_review`, resolver `lead`) before the stage-ready notify so TeammateIdle hooks do not nag through the fix→commit→re-review cycle; CLEAR when the team-lead acknowledges the commit. See the "Intentional Waiting" section in `pact-agent-teams/SKILL.md` for the SET/CLEAR contract.
 
@@ -142,20 +142,20 @@ Select the domain coder based on PR focus:
 - Infrastructure changes → **pact-devops-engineer** (CI/CD quality, Docker best practices, script safety)
 - Multiple domains → Coder for domain with most significant changes, or all relevant domain coders if changes are equally significant
 
-**Two-Task Dispatch Shape (TEACHBACK + WORK)**
+**Teachback-Gated Dispatch**
 
 Each reviewer dispatch creates **two tasks**, not one:
 
 - **Task A** — TEACHBACK gate. `subject = "{reviewer-type}: TEACHBACK for review of {feature}"`, owner = reviewer. Description: state which review angle the reviewer is taking (consistency check vs adversarial vs design coherence) before reading the diff.
 - **Task B** — primary review work. `subject = "{reviewer-type}: review {feature}"`, owner = reviewer, `blockedBy = [<Task A id>]`.
 
-Both are created BEFORE the `Agent(...)` spawn call. The reviewer claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review the teachback (does it state the review angle clearly?), accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review)). On accept, the reviewer wakes to claim B and read the diff.
+Both are created BEFORE the `Agent(...)` spawn call. The reviewer claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review the TEACHBACK (does it state the review angle clearly?), then accept via the two-call atomic pair: `SendMessage(to=reviewer, ...)` FIRST, then `TaskUpdate(A, status="completed")` — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review) for the rationale. On accept, the reviewer wakes to claim B and read the diff.
 
 ```
 A_id = TaskCreate(
     subject="{reviewer-type}: TEACHBACK for review of {feature}",
     description="DOGFOOD TEACHBACK GATE.\n\n"
-                "Submit teachback by writing metadata.teachback_submit (per pact-teachback skill). "
+                "Submit TEACHBACK by writing metadata.teachback_submit (per pact-teachback skill). "
                 "SET intentional_wait{reason=awaiting_lead_completion}. Idle. "
                 "DO NOT mark this task completed — team-lead-only completion.\n\n"
                 "Mission for Task B: see Task #{B_id}."
@@ -166,16 +166,18 @@ TaskUpdate(B_id, owner="{reviewer-name}", addBlockedBy=[A_id])
 TaskUpdate(A_id, addBlocks=[B_id])
 ```
 
-The `Agent()` `prompt` does NOT change shape — the two-task dispatch is encoded in the surrounding TaskCreate sequence.
+The `Agent()` `prompt` does NOT change shape — the Teachback-Gated Dispatch is encoded in the surrounding TaskCreate sequence.
 
 ---
 
-**Dispatch reviewers** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above per reviewer:
+**Dispatch reviewers** — for each reviewer, follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
-For each reviewer:
-1. `TaskCreate(subject="{reviewer-type}: review {feature}", description="Review this PR. Focus: [domain-specific review criteria]...")`
-2. `TaskUpdate(taskId, owner="{reviewer-name}")`
-3. Spawn the reviewer with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({reviewer-name})` marker on its own line so routing detects the teammate spawn (team protocol + teachback content arrive via spawn-time skills frontmatter, not a per-prompt directive):
+1. `TaskCreate(subject="{reviewer-type}: TEACHBACK for review of {feature}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
+2. `TaskCreate(subject="{reviewer-type}: review {feature}", description=<see below>)` — Task B.
+   - Task B's `description` carries the review mission: "Review this PR. Focus: [domain-specific review criteria]…"
+3. `TaskUpdate(A_id, owner="{reviewer-name}", addBlocks=[B_id])`
+4. `TaskUpdate(B_id, owner="{reviewer-name}", addBlockedBy=[A_id])`
+5. Spawn the reviewer with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({reviewer-name})` marker on its own line so routing detects the teammate spawn (team protocol + teachback content arrive via spawn-time skills frontmatter, not a per-prompt directive):
 
 ```
 Agent(
@@ -185,8 +187,6 @@ Agent(
   prompt="YOUR PACT ROLE: teammate ({reviewer-name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
 )
 ```
-
-> ⚠️ **`{reviewer-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `YOUR PACT ROLE: teammate ({reviewer-name}).` marker line. `name` MUST match `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses — to prevent marker spoofing.
 
 Spawn all reviewers in parallel (multiple `Task` calls in one response).
 
@@ -218,7 +218,7 @@ Each reviewer should state their understanding of the PR's intent before diving 
 **Mechanism**: Include in each reviewer's task description:
 > "Before reviewing, send a teachback message to the team-lead stating your understanding of what this PR is trying to accomplish and what you'll focus on in your domain. Format: `[{sender}→team-lead] Teachback: I understand this PR is [intent]. Reviewing with focus on [domain focus]. Proceeding unless corrected.` Non-blocking — proceed with review after sending."
 
-This uses the same teachback mechanism as agent handoffs. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
+This uses the same teachback mechanism as agent HANDOFFs. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 
 ---
 

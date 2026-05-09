@@ -157,18 +157,18 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
 2. **Verify session team exists** — The `{team_name}` team should already exist from session start. If not, create it now: `TeamCreate(team_name="{team_name}")`.
 3. **S2 coordination** (if concurrent) — Check for file conflicts, assign boundaries
 
-> **Teachback**: All dispatched specialists send a teachback before starting work (see [pact-ct-teachback.md](../protocols/pact-ct-teachback.md)).
+> **Teachback**: All dispatched specialists send a TEACHBACK before starting work (see [pact-ct-teachback.md](../protocols/pact-ct-teachback.md)).
 
 ---
 
-## Two-Task Dispatch Shape (TEACHBACK + WORK)
+## Teachback-Gated Dispatch
 
 Every specialist dispatch creates **two tasks**, not one:
 
 - **Task A** — TEACHBACK gate. `subject = "{specialist}: TEACHBACK for {sub-task}"`, owner = teammate. Description: teachback expectations + dispatch context.
 - **Task B** — primary work. `subject = "{specialist}: {sub-task}"`, owner = teammate, `blockedBy = [<Task A id>]`.
 
-Both are created BEFORE the `Agent(...)` spawn call so the teammate sees them on first `TaskList`. The teammate claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review)). On accept, the teammate wakes to claim B.
+Both are created BEFORE the `Agent(...)` spawn call so the teammate sees them on first `TaskList`. The teammate claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair: `SendMessage(to=teammate, ...)` FIRST, then `TaskUpdate(A, status="completed")` — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review) for the rationale. On accept, the teammate wakes to claim B.
 
 **Dispatch sequence (replaces single-task dispatch)**:
 
@@ -177,7 +177,7 @@ Both are created BEFORE the `Agent(...)` spawn call so the teammate sees them on
 A_id = TaskCreate(
     subject="{specialist}: TEACHBACK for {sub-task}",
     description="DOGFOOD TEACHBACK GATE for {sub-task}.\n\n"
-                "Submit teachback by writing metadata.teachback_submit (per pact-teachback skill). "
+                "Submit TEACHBACK by writing metadata.teachback_submit (per pact-teachback skill). "
                 "SET intentional_wait{reason=awaiting_lead_completion, expected_resolver=team-lead}. Idle. "
                 "DO NOT mark this task completed — team-lead-only completion. Lead will mark completed "
                 "after teachback acceptance, then send a wake-SendMessage confirming Task B is claimable.\n\n"
@@ -193,11 +193,11 @@ TaskUpdate(A_id, addBlocks=[B_id])
 # 3. Spawn the teammate via the canonical Agent() form (shown in §Invocation below).
 ```
 
-The `Agent()` `prompt` does NOT change shape — the two-task dispatch is encoded in the surrounding TaskCreate sequence, not in the `Agent()` call.
+The `Agent()` `prompt` does NOT change shape — the Teachback-Gated Dispatch is encoded in the surrounding TaskCreate sequence, not in the `Agent()` call.
 
 **Carve-outs** — single-task dispatch still applies for:
 
-- **Auditor signal-tasks** (`metadata.completion_type="signal"`): no teachback, no Task B.
+- **Auditor signal-tasks** (`metadata.completion_type="signal"`): no TEACHBACK, no Task B.
 - **Secretary memory-save tasks**: secretary self-completes via the team-config-keyed `SELF_COMPLETE_EXEMPT_AGENT_TYPES` set in `shared/intentional_wait.py` (resolved on `member.agentType`, so the carve-out applies regardless of spawn name).
 
 ---
@@ -206,12 +206,14 @@ The `Agent()` `prompt` does NOT change shape — the two-task dispatch is encode
 
 ### Multiple Specialists Concurrently (Default)
 
-When the task contains multiple independent items, invoke multiple specialists together with boundary context. Apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above per specialist:
+When the task contains multiple independent items, invoke multiple specialists together with boundary context. For each specialist needed, follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
-For each specialist needed:
-1. `TaskCreate(subject="{specialist}: {sub-task}", description="comPACT mode (concurrent): You are one of [N] specialists working concurrently.\nYou are working in a git worktree at [worktree_path].\nNote: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead.\n\nYOUR SCOPE: [specific sub-task]\nOTHER AGENTS' SCOPE: [what others handle]\n\nWork directly from this task description.\nIf upstream task IDs are provided, read via `TaskGet` for prior decisions.\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nStay within your assigned scope.\n\nTesting: New unit tests for logic changes. Fix broken existing tests. Run test suite before handoff.\n\nIf you hit a blocker, STOP and `SendMessage` it to the team-lead.\n\nTask: [this agent's specific sub-task]")`
-2. `TaskUpdate(taskId, owner="{specialist-name}")`
-3. **Journal event**: Write `agent_dispatch` before spawning each specialist:
+1. `TaskCreate(subject="{specialist-name}: TEACHBACK for {sub-task}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
+2. `TaskCreate(subject="{specialist-name}: {sub-task}", description=<see below>)` — Task B.
+   - Task B's `description` carries the comPACT-concurrent mission: "comPACT mode (concurrent): You are one of [N] specialists working concurrently.\nYou are working in a git worktree at [worktree_path].\nNote: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your HANDOFF instead.\n\nYOUR SCOPE: [specific sub-task]\nOTHER AGENTS' SCOPE: [what others handle]\n\nWork directly from this task description.\nIf upstream task IDs are provided, read via `TaskGet` for prior decisions.\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nStay within your assigned scope.\n\nTesting: New unit tests for logic changes. Fix broken existing tests. Run test suite before HANDOFF.\n\nIf you hit a blocker, STOP and `SendMessage` it to the team-lead.\n\nTask: [this agent's specific sub-task]"
+3. `TaskUpdate(A_id, owner="{specialist-name}", addBlocks=[B_id])`
+4. `TaskUpdate(B_id, owner="{specialist-name}", addBlockedBy=[A_id])`
+5. **Journal event**: Write `agent_dispatch` before spawning each specialist:
    ```bash
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
@@ -222,7 +224,8 @@ JSON
    ```
 
 > ⚠️ **Heredoc-stdin contract**: All journal-event writes in this command file use `--stdin <<'JSON' ... JSON` (quoted delimiter, closing `JSON` on its own line at column 0 — bash heredocs do NOT strip leading whitespace from the delimiter line unless `<<-` with TABS is used). The quoted delimiter disables bash variable expansion so apostrophes, quotes, and backticks in template-substituted values (e.g., `{first_line}` from a commit message) pass through verbatim. The orchestrator must still produce JSON-valid string content (escape `\"`, `\\`, and control chars).
-4. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({specialist-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter):
+
+6. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({specialist-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter):
 
 ```
 Agent(
@@ -247,11 +250,14 @@ Use a single specialist agent only when:
 - Sub-tasks have dependencies on each other
 - Conventions haven't been established yet (run one first to set patterns)
 
-**Dispatch the specialist** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above:
+**Dispatch the specialist** — follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
-1. `TaskCreate(subject="{specialist}: {task}", description="comPACT mode: Work directly from this task description.\nYou are working in a git worktree at [worktree_path].\nNote: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead.\nIf upstream task IDs are provided, read via `TaskGet` for prior decisions.\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nFocus on the task at hand.\n\nTesting: New unit tests for logic changes (optional for trivial changes). Fix broken existing tests. Run test suite before handoff.\n\n> Smoke vs comprehensive tests: These are verification tests. Comprehensive coverage is TEST phase work.\n\nIf you hit a blocker, STOP and `SendMessage` it to the team-lead.\n\nTask: [user's task description]")`
-2. `TaskUpdate(taskId, owner="{specialist-name}")`
-3. **Journal event**: Write `agent_dispatch` before spawning:
+1. `TaskCreate(subject="{specialist-name}: TEACHBACK for {task}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
+2. `TaskCreate(subject="{specialist-name}: {task}", description=<see below>)` — Task B.
+   - Task B's `description` carries the comPACT mission: "comPACT mode: Work directly from this task description.\nYou are working in a git worktree at [worktree_path].\nNote: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your HANDOFF instead.\nIf upstream task IDs are provided, read via `TaskGet` for prior decisions.\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nFocus on the task at hand.\n\nTesting: New unit tests for logic changes (optional for trivial changes). Fix broken existing tests. Run test suite before HANDOFF.\n\n> Smoke vs comprehensive tests: These are verification tests. Comprehensive coverage is TEST phase work.\n\nIf you hit a blocker, STOP and `SendMessage` it to the team-lead.\n\nTask: [user's task description]"
+3. `TaskUpdate(A_id, owner="{specialist-name}", addBlocks=[B_id])`
+4. `TaskUpdate(B_id, owner="{specialist-name}", addBlockedBy=[A_id])`
+5. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
@@ -260,7 +266,7 @@ Use a single specialist agent only when:
    {"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": []}
 JSON
    ```
-4. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({specialist-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter):
+6. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({specialist-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter):
 
 ```
 Agent(
@@ -270,8 +276,6 @@ Agent(
   prompt="YOUR PACT ROLE: teammate ({specialist-name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
 )
 ```
-
-> ⚠️ **`{specialist-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `YOUR PACT ROLE: teammate ({specialist-name}).` marker line. `name` MUST match `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses — to prevent marker spoofing.
 
 ---
 
@@ -318,7 +322,7 @@ When dispatching an auditor, create its task with `metadata: {"completion_type":
 
 ## After Specialist Completes
 
-- [ ] **Receive handoff** from specialist(s)
+- [ ] **Receive HANDOFF** from specialist(s)
 - [ ] Agent tasks marked `completed` (agents self-manage their task status via `TaskUpdate`)
 - [ ] **Agreement verification**: `SendMessage` to specialist to confirm shared understanding of deliverables before committing. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **Run tests** — verify work passes. If tests fail → return to specialist for fixes (create new agent task, repeat).
@@ -399,5 +403,5 @@ During comPACT execution, if you discover the task is more complex than expected
 **Heuristic**: If re-assessing variety would now score Medium+ (7+), escalate.
 
 **Conversely**, if the specialist reports the task is simpler than expected:
-- Note in handoff to orchestrator
+- Note in HANDOFF to orchestrator
 - Complete the task; orchestrator may simplify remaining work

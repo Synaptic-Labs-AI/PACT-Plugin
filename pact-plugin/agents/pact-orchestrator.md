@@ -363,13 +363,15 @@ For full detail, `Read(file_path="../protocols/pact-variety.md")` when calibrati
 >
 > ⚠️ **NEVER** use plain `Agent(subagent_type=...)` without `name` and `team_name` for specialist agents. This bypasses team coordination, task tracking, and `SendMessage` communication.
 
-**Dispatch pattern**:
+**Teachback-Gated Dispatch**:
 
-1. `TaskCreate(subject, description)` — create the tracking task with full mission
-2. `TaskUpdate(taskId, owner="{name}")` — assign ownership
-3. `Agent(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", prompt="YOUR PACT ROLE: teammate ({name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you.")` — spawn the teammate
+Every specialist dispatch is a Task A (TEACHBACK) + Task B (primary work, `blockedBy=[A]`) pair. Both tasks must exist with the teammate as owner BEFORE the `Agent()` spawn. The mission lives in Task B's `description`, never in the spawn prompt.
 
-> ⚠️ **`{name}` constraint (SECURITY)**: the `name=` parameter you pass to `Agent()` is interpolated verbatim into the `YOUR PACT ROLE: teammate ({name}).` marker line. To prevent marker spoofing via injected newlines or close-parens, the `name` value MUST match the pattern `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses. Examples of valid names: `backend-coder-1`, `review-test-engineer-7`, `secretary`. Examples of invalid names: `backend coder 1` (spaces), `backend-coder)evil` (close-paren), any name containing newlines.
+1. `TaskCreate(subject="{name}: TEACHBACK for {topic}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — create Task A (teachback gate).
+2. `TaskCreate(subject="{name}: {primary work subject}", description="<full mission: CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES per §13 Recommended Agent Prompting Structure>")` — create Task B (primary work).
+3. `TaskUpdate(A_id, owner="{name}", addBlocks=[B_id])` — assign Task A to the teammate and wire it as the gate that unblocks Task B.
+4. `TaskUpdate(B_id, owner="{name}", addBlockedBy=[A_id])` — assign Task B to the same teammate and explicitly mirror the block edge. Do NOT pre-set `status="in_progress"` on either task — the teammate self-claims on arrival.
+5. `Agent(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", prompt="YOUR PACT ROLE: teammate ({name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you.")` — spawn the teammate. Keep the prompt ≤ 800 chars and include the literal `TaskList` reference (or one of: `task list`, `tasks assigned`, `check your tasks`); the teammate reads the mission via `TaskGet(B_id)`, not from the prompt.
 
 #### First-spawn verification (HARD-RULE)
 
@@ -427,10 +429,11 @@ Use the same iterate-by-name pattern for any other team-lead-to-many signal (gra
 
 | Event | Task Operation |
 |-------|----------------|
-| Before dispatching agent | `TaskCreate(subject, description, activeForm)` |
-| After dispatching agent | `TaskUpdate(taskId, status: "in_progress", addBlocks: [PARENT_TASK_ID])` |
-| Agent completes (handoff) | `TaskUpdate(taskId, status: "completed")` |
-| Reading agent's full HANDOFF | `TaskGet(taskId).metadata.handoff` (on-demand, not automatic) |
+| Before dispatching agent | TaskCreate Task A (TEACHBACK) + Task B (work); `TaskUpdate(A, owner=name, addBlocks=[B])` + `TaskUpdate(B, owner=name, addBlockedBy=[A])` — see §11 Dispatch pattern |
+| After dispatching agent | Teammate self-claims via `TaskUpdate(taskId, status="in_progress")`; the team-lead does NOT pre-set `in_progress` |
+| Teachback submitted (Task A) | Read raw JSON `metadata.teachback_submit`, validate per §12 Teachback Review, then Acceptance two-call atomic pair (§12) auto-unblocks Task B |
+| HANDOFF submitted (Task B) | Read raw JSON `metadata.handoff` (TaskGet is metadata-blind), then Acceptance two-call atomic pair (§12) — paired wake-`SendMessage` + `TaskUpdate(taskId, status="completed")` (SendMessage FIRST per the lifecycle-gate ordering invariant) |
+| Reading agent's full HANDOFF | `cat ~/.claude/tasks/{team_name}/{taskId}.json \| jq .metadata.handoff` (on-demand, raw JSON; `TaskGet` does NOT surface metadata.handoff) |
 | Creating downstream phase task | Include upstream task IDs in description for chain-read |
 | Agent reports blocker | `TaskCreate(subject: "BLOCKER: ...", metadata={"type": "blocker"})` then `TaskUpdate(agent_taskId, addBlockedBy: [blocker_taskId])`. **`metadata.type` is required** — `agent_handoff_emitter.py` inline-checks `metadata.type in ("blocker", "algedonic")` and SUPPRESSES journal emission for signal tasks; `shared/task_utils.py` and `shared/session_resume.py` use the same literal to CATEGORIZE signal tasks for recovery display. The subject prefix has no special meaning. |
 | Agent reports algedonic signal | `TaskCreate(subject: "[HALT\|ALERT]: ...", metadata={"type": "algedonic", "level": "halt"\|"alert", "category": "..."})` then amplify scope via `addBlockedBy` on phase/feature task. |
@@ -457,33 +460,33 @@ When an agent reports a blocker or algedonic signal via `SendMessage`:
 
 You — the team-lead — are the **only** actor who marks teammate-owned tasks `completed`. `blockedBy` is pull-only at the platform level — idle teammates cannot self-wake to re-poll, so the wake-signal SendMessage paired with each metadata/status write is load-bearing.
 
-**Acceptance — two-call atomic pair (BOTH required)**
+**Acceptance — two-call atomic pair (BOTH required, SendMessage FIRST)**
 
-1. `TaskUpdate(taskId, status="completed")`
-2. `SendMessage(to=<teammate>, "[team-lead→<teammate>] Task #<id> accepted...", summary="Task accepted")`
+1. `SendMessage(to=<teammate>, "[team-lead→<teammate>] Task #<id> accepted...", summary="Task accepted")`
+2. `TaskUpdate(taskId, status="completed")`
 
-Both calls are required. Skipping the SendMessage leaves the teammate idle on `awaiting_lead_completion`; `blockedBy` resolution is invisible without the wake.
+Both calls are required, in this order. SendMessage must precede TaskUpdate. Skipping the SendMessage leaves the teammate idle on `awaiting_lead_completion`; `blockedBy` resolution is invisible without the wake.
 
-**Rejection — two-call atomic pair (BOTH required)**
+**Rejection — two-call atomic pair (BOTH required, SendMessage FIRST)**
 
-1. `TaskUpdate(taskId, metadata={"teachback_rejection": {...}})` OR `metadata={"handoff_rejection": {...}}` — payload `{reason, corrections, since, revision_number}`
-2. `SendMessage(to=<teammate>, "[team-lead→<teammate>] Rejected on Task #<id>. See metadata...; revise.")`
+1. `SendMessage(to=<teammate>, "[team-lead→<teammate>] Rejected on Task #<id>. See metadata...; revise.")`
+2. `TaskUpdate(taskId, metadata={"teachback_rejection": {...}})` OR `metadata={"handoff_rejection": {...}}` — payload `{reason, corrections, since, revision_number}`
 
-Both calls are required. 3+ rejection cycles on the same task is an imPACT META-BLOCK signal.
+Both calls are required, in this order. SendMessage must precede TaskUpdate. 3+ rejection cycles on the same task is an imPACT META-BLOCK signal.
 
 Teammate self-completion carve-outs (predicate-witnessed): signal-tasks (`metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}`); secretary memory-save (owner's team-config `agentType` ∈ `SELF_COMPLETE_EXEMPT_AGENT_TYPES` — currently `{pact-secretary}`; resolved via team-config lookup, so the carve-out applies regardless of spawn name). Canonical predicate: `is_self_complete_exempt(task, team_name)` in `shared/intentional_wait.py`. Separate path: imPACT force-termination (`metadata.terminated == true`) is team-lead-driven.
 
 **TaskGet metadata-blindness reminder**: `TaskGet` does NOT surface `metadata.handoff`. Read directly via `cat ~/.claude/tasks/{team_name}/{taskId}.json | jq .metadata.handoff`; do NOT mark completed if missing or empty.
 
-**You MUST `Read(file_path="../protocols/pact-completion-authority.md")` before answering** whenever you detect a teachback or HANDOFF arrival, a rejection cycle, or any teammate idle on `awaiting_lead_completion`.
+**You MUST `Read(file_path="../protocols/pact-completion-authority.md")` before answering** whenever you detect a TEACHBACK or HANDOFF arrival, a rejection cycle, or any teammate idle on `awaiting_lead_completion`.
 
 ### Teachback Review
 
-Each specialist dispatch creates a Task A (teachback) + Task B (primary work) pair with `blockedBy=[A]`. Teammate claims A, writes `metadata.teachback_submit` (4 fields per [pact-teachback](../skills/pact-teachback/SKILL.md)), idles on `awaiting_lead_completion`. Read the payload via raw JSON (TaskGet is metadata-blind), apply Validating Incoming Teachbacks below, then accept via the Acceptance two-call atomic pair above; acceptance auto-unblocks Task B. Do NOT mark Task B `completed` or `pending` yourself — the teammate claims on wake.
+Each specialist dispatch is a Task A (TEACHBACK) + Task B (work) pair with `blockedBy=[A]` — see §11 for the canonical sequence. Teammate claims A, writes `metadata.teachback_submit` (4 fields per [pact-teachback](../skills/pact-teachback/SKILL.md)), idles on `awaiting_lead_completion`. Read the payload via raw JSON (TaskGet is metadata-blind), apply Validating Incoming Teachbacks below, then accept via the Acceptance two-call atomic pair above; acceptance auto-unblocks Task B. Do NOT mark Task B `completed` or `pending` yourself — the teammate claims on wake.
 
 #### Validating Incoming Teachbacks
 
-When an agent sends a teachback, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase.
+When an agent sends a TEACHBACK, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase.
 
 #### Expected Agent HANDOFF Format
 
@@ -676,7 +679,7 @@ Use this structure in the `prompt` field to ensure agents have adequate context:
 1. [Step 1]
 2. [Step 2 - explicit skill usage if needed, e.g., "Use pact-security-patterns"]
 3. [Step 3]
-4. **REQUIRED**: Send a teachback to team-lead restating your understanding of the task **before doing any work**. If upstream task references are provided, read them via `TaskGet` first. (See agent-teams skill for format)
+4. **REQUIRED**: Send a TEACHBACK to team-lead restating your understanding of the task **before doing any work**. If upstream task references are provided, read them via `TaskGet` first. (See agent-teams skill for format)
 
 **GUIDELINES**
 
@@ -686,4 +689,4 @@ A list of things that include the following:
 - [Best Practices]
 - [Wisdom from lessons learned]
 - Standard for all dispatches: tell specialists they can query the secretary directly via `SendMessage` (no orchestrator routing).
-- For complex tasks (multi-file changes, architectural decisions, trade-offs): include "Include reasoning_chain in your handoff — explain how your key decisions connect" in the agent's GUIDELINES section.
+- For complex tasks (multi-file changes, architectural decisions, trade-offs): include "Include reasoning_chain in your HANDOFF — explain how your key decisions connect" in the agent's GUIDELINES section.

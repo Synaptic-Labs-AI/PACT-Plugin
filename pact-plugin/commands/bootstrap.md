@@ -17,11 +17,18 @@ Read `team_name` from the **Current Session** block in the project's `CLAUDE.md`
 
 ## Step 2 — Spawn `pact-secretary`
 
-Spawn the session secretary with `subagent_type="pact-secretary"` and the canonical `name="secretary"`. The literal name is load-bearing: `bootstrap_marker_writer.py` checks `member.name == "secretary"` as a marker pre-condition, and the housekeeping dispatch sites assign work via `TaskUpdate(owner="secretary")`. Use the canonical name unless you have a specific reason to override it.
+Spawn the session secretary using the Teachback-Gated Dispatch below (See persona §Agent Teams Dispatch for the canonical pattern applied to other dispatches):
+
+1. `TaskCreate(subject="secretary: TEACHBACK for session briefing", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A
+2. `TaskCreate(subject="secretary: Session briefing + HANDOFF readiness", description="<full mission: deliver session briefing on spawn, answer memory queries during the session, process HANDOFFs at workflow boundaries; CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES per the orchestrator persona §13 Recommended Agent Prompting Structure>")` — Task B
+3. `TaskUpdate(A_id, owner="secretary", addBlocks=[B_id])`
+4. `TaskUpdate(B_id, owner="secretary", addBlockedBy=[A_id])`
+5. `Agent(name="secretary", team_name="{team_name}", subagent_type="pact-secretary", prompt="YOUR PACT ROLE: teammate (secretary).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
+    - **Use `subagent_type="pact-secretary"` and the canonical `name="secretary"` — the literal name is load-bearing**.
 
 The secretary delivers the session briefing at spawn, answers memory queries during the session, and processes HANDOFFs at workflow boundaries. Memory queries from any other agent are blocked until the secretary is alive.
 
-Spawn the secretary once per session — reuse the existing instance on subsequent re-invocations of this command rather than spawning a duplicate.
+Spawn the secretary **only once per session** — reuse the same secretary for any subsequent memory queries or HANDOFF harvesting.
 
 ## Step 3 — Surface paused state
 

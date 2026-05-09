@@ -55,18 +55,16 @@ Agent(
 )
 ```
 
-> ⚠️ **`{teammate-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `YOUR PACT ROLE: teammate ({teammate-name}).` marker line. `name` MUST match `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses — to prevent marker spoofing via injected newlines or close-parens. Examples: `backend-coder-1`, `review-test-engineer-7`, `secretary`.
-
 > **Why store agent_id?** Enables `resume` for blocker recovery — see [Blocker Recovery](#blocker-recovery-resume-vs-fresh-spawn).
 
-### Two-Task Dispatch Shape (TEACHBACK + WORK)
+### Teachback-Gated Dispatch
 
 Every specialist dispatch creates **two tasks**, not one:
 
 - **Task A** — TEACHBACK gate. `subject = "{role}: TEACHBACK for {feature}"`, owner = teammate. Description: teachback expectations + dispatch context.
 - **Task B** — primary work. `subject = "{role}: {mission}"`, owner = teammate, `blockedBy = [<Task A id>]`.
 
-Both are created BEFORE the `Agent(...)` spawn call so the teammate sees them on first `TaskList`. The teammate claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review the teachback, accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review)), and the teammate wakes to claim B.
+Both are created BEFORE the `Agent(...)` spawn call so the teammate sees them on first `TaskList`. The teammate claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review the TEACHBACK, then accept via the two-call atomic pair: `SendMessage(to=teammate, ...)` FIRST, then `TaskUpdate(A, status="completed")` — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review) for the rationale. The teammate wakes to claim B.
 
 **Dispatch sequence (replaces single-task dispatch)**:
 
@@ -75,11 +73,11 @@ Both are created BEFORE the `Agent(...)` spawn call so the teammate sees them on
 A_id = TaskCreate(
     subject="{role}: TEACHBACK for {feature}",
     description="DOGFOOD TEACHBACK GATE for {feature}.\n\n"
-                "Submit teachback by writing metadata.teachback_submit (per pact-teachback skill). "
+                "Submit TEACHBACK by writing metadata.teachback_submit (per pact-teachback skill). "
                 "SET intentional_wait{reason=awaiting_lead_completion, expected_resolver=team-lead}. Idle. "
                 "DO NOT mark this task completed — team-lead-only completion. Lead will mark completed "
                 "after teachback acceptance, then send a wake-SendMessage confirming Task B is claimable. "
-                "If teachback is rejected, team-lead writes metadata.teachback_rejection and sends a "
+                "If TEACHBACK is rejected, team-lead writes metadata.teachback_rejection and sends a "
                 "wake-SendMessage with corrections; revise on this same task.\n\n"
                 "Mission for Task B: see Task #{B_id}."
 )
@@ -101,11 +99,11 @@ TaskUpdate(A_id, addBlocks=[B_id])
 # 3. Spawn the teammate via the canonical Agent() form above.
 ```
 
-The `Agent()` `prompt` does NOT change shape — the two-task dispatch is encoded in the surrounding TaskCreate sequence, not in the `Agent()` call. The teammate discovers Task A + Task B via `TaskList` and follows pact-agent-teams §On Start.
+The `Agent()` `prompt` does NOT change shape — the Teachback-Gated Dispatch is encoded in the surrounding TaskCreate sequence, not in the `Agent()` call. The teammate discovers Task A + Task B via `TaskList` and follows pact-agent-teams §On Start.
 
 **Carve-outs** — single-task dispatch still applies for:
 
-- **Auditor signal-tasks** (`metadata.completion_type="signal"`): no teachback, no Task B. The auditor IS observing; their task IS the signal.
+- **Auditor signal-tasks** (`metadata.completion_type="signal"`): no TEACHBACK, no Task B. The auditor IS observing; their task IS the signal.
 - **Secretary memory-save tasks**: secretary self-completes; the standard On Completion flow applies via the team-config-keyed `SELF_COMPLETE_EXEMPT_AGENT_TYPES` set in `shared/intentional_wait.py` (resolved on `member.agentType`, so the carve-out applies regardless of spawn name).
 - **imPACT force-termination**: `TaskStop` + team-lead-set `metadata.terminated=true` is its own out-of-band path. See [imPACT.md](imPACT.md).
 
@@ -427,14 +425,14 @@ When a phase is skipped but a coder encounters a decision that would have been h
 | Decision Scope | Examples | Action |
 |----------------|----------|--------|
 | **Minor** | Naming conventions, local file structure, error message wording | Coder decides, documents in commit message |
-| **Moderate** | Interface shape within your module, error handling pattern, internal component boundaries | Coder decides and implements, but flags decision with rationale in handoff; orchestrator validates before next phase |
+| **Moderate** | Interface shape within your module, error handling pattern, internal component boundaries | Coder decides and implements, but flags decision with rationale in HANDOFF; orchestrator validates before next phase |
 | **Major** | New module needed, cross-module contract, architectural pattern affecting multiple components | Blocker → `/PACT:imPACT` → may need to run skipped phase |
 
 **Boundary heuristic**: If a decision affects files outside the current specialist's scope, treat it as Major.
 
 **Coder instruction when phases were skipped**:
 
-> "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the handoff so it can be validated. Major decisions affecting other components are blockers—don't implement, escalate."
+> "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the HANDOFF so it can be validated. Major decisions affecting other components are blockers—don't implement, escalate."
 
 ---
 
@@ -446,12 +444,18 @@ When a phase is skipped but a coder encounters a decision that would have been h
 - "Preparation Phase"
 - "Open Questions > Require Further Research"
 
-**Dispatch `pact-preparer`** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above. Task A subject: `"preparer: TEACHBACK for {feature}"`. Task B is the research mission below:
+**Dispatch `pact-preparer`** — follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
-1. `TaskCreate(subject="preparer: research {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
-   - Include task description, plan sections (if any), and "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
-2. `TaskUpdate(taskId, owner="preparer")`
-3. **Journal event**: Write `agent_dispatch` before spawning:
+1. `TaskCreate(subject="preparer: TEACHBACK for {feature}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
+2. `TaskCreate(subject="preparer: research {feature}", description=<see below>)` — Task B.
+   - Task B's `description` content (CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES per §13):
+     - CONTEXT: [task description, plan sections (if any)]
+     - MISSION: [research mission]
+     - INSTRUCTIONS: [preparer-specific instructions]
+     - GUIDELINES: "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
+3. `TaskUpdate(A_id, owner="preparer", addBlocks=[B_id])`
+4. `TaskUpdate(B_id, owner="preparer", addBlockedBy=[A_id])`
+5. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
@@ -460,7 +464,7 @@ When a phase is skipped but a coder encounters a decision that would have been h
    {"agent": "preparer", "task_id": "{taskId}", "phase": "PREPARE", "scope": []}
 JSON
    ```
-4. Spawn the preparer with the canonical dispatch form:
+6. Spawn the preparer with the canonical dispatch form:
 
 ```
 Agent(
@@ -475,7 +479,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 
 **Before next phase**:
 - [ ] Outputs exist in `docs/preparation/`
-- [ ] Specialist handoff received
+- [ ] Specialist HANDOFF received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable? Optionally query secretary for S4 pattern check (variety 7+). See [pact-orchestrator §Memory Management](../agents/pact-orchestrator.md#memory-management).
 
@@ -535,15 +539,18 @@ When detection fires (score >= threshold), follow the evaluation response protoc
 - "Key Decisions"
 - "Interface Contracts"
 
-**Dispatch `pact-architect`** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above. Task A subject: `"architect: TEACHBACK for {feature}"`. Task B is the design mission below:
+**Dispatch `pact-architect`** — follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
-1. `TaskCreate(subject="architect: design {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
-   - Include task description, where to find PREPARE outputs (e.g., "Read `docs/preparation/{feature}.md`"), plan sections (if any), and plan reference.
-   - Include upstream task reference: "Preparer task: #{taskId} — read via `TaskGet` for research decisions and context."
-   - Do not read phase output files yourself or paste their content into the task description.
-   - If PREPARE was skipped: pass the plan's Preparation Phase section instead.
-2. `TaskUpdate(taskId, owner="architect")`
-3. **Journal event**: Write `agent_dispatch` before spawning:
+1. `TaskCreate(subject="architect: TEACHBACK for {feature}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
+2. `TaskCreate(subject="architect: design {feature}", description=<see below>)` — Task B.
+   - Task B's `description` content (CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES per §13):
+     - CONTEXT: [task description, where to find PREPARE outputs (e.g., "Read `docs/preparation/{feature}.md`"), plan sections (if any), plan reference]
+     - MISSION: [design mission]
+     - INSTRUCTIONS: "Preparer task: #{taskId} — read via `TaskGet` for research decisions and context."
+     - GUIDELINES: Do not read phase output files yourself or paste their content into the task description. If PREPARE was skipped: pass the plan's Preparation Phase section instead.
+3. `TaskUpdate(A_id, owner="architect", addBlocks=[B_id])`
+4. `TaskUpdate(B_id, owner="architect", addBlockedBy=[A_id])`
+5. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
@@ -552,7 +559,7 @@ When detection fires (score >= threshold), follow the evaluation response protoc
    {"agent": "architect", "task_id": "{taskId}", "phase": "ARCHITECT", "scope": []}
 JSON
    ```
-4. Spawn the architect with the canonical dispatch form:
+6. Spawn the architect with the canonical dispatch form:
 
 ```
 Agent(
@@ -567,7 +574,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 
 **Before next phase**:
 - [ ] Outputs exist in `docs/architecture/`
-- [ ] Specialist handoff received
+- [ ] Specialist HANDOFF received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
 
@@ -651,22 +658,25 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
 JSON
 ```
 
-**Include worktree path in all agent prompts**: "You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree. Note: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead."
+**Include worktree path in all agent prompts**: "You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree. Note: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your HANDOFF instead."
 
 **Progress monitoring**: For tasks where mid-flight visibility matters (variety 7+, parallel execution, novel domains), include in the agent prompt: "Send progress signals per the agent-teams skill Progress Signals section."
 
-**Dispatch coder(s)** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above for each coder. Task A subject: `"{coder-type}: TEACHBACK for {scope}"`. Task B is the implementation mission below:
+**Dispatch coder(s)** — for each coder needed, follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
-For each coder needed:
-1. `TaskCreate(subject="{coder-type}: implement {scope}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
-   - Include task description, where to find ARCHITECT outputs (e.g., "Read `docs/architecture/{feature}.md`"), plan sections (if any), plan reference.
-   - Include upstream task references: "Architect task: #{taskId} — read via `TaskGet` for design decisions." If multiple coders are dispatched concurrently, include peer names: "Your peers on this phase: {other-coder-names}."
-   - Do not read phase output files yourself or paste their content into the task description.
-   - If ARCHITECT was skipped: pass the plan's Architecture Phase section instead.
-   - If PREPARE/ARCHITECT were skipped, include: "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the handoff so it can be validated. Major decisions affecting other components are blockers—don't implement, escalate."
-   - Include: "Smoke Testing: Run the test suite before completing. If your changes break existing tests, fix them. Your tests are verification tests—enough to confirm your implementation works. Comprehensive coverage (edge cases, integration, E2E, adversarial) is TEST phase work."
-2. `TaskUpdate(taskId, owner="{coder-name}")`
-3. **Journal event**: Write `agent_dispatch` before spawning each coder:
+1. `TaskCreate(subject="{coder-type}: TEACHBACK for {scope}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
+2. `TaskCreate(subject="{coder-type}: implement {scope}", description=<see below>)` — Task B.
+   - Task B's `description` content (CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES per §13):
+     - CONTEXT: Where to find ARCHITECT outputs (e.g., "Read `docs/architecture/{feature}.md`"), plan sections (if any), plan reference. (NOTE: Do not read the phase output files yourself or paste their content into the task description.)
+     - MISSION: [implementation mission]
+     - INSTRUCTIONS: "Architect task: #{taskId} — read via `TaskGet` for design decisions." If multiple coders are dispatched concurrently, include peer names: "Your peers on this phase: {other-coder-names}."
+     - GUIDELINES:
+       - If ARCHITECT was skipped: pass the plan's Architecture Phase section instead.
+       - If PREPARE/ARCHITECT were skipped, include: "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the HANDOFF so it can be validated. Major decisions affecting other components are blockers—don't implement, escalate."
+       - "Smoke Testing: Run the test suite before completing. If your changes break existing tests, fix them. Your tests are verification tests—enough to confirm your implementation works. Comprehensive coverage (edge cases, integration, E2E, adversarial) is TEST phase work."
+3. `TaskUpdate(A_id, owner="{coder-name}", addBlocks=[B_id])`
+4. `TaskUpdate(B_id, owner="{coder-name}", addBlockedBy=[A_id])`
+5. **Journal event**: Write `agent_dispatch` before spawning each coder:
    ```bash
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
@@ -675,7 +685,7 @@ For each coder needed:
    {"agent": "{coder-name}", "task_id": "{taskId}", "phase": "CODE", "scope": ["{assigned_paths}"]}
 JSON
    ```
-4. Spawn each coder with the canonical dispatch form:
+6. Spawn each coder with the canonical dispatch form:
 
 ```
 Agent(
@@ -719,7 +729,7 @@ The auditor stores its final signal as `metadata.audit_summary` via `TaskUpdate`
 **Before next phase**:
 - [ ] Implementation complete
 - [ ] All tests passing (full test suite; fix any tests your changes break)
-- [ ] Specialist handoff(s) received
+- [ ] Specialist HANDOFF(s) received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment). Lead owns commits; specialists stage + SendMessage "stage-ready" and wait. A staging specialist should SET the `intentional_wait` task metadata (reason `awaiting_lead_commit`, resolver `lead`) before the stage-ready notify so TeammateIdle hooks do not nag while the team-lead works through the commit sequence; CLEAR on the team-lead's commit confirmation. See the "Intentional Waiting" section in `pact-agent-teams/SKILL.md` for the SET/CLEAR contract.
 - [ ] **Journal event**: After each commit, write a `commit` event:
@@ -787,13 +797,18 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
 - "Test Scenarios"
 - "Coverage Targets"
 
-**Dispatch `pact-test-engineer`** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above. Task A subject: `"test-engineer: TEACHBACK for {feature}"`. Task B is the testing mission below:
+**Dispatch `pact-test-engineer`** — follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
-1. `TaskCreate(subject="test-engineer: test {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
-   - Include task description, coder task references (e.g., "Coder tasks: #{id1}, #{id2} — read via `TaskGet` for implementation decisions and flagged uncertainties"), plan sections (if any), plan reference.
-   - Include: "You own ALL substantive testing: unit tests, integration, E2E, edge cases."
-2. `TaskUpdate(taskId, owner="test-engineer")`
-3. **Journal event**: Write `agent_dispatch` before spawning:
+1. `TaskCreate(subject="test-engineer: TEACHBACK for {feature}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
+2. `TaskCreate(subject="test-engineer: test {feature}", description=<see below>)` — Task B.
+   - Task B's `description` content (CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES per §13):
+     - CONTEXT: [task description, coder task references (e.g., "Coder tasks: #{id1}, #{id2} — read via `TaskGet` for implementation decisions and flagged uncertainties"), plan sections (if any), plan reference]
+     - MISSION: [testing mission]
+     - INSTRUCTIONS: [test-engineer-specific instructions]
+     - GUIDELINES: "You own ALL substantive testing: unit tests, integration, E2E, edge cases."
+3. `TaskUpdate(A_id, owner="test-engineer", addBlocks=[B_id])`
+4. `TaskUpdate(B_id, owner="test-engineer", addBlockedBy=[A_id])`
+5. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
@@ -802,7 +817,7 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
    {"agent": "test-engineer", "task_id": "{taskId}", "phase": "TEST", "scope": []}
 JSON
    ```
-4. Spawn the test engineer with the canonical dispatch form:
+6. Spawn the test engineer with the canonical dispatch form:
 
 ```
 Agent(
@@ -815,7 +830,7 @@ Agent(
 
 **Before completing**:
 - [ ] All tests passing
-- [ ] Specialist handoff received
+- [ ] Specialist HANDOFF received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **Agreement verification (L2)**: Before creating PR, verify implementation fulfills original purpose. `SendMessage` to test engineer to verify: "Does the tested implementation match the original requirements?" Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **Create atomic commit(s)** of TEST phase work (preserves work before strategic re-assessment)

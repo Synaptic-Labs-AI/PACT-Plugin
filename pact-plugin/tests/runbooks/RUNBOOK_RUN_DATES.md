@@ -8,6 +8,14 @@ informs the fallback-ladder trigger criteria evaluation across sessions
 (the lazy-load fidelity dogfooding signal cannot be CI-tested; runbook
 data is the substitute).
 
+## 591-inbox-wake.md
+
+| Run date (UTC) | Operator | Plugin version | Sections passed | inline-mission mode | Notes / per-section observations |
+| -------------- | -------- | -------------- | --------------- | ------------------- | -------------------------------- |
+| _pending — execute post-merge in fresh session_ | | | /9 | n/a | Arm-on-first-active-task (§5 step 3) PASS/FAIL · STATE_FILE on disk (§5 step 4) PASS/FAIL · FIRST_GROW + LAST_GROW (§5 steps 5-7) PASS/FAIL · Teardown on last-task transition (§5 step 8) PASS/FAIL · /wrap-up safety-net Teardown idempotent (§5 step 9) PASS/FAIL. |
+
+Sections-passed denominator is 9 per runbook §5 (the End-to-End Runbook nine steps). The inline-mission mode column does not apply to this runbook (`n/a`); the column is retained for cross-runbook column parity. If a step fails, map to the failure modes in runbook §3 and file a follow-up issue with the journal evidence.
+
 ## 662-dispatch-gate.md
 
 | Run date (UTC) | Operator | Plugin version | Sections passed | inline-mission mode | Notes / counter-test outcomes |
@@ -15,6 +23,14 @@ data is the substitute).
 | _pending — execute post-merge in fresh session_ | | 4.1.3 | /8 | warn (default) | matcher-fidelity (§1+§1.1) PASS/FAIL · Bash-touch bypass (§2+§2.1) PASS/FAIL · inline-mission advisory injection (§3) WARN-visible / WARN-dropped → flipped to deny · inline-mission shadow (§3.1) PASS/FAIL · inline-mission deny (§3.2) PASS/FAIL · sabotaged-import fail-closed (§4) PASS/FAIL. |
 
 Sections-passed denominator is 8 per runbook §5 (§1, §1.1, §2, §2.1, §3, §3.1, §3.2, §4). The inline-mission mode column records whether the empirical observation kept the production default at `warn` or motivated a flip to `deny`. If a section fails, file a follow-up issue and link it in the Notes column.
+
+## 691-bootstrap-secretary-dispatch.md
+
+| Run date (UTC) | Operator | Plugin version | Sections passed | inline-mission mode | Notes / per-section observations |
+| -------------- | -------- | -------------- | --------------- | ------------------- | -------------------------------- |
+| _pending — execute post-merge in fresh session_ | | 4.1.6 | /4 | warn (default) | gate-clean spawn (§1) PASS/FAIL · Task A/B structural shape (§2) PASS/FAIL · acceptance two-call pair (§3) PASS/FAIL · briefing-within-one-wake (§4) PASS/FAIL. |
+
+Sections-passed denominator is 4 per runbook §5 (§1, §2, §3, §4). The inline-mission mode column records whether the production default (`warn`) was in effect during the run or whether the operator overrode to `deny` / `shadow`. If a section fails, file a follow-up issue per the severity tiers in runbook §5 and link it in the Notes column.
 
 ## v4.0.0-launch-and-isolation.md
 

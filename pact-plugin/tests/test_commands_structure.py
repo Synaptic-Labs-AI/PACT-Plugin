@@ -173,7 +173,7 @@ CONSUMER_COMMANDS = [
 CANONICAL_FORM_COMPONENTS = [
     ("PACT_ROLE_marker", "YOUR PACT ROLE: teammate ("),
     ("team_join_note", "joining team"),
-    ("two_task_anchor", "Two-Task Dispatch Shape"),
+    ("teachback_gated_anchor", "Teachback-Gated Dispatch"),
     ("addBlockedBy_call", "addBlockedBy"),
 ]
 
@@ -205,7 +205,7 @@ class TestPactRoleTeammateInConsumerCommandsByComponent:
 
     Diagnostic axis = WHICH COMPONENT of the canonical dispatch form leaked.
     For each canonical-form component (PACT ROLE marker, team-join note,
-    two-task anchor, addBlockedBy call), assert it appears in at least one
+    Teachback-Gated Dispatch anchor, addBlockedBy call), assert it appears in at least one
     consumer command. Together with Class A (file axis), Class A failures
     isolate the file while Class B failures isolate the component —
     independent diagnostic signal.
@@ -428,5 +428,150 @@ class TestNoDanglingOrchestrationSkillRefs:
         assert not offenders, (
             f"Files contain dangling xref to deleted {self.FORBIDDEN_REF!r}:\n"
             + "\n".join(f"  - {f}" for f in offenders)
+        )
+
+
+class TestDispatchGatePhraseSync:
+    """Pin §Agent Teams Dispatch prose against dispatch_gate.TASK_REFERENCE_PHRASES.
+
+    Silent-drift defense: if either the source-of-truth tuple in
+    pact-plugin/hooks/dispatch_gate.py or the persona §Agent Teams Dispatch
+    section in pact-plugin/agents/pact-orchestrator.md is edited without the
+    other, this test fails. The two surfaces must enumerate the same accepted
+    phrases — the persona prose tells the orchestrator which phrases satisfy
+    the inline-mission heuristic, the runtime tuple decides what actually
+    counts.
+    """
+
+    PERSONA_FILE = COMMANDS_DIR.parent / "agents" / "pact-orchestrator.md"
+
+    def _agent_teams_dispatch_section(self) -> str:
+        """Return the body of the §Agent Teams Dispatch section.
+
+        Section-scope (not step-5-paragraph-scope): tolerates phrase
+        enumeration moving within the section while still catching deletion
+        of any phrase from the section entirely.
+        """
+        text = self.PERSONA_FILE.read_text(encoding="utf-8")
+        start_match = re.search(r"^## \d+\. Agent Teams Dispatch\b", text, re.MULTILINE)
+        assert start_match is not None, (
+            "pact-orchestrator.md missing §Agent Teams Dispatch section header"
+        )
+        start = start_match.start()
+        end_match = re.search(r"^## \d+\. ", text[start_match.end():], re.MULTILINE)
+        end = start_match.end() + (end_match.start() if end_match else len(text) - start_match.end())
+        return text[start:end]
+
+    def test_persona_section_contains_all_runtime_phrases(self):
+        import dispatch_gate
+
+        runtime_phrases = getattr(dispatch_gate, "TASK_REFERENCE_PHRASES")
+        assert isinstance(runtime_phrases, tuple) and runtime_phrases, (
+            "dispatch_gate.TASK_REFERENCE_PHRASES must be a non-empty tuple"
+        )
+
+        section = self._agent_teams_dispatch_section()
+        missing = [p for p in runtime_phrases if p not in section]
+        assert not missing, (
+            "Persona §Agent Teams Dispatch section is missing phrase(s) from "
+            f"dispatch_gate.TASK_REFERENCE_PHRASES: {missing!r}. Update either "
+            "pact-plugin/agents/pact-orchestrator.md §Agent Teams Dispatch "
+            "step 5 prose or pact-plugin/hooks/dispatch_gate.py "
+            "TASK_REFERENCE_PHRASES so they enumerate the same accepted phrases."
+        )
+
+
+class TestPerLoopDispatchSites:
+    """Structural pin for the 9 per-loop dispatch sites across command files.
+
+    Each site is identified by the literal lead-in
+    `follow the steps for [Teachback-Gated Dispatch]`. The block following
+    the lead-in must contain the canonical Teachback-Gated Dispatch shape:
+    at least two TaskCreate calls, at least two TaskUpdate calls, and at
+    least one Agent( spawn. Substring counting (not strict regex) tolerates
+    minor stylistic edits while still catching real drift such as a missing
+    TaskCreate, a single TaskUpdate, or an omitted Agent spawn.
+    """
+
+    LEAD_IN = "follow the steps for [Teachback-Gated Dispatch]"
+
+    # 9 per-loop dispatch sites. Each entry is
+    # (relative_command_path, lead_in_line_number_1based, role_or_phase_label).
+    SITES = [
+        ("orchestrate.md", 447, "PREPARE"),
+        ("orchestrate.md", 542, "ARCHITECT"),
+        ("orchestrate.md", 665, "CODE"),
+        ("orchestrate.md", 800, "TEST"),
+        ("comPACT.md", 209, "MultipleSpecialists"),
+        ("comPACT.md", 253, "SingleSpecialist"),
+        ("peer-review.md", 173, "Reviewers"),
+        ("plan-mode.md", 218, "Consultants"),
+        ("rePACT.md", 244, "SubScopeSpecialists"),
+    ]
+
+    @staticmethod
+    def _site_block(text: str, lead_in_line: int) -> str:
+        """Return the block of lines following the lead-in.
+
+        Reads up to 40 lines after the lead-in (1-based). The canonical
+        Teachback-Gated Dispatch sequence fits comfortably within that
+        window across all observed sites; oversized windows that span into
+        adjacent sections produce false positives, undersized windows miss
+        steps. 40 lines is empirically sufficient.
+        """
+        lines = text.splitlines()
+        start = lead_in_line  # 0-based index for the line AFTER the lead-in (lead_in_line is 1-based).
+        end = min(len(lines), start + 40)
+        return "\n".join(lines[start:end])
+
+    @pytest.mark.parametrize(
+        "rel_path,lead_in_line,label",
+        SITES,
+        ids=[f"{rel}:line{ln}:{lbl}" for rel, ln, lbl in SITES],
+    )
+    def test_dispatch_site_has_canonical_shape(self, rel_path, lead_in_line, label):
+        path = COMMANDS_DIR / rel_path
+        assert path.is_file(), f"Command file missing: {rel_path}"
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+
+        # Verify the lead-in is at the recorded line (1-based). If the
+        # command file was reorganized, the line anchor must be updated in
+        # SITES — the test surfaces the drift instead of silently passing
+        # against a different block.
+        assert 1 <= lead_in_line <= len(lines), (
+            f"{rel_path}:{label}: SITES line anchor {lead_in_line} out of "
+            f"range (file has {len(lines)} lines)."
+        )
+        assert self.LEAD_IN in lines[lead_in_line - 1], (
+            f"{rel_path}:{label}: SITES line anchor {lead_in_line} no longer "
+            f"contains lead-in {self.LEAD_IN!r}. Re-locate the per-loop "
+            "dispatch site and update SITES."
+        )
+
+        block = self._site_block(text, lead_in_line)
+        task_create_count = block.count("TaskCreate")
+        task_update_count = block.count("TaskUpdate")
+        agent_spawn_count = block.count("Agent(")
+
+        problems = []
+        if task_create_count < 2:
+            problems.append(
+                f"expected ≥2 TaskCreate occurrences, found {task_create_count}"
+            )
+        if task_update_count < 2:
+            problems.append(
+                f"expected ≥2 TaskUpdate occurrences, found {task_update_count}"
+            )
+        if agent_spawn_count < 1:
+            problems.append(
+                f"expected ≥1 Agent( occurrence, found {agent_spawn_count}"
+            )
+
+        assert not problems, (
+            f"{rel_path}:line{lead_in_line}:{label} per-loop dispatch site is "
+            f"missing canonical Teachback-Gated Dispatch shape:\n  - "
+            + "\n  - ".join(problems)
+            + f"\n\nBlock under test:\n{block}"
         )
 
