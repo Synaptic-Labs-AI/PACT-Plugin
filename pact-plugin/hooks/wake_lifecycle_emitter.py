@@ -12,14 +12,32 @@ Lifecycle automation:
   is absent, malformed, or older than the freshness window, emit
   a watch-inbox directive instructing the lead to invoke
   Skill("PACT:watch-inbox").
+- On TaskUpdate(status == in_progress) when the watch-inbox
+  STATE_FILE is absent or stale AND the team has at least one
+  lifecycle-relevant active task, emit a watch-inbox directive.
+  Re-Arm path covering cold-start (initial Arm never fired),
+  post-Teardown recovery (eager 1->0 Teardown unlinked the
+  STATE_FILE), mid-session resume, and Monitor-died-silently
+  cases categorically. STATE_FILE absence/staleness is the
+  implicit 1-bit pre-state proxy for "no live Monitor."
 - On TaskUpdate(status in {completed, deleted}) that drives the
   team's lifecycle-relevant active-task count to zero, emit an
   unwatch-inbox directive instructing the lead to invoke
   Skill("PACT:unwatch-inbox"). Both terminal statuses end active
-  work and are treated symmetrically.
-- On any other tool fire (TaskUpdate without a terminal-status
-  transition, TaskCreate when the count is zero, terminal-status
-  TaskUpdate leaving residual active tasks): no directive emitted.
+  work and are treated symmetrically. EXCEPTION: when the just-
+  completed task has a same-teammate-owned active continuation
+  in its `blocks` chain (per `has_same_teammate_continuation`,
+  which reads the resolved on-disk `blocks` field with `addBlocks`
+  as forward-compat fallback), the Teardown is deferred — the
+  teammate is staged to claim the next task imminently, so the
+  1->0 transient is suppressed to avoid a phantom Monitor-down
+  audit signal and a brief Monitor-down window for inbound
+  SendMessages.
+- On any other tool fire (TaskUpdate with neither a terminal-
+  status nor a pending->in_progress transition, TaskCreate when
+  the count is zero, terminal-status TaskUpdate leaving residual
+  active tasks or a same-teammate continuation): no directive
+  emitted.
 
 Transition detection (post-only):
 - post = count_active_tasks(team_name) — the count AFTER the tool's
@@ -35,12 +53,29 @@ Transition detection (post-only):
   the freshness window expires, the next TaskCreate emits Arm
   regardless of STATE_FILE presence, providing a bounded periodic
   re-arm trigger.
-- TaskUpdate(status in {completed, deleted}) + post == 0 → emit
-  Teardown. Skill's Teardown is idempotent (no-op if STATE_FILE absent),
-  so over-eager emission on edge cases (terminal-status update of a
-  never-counted signal-task while post==0) is benign.
-- Any other tool fire (non-status TaskUpdate, TaskCreate at post == 0,
-  terminal-status TaskUpdate at post > 0): no-op.
+- TaskUpdate(status == in_progress) + post >= 1 + STATE_FILE freshness
+  expired (or absent / malformed) → emit Arm. Mirrors the TaskCreate
+  Arm semantics; the STATE_FILE freshness gate is the same categorical
+  Arm-suppression mechanism (no redundant emit when the Monitor was
+  recently armed). Predicate is single-source on `tool_input.status`
+  per the empirical fixture constraint at
+  `tests/fixtures/wake_lifecycle/task_update_production_shape.json`
+  (FLAT tool_response, no statusChange.from field).
+- TaskUpdate(status in {completed, deleted}) + post == 0 + NO same-
+  teammate continuation → emit Teardown. Skill's Teardown is
+  idempotent (no-op if STATE_FILE absent), so over-eager emission on
+  edge cases (terminal-status update of a never-counted signal-task
+  while post==0) is benign. The same-teammate continuation guard
+  (`has_same_teammate_continuation`) defers Teardown when the
+  completing task has at least one task in its `blocks` chain (the
+  resolved on-disk field; `addBlocks` is the additive TaskUpdate API
+  parameter, normalized into `blocks` on the stored record) whose
+  owner matches and which passes `_lifecycle_relevant`, suppressing
+  the phantom 1->0 transient in canonical Two-Task Dispatch handoffs.
+- Any other tool fire (TaskUpdate with neither in_progress nor
+  terminal status, TaskCreate at post == 0, terminal-status TaskUpdate
+  at post > 0, terminal-status TaskUpdate at post == 0 with same-
+  teammate continuation): no-op.
 
 The Arm threshold (post >= 1) and `session_init.py`'s SessionStart
 Arm threshold (active_count > 0) apply the same minimum-positive-count
@@ -83,7 +118,8 @@ if str(_hooks_dir) not in sys.path:
 import shared.pact_context as pact_context
 from shared.pact_context import get_team_name
 from shared.session_state import is_safe_path_component
-from shared.wake_lifecycle import count_active_tasks
+from shared.task_utils import read_task_json
+from shared.wake_lifecycle import count_active_tasks, has_same_teammate_continuation
 
 # Suppress the false "hook error" UI surface on bare exit paths.
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -325,6 +361,36 @@ def _is_terminal_status_update(input_data: dict[str, Any]) -> bool:
     return False
 
 
+def _is_pending_to_in_progress_transition(input_data: dict[str, Any]) -> bool:
+    """
+    Return True iff this TaskUpdate fired with a status transition to
+    in_progress. Used by the re-Arm branch of `_decide_directive` to
+    detect a teammate claiming a task off the queue when the watch-
+    inbox STATE_FILE is absent or stale.
+
+    Single-source probe of `tool_input.status == "in_progress"`. NO
+    `tool_response.statusChange.to` fallback and NO flat
+    `tool_response.status` fallback: production TaskUpdate payloads
+    captured under `tests/fixtures/wake_lifecycle/
+    task_update_production_shape.json` are FLAT
+    (`tool_response = {id, subject, status, owner}` — no statusChange
+    key) and the flat `tool_response.status` field is the post-state,
+    identical to `tool_input.status`. Adding either fallback would be
+    redundant at best and a regression vector at worst (a future
+    platform change that flips `tool_input.status` to optional would
+    silently get covered by the redundant probe and mask the breakage).
+
+    Mirrors `_is_terminal_status_update` shape for consistency.
+    Conservative: returns False on missing/non-dict tool_input or any
+    status value other than the literal string `"in_progress"`.
+    """
+    tool_input = input_data.get("tool_input") or {}
+    if isinstance(tool_input, dict):
+        if tool_input.get("status") == "in_progress":
+            return True
+    return False
+
+
 def _emit_directive(prose: str) -> None:
     """
     Print the additionalContext output payload with the required
@@ -391,11 +457,49 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
         return _ARM_DIRECTIVE
 
     # tool_name == "TaskUpdate"
+    # Re-Arm branch on pending->in_progress transition. STATE_FILE
+    # absence (or staleness past the freshness window) is the implicit
+    # 1-bit pre-state proxy for "no live Monitor." Categorically covers
+    # cold-start (initial Arm never fired), post-Teardown recovery
+    # (eager 1->0 Teardown unlinked the STATE_FILE), and Monitor-died-
+    # silently. Mirrors the TaskCreate Arm semantics above so a single
+    # mental model — "Arm whenever post >= 1 AND STATE_FILE not fresh"
+    # — covers both surfaces. Empirical anchor:
+    # `tests/fixtures/wake_lifecycle/task_update_production_shape.json`
+    # fossilizes the FLAT tool_response (no statusChange.from), so the
+    # transition predicate consumes `tool_input.status` only.
+    if _is_pending_to_in_progress_transition(input_data):
+        if count_active_tasks(team_name) < 1:
+            return None
+        if _statefile_is_fresh(team_name):
+            return None
+        return _ARM_DIRECTIVE
+
     if not _is_terminal_status_update(input_data):
         return None
-    if count_active_tasks(team_name) == 0:
-        return _TEARDOWN_DIRECTIVE
-    return None
+    if count_active_tasks(team_name) != 0:
+        return None
+    # Defer the 1->0 Teardown when the just-completed task has a same-
+    # teammate-owned active continuation in its `blocks` chain. The
+    # teammate is staged to claim the next task imminently, so emitting
+    # Teardown would (a) surface a phantom Monitor-down audit signal,
+    # and (b) leave a brief Monitor-down window during which inbound
+    # SendMessages would not wake the lead. `has_same_teammate_
+    # continuation` reads `blocks` (the resolved on-disk field) with
+    # `addBlocks` as forward-compat fallback (note: `addBlocks` is the
+    # additive TaskUpdate API parameter — typically null on disk after
+    # the platform merges it into `blocks`; do NOT re-introduce
+    # `addBlocks` as the primary read field, that was a silent-inert
+    # bug). Reuses `_lifecycle_relevant` for unified active + carve-out
+    # semantics, so any future expansion of
+    # SELF_COMPLETE_EXEMPT_AGENT_TYPES is handled transparently. The
+    # predicate fail-closes (returns False) on any error path, which
+    # preserves the existing Teardown emit behavior on parse failures.
+    task_id = _extract_task_id(input_data)
+    completed_task = read_task_json(task_id, team_name) if task_id else {}
+    if has_same_teammate_continuation(completed_task, team_name):
+        return None
+    return _TEARDOWN_DIRECTIVE
 
 
 def main() -> None:

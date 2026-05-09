@@ -16,6 +16,16 @@ Public surface:
     _lifecycle_relevant returns True. `team_name` is threaded through
     to `_lifecycle_relevant` so the agentType carve-out can resolve via
     team config.
+- has_same_teammate_continuation(completed_task, team_name) -> bool
+    Predicate. True iff the just-completed task has at least one task
+    in its continuation chain (`blocks` field on disk; falls back to
+    `addBlocks` for forward-compat) whose owner equals the completed
+    task's owner AND `_lifecycle_relevant` returns True. Consumers
+    (the deferred-Teardown branch in
+    `wake_lifecycle_emitter._decide_directive`) use this to suppress
+    the 1->0 Teardown emit when a same-teammate continuation is staged
+    for handoff. Pure function; never raises; fail-closed (returns
+    False on every error path so Teardown emits unchanged).
 - _lifecycle_relevant(task, team_name="") -> bool
     Predicate. True iff the task counts toward the active-work tally that
     arms/tears down the wake mechanism.
@@ -44,7 +54,7 @@ and the inline-literal signal-task pattern at agent_handoff_emitter.py):
 from typing import Any
 
 from shared.intentional_wait import _is_exempt_agent_type
-from shared.task_utils import iter_team_task_jsons
+from shared.task_utils import iter_team_task_jsons, read_task_json
 
 # Signal-task types — inline literal mirrors the convention at
 # agent_handoff_emitter.py:78 and task_utils.find_blockers. The carve-out
@@ -147,3 +157,95 @@ def count_active_tasks(team_name: str) -> int:
         for task in iter_team_task_jsons(team_name)
         if _lifecycle_relevant(task, team_name)
     )
+
+
+# Defer Teardown when the just-completed task has a same-teammate-owned
+# active continuation chain. Two distinct values over emitting Teardown
+# and letting a later TaskUpdate(in_progress) re-Arm:
+#   1. Cleaner audit trail — the false-positive 1->0 transition signal
+#      never fires, so observers don't see a phantom Monitor-down event.
+#   2. Zero Monitor-down window — between the eager Teardown and the
+#      teammate's claim of the next task, inbound SendMessages would
+#      not wake the lead. Deferring Teardown closes this window.
+# Reuses `_lifecycle_relevant(blocked_task, team_name)` for unified
+# active-status + carve-out semantics, so any future expansion of
+# SELF_COMPLETE_EXEMPT_AGENT_TYPES is handled transparently.
+#
+# Field-name discipline (load-bearing): the on-disk task .json stores
+# the resolved continuation list under `blocks` (a list of task IDs).
+# `addBlocks` is the TaskUpdate API parameter (additive verb) — it
+# appears in the request payload but is normalized into `blocks` on the
+# stored record (and is typically `null` on disk after the merge). This
+# predicate reads `blocks` as the load-bearing field and falls back to
+# `addBlocks` only as a forward-compat / test-fixture convenience.
+# Consumer: wake_lifecycle_emitter._decide_directive deferred-Teardown
+# branch.
+def has_same_teammate_continuation(completed_task: Any, team_name: str) -> bool:
+    """
+    Return True iff the just-completed task has at least one task in its
+    continuation chain whose owner equals the completed task's owner
+    AND `_lifecycle_relevant` returns True.
+
+    Args:
+        completed_task: The task dict (as returned by `read_task_json`)
+            for the task whose completion triggered the Teardown
+            evaluation. May be `{}` or any non-dict on read failure.
+        team_name: Team name for scoped task lookup. Threaded through to
+            `read_task_json` and `_lifecycle_relevant` so the agentType
+            carve-out can resolve via team config.
+
+    Returns:
+        True iff a same-teammate active continuation exists. False on
+        every error path (non-dict input, missing owner, missing /
+        non-list continuation chain, non-string blocked id, read
+        failure on blocked task, no matching continuation found).
+
+    Pure function; never raises. Fail-closed (return False) means the
+    caller does NOT defer Teardown — the existing 1->0 emit behavior is
+    preserved on every failure mode. Teardown is idempotent in the
+    skill layer, so a fail-closed over-emit is benign; the alternative
+    (fail-open to "defer") would silently suppress legitimate Teardowns
+    on parse errors and is the worse failure mode here.
+
+    Field-name precedence: reads `blocks` first (the resolved on-disk
+    field; populated after the platform merges any `addBlocks` API
+    parameter into the stored record), then falls back to `addBlocks`
+    for forward-compat with hypothetical fixtures or platform versions
+    that surface the additive parameter directly. Both must be lists of
+    task ID strings; non-list values fail-close to False.
+
+    ANY-match semantics: a single same-teammate active continuation in
+    the chain is sufficient to defer. If the chain mixes a same-
+    teammate active task with signal-tasks or exempt-agentType tasks,
+    the same-teammate active match still defers — `_lifecycle_relevant`
+    excludes the non-matching entries from consideration.
+    """
+    try:
+        if not isinstance(completed_task, dict):
+            return False
+
+        owner = completed_task.get("owner")
+        if not isinstance(owner, str) or not owner:
+            return False
+
+        blocked_ids = completed_task.get("blocks")
+        if not isinstance(blocked_ids, list):
+            blocked_ids = completed_task.get("addBlocks")
+            if not isinstance(blocked_ids, list):
+                return False
+
+        for blocked_id in blocked_ids:
+            if not isinstance(blocked_id, str) or not blocked_id:
+                continue
+            blocked_task = read_task_json(blocked_id, team_name)
+            if not isinstance(blocked_task, dict) or not blocked_task:
+                continue
+            blocked_owner = blocked_task.get("owner")
+            if not isinstance(blocked_owner, str) or blocked_owner != owner:
+                continue
+            if _lifecycle_relevant(blocked_task, team_name):
+                return True
+
+        return False
+    except Exception:
+        return False
