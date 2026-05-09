@@ -126,7 +126,7 @@ RESERVED_NAMES = frozenset({
     "unknown",
     "solo",
 })
-# `secretary` / `pact-secretary` are NOT reserved here. The session
+# Audit: `secretary` / `pact-secretary` are NOT reserved here. The session
 # secretary is canonically spawned with `name="secretary"` (see
 # bootstrap_marker_writer._SECRETARY_NAME and commands/bootstrap.md
 # Step 2), and the dispatch sites that re-assign housekeeping work to
