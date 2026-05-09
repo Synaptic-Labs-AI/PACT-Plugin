@@ -173,7 +173,7 @@ CONSUMER_COMMANDS = [
 CANONICAL_FORM_COMPONENTS = [
     ("PACT_ROLE_marker", "YOUR PACT ROLE: teammate ("),
     ("team_join_note", "joining team"),
-    ("two_task_anchor", "Two-Task Dispatch Shape"),
+    ("teachback_gated_anchor", "Teachback-Gated Dispatch"),
     ("addBlockedBy_call", "addBlockedBy"),
 ]
 

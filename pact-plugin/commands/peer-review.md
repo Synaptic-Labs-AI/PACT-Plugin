@@ -142,7 +142,7 @@ Select the domain coder based on PR focus:
 - Infrastructure changes → **pact-devops-engineer** (CI/CD quality, Docker best practices, script safety)
 - Multiple domains → Coder for domain with most significant changes, or all relevant domain coders if changes are equally significant
 
-**Two-Task Dispatch Shape (TEACHBACK + WORK)**
+**Teachback-Gated Dispatch**
 
 Each reviewer dispatch creates **two tasks**, not one:
 
@@ -170,7 +170,7 @@ The `Agent()` `prompt` does NOT change shape — the two-task dispatch is encode
 
 ---
 
-**Dispatch reviewers** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) for each reviewer:
+**Dispatch reviewers** — apply the [Teachback-Gated Dispatch](#teachback-gated-dispatch) for each reviewer:
 
 1. `TaskCreate(subject="{reviewer-type}: TEACHBACK for review of {feature}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
 2. `TaskCreate(subject="{reviewer-type}: review {feature}", description=<see below>)` — Task B.

@@ -213,7 +213,7 @@ Implement the sub-component:
 
 **Verify session team exists**: The `{team_name}` team should already exist from session start. If not, create it now: `TeamCreate(team_name="{team_name}")`.
 
-**Two-Task Dispatch Shape (TEACHBACK + WORK)**
+**Teachback-Gated Dispatch**
 
 Each specialist dispatch creates **two tasks**, not one:
 
@@ -241,7 +241,7 @@ TaskUpdate(A_id, addBlocks=[B_id])
 
 ---
 
-For each specialist needed — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work):
+For each specialist needed — apply the [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
 1. `TaskCreate(subject="{scope-prefixed-name}: TEACHBACK for {sub-task}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
 2. `TaskCreate(subject="{scope-prefixed-name}: implement {sub-task}", description=<see below>)` — Task B.

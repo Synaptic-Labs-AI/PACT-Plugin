@@ -131,7 +131,7 @@ If the blocker reveals that a sub-task is more complex than expected and needs i
 
 > **Force-termination is a carve-out** to the team-lead-only-completion rule. The `metadata.terminated == true` marker on the team-lead-driven `TaskUpdate(status="completed")` distinguishes this path from the standard cooperative acceptance flow. The terminated teammate is not idling on `awaiting_lead_completion`; the team-lead is force-completing an unrecoverable agent's task out-of-band. See [Completion Authority](../protocols/pact-completion-authority.md#completion-authority) for the carve-out table.
 
-**Re-dispatch after imPACT-driven redo**: When imPACT decides to redo a phase, the new dispatch follows the standard [Two-Task Dispatch Shape](orchestrate.md#two-task-dispatch-shape-teachback--work) — Task A teachback + Task B work, blockedBy edge. The original (failed) phase task is marked `completed` with `metadata={"redo_reason": "..."}` (team-lead-driven; this is a team-lead-completion, not teammate-completion).
+**Re-dispatch after imPACT-driven redo**: When imPACT decides to redo a phase, the new dispatch follows the standard [Teachback-Gated Dispatch](orchestrate.md#teachback-gated-dispatch) — Task A teachback + Task B work, blockedBy edge. The original (failed) phase task is marked `completed` with `metadata={"redo_reason": "..."}` (team-lead-driven; this is a team-lead-completion, not teammate-completion).
 
 ### Conversation Failure Taxonomy
 

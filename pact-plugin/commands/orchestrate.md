@@ -57,7 +57,7 @@ Agent(
 
 > **Why store agent_id?** Enables `resume` for blocker recovery — see [Blocker Recovery](#blocker-recovery-resume-vs-fresh-spawn).
 
-### Two-Task Dispatch Shape (TEACHBACK + WORK)
+### Teachback-Gated Dispatch
 
 Every specialist dispatch creates **two tasks**, not one:
 
@@ -444,7 +444,7 @@ When a phase is skipped but a coder encounters a decision that would have been h
 - "Preparation Phase"
 - "Open Questions > Require Further Research"
 
-**Dispatch `pact-preparer`** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work):
+**Dispatch `pact-preparer`** — apply the [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
 1. `TaskCreate(subject="preparer: TEACHBACK for {feature}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
 2. `TaskCreate(subject="preparer: research {feature}", description=<see below>)` — Task B.
@@ -539,7 +539,7 @@ When detection fires (score >= threshold), follow the evaluation response protoc
 - "Key Decisions"
 - "Interface Contracts"
 
-**Dispatch `pact-architect`** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work):
+**Dispatch `pact-architect`** — apply the [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
 1. `TaskCreate(subject="architect: TEACHBACK for {feature}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
 2. `TaskCreate(subject="architect: design {feature}", description=<see below>)` — Task B.
@@ -662,7 +662,7 @@ JSON
 
 **Progress monitoring**: For tasks where mid-flight visibility matters (variety 7+, parallel execution, novel domains), include in the agent prompt: "Send progress signals per the agent-teams skill Progress Signals section."
 
-**Dispatch coder(s)** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) for each coder needed:
+**Dispatch coder(s)** — apply the [Teachback-Gated Dispatch](#teachback-gated-dispatch) for each coder needed:
 
 1. `TaskCreate(subject="{coder-type}: TEACHBACK for {scope}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
 2. `TaskCreate(subject="{coder-type}: implement {scope}", description=<see below>)` — Task B.
@@ -797,7 +797,7 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
 - "Test Scenarios"
 - "Coverage Targets"
 
-**Dispatch `pact-test-engineer`** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work):
+**Dispatch `pact-test-engineer`** — apply the [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
 1. `TaskCreate(subject="test-engineer: TEACHBACK for {feature}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
 2. `TaskCreate(subject="test-engineer: test {feature}", description=<see below>)` — Task B.

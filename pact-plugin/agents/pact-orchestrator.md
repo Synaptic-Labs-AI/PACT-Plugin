@@ -363,7 +363,7 @@ For full detail, `Read(file_path="../protocols/pact-variety.md")` when calibrati
 >
 > ⚠️ **NEVER** use plain `Agent(subagent_type=...)` without `name` and `team_name` for specialist agents. This bypasses team coordination, task tracking, and `SendMessage` communication.
 
-**Dispatch pattern (canonical five-step sequence)** — also called the **Two-Task Dispatch Shape** in command files:
+**Teachback-Gated Dispatch**:
 
 Every specialist dispatch is a Task A (teachback) + Task B (primary work, `blockedBy=[A]`) pair. Both tasks must exist with the teammate as owner BEFORE the `Agent()` spawn. The mission lives in Task B's `description`, never in the spawn prompt.
 
