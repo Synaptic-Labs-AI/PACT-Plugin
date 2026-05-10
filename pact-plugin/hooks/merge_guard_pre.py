@@ -72,7 +72,12 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
 
 # Optional global flags between CLI tool and subcommand.
 # (?:\S+\s+)* matches zero or more flag+value tokens (e.g., --repo owner/repo).
-_GH_GLOBAL_FLAGS = r"(?:\S+\s+)*"
+_GH_GLOBAL_FLAGS = r"(?:\S+\s+)*"  # broad — keep for DANGEROUS_PATTERNS (matches any token)
+# Tight variant for PR-number extraction (#665): only flag-shaped tokens
+# (`-x`, `--long`, optionally `--flag value`). Prevents the capture group
+# from greedily walking past the PR positional into heredoc body content,
+# 2>&1 redirects, or trailing positional-digit tokens.
+_GH_FLAG_TOKENS = r"(?:-\S*(?:\s+\S+)?\s+)*"
 _GIT_GLOBAL_FLAGS = r"(?:\S+\s+)*"
 
 # Composed prefixes for DRY usage across all patterns.
@@ -176,7 +181,12 @@ try:
     _GH_PR_CLOSE_RE = re.compile(_GH_PREFIX + r"pr\s+close\b")
     # PR number extraction: allows optional subcommand flags (e.g., --admin, --squash)
     # between merge/close and the PR number.
-    _GH_PR_NUMBER_RE = re.compile(_GH_PREFIX + r"pr\s+(?:merge|close)\s+" + _GH_GLOBAL_FLAGS + r"(\d+)")
+    # #665: use _GH_FLAG_TOKENS (flag-shaped only) for the post-subcommand
+    # token walk, and \b after (\d+) so the capture is a standalone digit
+    # token (not the suffix of a longer token like `7352-tests`).
+    _GH_PR_NUMBER_RE = re.compile(
+        _GH_PREFIX + r"pr\s+(?:merge|close)\s+" + _GH_FLAG_TOKENS + r"(\d+)\b"
+    )
 except BaseException as _pattern_compile_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_deny("pattern compilation", _pattern_compile_error)
 
