@@ -391,6 +391,35 @@ def _is_pending_to_in_progress_transition(input_data: dict[str, Any]) -> bool:
     return False
 
 
+# Shared Arm-decision helper. Two branches in `_decide_directive` (the
+# TaskCreate Arm branch and the pending->in_progress re-Arm branch) share
+# IDENTICAL Arm conditions: at least one lifecycle-relevant active task
+# AND the watch-inbox STATE_FILE is not currently fresh. Only the trigger
+# event differs. Extracting the conditions into one helper deduplicates
+# the predicate ladder without obscuring it (the helper body is the same
+# 3 lines that used to live inline at each site). DO NOT inline the
+# conditions back into either branch — the two-site duplication is the
+# exact pattern the helper is here to prevent re-introducing.
+def _arm_or_none(team_name: str) -> str | None:
+    """
+    Return _ARM_DIRECTIVE iff the conditions for emitting Arm are met:
+    at least one lifecycle-relevant active teammate task AND no fresh
+    STATE_FILE on disk. Otherwise return None.
+
+    Shared between the TaskCreate Arm branch and the pending->in_progress
+    re-Arm branch in `_decide_directive` — both branches share identical
+    Arm conditions; only the trigger differs. count_active_tasks already
+    filters carve-outs (signal-tasks, wake-excluded agentTypes), so
+    `>= 1` is the lifecycle-relevant positive count. _statefile_is_fresh
+    short-circuits redundant emits when the Monitor was recently armed.
+    """
+    if count_active_tasks(team_name) < 1:
+        return None
+    if _statefile_is_fresh(team_name):
+        return None
+    return _ARM_DIRECTIVE
+
+
 def _emit_directive(prose: str) -> None:
     """
     Print the additionalContext output payload with the required
@@ -451,11 +480,9 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     # transitions on a typical task lifecycle; gating the I/O on the
     # terminal-status check eliminates ~9k wasted reads/session.
     if tool_name == "TaskCreate":
-        if count_active_tasks(team_name) < 1:
-            return None
-        if _statefile_is_fresh(team_name):
-            return None
-        return _ARM_DIRECTIVE
+        # Arm conditions resolved via _arm_or_none(team_name) — shared
+        # with the pending->in_progress re-Arm branch below.
+        return _arm_or_none(team_name)
 
     # tool_name == "TaskUpdate"
     # Re-Arm branch on pending->in_progress transition. STATE_FILE
@@ -470,11 +497,9 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     # fossilizes the FLAT tool_response (no statusChange.from), so the
     # transition predicate consumes `tool_input.status` only.
     if _is_pending_to_in_progress_transition(input_data):
-        if count_active_tasks(team_name) < 1:
-            return None
-        if _statefile_is_fresh(team_name):
-            return None
-        return _ARM_DIRECTIVE
+        # Arm conditions resolved via _arm_or_none(team_name) — shared
+        # with the TaskCreate Arm branch above.
+        return _arm_or_none(team_name)
 
     if not _is_terminal_status_update(input_data):
         return None
