@@ -3,32 +3,34 @@ Tests for merge_guard_pre._GH_PR_NUMBER_RE — PR-number extraction.
 
 Pins the regex behavior: `_GH_FLAG_TOKENS` restricts BOTH flag-walks (between
 `gh` and `pr`, AND between subcommand and PR number) to flag-shaped tokens
-only (`-x`, `--long`, optionally `--flag value`). The `\\b` boundary on the
-(\\d+) capture rejects suffix matches inside longer alphanumeric tokens.
+only (`-x`, `--long`, optionally `--flag value`). The `(?![\\w-])` negative-
+lookahead on the (\\d+) capture rejects suffix matches inside longer
+alphanumeric-or-hyphenated tokens.
 
 Each TRUE-GAIN test below cites the exact OLD-vs-NEW behavioral delta — these
 are the cases that were broken on main (regex captured a non-PR digit token
-from heredoc body / 2>&1 redirect / trailing positional) and now correctly
-extract the PR number.
+from heredoc body / 2>&1 redirect / trailing positional / branch-name suffix)
+and now correctly extract the PR number or return None.
 
-The remaining limitation:
+Two previously-xfail-strict cases are now FIXED in this file:
 
-  Branch-name suffix `7352-tests`: Python `\\b` IS a word boundary at
-  digit-to-hyphen (word char `2` to non-word char `-`). The original
-  spec claimed `\\b` would reject this; that claim was wrong about
-  Python regex semantics. Fixing requires `(?![\\w-])` instead. The
-  test is marked xfail(strict=True) so a future tightening that fixes
-  it will fail the test (signaling the marker should be removed in lockstep).
+  1. "heredoc body containing a fully-formed `gh pr merge <N>` substring":
+     `_GH_PR_NUMBER_RE` uses the tight `_GH_FLAG_TOKENS` form for BOTH the
+     pre-subcommand AND post-subcommand flag walks (rather than reusing the
+     broad `_GH_GLOBAL_FLAGS` for the pre-subcommand walk). This eliminates
+     the re-anchor-at-second-occurrence authorization-bypass class.
 
-The previously-xfail "heredoc body containing a fully-formed `gh pr merge
-<N>` substring" case is now FIXED: `_GH_PR_NUMBER_RE` uses the tight
-`_GH_FLAG_TOKENS` form for BOTH the pre-subcommand AND post-subcommand
-flag walks (rather than reusing the broad `_GH_GLOBAL_FLAGS` for the
-pre-subcommand walk). This eliminates the re-anchor-at-second-occurrence
-authorization-bypass class. The `test_heredoc_body_with_embedded_gh_pr_merge`
-test below is now a regular passing test pinning the fix; the new
-`test_authorization_mismatch_attack` test pins the end-to-end attack
-shape that the fix prevents.
+  2. "branch-name suffix `7352-tests`": Python `\\b` IS a word boundary at
+     digit-to-hyphen (word char `2` to non-word char `-`). The earlier spec
+     assumed `\\b` would reject this; that assumption was wrong about Python
+     regex semantics. The fix replaces the trailing `\\b` with `(?![\\w-])`
+     (negative lookahead) — strictly stronger: rejects any continuation that
+     is a word char OR a hyphen.
+
+Both `test_heredoc_body_with_embedded_gh_pr_merge` and
+`test_branch_name_with_digit_prefix_suffix_match` are now regular passing
+tests pinning the fixes; the new `test_authorization_mismatch_attack` test
+pins the end-to-end attack shape that the heredoc-side fix prevents.
 """
 
 import re
@@ -132,16 +134,14 @@ class TestGH_PR_NumberRE_AcceptableNone:
 
 
 # =============================================================================
-# KNOWN LIMITATIONS — pinned with strict xfail
+# AUTHORIZATION-BYPASS FIXES — regression-protection for prior xfail cases
 # =============================================================================
-# These tests document cases the #665 fix does NOT solve. They are marked
-# strict=True so a future tightening that resolves either one will FAIL the
-# test (signaling the xfail marker should be removed in the follow-up PR).
-#
-# Without strict=True, an accidental fix would silently flip xfail→xpass and
-# the limitation would be re-rediscovered later. With strict=True, the test
-# acts as a tripwire: the limitation is honestly documented as a current
-# behavior, and any change to that behavior is forced through review.
+# Two cases that were previously pinned as xfail-strict are now passing
+# tests after the regex tightening:
+#   1. heredoc body containing embedded `gh pr merge <N>` — fixed by tight
+#      flag-walks on BOTH sides of `pr <subcmd>`.
+#   2. branch-name argument with digit prefix (e.g., `7352-tests`) — fixed
+#      by replacing `\b` with `(?![\w-])` (rejects hyphen continuation).
 
 class TestGH_PR_NumberRE_AuthorizationBypassFixed:
     """Fixed authorization-bypass class — pinned as regression-protection.
@@ -191,26 +191,18 @@ class TestGH_PR_NumberRE_AuthorizationBypassFixed:
         assert _capture(cmd) == "663"
 
 
-class TestGH_PR_NumberRE_KnownLimitations:
-    """Documented limitations — see module docstring + follow-up issue."""
-
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Python `\\b` IS a word boundary at digit-to-hyphen "
-            "(word char `2` to non-word char `-`). The earlier spec assumed \\b "
-            "would reject `7352-tests` as a suffix match; that assumption was "
-            "wrong about Python regex semantics. Fix requires `(?![\\w-])` "
-            "instead of `\\b`. Tracked for follow-up."
-        ),
-    )
     def test_branch_name_with_digit_prefix_suffix_match(self):
-        # If a user passes a branch name (instead of PR number) like `7352-tests`,
-        # the regex captures the leading digit run. Whether this is dangerous
-        # depends on the AskUserQuestion authorization flow, which is itself
-        # PR-number-oriented (so a branch-name merge is already an unusual path).
+        """Branch-name argument with digit prefix no longer captures the digit.
+
+        Previously xfail-strict (Python `\\b` IS a word boundary at
+        digit-to-hyphen, so `\\b` after `(\\d+)` allowed `7352` to match
+        from `7352-tests`). After replacing `\\b` with `(?![\\w-])` the
+        trailing-hyphen continuation is rejected and the regex returns
+        None, which the caller treats as ambiguous-and-permissive (the
+        intended degradation when no clean digit token can be extracted).
+        """
         cmd = "gh pr merge 7352-tests --squash"
-        assert _capture(cmd) is None  # Fix would return None (no clean digit token)
+        assert _capture(cmd) is None
 
 
 # =============================================================================
