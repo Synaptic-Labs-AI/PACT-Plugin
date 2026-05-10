@@ -124,7 +124,10 @@ class TestHasSameTeammateContinuationCells:
         → False (exempt agentType is not lifecycle-relevant). The same-
         owner-match condition is satisfied (both A and B owned by
         secretary) but _lifecycle_relevant excludes B from consideration
-        via the team-config agentType carve-out."""
+        via the team-config agentType carve-out (sourced from
+        WAKE_EXCLUDED_AGENT_TYPES — the wake-side carve-out, decoupled
+        from SELF_COMPLETE_EXEMPT_AGENT_TYPES; currently identical at
+        {pact-secretary} but may diverge in a future PR)."""
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         team = "team-cell6"
         _write_team_config(tmp_path, team, [

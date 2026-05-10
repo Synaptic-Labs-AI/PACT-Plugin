@@ -308,8 +308,11 @@ def test_no_op_on_create_of_signal_task(tmp_path):
 def test_no_op_on_create_owned_by_exempt_agent(tmp_path):
     home = tmp_path / "home"; home.mkdir()
     sid = "s"; pdir = "/tmp/p"; team = "t"
-    # Team config records session-secretary with the privileged agentType
-    # (#682 — carve-out resolves via team-config agentType lookup).
+    # Team config records session-secretary with the privileged agentType.
+    # Carve-out resolves via team-config agentType lookup against
+    # WAKE_EXCLUDED_AGENT_TYPES (the wake-side carve-out, decoupled from
+    # SELF_COMPLETE_EXEMPT_AGENT_TYPES; currently identical at
+    # {pact-secretary} but may diverge in a future PR).
     _write_session_context(
         home, sid, pdir, team,
         members=[{"name": "session-secretary", "agentType": "pact-secretary"}],

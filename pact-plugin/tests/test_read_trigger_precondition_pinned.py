@@ -2,28 +2,40 @@
 Structural pin tests for the Read-Trigger Precondition rule.
 
 Asserts the EXACT marker substring "wait for teammate's wake-signal SendMessage"
-is present at all 4 canonical doc-surface locations:
+is present at all 5 canonical doc-surface locations:
 
   1. pact-plugin/protocols/pact-completion-authority.md (SSOT)
-  2. pact-plugin/agents/pact-orchestrator.md §12 (persona mirror)
-  3. pact-plugin/skills/pact-teachback/SKILL.md (teammate-side audit comment)
-  4. pact-plugin/skills/pact-agent-teams/SKILL.md (teammate-side audit comment)
+  2. pact-plugin/protocols/pact-protocols.md (mirror enforced upstream by
+     verify-protocol-extracts.sh)
+  3. pact-plugin/agents/pact-orchestrator.md §12 (persona mirror)
+  4. pact-plugin/skills/pact-teachback/SKILL.md (teammate-side audit comment)
+  5. pact-plugin/skills/pact-agent-teams/SKILL.md (teammate-side audit comment)
 
 The marker phrase is the load-bearing contract — it is what an LLM reading any
-of the 4 surfaces at runtime must encounter to know the categorical rule (raw
+of the 5 surfaces at runtime must encounter to know the categorical rule (raw
 metadata reads MUST follow the wake-signal SendMessage, not precede it). STRICT
 phrasing pin (lead-decided): the assertions match the verbatim string. If a
 future re-wording is intentional, update this test in lockstep so the rule
 survives the re-word.
 
 The cross-surface drift-detection test asserts the marker is consistent across
-all 4 surfaces; if any one surface drifts (typo, paraphrase), the test fails.
+all 5 surfaces; if any one surface drifts (typo, paraphrase), the test fails.
 
-Counter-test-by-revert (manual / runbook-documented): cp-bak each of the 4 doc
+The per-surface count test additionally pins the EXACT occurrence count per
+surface. This catches a phantom-green-via-presence-not-count failure shape:
+removing one of two callouts in a multi-mention surface (e.g., dropping the
+load-bearing §11 inline rule from pact-orchestrator.md while keeping the §12
+cross-ref) leaves substring-presence assertions GREEN but degrades the lazy-
+load fidelity for an LLM reading only the section that lost the marker.
+A future intentional count change requires updating EXPECTED_COUNTS in
+lockstep — the brittleness IS the point.
+
+Counter-test-by-revert (manual / runbook-documented): cp-bak each of the 5 doc
 files, `git checkout HEAD~1 -- <paths>`, run this test module — expect
-cardinality {5 fail} (one per pin + one drift-detection). Restore the .bak
-files. See pact-plugin/tests/runbooks/wake-lifecycle-teachback-rearm.md for
-the full procedure.
+cardinality {5+ fail} (one presence-pin per surface + drift-detection +
+count-pin per surface). Restore the .bak files. See
+pact-plugin/tests/runbooks/wake-lifecycle-teachback-rearm.md for the full
+procedure.
 """
 
 from pathlib import Path
@@ -35,15 +47,35 @@ MARKER_PHRASE = "wait for teammate's wake-signal SendMessage"
 
 # Canonical doc-surface set. Path objects are resolved relative to the
 # pact-plugin/ repo root (which is the parent of the tests/ directory this
-# file lives in).
+# file lives in). pact-protocols.md is included as the upstream-enforced
+# mirror of pact-completion-authority.md (verify-protocol-extracts.sh keeps
+# them lockstep); the structural pin matches the actual reader-facing
+# surface set rather than relying solely on the upstream script.
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 
 DOC_SURFACES = [
     PLUGIN_ROOT / "protocols" / "pact-completion-authority.md",
+    PLUGIN_ROOT / "protocols" / "pact-protocols.md",
     PLUGIN_ROOT / "agents" / "pact-orchestrator.md",
     PLUGIN_ROOT / "skills" / "pact-teachback" / "SKILL.md",
     PLUGIN_ROOT / "skills" / "pact-agent-teams" / "SKILL.md",
 ]
+
+# Per-surface expected occurrence count. The SSOT and its
+# verify-protocol-extracts.sh-mirrored sibling each carry the rule twice
+# (once for teachback-context inspection, once for HANDOFF-context
+# inspection). The persona surface carries the rule twice (once in the
+# Teachback Review inline callout, once in the Expected Agent HANDOFF Format
+# callout). The two SKILL audit comments each carry the rule once. Update
+# this map in lockstep with any intentional change to surface counts —
+# the brittleness IS the point: it catches accidental cross-ref deletion.
+EXPECTED_COUNTS = {
+    PLUGIN_ROOT / "protocols" / "pact-completion-authority.md": 2,
+    PLUGIN_ROOT / "protocols" / "pact-protocols.md": 2,
+    PLUGIN_ROOT / "agents" / "pact-orchestrator.md": 2,
+    PLUGIN_ROOT / "skills" / "pact-teachback" / "SKILL.md": 1,
+    PLUGIN_ROOT / "skills" / "pact-agent-teams" / "SKILL.md": 1,
+}
 
 
 @pytest.mark.parametrize("doc_path", DOC_SURFACES, ids=lambda p: p.name)
@@ -97,8 +129,9 @@ def test_marker_substring_consistent_across_all_surfaces():
     assert not missing, (
         f"Marker substring {MARKER_PHRASE!r} missing from {len(missing)} of "
         f"{len(DOC_SURFACES)} doc surfaces: {missing}. Cross-surface drift "
-        f"detected — the categorical rule must be discoverable at all 4 "
-        f"canonical sites (SSOT + persona mirror + 2 SKILL audit comments)."
+        f"detected — the categorical rule must be discoverable at all 5 "
+        f"canonical sites (SSOT + protocols mirror + persona mirror + 2 "
+        f"SKILL audit comments)."
     )
 
 
@@ -135,4 +168,42 @@ def test_persona_cross_refs_to_ssot_anchor():
         "#read-trigger-precondition (the SSOT anchor in pact-completion-"
         "authority.md). Without this link, the lazy-load reference is a "
         "broken nav target and an agent following it lands on a 404."
+    )
+
+
+@pytest.mark.parametrize(
+    "doc_path", DOC_SURFACES, ids=lambda p: p.name
+)
+def test_marker_phrase_count_per_surface(doc_path: Path):
+    """Pin the EXACT marker-phrase occurrence count per surface.
+
+    Distinct from test_marker_substring_present_in_doc_surface (which only
+    asserts presence): this test catches the phantom-green-via-presence-not-
+    count failure shape. A surface with two load-bearing callouts can lose
+    one of them — leaving substring-presence assertions GREEN — while
+    silently degrading lazy-load fidelity for an LLM reading only the
+    section that lost the marker.
+
+    Empirically validated by mutation probe: dropping one of two markers in
+    pact-orchestrator.md (the §11 inline rule, leaving the §12 cross-ref-
+    only mention) leaves all presence-pin tests GREEN; only this count-pin
+    test catches the regression.
+
+    Brittleness is the point. A future intentional count change requires
+    updating EXPECTED_COUNTS in lockstep — the failure surfaces the
+    discrepancy in code review rather than letting silent erosion
+    accumulate.
+    """
+    expected = EXPECTED_COUNTS[doc_path]
+    text = doc_path.read_text(encoding="utf-8")
+    actual = text.count(MARKER_PHRASE)
+    assert actual == expected, (
+        f"{doc_path.name}: marker phrase {MARKER_PHRASE!r} appears "
+        f"{actual} time(s); expected exactly {expected}. If this change "
+        f"is intentional (e.g., a deliberate consolidation removing a "
+        f"redundant callout, or a deliberate addition adding a new "
+        f"reader-facing section that needs the rule), update "
+        f"EXPECTED_COUNTS in this file in lockstep. Otherwise the "
+        f"discrepancy is silent erosion of the Read-Trigger Precondition "
+        f"rule's coverage on this surface."
     )

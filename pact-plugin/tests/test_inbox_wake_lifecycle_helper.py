@@ -37,12 +37,39 @@ def _write_team_config(tmp_path, team_name, members):
 
 def test_helper_imports_shared_helper_from_intentional_wait():
     """No duplicate carve-out logic — the helper must reuse the canonical
-    _is_exempt_agent_type from shared.intentional_wait."""
+    wake-side carve-out helper from shared.intentional_wait. Pin the
+    DECOUPLED-CONSTANT discipline: the wake-side import must be
+    _is_wake_excluded_agent_type (consulting WAKE_EXCLUDED_AGENT_TYPES),
+    NOT _is_exempt_agent_type (the self-completion-side helper consulting
+    SELF_COMPLETE_EXEMPT_AGENT_TYPES). The two sets are currently
+    identical at {pact-secretary} but the import names are decoupled so
+    a future divergence (e.g., wake-side reduction without changing
+    self-completion authority) does not require touching this file."""
     src = (
         Path(__file__).resolve().parent.parent
         / "hooks" / "shared" / "wake_lifecycle.py"
     ).read_text(encoding="utf-8")
-    assert "from shared.intentional_wait import _is_exempt_agent_type" in src
+    assert "from shared.intentional_wait import _is_wake_excluded_agent_type" in src
+    # Active anti-recouple guard: wake_lifecycle MUST NOT IMPORT the
+    # self-completion-side helper. Re-introducing the import would
+    # silently re-couple the two policies. Pinned via line-anchored
+    # import-statement match (rather than bare substring) so the
+    # DECOUPLED-CONSTANT DISCIPLINE comment in wake_lifecycle.py — which
+    # legitimately mentions _is_exempt_agent_type as the warning target —
+    # does not trigger this assertion.
+    has_recouple_import = any(
+        line.strip() == "from shared.intentional_wait import _is_exempt_agent_type"
+        or line.strip().startswith(
+            "from shared.intentional_wait import "
+        ) and "_is_exempt_agent_type" in line.split("import", 1)[1]
+        for line in src.splitlines()
+    )
+    assert not has_recouple_import, (
+        "wake_lifecycle.py must NOT import _is_exempt_agent_type "
+        "(the self-completion-side helper). Use _is_wake_excluded_agent_type "
+        "instead — see DECOUPLED-CONSTANT DISCIPLINE comment in "
+        "wake_lifecycle.py."
+    )
     # No re-declaration: a literal exempt set in the helper would diverge
     # from intentional_wait. Belt-and-suspenders: stale post-#682 import.
     assert "SELF_COMPLETE_EXEMPT_AGENTS" not in src

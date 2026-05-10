@@ -221,12 +221,20 @@ class TestBugATeardownDeferralOnSameTeammateContinuation:
         INTENTIONALLY NOT FIXED in this PR.
 
         Architect cell-6 spec: exempt-agentType continuation returns
-        False (not lifecycle-relevant). This is correct per the
-        SELF_COMPLETE_EXEMPT_AGENT_TYPES carve-out semantics — exempt
-        agents don't count toward the wake mechanism by design (the
-        whole carve-out exists because secretary self-completion
-        bypasses the lead-as-completion-gate and shouldn't drive
-        Monitor lifecycle).
+        False (not lifecycle-relevant). The wake-mechanism carve-out is
+        sourced from WAKE_EXCLUDED_AGENT_TYPES — a constant DECOUPLED
+        from SELF_COMPLETE_EXEMPT_AGENT_TYPES even though the two sets
+        are currently identical ({pact-secretary}). The decoupling lets
+        wake policy and self-completion policy diverge in a future PR
+        without one carve-out's edit silently re-shaping the other.
+
+        Currently identical, future may diverge: if WAKE_EXCLUDED_AGENT_TYPES
+        is reduced (e.g., secretary removed from the wake-side carve-out)
+        while SELF_COMPLETE_EXEMPT_AGENT_TYPES is preserved (secretary
+        retains self-completion authority), the secretary-on-secretary
+        Bug A scenario will START deferring Teardown — at which point
+        this test must be UPDATED in lockstep (asserted outcome will
+        invert from Teardown-emits to suppressOutput).
 
         The empirical secretary Bug A in this session is the
         coincidence that the secretary's session-briefing teachback
@@ -239,11 +247,7 @@ class TestBugATeardownDeferralOnSameTeammateContinuation:
 
         This test pins the expectation: with both tasks secretary-
         owned, defer-Teardown does NOT fire (architect spec cell-6).
-        Teardown emits as before. If a future PR decouples
-        SELF_COMPLETE_EXEMPT_AGENT_TYPES into separate carve-outs for
-        wake vs self-completion (per follow-up issue), this test must
-        be UPDATED in lockstep — the secretary scenario will then
-        defer Teardown and this test should be inverted."""
+        Teardown emits as before."""
         home = tmp_path / "home"; home.mkdir()
         sid = "s"; pdir = "/tmp/p"; team = "team-secretary-not-fixed"
         _write_session_context(
@@ -276,9 +280,12 @@ class TestBugATeardownDeferralOnSameTeammateContinuation:
         assert hso is not None, (
             f"Expected Teardown emit on secretary-on-secretary scenario "
             f"(per architect cell-6 design — exempt agent continuation "
-            f"is not lifecycle-relevant). Got {out!r}. If suppressOutput, "
-            f"the SELF_COMPLETE_EXEMPT_AGENT_TYPES decoupling has landed "
-            f"and this test must be updated."
+            f"is not lifecycle-relevant per WAKE_EXCLUDED_AGENT_TYPES). "
+            f"Got {out!r}. If suppressOutput, WAKE_EXCLUDED_AGENT_TYPES "
+            f"has been reduced (decoupling from "
+            f"SELF_COMPLETE_EXEMPT_AGENT_TYPES) and this test must be "
+            f"updated in lockstep — the secretary scenario now defers "
+            f"Teardown."
         )
         assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]
 

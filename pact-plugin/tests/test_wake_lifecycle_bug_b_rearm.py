@@ -322,10 +322,14 @@ class TestAuditAnchorRegressionGuards:
 def test_no_op_on_taskupdate_owned_by_exempt_agent(tmp_path):
     """Parallel to existing test_no_op_on_create_owned_by_exempt_agent
     (L308 of test_inbox_wake_lifecycle_emitter.py). The Bug B re-Arm
-    branch must respect the SELF_COMPLETE_EXEMPT_AGENT_TYPES carve-out
-    via count_active_tasks: a secretary-owned task in_progress claim
-    does NOT increment the count, so post < 1 → no Arm emit even with
-    STATE_FILE absent.
+    branch must respect the wake-side carve-out via count_active_tasks:
+    a secretary-owned task in_progress claim does NOT increment the
+    count, so post < 1 → no Arm emit even with STATE_FILE absent.
+
+    Carve-out semantics: count_active_tasks consults
+    WAKE_EXCLUDED_AGENT_TYPES (the wake-side carve-out, decoupled from
+    SELF_COMPLETE_EXEMPT_AGENT_TYPES; currently identical at
+    {pact-secretary} but may diverge in a future PR).
 
     Pins explicit parity coverage to prevent future drift between the
     TaskCreate Arm branch (which already has this coverage) and the new
