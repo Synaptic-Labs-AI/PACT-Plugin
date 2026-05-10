@@ -214,42 +214,61 @@ class TestBugATeardownDeferralOnSameTeammateContinuation:
             f"missing."
         )
 
-    def test_secretary_bug_a_documented_not_fixed_in_this_pr(self, tmp_path):
+    def test_secretary_bug_a_fixed_via_count_gate_post_empty_carve_out(self, tmp_path):
         """DOCUMENTATION-IN-CODE test pinning the architectural decision:
         the secretary-on-secretary Bug A scenario (where BOTH Task A and
-        Task B are owned by an exempt agentType like pact-secretary) is
-        INTENTIONALLY NOT FIXED in this PR.
+        Task B are owned by pact-secretary) is now FIXED — by the count
+        gate, not by the defer-Teardown predicate.
 
-        Architect cell-6 spec: exempt-agentType continuation returns
-        False (not lifecycle-relevant). The wake-mechanism carve-out is
-        sourced from WAKE_EXCLUDED_AGENT_TYPES — a constant DECOUPLED
-        from SELF_COMPLETE_EXEMPT_AGENT_TYPES even though the two sets
-        are currently identical ({pact-secretary}). The decoupling lets
-        wake policy and self-completion policy diverge in a future PR
-        without one carve-out's edit silently re-shaping the other.
+        BACKGROUND. Pre-empty WAKE_EXCLUDED_AGENT_TYPES contained
+        pact-secretary, so count_active_tasks excluded secretary-owned
+        tasks from the wake-mechanism active tally. When the lead
+        completed a secretary teachback Task A, the count dropped to
+        0 (both A and B excluded), Teardown emitted eagerly, and the
+        Monitor was torn down before any non-exempt teammate could
+        dispatch. The empirical Bug A in the original session was
+        exactly this shape: the secretary's session-briefing teachback
+        chain is the FIRST teammate work, so the eager Teardown removed
+        the Monitor before non-exempt work began. The architect cell-6
+        spec for `has_same_teammate_continuation` returned False on
+        exempt-agentType continuations (correct per the carve-out
+        semantics, but it left the Bug A secretary-window unaddressed
+        at the predicate layer). The original PR fixed the secretary-
+        window via the Bug B re-Arm branch (which re-armed the Monitor
+        when a subsequent non-exempt teammate claimed a task), and
+        documented the secretary-window as INTENTIONALLY NOT FIXED at
+        the predicate layer.
 
-        Currently identical, future may diverge: if WAKE_EXCLUDED_AGENT_TYPES
-        is reduced (e.g., secretary removed from the wake-side carve-out)
-        while SELF_COMPLETE_EXEMPT_AGENT_TYPES is preserved (secretary
-        retains self-completion authority), the secretary-on-secretary
-        Bug A scenario will START deferring Teardown — at which point
-        this test must be UPDATED in lockstep (asserted outcome will
-        invert from Teardown-emits to suppressOutput).
+        POST-EMPTY-CARVE-OUT (cycle 5). WAKE_EXCLUDED_AGENT_TYPES is
+        now an empty frozenset. Secretary tasks count toward
+        count_active_tasks like any other teammate task. The Bug A
+        secretary-window is now fixed BEFORE the defer-Teardown
+        predicate is even consulted: when the lead completes secretary
+        Task A while Task B (also secretary, pending) remains, the
+        post-state count is 1 (only B counts; A is now completed but
+        was previously counted), and the Teardown count gate
+        (`count_active_tasks(team) != 0`) short-circuits — no Teardown
+        emitted. Monitor stays armed for the duration of the secretary
+        chain. SELF_COMPLETE_EXEMPT_AGENT_TYPES on the self-completion
+        side still contains pact-secretary; only the wake-side carve-
+        out is empty (decoupled by design).
 
-        The empirical secretary Bug A in this session is the
-        coincidence that the secretary's session-briefing teachback
-        chain happens to be the FIRST teammate work, so the eager
-        Teardown when secretary completes its teachback removes the
-        Monitor before non-exempt teammates dispatch later. The fix
-        for THAT scenario is the Bug B re-Arm branch (which fires
-        when the next non-exempt teammate claims a task, regardless
-        of how the STATE_FILE got removed).
+        This test pins the post-empty behavior: with both tasks
+        secretary-owned and Task B still pending, the post-state count
+        is 1 → Teardown count gate suppresses → out == suppressOutput.
+        The defer-Teardown predicate (has_same_teammate_continuation)
+        ALSO now returns True for secretary→secretary continuations
+        (cell-6 inverted in test_has_same_teammate_continuation.py) so
+        defense-in-depth is preserved.
 
-        This test pins the expectation: with both tasks secretary-
-        owned, defer-Teardown does NOT fire (architect spec cell-6).
-        Teardown emits as before."""
+        Counter-test-by-revert: a future re-population of
+        WAKE_EXCLUDED_AGENT_TYPES = {pact-secretary} flips the
+        post-state count back to 0, the count gate falls through, and
+        Teardown emits — this test must be inverted in lockstep
+        (asserted outcome flips from suppressOutput to Teardown emit).
+        """
         home = tmp_path / "home"; home.mkdir()
-        sid = "s"; pdir = "/tmp/p"; team = "team-secretary-not-fixed"
+        sid = "s"; pdir = "/tmp/p"; team = "team-secretary-fixed-post-empty"
         _write_session_context(
             home, sid, pdir, team,
             members=[
@@ -272,22 +291,20 @@ class TestBugATeardownDeferralOnSameTeammateContinuation:
                 "id": "A", "status": "completed", "owner": "secretary",
             },
         }, home)
-        # Architect spec cell-6: exempt continuation → False (not
-        # lifecycle-relevant). count_active_tasks==0 (both excluded).
-        # Defer-Teardown returns False. Teardown emits. This is the
-        # ARCHITECTURAL DECISION pinned here as a regression guard.
-        hso = out.get("hookSpecificOutput")
-        assert hso is not None, (
-            f"Expected Teardown emit on secretary-on-secretary scenario "
-            f"(per architect cell-6 design — exempt agent continuation "
-            f"is not lifecycle-relevant per WAKE_EXCLUDED_AGENT_TYPES). "
-            f"Got {out!r}. If suppressOutput, WAKE_EXCLUDED_AGENT_TYPES "
-            f"has been reduced (decoupling from "
-            f"SELF_COMPLETE_EXEMPT_AGENT_TYPES) and this test must be "
-            f"updated in lockstep — the secretary scenario now defers "
-            f"Teardown."
+        # Post-empty: count_active_tasks(team) == 1 (B is pending,
+        # secretary now counts since WAKE_EXCLUDED is empty). Teardown
+        # count gate (`count != 0`) suppresses BEFORE the defer-Teardown
+        # predicate is consulted. Outcome: suppressOutput.
+        assert out == {"suppressOutput": True}, (
+            f"Post-empty WAKE_EXCLUDED_AGENT_TYPES: secretary-on-"
+            f"secretary completion with pending Task B continuation must "
+            f"suppress Teardown via the count gate (count == 1 → no "
+            f"emit). Got {out!r}. If hookSpecificOutput with Teardown "
+            f"directive, the wake-side carve-out has been re-populated "
+            f"(secretary tasks excluded from count → count drops to 0 "
+            f"→ Teardown gate falls through) and this test must be "
+            f"inverted in lockstep."
         )
-        assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]
 
     def test_no_defer_on_different_owner_continuation(self, tmp_path):
         """Negative pair: Task A's addBlocks includes Task B owned by a

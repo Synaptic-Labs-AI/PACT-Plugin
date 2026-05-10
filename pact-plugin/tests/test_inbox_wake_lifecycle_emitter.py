@@ -305,14 +305,27 @@ def test_no_op_on_create_of_signal_task(tmp_path):
     assert out == {"suppressOutput": True}
 
 
-def test_no_op_on_create_owned_by_exempt_agent(tmp_path):
+def test_arm_on_create_owned_by_secretary_post_empty_carve_out(tmp_path):
+    """POST-EMPTY-CARVE-OUT: a secretary-owned TaskCreate now triggers
+    Arm because WAKE_EXCLUDED_AGENT_TYPES is empty and secretary tasks
+    count toward the active tally.
+
+    Pre-empty: this test asserted suppressOutput (the wake-side carve-
+    out filtered secretary tasks before count_active_tasks reached the
+    Arm threshold). Post-empty: secretary tasks DO count, so creating
+    one when no STATE_FILE exists triggers the Arm directive. This is
+    desired behavior — it's exactly what enables the Bug A secretary-
+    window fix at the count gate (Monitor stays armed for the duration
+    of secretary work, preventing the eager 1→0 Teardown).
+
+    SELF_COMPLETE_EXEMPT_AGENT_TYPES on the self-completion side still
+    contains pact-secretary (self-completion authority preserved); only
+    the wake-side carve-out is empty."""
     home = tmp_path / "home"; home.mkdir()
     sid = "s"; pdir = "/tmp/p"; team = "t"
     # Team config records session-secretary with the privileged agentType.
-    # Carve-out resolves via team-config agentType lookup against
-    # WAKE_EXCLUDED_AGENT_TYPES (the wake-side carve-out, decoupled from
-    # SELF_COMPLETE_EXEMPT_AGENT_TYPES; currently identical at
-    # {pact-secretary} but may diverge in a future PR).
+    # Post-empty-carve-out: the agentType still resolves via team-config
+    # lookup, but WAKE_EXCLUDED_AGENT_TYPES is empty so no membership match.
     _write_session_context(
         home, sid, pdir, team,
         members=[{"name": "session-secretary", "agentType": "pact-secretary"}],
@@ -322,7 +335,15 @@ def test_no_op_on_create_owned_by_exempt_agent(tmp_path):
         "tool_name": "TaskCreate", "session_id": sid, "cwd": pdir,
         "tool_input": {"taskId": "sec-1"}, "tool_response": {"task": {"id": "sec-1"}},
     }, home)
-    assert out == {"suppressOutput": True}
+    hso = out.get("hookSpecificOutput")
+    assert hso is not None, (
+        f"Post-empty WAKE_EXCLUDED_AGENT_TYPES: secretary TaskCreate must "
+        f"emit Arm directive (count_active_tasks >= 1, STATE_FILE absent). "
+        f"Got {out!r}. If suppressOutput, the wake-side carve-out has been "
+        f"re-populated and this test must be inverted in lockstep."
+    )
+    assert hso["hookEventName"] == "PostToolUse"
+    assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
 
 
 # ---------- Teardown directive (1 -> 0) ----------

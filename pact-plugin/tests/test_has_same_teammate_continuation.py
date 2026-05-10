@@ -119,15 +119,35 @@ class TestHasSameTeammateContinuationCells:
         }
         assert wl.has_same_teammate_continuation(completed, team) is False
 
-    def test_cell_6_exempt_agenttype_owner_not_lifecycle_relevant_emits(self, tmp_path, monkeypatch):
-        """Cell (6): X.owner is exempt agentType (e.g., pact-secretary)
-        → False (exempt agentType is not lifecycle-relevant). The same-
-        owner-match condition is satisfied (both A and B owned by
-        secretary) but _lifecycle_relevant excludes B from consideration
-        via the team-config agentType carve-out (sourced from
-        WAKE_EXCLUDED_AGENT_TYPES — the wake-side carve-out, decoupled
-        from SELF_COMPLETE_EXEMPT_AGENT_TYPES; currently identical at
-        {pact-secretary} but may diverge in a future PR)."""
+    def test_cell_6_secretary_owner_now_lifecycle_relevant_post_empty_carve_out(self, tmp_path, monkeypatch):
+        """Cell (6) POST-EMPTY-CARVE-OUT: X.owner is pact-secretary →
+        True (lifecycle-relevant) because WAKE_EXCLUDED_AGENT_TYPES is
+        now an empty frozenset.
+
+        Pre-empty: cell-6 returned False because the team-config
+        agentType carve-out filtered secretary tasks out via
+        _lifecycle_relevant. The has_same_teammate_continuation
+        predicate therefore did NOT defer for secretary→secretary
+        continuations, and the eager Teardown emitted in the Bug A
+        secretary-window scenario.
+
+        Post-empty: the carve-out is a no-op (WAKE_EXCLUDED_AGENT_TYPES
+        = frozenset()), so secretary-owned continuations ARE
+        lifecycle-relevant. The same-teammate-continuation predicate
+        now returns True for secretary→secretary, deferring Teardown
+        when the chain has not yet terminated. The Bug A secretary-
+        window scenario is fixed at the count gate (count > 0 prevents
+        Teardown emit before the predicate is even consulted), but the
+        defer-Teardown branch ALSO fires defensively because the
+        predicate now considers secretary continuations.
+
+        SELF_COMPLETE_EXEMPT_AGENT_TYPES on the self-completion side
+        still contains pact-secretary (self-completion authority
+        preserved); only the wake-side carve-out is empty.
+
+        Counter-test-by-revert: a future re-population of
+        WAKE_EXCLUDED_AGENT_TYPES = {pact-secretary} flips this back
+        to False; this test must be inverted in lockstep."""
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         team = "team-cell6"
         _write_team_config(tmp_path, team, [
@@ -138,7 +158,13 @@ class TestHasSameTeammateContinuationCells:
             "id": "A", "owner": "session-secretary", "status": "completed",
             "addBlocks": ["B"],
         }
-        assert wl.has_same_teammate_continuation(completed, team) is False
+        assert wl.has_same_teammate_continuation(completed, team) is True, (
+            "Post-empty WAKE_EXCLUDED_AGENT_TYPES: secretary-owned "
+            "continuations are lifecycle-relevant; same-teammate-"
+            "continuation predicate must return True. If False, the "
+            "wake-side carve-out has been re-populated and this test "
+            "must be inverted in lockstep."
+        )
 
     def test_cell_7_completed_continuation_emits(self, tmp_path, monkeypatch):
         """Cell (7): X.status==completed → False (no in-flight

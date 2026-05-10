@@ -319,21 +319,30 @@ class TestAuditAnchorRegressionGuards:
 # ---------- Parallel TaskUpdate-side test for parity ----------
 
 
-def test_no_op_on_taskupdate_owned_by_exempt_agent(tmp_path):
-    """Parallel to existing test_no_op_on_create_owned_by_exempt_agent
-    (L308 of test_inbox_wake_lifecycle_emitter.py). The Bug B re-Arm
-    branch must respect the wake-side carve-out via count_active_tasks:
-    a secretary-owned task in_progress claim does NOT increment the
-    count, so post < 1 → no Arm emit even with STATE_FILE absent.
+def test_rearm_on_taskupdate_owned_by_secretary_post_empty_carve_out(tmp_path):
+    """POST-EMPTY-CARVE-OUT: parallel to
+    test_arm_on_create_owned_by_secretary_post_empty_carve_out (L308
+    of test_inbox_wake_lifecycle_emitter.py). The Bug B re-Arm branch
+    fires for secretary-owned TaskUpdate(status=in_progress) because
+    WAKE_EXCLUDED_AGENT_TYPES is empty and secretary tasks count
+    toward the active tally.
 
-    Carve-out semantics: count_active_tasks consults
-    WAKE_EXCLUDED_AGENT_TYPES (the wake-side carve-out, decoupled from
-    SELF_COMPLETE_EXEMPT_AGENT_TYPES; currently identical at
-    {pact-secretary} but may diverge in a future PR).
+    Pre-empty: this test asserted suppressOutput (the wake-side carve-
+    out excluded secretary-owned tasks from the count, so post < 1
+    suppressed Arm even with STATE_FILE absent). Post-empty: secretary
+    tasks DO count, so claim transitions trigger re-Arm when STATE_FILE
+    is absent.
 
-    Pins explicit parity coverage to prevent future drift between the
-    TaskCreate Arm branch (which already has this coverage) and the new
-    TaskUpdate Arm branch."""
+    Pins parity between the TaskCreate Arm branch (already inverted at
+    test_arm_on_create_owned_by_secretary_post_empty_carve_out) and
+    the TaskUpdate Arm branch — both must respect the post-empty
+    semantics consistently. SELF_COMPLETE_EXEMPT_AGENT_TYPES on the
+    self-completion side still contains pact-secretary (self-completion
+    authority preserved); only the wake-side carve-out is empty.
+
+    Counter-test-by-revert: a future re-population of
+    WAKE_EXCLUDED_AGENT_TYPES = {pact-secretary} flips this back to
+    suppressOutput; this test must be inverted in lockstep."""
     home = tmp_path / "home"; home.mkdir()
     sid = "s"; pdir = "/tmp/p"; team = "team-exempt-update"
     _write_session_context(
@@ -351,11 +360,16 @@ def test_no_op_on_taskupdate_owned_by_exempt_agent(tmp_path):
             "owner": "session-secretary",
         },
     }, home)
-    assert out == {"suppressOutput": True}, (
-        f"Expected suppressOutput on TaskUpdate(in_progress) by exempt-"
-        f"agentType owner (count_active_tasks excludes secretary-owned "
-        f"tasks); got {out!r}."
+    hso = out.get("hookSpecificOutput")
+    assert hso is not None, (
+        f"Post-empty WAKE_EXCLUDED_AGENT_TYPES: secretary TaskUpdate("
+        f"in_progress) with STATE_FILE absent must emit Arm directive "
+        f"(count_active_tasks >= 1). Got {out!r}. If suppressOutput, "
+        f"the wake-side carve-out has been re-populated and this test "
+        f"must be inverted in lockstep."
     )
+    assert hso["hookEventName"] == "PostToolUse"
+    assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
 
 
 # ---------- Sequencing: Teardown then claim ----------
