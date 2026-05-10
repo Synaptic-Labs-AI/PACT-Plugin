@@ -28,10 +28,11 @@ Public surface:
   agentType is in this set.
 - WAKE_EXCLUDED_AGENT_TYPES — agentType tokens whose owners' active work
   does NOT count toward the wake-mechanism's active-task tally.
-  Companion predicate: _is_wake_excluded_agent_type. Semantically
-  distinct from SELF_COMPLETE_EXEMPT_AGENT_TYPES (different consumers
-  ask different questions); see constant docstring for why the two are
-  intentionally separate.
+  Companion predicate: _is_wake_excluded_agent_type. Currently EMPTY by
+  design — secretary's standing-listener role produces messages the
+  lead must receive promptly via wake. Semantically distinct from
+  SELF_COMPLETE_EXEMPT_AGENT_TYPES (different consumers ask different
+  questions); see constant docstring for the divergence rationale.
 - canonical_since() — ISO-8601 UTC timestamp helper for the `since` field.
 - validate_wait(wait_metadata) — True iff the flag is well-formed.
 - wait_stale(wait_metadata) — True iff the flag has aged past threshold.
@@ -94,22 +95,32 @@ SELF_COMPLETE_EXEMPT_AGENT_TYPES: frozenset = frozenset({
 
 # AgentType tokens whose owners do NOT count toward the wake-mechanism's
 # active-task tally. Semantically distinct from
-# SELF_COMPLETE_EXEMPT_AGENT_TYPES even when membership is currently
-# identical: the self-completion exemption answers "may this owner self-
-# complete without lead inspection?" while the wake-mechanism exclusion
-# answers "should this owner's active work fire the lead's inbox-watch
-# Monitor?" Two consumers, two questions. Today both answer "exclude
-# pact-secretary", so the sets coincide; future divergence (e.g. an
-# agentType added to one but not the other) is supported by keeping the
-# constants separate at the source.
+# SELF_COMPLETE_EXEMPT_AGENT_TYPES: the self-completion exemption answers
+# "may this owner self-complete without lead inspection?" while the
+# wake-mechanism exclusion answers "should this owner's active work fire
+# the lead's inbox-watch Monitor?" Two consumers, two questions.
 #
-# DO NOT recouple by aliasing one to the other. The two-constant shape is
-# the architectural anchor for the semantic separation; collapsing them
-# into a single import would silently re-link the two policies and break
-# the next time they need to diverge.
-WAKE_EXCLUDED_AGENT_TYPES: frozenset = frozenset({
-    "pact-secretary",
-})
+# CURRENTLY EMPTY by design. Earlier iterations of this constant included
+# `pact-secretary` (inherited from the pre-decoupling single-frozenset
+# design). That carve-out was wrong: the secretary's standing-listener
+# role still produces messages the lead must receive promptly via wake
+# (query replies, calibration responses, harvest summaries). Excluding
+# secretary from the wake count produced the secretary-window failure
+# mode where the Monitor tore down before the lead could read the
+# secretary's reply. Emptying the set restores wake coverage for ALL
+# agentTypes, including secretary.
+#
+# Future divergence is supported: a hypothetical wake-only-noisy
+# agentType (one that emits frequent low-signal traffic and should not
+# wake the Monitor on every task) could be added here without affecting
+# self-completion semantics. The two-constant shape is the architectural
+# anchor for that future divergence.
+#
+# DO NOT recouple by aliasing one constant to the other. Re-linking the
+# policies via a shared import would silently re-introduce the secretary-
+# window failure the next time SELF_COMPLETE_EXEMPT_AGENT_TYPES gains a
+# member.
+WAKE_EXCLUDED_AGENT_TYPES: frozenset = frozenset()
 
 
 def _is_exempt_agent_type(

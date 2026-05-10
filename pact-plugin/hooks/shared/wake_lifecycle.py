@@ -44,16 +44,17 @@ Carve-out rules:
    These self-complete without team-lead-as-completion-gate; they do
    not represent teammate work the wake mechanism needs to surface.
 2. Wake-excluded agentTypes: the task owner's team-config agentType is
-   in WAKE_EXCLUDED_AGENT_TYPES (currently {pact-secretary}).
+   in WAKE_EXCLUDED_AGENT_TYPES (currently EMPTY by design — every
+   agentType, including pact-secretary, counts toward the wake tally
+   so the lead receives messages from all teammates promptly).
    Resolution happens via `_is_wake_excluded_agent_type(owner,
-   team_name)`, so a secretary spawned under any name
-   (`session-secretary`, etc.) reaches the carve-out as long as the
-   team config records its agentType. WAKE_EXCLUDED_AGENT_TYPES is
-   intentionally a SEPARATE constant from
-   SELF_COMPLETE_EXEMPT_AGENT_TYPES so the two policies (self-
-   completion exemption vs wake-mechanism count exclusion) can diverge
-   without coupling. See the constant docstring in
-   shared.intentional_wait for the semantic rationale.
+   team_name)`. WAKE_EXCLUDED_AGENT_TYPES is intentionally a SEPARATE
+   constant from SELF_COMPLETE_EXEMPT_AGENT_TYPES so the two policies
+   (self-completion exemption vs wake-mechanism count exclusion) can
+   diverge without coupling — and they DO diverge today
+   (SELF_COMPLETE_EXEMPT_AGENT_TYPES contains pact-secretary;
+   WAKE_EXCLUDED_AGENT_TYPES is empty). See the constant docstring in
+   shared.intentional_wait for the divergence rationale.
 """
 
 from typing import Any
@@ -90,14 +91,15 @@ def _lifecycle_relevant(task: Any, team_name: str = "") -> bool:
     Carve-outs (apply only on top of a passing status check):
       - Wake-excluded agentType: owner's team-config agentType is
         in WAKE_EXCLUDED_AGENT_TYPES, resolved via
-        `_is_wake_excluded_agent_type(owner, team_name)`. Evaluated
-        before the metadata-shape check so that a wake-excluded
-        agentType task with corrupted metadata is still excluded.
-        With `team_name=""` (default) this carve-out short-circuits to
-        False (fail-closed): the helper's own empty-team_name guard
-        returns False BEFORE `_iter_members` is reached, so the
-        consumer-level outcome here is "not excluded → count it"
-        without any team-config read.
+        `_is_wake_excluded_agent_type(owner, team_name)`.
+        WAKE_EXCLUDED_AGENT_TYPES is currently EMPTY by design — every
+        agentType counts toward the wake tally so the lead receives
+        messages from all teammates (including secretary) promptly.
+        The carve-out call is retained so a future hypothetical wake-
+        only-noisy agentType can be added to the constant without
+        re-introducing the predicate. Evaluated before the metadata-
+        shape check so that a wake-excluded agentType task with
+        corrupted metadata is still excluded once the set is non-empty.
       - Signal-task pattern: metadata.completion_type == "signal" AND
         metadata.type in {"blocker", "algedonic"}.
     """
@@ -109,21 +111,26 @@ def _lifecycle_relevant(task: Any, team_name: str = "") -> bool:
 
     # Wake-excluded agentType carve-out. Hoisted above the metadata
     # shape check so that a wake-excluded agentType task with corrupted
-    # metadata is still excluded. The owner-shape check inside
-    # _is_wake_excluded_agent_type fail-closes on non-string owner.
+    # metadata is still excluded once the set is non-empty. The
+    # owner-shape check inside _is_wake_excluded_agent_type fail-closes
+    # on non-string owner.
     #
     # DECOUPLED-CONSTANT DISCIPLINE: WAKE_EXCLUDED_AGENT_TYPES is a
-    # SEPARATE constant from SELF_COMPLETE_EXEMPT_AGENT_TYPES, even
-    # though their membership currently coincides at {"pact-secretary"}.
-    # The two constants answer different questions for different
-    # consumers — the self-completion exemption asks "may this owner
-    # self-complete without lead inspection?" and the wake-mechanism
-    # exclusion asks "should this owner's active work fire the lead's
-    # inbox-watch Monitor?" Future divergence (an agentType added to
-    # one but not the other) is the architectural reason for the
-    # separation. DO NOT recouple by re-importing _is_exempt_agent_type
-    # here; that would silently re-link the two policies and break the
-    # next time they need to diverge.
+    # SEPARATE constant from SELF_COMPLETE_EXEMPT_AGENT_TYPES, and the
+    # two now DIVERGE: SELF_COMPLETE_EXEMPT contains pact-secretary
+    # (memory-save tasks self-complete without lead inspection),
+    # WAKE_EXCLUDED is empty (every teammate, including secretary,
+    # counts toward the wake tally so the lead receives all replies).
+    # The constants answer different questions for different consumers
+    # — self-completion asks "may this owner self-complete without
+    # lead inspection?" and wake-exclusion asks "should this owner's
+    # active work fire the lead's inbox-watch Monitor?" The empty
+    # WAKE_EXCLUDED set is load-bearing for secretary message coverage
+    # — re-adding pact-secretary here would re-introduce the
+    # secretary-window failure mode where the Monitor tore down before
+    # the lead could read the secretary's reply. DO NOT recouple by
+    # re-importing _is_exempt_agent_type here; the divergence is
+    # architectural intent, not a transient state.
     owner = task.get("owner")
     if isinstance(owner, str) and _is_wake_excluded_agent_type(owner, team_name):
         return False
