@@ -980,9 +980,12 @@ class TestIsExemptAgentTypeMixedTeamConfig:
         )
 
     def test_count_active_tasks_isolates_per_member(self, teams_dir, tmp_path, monkeypatch):
-        # Wake-lifecycle integration: in a multi-member team with one
-        # secretary and one non-secretary teammate, two simultaneous
-        # in_progress tasks (one each) must produce count=1, not 0 or 2.
+        # POST-EMPTY-CARVE-OUT: in a multi-member team with one secretary
+        # and one non-secretary teammate, two simultaneous in_progress
+        # tasks (one each) must now produce count=2 because
+        # WAKE_EXCLUDED_AGENT_TYPES is empty (secretary tasks count).
+        # Pre-empty this test asserted count=1 (secretary excluded);
+        # post-empty both members' tasks count toward the active tally.
         import shared.wake_lifecycle as wl
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -1004,18 +1007,27 @@ class TestIsExemptAgentTypeMixedTeamConfig:
         (tasks_dir / "2.json").write_text(json.dumps(
             {"id": "2", "status": "in_progress", "owner": "backend-coder-1"}
         ))
-        # Secretary task carved out; backend-coder task counts.
-        assert wl.count_active_tasks(team) == 1
+        # Both tasks count post-empty (secretary no longer wake-excluded).
+        assert wl.count_active_tasks(team) == 2
 
 
-class TestMultipleSecretaryTasksAllExempt:
-    """Cross-task interaction: a team running multiple parallel
-    memory-save tasks owned by the same secretary teammate (e.g.,
-    pre-CODE harvest + post-CODE harvest in the same wave) must all
-    be exempt. Pins that the predicate is stateless across task
-    iteration."""
+class TestMultipleSecretaryTasksAllCountPostEmptyCarveOut:
+    """POST-EMPTY-CARVE-OUT: cross-task interaction. A team running
+    multiple parallel memory-save tasks owned by the same secretary
+    teammate (e.g., pre-CODE harvest + post-CODE harvest in the same
+    wave) all COUNT toward the wake-mechanism active tally because
+    WAKE_EXCLUDED_AGENT_TYPES is empty.
 
-    def test_multiple_secretary_tasks_zero_active(self, tmp_path, monkeypatch):
+    Pre-empty: this class asserted secretary tasks were all exempt
+    (count == 0 regardless of how many secretary tasks). Post-empty:
+    each secretary task counts; the count gate handles the Bug A
+    secretary-window scenario at the count layer rather than the
+    per-owner carve-out layer.
+
+    Pins that the predicate is stateless across task iteration —
+    the post-empty count == N for N parallel secretary tasks."""
+
+    def test_multiple_secretary_tasks_all_count_post_empty(self, tmp_path, monkeypatch):
         import shared.wake_lifecycle as wl
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -1035,7 +1047,8 @@ class TestMultipleSecretaryTasksAllExempt:
             (tasks_dir / f"{tid}.json").write_text(json.dumps(
                 {"id": tid, "status": "in_progress", "owner": "session-secretary"}
             ))
-        assert wl.count_active_tasks(team) == 0
+        # All three count post-empty (predicate is stateless across iteration).
+        assert wl.count_active_tasks(team) == 3
 
 
 class TestDocSurfaceStalenessSweep:

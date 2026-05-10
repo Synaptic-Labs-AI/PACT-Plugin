@@ -1,0 +1,22 @@
+{
+  "_meta": {
+    "capture_session_id": "pact-8159e827",
+    "capture_date": "2026-05-09",
+    "capture_method": "synthesized",
+    "issue_ref": "TBD-wake-lifecycle-teachback-rearm",
+    "notes": "Synthesized PostToolUse stdin for the lead's TaskUpdate(status='completed') on a Task A whose paired Task B (same non-exempt teammate, still pending) is in the addBlocks/blocks chain. This is the canonical Two-Task Dispatch Shape continuation case for the defer-Teardown happy path: completed Task A's `blocks` contains Task B's id, Task B is owned by the SAME non-exempt teammate (backend-coder) and remains pending. Fixed hook should defer Teardown via has_same_teammate_continuation. Test expectation: this fixture + a corresponding pre-staged Task B file with owner=='backend-coder' + status=='pending' must produce suppressOutput (no Teardown emit). Source: derived from this session's task #19.json (backend-coder Task A teachback) + task #20.json (Task B work, pending until lead completes Task A). NOTE: production task files persist forward-pointing linkage as `blocks` (populated, e.g., ['20']); `addBlocks` is null on disk. The fixture's tool_response carries both fields with empirical values for predicate-shape resilience — the predicate may read either field but `blocks` is the load-bearing one in production."
+  },
+  "tool_name": "TaskUpdate",
+  "session_id": "8159e827-ac41-4e77-84dd-6d804ac6c633",
+  "cwd": "/Users/mj/Sites/collab/PACT-prompt",
+  "tool_input": {
+    "taskId": "19",
+    "status": "completed"
+  },
+  "tool_response": {
+    "id": "19",
+    "subject": "backend-coder: TEACHBACK for wake-lifecycle hook fix",
+    "status": "completed",
+    "owner": "backend-coder"
+  }
+}

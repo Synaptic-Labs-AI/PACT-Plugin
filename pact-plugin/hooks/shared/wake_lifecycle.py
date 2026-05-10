@@ -16,6 +16,16 @@ Public surface:
     _lifecycle_relevant returns True. `team_name` is threaded through
     to `_lifecycle_relevant` so the agentType carve-out can resolve via
     team config.
+- has_same_teammate_continuation(completed_task, team_name) -> bool
+    Predicate. True iff the just-completed task has at least one task
+    in its continuation chain (`blocks` field on disk; falls back to
+    `addBlocks` for forward-compat) whose owner equals the completed
+    task's owner AND `_lifecycle_relevant` returns True. Consumers
+    (the deferred-Teardown branch in
+    `wake_lifecycle_emitter._decide_directive`) use this to suppress
+    the 1->0 Teardown emit when a same-teammate continuation is staged
+    for handoff. Pure function; never raises; fail-closed (returns
+    False on every error path so Teardown emits unchanged).
 - _lifecycle_relevant(task, team_name="") -> bool
     Predicate. True iff the task counts toward the active-work tally that
     arms/tears down the wake mechanism.
@@ -27,24 +37,30 @@ opportunistic: a transient failure to read tasks degrades to "no Arm
 emit," which falls back to baseline idle-poll delivery — strictly
 better than crashing the hook.
 
-Carve-out rules (match shared.intentional_wait.is_self_complete_exempt
-and the inline-literal signal-task pattern at agent_handoff_emitter.py):
+Carve-out rules:
 1. Signal-tasks: metadata.completion_type == "signal" AND
-   metadata.type in {"blocker", "algedonic"}. These self-complete
-   without team-lead-as-completion-gate; they do not represent
-   teammate work the wake mechanism needs to surface.
-2. Self-complete-exempt agentTypes: the task owner's team-config
-   agentType is in SELF_COMPLETE_EXEMPT_AGENT_TYPES (currently
-   {pact-secretary}). Resolution happens via
-   `_is_exempt_agent_type(owner, team_name)`, so a secretary spawned
-   under any name (`session-secretary`, etc.) reaches the carve-out as
-   long as the team config records its agentType.
+   metadata.type in {"blocker", "algedonic"}. Inline-literal mirror of
+   the pattern at agent_handoff_emitter.py / task_utils.find_blockers.
+   These self-complete without team-lead-as-completion-gate; they do
+   not represent teammate work the wake mechanism needs to surface.
+2. Wake-excluded agentTypes: the task owner's team-config agentType is
+   in WAKE_EXCLUDED_AGENT_TYPES (currently EMPTY by design — every
+   agentType, including pact-secretary, counts toward the wake tally
+   so the lead receives messages from all teammates promptly).
+   Resolution happens via `_is_wake_excluded_agent_type(owner,
+   team_name)`. WAKE_EXCLUDED_AGENT_TYPES is intentionally a SEPARATE
+   constant from SELF_COMPLETE_EXEMPT_AGENT_TYPES so the two policies
+   (self-completion exemption vs wake-mechanism count exclusion) can
+   diverge without coupling — and they DO diverge today
+   (SELF_COMPLETE_EXEMPT_AGENT_TYPES contains pact-secretary;
+   WAKE_EXCLUDED_AGENT_TYPES is empty). See the constant docstring in
+   shared.intentional_wait for the divergence rationale.
 """
 
 from typing import Any
 
-from shared.intentional_wait import _is_exempt_agent_type
-from shared.task_utils import iter_team_task_jsons
+from shared.intentional_wait import _is_wake_excluded_agent_type
+from shared.task_utils import iter_team_task_jsons, read_task_json
 
 # Signal-task types — inline literal mirrors the convention at
 # agent_handoff_emitter.py:78 and task_utils.find_blockers. The carve-out
@@ -73,17 +89,17 @@ def _lifecycle_relevant(task: Any, team_name: str = "") -> bool:
     Other statuses (completed, deleted, blocked) do not count.
 
     Carve-outs (apply only on top of a passing status check):
-      - Self-complete-exempt agentType: owner's team-config agentType is
-        in SELF_COMPLETE_EXEMPT_AGENT_TYPES, resolved via
-        `_is_exempt_agent_type(owner, team_name)`. Evaluated before the
-        metadata-shape check so that an exempt-agentType task with
-        corrupted metadata is still exempt — symmetric with
-        shared.intentional_wait.is_self_complete_exempt. With
-        `team_name=""` (default) this carve-out short-circuits to False
-        (fail-closed): `_is_exempt_agent_type`'s own empty-team_name
-        guard (intentional_wait.py:124) returns False BEFORE
-        `_iter_members` is reached, so the consumer-level outcome here
-        is "not exempt → count it" without any team-config read.
+      - Wake-excluded agentType: owner's team-config agentType is
+        in WAKE_EXCLUDED_AGENT_TYPES, resolved via
+        `_is_wake_excluded_agent_type(owner, team_name)`.
+        WAKE_EXCLUDED_AGENT_TYPES is currently EMPTY by design — every
+        agentType counts toward the wake tally so the lead receives
+        messages from all teammates (including secretary) promptly.
+        The carve-out call is retained so a future hypothetical wake-
+        only-noisy agentType can be added to the constant without
+        re-introducing the predicate. Evaluated before the metadata-
+        shape check so that a wake-excluded agentType task with
+        corrupted metadata is still excluded once the set is non-empty.
       - Signal-task pattern: metadata.completion_type == "signal" AND
         metadata.type in {"blocker", "algedonic"}.
     """
@@ -93,22 +109,30 @@ def _lifecycle_relevant(task: Any, team_name: str = "") -> bool:
     if task.get("status") not in _ACTIVE_STATUSES:
         return False
 
-    # Self-complete-exempt agentType carve-out. Hoisted above the metadata
-    # shape check so that an exempt-agentType task with corrupted metadata
-    # is still exempt — symmetric with shared.intentional_wait.
-    # is_self_complete_exempt. The owner-shape check inside
-    # _is_exempt_agent_type fail-closes on non-string owner.
+    # Wake-excluded agentType carve-out. Hoisted above the metadata
+    # shape check so that a wake-excluded agentType task with corrupted
+    # metadata is still excluded once the set is non-empty. The
+    # owner-shape check inside _is_wake_excluded_agent_type fail-closes
+    # on non-string owner.
     #
-    # ASYMMETRIC CONSUMER SEMANTIC: the same `_is_exempt_agent_type(owner,
-    # team_name)` call also runs at intentional_wait.py:280 inside
-    # `is_self_complete_exempt`, but the consumer-level outcomes are
-    # opposite — there a True return ALLOWS teammate self-completion,
-    # whereas here a True return EXCLUDES the task from the wake-mechanism
-    # tally. Both directions are conservative for their own consumer:
-    # exempt agentTypes don't need the lead's wake (here) and don't
-    # require the lead's completion gate (there).
+    # DECOUPLED-CONSTANT DISCIPLINE: WAKE_EXCLUDED_AGENT_TYPES is a
+    # SEPARATE constant from SELF_COMPLETE_EXEMPT_AGENT_TYPES, and the
+    # two now DIVERGE: SELF_COMPLETE_EXEMPT contains pact-secretary
+    # (memory-save tasks self-complete without lead inspection),
+    # WAKE_EXCLUDED is empty (every teammate, including secretary,
+    # counts toward the wake tally so the lead receives all replies).
+    # The constants answer different questions for different consumers
+    # — self-completion asks "may this owner self-complete without
+    # lead inspection?" and wake-exclusion asks "should this owner's
+    # active work fire the lead's inbox-watch Monitor?" The empty
+    # WAKE_EXCLUDED set is load-bearing for secretary message coverage
+    # — re-adding pact-secretary here would re-introduce the
+    # secretary-window failure mode where the Monitor tore down before
+    # the lead could read the secretary's reply. DO NOT recouple by
+    # re-importing _is_exempt_agent_type here; the divergence is
+    # architectural intent, not a transient state.
     owner = task.get("owner")
-    if isinstance(owner, str) and _is_exempt_agent_type(owner, team_name):
+    if isinstance(owner, str) and _is_wake_excluded_agent_type(owner, team_name):
         return False
 
     metadata = task.get("metadata") or {}
@@ -147,3 +171,95 @@ def count_active_tasks(team_name: str) -> int:
         for task in iter_team_task_jsons(team_name)
         if _lifecycle_relevant(task, team_name)
     )
+
+
+# Defer Teardown when the just-completed task has a same-teammate-owned
+# active continuation chain. Two distinct values over emitting Teardown
+# and letting a later TaskUpdate(in_progress) re-Arm:
+#   1. Cleaner audit trail — the false-positive 1->0 transition signal
+#      never fires, so observers don't see a phantom Monitor-down event.
+#   2. Zero Monitor-down window — between the eager Teardown and the
+#      teammate's claim of the next task, inbound SendMessages would
+#      not wake the lead. Deferring Teardown closes this window.
+# Reuses `_lifecycle_relevant(blocked_task, team_name)` for unified
+# active-status + carve-out semantics, so any future expansion of
+# WAKE_EXCLUDED_AGENT_TYPES is handled transparently.
+#
+# Field-name discipline (load-bearing): the on-disk task .json stores
+# the resolved continuation list under `blocks` (a list of task IDs).
+# `addBlocks` is the TaskUpdate API parameter (additive verb) — it
+# appears in the request payload but is normalized into `blocks` on the
+# stored record (and is typically `null` on disk after the merge). This
+# predicate reads `blocks` as the load-bearing field and falls back to
+# `addBlocks` only as a forward-compat / test-fixture convenience.
+# Consumer: wake_lifecycle_emitter._decide_directive deferred-Teardown
+# branch.
+def has_same_teammate_continuation(completed_task: Any, team_name: str) -> bool:
+    """
+    Return True iff the just-completed task has at least one task in its
+    continuation chain whose owner equals the completed task's owner
+    AND `_lifecycle_relevant` returns True.
+
+    Args:
+        completed_task: The task dict (as returned by `read_task_json`)
+            for the task whose completion triggered the Teardown
+            evaluation. May be `{}` or any non-dict on read failure.
+        team_name: Team name for scoped task lookup. Threaded through to
+            `read_task_json` and `_lifecycle_relevant` so the agentType
+            carve-out can resolve via team config.
+
+    Returns:
+        True iff a same-teammate active continuation exists. False on
+        every error path (non-dict input, missing owner, missing /
+        non-list continuation chain, non-string blocked id, read
+        failure on blocked task, no matching continuation found).
+
+    Pure function; never raises. Fail-closed (return False) means the
+    caller does NOT defer Teardown — the existing 1->0 emit behavior is
+    preserved on every failure mode. Teardown is idempotent in the
+    skill layer, so a fail-closed over-emit is benign; the alternative
+    (fail-open to "defer") would silently suppress legitimate Teardowns
+    on parse errors and is the worse failure mode here.
+
+    Field-name precedence: reads `blocks` first (the resolved on-disk
+    field; populated after the platform merges any `addBlocks` API
+    parameter into the stored record), then falls back to `addBlocks`
+    for forward-compat with hypothetical fixtures or platform versions
+    that surface the additive parameter directly. Both must be lists of
+    task ID strings; non-list values fail-close to False.
+
+    ANY-match semantics: a single same-teammate active continuation in
+    the chain is sufficient to defer. If the chain mixes a same-
+    teammate active task with signal-tasks or exempt-agentType tasks,
+    the same-teammate active match still defers — `_lifecycle_relevant`
+    excludes the non-matching entries from consideration.
+    """
+    try:
+        if not isinstance(completed_task, dict):
+            return False
+
+        owner = completed_task.get("owner")
+        if not isinstance(owner, str) or not owner:
+            return False
+
+        blocked_ids = completed_task.get("blocks")
+        if not isinstance(blocked_ids, list):
+            blocked_ids = completed_task.get("addBlocks")
+            if not isinstance(blocked_ids, list):
+                return False
+
+        for blocked_id in blocked_ids:
+            if not isinstance(blocked_id, str) or not blocked_id:
+                continue
+            blocked_task = read_task_json(blocked_id, team_name)
+            if not isinstance(blocked_task, dict) or not blocked_task:
+                continue
+            blocked_owner = blocked_task.get("owner")
+            if not isinstance(blocked_owner, str) or blocked_owner != owner:
+                continue
+            if _lifecycle_relevant(blocked_task, team_name):
+                return True
+
+        return False
+    except Exception:
+        return False

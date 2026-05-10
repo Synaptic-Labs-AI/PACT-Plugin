@@ -5,16 +5,21 @@ Summary: PostToolUse hook (matcher='TaskCreate|TaskUpdate') enforcing PACT
          lifecycle invariants. Cannot DENY (post-action); emits structural
          advisory via additionalContext, plus a metadata writeback for
          self-completion violations.
-Used by: hooks.json PostToolUse matcher='TaskCreate|TaskUpdate' (#662)
+Used by: hooks.json PostToolUse matcher='TaskCreate|TaskUpdate' (per the
+         unified Task-mutating-tool matcher convention shared with
+         wake_lifecycle_emitter and agent_handoff_emitter).
 
 Self-completion writeback recursion mitigation: the metadata writeback marks
 metadata.gate_writeback=true. The gate's first check skips on this marker
 so the gate's own write does not re-trigger the self-completion advisory
 on itself.
 
-Safety: fail-closed-as-advisory on module-load failure (PR #660 pattern,
-adapted for PostToolUse — cannot DENY, emits advisory + exit 0).
-hookEventName always emitted (#658 defense).
+Safety: fail-closed-as-advisory on module-load failure (mirrors the
+bootstrap_gate fail-closed-as-deny pattern, adapted for PostToolUse —
+cannot DENY, emits advisory + exit 0).
+hookEventName always emitted on every output path (per the
+hookSpecificOutput schema-rejection defense — missing hookEventName
+triggers silent platform-layer rejection).
 
 Rule coverage:
   - teachback_addblocks_missing — Teachback Task created without
@@ -88,17 +93,24 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
 # ─── constants ────────────────────────────────────────────────────────────────
 
 # Paired-SendMessage time window (seconds) for the teachback-completion
-# rule. Per architect §7 / plan: 120s.
+# rule. Window: 120s — sized to cover normal lead reaction time between
+# the teachback-completing TaskUpdate and the paired wake-SendMessage,
+# while still detecting genuinely-missing pairs before the teammate's
+# idle-poll cycle.
 PAIRED_SENDMESSAGE_WINDOW_S = 120
 
 # Self-completion carve-out resolution is delegated entirely to
 # is_self_complete_exempt(task, team_name) in shared.intentional_wait
-# (the SSOT). The predicate now keys on team-config agentType rather
-# than owner name; team_name is resolved via pact_context at the call
-# site below. The dispatch_gate RESERVED_NAMES set still reserves the
-# `secretary`/`pact-secretary` literals as a defense-in-depth name
-# perimeter — see dispatch_gate.RESERVED_NAMES comment block for the
-# post-#682 rationale.
+# (the SSOT). The predicate keys on team-config agentType (NOT owner
+# name) — secretaries spawned under any name reach the carve-out as
+# long as the team-config records agentType=pact-secretary. team_name
+# is resolved via pact_context at the call site below. The dispatch_gate
+# RESERVED_NAMES set still reserves the `secretary`/`pact-secretary`
+# literals as a defense-in-depth name perimeter — see
+# dispatch_gate.RESERVED_NAMES comment block for the name-perimeter
+# rationale (the SSOT for self-completion exemption is agentType, but
+# the name perimeter blocks teammates from spawning under reserved
+# names that could shadow legitimate secretary spawn).
 
 # Required handoff schema fields (advisory if present-but-malformed).
 _HANDOFF_REQUIRED_FIELDS = (
@@ -109,6 +121,36 @@ _HANDOFF_REQUIRED_FIELDS = (
     "integration",
     "open_questions",
 )
+
+
+# Canonical Teachback Task subject pattern: `<teammate-name>: TEACHBACK
+# for <mission descriptor>`. The leading `[a-z0-9-]+:` is the canonical
+# teammate-prefix shape used across the plugin (matches names like
+# `backend-coder-2`, `secretary`, `architect-1`); `TEACHBACK for ` is
+# the canonical mission-framing per pact-completion-authority.md.
+#
+# WHY a structural match instead of substring `"teachback" in subject`:
+# the substring form fires on ANY task subject containing the word —
+# including planning/discussion subjects like `"Plan: wake-lifecycle
+# teachback re-arm fix"` — and produces benign-but-noisy false-positive
+# advisories. The structural match pins the pattern to the canonical
+# Teachback-Gated Dispatch shape so only actual teachback tasks trip
+# the rules.
+_TEACHBACK_SUBJECT_PATTERN = re.compile(r"^[a-z0-9-]+: TEACHBACK for ")
+
+
+def _is_teachback_subject(subject: str) -> bool:
+    """Return True iff `subject` matches the canonical Teachback Task
+    shape (`<teammate-name>: TEACHBACK for <mission>`).
+
+    Pure function; never raises. Returns False on non-string input or
+    any subject that does not match the anchored pattern. Replaces the
+    legacy `"TEACHBACK" in subject_upper` substring check across the
+    gate's TaskCreate and TaskUpdate rule paths.
+    """
+    if not isinstance(subject, str):
+        return False
+    return _TEACHBACK_SUBJECT_PATTERN.match(subject) is not None
 
 
 # ─── paired-SendMessage check (for teachback completion) ─────────────────────
@@ -196,8 +238,10 @@ def _writeback_dispute(task_id: str) -> bool:
     gate's step ① recursion check will skip it.
 
     Fail-OPEN by design: any IOError swallowed and returns False — advisory
-    is still emitted by the caller (architect §4 'failure mode'). Logged
-    via lifecycle_decision journal event.
+    is still emitted by the caller (per the writeback-failure convention:
+    the advisory's user-facing surface is the load-bearing signal; the
+    metadata writeback is best-effort accounting). Logged via
+    lifecycle_decision journal event.
 
     Returns True iff the writeback succeeded.
     """
@@ -284,12 +328,12 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
     # ② TaskCreate rules — teachback addBlocks + work-task addBlockedBy
     if tool_name == "TaskCreate":
         subject = (tool_input.get("subject") or "")
-        subject_upper = subject.upper() if isinstance(subject, str) else ""
+        is_teachback = _is_teachback_subject(subject)
         owner = tool_input.get("owner") or ""
         if not isinstance(owner, str):
             owner = ""
 
-        if "TEACHBACK" in subject_upper and not tool_input.get("addBlocks"):
+        if is_teachback and not tool_input.get("addBlocks"):
             advisories.append((
                 "teachback_addblocks_missing",
                 "PACT task_lifecycle_gate: Teachback Task created without "
@@ -298,7 +342,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
             ))
 
         if (
-            "TEACHBACK" not in subject_upper
+            not is_teachback
             and owner.startswith("pact-")
             and not tool_input.get("addBlockedBy")
         ):
@@ -327,7 +371,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
             task = read_task_json(task_id, team_name) if team_name else {}
 
         subject = task.get("subject") or ""
-        subject_upper = subject.upper() if isinstance(subject, str) else ""
+        is_teachback = _is_teachback_subject(subject)
         owner = task.get("owner") or ""
         if not isinstance(owner, str):
             owner = ""
@@ -340,7 +384,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
         #     check (no payload to validate).
         #   handoff present but schema malformed → handoff_schema_invalid
         #     advisory.
-        is_work_task = "TEACHBACK" not in subject_upper and owner.startswith("pact-")
+        is_work_task = not is_teachback and owner.startswith("pact-")
         if is_work_task:
             handoff = metadata.get("handoff")
             if not handoff:
@@ -360,7 +404,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                     ))
 
         # Teachback completion requires a paired wake-SendMessage to owner
-        if "TEACHBACK" in subject_upper and owner:
+        if is_teachback and owner:
             if not _has_paired_sendmessage(owner, PAIRED_SENDMESSAGE_WINDOW_S):
                 advisories.append((
                     "completion_no_paired_send",

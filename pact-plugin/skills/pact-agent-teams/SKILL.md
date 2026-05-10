@@ -124,6 +124,8 @@ For consequence-level disagreements:
 
 When your work is done, you store the HANDOFF and remain `in_progress`. **You do NOT mark your own tasks `completed`** — the team-lead is the authoritative completion signal.
 
+> **Ordering invariant** (audit anchor): the three steps below MUST execute in the order Step 1 → Step 2 → Step 3 — `metadata.handoff` write FIRST, then notify SendMessage to team-lead, then `intentional_wait` SET. This ordering is load-bearing for the team-lead's [Read-Trigger Precondition](../../protocols/pact-completion-authority.md#read-trigger-precondition): the lead must wait for teammate's wake-signal SendMessage before treating the raw `cat ~/.claude/tasks/.../{taskId}.json | jq .metadata.handoff` read as authoritative, but the SendMessage is only safe to send AFTER the metadata write has landed on disk. Reversing Step 1 and Step 2 produces false-empty raw reads on the lead side that have triggered false-positive HANDOFF rejection cycles. Reversing Step 2 and Step 3 (idle before SendMessage) silently strands the lead — they will never see the wake-signal because you went idle without sending it. Editors of this skill: do NOT re-order these steps.
+
 1. **Store HANDOFF in task metadata**:
    ```
    TaskUpdate(taskId, metadata={"handoff": {
@@ -174,9 +176,9 @@ If the team-lead rejects your teachback or HANDOFF, you wake on the inbound Send
    TaskUpdate(taskId, metadata={"intentional_wait": None})
    ```
 
-2. **Read the rejection metadata**:
-   - For Task A (teachback): `TaskGet(taskId).metadata.teachback_rejection`
-   - For Task B (work): `TaskGet(taskId).metadata.handoff_rejection`
+2. **Read the rejection metadata** via raw JSON (TaskGet does NOT surface `metadata.*` keys — see [pact-completion-authority §TaskGet metadata-blindness reminder](../../protocols/pact-completion-authority.md#completion-authority) and the symmetric rejection-receipt rule in [§Read-Trigger Precondition](../../protocols/pact-completion-authority.md#read-trigger-precondition)):
+   - For Task A (teachback): `cat ~/.claude/tasks/{team_name}/{taskId}.json | jq .metadata.teachback_rejection`
+   - For Task B (work): `cat ~/.claude/tasks/{team_name}/{taskId}.json | jq .metadata.handoff_rejection`
 
    The shape is `{"reason": str, "corrections": [str, ...], "since": ISO8601, "revision_number": int}`.
 
@@ -240,7 +242,7 @@ output (even zero-content) blocks the next inbox delivery.
 - **Idle-waiting for a protocol-defined resolution** (teachback, team-lead commit,
   peer reply, user decision)? Use the `intentional_wait` task metadata per
   the Intentional Waiting section below.
-- **Awaiting lead completion?** SET `intentional_wait{reason=awaiting_lead_completion, expected_resolver=lead, since=<canonical_since() output>}` after storing your HANDOFF or teachback metadata. Do NOT poll TaskList while idle — you cannot self-wake to do so. The team-lead's wake-signal SendMessage is the resolver.
+- **Awaiting lead completion?** SET `intentional_wait{reason=awaiting_lead_completion, expected_resolver=lead, since=<canonical_since() output>}` after storing your HANDOFF or teachback metadata AND sending the notify SendMessage to the team-lead. **Ordering invariant** (audit anchor, lead-side mirror): metadata write FIRST → notify SendMessage SECOND → intentional_wait SET THIRD. This ordering exists because the team-lead must wait for teammate's wake-signal SendMessage before treating their raw `cat ~/.claude/tasks/.../{id}.json | jq .metadata.{handoff,teachback_submit}` read as authoritative — see [pact-completion-authority §Read-Trigger Precondition](../../protocols/pact-completion-authority.md#read-trigger-precondition). Sending the SendMessage before the metadata write lands produces false-empty raw reads on the lead side; going idle before the SendMessage strands the lead silently. Do NOT poll TaskList while idle — you cannot self-wake to do so. The team-lead's wake-signal SendMessage is the resolver.
 - **Genuinely stuck**? Follow the On Blocker section.
 
 If you have nothing to say that advances the work, say nothing.

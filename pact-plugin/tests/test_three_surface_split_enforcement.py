@@ -168,28 +168,165 @@ class TestBootstrapCommandExcludesGovernanceDirectives:
     def bootstrap_text(self):
         return BOOTSTRAP_MD_PATH.read_text(encoding="utf-8")
 
+    @staticmethod
+    def _governance_leak_pattern(keyword: str) -> re.Pattern:
+        """Build the heading-shape detector for a governance keyword.
+
+        Two heading-shape contexts qualify as governance LEAK:
+          1. Markdown heading line (H1-H6): `^#{1,6}\\s.*<keyword>` — line
+             starts with one to six `#` markers followed by whitespace,
+             then arbitrary text including the keyword. Empirically this
+             is the canonical persona-body shape (e.g., `## 3. S5 POLICY
+             — SACROSANCT Non-Negotiables`, `## 4. Algedonic Signals
+             (Emergency Bypass)`, `## 12. Completion Authority, Teachback
+             Review & Intentional Waiting`).
+          2. Bold-emphasis form: `\\*\\*[^*\\n]*?<keyword>[^*\\n]*?\\*\\*` —
+             keyword wrapped between `**` markers on a SINGLE line.
+             Catches faux-heading usage like `**MISSION:**` or
+             `**FINAL MANDATE** to all agents`. The `[^*\\n]*?` bound is
+             load-bearing: excluding newlines prevents the non-greedy
+             `*?` from pulling content across lines (e.g., a `**create**`
+             on one line could otherwise reach forward to a `MISSION:`
+             on a later line and an arbitrary `**` after that, producing
+             a multi-line false match).
+
+        Both contexts use case-insensitive matching: a future contributor
+        lowercasing a heading (e.g., `## sacrosanct non-negotiables`) or
+        mixing case (`Mission:`) would bypass a case-sensitive guard.
+
+        Returns a compiled regex with both alternatives joined.
+        """
+        escaped = re.escape(keyword)
+        # Combined pattern: heading-line OR same-line bold-emphasis.
+        # MULTILINE so `^` matches per-line, IGNORECASE so case variants
+        # are caught. The `[^*\n]*?` non-greedy bound on the bold form
+        # prevents matching across `**` boundaries AND across newlines.
+        return re.compile(
+            rf"^#{{1,6}}\s.*{escaped}|\*\*[^*\n]*?{escaped}[^*\n]*?\*\*",
+            flags=re.MULTILINE | re.IGNORECASE,
+        )
+
     @pytest.mark.parametrize("keyword", GOVERNANCE_KEYWORDS)
     def test_bootstrap_md_excludes_governance_keyword(
         self, bootstrap_text, keyword
     ):
         """Each governance keyword names a persona-body-owned section.
-        Its presence in bootstrap.md indicates governance leaking into
-        the mechanics surface.
+        Its presence in bootstrap.md AS A HEADING-SHAPE construct
+        indicates governance leaking into the mechanics surface.
 
-        Case-insensitive substring check: a future contributor lowercasing
-        a section heading (e.g., `## sacrosanct non-negotiables`) or
-        mixing case (`Mission:`) would bypass a case-sensitive guard.
-        Lowercase BOTH sides before comparing so all case variants are
-        rejected.
+        Heading-shape detector (per `_governance_leak_pattern` above):
+          1. Markdown heading line (H1-H6) containing the keyword
+             (e.g., `## SACROSANCT Rules`, `### Completion Authority`).
+          2. Bold-emphasis form (e.g., `**MISSION:**`, `**FINAL MANDATE**
+             to all agents`).
+
+        Both forms are the empirical persona-body shape that signals real
+        governance leakage. Inline prose mentions (e.g., quoted example
+        blocks like `<full mission: deliver session briefing on spawn,
+        ... CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES per persona §13>`)
+        do NOT match — the test is intentionally specific to heading-shape
+        constructs, not arbitrary keyword presence.
+
+        Case-insensitive: a future contributor lowercasing a heading
+        (e.g., `## sacrosanct non-negotiables`) is still caught.
+
+        Positive controls: `test_governance_keyword_pattern_catches_known_leaks`
+        synthesizes representative heading-shape leaks and asserts the
+        pattern catches each — guards against silent regression to a
+        pattern that no longer fires on real leaks.
         """
-        bootstrap_lower = bootstrap_text.lower()
-        keyword_lower = keyword.lower()
-        assert keyword_lower not in bootstrap_lower, (
-            f"commands/bootstrap.md contains governance keyword "
-            f"{keyword!r} (case-insensitive); that content belongs in "
-            f"the --agent-delivered persona body, not the per-session "
-            f"ritual command. Re-locate to pact-orchestrator.md or remove."
-        )
+        pattern = self._governance_leak_pattern(keyword)
+        match = pattern.search(bootstrap_text)
+        if match is not None:
+            line_start = bootstrap_text.rfind("\n", 0, match.start()) + 1
+            line_end_idx = bootstrap_text.find("\n", match.start())
+            line_end = line_end_idx if line_end_idx != -1 else len(bootstrap_text)
+            line_no = bootstrap_text[:line_start].count("\n") + 1
+            line_text = bootstrap_text[line_start:line_end]
+            pytest.fail(
+                f"commands/bootstrap.md contains governance keyword "
+                f"{keyword!r} in HEADING SHAPE at L{line_no}: "
+                f"{line_text!r}. Heading-shape governance content "
+                f"belongs in the --agent-delivered persona body, not "
+                f"the per-session ritual command. Re-locate to "
+                f"pact-orchestrator.md or remove. (Inline prose "
+                f"mentions of the keyword are NOT caught by this test "
+                f"by design — see the heading-shape detector "
+                f"_governance_leak_pattern.)"
+            )
+
+    def test_governance_keyword_pattern_catches_known_leaks(self):
+        """Positive control for the heading-shape detector.
+
+        Pins that `_governance_leak_pattern` catches representative
+        governance-leak shapes for each keyword. Without this control,
+        the heading-shape detector could silently regress to a pattern
+        that no longer fires on real leaks (e.g., a future "tighten the
+        regex" edit that breaks the bold-emphasis branch) and the
+        `test_bootstrap_md_excludes_governance_keyword` parametrize
+        would still pass by reporting no match against unrelated text.
+
+        Per-keyword fixture leaks (one heading-shape AND one bold-shape
+        per keyword) are constructed inline. Each fixture must trigger
+        a match — failure indicates the pattern has lost discriminative
+        power on that keyword.
+
+        The companion negative-control assertions confirm the pattern
+        does NOT fire on inline prose, the canonical Recommended Agent
+        Prompting Structure reference, or quoted-example blocks. These
+        are the false-positive shapes the original case-insensitive
+        substring check over-fired on.
+        """
+        # POSITIVE controls: each (keyword, leak_text) pair MUST match.
+        positive_fixtures = [
+            ("MISSION:", "## MISSION:"),
+            ("MISSION:", "**MISSION:** all agents must..."),
+            ("MOTTO:", "## MOTTO: ship correctness over speed"),
+            ("MOTTO:", "**MOTTO:** be excellent"),
+            ("FINAL MANDATE", "## FINAL MANDATE for orchestrators"),
+            ("FINAL MANDATE", "**FINAL MANDATE** to all agents"),
+            ("SACROSANCT", "## 3. S5 POLICY — SACROSANCT Non-Negotiables"),
+            ("SACROSANCT", "**SACROSANCT** rules cannot be bypassed"),
+            ("S5 POLICY", "## 3. S5 POLICY — SACROSANCT Non-Negotiables"),
+            ("S5 POLICY", "**S5 POLICY** governs viability"),
+            ("Algedonic", "## 4. Algedonic Signals (Emergency Bypass)"),
+            ("Algedonic", "**Algedonic** emit on viability threats"),
+            ("Completion Authority", "## 12. Completion Authority, Teachback Review"),
+            ("Completion Authority", "### Completion Authority"),
+            ("Completion Authority", "**Completion Authority** belongs to the lead"),
+        ]
+        for keyword, leak in positive_fixtures:
+            pattern = self._governance_leak_pattern(keyword)
+            assert pattern.search(leak), (
+                f"Positive control failed: keyword {keyword!r} pattern "
+                f"did not match heading-shape leak {leak!r}. The "
+                f"heading-shape detector has lost discriminative power "
+                f"on this keyword — `_governance_leak_pattern` may have "
+                f"been edited to over-narrow."
+            )
+
+        # NEGATIVE controls: each (keyword, prose) pair must NOT match.
+        # These are the shapes that the original case-insensitive
+        # substring check over-fired on; the refined heading-shape
+        # detector correctly ignores them.
+        negative_fixtures = [
+            ("MISSION:", "the mission of the secretary is to deliver briefings"),
+            ("MISSION:", "CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES per persona §13"),
+            ("MISSION:", '`description="<full mission: deliver session briefing on spawn>"`'),
+            ("MISSION:", "2. `TaskCreate(subject=\"...\", description=\"<full mission: deliver session briefing on spawn, answer memory queries during the session, process HANDOFFs at workflow boundaries; CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES per the orchestrator persona §13 Recommended Agent Prompting Structure>\")`"),
+            ("SACROSANCT", "A SACROSANCT non-negotiable was clarified, refined, or newly discovered."),
+            ("Algedonic", "agents emit algedonic signals when they recognize viability threats"),
+            ("Completion Authority", "See Completion Authority section above"),
+        ]
+        for keyword, prose in negative_fixtures:
+            pattern = self._governance_leak_pattern(keyword)
+            assert not pattern.search(prose), (
+                f"Negative control failed: keyword {keyword!r} pattern "
+                f"OVER-FIRED on prose {prose!r}. The heading-shape "
+                f"detector has regressed to substring-match behavior — "
+                f"`_governance_leak_pattern` has been edited to "
+                f"over-broaden, undoing the Option E refinement."
+            )
 
     def test_bootstrap_md_no_mandatory_imperative_outside_step_sections(
         self, bootstrap_text

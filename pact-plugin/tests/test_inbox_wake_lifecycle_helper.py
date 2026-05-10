@@ -3,10 +3,19 @@ Behavioral invariants for pact-plugin/hooks/shared/wake_lifecycle.py.
 
 Direct-import tests of count_active_tasks() and _lifecycle_relevant().
 Pin the carve-out semantics (signal-tasks, team-config exempt agentTypes)
-to the shared helper _is_exempt_agent_type from shared.intentional_wait
-(no duplicate literal). Pure-never-raises property pins the contract so
-the redundant try/except in session_init.py:728-730 can be removed in
-future cleanup.
+to the shared helper _is_wake_excluded_agent_type from
+shared.intentional_wait (no duplicate literal). Pure-never-raises
+property pins the contract so the redundant try/except in
+session_init.py:728-730 can be removed in future cleanup.
+
+POST-EMPTY-CARVE-OUT NOTE: WAKE_EXCLUDED_AGENT_TYPES is now an empty
+frozenset (decoupled from SELF_COMPLETE_EXEMPT_AGENT_TYPES which still
+contains pact-secretary). Secretary tasks ARE counted toward the wake-
+mechanism active tally; the count gate (count > 0 prevents Teardown
+emit) handles the Bug A secretary-window scenario at the count layer
+rather than the per-owner carve-out layer. Tests below that previously
+asserted "secretary excluded from wake count" have been inverted to
+assert the post-empty behavior (secretary counts).
 """
 
 import json
@@ -17,7 +26,10 @@ import pytest
 
 # Hooks dir is added to sys.path by conftest.
 import shared.wake_lifecycle as wl
-from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENT_TYPES
+from shared.intentional_wait import (
+    SELF_COMPLETE_EXEMPT_AGENT_TYPES,
+    WAKE_EXCLUDED_AGENT_TYPES,
+)
 
 
 def _write_team_config(tmp_path, team_name, members):
@@ -37,12 +49,39 @@ def _write_team_config(tmp_path, team_name, members):
 
 def test_helper_imports_shared_helper_from_intentional_wait():
     """No duplicate carve-out logic — the helper must reuse the canonical
-    _is_exempt_agent_type from shared.intentional_wait."""
+    wake-side carve-out helper from shared.intentional_wait. Pin the
+    DECOUPLED-CONSTANT discipline: the wake-side import must be
+    _is_wake_excluded_agent_type (consulting WAKE_EXCLUDED_AGENT_TYPES),
+    NOT _is_exempt_agent_type (the self-completion-side helper consulting
+    SELF_COMPLETE_EXEMPT_AGENT_TYPES). The two sets are currently
+    identical at {pact-secretary} but the import names are decoupled so
+    a future divergence (e.g., wake-side reduction without changing
+    self-completion authority) does not require touching this file."""
     src = (
         Path(__file__).resolve().parent.parent
         / "hooks" / "shared" / "wake_lifecycle.py"
     ).read_text(encoding="utf-8")
-    assert "from shared.intentional_wait import _is_exempt_agent_type" in src
+    assert "from shared.intentional_wait import _is_wake_excluded_agent_type" in src
+    # Active anti-recouple guard: wake_lifecycle MUST NOT IMPORT the
+    # self-completion-side helper. Re-introducing the import would
+    # silently re-couple the two policies. Pinned via line-anchored
+    # import-statement match (rather than bare substring) so the
+    # DECOUPLED-CONSTANT DISCIPLINE comment in wake_lifecycle.py — which
+    # legitimately mentions _is_exempt_agent_type as the warning target —
+    # does not trigger this assertion.
+    has_recouple_import = any(
+        line.strip() == "from shared.intentional_wait import _is_exempt_agent_type"
+        or line.strip().startswith(
+            "from shared.intentional_wait import "
+        ) and "_is_exempt_agent_type" in line.split("import", 1)[1]
+        for line in src.splitlines()
+    )
+    assert not has_recouple_import, (
+        "wake_lifecycle.py must NOT import _is_exempt_agent_type "
+        "(the self-completion-side helper). Use _is_wake_excluded_agent_type "
+        "instead — see DECOUPLED-CONSTANT DISCIPLINE comment in "
+        "wake_lifecycle.py."
+    )
     # No re-declaration: a literal exempt set in the helper would diverge
     # from intentional_wait. Belt-and-suspenders: stale post-#682 import.
     assert "SELF_COMPLETE_EXEMPT_AGENTS" not in src
@@ -73,11 +112,20 @@ def test_lifecycle_relevant_status_gate(task, expected):
     assert wl._lifecycle_relevant(task) is expected
 
 
-@pytest.mark.parametrize("agent_type", sorted(SELF_COMPLETE_EXEMPT_AGENT_TYPES))
-def test_lifecycle_relevant_excludes_exempt_agenttypes(agent_type, tmp_path, monkeypatch):
-    """Exempt agentTypes resolved via team-config lookup do not count
-    toward the active-work tally. The owner name is arbitrary — the
-    team-config agentType is what matters (#682)."""
+@pytest.mark.parametrize("agent_type", sorted(WAKE_EXCLUDED_AGENT_TYPES))
+def test_lifecycle_relevant_excludes_wake_excluded_agenttypes(agent_type, tmp_path, monkeypatch):
+    """Wake-excluded agentTypes resolved via team-config lookup do not
+    count toward the active-work tally. The owner name is arbitrary —
+    the team-config agentType is what matters (#682).
+
+    POST-EMPTY-CARVE-OUT: WAKE_EXCLUDED_AGENT_TYPES is now an empty
+    frozenset, so this parametrize produces ZERO cells (vacuously true,
+    no test bodies execute). The test is preserved as a structural
+    placeholder: if a future PR re-populates WAKE_EXCLUDED_AGENT_TYPES
+    (e.g., adding back pact-secretary or adding a new exempt agentType),
+    the parametrize automatically re-activates and pins the carve-out
+    behavior. Distinct from the self-completion side which still has
+    pact-secretary in SELF_COMPLETE_EXEMPT_AGENT_TYPES."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     team = "team-exempt"
     _write_team_config(tmp_path, team, [
@@ -87,16 +135,34 @@ def test_lifecycle_relevant_excludes_exempt_agenttypes(agent_type, tmp_path, mon
     assert wl._lifecycle_relevant(task, team) is False
 
 
-def test_lifecycle_relevant_exempt_owner_arbitrary_name(tmp_path, monkeypatch):
-    """Spawn-name freedom: any name reaches the exempt-agentType
-    carve-out as long as the team config records its agentType."""
+def test_lifecycle_relevant_secretary_owner_now_counts_post_empty_carve_out(tmp_path, monkeypatch):
+    """POST-EMPTY-CARVE-OUT: a secretary-owned task is now lifecycle-
+    relevant (counts toward the active tally) because
+    WAKE_EXCLUDED_AGENT_TYPES is empty. Pre-empty, the spawn-name-
+    freedom test asserted the inverse (any name reaches the exempt
+    agentType carve-out, returns False); post-empty the carve-out has
+    no agentType members to match against, so the carve-out is a no-op
+    and secretary tasks count like any other teammate task.
+
+    The Bug A secretary-window scenario (eager Teardown when secretary
+    completes its first teachback) is now fixed at the count gate:
+    count_active_tasks > 0 prevents Teardown emit before the
+    has_same_teammate_continuation predicate is even consulted. The
+    SELF_COMPLETE_EXEMPT_AGENT_TYPES side still contains pact-secretary
+    (self-completion authority preserved); the wake-side carve-out is
+    decoupled and now empty."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     team = "team-arbitrary-name"
     _write_team_config(tmp_path, team, [
         {"name": "secretary-from-mars", "agentType": "pact-secretary"},
     ])
     task = {"status": "in_progress", "owner": "secretary-from-mars"}
-    assert wl._lifecycle_relevant(task, team) is False
+    assert wl._lifecycle_relevant(task, team) is True, (
+        "Post-empty WAKE_EXCLUDED_AGENT_TYPES: secretary tasks must count "
+        "toward the wake-mechanism active tally. If False, the wake-side "
+        "carve-out has been re-populated and this test must be inverted "
+        "in lockstep."
+    )
 
 
 def test_lifecycle_relevant_owner_named_secretary_without_agenttype_counts(tmp_path, monkeypatch):
@@ -149,24 +215,28 @@ def test_lifecycle_relevant_counts_under_malformed_metadata():
     assert wl._lifecycle_relevant(task) is True
 
 
-@pytest.mark.parametrize("agent_type", sorted(SELF_COMPLETE_EXEMPT_AGENT_TYPES))
-def test_lifecycle_relevant_exempt_agenttype_with_corrupted_metadata(
+@pytest.mark.parametrize("agent_type", sorted(WAKE_EXCLUDED_AGENT_TYPES))
+def test_lifecycle_relevant_wake_excluded_agenttype_with_corrupted_metadata(
     agent_type, tmp_path, monkeypatch
 ):
-    """AgentType-carve-out hoist: an exempt-agentType task (e.g. secretary)
-    with non-dict metadata must STILL be exempt — return False.
-    Pre-hoist behavior was True because the metadata-shape gate
-    short-circuited to conservative-count BEFORE checking the
-    agentType carve-out, so corrupted metadata accidentally promoted
-    exempt agents to lifecycle-relevant tasks. This is the inverse
-    asymmetry of the sibling
-    test_lifecycle_relevant_counts_under_malformed_metadata: a
-    NON-exempt agent with corrupted metadata stays True (count it
-    conservatively); an EXEMPT agentType with corrupted metadata flips
-    to False (the carve-out is agentType-keyed, not metadata-shape).
+    """AgentType-carve-out hoist: a wake-excluded agentType task with
+    non-dict metadata must STILL be excluded — return False. Pre-hoist
+    behavior was True because the metadata-shape gate short-circuited
+    to conservative-count BEFORE checking the agentType carve-out, so
+    corrupted metadata accidentally promoted exempt agents to lifecycle-
+    relevant tasks.
 
-    Counter-test-by-revert: reverting the agentType carve-out below the
-    metadata-shape gate would flip this test RED."""
+    POST-EMPTY-CARVE-OUT: WAKE_EXCLUDED_AGENT_TYPES is now empty, so
+    this parametrize produces ZERO cells (vacuously true, no test
+    bodies execute). The test is preserved as a structural placeholder:
+    if a future PR re-populates WAKE_EXCLUDED_AGENT_TYPES, the
+    parametrize automatically re-activates and pins the hoist invariant
+    (agentType carve-out must be checked BEFORE metadata-shape gate).
+
+    Distinct from the sibling
+    test_lifecycle_relevant_counts_under_malformed_metadata which
+    pins the conservative-count behavior for non-exempt teammates with
+    corrupted metadata (still True)."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     team = "team-corrupt-meta"
     _write_team_config(tmp_path, team, [
@@ -178,8 +248,40 @@ def test_lifecycle_relevant_exempt_agenttype_with_corrupted_metadata(
         "metadata": "not-a-dict",
     }
     assert wl._lifecycle_relevant(task, team) is False, (
-        f"Exempt agentType {agent_type!r} with corrupted metadata must remain "
+        f"Wake-excluded agentType {agent_type!r} with corrupted metadata must remain "
         f"exempt; pre-hoist behavior was True."
+    )
+
+
+def test_lifecycle_relevant_secretary_with_corrupted_metadata_now_counts_post_empty_carve_out(
+    tmp_path, monkeypatch
+):
+    """POST-EMPTY-CARVE-OUT companion: a secretary-owned task with
+    corrupted metadata is now lifecycle-relevant (returns True) because
+    WAKE_EXCLUDED_AGENT_TYPES is empty AND the metadata-shape gate's
+    conservative-count behavior takes effect. Pre-empty, this scenario
+    short-circuited to False via the agentType carve-out hoist; post-
+    empty, the carve-out is a no-op so secretary tasks are evaluated
+    under the same conservative-count rule as any other teammate.
+
+    Counter-test-by-revert: a future re-population of
+    WAKE_EXCLUDED_AGENT_TYPES = {pact-secretary} flips this back to
+    False; this test must be inverted in lockstep."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    team = "team-corrupt-meta-empty"
+    _write_team_config(tmp_path, team, [
+        {"name": "session-secretary", "agentType": "pact-secretary"},
+    ])
+    task = {
+        "status": "in_progress",
+        "owner": "session-secretary",
+        "metadata": "not-a-dict",
+    }
+    assert wl._lifecycle_relevant(task, team) is True, (
+        "Post-empty WAKE_EXCLUDED_AGENT_TYPES: secretary with corrupted "
+        "metadata must count (conservative-count rule applies). If False, "
+        "the wake-side carve-out has been re-populated and this test "
+        "must be inverted in lockstep."
     )
 
 
@@ -214,7 +316,20 @@ def test_count_active_tasks_counts_pending_and_in_progress(tmp_path, monkeypatch
     assert wl.count_active_tasks(team) == 2
 
 
-def test_count_active_tasks_skips_signal_and_exempt(tmp_path, monkeypatch):
+def test_count_active_tasks_skips_signal_only_post_empty_carve_out(tmp_path, monkeypatch):
+    """POST-EMPTY-CARVE-OUT: signal tasks are still excluded from the
+    active tally (signal-task carve-out is independent of the wake-side
+    agentType carve-out), but secretary tasks are now COUNTED because
+    WAKE_EXCLUDED_AGENT_TYPES is empty.
+
+    Pre-empty: count == 1 (only `real` counts; sig + sec excluded).
+    Post-empty: count == 2 (real + sec count; sig still excluded via
+    signal-task carve-out which lives at the metadata layer, not the
+    agentType layer).
+
+    Counter-test-by-revert: a future re-population of
+    WAKE_EXCLUDED_AGENT_TYPES = {pact-secretary} drops the count back
+    to 1; this test must be inverted in lockstep."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     team = "team-carveouts"
     # Team config records session-secretary with the privileged agentType.
@@ -228,20 +343,44 @@ def test_count_active_tasks_skips_signal_and_exempt(tmp_path, monkeypatch):
         metadata={"completion_type": "signal", "type": "blocker"},
     )
     _stage_task(tmp_path, team, "sec", status="in_progress", owner="session-secretary")
-    assert wl.count_active_tasks(team) == 1
+    assert wl.count_active_tasks(team) == 2, (
+        "Post-empty WAKE_EXCLUDED_AGENT_TYPES: secretary tasks count "
+        "(real + sec = 2); only signal tasks are excluded via the "
+        "metadata-layer signal-task carve-out (independent of the "
+        "wake-side agentType carve-out)."
+    )
 
 
-def test_count_active_tasks_session_secretary_does_not_count(tmp_path, monkeypatch):
-    """Production-shape parity case: a session-secretary owned task is
-    excluded from the active tally regardless of spawn name, as long as
-    the team config records its agentType (#682)."""
+def test_count_active_tasks_session_secretary_now_counts_post_empty_carve_out(tmp_path, monkeypatch):
+    """POST-EMPTY-CARVE-OUT: a session-secretary owned task is now
+    COUNTED in the active tally (was: excluded via the wake-side
+    agentType carve-out). Pre-empty, the carve-out at #682 made
+    secretary tasks invisible to the wake mechanism; post-empty, the
+    carve-out is a no-op (WAKE_EXCLUDED_AGENT_TYPES = frozenset()) so
+    secretary tasks count like any other teammate.
+
+    The Bug A secretary-window scenario (eager Teardown when secretary
+    completes its first teachback) is now fixed at the count gate
+    rather than the per-owner carve-out: count_active_tasks > 0
+    prevents Teardown emit before the same-teammate-continuation
+    predicate is consulted.
+
+    The team-config agentType lookup mechanism still works (#682
+    semantics preserved); only the wake-side carve-out's membership
+    set has been emptied. SELF_COMPLETE_EXEMPT_AGENT_TYPES on the
+    self-completion side still contains pact-secretary."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     team = "team-prod-shape"
     _write_team_config(tmp_path, team, [
         {"name": "session-secretary", "agentType": "pact-secretary"},
     ])
     _stage_task(tmp_path, team, "memo", status="in_progress", owner="session-secretary")
-    assert wl.count_active_tasks(team) == 0
+    assert wl.count_active_tasks(team) == 1, (
+        "Post-empty WAKE_EXCLUDED_AGENT_TYPES: secretary tasks must "
+        "count toward the active tally. If 0, the wake-side carve-out "
+        "has been re-populated and this test must be inverted in "
+        "lockstep."
+    )
 
 
 def test_count_active_tasks_secretary_owner_without_agenttype_counts(tmp_path, monkeypatch):
