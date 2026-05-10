@@ -124,6 +124,8 @@ For consequence-level disagreements:
 
 When your work is done, you store the HANDOFF and remain `in_progress`. **You do NOT mark your own tasks `completed`** — the team-lead is the authoritative completion signal.
 
+> **Ordering invariant** (audit anchor): the three steps below MUST execute in the order Step 1 → Step 2 → Step 3 — `metadata.handoff` write FIRST, then notify SendMessage to team-lead, then `intentional_wait` SET. This ordering is load-bearing for the team-lead's [Read-Trigger Precondition](../../protocols/pact-completion-authority.md#read-trigger-precondition): the lead must wait for teammate's wake-signal SendMessage before treating the raw `cat ~/.claude/tasks/.../{taskId}.json | jq .metadata.handoff` read as authoritative, but the SendMessage is only safe to send AFTER the metadata write has landed on disk. Reversing Step 1 and Step 2 produces false-empty raw reads on the lead side that have triggered false-positive HANDOFF rejection cycles. Reversing Step 2 and Step 3 (idle before SendMessage) silently strands the lead — they will never see the wake-signal because you went idle without sending it. Editors of this skill: do NOT re-order these steps.
+
 1. **Store HANDOFF in task metadata**:
    ```
    TaskUpdate(taskId, metadata={"handoff": {
