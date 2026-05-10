@@ -12,7 +12,7 @@ and the user answers affirmatively, a token file is written to ~/.claude/. The
 companion hook (merge_guard_pre.py) checks for this token before allowing
 dangerous commands.
 
-Input: JSON from stdin with tool_input (AskUserQuestion questions array) and tool_output (answers dict)
+Input: JSON from stdin with tool_input (AskUserQuestion questions array) and tool_response (answers dict)
 Output: None (side effect: writes token file on approval)
 """
 
@@ -196,7 +196,7 @@ def main():
 
         pact_context.init(input_data)
         tool_input = input_data.get("tool_input", {})
-        tool_output = input_data.get("tool_output", {})
+        tool_response = input_data.get("tool_response", {})
 
         # Extract question from AskUserQuestion schema:
         # tool_input: {"questions": [{"question": "...", ...}]}
@@ -211,11 +211,11 @@ def main():
             question = ""
 
         # Extract answer from AskUserQuestion schema:
-        # tool_output: {"answers": {"question_text": "answer_text"}, ...}
-        if not isinstance(tool_output, dict):
+        # tool_response: {"answers": {"question_text": "answer_text"}, ...}
+        if not isinstance(tool_response, dict):
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
-        answers = tool_output.get("answers", {})
+        answers = tool_response.get("answers", {})
         if isinstance(answers, dict) and answers:
             # Look up answer by exact question text; fall back to first value
             answer = str(answers.get(question, next(iter(answers.values()), "")))
