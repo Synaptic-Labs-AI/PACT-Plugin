@@ -174,9 +174,9 @@ If the team-lead rejects your teachback or HANDOFF, you wake on the inbound Send
    TaskUpdate(taskId, metadata={"intentional_wait": None})
    ```
 
-2. **Read the rejection metadata**:
-   - For Task A (teachback): `TaskGet(taskId).metadata.teachback_rejection`
-   - For Task B (work): `TaskGet(taskId).metadata.handoff_rejection`
+2. **Read the rejection metadata** via raw JSON (TaskGet does NOT surface `metadata.*` keys — see [pact-completion-authority §TaskGet metadata-blindness reminder](../../protocols/pact-completion-authority.md#completion-authority) and the symmetric rejection-receipt rule in [§Read-Trigger Precondition](../../protocols/pact-completion-authority.md#read-trigger-precondition)):
+   - For Task A (teachback): `cat ~/.claude/tasks/{team_name}/{taskId}.json | jq .metadata.teachback_rejection`
+   - For Task B (work): `cat ~/.claude/tasks/{team_name}/{taskId}.json | jq .metadata.handoff_rejection`
 
    The shape is `{"reason": str, "corrections": [str, ...], "since": ISO8601, "revision_number": int}`.
 
