@@ -74,13 +74,13 @@ EXPECTED_COUNTS = {
     PLUGIN_ROOT / "protocols" / "pact-protocols.md": 2,
     PLUGIN_ROOT / "agents" / "pact-orchestrator.md": 2,
     PLUGIN_ROOT / "skills" / "pact-teachback" / "SKILL.md": 1,
-    PLUGIN_ROOT / "skills" / "pact-agent-teams" / "SKILL.md": 1,
+    PLUGIN_ROOT / "skills" / "pact-agent-teams" / "SKILL.md": 2,
 }
 
 
 @pytest.mark.parametrize("doc_path", DOC_SURFACES, ids=lambda p: p.name)
 def test_marker_substring_present_in_doc_surface(doc_path: Path):
-    """For each of the 4 canonical doc surfaces, assert the marker
+    """For each of the 5 canonical doc surfaces, assert the marker
     substring is present.
 
     The marker phrase is the load-bearing contract at the LLM-reader layer:
@@ -90,12 +90,12 @@ def test_marker_substring_present_in_doc_surface(doc_path: Path):
     blind spot for agents loading only that surface (lazy-load fidelity
     failure mode per the agent-reader-primary axiom).
 
-    Counter-test-by-revert: revert any one of the 4 doc files to its
+    Counter-test-by-revert: revert any one of the 5 doc files to its
     pre-fix state and the corresponding parametrize cell fails.
     """
     assert doc_path.exists(), (
         f"Doc surface missing on disk: {doc_path}. The Read-Trigger "
-        f"Precondition rule must be discoverable at all 4 canonical "
+        f"Precondition rule must be discoverable at all 5 canonical "
         f"surfaces."
     )
     text = doc_path.read_text(encoding="utf-8")
@@ -116,8 +116,8 @@ def test_marker_substring_consistent_across_all_surfaces():
     single message naming all surfaces missing the phrase, making the
     cross-surface gap visible in one place rather than as a list of
     parametrize failures. Useful when a future devops dispatch updates
-    only 3 of the 4 surfaces (e.g., the SSOT + 2 mirrors but forgets
-    one SKILL audit comment) — the parametrized test reports 1 RED;
+    only 4 of the 5 surfaces (e.g., the SSOT + 2 mirrors + 1 SKILL but
+    forgets the other SKILL audit comment) — the parametrized test reports 1 RED;
     this test additionally pins the WHY (drift across surfaces).
 
     Counter-test-by-revert: removing the phrase from any one surface

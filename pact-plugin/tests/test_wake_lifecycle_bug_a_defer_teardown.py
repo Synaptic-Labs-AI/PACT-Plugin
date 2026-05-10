@@ -372,6 +372,105 @@ class TestBugATeardownDeferralOnSameTeammateContinuation:
         assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]
 
 
+# ---------- Defer-Teardown branch isolation (count==0 + predicate==True) ----------
+
+
+def test_defer_teardown_branch_isolated_at_post_zero(tmp_path):
+    """Isolate the defer-Teardown branch as a load-bearing guard at
+    count==0.
+
+    Why this test exists: the rest of TestBugATeardownDeferralOnSameTeammate-
+    Continuation pins the no-Teardown outcome under scenarios where EITHER
+    the count gate (`count_active_tasks(team) != 0`) OR the defer gate
+    (`has_same_teammate_continuation(...)`) suffices. Stubbing
+    `has_same_teammate_continuation` to return False unconditionally leaves
+    every one of those tests GREEN — the count gate covers the outcome by
+    itself. That is a phantom-green coverage gap for the defer-Teardown
+    branch: the integration test names it but never isolates it.
+
+    Engineering count==0 + same-teammate continuation simultaneously: rely
+    on the documented asymmetry between `iter_team_task_jsons(team)` (which
+    reads ONLY the team subdirectory `~/.claude/tasks/{team}/*.json`, with
+    dotfile + symlink filters) and `read_task_json(task_id, team)` (which
+    looks in `team_dir/{id}.json` first, then falls back to the BASE
+    `~/.claude/tasks/{id}.json`). Placing Task B at the base root rather
+    than the team subdirectory makes it invisible to count_active_tasks
+    while still resolvable by has_same_teammate_continuation via the
+    documented base-dir fallback. The asymmetry is empirical and stable
+    (read_task_json's two-step lookup is documented in its docstring at
+    pact-plugin/hooks/shared/task_utils.py:367-379) — not a fragile shim.
+
+    Wiring under HEAD source:
+      - count_active_tasks(team) iterates ~/.claude/tasks/team-y1-isolation/
+        — finds only A.json (status=completed) → returns 0.
+      - has_same_teammate_continuation reads completed_task.blocks=['B'],
+        calls read_task_json('B', team) → team subdir miss → base fallback
+        hits ~/.claude/tasks/B.json → returns True.
+      - _decide_directive: count==0 (gate passes), predicate==True →
+        defer fires → suppressOutput.
+
+    Mutation probe (counter-test for branch isolation): stub
+    has_same_teammate_continuation to return False unconditionally. With
+    the count gate already satisfied (count==0 is the path that REACHES
+    the predicate; count!=0 short-circuits earlier), the predicate is the
+    sole remaining guard. Stub flips outcome to Teardown emit → ONLY this
+    test FAILS RED among the Bug A integration suite (the other 6 stay
+    GREEN because they had count>=1 dual-coverage). Empirically verified
+    during the cycle 7 design phase.
+    """
+    home = tmp_path / "home"; home.mkdir()
+    sid = "s"; pdir = "/tmp/p"; team = "team-y1-isolation"
+    _write_session_context(home, sid, pdir, team)
+    # Task A in the team subdirectory: completed, addBlocks/blocks=['B'].
+    # iter_team_task_jsons sees A but A.status==completed so
+    # _lifecycle_relevant returns False → A does not contribute to count.
+    _write_task(
+        home, team, "A",
+        status="completed",
+        owner="backend-coder",
+        blocks=["B"],
+    )
+    # Task B at the BASE tasks directory (NOT in the team subdir).
+    # iter_team_task_jsons(team) globs only ~/.claude/tasks/team-y1-isolation/
+    # so B is invisible to it → count stays 0. read_task_json('B', team)
+    # falls back from team_dir to base via its documented two-step lookup
+    # (task_utils.py:367-379) → finds B → predicate sees pending +
+    # same-owner + lifecycle-relevant → returns True.
+    base_tasks_dir = home / ".claude" / "tasks"
+    base_tasks_dir.mkdir(parents=True, exist_ok=True)
+    (base_tasks_dir / "B.json").write_text(
+        json.dumps({
+            "id": "B", "status": "pending", "owner": "backend-coder",
+        }),
+        encoding="utf-8",
+    )
+
+    out = _emit_output({
+        "tool_name": "TaskUpdate",
+        "session_id": sid, "cwd": pdir,
+        "tool_input": {"taskId": "A", "status": "completed"},
+        "tool_response": {
+            "id": "A", "status": "completed",
+            "owner": "backend-coder",
+        },
+    }, home)
+    # count==0 reached the defer-Teardown predicate; predicate returns
+    # True via base-dir fallback; Teardown is suppressed.
+    assert out == {"suppressOutput": True}, (
+        f"Expected suppressOutput from defer-Teardown branch isolation "
+        f"(count==0 + predicate==True via base-dir fallback); got "
+        f"{out!r}. If hookSpecificOutput with Teardown directive, the "
+        f"defer-Teardown branch is no longer load-bearing — either the "
+        f"predicate body has been weakened, or the read_task_json "
+        f"base-dir fallback has been removed (which would also break "
+        f"production behavior on race-conditions where a continuation "
+        f"is mid-write). Mutation-probe verification: stub "
+        f"has_same_teammate_continuation to return False unconditionally; "
+        f"this test must FLIP to Teardown-emit while the other 6 Bug A "
+        f"integration tests stay GREEN."
+    )
+
+
 # ---------- P2.1(b) Race-deleted continuation ----------
 
 

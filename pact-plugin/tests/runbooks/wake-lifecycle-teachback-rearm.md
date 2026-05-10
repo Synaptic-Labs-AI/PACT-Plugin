@@ -218,6 +218,7 @@ Pass criteria:
 MARKER="wait for teammate's wake-signal SendMessage"
 SURFACES=(
     "pact-plugin/protocols/pact-completion-authority.md"
+    "pact-plugin/protocols/pact-protocols.md"
     "pact-plugin/agents/pact-orchestrator.md"
     "pact-plugin/skills/pact-teachback/SKILL.md"
     "pact-plugin/skills/pact-agent-teams/SKILL.md"
@@ -239,7 +240,7 @@ done
 
 if [ $failed -eq 0 ]; then
     echo ""
-    echo "D5 PASS: marker phrase present at all 4 surfaces"
+    echo "D5 PASS: marker phrase present at all 5 surfaces"
 else
     echo ""
     echo "D5 FAIL: marker phrase missing from $failed surface(s) — Bug C doc-fix incomplete"
@@ -268,7 +269,7 @@ grep -q '^### Read-Trigger Precondition$' \
 
 | Test scope | Pass criteria | Counter-test cardinality on revert |
 |-----------|----------------|-------------------------------------|
-| `test_has_same_teammate_continuation.py` (43 tests) | All pass on fix | ~38+ (collection errors + 8-cell matrix) |
+| `test_has_same_teammate_continuation.py` (43 tests) | All pass on fix | ~35 fail, 0 collection errors (predicate symbol AttributeError raises per-test, not at collection) |
 | `test_wake_lifecycle_bug_a_defer_teardown.py` (6 tests) | All pass on fix | 2-3 fail + 1 race-deleted on revert |
 | `test_wake_lifecycle_bug_b_rearm.py` (10 tests) | All pass on fix | 5 Bug B + 1 sequence + audit-anchor pass = ~6 fail on revert |
 | `test_is_pending_to_in_progress_transition.py` (8 tests) | All pass on fix | 7-8 fail/error on revert |
