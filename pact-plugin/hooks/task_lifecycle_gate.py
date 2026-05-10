@@ -312,6 +312,12 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
     advisories: list[tuple[str, str]] = []
     tool_name = input_data.get("tool_name", "")
     tool_input = input_data.get("tool_input") or {}
+    # Defense-in-depth: prefer canonical `tool_response` (platform contract — see
+    # wake_lifecycle_emitter.py:255). The `or tool_output` fallback covers (a)
+    # legacy/captured-from-production test fixtures whose envelope predates the
+    # canonical name, and (b) any future platform envelope rename. This hook
+    # fires on every Task-tool use, so a missed read here would silently disable
+    # lifecycle advisories. DO NOT remove the fallback.
     tool_response = input_data.get("tool_response") or input_data.get("tool_output") or {}
     if not isinstance(tool_input, dict):
         tool_input = {}
