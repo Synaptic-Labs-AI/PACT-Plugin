@@ -150,7 +150,9 @@ _STATEFILE_FRESHNESS_WINDOW_SECS = 600
 # transitions. Imperative voice; references the canonical command-pair
 # slugs `PACT:watch-inbox` (Arm role) and `PACT:unwatch-inbox` (Teardown
 # role); idempotency / best-effort clauses prevent the lead from adding
-# their own conditional self-diagnosis (#444 unconditional discipline).
+# their own conditional self-diagnosis (per the unconditional-directive
+# discipline: emit identical prose every fire — the orchestrator is not
+# authorized to second-guess directive applicability).
 _ARM_DIRECTIVE = (
     'First active teammate task created. '
     'Invoke Skill("PACT:watch-inbox") before any further teammate '
@@ -231,23 +233,24 @@ def _extract_task_id(input_data: dict[str, Any]) -> str | None:
 
     WHY the nested `tool_response.task.*` probes precede the flat
     `tool_response.*` probes: production-typical TaskCreate payloads
-    are nested (per #612 logging-shim capture from session
-    pact-56ce3a2a on 2026-05-02). Placing nested probes first means
-    the production-common case hits the first matching probe; the
-    flat probes remain as fallback for TaskUpdate and for legacy/test
-    fixture shapes.
+    are nested (empirically verified via a stdin-logging shim attached
+    to a real lead session — the captured fixture is fossilized at
+    `tests/fixtures/wake_lifecycle/task_create_production_shape.json`).
+    Placing nested probes first means the production-common case hits
+    the first matching probe; the flat probes remain as fallback for
+    TaskUpdate and for legacy/test fixture shapes.
 
-    Returned values are guaranteed non-empty after strip — a
-    whitespace-only id (e.g. `"   "`) would propagate to a TaskStop
-    call with a syntactically-valid-but-semantically-empty id and
-    fail downstream; rejecting at the source is cheaper. Returns
-    None if no probe matches.
+    Returned values are stripped of leading/trailing whitespace and
+    guaranteed non-empty — a whitespace-only id (e.g. `"   "`) would
+    propagate to a TaskStop call with a syntactically-valid-but-
+    semantically-empty id and fail downstream; rejecting at the
+    source is cheaper. Returns None if no probe matches.
     """
     tool_input = input_data.get("tool_input") or {}
     if isinstance(tool_input, dict):
         tid = tool_input.get("taskId") or tool_input.get("task_id")
         if isinstance(tid, str) and tid.strip():
-            return tid
+            return tid.strip()
 
     tool_response = input_data.get("tool_response") or {}
     if isinstance(tool_response, dict):
@@ -259,7 +262,7 @@ def _extract_task_id(input_data: dict[str, Any]) -> str | None:
                 or nested_task.get("task_id")
             )
             if isinstance(tid, str) and tid.strip():
-                return tid
+                return tid.strip()
 
         tid = (
             tool_response.get("id")
@@ -267,7 +270,7 @@ def _extract_task_id(input_data: dict[str, Any]) -> str | None:
             or tool_response.get("task_id")
         )
         if isinstance(tid, str) and tid.strip():
-            return tid
+            return tid.strip()
 
     return None
 
@@ -441,7 +444,14 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     Post-only transition detection:
     - TaskCreate + post >= 1 + STATE_FILE freshness expired (or absent
       / malformed) → Arm.
-    - TaskUpdate(status in {completed, deleted}) + post == 0 → Teardown.
+    - TaskUpdate(status == in_progress) + post >= 1 + STATE_FILE freshness
+      expired (or absent / malformed) → Arm. Re-Arm path covering cold-
+      start (initial Arm never fired), post-Teardown recovery (eager 1->0
+      Teardown unlinked the STATE_FILE), mid-session resume, and Monitor-
+      died-silently cases categorically. STATE_FILE absence/staleness is
+      the implicit 1-bit pre-state proxy for "no live Monitor."
+    - TaskUpdate(status in {completed, deleted}) + post == 0 + NO same-
+      teammate continuation → Teardown.
 
     count_active_tasks already filters carve-outs (signal-tasks,
     self-complete-exempt owners), so post >= 1 after a TaskCreate

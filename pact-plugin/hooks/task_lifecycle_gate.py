@@ -5,16 +5,21 @@ Summary: PostToolUse hook (matcher='TaskCreate|TaskUpdate') enforcing PACT
          lifecycle invariants. Cannot DENY (post-action); emits structural
          advisory via additionalContext, plus a metadata writeback for
          self-completion violations.
-Used by: hooks.json PostToolUse matcher='TaskCreate|TaskUpdate' (#662)
+Used by: hooks.json PostToolUse matcher='TaskCreate|TaskUpdate' (per the
+         unified Task-mutating-tool matcher convention shared with
+         wake_lifecycle_emitter and agent_handoff_emitter).
 
 Self-completion writeback recursion mitigation: the metadata writeback marks
 metadata.gate_writeback=true. The gate's first check skips on this marker
 so the gate's own write does not re-trigger the self-completion advisory
 on itself.
 
-Safety: fail-closed-as-advisory on module-load failure (PR #660 pattern,
-adapted for PostToolUse — cannot DENY, emits advisory + exit 0).
-hookEventName always emitted (#658 defense).
+Safety: fail-closed-as-advisory on module-load failure (mirrors the
+bootstrap_gate fail-closed-as-deny pattern, adapted for PostToolUse —
+cannot DENY, emits advisory + exit 0).
+hookEventName always emitted on every output path (per the
+hookSpecificOutput schema-rejection defense — missing hookEventName
+triggers silent platform-layer rejection).
 
 Rule coverage:
   - teachback_addblocks_missing — Teachback Task created without
@@ -88,17 +93,24 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
 # ─── constants ────────────────────────────────────────────────────────────────
 
 # Paired-SendMessage time window (seconds) for the teachback-completion
-# rule. Per architect §7 / plan: 120s.
+# rule. Window: 120s — sized to cover normal lead reaction time between
+# the teachback-completing TaskUpdate and the paired wake-SendMessage,
+# while still detecting genuinely-missing pairs before the teammate's
+# idle-poll cycle.
 PAIRED_SENDMESSAGE_WINDOW_S = 120
 
 # Self-completion carve-out resolution is delegated entirely to
 # is_self_complete_exempt(task, team_name) in shared.intentional_wait
-# (the SSOT). The predicate now keys on team-config agentType rather
-# than owner name; team_name is resolved via pact_context at the call
-# site below. The dispatch_gate RESERVED_NAMES set still reserves the
-# `secretary`/`pact-secretary` literals as a defense-in-depth name
-# perimeter — see dispatch_gate.RESERVED_NAMES comment block for the
-# post-#682 rationale.
+# (the SSOT). The predicate keys on team-config agentType (NOT owner
+# name) — secretaries spawned under any name reach the carve-out as
+# long as the team-config records agentType=pact-secretary. team_name
+# is resolved via pact_context at the call site below. The dispatch_gate
+# RESERVED_NAMES set still reserves the `secretary`/`pact-secretary`
+# literals as a defense-in-depth name perimeter — see
+# dispatch_gate.RESERVED_NAMES comment block for the name-perimeter
+# rationale (the SSOT for self-completion exemption is agentType, but
+# the name perimeter blocks teammates from spawning under reserved
+# names that could shadow legitimate secretary spawn).
 
 # Required handoff schema fields (advisory if present-but-malformed).
 _HANDOFF_REQUIRED_FIELDS = (
@@ -226,8 +238,10 @@ def _writeback_dispute(task_id: str) -> bool:
     gate's step ① recursion check will skip it.
 
     Fail-OPEN by design: any IOError swallowed and returns False — advisory
-    is still emitted by the caller (architect §4 'failure mode'). Logged
-    via lifecycle_decision journal event.
+    is still emitted by the caller (per the writeback-failure convention:
+    the advisory's user-facing surface is the load-bearing signal; the
+    metadata writeback is best-effort accounting). Logged via
+    lifecycle_decision journal event.
 
     Returns True iff the writeback succeeded.
     """
