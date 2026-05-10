@@ -7,7 +7,7 @@ Used by: Claude Code settings.json PostToolUse hook (Edit, Write tools)
 Monitors file sizes after edits and provides guidance when files grow too large,
 encouraging SOLID/DRY principles and architectural refactoring.
 
-Input: JSON from stdin with tool_name, tool_input, tool_output
+Input: JSON from stdin with tool_name, tool_input, tool_response
 Output: JSON with `hookSpecificOutput.additionalContext` when file exceeds threshold
 """
 

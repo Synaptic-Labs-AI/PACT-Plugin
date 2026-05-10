@@ -12,7 +12,7 @@ explicit justification to skip.
 
 This is a non-blocking reminder (always exits 0), not a gate.
 
-Input: JSON from stdin with tool_name, tool_input, tool_output
+Input: JSON from stdin with tool_name, tool_input, tool_response
 Output: JSON systemMessage on stdout if reminder needed, nothing otherwise
 """
 
