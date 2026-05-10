@@ -181,11 +181,31 @@ try:
     _GH_PR_CLOSE_RE = re.compile(_GH_PREFIX + r"pr\s+close\b")
     # PR number extraction: allows optional subcommand flags (e.g., --admin, --squash)
     # between merge/close and the PR number.
-    # #665: use _GH_FLAG_TOKENS (flag-shaped only) for the post-subcommand
-    # token walk, and \b after (\d+) so the capture is a standalone digit
-    # token (not the suffix of a longer token like `7352-tests`).
+    #
+    # Both flag-walks (between `gh` and `pr`, AND between subcommand and PR
+    # number) use the tight `_GH_FLAG_TOKENS` form. The earlier broad
+    # `_GH_GLOBAL_FLAGS` form on the pre-subcommand walk allowed greedy
+    # consumption past a `gh pr <subcmd> <PR>` substring inside `--body
+    # "..."` text, then re-anchoring at a SECOND `gh pr <subcmd>` occurrence
+    # embedded in the body. That re-anchor permitted an authorization-bypass
+    # attack where the body text contained `gh pr merge <fake_PR>` and the
+    # token-context check matched against the embedded fake PR number rather
+    # than the real positional. Restricting both walks to flag-shaped tokens
+    # only prevents the engine from walking past the real positional into
+    # quoted body content.
+    #
+    # The trailing `(?![\w-])` rejects BOTH alphanumeric-suffix tokens
+    # (e.g., `7352abc`) AND hyphen-suffix tokens (e.g., `7352-tests`).
+    # Python `\b` is a word-boundary that DOES match at digit-to-hyphen
+    # (because `-` is a non-word character), so a plain `\b` would
+    # incorrectly capture `7352` from `7352-tests` (a branch-name argument
+    # to `gh pr merge`). The negative-lookahead form `(?![\w-])` is
+    # strictly stronger: it rejects any continuation that is a word char
+    # OR a hyphen, which closes the branch-name suffix-match case while
+    # preserving rejection of the alphanumeric-suffix case.
     _GH_PR_NUMBER_RE = re.compile(
-        _GH_PREFIX + r"pr\s+(?:merge|close)\s+" + _GH_FLAG_TOKENS + r"(\d+)\b"
+        r"\bgh\s+" + _GH_FLAG_TOKENS + r"pr\s+(?:merge|close)\s+"
+        + _GH_FLAG_TOKENS + r"(\d+)(?![\w-])"
     )
 except BaseException as _pattern_compile_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_deny("pattern compilation", _pattern_compile_error)

@@ -1,38 +1,34 @@
 """
-Tests for merge_guard_pre._GH_PR_NUMBER_RE — PR-number extraction (#665).
+Tests for merge_guard_pre._GH_PR_NUMBER_RE — PR-number extraction.
 
-Pins the regex behavior introduced by the #665 fix: the new `_GH_FLAG_TOKENS`
-constant restricts the post-subcommand token walk to flag-shaped tokens only
-(`-x`, `--long`, optionally `--flag value`). The `\\b` boundary on the (\\d+)
-capture rejects suffix matches inside longer alphanumeric tokens.
+Pins the regex behavior: `_GH_FLAG_TOKENS` restricts BOTH flag-walks (between
+`gh` and `pr`, AND between subcommand and PR number) to flag-shaped tokens
+only (`-x`, `--long`, optionally `--flag value`). The `\\b` boundary on the
+(\\d+) capture rejects suffix matches inside longer alphanumeric tokens.
 
 Each TRUE-GAIN test below cites the exact OLD-vs-NEW behavioral delta — these
 are the cases that were broken on main (regex captured a non-PR digit token
 from heredoc body / 2>&1 redirect / trailing positional) and now correctly
 extract the PR number.
 
-The KNOWN LIMITATIONS section pins two cases the #665 fix does NOT solve.
-They are marked xfail(strict=True) so a future tightening that fixes either
-one will fail the test (signaling the marker should be removed in lockstep).
-Without the strict-xfail marker, fixing the limitation would silently pass
-the test and the limitation would be re-rediscovered later.
+The remaining limitation:
 
-The two limitations:
+  Branch-name suffix `7352-tests`: Python `\\b` IS a word boundary at
+  digit-to-hyphen (word char `2` to non-word char `-`). The original
+  spec claimed `\\b` would reject this; that claim was wrong about
+  Python regex semantics. Fixing requires `(?![\\w-])` instead. The
+  test is marked xfail(strict=True) so a future tightening that fixes
+  it will fail the test (signaling the marker should be removed in lockstep).
 
-  1. Heredoc body containing a fully-formed `gh pr merge <N>` substring:
-     `_GH_PREFIX` (line 79 of merge_guard_pre.py) still uses the broad
-     `_GH_GLOBAL_FLAGS` because DANGEROUS_PATTERNS shares it. The PR-number
-     regex re-anchors at the SECOND `gh pr merge` inside the heredoc body
-     and captures the embedded digit. Fixing requires duplicating
-     `_GH_PREFIX` into a tighter `_GH_PR_NUMBER_PREFIX` (does not affect
-     DANGEROUS_PATTERNS).
-
-  2. Branch-name suffix `7352-tests`: Python `\\b` IS a word boundary at
-     digit-to-hyphen (word char `2` to non-word char `-`). The original
-     architect spec claimed `\\b` would reject this; that claim was wrong
-     about Python regex semantics. Fixing requires `(?![\\w-])` instead.
-
-Both limitations are tracked for follow-up post-merge.
+The previously-xfail "heredoc body containing a fully-formed `gh pr merge
+<N>` substring" case is now FIXED: `_GH_PR_NUMBER_RE` uses the tight
+`_GH_FLAG_TOKENS` form for BOTH the pre-subcommand AND post-subcommand
+flag walks (rather than reusing the broad `_GH_GLOBAL_FLAGS` for the
+pre-subcommand walk). This eliminates the re-anchor-at-second-occurrence
+authorization-bypass class. The `test_heredoc_body_with_embedded_gh_pr_merge`
+test below is now a regular passing test pinning the fix; the new
+`test_authorization_mismatch_attack` test pins the end-to-end attack
+shape that the fix prevents.
 """
 
 import re
@@ -147,30 +143,62 @@ class TestGH_PR_NumberRE_AcceptableNone:
 # acts as a tripwire: the limitation is honestly documented as a current
 # behavior, and any change to that behavior is forced through review.
 
+class TestGH_PR_NumberRE_AuthorizationBypassFixed:
+    """Fixed authorization-bypass class — pinned as regression-protection.
+
+    These tests pin the regex tightening that closed an authorization-bypass
+    where a body string containing `gh pr merge <fake_PR>` could re-anchor
+    the regex past the real positional and cause the token-context check
+    to compare against the embedded fake PR rather than the real one.
+    """
+
+    def test_heredoc_body_with_embedded_gh_pr_merge(self):
+        """Body string with embedded `gh pr merge <N>` no longer re-anchors.
+
+        Previously xfail-strict (the regex captured 999 because the broad
+        pre-subcommand flag walk consumed past `663 --body "see also gh `
+        and re-anchored at the second `pr merge`). After tightening BOTH
+        flag-walks to flag-shaped tokens only, the broad walk cannot
+        consume past quoted body content, so the first-occurrence anchor
+        sticks and the real positional is captured.
+        """
+        cmd = 'gh pr merge 663 --body "see also gh pr merge 999 example"'
+        assert _capture(cmd) == "663"
+
+    def test_authorization_mismatch_attack(self):
+        """End-to-end shape of the authorization-bypass attack now blocked.
+
+        Resolves the BLOCKING finding from PR #697 review.
+
+        Attack shape: an attacker (or an honest user with a verbose body)
+        constructs `gh pr merge <real> --body "...gh pr merge <fake>..."`.
+        Pre-fix, the AskUserQuestion authorization issued for `<real>`
+        would be matched against `<fake>` extracted by the regex and
+        REJECTED with "Authorization token exists but does not match this
+        operation" — masking the real merge. Worse, an attacker could craft
+        the body so that the AskUserQuestion-issued token (for `<fake>`,
+        a non-existent PR they mention in the body of a different merge)
+        authorizes the actual `<real>` merge they intended to bypass.
+
+        Post-fix: the regex always extracts the real positional regardless
+        of body content, so the token-context check matches correctly.
+        """
+        cmd = (
+            'gh pr merge 663 --body "$(cat <<EOF\\n'
+            'Fixes #999. See related: gh pr merge 999 --admin\\n'
+            'EOF\\n)" --squash'
+        )
+        assert _capture(cmd) == "663"
+
+
 class TestGH_PR_NumberRE_KnownLimitations:
     """Documented limitations — see module docstring + follow-up issue."""
 
     @pytest.mark.xfail(
         strict=True,
         reason=(
-            "Limitation 1: heredoc body containing a fully-formed `gh pr merge <N>` "
-            "substring re-anchors the regex at the second occurrence and captures "
-            "the embedded digit. Root cause: _GH_PREFIX uses broad _GH_GLOBAL_FLAGS "
-            "(shared with DANGEROUS_PATTERNS). Fix requires duplicating _GH_PREFIX "
-            "into a tighter _GH_PR_NUMBER_PREFIX. Tracked for follow-up."
-        ),
-    )
-    def test_heredoc_body_with_embedded_gh_pr_merge(self):
-        cmd = 'gh pr merge 663 --body "see also gh pr merge 999 example"'
-        # Expected behavior under fix: capture 663 (the real positional).
-        # Current behavior: captures 999 (the embedded substring).
-        assert _capture(cmd) == "663"
-
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Limitation 2: Python `\\b` IS a word boundary at digit-to-hyphen "
-            "(word char `2` to non-word char `-`). Architect spec assumed \\b "
+            "Python `\\b` IS a word boundary at digit-to-hyphen "
+            "(word char `2` to non-word char `-`). The earlier spec assumed \\b "
             "would reject `7352-tests` as a suffix match; that assumption was "
             "wrong about Python regex semantics. Fix requires `(?![\\w-])` "
             "instead of `\\b`. Tracked for follow-up."
