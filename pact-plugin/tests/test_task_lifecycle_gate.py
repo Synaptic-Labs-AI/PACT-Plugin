@@ -694,3 +694,92 @@ def test_main_no_op_on_malformed_stdin(capsys):
     assert exc.value.code == 0
     out = capsys.readouterr().out.strip()
     assert json.loads(out) == {"suppressOutput": True}
+
+
+# =============================================================================
+# Defensive fallback: `tool_response or tool_output or {}`
+# =============================================================================
+#
+# evaluate_lifecycle reads the post-state task via:
+#     tool_response = input_data.get("tool_response") or input_data.get("tool_output") or {}
+#
+# The `or tool_output` fallback covers (a) legacy/captured-from-production
+# fixtures whose envelope predates the canonical `tool_response` rename,
+# and (b) any future platform envelope rename. The 4-line comment in
+# task_lifecycle_gate.py documents the intent; this test enforces it.
+#
+# If a future "cleanup" PR removes the `or tool_output` branch, the
+# test_legacy_envelope_extracts_via_fallback case fails — which is the
+# enforcement-mechanism prose alone cannot provide.
+
+
+def test_legacy_envelope_extracts_via_fallback():
+    """Legacy `tool_output` envelope (no `tool_response`) → handoff_missing fires.
+
+    Constructs a payload with NO `tool_response` field and the task data
+    under `tool_output` (the pre-rename envelope shape). evaluate_lifecycle
+    must extract the task via the `or tool_output` fallback; the
+    handoff_missing rule then fires because the work task carries no
+    metadata.handoff.
+
+    A regression that strips the `or tool_output` branch causes
+    tool_response to resolve to {}, task.get("subject") to be empty, and
+    handoff_missing to NOT fire (the rule is gated on subject + owner
+    being a pact-* work task) — which would leak past this assertion.
+    """
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "completed"},
+        # Legacy envelope shape — pre-rename. NO `tool_response` key.
+        "tool_output": {
+            "task": {
+                "id": "1",
+                "subject": "pact-backend-coder: implement foo",
+                "owner": "pact-backend-coder",
+                "metadata": {},
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(rule == "handoff_missing" for rule, _ in advisories), (
+        f"expected handoff_missing via tool_output fallback, got: {advisories}"
+    )
+
+
+def test_canonical_tool_response_takes_precedence_over_legacy():
+    """Both `tool_response` and `tool_output` present → canonical wins.
+
+    The `or` short-circuits: when `tool_response` is a truthy dict, the
+    fallback is never consulted. This pins the precedence so a refactor
+    that swapped the operands (e.g., to `tool_output or tool_response`)
+    would silently make legacy data shadow canonical data — caught here
+    by injecting DIFFERENT subjects in each envelope and asserting the
+    advisory reflects the canonical one.
+    """
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "completed"},
+        # Canonical envelope: pact-* work task, no handoff → handoff_missing fires.
+        "tool_response": {
+            "task": {
+                "id": "1",
+                "subject": "pact-backend-coder: implement canonical",
+                "owner": "pact-backend-coder",
+                "metadata": {},
+            }
+        },
+        # Legacy envelope: non-pact owner → handoff_missing would NOT fire if read.
+        "tool_output": {
+            "task": {
+                "id": "1",
+                "subject": "user: random task",
+                "owner": "user",
+                "metadata": {},
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    # Canonical was read → backend-coder pact-* work task → handoff_missing fires.
+    assert any(rule == "handoff_missing" for rule, _ in advisories), (
+        "canonical tool_response must take precedence over legacy tool_output"
+    )
