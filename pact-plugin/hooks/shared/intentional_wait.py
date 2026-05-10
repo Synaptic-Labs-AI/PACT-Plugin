@@ -26,6 +26,12 @@ Public surface:
   (member.agentType), NOT owner name — secretaries spawned under any
   name (e.g. session-secretary) reach the carve-out as long as their
   agentType is in this set.
+- WAKE_EXCLUDED_AGENT_TYPES — agentType tokens whose owners' active work
+  does NOT count toward the wake-mechanism's active-task tally.
+  Companion predicate: _is_wake_excluded_agent_type. Semantically
+  distinct from SELF_COMPLETE_EXEMPT_AGENT_TYPES (different consumers
+  ask different questions); see constant docstring for why the two are
+  intentionally separate.
 - canonical_since() — ISO-8601 UTC timestamp helper for the `since` field.
 - validate_wait(wait_metadata) — True iff the flag is well-formed.
 - wait_stale(wait_metadata) — True iff the flag has aged past threshold.
@@ -86,6 +92,26 @@ SELF_COMPLETE_EXEMPT_AGENT_TYPES: frozenset = frozenset({
 })
 
 
+# AgentType tokens whose owners do NOT count toward the wake-mechanism's
+# active-task tally. Semantically distinct from
+# SELF_COMPLETE_EXEMPT_AGENT_TYPES even when membership is currently
+# identical: the self-completion exemption answers "may this owner self-
+# complete without lead inspection?" while the wake-mechanism exclusion
+# answers "should this owner's active work fire the lead's inbox-watch
+# Monitor?" Two consumers, two questions. Today both answer "exclude
+# pact-secretary", so the sets coincide; future divergence (e.g. an
+# agentType added to one but not the other) is supported by keeping the
+# constants separate at the source.
+#
+# DO NOT recouple by aliasing one to the other. The two-constant shape is
+# the architectural anchor for the semantic separation; collapsing them
+# into a single import would silently re-link the two policies and break
+# the next time they need to diverge.
+WAKE_EXCLUDED_AGENT_TYPES: frozenset = frozenset({
+    "pact-secretary",
+})
+
+
 def _is_exempt_agent_type(
     owner: str,
     team_name: str,
@@ -135,6 +161,46 @@ def _is_exempt_agent_type(
             return (
                 isinstance(agent_type, str)
                 and agent_type in SELF_COMPLETE_EXEMPT_AGENT_TYPES
+            )
+    return False
+
+
+def _is_wake_excluded_agent_type(
+    owner: str,
+    team_name: str,
+    teams_dir: str | None = None,
+) -> bool:
+    """Return True iff the team-config member matching `owner` has an
+    agentType in WAKE_EXCLUDED_AGENT_TYPES.
+
+    Parallel to `_is_exempt_agent_type` but keyed on a different
+    constant so the wake-mechanism's count-exclusion policy can diverge
+    from the self-completion exemption policy without coupling. See the
+    WAKE_EXCLUDED_AGENT_TYPES constant docstring for the semantic
+    distinction.
+
+    Same fail-closed semantics as `_is_exempt_agent_type`: returns False
+    on every error path. Same upstream-config-read delegation to
+    `_iter_members`. Consumed by `shared.wake_lifecycle._lifecycle_relevant`.
+
+    NOT a hook predicate — pure helper.
+
+    Args:
+        owner: Task owner name (matched against member.name).
+        team_name: Team name for config path. Empty string returns False.
+        teams_dir: Override teams directory (for testing). When omitted,
+                   _iter_members uses ``~/.claude/teams/``.
+    """
+    if not isinstance(owner, str) or not owner:
+        return False
+    if not isinstance(team_name, str) or not team_name:
+        return False
+    for member in pact_context._iter_members(team_name, teams_dir):
+        if member.get("name") == owner:
+            agent_type = member.get("agentType")
+            return (
+                isinstance(agent_type, str)
+                and agent_type in WAKE_EXCLUDED_AGENT_TYPES
             )
     return False
 

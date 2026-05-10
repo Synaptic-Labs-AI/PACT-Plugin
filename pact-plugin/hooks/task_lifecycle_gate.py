@@ -111,6 +111,36 @@ _HANDOFF_REQUIRED_FIELDS = (
 )
 
 
+# Canonical Teachback Task subject pattern: `<teammate-name>: TEACHBACK
+# for <mission descriptor>`. The leading `[a-z0-9-]+:` is the canonical
+# teammate-prefix shape used across the plugin (matches names like
+# `backend-coder-2`, `secretary`, `architect-1`); `TEACHBACK for ` is
+# the canonical mission-framing per pact-completion-authority.md.
+#
+# WHY a structural match instead of substring `"teachback" in subject`:
+# the substring form fires on ANY task subject containing the word —
+# including planning/discussion subjects like `"Plan: wake-lifecycle
+# teachback re-arm fix"` — and produces benign-but-noisy false-positive
+# advisories. The structural match pins the pattern to the canonical
+# Teachback-Gated Dispatch shape so only actual teachback tasks trip
+# the rules.
+_TEACHBACK_SUBJECT_PATTERN = re.compile(r"^[a-z0-9-]+: TEACHBACK for ")
+
+
+def _is_teachback_subject(subject: str) -> bool:
+    """Return True iff `subject` matches the canonical Teachback Task
+    shape (`<teammate-name>: TEACHBACK for <mission>`).
+
+    Pure function; never raises. Returns False on non-string input or
+    any subject that does not match the anchored pattern. Replaces the
+    legacy `"TEACHBACK" in subject_upper` substring check across the
+    gate's TaskCreate and TaskUpdate rule paths.
+    """
+    if not isinstance(subject, str):
+        return False
+    return _TEACHBACK_SUBJECT_PATTERN.match(subject) is not None
+
+
 # ─── paired-SendMessage check (for teachback completion) ─────────────────────
 
 
@@ -284,12 +314,12 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
     # ② TaskCreate rules — teachback addBlocks + work-task addBlockedBy
     if tool_name == "TaskCreate":
         subject = (tool_input.get("subject") or "")
-        subject_upper = subject.upper() if isinstance(subject, str) else ""
+        is_teachback = _is_teachback_subject(subject)
         owner = tool_input.get("owner") or ""
         if not isinstance(owner, str):
             owner = ""
 
-        if "TEACHBACK" in subject_upper and not tool_input.get("addBlocks"):
+        if is_teachback and not tool_input.get("addBlocks"):
             advisories.append((
                 "teachback_addblocks_missing",
                 "PACT task_lifecycle_gate: Teachback Task created without "
@@ -298,7 +328,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
             ))
 
         if (
-            "TEACHBACK" not in subject_upper
+            not is_teachback
             and owner.startswith("pact-")
             and not tool_input.get("addBlockedBy")
         ):
@@ -327,7 +357,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
             task = read_task_json(task_id, team_name) if team_name else {}
 
         subject = task.get("subject") or ""
-        subject_upper = subject.upper() if isinstance(subject, str) else ""
+        is_teachback = _is_teachback_subject(subject)
         owner = task.get("owner") or ""
         if not isinstance(owner, str):
             owner = ""
@@ -340,7 +370,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
         #     check (no payload to validate).
         #   handoff present but schema malformed → handoff_schema_invalid
         #     advisory.
-        is_work_task = "TEACHBACK" not in subject_upper and owner.startswith("pact-")
+        is_work_task = not is_teachback and owner.startswith("pact-")
         if is_work_task:
             handoff = metadata.get("handoff")
             if not handoff:
@@ -360,7 +390,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                     ))
 
         # Teachback completion requires a paired wake-SendMessage to owner
-        if "TEACHBACK" in subject_upper and owner:
+        if is_teachback and owner:
             if not _has_paired_sendmessage(owner, PAIRED_SENDMESSAGE_WINDOW_S):
                 advisories.append((
                     "completion_no_paired_send",

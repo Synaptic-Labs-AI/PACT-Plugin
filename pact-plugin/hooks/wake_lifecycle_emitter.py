@@ -440,7 +440,8 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     if tool_name not in _TASK_MUTATING_TOOLS:
         return None
 
-    if not _extract_task_id(input_data):
+    task_id = _extract_task_id(input_data)
+    if not task_id:
         return None
 
     # Defer count_active_tasks (filesystem glob+parse) until after the
@@ -492,11 +493,10 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     # `addBlocks` as the primary read field, that was a silent-inert
     # bug). Reuses `_lifecycle_relevant` for unified active + carve-out
     # semantics, so any future expansion of
-    # SELF_COMPLETE_EXEMPT_AGENT_TYPES is handled transparently. The
+    # WAKE_EXCLUDED_AGENT_TYPES is handled transparently. The
     # predicate fail-closes (returns False) on any error path, which
     # preserves the existing Teardown emit behavior on parse failures.
-    task_id = _extract_task_id(input_data)
-    completed_task = read_task_json(task_id, team_name) if task_id else {}
+    completed_task = read_task_json(task_id, team_name)
     if has_same_teammate_continuation(completed_task, team_name):
         return None
     return _TEARDOWN_DIRECTIVE
