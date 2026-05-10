@@ -35,6 +35,7 @@ from shared.merge_guard_common import (
     TOKEN_DIR,
     cleanup_consumed_tokens as _cleanup_consumed_tokens,
 )
+from shared.tool_response import extract_tool_response
 
 # When the hook allows a command (exits 0), output this JSON so the Claude Code
 # UI suppresses the hook display instead of showing "hook error (No output)".
@@ -196,7 +197,10 @@ def main():
 
         pact_context.init(input_data)
         tool_input = input_data.get("tool_input", {})
-        tool_response = input_data.get("tool_response", {})
+        # Defense-in-depth via SSOT helper: prefers canonical `tool_response`,
+        # falls back to legacy `tool_output` for envelope-rename robustness,
+        # warns on dual-envelope payloads (envelope-confusion smell).
+        tool_response = extract_tool_response(input_data)
 
         # Extract question from AskUserQuestion schema:
         # tool_input: {"questions": [{"question": "...", ...}]}
@@ -212,9 +216,6 @@ def main():
 
         # Extract answer from AskUserQuestion schema:
         # tool_response: {"answers": {"question_text": "answer_text"}, ...}
-        if not isinstance(tool_response, dict):
-            print(_SUPPRESS_OUTPUT)
-            sys.exit(0)
         answers = tool_response.get("answers", {})
         if isinstance(answers, dict) and answers:
             # Look up answer by exact question text; fall back to first value

@@ -86,6 +86,7 @@ try:
     from shared.intentional_wait import is_self_complete_exempt
     from shared.session_journal import append_event, make_event
     from shared.task_utils import read_task_json
+    from shared.tool_response import extract_tool_response
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_advisory("module imports", _module_load_error)
 
@@ -312,17 +313,16 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
     advisories: list[tuple[str, str]] = []
     tool_name = input_data.get("tool_name", "")
     tool_input = input_data.get("tool_input") or {}
-    # Defense-in-depth: prefer canonical `tool_response` (platform contract — see
-    # wake_lifecycle_emitter.py:255). The `or tool_output` fallback covers (a)
-    # legacy/captured-from-production test fixtures whose envelope predates the
-    # canonical name, and (b) any future platform envelope rename. This hook
-    # fires on every Task-tool use, so a missed read here would silently disable
-    # lifecycle advisories. DO NOT remove the fallback.
-    tool_response = input_data.get("tool_response") or input_data.get("tool_output") or {}
+    # Defense-in-depth: extract_tool_response is the SSOT helper that prefers
+    # the canonical `tool_response` field, falls back to legacy `tool_output`
+    # (covers captured-from-production test fixtures predating the rename and
+    # any future platform envelope rename), and warns to stderr on
+    # dual-envelope payloads (categorically suspicious — no legitimate platform
+    # fire emits both). This hook fires on every Task-tool use, so a missed
+    # read here would silently disable lifecycle advisories. DO NOT remove.
+    tool_response = extract_tool_response(input_data)
     if not isinstance(tool_input, dict):
         tool_input = {}
-    if not isinstance(tool_response, dict):
-        tool_response = {}
 
     # ① Recursion guard (self-completion writeback self-trigger): skip
     # silently if THIS update is the gate's own writeback. Checked FIRST
