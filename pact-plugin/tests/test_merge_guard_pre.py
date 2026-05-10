@@ -90,8 +90,11 @@ class TestGH_PR_NumberRE_TrueGains:
         assert _capture(cmd) == "663"
 
     def test_body_file_with_versioned_path(self):
-        # OLD captured "7352" from path filename.
-        # NEW correctly captures "663".
+        # Regression-protection only: empirical probe shows OLD ALSO captured
+        # "663" here (the path's slashes/hyphens are non-word and `\S+\s+`
+        # requires whitespace separation, so the broad walk consumes the path
+        # and backtracks to the positional). Pinned as a no-op canary so a
+        # future regex change cannot regress this case to capturing "7352".
         cmd = "gh pr merge 663 --body-file /tmp/release-notes-v4.1.7-7352.md --squash"
         assert _capture(cmd) == "663"
 
