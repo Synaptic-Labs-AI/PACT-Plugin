@@ -17,7 +17,7 @@ Read `team_name` from the **Current Session** block in the project's `CLAUDE.md`
 
 ## Step 2 — Spawn `pact-secretary`
 
-Spawn the session secretary using single-task dispatch — the `pact-secretary` agentType is exempt from the teachback gate via `TEACHBACK_EXEMPT_AGENT_TYPES` (`shared/intentional_wait.py`). No Task A teachback round-trip; the secretary's work is rote and skill-defined (session briefing at spawn, HANDOFF harvest at workflow boundaries per pact-handoff-harvest skill, memory queries via SendMessage).
+Spawn the session secretary using single-task dispatch — the `pact-secretary` agentType is exempt from the teachback gate. No Task A teachback round-trip.
 
 1. `TaskCreate(subject="secretary: Session briefing + HANDOFF readiness", description="<full mission: deliver session briefing on spawn, answer memory queries during the session, process HANDOFFs at workflow boundaries; CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES per the orchestrator persona §13 Recommended Agent Prompting Structure>")` — single work task
 2. `TaskUpdate(task_id, owner="secretary")` — assign to the secretary; no `addBlockedBy` (no teachback gate)
