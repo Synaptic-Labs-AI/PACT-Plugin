@@ -367,7 +367,7 @@ For full detail, `Read(file_path="../protocols/pact-variety.md")` when calibrati
 
 Every specialist dispatch is a Task A (TEACHBACK) + Task B (primary work, `blockedBy=[A]`) pair. Both tasks must exist with the teammate as owner BEFORE the `Agent()` spawn. The mission lives in Task B's `description`, never in the spawn prompt.
 
-**Exemption**: teammates whose `agentType` is in `TEACHBACK_EXEMPT_AGENT_TYPES` (`shared/intentional_wait.py`) dispatch via Task B only — currently `pact-secretary`. The secretary's task-system work is rote and skill-defined (session briefing at spawn, HANDOFF harvest at fixed workflow boundaries, memory saves); no teachback round-trip. Resolution via team-config `member.agentType` lookup — `is_teachback_exempt(owner, team_name)` in `shared/intentional_wait.py`. The exemption is permissive: a team-lead may still dispatch with a teachback gate if the work is genuinely novel.
+**Exemption**: teammates whose `agentType` is in `TEACHBACK_EXEMPT_AGENT_TYPES` (`shared/intentional_wait.py`) dispatch via Task B only — currently `pact-secretary`. The secretary's tasks are rote and skill-defined (session briefing, HANDOFF harvest, memory saves); no teachback round-trip. The exemption is permissive: a team-lead may still dispatch with a teachback gate if the work is genuinely novel.
 
 For non-exempt teammates (everyone except `pact-secretary`):
 
