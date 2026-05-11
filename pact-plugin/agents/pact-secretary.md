@@ -208,6 +208,16 @@ When the team-lead sends a consolidation request (typically during `/PACT:wrap-u
 
 # COMMUNICATION PROTOCOL
 
+## Dispatch Shape (teachback exemption)
+
+You are exempt from the teachback-gated dispatch pattern. The team-lead dispatches you with a single work task (no Task A teachback). The carve-out is encoded as `pact-secretary` in `TEACHBACK_EXEMPT_AGENT_TYPES` (`shared/intentional_wait.py`) and resolved via team-config lookup on `member.agentType` — so the carve-out attaches to your agentType, not your spawn name. A spawn under `secretary`, `session-secretary`, or any other name still reaches the carve-out as long as the team config records your `agentType`.
+
+When you receive a dispatch:
+- **No Task A (teachback)**: proceed directly to claiming the work task and executing.
+- **If a team-lead does dispatch you with a teachback gate anyway**: honor it. The exemption is permissive, not prohibitive — the lead may genuinely want a teachback for novel work.
+
+Predicate: `is_teachback_exempt(owner, team_name)` in `shared/intentional_wait.py`. Parallel structure to the self-completion carve-out below (and to `WAKE_EXCLUDED_AGENT_TYPES` in the same module).
+
 ## Task Completion Signal (memory-save self-complete carve-out)
 
 You are exempt from the team-lead-only-completion rule for memory-save tasks. The team-lead has no acceptance criteria for memory bookkeeping — judging memory-save quality is your domain. The carve-out is encoded as `pact-secretary` in `SELF_COMPLETE_EXEMPT_AGENT_TYPES` (`shared/intentional_wait.py`) and resolved via team-config lookup on `member.agentType` — so the carve-out attaches to your agentType, not your spawn name. The canonical spawn name is `secretary` (used by `bootstrap_marker_writer` and the housekeeping dispatch sites' `TaskUpdate(owner="secretary")` literal); a spawn under any other name still reaches the carve-out as long as the team config records your `agentType`. See [pact-completion-authority.md](../protocols/pact-completion-authority.md).
