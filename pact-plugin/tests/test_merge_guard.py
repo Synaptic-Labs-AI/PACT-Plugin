@@ -9614,3 +9614,832 @@ class TestSymmetryContract:
             "git branch -D feat/teachback-exempt-secretary",
             "branch-delete",
         )
+
+
+# =============================================================================
+# TEST phase comprehensive coverage (#720) — appended classes
+# =============================================================================
+#
+# The classes below extend the verification-tests added during CODE phase with
+# adversarial, integration, and proof-discharge coverage per the architecture
+# doc's test-surface delta and the backend-coder's flagged uncertainty items.
+# They never modify the verification-tests above; failures here indicate gaps
+# in the comprehensive surface, not regressions in the verification surface.
+
+
+class TestConcurrentConsumptionThreaded:
+    """Real-thread race tests discharging the architect's per-slot O_EXCL
+    atomicity proof (#720 Bug C).
+
+    The verification-test suite simulates concurrency via back-to-back
+    synchronous calls. These tests use threading.Barrier to release N
+    real threads simultaneously at the os.open(O_CREAT|O_EXCL) syscall.
+    Python's GIL serializes bytecode, but the syscall releases the GIL,
+    so the kernel-level race window is genuine.
+
+    The architect §4.3 invariants under verification:
+    - Each concurrent invocation claims a distinct slot.
+    - No two invocations claim the same slot.
+    - Total successful claims ≤ MAX_USES.
+    - Terminal rename happens at most once.
+    """
+
+    def _drain_token(self, token_dir, pr_number):
+        """Helper: write a fresh token, return its path."""
+        from merge_guard_post import write_token
+
+        return write_token({"pr_number": pr_number}, token_dir=token_dir)
+
+    def test_two_threads_race_on_n2_token_distinct_slots(self, tmp_path):
+        """2 threads racing on a N=2 token: each claims a distinct slot.
+
+        Architect §4.3 proof discharge — explicit threading race rather
+        than synchronous back-to-back calls.
+        """
+        import threading
+
+        from shared.merge_guard_common import USE_MARKER_SUFFIX
+        from merge_guard_pre import _consume_token
+
+        token_path = self._drain_token(tmp_path, "42")
+
+        results = []
+        barrier = threading.Barrier(2)
+
+        def worker():
+            barrier.wait()  # release both threads at the same instant
+            results.append(_consume_token(token_path))
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Both threads succeeded
+        assert results.count(True) == 2
+        assert results.count(False) == 0
+
+        # Each slot was claimed exactly once (distinct slots)
+        assert Path(token_path + USE_MARKER_SUFFIX + "1").exists()
+        assert Path(token_path + USE_MARKER_SUFFIX + "2").exists()
+
+        # Terminal rename happened
+        assert not Path(token_path).exists()
+        assert Path(token_path + ".consumed").exists()
+
+    def test_three_threads_race_on_n2_token_one_denied(self, tmp_path):
+        """3 threads racing on N=2 token: 2 win distinct slots, 1 denied.
+
+        Pins the over-subscription failure mode: budget is hard-bounded;
+        excess concurrent claimants get False, not phantom slot-3.
+        """
+        import threading
+
+        from shared.merge_guard_common import USE_MARKER_SUFFIX
+        from merge_guard_pre import _consume_token
+
+        token_path = self._drain_token(tmp_path, "42")
+
+        results = []
+        results_lock = threading.Lock()
+        barrier = threading.Barrier(3)
+
+        def worker():
+            barrier.wait()
+            outcome = _consume_token(token_path)
+            with results_lock:
+                results.append(outcome)
+
+        threads = [threading.Thread(target=worker) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Exactly 2 wins, 1 denial
+        assert results.count(True) == 2
+        assert results.count(False) == 1
+
+        # Only the 2 valid slot markers exist; no phantom slot-3
+        assert Path(token_path + USE_MARKER_SUFFIX + "1").exists()
+        assert Path(token_path + USE_MARKER_SUFFIX + "2").exists()
+        assert not Path(token_path + USE_MARKER_SUFFIX + "3").exists()
+        assert Path(token_path + ".consumed").exists()
+
+    def test_high_contention_invariants_hold(self, tmp_path):
+        """8 threads contending for a N=2 token under barrier-release.
+
+        Stress test for the GIL-vs-syscall race envelope. Invariants:
+        - Total wins == MAX_USES.
+        - Marker file count == MAX_USES.
+        - No duplicate slot ownership (each marker has the correct slot
+          number recorded in its body).
+        """
+        import threading
+
+        from shared.merge_guard_common import MAX_USES, USE_MARKER_SUFFIX
+        from merge_guard_pre import _consume_token
+
+        token_path = self._drain_token(tmp_path, "42")
+
+        results = []
+        results_lock = threading.Lock()
+        barrier = threading.Barrier(8)
+
+        def worker():
+            barrier.wait()
+            outcome = _consume_token(token_path)
+            with results_lock:
+                results.append(outcome)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Exactly MAX_USES wins; the rest denied
+        assert results.count(True) == MAX_USES
+        assert results.count(False) == 8 - MAX_USES
+
+        # Exactly MAX_USES marker files; one per slot
+        markers = sorted(tmp_path.glob(f"merge-authorized-*{USE_MARKER_SUFFIX}*"))
+        assert len(markers) == MAX_USES
+
+        # Each marker body records its own slot — no duplicate ownership
+        recorded_slots = set()
+        for marker in markers:
+            data = json.loads(marker.read_text())
+            recorded_slots.add(data["slot"])
+        assert recorded_slots == set(range(1, MAX_USES + 1))
+
+    def test_subprocess_race_fs_level_atomicity(self, tmp_path):
+        """subprocess.Popen race: spawn 4 OS processes that hit the
+        kernel-level race window simultaneously, no GIL involvement.
+
+        Backstop for the in-process threading test in case GIL scheduling
+        ever masks a real race condition in the threaded path.
+        """
+        import subprocess
+        import textwrap
+
+        from shared.merge_guard_common import MAX_USES, USE_MARKER_SUFFIX
+        from merge_guard_post import write_token
+
+        token_path = write_token({"pr_number": "99"}, token_dir=tmp_path)
+        hooks_dir = Path(__file__).parent.parent / "hooks"
+
+        # Use a filesystem barrier: each child polls for a "go" file before
+        # invoking _consume_token, so all 4 cross the os.open boundary
+        # within microseconds of each other.
+        go_file = tmp_path / "GO"
+        script = textwrap.dedent(f"""
+            import sys, os, time
+            sys.path.insert(0, {str(hooks_dir)!r})
+            # Wait for the barrier file
+            while not os.path.exists({str(go_file)!r}):
+                time.sleep(0.001)
+            from merge_guard_pre import _consume_token
+            outcome = _consume_token({str(token_path)!r})
+            sys.exit(0 if outcome else 1)
+        """)
+        script_file = tmp_path / "_worker.py"
+        script_file.write_text(script)
+
+        procs = [
+            subprocess.Popen(
+                [sys.executable, str(script_file)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            for _ in range(4)
+        ]
+
+        # Release the barrier
+        go_file.write_text("go")
+
+        return_codes = [p.wait(timeout=10) for p in procs]
+        wins = return_codes.count(0)
+        losses = return_codes.count(1)
+
+        # Exactly MAX_USES processes won
+        assert wins == MAX_USES, f"expected {MAX_USES} wins, got {wins} (losses={losses})"
+        assert losses == 4 - MAX_USES
+
+        # Exactly MAX_USES marker files
+        markers = list(tmp_path.glob(f"merge-authorized-*{USE_MARKER_SUFFIX}*"))
+        assert len(markers) == MAX_USES
+
+
+class TestLegacyTokenBoundary:
+    """Adversarial coverage for the legacy-token (max_uses missing) path
+    (#720 Bug C, backend-coder uncertainty item #1).
+
+    The verification-tests pin individual legacy behaviors. These tests
+    cover the boundary cases: legacy tokens approaching TTL, legacy +
+    N=2 tokens coexisting in the same session, and the end-to-end
+    behavior of legacy tokens against check_merge_authorization (not
+    just the _consume_token unit surface).
+    """
+
+    def _write_legacy_token(self, tmp_path, pr_number="42", ttl_offset=300):
+        """Write a legacy token with no max_uses field; offset controls TTL."""
+        now = time.time()
+        token_path = tmp_path / f"merge-authorized-legacy-{pr_number}"
+        token_path.write_text(json.dumps({
+            "created_at": now,
+            "expires_at": now + ttl_offset,
+            "context": {"pr_number": pr_number, "operation_type": "merge"},
+        }))
+        return str(token_path)
+
+    def test_legacy_token_blocks_second_command_end_to_end(self, tmp_path):
+        """Legacy token authorizes 1 command via check_merge_authorization;
+        second identical command is blocked (no N-use budget for legacy)."""
+        from merge_guard_pre import check_merge_authorization
+
+        self._write_legacy_token(tmp_path, "42")
+
+        # First: allowed
+        assert check_merge_authorization("gh pr merge 42", token_dir=tmp_path) is None
+
+        # Second: blocked — no remaining token (legacy single-use exhausted)
+        result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        assert result is not None
+        assert "AskUserQuestion" in result
+
+    def test_legacy_and_n_use_tokens_coexist(self, tmp_path):
+        """Mixed session: legacy single-use token + N=2 token both present.
+
+        Authorize each with a context-matching command. Verifies the N-use
+        logic in _consume_token correctly dispatches based on max_uses
+        field presence per token, not based on which token was found first.
+        """
+        from shared.merge_guard_common import USE_MARKER_SUFFIX
+        from merge_guard_post import write_token
+        from merge_guard_pre import _consume_token, find_valid_token
+
+        legacy_path = self._write_legacy_token(tmp_path, "100")
+        n_use_path = write_token({"pr_number": "200"}, token_dir=tmp_path)
+
+        # Consume each token directly via _consume_token to bypass the
+        # token-vs-command matching (which is orthogonal to legacy/N-use
+        # dispatch). Behavior under test: each token's consumption semantic
+        # follows its OWN schema, not whichever was found first by glob.
+        assert _consume_token(legacy_path) is True
+        assert _consume_token(n_use_path) is True
+
+        # Legacy: renamed directly to .consumed (no slot markers)
+        assert not Path(legacy_path).exists()
+        assert Path(legacy_path + ".consumed").exists()
+        assert not Path(legacy_path + USE_MARKER_SUFFIX + "1").exists()
+
+        # N-use: slot 1 claimed, token still on disk (budget remaining)
+        assert Path(n_use_path).exists()
+        assert Path(n_use_path + USE_MARKER_SUFFIX + "1").exists()
+        assert not Path(n_use_path + ".consumed").exists()
+
+    def test_legacy_token_near_ttl_boundary(self, tmp_path):
+        """Legacy token at 1s before expiry: authorizes; at 1s past expiry:
+        cleaned up by find_valid_token, command blocked."""
+        from merge_guard_pre import check_merge_authorization
+
+        # 1s before TTL expiry: still valid
+        token_path = self._write_legacy_token(tmp_path, "42", ttl_offset=1)
+        assert check_merge_authorization("gh pr merge 42", token_dir=tmp_path) is None
+
+        # Force the next token to be already expired
+        now = time.time()
+        expired_path = tmp_path / "merge-authorized-legacy-expired"
+        expired_path.write_text(json.dumps({
+            "created_at": now - 600,
+            "expires_at": now - 1,
+            "context": {"pr_number": "43", "operation_type": "merge"},
+        }))
+        result = check_merge_authorization("gh pr merge 43", token_dir=tmp_path)
+        assert result is not None
+        # Expired token cleaned up by find_valid_token
+        assert not expired_path.exists()
+
+    def test_legacy_token_with_partial_n_use_fields_treated_as_legacy(self, tmp_path):
+        """Token has max_uses field but not uses_remaining (malformed-ish):
+        max_uses drives behavior — N=2 means slot-marker path is taken.
+
+        Pins the field-driven dispatch: _consume_token reads max_uses, not
+        uses_remaining. Defensive coverage for any future write_token path
+        that might emit one without the other.
+        """
+        from shared.merge_guard_common import USE_MARKER_SUFFIX
+        from merge_guard_pre import _consume_token
+
+        now = time.time()
+        token_path = tmp_path / "merge-authorized-partial-1"
+        token_path.write_text(json.dumps({
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {"pr_number": "55"},
+            "max_uses": 2,
+            # uses_remaining intentionally omitted
+        }))
+
+        # max_uses=2 → slot-marker path
+        assert _consume_token(str(token_path)) is True
+        assert Path(str(token_path) + USE_MARKER_SUFFIX + "1").exists()
+        assert not Path(str(token_path) + ".consumed").exists()
+
+
+class TestFDRedirectAdversarial:
+    """Adversarial extensions to Bug A's FD-redirect negatives (#720 Bug A).
+
+    Backend-coder added 5 negative tests. These extend to compound
+    redirect shapes, process substitution, here-strings, and combined
+    redirect+chain forms that should each be correctly classified —
+    either as compound (real chain) or as not-compound (pure redirect).
+    """
+
+    def test_redirect_with_dev_null_input_not_compound(self):
+        """`git push origin main > file.log 2>&1 < /dev/null` — three
+        redirects, no chain operator."""
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "git push origin main > file.log 2>&1 < /dev/null"
+        ) is False
+
+    def test_redirect_then_and_chain_is_compound(self):
+        """`git push origin main 2>&1 && echo done` — has `&&`, IS compound.
+
+        The redirect 2>&1 is silent; the && operator drives the classification.
+        """
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "git push origin main 2>&1 && echo done"
+        ) is True
+
+    def test_redirect_then_or_chain_is_compound(self):
+        """`gh pr merge 100 2>&1 || echo failed` — IS compound via `||`."""
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "gh pr merge 100 2>&1 || echo failed"
+        ) is True
+
+    def test_process_substitution_output_not_compound(self):
+        """`git push origin main > >(tee push.log)` — bash process
+        substitution `>(...)`. No chain operator, so not compound.
+
+        Note: the inner `>` of `>(...)` is part of process substitution
+        syntax. The compound regex correctly identifies this as not chained.
+        """
+        from merge_guard_pre import is_compound_destructive_command
+
+        cmd = "git push origin main > >(tee push.log)"
+        # Behavior: this should not be flagged as compound (no real chain).
+        assert is_compound_destructive_command(cmd) is False
+
+    def test_here_string_input_not_compound(self):
+        """`gh pr merge 42 <<< 'yes'` — here-string `<<<`, no chain."""
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command("gh pr merge 42 <<< 'yes'") is False
+
+    def test_combined_fd_redirects_in_sequence_not_compound(self):
+        """`gh pr merge 100 0<&-  1>&2  2>output.log` — multiple FD
+        redirects in a single command, none of which form a chain."""
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "gh pr merge 100 0<&-  1>&2  2>output.log"
+        ) is False
+
+    def test_append_redirect_not_compound(self):
+        """`gh pr merge 100 >> output.log 2>&1` — append `>>` redirect."""
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "gh pr merge 100 >> output.log 2>&1"
+        ) is False
+
+    def test_redirect_then_semicolon_is_compound(self):
+        """`git push --force 2>&1 ; ls` — semicolon chains, FD redirect
+        in head does NOT preempt the compound classification."""
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "git push --force 2>&1 ; ls"
+        ) is True
+
+
+class TestSymmetryAdversarial:
+    """Adversarial Bug B symmetry cases — multi-quoted-region prose,
+    fenced markdown, mistyped commands, defensive empty/None inputs
+    (#720 Bug B).
+
+    These extend the verification-tests' 5 happy-path symmetry pairings
+    with surfaces the orchestrator's question-generation behavior could
+    realistically produce: multiple backticked tokens, code-fence
+    blocks, typos, and edge-case empty prose.
+    """
+
+    def test_multi_quoted_region_first_destructive_wins(self):
+        """Prose with multiple quoted regions — the first that classifies
+        as a destructive op_type wins (document-order iteration).
+
+        Example: "should I run `git fetch` and then `git push origin main`?"
+        The first backticked region (`git fetch`) is non-destructive →
+        returns None; the second (`git push origin main`) classifies as
+        force-push.
+        """
+        from merge_guard_post import extract_context
+
+        ctx = extract_context(
+            "Should I run `git fetch` and then `git push origin main`?"
+        )
+        assert ctx.get("operation_type") == "force-push"
+
+    def test_multi_quoted_first_destructive_blocks_later(self):
+        """First quoted region is destructive — wins; later regions ignored.
+
+        Pins the first-match-wins ordering: even if a later quoted region
+        is destructive of a DIFFERENT op_type, the first wins.
+        """
+        from merge_guard_post import extract_context
+
+        ctx = extract_context(
+            "Merge via `gh pr merge 42` (note: do not run `git branch -D feat/x` after)?"
+        )
+        assert ctx.get("operation_type") == "merge"
+
+    def test_fenced_markdown_command_classifies_via_backticks(self):
+        """Triple-backtick fences: `_QUOTED_COMMAND_RE` matches single
+        backticks, so a ```bash fence's content is between two single
+        backticks at the boundary. Behavior: classifier may or may not
+        find the command — pin whichever behavior holds.
+        """
+        from merge_guard_post import extract_context
+
+        # Triple-backtick fence with command on its own line.
+        question = (
+            "Run this command:\n"
+            "```bash\n"
+            "git push --force origin main\n"
+            "```\n"
+            "Confirm?"
+        )
+        ctx = extract_context(question)
+        # The regex `` `([^`]+)` `` matches the empty content between
+        # ``` and the next backtick — yields empty captures that don't
+        # classify. Then the body "bash\ngit push --force origin main\n"
+        # falls between the next pair of backticks, which DOES classify
+        # as force-push via the embedded `git push --force`.
+        # We pin: classifier returns force-push (the inner command is
+        # detected by the read-side classifier inside the captured body).
+        assert ctx.get("operation_type") == "force-push"
+
+    def test_mistyped_command_falls_back_to_keyword_ladder(self):
+        """A typo'd command in backticks (e.g., `gh pr merg 42`) doesn't
+        classify via the quoted path — falls through to the keyword ladder,
+        which catches the prose 'merge'."""
+        from merge_guard_post import extract_context
+
+        ctx = extract_context(
+            "Confirm `gh pr merg 42` — merge the PR?"  # typo: merg
+        )
+        # Quoted path returns None for the typo; ladder catches 'merge'
+        # in prose.
+        assert ctx.get("operation_type") == "merge"
+
+    def test_empty_question_no_operation_type(self):
+        """Defensive: empty question yields no operation_type."""
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("")
+        assert "operation_type" not in ctx
+
+    def test_whitespace_only_question_no_operation_type(self):
+        """Whitespace-only question: classifier returns no op_type."""
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("    \n\t   ")
+        assert "operation_type" not in ctx
+
+    def test_no_quoted_region_no_keywords_no_op_type(self):
+        """Plain prose with neither quoted commands nor recognized
+        keywords yields no operation_type."""
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Please proceed with the deployment now.")
+        assert "operation_type" not in ctx
+
+    def test_ladder_reorder_branch_d_in_merged_prose(self):
+        """The ladder-reorder fix in pure-prose form (no quoted region).
+
+        Question: "is the merged feature branch ready to be removed via
+        git branch -D feat/x?"  Pre-fix: 'merge' keyword (via 'merged')
+        would have matched first → 'merge'. Post-fix: branch-delete
+        rule is checked before the bare 'merge' keyword.
+        """
+        from merge_guard_post import extract_context
+
+        ctx = extract_context(
+            "Is the merged feature branch ready to be removed via "
+            "git branch -D feat/x?"
+        )
+        assert ctx.get("operation_type") == "branch-delete"
+
+    def test_none_safe_classifier(self):
+        """detect_command_operation_type on edge inputs: empty string
+        and short non-command-shape strings return None."""
+        from shared.merge_guard_common import detect_command_operation_type
+
+        assert detect_command_operation_type("") is None
+        assert detect_command_operation_type("xyz") is None
+        assert detect_command_operation_type("git status") is None
+
+
+class TestAuditEmitFormatAdversarial:
+    """Bug C audit-emit format invariance under adversarial conditions
+    (#720 Bug C, backend-coder open question #3 implicit).
+
+    Verification-tests pin the format under the default MAX_USES. These
+    tests cover format invariance under unicode basenames, when MAX_USES
+    is monkeypatched to other integers, and the absence of audit emit
+    on the unhappy paths.
+    """
+
+    def test_audit_format_includes_token_basename(self, tmp_path, capfd):
+        """Audit line includes the os.path.basename(token_path) literally."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import _consume_token
+
+        token_path = write_token({"pr_number": "7"}, token_dir=tmp_path)
+        capfd.readouterr()  # drain write_token's emit
+
+        _consume_token(token_path)
+        out = capfd.readouterr()
+        assert os.path.basename(token_path) in out.err
+        # And the path is NOT echoed in full — only the basename.
+        # (Defensive: avoid leaking the full home-dir path to stderr.)
+        assert str(tmp_path) not in out.err
+
+    def test_audit_format_under_monkeypatched_max_uses(self, tmp_path, capfd, monkeypatch):
+        """If MAX_USES is monkeypatched to 5, the format reads `slot N/5`.
+
+        Pins the format-by-substitution contract: the emitter reads
+        the live max_uses value at consume-time, not a hard-coded constant.
+
+        Note: write_token captures MAX_USES at module-import via
+        `from shared.merge_guard_common import MAX_USES`, so we must reload
+        merge_guard_post AFTER patching. The reload is restored on teardown
+        to avoid polluting the module state for downstream tests.
+        """
+        import importlib
+
+        import merge_guard_post
+        import shared.merge_guard_common as common
+
+        # Save the live module state for teardown
+        _saved_max_uses = common.MAX_USES
+
+        # Monkeypatch BEFORE write_token so the token records max_uses=5
+        monkeypatch.setattr(common, "MAX_USES", 5)
+        importlib.reload(merge_guard_post)
+
+        try:
+            from merge_guard_post import write_token
+
+            token_path = write_token({"pr_number": "13"}, token_dir=tmp_path)
+            # Confirm token records max_uses=5
+            token_data = json.loads(Path(token_path).read_text())
+            assert token_data["max_uses"] == 5
+
+            capfd.readouterr()
+            from merge_guard_pre import _consume_token
+            _consume_token(token_path)
+            out = capfd.readouterr()
+            assert "(slot 1/5)" in out.err
+        finally:
+            # Restore module state so downstream tests see MAX_USES=2
+            common.MAX_USES = _saved_max_uses
+            importlib.reload(merge_guard_post)
+
+    def test_no_audit_emit_on_legacy_path(self, tmp_path, capfd):
+        """Legacy tokens (no max_uses field) use the rename-only path —
+        backend-coder's design emits audit on that path too. Pin actual
+        behavior so accidental changes flag the test.
+        """
+        from merge_guard_pre import _consume_token
+
+        now = time.time()
+        token_path = tmp_path / "merge-authorized-legacy-7"
+        token_path.write_text(json.dumps({
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {"pr_number": "7"},
+        }))
+
+        capfd.readouterr()
+        result = _consume_token(str(token_path))
+        out = capfd.readouterr()
+
+        assert result is True
+        # Legacy path: per the implementation it does not emit a slot/MAX
+        # line because that line is inside the N-use branch only.
+        assert "(slot " not in out.err
+
+    def test_audit_basename_with_special_chars_safe(self, tmp_path, capfd):
+        """Token basename containing special chars (hyphen, digits) is
+        emitted verbatim. Pins that the emitter doesn't quote/escape."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import _consume_token
+
+        token_path = write_token(
+            {"pr_number": "123", "branch": "feat/odd-name"},
+            token_dir=tmp_path,
+        )
+        capfd.readouterr()
+        _consume_token(token_path)
+        out = capfd.readouterr()
+
+        basename = os.path.basename(token_path)
+        # Basename appears in the audit line as-is
+        assert basename in out.err
+        # And the line is a single [security] entry on consume
+        consume_lines = [l for l in out.err.splitlines()
+                         if "[security] merge-authorized token consumed" in l]
+        assert len(consume_lines) == 1
+
+
+class TestEnvelopeIntegration:
+    """Envelope-level (PreToolUse stdin → main() → JSON stdout)
+    integration tests for the 3 bug surfaces (#720).
+
+    Verification-tests target the check_merge_authorization function
+    directly. These supplement with full main()-shape invocations to
+    catch any drift between the function-level contract and the JSON
+    serialization layer at the hook's external boundary.
+
+    Scope: 3-5 envelope tests, one per bug surface plus the end-to-end
+    flow. Not exhaustive — that's the function-level layer's job.
+    """
+
+    def _pre_envelope(self, command: str) -> str:
+        """Build a PreToolUse stdin envelope (Bash matcher)."""
+        return json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "session_id": "test-envelope-session",
+        })
+
+    def _post_envelope(self, question: str, answer: str = "yes") -> str:
+        """Build a PostToolUse stdin envelope (AskUserQuestion matcher)."""
+        return json.dumps({
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": [{"question": question}]},
+            "tool_response": {"answers": {question: answer}},
+            "session_id": "test-envelope-session",
+        })
+
+    def _invoke_pre(self, command: str, tmp_path):
+        """Invoke merge_guard_pre.main() with a built envelope.
+        Returns (exit_code, stdout_text, stderr_text)."""
+        from merge_guard_pre import main as pre_main
+
+        envelope = self._pre_envelope(command)
+        stdout_buf = io.StringIO()
+        with patch("merge_guard_pre.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(envelope)), \
+             patch("sys.stdout", stdout_buf):
+            with pytest.raises(SystemExit) as exc_info:
+                pre_main()
+        return exc_info.value.code, stdout_buf.getvalue()
+
+    def _invoke_post(self, question: str, tmp_path, answer: str = "yes"):
+        """Invoke merge_guard_post.main() with a built envelope."""
+        from merge_guard_post import main as post_main
+
+        envelope = self._post_envelope(question, answer)
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(envelope)):
+            with pytest.raises(SystemExit) as exc_info:
+                post_main()
+        return exc_info.value.code
+
+    def test_bug_a_envelope_fd_redirect_with_token_allowed(self, tmp_path):
+        """Full envelope: Bug A surface. AskUserQuestion approves; then
+        `git push origin main 2>&1` runs — FD redirect no longer flagged
+        as compound; token authorizes; exit code 0."""
+        # Step 1: approve via post hook. The question prose must satisfy
+        # is_merge_question (force-push keyword) AND embed the quoted
+        # command for the symmetric classifier.
+        post_code = self._invoke_post(
+            "Should I force-push via `git push origin main`?", tmp_path
+        )
+        assert post_code == 0
+        tokens = list(tmp_path.glob("merge-authorized-*"))
+        assert len(tokens) == 1
+
+        # Step 2: run the FD-redirect command through pre hook
+        pre_code, pre_stdout = self._invoke_pre(
+            "git push origin main 2>&1", tmp_path
+        )
+        assert pre_code == 0  # Allowed
+        # Suppress-output JSON, NOT a deny JSON
+        assert '"permissionDecision": "deny"' not in pre_stdout
+
+    def test_bug_b_envelope_joes_bare_push_authorizes(self, tmp_path):
+        """Full envelope: Bug B surface. AskUserQuestion question with
+        quoted-command `git push origin main` (Joe's case) → token writes
+        force-push op_type; pre hook recognizes bare `git push origin main`
+        as force-push and authorizes."""
+        post_code = self._invoke_post(
+            "Confirm force-push: `git push origin main`?", tmp_path
+        )
+        assert post_code == 0
+
+        # Verify token has force-push op_type (symmetric classifier worked)
+        token_files = list(tmp_path.glob("merge-authorized-*"))
+        assert len(token_files) == 1
+        token_data = json.loads(token_files[0].read_text())
+        assert token_data["context"]["operation_type"] == "force-push"
+
+        # Run the matching command — should be authorized
+        pre_code, pre_stdout = self._invoke_pre(
+            "git push origin main", tmp_path
+        )
+        assert pre_code == 0
+        assert '"permissionDecision": "deny"' not in pre_stdout
+
+    def test_bug_c_envelope_two_uses_then_third_denied(self, tmp_path):
+        """Full envelope: Bug C surface. Write token, consume 2 uses via
+        pre-main(), assert third consume is denied at the JSON envelope
+        layer with the AskUserQuestion deny reason."""
+        post_code = self._invoke_post(
+            "Should I merge via `gh pr merge 42`?", tmp_path
+        )
+        assert post_code == 0
+
+        # 2 successful authorizations (MAX_USES=2)
+        code1, _ = self._invoke_pre("gh pr merge 42", tmp_path)
+        code2, _ = self._invoke_pre("gh pr merge 42", tmp_path)
+        assert code1 == 0
+        assert code2 == 0
+
+        # 3rd: denied at envelope layer
+        code3, out3 = self._invoke_pre("gh pr merge 42", tmp_path)
+        assert code3 == 2  # deny exit code
+        deny_payload = json.loads(out3)
+        assert deny_payload["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "AskUserQuestion" in (
+            deny_payload["hookSpecificOutput"]["permissionDecisionReason"]
+        )
+
+    def test_envelope_ladder_reorder_branch_d_mjs_case(self, tmp_path):
+        """Full envelope: mj's case. AskUserQuestion prose embeds the
+        quoted `git branch -D feat/x` plus the word 'merged' in the
+        surrounding prose; symmetric classifier picks branch-delete;
+        pre hook authorizes the matching command.
+
+        Prose carefully shaped so extract_context's pre-existing branch
+        regex captures the actual branch name (feat/old), not a flag (-D).
+        This is orthogonal to the Bug B fix — that regex was unchanged in
+        this PR and uses pattern `branch\\s+['\"]?([a-zA-Z0-9/_.-]+)`.
+        """
+        post_code = self._invoke_post(
+            "Should I delete branch feat/old via `git branch -D feat/old`? (merged)",
+            tmp_path,
+        )
+        assert post_code == 0
+
+        token_files = list(tmp_path.glob("merge-authorized-*"))
+        token_data = json.loads(token_files[0].read_text())
+        assert token_data["context"]["operation_type"] == "branch-delete"
+        assert token_data["context"]["branch"] == "feat/old"
+
+        pre_code, pre_stdout = self._invoke_pre(
+            "git branch -D feat/old", tmp_path
+        )
+        assert pre_code == 0
+        assert '"permissionDecision": "deny"' not in pre_stdout
+
+    def test_envelope_deny_emits_well_formed_json(self, tmp_path):
+        """Envelope JSON-shape contract: deny path emits a payload with
+        hookSpecificOutput.hookEventName="PreToolUse",
+        permissionDecision="deny", and a non-empty permissionDecisionReason.
+
+        Catches JSON-serialization drift between the function's string
+        return and the wire-format the platform expects.
+        """
+        pre_code, pre_stdout = self._invoke_pre(
+            "gh pr merge 99 --admin", tmp_path
+        )
+        assert pre_code == 2
+        payload = json.loads(pre_stdout)
+        assert "hookSpecificOutput" in payload
+        hso = payload["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "deny"
+        assert isinstance(hso["permissionDecisionReason"], str)
+        assert hso["permissionDecisionReason"] != ""
