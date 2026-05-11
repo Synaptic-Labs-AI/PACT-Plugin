@@ -109,6 +109,192 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 
+# ─── Tunable constants ─────────────────────────────────────────────────
+
+# Backward scan window for transcript walk. Covers the 3-instance
+# corpus gap distribution (22 / 196 / no-counterpart) with headroom.
+# ~5-15 lines per turn → 500 lines ≈ 30-100 turns of context.
+TRANSCRIPT_SCAN_WINDOW_LINES = 500
+
+# Minimum characters in the post-`Human:` substring for tier-1/2 matching.
+# Hallucinated text below the floor (~4 words) is treated as
+# discrimination-insufficient: if temporal anchor passes (user entry more
+# recent than emission), ALLOW. Avoids tripping on `Human: ok`.
+SUBSTRING_LENGTH_FLOOR_CHARS = 20
+
+# Maximum chars extracted after `Human:` for substring comparison.
+# Bounds the compare cost; the orchestrator hallucination shape observed
+# in the corpus puts the directive on the same or next line.
+EXTRACTED_HUMAN_MAX_CHARS = 200
+
+
+# ─── Envelope-exclusion ────────────────────────────────────────────────
+
+# Prefixes that mark a `type=user` content string as PLATFORM-INJECTED
+# rather than a genuine user keystroke. Any user-entry whose content
+# (after lstrip) starts with one of these is filtered out of the
+# temporal-anchor walk — it cannot serve as the "authorizing user turn"
+# for a destructive op.
+#
+# `startswith` is more conservative than `in`: a user who literally
+# types `<teammate-message` at message start is vanishingly rare;
+# substring-anywhere would over-exclude legitimate quotations.
+ENVELOPE_PREFIXES = (
+    "<teammate-message",
+    "<task-notification>",
+    "<command-message>",
+    "<system-reminder>",
+    "[Request interrupted",
+)
+
+
+def passes_envelope_exclusion(content: str) -> bool:
+    """Return True iff `content` is shaped like a genuine user keystroke.
+
+    Pure function. False on any of the 5 platform-injected envelopes;
+    True on bare text. lstrip handles leading whitespace from soft
+    indentation.
+    """
+    if not isinstance(content, str):
+        return False
+    s = content.lstrip()
+    return not any(s.startswith(p) for p in ENVELOPE_PREFIXES)
+
+
+def extract_after_human(text: str) -> str:
+    """Extract the substring after the LAST `Human:` occurrence.
+
+    Returns up to EXTRACTED_HUMAN_MAX_CHARS from the first line after
+    the marker, stripped of leading whitespace. Returns "" if `Human:`
+    is absent.
+
+    The orchestrator emission shape observed in the corpus is a
+    multi-line block where `Human:` is followed by the hallucinated
+    directive on the same or next line; bounding the extract keeps the
+    downstream substring compare cheap.
+    """
+    if not isinstance(text, str):
+        return ""
+    idx = text.rfind("Human:")
+    if idx == -1:
+        return ""
+    tail = text[idx + len("Human:"):].lstrip()
+    if not tail:
+        return ""
+    first_line = tail.splitlines()[0] if tail else ""
+    return first_line[:EXTRACTED_HUMAN_MAX_CHARS]
+
+
+def normalize(s: str) -> str:
+    """Tier-2 normalization: case-fold + whitespace-collapse.
+
+    `"  Yes\\tplease   MERGE  it.\\n"` → `"yes please merge it."`.
+    Pure function. Used for tier-2 substring comparison between the
+    hallucinated `Human:` text and the latest genuine user turn.
+    """
+    if not isinstance(s, str):
+        return ""
+    return " ".join(s.lower().split())
+
+
+# ─── Destructive-Bash pattern set ──────────────────────────────────────
+
+# Composed prefixes mirror merge_guard_pre conventions for DRY usage.
+# `(?:\S+\s+)*` matches zero or more global-flag+value tokens (e.g.,
+# `--repo owner/repo`) between the tool name and the subcommand.
+try:
+    _GH_GLOBAL_FLAGS = r"(?:\S+\s+)*"
+    _GIT_GLOBAL_FLAGS = r"(?:\S+\s+)*"
+    _GH_PREFIX = r"\bgh\s+" + _GH_GLOBAL_FLAGS
+    _GIT_PREFIX = r"\bgit\s+" + _GIT_GLOBAL_FLAGS
+
+    # Compound pattern: merge_guard_pre overlap (layered defense) +
+    # rm -rf variants + artifact-creation/destruction + history-rewrite +
+    # tag-publication. Layered Option B per architect: hallucination_gate
+    # runs FIRST under the shared matcher=Bash entry; on DENY the chain
+    # halts and merge_guard_pre does not run.
+    DESTRUCTIVE_PATTERNS = [
+        # ─── merge_guard_pre overlap (layered defense-in-depth) ───
+        re.compile(_GH_PREFIX + r"pr\s+merge\b"),
+        re.compile(_GH_PREFIX + r"pr\s+close\b(?=.*--delete-branch)"),
+        re.compile(r"--delete-branch.*" + _GH_PREFIX + r"pr\s+close\b"),
+        re.compile(_GIT_PREFIX + r"push\s+.*--force(?!-with-lease)\b"),
+        re.compile(_GIT_PREFIX + r"push\s+.*-f\b"),
+        re.compile(_GIT_PREFIX + r"push\s+-[a-zA-Z]*f"),
+        re.compile(_GIT_PREFIX + r"branch\s+.*-D\b"),
+        re.compile(_GIT_PREFIX + r"branch\s+.*--delete\s+--force\b"),
+        re.compile(_GIT_PREFIX + r"branch\s+--force\s+--delete\b"),
+
+        # ─── rm -rf and combined-flag variants ───
+        # Conservative coverage: order-agnostic -r/-f combos + glued
+        # -rf/-fr/-Rf, including extra letters like -rfv.
+        re.compile(r"\brm\s+(?:\S+\s+)*-rf\b"),
+        re.compile(r"\brm\s+(?:\S+\s+)*-fr\b"),
+        re.compile(r"\brm\s+(?:\S+\s+)*-r\s+(?:\S+\s+)*-f\b"),
+        re.compile(r"\brm\s+(?:\S+\s+)*-f\s+(?:\S+\s+)*-r\b"),
+        re.compile(r"\brm\s+(?:\S+\s+)*-[a-zA-Z]*r[a-zA-Z]*f"),
+        re.compile(r"\brm\s+(?:\S+\s+)*-[a-zA-Z]*f[a-zA-Z]*r"),
+
+        # ─── Artifact creation / deletion via gh ───
+        # gh issue create surfaced by the cross-session #684 case
+        # (hallucinated 'Human:' instance that escaped existing
+        # defenses). Release create/delete rewrites public artifacts.
+        re.compile(_GH_PREFIX + r"issue\s+create\b"),
+        re.compile(_GH_PREFIX + r"release\s+create\b"),
+        re.compile(_GH_PREFIX + r"release\s+delete\b"),
+
+        # ─── Tag publication (rewrites public history) ───
+        # Narrowed from the broader sketch flagged in teachback:
+        #   `git push --tags`            — explicit tag-bulk push
+        #   `git push <remote> refs/tags/<x>`  — explicit tag refspec
+        #   `git push <remote> v1.2.3`   — semver-shaped tag positional
+        # Branch-shaped positionals are NOT flagged by this set; the
+        # main-branch push form is handled by merge_guard_pre.
+        re.compile(_GIT_PREFIX + r"push\s+--tags\b"),
+        re.compile(
+            _GIT_PREFIX
+            + r"push\s+(?:-\S+\s+)*\S+\s+refs/tags/\S+"
+        ),
+        re.compile(
+            _GIT_PREFIX
+            + r"push\s+(?:-\S+\s+)*\S+\s+v?\d+(?:\.\d+)+\b"
+        ),
+
+        # ─── History-rewriting ops ───
+        re.compile(_GIT_PREFIX + r"reset\s+(?:\S+\s+)*--hard\b"),
+        # rebase (any form): interactive, --onto, plain — all rewrite
+        # history; orchestrator-authorized rebase from hallucination
+        # is categorically destructive.
+        re.compile(_GIT_PREFIX + r"rebase\b"),
+        re.compile(_GIT_PREFIX + r"tag\s+-d\b"),
+        # Remote ref deletion: `git push <remote> :refs/heads/<x>` or
+        # `git push <remote> --delete <ref>`.
+        re.compile(_GIT_PREFIX + r"push\s+(?:\S+\s+)*\S+\s+:refs/"),
+        re.compile(_GIT_PREFIX + r"push\s+(?:\S+\s+)*--delete\s+\S+"),
+    ]
+except BaseException as _pattern_compile_error:  # noqa: BLE001 — fail-closed catch-all
+    _emit_load_failure_deny("pattern compilation", _pattern_compile_error)
+
+
+def is_destructive_command(command: str) -> bool:
+    """Return True iff `command` matches any DESTRUCTIVE_PATTERNS entry
+    AFTER stripping non-executable content (heredocs, comments, quoted
+    echo/printf/git-commit-message args, variable assignment values,
+    here-strings).
+
+    Pure function. Reuses merge_guard_pre._strip_non_executable_content
+    for false-positive suppression — same canonical strip pipeline
+    applied by the layered companion gate.
+    """
+    if not isinstance(command, str) or not command:
+        return False
+    # Normalize bash line continuations before stripping (without this,
+    # patterns split across lines bypass all regex detection).
+    normalized = command.replace("\\\n", " ")
+    stripped = _strip_non_executable_content(normalized)
+    return any(pat.search(stripped) for pat in DESTRUCTIVE_PATTERNS)
+
+
 def main() -> NoReturn:
     """Hook entry point. Scaffolding only in this commit — main logic
     lands in a subsequent commit. Current behavior: fail-OPEN ALLOW on
