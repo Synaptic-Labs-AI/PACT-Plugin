@@ -753,3 +753,83 @@ def test_main_compound_command_caught_by_pattern_match(tmp_path):
     )
     code, out, _err = _run_hook(env)
     assert code == 2  # DENY — Human-emission with no matching user turn
+
+
+# ─── hooks.json registration ───────────────────────────────────────────
+
+
+HOOKS_JSON_PATH = Path(__file__).parent.parent / "hooks" / "hooks.json"
+
+
+def _bash_pretooluse_chain() -> list[dict]:
+    """Return the ordered hooks list for the PreToolUse matcher=Bash
+    block, or [] if not registered."""
+    data = _json.loads(HOOKS_JSON_PATH.read_text(encoding="utf-8"))
+    pretool = data.get("hooks", {}).get("PreToolUse", [])
+    for entry in pretool:
+        if entry.get("matcher") == "Bash":
+            return entry.get("hooks", [])
+    return []
+
+
+def test_hooks_json_registers_hallucination_gate_under_bash_matcher():
+    chain = _bash_pretooluse_chain()
+    assert chain, "PreToolUse matcher=Bash entry missing from hooks.json"
+    commands = [h.get("command", "") for h in chain]
+    assert any("hallucination_gate.py" in c for c in commands), (
+        f"hallucination_gate.py not registered under matcher=Bash; "
+        f"chain={commands}"
+    )
+
+
+def test_hooks_json_hallucination_gate_is_first_in_bash_chain():
+    # Layered defense-in-depth: chain-halt-on-DENY semantics require
+    # hallucination_gate to fire FIRST so that an orchestrator-
+    # hallucinated authorization cannot reach the merge_guard_pre
+    # token check.
+    chain = _bash_pretooluse_chain()
+    assert chain, "PreToolUse matcher=Bash entry missing"
+    first_command = chain[0].get("command", "")
+    assert "hallucination_gate.py" in first_command, (
+        f"hallucination_gate must be first in matcher=Bash chain "
+        f"(layered defense ordering); got first={first_command!r}"
+    )
+
+
+def test_hooks_json_bash_chain_preserves_companion_gates():
+    # Commit 5 must NOT drop or reorder the existing companion entries
+    # (git_commit_check, merge_guard_pre). Pin their continued presence
+    # against accidental deletion.
+    chain = _bash_pretooluse_chain()
+    commands = [h.get("command", "") for h in chain]
+    assert any("git_commit_check.py" in c for c in commands), (
+        "git_commit_check.py was dropped from matcher=Bash chain"
+    )
+    assert any("merge_guard_pre.py" in c for c in commands), (
+        "merge_guard_pre.py was dropped from matcher=Bash chain"
+    )
+
+
+def test_hooks_json_bash_chain_ordering_invariant():
+    # hallucination_gate FIRST, then git_commit_check, then
+    # merge_guard_pre. Pin the relative ordering.
+    chain = _bash_pretooluse_chain()
+    commands = [h.get("command", "") for h in chain]
+    idx_hg = next(i for i, c in enumerate(commands) if "hallucination_gate.py" in c)
+    idx_gc = next(i for i, c in enumerate(commands) if "git_commit_check.py" in c)
+    idx_mg = next(i for i, c in enumerate(commands) if "merge_guard_pre.py" in c)
+    assert idx_hg < idx_gc < idx_mg, (
+        f"hooks.json matcher=Bash ordering invariant violated: "
+        f"hallucination_gate@{idx_hg} git_commit_check@{idx_gc} "
+        f"merge_guard_pre@{idx_mg}"
+    )
+
+
+def test_hooks_json_remains_valid_after_registration():
+    # JSON parse + top-level shape sanity (defends against trailing-
+    # comma / bracket-mismatch regressions introduced by editing the
+    # registration block).
+    data = _json.loads(HOOKS_JSON_PATH.read_text(encoding="utf-8"))
+    assert isinstance(data, dict)
+    assert "hooks" in data
+    assert "PreToolUse" in data["hooks"]
