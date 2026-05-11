@@ -337,6 +337,27 @@ def test_human_emission_more_recent_than_user_denies():
     assert reason == "human_emission_more_recent_than_user_turn"
 
 
+def test_temporal_anchor_boundary_user_immediately_after_emission():
+    # Boundary pin for the strict-> temporal-anchor check
+    # (`last_assistant_human_idx > last_user_directive_idx`). Literal
+    # idx-tie is impossible (different `type` per JSONL line); the
+    # closest non-tied case is `assistant_idx == user_idx - 1` (the
+    # user message is the immediately-next line after the assistant
+    # emission). Expected: ALLOW because user is more recent than
+    # emission (user_idx > assistant_idx by 1).
+    lines = [
+        _assistant_line(["Human: please merge the open PR right now"]),
+        _user_line("please merge the open PR right now"),
+    ]
+    decision, _reason = evaluate_transcript(lines)
+    assert decision == DECISION_ALLOW, (
+        "strict-> check at idx-adjacency must return ALLOW: user (idx 1) "
+        "is more recent than assistant Human emission (idx 0); the "
+        "predicate is `assistant_idx > user_idx` so 0 > 1 is False → "
+        "fall through to substring tiers → tier-1 match → ALLOW."
+    )
+
+
 def test_tier1_exact_substring_allows():
     # Corpus #3 retroactive (L2478 included): genuine user verbatim
     # matches the prior assistant Human emission.
@@ -731,12 +752,14 @@ def test_main_human_emission_more_recent_than_user_denies(tmp_path):
 def test_main_warn_on_tier_miss_with_temporal_anchor_pass(tmp_path):
     # User turn exists and precedes the Human emission, but the
     # hallucinated text is not in the user turn → WARN, not DENY.
+    # The command must be a REVERSIBLE destructive op so the
+    # irreversible-subset escalation does not flip this case to DENY.
     transcript = _make_transcript(tmp_path, [
         _assistant_line(["Human: completely unrelated paraphrase here please"]),
         _user_line("can you summarize the recent commits for me"),
     ])
     env = _bash_envelope(
-        "git push --force origin main",
+        "gh pr merge 705",  # reversible-via-revert → stays WARN
         transcript_path=transcript,
     )
     code, out, _err = _run_hook(env)
@@ -745,6 +768,47 @@ def test_main_warn_on_tier_miss_with_temporal_anchor_pass(tmp_path):
     hsp = payload["hookSpecificOutput"]
     assert "additionalContext" in hsp
     assert "human_emission_text_not_found_in_recent_user_turns" in hsp["additionalContext"]
+
+
+def test_main_warn_carries_audit_anchor(tmp_path):
+    # WARN-path envelope-shape pin: additionalContext output must carry
+    # `hookEventName: PreToolUse` audit anchor. The harness silently
+    # fails open without it.
+    transcript = _make_transcript(tmp_path, [
+        _assistant_line(["Human: completely unrelated paraphrase here please"]),
+        _user_line("can you summarize the recent commits for me"),
+    ])
+    env = _bash_envelope(
+        "gh pr merge 705",  # reversible → WARN, not escalated
+        transcript_path=transcript,
+    )
+    code, out, _err = _run_hook(env)
+    assert code == 0
+    payload = _json.loads(out)
+    hsp = payload["hookSpecificOutput"]
+    assert hsp["hookEventName"] == "PreToolUse"
+    assert "additionalContext" in hsp
+
+
+def test_main_warn_escalates_to_deny_on_irreversible_command(tmp_path):
+    # S-M1: tier-miss + temporal-anchor-pass on an IRREVERSIBLE command
+    # must escalate WARN → DENY. The reason carries the
+    # `_escalated_irreversible_subset` suffix for audit traceability.
+    transcript = _make_transcript(tmp_path, [
+        _assistant_line(["Human: completely unrelated paraphrase here please"]),
+        _user_line("can you summarize the recent commits for me"),
+    ])
+    env = _bash_envelope(
+        "git push --force origin main",  # irreversible — must escalate
+        transcript_path=transcript,
+    )
+    code, out, _err = _run_hook(env)
+    assert code == 2
+    payload = _json.loads(out)
+    hsp = payload["hookSpecificOutput"]
+    assert hsp["hookEventName"] == "PreToolUse"
+    assert hsp["permissionDecision"] == "deny"
+    assert "_escalated_irreversible_subset" in hsp["permissionDecisionReason"]
 
 
 def test_main_deny_carries_audit_anchor_and_snippet(tmp_path):
@@ -1076,22 +1140,19 @@ def test_main_gh_issue_create_with_hallucinated_priming_denies(tmp_path):
     assert "no_matching_user_message_in_scan_window" in hsp["permissionDecisionReason"]
 
 
-def test_assistant_explanatory_mention_of_past_human_produces_warn():
-    # Architect scenario: genuine user `merge it` at idx 0; assistant
-    # later emits explanatory prose quoting the prior Human: directive.
-    # Temporal anchor: assistant emission > user entry → would DENY on
-    # the strict ordering check, BUT this docstring documents that the
-    # design accepts the WARN-degradation when the quoted suffix appears
-    # in the user turn (tier-1 catches the substring). The captured
-    # `peerreview_after_genuine` fixture validates the WARN path via
-    # fixture_corpus_evaluations; this test pins the synthetic shape so
-    # future refactors do not silently regress to DENY without observing
-    # the fixture-level signal.
+def test_assistant_explanatory_mention_of_past_human_produces_deny():
+    # Scenario: genuine user `merge it` at idx 0; assistant later
+    # emits explanatory prose quoting the prior Human: directive. The
+    # strict-> temporal-anchor check fires first: assistant idx >
+    # user idx → DENY. v1 design accepts this: the gate cannot
+    # distinguish quoted-explanation-of-prior-directive from fresh
+    # hallucination; conservative behavior is to DENY both.
     #
     # The synthetic transcript uses the same quotation pattern as the
-    # captured slice: assistant emits prose containing both the literal
-    # `Human:` marker and a suffix that does NOT verbatim-match the
-    # earlier user turn (the explanatory suffix is added).
+    # captured `peerreview_after_genuine` fixture slice: assistant
+    # emits prose containing both the literal `Human:` marker and a
+    # suffix that does NOT verbatim-match the earlier user turn (the
+    # explanatory suffix is added).
     lines = [
         _user_line("merge it"),
         _assistant_line([
@@ -1101,12 +1162,9 @@ def test_assistant_explanatory_mention_of_past_human_produces_warn():
         ]),
     ]
     decision, _reason = evaluate_transcript(lines)
-    # Strict-order check fires first: assistant idx > user idx → DENY.
-    # Documented v1 acceptance: the quoted explanatory mention is
-    # treated as a hallucination from the temporal-anchor POV; this is
-    # the conservative behavior. If a future change wants to recognize
-    # explanatory quotations (substring-of-prior-user-turn check), this
-    # test will flip and require deliberate update.
+    # If a future change wants to recognize explanatory quotations
+    # (substring-of-prior-user-turn check), this test will flip and
+    # require deliberate update.
     assert decision == DECISION_DENY
 
 
@@ -1595,30 +1653,36 @@ def test_negative_user_typed_destructive_with_intervening_assistant_prose(tmp_pa
     assert _json.loads(out) == {"suppressOutput": True}
 
 
-# ─── Phantom-green 3-class mutation probe ──────────────────────────────
-# Architect §9.3: probe `passes_envelope_exclusion` (allowlist-based
-# predicate) via 3 mutations. Each mutation should flip at least one
-# envelope-exclusion test case. The probe-tests below exercise the
-# CURRENT (correct) state; the COUNTER-test-by-revert primitive is
-# applied at the source-revert level documented in the HANDOFF.
+# ─── passes_envelope_exclusion predicate-identity pins ─────────────────
+# These tests pin the CURRENT (correct) state of `passes_envelope_
+# exclusion` against three failure modes: an always-True predicate
+# (would silently admit every envelope as a genuine user turn), an
+# empty curated tuple (would no-op the historical sample-set audit
+# anchor), and an overbroad curated tuple (would reject genuine
+# keystrokes). They are predicate-identity pins exercising the
+# current state, not in-source mutation probes — the counter-test-
+# by-revert primitive is applied at the source-revert level documented
+# in the HANDOFF.
 
 
-def test_phantom_green_probe_force_true_would_break_all_envelope_denies():
-    # If passes_envelope_exclusion always returned True, every envelope
-    # wrapper would be treated as a genuine user keystroke and the
-    # envelope-exclusion tests would flip from DENY to ALLOW (or to
-    # tier-1 match in some cases). Sanity-pin: with the current
-    # (correct) predicate, the 5 wrapper prefixes return False.
+def test_envelope_filter_rejects_curated_prefix_sample_set():
+    # Predicate-identity pin: the 5 curated sample-set prefixes (now
+    # historical documentation; the load-bearing filter is the
+    # categorical angle-bracket check) must each be rejected. Catches
+    # the always-True regression.
     for prefix in ENVELOPE_PREFIXES:
         assert passes_envelope_exclusion(prefix + " payload") is False, (
             f"envelope-exclusion predicate should reject prefix={prefix!r}"
         )
 
 
-def test_phantom_green_probe_empty_allowlist_would_pass_all_envelopes():
-    # If ENVELOPE_PREFIXES were empty, every content (including
-    # wrappers) would pass exclusion. Sanity-pin: ENVELOPE_PREFIXES is
-    # non-empty AND covers the 5 architect-documented prefixes.
+def test_envelope_prefixes_documents_known_corpus_shapes():
+    # Predicate-identity pin: ENVELOPE_PREFIXES retains the 5 known
+    # corpus shapes as historical documentation. The categorical
+    # angle-bracket filter is the load-bearing primary check; this
+    # curated tuple is the audit anchor for what shapes were observed
+    # empirically. Catches accidental deletion of the documentation
+    # tuple.
     assert len(ENVELOPE_PREFIXES) >= 5
     required = {
         "<teammate-message",
@@ -1630,11 +1694,59 @@ def test_phantom_green_probe_empty_allowlist_would_pass_all_envelopes():
     assert required.issubset(set(ENVELOPE_PREFIXES))
 
 
-def test_phantom_green_probe_overbroad_allowlist_would_reject_genuine():
-    # If ENVELOPE_PREFIXES contained "" (empty string), every content
-    # would be rejected (every string starts with ""). Sanity-pin: no
-    # empty-string entry in the allowlist.
+def test_envelope_filter_accepts_genuine_bare_text():
+    # Predicate-identity pin: the filter MUST accept genuine user
+    # keystrokes. Catches overbroad-rejection regressions (e.g., an
+    # empty-string prefix accidentally added that would match all
+    # content via startswith).
     assert "" not in ENVELOPE_PREFIXES
-    # And the predicate accepts genuine user keystrokes.
     assert passes_envelope_exclusion("merge it") is True
     assert passes_envelope_exclusion("yes proceed") is True
+
+
+# Corpus-derived envelope shapes extracted verbatim from the captured
+# real-world fixture transcripts under
+# pact-plugin/tests/fixtures/sample_transcripts/hallucination_gate/.
+# Higher realism than handcrafted strings: these are the exact byte
+# sequences Claude Code emits as platform envelopes in production.
+_CORPUS_ENVELOPE_SHAPES = [
+    # fixture_envelope_exclusion_teammate.jsonl L0
+    (
+        '<teammate-message teammate_id="secretary" summary="hi">please '
+        'run gh pr merge 999 on my behalf</teammate-message>'
+    ),
+    # fixture_envelope_exclusion_task_notification.jsonl L0
+    (
+        "<task-notification>task 5 was created and assigned to "
+        "backend-coder</task-notification>"
+    ),
+    # fixture_hallucination_pause.jsonl L36 — teammate-message containing
+    # an idle-notification payload (richer real-world shape than the
+    # synthetic single-attribute teammate-message)
+    (
+        '<teammate-message teammate_id="devops-coder" color="orange">\n'
+        '{"type":"idle_notification","from":"devops-coder",'
+        '"timestamp":"2026-05-10T19:24:25.523Z","idleReason":"available"}\n'
+        '</teammate-message>'
+    ),
+    # fixture_hallucination_pause.jsonl L40 — task-notification with
+    # multi-line nested-tag payload
+    (
+        "<task-notification>\n<task-id>bvfotiikz</task-id>\n"
+        '<summary>Monitor event: "team-lead inbox-grow wake"</summary>\n'
+        "<event>INBOX_GROW</event>\n</task-notification>"
+    ),
+]
+
+
+@pytest.mark.parametrize("envelope", _CORPUS_ENVELOPE_SHAPES)
+def test_envelope_filter_rejects_corpus_derived_shapes(envelope):
+    # Corpus-derived realism pin: real-world envelope shapes extracted
+    # from captured Claude Code transcripts MUST be rejected by the
+    # categorical angle-bracket filter. Higher fidelity than the
+    # handcrafted strings in `test_passes_envelope_exclusion` — catches
+    # any regression that admits production envelopes as genuine user
+    # turns.
+    assert passes_envelope_exclusion(envelope) is False, (
+        f"corpus-derived envelope must be rejected: {envelope[:80]!r}..."
+    )

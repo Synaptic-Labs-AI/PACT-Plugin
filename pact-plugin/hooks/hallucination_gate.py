@@ -67,8 +67,15 @@ Known v1 limitations:
   5. Tier-3 paraphrase matching deferred. The empirical corpus is
      verbatim echoes; no paraphrasing calibration data. Tier 1 (exact
      substring) + Tier 2 (case-fold + whitespace-collapse) only in v1.
-     Tier-miss with passing temporal anchor produces WARN (advisory),
-     not DENY — paraphrase-class FP is preferred over silent allow.
+     Tier-miss with passing temporal anchor produces WARN (advisory)
+     for reversible destructive ops; for the irreversible subset (see
+     `IRREVERSIBLE_PATTERNS`: force-push, history rewrite, tag
+     publication, remote-ref deletion, recursive force-rm,
+     public-artifact mutation) the gate escalates WARN to DENY,
+     forcing re-authorization via AskUserQuestion. Paraphrase-class FP
+     on reversibles is preferred over silent allow; paraphrase-class
+     FP on irreversibles is preferred over the silent allow of an
+     unauthorized irreversible op.
 
   6. Scan window bound. 500-line backward scan may miss far-back
      genuine authorizations ("go ahead with all merges for the rest of
@@ -78,11 +85,18 @@ Known v1 limitations:
 
   7. Assistant explanatory mentions of past Human: content. If the
      assistant emits prose quoting a prior `Human:` directive (e.g.,
-     "the user wrote 'Human: yes' earlier") AFTER the genuine user turn,
-     the gate latches onto the quoted suffix as the hallucinated text.
-     Substring tier-1/2 typically miss (the quote has extra surrounding
-     text), producing WARN. This is acceptable v1 behavior — the
-     destructive op is not blocked, just flagged.
+     "the user wrote 'Human: yes' earlier") AFTER the genuine user
+     turn, the assistant emission is the most-recent anchor and the
+     gate's strict-> temporal check (`assistant_idx > user_idx`)
+     produces DENY, not WARN — the quoted-suffix case is treated
+     identically to a fresh hallucination because the gate cannot
+     distinguish quotation-of-prior-directive from new emission. The
+     WARN path triggers only on the SYMMETRIC case: `user_idx >
+     assistant_idx` (user turn more recent) AND substring tiers 1+2
+     both miss. WARN means temporal anchor passes but text content
+     diverges; DENY means temporal anchor fails. Quoted-explanation
+     handling deferred — substring-of-prior-user-turn check would
+     close the gap if a future calibration signal demands it.
 
 Input: JSON from stdin with tool_name, tool_input, transcript_path, cwd.
 Output: JSON with `suppressOutput` (allow), `permissionDecision` (deny),
@@ -363,6 +377,63 @@ try:
         re.compile(_GIT_PREFIX + r"push\s+(?:\S+\s+)*\S+\s+:refs/"),
         re.compile(_GIT_PREFIX + r"push\s+(?:\S+\s+)*--delete\s+\S+"),
     ]
+
+    # IRREVERSIBLE_PATTERNS is a strict subset of DESTRUCTIVE_PATTERNS:
+    # the ops that cannot be undone via revert-commit / re-open-issue /
+    # reflog-recovery-the-typical-user-knows-about. On the tier-miss-
+    # with-passing-temporal-anchor branch (where the gate would emit
+    # advisory WARN), an irreversible command escalates to DENY instead
+    # — the user must re-authorize via AskUserQuestion, which writes a
+    # genuine `type=user` transcript entry that next-time substring-
+    # matches.
+    #
+    # OMITTED-as-reversible (still in DESTRUCTIVE_PATTERNS for advisory
+    # WARN flow): `gh pr merge` (revertable), `gh pr close
+    # --delete-branch` (branch recoverable from reflog at orchestrator
+    # tier), `git branch -D` (reflog recoverable), `gh issue create`
+    # (issue closeable). The reflog-recoverable history-rewrite cases
+    # (`git reset --hard`, `git rebase`, `git tag -d`) ARE included
+    # because reflog recovery requires user awareness and access — for
+    # SACROSANCT-class safety the re-authorization friction is worth
+    # the safety gain.
+    IRREVERSIBLE_PATTERNS = [
+        # ─── rm -rf and combined-flag variants (mirror DESTRUCTIVE) ───
+        re.compile(r"\brm\s+(?:\S+\s+)*-[rR][fF]\b"),
+        re.compile(r"\brm\s+(?:\S+\s+)*-[fF][rR]\b"),
+        re.compile(r"\brm\s+(?:\S+\s+)*-[rR]\s+(?:\S+\s+)*-[fF]\b"),
+        re.compile(r"\brm\s+(?:\S+\s+)*-[fF]\s+(?:\S+\s+)*-[rR]\b"),
+        re.compile(r"\brm\s+(?:\S+\s+)*-[a-zA-Z]*[rR][a-zA-Z]*[fF][a-zA-Z]*"),
+        re.compile(r"\brm\s+(?:\S+\s+)*-[a-zA-Z]*[fF][a-zA-Z]*[rR][a-zA-Z]*"),
+
+        # ─── git push --force variants (rewrites remote history) ───
+        re.compile(_GIT_PREFIX + r"push\s+.*--force(?!-with-lease)\b"),
+        re.compile(_GIT_PREFIX + r"push\s+.*-f\b"),
+        re.compile(_GIT_PREFIX + r"push\s+-[a-zA-Z]*f"),
+
+        # ─── Tag publication / history rewrite ───
+        re.compile(_GIT_PREFIX + r"push\s+(?:\S+\s+)*--tags\b"),
+        re.compile(
+            _GIT_PREFIX
+            + r"push\s+(?:-\S+\s+)*\S+\s+refs/tags/\S+"
+        ),
+        re.compile(
+            _GIT_PREFIX
+            + r"push\s+(?:-\S+\s+)*\S+\s+v?\d+(?:\.\d+)*(?![\w-])"
+        ),
+
+        # ─── Remote ref deletion ───
+        re.compile(_GIT_PREFIX + r"push\s+(?:\S+\s+)*\S+\s+:refs/"),
+        re.compile(_GIT_PREFIX + r"push\s+(?:\S+\s+)*--delete\s+\S+"),
+
+        # ─── History-rewriting ops ───
+        re.compile(_GIT_PREFIX + r"reset\s+(?:\S+\s+)*--hard\b"),
+        re.compile(_GIT_PREFIX + r"rebase\b"),
+        re.compile(_GIT_PREFIX + r"tag\s+-d\b"),
+
+        # ─── Public-artifact mutation ───
+        re.compile(_GH_PREFIX + r"release\s+create\b"),
+        re.compile(_GH_PREFIX + r"release\s+delete\b"),
+    ]
 except BaseException as _pattern_compile_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_deny("pattern compilation", _pattern_compile_error)
 
@@ -384,6 +455,22 @@ def is_destructive_command(command: str) -> bool:
     normalized = command.replace("\\\n", " ")
     stripped = _strip_non_executable_content(normalized)
     return any(pat.search(stripped) for pat in DESTRUCTIVE_PATTERNS)
+
+
+def is_irreversible_command(command: str) -> bool:
+    """Return True iff `command` matches any IRREVERSIBLE_PATTERNS entry.
+
+    Pure function, parallel shape to `is_destructive_command`. Used by
+    `main()` on the tier-miss-with-passing-temporal-anchor branch to
+    escalate WARN→DENY for the irreversible subset (re-authorization
+    required via AskUserQuestion). Strict subset of destructive: every
+    irreversible command is destructive, but not vice versa.
+    """
+    if not isinstance(command, str) or not command:
+        return False
+    normalized = command.replace("\\\n", " ")
+    stripped = _strip_non_executable_content(normalized)
+    return any(pat.search(stripped) for pat in IRREVERSIBLE_PATTERNS)
 
 
 # ─── Temporal-anchor algorithm ─────────────────────────────────────────
@@ -522,6 +609,12 @@ def _read_last_n_lines(path: Path, n: int) -> list[str]:
     newest at end) or [] on any I/O error.
 
     Small files (< 10MB) read+slice; large files reverse-seek in chunks.
+    Both branches preserve original line termination: a file ending with
+    `\\n` returns trailing newlines on every element; a file whose final
+    line lacks a trailing `\\n` returns the final element without one
+    (mirrors `readlines()` semantics so the two branches stay observably
+    equivalent).
+
     All exceptions are swallowed and surface as []; the caller treats
     empty as `cannot evaluate` → fail-OPEN ALLOW.
     """
@@ -532,6 +625,13 @@ def _read_last_n_lines(path: Path, n: int) -> list[str]:
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
             return lines[-n:] if len(lines) > n else lines
+
+        # Probe the final byte to know whether the file ends with a
+        # newline. This determines whether the LAST collected element
+        # carries a trailing `\n` (mirrors readlines() semantics).
+        with open(path, "rb") as f:
+            f.seek(-1, 2)
+            file_ends_with_newline = f.read(1) == b"\n"
 
         chunk_size = 8192
         collected: list[str] = []
@@ -556,6 +656,10 @@ def _read_last_n_lines(path: Path, n: int) -> list[str]:
                     p.decode("utf-8", errors="replace") + "\n"
                     for p in new_parts if p
                 ] + collected
+        # If the file does not end with `\n`, strip the synthesized
+        # trailing newline from the final element to mirror readlines().
+        if collected and not file_ends_with_newline:
+            collected[-1] = collected[-1].rstrip("\n")
         return collected[-n:] if len(collected) > n else collected
     except (OSError, ValueError):
         return []
@@ -697,6 +801,18 @@ def main() -> NoReturn:
         elif decision == DECISION_DENY:
             _emit_deny(reason, command)
         elif decision == DECISION_WARN:
+            # Irreversible-subset escalation: tier-miss with passing
+            # temporal anchor would normally produce advisory WARN, but
+            # for ops that cannot be undone (force-push, history
+            # rewrite, public-artifact mutation, recursive force-rm,
+            # tag publication, remote-ref deletion) the friction of
+            # re-authorization is worth the safety gain. Distinct
+            # reason-suffix preserves audit traceability.
+            if is_irreversible_command(command):
+                _emit_deny(
+                    reason + "_escalated_irreversible_subset",
+                    command,
+                )
             _emit_warn(reason, command)
         else:
             # Unknown decision string — treat as fail-OPEN ALLOW rather
