@@ -49,6 +49,8 @@ try:
         TOKEN_TTL,
         TOKEN_DIR,
         TOKEN_PREFIX,
+        MAX_USES,
+        USE_MARKER_SUFFIX,
         cleanup_consumed_tokens as _cleanup_consumed_tokens,
         detect_command_operation_type,
         # Regex prefix constants relocated to shared so the read-side
@@ -572,6 +574,12 @@ def find_valid_token(token_dir: Path | None = None) -> tuple[dict, str] | tuple[
         # Skip consumed tokens — they were already used by a prior invocation
         if token_path.endswith(".consumed"):
             continue
+        # Skip per-use slot markers (#720 Bug C). These are auxiliary files
+        # (e.g., merge-authorized-N.use-1) created by _consume_token to
+        # atomically claim a use slot; they are NOT tokens themselves and
+        # have no JSON body to parse as one.
+        if USE_MARKER_SUFFIX in os.path.basename(token_path):
+            continue
 
         try:
             with open(token_path, "r") as f:
@@ -596,6 +604,28 @@ def find_valid_token(token_dir: Path | None = None) -> tuple[dict, str] | tuple[
                 # it may be valid for its own session)
                 continue
 
+            # Slot-claim filter (#720 Bug C). If max_uses > 1 and all use
+            # slots are already claimed, the token is fully consumed even
+            # if the terminal .consumed rename was lost to a transient FS
+            # error. Treat as already-consumed (skip + race-recover the
+            # rename). Legacy tokens missing max_uses are treated as N=1
+            # and reach this point only when not yet consumed at all.
+            token_max_uses = token_data.get("max_uses", 1)
+            if isinstance(token_max_uses, int) and token_max_uses > 1:
+                all_claimed = all(
+                    os.path.exists(f"{token_path}{USE_MARKER_SUFFIX}{slot}")
+                    for slot in range(1, token_max_uses + 1)
+                )
+                if all_claimed:
+                    # Race-recover: attempt the missed terminal rename;
+                    # ignore failure (the next scan will retry or the
+                    # cleanup loop will eventually reap the markers).
+                    try:
+                        os.rename(token_path, token_path + ".consumed")
+                    except OSError:
+                        pass
+                    continue
+
             # Valid token found
             valid_token = token_data
             valid_path = token_path
@@ -618,46 +648,139 @@ def _safe_remove(path: str):
         pass
 
 
-def _consume_token(token_path: str) -> bool:
-    """Consume a token by renaming it to .consumed (idempotent).
+def _consume_token(token_path: str, max_uses_default: int = 1) -> bool:
+    """Consume one use of a token via per-use marker O_EXCL claim (#720 Bug C).
 
-    Uses os.rename() for POSIX atomicity. If the rename fails because the
-    file was already renamed by a concurrent invocation, that IS the success
-    case — the token was already consumed for this operation.
+    Atomicity model:
+    - Read the token JSON to determine max_uses. Tokens missing the field
+      (written by pre-#720 versions) default to max_uses_default=1 —
+      preserving prior single-use semantics for in-flight legacy tokens.
+    - For each candidate slot in 1..max_uses, atomically attempt to claim
+      `<token_path>.use-<slot>` via os.open(O_CREAT | O_EXCL). The FIRST
+      successful claim is THIS invocation's use; the slot file's existence
+      is the consume record.
+    - If the claimed slot is the LAST slot (slot == max_uses), also rename
+      the token to `.consumed` (terminal). Rename failure is non-fatal —
+      `find_valid_token`'s slot-claim filter detects the all-claimed state
+      on the next scan and race-recovers the rename.
+    - If ALL slots are already claimed (FileExistsError on every slot),
+      this invocation returns False — the token is fully consumed and the
+      caller fails closed.
 
-    The fallback verification uses an atomic open() instead of os.path.exists()
-    to avoid a TOCTOU race where the .consumed file could be deleted between
-    the existence check and any subsequent read.
+    Legacy compat path (max_uses == 1): skips slot markers entirely and
+    invokes the original rename-to-.consumed flow, preserving exact prior
+    semantics for tokens written by pre-#720 merge_guard_post.
+
+    Concurrent-invocation safety: O_EXCL is POSIX-atomic, so two
+    simultaneous invocations contending for the same slot resolve with
+    exactly one winner; the loser falls through to the next slot.
 
     Args:
-        token_path: Path to the token file to consume
+        token_path: Path to the valid (non-.consumed) token file.
+        max_uses_default: Default max_uses when the token JSON lacks the
+                          field (legacy compat). Callers from this module
+                          rely on 1 to preserve prior single-use semantics
+                          for older tokens.
 
     Returns:
-        True if the token was consumed (either by us or by a prior invocation),
-        False if consumption failed for an unexpected reason
+        True if this invocation claimed a use slot, False otherwise.
     """
-    consumed_path = token_path + ".consumed"
+    max_uses = max_uses_default
+    n_use_token = False  # Set True when we observe N>1 from JSON OR filesystem
     try:
-        os.rename(token_path, consumed_path)
-        return True
-    except FileNotFoundError:
-        # Token already renamed by a concurrent invocation — verify the
-        # .consumed file exists atomically by trying to open it. This avoids
-        # a TOCTOU race with os.path.exists() where the file could vanish
-        # between the check and any subsequent use.
+        with open(token_path, "r") as f:
+            token_data = json.load(f)
+            field_value = token_data.get("max_uses", max_uses_default)
+            if isinstance(field_value, int) and field_value > 0:
+                max_uses = field_value
+                if max_uses > 1:
+                    n_use_token = True
+    except (json.JSONDecodeError, OSError, KeyError, AttributeError, TypeError):
+        # Read failure (corrupt JSON OR token already renamed to .consumed
+        # after a prior slot-claim flow). If we can see any .use-N markers
+        # on disk, this is an N-use token whose budget is being inspected
+        # post-rename — fail closed rather than fall back to legacy
+        # rename-idempotent semantics.
+        if os.path.exists(f"{token_path}{USE_MARKER_SUFFIX}1"):
+            return False
+        max_uses = max_uses_default
+
+    consumed_path = token_path + ".consumed"
+
+    # Legacy single-use path (max_uses == 1, no slot markers visible):
+    # identical to pre-#720 behavior — rename to .consumed, with the
+    # FileNotFoundError ↔ .consumed-exists idempotency fallback preserved
+    # verbatim.
+    if max_uses <= 1 and not n_use_token:
         try:
-            fd = os.open(consumed_path, os.O_RDONLY)
-            os.close(fd)
+            os.rename(token_path, consumed_path)
             return True
         except FileNotFoundError:
-            # Neither original nor .consumed exists — token was genuinely lost
-            return False
+            try:
+                fd = os.open(consumed_path, os.O_RDONLY)
+                os.close(fd)
+                return True
+            except FileNotFoundError:
+                return False
+            except OSError:
+                return False
         except OSError:
-            # Unexpected error accessing .consumed — fail closed
             return False
-    except OSError:
-        # Unexpected error — fail closed (return False to block)
-        return False
+
+    # N-use path: claim slots via O_EXCL. The first slot we can claim is
+    # this invocation's use; the last slot also triggers terminal rename.
+    for slot in range(1, max_uses + 1):
+        marker_path = f"{token_path}{USE_MARKER_SUFFIX}{slot}"
+        try:
+            fd = os.open(marker_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            # Slot already claimed by a prior or concurrent invocation —
+            # try the next slot.
+            continue
+        except OSError:
+            # Transient FS error claiming this slot — try the next slot
+            # rather than fail closed, since another slot may still be
+            # available.
+            continue
+
+        # Slot claimed. Write the audit body; on body-write failure, unlink
+        # the marker so we don't leave an orphan slot blocking future uses
+        # (mirrors merge_guard_post.write_token's body-write failure path).
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps({
+                    "consumed_at": time.time(),
+                    "slot": slot,
+                }))
+        except Exception:
+            try:
+                os.unlink(marker_path)
+            except OSError:
+                pass
+            continue
+
+        # Audit emit — operator-visible stderr (mirrors existing [security]
+        # and `Merge authorization token written` emits). Format is
+        # invariant under MAX_USES changes.
+        print(
+            f"[security] merge-authorized token consumed "
+            f"(slot {slot}/{max_uses}): {os.path.basename(token_path)}",
+            file=sys.stderr,
+        )
+
+        # Terminal rename when the final slot is claimed. Rename failure is
+        # non-fatal: find_valid_token will see all slots claimed on the
+        # next scan and race-recover the rename then.
+        if slot == max_uses:
+            try:
+                os.rename(token_path, consumed_path)
+            except OSError:
+                pass
+        return True
+
+    # Every slot was already claimed before we got there — token is fully
+    # consumed. Caller fails closed.
+    return False
 
 
 # Allowlist of `gh pr merge|close` long-form flags KNOWN to take a value.

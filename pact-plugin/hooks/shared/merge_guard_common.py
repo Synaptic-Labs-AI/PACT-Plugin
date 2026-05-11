@@ -26,6 +26,22 @@ TOKEN_DIR = Path.home() / ".claude"
 # Token file prefix
 TOKEN_PREFIX = "merge-authorized-"
 
+# Default max-use budget per authorization token. A token can authorize up
+# to MAX_USES identical-context retries within TOKEN_TTL before requiring
+# fresh AskUserQuestion approval. Set to 2 — the smallest N that resolves
+# the empirical retry-on-transient-failure case (single retry of an
+# identical command) without further eroding per-use-confirmation
+# discipline. A third identical retry still re-prompts via
+# AskUserQuestion, preserving the "stop and reconsider" checkpoint.
+# Audit: tightening this value is always safe (more re-prompting);
+# loosening (N>2) requires empirical justification — there is no current
+# case that needs >2 same-context retries.
+MAX_USES = 2
+
+# Suffix used by per-use marker files. Each marker file is created via
+# O_EXCL to atomically claim one use slot of an N-use token (#720 Bug C).
+USE_MARKER_SUFFIX = ".use-"
+
 # -----------------------------------------------------------------------------
 # Regex prefix constants — shared between DANGEROUS_PATTERNS (read-side) and
 # detect_command_operation_type (both sides). Centralized here so the
@@ -130,25 +146,31 @@ def detect_command_operation_type(command: str) -> str | None:
 
 
 def cleanup_consumed_tokens(token_dir: Path) -> None:
-    """Remove stale .consumed token files older than TOKEN_TTL.
+    """Remove stale .consumed token files and .use-N markers older than TOKEN_TTL.
 
     Called from both hooks: during token scanning (pre-hook) and during
-    token creation (post-hook) to prevent accumulation.
+    token creation (post-hook) to prevent accumulation. The .use-N markers
+    accompany N-use tokens (#720 Bug C) and persist on disk alongside the
+    .consumed terminal-rename until the TTL window elapses.
 
     Args:
         token_dir: Directory containing token files
     """
-    consumed_pattern = str(token_dir / f"{TOKEN_PREFIX}*.consumed")
     now = time.time()
-    for consumed_path in glob.glob(consumed_pattern):
-        try:
-            # Use file modification time as a proxy for consumption time
-            mtime = os.path.getmtime(consumed_path)
-            if now - mtime > TOKEN_TTL:
-                try:
-                    os.unlink(consumed_path)
-                except OSError:
-                    pass
-        except OSError:
-            # File may have been cleaned up concurrently — ignore
-            pass
+    patterns = (
+        str(token_dir / f"{TOKEN_PREFIX}*.consumed"),
+        str(token_dir / f"{TOKEN_PREFIX}*{USE_MARKER_SUFFIX}*"),
+    )
+    for pattern in patterns:
+        for stale_path in glob.glob(pattern):
+            try:
+                # Use file modification time as a proxy for consumption time
+                mtime = os.path.getmtime(stale_path)
+                if now - mtime > TOKEN_TTL:
+                    try:
+                        os.unlink(stale_path)
+                    except OSError:
+                        pass
+            except OSError:
+                # File may have been cleaned up concurrently — ignore
+                pass

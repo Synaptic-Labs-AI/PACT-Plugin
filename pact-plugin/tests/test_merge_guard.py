@@ -317,6 +317,28 @@ class TestWriteToken:
         result = write_token(dict(self._MIN_CTX), token_dir=tmp_path)
         assert "merge-authorized-" in Path(result).name
 
+    def test_token_includes_max_uses_field(self, tmp_path):
+        """Token JSON carries the max_uses field for N-use authorization (#720 Bug C)."""
+        from merge_guard_post import write_token
+        from shared.merge_guard_common import MAX_USES
+
+        result = write_token(dict(self._MIN_CTX), token_dir=tmp_path)
+        with open(result) as f:
+            data = json.load(f)
+
+        assert data["max_uses"] == MAX_USES
+
+    def test_token_includes_uses_remaining_field(self, tmp_path):
+        """Token JSON carries uses_remaining = max_uses at write time (#720 Bug C)."""
+        from merge_guard_post import write_token
+        from shared.merge_guard_common import MAX_USES
+
+        result = write_token(dict(self._MIN_CTX), token_dir=tmp_path)
+        with open(result) as f:
+            data = json.load(f)
+
+        assert data["uses_remaining"] == MAX_USES
+
 
 class TestWriteTokenSparseContextGuard:
     """Pin the F-2 sparse-context refusal at the write boundary.
@@ -635,6 +657,53 @@ class TestFindValidToken:
         assert path is None
         assert other_file.exists()  # Not cleaned up
 
+    def test_skips_token_with_all_slots_claimed(self, tmp_path):
+        """Slot-claim filter (#720 Bug C): when all use slots are already
+        claimed but the .consumed rename was lost to a transient FS error,
+        find_valid_token treats the token as already-consumed (skips it
+        + race-recovers the rename)."""
+        from shared.merge_guard_common import MAX_USES, USE_MARKER_SUFFIX
+        from merge_guard_pre import find_valid_token
+
+        now = time.time()
+        token_path = tmp_path / "merge-authorized-77777"
+        token_path.write_text(json.dumps({
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {"pr_number": "42", "operation_type": "merge"},
+            "max_uses": MAX_USES,
+            "uses_remaining": 0,
+        }))
+        # Pre-create all slot markers — simulating the all-claimed state
+        # with the terminal rename lost.
+        for slot in range(1, MAX_USES + 1):
+            (tmp_path / f"merge-authorized-77777{USE_MARKER_SUFFIX}{slot}").write_text(
+                json.dumps({"slot": slot, "consumed_at": now})
+            )
+
+        result, path = find_valid_token(token_dir=tmp_path)
+        assert result is None
+        assert path is None
+        # Race-recovery: the missed terminal rename was attempted
+        assert not token_path.exists()
+        assert (tmp_path / "merge-authorized-77777.consumed").exists()
+
+    def test_skips_use_marker_files_as_tokens(self, tmp_path):
+        """`.use-N` marker files are not themselves tokens — find_valid_token
+        must not attempt to parse them as token JSON."""
+        from shared.merge_guard_common import USE_MARKER_SUFFIX
+        from merge_guard_pre import find_valid_token
+
+        # An orphan .use-N marker with no parent token
+        marker = tmp_path / f"merge-authorized-66666{USE_MARKER_SUFFIX}1"
+        marker.write_text(json.dumps({"slot": 1, "consumed_at": time.time()}))
+
+        result, path = find_valid_token(token_dir=tmp_path)
+        assert result is None
+        assert path is None
+        # Marker file was not erroneously cleaned up
+        assert marker.exists()
+
 
 class TestCheckMergeAuthorization:
     """Tests for merge_guard_pre.check_merge_authorization()."""
@@ -849,13 +918,13 @@ class TestIntegration:
         assert exc_info.value.code == 0  # Allowed
 
     def test_multiple_valid_tokens(self, tmp_path):
-        """Multiple valid tokens: each authorizes one matching operation.
+        """Multiple valid tokens: aggregate budget is MAX_USES per token.
 
-        Each token's operation_type is matched against the consuming
-        command. Two compatible-class operations succeed (one merge token
-        consumed by `gh pr merge`, one merge token consumed by another
-        `gh pr merge`); a third operation with no matching token blocks.
+        Each token authorizes MAX_USES identical-context operations via
+        per-use slot markers. Two merge tokens therefore authorize
+        2*MAX_USES merge operations; the next merge command blocks.
         """
+        from shared.merge_guard_common import MAX_USES
         from merge_guard_post import write_token
         from merge_guard_pre import check_merge_authorization
 
@@ -868,17 +937,13 @@ class TestIntegration:
         tokens = list(tmp_path.glob("merge-authorized-*"))
         assert len(tokens) >= 2
 
-        # First operation: consumes one merge token
-        result1 = check_merge_authorization("gh pr merge 1", token_dir=tmp_path)
-        assert result1 is None
+        # Two tokens × MAX_USES slots each: all should authorize merges.
+        for _ in range(2 * MAX_USES):
+            assert check_merge_authorization("gh pr merge 1", token_dir=tmp_path) is None
 
-        # Second operation: consumes the other merge token
-        result2 = check_merge_authorization("gh pr merge 2", token_dir=tmp_path)
-        assert result2 is None
-
-        # Third operation: blocked (all tokens consumed)
-        result3 = check_merge_authorization("gh pr merge 3", token_dir=tmp_path)
-        assert result3 is not None
+        # Next operation: blocked (aggregate budget exhausted)
+        result = check_merge_authorization("gh pr merge 3", token_dir=tmp_path)
+        assert result is not None
 
     def test_expired_token_does_not_authorize(self, tmp_path):
         """Only expired tokens present — command should be blocked."""
@@ -903,11 +968,20 @@ class TestIntegration:
 # =============================================================================
 
 
-class TestSingleUseToken:
-    """Verify that tokens are consumed (renamed to .consumed) after first use."""
+class TestNUseBoundedToken:
+    """N-use bounded token semantics (#720 Bug C, MAX_USES=2).
 
-    def test_token_consumed_after_authorization(self, tmp_path):
-        """Token file is renamed to .consumed after it authorizes a command."""
+    A single AskUserQuestion approval now authorizes up to MAX_USES
+    identical-context retries within TOKEN_TTL via per-use slot markers.
+    The (MAX_USES + 1)-th identical-context command requires a fresh
+    AskUserQuestion approval, preserving the "stop and reconsider"
+    checkpoint.
+    """
+
+    def test_first_use_succeeds(self, tmp_path):
+        """First identical-context use is authorized; slot-1 marker created;
+        token still present (terminal rename happens only on last slot)."""
+        from shared.merge_guard_common import USE_MARKER_SUFFIX
         from merge_guard_post import write_token
         from merge_guard_pre import check_merge_authorization
 
@@ -915,42 +989,70 @@ class TestSingleUseToken:
         assert token_path is not None
         assert Path(token_path).exists()
 
-        # First command: allowed, token consumed
+        # First command: allowed; slot-1 claimed; token not yet .consumed
         result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
         assert result is None  # Allowed
-        assert not Path(token_path).exists()  # Original token gone
-        assert Path(token_path + ".consumed").exists()  # Renamed to .consumed
+        assert Path(token_path).exists()  # Token still on disk (budget remaining)
+        assert Path(token_path + USE_MARKER_SUFFIX + "1").exists()
+        assert not Path(token_path + ".consumed").exists()
 
-    def test_second_command_blocked_after_consumption(self, tmp_path):
-        """Second dangerous command is blocked because token was consumed."""
-        from merge_guard_post import write_token
-        from merge_guard_pre import check_merge_authorization
-
-        write_token({"pr_number": "42"}, token_dir=tmp_path)
-
-        # First command: allowed
-        result1 = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
-        assert result1 is None
-
-        # Second command: blocked (token consumed)
-        result2 = check_merge_authorization("git push --force origin main", token_dir=tmp_path)
-        assert result2 is not None
-        assert "AskUserQuestion" in result2
-
-    def test_safe_commands_do_not_consume_token(self, tmp_path):
-        """Safe commands don't trigger token consumption."""
+    def test_second_use_within_budget_succeeds(self, tmp_path):
+        """Second identical-context use IS authorized under MAX_USES=2.
+        After this, BOTH use-1 and use-2 markers exist and the token has
+        been terminally renamed to .consumed."""
+        from shared.merge_guard_common import USE_MARKER_SUFFIX
         from merge_guard_post import write_token
         from merge_guard_pre import check_merge_authorization
 
         token_path = write_token({"pr_number": "42"}, token_dir=tmp_path)
 
-        # Safe command: allowed without consuming token
+        result1 = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        assert result1 is None
+
+        # Second command within MAX_USES budget: allowed
+        result2 = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        assert result2 is None
+        assert Path(token_path + USE_MARKER_SUFFIX + "1").exists()
+        assert Path(token_path + USE_MARKER_SUFFIX + "2").exists()
+        # Terminal rename on last slot
+        assert not Path(token_path).exists()
+        assert Path(token_path + ".consumed").exists()
+
+    def test_third_use_blocked_after_budget_exhausted(self, tmp_path):
+        """Third identical-context use is blocked — budget exhausted,
+        requires fresh AskUserQuestion approval."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        write_token({"pr_number": "42"}, token_dir=tmp_path)
+
+        # Burn through both slots
+        assert check_merge_authorization("gh pr merge 42", token_dir=tmp_path) is None
+        assert check_merge_authorization("gh pr merge 42", token_dir=tmp_path) is None
+
+        # Third: blocked
+        result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        assert result is not None
+        assert "AskUserQuestion" in result
+
+    def test_safe_commands_do_not_consume_token(self, tmp_path):
+        """Safe commands don't claim any slot; full budget remains."""
+        from shared.merge_guard_common import USE_MARKER_SUFFIX
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        token_path = write_token({"pr_number": "42"}, token_dir=tmp_path)
+
         result = check_merge_authorization("git status", token_dir=tmp_path)
         assert result is None
         assert Path(token_path).exists()  # Token still present
+        # No slot markers created
+        assert not Path(token_path + USE_MARKER_SUFFIX + "1").exists()
+        assert not Path(token_path + USE_MARKER_SUFFIX + "2").exists()
 
     def test_consumption_does_not_interfere_with_expired_cleanup(self, tmp_path):
-        """Expired tokens are cleaned up normally alongside consumption."""
+        """Expired tokens are cleaned up normally alongside N-use consumption."""
+        from shared.merge_guard_common import USE_MARKER_SUFFIX
         from merge_guard_post import write_token
         from merge_guard_pre import check_merge_authorization
 
@@ -968,69 +1070,260 @@ class TestSingleUseToken:
         # Create a valid token
         valid_path = write_token({"pr_number": "99"}, token_dir=tmp_path)
 
-        # Authorize: expired cleaned up, valid consumed (renamed to .consumed)
+        # Authorize: expired cleaned up, valid claims slot 1 (token still
+        # present because MAX_USES=2 and only one slot has been used).
         result = check_merge_authorization("gh pr merge 99", token_dir=tmp_path)
         assert result is None
         assert not expired_file.exists()  # Expired: cleaned up
-        assert not Path(valid_path).exists()  # Valid: original gone
-        assert Path(valid_path + ".consumed").exists()  # Valid: renamed to .consumed
+        assert Path(valid_path).exists()  # Valid: still present (slot 1 claimed)
+        assert Path(valid_path + USE_MARKER_SUFFIX + "1").exists()
 
-    def test_each_approval_authorizes_one_operation(self, tmp_path):
-        """Two approvals authorize exactly two operations."""
+    def test_each_approval_authorizes_max_uses_operations(self, tmp_path):
+        """Each approval authorizes exactly MAX_USES operations."""
+        from shared.merge_guard_common import MAX_USES
         from merge_guard_post import write_token
         from merge_guard_pre import check_merge_authorization
 
-        # First approval
+        # First approval: authorizes MAX_USES merges
         write_token({"operation_type": "merge"}, token_dir=tmp_path)
-        result1 = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
-        assert result1 is None  # Allowed
+        for _ in range(MAX_USES):
+            assert check_merge_authorization("gh pr merge 42", token_dir=tmp_path) is None
 
-        # Blocked without new approval
-        result2 = check_merge_authorization("gh pr merge 43", token_dir=tmp_path)
-        assert result2 is not None  # Blocked
+        # Blocked: budget exhausted
+        assert check_merge_authorization("gh pr merge 43", token_dir=tmp_path) is not None
 
-        # Second approval
+        # Second approval (different op): authorizes MAX_USES force-pushes
         with patch("merge_guard_post.time") as mock_time:
             mock_time.time.return_value = time.time() + 1
             write_token({"operation_type": "force-push"}, token_dir=tmp_path)
-        result3 = check_merge_authorization("git push --force origin main", token_dir=tmp_path)
-        assert result3 is None  # Allowed
+        for _ in range(MAX_USES):
+            assert check_merge_authorization(
+                "git push --force origin main", token_dir=tmp_path
+            ) is None
 
-        # Blocked again
-        result4 = check_merge_authorization("git branch -D old", token_dir=tmp_path)
-        assert result4 is not None  # Blocked
+        # Blocked again (cross-op + budget)
+        assert check_merge_authorization("git branch -D old", token_dir=tmp_path) is not None
 
     def test_concurrent_deletion_is_safe(self, tmp_path):
-        """If token is externally deleted (not renamed), command is blocked."""
+        """If token is externally deleted before any consume, command is blocked."""
         from merge_guard_post import write_token
         from merge_guard_pre import check_merge_authorization
 
         token_path = write_token({"pr_number": "42"}, token_dir=tmp_path)
 
-        # Simulate external deletion: remove the token before
-        # check_merge_authorization can consume it. Since neither the
-        # original nor a .consumed file exists, the command is blocked.
+        # Simulate external deletion before any consume happens.
         os.unlink(token_path)
 
-        # Command should be blocked because token no longer exists
+        # Command should be blocked because token no longer exists.
         result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
         assert result is not None
 
-    def test_concurrent_consumption_is_idempotent(self, tmp_path):
-        """If token was already renamed to .consumed, second invocation allows."""
+    def test_concurrent_consumption_claims_distinct_slots(self, tmp_path):
+        """Two concurrent consumes claim distinct slots (slot 1 + slot 2),
+        not the same slot. Verifies O_EXCL race semantics."""
+        from shared.merge_guard_common import USE_MARKER_SUFFIX
         from merge_guard_post import write_token
-        from merge_guard_pre import _consume_token, check_merge_authorization
+        from merge_guard_pre import _consume_token
 
         token_path = write_token({"pr_number": "42"}, token_dir=tmp_path)
 
-        # First consumption: rename to .consumed
+        # Two back-to-back consumes simulate concurrent invocations
+        # racing on the same token.
         assert _consume_token(token_path) is True
+        assert _consume_token(token_path) is True
+
+        # BOTH slot markers exist (distinct slots claimed)
+        assert Path(token_path + USE_MARKER_SUFFIX + "1").exists()
+        assert Path(token_path + USE_MARKER_SUFFIX + "2").exists()
+
+        # Token was terminally renamed when slot 2 was claimed
         assert not Path(token_path).exists()
         assert Path(token_path + ".consumed").exists()
 
-        # Second consumption attempt: original gone, but .consumed exists
-        # _consume_token recognizes this as success
+        # A third consume attempt fails (budget exhausted, no slot to claim)
+        assert _consume_token(token_path) is False
+
+
+class TestNUseBackwardCompat:
+    """Legacy tokens missing the max_uses field are treated as N=1 (#720 Bug C).
+
+    Tokens written by pre-#720 merge_guard_post lack max_uses /
+    uses_remaining fields. _consume_token defaults them to single-use
+    semantics — the first consume renames directly to .consumed (no slot
+    markers), preserving prior behavior for in-flight legacy tokens.
+    """
+
+    def _write_legacy_token(self, tmp_path) -> str:
+        """Write a token in the pre-#720 schema (no max_uses field)."""
+        now = time.time()
+        token_path = tmp_path / "merge-authorized-99999"
+        token_path.write_text(json.dumps({
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {"pr_number": "42", "operation_type": "merge"},
+        }))
+        return str(token_path)
+
+    def test_legacy_token_first_use_renames_directly(self, tmp_path):
+        """First consume of a legacy token renames it to .consumed (no slot markers)."""
+        from shared.merge_guard_common import USE_MARKER_SUFFIX
+        from merge_guard_pre import _consume_token
+
+        token_path = self._write_legacy_token(tmp_path)
         assert _consume_token(token_path) is True
+
+        # Terminal rename happened on first consume (legacy single-use)
+        assert not Path(token_path).exists()
+        assert Path(token_path + ".consumed").exists()
+        # No slot markers created
+        assert not Path(token_path + USE_MARKER_SUFFIX + "1").exists()
+
+    def test_legacy_token_second_use_blocked(self, tmp_path):
+        """Second consume of a legacy token is the idempotent-recognize path
+        (preserves the prior FileNotFoundError → .consumed-exists semantics)."""
+        from merge_guard_pre import _consume_token
+
+        token_path = self._write_legacy_token(tmp_path)
+        assert _consume_token(token_path) is True
+
+        # Second call: original gone, .consumed present → idempotent True
+        # (this preserves pre-#720 behavior; a legacy token has no slot
+        # markers so the n-use exhausted path is not triggered).
+        assert _consume_token(token_path) is True
+
+    def test_legacy_token_blocks_subsequent_authorization(self, tmp_path):
+        """End-to-end: a legacy token authorizes ONE command, then blocks."""
+        from merge_guard_pre import check_merge_authorization
+
+        token_path = self._write_legacy_token(tmp_path)
+
+        # First command authorized
+        assert check_merge_authorization("gh pr merge 42", token_dir=tmp_path) is None
+        assert Path(token_path + ".consumed").exists()
+
+        # Second command blocked — no active token remains
+        result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        assert result is not None
+        assert "AskUserQuestion" in result
+
+
+class TestNUseAuditEmit:
+    """Per-consume stderr audit emit (#720 Bug C).
+
+    Each successful slot claim emits a [security] line to stderr in the
+    format `[security] merge-authorized token consumed (slot N/MAX):
+    <basename>`. Format is invariant under MAX_USES changes — `slot N/MAX`
+    reads correctly regardless of the current MAX_USES value.
+    """
+
+    def test_audit_emitted_for_each_slot(self, tmp_path, capfd):
+        """Each consume emits exactly one [security] line."""
+        from shared.merge_guard_common import MAX_USES
+        from merge_guard_post import write_token
+        from merge_guard_pre import _consume_token
+
+        token_path = write_token({"pr_number": "42"}, token_dir=tmp_path)
+
+        # Drain prior stderr (write_token also emits)
+        capfd.readouterr()
+
+        for slot in range(1, MAX_USES + 1):
+            assert _consume_token(token_path) is True
+            captured = capfd.readouterr()
+            assert (
+                f"[security] merge-authorized token consumed "
+                f"(slot {slot}/{MAX_USES})" in captured.err
+            )
+            assert os.path.basename(token_path) in captured.err
+
+    def test_audit_format_is_max_uses_invariant(self, tmp_path, capfd):
+        """The 'slot N/MAX' format substitutes the configured MAX_USES,
+        so future changes to MAX_USES don't break the parseable form."""
+        from shared.merge_guard_common import MAX_USES
+        from merge_guard_post import write_token
+        from merge_guard_pre import _consume_token
+
+        token_path = write_token({"pr_number": "42"}, token_dir=tmp_path)
+        capfd.readouterr()
+
+        _consume_token(token_path)
+        captured = capfd.readouterr()
+        # The exact MAX_USES integer appears in the denominator
+        assert f"/{MAX_USES})" in captured.err
+
+    def test_no_audit_emit_when_slot_unclaimable(self, tmp_path, capfd):
+        """When every slot is already claimed, _consume_token returns False
+        and emits no [security] consume line for that invocation."""
+        from shared.merge_guard_common import MAX_USES
+        from merge_guard_post import write_token
+        from merge_guard_pre import _consume_token
+
+        token_path = write_token({"pr_number": "42"}, token_dir=tmp_path)
+        for _ in range(MAX_USES):
+            _consume_token(token_path)
+
+        capfd.readouterr()  # Drain prior emits
+        assert _consume_token(token_path) is False
+        captured = capfd.readouterr()
+        assert "[security] merge-authorized token consumed" not in captured.err
+
+
+class TestNUseSlotMarkerCleanup:
+    """`.use-N` markers are cleaned up alongside `.consumed` files (#720 Bug C).
+
+    The cleanup_consumed_tokens helper now reaps both `.consumed` files
+    and `.use-N` markers older than TOKEN_TTL.
+    """
+
+    def test_stale_use_markers_cleaned_up(self, tmp_path):
+        """`.use-N` markers older than TOKEN_TTL are removed by cleanup."""
+        from shared.merge_guard_common import (
+            MAX_USES,
+            USE_MARKER_SUFFIX,
+            cleanup_consumed_tokens,
+        )
+        from merge_guard_post import write_token
+        from merge_guard_pre import _consume_token
+
+        token_path = write_token({"pr_number": "42"}, token_dir=tmp_path)
+        for _ in range(MAX_USES):
+            _consume_token(token_path)
+
+        # Slot markers exist
+        for slot in range(1, MAX_USES + 1):
+            assert Path(token_path + USE_MARKER_SUFFIX + str(slot)).exists()
+
+        # Age them past TTL
+        old_mtime = time.time() - 600
+        for marker in tmp_path.glob("merge-authorized-*.use-*"):
+            os.utime(marker, (old_mtime, old_mtime))
+        # Age the .consumed file too so it doesn't interfere
+        os.utime(token_path + ".consumed", (old_mtime, old_mtime))
+
+        cleanup_consumed_tokens(tmp_path)
+
+        # All slot markers reaped
+        remaining = list(tmp_path.glob("merge-authorized-*.use-*"))
+        assert remaining == []
+
+    def test_fresh_use_markers_retained(self, tmp_path):
+        """`.use-N` markers within TTL are NOT cleaned up."""
+        from shared.merge_guard_common import (
+            MAX_USES,
+            USE_MARKER_SUFFIX,
+            cleanup_consumed_tokens,
+        )
+        from merge_guard_post import write_token
+        from merge_guard_pre import _consume_token
+
+        token_path = write_token({"pr_number": "42"}, token_dir=tmp_path)
+        for _ in range(MAX_USES):
+            _consume_token(token_path)
+
+        # Markers are fresh — cleanup should not reap them
+        cleanup_consumed_tokens(tmp_path)
+        for slot in range(1, MAX_USES + 1):
+            assert Path(token_path + USE_MARKER_SUFFIX + str(slot)).exists()
 
 
 # =============================================================================
@@ -5298,20 +5591,25 @@ class TestSchemaFixEndToEnd:
         assert "context" in token_data
         assert token_data["context"]["pr_number"] == "252"
 
-        # Pre hook: consume token and allow merge
-        pre_input = json.dumps({
-            "tool_input": {"command": "gh pr merge 252 --squash --delete-branch"}
-        })
-        with patch("merge_guard_pre.TOKEN_DIR", tmp_path), \
-             patch("sys.stdin", io.StringIO(pre_input)):
-            with pytest.raises(SystemExit) as exc_info:
-                pre_main()
-        assert exc_info.value.code == 0
+        # Pre hook: consume token MAX_USES times (terminal rename happens
+        # on the final slot under #720 Bug C).
+        from shared.merge_guard_common import MAX_USES, USE_MARKER_SUFFIX
 
-        # Token should be consumed (renamed to .consumed, original gone)
+        for _ in range(MAX_USES):
+            pre_input = json.dumps({
+                "tool_input": {"command": "gh pr merge 252 --squash --delete-branch"}
+            })
+            with patch("merge_guard_pre.TOKEN_DIR", tmp_path), \
+                 patch("sys.stdin", io.StringIO(pre_input)):
+                with pytest.raises(SystemExit) as exc_info:
+                    pre_main()
+            assert exc_info.value.code == 0
+
+        # Token should be terminally consumed after MAX_USES uses.
         active_tokens = [
             p for p in tmp_path.glob("merge-authorized-*")
             if not p.name.endswith(".consumed")
+            and USE_MARKER_SUFFIX not in p.name
         ]
         assert len(active_tokens) == 0
         consumed_tokens = list(tmp_path.glob("merge-authorized-*.consumed"))
@@ -6152,43 +6450,49 @@ class TestIdempotentTokenConsumption:
         result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
         assert result is None
 
-    def test_authorization_consumes_and_blocks_second_command(self, tmp_path):
-        """Full flow: first command consumes token, second is blocked."""
+    def test_authorization_consumes_and_blocks_after_budget_exhausted(self, tmp_path):
+        """Full flow: MAX_USES commands authorized, next blocked (#720 Bug C)."""
+        from shared.merge_guard_common import MAX_USES
         from merge_guard_post import write_token
         from merge_guard_pre import check_merge_authorization
 
         token_path = write_token({"pr_number": "42"}, token_dir=tmp_path)
         assert token_path is not None
 
-        # First: allowed, token consumed
-        result1 = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
-        assert result1 is None
+        # Burn through the full MAX_USES budget
+        for _ in range(MAX_USES):
+            assert check_merge_authorization("gh pr merge 42", token_dir=tmp_path) is None
+
+        # Terminal rename after last slot
         assert Path(token_path + ".consumed").exists()
 
-        # Second: blocked, no active tokens
-        result2 = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
-        assert result2 is not None
-        assert "AskUserQuestion" in result2
+        # Next command: blocked, no active tokens
+        result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        assert result is not None
+        assert "AskUserQuestion" in result
 
     def test_concurrent_authorization_both_succeed(self, tmp_path):
-        """Two concurrent check_merge_authorization calls for the same token both succeed.
-
-        This simulates the real scenario: PreToolUse hook fires twice for the same
-        tool call. The first call renames the token to .consumed. The second call
-        finds the original missing but the .consumed file present, so it also allows.
-        """
+        """Two concurrent _consume_token calls for the same token both succeed
+        by claiming distinct slots (#720 Bug C). The first claim is slot 1
+        (token still on disk); the second claim is slot 2 (terminal rename
+        fires)."""
+        from shared.merge_guard_common import USE_MARKER_SUFFIX
         from merge_guard_post import write_token
-        from merge_guard_pre import _consume_token, check_merge_authorization
+        from merge_guard_pre import _consume_token
 
         token_path = write_token({"pr_number": "42"}, token_dir=tmp_path)
 
-        # First invocation: consume via rename
+        # First invocation: claims slot 1 (token still on disk; budget left)
         assert _consume_token(token_path) is True
+        assert Path(token_path + USE_MARKER_SUFFIX + "1").exists()
+        assert Path(token_path).exists()
+        assert not Path(token_path + ".consumed").exists()
+
+        # Second invocation: claims slot 2 (last slot → terminal rename)
+        assert _consume_token(token_path) is True
+        assert Path(token_path + USE_MARKER_SUFFIX + "2").exists()
         assert not Path(token_path).exists()
         assert Path(token_path + ".consumed").exists()
-
-        # Second invocation: original gone but .consumed exists
-        assert _consume_token(token_path) is True
 
     # -------------------------------------------------------------------------
     # Edge cases
@@ -6239,7 +6543,8 @@ class TestIdempotentTokenConsumption:
         assert "AskUserQuestion" in result
 
     def test_consumed_file_with_secure_permissions(self, tmp_path):
-        """Token created with write_token maintains 0o600 after consumption."""
+        """Token created with write_token maintains 0o600 after MAX_USES consumes."""
+        from shared.merge_guard_common import MAX_USES
         from merge_guard_post import write_token
         from merge_guard_pre import check_merge_authorization
 
@@ -6250,8 +6555,9 @@ class TestIdempotentTokenConsumption:
         original_mode = stat.S_IMODE(os.stat(token_path).st_mode)
         assert original_mode == 0o600
 
-        # Consume via authorization
-        check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        # Burn the full budget so the terminal rename fires
+        for _ in range(MAX_USES):
+            check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
 
         # Verify .consumed file retains secure permissions
         consumed_path = token_path + ".consumed"
@@ -6264,7 +6570,8 @@ class TestIdempotentTokenConsumption:
     # -------------------------------------------------------------------------
 
     def test_full_lifecycle_create_consume_cleanup(self, tmp_path):
-        """Full lifecycle: create token -> consume -> cleanup after TTL."""
+        """Full lifecycle: create token -> consume MAX_USES times -> cleanup after TTL."""
+        from shared.merge_guard_common import MAX_USES
         from merge_guard_post import write_token
         from merge_guard_pre import (
             _cleanup_consumed_tokens,
@@ -6276,9 +6583,11 @@ class TestIdempotentTokenConsumption:
         assert token_path is not None
         assert Path(token_path).exists()
 
-        # 2. Consume via authorization
-        result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
-        assert result is None
+        # 2. Consume via authorization MAX_USES times → terminal rename
+        for _ in range(MAX_USES):
+            assert check_merge_authorization(
+                "gh pr merge 42", token_dir=tmp_path
+            ) is None
         consumed_path = token_path + ".consumed"
         assert Path(consumed_path).exists()
         assert not Path(token_path).exists()
@@ -6287,9 +6596,11 @@ class TestIdempotentTokenConsumption:
         _cleanup_consumed_tokens(tmp_path)
         assert Path(consumed_path).exists()  # Still within TTL
 
-        # 4. After TTL, consumed file is cleaned up
+        # 4. After TTL, consumed file is cleaned up (along with .use-N markers)
         old_mtime = time.time() - 600
         os.utime(consumed_path, (old_mtime, old_mtime))
+        for marker in tmp_path.glob("merge-authorized-*.use-*"):
+            os.utime(marker, (old_mtime, old_mtime))
         _cleanup_consumed_tokens(tmp_path)
         assert not Path(consumed_path).exists()
 
@@ -7438,20 +7749,25 @@ class TestGhPrCloseFullIntegration:
         result = check_merge_authorization("gh pr close 42 --delete-branch", token_dir=tmp_path)
         assert result is None
 
-    def test_close_flow_token_consumed_blocks_second(self, tmp_path):
-        """After first close is authorized, second attempt is blocked (single-use)."""
+    def test_close_flow_token_blocks_after_budget_exhausted(self, tmp_path):
+        """After MAX_USES close ops authorized, next attempt blocks (#720 Bug C)."""
+        from shared.merge_guard_common import MAX_USES
         from merge_guard_post import extract_context, write_token
         from merge_guard_pre import check_merge_authorization
 
         context = extract_context("Close PR #42?")
         write_token(context, token_dir=tmp_path)
 
-        # First — allowed
-        result = check_merge_authorization("gh pr close 42 --delete-branch", token_dir=tmp_path)
-        assert result is None
+        # MAX_USES close ops all authorized
+        for _ in range(MAX_USES):
+            assert check_merge_authorization(
+                "gh pr close 42 --delete-branch", token_dir=tmp_path
+            ) is None
 
-        # Second — blocked (consumed)
-        result = check_merge_authorization("gh pr close 42 --delete-branch", token_dir=tmp_path)
+        # Next attempt: blocked
+        result = check_merge_authorization(
+            "gh pr close 42 --delete-branch", token_dir=tmp_path
+        )
         assert result is not None
 
     def test_close_flow_token_rejects_wrong_pr(self, tmp_path):

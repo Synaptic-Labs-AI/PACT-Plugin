@@ -54,6 +54,7 @@ from .merge_guard_common import (
     TOKEN_TTL,
     TOKEN_DIR,
     TOKEN_PREFIX,
+    MAX_USES,
     cleanup_consumed_tokens,
     detect_command_operation_type,
 )
@@ -137,6 +138,7 @@ __all__ = [
     "TOKEN_TTL",
     "TOKEN_DIR",
     "TOKEN_PREFIX",
+    "MAX_USES",
     "cleanup_consumed_tokens",
     "detect_command_operation_type",
     "hook_error_json",

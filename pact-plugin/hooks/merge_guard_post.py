@@ -33,6 +33,7 @@ from shared.error_output import hook_error_json
 from shared.merge_guard_common import (
     TOKEN_TTL,
     TOKEN_DIR,
+    MAX_USES,
     cleanup_consumed_tokens as _cleanup_consumed_tokens,
     detect_command_operation_type,
 )
@@ -237,6 +238,13 @@ def write_token(context: dict, token_dir: Path | None = None) -> str | None:
         "created_at": now,
         "expires_at": now + TOKEN_TTL,
         "context": context,
+        # N-use budget (#720 Bug C). Reader (merge_guard_pre._consume_token)
+        # claims one use-slot per invocation via O_EXCL on a per-use marker
+        # file; the final slot also triggers terminal rename to .consumed.
+        # Tokens written by pre-#720 versions lack these fields and are
+        # treated by the reader as max_uses=1 (single-use, legacy semantics).
+        "max_uses": MAX_USES,
+        "uses_remaining": MAX_USES,
     }
     if session_id:
         token_data["session_id"] = session_id
