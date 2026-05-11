@@ -40,10 +40,15 @@ Known v1 limitations:
      to require explicit AUQ before each destructive Skill invocation.
 
   2. Wrapper-class hallucination. The orchestrator can emit a fake
-     `<system-reminder>` as an assistant text block. This gate inspects
-     for the literal `Human:` substring in assistant text but does NOT
-     detect spoofed platform-injected wrappers. Cryptographic sentinel
-     defense is the right mechanism for that class.
+     `<system-reminder>` (or any other angle-bracket-shaped wrapper) as
+     an assistant text block. This gate inspects for the literal
+     `Human:` substring in assistant text but does NOT detect spoofed
+     platform-injected wrappers emitted by the assistant role.
+     Cryptographic sentinel defense is the right mechanism for that
+     class. Note: the user-side envelope-exclusion filter (see
+     `passes_envelope_exclusion`) categorically rejects ANY angle-
+     bracket-shaped wrapper from serving as the temporal anchor; only
+     the assistant-emission-of-wrapper-spoof case remains uncovered.
 
   3. Recursive hallucination. If the orchestrator hallucinates the SAME
      text twice (once at gate-fire time, blocked; then again after a
@@ -167,15 +172,17 @@ EXTRACTED_HUMAN_MAX_CHARS = 200
 
 # ─── Envelope-exclusion ────────────────────────────────────────────────
 
-# Prefixes that mark a `type=user` content string as PLATFORM-INJECTED
-# rather than a genuine user keystroke. Any user-entry whose content
-# (after lstrip) starts with one of these is filtered out of the
-# temporal-anchor walk — it cannot serve as the "authorizing user turn"
-# for a destructive op.
+# Historical curated sample-set of platform-injected wrappers observed
+# in the captured fixture corpus. Retained for documentation and audit
+# only — the load-bearing filter inverted from this curated deny-list to
+# the categorical angle-bracket-shape check below, because any future
+# Claude Code substrate wrapper class (e.g., `<inbox-message>`,
+# `<wake-signal>`, `<event>`, arbitrary `<*-notification>` shapes) is a
+# deny-by-omission bypass against a curated allowlist. The angle-bracket
+# heuristic closes the gap categorically.
 #
-# `startswith` is more conservative than `in`: a user who literally
-# types `<teammate-message` at message start is vanishingly rare;
-# substring-anywhere would over-exclude legitimate quotations.
+# The `[Request interrupted` envelope is the only observed non-angle-
+# bracket wrapper class and is kept as a secondary legacy prefix check.
 ENVELOPE_PREFIXES = (
     "<teammate-message",
     "<task-notification>",
@@ -184,18 +191,46 @@ ENVELOPE_PREFIXES = (
     "[Request interrupted",
 )
 
+# Legacy non-angle-bracket envelope prefixes. Angle-bracket wrappers
+# (any `<*` shape) are handled categorically by the angle-bracket check
+# in `passes_envelope_exclusion`; this tuple holds only the wrappers
+# that do NOT start with `<` and therefore need an explicit prefix.
+_LEGACY_NON_ANGLE_BRACKET_ENVELOPES = (
+    "[Request interrupted",
+)
+
 
 def passes_envelope_exclusion(content: str) -> bool:
     """Return True iff `content` is shaped like a genuine user keystroke.
 
-    Pure function. False on any of the 5 platform-injected envelopes;
-    True on bare text. lstrip handles leading whitespace from soft
-    indentation.
+    Pure function. Filter shape: any `lstrip`-normalized content that
+    starts with `<` is treated as an angle-bracket-wrapped platform
+    envelope (regardless of specific tag name); plus a small set of
+    legacy non-angle-bracket envelopes (e.g. `[Request interrupted`).
+    Anything else is treated as bare user text and passes.
+
+    Rationale: a curated 5-prefix deny-list is deny-by-omission — any
+    future Claude Code substrate wrapper (`<inbox-message>`,
+    `<wake-signal>`, `<event>`, etc.) bypasses until added. The
+    angle-bracket heuristic catches every `<*>`-shaped wrapper
+    categorically, including ones not yet introduced. False-positive
+    cost (a user who literally types `<` as the first non-whitespace
+    character of a directive) is vanishingly rare and recoverable via
+    AskUserQuestion; false-negative cost (silently accepting a future
+    wrapper class as a genuine user turn) is a SACROSANCT authorization
+    bypass.
     """
     if not isinstance(content, str):
         return False
     s = content.lstrip()
-    return not any(s.startswith(p) for p in ENVELOPE_PREFIXES)
+    if not s:
+        # Empty-after-lstrip is shape-allowed (caller handles emptiness).
+        return True
+    if s.startswith("<"):
+        return False
+    if any(s.startswith(p) for p in _LEGACY_NON_ANGLE_BRACKET_ENVELOPES):
+        return False
+    return True
 
 
 def extract_after_human(text: str) -> str:
@@ -265,12 +300,18 @@ try:
         # ─── rm -rf and combined-flag variants ───
         # Conservative coverage: order-agnostic -r/-f combos + glued
         # -rf/-fr/-Rf, including extra letters like -rfv.
-        re.compile(r"\brm\s+(?:\S+\s+)*-rf\b"),
-        re.compile(r"\brm\s+(?:\S+\s+)*-fr\b"),
-        re.compile(r"\brm\s+(?:\S+\s+)*-r\s+(?:\S+\s+)*-f\b"),
-        re.compile(r"\brm\s+(?:\S+\s+)*-f\s+(?:\S+\s+)*-r\b"),
-        re.compile(r"\brm\s+(?:\S+\s+)*-[a-zA-Z]*r[a-zA-Z]*f"),
-        re.compile(r"\brm\s+(?:\S+\s+)*-[a-zA-Z]*f[a-zA-Z]*r"),
+        # POSIX `rm -R` is a documented synonym for `-r`, so the recursion
+        # flag is matched case-insensitively via `[rR]` / `[fF]` character
+        # classes. The surrounding `[a-zA-Z]*` flanks match any case
+        # already, but the recursion/force literals themselves must accept
+        # both cases — `rm -Rf foo` and `rm -RF foo` are bypass shapes
+        # the lowercase-only literals previously admitted.
+        re.compile(r"\brm\s+(?:\S+\s+)*-[rR][fF]\b"),
+        re.compile(r"\brm\s+(?:\S+\s+)*-[fF][rR]\b"),
+        re.compile(r"\brm\s+(?:\S+\s+)*-[rR]\s+(?:\S+\s+)*-[fF]\b"),
+        re.compile(r"\brm\s+(?:\S+\s+)*-[fF]\s+(?:\S+\s+)*-[rR]\b"),
+        re.compile(r"\brm\s+(?:\S+\s+)*-[a-zA-Z]*[rR][a-zA-Z]*[fF][a-zA-Z]*"),
+        re.compile(r"\brm\s+(?:\S+\s+)*-[a-zA-Z]*[fF][a-zA-Z]*[rR][a-zA-Z]*"),
 
         # ─── Artifact creation / deletion via gh ───
         # gh issue create surfaced by the cross-session #684 case

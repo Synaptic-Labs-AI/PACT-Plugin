@@ -86,18 +86,30 @@ def test_extract_max_bounds_compare_cost():
         ("merge it", True),
         ("yes proceed", True),
         ("  leading whitespace then text", True),
-        # All 5 platform-injected envelopes
+        # Known-corpus angle-bracket envelopes
         ("<teammate-message teammate_id=\"x\">payload</teammate-message>", False),
         ("<task-notification>foo</task-notification>", False),
         ("<command-message>/pause</command-message>", False),
         ("<system-reminder>note</system-reminder>", False),
+        # Legacy non-angle-bracket envelope
         ("[Request interrupted by user]", False),
+        # Novel / future angle-bracket wrappers — must be rejected by the
+        # categorical angle-bracket heuristic without explicit prefix
+        # enumeration (defense against deny-by-omission).
+        ("<inbox-message>foo</inbox-message>", False),
+        ("<wake-signal>bar</wake-signal>", False),
+        ("<event>x</event>", False),
+        ("<user-prompt-submit-hook>x</user-prompt-submit-hook>", False),
+        ("<future-platform-tag>x</future-platform-tag>", False),
+        ("<arbitrary-novel-wrapper>x</arbitrary-novel-wrapper>", False),
         # lstrip handles indented envelopes
         ("   <teammate-message id=\"x\">", False),
         ("\t<system-reminder>x</system-reminder>", False),
-        # Substring-anywhere would over-exclude legitimate quotes
+        ("   <inbox-message>x</inbox-message>", False),
+        # Mid-string angle brackets must NOT trigger rejection
         ("the user said '<teammate-message' is the prefix", True),
         ("about <system-reminder> tags in general", True),
+        ("proceed with the merge please <details>", True),
         # Edge cases
         ("", True),  # empty content is shape-allowed (caller handles emptiness)
         (None, False),
@@ -108,10 +120,20 @@ def test_passes_envelope_exclusion(content, expected):
     assert passes_envelope_exclusion(content) is expected
 
 
-def test_envelope_prefixes_count_matches_design():
-    # 5 prefixes per architect §5; if this drifts the temporal-anchor
-    # walk loses cases. Pinned to catch accidental additions/removals.
-    assert len(ENVELOPE_PREFIXES) == 5
+def test_envelope_filter_is_categorical_not_curated():
+    # The load-bearing filter must be the angle-bracket-shape heuristic,
+    # NOT the curated 5-entry prefix list. Pin the architectural choice
+    # so a future refactor cannot silently revert to deny-by-omission.
+    # Sample a wrapper NOT in ENVELOPE_PREFIXES — it must still be
+    # rejected.
+    novel_wrapper = "<deliberately-not-in-curated-list>x</deliberately-not-in-curated-list>"
+    assert not any(novel_wrapper.startswith(p) for p in ENVELOPE_PREFIXES), (
+        "test premise: chosen wrapper must NOT appear in the curated list"
+    )
+    assert passes_envelope_exclusion(novel_wrapper) is False, (
+        "categorical angle-bracket heuristic must reject any <*>-shaped "
+        "wrapper, including ones absent from the curated ENVELOPE_PREFIXES"
+    )
 
 
 # ─── extract_after_human ───────────────────────────────────────────────
@@ -192,6 +214,19 @@ def test_normalize_enables_tier2_substring_match():
         "rm -fr /tmp/junk",
         "rm -rfv /tmp/junk",
         "rm -r /tmp/junk -f",
+        # POSIX `rm -R` is a documented synonym for `-r`. Uppercase and
+        # mixed-case recursion/force flags must be caught — lowercase-only
+        # literals previously admitted these as bypass shapes.
+        "rm -Rf /tmp/junk",
+        "rm -RF /tmp/junk",
+        "rm -RFv /tmp/junk",
+        "rm -fR /tmp/junk",
+        "rm -fRv /tmp/junk",
+        "rm -Fr /tmp/junk",
+        "rm -FR /tmp/junk",
+        "rm -R /tmp/junk -f",
+        "rm -F /tmp/junk -R",
+        "rm -r /tmp/junk -F",
         "gh issue create -t Test -b Body",
         "gh release create v1.2.3",
         "gh release delete v1.2.3",
@@ -229,6 +264,9 @@ def test_is_destructive_command_positive(command):
         "git clean -fd",  # excluded per architect (recoverable)
         "rm foo.txt",  # no -r/-f
         "rm -i foo.txt",  # interactive, not force
+        "rm -R foo",  # recursion alone (no force) — out of gate scope
+        "rm -F foo",  # force alone (no recursion) — out of gate scope
+        "rm -Iv foo",  # interactive verbose, no recursion+force
         "git commit -m 'gh pr merge 705 in body'",  # commit-msg stripped
         "echo 'rm -rf /tmp'",  # echo-quoted, stripped
         "",
