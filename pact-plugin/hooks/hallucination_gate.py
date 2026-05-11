@@ -415,25 +415,205 @@ def evaluate_transcript(
     return (DECISION_WARN, "human_emission_text_not_found_in_recent_user_turns")
 
 
+# ─── Transcript I/O ────────────────────────────────────────────────────
+
+# Inlined local copy of refresh.transcript_parser.read_last_n_lines.
+# Inlining keeps the SACROSANCT gate decoupled from the refresh-subsystem
+# evolution (the gate fail-CLOSES on any module-load failure of an
+# imported helper). Extract to shared/transcript_tail.py if a second
+# consumer materializes; until then, ~25 lines of seek-from-end
+# boilerplate is cheaper than the coupling.
+_LARGE_FILE_THRESHOLD_BYTES = 10 * 1024 * 1024
+
+
+def _read_last_n_lines(path: Path, n: int) -> list[str]:
+    """Return the last N lines of `path` (oldest first within the slice,
+    newest at end) or [] on any I/O error.
+
+    Small files (< 10MB) read+slice; large files reverse-seek in chunks.
+    All exceptions are swallowed and surface as []; the caller treats
+    empty as `cannot evaluate` → fail-OPEN ALLOW.
+    """
+    try:
+        file_size = path.stat().st_size
+
+        if file_size < _LARGE_FILE_THRESHOLD_BYTES:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+            return lines[-n:] if len(lines) > n else lines
+
+        chunk_size = 8192
+        collected: list[str] = []
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            remaining = f.tell()
+            buffer = b""
+            while remaining > 0 and len(collected) < n:
+                read_size = min(chunk_size, remaining)
+                remaining -= read_size
+                f.seek(remaining)
+                chunk = f.read(read_size)
+                buffer = chunk + buffer
+                parts = buffer.split(b"\n")
+                if remaining > 0:
+                    buffer = parts[0]
+                    new_parts = parts[1:]
+                else:
+                    new_parts = parts
+                    buffer = b""
+                collected = [
+                    p.decode("utf-8", errors="replace") + "\n"
+                    for p in new_parts if p
+                ] + collected
+        return collected[-n:] if len(collected) > n else collected
+    except (OSError, ValueError):
+        return []
+
+
+# ─── Output envelope ───────────────────────────────────────────────────
+
+
+def _emit_deny(reason: str, triggering_text: str = "") -> NoReturn:
+    """Emit canonical DENY envelope with hookEventName audit anchor."""
+    snippet = (triggering_text or "")[:60]
+    msg = (
+        f"PACT hallucination_gate denied destructive Bash op — reason: "
+        f"{reason}."
+    )
+    if snippet:
+        msg += f" Triggering text snippet: {snippet!r}."
+    msg += (
+        " The most recent `Human:` directive appears to be an "
+        "orchestrator-emitted hallucination rather than a genuine user "
+        "keystroke. Use AskUserQuestion to confirm with the user before "
+        "proceeding."
+    )
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": msg,
+        }
+    }))
+    sys.exit(2)
+
+
+def _emit_warn(reason: str, triggering_text: str = "") -> NoReturn:
+    """Emit advisory WARN envelope via additionalContext.
+
+    Tier-miss with passing temporal anchor: the assistant emitted a
+    `Human:` directive that does NOT appear verbatim (or via case-fold +
+    whitespace-collapse) in any recent genuine user turn, yet the user
+    turn precedes the emission. Could be paraphrase-class authorization
+    OR a paraphrase-class hallucination; gate does not block in v1.
+    """
+    snippet = (triggering_text or "")[:60]
+    msg = (
+        f"PACT hallucination_gate advisory — reason: {reason}."
+    )
+    if snippet:
+        msg += f" Triggering text snippet: {snippet!r}."
+    msg += (
+        " The most recent assistant `Human:` block was not found in the "
+        "recent genuine user turns within the scan window. Temporal "
+        "anchor passes, so this is not blocked, but the operator should "
+        "verify the destructive op was actually user-authorized."
+    )
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": msg,
+        }
+    }))
+    sys.exit(0)
+
+
+def _emit_allow() -> NoReturn:
+    print(_SUPPRESS_OUTPUT)
+    sys.exit(0)
+
+
+# ─── main() entry point ────────────────────────────────────────────────
+
+
 def main() -> NoReturn:
-    """Hook entry point. Scaffolding only in this commit — main logic
-    lands in a subsequent commit. Current behavior: fail-OPEN ALLOW on
-    every invocation so the hook is registration-safe pre-logic.
+    """Hook entry point.
+
+    Flow:
+      1. Parse stdin (fail-OPEN on JSONDecodeError).
+      2. Initialize pact_context; short-circuit ALLOW on non-PACT
+         session or teammate caller.
+      3. Short-circuit ALLOW on non-Bash tool or missing command.
+      4. Short-circuit ALLOW on non-destructive command (regex filter).
+      5. Read transcript_path last N lines (fail-OPEN on missing/
+         unreadable file).
+      6. Dispatch to evaluate_transcript and emit the corresponding
+         envelope.
+
+    Every uncaught exception in this body fail-CLOSES via
+    _emit_load_failure_deny("runtime", error) — SACROSANCT.
     """
     try:
         try:
-            json.load(sys.stdin)
+            input_data = json.load(sys.stdin)
         except json.JSONDecodeError:
-            print(_SUPPRESS_OUTPUT)
-            sys.exit(0)
+            _emit_allow()
 
-        print(_SUPPRESS_OUTPUT)
-        sys.exit(0)
+        if not isinstance(input_data, dict):
+            _emit_allow()
+
+        pact_context.init(input_data)
+
+        # Teammate-caller short-circuit. resolve_agent_name returns ""
+        # for the lead (main process / non-PACT) and a non-empty name
+        # for teammates. Orchestrator-side `Human:` hallucinations are
+        # a lead-side failure mode; teammates have a different message
+        # envelope and don't trigger the same priming pattern.
+        if resolve_agent_name(input_data):
+            _emit_allow()
+
+        tool_name = input_data.get("tool_name", "")
+        if tool_name != "Bash":
+            _emit_allow()
+
+        tool_input = input_data.get("tool_input", {})
+        if not isinstance(tool_input, dict):
+            _emit_allow()
+
+        command = tool_input.get("command", "")
+        if not command or not isinstance(command, str):
+            _emit_allow()
+
+        if not is_destructive_command(command):
+            _emit_allow()
+
+        transcript_path = input_data.get("transcript_path", "")
+        if not transcript_path or not isinstance(transcript_path, str):
+            _emit_allow()
+
+        path = Path(transcript_path)
+        if not path.exists() or not path.is_file():
+            _emit_allow()
+
+        lines = _read_last_n_lines(path, TRANSCRIPT_SCAN_WINDOW_LINES)
+        if not lines:
+            _emit_allow()
+
+        decision, reason = evaluate_transcript(lines)
+
+        if decision == DECISION_ALLOW:
+            _emit_allow()
+        elif decision == DECISION_DENY:
+            _emit_deny(reason, command)
+        elif decision == DECISION_WARN:
+            _emit_warn(reason, command)
+        else:
+            # Unknown decision string — treat as fail-OPEN ALLOW rather
+            # than DENY: better to let the layered merge_guard gate
+            # below decide than to invent semantics.
+            _emit_allow()
 
     except (SystemExit, KeyboardInterrupt):
-        # SystemExit is the success-path exit (sys.exit(0) above);
-        # KeyboardInterrupt is operator-initiated. Neither is a
-        # gate-logic failure — re-raise so the process exits normally.
         raise
     except Exception as runtime_error:  # noqa: BLE001 — SACROSANCT fail-closed
         _emit_load_failure_deny("runtime", runtime_error)

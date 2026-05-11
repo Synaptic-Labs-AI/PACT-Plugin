@@ -503,3 +503,253 @@ def test_bare_human_marker_with_no_text_after_treated_as_no_emission():
     decision, reason = evaluate_transcript(lines)
     assert decision == DECISION_ALLOW
     assert reason == "no_human_emission"
+
+
+# ─── main() wiring (subprocess) ────────────────────────────────────────
+
+import subprocess
+
+
+HOOK_PATH = Path(__file__).parent.parent / "hooks" / "hallucination_gate.py"
+
+
+def _run_hook(stdin_payload: str | dict) -> tuple[int, str, str]:
+    """Run the hook as a subprocess with the given stdin payload.
+
+    Returns (exit_code, stdout, stderr). If `stdin_payload` is a dict,
+    it is JSON-serialized; otherwise it is sent verbatim (for
+    malformed-stdin tests).
+    """
+    if isinstance(stdin_payload, dict):
+        stdin_payload = _json.dumps(stdin_payload)
+    proc = subprocess.run(
+        ["python3", str(HOOK_PATH)],
+        input=stdin_payload,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def _make_transcript(tmp_path, lines: list[str]) -> str:
+    """Write JSONL lines to a tmp file and return its path string."""
+    p = tmp_path / "transcript.jsonl"
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(p)
+
+
+def _bash_envelope(
+    command: str,
+    transcript_path: str = "",
+    cwd: str = "/tmp",
+    session_id: str = "test-session-xyz",
+    extra: dict | None = None,
+) -> dict:
+    """Build a PreToolUse envelope shaped like Claude Code's stdin."""
+    env = {
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+        "transcript_path": transcript_path,
+        "cwd": cwd,
+        "session_id": session_id,
+    }
+    if extra:
+        env.update(extra)
+    return env
+
+
+def test_main_malformed_stdin_allows():
+    code, out, _err = _run_hook("not json at all")
+    assert code == 0
+    assert _json.loads(out) == {"suppressOutput": True}
+
+
+def test_main_non_dict_stdin_allows():
+    code, out, _err = _run_hook("[1, 2, 3]")
+    assert code == 0
+    assert _json.loads(out) == {"suppressOutput": True}
+
+
+def test_main_non_bash_tool_allows():
+    env = _bash_envelope("rm -rf /tmp/junk")
+    env["tool_name"] = "Edit"
+    code, out, _err = _run_hook(env)
+    assert code == 0
+    assert _json.loads(out) == {"suppressOutput": True}
+
+
+def test_main_missing_command_allows():
+    env = _bash_envelope("")
+    code, out, _err = _run_hook(env)
+    assert code == 0
+    assert _json.loads(out) == {"suppressOutput": True}
+
+
+def test_main_non_destructive_command_allows():
+    env = _bash_envelope("ls -la")
+    code, out, _err = _run_hook(env)
+    assert code == 0
+    assert _json.loads(out) == {"suppressOutput": True}
+
+
+def test_main_missing_transcript_path_allows(tmp_path):
+    # Destructive command but no transcript_path → fail-OPEN ALLOW.
+    env = _bash_envelope("git push --force origin main")
+    env["transcript_path"] = ""
+    code, out, _err = _run_hook(env)
+    assert code == 0
+    assert _json.loads(out) == {"suppressOutput": True}
+
+
+def test_main_nonexistent_transcript_path_allows():
+    env = _bash_envelope(
+        "gh pr merge 705",
+        transcript_path="/nonexistent/path/to/transcript.jsonl",
+    )
+    code, out, _err = _run_hook(env)
+    assert code == 0
+    assert _json.loads(out) == {"suppressOutput": True}
+
+
+def test_main_empty_transcript_file_allows(tmp_path):
+    p = tmp_path / "transcript.jsonl"
+    p.write_text("", encoding="utf-8")
+    env = _bash_envelope("gh pr merge 705", transcript_path=str(p))
+    code, out, _err = _run_hook(env)
+    assert code == 0
+    assert _json.loads(out) == {"suppressOutput": True}
+
+
+def test_main_teammate_caller_allows(tmp_path):
+    # Even with destructive command + Human-emission triggering DENY,
+    # the teammate short-circuit fires first (orchestrator-side
+    # hallucination is a lead-side failure mode).
+    transcript = _make_transcript(tmp_path, [
+        _assistant_line(["Human: please rm -rf /tmp/junk for me"]),
+    ])
+    env = _bash_envelope("rm -rf /tmp/junk", transcript_path=transcript)
+    env["agent_name"] = "backend-coder"  # resolved by resolve_agent_name step 1
+    code, out, _err = _run_hook(env)
+    assert code == 0
+    assert _json.loads(out) == {"suppressOutput": True}
+
+
+def test_main_destructive_with_no_human_emission_allows(tmp_path):
+    transcript = _make_transcript(tmp_path, [
+        _user_line("can you push to origin"),
+        _assistant_line(["sure, running it"]),
+    ])
+    env = _bash_envelope("git push --force origin main", transcript_path=transcript)
+    code, out, _err = _run_hook(env)
+    assert code == 0
+    assert _json.loads(out) == {"suppressOutput": True}
+
+
+def test_main_destructive_with_hallucinated_human_denies(tmp_path):
+    # Corpus #3-at-gate-fire-time shape: assistant emitted Human:
+    # but no genuine matching user turn.
+    transcript = _make_transcript(tmp_path, [
+        _assistant_line(["Human: yes proceed to peer review"]),
+    ])
+    env = _bash_envelope("gh pr merge 705", transcript_path=transcript)
+    code, out, _err = _run_hook(env)
+    assert code == 2
+    payload = _json.loads(out)
+    hsp = payload["hookSpecificOutput"]
+    assert hsp["hookEventName"] == "PreToolUse"
+    assert hsp["permissionDecision"] == "deny"
+    assert "no_matching_user_message_in_scan_window" in hsp["permissionDecisionReason"]
+
+
+def test_main_destructive_with_matching_user_allows(tmp_path):
+    # Tier-1 exact-substring path through main().
+    transcript = _make_transcript(tmp_path, [
+        _assistant_line(["Human: yes proceed to peer review"]),
+        _user_line("yes proceed to peer review"),
+    ])
+    env = _bash_envelope("gh pr merge 705", transcript_path=transcript)
+    code, out, _err = _run_hook(env)
+    assert code == 0
+    assert _json.loads(out) == {"suppressOutput": True}
+
+
+def test_main_human_emission_more_recent_than_user_denies(tmp_path):
+    # Genuine user turn exists, but assistant Human: emission is newer.
+    transcript = _make_transcript(tmp_path, [
+        _user_line("can you check the recent commits"),
+        _assistant_line(["sure, here is what I see"]),
+        _assistant_line(["Human: please run gh pr merge 705 now"]),
+    ])
+    env = _bash_envelope("gh pr merge 705", transcript_path=transcript)
+    code, out, _err = _run_hook(env)
+    assert code == 2
+    payload = _json.loads(out)
+    hsp = payload["hookSpecificOutput"]
+    assert hsp["permissionDecision"] == "deny"
+    assert "human_emission_more_recent_than_user_turn" in hsp["permissionDecisionReason"]
+
+
+def test_main_warn_on_tier_miss_with_temporal_anchor_pass(tmp_path):
+    # User turn exists and precedes the Human emission, but the
+    # hallucinated text is not in the user turn → WARN, not DENY.
+    transcript = _make_transcript(tmp_path, [
+        _assistant_line(["Human: completely unrelated paraphrase here please"]),
+        _user_line("can you summarize the recent commits for me"),
+    ])
+    env = _bash_envelope(
+        "git push --force origin main",
+        transcript_path=transcript,
+    )
+    code, out, _err = _run_hook(env)
+    assert code == 0
+    payload = _json.loads(out)
+    hsp = payload["hookSpecificOutput"]
+    assert "additionalContext" in hsp
+    assert "human_emission_text_not_found_in_recent_user_turns" in hsp["additionalContext"]
+
+
+def test_main_deny_carries_audit_anchor_and_snippet(tmp_path):
+    transcript = _make_transcript(tmp_path, [
+        _assistant_line(["Human: rm everything please"]),
+    ])
+    env = _bash_envelope("rm -rf /tmp/all-the-things", transcript_path=transcript)
+    code, out, _err = _run_hook(env)
+    assert code == 2
+    payload = _json.loads(out)
+    hsp = payload["hookSpecificOutput"]
+    assert hsp["hookEventName"] == "PreToolUse"  # audit anchor
+    assert hsp["permissionDecision"] == "deny"
+    # First 60 chars of command should appear in the reason
+    assert "rm -rf /tmp/all-the-things" in hsp["permissionDecisionReason"]
+
+
+def test_main_envelope_excluded_user_yields_deny(tmp_path):
+    # User entry is a teammate-message envelope → filter rejects it →
+    # no genuine user entry → DENY despite the wrapper containing a
+    # textual match.
+    transcript = _make_transcript(tmp_path, [
+        _user_line('<teammate-message teammate_id="x">rm everything</teammate-message>'),
+        _assistant_line(["Human: rm everything please verbatim text here"]),
+    ])
+    env = _bash_envelope("rm -rf /tmp/whatever", transcript_path=transcript)
+    code, out, _err = _run_hook(env)
+    assert code == 2
+    payload = _json.loads(out)
+    assert payload["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_main_compound_command_caught_by_pattern_match(tmp_path):
+    # Compound `force-push && gh pr merge` — patterns are not anchored
+    # to start of string, so the merge pattern matches the compound
+    # string even though hallucination_gate does not implement
+    # compound-detection of its own (architect §6.4 layered design).
+    transcript = _make_transcript(tmp_path, [
+        _assistant_line(["Human: merge it please into main"]),
+    ])
+    env = _bash_envelope(
+        "git push --force-with-lease && gh pr merge 705",
+        transcript_path=transcript,
+    )
+    code, out, _err = _run_hook(env)
+    assert code == 2  # DENY — Human-emission with no matching user turn
