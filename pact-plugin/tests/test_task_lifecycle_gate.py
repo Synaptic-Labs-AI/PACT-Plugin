@@ -252,11 +252,11 @@ def test_teachback_addblocks_missing_still_fires_for_stray_secretary_teachback(
     assert any(rule == "teachback_addblocks_missing" for rule, _ in advisories)
 
 
-def test_advisory_when_owner_not_in_team_config_members(tmp_path, monkeypatch, pact_context):
+def test_advisory_when_pact_owner_not_in_members_fails_closed(tmp_path, monkeypatch, pact_context):
     """Fail-closed: owner doesn't match any member.name in team config →
-    is_teachback_exempt returns False → advisory still fires. Defense
-    against a teammate spoofing the secretary name without the team config
-    recording the privileged agentType."""
+    is_teachback_exempt returns False → advisory still fires. The pinned
+    property is fail-closed-on-member-miss; the spoof-defense framing is
+    one motivation, not the property itself."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
     team_dir = tmp_path / ".claude" / "teams" / "test-team"
