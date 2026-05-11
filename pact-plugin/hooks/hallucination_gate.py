@@ -295,6 +295,126 @@ def is_destructive_command(command: str) -> bool:
     return any(pat.search(stripped) for pat in DESTRUCTIVE_PATTERNS)
 
 
+# ─── Temporal-anchor algorithm ─────────────────────────────────────────
+
+# Decision sentinel values returned by `evaluate_transcript`. Stable
+# strings — tests pin against them and the main() output layer maps them
+# to suppressOutput / permissionDecision / additionalContext envelopes.
+DECISION_ALLOW = "allow"
+DECISION_DENY = "deny"
+DECISION_WARN = "warn"
+
+
+def evaluate_transcript(
+    transcript_lines: list[str],
+) -> tuple[str, str]:
+    """Return (decision, reason) for the destructive-Bash gate.
+
+    Decision is one of DECISION_ALLOW / DECISION_DENY / DECISION_WARN.
+    Pure function — no I/O, no env reads. The caller (main()) handles
+    transcript_path read + scan-window trim and passes the trimmed
+    list with newest entry at the end.
+
+    Algorithm (walks BACKWARD, newest line first):
+      1. Track most recent `type=user` entry whose string content
+         passes envelope-exclusion.
+      2. Track most recent `type=assistant` entry whose content blocks
+         include a text block containing the literal `Human:`.
+      3. Early-break once both anchors found (backward walk yields
+         newest-first → first hit is the latest occurrence).
+
+    Decision tree:
+      - No Human-emission found → ALLOW (no priming signal).
+      - Emission present AND no genuine user entry → DENY.
+      - Emission line-index > user-entry line-index → DENY
+        (the assistant emitted Human: more recently than the latest
+        genuine user keystroke; treat as hallucinated authorization).
+      - User-entry more recent; hallucinated text below length floor
+        → ALLOW (too short to discriminate meaningfully).
+      - Tier 1 exact substring (hallucinated ⊂ user_text) → ALLOW.
+      - Tier 2 normalized substring (case-fold + ws-collapse) → ALLOW.
+      - All tiers miss → WARN (advisory; temporal anchor already
+        passed, so this is paraphrase-class FP territory).
+    """
+    last_user_directive = None
+    last_user_directive_idx = None
+    last_assistant_human = None
+    last_assistant_human_idx = None
+
+    # Backward walk: highest-index lines are newest in JSONL format.
+    # First hit on each anchor is therefore the latest occurrence;
+    # early-break once both anchors found is safe.
+    for idx in range(len(transcript_lines) - 1, -1, -1):
+        try:
+            entry = json.loads(transcript_lines[idx])
+        except (json.JSONDecodeError, ValueError):
+            continue  # malformed lines silently skipped, like the refresh parser
+
+        if not isinstance(entry, dict):
+            continue
+
+        entry_type = entry.get("type")
+        message = entry.get("message")
+        if not isinstance(message, dict):
+            continue
+
+        if entry_type == "user" and last_user_directive is None:
+            content = message.get("content")
+            # Only string-content user entries are considered.
+            # AskUserQuestion answers arrive as array content embedded in
+            # tool_result blocks; descent deferred to v2 (the
+            # merge_guard token system absorbs AUQ-class authorizations
+            # for Bash ops).
+            if isinstance(content, str) and passes_envelope_exclusion(content):
+                last_user_directive = content
+                last_user_directive_idx = idx
+
+        elif entry_type == "assistant" and last_assistant_human is None:
+            blocks = message.get("content", [])
+            if isinstance(blocks, list):
+                for block in blocks:
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type") == "text"
+                        and isinstance(block.get("text"), str)
+                        and "Human:" in block["text"]
+                    ):
+                        extracted = extract_after_human(block["text"])
+                        if extracted:
+                            last_assistant_human = extracted
+                            last_assistant_human_idx = idx
+                            break
+
+        if last_user_directive is not None and last_assistant_human is not None:
+            break
+
+    if last_assistant_human is None:
+        return (DECISION_ALLOW, "no_human_emission")
+
+    if last_user_directive_idx is None:
+        return (DECISION_DENY, "no_matching_user_message_in_scan_window")
+
+    if last_assistant_human_idx > last_user_directive_idx:
+        return (DECISION_DENY, "human_emission_more_recent_than_user_turn")
+
+    # Genuine user entry precedes the assistant Human emission. Apply
+    # substring tiers in order: length-floor short-circuit → exact →
+    # normalized.
+    hallucinated = last_assistant_human.strip()
+    user_text = last_user_directive
+
+    if len(hallucinated) < SUBSTRING_LENGTH_FLOOR_CHARS:
+        return (DECISION_ALLOW, "tier0_below_length_floor_with_user_precedence")
+
+    if hallucinated in user_text:
+        return (DECISION_ALLOW, "tier1_exact_substring")
+
+    if normalize(hallucinated) in normalize(user_text):
+        return (DECISION_ALLOW, "tier2_normalized_substring")
+
+    return (DECISION_WARN, "human_emission_text_not_found_in_recent_user_turns")
+
+
 def main() -> NoReturn:
     """Hook entry point. Scaffolding only in this commit — main logic
     lands in a subsequent commit. Current behavior: fail-OPEN ALLOW on
