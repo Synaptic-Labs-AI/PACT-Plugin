@@ -1,0 +1,4 @@
+{"type": "user", "message": {"content": "can you check the git status and tell me what's going on"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Sure, let me run git status."}]}}
+{"type": "user", "message": {"content": "ok thanks, what about the pending PRs?"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "There are 3 open PRs: #705, #694, #692."}]}}

@@ -1,0 +1,6 @@
+not json at all
+{"type": "user", "message": {"content": "please proceed with whatever you think is best for us"}}
+{not closed brace at all
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "OK, proceeding."}]}}
+
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Human: please proceed with whatever you think is best for us"}]}}

@@ -833,3 +833,92 @@ def test_hooks_json_remains_valid_after_registration():
     assert isinstance(data, dict)
     assert "hooks" in data
     assert "PreToolUse" in data["hooks"]
+
+
+# ─── Fixture corpus (captured-from-production + synthetic) ─────────────
+
+FIXTURE_DIR = (
+    Path(__file__).parent
+    / "fixtures"
+    / "sample_transcripts"
+    / "hallucination_gate"
+)
+
+
+@pytest.mark.parametrize(
+    "fixture_name,expected_decision,expected_reason",
+    [
+        # Captured-from-production slices (session 95e44763)
+        (
+            "fixture_hallucination_pause.jsonl",
+            DECISION_DENY,
+            "no_matching_user_message_in_scan_window",
+        ),
+        (
+            "fixture_hallucination_wrapup.jsonl",
+            DECISION_DENY,
+            "no_matching_user_message_in_scan_window",
+        ),
+        (
+            "fixture_hallucination_peerreview_before_genuine.jsonl",
+            DECISION_DENY,
+            "human_emission_more_recent_than_user_turn",
+        ),
+        (
+            "fixture_hallucination_peerreview_after_genuine.jsonl",
+            DECISION_WARN,
+            "human_emission_text_not_found_in_recent_user_turns",
+        ),
+        (
+            "fixture_hallucination_peerreview_tier1_clean.jsonl",
+            DECISION_ALLOW,
+            "tier1_exact_substring",
+        ),
+        # Synthetic envelope-exclusion + baseline + malformed
+        (
+            "fixture_envelope_exclusion_teammate.jsonl",
+            DECISION_DENY,
+            "no_matching_user_message_in_scan_window",
+        ),
+        (
+            "fixture_envelope_exclusion_task_notification.jsonl",
+            DECISION_DENY,
+            "no_matching_user_message_in_scan_window",
+        ),
+        (
+            "fixture_benign_no_human_emission.jsonl",
+            DECISION_ALLOW,
+            "no_human_emission",
+        ),
+        (
+            "fixture_malformed_jsonl.jsonl",
+            DECISION_DENY,
+            "human_emission_more_recent_than_user_turn",
+        ),
+    ],
+)
+def test_fixture_corpus_evaluations(fixture_name, expected_decision, expected_reason):
+    path = FIXTURE_DIR / fixture_name
+    assert path.exists(), f"missing fixture: {path}"
+    with open(path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    decision, reason = evaluate_transcript(lines)
+    assert (decision, reason) == (expected_decision, expected_reason), (
+        f"{fixture_name}: got ({decision!r}, {reason!r}), "
+        f"expected ({expected_decision!r}, {expected_reason!r})"
+    )
+
+
+def test_fixture_corpus_directory_exists():
+    assert FIXTURE_DIR.is_dir(), (
+        f"hallucination_gate fixture directory missing: {FIXTURE_DIR}"
+    )
+
+
+def test_fixture_corpus_minimum_cardinality():
+    # 5 captured + 4 synthetic = 9 fixtures. Floor against accidental
+    # deletion of captured-from-production data.
+    fixtures = list(FIXTURE_DIR.glob("fixture_*.jsonl"))
+    assert len(fixtures) >= 8, (
+        f"hallucination_gate fixture count below floor: {len(fixtures)}"
+    )

@@ -31,16 +31,53 @@ SACROSANCT failure semantics (mirrors merge_guard_pre / bootstrap_gate):
 Audit anchor: every DENY output carries `hookEventName: "PreToolUse"`;
 the harness silently fails open without it.
 
-Known v1 limitations (see module-load docstring expansion in later
-commit + hook docstring referenced from issue tracker):
-  - Skill is non-hookable under PreToolUse; gate covers Bash only.
-  - Wrapper-class hallucination (fake <system-reminder> emitted as
-    assistant text) is out of scope; cryptographic-sentinel defense
-    handles that class.
-  - Recursive hallucination (same text emitted twice across a genuine
-    user message landing in between) is out of scope.
-  - AskUserQuestion answer descent into tool_result.content arrays
-    deferred to v2; covered for Bash ops via merge_guard token system.
+Known v1 limitations:
+
+  1. Skill is non-hookable under PreToolUse. The gate covers Bash only.
+     Skill calls (e.g., voluntary self-refusal preludes on destructive
+     skills) require a separate enforcement path. Mitigation: the
+     SACROSANCT AskUserQuestion-discipline framework can be extended
+     to require explicit AUQ before each destructive Skill invocation.
+
+  2. Wrapper-class hallucination. The orchestrator can emit a fake
+     `<system-reminder>` as an assistant text block. This gate inspects
+     for the literal `Human:` substring in assistant text but does NOT
+     detect spoofed platform-injected wrappers. Cryptographic sentinel
+     defense is the right mechanism for that class.
+
+  3. Recursive hallucination. If the orchestrator hallucinates the SAME
+     text twice (once at gate-fire time, blocked; then again after a
+     genuine user message containing the same text lands), the second
+     evaluation passes the temporal anchor. The gate cannot distinguish
+     re-emission from genuine authorization. Low realism in the current
+     corpus; FN cost > FP cost favors the temporal-anchor approach
+     despite the gap.
+
+  4. AskUserQuestion answer descent. AUQ answers arrive as `type=user`
+     entries with array content (not string) embedded in tool_result
+     blocks. The gate skips array-content user entries. For Bash
+     destructive ops, the merge_guard token system absorbs AUQ-class
+     authorizations differently (token file, not transcript-grep).
+
+  5. Tier-3 paraphrase matching deferred. The empirical corpus is
+     verbatim echoes; no paraphrasing calibration data. Tier 1 (exact
+     substring) + Tier 2 (case-fold + whitespace-collapse) only in v1.
+     Tier-miss with passing temporal anchor produces WARN (advisory),
+     not DENY — paraphrase-class FP is preferred over silent allow.
+
+  6. Scan window bound. 500-line backward scan may miss far-back
+     genuine authorizations ("go ahead with all merges for the rest of
+     the session"). The no-matching-user-turn case will DENY in this
+     scenario; the user must re-authorize via AskUserQuestion (which
+     flows through the merge_guard token path).
+
+  7. Assistant explanatory mentions of past Human: content. If the
+     assistant emits prose quoting a prior `Human:` directive (e.g.,
+     "the user wrote 'Human: yes' earlier") AFTER the genuine user turn,
+     the gate latches onto the quoted suffix as the hallucinated text.
+     Substring tier-1/2 typically miss (the quote has extra surrounding
+     text), producing WARN. This is acceptable v1 behavior — the
+     destructive op is not blocked, just flagged.
 
 Input: JSON from stdin with tool_name, tool_input, transcript_path, cwd.
 Output: JSON with `suppressOutput` (allow), `permissionDecision` (deny),
