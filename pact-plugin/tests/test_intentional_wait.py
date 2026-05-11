@@ -801,6 +801,52 @@ class TestSelfCompleteExemptAgentTypesImmutability:
             KNOWN_REASONS.add("awaiting_something_new")
 
 
+class TestTeachbackExemptAgentTypesConstant:
+    """Third agentType-keyed carve-out frozenset, parallel structure to
+    SELF_COMPLETE_EXEMPT_AGENT_TYPES and WAKE_EXCLUDED_AGENT_TYPES. Membership:
+    {pact-secretary}. Surface: teachback-gated dispatch (Task A skipped).
+    """
+
+    def test_is_frozenset(self):
+        from shared.intentional_wait import TEACHBACK_EXEMPT_AGENT_TYPES
+
+        assert isinstance(TEACHBACK_EXEMPT_AGENT_TYPES, frozenset)
+
+    def test_contains_pact_secretary(self):
+        from shared.intentional_wait import TEACHBACK_EXEMPT_AGENT_TYPES
+
+        assert "pact-secretary" in TEACHBACK_EXEMPT_AGENT_TYPES
+
+    def test_excludes_other_agent_types(self):
+        from shared.intentional_wait import TEACHBACK_EXEMPT_AGENT_TYPES
+
+        assert "pact-auditor" not in TEACHBACK_EXEMPT_AGENT_TYPES
+        assert "pact-backend-coder" not in TEACHBACK_EXEMPT_AGENT_TYPES
+        assert "pact-test-engineer" not in TEACHBACK_EXEMPT_AGENT_TYPES
+
+
+class TestTeachbackExemptAgentTypesImmutability:
+    """frozenset chosen specifically to prevent accidental mutation; pin that."""
+
+    def test_add_raises_attribute_error(self):
+        from shared.intentional_wait import TEACHBACK_EXEMPT_AGENT_TYPES
+
+        with pytest.raises(AttributeError):
+            TEACHBACK_EXEMPT_AGENT_TYPES.add("new-agent-type")
+
+    def test_remove_raises_attribute_error(self):
+        from shared.intentional_wait import TEACHBACK_EXEMPT_AGENT_TYPES
+
+        with pytest.raises(AttributeError):
+            TEACHBACK_EXEMPT_AGENT_TYPES.remove("pact-secretary")
+
+    def test_clear_raises_attribute_error(self):
+        from shared.intentional_wait import TEACHBACK_EXEMPT_AGENT_TYPES
+
+        with pytest.raises(AttributeError):
+            TEACHBACK_EXEMPT_AGENT_TYPES.clear()
+
+
 class TestKnownReasonsLiteralRegressionGuard:
     """Pin the exact set of known reasons. Any silent removal/rename must fail loudly.
 
