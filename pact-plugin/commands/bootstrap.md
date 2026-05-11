@@ -17,13 +17,11 @@ Read `team_name` from the **Current Session** block in the project's `CLAUDE.md`
 
 ## Step 2 — Spawn `pact-secretary`
 
-Spawn the session secretary using the Teachback-Gated Dispatch below (See persona §Agent Teams Dispatch for the canonical pattern applied to other dispatches):
+Spawn the session secretary using single-task dispatch — the `pact-secretary` agentType is exempt from the teachback gate via `TEACHBACK_EXEMPT_AGENT_TYPES` (`shared/intentional_wait.py`). No Task A teachback round-trip; the secretary's work is rote and skill-defined (session briefing at spawn, HANDOFF harvest at workflow boundaries per pact-handoff-harvest skill, memory queries via SendMessage).
 
-1. `TaskCreate(subject="secretary: TEACHBACK for session briefing", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A
-2. `TaskCreate(subject="secretary: Session briefing + HANDOFF readiness", description="<full mission: deliver session briefing on spawn, answer memory queries during the session, process HANDOFFs at workflow boundaries; CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES per the orchestrator persona §13 Recommended Agent Prompting Structure>")` — Task B
-3. `TaskUpdate(A_id, owner="secretary", addBlocks=[B_id])`
-4. `TaskUpdate(B_id, owner="secretary", addBlockedBy=[A_id])`
-5. `Agent(name="secretary", team_name="{team_name}", subagent_type="pact-secretary", prompt="YOUR PACT ROLE: teammate (secretary).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
+1. `TaskCreate(subject="secretary: Session briefing + HANDOFF readiness", description="<full mission: deliver session briefing on spawn, answer memory queries during the session, process HANDOFFs at workflow boundaries; CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES per the orchestrator persona §13 Recommended Agent Prompting Structure>")` — single work task
+2. `TaskUpdate(task_id, owner="secretary")` — assign to the secretary; no `addBlockedBy` (no teachback gate)
+3. `Agent(name="secretary", team_name="{team_name}", subagent_type="pact-secretary", prompt="YOUR PACT ROLE: teammate (secretary).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
     - **Use `subagent_type="pact-secretary"` and the canonical `name="secretary"` — the literal name is load-bearing**.
 
 The secretary delivers the session briefing at spawn, answers memory queries during the session, and processes HANDOFFs at workflow boundaries. Memory queries from any other agent are blocked until the secretary is alive.
