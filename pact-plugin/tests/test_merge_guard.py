@@ -193,6 +193,76 @@ class TestExtractContext:
         ctx = extract_context("Should I merge this branch?")
         assert "pr_number" not in ctx
 
+    # Quoted-command path (canonical, post-Bug-B). When the AskUserQuestion
+    # text embeds a literal command in backticks/quotes, the SAME read-side
+    # classifier is applied — guaranteeing bidirectional agreement.
+
+    def test_quoted_backtick_command_classifies_merge(self):
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Merge `gh pr merge 42`?")
+        assert ctx["operation_type"] == "merge"
+
+    def test_quoted_single_quote_command_classifies_close(self):
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Should I run 'gh pr close 42 --delete-branch'?")
+        assert ctx["operation_type"] == "close"
+
+    def test_quoted_command_classifies_force_push(self):
+        """Joe's case: bare `git push origin main` classifies as force-push
+        via the quoted-command path (the embedded literal is the source of
+        truth; the surrounding prose is irrelevant)."""
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Confirm `git push origin main` with commit a548dd0c?")
+        assert ctx["operation_type"] == "force-push"
+
+    def test_quoted_command_classifies_branch_delete(self):
+        """mj's case: prose mentions 'the merged feature branch' but the
+        quoted command is `git branch -D feat/x` — classifies as
+        branch-delete via the quoted path, not as merge."""
+        from merge_guard_post import extract_context
+
+        ctx = extract_context(
+            "`git branch -D feat/teachback-exempt-secretary` "
+            "to force-delete the merged feature branch?"
+        )
+        assert ctx["operation_type"] == "branch-delete"
+
+    def test_fallback_ladder_classifies_when_no_quoted_command(self):
+        """When no quoted command is present, the keyword ladder fallback
+        still classifies legacy/non-conforming prose."""
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Should I merge PR 42 into main?")
+        assert ctx["operation_type"] == "merge"
+
+    def test_fallback_ladder_close_precedes_merge(self):
+        """Close keywords win over a bare 'merge' mention in the fallback ladder."""
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Close PR 42 (pull request from the merge queue)?")
+        assert ctx["operation_type"] == "close"
+
+    def test_fallback_ladder_branch_delete_precedes_merge(self):
+        """mj's case via the fallback path: prose with both 'branch -D' and
+        'merged' classifies as branch-delete because the reordered ladder
+        puts unambiguous syntactic rules before fuzzy bare-word merge."""
+        from merge_guard_post import extract_context
+
+        ctx = extract_context(
+            "Force-delete the merged feature branch via branch -D feat/x?"
+        )
+        assert ctx["operation_type"] == "branch-delete"
+
+    def test_fallback_ladder_force_push_precedes_merge(self):
+        """Fallback ladder: force-push keyword wins over bare 'merge'."""
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Force-push the merge-base override to origin?")
+        assert ctx["operation_type"] == "force-push"
+
 
 class TestWriteToken:
     """Tests for merge_guard_post.write_token().
@@ -9159,3 +9229,72 @@ class TestExtractPRNumberLongFlagValueGuard:
 
         assert _extract_pr_number("ls -la") is None
         assert _extract_pr_number("gh pr merge --auto") is None  # no positional
+
+
+class TestSymmetryContract:
+    """Bidirectional agreement between extract_context (write-side) and
+    detect_command_operation_type (read-side).
+
+    Symmetry contract: for every operation_type X, if the AskUserQuestion
+    prose embeds a literal command C in a quoted region, then
+    extract_context(question)["operation_type"] == detect_command_operation_type(C)
+    by construction — both sides delegate to the SAME shared classifier.
+    These tests pin that invariant per op_type with one realistic prose
+    pairing each, plus Joe's and mj's empirical cases.
+    """
+
+    def _assert_pair(self, question: str, command: str, expected: str) -> None:
+        from merge_guard_post import extract_context
+        from shared.merge_guard_common import detect_command_operation_type
+
+        write_side = extract_context(question).get("operation_type")
+        read_side = detect_command_operation_type(command)
+        assert read_side == expected, (
+            f"detect_command_operation_type({command!r}) returned {read_side!r}, "
+            f"expected {expected!r}"
+        )
+        assert write_side == expected, (
+            f"extract_context returned {write_side!r}, expected {expected!r}"
+        )
+        assert write_side == read_side, "symmetry violation between write-side and read-side"
+
+    def test_symmetry_merge(self):
+        self._assert_pair(
+            "Merge `gh pr merge 42`?",
+            "gh pr merge 42",
+            "merge",
+        )
+
+    def test_symmetry_close(self):
+        self._assert_pair(
+            "Close PR via `gh pr close 42`?",
+            "gh pr close 42",
+            "close",
+        )
+
+    def test_symmetry_force_push(self):
+        self._assert_pair(
+            "Confirm `git push --force origin main`?",
+            "git push --force origin main",
+            "force-push",
+        )
+
+    def test_symmetry_force_push_joes_case(self):
+        """Joe's empirical case: bare `git push origin main` is force-push
+        on the read side; the quoted-command path delegates and agrees."""
+        self._assert_pair(
+            "Confirm `git push origin main` with commit a548dd0c?",
+            "git push origin main",
+            "force-push",
+        )
+
+    def test_symmetry_branch_delete_mjs_case(self):
+        """mj's empirical case: prose mentions 'the merged feature branch'
+        but the quoted command is the unambiguous syntactic shape; both
+        sides agree on branch-delete."""
+        self._assert_pair(
+            "`git branch -D feat/teachback-exempt-secretary` to "
+            "force-delete the merged feature branch?",
+            "git branch -D feat/teachback-exempt-secretary",
+            "branch-delete",
+        )

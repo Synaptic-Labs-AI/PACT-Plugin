@@ -50,7 +50,25 @@ try:
         TOKEN_DIR,
         TOKEN_PREFIX,
         cleanup_consumed_tokens as _cleanup_consumed_tokens,
+        detect_command_operation_type,
+        # Regex prefix constants relocated to shared so the read-side
+        # DANGEROUS_PATTERNS bank and the shared classifier compose against
+        # identical prefix semantics (#720 Bug B).
+        _GH_GLOBAL_FLAGS,
+        _GH_FLAG_TOKENS,
+        _GIT_GLOBAL_FLAGS,
+        _GH_PREFIX,
+        _GIT_PREFIX,
+        _GH_API_PREFIX,
+        _GH_PR_MERGE_RE,
+        _GH_PR_CLOSE_RE,
     )
+
+    # Back-compat alias for the legacy module-private name.
+    # Tests and internal callers continue to import
+    # `_detect_command_operation_type` from `merge_guard_pre`; the canonical
+    # implementation now lives in `shared.merge_guard_common` (see #720 Bug B).
+    _detect_command_operation_type = detect_command_operation_type
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     # Hand-built deny output using only stdlib (json, sys). Cannot rely on any
     # constants or helpers from the failed imports.
@@ -70,20 +88,9 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
     )
     sys.exit(2)
 
-# Optional global flags between CLI tool and subcommand.
-# (?:\S+\s+)* matches zero or more flag+value tokens (e.g., --repo owner/repo).
-_GH_GLOBAL_FLAGS = r"(?:\S+\s+)*"  # broad — keep for DANGEROUS_PATTERNS (matches any token)
-# Tight variant for PR-number extraction (#665): only flag-shaped tokens
-# (`-x`, `--long`, optionally `--flag value`). Prevents the capture group
-# from greedily walking past the PR positional into heredoc body content,
-# 2>&1 redirects, or trailing positional-digit tokens.
-_GH_FLAG_TOKENS = r"(?:-\S*(?:\s+\S+)?\s+)*"
-_GIT_GLOBAL_FLAGS = r"(?:\S+\s+)*"
-
-# Composed prefixes for DRY usage across all patterns.
-_GH_PREFIX = r"\bgh\s+" + _GH_GLOBAL_FLAGS
-_GIT_PREFIX = r"\bgit\s+" + _GIT_GLOBAL_FLAGS
-_GH_API_PREFIX = _GH_PREFIX + r"api\b"
+# Note: _GH_GLOBAL_FLAGS, _GH_FLAG_TOKENS, _GIT_GLOBAL_FLAGS, _GH_PREFIX,
+# _GIT_PREFIX, _GH_API_PREFIX, _GH_PR_MERGE_RE, _GH_PR_CLOSE_RE are imported
+# from shared.merge_guard_common above (#720 Bug B relocation).
 
 # Pre-serialized JSON for allow-path output: tells Claude Code UI to suppress
 # the hook display instead of showing "hook error (No output)".
@@ -176,9 +183,11 @@ try:
     re.compile(_GIT_PREFIX + r"push\s+(?:-\S+\s+)*\S+\s+master(?!:)\b"),
 ]
 
-    # Pre-compiled patterns for helper functions (consistent with DANGEROUS_PATTERNS style).
-    _GH_PR_MERGE_RE = re.compile(_GH_PREFIX + r"pr\s+merge\b")
-    _GH_PR_CLOSE_RE = re.compile(_GH_PREFIX + r"pr\s+close\b")
+    # _GH_PR_MERGE_RE and _GH_PR_CLOSE_RE relocated to shared.merge_guard_common
+    # (used only by the operation-type classifier, now also relocated). They
+    # are imported back into this module at the top so any direct callers in
+    # this file continue to resolve them.
+
     # PR number extraction: allows optional subcommand flags (e.g., --admin, --squash)
     # between merge/close and the PR number.
     #
@@ -649,78 +658,6 @@ def _consume_token(token_path: str) -> bool:
     except OSError:
         # Unexpected error — fail closed (return False to block)
         return False
-
-
-def _detect_command_operation_type(command: str) -> str | None:
-    """Detect the operation type of a dangerous command.
-
-    Symmetric with `extract_context()` in merge_guard_post.py: both must
-    recognize the SAME four operation classes so write-side tokens and
-    read-side commands compare on a common axis.
-
-    Returns:
-        "merge"         — gh pr merge
-        "close"         — gh pr close (any variant)
-        "force-push"    — git push --force / git push -f (excludes --force-with-lease)
-        "branch-delete" — git branch -D / git branch --delete --force / gh pr close --delete-branch
-        None            — destructive shape not in the recognized set
-                          (caller treats None as "untyped command", which the
-                          tightened token-match semantic now treats as a
-                          deny-on-typed-token signal rather than permissive)
-    """
-    # Order matters: gh pr close --delete-branch is BOTH a close and a
-    # branch-delete operation; the AskUserQuestion-side classifier
-    # (extract_context) tags it as "close" in priority order, so match
-    # the same precedence here for write/read symmetry.
-    if _GH_PR_MERGE_RE.search(command):
-        return "merge"
-    if _GH_PR_CLOSE_RE.search(command):
-        # gh pr close --delete-branch is a close-type operation per the
-        # write-side classifier. Branch-delete-via-pr-close is folded into
-        # the close class on both sides for symmetric authorization.
-        return "close"
-    # force-push: git push ... --force (excludes --force-with-lease which
-    # the existing DANGEROUS_PATTERNS treats as safe). The negative
-    # lookahead matches the DANGEROUS_PATTERNS L127 form.
-    if re.search(_GIT_PREFIX + r"push\s+.*--force(?!-with-lease)\b", command):
-        return "force-push"
-    if re.search(_GIT_PREFIX + r"push\s+.*-f\b", command):
-        return "force-push"
-    if re.search(_GIT_PREFIX + r"push\s+-[a-zA-Z]*f", command):
-        return "force-push"
-    # Direct push to default branch is force-push-class (bypasses PR
-    # review). Match the existing DANGEROUS_PATTERNS forms but require
-    # the dangerous shape to actually fire — the negative-lookahead-free
-    # pattern `git push X main` would over-match safer flows. Use the
-    # same `(?!:)` refspec exclusion as DANGEROUS_PATTERNS L175-176.
-    if re.search(_GIT_PREFIX + r"push\s+\S+\s+HEAD:(?:main|master)\b", command):
-        return "force-push"
-    if re.search(
-        _GIT_PREFIX + r"push\s+(?:-(?!-force-with-lease\b)\S+\s+)*\S+\s+(?:main|master)(?!:)\b",
-        command,
-    ):
-        return "force-push"
-    # API-based ref-mutation forms (gh api / curl / wget targeting
-    # /git/refs with mutating HTTP methods) classify by HTTP semantic:
-    # DELETE → branch-delete class (removes a ref)
-    # PATCH/POST/PUT → force-push class (rewrites a ref without PR review)
-    # Symmetric with how a force-push or branch-delete token from
-    # extract_context() would authorize the equivalent CLI form.
-    _is_api_form = re.search(r"\b(?:gh\s+api|curl|wget)\b", command, re.IGNORECASE)
-    if _is_api_form and "git/refs" in command:
-        if re.search(r"\bDELETE\b", command):
-            return "branch-delete"
-        if re.search(r"\b(?:PATCH|POST|PUT)\b", command):
-            return "force-push"
-    # branch-delete: git branch -D, git branch --delete --force,
-    # or git branch --force --delete (matches DANGEROUS_PATTERNS L131-133).
-    if re.search(_GIT_PREFIX + r"branch\s+.*-D\b", command):
-        return "branch-delete"
-    if re.search(_GIT_PREFIX + r"branch\s+.*--delete\s+--force\b", command):
-        return "branch-delete"
-    if re.search(_GIT_PREFIX + r"branch\s+--force\s+--delete\b", command):
-        return "branch-delete"
-    return None
 
 
 # Allowlist of `gh pr merge|close` long-form flags KNOWN to take a value.

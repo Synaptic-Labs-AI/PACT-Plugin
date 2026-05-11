@@ -55,6 +55,7 @@ from .merge_guard_common import (
     TOKEN_DIR,
     TOKEN_PREFIX,
     cleanup_consumed_tokens,
+    detect_command_operation_type,
 )
 from .error_output import hook_error_json
 from .gh_helpers import check_pr_state
@@ -137,6 +138,7 @@ __all__ = [
     "TOKEN_DIR",
     "TOKEN_PREFIX",
     "cleanup_consumed_tokens",
+    "detect_command_operation_type",
     "hook_error_json",
     "check_pr_state",
     "PACT_AGENTS",
