@@ -3554,7 +3554,7 @@ class TestAPIBypassAuthorizationFlow:
         from merge_guard_post import write_token
         from merge_guard_pre import check_merge_authorization
 
-        write_token({"operation_type": "api-delete-ref"}, token_dir=tmp_path)
+        write_token({"operation_type": "branch-delete"}, token_dir=tmp_path)
 
         result = check_merge_authorization(
             "gh api -X DELETE repos/owner/repo/git/refs/heads/feature",
@@ -3567,7 +3567,7 @@ class TestAPIBypassAuthorizationFlow:
         from merge_guard_post import write_token
         from merge_guard_pre import check_merge_authorization
 
-        write_token({"operation_type": "api-patch-main"}, token_dir=tmp_path)
+        write_token({"operation_type": "force-push"}, token_dir=tmp_path)
 
         result = check_merge_authorization(
             "gh api -X PATCH repos/owner/repo/git/refs/heads/main -f sha=abc",
@@ -3580,7 +3580,7 @@ class TestAPIBypassAuthorizationFlow:
         from merge_guard_post import write_token
         from merge_guard_pre import check_merge_authorization
 
-        write_token({"operation_type": "api-patch-ref"}, token_dir=tmp_path)
+        write_token({"operation_type": "force-push"}, token_dir=tmp_path)
 
         result = check_merge_authorization(
             "curl -X PATCH https://api.github.com/repos/owner/repo/git/refs/heads/feature",
@@ -4433,7 +4433,7 @@ class TestDirectPushToDefaultBranch:
         from merge_guard_post import write_token
         from merge_guard_pre import check_merge_authorization
 
-        write_token({"operation_type": "push-main"}, token_dir=tmp_path)
+        write_token({"operation_type": "force-push"}, token_dir=tmp_path)
 
         result = check_merge_authorization("git push origin main", token_dir=tmp_path)
         assert result is None  # Allowed
@@ -7448,15 +7448,68 @@ class TestDetectCommandOperationType:
 
         assert _detect_command_operation_type("gh pr close 42") == "close"
 
-    def test_force_push_returns_none(self):
+    def test_force_push_returns_force_push(self):
         from merge_guard_pre import _detect_command_operation_type
 
-        assert _detect_command_operation_type("git push --force origin main") is None
+        assert _detect_command_operation_type("git push --force origin main") == "force-push"
 
-    def test_branch_delete_returns_none(self):
+    def test_branch_delete_returns_branch_delete(self):
         from merge_guard_pre import _detect_command_operation_type
 
-        assert _detect_command_operation_type("git branch -D feature") is None
+        assert _detect_command_operation_type("git branch -D feature") == "branch-delete"
+
+    def test_force_push_short_flag(self):
+        from merge_guard_pre import _detect_command_operation_type
+
+        assert _detect_command_operation_type("git push -f origin main") == "force-push"
+
+    def test_force_push_with_lease_to_topic_branch_returns_none(self):
+        """git push --force-with-lease (without main/master target) is the SAFE form.
+
+        The detector classifies bare --force / -f as force-push but
+        deliberately excludes --force-with-lease (matches the safe-form
+        carve-out in DANGEROUS_PATTERNS). Direct push to main is dangerous
+        but not classified by the op-type detector — only explicit
+        --force / -f forms produce a force-push tag for token-authorization
+        purposes.
+        """
+        from merge_guard_pre import _detect_command_operation_type
+
+        assert _detect_command_operation_type("git push --force-with-lease origin feature") is None
+
+    def test_api_ref_delete_classified_as_branch_delete(self):
+        """API DELETE on git/refs is a branch-delete class operation."""
+        from merge_guard_pre import _detect_command_operation_type
+
+        assert _detect_command_operation_type(
+            "gh api -X DELETE repos/owner/repo/git/refs/heads/feature"
+        ) == "branch-delete"
+
+    def test_api_ref_patch_classified_as_force_push(self):
+        from merge_guard_pre import _detect_command_operation_type
+
+        assert _detect_command_operation_type(
+            "gh api -X PATCH repos/owner/repo/git/refs/heads/main -f sha=abc"
+        ) == "force-push"
+
+    def test_curl_ref_patch_classified_as_force_push(self):
+        from merge_guard_pre import _detect_command_operation_type
+
+        assert _detect_command_operation_type(
+            "curl -X PATCH https://api.github.com/repos/o/r/git/refs/heads/main"
+        ) == "force-push"
+
+    def test_branch_delete_force_long_form(self):
+        from merge_guard_pre import _detect_command_operation_type
+
+        assert _detect_command_operation_type("git branch --delete --force feature") == "branch-delete"
+
+    def test_unknown_command_returns_none(self):
+        """Non-destructive shapes correctly return None."""
+        from merge_guard_pre import _detect_command_operation_type
+
+        assert _detect_command_operation_type("ls -la") is None
+        assert _detect_command_operation_type("git status") is None
 
 
 # =============================================================================
@@ -8825,3 +8878,195 @@ class TestEvalHeredocRejection:
         cmd = "eval $(cat <<HEREDOC\ngh pr merge 999 --admin\nHEREDOC\n)"
         result = check_merge_authorization(cmd, token_dir=tmp_path)
         assert result is not None, "eval+heredoc must be denied without token"
+
+
+class TestCrossOperationAuthorizationDenied:
+    """Pin the F-1 cross-operation authorization closure.
+
+    Cycle-2 added force-push and branch-delete to extract_context() (the
+    write side). Cycle-3 mirrors the symmetric coverage in
+    _detect_command_operation_type (the read side) and tightens the
+    cross-op comparison so a typed token CANNOT authorize a command of a
+    different operation class. Pre-fix, the read-side detector returned
+    None for force-push/branch-delete, and the comparison fell through
+    permissively (cmd_op_type=None → no comparison), allowing any typed
+    token to authorize any destructive command in those classes.
+    """
+
+    def test_merge_token_does_not_authorize_force_push(self, tmp_path):
+        """The empirical bypass: merge-token + force-push command → deny.
+
+        Pre-fix: cmd_op_type was None for `git push --force`, so the
+        token's `operation_type=merge` comparison was skipped, and the
+        merge token authorized the force-push. Post-fix: cmd_op_type is
+        `force-push`, the comparison fires, and the typed-mismatch denies.
+        """
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        write_token({"operation_type": "merge", "pr_number": "100"}, token_dir=tmp_path)
+        result = check_merge_authorization(
+            "git push --force origin main", token_dir=tmp_path
+        )
+        assert result is not None
+        assert "does not match" in result.lower() or "approval" in result.lower()
+
+    def test_force_push_token_does_not_authorize_merge(self, tmp_path):
+        """Symmetric inverse: force-push token + gh pr merge → deny."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        write_token({"operation_type": "force-push"}, token_dir=tmp_path)
+        result = check_merge_authorization(
+            "gh pr merge 42 --squash", token_dir=tmp_path
+        )
+        assert result is not None
+        assert "does not match" in result.lower() or "approval" in result.lower()
+
+    def test_branch_delete_token_does_not_authorize_close(self, tmp_path):
+        """branch-delete token + gh pr close → deny.
+
+        gh pr close (without --delete-branch) is the close op-class;
+        a branch-delete token cannot authorize it.
+        """
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        write_token({"operation_type": "branch-delete"}, token_dir=tmp_path)
+        # bare close is not a DANGEROUS_PATTERNS hit; use --delete-branch
+        # which IS dangerous and is classified as "close" per the
+        # extract_context precedence. The token op_type=branch-delete
+        # mismatches the cmd op_type=close.
+        result = check_merge_authorization(
+            "gh pr close 42 --delete-branch", token_dir=tmp_path
+        )
+        assert result is not None
+        assert "does not match" in result.lower() or "approval" in result.lower()
+
+    def test_unknown_op_command_with_typed_token_denied(self, tmp_path):
+        """Typed token + dangerous-but-unrecognized command shape → deny.
+
+        The strict-match semantic: if the token has an operation_type but
+        the command's shape doesn't match any of the known op classes, the
+        comparison fails closed rather than falling through permissively.
+        """
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        write_token({"operation_type": "merge"}, token_dir=tmp_path)
+        # gh api PATCH on /merge endpoint is dangerous (DANGEROUS_PATTERNS L142)
+        # but my detector classifies it as None (only git/refs API forms map
+        # to force-push/branch-delete). Typed token vs untyped cmd → deny.
+        result = check_merge_authorization(
+            "gh api -X PATCH repos/o/r/merges -f base=main -f head=feature",
+            token_dir=tmp_path,
+        )
+        assert result is not None
+
+    def test_matching_op_type_still_authorizes(self, tmp_path):
+        """Regression-protection: matching op_type still allows execution."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        write_token({"operation_type": "force-push"}, token_dir=tmp_path)
+        result = check_merge_authorization(
+            "git push --force origin feature", token_dir=tmp_path
+        )
+        assert result is None, "matching force-push token must authorize git push --force"
+
+
+class TestExtractPRNumberLongFlagValueGuard:
+    """Pin the F3 long-flag-value defensive check.
+
+    `_GH_PR_NUMBER_RE` matches `gh pr merge --max-retries 5 --auto` and
+    captures `5` as the PR number — but `5` is the value of `--max-retries`,
+    not a positional. The wrapper `_extract_pr_number()` rejects digits
+    that are immediately preceded by a long-form flag, returning None
+    (which the caller treats as ambiguous-permissive on the pr_number
+    axis). No current `gh pr merge|close` flag takes a digit value, so
+    the realistic risk is theoretical — this is defense-in-depth post the
+    cycle-3 strict-match enforcement.
+    """
+
+    def test_long_flag_numeric_value_not_captured(self):
+        """`--max-retries 5 --auto`: `5` is the flag's value, not a PR number."""
+        from merge_guard_pre import _extract_pr_number
+
+        cmd = "gh pr merge --max-retries 5 --auto"
+        assert _extract_pr_number(cmd) is None
+
+    def test_long_flag_then_real_positional_captures_positional(self):
+        """`--max-retries 5 999`: `999` is the real positional, captured correctly."""
+        from merge_guard_pre import _extract_pr_number
+
+        cmd = "gh pr merge --max-retries 5 999 --squash"
+        assert _extract_pr_number(cmd) == "999"
+
+    def test_value_less_long_flag_before_positional_captures_positional(self):
+        """`--auto 999`: `--auto` is value-less, so `999` IS the positional.
+
+        The allowlist `_GH_PR_VALUE_TAKING_FLAGS` excludes value-less
+        flags like `--admin`, `--auto`, `--squash`. A digit immediately
+        following one of those flags IS the PR positional and is
+        captured correctly.
+        """
+        from merge_guard_pre import _extract_pr_number
+
+        cmd = "gh pr merge --auto 999"
+        assert _extract_pr_number(cmd) == "999"
+
+    def test_admin_flag_then_positional_unchanged(self):
+        """Regression-protection: `--admin 99` still captures 99 (--admin is value-less)."""
+        from merge_guard_pre import _extract_pr_number
+
+        assert _extract_pr_number("gh pr merge --admin 99") == "99"
+
+    def test_known_value_taking_flag_blocks_capture(self):
+        """`--body 123 --auto`: `--body` IS in the allowlist; `123` rejected."""
+        from merge_guard_pre import _extract_pr_number
+
+        cmd = "gh pr merge --body 123 --auto"
+        assert _extract_pr_number(cmd) is None
+
+    def test_subject_flag_blocks_capture(self):
+        """`--subject 999`: `--subject` is in the allowlist."""
+        from merge_guard_pre import _extract_pr_number
+
+        cmd = "gh pr merge --subject 999"
+        assert _extract_pr_number(cmd) is None
+
+    def test_positional_then_long_flag_with_numeric_value_captures_positional(self):
+        """`999 --max-retries 5`: `999` is the positional (matched first)."""
+        from merge_guard_pre import _extract_pr_number
+
+        cmd = "gh pr merge 999 --max-retries 5"
+        assert _extract_pr_number(cmd) == "999"
+
+    def test_short_flag_with_numeric_value_not_blocked(self):
+        """Short flags (`-n 5`) are not checked by the defensive guard.
+
+        The guard is narrowly scoped to long-form flags. Short flags are
+        combinable and rarely take numeric values; if a real `gh` short
+        flag emerges that takes a digit value, this test pins the
+        current narrow-scope behavior so any future widening is
+        reviewed in lockstep.
+        """
+        from merge_guard_pre import _extract_pr_number
+
+        cmd = "gh pr merge -n 5 999"
+        # 999 is captured as the positional; the regex's _GH_FLAG_TOKENS
+        # walk consumed `-n 5` as a flag pair, leaving 999 to capture.
+        assert _extract_pr_number(cmd) == "999"
+
+    def test_simple_positional_unchanged(self):
+        """Regression-protection: simple `gh pr merge 999` still works."""
+        from merge_guard_pre import _extract_pr_number
+
+        assert _extract_pr_number("gh pr merge 999 --squash") == "999"
+
+    def test_no_pr_match_returns_none(self):
+        """No PR-number match → None (regression-protection)."""
+        from merge_guard_pre import _extract_pr_number
+
+        assert _extract_pr_number("ls -la") is None
+        assert _extract_pr_number("gh pr merge --auto") is None  # no positional

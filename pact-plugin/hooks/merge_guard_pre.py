@@ -645,15 +645,137 @@ def _consume_token(token_path: str) -> bool:
 def _detect_command_operation_type(command: str) -> str | None:
     """Detect the operation type of a dangerous command.
 
+    Symmetric with `extract_context()` in merge_guard_post.py: both must
+    recognize the SAME four operation classes so write-side tokens and
+    read-side commands compare on a common axis.
+
     Returns:
-        "merge" for gh pr merge, "close" for gh pr close (any variant),
-        or None for other operation types (force push, branch delete, etc.)
+        "merge"         — gh pr merge
+        "close"         — gh pr close (any variant)
+        "force-push"    — git push --force / git push -f (excludes --force-with-lease)
+        "branch-delete" — git branch -D / git branch --delete --force / gh pr close --delete-branch
+        None            — destructive shape not in the recognized set
+                          (caller treats None as "untyped command", which the
+                          tightened token-match semantic now treats as a
+                          deny-on-typed-token signal rather than permissive)
     """
+    # Order matters: gh pr close --delete-branch is BOTH a close and a
+    # branch-delete operation; the AskUserQuestion-side classifier
+    # (extract_context) tags it as "close" in priority order, so match
+    # the same precedence here for write/read symmetry.
     if _GH_PR_MERGE_RE.search(command):
         return "merge"
     if _GH_PR_CLOSE_RE.search(command):
+        # gh pr close --delete-branch is a close-type operation per the
+        # write-side classifier. Branch-delete-via-pr-close is folded into
+        # the close class on both sides for symmetric authorization.
         return "close"
+    # force-push: git push ... --force (excludes --force-with-lease which
+    # the existing DANGEROUS_PATTERNS treats as safe). The negative
+    # lookahead matches the DANGEROUS_PATTERNS L127 form.
+    if re.search(_GIT_PREFIX + r"push\s+.*--force(?!-with-lease)\b", command):
+        return "force-push"
+    if re.search(_GIT_PREFIX + r"push\s+.*-f\b", command):
+        return "force-push"
+    if re.search(_GIT_PREFIX + r"push\s+-[a-zA-Z]*f", command):
+        return "force-push"
+    # Direct push to default branch is force-push-class (bypasses PR
+    # review). Match the existing DANGEROUS_PATTERNS forms but require
+    # the dangerous shape to actually fire — the negative-lookahead-free
+    # pattern `git push X main` would over-match safer flows. Use the
+    # same `(?!:)` refspec exclusion as DANGEROUS_PATTERNS L175-176.
+    if re.search(_GIT_PREFIX + r"push\s+\S+\s+HEAD:(?:main|master)\b", command):
+        return "force-push"
+    if re.search(
+        _GIT_PREFIX + r"push\s+(?:-(?!-force-with-lease\b)\S+\s+)*\S+\s+(?:main|master)(?!:)\b",
+        command,
+    ):
+        return "force-push"
+    # API-based ref-mutation forms (gh api / curl / wget targeting
+    # /git/refs with mutating HTTP methods) classify by HTTP semantic:
+    # DELETE → branch-delete class (removes a ref)
+    # PATCH/POST/PUT → force-push class (rewrites a ref without PR review)
+    # Symmetric with how a force-push or branch-delete token from
+    # extract_context() would authorize the equivalent CLI form.
+    _is_api_form = re.search(r"\b(?:gh\s+api|curl|wget)\b", command, re.IGNORECASE)
+    if _is_api_form and "git/refs" in command:
+        if re.search(r"\bDELETE\b", command):
+            return "branch-delete"
+        if re.search(r"\b(?:PATCH|POST|PUT)\b", command):
+            return "force-push"
+    # branch-delete: git branch -D, git branch --delete --force,
+    # or git branch --force --delete (matches DANGEROUS_PATTERNS L131-133).
+    if re.search(_GIT_PREFIX + r"branch\s+.*-D\b", command):
+        return "branch-delete"
+    if re.search(_GIT_PREFIX + r"branch\s+.*--delete\s+--force\b", command):
+        return "branch-delete"
+    if re.search(_GIT_PREFIX + r"branch\s+--force\s+--delete\b", command):
+        return "branch-delete"
     return None
+
+
+# Allowlist of `gh pr merge|close` long-form flags KNOWN to take a value.
+# The F3 defensive check only rejects digits preceded by one of these
+# value-taking flags (avoiding false-positives on value-less flags like
+# `--admin`, `--auto`, `--squash` whose positional digit IS the PR).
+#
+# As of `gh` v2 (2026-04 baseline), no real `gh pr merge|close` flag
+# takes a digit value; this allowlist is a forward-compatible defense
+# for hypothetical future flags. `--max-retries` is the canonical
+# example cited in the F3 review (test-engineer-2). Extend this list
+# when `gh` ships a flag that takes a numeric value.
+_GH_PR_VALUE_TAKING_FLAGS = frozenset({
+    # Known string/path-value flags from `gh pr merge --help` /
+    # `gh pr close --help`. Listed here for forward-compat: if any of
+    # these were given a digit value (e.g. `--subject 123`), the
+    # defensive check correctly rejects the digit-as-flag-value capture.
+    "--body",
+    "--body-file",
+    "--subject",
+    "--author-email",
+    "--match-head-commit",
+    "--comment",
+    # Hypothetical future flags. Add here when gh ships one.
+    "--max-retries",
+    "--retry-count",
+    "--timeout",
+})
+
+
+def _extract_pr_number(command: str) -> str | None:
+    """Extract the PR number positional from a `gh pr merge|close` command.
+
+    Wraps `_GH_PR_NUMBER_RE.search()` with a defensive post-extract check
+    that rejects digits which are actually the VALUE of an immediately-
+    preceding value-taking long-form flag (e.g., `--max-retries 5`).
+
+    The defensive check is narrowly scoped to flags in
+    `_GH_PR_VALUE_TAKING_FLAGS`. Value-less flags like `--admin`,
+    `--auto`, `--squash` do NOT trigger the check — a digit immediately
+    after one of them IS the PR positional. This avoids the false-
+    negative class where a real PR positional after a value-less flag
+    would be incorrectly rejected.
+
+    No current `gh pr merge|close` flag takes a digit value, so the
+    realistic risk is theoretical — but this is defense-in-depth post
+    the cycle-3 strict-match enforcement: a typed token would otherwise
+    compare against the wrong digit and emit a confusing
+    "does-not-match" deny. Returning None here lets the comparison fall
+    through to the ambiguous-permissive path on the pr_number axis
+    (op_type strict-match still applies).
+    """
+    match = _GH_PR_NUMBER_RE.search(command)
+    if not match:
+        return None
+    pr_pos = match.start(1)
+    # Inspect the immediately-preceding token for a known value-taking
+    # long-form flag. Match captures the flag name (without trailing
+    # whitespace) so we can look it up in the allowlist.
+    preceding = command[:pr_pos].rstrip()
+    flag_match = re.search(r"(--[\w-]+)$", preceding)
+    if flag_match and flag_match.group(1) in _GH_PR_VALUE_TAKING_FLAGS:
+        return None
+    return match.group(1)
 
 
 def _token_matches_command(token: dict, command: str) -> bool:
@@ -678,19 +800,33 @@ def _token_matches_command(token: dict, command: str) -> bool:
     branch = context.get("branch")
     token_op_type = context.get("operation_type")
 
-    # Check operation type: a merge token should not authorize a close and
-    # vice versa. If either side has no operation_type, skip the check
-    # (ambiguous is permissive for backward compatibility with old tokens).
+    # Cross-operation authorization guard: a typed token (one with a known
+    # operation_type) MUST match the command's detected operation type, OR
+    # the command shape is unrecognized. Symmetric coverage —
+    # `_detect_command_operation_type` recognizes all four classes
+    # (merge / close / force-push / branch-delete) so a missing cmd_op_type
+    # means the destructive shape is outside the recognized set, not a
+    # legitimate "untyped" path. Refuse the cross-op authorization rather
+    # than fall through permissively (the prior fall-through let
+    # token{op=merge} authorize `git push --force` because cmd_op_type was
+    # None — closed by extending the detector + tightening this check).
+    #
+    # Untyped tokens (no operation_type — only shipped pre-cycle-2; should
+    # not occur post-#700 sparse-context guard at write time) still fall
+    # through to the pr_number/branch checks for backward compatibility.
     if token_op_type:
         cmd_op_type = _detect_command_operation_type(command)
-        if cmd_op_type and token_op_type != cmd_op_type:
+        if cmd_op_type is None or token_op_type != cmd_op_type:
             return False
 
-    # If token has a PR number, check gh pr merge/close commands match
+    # If token has a PR number, check gh pr merge/close commands match.
+    # Use _extract_pr_number for the defensive long-flag-value check so a
+    # token's pr_number is not compared against a flag-value digit
+    # (e.g., the `5` in `gh pr merge --max-retries 5 --auto`).
     if pr_number:
-        pr_match = _GH_PR_NUMBER_RE.search(command)
-        if pr_match:
-            return pr_match.group(1) == str(pr_number)
+        cmd_pr = _extract_pr_number(command)
+        if cmd_pr is not None:
+            return cmd_pr == str(pr_number)
 
     # If token has a branch, check branch deletion commands match
     if branch:
