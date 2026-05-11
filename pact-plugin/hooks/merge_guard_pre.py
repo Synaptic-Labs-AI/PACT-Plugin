@@ -433,6 +433,45 @@ def _strip_non_executable_content(command: str) -> str:
     return result
 
 
+def _has_eval_with_heredoc(command: str) -> bool:
+    """Detect eval (or backtick) command-substitution that wraps a heredoc.
+
+    The strip pipeline removes heredoc bodies BEFORE the regex-match phase.
+    An eval-wrapped destructive command inside a heredoc body is therefore
+    invisible to DANGEROUS_PATTERNS by the time matching runs:
+
+        eval $(cat <<HEREDOC
+        gh pr merge 999 --admin
+        HEREDOC
+        )
+
+    After ``_strip_non_executable_content``, the inner ``gh pr merge 999``
+    is gone. The outer eval invokes the heredoc body as a command, which
+    is exactly the destructive operation the merge guard is supposed to
+    intercept. Treat the eval+heredoc shape as categorically dangerous —
+    legitimate operator command flows do not use eval-wrapped heredoc as
+    a delivery mechanism, so the false-positive risk is low.
+
+    Detects both the modern ``$(...)`` substitution form and the legacy
+    backtick form.
+    """
+    # eval $(...) with a heredoc anywhere within the substitution
+    if re.search(r"\beval\s+\$\(", command) and "<<" in command:
+        return True
+    # eval `...` (backtick) wrapping a heredoc
+    if re.search(r"\beval\s+`[^`]*<<", command):
+        return True
+    return False
+
+
+# Compound-command detection: shell control-flow operators that split a
+# command line into multiple independent operations. When a destructive
+# operation appears inside a compound, the merge-guard token model breaks
+# down — a single AskUserQuestion approval is presumed by the operator to
+# authorize ONE operation, but the compound runs many.
+_COMPOUND_OPS_RE = re.compile(r"[&;|\n]")
+
+
 def is_dangerous_command(command: str) -> bool:
     """Check if a bash command is a dangerous git operation.
 
@@ -446,10 +485,41 @@ def is_dangerous_command(command: str) -> bool:
     Returns:
         True if the command matches a dangerous pattern
     """
+    # Pre-strip detection: eval+heredoc shape obscures destructive ops via
+    # the heredoc-strip pipeline. Treat as dangerous before the strip runs.
+    if _has_eval_with_heredoc(command):
+        return True
+
     # Normalize bash line continuations (\<newline>) before any matching.
     # Without this, patterns split across lines bypass all regex detection.
     command = command.replace("\\\n", " ")
     stripped = _strip_non_executable_content(command)
+    for pattern in DANGEROUS_PATTERNS:
+        if pattern.search(stripped):
+            return True
+    return False
+
+
+def is_compound_destructive_command(command: str) -> bool:
+    """Detect destructive operations chained inside a shell compound shape.
+
+    Returns True iff the stripped command contains BOTH (a) a compound-shape
+    character (``&&``, ``||``, ``;``, ``|``, newline) AND (b) a
+    DANGEROUS_PATTERNS match. Safe compounds (``ls && pwd``) are NOT flagged.
+
+    Operator-side review of AskUserQuestion text typically focuses on the
+    headline command and may miss a chained second destructive op, e.g.:
+
+        gh pr merge 100 && gh pr merge 999 --admin
+
+    Single-token authorization for the headline command would otherwise
+    let the second op execute unauthorized. Reject compound destructive
+    shapes outright; force one-op-at-a-time with one checkpoint each.
+    """
+    normalized = command.replace("\\\n", " ")
+    stripped = _strip_non_executable_content(normalized)
+    if not _COMPOUND_OPS_RE.search(stripped):
+        return False
     for pattern in DANGEROUS_PATTERNS:
         if pattern.search(stripped):
             return True
@@ -658,6 +728,19 @@ def check_merge_authorization(command: str, token_dir: Path | None = None) -> st
     """
     if not is_dangerous_command(command):
         return None
+
+    # Compound destructive shapes are categorically denied — a single
+    # token cannot authorize multiple chained ops. The operator must run
+    # one destructive op per checkpoint. Checked BEFORE the token lookup
+    # so a valid token for the headline op cannot accidentally authorize
+    # the chained second op.
+    if is_compound_destructive_command(command):
+        return (
+            "Compound destructive command rejected — `&&`, `||`, `;`, `|`, and "
+            "newlines cannot be authorized atomically. A single AskUserQuestion "
+            "approval can only authorize ONE destructive operation. Run each "
+            "destructive op separately with its own approval."
+        )
 
     token, token_path = find_valid_token(token_dir)
     if token is not None:

@@ -109,12 +109,19 @@ def extract_context(question: str) -> dict:
     if branch_match:
         context["branch"] = branch_match.group(1) or branch_match.group(2)
 
-    # Detect operation type for token scoping
+    # Detect operation type for token scoping. The order matters — close
+    # is more specific than merge (close can mention "merge"), and
+    # force-push / branch-delete are independent operation classes whose
+    # AskUserQuestion text typically does not mention "merge" or "close".
     question_lower = question.lower()
     if re.search(r"\bclose\b.*(?:pr|pull\s*request)|(?:pr|pull\s*request).*\bclose\b|gh\s+pr\s+close", question_lower):
         context["operation_type"] = "close"
     elif re.search(r"\bmerge\b", question_lower):
         context["operation_type"] = "merge"
+    elif re.search(r"force[\s-]?push|push\s+--force|push\s+-f\b|push\s+-[a-z]*f", question_lower):
+        context["operation_type"] = "force-push"
+    elif re.search(r"delete[\s-]?branch|branch\s+(?:-D|--delete)\b", question_lower):
+        context["operation_type"] = "branch-delete"
 
     return context
 
@@ -127,8 +134,36 @@ def write_token(context: dict, token_dir: Path | None = None) -> str | None:
         token_dir: Override token directory (for testing)
 
     Returns:
-        Path to the created token file, or None on failure
+        Path to the created token file, or None on failure or refusal
     """
+    # Sparse-context guard: refuse to write a token whose context — as
+    # produced by `extract_context()` on a vague AskUserQuestion text —
+    # carries NONE of the three concrete anchor keys (pr_number, branch,
+    # operation_type). The realistic shape of such a wildcard context is
+    # `{question_snippet: "<vague text>"}` with no extracted anchors; a
+    # token written from it would match ANY destructive command via the
+    # PRE-side `_token_matches_command` ladder's ambiguous-permissive
+    # fallback. Fail closed at the WRITE side so the wildcard token never
+    # reaches the PRE-side ladder. Any one concrete anchor is sufficient.
+    if not isinstance(context, dict):
+        print(
+            "[security] sparse context: non-dict context, refusing token write",
+            file=sys.stderr,
+        )
+        return None
+    has_pr = bool(context.get("pr_number"))
+    has_branch = bool(context.get("branch"))
+    has_op = bool(context.get("operation_type"))
+    if not (has_pr or has_branch or has_op):
+        print(
+            "[security] sparse context: AskUserQuestion text yielded no "
+            "extractable pr_number, branch, or operation_type — refusing "
+            "token write to avoid wildcard-allow against subsequent "
+            "destructive commands.",
+            file=sys.stderr,
+        )
+        return None
+
     if token_dir is None:
         token_dir = TOKEN_DIR
 
