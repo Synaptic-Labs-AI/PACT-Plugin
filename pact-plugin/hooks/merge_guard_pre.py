@@ -49,7 +49,21 @@ try:
         TOKEN_TTL,
         TOKEN_DIR,
         TOKEN_PREFIX,
+        MAX_USES,
+        USE_MARKER_SUFFIX,
         cleanup_consumed_tokens as _cleanup_consumed_tokens,
+        detect_command_operation_type,
+        # Regex prefix constants relocated to shared so the read-side
+        # DANGEROUS_PATTERNS bank and the shared classifier compose against
+        # identical prefix semantics (#720 Bug B).
+        _GH_GLOBAL_FLAGS,
+        _GH_FLAG_TOKENS,
+        _GIT_GLOBAL_FLAGS,
+        _GH_PREFIX,
+        _GIT_PREFIX,
+        _GH_API_PREFIX,
+        _GH_PR_MERGE_RE,
+        _GH_PR_CLOSE_RE,
     )
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     # Hand-built deny output using only stdlib (json, sys). Cannot rely on any
@@ -70,20 +84,9 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
     )
     sys.exit(2)
 
-# Optional global flags between CLI tool and subcommand.
-# (?:\S+\s+)* matches zero or more flag+value tokens (e.g., --repo owner/repo).
-_GH_GLOBAL_FLAGS = r"(?:\S+\s+)*"  # broad — keep for DANGEROUS_PATTERNS (matches any token)
-# Tight variant for PR-number extraction (#665): only flag-shaped tokens
-# (`-x`, `--long`, optionally `--flag value`). Prevents the capture group
-# from greedily walking past the PR positional into heredoc body content,
-# 2>&1 redirects, or trailing positional-digit tokens.
-_GH_FLAG_TOKENS = r"(?:-\S*(?:\s+\S+)?\s+)*"
-_GIT_GLOBAL_FLAGS = r"(?:\S+\s+)*"
-
-# Composed prefixes for DRY usage across all patterns.
-_GH_PREFIX = r"\bgh\s+" + _GH_GLOBAL_FLAGS
-_GIT_PREFIX = r"\bgit\s+" + _GIT_GLOBAL_FLAGS
-_GH_API_PREFIX = _GH_PREFIX + r"api\b"
+# Note: _GH_GLOBAL_FLAGS, _GH_FLAG_TOKENS, _GIT_GLOBAL_FLAGS, _GH_PREFIX,
+# _GIT_PREFIX, _GH_API_PREFIX, _GH_PR_MERGE_RE, _GH_PR_CLOSE_RE are imported
+# from shared.merge_guard_common above (#720 Bug B relocation).
 
 # Pre-serialized JSON for allow-path output: tells Claude Code UI to suppress
 # the hook display instead of showing "hook error (No output)".
@@ -176,9 +179,11 @@ try:
     re.compile(_GIT_PREFIX + r"push\s+(?:-\S+\s+)*\S+\s+master(?!:)\b"),
 ]
 
-    # Pre-compiled patterns for helper functions (consistent with DANGEROUS_PATTERNS style).
-    _GH_PR_MERGE_RE = re.compile(_GH_PREFIX + r"pr\s+merge\b")
-    _GH_PR_CLOSE_RE = re.compile(_GH_PREFIX + r"pr\s+close\b")
+    # _GH_PR_MERGE_RE and _GH_PR_CLOSE_RE relocated to shared.merge_guard_common
+    # (used only by the operation-type classifier, now also relocated). They
+    # are imported back into this module at the top so any direct callers in
+    # this file continue to resolve them.
+
     # PR number extraction: allows optional subcommand flags (e.g., --admin, --squash)
     # between merge/close and the PR number.
     #
@@ -469,7 +474,42 @@ def _has_eval_with_heredoc(command: str) -> bool:
 # operation appears inside a compound, the merge-guard token model breaks
 # down — a single AskUserQuestion approval is presumed by the operator to
 # authorize ONE operation, but the compound runs many.
-_COMPOUND_OPS_RE = re.compile(r"[&;|\n]")
+#
+# Pattern matches the five true compound shapes: `&&`, `||`, `;`,
+# bare `|` shell pipe, and newline. FD-redirect tokens (`2>&1`, `1>&2`,
+# `3<&0`) and clobber redirects (`>|`) are EXCLUDED structurally via the
+# `_FD_REDIRECT_RE` pre-strip in `is_compound_destructive_command` —
+# NOT via lookaround on the bare-pipe arm. An earlier lookbehind-based
+# form `(?<![0-9>])\|(?![<&])` was vulnerable to a spaceless adjacency
+# bypass: `gh pr merge 100 2>&1|gh pr merge 999` slipped past detection
+# because the lookbehind rejected the real shell-pipe `|` whenever it
+# followed a digit (`1` of `2>&1`), conflating FD-redirect tail with
+# pipe-prefix context. The structural strip neutralizes FD-redirect
+# tokens by shape, eliminating the adjacency class.
+# Audit: any future loosening of this regex must preserve the five
+# true-positive shapes; tightening must not re-introduce the FD-redirect
+# false-positive class via lookaround — the pre-strip is the single
+# source of truth for FD-redirect neutralization.
+_COMPOUND_OPS_RE = re.compile(r"&&|\|\||;|\||\n")
+
+# Pre-strip pattern for FD-redirect tokens that contain `&` or appear next
+# to `|` in shell redirect syntax. Matches:
+#   `\d*[<>]&\d+`   FD-to-FD redirects: `2>&1`, `1>&2`, `3<&0`, `>&2`
+#   `>\|`           clobber redirect (force-overwrite of existing file)
+# These are NOT compound control-flow; they are I/O redirection syntax.
+# Replaced with a single space in the LOCAL copy of the command seen by
+# `_COMPOUND_OPS_RE` so the digit-tail of `2>&1` cannot be adjacent to a
+# real `|` and pollute compound-detection. Scoped to
+# `is_compound_destructive_command` — does NOT leak into other consumers
+# (DANGEROUS_PATTERNS scan, `_token_matches_command`, etc.).
+#
+# Note on zsh `|&` (combined-stderr-pipe shorthand): deliberately NOT in this
+# pattern. Bash users write `cmd 2>&1 | next` as separate tokens (the FD-strip
+# above neutralizes the `2>&1`, leaving the bare `|` for compound detection).
+# Zsh users write `cmd |& next`, which would require a third arm here. The
+# merge_guard hooks run under bash (Claude Code's default shell), so `|&` is
+# out of scope. If the shell ever changes, add an arm for `|\s*&` here.
+_FD_REDIRECT_RE = re.compile(r"\d*[<>]&\d+|>\|")
 
 
 def is_dangerous_command(command: str) -> bool:
@@ -518,7 +558,11 @@ def is_compound_destructive_command(command: str) -> bool:
     """
     normalized = command.replace("\\\n", " ")
     stripped = _strip_non_executable_content(normalized)
-    if not _COMPOUND_OPS_RE.search(stripped):
+    # Neutralize FD-redirect tokens before compound-shape scanning. The
+    # strip operates on a LOCAL copy so DANGEROUS_PATTERNS still sees the
+    # full stripped command on the line below.
+    compound_view = _FD_REDIRECT_RE.sub(" ", stripped)
+    if not _COMPOUND_OPS_RE.search(compound_view):
         return False
     for pattern in DANGEROUS_PATTERNS:
         if pattern.search(stripped):
@@ -554,6 +598,18 @@ def find_valid_token(token_dir: Path | None = None) -> tuple[dict, str] | tuple[
         # Skip consumed tokens — they were already used by a prior invocation
         if token_path.endswith(".consumed"):
             continue
+        # Skip per-use slot markers (#720 Bug C). These are auxiliary files
+        # (e.g., merge-authorized-N.use-1) created by _consume_token to
+        # atomically claim a use slot; they are NOT tokens themselves and
+        # have no JSON body to parse as one.
+        # Substring-contains is correct by construction: the outer glob
+        # `TOKEN_PREFIX*` constrains every basename to begin with
+        # `merge-authorized-`, and tokens are written by `write_token` via
+        # `tempfile.mkstemp` with controlled suffixes that never include
+        # `.use-`. The only way `.use-` appears in a basename is via the
+        # marker-file shape this check is designed to filter.
+        if USE_MARKER_SUFFIX in os.path.basename(token_path):
+            continue
 
         try:
             with open(token_path, "r") as f:
@@ -578,6 +634,28 @@ def find_valid_token(token_dir: Path | None = None) -> tuple[dict, str] | tuple[
                 # it may be valid for its own session)
                 continue
 
+            # Slot-claim filter (#720 Bug C). If max_uses > 1 and all use
+            # slots are already claimed, the token is fully consumed even
+            # if the terminal .consumed rename was lost to a transient FS
+            # error. Treat as already-consumed (skip + race-recover the
+            # rename). Legacy tokens missing max_uses are treated as N=1
+            # and reach this point only when not yet consumed at all.
+            token_max_uses = token_data.get("max_uses", 1)
+            if isinstance(token_max_uses, int) and token_max_uses > 1:
+                all_claimed = all(
+                    os.path.exists(f"{token_path}{USE_MARKER_SUFFIX}{slot}")
+                    for slot in range(1, token_max_uses + 1)
+                )
+                if all_claimed:
+                    # Race-recover: attempt the missed terminal rename;
+                    # ignore failure (the next scan will retry or the
+                    # cleanup loop will eventually reap the markers).
+                    try:
+                        os.rename(token_path, token_path + ".consumed")
+                    except OSError:
+                        pass
+                    continue
+
             # Valid token found
             valid_token = token_data
             valid_path = token_path
@@ -600,118 +678,178 @@ def _safe_remove(path: str):
         pass
 
 
-def _consume_token(token_path: str) -> bool:
-    """Consume a token by renaming it to .consumed (idempotent).
+def _consume_token(token_path: str, max_uses_default: int = 1) -> bool:
+    """Consume one use of a token via per-use marker O_EXCL claim (#720 Bug C).
 
-    Uses os.rename() for POSIX atomicity. If the rename fails because the
-    file was already renamed by a concurrent invocation, that IS the success
-    case — the token was already consumed for this operation.
+    Atomicity model:
+    - Read the token JSON to determine max_uses. Tokens missing the field
+      (written by pre-#720 versions) default to max_uses_default=1 —
+      preserving prior single-use semantics for in-flight legacy tokens.
+    - For each candidate slot in 1..max_uses, atomically attempt to claim
+      `<token_path>.use-<slot>` via os.open(O_CREAT | O_EXCL). The FIRST
+      successful claim is THIS invocation's use; the slot file's existence
+      is the consume record.
+    - If the claimed slot is the LAST slot (slot == max_uses), also rename
+      the token to `.consumed` (terminal). Rename failure is non-fatal —
+      `find_valid_token`'s slot-claim filter detects the all-claimed state
+      on the next scan and race-recovers the rename.
+    - If ALL slots are already claimed (FileExistsError on every slot),
+      this invocation returns False — the token is fully consumed and the
+      caller fails closed.
 
-    The fallback verification uses an atomic open() instead of os.path.exists()
-    to avoid a TOCTOU race where the .consumed file could be deleted between
-    the existence check and any subsequent read.
+    Legacy compat path (max_uses == 1): skips slot markers entirely and
+    invokes the original rename-to-.consumed flow, preserving exact prior
+    semantics for tokens written by pre-#720 merge_guard_post.
+
+    Concurrent-invocation safety: O_EXCL is POSIX-atomic, so two
+    simultaneous invocations contending for the same slot resolve with
+    exactly one winner; the loser falls through to the next slot.
 
     Args:
-        token_path: Path to the token file to consume
+        token_path: Path to the valid (non-.consumed) token file.
+        max_uses_default: Default max_uses when the token JSON lacks the
+                          field (legacy compat). Callers from this module
+                          rely on 1 to preserve prior single-use semantics
+                          for older tokens.
 
     Returns:
-        True if the token was consumed (either by us or by a prior invocation),
-        False if consumption failed for an unexpected reason
+        True if this invocation claimed a use slot, False otherwise.
     """
-    consumed_path = token_path + ".consumed"
+    max_uses = max_uses_default
+    n_use_token = False  # Set True when we observe N>1 from JSON OR filesystem
     try:
-        os.rename(token_path, consumed_path)
-        return True
-    except FileNotFoundError:
-        # Token already renamed by a concurrent invocation — verify the
-        # .consumed file exists atomically by trying to open it. This avoids
-        # a TOCTOU race with os.path.exists() where the file could vanish
-        # between the check and any subsequent use.
+        with open(token_path, "r") as f:
+            token_data = json.load(f)
+            field_value = token_data.get("max_uses", max_uses_default)
+            if isinstance(field_value, int) and field_value > 0:
+                max_uses = field_value
+                if max_uses > 1:
+                    n_use_token = True
+    except (json.JSONDecodeError, OSError, KeyError, AttributeError, TypeError):
+        # Read failure (corrupt JSON OR token already renamed to .consumed
+        # after a prior slot-claim flow). If we can see any .use-N markers
+        # on disk, this is an N-use token whose budget is being inspected
+        # post-rename — fail closed rather than fall back to legacy
+        # rename-idempotent semantics.
+        if os.path.exists(f"{token_path}{USE_MARKER_SUFFIX}1"):
+            return False
+        max_uses = max_uses_default
+
+    consumed_path = token_path + ".consumed"
+
+    # Legacy single-use path (max_uses == 1, no slot markers visible):
+    # identical to pre-#720 behavior — rename to .consumed, with the
+    # FileNotFoundError ↔ .consumed-exists idempotency fallback preserved
+    # verbatim.
+    #
+    # Idempotency model: under concurrent invocation, the first caller
+    # wins the os.rename (atomic on POSIX); the second caller's rename
+    # raises FileNotFoundError because the source no longer exists. The
+    # fallback `os.open(consumed_path, O_RDONLY)` confirms the .consumed
+    # file is on disk — meaning a prior invocation succeeded — and this
+    # invocation returns True idempotently. A True return from EITHER
+    # caller means "your operation is authorized"; legacy N=1 semantics
+    # treat the first-success and the racing-recognition as equivalent.
+    if max_uses <= 1 and not n_use_token:
         try:
-            fd = os.open(consumed_path, os.O_RDONLY)
-            os.close(fd)
+            os.rename(token_path, consumed_path)
             return True
         except FileNotFoundError:
-            # Neither original nor .consumed exists — token was genuinely lost
-            return False
+            try:
+                fd = os.open(consumed_path, os.O_RDONLY)
+                os.close(fd)
+                return True
+            except FileNotFoundError:
+                return False
+            except OSError:
+                return False
         except OSError:
-            # Unexpected error accessing .consumed — fail closed
             return False
-    except OSError:
-        # Unexpected error — fail closed (return False to block)
-        return False
 
+    # N-use path: claim slots via O_EXCL. The first slot we can claim is
+    # this invocation's use; the last slot also triggers terminal rename.
+    for slot in range(1, max_uses + 1):
+        marker_path = f"{token_path}{USE_MARKER_SUFFIX}{slot}"
+        try:
+            fd = os.open(marker_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            # Slot already claimed by a prior or concurrent invocation —
+            # try the next slot.
+            continue
+        except OSError:
+            # Transient FS error claiming this slot — try the next slot
+            # rather than fail closed, since another slot may still be
+            # available.
+            continue
 
-def _detect_command_operation_type(command: str) -> str | None:
-    """Detect the operation type of a dangerous command.
+        # Slot claimed. Write the audit body; on body-write failure, unlink
+        # the marker so we don't leave an orphan slot blocking future uses
+        # (mirrors merge_guard_post.write_token's body-write failure path).
+        # The inner try/finally guarantees the raw fd is closed even if
+        # os.fdopen itself raises before taking ownership (e.g., MemoryError
+        # mid-construction). os.fdopen success transfers ownership of fd
+        # to the file object, whose with-block close becomes the source of
+        # truth; the outer os.close in the finally then raises EBADF, which
+        # we suppress because that path indicates fdopen took ownership
+        # already.
+        fdopen_took_ownership = False
+        try:
+            try:
+                file_obj = os.fdopen(fd, "w")
+            except Exception:
+                # fdopen failed before taking ownership — fd still ours.
+                raise
+            fdopen_took_ownership = True
+            with file_obj as f:
+                f.write(json.dumps({
+                    "consumed_at": time.time(),
+                    "slot": slot,
+                }))
+        except Exception:
+            if not fdopen_took_ownership:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            try:
+                os.unlink(marker_path)
+            except OSError:
+                pass
+            continue
 
-    Symmetric with `extract_context()` in merge_guard_post.py: both must
-    recognize the SAME four operation classes so write-side tokens and
-    read-side commands compare on a common axis.
+        # Audit emit — operator-visible stderr (mirrors existing [security]
+        # and `Merge authorization token written` emits). Format is
+        # invariant under MAX_USES changes.
+        # Defense-in-depth: sanitize the basename's CR/LF characters before
+        # interpolation to prevent log-line injection if a malicious local
+        # actor planted a token file with a newline in its name. In practice
+        # write_token uses tempfile.mkstemp with a controlled suffix so the
+        # path can never contain CR/LF; this sanitization is belt-and-
+        # suspenders for the audit-trail integrity story.
+        safe_basename = (
+            os.path.basename(token_path)
+            .replace("\n", " ")
+            .replace("\r", " ")
+        )
+        print(
+            f"[security] merge-authorized token consumed "
+            f"(slot {slot}/{max_uses}): {safe_basename}",
+            file=sys.stderr,
+        )
 
-    Returns:
-        "merge"         — gh pr merge
-        "close"         — gh pr close (any variant)
-        "force-push"    — git push --force / git push -f (excludes --force-with-lease)
-        "branch-delete" — git branch -D / git branch --delete --force / gh pr close --delete-branch
-        None            — destructive shape not in the recognized set
-                          (caller treats None as "untyped command", which the
-                          tightened token-match semantic now treats as a
-                          deny-on-typed-token signal rather than permissive)
-    """
-    # Order matters: gh pr close --delete-branch is BOTH a close and a
-    # branch-delete operation; the AskUserQuestion-side classifier
-    # (extract_context) tags it as "close" in priority order, so match
-    # the same precedence here for write/read symmetry.
-    if _GH_PR_MERGE_RE.search(command):
-        return "merge"
-    if _GH_PR_CLOSE_RE.search(command):
-        # gh pr close --delete-branch is a close-type operation per the
-        # write-side classifier. Branch-delete-via-pr-close is folded into
-        # the close class on both sides for symmetric authorization.
-        return "close"
-    # force-push: git push ... --force (excludes --force-with-lease which
-    # the existing DANGEROUS_PATTERNS treats as safe). The negative
-    # lookahead matches the DANGEROUS_PATTERNS L127 form.
-    if re.search(_GIT_PREFIX + r"push\s+.*--force(?!-with-lease)\b", command):
-        return "force-push"
-    if re.search(_GIT_PREFIX + r"push\s+.*-f\b", command):
-        return "force-push"
-    if re.search(_GIT_PREFIX + r"push\s+-[a-zA-Z]*f", command):
-        return "force-push"
-    # Direct push to default branch is force-push-class (bypasses PR
-    # review). Match the existing DANGEROUS_PATTERNS forms but require
-    # the dangerous shape to actually fire — the negative-lookahead-free
-    # pattern `git push X main` would over-match safer flows. Use the
-    # same `(?!:)` refspec exclusion as DANGEROUS_PATTERNS L175-176.
-    if re.search(_GIT_PREFIX + r"push\s+\S+\s+HEAD:(?:main|master)\b", command):
-        return "force-push"
-    if re.search(
-        _GIT_PREFIX + r"push\s+(?:-(?!-force-with-lease\b)\S+\s+)*\S+\s+(?:main|master)(?!:)\b",
-        command,
-    ):
-        return "force-push"
-    # API-based ref-mutation forms (gh api / curl / wget targeting
-    # /git/refs with mutating HTTP methods) classify by HTTP semantic:
-    # DELETE → branch-delete class (removes a ref)
-    # PATCH/POST/PUT → force-push class (rewrites a ref without PR review)
-    # Symmetric with how a force-push or branch-delete token from
-    # extract_context() would authorize the equivalent CLI form.
-    _is_api_form = re.search(r"\b(?:gh\s+api|curl|wget)\b", command, re.IGNORECASE)
-    if _is_api_form and "git/refs" in command:
-        if re.search(r"\bDELETE\b", command):
-            return "branch-delete"
-        if re.search(r"\b(?:PATCH|POST|PUT)\b", command):
-            return "force-push"
-    # branch-delete: git branch -D, git branch --delete --force,
-    # or git branch --force --delete (matches DANGEROUS_PATTERNS L131-133).
-    if re.search(_GIT_PREFIX + r"branch\s+.*-D\b", command):
-        return "branch-delete"
-    if re.search(_GIT_PREFIX + r"branch\s+.*--delete\s+--force\b", command):
-        return "branch-delete"
-    if re.search(_GIT_PREFIX + r"branch\s+--force\s+--delete\b", command):
-        return "branch-delete"
-    return None
+        # Terminal rename when the final slot is claimed. Rename failure is
+        # non-fatal: find_valid_token will see all slots claimed on the
+        # next scan and race-recover the rename then.
+        if slot == max_uses:
+            try:
+                os.rename(token_path, consumed_path)
+            except OSError:
+                pass
+        return True
+
+    # Every slot was already claimed before we got there — token is fully
+    # consumed. Caller fails closed.
+    return False
 
 
 # Allowlist of `gh pr merge|close` long-form flags KNOWN to take a value.
@@ -803,7 +941,7 @@ def _token_matches_command(token: dict, command: str) -> bool:
     # Cross-operation authorization guard: a typed token (one with a known
     # operation_type) MUST match the command's detected operation type, OR
     # the command shape is unrecognized. Symmetric coverage —
-    # `_detect_command_operation_type` recognizes all four classes
+    # `detect_command_operation_type` recognizes all four classes
     # (merge / close / force-push / branch-delete) so a missing cmd_op_type
     # means the destructive shape is outside the recognized set, not a
     # legitimate "untyped" path. Refuse the cross-op authorization rather
@@ -815,7 +953,7 @@ def _token_matches_command(token: dict, command: str) -> bool:
     # not occur post-#700 sparse-context guard at write time) still fall
     # through to the pr_number/branch checks for backward compatibility.
     if token_op_type:
-        cmd_op_type = _detect_command_operation_type(command)
+        cmd_op_type = detect_command_operation_type(command)
         if cmd_op_type is None or token_op_type != cmd_op_type:
             return False
 

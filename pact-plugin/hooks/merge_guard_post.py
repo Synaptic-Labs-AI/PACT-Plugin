@@ -33,9 +33,53 @@ from shared.error_output import hook_error_json
 from shared.merge_guard_common import (
     TOKEN_TTL,
     TOKEN_DIR,
+    MAX_USES,
     cleanup_consumed_tokens as _cleanup_consumed_tokens,
+    detect_command_operation_type,
 )
 from shared.tool_response import extract_tool_response
+
+
+# Regex for a quoted-command region inside question prose. Tries
+# backticks first (most common), then single quotes, then double quotes.
+# Captures the content. The question prose is short and single-line in
+# practice; no DOTALL needed.
+#
+# When the AskUserQuestion text embeds the literal command in a quoted
+# region (e.g., `gh pr merge 42` or 'git branch -D feat/x'), the
+# read-side classifier shared.detect_command_operation_type is applied
+# to the embedded command — guaranteeing the write-side and read-side
+# classifications agree on the SAME input. This is the canonical
+# operation-type path; the keyword-ladder fallback in extract_context()
+# only fires when no quoted region matched (#720 Bug B).
+_QUOTED_COMMAND_RE = re.compile(
+    r"`([^`]+)`"        # backticks: `git push origin main`
+    r"|'([^']+)'"       # single quotes: 'git push origin main'
+    r'|"([^"]+)"'       # double quotes: "git push origin main"
+)
+
+
+def _classify_from_quoted_command(question: str) -> str | None:
+    """Find a quoted command region in question prose and classify it
+    via shared.detect_command_operation_type.
+
+    Returns the op_type literal (merge/close/force-push/branch-delete)
+    or None if no quoted region matched a destructive shape.
+
+    Tries each quoted region in document order; returns the first
+    non-None classification. This makes embedding the command-literal in
+    the question prose the AUTHORITATIVE classifier path. The keyword
+    ladder in extract_context() is the fallback for questions that omit
+    the embedded command (legacy or non-conforming orchestrator prose).
+    """
+    for match in _QUOTED_COMMAND_RE.finditer(question):
+        candidate = match.group(1) or match.group(2) or match.group(3)
+        if not candidate:
+            continue
+        op_type = detect_command_operation_type(candidate)
+        if op_type is not None:
+            return op_type
+    return None
 
 # When the hook allows a command (exits 0), output this JSON so the Claude Code
 # UI suppresses the hook display instead of showing "hook error (No output)".
@@ -83,8 +127,12 @@ def is_affirmative(answer: str) -> bool:
 def extract_context(question: str) -> dict:
     """Extract operation context from the question text.
 
-    Attempts to find PR numbers, branch names, and operation type from the
-    question.
+    Symmetry with shared.detect_command_operation_type: if the question
+    embeds a literal command in a quoted region (backticks, single
+    quotes, or double quotes), the SAME classifier the read-side uses is
+    applied — guaranteeing bidirectional agreement when the convention
+    is honored. Falls back to a keyword-ladder classification for
+    legacy/non-conforming prose (#720 Bug B).
 
     Args:
         question: The question text
@@ -109,19 +157,29 @@ def extract_context(question: str) -> dict:
     if branch_match:
         context["branch"] = branch_match.group(1) or branch_match.group(2)
 
-    # Detect operation type for token scoping. The order matters — close
-    # is more specific than merge (close can mention "merge"), and
-    # force-push / branch-delete are independent operation classes whose
-    # AskUserQuestion text typically does not mention "merge" or "close".
-    question_lower = question.lower()
-    if re.search(r"\bclose\b.*(?:pr|pull\s*request)|(?:pr|pull\s*request).*\bclose\b|gh\s+pr\s+close", question_lower):
-        context["operation_type"] = "close"
-    elif re.search(r"\bmerge\b", question_lower):
-        context["operation_type"] = "merge"
-    elif re.search(r"force[\s-]?push|push\s+--force|push\s+-f\b|push\s+-[a-z]*f", question_lower):
-        context["operation_type"] = "force-push"
-    elif re.search(r"delete[\s-]?branch|branch\s+(?:-D|--delete)\b", question_lower):
-        context["operation_type"] = "branch-delete"
+    # Operation type — canonical path: try a quoted-command region first
+    # and delegate to the shared read-side classifier. When this returns
+    # non-None, bidirectional write/read symmetry is guaranteed by
+    # construction (both sides classify the SAME literal command).
+    op_from_quoted = _classify_from_quoted_command(question)
+    if op_from_quoted is not None:
+        context["operation_type"] = op_from_quoted
+    else:
+        # Fallback keyword ladder for prose that omits the quoted command.
+        # Order: close → force-push → branch-delete → merge.
+        # Unambiguous syntactic features (`branch -D`, `--force`, `-f`)
+        # precede the fuzzy bare-word `\bmerge\b`, so prose mentioning
+        # both (e.g., "force-delete the merged feature branch") classifies
+        # by the syntactic feature, not by the appearance of "merged".
+        question_lower = question.lower()
+        if re.search(r"\bclose\b.*(?:pr|pull\s*request)|(?:pr|pull\s*request).*\bclose\b|gh\s+pr\s+close", question_lower):
+            context["operation_type"] = "close"
+        elif re.search(r"force[\s-]?push|push\s+--force|push\s+-f\b|push\s+-[a-z]*f", question_lower):
+            context["operation_type"] = "force-push"
+        elif re.search(r"delete[\s-]?branch|branch\s+(?:-d|--delete)\b", question_lower):
+            context["operation_type"] = "branch-delete"
+        elif re.search(r"\bmerge\b", question_lower):
+            context["operation_type"] = "merge"
 
     return context
 
@@ -180,6 +238,13 @@ def write_token(context: dict, token_dir: Path | None = None) -> str | None:
         "created_at": now,
         "expires_at": now + TOKEN_TTL,
         "context": context,
+        # N-use budget (#720 Bug C). Reader (merge_guard_pre._consume_token)
+        # claims one use-slot per invocation via O_EXCL on a per-use marker
+        # file; the final slot also triggers terminal rename to .consumed.
+        # Tokens written by pre-#720 versions lack these fields and are
+        # treated by the reader as max_uses=1 (single-use, legacy semantics).
+        "max_uses": MAX_USES,
+        "uses_remaining": MAX_USES,
     }
     if session_id:
         token_data["session_id"] = session_id
@@ -263,8 +328,19 @@ def main():
             context = extract_context(question)
             token_path = write_token(context)
             if token_path:
+                # Defense-in-depth parity with merge_guard_pre.py M-sec-2:
+                # sanitize newline and carriage-return characters from the
+                # path before interpolation to prevent log-line injection.
+                # In practice `write_token` builds the path from `TOKEN_DIR`
+                # (hardcoded `~/.claude/`) and a timestamp-derived filename
+                # via `tempfile.mkstemp`, so neither segment can contain
+                # CR/LF — this sanitization is belt-and-suspenders for the
+                # audit-trail integrity story. Full path retained (not just
+                # basename) so operators can locate the token file directly
+                # from the log line during triage.
+                safe_token_path = token_path.replace("\n", " ").replace("\r", " ")
                 print(
-                    f"Merge authorization token written: {token_path}",
+                    f"Merge authorization token written: {safe_token_path}",
                     file=sys.stderr,
                 )
 
