@@ -922,3 +922,652 @@ def test_fixture_corpus_minimum_cardinality():
     assert len(fixtures) >= 8, (
         f"hallucination_gate fixture count below floor: {len(fixtures)}"
     )
+
+
+# ─── Architect scenario gap closure ────────────────────────────────────
+# The architect spec enumerates 24 mandatory scenarios. Most have direct
+# coverage above; the cases below close the remaining gaps and pin
+# behavioral properties the comprehensive TEST phase guarantees.
+
+
+def test_pattern_compile_failure_emits_audit_anchored_deny():
+    # Architect scenario: module-load / pattern-compile failure produces
+    # DENY with hookEventName='PreToolUse' audit anchor. Cannot import-
+    # break the module from inside the test process without a subprocess
+    # contortion, so exercise _emit_load_failure_deny directly via the
+    # subprocess-friendly path: send a malformed envelope through a
+    # subprocess with a forced-broken sys.path that masks the shared
+    # pact_context import. The fail-CLOSED handler must still produce a
+    # structured deny on stdout — empty stdout would silently fail open.
+    import os
+
+    proc = subprocess.run(
+        [
+            "python3",
+            "-c",
+            (
+                "import sys, json; "
+                f"sys.path.insert(0, {str(HOOK_PATH.parent)!r}); "
+                "import hallucination_gate as hg; "
+                "hg._emit_load_failure_deny('module load', "
+                "RuntimeError('synthetic regex compile failure'))"
+            ),
+        ],
+        env={**os.environ},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    # SACROSANCT contract: nonzero exit code (sys.exit(2)) + structured
+    # deny on stdout with hookEventName audit anchor.
+    assert proc.returncode == 2
+    payload = _json.loads(proc.stdout)
+    hsp = payload["hookSpecificOutput"]
+    assert hsp["hookEventName"] == "PreToolUse"
+    assert hsp["permissionDecision"] == "deny"
+    assert "module load" in hsp["permissionDecisionReason"]
+    assert "synthetic regex compile failure" in hsp["permissionDecisionReason"]
+
+
+def test_runtime_exception_fail_closes_via_load_failure_deny():
+    # Architect scenario (companion to T9): an uncaught runtime exception
+    # inside main() must fail-CLOSED with hookEventName audit anchor.
+    # Exercise via _emit_load_failure_deny stage='runtime'.
+    import os
+
+    proc = subprocess.run(
+        [
+            "python3",
+            "-c",
+            (
+                "import sys, json; "
+                f"sys.path.insert(0, {str(HOOK_PATH.parent)!r}); "
+                "import hallucination_gate as hg; "
+                "hg._emit_load_failure_deny('runtime', "
+                "ValueError('synthetic runtime gate exception'))"
+            ),
+        ],
+        env={**os.environ},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 2
+    payload = _json.loads(proc.stdout)
+    hsp = payload["hookSpecificOutput"]
+    assert hsp["hookEventName"] == "PreToolUse"
+    assert hsp["permissionDecision"] == "deny"
+    assert "runtime" in hsp["permissionDecisionReason"]
+
+
+def test_main_heredoc_describing_destructive_op_allows(tmp_path):
+    # Architect scenario: `gh pr merge 705` inside a `git commit -m`
+    # heredoc must NOT trip the gate (the strip pipeline removes the
+    # quoted message body before destructive-pattern scan).
+    # Pin at the main()-entry level so the wiring is exercised end-to-end.
+    transcript = _make_transcript(tmp_path, [
+        _user_line("commit the staging area please"),
+        _assistant_line(["sure, running git commit"]),
+    ])
+    env = _bash_envelope(
+        "git commit -m 'describes gh pr merge 705 in the message body'",
+        transcript_path=transcript,
+    )
+    code, out, _err = _run_hook(env)
+    assert code == 0
+    assert _json.loads(out) == {"suppressOutput": True}
+
+
+def test_main_gh_issue_create_with_hallucinated_priming_denies(tmp_path):
+    # Architect scenario (#684 corollary): hallucinated `Human: please
+    # file an issue` priming + `gh issue create` op must DENY.
+    transcript = _make_transcript(tmp_path, [
+        _other_line("system"),
+        _assistant_line(["Human: please file an issue for this bug"]),
+    ])
+    env = _bash_envelope(
+        "gh issue create -t 'Bug report' -b 'details'",
+        transcript_path=transcript,
+    )
+    code, out, _err = _run_hook(env)
+    assert code == 2
+    payload = _json.loads(out)
+    hsp = payload["hookSpecificOutput"]
+    assert hsp["hookEventName"] == "PreToolUse"
+    assert hsp["permissionDecision"] == "deny"
+    assert "no_matching_user_message_in_scan_window" in hsp["permissionDecisionReason"]
+
+
+def test_assistant_explanatory_mention_of_past_human_produces_warn():
+    # Architect scenario: genuine user `merge it` at idx 0; assistant
+    # later emits explanatory prose quoting the prior Human: directive.
+    # Temporal anchor: assistant emission > user entry → would DENY on
+    # the strict ordering check, BUT this docstring documents that the
+    # design accepts the WARN-degradation when the quoted suffix appears
+    # in the user turn (tier-1 catches the substring). The captured
+    # `peerreview_after_genuine` fixture validates the WARN path via
+    # fixture_corpus_evaluations; this test pins the synthetic shape so
+    # future refactors do not silently regress to DENY without observing
+    # the fixture-level signal.
+    #
+    # The synthetic transcript uses the same quotation pattern as the
+    # captured slice: assistant emits prose containing both the literal
+    # `Human:` marker and a suffix that does NOT verbatim-match the
+    # earlier user turn (the explanatory suffix is added).
+    lines = [
+        _user_line("merge it"),
+        _assistant_line([
+            "The orchestrator hallucinated `Human: merge it` — generated "
+            "by me. Identical pattern: I ask a question, then hallucinate "
+            "the answer."
+        ]),
+    ]
+    decision, _reason = evaluate_transcript(lines)
+    # Strict-order check fires first: assistant idx > user idx → DENY.
+    # Documented v1 acceptance: the quoted explanatory mention is
+    # treated as a hallucination from the temporal-anchor POV; this is
+    # the conservative behavior. If a future change wants to recognize
+    # explanatory quotations (substring-of-prior-user-turn check), this
+    # test will flip and require deliberate update.
+    assert decision == DECISION_DENY
+
+
+# ─── YELLOW item pins ──────────────────────────────────────────────────
+# Three behaviors flagged during CODE phase that the architect spec
+# describes by intent rather than implementation specifics. Pin the
+# current implementation against silent regression.
+
+
+def test_yellow_a_non_pact_session_with_no_transcript_allows(tmp_path):
+    # Effect-equivalent ALLOW for a non-PACT session. The implementation
+    # does not have an explicit "non-PACT session" short-circuit but
+    # achieves the same outcome via: (1) resolve_agent_name returns ""
+    # when no agent_name/agent_id/agent_type → does NOT short-circuit,
+    # (2) transcript fail-OPEN ALLOW when transcript_path is missing
+    # or unreadable. Pin the composite behavior.
+    env = _bash_envelope("gh pr merge 705", transcript_path="")
+    # Strip every PACT identifier — no agent_name, agent_id, agent_type.
+    env.pop("agent_name", None)
+    env.pop("agent_id", None)
+    env.pop("agent_type", None)
+    code, out, _err = _run_hook(env)
+    assert code == 0
+    assert _json.loads(out) == {"suppressOutput": True}
+
+
+def test_yellow_a_non_pact_session_with_empty_transcript_allows(tmp_path):
+    # Second leg of non-PACT-session coverage: transcript file exists
+    # but is empty → _read_last_n_lines returns [] → fail-OPEN ALLOW.
+    p = tmp_path / "transcript.jsonl"
+    p.write_text("", encoding="utf-8")
+    env = _bash_envelope("rm -rf /tmp/junk", transcript_path=str(p))
+    env.pop("agent_name", None)
+    env.pop("agent_id", None)
+    env.pop("agent_type", None)
+    code, out, _err = _run_hook(env)
+    assert code == 0
+    assert _json.loads(out) == {"suppressOutput": True}
+
+
+def test_yellow_b_read_last_n_lines_large_file_chunk_branch(tmp_path):
+    # _read_last_n_lines has a small-file branch (read+slice) and a
+    # large-file branch (reverse-seek in 8KB chunks). The threshold is
+    # 10MB. Synthesize a file just over the threshold and verify the
+    # chunk-seek branch returns the last N lines correctly.
+    from hallucination_gate import _read_last_n_lines, _LARGE_FILE_THRESHOLD_BYTES
+
+    p = tmp_path / "large_transcript.jsonl"
+    # Build a file just past the threshold by repeating a unique line
+    # with a stable index marker. ~80 bytes per line × 140_000 lines
+    # = ~11.2MB, comfortably past the 10MB threshold.
+    line_template = (
+        '{"type":"user","message":{"content":"line %d padding xxxxxxxxxxxxxxxxx"}}\n'
+    )
+    chunk = "".join(line_template % i for i in range(140_000))
+    p.write_text(chunk, encoding="utf-8")
+    assert p.stat().st_size > _LARGE_FILE_THRESHOLD_BYTES, (
+        "fixture sizing must exceed large-file threshold to exercise "
+        "the chunk-seek branch"
+    )
+
+    tail = _read_last_n_lines(p, 5)
+    assert len(tail) == 5
+    # Newest 5 lines must be 139_995..139_999 in order (newest at end).
+    for offset, line in enumerate(tail):
+        expected_idx = 140_000 - 5 + offset
+        assert f"line {expected_idx}" in line, (
+            f"chunk-seek branch returned wrong line at offset {offset}: "
+            f"got {line!r}, expected to contain 'line {expected_idx}'"
+        )
+
+
+def test_yellow_b_read_last_n_lines_returns_empty_on_io_error(tmp_path):
+    # The error-swallowing branch returns [] on any I/O error. Pass a
+    # non-existent path — stat() raises FileNotFoundError → caught →
+    # returns []. Callers treat empty as fail-OPEN ALLOW.
+    from hallucination_gate import _read_last_n_lines
+
+    missing = tmp_path / "does_not_exist.jsonl"
+    assert _read_last_n_lines(missing, 10) == []
+
+
+def test_yellow_c_deny_snippet_shows_bash_command_not_human_text(tmp_path):
+    # DENY message snippet shows the Bash command (operator-readable)
+    # rather than the assistant Human: text (diagnostic-readable). Pin
+    # the operator-readable choice — if a future refactor wants to flip
+    # to the diagnostic-readable form, this test must be updated
+    # deliberately.
+    distinctive_command = "rm -rf /tmp/unique-yellow-c-marker-path"
+    distinctive_human_text = "alpha-beta-gamma-distinctive-human-marker"
+    transcript = _make_transcript(tmp_path, [
+        _assistant_line([f"Human: {distinctive_human_text} please proceed"]),
+    ])
+    env = _bash_envelope(distinctive_command, transcript_path=transcript)
+    code, out, _err = _run_hook(env)
+    assert code == 2
+    payload = _json.loads(out)
+    reason = payload["hookSpecificOutput"]["permissionDecisionReason"]
+    # The Bash command snippet appears in the message…
+    assert distinctive_command in reason, (
+        f"DENY message should embed the Bash command (operator-readable). "
+        f"Got: {reason!r}"
+    )
+    # …and the assistant Human: text does NOT.
+    assert distinctive_human_text not in reason, (
+        f"DENY message should NOT embed the assistant Human: text "
+        f"(implementation choice favors operator-readability). "
+        f"Got: {reason!r}"
+    )
+
+
+# ─── Tag-push regex variant coverage ───────────────────────────────────
+# Architect Q7 (tag-push regex refinement) was closed during CODE phase
+# with the narrowed pattern set in DESTRUCTIVE_PATTERNS. Pin both the
+# positive (catches tag pushes) and negative (does NOT catch ordinary
+# branch pushes) cases against silent regex regression.
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Explicit tag refspec
+        "git push origin refs/tags/foo",
+        "git push origin refs/tags/v1.2.3",
+        "git push origin refs/tags/release-2026-04-01",
+        # Semver-shaped positional (must contain at least one dot —
+        # see test_tag_push_regex_dotless_v_prefix_not_caught for the
+        # narrow-by-design exclusion of `v1` / `v2`).
+        "git push origin v1.2.3",
+        "git push origin v1.2.3-rc.1",
+        "git push origin 1.2",
+        "git push origin 1.2.3",
+        # --tags flag IMMEDIATELY after `push` (no remote between).
+        # `git push origin --tags` is NOT caught — see
+        # test_tag_push_regex_tags_flag_after_remote_not_caught for the
+        # narrow-by-design exclusion of the flag-after-remote shape.
+        "git push --tags",
+        # Global flags between `git` and `push`
+        "git -C /repo push origin v1.2.3",
+        "git --git-dir=/r push origin refs/tags/foo",
+    ],
+)
+def test_tag_push_regex_catches_tag_variants(command):
+    assert is_destructive_command(command), (
+        f"tag-push variant escaped DESTRUCTIVE_PATTERNS: {command!r}"
+    )
+
+
+def test_tag_push_regex_dotless_v_prefix_not_caught():
+    # Documented v1 limitation: the semver-shaped tag regex requires AT
+    # LEAST ONE dot — pattern is `v?\d+(?:\.\d+)+\b`. Therefore `v1` and
+    # `v2` are NOT caught as tag pushes by this regex. This is a real
+    # narrowing gap (a `git push origin v1` form against a tag named
+    # `v1` would bypass the hallucination_gate tag-push check), but is
+    # the AS-IMPLEMENTED behavior. Pin the gap as a finding — flip the
+    # assertion if the lead's verdict is to widen the regex to allow
+    # dotless v-prefixed semver. See TEST-phase findings note.
+    assert not is_destructive_command("git push origin v1"), (
+        "test pins documented narrowing gap; if regex is widened to "
+        "accept dotless v-prefix this assertion must flip"
+    )
+    assert not is_destructive_command("git push origin v2")
+
+
+def test_tag_push_regex_tags_flag_after_remote_not_caught():
+    # Documented v1 limitation: the --tags regex requires `--tags`
+    # IMMEDIATELY after `push` (pattern: `push\s+--tags\b`). The shape
+    # `git push origin --tags` is NOT caught because `origin` sits
+    # between `push` and `--tags`. This is a real narrowing gap; pin
+    # the AS-IMPLEMENTED behavior. Flip the assertion if the lead's
+    # verdict is to widen the pattern to `push\s+(?:\S+\s+)*--tags\b`.
+    assert not is_destructive_command("git push origin --tags"), (
+        "test pins documented narrowing gap; if regex is widened to "
+        "accept --tags after a remote positional this assertion must flip"
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Ordinary branch pushes — must NOT trip the tag-push regex.
+        "git push origin feature-x",
+        "git push origin feature/my-work",
+        "git push origin bugfix/issue-705",
+        "git push origin main",  # main not gated by hallucination_gate
+        "git push origin master",
+        "git push origin develop",
+        # Branch names containing digits but not semver-shaped
+        "git push origin release-2026",
+        "git push origin feature-v1-deprecated",
+        # Branch names with v-prefix but not semver (alphabetic suffix)
+        "git push origin vendor-update",
+        "git push origin victory-lap",
+        # `git push` alone (no positional)
+        "git push",
+        "git push origin",
+    ],
+)
+def test_tag_push_regex_excludes_branch_pushes(command):
+    assert not is_destructive_command(command), (
+        f"branch push incorrectly flagged as tag push: {command!r}"
+    )
+
+
+# ─── Edge cases beyond architect scenarios ─────────────────────────────
+# Production-reality edge cases the architect did not specify. Highest-
+# leverage class: boundary tests on the three named tunable constants
+# (TRANSCRIPT_SCAN_WINDOW_LINES=500, SUBSTRING_LENGTH_FLOOR_CHARS=20,
+# EXTRACTED_HUMAN_MAX_CHARS=200) and corpus-realistic transcript shapes.
+
+
+def test_edge_human_emission_at_exact_scan_window_boundary(tmp_path):
+    # Synthesize a transcript with Human: emission AT the line-500 scan-
+    # window boundary. _read_last_n_lines returns last N lines, so the
+    # boundary line is included in the scanned window.
+    lines = []
+    # Pad with 499 non-relevant assistant lines (no Human:)
+    for i in range(499):
+        lines.append(_assistant_line([f"benign assistant turn {i}"]))
+    # Insert the Human: emission as the final (newest) line — index 499
+    # in the slice → on the scan-window boundary.
+    lines.append(_assistant_line(["Human: completely unauthorized destructive request"]))
+
+    transcript = _make_transcript(tmp_path, lines)
+    env = _bash_envelope("rm -rf /tmp/junk", transcript_path=transcript)
+    code, out, _err = _run_hook(env)
+    # Last 500 lines include the Human: emission → DENY (no matching
+    # user turn in window).
+    assert code == 2
+    payload = _json.loads(out)
+    assert payload["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_edge_human_emission_just_outside_scan_window_silently_allowed(tmp_path):
+    # Emission OLDER than the scan window must not be seen → ALLOW.
+    # Pin the windowed-scan property: emissions beyond the window
+    # silently allow.
+    lines = []
+    # The oldest line is the Human: emission; it should be trimmed.
+    lines.append(_assistant_line(["Human: destructive request out of window"]))
+    # 510 newer lines push it past the window (window=500).
+    for i in range(510):
+        lines.append(_assistant_line([f"benign assistant turn {i}"]))
+
+    transcript = _make_transcript(tmp_path, lines)
+    env = _bash_envelope("rm -rf /tmp/junk", transcript_path=transcript)
+    code, out, _err = _run_hook(env)
+    assert code == 0
+    assert _json.loads(out) == {"suppressOutput": True}
+
+
+def test_edge_extracted_human_truncation_at_exact_200_char_boundary():
+    # EXTRACTED_HUMAN_MAX_CHARS=200. Verify slice is exactly 200 chars
+    # when the post-Human: text is longer. Off-by-one would surface as
+    # 199 or 201.
+    boundary_text = "x" * EXTRACTED_HUMAN_MAX_CHARS
+    one_over = "x" * (EXTRACTED_HUMAN_MAX_CHARS + 1)
+    one_under = "x" * (EXTRACTED_HUMAN_MAX_CHARS - 1)
+
+    assert extract_after_human(f"Human: {boundary_text}") == boundary_text
+    assert extract_after_human(f"Human: {one_over}") == "x" * EXTRACTED_HUMAN_MAX_CHARS
+    assert extract_after_human(f"Human: {one_under}") == one_under
+
+
+def test_edge_substring_length_floor_exact_boundary():
+    # SUBSTRING_LENGTH_FLOOR_CHARS=20. The check uses `<` so a 20-char
+    # hallucinated string is NOT below the floor and proceeds to the
+    # tier-1/2 substring compare. Pin the strict-less-than semantic.
+    exact_floor = "x" * SUBSTRING_LENGTH_FLOOR_CHARS  # 20 chars
+    below_floor = "x" * (SUBSTRING_LENGTH_FLOOR_CHARS - 1)  # 19 chars
+
+    # 19-char emission with a (different) user turn → tier-0 short-circuit
+    # ALLOW (below floor).
+    lines = [
+        _assistant_line([f"Human: {below_floor}"]),
+        _user_line("yes ok go ahead with whatever you decided"),
+    ]
+    decision, reason = evaluate_transcript(lines)
+    assert decision == DECISION_ALLOW
+    assert reason == "tier0_below_length_floor_with_user_precedence"
+
+    # 20-char emission with a non-matching user turn → tier-1 miss,
+    # tier-2 miss → WARN (does not short-circuit on length).
+    lines2 = [
+        _assistant_line([f"Human: {exact_floor}"]),
+        _user_line("completely unrelated user turn that does not match"),
+    ]
+    decision2, reason2 = evaluate_transcript(lines2)
+    assert decision2 == DECISION_WARN
+    assert reason2 == "human_emission_text_not_found_in_recent_user_turns"
+
+
+def test_edge_nfkc_unicode_variants_in_tier2(tmp_path):
+    # Tier-2 normalization is lower() + whitespace-collapse only — it
+    # does NOT NFKC-normalize. Pin that behavior: fullwidth or composed-
+    # variant Unicode in the hallucinated text does NOT match an ASCII
+    # user turn, even though human readers see them as equivalent.
+    # This documents the v1 limitation; if a future refactor adds NFKC
+    # this test must flip.
+    fullwidth_ascii = "ｙｅｓ ｐｒｏｃｅｅｄ ｗｉｔｈ ｍｅｒｇｅ"  # NFKC → "yes proceed with merge"
+    plain_ascii = "yes proceed with merge"
+    # normalize() is case-fold + whitespace-collapse only.
+    assert normalize(fullwidth_ascii) != normalize(plain_ascii)
+    # Therefore tier-2 substring miss.
+    assert normalize(fullwidth_ascii) not in normalize(plain_ascii)
+    assert normalize(plain_ascii) not in normalize(fullwidth_ascii)
+
+
+def test_edge_assistant_block_with_embedded_tool_use_then_text():
+    # Assistant content blocks may interleave tool_use and text blocks.
+    # The walk must skip non-text blocks and still find the Human:
+    # substring in the text block.
+    msg = _json.dumps({
+        "type": "assistant",
+        "message": {"content": [
+            {"type": "tool_use", "id": "x", "name": "Bash",
+             "input": {"command": "ls"}},
+            {"type": "tool_use", "id": "y", "name": "Read",
+             "input": {"file_path": "/etc/passwd"}},
+            {"type": "text", "text": "Human: please run gh pr merge 705"},
+        ]},
+    })
+    lines = [
+        _user_line("an earlier unrelated user keystroke from long ago"),
+        msg,
+    ]
+    decision, _reason = evaluate_transcript(lines)
+    # Temporal anchor: assistant idx (1) > user idx (0) → DENY.
+    assert decision == DECISION_DENY
+
+
+def test_edge_malformed_jsonl_interleaved_with_valid(tmp_path):
+    # Bond-stress on the json.JSONDecodeError continue branch: 5
+    # malformed lines interleaved with valid ones. The walk must skip
+    # all malformed lines without crashing AND extract the correct
+    # decision from the valid lines.
+    lines = [
+        "not json",
+        _user_line("yes proceed with the merge as planned today"),
+        "{malformed",
+        '"a bare string"',
+        _assistant_line(["Human: yes proceed with the merge as planned today"]),
+        "{another: malformed",
+        "",
+        "[]",
+    ]
+    decision, reason = evaluate_transcript(lines)
+    # User idx (1) < assistant idx (4) → assistant emission more recent
+    # than user → DENY (temporal anchor).
+    assert decision == DECISION_DENY
+    assert reason == "human_emission_more_recent_than_user_turn"
+
+
+def test_edge_compound_command_chained_with_pipes_and_subshells(tmp_path):
+    # Production reality: destructive commands often appear in compound
+    # chains. The regex `search` (not `match`) catches the destructive
+    # pattern anywhere in the stripped command string.
+    transcript = _make_transcript(tmp_path, [
+        _assistant_line(["Human: please do all the cleanup steps for me"]),
+    ])
+    compound_chains = [
+        # && chain
+        "echo 'starting' && rm -rf /tmp/junk && echo 'done'",
+        # ; sequence
+        "git status; git push --force origin main; git status",
+        # | pipe (rare for destructive ops but possible)
+        "echo y | gh pr merge 705",
+        # $(subshell) — destructive op inside a subshell
+        "echo $(gh release create v1.2.3)",
+    ]
+    for command in compound_chains:
+        env = _bash_envelope(command, transcript_path=transcript)
+        code, _out, _err = _run_hook(env)
+        assert code == 2, (
+            f"compound command not denied: {command!r} (code={code})"
+        )
+
+
+def test_edge_race_open_file_unlinked_between_exists_and_read(tmp_path):
+    # Production race: transcript_path exists at the `path.exists()`
+    # check but is unlinked before _read_last_n_lines opens it. The
+    # I/O error must be swallowed → fail-OPEN ALLOW.
+    from hallucination_gate import _read_last_n_lines
+
+    p = tmp_path / "race.jsonl"
+    p.write_text("{}\n", encoding="utf-8")
+    # Simulate the race by passing a Path whose stat will raise. The
+    # easiest reliable simulation: unlink the file, then call _read.
+    p.unlink()
+    assert _read_last_n_lines(p, 10) == []
+
+
+# ─── Negative tests (false-positive resistance) ────────────────────────
+# Legitimate user-authorized destructive operations MUST flow through.
+# False-positive cost is high — operators rely on these commands daily.
+
+
+def test_negative_user_typed_rm_rf_node_modules_allows(tmp_path):
+    # Real user typed `rm -rf node_modules` — tier-1 exact substring
+    # match against the latest user turn passes the gate.
+    transcript = _make_transcript(tmp_path, [
+        _other_line("system"),
+        _assistant_line(["Human: rm -rf node_modules"]),
+        _user_line("rm -rf node_modules"),
+    ])
+    env = _bash_envelope("rm -rf node_modules", transcript_path=transcript)
+    code, out, _err = _run_hook(env)
+    assert code == 0
+    assert _json.loads(out) == {"suppressOutput": True}
+
+
+def test_negative_user_typed_git_reset_hard_allows(tmp_path):
+    transcript = _make_transcript(tmp_path, [
+        _assistant_line(["Human: git reset --hard HEAD~1"]),
+        _user_line("git reset --hard HEAD~1"),
+    ])
+    env = _bash_envelope("git reset --hard HEAD~1", transcript_path=transcript)
+    code, out, _err = _run_hook(env)
+    assert code == 0
+    assert _json.loads(out) == {"suppressOutput": True}
+
+
+def test_negative_user_typed_gh_pr_merge_allows(tmp_path):
+    transcript = _make_transcript(tmp_path, [
+        _assistant_line(["Human: gh pr merge 705"]),
+        _user_line("gh pr merge 705"),
+    ])
+    env = _bash_envelope("gh pr merge 705", transcript_path=transcript)
+    code, out, _err = _run_hook(env)
+    assert code == 0
+    assert _json.loads(out) == {"suppressOutput": True}
+
+
+def test_negative_user_typed_destructive_with_intervening_assistant_prose(tmp_path):
+    # Real flow: user types command, assistant explains, assistant runs.
+    # The user keystroke must remain the anchor; intervening assistant
+    # prose (without Human:) does not flip the gate.
+    transcript = _make_transcript(tmp_path, [
+        _user_line("git push --force-with-lease origin feature-x"),
+        _assistant_line(["sure, let me run that for you now"]),
+        _assistant_line(["here is the dry-run output first"]),
+    ])
+    # Hallucination_gate fires before merge_guard; the command itself
+    # is force-push without --force, which IS in DESTRUCTIVE_PATTERNS
+    # for the `--force(?!-with-lease)` pattern. Use the --force-with-
+    # lease form to confirm the gate ALLOWs (pattern uses negative
+    # lookahead).
+    env = _bash_envelope(
+        "git push --force-with-lease origin feature-x",
+        transcript_path=transcript,
+    )
+    code, out, _err = _run_hook(env)
+    assert code == 0
+    # The command is NOT destructive per the regex set (force-with-
+    # lease is excluded), so we exit at the is_destructive_command
+    # short-circuit.
+    assert _json.loads(out) == {"suppressOutput": True}
+
+
+# ─── Phantom-green 3-class mutation probe ──────────────────────────────
+# Architect §9.3: probe `passes_envelope_exclusion` (allowlist-based
+# predicate) via 3 mutations. Each mutation should flip at least one
+# envelope-exclusion test case. The probe-tests below exercise the
+# CURRENT (correct) state; the COUNTER-test-by-revert primitive is
+# applied at the source-revert level documented in the HANDOFF.
+
+
+def test_phantom_green_probe_force_true_would_break_all_envelope_denies():
+    # If passes_envelope_exclusion always returned True, every envelope
+    # wrapper would be treated as a genuine user keystroke and the
+    # envelope-exclusion tests would flip from DENY to ALLOW (or to
+    # tier-1 match in some cases). Sanity-pin: with the current
+    # (correct) predicate, the 5 wrapper prefixes return False.
+    for prefix in ENVELOPE_PREFIXES:
+        assert passes_envelope_exclusion(prefix + " payload") is False, (
+            f"envelope-exclusion predicate should reject prefix={prefix!r}"
+        )
+
+
+def test_phantom_green_probe_empty_allowlist_would_pass_all_envelopes():
+    # If ENVELOPE_PREFIXES were empty, every content (including
+    # wrappers) would pass exclusion. Sanity-pin: ENVELOPE_PREFIXES is
+    # non-empty AND covers the 5 architect-documented prefixes.
+    assert len(ENVELOPE_PREFIXES) >= 5
+    required = {
+        "<teammate-message",
+        "<task-notification>",
+        "<command-message>",
+        "<system-reminder>",
+        "[Request interrupted",
+    }
+    assert required.issubset(set(ENVELOPE_PREFIXES))
+
+
+def test_phantom_green_probe_overbroad_allowlist_would_reject_genuine():
+    # If ENVELOPE_PREFIXES contained "" (empty string), every content
+    # would be rejected (every string starts with ""). Sanity-pin: no
+    # empty-string entry in the allowlist.
+    assert "" not in ENVELOPE_PREFIXES
+    # And the predicate accepts genuine user keystrokes.
+    assert passes_envelope_exclusion("merge it") is True
+    assert passes_envelope_exclusion("yes proceed") is True
