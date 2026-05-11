@@ -44,6 +44,9 @@ Public surface:
 - is_self_complete_exempt(task, team_name="", teams_dir=None) — True iff
   the task is exempt from the team-lead-only-completion rule (by
   team-config-resolved agentType, or signal-task pattern).
+- is_teachback_exempt(owner, team_name="", teams_dir=None) — True iff
+  the owner's team-config agentType is in TEACHBACK_EXEMPT_AGENT_TYPES.
+  Consumed by task_lifecycle_gate.work_addblockedby_missing.
 """
 
 from datetime import datetime, timezone
@@ -248,6 +251,77 @@ def _is_wake_excluded_agent_type(
                 and agent_type in WAKE_EXCLUDED_AGENT_TYPES
             )
     return False
+
+
+def _is_teachback_exempt_agent_type(
+    owner: str,
+    team_name: str,
+    teams_dir: str | None = None,
+) -> bool:
+    """Return True iff the team-config member matching `owner` has an
+    agentType in TEACHBACK_EXEMPT_AGENT_TYPES.
+
+    Parallel to `_is_exempt_agent_type` and `_is_wake_excluded_agent_type`
+    but keyed on a different constant so the dispatch-exemption policy
+    can diverge from the self-completion and wake-counting policies
+    without coupling. See the TEACHBACK_EXEMPT_AGENT_TYPES constant
+    docstring for the semantic distinction.
+
+    Same fail-closed semantics as the sibling predicates: returns False
+    on every error path. Conservative posture — a non-exempt owner
+    falsely exempted via a corrupt config would skip the teachback
+    round-trip the team-lead might genuinely have wanted.
+
+    Consumed by `task_lifecycle_gate.evaluate_lifecycle` via the public
+    `is_teachback_exempt` predicate.
+
+    NOT a hook predicate — pure helper.
+
+    Args:
+        owner: Task owner name (matched against member.name).
+        team_name: Team name for config path. Empty string returns False.
+        teams_dir: Override teams directory (for testing). When omitted,
+                   _iter_members uses ``~/.claude/teams/``.
+    """
+    if not isinstance(owner, str) or not owner:
+        return False
+    if not isinstance(team_name, str) or not team_name:
+        return False
+    for member in pact_context._iter_members(team_name, teams_dir):
+        if member.get("name") == owner:
+            agent_type = member.get("agentType")
+            return (
+                isinstance(agent_type, str)
+                and agent_type in TEACHBACK_EXEMPT_AGENT_TYPES
+            )
+    return False
+
+
+def is_teachback_exempt(
+    owner: str,
+    team_name: str = "",
+    teams_dir: str | None = None,
+) -> bool:
+    """Return True iff this owner is exempt from teachback-gated dispatch.
+
+    Single exemption surface: team-config agentType lookup. Unlike
+    `is_self_complete_exempt(task, team_name)`, there is no signal-task
+    analog for the dispatch surface — dispatch is a per-spawn decision
+    keyed on agentType only.
+
+    Resolution via `_is_teachback_exempt_agent_type(owner, team_name,
+    teams_dir)`. Fail-closed on every error path.
+
+    Used by `task_lifecycle_gate.evaluate_lifecycle` to suppress the
+    `work_addblockedby_missing` advisory when the work task's owner is
+    teachback-exempt.
+
+    Args:
+        owner: Task owner name (matched against team-config member.name).
+        team_name: Team name for config path. Empty string returns False.
+        teams_dir: Override teams directory (for testing).
+    """
+    return _is_teachback_exempt_agent_type(owner, team_name, teams_dir)
 
 
 def canonical_since() -> str:

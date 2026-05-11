@@ -847,6 +847,77 @@ class TestTeachbackExemptAgentTypesImmutability:
             TEACHBACK_EXEMPT_AGENT_TYPES.clear()
 
 
+class TestIsTeachbackExempt:
+    """Direct unit tests on is_teachback_exempt — the public predicate that
+    backs task_lifecycle_gate.work_addblockedby_missing carve-out. Parallel
+    structure to TestIsExemptAgentType; fail-closed on every error path.
+    """
+
+    def test_secretary_owner_is_exempt(self, teams_dir):
+        from shared.intentional_wait import is_teachback_exempt
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "secretary", "agentType": "pact-secretary"},
+        ])
+        assert is_teachback_exempt("secretary", "test-team", teams_dir) is True
+
+    def test_non_canonical_spawn_name_with_secretary_agenttype_is_exempt(self, teams_dir):
+        """Resolution via team-config agentType, NOT spawn name."""
+        from shared.intentional_wait import is_teachback_exempt
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "session-secretary", "agentType": "pact-secretary"},
+        ])
+        assert is_teachback_exempt("session-secretary", "test-team", teams_dir) is True
+
+    def test_non_secretary_agenttype_not_exempt(self, teams_dir):
+        from shared.intentional_wait import is_teachback_exempt
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "coder", "agentType": "pact-backend-coder"},
+        ])
+        assert is_teachback_exempt("coder", "test-team", teams_dir) is False
+
+    def test_empty_owner_fails_closed(self, teams_dir):
+        from shared.intentional_wait import is_teachback_exempt
+
+        assert is_teachback_exempt("", "test-team", teams_dir) is False
+
+    def test_empty_team_name_fails_closed(self, teams_dir):
+        from shared.intentional_wait import is_teachback_exempt
+
+        assert is_teachback_exempt("secretary", "", teams_dir) is False
+
+    def test_missing_team_config_fails_closed(self, teams_dir):
+        from shared.intentional_wait import is_teachback_exempt
+
+        # No config written — _iter_members returns []; no match; fail-closed.
+        assert is_teachback_exempt("secretary", "ghost-team", teams_dir) is False
+
+    def test_owner_not_in_members_fails_closed(self, teams_dir):
+        from shared.intentional_wait import is_teachback_exempt
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "other", "agentType": "pact-secretary"},
+        ])
+        assert is_teachback_exempt("secretary", "test-team", teams_dir) is False
+
+    def test_empty_agent_type_field_fails_closed(self, teams_dir):
+        from shared.intentional_wait import is_teachback_exempt
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "secretary", "agentType": ""},
+        ])
+        assert is_teachback_exempt("secretary", "test-team", teams_dir) is False
+
+    def test_non_string_inputs_fail_closed(self, teams_dir):
+        from shared.intentional_wait import is_teachback_exempt
+
+        assert is_teachback_exempt(None, "test-team", teams_dir) is False  # type: ignore[arg-type]
+        assert is_teachback_exempt("secretary", None, teams_dir) is False  # type: ignore[arg-type]
+        assert is_teachback_exempt(123, "test-team", teams_dir) is False  # type: ignore[arg-type]
+
+
 class TestKnownReasonsLiteralRegressionGuard:
     """Pin the exact set of known reasons. Any silent removal/rename must fail loudly.
 
