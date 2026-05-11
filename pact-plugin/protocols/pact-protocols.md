@@ -1982,7 +1982,7 @@ Both calls are **required**, and the ordering matches Acceptance for the same li
 
 The canonical predicate `is_self_complete_exempt(task, team_name)` in `shared/intentional_wait.py` witnesses ONLY these two surfaces — pure function for your TaskGet inspection and audit tooling. No hook reads it. Pass `team_name` (read from session context) to get accurate exemption signal for surface 1; surface 2 is independent of `team_name`.
 
-**Related (dispatch surface)**: A parallel agentType-keyed predicate `is_teachback_exempt(owner, team_name)` in `shared/intentional_wait.py` governs the **dispatch-shape** exemption — owners whose team-config `agentType` is in `TEACHBACK_EXEMPT_AGENT_TYPES` (currently `{pact-secretary}`) dispatch via single-task (no Task A teachback gate). This is the third agentType-keyed carve-out, parallel to `SELF_COMPLETE_EXEMPT_AGENT_TYPES` (completion, above) and `WAKE_EXCLUDED_AGENT_TYPES` (wake counting). Three frozensets, three behavioral surfaces, fully decoupled. See `agents/pact-orchestrator.md` §11 for the dispatch-side rule and `commands/bootstrap.md` for the canonical single-task dispatch shape.
+**Related (dispatch surface)**: `member.agentType="pact-secretary"` also gets a dispatch carve-out — no TEACHBACK (single-task dispatch). Third agentType-keyed carve-out, parallel to `SELF_COMPLETE_EXEMPT_AGENT_TYPES` (completion, above) and `WAKE_EXCLUDED_AGENT_TYPES` (wake counting); three frozensets, three behavioral surfaces, fully decoupled. See `agents/pact-orchestrator.md` §11 + `commands/bootstrap.md`.
 
 **Lead-driven force-completion (separate path, not predicate-witnessed)**:
 

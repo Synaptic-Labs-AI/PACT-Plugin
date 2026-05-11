@@ -104,7 +104,7 @@ The `Agent()` `prompt` does NOT change shape — the Teachback-Gated Dispatch is
 **Carve-outs** — single-task dispatch still applies for:
 
 - **Auditor signal-tasks** (`metadata.completion_type="signal"`): no TEACHBACK, no Task B. The auditor IS observing; their task IS the signal.
-- **Secretary dispatches**: owner's team-config `agentType` ∈ `TEACHBACK_EXEMPT_AGENT_TYPES` (`shared/intentional_wait.py`) — predicate `is_teachback_exempt(owner, team_name)` suppresses the Task A teachback gate. Completion-side companion: secretary self-completes memory-save tasks via `SELF_COMPLETE_EXEMPT_AGENT_TYPES` and `is_self_complete_exempt(task, team_name)`. Both resolve via team-config `member.agentType`, so the carve-outs apply regardless of spawn name.
+- **Secretary** (`member.agentType="pact-secretary"`): no TEACHBACK (single-task dispatch); can self-complete memory-save tasks. Resolves on agentType, not spawn name.
 - **imPACT force-termination**: `TaskStop` + team-lead-set `metadata.terminated=true` is its own out-of-band path. See [imPACT.md](imPACT.md).
 
 **Skipped phases**: Mark directly `completed` (no `in_progress` — no work occurs):
