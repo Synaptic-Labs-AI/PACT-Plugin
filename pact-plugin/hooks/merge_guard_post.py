@@ -328,8 +328,19 @@ def main():
             context = extract_context(question)
             token_path = write_token(context)
             if token_path:
+                # Defense-in-depth parity with merge_guard_pre.py M-sec-2:
+                # sanitize newline and carriage-return characters from the
+                # path before interpolation to prevent log-line injection.
+                # In practice `write_token` builds the path from `TOKEN_DIR`
+                # (hardcoded `~/.claude/`) and a timestamp-derived filename
+                # via `tempfile.mkstemp`, so neither segment can contain
+                # CR/LF — this sanitization is belt-and-suspenders for the
+                # audit-trail integrity story. Full path retained (not just
+                # basename) so operators can locate the token file directly
+                # from the log line during triage.
+                safe_token_path = token_path.replace("\n", " ").replace("\r", " ")
                 print(
-                    f"Merge authorization token written: {token_path}",
+                    f"Merge authorization token written: {safe_token_path}",
                     file=sys.stderr,
                 )
 
