@@ -801,6 +801,169 @@ class TestSelfCompleteExemptAgentTypesImmutability:
             KNOWN_REASONS.add("awaiting_something_new")
 
 
+class TestTeachbackExemptAgentTypesConstant:
+    """Third agentType-keyed carve-out frozenset, parallel structure to
+    SELF_COMPLETE_EXEMPT_AGENT_TYPES and WAKE_EXCLUDED_AGENT_TYPES. Membership:
+    {pact-secretary}. Surface: teachback-gated dispatch (Task A skipped).
+    """
+
+    def test_is_frozenset(self):
+        from shared.intentional_wait import TEACHBACK_EXEMPT_AGENT_TYPES
+
+        assert isinstance(TEACHBACK_EXEMPT_AGENT_TYPES, frozenset)
+
+    def test_contains_pact_secretary(self):
+        from shared.intentional_wait import TEACHBACK_EXEMPT_AGENT_TYPES
+
+        assert "pact-secretary" in TEACHBACK_EXEMPT_AGENT_TYPES
+
+    @pytest.mark.parametrize("agent_type", [
+        "pact-architect",
+        "pact-auditor",
+        "pact-backend-coder",
+        "pact-frontend-coder",
+        "pact-test-engineer",
+        "pact-security-engineer",
+        "pact-database-engineer",
+        "pact-preparer",
+        "pact-orchestrator",
+        "pact-devops-engineer",
+        "pact-n8n",
+        "pact-qa-engineer",
+    ])
+    def test_excludes_other_agent_types(self, agent_type):
+        """Exclusivity invariant pinned over the full canonical PACT roster
+        (everyone except pact-secretary). A future agentType addition that
+        accidentally widens the exempt set surfaces as a parametrize-row
+        failure, not silent privilege drift.
+        """
+        from shared.intentional_wait import TEACHBACK_EXEMPT_AGENT_TYPES
+
+        assert agent_type not in TEACHBACK_EXEMPT_AGENT_TYPES
+
+
+class TestTeachbackExemptAgentTypesImmutability:
+    """frozenset chosen specifically to prevent accidental mutation; pin that."""
+
+    def test_add_raises_attribute_error(self):
+        from shared.intentional_wait import TEACHBACK_EXEMPT_AGENT_TYPES
+
+        with pytest.raises(AttributeError):
+            TEACHBACK_EXEMPT_AGENT_TYPES.add("new-agent-type")
+
+    def test_remove_raises_attribute_error(self):
+        from shared.intentional_wait import TEACHBACK_EXEMPT_AGENT_TYPES
+
+        with pytest.raises(AttributeError):
+            TEACHBACK_EXEMPT_AGENT_TYPES.remove("pact-secretary")
+
+    def test_clear_raises_attribute_error(self):
+        from shared.intentional_wait import TEACHBACK_EXEMPT_AGENT_TYPES
+
+        with pytest.raises(AttributeError):
+            TEACHBACK_EXEMPT_AGENT_TYPES.clear()
+
+
+class TestThreeFrozensetsAreSeparateObjects:
+    """Phantom-green guard: the module docstring forbids aliasing the three
+    agentType-keyed carve-out frozensets (`SELF_COMPLETE_EXEMPT_AGENT_TYPES`,
+    `WAKE_EXCLUDED_AGENT_TYPES`, `TEACHBACK_EXEMPT_AGENT_TYPES`) because
+    each governs an independent operational surface (self-completion,
+    wake-counting, dispatch). Same-contents aliasing — e.g.
+    `TEACHBACK_EXEMPT_AGENT_TYPES = SELF_COMPLETE_EXEMPT_AGENT_TYPES` — is a
+    silent-recouple defect: membership and immutability tests stay GREEN
+    because the alias preserves contents; the docstring prohibition has no
+    CI teeth. This test pins the three as separate objects via `is not`
+    identity checks so a future aliasing refactor fails loudly.
+
+    When divergence lands (one frozenset gains a member the others don't),
+    contents-based tests will catch it. But during the equal-contents
+    window — which is the current state — only identity checks discriminate.
+    """
+
+    def test_three_frozensets_are_separate_objects(self):
+        from shared.intentional_wait import (
+            SELF_COMPLETE_EXEMPT_AGENT_TYPES,
+            TEACHBACK_EXEMPT_AGENT_TYPES,
+            WAKE_EXCLUDED_AGENT_TYPES,
+        )
+
+        assert TEACHBACK_EXEMPT_AGENT_TYPES is not SELF_COMPLETE_EXEMPT_AGENT_TYPES
+        assert TEACHBACK_EXEMPT_AGENT_TYPES is not WAKE_EXCLUDED_AGENT_TYPES
+        assert SELF_COMPLETE_EXEMPT_AGENT_TYPES is not WAKE_EXCLUDED_AGENT_TYPES
+
+
+class TestIsTeachbackExempt:
+    """Direct unit tests on is_teachback_exempt — the public predicate that
+    backs task_lifecycle_gate.work_addblockedby_missing carve-out. Parallel
+    structure to TestIsExemptAgentType; fail-closed on every error path.
+    """
+
+    def test_secretary_owner_is_exempt(self, teams_dir):
+        from shared.intentional_wait import is_teachback_exempt
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "secretary", "agentType": "pact-secretary"},
+        ])
+        assert is_teachback_exempt("secretary", "test-team", teams_dir) is True
+
+    def test_non_canonical_spawn_name_with_secretary_agenttype_is_exempt(self, teams_dir):
+        """Resolution via team-config agentType, NOT spawn name."""
+        from shared.intentional_wait import is_teachback_exempt
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "session-secretary", "agentType": "pact-secretary"},
+        ])
+        assert is_teachback_exempt("session-secretary", "test-team", teams_dir) is True
+
+    def test_non_secretary_agenttype_not_exempt(self, teams_dir):
+        from shared.intentional_wait import is_teachback_exempt
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "coder", "agentType": "pact-backend-coder"},
+        ])
+        assert is_teachback_exempt("coder", "test-team", teams_dir) is False
+
+    def test_empty_owner_fails_closed(self, teams_dir):
+        from shared.intentional_wait import is_teachback_exempt
+
+        assert is_teachback_exempt("", "test-team", teams_dir) is False
+
+    def test_empty_team_name_fails_closed(self, teams_dir):
+        from shared.intentional_wait import is_teachback_exempt
+
+        assert is_teachback_exempt("secretary", "", teams_dir) is False
+
+    def test_missing_team_config_fails_closed(self, teams_dir):
+        from shared.intentional_wait import is_teachback_exempt
+
+        # No config written — _iter_members returns []; no match; fail-closed.
+        assert is_teachback_exempt("secretary", "ghost-team", teams_dir) is False
+
+    def test_owner_not_in_members_fails_closed(self, teams_dir):
+        from shared.intentional_wait import is_teachback_exempt
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "other", "agentType": "pact-secretary"},
+        ])
+        assert is_teachback_exempt("secretary", "test-team", teams_dir) is False
+
+    def test_empty_agent_type_field_fails_closed(self, teams_dir):
+        from shared.intentional_wait import is_teachback_exempt
+
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "secretary", "agentType": ""},
+        ])
+        assert is_teachback_exempt("secretary", "test-team", teams_dir) is False
+
+    def test_non_string_inputs_fail_closed(self, teams_dir):
+        from shared.intentional_wait import is_teachback_exempt
+
+        assert is_teachback_exempt(None, "test-team", teams_dir) is False  # type: ignore[arg-type]
+        assert is_teachback_exempt("secretary", None, teams_dir) is False  # type: ignore[arg-type]
+        assert is_teachback_exempt(123, "test-team", teams_dir) is False  # type: ignore[arg-type]
+
+
 class TestKnownReasonsLiteralRegressionGuard:
     """Pin the exact set of known reasons. Any silent removal/rename must fail loudly.
 
@@ -893,6 +1056,67 @@ class TestIsExemptAgentTypeDefaultTeamsDir:
         # Both teams_dir omitted; `team_name` provided.
         task = {"owner": "session-secretary", "metadata": {}}
         assert is_self_complete_exempt(task, "default-path-team") is True
+
+
+class TestIsTeachbackExemptDefaultTeamsDir:
+    """teams_dir=None default-path coverage for is_teachback_exempt: when
+    the override is omitted, the underlying `_iter_members` must resolve
+    via Path.home()/.claude/teams/. TestIsTeachbackExempt above passes
+    teams_dir explicitly; this class exercises the production default path
+    so a future regression that bypasses `_iter_members` (e.g. inlines its
+    own path) fails loudly.
+
+    Mirror of TestIsExemptAgentTypeDefaultTeamsDir for the self-complete
+    surface — same shape, different predicate.
+    """
+
+    def test_default_teams_dir_resolves_via_path_home(self, tmp_path, monkeypatch):
+        from shared.intentional_wait import is_teachback_exempt
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        team_dir = tmp_path / ".claude" / "teams" / "default-path-team"
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text(
+            json.dumps({"team_name": "default-path-team", "members": [
+                {"name": "session-secretary", "agentType": "pact-secretary"},
+            ]}),
+            encoding="utf-8",
+        )
+        # teams_dir omitted → exercises _iter_members default branch.
+        assert is_teachback_exempt(
+            "session-secretary", "default-path-team"
+        ) is True
+
+    def test_default_teams_dir_missing_config_fails_closed(
+        self, tmp_path, monkeypatch
+    ):
+        from shared.intentional_wait import is_teachback_exempt
+
+        # Path.home() points to tmp_path with no .claude/teams set up.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        # Default-path resolution must fail-closed without raising.
+        assert is_teachback_exempt(
+            "session-secretary", "ghost-team"
+        ) is False
+
+    def test_default_teams_dir_non_exempt_agent_type(
+        self, tmp_path, monkeypatch
+    ):
+        from shared.intentional_wait import is_teachback_exempt
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        team_dir = tmp_path / ".claude" / "teams" / "default-path-team"
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text(
+            json.dumps({"team_name": "default-path-team", "members": [
+                {"name": "backend-coder-1", "agentType": "pact-backend-coder"},
+            ]}),
+            encoding="utf-8",
+        )
+        # Default-path resolves member but agentType is non-exempt.
+        assert is_teachback_exempt(
+            "backend-coder-1", "default-path-team"
+        ) is False
 
 
 class TestIsExemptAgentTypeMixedTeamConfig:
@@ -1093,6 +1317,14 @@ class TestDocSurfaceStalenessSweep:
     import re
 
     OLD_NAME_PATTERN = re.compile(r"\bSELF_COMPLETE_EXEMPT_AGENTS\b")
+    # Preventive guard for the dispatch-exemption frozenset: forbid the
+    # `_TYPES`-less typo variant of TEACHBACK_EXEMPT_AGENT_TYPES. Currently
+    # zero occurrences exist; this pattern catches a future rename-typo
+    # before it lands in agent-facing instruction.
+    TEACHBACK_OLD_NAME_PATTERN = re.compile(r"\bTEACHBACK_EXEMPT_AGENTS\b")
+    # All patterns scanned for staleness — extended via tuple so adding a
+    # third constant-rename guard is a one-line change.
+    ALL_OLD_NAME_PATTERNS = (OLD_NAME_PATTERN, TEACHBACK_OLD_NAME_PATTERN)
     # `> Deprecated:` blockquote marker, leading whitespace tolerated.
     DEPRECATION_BLOCKQUOTE_PATTERN = re.compile(r"^\s*>\s*Deprecated:")
     # `<!-- old name:` HTML comment marker (case-insensitive on `old name`),
@@ -1137,11 +1369,15 @@ class TestDocSurfaceStalenessSweep:
                     continue
                 if self._skipped_line(line, in_fence):
                     continue
-                if self.OLD_NAME_PATTERN.search(line):
-                    violations.append(f"{md_path.relative_to(root.parent)}:{line_no}: {line.strip()}")
+                for pattern in self.ALL_OLD_NAME_PATTERNS:
+                    if pattern.search(line):
+                        violations.append(
+                            f"{md_path.relative_to(root.parent)}:{line_no}: "
+                            f"[{pattern.pattern}] {line.strip()}"
+                        )
         assert not violations, (
-            "Stale `SELF_COMPLETE_EXEMPT_AGENTS` references found in doc "
-            "surface — must be retargeted to `SELF_COMPLETE_EXEMPT_AGENT_TYPES`:\n"
+            "Stale typo-variant references found in doc surface — must be "
+            "retargeted to the canonical `_AGENT_TYPES`-suffixed name:\n"
             + "\n".join(violations)
         )
 
@@ -1161,7 +1397,7 @@ class TestDocSurfaceStalenessSweep:
                 continue
             if self._skipped_line(line, in_fence):
                 continue
-            if self.OLD_NAME_PATTERN.search(line):
+            if any(p.search(line) for p in self.ALL_OLD_NAME_PATTERNS):
                 violations.append(line_no)
         return violations
 
@@ -1247,6 +1483,41 @@ class TestDocSurfaceStalenessSweep:
         # predicate accidentally suppressing the NEW name.
         lines = [
             "Reference SELF_COMPLETE_EXEMPT_AGENT_TYPES in shared module.",
+        ]
+        assert self._scan_lines(lines) == []
+
+    # ---- TEACHBACK_EXEMPT_AGENTS typo-variant counter-tests ----
+
+    def test_teachback_typo_variant_caught(self):
+        # Bare prose mention of the TEACHBACK typo variant in a plain
+        # doc line MUST fire. Currently zero occurrences exist in the
+        # repo; this pin catches a future rename-typo before it lands.
+        lines = [
+            "## Dispatch carve-out",
+            "",
+            "Owners listed in TEACHBACK_EXEMPT_AGENTS skip the gate.",
+        ]
+        assert self._scan_lines(lines) == [3]
+
+    def test_teachback_typo_in_deprecation_blockquote_skipped(self):
+        # Same exclusion logic applies to the new pattern.
+        lines = [
+            "## Dispatch carve-out",
+            "",
+            "> Deprecated: TEACHBACK_EXEMPT_AGENTS (pre-rename). See "
+            "TEACHBACK_EXEMPT_AGENT_TYPES below.",
+            "",
+            "Carve-out is keyed on agentType.",
+        ]
+        assert self._scan_lines(lines) == []
+
+    def test_teachback_typo_in_fenced_block_skipped(self):
+        # Snippets quoting historical-typo code inside fences must NOT fire.
+        lines = [
+            "```python",
+            "if owner in TEACHBACK_EXEMPT_AGENTS:",
+            "    return True",
+            "```",
         ]
         assert self._scan_lines(lines) == []
 

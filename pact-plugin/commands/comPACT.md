@@ -197,8 +197,8 @@ The `Agent()` `prompt` does NOT change shape — the Teachback-Gated Dispatch is
 
 **Carve-outs** — single-task dispatch still applies for:
 
-- **Auditor signal-tasks** (`metadata.completion_type="signal"`): no TEACHBACK, no Task B.
-- **Secretary memory-save tasks**: secretary self-completes via the team-config-keyed `SELF_COMPLETE_EXEMPT_AGENT_TYPES` set in `shared/intentional_wait.py` (resolved on `member.agentType`, so the carve-out applies regardless of spawn name).
+- **Auditor signal-tasks** (`metadata.completion_type="signal"`): no TEACHBACK, no Task B; self-completes tasks.
+- **Secretary** (`member.agentType="pact-secretary"`): no TEACHBACK (single-task dispatch); self-completes memory-save tasks.
 
 ---
 

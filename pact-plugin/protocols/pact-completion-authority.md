@@ -31,6 +31,8 @@ Both calls are **required**, and the ordering matches Acceptance for the same li
 
 The canonical predicate `is_self_complete_exempt(task, team_name)` in `shared/intentional_wait.py` witnesses ONLY these two surfaces — pure function for your TaskGet inspection and audit tooling. No hook reads it. Pass `team_name` (read from session context) to get accurate exemption signal for surface 1; surface 2 is independent of `team_name`.
 
+**Related (dispatch surface)**: `member.agentType="pact-secretary"` also gets a dispatch carve-out — no TEACHBACK (single-task dispatch). Third agentType-keyed carve-out, parallel to `SELF_COMPLETE_EXEMPT_AGENT_TYPES` (completion, above) and `WAKE_EXCLUDED_AGENT_TYPES` (wake counting); three frozensets, three behavioral surfaces, fully decoupled. See `agents/pact-orchestrator.md` §11 + `commands/bootstrap.md`.
+
 **Lead-driven force-completion (separate path, not predicate-witnessed)**:
 
 | Path | Trigger | Rule |

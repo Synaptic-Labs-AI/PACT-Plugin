@@ -127,6 +127,161 @@ def test_silent_when_owner_is_not_pact_specialist(pact_context):
     assert not any(rule == "work_addblockedby_missing" for rule, _ in advisories)
 
 
+def test_silent_when_owner_is_teachback_exempt_secretary(tmp_path, monkeypatch, pact_context):
+    """Secretary owner with agentType in TEACHBACK_EXEMPT_AGENT_TYPES → no
+    work_addblockedby_missing advisory even without addBlockedBy. Resolution
+    via team-config agentType lookup (mirrors the self-completion carve-out
+    fixture pattern at test_silent_when_secretary_self_completes)."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    team_dir = tmp_path / ".claude" / "teams" / "test-team"
+    team_dir.mkdir(parents=True)
+    (team_dir / "config.json").write_text(
+        json.dumps({
+            "team_name": "test-team",
+            "members": [
+                {"name": "pact-secretary", "agentType": "pact-secretary"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    payload = {
+        "tool_name": "TaskCreate",
+        "tool_input": {
+            "subject": "secretary: session briefing + HANDOFF readiness",
+            "owner": "pact-secretary",
+            # no addBlockedBy — single-task dispatch shape
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(rule == "work_addblockedby_missing" for rule, _ in advisories)
+
+
+def test_advisory_when_pact_owner_is_not_teachback_exempt(tmp_path, monkeypatch, pact_context):
+    """A pact-* owner whose team-config agentType is NOT in
+    TEACHBACK_EXEMPT_AGENT_TYPES still fires work_addblockedby_missing —
+    regression protection for the unchanged majority path."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    team_dir = tmp_path / ".claude" / "teams" / "test-team"
+    team_dir.mkdir(parents=True)
+    (team_dir / "config.json").write_text(
+        json.dumps({
+            "team_name": "test-team",
+            "members": [
+                {"name": "pact-backend-coder", "agentType": "pact-backend-coder"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    payload = {
+        "tool_name": "TaskCreate",
+        "tool_input": {
+            "subject": "implement feature X",
+            "owner": "pact-backend-coder",
+            # no addBlockedBy
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(rule == "work_addblockedby_missing" for rule, _ in advisories)
+
+
+def test_silent_when_teachback_exempt_resolves_via_team_config_agent_type(
+    tmp_path, monkeypatch, pact_context
+):
+    """Spawn-name independence: owner='session-secretary' (non-canonical
+    spawn name) with team-config agentType='pact-secretary' still reaches
+    the exemption. The carve-out keys on agentType, not owner-name match."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    team_dir = tmp_path / ".claude" / "teams" / "test-team"
+    team_dir.mkdir(parents=True)
+    (team_dir / "config.json").write_text(
+        json.dumps({
+            "team_name": "test-team",
+            "members": [
+                {"name": "pact-session-secretary", "agentType": "pact-secretary"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    payload = {
+        "tool_name": "TaskCreate",
+        "tool_input": {
+            "subject": "session-secretary: harvest HANDOFFs",
+            "owner": "pact-session-secretary",
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(rule == "work_addblockedby_missing" for rule, _ in advisories)
+
+
+def test_teachback_addblocks_missing_still_fires_for_stray_secretary_teachback(
+    tmp_path, monkeypatch, pact_context
+):
+    """Defensive: the teachback_addblocks_missing rule is independent of the
+    new exemption. A stray teachback-subject task for the secretary still
+    triggers the addBlocks advisory — exemption applies only to the
+    work_addblockedby_missing rule."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    team_dir = tmp_path / ".claude" / "teams" / "test-team"
+    team_dir.mkdir(parents=True)
+    (team_dir / "config.json").write_text(
+        json.dumps({
+            "team_name": "test-team",
+            "members": [
+                {"name": "pact-secretary", "agentType": "pact-secretary"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    payload = {
+        "tool_name": "TaskCreate",
+        "tool_input": {
+            "subject": "secretary: TEACHBACK for some task",
+            "owner": "pact-secretary",
+            # no addBlocks
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(rule == "teachback_addblocks_missing" for rule, _ in advisories)
+
+
+def test_advisory_when_pact_owner_not_in_members_fails_closed(tmp_path, monkeypatch, pact_context):
+    """Fail-closed: owner doesn't match any member.name in team config →
+    is_teachback_exempt returns False → advisory still fires. The pinned
+    property is fail-closed-on-member-miss; the spoof-defense framing is
+    one motivation, not the property itself."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    team_dir = tmp_path / ".claude" / "teams" / "test-team"
+    team_dir.mkdir(parents=True)
+    (team_dir / "config.json").write_text(
+        json.dumps({
+            "team_name": "test-team",
+            "members": [
+                {"name": "other-agent", "agentType": "pact-secretary"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    payload = {
+        "tool_name": "TaskCreate",
+        "tool_input": {
+            "subject": "spoof: pact-secretary work",
+            "owner": "pact-secretary",  # owner doesn't match any member.name
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(rule == "work_addblockedby_missing" for rule, _ in advisories)
+
+
 # =============================================================================
 # completion_no_paired_send — teachback completion without paired SendMessage (120s window)
 # =============================================================================
