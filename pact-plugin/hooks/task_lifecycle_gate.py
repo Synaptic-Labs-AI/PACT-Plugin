@@ -113,6 +113,9 @@ PAIRED_SENDMESSAGE_WINDOW_S = 120
 # the name perimeter blocks teammates from spawning under reserved
 # names that could shadow legitimate secretary spawn).
 
+# Teachback-exempt dispatch carve-out resolution is delegated entirely to
+# is_teachback_exempt(owner, team_name) in shared.intentional_wait.
+
 # Required handoff schema fields (advisory if present-but-malformed).
 _HANDOFF_REQUIRED_FIELDS = (
     "produced",
@@ -359,6 +362,14 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                 "the work task (per pact-completion-authority).",
             ))
 
+        # Clause order is intentional: the cheap checks
+        # (is_teachback dict-lookup, owner.startswith string-prefix,
+        # tool_input.get dict-lookup) precede the disk-reading
+        # is_teachback_exempt predicate. Common path (well-formed
+        # dispatch with addBlockedBy provided) short-circuits at the
+        # 3rd clause and never hits disk. Failure path (missing
+        # addBlockedBy) does hit disk via _iter_members, but this is
+        # the rare misconfiguration path — amortized cost near zero.
         if (
             not is_teachback
             and owner.startswith("pact-")
