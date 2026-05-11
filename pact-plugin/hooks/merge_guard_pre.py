@@ -65,12 +65,6 @@ try:
         _GH_PR_MERGE_RE,
         _GH_PR_CLOSE_RE,
     )
-
-    # Back-compat alias for the legacy module-private name.
-    # Tests and internal callers continue to import
-    # `_detect_command_operation_type` from `merge_guard_pre`; the canonical
-    # implementation now lives in `shared.merge_guard_common` (see #720 Bug B).
-    _detect_command_operation_type = detect_command_operation_type
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     # Hand-built deny output using only stdlib (json, sys). Cannot rely on any
     # constants or helpers from the failed imports.
@@ -508,6 +502,13 @@ _COMPOUND_OPS_RE = re.compile(r"&&|\|\||;|\||\n")
 # real `|` and pollute compound-detection. Scoped to
 # `is_compound_destructive_command` — does NOT leak into other consumers
 # (DANGEROUS_PATTERNS scan, `_token_matches_command`, etc.).
+#
+# Note on zsh `|&` (combined-stderr-pipe shorthand): deliberately NOT in this
+# pattern. Bash users write `cmd 2>&1 | next` as separate tokens (the FD-strip
+# above neutralizes the `2>&1`, leaving the bare `|` for compound detection).
+# Zsh users write `cmd |& next`, which would require a third arm here. The
+# merge_guard hooks run under bash (Claude Code's default shell), so `|&` is
+# out of scope. If the shell ever changes, add an arm for `|\s*&` here.
 _FD_REDIRECT_RE = re.compile(r"\d*[<>]&\d+|>\|")
 
 
@@ -601,6 +602,12 @@ def find_valid_token(token_dir: Path | None = None) -> tuple[dict, str] | tuple[
         # (e.g., merge-authorized-N.use-1) created by _consume_token to
         # atomically claim a use slot; they are NOT tokens themselves and
         # have no JSON body to parse as one.
+        # Substring-contains is correct by construction: the outer glob
+        # `TOKEN_PREFIX*` constrains every basename to begin with
+        # `merge-authorized-`, and tokens are written by `write_token` via
+        # `tempfile.mkstemp` with controlled suffixes that never include
+        # `.use-`. The only way `.use-` appears in a basename is via the
+        # marker-file shape this check is designed to filter.
         if USE_MARKER_SUFFIX in os.path.basename(token_path):
             continue
 
@@ -734,6 +741,15 @@ def _consume_token(token_path: str, max_uses_default: int = 1) -> bool:
     # identical to pre-#720 behavior — rename to .consumed, with the
     # FileNotFoundError ↔ .consumed-exists idempotency fallback preserved
     # verbatim.
+    #
+    # Idempotency model: under concurrent invocation, the first caller
+    # wins the os.rename (atomic on POSIX); the second caller's rename
+    # raises FileNotFoundError because the source no longer exists. The
+    # fallback `os.open(consumed_path, O_RDONLY)` confirms the .consumed
+    # file is on disk — meaning a prior invocation succeeded — and this
+    # invocation returns True idempotently. A True return from EITHER
+    # caller means "your operation is authorized"; legacy N=1 semantics
+    # treat the first-success and the racing-recognition as equivalent.
     if max_uses <= 1 and not n_use_token:
         try:
             os.rename(token_path, consumed_path)
@@ -769,13 +785,32 @@ def _consume_token(token_path: str, max_uses_default: int = 1) -> bool:
         # Slot claimed. Write the audit body; on body-write failure, unlink
         # the marker so we don't leave an orphan slot blocking future uses
         # (mirrors merge_guard_post.write_token's body-write failure path).
+        # The inner try/finally guarantees the raw fd is closed even if
+        # os.fdopen itself raises before taking ownership (e.g., MemoryError
+        # mid-construction). os.fdopen success transfers ownership of fd
+        # to the file object, whose with-block close becomes the source of
+        # truth; the outer os.close in the finally then raises EBADF, which
+        # we suppress because that path indicates fdopen took ownership
+        # already.
+        fdopen_took_ownership = False
         try:
-            with os.fdopen(fd, "w") as f:
+            try:
+                file_obj = os.fdopen(fd, "w")
+            except Exception:
+                # fdopen failed before taking ownership — fd still ours.
+                raise
+            fdopen_took_ownership = True
+            with file_obj as f:
                 f.write(json.dumps({
                     "consumed_at": time.time(),
                     "slot": slot,
                 }))
         except Exception:
+            if not fdopen_took_ownership:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             try:
                 os.unlink(marker_path)
             except OSError:
@@ -785,9 +820,20 @@ def _consume_token(token_path: str, max_uses_default: int = 1) -> bool:
         # Audit emit — operator-visible stderr (mirrors existing [security]
         # and `Merge authorization token written` emits). Format is
         # invariant under MAX_USES changes.
+        # Defense-in-depth: sanitize the basename's CR/LF characters before
+        # interpolation to prevent log-line injection if a malicious local
+        # actor planted a token file with a newline in its name. In practice
+        # write_token uses tempfile.mkstemp with a controlled suffix so the
+        # path can never contain CR/LF; this sanitization is belt-and-
+        # suspenders for the audit-trail integrity story.
+        safe_basename = (
+            os.path.basename(token_path)
+            .replace("\n", " ")
+            .replace("\r", " ")
+        )
         print(
             f"[security] merge-authorized token consumed "
-            f"(slot {slot}/{max_uses}): {os.path.basename(token_path)}",
+            f"(slot {slot}/{max_uses}): {safe_basename}",
             file=sys.stderr,
         )
 
@@ -895,7 +941,7 @@ def _token_matches_command(token: dict, command: str) -> bool:
     # Cross-operation authorization guard: a typed token (one with a known
     # operation_type) MUST match the command's detected operation type, OR
     # the command shape is unrecognized. Symmetric coverage —
-    # `_detect_command_operation_type` recognizes all four classes
+    # `detect_command_operation_type` recognizes all four classes
     # (merge / close / force-push / branch-delete) so a missing cmd_op_type
     # means the destructive shape is outside the recognized set, not a
     # legitimate "untyped" path. Refuse the cross-op authorization rather
@@ -907,7 +953,7 @@ def _token_matches_command(token: dict, command: str) -> bool:
     # not occur post-#700 sparse-context guard at write time) still fall
     # through to the pr_number/branch checks for backward compatibility.
     if token_op_type:
-        cmd_op_type = _detect_command_operation_type(command)
+        cmd_op_type = detect_command_operation_type(command)
         if cmd_op_type is None or token_op_type != cmd_op_type:
             return False
 

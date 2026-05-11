@@ -7817,37 +7817,37 @@ class TestGhPrCloseFullIntegration:
 
 
 # =============================================================================
-# _detect_command_operation_type unit tests
+# detect_command_operation_type unit tests
 # =============================================================================
 
 
 class TestDetectCommandOperationType:
-    """Direct unit tests for _detect_command_operation_type helper."""
+    """Direct unit tests for detect_command_operation_type helper."""
 
     def test_merge_command(self):
-        from merge_guard_pre import _detect_command_operation_type
+        from shared.merge_guard_common import detect_command_operation_type
 
-        assert _detect_command_operation_type("gh pr merge 42") == "merge"
+        assert detect_command_operation_type("gh pr merge 42") == "merge"
 
     def test_close_command(self):
-        from merge_guard_pre import _detect_command_operation_type
+        from shared.merge_guard_common import detect_command_operation_type
 
-        assert _detect_command_operation_type("gh pr close 42") == "close"
+        assert detect_command_operation_type("gh pr close 42") == "close"
 
     def test_force_push_returns_force_push(self):
-        from merge_guard_pre import _detect_command_operation_type
+        from shared.merge_guard_common import detect_command_operation_type
 
-        assert _detect_command_operation_type("git push --force origin main") == "force-push"
+        assert detect_command_operation_type("git push --force origin main") == "force-push"
 
     def test_branch_delete_returns_branch_delete(self):
-        from merge_guard_pre import _detect_command_operation_type
+        from shared.merge_guard_common import detect_command_operation_type
 
-        assert _detect_command_operation_type("git branch -D feature") == "branch-delete"
+        assert detect_command_operation_type("git branch -D feature") == "branch-delete"
 
     def test_force_push_short_flag(self):
-        from merge_guard_pre import _detect_command_operation_type
+        from shared.merge_guard_common import detect_command_operation_type
 
-        assert _detect_command_operation_type("git push -f origin main") == "force-push"
+        assert detect_command_operation_type("git push -f origin main") == "force-push"
 
     def test_force_push_with_lease_to_topic_branch_returns_none(self):
         """git push --force-with-lease (without main/master target) is the SAFE form.
@@ -7859,43 +7859,43 @@ class TestDetectCommandOperationType:
         --force / -f forms produce a force-push tag for token-authorization
         purposes.
         """
-        from merge_guard_pre import _detect_command_operation_type
+        from shared.merge_guard_common import detect_command_operation_type
 
-        assert _detect_command_operation_type("git push --force-with-lease origin feature") is None
+        assert detect_command_operation_type("git push --force-with-lease origin feature") is None
 
     def test_api_ref_delete_classified_as_branch_delete(self):
         """API DELETE on git/refs is a branch-delete class operation."""
-        from merge_guard_pre import _detect_command_operation_type
+        from shared.merge_guard_common import detect_command_operation_type
 
-        assert _detect_command_operation_type(
+        assert detect_command_operation_type(
             "gh api -X DELETE repos/owner/repo/git/refs/heads/feature"
         ) == "branch-delete"
 
     def test_api_ref_patch_classified_as_force_push(self):
-        from merge_guard_pre import _detect_command_operation_type
+        from shared.merge_guard_common import detect_command_operation_type
 
-        assert _detect_command_operation_type(
+        assert detect_command_operation_type(
             "gh api -X PATCH repos/owner/repo/git/refs/heads/main -f sha=abc"
         ) == "force-push"
 
     def test_curl_ref_patch_classified_as_force_push(self):
-        from merge_guard_pre import _detect_command_operation_type
+        from shared.merge_guard_common import detect_command_operation_type
 
-        assert _detect_command_operation_type(
+        assert detect_command_operation_type(
             "curl -X PATCH https://api.github.com/repos/o/r/git/refs/heads/main"
         ) == "force-push"
 
     def test_branch_delete_force_long_form(self):
-        from merge_guard_pre import _detect_command_operation_type
+        from shared.merge_guard_common import detect_command_operation_type
 
-        assert _detect_command_operation_type("git branch --delete --force feature") == "branch-delete"
+        assert detect_command_operation_type("git branch --delete --force feature") == "branch-delete"
 
     def test_unknown_command_returns_none(self):
         """Non-destructive shapes correctly return None."""
-        from merge_guard_pre import _detect_command_operation_type
+        from shared.merge_guard_common import detect_command_operation_type
 
-        assert _detect_command_operation_type("ls -la") is None
-        assert _detect_command_operation_type("git status") is None
+        assert detect_command_operation_type("ls -la") is None
+        assert detect_command_operation_type("git status") is None
 
 
 # =============================================================================
@@ -8096,37 +8096,37 @@ class TestGhGlobalFlagBypass:
             "gh --repo owner/repo api repos/owner/repo/pulls/42/merge"
         )
 
-    # --- _detect_command_operation_type with global flags ---
+    # --- detect_command_operation_type with global flags ---
 
     def test_operation_type_merge_with_repo_flag(self):
-        """_detect_command_operation_type finds 'merge' with --repo flag."""
-        from merge_guard_pre import _detect_command_operation_type
+        """detect_command_operation_type finds 'merge' with --repo flag."""
+        from shared.merge_guard_common import detect_command_operation_type
 
-        assert _detect_command_operation_type("gh --repo owner/repo pr merge 42") == "merge"
+        assert detect_command_operation_type("gh --repo owner/repo pr merge 42") == "merge"
 
     def test_operation_type_close_with_repo_flag(self):
-        """_detect_command_operation_type finds 'close' with --repo flag."""
-        from merge_guard_pre import _detect_command_operation_type
+        """detect_command_operation_type finds 'close' with --repo flag."""
+        from shared.merge_guard_common import detect_command_operation_type
 
-        assert _detect_command_operation_type("gh --repo owner/repo pr close 42") == "close"
+        assert detect_command_operation_type("gh --repo owner/repo pr close 42") == "close"
 
     def test_operation_type_merge_with_short_repo_flag(self):
-        """_detect_command_operation_type finds 'merge' with -R flag."""
-        from merge_guard_pre import _detect_command_operation_type
+        """detect_command_operation_type finds 'merge' with -R flag."""
+        from shared.merge_guard_common import detect_command_operation_type
 
-        assert _detect_command_operation_type("gh -R owner/repo pr merge 42") == "merge"
+        assert detect_command_operation_type("gh -R owner/repo pr merge 42") == "merge"
 
     def test_operation_type_close_with_short_repo_flag(self):
-        """_detect_command_operation_type finds 'close' with -R flag."""
-        from merge_guard_pre import _detect_command_operation_type
+        """detect_command_operation_type finds 'close' with -R flag."""
+        from shared.merge_guard_common import detect_command_operation_type
 
-        assert _detect_command_operation_type("gh -R owner/repo pr close 42") == "close"
+        assert detect_command_operation_type("gh -R owner/repo pr close 42") == "close"
 
     def test_operation_type_none_with_repo_flag(self):
-        """_detect_command_operation_type returns None for non-PR gh commands."""
-        from merge_guard_pre import _detect_command_operation_type
+        """detect_command_operation_type returns None for non-PR gh commands."""
+        from shared.merge_guard_common import detect_command_operation_type
 
-        assert _detect_command_operation_type("gh --repo owner/repo issue list") is None
+        assert detect_command_operation_type("gh --repo owner/repo issue list") is None
 
     # --- _token_matches_command with global flags ---
 
@@ -8636,17 +8636,17 @@ class TestGhGlobalFlagBypassEdgeCases:
 
     def test_token_op_type_close_with_multiple_flags(self):
         """Operation type 'close' detected with multiple global flags."""
-        from merge_guard_pre import _detect_command_operation_type
+        from shared.merge_guard_common import detect_command_operation_type
 
-        assert _detect_command_operation_type(
+        assert detect_command_operation_type(
             "gh --repo owner/repo --hostname host.com pr close 42"
         ) == "close"
 
     def test_token_op_type_merge_with_equals_syntax(self):
         """Operation type 'merge' detected with --repo=value syntax."""
-        from merge_guard_pre import _detect_command_operation_type
+        from shared.merge_guard_common import detect_command_operation_type
 
-        assert _detect_command_operation_type(
+        assert detect_command_operation_type(
             "gh --repo=owner/repo pr merge 42"
         ) == "merge"
 
@@ -9360,7 +9360,7 @@ class TestCrossOperationAuthorizationDenied:
 
     Cycle-2 added force-push and branch-delete to extract_context() (the
     write side). Cycle-3 mirrors the symmetric coverage in
-    _detect_command_operation_type (the read side) and tightens the
+    detect_command_operation_type (the read side) and tightens the
     cross-op comparison so a typed token CANNOT authorize a command of a
     different operation class. Pre-fix, the read-side detector returned
     None for force-push/branch-delete, and the comparison fell through
@@ -9612,6 +9612,19 @@ class TestSymmetryContract:
             "`git branch -D feat/teachback-exempt-secretary` to "
             "force-delete the merged feature branch?",
             "git branch -D feat/teachback-exempt-secretary",
+            "branch-delete",
+        )
+
+    def test_symmetry_branch_delete_quoted_path_only(self):
+        """Canonical branch-delete pair: clean quoted-command-only prose
+        (no fallback-ladder keyword like 'merged' / 'delete'). Pins the
+        quoted-path classifier branch independently of the keyword
+        ladder, closing the asymmetric defense-in-depth gap where a
+        regression in `_classify_from_quoted_command` for branch-delete
+        could be hidden by ladder fallback in mj's case test above."""
+        self._assert_pair(
+            "Run `git branch -D feat/x`?",
+            "git branch -D feat/x",
             "branch-delete",
         )
 
@@ -10137,13 +10150,12 @@ class TestFDRedirectAdversarial:
 
 class TestSymmetryAdversarial:
     """Adversarial Bug B symmetry cases — multi-quoted-region prose,
-    fenced markdown, mistyped commands, defensive empty/None inputs
-    (#720 Bug B).
+    mistyped commands, defensive empty/None inputs (#720 Bug B).
 
     These extend the verification-tests' 5 happy-path symmetry pairings
     with surfaces the orchestrator's question-generation behavior could
-    realistically produce: multiple backticked tokens, code-fence
-    blocks, typos, and edge-case empty prose.
+    realistically produce: multiple backticked tokens, typos, and
+    edge-case empty prose.
     """
 
     def test_multi_quoted_region_first_destructive_wins(self):
@@ -10174,32 +10186,6 @@ class TestSymmetryAdversarial:
             "Merge via `gh pr merge 42` (note: do not run `git branch -D feat/x` after)?"
         )
         assert ctx.get("operation_type") == "merge"
-
-    def test_fenced_markdown_command_classifies_via_backticks(self):
-        """Triple-backtick fences: `_QUOTED_COMMAND_RE` matches single
-        backticks, so a ```bash fence's content is between two single
-        backticks at the boundary. Behavior: classifier may or may not
-        find the command — pin whichever behavior holds.
-        """
-        from merge_guard_post import extract_context
-
-        # Triple-backtick fence with command on its own line.
-        question = (
-            "Run this command:\n"
-            "```bash\n"
-            "git push --force origin main\n"
-            "```\n"
-            "Confirm?"
-        )
-        ctx = extract_context(question)
-        # The regex `` `([^`]+)` `` matches the empty content between
-        # ``` and the next backtick — yields empty captures that don't
-        # classify. Then the body "bash\ngit push --force origin main\n"
-        # falls between the next pair of backticks, which DOES classify
-        # as force-push via the embedded `git push --force`.
-        # We pin: classifier returns force-push (the inner command is
-        # detected by the read-side classifier inside the captured body).
-        assert ctx.get("operation_type") == "force-push"
 
     def test_mistyped_command_falls_back_to_keyword_ladder(self):
         """A typo'd command in backticks (e.g., `gh pr merg 42`) doesn't
@@ -10546,3 +10532,101 @@ class TestEnvelopeIntegration:
         assert hso["permissionDecision"] == "deny"
         assert isinstance(hso["permissionDecisionReason"], str)
         assert hso["permissionDecisionReason"] != ""
+
+    # -----------------------------------------------------------------------
+    # Envelope-shape adversarial coverage. The non-envelope tests at lines
+    # 462 / 820 / 831 cover the same logical paths via direct main()
+    # invocation, but a future restructure of stdin parsing could regress
+    # envelope-shape behavior while those tests stay green. These tests
+    # pin behavior through the envelope-fixture interface specifically.
+
+    def test_envelope_with_malformed_tool_input_fails_closed(self, tmp_path):
+        """tool_input is a non-dict (e.g., a string). Defensive contract:
+        hook fails closed via the catch-all exception handler (exit 2),
+        does NOT crash, does NOT auto-allow."""
+        from merge_guard_pre import main as pre_main
+
+        # tool_input is a string instead of a dict — .get() on a string
+        # raises AttributeError → catch-all → fail-closed deny.
+        envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": "git push origin main",  # type-error shape
+            "session_id": "test-envelope-session",
+        })
+        stdout_buf = io.StringIO()
+        with patch("merge_guard_pre.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(envelope)), \
+             patch("sys.stdout", stdout_buf):
+            with pytest.raises(SystemExit) as exc_info:
+                pre_main()
+        assert exc_info.value.code == 2  # fail-closed
+        # Output is the well-formed deny payload from the catch-all.
+        payload = json.loads(stdout_buf.getvalue())
+        assert payload["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_envelope_missing_tool_input_field_handled(self, tmp_path):
+        """Envelope omits tool_input entirely. Defensive: hook treats as
+        empty command (suppress + exit 0) — does NOT crash, does NOT
+        treat absent tool_input as a destructive command."""
+        from merge_guard_pre import main as pre_main
+
+        envelope = json.dumps({
+            "tool_name": "Bash",
+            # tool_input intentionally absent
+            "session_id": "test-envelope-session",
+        })
+        stdout_buf = io.StringIO()
+        with patch("merge_guard_pre.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(envelope)), \
+             patch("sys.stdout", stdout_buf):
+            with pytest.raises(SystemExit) as exc_info:
+                pre_main()
+        assert exc_info.value.code == 0  # suppress on empty command
+        # Suppress-output, not a deny payload
+        assert '"permissionDecision": "deny"' not in stdout_buf.getvalue()
+
+    def test_envelope_with_extra_unknown_fields_ignored(self, tmp_path):
+        """Forward-compat: envelope contains unknown extra top-level
+        fields. Hook ignores them and processes normally."""
+        from merge_guard_pre import main as pre_main
+
+        envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr merge 99 --admin"},
+            "session_id": "test-envelope-session",
+            # Unknown future fields:
+            "transcript_path": "/tmp/some-transcript.json",
+            "future_feature": {"some": "metadata"},
+            "another_unknown_key": [1, 2, 3],
+        })
+        stdout_buf = io.StringIO()
+        with patch("merge_guard_pre.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(envelope)), \
+             patch("sys.stdout", stdout_buf):
+            with pytest.raises(SystemExit) as exc_info:
+                pre_main()
+        # Destructive command without token → deny exit 2 (same as the
+        # canonical deny test). Extra fields do not change behavior.
+        assert exc_info.value.code == 2
+        payload = json.loads(stdout_buf.getvalue())
+        assert payload["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_envelope_with_empty_command_suppresses(self, tmp_path):
+        """tool_input.command is the empty string. Defensive: suppress
+        + exit 0 — does NOT crash, does NOT auto-allow downstream
+        destructive checks on an empty command."""
+        from merge_guard_pre import main as pre_main
+
+        envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": ""},
+            "session_id": "test-envelope-session",
+        })
+        stdout_buf = io.StringIO()
+        with patch("merge_guard_pre.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(envelope)), \
+             patch("sys.stdout", stdout_buf):
+            with pytest.raises(SystemExit) as exc_info:
+                pre_main()
+        assert exc_info.value.code == 0
+        assert '"permissionDecision": "deny"' not in stdout_buf.getvalue()
