@@ -8832,6 +8832,95 @@ class TestCompoundDestructiveCommandRejection:
         result = check_merge_authorization("gh pr merge 100", token_dir=tmp_path)
         assert result is None, "single destructive with token must be allowed"
 
+    # Regression pins for the five true-positive compound arms after the
+    # _COMPOUND_OPS_RE tightening. These exercise is_compound_destructive_command
+    # directly so the predicate is anchored independently of token state.
+    def test_compound_double_amp_still_matches(self):
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "gh pr merge 100 && gh pr merge 999 --admin"
+        ) is True
+
+    def test_compound_double_pipe_still_matches(self):
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "gh pr merge 100 || gh pr merge 999 --admin"
+        ) is True
+
+    def test_compound_semicolon_still_matches(self):
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "gh pr merge 100; gh pr merge 999 --admin"
+        ) is True
+
+    def test_compound_bare_pipe_still_matches(self):
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "gh pr merge 100 | tee logfile"
+        ) is True
+
+    def test_compound_newline_still_matches(self):
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "gh pr merge 100\ngh pr merge 999"
+        ) is True
+
+    # New negatives — these previously triggered the compound predicate
+    # via the loose `[&;|\n]` character class. The tightened pattern
+    # excludes file-descriptor redirects and clobber redirects.
+    def test_fd_merge_stderr_to_stdout_not_compound(self, tmp_path):
+        """`gh pr merge 100 2>&1` no longer flagged as compound (was a false positive)."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization, is_compound_destructive_command
+
+        cmd = "gh pr merge 100 2>&1"
+        assert is_compound_destructive_command(cmd) is False
+        # End-to-end: with valid token, the FD redirect should NOT be denied
+        # as compound. (Token-match still applies; check authorization passes.)
+        write_token(
+            {"pr_number": "100", "operation_type": "merge"},
+            token_dir=tmp_path,
+        )
+        result = check_merge_authorization(cmd, token_dir=tmp_path)
+        assert result is None, "FD redirect must not be flagged as compound"
+
+    def test_fd_merge_stdout_to_stderr_not_compound(self):
+        """`git push --force 1>&2` — other-direction FD merge."""
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "git push --force origin main 1>&2"
+        ) is False
+
+    def test_fd_merge_with_stdout_redirect_not_compound(self):
+        """`gh pr merge 100 >foo 2>&1` — combined stdout-file + stderr-to-stdout."""
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "gh pr merge 100 >foo 2>&1"
+        ) is False
+
+    def test_fd_duplication_input_not_compound(self):
+        """`gh pr merge 100 3<&0` — FD-duplication on stdin."""
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "gh pr merge 100 3<&0"
+        ) is False
+
+    def test_clobber_redirect_not_compound(self):
+        """`gh pr merge 100 >| file` — `>|` clobber redirect (the `|` is preceded by `>`)."""
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "gh pr merge 100 >| file"
+        ) is False
+
 
 class TestEvalHeredocRejection:
     """Pin the eval+heredoc detection that closes the strip-pipeline-bypass class.

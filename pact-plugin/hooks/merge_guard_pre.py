@@ -469,7 +469,16 @@ def _has_eval_with_heredoc(command: str) -> bool:
 # operation appears inside a compound, the merge-guard token model breaks
 # down — a single AskUserQuestion approval is presumed by the operator to
 # authorize ONE operation, but the compound runs many.
-_COMPOUND_OPS_RE = re.compile(r"[&;|\n]")
+#
+# Pattern matches the five true compound shapes: `&&`, `||`, `;`,
+# bare `|` shell pipe, and newline. The lookbehind `(?<![0-9>])` and
+# lookahead `(?![<&])` on the bare-`|` arm exclude file-descriptor
+# redirects (`2>&1`, `1>&2`, `3<&0`) and clobber redirects (`>|`)
+# which contain `&` or `|` but are NOT compound control-flow.
+# Audit: any future loosening of this regex must preserve the five
+# true-positive shapes; tightening must not re-introduce the FD-redirect
+# false-positive class.
+_COMPOUND_OPS_RE = re.compile(r"&&|\|\||;|(?<![0-9>])\|(?![<&])|\n")
 
 
 def is_dangerous_command(command: str) -> bool:
