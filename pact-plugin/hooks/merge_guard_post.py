@@ -12,7 +12,7 @@ and the user answers affirmatively, a token file is written to ~/.claude/. The
 companion hook (merge_guard_pre.py) checks for this token before allowing
 dangerous commands.
 
-Input: JSON from stdin with tool_input (AskUserQuestion questions array) and tool_output (answers dict)
+Input: JSON from stdin with tool_input (AskUserQuestion questions array) and tool_response (answers dict)
 Output: None (side effect: writes token file on approval)
 """
 
@@ -35,6 +35,7 @@ from shared.merge_guard_common import (
     TOKEN_DIR,
     cleanup_consumed_tokens as _cleanup_consumed_tokens,
 )
+from shared.tool_response import extract_tool_response
 
 # When the hook allows a command (exits 0), output this JSON so the Claude Code
 # UI suppresses the hook display instead of showing "hook error (No output)".
@@ -108,12 +109,19 @@ def extract_context(question: str) -> dict:
     if branch_match:
         context["branch"] = branch_match.group(1) or branch_match.group(2)
 
-    # Detect operation type for token scoping
+    # Detect operation type for token scoping. The order matters — close
+    # is more specific than merge (close can mention "merge"), and
+    # force-push / branch-delete are independent operation classes whose
+    # AskUserQuestion text typically does not mention "merge" or "close".
     question_lower = question.lower()
     if re.search(r"\bclose\b.*(?:pr|pull\s*request)|(?:pr|pull\s*request).*\bclose\b|gh\s+pr\s+close", question_lower):
         context["operation_type"] = "close"
     elif re.search(r"\bmerge\b", question_lower):
         context["operation_type"] = "merge"
+    elif re.search(r"force[\s-]?push|push\s+--force|push\s+-f\b|push\s+-[a-z]*f", question_lower):
+        context["operation_type"] = "force-push"
+    elif re.search(r"delete[\s-]?branch|branch\s+(?:-D|--delete)\b", question_lower):
+        context["operation_type"] = "branch-delete"
 
     return context
 
@@ -126,8 +134,36 @@ def write_token(context: dict, token_dir: Path | None = None) -> str | None:
         token_dir: Override token directory (for testing)
 
     Returns:
-        Path to the created token file, or None on failure
+        Path to the created token file, or None on failure or refusal
     """
+    # Sparse-context guard: refuse to write a token whose context — as
+    # produced by `extract_context()` on a vague AskUserQuestion text —
+    # carries NONE of the three concrete anchor keys (pr_number, branch,
+    # operation_type). The realistic shape of such a wildcard context is
+    # `{question_snippet: "<vague text>"}` with no extracted anchors; a
+    # token written from it would match ANY destructive command via the
+    # PRE-side `_token_matches_command` ladder's ambiguous-permissive
+    # fallback. Fail closed at the WRITE side so the wildcard token never
+    # reaches the PRE-side ladder. Any one concrete anchor is sufficient.
+    if not isinstance(context, dict):
+        print(
+            "[security] sparse context: non-dict context, refusing token write",
+            file=sys.stderr,
+        )
+        return None
+    has_pr = bool(context.get("pr_number"))
+    has_branch = bool(context.get("branch"))
+    has_op = bool(context.get("operation_type"))
+    if not (has_pr or has_branch or has_op):
+        print(
+            "[security] sparse context: AskUserQuestion text yielded no "
+            "extractable pr_number, branch, or operation_type — refusing "
+            "token write to avoid wildcard-allow against subsequent "
+            "destructive commands.",
+            file=sys.stderr,
+        )
+        return None
+
     if token_dir is None:
         token_dir = TOKEN_DIR
 
@@ -196,7 +232,10 @@ def main():
 
         pact_context.init(input_data)
         tool_input = input_data.get("tool_input", {})
-        tool_output = input_data.get("tool_output", {})
+        # Defense-in-depth via SSOT helper: prefers canonical `tool_response`,
+        # falls back to legacy `tool_output` for envelope-rename robustness,
+        # warns on dual-envelope payloads (envelope-confusion smell).
+        tool_response = extract_tool_response(input_data)
 
         # Extract question from AskUserQuestion schema:
         # tool_input: {"questions": [{"question": "...", ...}]}
@@ -211,11 +250,8 @@ def main():
             question = ""
 
         # Extract answer from AskUserQuestion schema:
-        # tool_output: {"answers": {"question_text": "answer_text"}, ...}
-        if not isinstance(tool_output, dict):
-            print(_SUPPRESS_OUTPUT)
-            sys.exit(0)
-        answers = tool_output.get("answers", {})
+        # tool_response: {"answers": {"question_text": "answer_text"}, ...}
+        answers = tool_response.get("answers", {})
         if isinstance(answers, dict) and answers:
             # Look up answer by exact question text; fall back to first value
             answer = str(answers.get(question, next(iter(answers.values()), "")))

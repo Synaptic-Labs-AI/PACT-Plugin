@@ -491,7 +491,7 @@ class TestMergeGuardPostErrorOutput:
             "tool_input": {
                 "questions": [{"question": "Merge PR #42?"}]
             },
-            "tool_output": {
+            "tool_response": {
                 "answers": {"Merge PR #42?": "yes"}
             },
         })
@@ -539,7 +539,7 @@ class TestMergeGuardPostErrorOutput:
             "tool_input": {
                 "questions": [{"question": "What color?"}]
             },
-            "tool_output": {
+            "tool_response": {
                 "answers": {"What color?": "blue"}
             },
         })

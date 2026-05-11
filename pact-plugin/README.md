@@ -1,6 +1,6 @@
 # PACT — Orchestration Harness for Claude Code
 
-> **Version**: 4.1.7
+> **Version**: 4.1.8
 
 Turn a single Claude Code session into a managed team of specialist AI agents that prepare, design, build, and test your code systematically.
 
@@ -74,7 +74,7 @@ Environment variables that tune hook behavior:
 
 | Variable | Default | Allowed values | Effect |
 |---|---|---|---|
-| `PACT_DISPATCH_INLINE_MISSION_MODE` | `warn` | `warn` / `deny` / `shadow` | Disposition of the dispatch-gate inline-mission heuristic (flags dispatchers inlining mission text into `prompt=` instead of using the canonical "check TaskList" form; F7 in the #662 failure-mode index). `warn` emits an advisory `additionalContext`; `deny` blocks the spawn (flip after the F22 counter-test in `tests/runbooks/662-dispatch-gate.md` confirms `additionalContext` is silently dropped under PreToolUse); `shadow` journals only — the trigger is observable but neither WARNs nor DENYs (calibration / first-session safety net). F1-F6, F14, F15 are unaffected. Unknown values fall back to `warn`. |
+| `PACT_DISPATCH_INLINE_MISSION_MODE` | `warn` | `warn` / `deny` / `shadow` | Disposition of the dispatch-gate inline-mission heuristic (flags dispatchers inlining mission text into `prompt=` instead of using the canonical "check TaskList" form). `warn` emits an advisory `additionalContext`; `deny` blocks the spawn (flip only after empirically confirming `additionalContext` injection is reliable under PreToolUse — see `pact-plugin/hooks/dispatch_gate.py` for the matcher-fidelity discussion); `shadow` journals only — the trigger is observable but neither WARNs nor DENYs (calibration / first-session safety net). The other dispatch-gate rules (name/team presence, name validation, specialist registry, session-team match, member uniqueness, task-assignment) are unaffected by this env-var. Unknown values fall back to `warn`. |
 
 ## Full Documentation
 

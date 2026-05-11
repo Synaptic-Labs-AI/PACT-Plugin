@@ -119,6 +119,7 @@ import shared.pact_context as pact_context
 from shared.pact_context import get_team_name
 from shared.session_state import is_safe_path_component
 from shared.task_utils import read_task_json
+from shared.tool_response import extract_tool_response
 from shared.wake_lifecycle import count_active_tasks, has_same_teammate_continuation
 
 # Suppress the false "hook error" UI surface on bare exit paths.
@@ -252,7 +253,7 @@ def _extract_task_id(input_data: dict[str, Any]) -> str | None:
         if isinstance(tid, str) and tid.strip():
             return tid.strip()
 
-    tool_response = input_data.get("tool_response") or {}
+    tool_response = extract_tool_response(input_data)
     if isinstance(tool_response, dict):
         nested_task = tool_response.get("task") or {}
         if isinstance(nested_task, dict):
@@ -353,7 +354,7 @@ def _is_terminal_status_update(input_data: dict[str, Any]) -> bool:
         if tool_input.get("status") in _TERMINAL_STATUSES:
             return True
 
-    tool_response = input_data.get("tool_response") or {}
+    tool_response = extract_tool_response(input_data)
     if isinstance(tool_response, dict):
         status_change = tool_response.get("statusChange")
         if isinstance(status_change, dict) and status_change.get("to") in _TERMINAL_STATUSES:

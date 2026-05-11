@@ -7,7 +7,7 @@ Used by: Claude Code settings.json PostToolUse hook (Edit, Write tools)
 Extracts file paths from Edit/Write tool usage and records them
 for the memory system's graph network.
 
-Input: JSON from stdin with tool_name, tool_input, tool_output
+Input: JSON from stdin with tool_name, tool_input, tool_response
 Output: None (writes to tracking file for later memory association)
 """
 

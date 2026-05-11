@@ -19,7 +19,7 @@ Non-PACT agents and the orchestrator (no agent identity resolvable) are skipped.
 Exit codes:
     0 — always (non-blocking; this is a warning layer, not a gate)
 
-Input: JSON from stdin with tool_name, tool_input, tool_output
+Input: JSON from stdin with tool_name, tool_input, tool_response
 Output: JSON systemMessage on stdout if warning needed, suppressOutput otherwise
 """
 
