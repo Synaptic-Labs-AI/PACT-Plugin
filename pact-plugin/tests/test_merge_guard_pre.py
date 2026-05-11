@@ -51,14 +51,33 @@ def _capture(command: str):
 
 
 # =============================================================================
-# TRUE GAINS — cases broken on main, fixed by #665
+# TRUE GAINS — cases broken on main, fixed by the regex tightening
 # =============================================================================
-# Each test documents the OLD-vs-NEW delta. On main, the regex used the broad
-# `_GH_GLOBAL_FLAGS` for the post-subcommand walk, which greedily consumed
-# tokens past the PR positional and captured the LAST digit reachable.
+# Each test in this class documents the OLD-vs-NEW behavioral delta. On main,
+# the regex used the broad `_GH_GLOBAL_FLAGS` for the post-subcommand walk,
+# which greedily consumed tokens past the PR positional and captured the LAST
+# digit reachable. After tightening to `_GH_FLAG_TOKENS`, each of these cases
+# now captures the real positional PR number.
+#
+# Selection criterion: a test belongs in TrueGains iff source-only revert of
+# the regex tightening commit causes the test to FAIL. Cases that pass on
+# both pre-fix and post-fix source belong in NoRegressionCanaries (sibling
+# class below) instead.
+#
+# Counter-test cardinality: source-only revert of the regex tightening
+# (`git checkout <pre-fix-sha> -- pact-plugin/hooks/merge_guard_pre.py`)
+# causes ALL 4 tests in this class to FAIL with the regex capturing the
+# wrong digit. Empirically verified during PR #697 review.
 
 class TestGH_PR_NumberRE_TrueGains:
-    """The behavioral delta that resolves #665."""
+    """Cases broken on main, fixed by the regex tightening.
+
+    Each test fails on source-only revert of the fix commit. This is the
+    discriminating criterion: TRUE GAINS cause failures when the fix is
+    reverted. Compare with `TestGH_PR_NumberRE_NoRegressionCanaries`
+    (sibling class) where the cases pass on both pre-fix and post-fix
+    source — those are no-op protection canaries, not behavioral deltas.
+    """
 
     def test_subject_with_version_digits_captures_pr(self):
         # OLD captured "7352" (last digit in subject string).
@@ -87,32 +106,59 @@ class TestGH_PR_NumberRE_TrueGains:
         cmd = "gh pr merge 663 with 7352 tests passing"
         assert _capture(cmd) == "663"
 
+
+# =============================================================================
+# NO-REGRESSION CANARIES — cases unchanged by the fix; pinned as protection
+# =============================================================================
+# These tests pass on BOTH pre-fix and post-fix source. They do not demonstrate
+# behavioral gain from the fix; instead they pin currently-correct behavior so
+# a future regex change cannot silently regress these working cases.
+#
+# Selection criterion: a test belongs in NoRegressionCanaries iff source-only
+# revert of the regex tightening commit leaves the test PASSING. The fix is
+# orthogonal to these inputs.
+#
+# Counter-test cardinality: source-only revert of the regex tightening leaves
+# ALL 5 tests in this class PASSING. Empirically verified during PR #697
+# review. If a future regression causes any of these to fail under the
+# current source, the canary fires loudly.
+
+class TestGH_PR_NumberRE_NoRegressionCanaries:
+    """Cases unchanged by the fix — pinned as future-regression tripwires.
+
+    Distinct from `TestGH_PR_NumberRE_TrueGains` (sibling class above)
+    where source-only revert of the fix causes failure: these cases pass
+    regardless of whether the fix is in place. Their value is forward-
+    looking — a future "cleanup" or refactor of the regex that broke any
+    of these inputs would be caught by the canary firing.
+    """
+
     def test_body_file_with_versioned_path(self):
-        # Regression-protection only: empirical probe shows OLD ALSO captured
-        # "663" here (the path's slashes/hyphens are non-word and `\S+\s+`
-        # requires whitespace separation, so the broad walk consumes the path
-        # and backtracks to the positional). Pinned as a no-op canary so a
-        # future regex change cannot regress this case to capturing "7352".
+        # Empirical probe: OLD captured "663" here (the path's slashes/
+        # hyphens are non-word and `\S+\s+` requires whitespace separation,
+        # so the broad walk consumes the path and backtracks to the
+        # positional). Pinned as a no-op canary so a future regex change
+        # cannot regress this case to capturing "7352".
         cmd = "gh pr merge 663 --body-file /tmp/release-notes-v4.1.7-7352.md --squash"
         assert _capture(cmd) == "663"
 
     def test_simple_squash_unaffected(self):
-        # No regression: simple case still works.
+        # Simple case: no flags between subcommand and PR positional.
         cmd = "gh pr merge 663 --squash"
         assert _capture(cmd) == "663"
 
     def test_pre_subcommand_flag_unaffected(self):
-        # No regression: --admin between merge subcommand and PR number.
+        # `--admin` between merge subcommand and PR number.
         cmd = "gh pr merge --admin 663 --squash"
         assert _capture(cmd) == "663"
 
     def test_global_flag_before_subcommand_unaffected(self):
-        # No regression: --repo owner/repo as a gh global flag.
+        # `--repo owner/repo` as a gh global flag (pre-subcommand).
         cmd = "gh --repo owner/repo pr merge 663 --squash"
         assert _capture(cmd) == "663"
 
     def test_close_with_delete_branch_captures_pr(self):
-        # No regression: gh pr close form with --delete-branch.
+        # `gh pr close` form with `--delete-branch` (sibling subcommand).
         cmd = "gh pr close 663 --delete-branch"
         assert _capture(cmd) == "663"
 
