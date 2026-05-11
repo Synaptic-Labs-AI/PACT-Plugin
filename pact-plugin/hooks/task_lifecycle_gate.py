@@ -83,7 +83,7 @@ try:
 
     import shared.pact_context as pact_context
     from shared.dispatch_helpers import trustworthy_actor_name
-    from shared.intentional_wait import is_self_complete_exempt
+    from shared.intentional_wait import is_self_complete_exempt, is_teachback_exempt
     from shared.session_journal import append_event, make_event
     from shared.task_utils import read_task_json
     from shared.tool_response import extract_tool_response
@@ -331,6 +331,18 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
     if isinstance(incoming_metadata, dict) and incoming_metadata.get("gate_writeback") is True:
         return []
 
+    # Resolve team_name once at function scope. Both branches need it:
+    # TaskCreate's work_addblockedby_missing rule consumes it via
+    # is_teachback_exempt; TaskUpdate's self-completion carve-out consumes
+    # it via is_self_complete_exempt; and the TaskUpdate disk-fallback read
+    # uses it for the team-scoped task path. Empty string on failure
+    # (fail-closed downstream: both predicates return False on empty
+    # team_name).
+    try:
+        team_name = pact_context.get_pact_context().get("team_name", "")
+    except Exception:
+        team_name = ""
+
     # ② TaskCreate rules — teachback addBlocks + work-task addBlockedBy
     if tool_name == "TaskCreate":
         subject = (tool_input.get("subject") or "")
@@ -351,6 +363,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
             not is_teachback
             and owner.startswith("pact-")
             and not tool_input.get("addBlockedBy")
+            and not is_teachback_exempt(owner, team_name)
         ):
             advisories.append((
                 "work_addblockedby_missing",
@@ -363,13 +376,9 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
     # handoff schema, self-completion
     if tool_name == "TaskUpdate" and tool_input.get("status") == "completed":
         task_id = tool_input.get("taskId", "") or ""
-        # Resolve team_name from pact_context once for use by both the
+        # team_name resolved at function scope above; consumed here by the
         # disk-fallback read and the self-completion carve-out predicate
-        # (is_self_complete_exempt now keys on team-config agentType).
-        try:
-            team_name = pact_context.get_pact_context().get("team_name", "")
-        except Exception:
-            team_name = ""
+        # (is_self_complete_exempt keys on team-config agentType).
         # Final post-state — prefer tool_response.task; fallback to bare dict.
         task = tool_response.get("task") if isinstance(tool_response, dict) else None
         if not isinstance(task, dict):
