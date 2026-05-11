@@ -10031,6 +10031,109 @@ class TestFDRedirectAdversarial:
             "git push --force 2>&1 ; ls"
         ) is True
 
+    def test_spaceless_fd_redirect_then_pipe_is_compound(self):
+        """`gh pr merge 100 2>&1|gh pr merge 999 --admin` — spaceless
+        adjacency between an FD-redirect tail and a real pipe MUST NOT
+        slip past compound detection.
+
+        Regression pin for the bypass class where an earlier lookbehind
+        `(?<![0-9>])` form treated the `|` immediately after the digit
+        `1` of `2>&1` as part of an FD-redirect, when it was in fact a
+        true shell pipe to a second destructive command. The structural
+        FD-redirect pre-strip neutralizes the `2>&1` token before the
+        compound-regex sees the line, so the surviving `|` correctly
+        matches the bare-pipe arm.
+        """
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "gh pr merge 100 2>&1|gh pr merge 999 --admin"
+        ) is True
+
+    def test_spaceless_fd_redirect_then_pipe_force_push_is_compound(self):
+        """`git push --force 2>&1|cat` — same bypass class with a
+        force-push headline rather than gh-pr-merge.
+        """
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "git push --force 2>&1|cat"
+        ) is True
+
+    def test_spaceless_fd_redirect_then_pipe_branch_delete_is_compound(self):
+        """`git branch -D foo 2>&1|rm -rf ~` — same bypass class with
+        a branch-delete headline; verifies the structural strip is
+        op-type-independent.
+        """
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "git branch -D foo 2>&1|rm -rf ~"
+        ) is True
+
+    # --- Class A bypass-regression pins (#723 cycle 1 remediation) ---
+    #
+    # Class A: digit-then-pipe with no FD redirect. Pre-fix lookbehind
+    # `(?<![0-9>])` suppressed the bare-`|` match whenever the preceding
+    # character was a digit — including the trailing digit of a PR-number
+    # positional. Post-fix simplified regex has no lookbehind, so the
+    # bare-`|` matches unconditionally. Pre-strip is a no-op on Class-A
+    # inputs (no FD-redirect token to strip).
+
+    def test_class_a_digit_then_pipe_gh_pr_merge_is_compound(self):
+        """Class A — `gh pr merge 100|gh pr merge 999` — no FD redirect;
+        trailing PR-number digit immediately followed by bare pipe to a
+        second destructive command. Pre-fix bypass."""
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "gh pr merge 100|gh pr merge 999"
+        ) is True
+
+    def test_class_a_digit_then_pipe_force_push_is_compound(self):
+        """Class A — `git push --force 100|rm -rf ~` — force-push with
+        trailing digit, then tight pipe to `rm -rf`. Pre-fix bypass."""
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "git push --force 100|rm -rf ~"
+        ) is True
+
+    def test_class_a_alpha_then_pipe_branch_delete_is_compound(self):
+        """Class A variant — `git branch -D foo|cat` — alpha branch name
+        followed by bare pipe (no digit at the `|` boundary). Confirms
+        the simplified regex matches bare `|` regardless of preceding
+        character class."""
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "git branch -D foo|cat"
+        ) is True
+
+    # --- Class B variant pins (#723 cycle 1 remediation) ---
+
+    def test_class_b_reverse_fd_redirect_then_pipe_is_compound(self):
+        """Class B variant — `git push --force 1>&2|cat` — reverse FD
+        direction (`1>&2` instead of `2>&1`). Confirms the strip pattern
+        `\\d*[<>]&\\d+` is direction-agnostic (matches both `>&` and `<&`).
+        """
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "git push --force 1>&2|cat"
+        ) is True
+
+    def test_fd_to_file_redirect_alone_not_compound(self):
+        """Negative regression pin — `cat 1>file 2>&1` — has an FD-to-FD
+        redirect (`2>&1`) and a write redirect (`1>file`) but NO chain
+        operator. Must remain not-compound. Verifies the strip pattern
+        does NOT over-match `1>file` (no `&` after the `>`)."""
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "cat 1>file 2>&1"
+        ) is False
+
 
 class TestSymmetryAdversarial:
     """Adversarial Bug B symmetry cases — multi-quoted-region prose,

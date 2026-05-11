@@ -482,14 +482,33 @@ def _has_eval_with_heredoc(command: str) -> bool:
 # authorize ONE operation, but the compound runs many.
 #
 # Pattern matches the five true compound shapes: `&&`, `||`, `;`,
-# bare `|` shell pipe, and newline. The lookbehind `(?<![0-9>])` and
-# lookahead `(?![<&])` on the bare-`|` arm exclude file-descriptor
-# redirects (`2>&1`, `1>&2`, `3<&0`) and clobber redirects (`>|`)
-# which contain `&` or `|` but are NOT compound control-flow.
+# bare `|` shell pipe, and newline. FD-redirect tokens (`2>&1`, `1>&2`,
+# `3<&0`) and clobber redirects (`>|`) are EXCLUDED structurally via the
+# `_FD_REDIRECT_RE` pre-strip in `is_compound_destructive_command` —
+# NOT via lookaround on the bare-pipe arm. An earlier lookbehind-based
+# form `(?<![0-9>])\|(?![<&])` was vulnerable to a spaceless adjacency
+# bypass: `gh pr merge 100 2>&1|gh pr merge 999` slipped past detection
+# because the lookbehind rejected the real shell-pipe `|` whenever it
+# followed a digit (`1` of `2>&1`), conflating FD-redirect tail with
+# pipe-prefix context. The structural strip neutralizes FD-redirect
+# tokens by shape, eliminating the adjacency class.
 # Audit: any future loosening of this regex must preserve the five
 # true-positive shapes; tightening must not re-introduce the FD-redirect
-# false-positive class.
-_COMPOUND_OPS_RE = re.compile(r"&&|\|\||;|(?<![0-9>])\|(?![<&])|\n")
+# false-positive class via lookaround — the pre-strip is the single
+# source of truth for FD-redirect neutralization.
+_COMPOUND_OPS_RE = re.compile(r"&&|\|\||;|\||\n")
+
+# Pre-strip pattern for FD-redirect tokens that contain `&` or appear next
+# to `|` in shell redirect syntax. Matches:
+#   `\d*[<>]&\d+`   FD-to-FD redirects: `2>&1`, `1>&2`, `3<&0`, `>&2`
+#   `>\|`           clobber redirect (force-overwrite of existing file)
+# These are NOT compound control-flow; they are I/O redirection syntax.
+# Replaced with a single space in the LOCAL copy of the command seen by
+# `_COMPOUND_OPS_RE` so the digit-tail of `2>&1` cannot be adjacent to a
+# real `|` and pollute compound-detection. Scoped to
+# `is_compound_destructive_command` — does NOT leak into other consumers
+# (DANGEROUS_PATTERNS scan, `_token_matches_command`, etc.).
+_FD_REDIRECT_RE = re.compile(r"\d*[<>]&\d+|>\|")
 
 
 def is_dangerous_command(command: str) -> bool:
@@ -538,7 +557,11 @@ def is_compound_destructive_command(command: str) -> bool:
     """
     normalized = command.replace("\\\n", " ")
     stripped = _strip_non_executable_content(normalized)
-    if not _COMPOUND_OPS_RE.search(stripped):
+    # Neutralize FD-redirect tokens before compound-shape scanning. The
+    # strip operates on a LOCAL copy so DANGEROUS_PATTERNS still sees the
+    # full stripped command on the line below.
+    compound_view = _FD_REDIRECT_RE.sub(" ", stripped)
+    if not _COMPOUND_OPS_RE.search(compound_view):
         return False
     for pattern in DANGEROUS_PATTERNS:
         if pattern.search(stripped):
