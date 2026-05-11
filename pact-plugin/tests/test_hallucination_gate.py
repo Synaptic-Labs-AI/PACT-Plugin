@@ -1194,17 +1194,18 @@ def test_yellow_c_deny_snippet_shows_bash_command_not_human_text(tmp_path):
         "git push origin refs/tags/foo",
         "git push origin refs/tags/v1.2.3",
         "git push origin refs/tags/release-2026-04-01",
-        # Semver-shaped positional (must contain at least one dot —
-        # see test_tag_push_regex_dotless_v_prefix_not_caught for the
-        # narrow-by-design exclusion of `v1` / `v2`).
+        # Semver-shaped positional — supports dotted (v1.2.3) AND dotless
+        # (v1, 2) tag forms. The trailing `(?![\w-])` post-anchor rejects
+        # branch-suffix forms; see test_tag_push_regex_dotless_v_prefix_caught
+        # for the dotless coverage and the negative-list parametrize for
+        # the rejected branch-with-digit-suffix forms.
         "git push origin v1.2.3",
         "git push origin v1.2.3-rc.1",
         "git push origin 1.2",
         "git push origin 1.2.3",
-        # --tags flag IMMEDIATELY after `push` (no remote between).
-        # `git push origin --tags` is NOT caught — see
-        # test_tag_push_regex_tags_flag_after_remote_not_caught for the
-        # narrow-by-design exclusion of the flag-after-remote shape.
+        # --tags flag — supports both first-position (push --tags) and
+        # after-remote (push origin --tags) shapes via the (?:\S+\s+)*
+        # flag-walk idiom. See test_tag_push_regex_tags_flag_after_remote_caught.
         "git push --tags",
         # Global flags between `git` and `push`
         "git -C /repo push origin v1.2.3",
@@ -1217,32 +1218,53 @@ def test_tag_push_regex_catches_tag_variants(command):
     )
 
 
-def test_tag_push_regex_dotless_v_prefix_not_caught():
-    # Documented v1 limitation: the semver-shaped tag regex requires AT
-    # LEAST ONE dot — pattern is `v?\d+(?:\.\d+)+\b`. Therefore `v1` and
-    # `v2` are NOT caught as tag pushes by this regex. This is a real
-    # narrowing gap (a `git push origin v1` form against a tag named
-    # `v1` would bypass the hallucination_gate tag-push check), but is
-    # the AS-IMPLEMENTED behavior. Pin the gap as a finding — flip the
-    # assertion if the lead's verdict is to widen the regex to allow
-    # dotless v-prefixed semver. See TEST-phase findings note.
-    assert not is_destructive_command("git push origin v1"), (
-        "test pins documented narrowing gap; if regex is widened to "
-        "accept dotless v-prefix this assertion must flip"
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Dotless v-prefix variants
+        "git push origin v1",
+        "git push origin v2",
+        "git push origin v42",
+        # Dotless plain-digit variants (single-token version refs)
+        "git push origin 2",
+        "git push origin 1024",
+        # Global flags between `git` and `push` with dotless positional
+        "git -C /repo push origin v1",
+    ],
+)
+def test_tag_push_regex_dotless_v_prefix_caught(command):
+    # Closed narrowing gap: the semver-shape regex now uses
+    # `v?\d+(?:\.\d+)*(?![\w-])` (zero-or-more decimal groups + strict
+    # post-anchor). Single-token tag-name positionals like `v1`, `v2`,
+    # `2`, `1024` ARE caught as tag pushes. Paired negative parametrize
+    # below pins the branch-suffix forms that the strict post-anchor
+    # excludes.
+    assert is_destructive_command(command), (
+        f"dotless tag-push form escaped DESTRUCTIVE_PATTERNS: {command!r}"
     )
-    assert not is_destructive_command("git push origin v2")
 
 
-def test_tag_push_regex_tags_flag_after_remote_not_caught():
-    # Documented v1 limitation: the --tags regex requires `--tags`
-    # IMMEDIATELY after `push` (pattern: `push\s+--tags\b`). The shape
-    # `git push origin --tags` is NOT caught because `origin` sits
-    # between `push` and `--tags`. This is a real narrowing gap; pin
-    # the AS-IMPLEMENTED behavior. Flip the assertion if the lead's
-    # verdict is to widen the pattern to `push\s+(?:\S+\s+)*--tags\b`.
-    assert not is_destructive_command("git push origin --tags"), (
-        "test pins documented narrowing gap; if regex is widened to "
-        "accept --tags after a remote positional this assertion must flip"
+@pytest.mark.parametrize(
+    "command",
+    [
+        # --tags after a remote positional
+        "git push origin --tags",
+        "git push upstream --tags",
+        # --tags after flag-walk-shaped tokens
+        "git push -v origin --tags",
+        "git push --no-verify origin --tags",
+        # --tags with an additional trailing positional
+        "git push origin --tags v1.0",
+        # Global flags between `git` and `push`
+        "git -C /repo push origin --tags",
+    ],
+)
+def test_tag_push_regex_tags_flag_after_remote_caught(command):
+    # Closed narrowing gap: the --tags regex now uses
+    # `push\s+(?:\S+\s+)*--tags\b` (flag-walk-shaped wildcard before
+    # --tags). The common `git push origin --tags` form IS caught.
+    assert is_destructive_command(command), (
+        f"--tags-after-remote form escaped DESTRUCTIVE_PATTERNS: {command!r}"
     )
 
 
@@ -1262,6 +1284,13 @@ def test_tag_push_regex_tags_flag_after_remote_not_caught():
         # Branch names with v-prefix but not semver (alphabetic suffix)
         "git push origin vendor-update",
         "git push origin victory-lap",
+        # Branch names with a digit-then-hyphen prefix — the strict
+        # `(?![\w-])` post-anchor MUST reject these. A plain `\b` would
+        # incorrectly admit them (digit→hyphen is a word-boundary), so
+        # these pin the load-bearing post-anchor against regression.
+        "git push origin 2-branch",
+        "git push origin 1024-stuff",
+        "git push origin v1-branch",
         # `git push` alone (no positional)
         "git push",
         "git push origin",

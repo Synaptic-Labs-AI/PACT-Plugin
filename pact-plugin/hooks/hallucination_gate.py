@@ -281,20 +281,33 @@ try:
         re.compile(_GH_PREFIX + r"release\s+delete\b"),
 
         # ─── Tag publication (rewrites public history) ───
-        # Narrowed from the broader sketch flagged in teachback:
-        #   `git push --tags`            — explicit tag-bulk push
+        # Shapes covered:
+        #   `git push --tags`               — bulk tag push, --tags first
+        #   `git push origin --tags`        — bulk tag push, --tags after remote
         #   `git push <remote> refs/tags/<x>`  — explicit tag refspec
-        #   `git push <remote> v1.2.3`   — semver-shaped tag positional
-        # Branch-shaped positionals are NOT flagged by this set; the
-        # main-branch push form is handled by merge_guard_pre.
-        re.compile(_GIT_PREFIX + r"push\s+--tags\b"),
+        #   `git push <remote> v1.2.3`      — semver-shaped tag positional
+        #   `git push <remote> v1` / `2`    — dotless single-token version ref
+        #
+        # The semver-tag regex uses `(?:\.\d+)*` (zero-or-more decimal
+        # groups) to admit dotless forms like `v1`, `2`, `1024`. The
+        # trailing `(?![\w-])` post-anchor (mirrors merge_guard_pre's
+        # _GH_PR_NUMBER_RE convention) rejects branch-suffix forms like
+        # `2-branch`, `1024-stuff`, `v1-branch` that a plain `\b` would
+        # incorrectly admit (digit→hyphen IS a word-boundary under \b).
+        # The --tags flag-walk uses the same `(?:\S+\s+)*` idiom as the
+        # other destructive patterns so --tags is caught wherever it
+        # appears after `push`.
+        # Branch-shaped positionals (`feature-x`, `release-2026`) are
+        # NOT flagged; the main-branch push form is handled by
+        # merge_guard_pre.
+        re.compile(_GIT_PREFIX + r"push\s+(?:\S+\s+)*--tags\b"),
         re.compile(
             _GIT_PREFIX
             + r"push\s+(?:-\S+\s+)*\S+\s+refs/tags/\S+"
         ),
         re.compile(
             _GIT_PREFIX
-            + r"push\s+(?:-\S+\s+)*\S+\s+v?\d+(?:\.\d+)+\b"
+            + r"push\s+(?:-\S+\s+)*\S+\s+v?\d+(?:\.\d+)*(?![\w-])"
         ),
 
         # ─── History-rewriting ops ───
