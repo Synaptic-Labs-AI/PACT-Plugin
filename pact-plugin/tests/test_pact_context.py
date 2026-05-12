@@ -2084,7 +2084,7 @@ class TestParallelSessionIsolation:
 
     This is the CORE behavioral change of issue #345 — the entire point of
     session-scoping. Two sessions with different session_ids must produce
-    different get_session_dir() values, ensuring teachback markers, context
+    different get_session_dir() values, ensuring session journals, context
     files, and other artifacts don't interfere.
     """
 
