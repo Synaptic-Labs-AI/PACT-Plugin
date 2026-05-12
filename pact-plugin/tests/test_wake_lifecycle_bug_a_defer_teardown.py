@@ -340,7 +340,7 @@ class TestBugATeardownDeferralOnSameTeammateContinuation:
             f"Expected Teardown emit when continuation owner differs; "
             f"got {out!r}."
         )
-        assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]
+        assert "Skill(\"PACT:stop-pending-scan\")" in hso["additionalContext"]
 
     def test_no_defer_on_empty_addBlocks(self, tmp_path):
         """Negative pair: standalone single-task dispatch (no addBlocks).
@@ -369,7 +369,7 @@ class TestBugATeardownDeferralOnSameTeammateContinuation:
             f"Expected Teardown emit on standalone task completion; "
             f"got {out!r}."
         )
-        assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]
+        assert "Skill(\"PACT:stop-pending-scan\")" in hso["additionalContext"]
 
 
 # ---------- Defer-Teardown branch isolation (count==0 + predicate==True) ----------
@@ -508,4 +508,4 @@ def test_defer_predicate_handles_race_deleted_continuation(tmp_path):
         f"predicate is fail-open on deleted continuations — silent "
         f"Teardown suppression is the worse failure mode."
     )
-    assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]
+    assert "Skill(\"PACT:stop-pending-scan\")" in hso["additionalContext"]

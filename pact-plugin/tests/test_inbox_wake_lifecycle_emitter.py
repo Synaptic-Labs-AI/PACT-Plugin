@@ -6,8 +6,9 @@ asserts:
 - hookEventName="PostToolUse" present on all directive emits (REQUIRED;
   silent platform rejection without it).
 - TaskCreate with post-count >= 1 emits Arm; 1->0 TaskUpdate emits
-  Teardown. PACT:watch-inbox idempotency absorbs redundant Arm emits
-  on subsequent TaskCreates within the same active window.
+  Teardown. start-pending-scan's CronList idempotency absorbs
+  redundant Arm emits on subsequent TaskCreates within the same
+  active window.
 - Non-status TaskUpdate, Task/Agent spawn, and TaskCreate at zero
   post-count are no-ops.
 - Fail-open exit-0 + suppressOutput sentinel on malformed stdin /
@@ -20,7 +21,6 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -220,7 +220,7 @@ def test_arm_emitted_on_first_task_create(tmp_path):
     out = _emit_output(payload, home)
     hso = out["hookSpecificOutput"]
     assert hso["hookEventName"] == "PostToolUse"
-    assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+    assert "Skill(\"PACT:start-pending-scan\")" in hso["additionalContext"]
 
 
 def test_arm_includes_idempotency_clause(tmp_path):
@@ -237,12 +237,15 @@ def test_arm_includes_idempotency_clause(tmp_path):
     # the substring 'idempotent' must still appear somewhere.
     assert "idempotent" in additional.lower()
     # Pin the no-op clause as well — anchors the WHY of idempotency.
-    assert "no-op if a valid STATE_FILE" in additional
+    # Under cron mechanism, idempotency is enforced by start-pending-scan's
+    # CronList match (the cron entry's existence is the armed-state bit).
+    assert "no-op" in additional.lower()
+    assert "cron" in additional.lower()
 
 
 def test_teardown_includes_best_effort_clause(tmp_path):
     """Symmetric to Arm idempotency: pin the best-effort clause + the
-    'tolerates Monitor that died silently' rationale."""
+    tolerance rationale for missing-cron-entry scenarios."""
     home = tmp_path / "home"; home.mkdir()
     sid = "s"; pdir = "/tmp/p"; team = "t"
     _write_session_context(home, sid, pdir, team)
@@ -254,7 +257,9 @@ def test_teardown_includes_best_effort_clause(tmp_path):
     }, home)
     additional = out["hookSpecificOutput"]["additionalContext"]
     assert "best-effort" in additional.lower()
-    assert "tolerates a Monitor that died silently" in additional
+    # Cron teardown tolerates a missing cron entry (stop-pending-scan
+    # is idempotent / ignore-if-absent per INV-5).
+    assert "tolerat" in additional.lower()
 
 
 def test_arm_directive_contains_precondition_phrase(tmp_path):
@@ -313,10 +318,10 @@ def test_arm_on_create_owned_by_secretary_post_empty_carve_out(tmp_path):
     Pre-empty: this test asserted suppressOutput (the wake-side carve-
     out filtered secretary tasks before count_active_tasks reached the
     Arm threshold). Post-empty: secretary tasks DO count, so creating
-    one when no STATE_FILE exists triggers the Arm directive. This is
-    desired behavior — it's exactly what enables the Bug A secretary-
-    window fix at the count gate (Monitor stays armed for the duration
-    of secretary work, preventing the eager 1→0 Teardown).
+    one triggers the Arm directive. This is desired behavior — it's
+    exactly what enables the Bug A secretary-window fix at the count
+    gate (the cron scan stays armed for the duration of secretary
+    work, preventing the eager 1→0 Teardown).
 
     SELF_COMPLETE_EXEMPT_AGENT_TYPES on the self-completion side still
     contains pact-secretary (self-completion authority preserved); only
@@ -338,12 +343,12 @@ def test_arm_on_create_owned_by_secretary_post_empty_carve_out(tmp_path):
     hso = out.get("hookSpecificOutput")
     assert hso is not None, (
         f"Post-empty WAKE_EXCLUDED_AGENT_TYPES: secretary TaskCreate must "
-        f"emit Arm directive (count_active_tasks >= 1, STATE_FILE absent). "
+        f"emit Arm directive (count_active_tasks >= 1). "
         f"Got {out!r}. If suppressOutput, the wake-side carve-out has been "
         f"re-populated and this test must be inverted in lockstep."
     )
     assert hso["hookEventName"] == "PostToolUse"
-    assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+    assert "Skill(\"PACT:start-pending-scan\")" in hso["additionalContext"]
 
 
 # ---------- Teardown directive (1 -> 0) ----------
@@ -361,7 +366,7 @@ def test_teardown_emitted_on_last_active_completion(tmp_path):
     }, home)
     hso = out["hookSpecificOutput"]
     assert hso["hookEventName"] == "PostToolUse"
-    assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]
+    assert "Skill(\"PACT:stop-pending-scan\")" in hso["additionalContext"]
 
 
 def test_no_teardown_when_other_active_remains(tmp_path):
@@ -396,8 +401,8 @@ def test_teardown_emits_on_signal_task_completion_at_post_zero(tmp_path):
     """A1 simplification (see emitter docstring): post-only transition
     detector emits Teardown on any status=completed TaskUpdate when
     post==0, including the signal-task completion case where the task
-    never contributed to the active count. Skill's Teardown is
-    idempotent (no-op if STATE_FILE absent), so this over-eager emit
+    never contributed to the active count. stop-pending-scan is
+    idempotent (no-op if cron entry absent), so this over-eager emit
     is benign by design — replaces the prior hypothetical_pre filter."""
     home = tmp_path / "home"; home.mkdir()
     sid = "s"; pdir = "/tmp/p"; team = "t"
@@ -415,7 +420,7 @@ def test_teardown_emits_on_signal_task_completion_at_post_zero(tmp_path):
     }, home)
     hso = out["hookSpecificOutput"]
     assert hso["hookEventName"] == "PostToolUse"
-    assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]
+    assert "Skill(\"PACT:stop-pending-scan\")" in hso["additionalContext"]
 
 
 # ---------- _decide_directive direct unit coverage ----------
@@ -462,7 +467,7 @@ def test_teardown_emitted_on_status_deleted_at_post_zero(tmp_path):
         f"(be-F2). Actual emit: {out!r}"
     )
     assert hso["hookEventName"] == "PostToolUse"
-    assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]
+    assert "Skill(\"PACT:stop-pending-scan\")" in hso["additionalContext"]
 
 
 def test_is_terminal_status_update_matches_completed_and_deleted():
@@ -914,7 +919,7 @@ def test_arm_emitted_on_captured_production_taskcreate_payload(tmp_path):
         f"nested-task probe in _extract_task_id is missing — see #620."
     )
     assert hso["hookEventName"] == "PostToolUse"
-    assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+    assert "Skill(\"PACT:start-pending-scan\")" in hso["additionalContext"]
 
 
 # ---------- Arm directive on parallel-TaskCreate race (#637) ----------
@@ -928,10 +933,10 @@ class TestArmDirectiveOnParallelTaskCreateRace:
     PostToolUse hook reads `count_active_tasks`. Under a strict-equality
     predicate (`count == 1`) every fire rejects because the post-state
     count is already N >= 2; the Arm directive never emits and the
-    inbox-watch Monitor is never armed. Under the positive-bound
-    predicate (`count >= 1`) every fire emits Arm and PACT:watch-inbox
-    idempotency (no-op when a valid STATE_FILE is on disk) absorbs the
-    redundant emits within the active window.
+    pending-scan cron entry is never created. Under the positive-bound
+    predicate (`count >= 1`) every fire emits Arm and start-pending-scan's
+    CronList idempotency (no-op when a matching cron entry is already
+    on disk) absorbs the redundant emits within the active window.
 
     The two race-coupled tests below are the counter-test-by-revert
     targets: revert pact-plugin/hooks/wake_lifecycle_emitter.py to the
@@ -978,13 +983,13 @@ class TestArmDirectiveOnParallelTaskCreateRace:
             f"on the post-batch count of 2 — see #637."
         )
         assert hso["hookEventName"] == "PostToolUse"
-        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+        assert "Skill(\"PACT:start-pending-scan\")" in hso["additionalContext"]
 
     def test_arm_emits_on_parallel_burst_second_fire(self, tmp_path):
         """Race-coupled test #2. Same post-batch filesystem state as
         burst-first; pipe the SECOND burst fixture. The contract is
-        'both fires must emit; PACT:watch-inbox idempotency handles the
-        redundant emit at the skill layer.' Strict-equality reverts FAIL
+        'both fires must emit; start-pending-scan CronList idempotency
+        handles the redundant emit at the skill layer.' Strict-equality reverts FAIL
         here for the same reason as burst-first."""
         fixture = self._load_fixture("task_create_parallel_burst_second.json")
         home, team = self._setup_session(tmp_path, fixture)
@@ -998,7 +1003,7 @@ class TestArmDirectiveOnParallelTaskCreateRace:
             f"got {out!r}."
         )
         assert hso["hookEventName"] == "PostToolUse"
-        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+        assert "Skill(\"PACT:start-pending-scan\")" in hso["additionalContext"]
 
     def test_arm_emits_on_sequential_first_create(self, tmp_path):
         """No-regression sentinel for the original sequential 0->1 path.
@@ -1017,7 +1022,7 @@ class TestArmDirectiveOnParallelTaskCreateRace:
             f"got {out!r}."
         )
         assert hso["hookEventName"] == "PostToolUse"
-        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+        assert "Skill(\"PACT:start-pending-scan\")" in hso["additionalContext"]
 
     def test_teardown_emits_on_terminal_update_to_zero(self, tmp_path):
         """No-regression guard for the Teardown threshold (count == 0).
@@ -1042,7 +1047,7 @@ class TestArmDirectiveOnParallelTaskCreateRace:
         hso = out.get("hookSpecificOutput")
         assert hso is not None, f"Expected Teardown; got {out!r}."
         assert hso["hookEventName"] == "PostToolUse"
-        assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]
+        assert "Skill(\"PACT:stop-pending-scan\")" in hso["additionalContext"]
 
     def test_teardown_no_emit_on_terminal_update_with_residual(self, tmp_path):
         """No-regression guard against accidentally relaxing Teardown
@@ -1113,7 +1118,7 @@ class TestArmDirectiveOnParallelTaskCreateRace:
             f"got {out!r}."
         )
         assert hso["hookEventName"] == "PostToolUse"
-        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+        assert "Skill(\"PACT:start-pending-scan\")" in hso["additionalContext"]
 
     def test_teardown_sequence_after_parallel_burst_arm(self, tmp_path):
         """Lifecycle-symmetric guard for the Teardown side of the race
@@ -1163,7 +1168,7 @@ class TestArmDirectiveOnParallelTaskCreateRace:
             f"after parallel-burst Arm; got {out_final!r}."
         )
         assert hso["hookEventName"] == "PostToolUse"
-        assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]
+        assert "Skill(\"PACT:stop-pending-scan\")" in hso["additionalContext"]
 
     def test_arm_emits_when_parallel_burst_includes_signal_task(self, tmp_path):
         """Predicate-invariance under the count_active_tasks signal-task
@@ -1195,7 +1200,7 @@ class TestArmDirectiveOnParallelTaskCreateRace:
             f"predicate — predicate-invariance broken."
         )
         assert hso["hookEventName"] == "PostToolUse"
-        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+        assert "Skill(\"PACT:start-pending-scan\")" in hso["additionalContext"]
 
     def test_arm_emits_when_parallel_burst_includes_exempt_owner(self, tmp_path):
         """Predicate-invariance under the count_active_tasks self-
@@ -1233,283 +1238,6 @@ class TestArmDirectiveOnParallelTaskCreateRace:
             f"suppressOutput, the exempt-owner filter is being bypassed."
         )
         assert hso["hookEventName"] == "PostToolUse"
-        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+        assert "Skill(\"PACT:start-pending-scan\")" in hso["additionalContext"]
 
 
-# ---------- STATE_FILE freshness short-circuit (Future-1) ----------
-
-
-def _write_state_file(
-    home: Path,
-    team_name: str,
-    *,
-    armed_at: str | None = "FRESH",
-    v: object = 1,
-    raw_bytes: bytes | None = None,
-    extra: dict | None = None,
-    omit_armed_at: bool = False,
-) -> Path:
-    """Write a watch-inbox STATE_FILE under the synthesized HOME for tests
-    that need to exercise the freshness-short-circuit path.
-
-    Helper conveniences (only one is load-bearing per call):
-    - `armed_at="FRESH"` (default) → now-60s, well within window.
-    - `armed_at="STALE"` → now-700s, outside the 600s window.
-    - `armed_at="FUTURE"` → now+60s, simulates clock skew.
-    - `armed_at=<str>` → use literal value (e.g., for malformed cases).
-    - `omit_armed_at=True` → write STATE_FILE without the field.
-    - `raw_bytes=<bytes>` → bypass JSON encoding entirely (for malformed-
-      JSON cases). Other kwargs are ignored when this is set.
-    - `v=<value>` → override schema version (use `v=2` to test forward-
-      compat fall-through).
-    - `extra=<dict>` → merge additional keys into the payload.
-    """
-    state_dir = home / ".claude" / "teams" / team_name
-    state_dir.mkdir(parents=True, exist_ok=True)
-    path = state_dir / "inbox-wake-state.json"
-    if raw_bytes is not None:
-        path.write_bytes(raw_bytes)
-        return path
-    payload: dict = {
-        "v": v,
-        "monitor_task_id": "fixture-monitor-id",
-        "armed_by_session_id": "fixture-session-id",
-    }
-    if not omit_armed_at:
-        if armed_at == "FRESH":
-            ts = datetime.now(timezone.utc) - timedelta(seconds=60)
-            payload["armed_at"] = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
-        elif armed_at == "STALE":
-            ts = datetime.now(timezone.utc) - timedelta(seconds=700)
-            payload["armed_at"] = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
-        elif armed_at == "FUTURE":
-            ts = datetime.now(timezone.utc) + timedelta(seconds=60)
-            payload["armed_at"] = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
-        else:
-            payload["armed_at"] = armed_at
-    if extra:
-        payload.update(extra)
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    return path
-
-
-class TestStatefileFreshnessShortCircuit:
-    """Pin the STATE_FILE freshness-window short-circuit on the
-    TaskCreate Arm path.
-
-    Contract (architect §3.1.3 / `_decide_directive`):
-      `count_active_tasks(team_name) >= 1 AND NOT _statefile_is_fresh(team_name)`
-    emits Arm. When STATE_FILE is present + parses as v=1 + carries an
-    armed_at timestamp within `_STATEFILE_FRESHNESS_WINDOW_SECS` (600s)
-    of the current UTC clock, the hook short-circuits (returns None →
-    suppressOutput). Every other branch (absent / malformed / wrong
-    schema / missing armed_at / unparseable / clock skew / OS error)
-    fail-opens to emit (helper returns False, caller emits as if
-    Future-1 were not in play).
-
-    Counter-test-by-revert: revert just `_statefile_is_fresh` and the
-    call site at the TaskCreate branch. The fresh-STATE_FILE test moves
-    from suppressOutput-asserting to Arm-asserting; cardinality on this
-    class is {1 fail [the short-circuit case], rest pass}.
-    """
-
-    @staticmethod
-    def _load_fixture(name: str) -> dict:
-        data = json.loads((FIXTURES_DIR / name).read_text(encoding="utf-8"))
-        data.pop("_meta", None)
-        return data
-
-    def _setup_session(self, tmp_path: Path, fixture: dict, team: str = "team-fresh"):
-        home = tmp_path / "home"
-        home.mkdir()
-        sid = fixture["session_id"]
-        pdir = fixture["cwd"]
-        _write_session_context(home, sid, pdir, team)
-        return home, team
-
-    def test_short_circuit_on_fresh_statefile(self, tmp_path):
-        """The load-bearing positive case. Fresh STATE_FILE present
-        (armed_at = now - 60s); count_active_tasks == 1 from the
-        pre-written task. Hook short-circuits — suppressOutput sentinel,
-        no Arm emit. Counter-test-by-revert: removing _statefile_is_fresh
-        flips this to an Arm-emit assertion failure."""
-        fixture = self._load_fixture("task_create_parallel_burst_first.json")
-        home, team = self._setup_session(tmp_path, fixture)
-        _write_task(home, team, "10", status="pending", owner="backend-coder")
-        _write_state_file(home, team, armed_at="FRESH")
-
-        out = _emit_output(fixture, home)
-        assert out == {"suppressOutput": True}, (
-            f"Expected suppressOutput on fresh STATE_FILE short-circuit; "
-            f"got {out!r}. If hookSpecificOutput is present, the "
-            f"_statefile_is_fresh gate is missing or returning False."
-        )
-
-    def test_emit_on_stale_statefile(self, tmp_path):
-        """Periodic re-arm trigger. STATE_FILE is present but armed_at
-        is past the 600s window (now - 700s). Hook emits Arm,
-        guaranteeing a bounded periodic re-arm occasion."""
-        fixture = self._load_fixture("task_create_parallel_burst_first.json")
-        home, team = self._setup_session(tmp_path, fixture)
-        _write_task(home, team, "10", status="pending", owner="backend-coder")
-        _write_state_file(home, team, armed_at="STALE")
-
-        out = _emit_output(fixture, home)
-        hso = out.get("hookSpecificOutput")
-        assert hso is not None, (
-            f"Expected Arm on stale STATE_FILE (past 600s window); "
-            f"got {out!r}. The freshness window appears to extend past "
-            f"600s, which would defeat the periodic re-arm trigger."
-        )
-        assert hso["hookEventName"] == "PostToolUse"
-        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
-
-    def test_emit_on_absent_statefile(self, tmp_path):
-        """Cold-start regression guard. No STATE_FILE on disk; helper
-        fail-opens to False; hook emits Arm. Pins that Future-1 does
-        not break the original 0->1 (or post-Teardown re-arm) path."""
-        fixture = self._load_fixture("task_create_parallel_burst_first.json")
-        home, team = self._setup_session(tmp_path, fixture)
-        _write_task(home, team, "10", status="pending", owner="backend-coder")
-        # Deliberately do NOT write a STATE_FILE.
-
-        out = _emit_output(fixture, home)
-        hso = out.get("hookSpecificOutput")
-        assert hso is not None, (
-            f"Expected Arm when STATE_FILE is absent (cold-start path); "
-            f"got {out!r}. Future-1 must fail-open to emit when no "
-            f"STATE_FILE exists, otherwise the cold-start Arm is lost."
-        )
-        assert hso["hookEventName"] == "PostToolUse"
-        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
-
-    def test_emit_on_malformed_json_statefile(self, tmp_path):
-        """Fail-open on STATE_FILE that exists but is not valid JSON.
-        Helper catches json.JSONDecodeError → returns False → hook emits.
-        Pins the pure-never-raises contract on the JSON parse failure
-        path."""
-        fixture = self._load_fixture("task_create_parallel_burst_first.json")
-        home, team = self._setup_session(tmp_path, fixture)
-        _write_task(home, team, "10", status="pending", owner="backend-coder")
-        _write_state_file(home, team, raw_bytes=b"{not valid json")
-
-        out = _emit_output(fixture, home)
-        hso = out.get("hookSpecificOutput")
-        assert hso is not None, (
-            f"Expected Arm (fail-open) on malformed STATE_FILE JSON; "
-            f"got {out!r}."
-        )
-        assert hso["hookEventName"] == "PostToolUse"
-        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
-
-    def test_emit_on_wrong_schema_version(self, tmp_path):
-        """Forward-compat fall-through. STATE_FILE has v=2 (a future
-        schema bump); current Future-1 helper returns False so hook
-        emits. Pins the v != 1 fail-through path so a future schema
-        migration doesn't accidentally land both old + new helpers
-        treating v=2 as fresh."""
-        fixture = self._load_fixture("task_create_parallel_burst_first.json")
-        home, team = self._setup_session(tmp_path, fixture)
-        _write_task(home, team, "10", status="pending", owner="backend-coder")
-        _write_state_file(home, team, armed_at="FRESH", v=2)
-
-        out = _emit_output(fixture, home)
-        hso = out.get("hookSpecificOutput")
-        assert hso is not None, (
-            f"Expected Arm (fall-through) on STATE_FILE with v=2; "
-            f"got {out!r}. The v != 1 branch must not short-circuit."
-        )
-        assert hso["hookEventName"] == "PostToolUse"
-        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
-
-    def test_emit_on_missing_armed_at_field(self, tmp_path):
-        """Fail-open on STATE_FILE with v=1 but no armed_at. Helper
-        returns False on missing-field; hook emits. Pins the discipline
-        that 'present and parseable' is necessary but not sufficient
-        for short-circuit — armed_at must exist AND be parseable AND
-        be within window."""
-        fixture = self._load_fixture("task_create_parallel_burst_first.json")
-        home, team = self._setup_session(tmp_path, fixture)
-        _write_task(home, team, "10", status="pending", owner="backend-coder")
-        _write_state_file(home, team, omit_armed_at=True)
-
-        out = _emit_output(fixture, home)
-        hso = out.get("hookSpecificOutput")
-        assert hso is not None, (
-            f"Expected Arm (fail-open) on STATE_FILE missing armed_at; "
-            f"got {out!r}."
-        )
-        assert hso["hookEventName"] == "PostToolUse"
-        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
-
-    def test_emit_on_clock_skew_future_armed_at(self, tmp_path):
-        """Fail-open on negative-age (clock skew). armed_at is 60s in
-        the future relative to the current clock. Helper detects
-        age_secs < 0 and returns False; hook emits. Pins the discipline
-        that a future-dated armed_at is treated as not-fresh rather
-        than as 'extremely fresh' (which would silently extend the
-        short-circuit indefinitely on a misconfigured clock)."""
-        fixture = self._load_fixture("task_create_parallel_burst_first.json")
-        home, team = self._setup_session(tmp_path, fixture)
-        _write_task(home, team, "10", status="pending", owner="backend-coder")
-        _write_state_file(home, team, armed_at="FUTURE")
-
-        out = _emit_output(fixture, home)
-        hso = out.get("hookSpecificOutput")
-        assert hso is not None, (
-            f"Expected Arm (fail-open) on future-dated armed_at "
-            f"(clock skew); got {out!r}. If suppressOutput, the helper "
-            f"is treating negative age as fresh — which silently "
-            f"extends short-circuit indefinitely on a misconfigured "
-            f"clock."
-        )
-        assert hso["hookEventName"] == "PostToolUse"
-        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
-
-    def test_no_emit_on_zero_count_regardless_of_statefile(self, tmp_path):
-        """Lower-bound regression guard. Even with a fresh STATE_FILE,
-        TaskCreate at count==0 must NOT emit Arm — the short-circuit
-        does not bypass the count-positive predicate. Pins the
-        composition order: count check first, freshness check second."""
-        fixture = self._load_fixture("task_create_parallel_burst_first.json")
-        home, team = self._setup_session(tmp_path, fixture)
-        # Deliberately do NOT write a task file (count == 0).
-        _write_state_file(home, team, armed_at="FRESH")
-
-        out = _emit_output(fixture, home)
-        assert out == {"suppressOutput": True}, (
-            f"Expected suppressOutput when count == 0 (regardless of "
-            f"STATE_FILE freshness); got {out!r}. The lower-bound "
-            f"count check must dominate the freshness-short-circuit."
-        )
-
-    def test_teardown_unaffected_by_fresh_statefile(self, tmp_path):
-        """Teardown side regression guard. TaskUpdate(terminal-status)
-        at count==0 must still emit Teardown regardless of STATE_FILE
-        presence/freshness — Future-1 gates only the TaskCreate branch.
-        Pins that the freshness short-circuit does not leak into the
-        Teardown predicate."""
-        home = tmp_path / "home"
-        home.mkdir()
-        sid = "pact-2877fe69"
-        pdir = "/Users/mj/Sites/collab/PACT-prompt"
-        team = "team-fresh"
-        _write_session_context(home, sid, pdir, team)
-        _write_task(home, team, "10", status="completed", owner="backend-coder")
-        _write_state_file(home, team, armed_at="FRESH")
-
-        out = _emit_output({
-            "tool_name": "TaskUpdate",
-            "session_id": sid,
-            "cwd": pdir,
-            "tool_input": {"taskId": "10", "status": "completed"},
-            "tool_response": {"id": "10", "status": "completed"},
-        }, home)
-        hso = out.get("hookSpecificOutput")
-        assert hso is not None, (
-            f"Expected Teardown on terminal-status TaskUpdate at "
-            f"count==0 even with fresh STATE_FILE; got {out!r}. The "
-            f"freshness short-circuit must not gate the Teardown path."
-        )
-        assert hso["hookEventName"] == "PostToolUse"
-        assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]

@@ -1,27 +1,34 @@
 """
-Integration tests for Bug B: emit Arm on TaskUpdate(status=in_progress)
-when STATE_FILE is absent or stale AND count_active_tasks >= 1.
+Integration tests for Bug B re-Arm preservation under cron-based pending-scan:
+emit Arm on TaskUpdate(status=in_progress) when count_active_tasks >= 1.
 
-Bug B surface: after the eager Teardown (or any other STATE_FILE-absent
-state — cold-start, mid-session-resume, Monitor-died-silently), when
-the teammate claims Task B (TaskUpdate status=in_progress), the unfixed
-hook does NOT re-fire watch-inbox — pending->in_progress falls through
-the existing TaskUpdate branch's terminal-status guard by design. The
-fix adds an Arm branch on the TaskUpdate(status=='in_progress')
-transition gated by STATE_FILE absence as the implicit pre-state proxy.
+Bug B surface: after an eager Teardown (cold-start, mid-session resume,
+session-end cleanup), when the teammate claims Task B
+(TaskUpdate status=in_progress), the hook must re-fire the Arm
+directive (now /PACT:start-pending-scan) — pending->in_progress falls
+through the existing TaskUpdate branch's terminal-status guard by
+design. The fix adds an Arm branch on TaskUpdate(status=='in_progress')
+transitions; idempotency lives in the skill body (CronList match), not
+in a hook-level freshness short-circuit.
+
+Per cron mechanism (INV-6 mechanical branch): STATE_FILE-based freshness
+short-circuit is REMOVED. CronList-as-state is the single idempotency
+source of truth at the skill body. The Arm directive may fire redundantly
+without harm — start-pending-scan idempotently no-ops if its cron entry
+already exists.
 
 Also includes:
 - Audit-anchor regression guards for _ARM_DIRECTIVE / _TEARDOWN_DIRECTIVE
-  literal prose + _STATEFILE_FRESHNESS_WINDOW_SECS == 600 pin (per
-  memory feedback_491 literal-phrase regression guard pattern).
+  literal prose (per memory feedback_491 literal-phrase regression
+  guard pattern).
 - Parallel test_no_op_on_taskupdate_owned_by_exempt_agent for parity
   with existing test_no_op_on_create_owned_by_exempt_agent.
 - Sequencing test: Teardown then claim → re-Arm fires.
 
 Counter-test-by-revert (manual / runbook-documented): SOURCE-ONLY revert
-via cp-bak / git-checkout HEAD~1 of pact-plugin/hooks/wake_lifecycle_emitter.py.
-Expected cardinality on revert: ~5 fail (TestBugBReArmOnTeammateClaim
-5 cases) + sequence test fails on Step 2 + audit-anchor tests pass.
+via git-checkout HEAD~1 of pact-plugin/hooks/wake_lifecycle_emitter.py.
+Expected cardinality on revert: ~4 fail (TestBugBReArmOnTeammateClaim
+cases) + sequence test fails on Step 2 + audit-anchor tests pass.
 See pact-plugin/tests/runbooks/wake-lifecycle-teachback-rearm.md.
 """
 
@@ -29,7 +36,6 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HOOK_DIR = Path(__file__).resolve().parent.parent / "hooks"
@@ -119,29 +125,32 @@ def _load_fixture(name: str) -> dict:
     return data
 
 
-# ---------- Bug B: re-Arm on pending->in_progress when STATE_FILE absent ----------
+# ---------- Bug B: re-Arm on pending->in_progress under cron mechanism ----------
 
 
 class TestBugBReArmOnTeammateClaim:
-    """Bug B integration: emit Arm when teammate claims a task off the
-    queue (TaskUpdate status=in_progress) AND STATE_FILE is absent or
-    stale AND count_active_tasks >= 1.
+    """Bug B integration: emit Arm directive when teammate claims a task
+    off the queue (TaskUpdate status=in_progress) AND count_active_tasks
+    >= 1.
 
     Categorically covers cold-start, post-Teardown recovery, mid-session
-    resume, and Monitor-died-silently — the STATE_FILE absence/staleness
-    is the implicit 1-bit pre-state proxy for "no live Monitor."
+    resume — under cron mechanism, idempotency is enforced at the skill
+    body (CronList match), not at the hook layer. The hook MUST emit
+    Arm whenever the lifecycle transition warrants it; redundant emits
+    are absorbed by start-pending-scan's CronList idempotency check.
     """
 
     def test_rearm_on_claim_after_eager_teardown(self, tmp_path):
-        """Recovery case: STATE_FILE was unlinked by an earlier Teardown
-        (or never written for cold-start). Teammate claims Task B
-        (status=in_progress); count==1; STATE_FILE absent → Arm emits."""
+        """Recovery case: a prior Teardown ran (cold-start, mid-session
+        resume, etc.). Teammate claims Task B (status=in_progress);
+        count==1; the hook MUST emit Arm. Under cron mechanism, no
+        hook-level freshness short-circuit exists — idempotency lives
+        in the skill body's CronList match."""
         home = tmp_path / "home"; home.mkdir()
         sid = "s"; pdir = "/tmp/p"; team = "team-rearm-recovery"
         _write_session_context(home, sid, pdir, team)
         # Task on disk is now in_progress (post-state).
         _write_task(home, team, "B", status="in_progress", owner="backend-coder")
-        # Deliberately do NOT write a STATE_FILE.
 
         out = _emit_output({
             "tool_name": "TaskUpdate",
@@ -154,55 +163,18 @@ class TestBugBReArmOnTeammateClaim:
         }, home)
         hso = out.get("hookSpecificOutput")
         assert hso is not None, (
-            f"Expected Arm emit on pending->in_progress when STATE_FILE "
-            f"absent (recovery case); got {out!r}. If suppressOutput, "
-            f"the Bug B re-Arm branch is missing or the STATE_FILE "
-            f"freshness short-circuit is leaking into this path."
+            f"Expected Arm emit on pending->in_progress (recovery case); "
+            f"got {out!r}. If suppressOutput, the Bug B re-Arm branch "
+            f"is missing from the TaskUpdate hook path."
         )
         assert hso["hookEventName"] == "PostToolUse"
-        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
-
-    def test_no_rearm_on_fresh_statefile(self, tmp_path):
-        """Freshness short-circuit: STATE_FILE present and within window
-        → no emit. Mirrors the TaskCreate-side freshness gate so the
-        Bug B branch composes correctly with the existing freshness
-        suppression."""
-        home = tmp_path / "home"; home.mkdir()
-        sid = "s"; pdir = "/tmp/p"; team = "team-fresh"
-        _write_session_context(home, sid, pdir, team)
-        _write_task(home, team, "B", status="in_progress", owner="backend-coder")
-        # Write a fresh STATE_FILE (now - 60s).
-        state_dir = home / ".claude" / "teams" / team
-        state_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(timezone.utc) - timedelta(seconds=60)
-        (state_dir / "inbox-wake-state.json").write_text(
-            json.dumps({
-                "v": 1,
-                "monitor_task_id": "fixture-monitor",
-                "armed_by_session_id": "fixture-sid",
-                "armed_at": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            }),
-            encoding="utf-8",
-        )
-
-        out = _emit_output({
-            "tool_name": "TaskUpdate",
-            "session_id": sid, "cwd": pdir,
-            "tool_input": {"taskId": "B", "status": "in_progress"},
-            "tool_response": {
-                "id": "B", "status": "in_progress",
-                "owner": "backend-coder",
-            },
-        }, home)
-        assert out == {"suppressOutput": True}, (
-            f"Expected suppressOutput on fresh STATE_FILE short-circuit; "
-            f"got {out!r}."
-        )
+        assert "Skill(\"PACT:start-pending-scan\")" in hso["additionalContext"]
 
     def test_no_rearm_on_zero_count(self, tmp_path):
-        """Lower-bound regression guard: even with STATE_FILE absent, a
-        pending->in_progress at count==0 must NOT emit Arm. Pins the
-        composition order: count check first, freshness check second."""
+        """Lower-bound regression guard: a pending->in_progress
+        at count==0 must NOT emit Arm. Pins the composition order:
+        count check is the gating predicate; under cron mechanism it
+        is the SOLE gating predicate (no STATE_FILE freshness layer)."""
         home = tmp_path / "home"; home.mkdir()
         sid = "s"; pdir = "/tmp/p"; team = "team-zero-count"
         _write_session_context(home, sid, pdir, team)
@@ -220,8 +192,7 @@ class TestBugBReArmOnTeammateClaim:
             },
         }, home)
         assert out == {"suppressOutput": True}, (
-            f"Expected suppressOutput when count==0 regardless of "
-            f"STATE_FILE; got {out!r}."
+            f"Expected suppressOutput when count==0; got {out!r}."
         )
 
     def test_no_rearm_on_metadata_only_taskupdate(self, tmp_path):
@@ -251,7 +222,7 @@ class TestBugBReArmOnTeammateClaim:
         fixture (teammate_claim_in_progress_shape.json). The fixture
         encodes the canonical TaskUpdate(status=in_progress) shape from
         a real PACT session. Predicate must classify this as the re-Arm
-        trigger; with STATE_FILE absent and count==1, Arm emits.
+        trigger; with count==1, Arm emits.
 
         Counter-test-by-revert: revert the Bug B re-Arm branch and this
         test FAILS — the captured production payload no longer triggers
@@ -273,15 +244,20 @@ class TestBugBReArmOnTeammateClaim:
             f"payload; got {out!r}. Bug B re-Arm branch may be missing."
         )
         assert hso["hookEventName"] == "PostToolUse"
-        assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+        assert "Skill(\"PACT:start-pending-scan\")" in hso["additionalContext"]
 
 
 # ---------- Audit-anchor regression guards ----------
 
 
 class TestAuditAnchorRegressionGuards:
-    """Pin load-bearing constants and prose so a future 'simplification'
-    LLM cannot accidentally widen / shrink the contract."""
+    """Pin load-bearing directive prose so a future 'simplification' LLM
+    cannot accidentally widen / shrink the contract.
+
+    Under cron mechanism (INV-6 mechanical branch): the STATE_FILE
+    freshness-window constant pin is REMOVED — no STATE_FILE exists,
+    no freshness window applies, idempotency is enforced at the skill
+    body via CronList match."""
 
     def test_arm_directive_constant_unchanged(self):
         sys.path.insert(0, str(HOOK_DIR))
@@ -289,31 +265,15 @@ class TestAuditAnchorRegressionGuards:
         # The exact directive prose — pin per memory feedback_491
         # literal-phrase regression guard pattern.
         assert "First active teammate task created" in emitter._ARM_DIRECTIVE
-        assert 'Skill("PACT:watch-inbox")' in emitter._ARM_DIRECTIVE
+        assert 'Skill("PACT:start-pending-scan")' in emitter._ARM_DIRECTIVE
         assert "Idempotent" in emitter._ARM_DIRECTIVE
 
     def test_teardown_directive_constant_unchanged(self):
         sys.path.insert(0, str(HOOK_DIR))
         import wake_lifecycle_emitter as emitter
         assert "Last active teammate task completed" in emitter._TEARDOWN_DIRECTIVE
-        assert 'Skill("PACT:unwatch-inbox")' in emitter._TEARDOWN_DIRECTIVE
+        assert 'Skill("PACT:stop-pending-scan")' in emitter._TEARDOWN_DIRECTIVE
         assert "Best-effort" in emitter._TEARDOWN_DIRECTIVE
-
-    def test_statefile_freshness_window_pinned_at_600s(self):
-        """Pin _STATEFILE_FRESHNESS_WINDOW_SECS at 600. Documented in the
-        audit anchor at L97-111. Pinning the value rather than a range
-        catches an unintentional retune (e.g., a future refactor that
-        treats the constant as a "tunable parameter")."""
-        sys.path.insert(0, str(HOOK_DIR))
-        import wake_lifecycle_emitter as emitter
-        assert emitter._STATEFILE_FRESHNESS_WINDOW_SECS == 600, (
-            f"_STATEFILE_FRESHNESS_WINDOW_SECS must be 600s "
-            f"(>= 5x Monitor MAX_DELAY ceiling, >= typical PACT phase "
-            f"duration, <= user-perceived staleness threshold). "
-            f"Got {emitter._STATEFILE_FRESHNESS_WINDOW_SECS}s. If this "
-            f"was retuned intentionally, update this assertion in "
-            f"lockstep so the new value is pinned."
-        )
 
 
 # ---------- Parallel TaskUpdate-side test for parity ----------
@@ -329,9 +289,8 @@ def test_rearm_on_taskupdate_owned_by_secretary_post_empty_carve_out(tmp_path):
 
     Pre-empty: this test asserted suppressOutput (the wake-side carve-
     out excluded secretary-owned tasks from the count, so post < 1
-    suppressed Arm even with STATE_FILE absent). Post-empty: secretary
-    tasks DO count, so claim transitions trigger re-Arm when STATE_FILE
-    is absent.
+    suppressed Arm). Post-empty: secretary tasks DO count, so claim
+    transitions trigger re-Arm under cron mechanism.
 
     Pins parity between the TaskCreate Arm branch (already inverted at
     test_arm_on_create_owned_by_secretary_post_empty_carve_out) and
@@ -363,13 +322,13 @@ def test_rearm_on_taskupdate_owned_by_secretary_post_empty_carve_out(tmp_path):
     hso = out.get("hookSpecificOutput")
     assert hso is not None, (
         f"Post-empty WAKE_EXCLUDED_AGENT_TYPES: secretary TaskUpdate("
-        f"in_progress) with STATE_FILE absent must emit Arm directive "
+        f"in_progress) must emit Arm directive "
         f"(count_active_tasks >= 1). Got {out!r}. If suppressOutput, "
         f"the wake-side carve-out has been re-populated and this test "
         f"must be inverted in lockstep."
     )
     assert hso["hookEventName"] == "PostToolUse"
-    assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+    assert "Skill(\"PACT:start-pending-scan\")" in hso["additionalContext"]
 
 
 # ---------- Sequencing: Teardown then claim ----------
@@ -383,13 +342,13 @@ def test_sequence_teardown_then_claim_emits_rearm(tmp_path):
               teammate, pending). With the fix, defer-Teardown branch
               suppresses the eager 1->0 emit.
       Step 2: Teammate claims Task B (status=in_progress). Re-Arm
-              branch fires (STATE_FILE absent — no Arm ever emitted).
+              branch fires (no prior Arm emitted; cron mechanism
+              idempotency lives in skill body, not hook layer).
 
     Pins that both branches compose correctly when the canonical
     Two-Task Dispatch lifecycle runs end-to-end. If either branch is
     missing, the sequence breaks: Step 1 missing → Teardown fires
-    eagerly; Step 2 missing → no re-Arm even though count is now >=1
-    and STATE_FILE absent.
+    eagerly; Step 2 missing → no re-Arm even though count is now >=1.
     """
     home = tmp_path / "home"; home.mkdir()
     sid = "s"; pdir = "/tmp/p"; team = "team-sequence"
@@ -447,4 +406,4 @@ def test_sequence_teardown_then_claim_emits_rearm(tmp_path):
         f"got {out_step2!r}. The Bug B re-Arm branch did not fire."
     )
     assert hso["hookEventName"] == "PostToolUse"
-    assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
+    assert "Skill(\"PACT:start-pending-scan\")" in hso["additionalContext"]
