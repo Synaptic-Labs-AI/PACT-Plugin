@@ -134,7 +134,7 @@ This is the load-bearing verification — the 5 anti-hallucination guardrails ar
 
 **Acceptance**: After Task A completes, `CronList` still contains the cron entry. No spurious Teardown was emitted. When Task B subsequently completes (and no further same-teammate continuation exists), the regular 1→0 Teardown fires normally.
 
-## 9. Bug B Preservation — Re-Arm on Pending→In-Progress Transition
+## 9. Bug B Preservation — Re-Arm on Pending->In-Progress Transition
 
 **Action**: After Teardown (cron entry absent), have a teammate claim a `pending` task via `TaskUpdate(status="in_progress")`. Observe hook behavior.
 

@@ -38,6 +38,144 @@ def cmd_text() -> str:
     return CMD_FILE.read_text(encoding="utf-8")
 
 
+def _find_balanced_close_paren(text: str, open_paren_pos: int) -> int:
+    """Find the closing `)` that balances the opening `(` at open_paren_pos.
+
+    Counts open/close parens forward from open_paren_pos. Robust against
+    `)` characters appearing inside field values (e.g., a hypothetical
+    `prompt="(foo)"` would not prematurely terminate block extraction).
+    Replaces the prior `text.find(")", open_paren_pos)` which returned
+    the first `)` regardless of nesting (commit-13 F6 fix).
+
+    Returns the index of the balancing `)`, or -1 if unbalanced.
+    Assumes text[open_paren_pos] == '('.
+    """
+    assert open_paren_pos >= 0 and text[open_paren_pos] == "(", (
+        f"_find_balanced_close_paren expected '(' at position "
+        f"{open_paren_pos}, got {text[open_paren_pos:open_paren_pos + 1]!r}"
+    )
+    depth = 0
+    for i in range(open_paren_pos, len(text)):
+        ch = text[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+# ---------- F6 regression coverage: balanced-paren parser handles )-containing values ----------
+
+
+# Synthetic source: CronCreate block with a `)`-containing field value.
+# The OLD `find(")")` parser truncates at the inner `)` of the note value;
+# the NEW balanced-paren parser correctly identifies the final `)` of the
+# CronCreate call.
+_F6_REGRESSION_SOURCE = (
+    'CronCreate(\n'
+    '    cron="*/2 * * * *",\n'
+    '    prompt="/PACT:scan-pending-tasks",\n'
+    '    note="(deprecated 2026-Q3)",\n'
+    '    recurring=True,\n'
+    '    durable=False,\n'
+    ')'
+)
+
+
+def test_f6_balanced_paren_handles_close_paren_in_field_value():
+    """F6 regression coverage (commit-13): `_find_balanced_close_paren`
+    correctly extracts a CronCreate block whose field value contains
+    a `)` character. The OLD `text.find(")", open_paren_pos)` parser
+    would truncate at the inner `)` of the note value, MISSING the
+    later fields and the actual final `)`. The NEW balanced-paren
+    parser counts depth and returns the call's final `)`.
+
+    Empirical discharge documented in commit-13 HANDOFF: OLD parser
+    truncated at synthetic index 9 (inner `)` of note); NEW parser
+    returned synthetic index ~150 (call's final `)`). Permanent
+    regression coverage: this test makes a future revert to the OLD
+    parser structurally undetectable without test failure."""
+    src = _F6_REGRESSION_SOURCE
+    open_paren_pos = src.find("CronCreate(") + len("CronCreate")
+    assert src[open_paren_pos] == "(", "Test setup invariant: CronCreate( in synthetic"
+
+    block_end = _find_balanced_close_paren(src, open_paren_pos)
+    assert block_end > open_paren_pos, (
+        "F6: balanced-paren parser must return a position after the opening `(`. "
+        f"Got block_end={block_end}, open_paren_pos={open_paren_pos}."
+    )
+    # The extracted block must end at the FINAL `)` of the CronCreate
+    # call (which is the very last character of the synthetic source).
+    assert block_end == len(src) - 1, (
+        "F6: balanced-paren must return the FINAL `)` index, not a premature "
+        f"inner `)`. Got block_end={block_end}, expected {len(src) - 1} (last char). "
+        f"The OLD `find(\")\")` parser would have returned the inner `)` of the "
+        f"note value at index {src.find(')')}, truncating the block."
+    )
+
+    # The extracted block must contain ALL canonical fields, including
+    # those after the )-containing note value. If the parser truncates
+    # prematurely, these would be missing.
+    block = src[open_paren_pos - len("CronCreate"):block_end + 1]
+    assert 'recurring=True' in block, (
+        "F6: balanced-paren must capture `recurring=True` even though it "
+        "appears AFTER the )-containing note value. Premature termination "
+        "at the inner `)` (OLD parser behavior) would miss this field."
+    )
+    assert 'durable=False' in block, (
+        "F6: balanced-paren must capture `durable=False` even though it "
+        "appears AFTER the )-containing note value."
+    )
+    assert 'note="(deprecated 2026-Q3)"' in block, (
+        "F6: balanced-paren must capture the full `)`-containing note "
+        "value (including both opening and closing parens of the inner value)."
+    )
+
+
+def test_f6_balanced_paren_returns_minus_one_when_unbalanced():
+    """F6 invariant: `_find_balanced_close_paren` returns -1 if the
+    parens are unbalanced (more opens than closes). Documenting this
+    fail-mode prevents a future caller from treating -1 as a valid
+    index (which would slice from the end of the string)."""
+    # Unbalanced: 2 opens, 1 close.
+    src = 'CronCreate(\n    note="(unclosed",\n    recurring=True,\n'
+    open_paren_pos = src.find("CronCreate(") + len("CronCreate")
+    result = _find_balanced_close_paren(src, open_paren_pos)
+    assert result == -1, (
+        "F6: unbalanced parens must return -1 (sentinel), not a "
+        f"misleading positive index. Got {result}."
+    )
+
+
+def test_f6_balanced_paren_handles_nested_parens_in_field_value():
+    """F6: nested `()` pairs in a field value (e.g., a hypothetical
+    `tags=("a", "b", "c")` tuple-style field) must not confuse the
+    depth counter. The parser counts opens and closes; balanced
+    inner pairs return to outer-depth and the outer `)` is correctly
+    identified as the call's terminator."""
+    src = (
+        'CronCreate(\n'
+        '    cron="*/2 * * * *",\n'
+        '    tags=("a", "b", "c"),\n'  # nested () inside a tuple-style value
+        '    recurring=True,\n'
+        ')'
+    )
+    open_paren_pos = src.find("CronCreate(") + len("CronCreate")
+    block_end = _find_balanced_close_paren(src, open_paren_pos)
+    assert block_end == len(src) - 1, (
+        "F6: nested () must not confuse depth counter. Got "
+        f"block_end={block_end}, expected {len(src) - 1} (final `)`)."
+    )
+    # The full block must contain the nested tuple verbatim.
+    block = src[open_paren_pos - len("CronCreate"):block_end + 1]
+    assert '("a", "b", "c")' in block, (
+        "F6: nested tuple-style value must be captured verbatim including "
+        "both inner parens."
+    )
+
+
 # ---------- File presence and frontmatter ----------
 
 def test_command_file_exists():
@@ -129,13 +267,16 @@ def test_cron_create_call_shape_cron_create_block_has_four_fields(cmd_text):
     section_end = cmd_text.find("\n## ", section_start + 1)
     section = cmd_text[section_start:section_end] if section_end > 0 else cmd_text[section_start:]
     # Extract the CronCreate( ... ) block WITHIN the §CronCreate Block section.
+    # Use balanced-paren parsing (commit-13 F6) to tolerate hypothetical
+    # `)`-containing field values without prematurely terminating the block.
     block_start = section.find("CronCreate(")
     assert block_start >= 0, (
         "§CronCreate Block section missing CronCreate( call. The section "
         "must contain the operational Python-form code block."
     )
-    block_end = section.find(")", block_start)
-    assert block_end > block_start, "CronCreate( in §CronCreate Block has no closing )"
+    open_paren_pos = block_start + len("CronCreate")
+    block_end = _find_balanced_close_paren(section, open_paren_pos)
+    assert block_end > block_start, "CronCreate( in §CronCreate Block has no balanced closing )"
     block = section[block_start:block_end + 1]
     assert 'cron="*/2 * * * *"' in block, (
         "CronCreate Call Shape/M1: §CronCreate Block must use cron='*/2 * * * *' (2-minute "
@@ -178,8 +319,11 @@ def test_cron_create_call_shape_cron_create_block_has_no_extra_fields(cmd_text):
     section_end = cmd_text.find("\n## ", section_start + 1)
     section = cmd_text[section_start:section_end] if section_end > 0 else cmd_text[section_start:]
     block_start = section.find("CronCreate(")
-    block_end = section.find(")", block_start)
-    assert block_start >= 0 and block_end > block_start
+    assert block_start >= 0
+    # Use balanced-paren parsing (commit-13 F6) — tolerates )-containing field values.
+    open_paren_pos = block_start + len("CronCreate")
+    block_end = _find_balanced_close_paren(section, open_paren_pos)
+    assert block_end > block_start
     block = section[block_start:block_end + 1]
     # Each canonical field appears exactly once in the call block.
     assert block.count("cron=") == 1
@@ -240,7 +384,10 @@ def _extract_croncreate_prompt(cmd_text: str) -> str:
     import re
     block_start = cmd_text.find("CronCreate(")
     assert block_start >= 0, "Missing CronCreate( in start-pending-scan.md"
-    block_end = cmd_text.find(")", block_start)
+    # Use balanced-paren parsing (commit-13 F6) — tolerates )-containing field values.
+    open_paren_pos = block_start + len("CronCreate")
+    block_end = _find_balanced_close_paren(cmd_text, open_paren_pos)
+    assert block_end > block_start, "Cannot find balanced ) for CronCreate( in cmd_text"
     block = cmd_text[block_start:block_end + 1]
     m = re.search(r'prompt=("[^"]+")', block)
     assert m is not None, (

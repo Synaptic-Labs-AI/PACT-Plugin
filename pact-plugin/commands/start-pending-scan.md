@@ -36,7 +36,7 @@ Single procedure — the command IS the operation. No Arm/Teardown sub-section.
 1. `CronList` — read all cron entries registered in the current session.
 2. Filter the output for any line whose suffix after `": "` is exactly `/PACT:scan-pending-tasks` (see `## CronList Filter Discipline` below for the exact-equality contract).
 3. If a match is found: no-op — already armed. Cheap on every re-invocation.
-4. Otherwise cold-start: `CronCreate(cron="*/2 * * * *", prompt="/PACT:scan-pending-tasks", recurring=true, durable=false)` — see `## CronCreate Block` below for the exact 4-field call shape.
+4. Otherwise cold-start: `CronCreate(cron="*/2 * * * *", prompt="/PACT:scan-pending-tasks", recurring=True, durable=False)` — see `## CronCreate Block` below for the exact 4-field call shape.
 
 **Audit**: idempotency lives in this command (CronList-presence check), NOT in the directive that invokes it. An editing LLM tempted to add an "if not already armed" guard at the directive site would re-introduce LLM-self-diagnosis as the gate, which is the failure mode the unconditional-emit discipline closes (hook emits unconditionally on the lifecycle transition; the skill body decides whether the work needs doing).
 

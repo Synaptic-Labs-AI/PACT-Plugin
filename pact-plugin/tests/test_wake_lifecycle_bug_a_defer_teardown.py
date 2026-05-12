@@ -509,3 +509,93 @@ def test_defer_predicate_handles_race_deleted_continuation(tmp_path):
         f"Teardown suppression is the worse failure mode."
     )
     assert "Skill(\"PACT:stop-pending-scan\")" in hso["additionalContext"]
+
+
+# ---------- F7: deferred-teardown pathway end-to-end via _decide_directive ----------
+
+
+import pytest as _pytest  # noqa: E402 — late import for parametrize-only usage
+
+
+@_pytest.mark.parametrize(
+    "continuation_predicate_returns,expected_directive_kind",
+    [
+        (True, "defer"),       # has_same_teammate_continuation → True → defer (return None)
+        (False, "teardown"),   # has_same_teammate_continuation → False → emit _TEARDOWN_DIRECTIVE
+    ],
+)
+def test_decide_directive_defers_when_continuation_predicate_true(
+    tmp_path, monkeypatch, continuation_predicate_returns, expected_directive_kind,
+):
+    """F7 (commit-13): integration-layer test of the full Bug A pathway
+    via direct `_decide_directive` invocation. Complements the existing
+    `test_defer_teardown_branch_isolated_at_post_zero` wiring-detector
+    (which engineers count==0 + base-dir-fallback to reach the predicate)
+    with a different verification angle: mock the predicate directly
+    and assert the directive-emit decision.
+
+    This pins the deferral SEMANTIC, not just call-site presence:
+      - predicate returns True  → _decide_directive returns None (defer)
+      - predicate returns False → _decide_directive returns _TEARDOWN_DIRECTIVE
+
+    Phantom-green prevention: the existing integration suite was
+    susceptible to passing under hostile-edit removal of the predicate
+    call site, because the count-gate covered most outcomes. This test
+    isolates the predicate's CAUSAL role in the decision by mocking it
+    in-process and asserting the outcome bijection.
+
+    Counter-test-by-revert: remove the `has_same_teammate_continuation`
+    call from `_decide_directive` (replace with a constant False). Both
+    parametrized cases will FAIL — case (True) returns _TEARDOWN_DIRECTIVE
+    instead of None, case (False) is unchanged (still returns
+    _TEARDOWN_DIRECTIVE) so partial discriminating cardinality {1 fail,
+    1 pass}. Compared to the wiring-detector's {1 fail, 0 pass} this
+    adds a positive-asserting test that the deferral happens, not just
+    that the call site exists.
+    """
+    sys.path.insert(0, str(HOOK_DIR))
+    import wake_lifecycle_emitter as emitter
+
+    # Stage a session-context + completed Task A at count==0 (no other tasks).
+    home = tmp_path / "home"; home.mkdir()
+    sid = "s"; pdir = "/tmp/p"; team = "team-f7-direct-mock"
+    _write_session_context(home, sid, pdir, team)
+    _write_task(home, team, "A", status="completed", owner="backend-coder", blocks=["B"])
+    # Task B not present anywhere — only the predicate mock matters.
+
+    # Point HOME so internal helpers see our staged session.
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", pdir)
+    # Replace `has_same_teammate_continuation` IN the emitter module
+    # (which imported it via `from ... import`, so module-level rebind is
+    # the correct injection point per the docstring at the import site).
+    monkeypatch.setattr(
+        emitter, "has_same_teammate_continuation",
+        lambda completed_task, team_name: continuation_predicate_returns,
+    )
+
+    input_data = {
+        "tool_name": "TaskUpdate",
+        "session_id": sid,
+        "cwd": pdir,
+        "tool_input": {"taskId": "A", "status": "completed"},
+        "tool_response": {
+            "id": "A", "status": "completed", "owner": "backend-coder",
+        },
+    }
+    result = emitter._decide_directive(input_data, team)
+
+    if expected_directive_kind == "defer":
+        assert result is None, (
+            f"F7: when has_same_teammate_continuation returns True, "
+            f"_decide_directive must defer (return None). Got {result!r}. "
+            f"If _TEARDOWN_DIRECTIVE returned, the predicate's gate was "
+            f"bypassed — the defer-Teardown branch is broken or removed."
+        )
+    else:  # "teardown"
+        assert result == emitter._TEARDOWN_DIRECTIVE, (
+            f"F7: when has_same_teammate_continuation returns False, "
+            f"_decide_directive must emit _TEARDOWN_DIRECTIVE. Got "
+            f"{result!r}. If None returned, the defer-Teardown branch is "
+            f"fail-open (returning None on False predicate is wrong)."
+        )

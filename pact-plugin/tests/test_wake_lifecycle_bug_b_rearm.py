@@ -11,7 +11,7 @@ design. The fix adds an Arm branch on TaskUpdate(status=='in_progress')
 transitions; idempotency lives in the skill body (CronList match), not
 in a hook-level freshness short-circuit.
 
-Per cron mechanism (Re-Arm on Pending→In-Progress mechanical branch): STATE_FILE-based freshness
+Per cron mechanism (Re-Arm on Pending->In-Progress mechanical branch): STATE_FILE-based freshness
 short-circuit is REMOVED. CronList-as-state is the single idempotency
 source of truth at the skill body. The Arm directive may fire redundantly
 without harm — start-pending-scan idempotently no-ops if its cron entry
@@ -254,7 +254,7 @@ class TestAuditAnchorRegressionGuards:
     """Pin load-bearing directive prose so a future 'simplification' LLM
     cannot accidentally widen / shrink the contract.
 
-    Under cron mechanism (Re-Arm on Pending→In-Progress mechanical branch): the STATE_FILE
+    Under cron mechanism (Re-Arm on Pending->In-Progress mechanical branch): the STATE_FILE
     freshness-window constant pin is REMOVED — no STATE_FILE exists,
     no freshness window applies, idempotency is enforced at the skill
     body via CronList match."""
