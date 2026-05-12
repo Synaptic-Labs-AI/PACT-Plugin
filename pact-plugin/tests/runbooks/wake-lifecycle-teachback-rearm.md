@@ -189,7 +189,7 @@ Pass criteria:
   - Lead's next turn carries the Arm directive
     ("First active teammate task created. Invoke Skill(\"PACT:start-pending-scan\")...").
   - Cron entry is re-created via start-pending-scan's CronCreate call
-    (4-field shape per INV-3).
+    (4-field shape per CronCreate Call Shape).
 
 Failure mode (Bug B bug back): no Arm directive emitted; cron entry
 remains absent; lead never re-arms the scan; subsequent SendMessages from teammate

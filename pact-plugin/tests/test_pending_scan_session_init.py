@@ -8,7 +8,7 @@ session_init.py end-to-end for the structural tier — those are
 file-parsing fences. The behavioral tier at the bottom of the file
 exercises the emit gate via subprocess.
 
-INV-12 Layer 0: directives only emit from the lead session. The
+Lead-Session Guard at Directive Emission Layer 0: directives only emit from the lead session. The
 hook-level session guard is verified at the source-grep tier (guard
 call site exists in session_init.py) and at the behavior tier
 (non-lead-session payloads do not produce Arm prose).
@@ -66,7 +66,7 @@ def test_directive_includes_active_task_trigger_phrase(src):
 def test_directive_emitted_only_when_count_positive(src):
     """Guard the emission with a positive-count check. The directive
     must NOT fire on sessions with zero active teammate tasks. The
-    gate expression may include additional conjuncts (e.g., the INV-12
+    gate expression may include additional conjuncts (e.g., the Lead-Session Guard at Directive Emission
     Layer 0 lead-session guard `_is_lead_session_at_init(...)`) — what
     is load-bearing is the `active_count > 0` predicate participating
     in the if-test."""
@@ -180,10 +180,10 @@ def test_session_init_emits_arm_directive_when_active_tasks_present(tmp_path):
     assert 'Skill("PACT:start-pending-scan")' in additional
 
 
-# ---------- INV-12 Layer 0: hook-level session guard ----------
+# ---------- Lead-Session Guard at Directive Emission Layer 0: hook-level session guard ----------
 
 def test_session_init_imports_or_calls_lead_session_guard(src):
-    """INV-12 Layer 0 (structural tier; commit-9 tightened from
+    """Lead-Session Guard at Directive Emission Layer 0 (structural tier; commit-9 tightened from
     OR-permissive substring-anywhere to regex-in-code-line): session_init.py
     must CALL a lead-session guard before emitting the Arm directive.
     The guard compares the incoming session_id to team_config.leadSessionId;
@@ -197,7 +197,7 @@ def test_session_init_imports_or_calls_lead_session_guard(src):
     of `_is_lead_session` would have passed the prior substring check;
     the regex-in-code-line check catches the wiring-disconnect.
 
-    Defense-in-depth Layer 0 (per plan §Architecture INV-12) catches
+    Defense-in-depth Layer 0 (per plan §Architecture Lead-Session Guard at Directive Emission) catches
     misdirected directive emission at the source. Layers 1 (skill-body
     Lead-Session Guard), 2 (platform CronCreate session-scoping), and 3
     (scan-pending-tasks same-session-identity gate) all assume Layer 0
@@ -212,7 +212,7 @@ def test_session_init_imports_or_calls_lead_session_guard(src):
         _re.MULTILINE,
     )
     assert code_line_pattern.search(src) is not None, (
-        "INV-12 Layer 0 strict: session_init.py missing guard CALL within "
+        "Lead-Session Guard at Directive Emission Layer 0 strict: session_init.py missing guard CALL within "
         "control-flow construct (if/return/elif/while/assert). The prior "
         "OR-permissive substring check passed on mere docstring mentions; "
         "the strict check requires the guard to appear in actual code. "
@@ -222,7 +222,7 @@ def test_session_init_imports_or_calls_lead_session_guard(src):
 
 
 def test_session_init_does_not_emit_arm_directive_from_non_lead_session(tmp_path):
-    """INV-12 Layer 0 (behavior tier): a teammate-session session_init
+    """Lead-Session Guard at Directive Emission Layer 0 (behavior tier): a teammate-session session_init
     payload must NOT produce the Arm directive prose. Stage the team
     config with a DIFFERENT leadSessionId than the incoming
     session_id; expect no Arm prose in additionalContext."""
@@ -245,11 +245,11 @@ def test_session_init_does_not_emit_arm_directive_from_non_lead_session(tmp_path
     out = _run_session_init(home, teammate_sid, pdir)
     additional = out.get("hookSpecificOutput", {}).get("additionalContext", "")
     assert _ARM_DIRECTIVE_PHRASE not in additional, (
-        "INV-12 Layer 0 broken: session_init emitted Arm directive "
+        "Lead-Session Guard at Directive Emission Layer 0 broken: session_init emitted Arm directive "
         "from non-lead session. The hook must compare session_id to "
         "team_config.leadSessionId and suppress emission on mismatch."
     )
     assert 'Skill("PACT:start-pending-scan")' not in additional, (
-        "INV-12 Layer 0 broken: session_init emitted start-pending-scan "
+        "Lead-Session Guard at Directive Emission Layer 0 broken: session_init emitted start-pending-scan "
         "slug from non-lead session."
     )

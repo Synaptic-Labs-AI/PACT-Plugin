@@ -6,12 +6,12 @@ Each P0 invariant assertion is paired with prose explaining the
 editing-LLM regression it prevents.
 
 Invariants verified here:
-- INV-1 byte-identical /PACT:scan-pending-tasks across all 3 command files
+- Cross-Skill Prompt-String Byte-Identity: /PACT:scan-pending-tasks across all 3 command files
   (start-pending-scan.md + scan-pending-tasks.md + stop-pending-scan.md)
-- INV-2 the 5 anti-hallucination guardrails (G1-G5) appear VERBATIM
-- INV-8 [CRON-FIRE] marker presence at top of file
-- INV-9 same-session-identity gate at step 1 of the operation
-- INV-10 lead-only completion contract (scan body uses canonical
+- Verbatim Anti-Hallucination Guardrails: (Read-Filesystem-Only through Emit-Nothing-If-Empty) appear VERBATIM
+- Cron-Fire Marker Discipline: presence at top of file
+- Same-Session-Identity Gate at step 1 of the operation
+- Lead-Only Completion Preservation (scan body uses canonical
   acceptance pair, no inline TaskUpdate(completed) standalone)
 - Cron-Origin Distinction section present and forbids cron-fire as user-consent
 - Forbidden-token absence (no Monitor/STATE_FILE/armed_by_session_id)
@@ -19,7 +19,7 @@ Invariants verified here:
 
 Counter-test-by-revert scope: reverting pact-plugin/commands/scan-pending-tasks.md
 falsifies these tests with discriminating cardinality. Reverting all 3 .md
-files together is required for INV-1 byte-identity counter-test (single-file
+files together is required for Cross-Skill Prompt-String Byte-Identity byte-identity counter-test (single-file
 revert masks cross-file drift detection — per PR #723 cycle-1 multi-file
 revert lesson).
 """
@@ -42,7 +42,7 @@ def cmd_text() -> str:
 
 def test_command_file_exists():
     assert CMD_FILE.is_file(), (
-        f"scan-pending-tasks.md missing at {CMD_FILE} — INV-1/2/8/9/10 "
+        f"scan-pending-tasks.md missing at {CMD_FILE} — Cross-Skill Prompt-String Byte-Identity / Verbatim Anti-Hallucination Guardrails / Cron-Fire Marker Discipline / Same-Session-Identity Gate / Lead-Only Completion Preservation "
         f"cannot be verified without the source file."
     )
 
@@ -82,30 +82,30 @@ def test_command_body_under_compaction_budget(cmd_text):
     )
 
 
-# ---------- INV-8: [CRON-FIRE] marker presence at file top ----------
+# ---------- Cron-Fire Marker Discipline: [CRON-FIRE] marker presence at file top ----------
 
-def test_inv8_cron_fire_marker_at_top_of_file(cmd_text):
-    """INV-8: the [CRON-FIRE] discipline marker must appear in the
+def test_cron_fire_marker_discipline_cron_fire_marker_at_top_of_file(cmd_text):
+    """Cron-Fire Marker Discipline: the [CRON-FIRE] discipline marker must appear in the
     first 30 lines of the file. The marker is the structural anchor
     for the Cron-Origin Distinction — removing it lets an editing
     LLM treat cron fires as user-typed input, re-opening the
     hallucination-cascade failure mode."""
     head = "\n".join(cmd_text.splitlines()[:30])
     assert "[CRON-FIRE]" in head, (
-        "INV-8: [CRON-FIRE] marker must appear in first 30 lines of "
+        "Cron-Fire Marker Discipline: [CRON-FIRE] marker must appear in first 30 lines of "
         "scan-pending-tasks.md as the structural anchor for the "
         "Cron-Origin Distinction. Removal re-opens the cascade."
     )
 
 
-def test_inv8_cron_origin_distinction_section_present(cmd_text):
-    """INV-8: the §Cron-Fire Origin section anchors the principle
+def test_cron_fire_marker_discipline_cron_origin_distinction_section_present(cmd_text):
+    """Cron-Fire Marker Discipline: the §Cron-Fire Origin section anchors the principle
     statement that cron-fire is NOT user consent."""
     assert "## Cron-Fire Origin" in cmd_text
 
 
-def test_inv8_cron_origin_section_forbids_consent_treatment(cmd_text):
-    """INV-8 audit: the section explicitly states cron-fire is NOT
+def test_cron_fire_marker_discipline_cron_origin_section_forbids_consent_treatment(cmd_text):
+    """Cron-Fire Marker Discipline audit: the section explicitly states cron-fire is NOT
     user consent for downstream consent-gated decisions (merge, push,
     destructive bash, etc.)."""
     section_start = cmd_text.find("\n## Cron-Fire Origin")
@@ -122,80 +122,89 @@ def test_inv8_cron_origin_section_forbids_consent_treatment(cmd_text):
         )
 
 
-# ---------- INV-2: 5 anti-hallucination guardrails (G1-G5) verbatim ----------
+# ---------- Verbatim Anti-Hallucination Guardrails: 5 anti-hallucination guardrails (Read-Filesystem-Only through Emit-Nothing-If-Empty) verbatim ----------
 
-def test_inv2_guardrails_section_present(cmd_text):
-    """INV-2: the §Guardrails section anchors all 5 guardrails."""
+def test_verbatim_anti_hallucination_guardrails_guardrails_section_present(cmd_text):
+    """Verbatim Anti-Hallucination Guardrails: the §Guardrails section anchors all 5 guardrails."""
     assert "## Guardrails" in cmd_text
 
 
 @pytest.mark.parametrize("guardrail_header", [
-    "### G1: Read filesystem only",
-    "### G2: No narration",
-    "### G3: Raw-read metadata",
-    "### G4: Race-window skip",
-    "### G5: Emit nothing if empty",
+    "### Read-Filesystem-Only",
+    "### No-Narration",
+    "### Raw-Read-Metadata",
+    "### Race-Window-Skip",
+    "### Emit-Nothing-If-Empty",
 ])
-def test_inv2_each_guardrail_header_present(cmd_text, guardrail_header):
-    """INV-2: each of the 5 guardrails has its dedicated section
+def test_verbatim_anti_hallucination_guardrails_each_guardrail_header_present(cmd_text, guardrail_header):
+    """Verbatim Anti-Hallucination Guardrails: each of the 5 guardrails has its dedicated section
     header. Verbatim presence — paraphrase during PR review = silent
     regression of the anti-hallucination contract."""
     assert guardrail_header in cmd_text, (
-        f"INV-2: scan-pending-tasks.md missing required guardrail "
+        f"Verbatim Anti-Hallucination Guardrails: scan-pending-tasks.md missing required guardrail "
         f"header '{guardrail_header}'. The 5 guardrails are load-"
         f"bearing per architecture spec; each prevents a specific "
         f"cascade failure mode."
     )
 
 
-def test_inv2_exactly_five_guardrail_headers(cmd_text):
-    """INV-2 cardinality: exactly 5 guardrail headers G1-G5. Adding
-    a G6 silently expands the audit-anchored contract; removing one
-    silently relaxes it."""
-    g_headers = [
+def test_verbatim_anti_hallucination_guardrails_exactly_five_guardrail_headers(cmd_text):
+    """Verbatim Anti-Hallucination Guardrails cardinality: exactly 5 guardrail headers
+    in the canonical set (Read-Filesystem-Only, No-Narration, Raw-Read-Metadata,
+    Race-Window-Skip, Emit-Nothing-If-Empty). Adding a 6th silently expands the
+    audit-anchored contract; removing one silently relaxes it."""
+    canonical_guardrail_headers = (
+        "### Read-Filesystem-Only",
+        "### No-Narration",
+        "### Raw-Read-Metadata",
+        "### Race-Window-Skip",
+        "### Emit-Nothing-If-Empty",
+    )
+    found_headers = [
         line for line in cmd_text.splitlines()
-        if line.startswith("### G") and ":" in line
+        if line.strip() in canonical_guardrail_headers
     ]
-    assert len(g_headers) == 5, (
-        f"INV-2 cardinality: expected exactly 5 G* guardrail headers, "
-        f"found {len(g_headers)}: {g_headers}"
+    assert len(found_headers) == 5, (
+        f"Verbatim Anti-Hallucination Guardrails cardinality: expected exactly "
+        f"5 canonical guardrail headers from {canonical_guardrail_headers}, "
+        f"found {len(found_headers)}: {found_headers}"
     )
 
 
-def test_inv2_each_guardrail_has_audit_block(cmd_text):
-    """INV-2 audit anchor: each G* guardrail must be followed by a
+def test_verbatim_anti_hallucination_guardrails_each_guardrail_has_audit_block(cmd_text):
+    """Verbatim Anti-Hallucination Guardrails audit anchor: each G* guardrail must be followed by a
     paragraph starting with '**Audit**:'. The audit prose anchors
     the WHY of the guardrail so an editing LLM cannot quietly relax
     the contract.
 
     Strictness (commit-9): EXACTLY 5 audit blocks, not >=5. A 6th
-    audit block would either duplicate G1-G5 audit prose (silent
+    audit block would either duplicate Read-Filesystem-Only through Emit-Nothing-If-Empty audit prose (silent
     redundancy) or expand the audit-anchored contract beyond the
     5-guardrail architectural pin (silent contract expansion).
-    Consistent with the companion test_inv2_exactly_five_guardrail_headers
+    Consistent with the companion test_verbatim_anti_hallucination_guardrails_exactly_five_guardrail_headers
     cardinality assertion."""
     g_start = cmd_text.find("\n## Guardrails")
     g_end = cmd_text.find("\n## ", g_start + 1)
     g_section = cmd_text[g_start:g_end] if g_end > 0 else cmd_text[g_start:]
     audit_count = g_section.count("**Audit**")
     assert audit_count == 5, (
-        f"INV-2: §Guardrails section must contain EXACTLY 5 '**Audit**' "
-        f"blocks (one per guardrail G1-G5). Found {audit_count}. "
+        f"Verbatim Anti-Hallucination Guardrails: §Guardrails section must contain EXACTLY 5 '**Audit**' "
+        f"blocks (one per guardrail Read-Filesystem-Only through Emit-Nothing-If-Empty). Found {audit_count}. "
         f"Tightened to == in commit-9 strictness pass."
     )
 
 
-# ---------- INV-1: byte-identical prompt cross-file ----------
+# ---------- Cross-Skill Prompt-String Byte-Identity: byte-identical prompt cross-file ----------
 
-def test_inv1_prompt_string_in_this_file(cmd_text):
-    """INV-1: the /PACT:scan-pending-tasks slug appears verbatim in
+def test_cross_skill_prompt_string_byte_identity_prompt_string_in_this_file(cmd_text):
+    """Cross-Skill Prompt-String Byte-Identity: the /PACT:scan-pending-tasks slug appears verbatim in
     this file (in §References cross-links and in operation prose)."""
     target = "/PACT:scan-pending-tasks"
     assert target in cmd_text
 
 
-def test_inv1_byte_identical_across_three_command_files(cmd_text):
-    """INV-1 cross-file byte-identity (commit-9 tightened): the slug
+def test_cross_skill_prompt_string_byte_identity_byte_identical_across_three_command_files(cmd_text):
+    """Cross-Skill Prompt-String Byte-Identity cross-file byte-identity (commit-9 tightened): the slug
     literal extracted from start-pending-scan.md's CronCreate( call
     (the operational source-of-truth — what the platform actually
     receives) MUST appear byte-identical in all 3 command files. Drift
@@ -227,33 +236,33 @@ def test_inv1_byte_identical_across_three_command_files(cmd_text):
     operational_slug = m.group(1)
     # Byte-identity contract: the operational slug appears in all 3 files.
     assert operational_slug in start_text, (
-        f"INV-1: start-pending-scan.md missing operational slug "
+        f"Cross-Skill Prompt-String Byte-Identity: start-pending-scan.md missing operational slug "
         f"{operational_slug!r}"
     )
     assert operational_slug in stop_text, (
-        f"INV-1: stop-pending-scan.md missing operational slug "
+        f"Cross-Skill Prompt-String Byte-Identity: stop-pending-scan.md missing operational slug "
         f"{operational_slug!r} — filter target drift; teardown would "
         f"fail to find the cron registered by start-pending-scan."
     )
     assert operational_slug in cmd_text, (
-        f"INV-1: scan-pending-tasks.md missing operational slug "
+        f"Cross-Skill Prompt-String Byte-Identity: scan-pending-tasks.md missing operational slug "
         f"{operational_slug!r} — the scan body itself is named by the "
         f"slug that CronCreate registers; drift breaks the firing chain."
     )
 
 
-# ---------- INV-9: same-session-identity gate at step 1 of operation ----------
+# ---------- Same-Session-Identity Gate: same-session-identity gate at step 1 of operation ----------
 
-def test_inv9_same_session_identity_gate_section_present(cmd_text):
-    """INV-9: the §Same-Session-Identity Gate section anchors the
+def test_same_session_identity_gate_same_session_identity_gate_section_present(cmd_text):
+    """Same-Session-Identity Gate: the §Same-Session-Identity Gate section anchors the
     cross-session-contamination defense (Layer 3 of defense-in-depth).
     Without this gate, two concurrent PACT sessions sharing a team_name
     contaminate each other's task acceptance."""
     assert "## Same-Session-Identity Gate" in cmd_text
 
 
-def test_inv9_gate_invoked_at_step_one_of_operation(cmd_text):
-    """INV-9: the gate is invoked at step 1 of §Operation (before
+def test_same_session_identity_gate_gate_invoked_at_step_one_of_operation(cmd_text):
+    """Same-Session-Identity Gate: the gate is invoked at step 1 of §Operation (before
     raw-read in step 4). Ordering matters: the gate must filter
     candidate tasks BEFORE the scan reads their metadata, not after.
     Reading-then-filtering still leaks cross-session metadata to
@@ -273,12 +282,12 @@ def test_inv9_gate_invoked_at_step_one_of_operation(cmd_text):
     step_1_pos = op_section.find("1. ")
     step_2_pos = op_section.find("2. ", step_1_pos)
     assert step_1_pos >= 0, (
-        "INV-9 strict: §Operation must use canonical numbered-list "
+        "Same-Session-Identity Gate strict: §Operation must use canonical numbered-list "
         "shape with '1. ' marker. No fallback path; restructure the "
         "section to use numbered steps."
     )
     assert step_2_pos > step_1_pos, (
-        "INV-9 strict: §Operation must have a '2. ' marker after the "
+        "Same-Session-Identity Gate strict: §Operation must have a '2. ' marker after the "
         "'1. ' marker. Canonical numbered-list shape required."
     )
     step_1 = op_section[step_1_pos:step_2_pos]
@@ -286,14 +295,14 @@ def test_inv9_gate_invoked_at_step_one_of_operation(cmd_text):
         "same-session-identity gate" in step_1.lower()
         or "lead_session_id" in step_1
     ), (
-        "INV-9: Operation step 1 must invoke the same-session-"
+        "Same-Session-Identity Gate: Operation step 1 must invoke the same-session-"
         "identity gate (compare session_id to "
         "metadata.lead_session_id)."
     )
 
 
-def test_inv9_gate_uses_exact_equality_match(cmd_text):
-    """INV-9 / H2-strict (commit-9 tightened): gate uses verbatim `==`
+def test_same_session_identity_gate_gate_uses_exact_equality_match(cmd_text):
+    """Same-Session-Identity Gate / H2-strict (commit-9 tightened): gate uses verbatim `==`
     comparison on `metadata.lead_session_id` AND the current session_id.
     Substring or partial match invites false-positive acceptance.
 
@@ -318,12 +327,12 @@ def test_inv9_gate_uses_exact_equality_match(cmd_text):
     # section. Beyond that, require the two tokens to co-occur within the
     # same pseudocode/operation context (audit-anchored equality assertion).
     assert "==" in section, (
-        "INV-9/H2-strict: §Same-Session-Identity Gate must use verbatim "
+        "Same-Session-Identity Gate/H2-strict: §Same-Session-Identity Gate must use verbatim "
         "'==' equality operator. Partial-match relaxation (in/startswith) "
         "re-opens H2 cross-session-contamination vector."
     )
     assert "lead_session_id" in section, (
-        "INV-9/H2-strict: §Same-Session-Identity Gate must reference "
+        "Same-Session-Identity Gate/H2-strict: §Same-Session-Identity Gate must reference "
         "`metadata.lead_session_id` field. Required for H2 mitigation."
     )
     # Strict combined check: at least one occurrence of `lead_session_id`
@@ -334,7 +343,7 @@ def test_inv9_gate_uses_exact_equality_match(cmd_text):
         _re.MULTILINE,
     )
     assert combined_pattern.search(section) is not None, (
-        "INV-9/H2-strict: §Same-Session-Identity Gate must contain a "
+        "Same-Session-Identity Gate/H2-strict: §Same-Session-Identity Gate must contain a "
         "verbatim equality-comparison pattern combining lead_session_id "
         "and ==. Examples: `metadata.lead_session_id == current session_id`, "
         "`task.metadata.lead_session_id == pact_session_context[\"session_id\"]`. "
@@ -344,8 +353,8 @@ def test_inv9_gate_uses_exact_equality_match(cmd_text):
     )
 
 
-def test_inv9_fails_closed_on_missing_field(cmd_text):
-    """INV-9 audit: tasks where metadata.lead_session_id is ABSENT
+def test_same_session_identity_gate_fails_closed_on_missing_field(cmd_text):
+    """Same-Session-Identity Gate audit: tasks where metadata.lead_session_id is ABSENT
     must be SKIPPED (fail-closed). Fail-open would re-open the
     cross-session contamination vector. An editing LLM tempted to
     'be lenient on missing field' is re-introducing the failure mode."""
@@ -357,18 +366,18 @@ def test_inv9_fails_closed_on_missing_field(cmd_text):
     assert "skip" in section.lower()
 
 
-# ---------- INV-10: lead-only completion contract ----------
+# ---------- Lead-Only Completion Preservation: lead-only completion contract ----------
 
-def test_inv10_lead_only_completion_contract_section_present(cmd_text):
-    """INV-10: §Lead-Only Completion Contract anchors the canonical
+def test_lead_only_completion_preservation_lead_only_completion_contract_section_present(cmd_text):
+    """Lead-Only Completion Preservation: §Lead-Only Completion Contract anchors the canonical
     acceptance two-call pair (SendMessage FIRST, then TaskUpdate
     completed). The scan does NOT call TaskUpdate(status="completed")
     standalone — only as the second half of the canonical pair."""
     assert "## Lead-Only Completion Contract" in cmd_text
 
 
-def test_inv10_acceptance_pair_ordering_sendmessage_first(cmd_text):
-    """INV-10: SendMessage MUST precede TaskUpdate in the canonical
+def test_lead_only_completion_preservation_acceptance_pair_ordering_sendmessage_first(cmd_text):
+    """Lead-Only Completion Preservation: SendMessage MUST precede TaskUpdate in the canonical
     numbered acceptance pair (SendMessage-FIRST ordering invariant
     per completion-authority protocol §12). Pin the numbered-list
     ordering: step '1.' references SendMessage and step '2.'
@@ -381,24 +390,24 @@ def test_inv10_acceptance_pair_ordering_sendmessage_first(cmd_text):
     step_1_pos = section.find("1. ")
     step_2_pos = section.find("2. ", step_1_pos + 1)
     assert step_1_pos >= 0 and step_2_pos > step_1_pos, (
-        "INV-10: §Lead-Only Completion Contract must contain the "
+        "Lead-Only Completion Preservation: §Lead-Only Completion Contract must contain the "
         "canonical numbered acceptance pair as steps '1.' and '2.'"
     )
     # Step 1 references SendMessage; step 2 references TaskUpdate.
     step_1 = section[step_1_pos:step_2_pos]
     step_2 = section[step_2_pos:step_2_pos + 300]
     assert "SendMessage" in step_1, (
-        "INV-10: numbered step 1 must reference SendMessage (FIRST)"
+        "Lead-Only Completion Preservation: numbered step 1 must reference SendMessage (FIRST)"
     )
     assert "TaskUpdate" in step_2, (
-        "INV-10: numbered step 2 must reference TaskUpdate (SECOND)"
+        "Lead-Only Completion Preservation: numbered step 2 must reference TaskUpdate (SECOND)"
     )
     # And the SendMessage-FIRST invariant must be pinned in prose.
     assert "FIRST" in step_1 or "SendMessage-FIRST" in section
 
 
-def test_inv10_no_standalone_taskupdate_completed_in_operation(cmd_text):
-    """INV-10: §Operation must invoke TaskUpdate(status='completed')
+def test_lead_only_completion_preservation_no_standalone_taskupdate_completed_in_operation(cmd_text):
+    """Lead-Only Completion Preservation: §Operation must invoke TaskUpdate(status='completed')
     ONLY as the second half of the acceptance pair (paired with
     SendMessage). Standalone TaskUpdate(status='completed') without
     the preceding SendMessage is a lead-only-completion violation."""
@@ -410,7 +419,7 @@ def test_inv10_no_standalone_taskupdate_completed_in_operation(cmd_text):
         sendmsg_pos = op_section.find("SendMessage")
         taskupdate_pos = op_section.find("TaskUpdate")
         assert sendmsg_pos >= 0 and sendmsg_pos < taskupdate_pos, (
-            "INV-10 (§Operation): if TaskUpdate is invoked here, "
+            "Lead-Only Completion Preservation (§Operation): if TaskUpdate is invoked here, "
             "SendMessage must precede it (acceptance pair ordering)."
         )
 

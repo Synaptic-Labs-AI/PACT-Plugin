@@ -258,7 +258,7 @@ def test_teardown_includes_best_effort_clause(tmp_path):
     additional = out["hookSpecificOutput"]["additionalContext"]
     assert "best-effort" in additional.lower()
     # Cron teardown tolerates a missing cron entry (stop-pending-scan
-    # is idempotent / ignore-if-absent per INV-5).
+    # is idempotent / ignore-if-absent per CronDelete by Extracted ID).
     assert "tolerat" in additional.lower()
 
 
@@ -515,7 +515,7 @@ def test_emitter_guards_on_lead_session_id_structural():
         _re.MULTILINE,
     )
     assert code_line_pattern.search(src) is not None, (
-        "INV-12 Layer 0 strict: wake_lifecycle_emitter.py missing guard "
+        "Lead-Session Guard at Directive Emission Layer 0 strict: wake_lifecycle_emitter.py missing guard "
         "CALL within control-flow construct (if/return/elif/while/assert). "
         "The prior substring check passed on docstring mentions; "
         "the strict check requires the guard to appear in actual code."

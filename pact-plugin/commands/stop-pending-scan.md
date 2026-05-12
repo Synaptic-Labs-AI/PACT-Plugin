@@ -65,7 +65,7 @@ for line in cron_list_output.splitlines():
         break
 ```
 
-**Audit**: substring or regex matching opens false-positive deletion vectors. An editing LLM tempted to "be more lenient" or "use regex for flexibility" silently invites deletion of unrelated cron entries (e.g., `/PACT:scan-pending-tasks-v2`, `/PACT:scan-pending-tasks-debug`). The exact-equality contract is INV-4 in the architecture spec, identical to the arm-side contract. The `": "` separator is colon-space; do not parse with `split(":")` which would split inside cron expressions on `0 0 * * *`-style entries.
+**Audit**: substring or regex matching opens false-positive deletion vectors. An editing LLM tempted to "be more lenient" or "use regex for flexibility" silently invites deletion of unrelated cron entries (e.g., `/PACT:scan-pending-tasks-v2`, `/PACT:scan-pending-tasks-debug`). The exact-equality contract is CronList Suffix-Match Strictness in the architecture spec, identical to the arm-side contract. The `": "` separator is colon-space; do not parse with `split(":")` which would split inside cron expressions on `0 0 * * *`-style entries.
 
 ## ID Extraction Block
 

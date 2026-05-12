@@ -7,10 +7,10 @@ editing-LLM regression it prevents — pin the WHY so a future
 "simplification" cannot quietly relax the contract.
 
 Invariants verified here:
-- INV-3 CronCreate 4-field call shape (cron + prompt + recurring + durable)
-- INV-4 CronList exact-suffix-match filter discipline
-- INV-11 Lead-Session Guard refuse-and-return from non-lead session
-- INV-1 byte-identical /PACT:scan-pending-tasks (cross-file: also checked
+- CronCreate Call Shape: (cron + prompt + recurring + durable)
+- CronList Suffix-Match Strictness: discipline
+- Lead-Session Guard at Command Entry Lead-Session Guard refuse-and-return from non-lead session
+- Cross-Skill Prompt-String Byte-Identity: /PACT:scan-pending-tasks (cross-file: also checked
   in test_scan_pending_tasks_command_structure.py and
   test_stop_pending_scan_command_structure.py — this file pins the
   outbound side from start-pending-scan)
@@ -43,7 +43,7 @@ def cmd_text() -> str:
 def test_command_file_exists():
     assert CMD_FILE.is_file(), (
         f"start-pending-scan.md missing at {CMD_FILE} — "
-        f"INV-1/3/4/11 cannot be verified without the source file."
+        f"Cross-Skill Prompt-String Byte-Identity/3/4/11 cannot be verified without the source file."
     )
 
 
@@ -95,10 +95,10 @@ def test_required_section_present(cmd_text, section):
     )
 
 
-# ---------- INV-3: CronCreate 4-field call shape ----------
+# ---------- CronCreate Call Shape: CronCreate 4-field call shape ----------
 
-def test_inv3_cron_create_block_has_four_fields(cmd_text):
-    """INV-3 / M1 (commit-9 tightened to §CronCreate Block scope): the
+def test_cron_create_call_shape_cron_create_block_has_four_fields(cmd_text):
+    """CronCreate Call Shape / M1 (commit-9 tightened to §CronCreate Block scope): the
     CronCreate call in the §CronCreate Block exposes exactly 4 named
     fields (cron + prompt + recurring + durable) with VERBATIM Python-form
     values. Each field is load-bearing per the §CronCreate Block audit
@@ -138,32 +138,32 @@ def test_inv3_cron_create_block_has_four_fields(cmd_text):
     assert block_end > block_start, "CronCreate( in §CronCreate Block has no closing )"
     block = section[block_start:block_end + 1]
     assert 'cron="*/2 * * * *"' in block, (
-        "INV-3/M1: §CronCreate Block must use cron='*/2 * * * *' (2-minute "
+        "CronCreate Call Shape/M1: §CronCreate Block must use cron='*/2 * * * *' (2-minute "
         "cadence pinned in plan §Architecture). Tuning the cadence requires "
         "Communication Charter §Cron-Fire Mechanism prose update in lockstep. "
         f"§CronCreate Block contents: {block!r}"
     )
     assert 'prompt="/PACT:scan-pending-tasks"' in block, (
-        "INV-3/M1: §CronCreate Block must use prompt='/PACT:scan-pending-tasks' "
+        "CronCreate Call Shape/M1: §CronCreate Block must use prompt='/PACT:scan-pending-tasks' "
         "verbatim. The string must be byte-identical with scan-pending-tasks.md "
-        "frontmatter and stop-pending-scan.md filter target (INV-1 cross-file pin). "
+        "frontmatter and stop-pending-scan.md filter target (Cross-Skill Prompt-String Byte-Identity cross-file pin). "
         f"§CronCreate Block contents: {block!r}"
     )
     assert 'recurring=True' in block, (
-        "INV-3/M1: §CronCreate Block must set recurring=True (Python-form, "
+        "CronCreate Call Shape/M1: §CronCreate Block must set recurring=True (Python-form, "
         "capitalized). One-shot mode (recurring=False) would re-introduce the "
         "LLM-self-diagnosis failure mode the unconditional-emit discipline closes. "
         f"§CronCreate Block contents: {block!r}"
     )
     assert 'durable=False' in block, (
-        "INV-3/M1: §CronCreate Block must set durable=False (Python-form, "
+        "CronCreate Call Shape/M1: §CronCreate Block must set durable=False (Python-form, "
         "capitalized). durable=True would re-introduce cross-session contamination — "
         "stale crons from prior sessions firing against unrelated tasks in fresh sessions. "
         f"§CronCreate Block contents: {block!r}"
     )
 
 
-def test_inv3_cron_create_block_has_no_extra_fields(cmd_text):
+def test_cron_create_call_shape_cron_create_block_has_no_extra_fields(cmd_text):
     """Hostile-coupling check (commit-9 tightened to §CronCreate Block
     scope): the §CronCreate Block code contains EXACTLY the 4 documented
     fields, no additional kwargs. Extra args (e.g., a hypothetical
@@ -188,10 +188,10 @@ def test_inv3_cron_create_block_has_no_extra_fields(cmd_text):
     assert block.count("durable=") == 1
 
 
-# ---------- INV-4: CronList suffix-match filter discipline ----------
+# ---------- CronList Suffix-Match Strictness: CronList suffix-match filter discipline ----------
 
-def test_inv4_cronlist_uses_exact_equality_suffix_match(cmd_text):
-    """INV-4: CronList output is filtered by exact-equality match on
+def test_cron_list_suffix_match_strictness_cronlist_uses_exact_equality_suffix_match(cmd_text):
+    """CronList Suffix-Match Strictness: CronList output is filtered by exact-equality match on
     the suffix after the ': ' separator, NOT substring, NOT regex.
     Substring match would falsely match /PACT:scan-pending-tasks-debug
     or any future variant, causing silent idempotency failures."""
@@ -200,7 +200,7 @@ def test_inv4_cronlist_uses_exact_equality_suffix_match(cmd_text):
     section_start = cmd_text.find("\n## CronList Filter Discipline")
     section = cmd_text[section_start:section_start + 3000]
     assert "exact-equality" in section.lower() or "== target_prompt" in section, (
-        "INV-4: CronList §Filter Discipline must document exact-equality "
+        "CronList Suffix-Match Strictness: CronList §Filter Discipline must document exact-equality "
         "filter and show 'suffix == target_prompt' (or equivalent) in "
         "the code example. Substring or regex relaxation is forbidden."
     )
@@ -211,8 +211,8 @@ def test_inv4_cronlist_uses_exact_equality_suffix_match(cmd_text):
     assert '": "' in section
 
 
-def test_inv4_forbids_substring_and_regex_filter_in_audit(cmd_text):
-    """INV-4 audit anchor: the §CronList Filter Discipline audit prose
+def test_cron_list_suffix_match_strictness_forbids_substring_and_regex_filter_in_audit(cmd_text):
+    """CronList Suffix-Match Strictness audit anchor: the §CronList Filter Discipline audit prose
     explicitly forbids substring and regex relaxation. Removing the
     forbidding language relaxes the contract silently."""
     section_start = cmd_text.find("\n## CronList Filter Discipline")
@@ -220,13 +220,13 @@ def test_inv4_forbids_substring_and_regex_filter_in_audit(cmd_text):
     forbidding_tokens = ("substring", "regex")
     for token in forbidding_tokens:
         assert token in section.lower(), (
-            f"INV-4 audit anchor must explicitly mention '{token}' as "
+            f"CronList Suffix-Match Strictness audit anchor must explicitly mention '{token}' as "
             f"a forbidden relaxation. Removing the forbidding language "
             f"silently relaxes the exact-equality contract."
         )
 
 
-# ---------- INV-1: byte-identical prompt cross-file ----------
+# ---------- Cross-Skill Prompt-String Byte-Identity: byte-identical prompt cross-file ----------
 
 def _extract_croncreate_prompt(cmd_text: str) -> str:
     """Extract the operational prompt-string literal from start-pending-scan.md's
@@ -249,8 +249,8 @@ def _extract_croncreate_prompt(cmd_text: str) -> str:
     return m.group(1)
 
 
-def test_inv1_prompt_string_byte_identical_with_scan_body(cmd_text):
-    """INV-1 cross-file byte-identity (commit-9 tightened): the prompt
+def test_cross_skill_prompt_string_byte_identity_prompt_string_byte_identical_with_scan_body(cmd_text):
+    """Cross-Skill Prompt-String Byte-Identity cross-file byte-identity (commit-9 tightened): the prompt
     literal in start-pending-scan.md's CronCreate( call MUST appear
     byte-identical in scan-pending-tasks.md. Tightening over substring-
     presence: the literal form `"/PACT:scan-pending-tasks"` (quoted)
@@ -269,14 +269,14 @@ def test_inv1_prompt_string_byte_identical_with_scan_body(cmd_text):
     scan_text = scan_file.read_text(encoding="utf-8")
     assert unquoted_slug in scan_text, (
         f"scan-pending-tasks.md missing the canonical slug {unquoted_slug!r} — "
-        f"INV-1 cross-file byte-identity broken at the source side. "
+        f"Cross-Skill Prompt-String Byte-Identity cross-file byte-identity broken at the source side. "
         f"start-pending-scan.md's CronCreate uses prompt={operational_prompt}; "
         f"scan-pending-tasks.md must contain the same slug literal."
     )
 
 
-def test_inv1_prompt_string_byte_identical_with_stop_command(cmd_text):
-    """INV-1 cross-file byte-identity (commit-9 tightened, 3rd file):
+def test_cross_skill_prompt_string_byte_identity_prompt_string_byte_identical_with_stop_command(cmd_text):
+    """Cross-Skill Prompt-String Byte-Identity cross-file byte-identity (commit-9 tightened, 3rd file):
     the operational prompt literal must also appear in stop-pending-scan.md
     (where it's the filter target for CronList lookup)."""
     operational_prompt = _extract_croncreate_prompt(cmd_text)
@@ -285,23 +285,23 @@ def test_inv1_prompt_string_byte_identical_with_stop_command(cmd_text):
     stop_text = stop_file.read_text(encoding="utf-8")
     assert unquoted_slug in stop_text, (
         f"stop-pending-scan.md missing the canonical slug {unquoted_slug!r} — "
-        f"INV-1 cross-file byte-identity broken at the teardown side; "
+        f"Cross-Skill Prompt-String Byte-Identity cross-file byte-identity broken at the teardown side; "
         f"teardown would silently fail to find the cron registered by "
         f"start-pending-scan.md's CronCreate(prompt={operational_prompt})."
     )
 
 
-# ---------- INV-11: Lead-Session Guard ----------
+# ---------- Lead-Session Guard at Command Entry: Lead-Session Guard ----------
 
-def test_inv11_lead_session_guard_section_present(cmd_text):
-    """INV-11: refuse-and-return when invoked from non-lead session.
+def test_lead_session_guard_at_command_entry_lead_session_guard_section_present(cmd_text):
+    """Lead-Session Guard at Command Entry: refuse-and-return when invoked from non-lead session.
     Defense-in-depth Layer 1 — catches user-typed invocations from a
     teammate session that bypass Layer 0 (hook-level guard)."""
     assert "## Lead-Session Guard" in cmd_text
 
 
-def test_inv11_lead_session_guard_compares_session_id_to_leadSessionId(cmd_text):
-    """INV-11: the guard compares session_id to team_config.leadSessionId.
+def test_lead_session_guard_at_command_entry_lead_session_guard_compares_session_id_to_leadSessionId(cmd_text):
+    """Lead-Session Guard at Command Entry: the guard compares session_id to team_config.leadSessionId.
     Replicating the signal to a hypothetical agent_type field on
     session-context creates two-source-of-truth drift — forbidden."""
     section_start = cmd_text.find("\n## Lead-Session Guard")
@@ -312,8 +312,8 @@ def test_inv11_lead_session_guard_compares_session_id_to_leadSessionId(cmd_text)
     assert "team_config" in section or "team config" in section.lower()
 
 
-def test_inv11_lead_session_guard_refuses_and_returns(cmd_text):
-    """INV-11: the guard refuses (not just logs) when invocation comes
+def test_lead_session_guard_at_command_entry_lead_session_guard_refuses_and_returns(cmd_text):
+    """Lead-Session Guard at Command Entry: the guard refuses (not just logs) when invocation comes
     from non-lead session. An editing LLM tempted to 'just warn' would
     silently let the cron register in the wrong session."""
     section_start = cmd_text.find("\n## Lead-Session Guard")

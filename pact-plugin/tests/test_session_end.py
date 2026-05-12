@@ -3240,7 +3240,7 @@ class TestCleanupOldSessionsUnchangedRegression:
 
 
 # =============================================================================
-# Cycle-1 remediation pins (G2/G3/G5/G6/G7) — #412 Fix B
+# Cycle-1 remediation pins (No-Narration/Raw-Read-Metadata/Emit-Nothing-If-Empty/G6/G7) — #412 Fix B
 # =============================================================================
 
 
@@ -3251,7 +3251,7 @@ class TestReaperBehaviorPins:
     test docstring names the specific refactor it would catch.
     """
 
-    # G2 — TTL boundary semantics
+    # No-Narration — TTL boundary semantics
     def test_ttl_boundary_29d_survives_30d_reaps(self, tmp_path):
         """29d-aged survives; 30d-aged reaps — pins effective `>= ~30d reaps`.
 
@@ -3285,7 +3285,7 @@ class TestReaperBehaviorPins:
         )
         assert reaped == 1
 
-    # G3 — _task_dir_mtime glob scope
+    # Raw-Read-Metadata — _task_dir_mtime glob scope
     def test_task_dir_mtime_ignores_non_json_sidecar(self, tmp_path):
         """Max-child probe scans `*.json` ONLY; fresh sidecars don't keep dir alive.
 
@@ -3318,7 +3318,7 @@ class TestReaperBehaviorPins:
             "this test flips to 0 reaped and catches the change."
         )
 
-    # G5 — main() reaper → cleanup_summary emission ordering
+    # Emit-Nothing-If-Empty — main() reaper → cleanup_summary emission ordering
     def test_cleanup_summary_emitted_after_both_reapers(self):
         """`append_event(cleanup_summary)` fires AFTER both reaper calls.
 
@@ -4507,7 +4507,7 @@ class TestTasksByteExactSkip:
     """Cycle-8 Test 6 — `cleanup_old_tasks` skip uses byte-exact (in)
     membership, NOT case-insensitive compare.
 
-    Gap identified in PR #433 blind review (MED G1): cycle-5 added
+    Gap identified in PR #433 blind review (MED Read-Filesystem-Only): cycle-5 added
     `.lower()==.lower()` to teams-reaper skip (TestTeamsCaseInsensitiveSkip
     pins it). tasks-reaper intentionally uses byte-exact `entry.name in
     skip_names`. Without a pin on the tasks side, a future reviewer could

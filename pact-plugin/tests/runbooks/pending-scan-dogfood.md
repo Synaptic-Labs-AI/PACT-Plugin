@@ -6,7 +6,7 @@ End-to-end validation of the cron-based pending-scan mechanism in a fresh sessio
 
 Cron-based pending-scan mechanism: `/PACT:start-pending-scan`, `/PACT:scan-pending-tasks`, `/PACT:stop-pending-scan`. Hook integration: `wake_lifecycle_emitter.py` (PostToolUse) + `session_init.py` (SessionStart resume).
 
-The runbook deliberately covers BOTH happy-path lifecycle and edge cases that the 5 anti-hallucination guardrails (G1-G5) defend against. Each step lists its acceptance criterion; a single failure fails the runbook.
+The runbook deliberately covers BOTH happy-path lifecycle and edge cases that the 5 anti-hallucination guardrails (Read-Filesystem-Only through Emit-Nothing-If-Empty) defend against. Each step lists its acceptance criterion; a single failure fails the runbook.
 
 ## Pre-Requisites
 
@@ -55,15 +55,15 @@ The runbook deliberately covers BOTH happy-path lifecycle and edge cases that th
 
 This is the load-bearing verification — the 5 anti-hallucination guardrails are why this mechanism exists.
 
-### 4a. G1: Read filesystem only
+### 4a. Read-Filesystem-Only
 
 **Action**: Before the next cron-fire, manually inject misleading prose into a teammate `SendMessage` that mentions a fake teachback (e.g., "Teachback submitted!") WITHOUT actually writing `metadata.teachback_submit`. Wait for the next cron-fire.
 
-**Expected**: The scan does NOT accept the task. It reads the raw task JSON, finds `metadata.teachback_submit` is absent, and skips the task (per G4 race-window-skip) or emits nothing (per G5 if no other candidates).
+**Expected**: The scan does NOT accept the task. It reads the raw task JSON, finds `metadata.teachback_submit` is absent, and skips the task (per Race-Window-Skip race-window-skip) or emits nothing (per Emit-Nothing-If-Empty if no other candidates).
 
 **Acceptance**: Task remains `in_progress`; no `TaskUpdate(status="completed")` is invoked; no acceptance SendMessage sent to the teammate.
 
-### 4b. G2: No narration
+### 4b. No-Narration
 
 **Action**: Observe the lead session's transcript across multiple cron-fire cycles (at least 3 fires during active teammate work).
 
@@ -71,7 +71,7 @@ This is the load-bearing verification — the 5 anti-hallucination guardrails ar
 
 **Acceptance**: User-visible output across the 3+ fires is either (a) an actual acceptance two-call pair, or (b) silence. Nothing else.
 
-### 4c. G3: Raw-read metadata
+### 4c. Raw-Read-Metadata
 
 **Action**: Inspect the scan-body execution log (if available) or trace the file reads. Confirm the scan reads `~/.claude/tasks/{team_name}/{id}.json` directly, NOT via `TaskGet`.
 
@@ -79,7 +79,7 @@ This is the load-bearing verification — the 5 anti-hallucination guardrails ar
 
 **Acceptance**: The scan's read of `metadata.teachback_submit` / `metadata.handoff` returns populated payloads when those fields ARE on disk (regardless of what `TaskGet` might surface separately).
 
-### 4d. G4: Race-window skip
+### 4d. Race-Window-Skip
 
 **Action**: Have a teammate write `metadata.teachback_submit` and send the wake-SendMessage in rapid succession (back-to-back tool calls). The teammate's write may still be flushing to disk when the next cron-fire occurs.
 
@@ -87,7 +87,7 @@ This is the load-bearing verification — the 5 anti-hallucination guardrails ar
 
 **Acceptance**: At least one cron-fire turn observes the empty metadata and skips silently; the subsequent cron-fire (after the write lands) accepts the artifact correctly.
 
-### 4e. G5: Emit nothing if empty
+### 4e. Emit-Nothing-If-Empty
 
 **Action**: With no pending teachbacks/handoffs (all teammates mid-work, no `awaiting_lead_completion` tasks), observe at least 3 consecutive cron-fires.
 
@@ -107,7 +107,7 @@ This is the load-bearing verification — the 5 anti-hallucination guardrails ar
 
 **Acceptance**: Task A status is `completed`. The acceptance SendMessage appears in the teammate's inbox before the `TaskUpdate` call (verifiable from the journal event ordering).
 
-## 6. Lead-Session-ID Gate Verification (INV-9, Layer 3)
+## 6. Lead-Session-ID Gate Verification (Same-Session-Identity Gate, Layer 3)
 
 **Action**: Manually create a task in `~/.claude/teams/{team_name}/` whose `metadata.lead_session_id` is a different (fake) session_id, while in `awaiting_lead_completion` status with populated `metadata.teachback_submit`. Wait for next cron-fire.
 
@@ -115,7 +115,7 @@ This is the load-bearing verification — the 5 anti-hallucination guardrails ar
 
 **Acceptance**: The mismatched-session task remains in `awaiting_lead_completion` status indefinitely. The scan's behavior for tasks owned by THIS session is unaffected.
 
-## 7. Hook-Level Session Guard (INV-12, Layer 0)
+## 7. Hook-Level Session Guard (Lead-Session Guard at Directive Emission, Layer 0)
 
 **Action**: In a second concurrent PACT session (with a teammate-typed agent role, NOT the lead) that shares the same `team_name`, trigger a `TaskCreate` or `TaskUpdate(status="in_progress")` event. Observe whether `wake_lifecycle_emitter.py` emits the Arm directive.
 
@@ -159,7 +159,7 @@ This is the load-bearing verification — the 5 anti-hallucination guardrails ar
 
 **Acceptance**: `head -5 pact-plugin/commands/scan-pending-tasks.md | grep -c '\[CRON-FIRE\]'` returns `1` (marker present in the first 5 lines).
 
-## 12. Cross-Skill Byte-Identity (INV-1)
+## 12. Cross-Skill Byte-Identity (Cross-Skill Prompt-String Byte-Identity)
 
 **Action**: Verify `/PACT:scan-pending-tasks` string is byte-identical across all 3 skill files.
 

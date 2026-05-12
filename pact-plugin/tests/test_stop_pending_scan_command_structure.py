@@ -6,11 +6,11 @@ Each P0 invariant assertion is paired with prose explaining the
 editing-LLM regression it prevents.
 
 Invariants verified here:
-- INV-4 CronList exact-suffix-match filter discipline (teardown side)
-- INV-5 CronDelete-by-extracted-8-char-ID extraction
-- INV-11 Lead-Session Guard refuse-and-return from non-lead session
+- CronList Suffix-Match Strictness: discipline (teardown side)
+- CronDelete by Extracted ID (8-char-ID extraction)
+- Lead-Session Guard at Command Entry Lead-Session Guard refuse-and-return from non-lead session
 - Ignore-if-absent behavior (best-effort teardown)
-- INV-1 byte-identical /PACT:scan-pending-tasks (cross-file pin —
+- Cross-Skill Prompt-String Byte-Identity: /PACT:scan-pending-tasks (cross-file pin —
   this file asserts the teardown-side filter target)
 - Line-cap discipline
 - Forbidden-token absence (no STATE_FILE / Monitor / armed_by_session_id)
@@ -37,7 +37,7 @@ def cmd_text() -> str:
 
 def test_command_file_exists():
     assert CMD_FILE.is_file(), (
-        f"stop-pending-scan.md missing at {CMD_FILE} — INV-4/5/11 "
+        f"stop-pending-scan.md missing at {CMD_FILE} — CronList Suffix-Match Strictness/5/11 "
         f"cannot be verified without the source file."
     )
 
@@ -82,10 +82,10 @@ def test_required_section_present(cmd_text, section):
     )
 
 
-# ---------- INV-4: CronList suffix-match filter discipline (teardown side) ----------
+# ---------- CronList Suffix-Match Strictness: CronList suffix-match filter discipline (teardown side) ----------
 
-def test_inv4_cronlist_uses_exact_equality_suffix_match(cmd_text):
-    """INV-4 (teardown side): the lookup uses exact-equality match
+def test_cron_list_suffix_match_strictness_cronlist_uses_exact_equality_suffix_match(cmd_text):
+    """CronList Suffix-Match Strictness (teardown side): the lookup uses exact-equality match
     on the suffix after ': '. Substring/regex match opens false-
     positive deletion vectors (could delete /PACT:scan-pending-tasks-debug
     or similar)."""
@@ -97,8 +97,8 @@ def test_inv4_cronlist_uses_exact_equality_suffix_match(cmd_text):
     assert '": "' in section
 
 
-def test_inv4_forbids_substring_and_regex_filter_in_audit(cmd_text):
-    """INV-4 audit anchor must explicitly forbid substring and regex
+def test_cron_list_suffix_match_strictness_forbids_substring_and_regex_filter_in_audit(cmd_text):
+    """CronList Suffix-Match Strictness audit anchor must explicitly forbid substring and regex
     relaxation — removing the forbidding language silently relaxes
     the exact-equality contract."""
     section_start = cmd_text.find("\n## CronList Filter Discipline")
@@ -106,15 +106,15 @@ def test_inv4_forbids_substring_and_regex_filter_in_audit(cmd_text):
     section = cmd_text[section_start:section_end] if section_end > 0 else cmd_text[section_start:]
     for token in ("substring", "regex"):
         assert token in section.lower(), (
-            f"INV-4 audit must explicitly mention '{token}' as a "
+            f"CronList Suffix-Match Strictness audit must explicitly mention '{token}' as a "
             f"forbidden relaxation on the teardown side."
         )
 
 
-# ---------- INV-5: CronDelete-by-extracted-ID ----------
+# ---------- CronDelete by Extracted ID: CronDelete-by-extracted-ID ----------
 
-def test_inv5_id_extraction_block_present(cmd_text):
-    """INV-5: cron IDs are platform-assigned (8-char hex), not
+def test_cron_delete_by_extracted_id_id_extraction_block_present(cmd_text):
+    """CronDelete by Extracted ID: cron IDs are platform-assigned (8-char hex), not
     caller-specifiable. The §ID Extraction Block documents the
     canonical extraction pattern."""
     section_start = cmd_text.find("\n## ID Extraction Block")
@@ -126,8 +126,8 @@ def test_inv5_id_extraction_block_present(cmd_text):
     assert "8" in section or "8-character" in section or "split(\" \", 1)" in section
 
 
-def test_inv5_uses_whitespace_token_split_not_fixed_width(cmd_text):
-    """INV-5: extraction via `split(" ", 1)[0]` (first whitespace-
+def test_cron_delete_by_extracted_id_uses_whitespace_token_split_not_fixed_width(cmd_text):
+    """CronDelete by Extracted ID: extraction via `split(" ", 1)[0]` (first whitespace-
     delimited token), NOT a fixed-width slice `match_line[:8]`. The
     whitespace-tokenization form survives format evolution; the
     fixed-width form silently breaks if platform extends ID length."""
@@ -135,12 +135,12 @@ def test_inv5_uses_whitespace_token_split_not_fixed_width(cmd_text):
     section_end = cmd_text.find("\n## ", section_start + 1)
     section = cmd_text[section_start:section_end] if section_end > 0 else cmd_text[section_start:]
     assert 'split(" "' in section or 'split(" ", 1)' in section, (
-        "INV-5: ID extraction must use whitespace-token split, NOT a "
+        "CronDelete by Extracted ID: ID extraction must use whitespace-token split, NOT a "
         "fixed-width slice. Fixed-width breaks silently on ID format change."
     )
 
 
-def test_inv5_cron_delete_call_present_in_operation(cmd_text):
+def test_cron_delete_by_extracted_id_cron_delete_call_present_in_operation(cmd_text):
     """The §Operation section's step 4 must invoke CronDelete with
     the extracted ID."""
     op_start = cmd_text.find("## Operation")
@@ -149,10 +149,10 @@ def test_inv5_cron_delete_call_present_in_operation(cmd_text):
     assert "CronDelete" in op_section
 
 
-# ---------- INV-1: byte-identical prompt cross-file ----------
+# ---------- Cross-Skill Prompt-String Byte-Identity: byte-identical prompt cross-file ----------
 
-def test_inv1_filter_target_byte_identical_with_companion_commands(cmd_text):
-    """INV-1 cross-file pin (teardown side): the filter target
+def test_cross_skill_prompt_string_byte_identity_filter_target_byte_identical_with_companion_commands(cmd_text):
+    """Cross-Skill Prompt-String Byte-Identity cross-file pin (teardown side): the filter target
     /PACT:scan-pending-tasks must be byte-identical with the
     start-pending-scan.md CronCreate prompt and the scan-pending-tasks.md
     frontmatter. Drift here causes teardown to silently fail to find
@@ -169,18 +169,18 @@ def test_inv1_filter_target_byte_identical_with_companion_commands(cmd_text):
     assert target in scan_text, "scan-pending-tasks.md drift"
 
 
-# ---------- INV-11: Lead-Session Guard ----------
+# ---------- Lead-Session Guard at Command Entry: Lead-Session Guard ----------
 
-def test_inv11_lead_session_guard_section_present(cmd_text):
-    """INV-11: refuse-and-return when invoked from non-lead session.
+def test_lead_session_guard_at_command_entry_lead_session_guard_section_present(cmd_text):
+    """Lead-Session Guard at Command Entry: refuse-and-return when invoked from non-lead session.
     Even though durable=false cron is session-scoped at the platform
     layer (Layer 2 invariant), the §Lead-Session Guard is Layer 1
     foot-gun protection against user-typed misinvocation."""
     assert "## Lead-Session Guard" in cmd_text
 
 
-def test_inv11_lead_session_guard_compares_session_id_to_leadSessionId(cmd_text):
-    """INV-11: the guard compares session_id to team_config.leadSessionId.
+def test_lead_session_guard_at_command_entry_lead_session_guard_compares_session_id_to_leadSessionId(cmd_text):
+    """Lead-Session Guard at Command Entry: the guard compares session_id to team_config.leadSessionId.
     No agent_type field on session-context — single source of truth
     is team_config.json."""
     section_start = cmd_text.find("\n## Lead-Session Guard")
@@ -191,8 +191,8 @@ def test_inv11_lead_session_guard_compares_session_id_to_leadSessionId(cmd_text)
     assert "team_config" in section or "team config" in section.lower()
 
 
-def test_inv11_lead_session_guard_refuses_and_returns(cmd_text):
-    """INV-11: guard refuses (not just warns) when invocation comes
+def test_lead_session_guard_at_command_entry_lead_session_guard_refuses_and_returns(cmd_text):
+    """Lead-Session Guard at Command Entry: guard refuses (not just warns) when invocation comes
     from non-lead session."""
     section_start = cmd_text.find("\n## Lead-Session Guard")
     section_end = cmd_text.find("\n## ", section_start + 1)
