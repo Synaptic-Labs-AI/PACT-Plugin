@@ -155,40 +155,44 @@ Sequence:
      SendMessage(to=teammate, ...) FIRST, then TaskUpdate(A, status="completed")
      (per CLAUDE.md "Two-call atomic pair: SendMessage FIRST" pin).
   3. Observe: between step 2 (Task A completion) and the teammate's claim of Task B,
-     does the inbox-watch Monitor STATE_FILE remain present?
+     does the pending-scan cron entry remain present in CronList?
 
 Pass criteria:
-  - The Monitor STATE_FILE at ~/.claude/teams/{team}/inbox-wake-state.json
-    REMAINS PRESENT throughout Task A completion + Task B claim. No phantom
-    1->0 transient.
-  - Verify with `ls -la ~/.claude/teams/{team}/inbox-wake-state.json` between
-    each step.
+  - The pending-scan cron entry (filter CronList output by suffix
+    `: /PACT:scan-pending-tasks`) REMAINS PRESENT throughout Task A
+    completion + Task B claim. No phantom 1->0 transient.
+  - Verify with CronList between each step; the suffix-match line must
+    persist.
 
-Failure mode (Bug A bug back): the STATE_FILE is unlinked between Task A
-completion and the next teammate claim → the eager Teardown emitted.
+Failure mode (Bug A bug back): the cron entry is CronDeleted between
+Task A completion and the next teammate claim → the eager Teardown emitted.
 ```
 
-### D2 — Bug B re-Arm on teammate claim after STATE_FILE absence
+### D2 — Bug B re-Arm on teammate claim after cron entry absence
 
 ```
-Setup: Same two-task dispatch as D1, but manually `rm` the STATE_FILE to simulate
-       a Monitor-died-silently scenario:
-       rm -f ~/.claude/teams/{team}/inbox-wake-state.json
+Setup: Same two-task dispatch as D1, but manually CronDelete the
+       /PACT:scan-pending-tasks cron entry to simulate a cron-died-silently
+       scenario (or rely on platform 7-day auto-expiry edge case):
+         1. CronList to find the leading 8-char id of the line whose
+            suffix is `: /PACT:scan-pending-tasks`.
+         2. CronDelete(id=<extracted-id>).
 
 Sequence:
-  1. With STATE_FILE removed, instruct the teammate to claim Task B
+  1. With cron entry removed, instruct the teammate to claim Task B
      (TaskUpdate(B, status="in_progress")).
   2. Observe: does the lead receive an Arm directive in their next turn?
-  3. Verify STATE_FILE is re-armed:
-     ls -la ~/.claude/teams/{team}/inbox-wake-state.json
+  3. Verify cron entry is re-armed: CronList must show a fresh line
+     with suffix `: /PACT:scan-pending-tasks`.
 
 Pass criteria:
   - Lead's next turn carries the Arm directive
-    ("First active teammate task created. Invoke Skill(\"PACT:watch-inbox\")...").
-  - STATE_FILE is re-created with fresh armed_at timestamp.
+    ("First active teammate task created. Invoke Skill(\"PACT:start-pending-scan\")...").
+  - Cron entry is re-created via start-pending-scan's CronCreate call
+    (4-field shape per CronCreate Call Shape).
 
-Failure mode (Bug B bug back): no Arm directive emitted; STATE_FILE remains
-absent; lead never re-arms the Monitor; subsequent SendMessages from teammate
+Failure mode (Bug B bug back): no Arm directive emitted; cron entry
+remains absent; lead never re-arms the scan; subsequent SendMessages from teammate
 do not wake the lead until next user turn.
 ```
 
@@ -201,12 +205,13 @@ Setup: Dispatch a SINGLE task (no addBlocks/blocks chain) via TaskCreate.
 Sequence:
   1. Teammate completes the task (TaskUpdate(status="completed")).
   2. Observe: lead receives Teardown directive in next turn.
-  3. STATE_FILE is unlinked.
+  3. Pending-scan cron entry is CronDeleted.
 
 Pass criteria:
   - Teardown directive emitted as expected
-    ("Last active teammate task completed. Invoke Skill(\"PACT:unwatch-inbox\")...").
-  - STATE_FILE is removed after Teardown skill invocation.
+    ("Last active teammate task completed. Invoke Skill(\"PACT:stop-pending-scan\")...").
+  - CronList no longer shows a line with suffix `: /PACT:scan-pending-tasks`
+    after stop-pending-scan skill invocation.
 
 Failure mode: defer-Teardown over-fires (suppresses legitimate Teardown on a
 standalone task). Indicates the predicate's empty-blocks check is broken.
@@ -222,7 +227,7 @@ Sequence:
   1. Lead completes Task A.
   2. Observe: Teardown directive emits if count_active_tasks==0 (Task B is
      pending and non-exempt → count==1 → no Teardown). Then teammate-test
-     claims Task B → re-Arm fires only if STATE_FILE absent.
+     claims Task B → re-Arm fires (idempotent at the skill body via CronList match).
 
 Pass criteria:
   - The defer-Teardown predicate returns False (different owner) so

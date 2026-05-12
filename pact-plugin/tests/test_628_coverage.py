@@ -4,11 +4,11 @@ Coverage gap-fills for #628 restore-startup-ritual TEST phase.
 Pins the plan §Test Phase scenarios that backend's TDD coverage did not
 land tests for, plus the auditor YELLOW signal resolutions:
 
-G1-G3: /PACT:bootstrap command structural pins
+Read-Filesystem-Only-Raw-Read-Metadata: /PACT:bootstrap command structural pins
        (frontmatter, ritual-only-content, plugin.json registration via
        EXPECTED_COMMANDS update is in test_commands_structure.py)
-G4: bootstrap marker clear-on-clear-source AND not-clear-on-resume-source
-G5: orchestrator persona references Skill("PACT:bootstrap")
+Race-Window-Skip: bootstrap marker clear-on-clear-source AND not-clear-on-resume-source
+Emit-Nothing-If-Empty: orchestrator persona references Skill("PACT:bootstrap")
 G6: orchestrator persona includes pin-memory mid-session directive (F2)
 G7: Lead-Side HALT Fan-Out byte-equal at two sites
 G8: strip_orphan_routing_markers fail-open on lock timeout
@@ -43,7 +43,7 @@ SKILLS_DIR = PLUGIN_ROOT / "skills"
 
 
 # =============================================================================
-# G1-G2: /PACT:bootstrap command structural pins
+# Read-Filesystem-Only-No-Narration: /PACT:bootstrap command structural pins
 # =============================================================================
 
 
@@ -115,7 +115,7 @@ class TestBootstrapCommandStructure:
 
 
 # =============================================================================
-# G4: Bootstrap marker clear behavior across sources
+# Race-Window-Skip: Bootstrap marker clear behavior across sources
 # =============================================================================
 
 
@@ -239,7 +239,7 @@ class TestBootstrapMarkerClearAcrossSources:
 
 
 # =============================================================================
-# G5-G6: Orchestrator persona body invariants
+# Emit-Nothing-If-Empty-G6: Orchestrator persona body invariants
 # =============================================================================
 
 

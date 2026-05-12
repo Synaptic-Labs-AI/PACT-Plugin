@@ -80,6 +80,7 @@ from shared.pact_context import get_session_dir, write_context
 from shared.session_journal import append_event, make_event
 from shared.failure_log import append_failure
 from shared.plugin_manifest import format_plugin_banner
+from shared.session_state import is_safe_path_component
 from shared.wake_lifecycle import count_active_tasks
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
@@ -648,6 +649,64 @@ def _clear_bootstrap_marker(session_path: Path) -> None:
         pass  # Fail-open: don't block session init for marker cleanup
 
 
+def _is_lead_session_at_init(input_data: dict[str, Any], team_name: str) -> bool:
+    """
+    Return True iff this SessionStart should emit the lead-only
+    start-pending-scan directive.
+
+    Lead-Session Guard at SessionStart (Layer 0 of the
+    scan-firing-only-in-lead-session defense-in-depth model). The
+    semantics differ slightly from the runtime PostToolUse guard in
+    `wake_lifecycle_emitter._is_lead_session`:
+
+    - If `~/.claude/teams/{team_name}/config.json` is ABSENT, this
+      session is starting fresh and will become the lead (the
+      session_init flow downstream writes the team config). Return
+      True — proceed to emit the Arm directive.
+    - If `config.json` exists and `leadSessionId` matches the current
+      session_id, return True.
+    - If `config.json` exists and `leadSessionId` does NOT match,
+      this is a teammate session resuming with leadership already
+      assigned elsewhere. Return False — suppress the directive.
+
+    The asymmetry is intentional: at SessionStart, the team-config
+    may not yet exist; treating "config absent" as "I am not lead"
+    would silently suppress the directive on every fresh-start lead
+    session, which is the opposite of the failure mode the guard
+    exists to prevent. The downstream `_is_lead_session` in
+    wake_lifecycle_emitter runs only AFTER the team-config has been
+    written, so it can fail-closed safely.
+
+    Pure function; never raises. Returns False on any unsafe path
+    component, filesystem error, or malformed config — fail-closed
+    when the config exists but cannot be validated.
+    """
+    raw_session_id = input_data.get("session_id")
+    if not isinstance(raw_session_id, str) or not raw_session_id:
+        return False
+    if not team_name or not is_safe_path_component(team_name):
+        return False
+    try:
+        config_path = (
+            Path.home() / ".claude" / "teams" / team_name / "config.json"
+        )
+        if not config_path.exists():
+            # Fresh start — this session will become lead via the
+            # downstream team-config write. Permit directive emission.
+            return True
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    lead_session_id = data.get("leadSessionId")
+    if not isinstance(lead_session_id, str) or not lead_session_id:
+        # Config exists but has no leadSessionId — ambiguous state.
+        # Fail-closed: do not emit the directive.
+        return False
+    return raw_session_id == lead_session_id
+
+
 def main():
     """
     Main entry point for the SessionStart hook.
@@ -828,24 +887,25 @@ def main():
         # 5. Remind orchestrator to create session-unique PACT team (or reuse on resume)
         team_name = generate_team_name(input_data)
 
-        # 5_pre. Wake-arm directive (resume-with-active-tasks gap closure).
+        # 5_pre. Scan-arm directive (resume-with-active-tasks gap closure).
         # PostToolUse on Task-mutating tools handles 0->1 transitions
         # within a session, but a session resuming with tasks already in
         # flight has no such transition to observe. Hook-side
         # count_active_tasks check + unconditional Arm emit when the
         # team has any active teammate work on disk. The hook does the
         # diagnosis; the directive itself is unconditional per the
-        # hook-emitted-directives discipline (#444 unconditional >
+        # hook-emitted-directives discipline (unconditional >
         # conditional). Tier-0 additionalContext via context_parts
         # append; resume / startup / clear / compact all reach this
-        # branch identically — Arm is idempotent in the skill, so
-        # redundant emission no-ops cheaply.
+        # branch identically — Arm is idempotent in the skill (CronList
+        # exact-suffix-match in start-pending-scan.md), so redundant
+        # emission no-ops cheaply.
         #
         # count_active_tasks honors the pure-never-raises contract
         # (shared.wake_lifecycle module-wide pin); call it directly,
         # no try/except wrapper required.
         active_count = count_active_tasks(team_name)
-        if active_count > 0:
+        if active_count > 0 and _is_lead_session_at_init(input_data, team_name):
             # Audit anchor (editing-LLM warning): the directive prose
             # below is UNCONDITIONAL by design. Do not introduce
             # LLM-self-diagnosis here ("only emit if X"). Diagnostic
@@ -853,12 +913,21 @@ def main():
             # the directive (LLM side) carries no conditional wording.
             # Tier-0 additionalContext is architecturally binding;
             # conditional wording silently regresses to the
-            # LLM-self-diagnosis failure mode #444 forbids.
+            # LLM-self-diagnosis failure mode.
+            #
+            # Lead-Session Guard (Layer 0 of the defense-in-depth model
+            # for scan-firing-only-in-lead-session): the
+            # `_is_lead_session_at_init` predicate filters directive
+            # emission to lead sessions only — teammates' SessionStart
+            # invocations never receive the start-pending-scan
+            # directive. Correct-by-construction at the emission source;
+            # the skill body's Lead-Session Guard (Layer 1) is backstop
+            # for user-typed manual invocation.
             context_parts.append(
                 'Active teammate tasks detected on session start. '
-                'Invoke Skill("PACT:watch-inbox") before any further '
-                'teammate dispatch. Idempotent — no-op if a valid '
-                'STATE_FILE is already on disk.'
+                'Invoke Skill("PACT:start-pending-scan") before any further '
+                'teammate dispatch. Idempotent — no-op if a '
+                '/PACT:scan-pending-tasks cron is already registered.'
             )
 
         # 5a. Write session context file FIRST so get_session_dir() works for
