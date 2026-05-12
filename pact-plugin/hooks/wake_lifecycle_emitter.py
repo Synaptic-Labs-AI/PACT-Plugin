@@ -1,81 +1,93 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/wake_lifecycle_emitter.py
-Summary: PostToolUse hook that emits watch-inbox/unwatch-inbox directives
-         for the inbox-wake command pair on first/last active-task transitions.
+Summary: PostToolUse hook that emits start-pending-scan/stop-pending-scan
+         directives for the cron-based pending-scan command pair on
+         first/last active-task transitions.
 Used by: hooks.json PostToolUse hook with matcher
          `TaskCreate|TaskUpdate`.
 
 Lifecycle automation:
 - On TaskCreate that lands while the team has at least one
-  lifecycle-relevant active task AND the watch-inbox STATE_FILE
-  is absent, malformed, or older than the freshness window, emit
-  a watch-inbox directive instructing the lead to invoke
-  Skill("PACT:watch-inbox").
-- On TaskUpdate(status == in_progress) when the watch-inbox
-  STATE_FILE is absent or stale AND the team has at least one
-  lifecycle-relevant active task, emit a watch-inbox directive.
-  Re-Arm path covering cold-start (initial Arm never fired),
-  post-Teardown recovery (eager 1->0 Teardown unlinked the
-  STATE_FILE), mid-session resume, and Monitor-died-silently
-  cases categorically. STATE_FILE absence/staleness is the
-  implicit 1-bit pre-state proxy for "no live Monitor."
+  lifecycle-relevant active task, emit a start-pending-scan
+  directive instructing the lead to invoke
+  Skill("PACT:start-pending-scan"). Idempotency is enforced in
+  the skill body (CronList exact-suffix-match check); re-emit on
+  every TaskCreate is benign because the skill no-ops if the
+  /PACT:scan-pending-tasks cron is already registered.
+- On TaskUpdate(status == in_progress) when the team has at least
+  one lifecycle-relevant active task, emit a start-pending-scan
+  directive. Re-Arm path covering cold-start (initial Arm never
+  fired), post-Teardown recovery (eager 1->0 Teardown removed the
+  cron entry), mid-session resume, and any cron-died-silently
+  edge cases categorically. The CronList match in the skill is the
+  single source of idempotency truth — no hook-side state file.
 - On TaskUpdate(status in {completed, deleted}) that drives the
-  team's lifecycle-relevant active-task count to zero, emit an
-  unwatch-inbox directive instructing the lead to invoke
-  Skill("PACT:unwatch-inbox"). Both terminal statuses end active
-  work and are treated symmetrically. EXCEPTION: when the just-
-  completed task has a same-teammate-owned active continuation
-  in its `blocks` chain (per `has_same_teammate_continuation`,
-  which reads the resolved on-disk `blocks` field with `addBlocks`
-  as forward-compat fallback), the Teardown is deferred — the
-  teammate is staged to claim the next task imminently, so the
-  1->0 transient is suppressed to avoid a phantom Monitor-down
-  audit signal and a brief Monitor-down window for inbound
-  SendMessages.
+  team's lifecycle-relevant active-task count to zero, emit a
+  stop-pending-scan directive instructing the lead to invoke
+  Skill("PACT:stop-pending-scan"). Both terminal statuses end
+  active work and are treated symmetrically. EXCEPTION: when the
+  just-completed task has a same-teammate-owned active
+  continuation in its `blocks` chain (per
+  `has_same_teammate_continuation`, which reads the resolved
+  on-disk `blocks` field with `addBlocks` as forward-compat
+  fallback), the Teardown is deferred — the teammate is staged to
+  claim the next task imminently, so the 1->0 transient is
+  suppressed to avoid a phantom cron-down audit signal and a
+  brief cron-down window for inbound completion-authority work.
 - On any other tool fire (TaskUpdate with neither a terminal-
   status nor a pending->in_progress transition, TaskCreate when
   the count is zero, terminal-status TaskUpdate leaving residual
   active tasks or a same-teammate continuation): no directive
   emitted.
 
+Lead-Session Guard (Layer 0 — defense-in-depth):
+- Every directive emission is gated by `_is_lead_session`, which
+  verifies that the current PostToolUse session's `session_id`
+  matches the team's `leadSessionId` from team_config.json.
+  Teammate sessions never receive the Arm/Teardown directives —
+  hook-level filtering at the emission source, correct-by-
+  construction rather than relying on the skill body's
+  Lead-Session Guard (Layer 1) as the primary defense. The skill-
+  body guard remains as backstop for user-typed manual invocation
+  from a teammate session.
+
 Transition detection (post-only):
 - post = count_active_tasks(team_name) — the count AFTER the tool's
   effect is on disk. count_active_tasks already filters out signal-
   tasks and self-complete-exempt agents, so post is the lifecycle-
   relevant count.
-- TaskCreate + post >= 1 + STATE_FILE freshness expired (or absent /
-  malformed) → emit Arm. The freshness window
-  (_STATEFILE_FRESHNESS_WINDOW_SECS) bounds the per-TaskCreate
-  redundant-emit cost: when the watch-inbox STATE_FILE was armed
-  recently, the hook short-circuits (no directive emitted) since the
-  orchestrator would only invoke an idempotent skill no-op. After
-  the freshness window expires, the next TaskCreate emits Arm
-  regardless of STATE_FILE presence, providing a bounded periodic
-  re-arm trigger.
-- TaskUpdate(status == in_progress) + post >= 1 + STATE_FILE freshness
-  expired (or absent / malformed) → emit Arm. Mirrors the TaskCreate
-  Arm semantics; the STATE_FILE freshness gate is the same categorical
-  Arm-suppression mechanism (no redundant emit when the Monitor was
-  recently armed). Predicate is single-source on `tool_input.status`
-  per the empirical fixture constraint at
+- TaskCreate + post >= 1 → emit Arm. The skill body's CronList
+  match is the single idempotency layer; the hook emits
+  unconditionally on the lifecycle transition, the skill decides
+  whether the work needs doing. This is the architectural change
+  from the Monitor era (which used a STATE_FILE freshness window
+  in the hook to short-circuit redundant directive emits) — under
+  cron, the per-emit context-budget cost is small and the
+  single-source-of-truth idempotency in the skill body is
+  architecturally cleaner.
+- TaskUpdate(status == in_progress) + post >= 1 → emit Arm.
+  Mirrors the TaskCreate Arm semantics. Predicate is single-source
+  on `tool_input.status` per the empirical fixture constraint at
   `tests/fixtures/wake_lifecycle/task_update_production_shape.json`
   (FLAT tool_response, no statusChange.from field).
 - TaskUpdate(status in {completed, deleted}) + post == 0 + NO same-
   teammate continuation → emit Teardown. Skill's Teardown is
-  idempotent (no-op if STATE_FILE absent), so over-eager emission on
-  edge cases (terminal-status update of a never-counted signal-task
-  while post==0) is benign. The same-teammate continuation guard
+  idempotent (no-op if no /PACT:scan-pending-tasks cron is
+  registered), so over-eager emission on edge cases (terminal-
+  status update of a never-counted signal-task while post==0) is
+  benign. The same-teammate continuation guard
   (`has_same_teammate_continuation`) defers Teardown when the
   completing task has at least one task in its `blocks` chain (the
-  resolved on-disk field; `addBlocks` is the additive TaskUpdate API
-  parameter, normalized into `blocks` on the stored record) whose
-  owner matches and which passes `_lifecycle_relevant`, suppressing
-  the phantom 1->0 transient in canonical Two-Task Dispatch handoffs.
+  resolved on-disk field; `addBlocks` is the additive TaskUpdate
+  API parameter, normalized into `blocks` on the stored record)
+  whose owner matches and which passes `_lifecycle_relevant`,
+  suppressing the phantom 1->0 transient in canonical Two-Task
+  Dispatch handoffs.
 - Any other tool fire (TaskUpdate with neither in_progress nor
-  terminal status, TaskCreate at post == 0, terminal-status TaskUpdate
-  at post > 0, terminal-status TaskUpdate at post == 0 with same-
-  teammate continuation): no-op.
+  terminal status, TaskCreate at post == 0, terminal-status
+  TaskUpdate at post > 0, terminal-status TaskUpdate at post == 0
+  with same-teammate continuation): no-op.
 
 The Arm threshold (post >= 1) and `session_init.py`'s SessionStart
 Arm threshold (active_count > 0) apply the same minimum-positive-count
@@ -94,7 +106,7 @@ Empirically verified during the Phase 0 routing probe: missing
 
 Fail-open invariant: every code path exits 0 with `suppressOutput`
 sentinel on parse errors, missing fields, or unexpected exceptions.
-The wake mechanism is opportunistic — a crashed lifecycle hook degrades
+The scan mechanism is opportunistic — a crashed lifecycle hook degrades
 to "no Arm/Teardown emit," which falls back to baseline idle-poll
 delivery. Livelock-safety > observability for hook code emitting on
 every Task-tool fire.
@@ -106,7 +118,6 @@ Output: hookSpecificOutput with additionalContext on transitions;
 
 import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -131,40 +142,27 @@ _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 # rejection signal (parser amplification / memory-exhaustion vector).
 _MAX_PAYLOAD_BYTES = 1024 * 1024
 
-# STATE_FILE freshness window (seconds). When the watch-inbox
-# STATE_FILE's armed_at is within this window, the hook short-circuits
-# (no Arm directive emitted) — the orchestrator's per-TaskCreate
-# context-budget tax of reading the directive prose is avoided. After
-# the window expires, the next TaskCreate emits Arm regardless of
-# STATE_FILE presence, providing a bounded periodic re-arm trigger.
-#
-# 600s = 10 min:
-#   >= 5x the Monitor's MAX_DELAY ceiling (120s, see watch-inbox.md
-#     §Monitor Block audit anchor) so freshness does not expire under
-#     normal sustained-traffic emit cadence.
-#   >= typical PACT phase duration so a single CODE/TEST work unit
-#     does not trip the periodic re-arm.
-#   <= user-perceived staleness threshold for "Monitor probably died."
-_STATEFILE_FRESHNESS_WINDOW_SECS = 600
-
 # Directive prose — verbatim text emitted via additionalContext on
 # transitions. Imperative voice; references the canonical command-pair
-# slugs `PACT:watch-inbox` (Arm role) and `PACT:unwatch-inbox` (Teardown
-# role); idempotency / best-effort clauses prevent the lead from adding
-# their own conditional self-diagnosis (per the unconditional-directive
-# discipline: emit identical prose every fire — the orchestrator is not
-# authorized to second-guess directive applicability).
+# slugs `PACT:start-pending-scan` (Arm role) and `PACT:stop-pending-scan`
+# (Teardown role); idempotency / best-effort clauses prevent the lead
+# from adding their own conditional self-diagnosis (per the
+# unconditional-directive discipline: emit identical prose every fire —
+# the orchestrator is not authorized to second-guess directive
+# applicability). Idempotency is enforced in the skill body via
+# CronList exact-suffix-match; there is no hook-side STATE_FILE.
 _ARM_DIRECTIVE = (
     'First active teammate task created. '
-    'Invoke Skill("PACT:watch-inbox") before any further teammate '
-    'dispatch. Idempotent — no-op if a valid STATE_FILE is already on disk.'
+    'Invoke Skill("PACT:start-pending-scan") before any further teammate '
+    'dispatch. Idempotent — no-op if a /PACT:scan-pending-tasks cron is '
+    'already registered.'
 )
 
 _TEARDOWN_DIRECTIVE = (
     'Last active teammate task completed. '
-    'Invoke Skill("PACT:unwatch-inbox") to stop the Monitor and unlink '
-    'the STATE_FILE. Best-effort — tolerates a Monitor that died '
-    'silently mid-session.'
+    'Invoke Skill("PACT:stop-pending-scan") to delete the '
+    '/PACT:scan-pending-tasks cron. Best-effort — tolerates a cron that '
+    'was already auto-deleted (7-day expiry) or never registered.'
 )
 
 # Tools accepted by _decide_directive. The hooks.json matcher prunes
@@ -179,9 +177,11 @@ def _is_lead_session(input_data: dict[str, Any], team_name: str) -> bool:
 
     Reads `session_id` from the PostToolUse stdin payload and
     `leadSessionId` from ~/.claude/teams/{team_name}/config.json.
-    Mirrors the Lead-Session Guard pattern used by the watch-inbox /
-    unwatch-inbox skill bodies; team_config is the single source of
-    truth for lead identity.
+    Mirrors the Lead-Session Guard pattern used by the start-pending-scan /
+    stop-pending-scan skill bodies (Layer 1 of the defense-in-depth model);
+    this hook-level check is Layer 0, preventing directive emission to
+    teammate sessions at the emission source. team_config is the single
+    source of truth for lead identity.
 
     Pure function; never raises. Returns False on missing/empty
     session_id, missing/unsafe team_name, missing config.json, malformed
@@ -276,64 +276,6 @@ def _extract_task_id(input_data: dict[str, Any]) -> str | None:
     return None
 
 
-def _statefile_is_fresh(team_name: str) -> bool:
-    """
-    Return True iff the watch-inbox STATE_FILE is present, parses with
-    v=1, carries an armed_at timestamp, and that timestamp is within
-    _STATEFILE_FRESHNESS_WINDOW_SECS of the current UTC clock.
-
-    Used by _decide_directive to short-circuit the Arm emit path when
-    the Monitor was recently armed; the per-TaskCreate context-budget
-    tax of redundant directive emission is the cost being avoided.
-
-    Pure-never-raises contract: returns False on any failure mode
-    (file missing, unreadable, malformed JSON, missing fields, wrong
-    schema version, unparseable timestamp, clock skew yielding negative
-    age, OS error). Fail-open to "not fresh" preserves the emit
-    behavior on any unexpected condition; the redundant-emit cost is
-    the only thing on the line, so fail-open here is strictly correct
-    (no silent-death masking, no missed Arm on a genuinely needed
-    cold-start).
-    """
-    try:
-        if not team_name or not is_safe_path_component(team_name):
-            return False
-        path = (
-            Path.home()
-            / ".claude"
-            / "teams"
-            / team_name
-            / "inbox-wake-state.json"
-        )
-        if not path.exists():
-            return False
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return False
-        if data.get("v") != 1:
-            return False
-        armed_at_raw = data.get("armed_at")
-        if not isinstance(armed_at_raw, str):
-            return False
-        # ISO-8601 'Z' suffix is the watch-inbox WriteStateFile format.
-        # datetime.fromisoformat handles +HH:MM but not 'Z' before
-        # Python 3.11; shim the suffix and require an aware datetime.
-        armed_at = datetime.fromisoformat(
-            armed_at_raw.replace("Z", "+00:00")
-        )
-        if armed_at.tzinfo is None:
-            return False
-        age_secs = (datetime.now(timezone.utc) - armed_at).total_seconds()
-        if age_secs < 0:
-            # Clock skew: armed_at is in the future. Treat as not-fresh
-            # so the next TaskCreate re-evaluates after the clock
-            # converges.
-            return False
-        return age_secs <= _STATEFILE_FRESHNESS_WINDOW_SECS
-    except (OSError, json.JSONDecodeError, ValueError, TypeError):
-        return False
-
-
 _TERMINAL_STATUSES = ("completed", "deleted")
 
 
@@ -369,8 +311,9 @@ def _is_pending_to_in_progress_transition(input_data: dict[str, Any]) -> bool:
     """
     Return True iff this TaskUpdate fired with a status transition to
     in_progress. Used by the re-Arm branch of `_decide_directive` to
-    detect a teammate claiming a task off the queue when the watch-
-    inbox STATE_FILE is absent or stale.
+    detect a teammate claiming a task off the queue; the skill body's
+    CronList match handles idempotency when a cron is already
+    registered, so no hook-side staleness check is needed.
 
     Single-source probe of `tool_input.status == "in_progress"`. NO
     `tool_response.statusChange.to` fallback and NO flat
@@ -397,29 +340,35 @@ def _is_pending_to_in_progress_transition(input_data: dict[str, Any]) -> bool:
 
 # Shared Arm-decision helper. Two branches in `_decide_directive` (the
 # TaskCreate Arm branch and the pending->in_progress re-Arm branch) share
-# IDENTICAL Arm conditions: at least one lifecycle-relevant active task
-# AND the watch-inbox STATE_FILE is not currently fresh. Only the trigger
-# event differs. Extracting the conditions into one helper deduplicates
-# the predicate ladder without obscuring it (the helper body is the same
-# 3 lines that used to live inline at each site). DO NOT inline the
-# conditions back into either branch — the two-site duplication is the
-# exact pattern the helper is here to prevent re-introducing.
+# IDENTICAL Arm conditions: at least one lifecycle-relevant active task.
+# Only the trigger event differs. Extracting the condition into one
+# helper deduplicates the predicate ladder without obscuring it. DO NOT
+# inline the condition back into either branch — the two-site
+# duplication is the exact pattern the helper is here to prevent
+# re-introducing.
+#
+# Audit: under the Monitor era this helper also gated on a STATE_FILE
+# freshness window (`_statefile_is_fresh`) to short-circuit redundant
+# directive emits. Under the cron mechanism, idempotency lives in the
+# skill body (CronList exact-suffix-match in start-pending-scan.md);
+# the hook emits unconditionally on the lifecycle transition. An
+# editing LLM tempted to re-introduce a hook-side idempotency cache is
+# re-coupling the hook to scan-mechanism state, which violates the
+# single-source-of-truth design (CronList is the authoritative armed-
+# state bit).
 def _arm_or_none(team_name: str) -> str | None:
     """
     Return _ARM_DIRECTIVE iff the conditions for emitting Arm are met:
-    at least one lifecycle-relevant active teammate task AND no fresh
-    STATE_FILE on disk. Otherwise return None.
+    at least one lifecycle-relevant active teammate task. Otherwise
+    return None.
 
     Shared between the TaskCreate Arm branch and the pending->in_progress
     re-Arm branch in `_decide_directive` — both branches share identical
     Arm conditions; only the trigger differs. count_active_tasks already
     filters carve-outs (signal-tasks, wake-excluded agentTypes), so
-    `>= 1` is the lifecycle-relevant positive count. _statefile_is_fresh
-    short-circuits redundant emits when the Monitor was recently armed.
+    `>= 1` is the lifecycle-relevant positive count.
     """
     if count_active_tasks(team_name) < 1:
-        return None
-    if _statefile_is_fresh(team_name):
         return None
     return _ARM_DIRECTIVE
 
@@ -443,14 +392,13 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     Return the directive prose to emit, or None for no-op.
 
     Post-only transition detection:
-    - TaskCreate + post >= 1 + STATE_FILE freshness expired (or absent
-      / malformed) → Arm.
-    - TaskUpdate(status == in_progress) + post >= 1 + STATE_FILE freshness
-      expired (or absent / malformed) → Arm. Re-Arm path covering cold-
-      start (initial Arm never fired), post-Teardown recovery (eager 1->0
-      Teardown unlinked the STATE_FILE), mid-session resume, and Monitor-
-      died-silently cases categorically. STATE_FILE absence/staleness is
-      the implicit 1-bit pre-state proxy for "no live Monitor."
+    - TaskCreate + post >= 1 → Arm.
+    - TaskUpdate(status == in_progress) + post >= 1 → Arm. Re-Arm path
+      covering cold-start (initial Arm never fired), post-Teardown
+      recovery (eager 1->0 Teardown removed the cron entry), mid-session
+      resume, and any cron-died-silently edge cases categorically. The
+      CronList match in the skill body is the single source of
+      idempotency truth — no hook-side pre-state proxy.
     - TaskUpdate(status in {completed, deleted}) + post == 0 + NO same-
       teammate continuation → Teardown.
 
@@ -459,14 +407,10 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     means at least one lifecycle-relevant task is active, and
     post == 0 after a terminal-status TaskUpdate means the team
     has no remaining lifecycle-relevant work. The Arm threshold
-    accepts any positive count and the freshness gate
-    (_statefile_is_fresh) short-circuits redundant emits when the
-    watch-inbox STATE_FILE was armed within
-    _STATEFILE_FRESHNESS_WINDOW_SECS; once the window expires the
-    next TaskCreate emits Arm regardless of STATE_FILE presence,
-    bounding the redundant-emit cost while preserving a periodic
-    re-arm trigger. Both Arm and Teardown are idempotent in the
-    skill layer, so any over-eager emit on edge cases is benign.
+    accepts any positive count; the skill body's CronList match
+    handles redundant-emit no-op cheaply. Both Arm and Teardown are
+    idempotent in the skill layer, so any over-eager emit on edge
+    cases is benign.
 
     Test coverage pins the Arm predicate to the equivalent forms
     >= 1 and > 0: the lower-bound zero-count no-emit case and the
@@ -496,14 +440,14 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
         return _arm_or_none(team_name)
 
     # tool_name == "TaskUpdate"
-    # Re-Arm branch on pending->in_progress transition. STATE_FILE
-    # absence (or staleness past the freshness window) is the implicit
-    # 1-bit pre-state proxy for "no live Monitor." Categorically covers
-    # cold-start (initial Arm never fired), post-Teardown recovery
-    # (eager 1->0 Teardown unlinked the STATE_FILE), and Monitor-died-
-    # silently. Mirrors the TaskCreate Arm semantics above so a single
-    # mental model — "Arm whenever post >= 1 AND STATE_FILE not fresh"
-    # — covers both surfaces. Empirical anchor:
+    # Re-Arm branch on pending->in_progress transition. Categorically
+    # covers cold-start (initial Arm never fired), post-Teardown
+    # recovery (eager 1->0 Teardown removed the cron entry), and any
+    # cron-died-silently edge case. Mirrors the TaskCreate Arm
+    # semantics above so a single mental model — "Arm whenever post
+    # >= 1" — covers both surfaces. Idempotency lives in the skill
+    # body (CronList exact-suffix-match); the hook emits
+    # unconditionally on the transition. Empirical anchor:
     # `tests/fixtures/wake_lifecycle/task_update_production_shape.json`
     # fossilizes the FLAT tool_response (no statusChange.from), so the
     # transition predicate consumes `tool_input.status` only.
@@ -519,10 +463,11 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     # Defer the 1->0 Teardown when the just-completed task has a same-
     # teammate-owned active continuation in its `blocks` chain. The
     # teammate is staged to claim the next task imminently, so emitting
-    # Teardown would (a) surface a phantom Monitor-down audit signal,
-    # and (b) leave a brief Monitor-down window during which inbound
-    # SendMessages would not wake the lead. `has_same_teammate_
-    # continuation` reads `blocks` (the resolved on-disk field) with
+    # Teardown would (a) surface a phantom cron-down audit signal,
+    # and (b) leave a brief cron-down window during which inbound
+    # completion-authority work would wait for the next 0->1 transition
+    # to re-Arm. `has_same_teammate_continuation` reads `blocks` (the
+    # resolved on-disk field) with
     # `addBlocks` as forward-compat fallback (note: `addBlocks` is the
     # additive TaskUpdate API parameter — typically null on disk after
     # the platform merges it into `blocks`; do NOT re-introduce
@@ -541,7 +486,7 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
 def main() -> None:
     # Outer catch-all preserves the exit-0 fail-open contract against
     # any unexpected exception (malformed task.json, filesystem race,
-    # import-time error). The wake mechanism is opportunistic; a crash
+    # import-time error). The scan mechanism is opportunistic; a crash
     # here would surface as a "hook-error" UI on every Task-tool call,
     # which is the livelock-capable failure shape the categorical
     # standard forbids for any TaskCompleted/TeammateIdle/Stop-class
