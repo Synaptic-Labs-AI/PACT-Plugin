@@ -1,5 +1,5 @@
 """
-Behavioral invariants for pact-plugin/hooks/shared/wake_lifecycle.py.
+Behavioral invariants for pact-plugin/hooks/shared/pending_scan_lifecycle.py.
 
 Direct-import tests of count_active_tasks() and _lifecycle_relevant().
 Pin the carve-out semantics (signal-tasks, team-config exempt agentTypes)
@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 
 # Hooks dir is added to sys.path by conftest.
-import shared.wake_lifecycle as wl
+import shared.pending_scan_lifecycle as wl
 from shared.intentional_wait import (
     SELF_COMPLETE_EXEMPT_AGENT_TYPES,
     WAKE_EXCLUDED_AGENT_TYPES,
@@ -59,16 +59,16 @@ def test_helper_imports_shared_helper_from_intentional_wait():
     self-completion authority) does not require touching this file."""
     src = (
         Path(__file__).resolve().parent.parent
-        / "hooks" / "shared" / "wake_lifecycle.py"
+        / "hooks" / "shared" / "pending_scan_lifecycle.py"
     ).read_text(encoding="utf-8")
     assert "from shared.intentional_wait import _is_wake_excluded_agent_type" in src
-    # Active anti-recouple guard: wake_lifecycle MUST NOT IMPORT the
-    # self-completion-side helper. Re-introducing the import would
+    # Active anti-recouple guard: pending_scan_lifecycle MUST NOT IMPORT
+    # the self-completion-side helper. Re-introducing the import would
     # silently re-couple the two policies. Pinned via line-anchored
     # import-statement match (rather than bare substring) so the
-    # DECOUPLED-CONSTANT DISCIPLINE comment in wake_lifecycle.py — which
-    # legitimately mentions _is_exempt_agent_type as the warning target —
-    # does not trigger this assertion.
+    # DECOUPLED-CONSTANT DISCIPLINE comment in pending_scan_lifecycle.py —
+    # which legitimately mentions _is_exempt_agent_type as the warning
+    # target — does not trigger this assertion.
     has_recouple_import = any(
         line.strip() == "from shared.intentional_wait import _is_exempt_agent_type"
         or line.strip().startswith(
@@ -77,10 +77,10 @@ def test_helper_imports_shared_helper_from_intentional_wait():
         for line in src.splitlines()
     )
     assert not has_recouple_import, (
-        "wake_lifecycle.py must NOT import _is_exempt_agent_type "
+        "pending_scan_lifecycle.py must NOT import _is_exempt_agent_type "
         "(the self-completion-side helper). Use _is_wake_excluded_agent_type "
         "instead — see DECOUPLED-CONSTANT DISCIPLINE comment in "
-        "wake_lifecycle.py."
+        "pending_scan_lifecycle.py."
     )
     # No re-declaration: a literal exempt set in the helper would diverge
     # from intentional_wait. Belt-and-suspenders: stale post-#682 import.

@@ -81,7 +81,7 @@ from shared.session_journal import append_event, make_event
 from shared.failure_log import append_failure
 from shared.plugin_manifest import format_plugin_banner
 from shared.session_state import is_safe_path_component
-from shared.wake_lifecycle import count_active_tasks
+from shared.pending_scan_lifecycle import count_active_tasks
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import setup_plugin_symlinks
@@ -902,7 +902,7 @@ def main():
         # emission no-ops cheaply.
         #
         # count_active_tasks honors the pure-never-raises contract
-        # (shared.wake_lifecycle module-wide pin); call it directly,
+        # (shared.pending_scan_lifecycle module-wide pin); call it directly,
         # no try/except wrapper required.
         active_count = count_active_tasks(team_name)
         if active_count > 0 and _is_lead_session_at_init(input_data, team_name):

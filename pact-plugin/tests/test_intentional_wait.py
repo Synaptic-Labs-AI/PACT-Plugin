@@ -388,7 +388,7 @@ class TestSelfCompleteExemptAgentTypesConstant:
 class TestIsExemptAgentType:
     """Direct unit tests on _is_exempt_agent_type — the shared helper that
     backs both is_self_complete_exempt (surface 1) and
-    wake_lifecycle._lifecycle_relevant (carve-out 2).
+    pending_scan_lifecycle._lifecycle_relevant (carve-out 2).
     """
 
     def test_owner_with_pact_secretary_agenttype_is_exempt(self, teams_dir):
@@ -634,7 +634,7 @@ class TestIsSelfCompleteExemptMalformedTaskShapes:
         truthy) metadata" differently because they hoist the agentType
         carve-out at different points relative to the metadata-shape gate:
 
-        - `_lifecycle_relevant` (wake_lifecycle.py): hoists agentType
+        - `_lifecycle_relevant` (pending_scan_lifecycle.py): hoists agentType
           check ABOVE the metadata-shape gate. A secretary task with
           `metadata="garbage"` returns False (carve-out applied → not
           counted toward wake-arming). Correct behavior.
@@ -682,16 +682,16 @@ class TestIsSelfCompleteExemptMalformedTaskShapes:
         )
         # Confirm the asymmetry is real by comparing with the sibling
         # predicate _lifecycle_relevant on identical input.
-        import shared.wake_lifecycle as wl
+        import shared.pending_scan_lifecycle as wl
         # _lifecycle_relevant requires Path.home()-rooted teams_dir to
         # find the team config. Use a minimal monkeypatch-free approach
         # by construct the full path lookup. Skip: the asymmetry pin
         # via is_self_complete_exempt alone is sufficient regression
         # coverage; cross-predicate equivalence is a separate concern
-        # belonging to wake_lifecycle's own test suite. The wake-side
+        # belonging to pending_scan_lifecycle's own test suite. The scan-side
         # behavior is already pinned by
         # test_lifecycle_relevant_exempt_agenttype_with_corrupted_metadata
-        # in test_inbox_wake_lifecycle_helper.py.
+        # in test_pending_scan_lifecycle_helper.py.
         _ = wl  # keep import to make divergence-target explicit in test source
 
     def test_owner_none_returns_false(self):
@@ -1210,7 +1210,7 @@ class TestIsExemptAgentTypeMixedTeamConfig:
         # WAKE_EXCLUDED_AGENT_TYPES is empty (secretary tasks count).
         # Pre-empty this test asserted count=1 (secretary excluded);
         # post-empty both members' tasks count toward the active tally.
-        import shared.wake_lifecycle as wl
+        import shared.pending_scan_lifecycle as wl
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         team = "multi-task-team"
@@ -1252,7 +1252,7 @@ class TestMultipleSecretaryTasksAllCountPostEmptyCarveOut:
     the post-empty count == N for N parallel secretary tasks."""
 
     def test_multiple_secretary_tasks_all_count_post_empty(self, tmp_path, monkeypatch):
-        import shared.wake_lifecycle as wl
+        import shared.pending_scan_lifecycle as wl
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         team = "multi-sec-team"
@@ -1306,9 +1306,9 @@ class TestDocSurfaceStalenessSweep:
     - `test_fenced_code_block_skipped` — content inside ```...``` does NOT.
 
     The single permitted reference outside doc surfaces is the
-    negative-assertion in test_inbox_wake_lifecycle_helper.py:48
+    negative-assertion in test_pending_scan_lifecycle_helper.py:48
     (`assert "SELF_COMPLETE_EXEMPT_AGENTS" not in src`), which is itself
-    a guard against the old name reappearing in wake_lifecycle.py.
+    a guard against the old name reappearing in pending_scan_lifecycle.py.
 
     If a future refactor genuinely needs to rename
     SELF_COMPLETE_EXEMPT_AGENT_TYPES, update this test alongside the

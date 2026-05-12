@@ -1,5 +1,5 @@
 """
-Predicate-isolation tests for shared.wake_lifecycle.has_same_teammate_continuation.
+Predicate-isolation tests for shared.pending_scan_lifecycle.has_same_teammate_continuation.
 
 Architect-spec 8-cell + production-shape regression. The 8 cells exercise
 the predicate's logical decision table; the 9th (production-shape) cell
@@ -10,7 +10,7 @@ pact-8159e827 — `addBlocks` is null on every persisted task; `blocks` is
 the populated forward-pointing linkage).
 
 Counter-test-by-revert (manual / runbook-documented): cp-bak the file,
-`git checkout HEAD~1 -- pact-plugin/hooks/shared/wake_lifecycle.py`, run
+`git checkout HEAD~1 -- pact-plugin/hooks/shared/pending_scan_lifecycle.py`, run
 this module — expect cardinality {8 fail, 1 collection error} (8 cells
 fail because helper is gone; production-shape cell errors on import).
 See pact-plugin/tests/runbooks/wake-lifecycle-teachback-rearm.md.
@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-import shared.wake_lifecycle as wl
+import shared.pending_scan_lifecycle as wl
 
 
 def _write_team_config(home: Path, team: str, members: list[dict]) -> None:

@@ -1,10 +1,10 @@
 """
-Location: pact-plugin/hooks/shared/wake_lifecycle.py
-Summary: Shared helper for inbox-wake lifecycle hooks. Counts active teammate
-         tasks under a team, applying carve-out filters that match the lead-only
-         completion-authority model (signal-tasks and self-complete-exempt
-         agentTypes do not count toward the wake-mechanism's "any active work"
-         signal).
+Location: pact-plugin/hooks/shared/pending_scan_lifecycle.py
+Summary: Shared helper for pending-scan lifecycle hooks. Counts active
+         teammate tasks under a team, applying carve-out filters that match
+         the lead-only completion-authority model (signal-tasks and self-
+         complete-exempt agentTypes do not count toward the scan-mechanism's
+         "any active work" signal).
 Used by: pact-plugin/hooks/wake_lifecycle_emitter.py (PostToolUse hook on
          TaskCreate / TaskUpdate), and
          pact-plugin/hooks/session_init.py (resume-with-active-tasks Arm
