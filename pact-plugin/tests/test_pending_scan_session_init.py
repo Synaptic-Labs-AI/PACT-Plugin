@@ -199,9 +199,8 @@ def test_session_init_imports_or_calls_lead_session_guard(src):
 
     Defense-in-depth Layer 0 (per plan §Architecture Lead-Session Guard at Directive Emission) catches
     misdirected directive emission at the source. Layers 1 (skill-body
-    Lead-Session Guard), 2 (platform CronCreate session-scoping), and 3
-    (scan-pending-tasks same-session-identity gate) all assume Layer 0
-    is in place but must remain effective even if it isn't."""
+    Lead-Session Guard) and 2 (platform CronCreate session-scoping) both
+    assume Layer 0 is in place but must remain effective even if it isn't."""
     import re as _re
     # Strict: the guard symbol must appear inside an if/return/elif/while/assert
     # statement in the source. Matches either the canonical

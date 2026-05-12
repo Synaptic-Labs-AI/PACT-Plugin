@@ -45,7 +45,6 @@ Five anti-hallucination guardrails live in [scan-pending-tasks.md §Guardrails](
 
 Additional discipline:
 
-- **Same-session-identity gate** (Layer 3 of the scan-firing-only-in-lead-session defense-in-depth model). The scan acts ONLY on tasks where `metadata.lead_session_id` equals the current `session_id`. The field is set-at-task-creation by the orchestrator (canonical sites: `commands/orchestrate.md` Task A + Task B creation, `agents/pact-orchestrator.md` §11 dispatch pattern) and is immutable thereafter. Mitigates cross-session contamination when two concurrent PACT sessions share `~/.claude/teams/{team_name}/`. Tasks missing the field are skipped fail-closed.
 - **Lead-only completion preserved.** The scan body invokes the canonical acceptance two-call pair (`SendMessage` to teammate FIRST, then `TaskUpdate(taskId, status="completed")`) per [completion-authority §12](pact-completion-authority.md#12-completion-authority). The scan does NOT call `TaskUpdate(status="completed")` standalone; the scan is the canonical procedure at cron cadence, not a shortcut.
 
 ### Lead-Side Discipline — Verify Before Dispatching

@@ -81,7 +81,7 @@ A_id = TaskCreate(
                 "wake-SendMessage with corrections; revise on this same task.\n\n"
                 "Mission for Task B: see Task #{B_id}."
 )
-TaskUpdate(A_id, owner="{teammate-name}", metadata={"lead_session_id": pact_session_context["session_id"]})
+TaskUpdate(A_id, owner="{teammate-name}")
 
 # 2. Create Task B (primary work)
 B_id = TaskCreate(
@@ -93,15 +93,13 @@ B_id = TaskCreate(
                 "completed after HANDOFF validation. If team-lead rejects, team-lead writes metadata.handoff_rejection; "
                 "revise on this same task.\n\nUpstream: TEACHBACK Task #{A_id}."
 )
-TaskUpdate(B_id, owner="{teammate-name}", addBlockedBy=[A_id], metadata={"lead_session_id": pact_session_context["session_id"]})
+TaskUpdate(B_id, owner="{teammate-name}", addBlockedBy=[A_id])
 TaskUpdate(A_id, addBlocks=[B_id])
 
 # 3. Spawn the teammate via the canonical Agent() form above.
 ```
 
 The `Agent()` `prompt` does NOT change shape — the Teachback-Gated Dispatch is encoded in the surrounding TaskCreate sequence, not in the `Agent()` call. The teammate discovers Task A + Task B via `TaskList` and follows pact-agent-teams §On Start.
-
-**`metadata.lead_session_id` is set at task creation by the orchestrator.** It records the team-lead's current `session_id` as the authoritative owner of the task's completion-authority gate. Once set, the field is **immutable** — downstream `TaskUpdate` calls (e.g., metadata merges for teachback submission, handoff write, intentional_wait toggles) MUST NOT modify `lead_session_id`. The field is consumed by [`/PACT:scan-pending-tasks`](scan-pending-tasks.md#same-session-identity-gate) as Layer 3 of the defense-in-depth model: the scan operates ONLY on tasks where `metadata.lead_session_id` matches the current session_id, preventing cross-session contamination when multiple lead sessions share `~/.claude/teams/{team_name}/`. Tasks created without this field (pre-schema-update or out-of-protocol) are skipped by the scan (fail-closed). Apply the same field-write pattern at every canonical task-creation site — see also: skipped-phase markers, signal tasks, auditor tasks; all benefit from the same provenance field.
 
 **Carve-outs** — single-task dispatch still applies for:
 

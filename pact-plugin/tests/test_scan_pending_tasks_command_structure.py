@@ -10,7 +10,6 @@ Invariants verified here:
   (start-pending-scan.md + scan-pending-tasks.md + stop-pending-scan.md)
 - Verbatim Anti-Hallucination Guardrails: (Read-Filesystem-Only through Emit-Nothing-If-Empty) appear VERBATIM
 - Cron-Fire Marker Discipline: presence at top of file
-- Same-Session-Identity Gate at step 1 of the operation
 - Lead-Only Completion Preservation (scan body uses canonical
   acceptance pair, no inline TaskUpdate(completed) standalone)
 - Cron-Origin Distinction section present and forbids cron-fire as user-consent
@@ -42,7 +41,7 @@ def cmd_text() -> str:
 
 def test_command_file_exists():
     assert CMD_FILE.is_file(), (
-        f"scan-pending-tasks.md missing at {CMD_FILE} — Cross-Skill Prompt-String Byte-Identity / Verbatim Anti-Hallucination Guardrails / Cron-Fire Marker Discipline / Same-Session-Identity Gate / Lead-Only Completion Preservation "
+        f"scan-pending-tasks.md missing at {CMD_FILE} — Cross-Skill Prompt-String Byte-Identity / Verbatim Anti-Hallucination Guardrails / Cron-Fire Marker Discipline / Lead-Only Completion Preservation "
         f"cannot be verified without the source file."
     )
 
@@ -249,121 +248,6 @@ def test_cross_skill_prompt_string_byte_identity_byte_identical_across_three_com
         f"{operational_slug!r} — the scan body itself is named by the "
         f"slug that CronCreate registers; drift breaks the firing chain."
     )
-
-
-# ---------- Same-Session-Identity Gate: same-session-identity gate at step 1 of operation ----------
-
-def test_same_session_identity_gate_same_session_identity_gate_section_present(cmd_text):
-    """Same-Session-Identity Gate: the §Same-Session-Identity Gate section anchors the
-    cross-session-contamination defense (Layer 3 of defense-in-depth).
-    Without this gate, two concurrent PACT sessions sharing a team_name
-    contaminate each other's task acceptance."""
-    assert "## Same-Session-Identity Gate" in cmd_text
-
-
-def test_same_session_identity_gate_gate_invoked_at_step_one_of_operation(cmd_text):
-    """Same-Session-Identity Gate: the gate is invoked at step 1 of §Operation (before
-    raw-read in step 4). Ordering matters: the gate must filter
-    candidate tasks BEFORE the scan reads their metadata, not after.
-    Reading-then-filtering still leaks cross-session metadata to
-    the scan's working set.
-
-    Strictness (commit-9): the forgiving fallback path (scan whole
-    operation for gate-before-raw-read anywhere) was removed. The
-    test requires the canonical numbered-list shape (step 1./2./3./...)
-    AND requires step 1 to reference the gate explicitly. A future
-    runbook reformat that drops numbered-list markers will fail this
-    test with a clear error message rather than silently passing the
-    looser any-position check."""
-    op_start = cmd_text.find("## Operation")
-    op_end = cmd_text.find("\n## ", op_start + 1)
-    op_section = cmd_text[op_start:op_end] if op_end > 0 else cmd_text[op_start:]
-    # Strict: step 1./2. markers MUST be present (canonical numbered-list shape).
-    step_1_pos = op_section.find("1. ")
-    step_2_pos = op_section.find("2. ", step_1_pos)
-    assert step_1_pos >= 0, (
-        "Same-Session-Identity Gate strict: §Operation must use canonical numbered-list "
-        "shape with '1. ' marker. No fallback path; restructure the "
-        "section to use numbered steps."
-    )
-    assert step_2_pos > step_1_pos, (
-        "Same-Session-Identity Gate strict: §Operation must have a '2. ' marker after the "
-        "'1. ' marker. Canonical numbered-list shape required."
-    )
-    step_1 = op_section[step_1_pos:step_2_pos]
-    assert (
-        "same-session-identity gate" in step_1.lower()
-        or "lead_session_id" in step_1
-    ), (
-        "Same-Session-Identity Gate: Operation step 1 must invoke the same-session-"
-        "identity gate (compare session_id to "
-        "metadata.lead_session_id)."
-    )
-
-
-def test_same_session_identity_gate_gate_uses_exact_equality_match(cmd_text):
-    """Same-Session-Identity Gate / H2-strict (commit-9 tightened): gate uses verbatim `==`
-    comparison on `metadata.lead_session_id` AND the current session_id.
-    Substring or partial match invites false-positive acceptance.
-
-    Tightening over the prior OR-permissive check (`"exact-equality" OR
-    "=="`): require the verbatim equality-comparison pattern combining
-    `metadata.lead_session_id` and the `==` operator in the same
-    pseudocode/operation context. A future edit that drops the `==`
-    operator while leaving the `lead_session_id` token in audit prose
-    would have passed the prior check; the combined-token check
-    catches it.
-
-    H2 mitigation (security): the gate is the architectural replacement
-    for the Monitor-era `armed_by_session_id` cross-session-contamination
-    defense. The verbatim `==` is non-negotiable — `in` membership,
-    `startswith`, or any partial-match relaxation re-opens the H2 vector.
-    """
-    import re as _re
-    section_start = cmd_text.find("\n## Same-Session-Identity Gate")
-    section_end = cmd_text.find("\n## ", section_start + 1)
-    section = cmd_text[section_start:section_end] if section_end > 0 else cmd_text[section_start:]
-    # Strict: BOTH `==` operator AND `lead_session_id` must appear in the
-    # section. Beyond that, require the two tokens to co-occur within the
-    # same pseudocode/operation context (audit-anchored equality assertion).
-    assert "==" in section, (
-        "Same-Session-Identity Gate/H2-strict: §Same-Session-Identity Gate must use verbatim "
-        "'==' equality operator. Partial-match relaxation (in/startswith) "
-        "re-opens H2 cross-session-contamination vector."
-    )
-    assert "lead_session_id" in section, (
-        "Same-Session-Identity Gate/H2-strict: §Same-Session-Identity Gate must reference "
-        "`metadata.lead_session_id` field. Required for H2 mitigation."
-    )
-    # Strict combined check: at least one occurrence of `lead_session_id`
-    # within a small window of an `==` operator. Use regex spanning the
-    # canonical pseudocode comparison shapes.
-    combined_pattern = _re.compile(
-        r"lead_session_id\s*==|==\s*[^=\n]{0,80}?(session_id|lead_session_id)",
-        _re.MULTILINE,
-    )
-    assert combined_pattern.search(section) is not None, (
-        "Same-Session-Identity Gate/H2-strict: §Same-Session-Identity Gate must contain a "
-        "verbatim equality-comparison pattern combining lead_session_id "
-        "and ==. Examples: `metadata.lead_session_id == current session_id`, "
-        "`task.metadata.lead_session_id == pact_session_context[\"session_id\"]`. "
-        "A separated mention of `==` AND `lead_session_id` in unrelated "
-        "prose passes the prior individual-token check but fails this "
-        "combined-pattern check."
-    )
-
-
-def test_same_session_identity_gate_fails_closed_on_missing_field(cmd_text):
-    """Same-Session-Identity Gate audit: tasks where metadata.lead_session_id is ABSENT
-    must be SKIPPED (fail-closed). Fail-open would re-open the
-    cross-session contamination vector. An editing LLM tempted to
-    'be lenient on missing field' is re-introducing the failure mode."""
-    section_start = cmd_text.find("\n## Same-Session-Identity Gate")
-    section_end = cmd_text.find("\n## ", section_start + 1)
-    section = cmd_text[section_start:section_end] if section_end > 0 else cmd_text[section_start:]
-    # The fail-closed semantics must be documented.
-    assert "fail-closed" in section.lower() or "absent" in section.lower()
-    assert "skip" in section.lower()
 
 
 # ---------- Lead-Only Completion Preservation: lead-only completion contract ----------

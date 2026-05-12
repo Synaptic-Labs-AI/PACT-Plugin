@@ -1,6 +1,6 @@
 # Pending-Scan Dogfood Runbook
 
-End-to-end validation of the cron-based pending-scan mechanism in a fresh session post-merge. Verifies arm/teardown lifecycle, cron-fire cadence, scan-output discipline (5 anti-hallucination guardrails), `lead_session_id` gate, and `[CRON-FIRE]` marker presence.
+End-to-end validation of the cron-based pending-scan mechanism in a fresh session post-merge. Verifies arm/teardown lifecycle, cron-fire cadence, scan-output discipline (5 anti-hallucination guardrails), and `[CRON-FIRE]` marker presence.
 
 ## Scope
 
@@ -44,10 +44,9 @@ The runbook deliberately covers BOTH happy-path lifecycle and edge cases that th
 **Expected**:
 - Within ~2 minutes (allow up to 3 minutes for jitter — cron may fire up to 10% of its period late, max 15 minutes), the cron fires `/PACT:scan-pending-tasks` as the lead's next turn.
 - The fired prompt has the `[CRON-FIRE]` discipline marker at the top of the skill body (verifiable by inspection of the loaded skill content).
-- Scan body runs steps 1-7 from `scan-pending-tasks.md §Operation`:
-  - Step 1: read `pact_session_context["session_id"]` for the same-session-identity gate.
-  - Step 2: `TaskList` returns the active tasks.
-  - Steps 3-7: filter by gate + read metadata + accept-or-skip-or-emit-nothing.
+- Scan body runs steps 1-5 from `scan-pending-tasks.md §Operation`:
+  - Step 1: `TaskList` returns the active tasks (filtered by owner + status + intentional_wait reason).
+  - Steps 2-5: raw-read metadata + accept-or-skip-or-emit-nothing.
 
 **Acceptance**: A scan-fire turn occurs within 3 minutes of Arm. The scan body executes against the actual filesystem (verifiable by post-scan inspection of any task-state changes or by the absence of changes if no acceptance was due).
 
@@ -107,15 +106,7 @@ This is the load-bearing verification — the 5 anti-hallucination guardrails ar
 
 **Acceptance**: Task A status is `completed`. The acceptance SendMessage appears in the teammate's inbox before the `TaskUpdate` call (verifiable from the journal event ordering).
 
-## 6. Lead-Session-ID Gate Verification (Same-Session-Identity Gate, Layer 3)
-
-**Action**: Manually create a task in `~/.claude/teams/{team_name}/` whose `metadata.lead_session_id` is a different (fake) session_id, while in `awaiting_lead_completion` status with populated `metadata.teachback_submit`. Wait for next cron-fire.
-
-**Expected**: The scan filters this task out at step 1 of `scan-pending-tasks §Operation` (same-session-identity gate). The task is NOT accepted, no SendMessage sent, no `TaskUpdate(status="completed")` called.
-
-**Acceptance**: The mismatched-session task remains in `awaiting_lead_completion` status indefinitely. The scan's behavior for tasks owned by THIS session is unaffected.
-
-## 7. Hook-Level Session Guard (Lead-Session Guard at Directive Emission, Layer 0)
+## 6. Hook-Level Session Guard (Lead-Session Guard at Directive Emission, Layer 0)
 
 **Action**: In a second concurrent PACT session (with a teammate-typed agent role, NOT the lead) that shares the same `team_name`, trigger a `TaskCreate` or `TaskUpdate(status="in_progress")` event. Observe whether `wake_lifecycle_emitter.py` emits the Arm directive.
 
@@ -123,7 +114,7 @@ This is the load-bearing verification — the 5 anti-hallucination guardrails ar
 
 **Acceptance**: The teammate session sees no `start-pending-scan` directive in `additionalContext`. No spurious cron is registered in the teammate's session.
 
-## 8. Teardown via Last-Active-Task Transition
+## 7. Teardown via Last-Active-Task Transition
 
 **Action**: Complete all teammate tasks (or have all reach `completed` / `deleted` terminal status). Verify the same-teammate-continuation guard does NOT defer Teardown (no remaining same-teammate active continuation in any task's `blocks` chain).
 
@@ -135,7 +126,7 @@ This is the load-bearing verification — the 5 anti-hallucination guardrails ar
 
 **Acceptance**: `CronList | grep -o '/PACT:scan-pending-tasks' | wc -l` returns `0`.
 
-## 9. Bug A Preservation — Deferred Teardown on Same-Teammate Continuation
+## 8. Bug A Preservation — Deferred Teardown on Same-Teammate Continuation
 
 **Action**: Spawn a teammate with Task A blocking Task B (canonical Two-Task Dispatch shape). Have the teammate complete Task A (the teachback gate) — Task A reaches `completed` while Task B is still `pending` (same owner). Watch for PostToolUse hook behavior.
 
@@ -143,7 +134,7 @@ This is the load-bearing verification — the 5 anti-hallucination guardrails ar
 
 **Acceptance**: After Task A completes, `CronList` still contains the cron entry. No spurious Teardown was emitted. When Task B subsequently completes (and no further same-teammate continuation exists), the regular 1→0 Teardown fires normally.
 
-## 10. Bug B Preservation — Re-Arm on Pending→In-Progress Transition
+## 9. Bug B Preservation — Re-Arm on Pending→In-Progress Transition
 
 **Action**: After Teardown (cron entry absent), have a teammate claim a `pending` task via `TaskUpdate(status="in_progress")`. Observe hook behavior.
 
@@ -151,7 +142,7 @@ This is the load-bearing verification — the 5 anti-hallucination guardrails ar
 
 **Acceptance**: Post-transition `CronList` contains exactly one `/PACT:scan-pending-tasks` entry.
 
-## 11. `[CRON-FIRE]` Discipline Marker Presence Verification
+## 10. `[CRON-FIRE]` Discipline Marker Presence Verification
 
 **Action**: Open `pact-plugin/commands/scan-pending-tasks.md`. Confirm the file body begins with the marker `[CRON-FIRE] This skill is invoked by the platform cron scheduler, NOT by user input.` — appearing BEFORE the `## Overview` section header.
 
@@ -159,7 +150,7 @@ This is the load-bearing verification — the 5 anti-hallucination guardrails ar
 
 **Acceptance**: `head -5 pact-plugin/commands/scan-pending-tasks.md | grep -c '\[CRON-FIRE\]'` returns `1` (marker present in the first 5 lines).
 
-## 12. Cross-Skill Byte-Identity (Cross-Skill Prompt-String Byte-Identity)
+## 11. Cross-Skill Byte-Identity (Cross-Skill Prompt-String Byte-Identity)
 
 **Action**: Verify `/PACT:scan-pending-tasks` string is byte-identical across all 3 skill files.
 
@@ -178,7 +169,7 @@ grep -o '/PACT:scan-pending-tasks' \
 
 ## Pass Criteria
 
-All 12 steps pass independently. A single step failure fails the runbook and must be triaged before merging the next PACT release.
+All 11 steps pass independently. A single step failure fails the runbook and must be triaged before merging the next PACT release.
 
 ## Failure Triage
 
@@ -186,7 +177,6 @@ All 12 steps pass independently. A single step failure fails the runbook and mus
 - **Step 3 fails**: platform cron primitive issue or 2-minute cadence misconfiguration. Check `CronCreate` call shape against canonical schema.
 - **Step 4 (any sub-step) fails**: load-bearing guardrail violation. Treat as a P0 regression; the 5 guardrails are why this mechanism exists.
 - **Step 5 fails**: completion-authority procedure regression. Inspect canonical acceptance two-call pair in `scan-pending-tasks §Lead-Only Completion Contract`.
-- **Step 6 fails**: cross-session contamination defense regression. Inspect `lead_session_id` field-write at canonical task-creation sites and the gate logic in `scan-pending-tasks.md` step 1.
-- **Step 7 fails**: hook-level session guard regression. Inspect `_is_lead_session` in `wake_lifecycle_emitter.py` and `_is_lead_session_at_init` in `session_init.py`.
-- **Step 8 / 9 / 10 fail**: lifecycle predicate regression. Inspect `count_active_tasks` and `has_same_teammate_continuation` in `shared/wake_lifecycle.py`.
-- **Step 11 / 12 fail**: structural-test territory; the corresponding test suite should have caught this in CI. Re-run `test_scan_pending_tasks_command_structure.py`.
+- **Step 6 fails**: hook-level session guard regression. Inspect `_is_lead_session` in `wake_lifecycle_emitter.py` and `_is_lead_session_at_init` in `session_init.py`.
+- **Step 7 / 8 / 9 fail**: lifecycle predicate regression. Inspect `count_active_tasks` and `has_same_teammate_continuation` in `shared/wake_lifecycle.py`.
+- **Step 10 / 11 fail**: structural-test territory; the corresponding test suite should have caught this in CI. Re-run `test_scan_pending_tasks_command_structure.py`.
