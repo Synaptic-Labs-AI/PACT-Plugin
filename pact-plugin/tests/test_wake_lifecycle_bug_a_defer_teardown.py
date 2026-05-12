@@ -15,7 +15,7 @@ Test mechanics mirror existing test_inbox_wake_lifecycle_emitter.py
 helpers (subprocess-piped, post-only state on disk).
 
 Counter-test-by-revert (manual / runbook-documented): SOURCE-ONLY revert
-via cp-bak / git-checkout HEAD~1 of pact-plugin/hooks/shared/wake_lifecycle.py
+via cp-bak / git-checkout HEAD~1 of pact-plugin/hooks/shared/pending_scan_lifecycle.py
 + pact-plugin/hooks/wake_lifecycle_emitter.py. Expected cardinality on
 revert: ~5 fail (TestBugATeardownDeferralOnSameTeammateContinuation
 4 cases + race-deleted continuation 1 case).
