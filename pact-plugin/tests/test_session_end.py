@@ -11,8 +11,7 @@ Tests cover:
    - Reads review_dispatch events from journal (primary PR detection)
    - Falls back to task metadata/handoff scanning for PR number
    - Writes warning to journal via append_event
-3. cleanup_teachback_markers() — session-scoped marker cleanup
-4. cleanup_old_sessions() — stale session directory removal
+3. cleanup_old_sessions() — stale session directory removal
 """
 import io
 import json
@@ -50,7 +49,7 @@ class TestMainEntryPoint:
 
         Default mocks: pact_context.init, get_project_dir, get_session_dir,
         get_session_id, get_team_name, get_task_list, append_event,
-        check_unpaused_pr, cleanup_teachback_markers, cleanup_old_sessions.
+        check_unpaused_pr, cleanup_old_sessions.
 
         Pass keyword overrides to replace defaults (e.g., get_task_list=...).
         """
@@ -67,7 +66,6 @@ class TestMainEntryPoint:
             "get_task_list": patch("session_end.get_task_list", return_value=[]),
             "append_event": patch("session_end.append_event"),
             "check_unpaused_pr": patch("session_end.check_unpaused_pr"),
-            "cleanup_teachback_markers": patch("session_end.cleanup_teachback_markers"),
             "cleanup_old_sessions": patch("session_end.cleanup_old_sessions"),
             "cleanup_old_teams": patch("session_end.cleanup_old_teams", return_value=(0, 0)),
             "cleanup_old_tasks": patch("session_end.cleanup_old_tasks", return_value=(0, 0)),
@@ -157,8 +155,7 @@ class TestMainEntryPoint:
 
     def test_main_call_ordering(self):
         """main() must call functions in correct order:
-        check_unpaused_pr -> cleanup_teachback_markers -> cleanup_old_sessions
-        -> _cleanup_old_checkpoints.
+        check_unpaused_pr -> cleanup_old_sessions -> _cleanup_old_checkpoints.
         check_unpaused_pr now runs BEFORE the journal write so its return
         value can be merged into the single session_end event.
         """
@@ -181,8 +178,6 @@ class TestMainEntryPoint:
         patches = self._patch_main_deps(
             check_unpaused_pr=patch("session_end.check_unpaused_pr",
                 side_effect=_record("check_unpaused_pr")),
-            cleanup_teachback_markers=patch("session_end.cleanup_teachback_markers",
-                side_effect=_record("cleanup_teachback_markers")),
             cleanup_old_sessions=patch("session_end.cleanup_old_sessions",
                 side_effect=_record("cleanup_old_sessions")),
             cleanup_old_teams=patch("session_end.cleanup_old_teams",
@@ -201,7 +196,6 @@ class TestMainEntryPoint:
 
         assert call_order == [
             "check_unpaused_pr",
-            "cleanup_teachback_markers",
             "cleanup_old_sessions",
             "cleanup_old_teams",
             "cleanup_old_tasks",
@@ -277,7 +271,6 @@ class TestMainEntryPoint:
         # Exit 0 (fire-and-forget)
         assert exc_info.value.code == 0
         # Cleanup steps still ran despite the journal write failure
-        mocks["cleanup_teachback_markers"].assert_called_once()
         mocks["cleanup_old_sessions"].assert_called_once()
 
 
@@ -1077,136 +1070,6 @@ class TestCheckUnpausedPr:
 
 
 # =============================================================================
-# cleanup_teachback_markers() Tests
-# =============================================================================
-
-class TestCleanupTeachbackMarkers:
-    """Tests for session_end.cleanup_teachback_markers() — session-scoped cleanup."""
-
-    def _create_markers(self, directory, names):
-        """Helper: create teachback marker files in a directory."""
-        directory.mkdir(parents=True, exist_ok=True)
-        for name in names:
-            (directory / name).touch()
-
-    def test_cleans_session_scoped_markers(self, tmp_path):
-        """Should remove teachback-warned-* files from session_dir."""
-        from session_end import cleanup_teachback_markers
-
-        session_dir = tmp_path / "my-project" / "abc-123"
-        self._create_markers(session_dir, [
-            "teachback-warned-coder-1-42",
-            "teachback-warned-coder-2-7",
-        ])
-
-        cleanup_teachback_markers(
-            project_slug="my-project",
-            session_dir=str(session_dir),
-            sessions_dir=str(tmp_path),
-        )
-
-        assert not list(session_dir.glob("teachback-warned-*"))
-
-    def test_cleans_legacy_slug_level_markers(self, tmp_path):
-        """Should sweep orphaned teachback markers at slug level (migration)."""
-        from session_end import cleanup_teachback_markers
-
-        slug_dir = tmp_path / "my-project"
-        self._create_markers(slug_dir, [
-            "teachback-warned-old-agent-1",
-        ])
-
-        cleanup_teachback_markers(
-            project_slug="my-project",
-            session_dir=None,
-            sessions_dir=str(tmp_path),
-        )
-
-        assert not list(slug_dir.glob("teachback-warned-*"))
-
-    def test_preserves_non_marker_files(self, tmp_path):
-        """Should not delete non-marker files in the slug directory."""
-        from session_end import cleanup_teachback_markers
-
-        slug_dir = tmp_path / "my-project"
-        slug_dir.mkdir(parents=True)
-        (slug_dir / "notes.txt").write_text("keep me")
-        (slug_dir / "config.json").write_text("{}")
-        self._create_markers(slug_dir, ["teachback-warned-agent-1"])
-
-        cleanup_teachback_markers(
-            project_slug="my-project",
-            session_dir=None,
-            sessions_dir=str(tmp_path),
-        )
-
-        assert (slug_dir / "notes.txt").exists()
-        assert (slug_dir / "config.json").exists()
-        assert not (slug_dir / "teachback-warned-agent-1").exists()
-
-    def test_skips_when_no_project_slug(self, tmp_path):
-        from session_end import cleanup_teachback_markers
-
-        # Should not raise
-        cleanup_teachback_markers(
-            project_slug="",
-            session_dir=None,
-            sessions_dir=str(tmp_path),
-        )
-
-    def test_handles_missing_directories(self, tmp_path):
-        from session_end import cleanup_teachback_markers
-
-        # Should not raise even if directories don't exist
-        cleanup_teachback_markers(
-            project_slug="nonexistent",
-            session_dir=str(tmp_path / "missing" / "session"),
-            sessions_dir=str(tmp_path),
-        )
-
-    def test_continues_when_single_unlink_fails(self, tmp_path):
-        """If one marker file can't be deleted, sweep should continue to others.
-
-        Exercises the inner `except OSError: pass` in _sweep_teachback_markers()
-        (session_end.py ~line 275). A read-only marker should not prevent
-        cleanup of subsequent markers in the same directory.
-        """
-        from session_end import _sweep_teachback_markers
-
-        directory = tmp_path / "session-dir"
-        directory.mkdir()
-
-        # Create three marker files
-        marker_a = directory / "teachback-warned-agent-a-1"
-        marker_b = directory / "teachback-warned-agent-b-2"
-        marker_c = directory / "teachback-warned-agent-c-3"
-        marker_a.touch()
-        marker_b.touch()
-        marker_c.touch()
-
-        # Make marker_b read-only so unlink() raises PermissionError (OSError)
-        marker_b.chmod(0o444)
-        # Also make the parent dir read-only to prevent unlink on that file
-        # (on some systems, unlink requires write permission on parent dir)
-        # Instead, mock unlink for just that file to guarantee the OSError
-        original_unlink = Path.unlink
-
-        def selective_unlink(self_path, *args, **kwargs):
-            if self_path.name == "teachback-warned-agent-b-2":
-                raise OSError("Permission denied (simulated)")
-            return original_unlink(self_path, *args, **kwargs)
-
-        from unittest.mock import patch
-        with patch.object(Path, "unlink", selective_unlink):
-            _sweep_teachback_markers(directory)
-
-        # marker_a and marker_c should be deleted; marker_b should survive
-        assert not marker_a.exists(), "marker_a should have been deleted"
-        assert marker_b.exists(), "marker_b should survive (unlink failed)"
-        assert not marker_c.exists(), "marker_c should have been deleted"
-
-
-# =============================================================================
 # cleanup_old_sessions() Tests
 # =============================================================================
 
@@ -1479,7 +1342,6 @@ class TestCleanupOldSessionsBoundary:
         old_dir = slug_dir / old_id
         old_dir.mkdir(parents=True, exist_ok=True)
         (old_dir / "pact-session-context.json").write_text("{}")
-        (old_dir / "teachback-warned-coder-1-42").touch()
         (old_dir / "some-other-artifact.json").write_text("{}")
         # Set mtime AFTER all writes (writing updates dir mtime on Unix)
         old_time = _time.time() - (31 * 86400)
@@ -1566,90 +1428,6 @@ class TestCleanupOldSessionsBoundary:
 
 
 # =============================================================================
-# Cleanup Migration Scenario — Combined Session + Slug Level (Test Engineer)
-# =============================================================================
-
-class TestCleanupMigrationScenario:
-    """Test the migration scenario where both legacy (slug-level) and new
-    (session-scoped) markers coexist.
-
-    After upgrading to #345, existing projects may have orphaned teachback
-    markers at the slug level from previous sessions. The cleanup should
-    remove both levels without interfering with non-marker files.
-    """
-
-    def test_both_levels_cleaned_simultaneously(self, tmp_path):
-        """Both session-scoped and legacy markers should be cleaned in one call."""
-        from session_end import cleanup_teachback_markers
-
-        slug_dir = tmp_path / "my-project"
-        slug_dir.mkdir(parents=True)
-        session_dir = slug_dir / "abc-123-session"
-        session_dir.mkdir()
-
-        # Legacy (slug-level) marker
-        (slug_dir / "teachback-warned-old-coder").touch()
-        # Session-scoped marker
-        (session_dir / "teachback-warned-new-coder-42").touch()
-        # Non-marker file at slug level
-        (slug_dir / "notes.txt").write_text("keep me")
-
-        cleanup_teachback_markers(
-            project_slug="my-project",
-            session_dir=str(session_dir),
-            sessions_dir=str(tmp_path),
-        )
-
-        # Both markers cleaned
-        assert not (slug_dir / "teachback-warned-old-coder").exists()
-        assert not (session_dir / "teachback-warned-new-coder-42").exists()
-        # Non-marker preserved
-        assert (slug_dir / "notes.txt").exists()
-
-    def test_session_dir_markers_not_affected_by_slug_sweep(self, tmp_path):
-        """Slug-level sweep should not descend into session directories.
-
-        _sweep_teachback_markers() uses iterdir() (not recursive glob), so
-        markers in subdirectories are only cleaned if session_dir is explicitly
-        provided.
-        """
-        from session_end import cleanup_teachback_markers
-
-        slug_dir = tmp_path / "my-project"
-        session_dir = slug_dir / "session-abc"
-        session_dir.mkdir(parents=True)
-
-        (session_dir / "teachback-warned-coder-1").touch()
-
-        # Only slug-level sweep (session_dir=None)
-        cleanup_teachback_markers(
-            project_slug="my-project",
-            session_dir=None,
-            sessions_dir=str(tmp_path),
-        )
-
-        # Session-dir markers should survive because slug sweep doesn't recurse
-        assert (session_dir / "teachback-warned-coder-1").exists()
-
-    def test_empty_session_dir_survives_cleanup(self, tmp_path):
-        """Session directory itself should not be removed by marker cleanup."""
-        from session_end import cleanup_teachback_markers
-
-        slug_dir = tmp_path / "my-project"
-        session_dir = slug_dir / "session-abc"
-        session_dir.mkdir(parents=True)
-
-        cleanup_teachback_markers(
-            project_slug="my-project",
-            session_dir=str(session_dir),
-            sessions_dir=str(tmp_path),
-        )
-
-        # Directory itself should survive
-        assert session_dir.exists()
-
-
-# =============================================================================
 # main() Integration — Full SessionEnd Flow (Test Engineer)
 # =============================================================================
 
@@ -1657,36 +1435,9 @@ class TestMainIntegrationCleanup:
     """Integration tests for main() exercising cleanup functions with session context.
 
     Verifies that main() correctly chains pact_context.init() -> get_session_dir()
-    -> cleanup_teachback_markers() -> cleanup_old_sessions() ->
-    _cleanup_old_checkpoints() using the session context from stdin.
+    -> cleanup_old_sessions() -> _cleanup_old_checkpoints() using the session
+    context from stdin.
     """
-
-    def test_main_calls_cleanup_teachback_markers(self):
-        """main() should call cleanup_teachback_markers with session context."""
-        from unittest.mock import patch, MagicMock
-        import io
-
-        input_data = json.dumps({"session_id": "test-session"})
-
-        with patch("sys.stdin", io.StringIO(input_data)), \
-             patch("session_end.pact_context") as mock_ctx, \
-             patch("session_end.get_project_dir", return_value="/test/proj"), \
-             patch("session_end.get_session_dir", return_value="/tmp/session"), \
-             patch("session_end.get_session_id", return_value="test-session"), \
-             patch("session_end.get_task_list", return_value=[]), \
-             patch("session_end.check_unpaused_pr"), \
-             patch("session_end.cleanup_teachback_markers") as mock_cleanup, \
-             patch("session_end.cleanup_old_sessions"), \
-             patch("session_end._cleanup_old_checkpoints"), \
-             pytest.raises(SystemExit):
-            mock_ctx.init = MagicMock()
-            from session_end import main
-            main()
-
-        mock_cleanup.assert_called_once_with(
-            project_slug="proj",
-            session_dir="/tmp/session",
-        )
 
     def test_main_calls_cleanup_old_sessions(self):
         """main() should call cleanup_old_sessions with session context."""
@@ -1702,7 +1453,6 @@ class TestMainIntegrationCleanup:
              patch("session_end.get_session_id", return_value="test-session"), \
              patch("session_end.get_task_list", return_value=[]), \
              patch("session_end.check_unpaused_pr"), \
-             patch("session_end.cleanup_teachback_markers"), \
              patch("session_end.cleanup_old_sessions") as mock_cleanup, \
              patch("session_end._cleanup_old_checkpoints"), \
              pytest.raises(SystemExit):
@@ -1734,7 +1484,6 @@ class TestMainIntegrationCleanup:
              patch("session_end.get_session_id", return_value="test-session"), \
              patch("session_end.get_task_list", return_value=[]), \
              patch("session_end.check_unpaused_pr"), \
-             patch("session_end.cleanup_teachback_markers"), \
              patch("session_end.cleanup_old_sessions"), \
              patch("session_end._cleanup_old_checkpoints") as mock_cleanup, \
              pytest.raises(SystemExit):
@@ -2861,7 +2610,6 @@ class TestCleanupSummaryEvent:
             patch("session_end.get_team_name", return_value=team_return),
             patch("session_end.get_task_list", return_value=[]),
             patch("session_end.check_unpaused_pr", return_value=None),
-            patch("session_end.cleanup_teachback_markers"),
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(3, 1)),
             patch("session_end.cleanup_old_tasks", return_value=(2, 0)),
@@ -2908,7 +2656,6 @@ class TestCleanupSummaryEvent:
             patch("session_end.get_team_name", return_value="pact-current"),
             patch("session_end.get_task_list", return_value=[]),
             patch("session_end.check_unpaused_pr", return_value=None),
-            patch("session_end.cleanup_teachback_markers"),
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(0, 0)),
             patch("session_end.cleanup_old_tasks", return_value=(0, 0)),
@@ -3037,7 +2784,6 @@ class TestMainReaperWiring:
             patch("session_end.get_team_name", return_value=team_return),
             patch("session_end.get_task_list", return_value=[]),
             patch("session_end.check_unpaused_pr", return_value=None),
-            patch("session_end.cleanup_teachback_markers"),
             patch("session_end.cleanup_old_sessions"),
             patch("session_end._cleanup_old_checkpoints"),
             patch("session_end.append_event"),
@@ -3123,7 +2869,6 @@ class TestMainReaperWiring:
             patch("session_end.get_team_name", return_value="pact-current"),
             patch("session_end.get_task_list", return_value=[]),
             patch("session_end.check_unpaused_pr", return_value=None),
-            patch("session_end.cleanup_teachback_markers"),
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(0, 0)),
             patch("session_end.cleanup_old_tasks", return_value=(0, 0)),
@@ -3354,7 +3099,6 @@ class TestReaperBehaviorPins:
             patch("session_end.get_team_name", return_value="pact-current"),
             patch("session_end.get_task_list", return_value=[]),
             patch("session_end.check_unpaused_pr", return_value=None),
-            patch("session_end.cleanup_teachback_markers"),
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", side_effect=rec_teams),
             patch("session_end.cleanup_old_tasks", side_effect=rec_tasks),
@@ -3506,7 +3250,6 @@ class TestTaskListIdAllowlistRejection:
             patch("session_end.get_team_name", return_value="team-A"),
             patch("session_end.get_task_list", return_value=[]),
             patch("session_end.check_unpaused_pr", return_value=None),
-            patch("session_end.cleanup_teachback_markers"),
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(0, 0)),
             patch("session_end._cleanup_old_checkpoints"),
@@ -3558,7 +3301,6 @@ class TestTaskListIdAllowlistRejection:
             patch("session_end.get_team_name", return_value="team-A"),
             patch("session_end.get_task_list", return_value=[]),
             patch("session_end.check_unpaused_pr", return_value=None),
-            patch("session_end.cleanup_teachback_markers"),
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(0, 0)),
             patch("session_end._cleanup_old_checkpoints"),
@@ -3607,7 +3349,6 @@ class TestTaskListIdAllowlistRejection:
             patch("session_end.get_team_name", return_value="team-A"),
             patch("session_end.get_task_list", return_value=[]),
             patch("session_end.check_unpaused_pr", return_value=None),
-            patch("session_end.cleanup_teachback_markers"),
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(0, 0)),
             patch("session_end._cleanup_old_checkpoints"),
@@ -3976,7 +3717,6 @@ class TestCleanupSummaryReaperRan:
             patch("session_end.get_team_name", return_value=team_return),
             patch("session_end.get_task_list", return_value=[]),
             patch("session_end.check_unpaused_pr", return_value=None),
-            patch("session_end.cleanup_teachback_markers"),
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(0, 0)),
             patch("session_end.cleanup_old_tasks", return_value=(0, 0)),
@@ -4688,7 +4428,6 @@ class TestSessionIdAllowlist:
             patch("session_end.get_team_name", return_value="team-A"),
             patch("session_end.get_task_list", return_value=[]),
             patch("session_end.check_unpaused_pr", return_value=None),
-            patch("session_end.cleanup_teachback_markers"),
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(0, 0)),
             patch("session_end._cleanup_old_checkpoints"),
@@ -4735,7 +4474,6 @@ class TestSessionIdAllowlist:
             patch("session_end.get_team_name", return_value="team-A"),
             patch("session_end.get_task_list", return_value=[]),
             patch("session_end.check_unpaused_pr", return_value=None),
-            patch("session_end.cleanup_teachback_markers"),
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(0, 0)),
             patch("session_end._cleanup_old_checkpoints"),
@@ -4803,7 +4541,6 @@ class TestTeamNameAllowlist:
             patch("session_end.get_team_name", return_value=hostile_value),
             patch("session_end.get_task_list", return_value=[]),
             patch("session_end.check_unpaused_pr", return_value=None),
-            patch("session_end.cleanup_teachback_markers"),
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(0, 0)),
             patch("session_end._cleanup_old_checkpoints"),
@@ -4851,7 +4588,6 @@ class TestTeamNameAllowlist:
             patch("session_end.get_team_name", return_value=good_team),
             patch("session_end.get_task_list", return_value=[]),
             patch("session_end.check_unpaused_pr", return_value=None),
-            patch("session_end.cleanup_teachback_markers"),
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(0, 0)),
             patch("session_end._cleanup_old_checkpoints"),

@@ -8,8 +8,7 @@ Used by: hooks.json SessionEnd hook
 Actions:
 1. Write session_end event to the session journal
 2. Detect open PRs that were not paused (append warning to journal)
-3. Clean up teachback warning markers (session-scoped + legacy slug-level)
-4. Clean up stale session directories using a dual TTL (30 days active, 180 days paused)
+3. Clean up stale session directories using a dual TTL (30 days active, 180 days paused)
 
 Purely observational — no destructive operations on project files. Session
 directory cleanup is best-effort and never blocks session termination.
@@ -162,57 +161,6 @@ def check_unpaused_pr(
         f"PR #{pr_number} may still be open but pause-mode was not run. "
         f"Run /PACT:pause or /PACT:wrap-up in next session."
     )
-
-
-def cleanup_teachback_markers(
-    project_slug: str,
-    session_dir: str | None = None,
-    sessions_dir: str | None = None,
-) -> None:
-    """
-    Remove teachback warning marker files from the session directory.
-
-    Marker files (teachback-warned-{agent}-{task_id}) accumulate during a session
-    and are no longer needed once the session ends. Cleanup is best-effort.
-
-    Cleans two locations:
-    1. Session-scoped dir: {slug}/{session_id}/teachback-warned-* (current format)
-    2. Slug-level dir: {slug}/teachback-warned-* (legacy migration sweep)
-
-    Args:
-        project_slug: Project identifier for the session directory
-        session_dir: The session-scoped directory path (from get_session_dir()).
-            When provided, markers are cleaned from this directory.
-        sessions_dir: Override for sessions base directory (for testing)
-    """
-    if not project_slug:
-        return
-
-    if sessions_dir is None:
-        sessions_dir = str(Path.home() / ".claude" / "pact-sessions")
-
-    # Clean session-scoped markers (current format)
-    if session_dir:
-        _sweep_teachback_markers(Path(session_dir))
-
-    # Migration sweep: clean orphaned slug-level markers (pre-#345 format)
-    slug_dir = Path(sessions_dir) / project_slug
-    _sweep_teachback_markers(slug_dir)
-
-
-def _sweep_teachback_markers(directory: Path) -> None:
-    """Remove all teachback-warned-* files in a directory. Best-effort."""
-    if not directory.exists():
-        return
-    try:
-        for marker in directory.iterdir():
-            if marker.name.startswith("teachback-warned-"):
-                try:
-                    marker.unlink()
-                except OSError:
-                    pass
-    except OSError:
-        pass
 
 
 # Regex for validating UUID-format directory names (session IDs).
@@ -784,12 +732,6 @@ def main():
             append_event(make_event("session_end", **event_kwargs))
         except Exception as e:
             print(f"Hook warning (session_end journal): {e}", file=sys.stderr)
-
-        # Clean up teachback warning markers (no longer needed after session)
-        cleanup_teachback_markers(
-            project_slug=project_slug,
-            session_dir=session_dir,
-        )
 
         # Clean up stale session directories (dual TTL: 30d active, 180d paused)
         cleanup_old_sessions(

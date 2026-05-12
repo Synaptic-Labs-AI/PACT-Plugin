@@ -125,7 +125,6 @@ pact_session.py path:
 init()-before-reader ordering guard:
 69. (parametrized) Every hook that calls a pact_context reader calls init() first
 70. session_end.py: init() before get_project_slug() (indirect get_project_dir() call)
-73. teachback_check.py: init() before should_warn() (indirect get_session_dir())
 
 Library module init() contract:
 71. task_utils.get_task_list() works when init() was called by a prior hook
@@ -1587,7 +1586,6 @@ class TestInitBeforeReaderOrdering:
     # Each tuple: (module filename, reader function names used)
     HOOKS_WITH_READERS = [
         ("agent_handoff_emitter.py", {"get_team_name"}),
-        ("teachback_check.py", {"get_team_name", "resolve_agent_name"}),
         ("file_tracker.py", {"get_team_name", "resolve_agent_name"}),
         ("track_files.py", {"get_session_id"}),
         ("merge_guard_pre.py", {"get_session_id"}),
@@ -1709,71 +1707,6 @@ class TestInitBeforeReaderOrdering:
         )
         assert init_line < slug_line, (
             f"session_end.py: get_project_slug() at line {slug_line} "
-            f"appears before pact_context.init() at line {init_line}"
-        )
-
-    def test_teachback_check_init_before_indirect_reader(self):
-        """teachback_check.py: init() must appear before should_warn() (which calls _get_marker_path() → get_session_dir()).
-
-        teachback_check.py calls get_session_dir() indirectly through
-        _get_marker_path(), which is called from should_warn(). The
-        parametrized test covers the direct readers (get_team_name,
-        resolve_agent_name), so this test verifies the indirect case.
-        """
-        import ast
-
-        hooks_dir = Path(__file__).parent.parent / "hooks"
-        source = (hooks_dir / "teachback_check.py").read_text(encoding="utf-8")
-        tree = ast.parse(source)
-
-        # Verify _get_marker_path() calls get_session_dir()
-        marker_func = None
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "_get_marker_path":
-                marker_func = node
-                break
-        assert marker_func is not None, "teachback_check.py has no _get_marker_path() function"
-
-        calls_get_session_dir = any(
-            isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-            and n.func.id == "get_session_dir"
-            for n in ast.walk(marker_func)
-        )
-        assert calls_get_session_dir, (
-            "teachback_check.py: _get_marker_path() does not call get_session_dir()"
-        )
-
-        # Verify init() appears before should_warn() in main()
-        main_func = None
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "main":
-                main_func = node
-                break
-        assert main_func is not None, "teachback_check.py has no main() function"
-
-        init_line = None
-        warn_line = None
-        for node in ast.walk(main_func):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            if (isinstance(func, ast.Attribute) and func.attr == "init"
-                    and isinstance(func.value, ast.Name)
-                    and func.value.id == "pact_context"):
-                if init_line is None:
-                    init_line = node.lineno
-            if isinstance(func, ast.Name) and func.id == "should_warn":
-                if warn_line is None:
-                    warn_line = node.lineno
-
-        assert init_line is not None, (
-            "teachback_check.py: main() never calls pact_context.init()"
-        )
-        assert warn_line is not None, (
-            "teachback_check.py: main() never calls should_warn()"
-        )
-        assert init_line < warn_line, (
-            f"teachback_check.py: should_warn() at line {warn_line} "
             f"appears before pact_context.init() at line {init_line}"
         )
 
@@ -2151,7 +2084,7 @@ class TestParallelSessionIsolation:
 
     This is the CORE behavioral change of issue #345 — the entire point of
     session-scoping. Two sessions with different session_ids must produce
-    different get_session_dir() values, ensuring teachback markers, context
+    different get_session_dir() values, ensuring session journals, context
     files, and other artifacts don't interfere.
     """
 
