@@ -28,11 +28,11 @@ def src() -> str:
     return SESSION_INIT_PATH.read_text(encoding="utf-8")
 
 
-def test_imports_count_active_tasks_from_pending_scan_lifecycle(src):
-    """The lifecycle helper module was renamed wake_lifecycle.py ->
-    pending_scan_lifecycle.py as part of the cron-mechanism migration
-    (commit 6). The session_init import follows the new module name."""
-    assert "from shared.pending_scan_lifecycle import count_active_tasks" in src
+def test_imports_count_active_tasks_from_wake_lifecycle(src):
+    """The lifecycle helper module is `shared.wake_lifecycle.py`. The
+    session_init resume-Arm branch imports `count_active_tasks` from
+    that module to detect first-active-task transitions at SessionStart."""
+    assert "from shared.wake_lifecycle import count_active_tasks" in src
 
 
 def test_calls_count_active_tasks(src):

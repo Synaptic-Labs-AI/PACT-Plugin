@@ -19,11 +19,11 @@ cd <repo-root>
 WORKTREE=$(pwd)
 
 # Snapshot current state.
-cp pact-plugin/hooks/shared/pending_scan_lifecycle.py /tmp/pending_scan_lifecycle.py.bak
+cp pact-plugin/hooks/shared/wake_lifecycle.py /tmp/wake_lifecycle.py.bak
 cp pact-plugin/hooks/wake_lifecycle_emitter.py /tmp/wake_lifecycle_emitter.py.bak
 
 # Revert source files only (NOT the tests).
-git checkout HEAD~1 -- pact-plugin/hooks/shared/pending_scan_lifecycle.py \
+git checkout HEAD~1 -- pact-plugin/hooks/shared/wake_lifecycle.py \
                        pact-plugin/hooks/wake_lifecycle_emitter.py
 
 # Run the affected test scope and record cardinality.
@@ -36,7 +36,7 @@ cd "$WORKTREE"
 # EXPECTED CARDINALITY ON REVERT (empirical, measured against
 # 00184b8b^ source):
 #   - test_has_same_teammate_continuation.py: ~34 fail, 0 collection
-#     errors. The module imports the helper as `import shared.pending_scan_lifecycle
+#     errors. The module imports the helper as `import shared.wake_lifecycle
 #     as wl` and references `wl.has_same_teammate_continuation` per-test;
 #     when the symbol is gone the AttributeError raises per-test rather
 #     than at module-collection. Three production-shape regression tests
@@ -51,14 +51,14 @@ cd "$WORKTREE"
 # Total cardinality on this scope's revert: ~36 test failures, 0 collection errors.
 
 # Restore source atomically.
-cp /tmp/pending_scan_lifecycle.py.bak pact-plugin/hooks/shared/pending_scan_lifecycle.py
+cp /tmp/wake_lifecycle.py.bak pact-plugin/hooks/shared/wake_lifecycle.py
 cp /tmp/wake_lifecycle_emitter.py.bak pact-plugin/hooks/wake_lifecycle_emitter.py
 
 # Verify byte-identical restore.
-git diff --quiet -- pact-plugin/hooks/shared/pending_scan_lifecycle.py \
+git diff --quiet -- pact-plugin/hooks/shared/wake_lifecycle.py \
                     pact-plugin/hooks/wake_lifecycle_emitter.py
 echo "exit code: $?"  # MUST be 0 — clean restore.
-git status --porcelain -- pact-plugin/hooks/shared/pending_scan_lifecycle.py \
+git status --porcelain -- pact-plugin/hooks/shared/wake_lifecycle.py \
                           pact-plugin/hooks/wake_lifecycle_emitter.py
 # MUST print nothing — clean restore confirmed.
 ```

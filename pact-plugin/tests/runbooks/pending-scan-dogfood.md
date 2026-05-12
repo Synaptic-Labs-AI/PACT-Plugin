@@ -188,5 +188,5 @@ All 12 steps pass independently. A single step failure fails the runbook and mus
 - **Step 5 fails**: completion-authority procedure regression. Inspect canonical acceptance two-call pair in `scan-pending-tasks §Lead-Only Completion Contract`.
 - **Step 6 fails**: cross-session contamination defense regression. Inspect `lead_session_id` field-write at canonical task-creation sites and the gate logic in `scan-pending-tasks.md` step 1.
 - **Step 7 fails**: hook-level session guard regression. Inspect `_is_lead_session` in `wake_lifecycle_emitter.py` and `_is_lead_session_at_init` in `session_init.py`.
-- **Step 8 / 9 / 10 fail**: lifecycle predicate regression. Inspect `count_active_tasks` and `has_same_teammate_continuation` in `shared/wake_lifecycle.py` (or `shared/pending_scan_lifecycle.py` post-rename).
+- **Step 8 / 9 / 10 fail**: lifecycle predicate regression. Inspect `count_active_tasks` and `has_same_teammate_continuation` in `shared/wake_lifecycle.py`.
 - **Step 11 / 12 fail**: structural-test territory; the corresponding test suite should have caught this in CI. Re-run `test_scan_pending_tasks_command_structure.py`.

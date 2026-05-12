@@ -131,7 +131,7 @@ from shared.pact_context import get_team_name
 from shared.session_state import is_safe_path_component
 from shared.task_utils import read_task_json
 from shared.tool_response import extract_tool_response
-from shared.pending_scan_lifecycle import count_active_tasks, has_same_teammate_continuation
+from shared.wake_lifecycle import count_active_tasks, has_same_teammate_continuation
 
 # Suppress the false "hook error" UI surface on bare exit paths.
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})

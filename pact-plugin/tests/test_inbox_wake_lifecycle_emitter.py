@@ -586,8 +586,8 @@ def test_count_active_tasks_not_called_on_metadata_only_taskupdate():
     sys.path.insert(0, str(HOOK_DIR))
     import wake_lifecycle_emitter as emitter
 
-    # Patch the imported reference at the call site (NOT shared.pending_scan_lifecycle).
-    # `from shared.pending_scan_lifecycle import count_active_tasks` binds the name
+    # Patch the imported reference at the call site (NOT shared.wake_lifecycle).
+    # `from shared.wake_lifecycle import count_active_tasks` binds the name
     # `count_active_tasks` into emitter's module globals, so patching the
     # source module reference would miss this binding (phantom-green trap).
     from unittest.mock import patch

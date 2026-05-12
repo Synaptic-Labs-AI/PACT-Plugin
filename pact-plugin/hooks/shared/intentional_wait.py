@@ -184,7 +184,7 @@ def _is_exempt_agent_type(
     a positive match.
 
     NOT a hook predicate — pure helper for shared.intentional_wait.
-    is_self_complete_exempt and shared.pending_scan_lifecycle._lifecycle_relevant.
+    is_self_complete_exempt and shared.wake_lifecycle._lifecycle_relevant.
     Mirrors the auditor_reminder._team_has_auditor precedent in
     parameter shape (owner-or-role + team_name + teams_dir override) and
     in upstream-config-read delegation, BUT inverts the error semantics:
@@ -229,7 +229,7 @@ def _is_wake_excluded_agent_type(
 
     Same fail-closed semantics as `_is_exempt_agent_type`: returns False
     on every error path. Same upstream-config-read delegation to
-    `_iter_members`. Consumed by `shared.pending_scan_lifecycle._lifecycle_relevant`.
+    `_iter_members`. Consumed by `shared.wake_lifecycle._lifecycle_relevant`.
 
     NOT a hook predicate — pure helper.
 
