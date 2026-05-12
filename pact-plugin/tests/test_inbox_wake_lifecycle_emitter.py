@@ -494,16 +494,32 @@ def test_is_terminal_status_update_matches_completed_and_deleted():
 # ---------- Lead-session guard (sec-M5 / te-MED-1) ----------
 
 def test_emitter_guards_on_lead_session_id_structural():
-    """Source-level structural pin: the emitter must call
-    `_is_lead_session` (or equivalent guard against
-    team_config.leadSessionId) before any directive emit. Without this
-    structural anchor, the emitter would fire Arm/Teardown directives
-    in teammate sessions (where they're inert at best, attacker-
-    weaponizable at worst — a teammate session that arms a Monitor
-    would watch the lead's inbox file from the wrong process)."""
+    """Source-level structural pin (commit-9 tightened from substring-
+    anywhere to regex-in-code-line): the emitter must CALL `_is_lead_session`
+    (or equivalent guard against team_config.leadSessionId) before any
+    directive emit. Without this structural anchor, the emitter would
+    fire Arm/Teardown directives in teammate sessions (where they're
+    inert at best, attacker-weaponizable at worst — a teammate session
+    that arms a cron scan would scan the lead's task store from the wrong
+    process).
+
+    Tightening: require the guard symbol to appear within a control-flow
+    construct (if/return/elif/while/assert), NOT just anywhere in source.
+    A hostile edit removing the actual guard call but leaving a docstring
+    mention would pass the prior substring check; the regex-in-code-line
+    check catches the wiring-disconnect."""
+    import re as _re
     src = (HOOK_DIR / "wake_lifecycle_emitter.py").read_text(encoding="utf-8")
-    assert "_is_lead_session" in src
-    assert "leadSessionId" in src
+    code_line_pattern = _re.compile(
+        r"^\s*(if|return|elif|while|assert)\b.*(_is_lead_session|leadSessionId)",
+        _re.MULTILINE,
+    )
+    assert code_line_pattern.search(src) is not None, (
+        "INV-12 Layer 0 strict: wake_lifecycle_emitter.py missing guard "
+        "CALL within control-flow construct (if/return/elif/while/assert). "
+        "The prior substring check passed on docstring mentions; "
+        "the strict check requires the guard to appear in actual code."
+    )
 
 
 def test_no_emit_when_session_id_does_not_match_lead(tmp_path):

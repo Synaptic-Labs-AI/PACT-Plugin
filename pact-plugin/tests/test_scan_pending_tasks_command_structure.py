@@ -166,14 +166,22 @@ def test_inv2_each_guardrail_has_audit_block(cmd_text):
     """INV-2 audit anchor: each G* guardrail must be followed by a
     paragraph starting with '**Audit**:'. The audit prose anchors
     the WHY of the guardrail so an editing LLM cannot quietly relax
-    the contract."""
+    the contract.
+
+    Strictness (commit-9): EXACTLY 5 audit blocks, not >=5. A 6th
+    audit block would either duplicate G1-G5 audit prose (silent
+    redundancy) or expand the audit-anchored contract beyond the
+    5-guardrail architectural pin (silent contract expansion).
+    Consistent with the companion test_inv2_exactly_five_guardrail_headers
+    cardinality assertion."""
     g_start = cmd_text.find("\n## Guardrails")
     g_end = cmd_text.find("\n## ", g_start + 1)
     g_section = cmd_text[g_start:g_end] if g_end > 0 else cmd_text[g_start:]
     audit_count = g_section.count("**Audit**")
-    assert audit_count >= 5, (
-        f"INV-2: §Guardrails section must contain at least 5 '**Audit**' "
-        f"blocks (one per guardrail). Found {audit_count}."
+    assert audit_count == 5, (
+        f"INV-2: §Guardrails section must contain EXACTLY 5 '**Audit**' "
+        f"blocks (one per guardrail G1-G5). Found {audit_count}. "
+        f"Tightened to == in commit-9 strictness pass."
     )
 
 
@@ -187,25 +195,50 @@ def test_inv1_prompt_string_in_this_file(cmd_text):
 
 
 def test_inv1_byte_identical_across_three_command_files(cmd_text):
-    """INV-1 cross-file byte-identity: the literal string
-    /PACT:scan-pending-tasks appears in all 3 command files. Drift
+    """INV-1 cross-file byte-identity (commit-9 tightened): the slug
+    literal extracted from start-pending-scan.md's CronCreate( call
+    (the operational source-of-truth — what the platform actually
+    receives) MUST appear byte-identical in all 3 command files. Drift
     between them breaks the CronList idempotency lookup (start-side)
     and teardown lookup (stop-side).
+
+    Tightening over substring-presence: extract the slug from the
+    OPERATIONAL CronCreate call shape, not a hardcoded literal in
+    this test — this means the test follows the source-of-truth
+    rather than caching its own constant that could drift from the
+    actual call.
 
     Counter-test-by-revert scope (per PR #723 cycle-1 lesson): this
     test requires reverting ALL THREE .md files together to falsify
     correctly — single-file revert masks cross-file drift detection."""
-    target = "/PACT:scan-pending-tasks"
+    import re
     start_text = (ROOT / "commands" / "start-pending-scan.md").read_text(encoding="utf-8")
     stop_text = (ROOT / "commands" / "stop-pending-scan.md").read_text(encoding="utf-8")
-    assert target in start_text, (
-        f"INV-1: start-pending-scan.md missing canonical slug {target}"
+    # Extract operational prompt from start-pending-scan.md's CronCreate( block
+    block_start = start_text.find("CronCreate(")
+    assert block_start >= 0, "start-pending-scan.md missing CronCreate( call"
+    block_end = start_text.find(")", block_start)
+    block = start_text[block_start:block_end + 1]
+    m = re.search(r'prompt="([^"]+)"', block)
+    assert m is not None, (
+        f"Cannot extract prompt=... from start-pending-scan.md's "
+        f"CronCreate block: {block!r}"
     )
-    assert target in stop_text, (
-        f"INV-1: stop-pending-scan.md missing canonical slug {target}"
+    operational_slug = m.group(1)
+    # Byte-identity contract: the operational slug appears in all 3 files.
+    assert operational_slug in start_text, (
+        f"INV-1: start-pending-scan.md missing operational slug "
+        f"{operational_slug!r}"
     )
-    assert target in cmd_text, (
-        f"INV-1: scan-pending-tasks.md missing canonical slug {target}"
+    assert operational_slug in stop_text, (
+        f"INV-1: stop-pending-scan.md missing operational slug "
+        f"{operational_slug!r} — filter target drift; teardown would "
+        f"fail to find the cron registered by start-pending-scan."
+    )
+    assert operational_slug in cmd_text, (
+        f"INV-1: scan-pending-tasks.md missing operational slug "
+        f"{operational_slug!r} — the scan body itself is named by the "
+        f"slug that CronCreate registers; drift breaks the firing chain."
     )
 
 
@@ -224,48 +257,91 @@ def test_inv9_gate_invoked_at_step_one_of_operation(cmd_text):
     raw-read in step 4). Ordering matters: the gate must filter
     candidate tasks BEFORE the scan reads their metadata, not after.
     Reading-then-filtering still leaks cross-session metadata to
-    the scan's working set."""
+    the scan's working set.
+
+    Strictness (commit-9): the forgiving fallback path (scan whole
+    operation for gate-before-raw-read anywhere) was removed. The
+    test requires the canonical numbered-list shape (step 1./2./3./...)
+    AND requires step 1 to reference the gate explicitly. A future
+    runbook reformat that drops numbered-list markers will fail this
+    test with a clear error message rather than silently passing the
+    looser any-position check."""
     op_start = cmd_text.find("## Operation")
     op_end = cmd_text.find("\n## ", op_start + 1)
     op_section = cmd_text[op_start:op_end] if op_end > 0 else cmd_text[op_start:]
-    # Step 1 must reference the same-session-identity gate or
-    # lead_session_id check.
+    # Strict: step 1./2. markers MUST be present (canonical numbered-list shape).
     step_1_pos = op_section.find("1. ")
     step_2_pos = op_section.find("2. ", step_1_pos)
-    if step_1_pos < 0 or step_2_pos < 0:
-        # Fallback: scan the whole operation for the gate token
-        # appearing before the raw-read step.
-        gate_pos = op_section.lower().find("same-session-identity gate")
-        if gate_pos < 0:
-            gate_pos = op_section.find("lead_session_id")
-        raw_read_pos = op_section.lower().find("raw-read")
-        if raw_read_pos < 0:
-            raw_read_pos = op_section.find("metadata.teachback_submit")
-        assert gate_pos >= 0 and raw_read_pos >= 0
-        assert gate_pos < raw_read_pos, (
-            "INV-9: same-session-identity gate must precede raw-read "
-            "in §Operation."
-        )
-    else:
-        step_1 = op_section[step_1_pos:step_2_pos]
-        assert (
-            "same-session-identity gate" in step_1.lower()
-            or "lead_session_id" in step_1
-        ), (
-            "INV-9: Operation step 1 must invoke the same-session-"
-            "identity gate (compare session_id to "
-            "metadata.lead_session_id)."
-        )
+    assert step_1_pos >= 0, (
+        "INV-9 strict: §Operation must use canonical numbered-list "
+        "shape with '1. ' marker. No fallback path; restructure the "
+        "section to use numbered steps."
+    )
+    assert step_2_pos > step_1_pos, (
+        "INV-9 strict: §Operation must have a '2. ' marker after the "
+        "'1. ' marker. Canonical numbered-list shape required."
+    )
+    step_1 = op_section[step_1_pos:step_2_pos]
+    assert (
+        "same-session-identity gate" in step_1.lower()
+        or "lead_session_id" in step_1
+    ), (
+        "INV-9: Operation step 1 must invoke the same-session-"
+        "identity gate (compare session_id to "
+        "metadata.lead_session_id)."
+    )
 
 
 def test_inv9_gate_uses_exact_equality_match(cmd_text):
-    """INV-9: gate uses exact-equality match on lead_session_id.
-    Substring or partial match invites false-positive acceptance."""
+    """INV-9 / H2-strict (commit-9 tightened): gate uses verbatim `==`
+    comparison on `metadata.lead_session_id` AND the current session_id.
+    Substring or partial match invites false-positive acceptance.
+
+    Tightening over the prior OR-permissive check (`"exact-equality" OR
+    "=="`): require the verbatim equality-comparison pattern combining
+    `metadata.lead_session_id` and the `==` operator in the same
+    pseudocode/operation context. A future edit that drops the `==`
+    operator while leaving the `lead_session_id` token in audit prose
+    would have passed the prior check; the combined-token check
+    catches it.
+
+    H2 mitigation (security): the gate is the architectural replacement
+    for the Monitor-era `armed_by_session_id` cross-session-contamination
+    defense. The verbatim `==` is non-negotiable — `in` membership,
+    `startswith`, or any partial-match relaxation re-opens the H2 vector.
+    """
+    import re as _re
     section_start = cmd_text.find("\n## Same-Session-Identity Gate")
     section_end = cmd_text.find("\n## ", section_start + 1)
     section = cmd_text[section_start:section_end] if section_end > 0 else cmd_text[section_start:]
-    assert "exact-equality" in section.lower() or "==" in section
-    assert "lead_session_id" in section
+    # Strict: BOTH `==` operator AND `lead_session_id` must appear in the
+    # section. Beyond that, require the two tokens to co-occur within the
+    # same pseudocode/operation context (audit-anchored equality assertion).
+    assert "==" in section, (
+        "INV-9/H2-strict: §Same-Session-Identity Gate must use verbatim "
+        "'==' equality operator. Partial-match relaxation (in/startswith) "
+        "re-opens H2 cross-session-contamination vector."
+    )
+    assert "lead_session_id" in section, (
+        "INV-9/H2-strict: §Same-Session-Identity Gate must reference "
+        "`metadata.lead_session_id` field. Required for H2 mitigation."
+    )
+    # Strict combined check: at least one occurrence of `lead_session_id`
+    # within a small window of an `==` operator. Use regex spanning the
+    # canonical pseudocode comparison shapes.
+    combined_pattern = _re.compile(
+        r"lead_session_id\s*==|==\s*[^=\n]{0,80}?(session_id|lead_session_id)",
+        _re.MULTILINE,
+    )
+    assert combined_pattern.search(section) is not None, (
+        "INV-9/H2-strict: §Same-Session-Identity Gate must contain a "
+        "verbatim equality-comparison pattern combining lead_session_id "
+        "and ==. Examples: `metadata.lead_session_id == current session_id`, "
+        "`task.metadata.lead_session_id == pact_session_context[\"session_id\"]`. "
+        "A separated mention of `==` AND `lead_session_id` in unrelated "
+        "prose passes the prior individual-token check but fails this "
+        "combined-pattern check."
+    )
 
 
 def test_inv9_fails_closed_on_missing_field(cmd_text):

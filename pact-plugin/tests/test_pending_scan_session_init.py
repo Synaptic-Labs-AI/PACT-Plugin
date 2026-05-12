@@ -183,25 +183,41 @@ def test_session_init_emits_arm_directive_when_active_tasks_present(tmp_path):
 # ---------- INV-12 Layer 0: hook-level session guard ----------
 
 def test_session_init_imports_or_calls_lead_session_guard(src):
-    """INV-12 Layer 0 (structural tier): session_init.py must call a
-    lead-session guard before emitting the Arm directive. The guard
-    compares the incoming session_id to team_config.leadSessionId;
-    a mismatch suppresses emission so a teammate session never
-    receives the Arm prose. Pin one of the expected guard tokens —
-    backend-coder picks the exact symbol but it must surface here.
+    """INV-12 Layer 0 (structural tier; commit-9 tightened from
+    OR-permissive substring-anywhere to regex-in-code-line): session_init.py
+    must CALL a lead-session guard before emitting the Arm directive.
+    The guard compares the incoming session_id to team_config.leadSessionId;
+    a mismatch suppresses emission so a teammate session never receives
+    the Arm prose.
+
+    Tightening over the prior OR-permissive substring check: require the
+    guard symbol to appear within a control-flow construct (if-statement
+    or return-statement etc.), NOT just anywhere in source. A hostile edit
+    that removes the actual guard call but leaves a docstring mention
+    of `_is_lead_session` would have passed the prior substring check;
+    the regex-in-code-line check catches the wiring-disconnect.
 
     Defense-in-depth Layer 0 (per plan §Architecture INV-12) catches
     misdirected directive emission at the source. Layers 1 (skill-body
     Lead-Session Guard), 2 (platform CronCreate session-scoping), and 3
     (scan-pending-tasks same-session-identity gate) all assume Layer 0
     is in place but must remain effective even if it isn't."""
-    assert (
-        "_is_lead_session" in src
-        or "leadSessionId" in src
-    ), (
-        "session_init.py missing Layer 0 lead-session guard token. "
-        "Expected _is_lead_session call or direct leadSessionId "
-        "comparison before Arm directive emission."
+    import re as _re
+    # Strict: the guard symbol must appear inside an if/return/elif/while/assert
+    # statement in the source. Matches either the canonical
+    # `_is_lead_session_at_init(` predicate call or a direct
+    # `leadSessionId` comparison expression.
+    code_line_pattern = _re.compile(
+        r"^\s*(if|return|elif|while|assert)\b.*(_is_lead_session|leadSessionId)",
+        _re.MULTILINE,
+    )
+    assert code_line_pattern.search(src) is not None, (
+        "INV-12 Layer 0 strict: session_init.py missing guard CALL within "
+        "control-flow construct (if/return/elif/while/assert). The prior "
+        "OR-permissive substring check passed on mere docstring mentions; "
+        "the strict check requires the guard to appear in actual code. "
+        "Expected pattern: `if ... _is_lead_session_at_init(...)` or "
+        "equivalent leadSessionId comparison in a code line."
     )
 
 

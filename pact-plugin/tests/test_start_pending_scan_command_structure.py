@@ -98,42 +98,89 @@ def test_required_section_present(cmd_text, section):
 # ---------- INV-3: CronCreate 4-field call shape ----------
 
 def test_inv3_cron_create_block_has_four_fields(cmd_text):
-    """INV-3: the CronCreate call exposes exactly 4 named fields
-    (cron + prompt + recurring + durable). Each field is load-bearing
-    per the §CronCreate Block audit anchor — extra args or omitted
-    fields produce a different cron behavior."""
+    """INV-3 / M1 (commit-9 tightened to §CronCreate Block scope): the
+    CronCreate call in the §CronCreate Block exposes exactly 4 named
+    fields (cron + prompt + recurring + durable) with VERBATIM Python-form
+    values. Each field is load-bearing per the §CronCreate Block audit
+    anchor — extra args or omitted fields produce a different cron
+    behavior.
+
+    Tightening (M1): previously the verbatim-value checks used `in cmd_text`
+    (substring-anywhere-in-file). M1 scopes them to the §CronCreate Block
+    Python-form code (the operational source-of-truth that the platform
+    receives), NOT the §Operation inline markdown-prose summary which
+    uses lowercase `true`/`false` to read naturally in prose. A hostile
+    edit that breaks the actual Python-form CronCreate call but leaves
+    audit prose intact would pass the prior check; the in-section scope
+    check catches it.
+
+    Note: the file may contain TWO `CronCreate(` occurrences — the
+    markdown-prose inline example at §Operation (lowercase true/false)
+    and the Python-form code block at §CronCreate Block (capitalized
+    True/False). We target the §CronCreate Block section because that
+    is the operational source-of-truth."""
     assert 'CronCreate(' in cmd_text, "Missing CronCreate( call"
-    assert 'cron="*/2 * * * *"' in cmd_text, (
-        "INV-3: CronCreate must use cron='*/2 * * * *' (2-minute cadence "
-        "pinned in plan §Architecture). Tuning the cadence requires "
-        "Communication Charter §Cron-Fire Mechanism prose update in lockstep."
+    # Locate the §CronCreate Block section (the Python-form code block).
+    section_start = cmd_text.find("\n## CronCreate Block")
+    assert section_start >= 0, (
+        "Missing §CronCreate Block section — expected the operational "
+        "Python-form code block to be anchored under this section heading."
     )
-    assert 'prompt="/PACT:scan-pending-tasks"' in cmd_text, (
-        "INV-3: CronCreate prompt must be exactly /PACT:scan-pending-tasks "
-        "and byte-identical with the scan-pending-tasks.md frontmatter "
-        "and stop-pending-scan.md filter target (INV-1 cross-file pin)."
+    section_end = cmd_text.find("\n## ", section_start + 1)
+    section = cmd_text[section_start:section_end] if section_end > 0 else cmd_text[section_start:]
+    # Extract the CronCreate( ... ) block WITHIN the §CronCreate Block section.
+    block_start = section.find("CronCreate(")
+    assert block_start >= 0, (
+        "§CronCreate Block section missing CronCreate( call. The section "
+        "must contain the operational Python-form code block."
     )
-    assert 'recurring=True' in cmd_text, (
-        "INV-3: CronCreate must set recurring=True. One-shot mode "
-        "(recurring=False) would re-introduce the LLM-self-diagnosis "
-        "failure mode the unconditional-emit discipline closes."
+    block_end = section.find(")", block_start)
+    assert block_end > block_start, "CronCreate( in §CronCreate Block has no closing )"
+    block = section[block_start:block_end + 1]
+    assert 'cron="*/2 * * * *"' in block, (
+        "INV-3/M1: §CronCreate Block must use cron='*/2 * * * *' (2-minute "
+        "cadence pinned in plan §Architecture). Tuning the cadence requires "
+        "Communication Charter §Cron-Fire Mechanism prose update in lockstep. "
+        f"§CronCreate Block contents: {block!r}"
     )
-    assert 'durable=False' in cmd_text, (
-        "INV-3: CronCreate must set durable=False. durable=True would "
-        "re-introduce cross-session contamination — stale crons from "
-        "prior sessions firing against unrelated tasks in fresh sessions."
+    assert 'prompt="/PACT:scan-pending-tasks"' in block, (
+        "INV-3/M1: §CronCreate Block must use prompt='/PACT:scan-pending-tasks' "
+        "verbatim. The string must be byte-identical with scan-pending-tasks.md "
+        "frontmatter and stop-pending-scan.md filter target (INV-1 cross-file pin). "
+        f"§CronCreate Block contents: {block!r}"
+    )
+    assert 'recurring=True' in block, (
+        "INV-3/M1: §CronCreate Block must set recurring=True (Python-form, "
+        "capitalized). One-shot mode (recurring=False) would re-introduce the "
+        "LLM-self-diagnosis failure mode the unconditional-emit discipline closes. "
+        f"§CronCreate Block contents: {block!r}"
+    )
+    assert 'durable=False' in block, (
+        "INV-3/M1: §CronCreate Block must set durable=False (Python-form, "
+        "capitalized). durable=True would re-introduce cross-session contamination — "
+        "stale crons from prior sessions firing against unrelated tasks in fresh sessions. "
+        f"§CronCreate Block contents: {block!r}"
     )
 
 
 def test_inv3_cron_create_block_has_no_extra_fields(cmd_text):
-    """Hostile-coupling check: the CronCreate example block contains
-    EXACTLY the 4 documented fields, no additional kwargs. Extra args
-    (e.g., a hypothetical 'tags' or 'priority') would couple the
-    skill to a platform extension the contract does not endorse."""
-    block_start = cmd_text.find("CronCreate(")
-    block_end = cmd_text.find(")", block_start)
+    """Hostile-coupling check (commit-9 tightened to §CronCreate Block
+    scope): the §CronCreate Block code contains EXACTLY the 4 documented
+    fields, no additional kwargs. Extra args (e.g., a hypothetical
+    'tags' or 'priority') would couple the skill to a platform extension
+    the contract does not endorse.
+
+    Tightening: extract from §CronCreate Block section, not the first
+    CronCreate( in the file (which is the §Operation inline summary
+    using lowercase markdown-prose form)."""
+    section_start = cmd_text.find("\n## CronCreate Block")
+    assert section_start >= 0, "Missing §CronCreate Block section"
+    section_end = cmd_text.find("\n## ", section_start + 1)
+    section = cmd_text[section_start:section_end] if section_end > 0 else cmd_text[section_start:]
+    block_start = section.find("CronCreate(")
+    block_end = section.find(")", block_start)
     assert block_start >= 0 and block_end > block_start
-    block = cmd_text[block_start:block_end + 1]
+    block = section[block_start:block_end + 1]
     # Each canonical field appears exactly once in the call block.
     assert block.count("cron=") == 1
     assert block.count("prompt=") == 1
@@ -181,36 +228,66 @@ def test_inv4_forbids_substring_and_regex_filter_in_audit(cmd_text):
 
 # ---------- INV-1: byte-identical prompt cross-file ----------
 
+def _extract_croncreate_prompt(cmd_text: str) -> str:
+    """Extract the operational prompt-string literal from start-pending-scan.md's
+    CronCreate( block. This is the source-of-truth: it's the string the
+    platform actually receives when the skill executes.
+
+    Returns the raw quoted form (e.g., '"/PACT:scan-pending-tasks"') so the
+    cross-file byte-identity check compares the EXACT call-shape literal,
+    not a substring within any prose mention of the slug.
+    """
+    import re
+    block_start = cmd_text.find("CronCreate(")
+    assert block_start >= 0, "Missing CronCreate( in start-pending-scan.md"
+    block_end = cmd_text.find(")", block_start)
+    block = cmd_text[block_start:block_end + 1]
+    m = re.search(r'prompt=("[^"]+")', block)
+    assert m is not None, (
+        f"Cannot extract prompt=... from CronCreate block: {block!r}"
+    )
+    return m.group(1)
+
+
 def test_inv1_prompt_string_byte_identical_with_scan_body(cmd_text):
-    """INV-1 cross-file pin: the prompt string in the CronCreate call
-    here MUST match the scan-pending-tasks.md frontmatter byte-for-byte.
-    Silent drift between the two breaks the CronList lookup, causing
-    orphan-cron accumulation and silent re-arm failure."""
+    """INV-1 cross-file byte-identity (commit-9 tightened): the prompt
+    literal in start-pending-scan.md's CronCreate( call MUST appear
+    byte-identical in scan-pending-tasks.md. Tightening over substring-
+    presence: the literal form `"/PACT:scan-pending-tasks"` (quoted)
+    must appear in both files, not just the unquoted slug. This
+    discriminates the operational call-shape from prose-mentions
+    of the slug in audit anchors."""
+    operational_prompt = _extract_croncreate_prompt(cmd_text)
+    # operational_prompt is the quoted form, e.g. '"/PACT:scan-pending-tasks"'
+    # The unquoted slug (without quotes) is what appears in scan-pending-tasks.md
+    # frontmatter and prose; the quoted form appears only in CronCreate-shaped
+    # code blocks. Byte-identity contract: both files contain the SAME
+    # unquoted slug literal, AND the quoted form appears in start-pending-scan.md
+    # (verified by extracting it).
+    unquoted_slug = operational_prompt.strip('"')
     scan_file = ROOT / "commands" / "scan-pending-tasks.md"
     scan_text = scan_file.read_text(encoding="utf-8")
-    target = "/PACT:scan-pending-tasks"
-    assert target in cmd_text, (
-        f"start-pending-scan.md missing the canonical prompt {target}"
-    )
-    # The scan-pending-tasks.md file uses the slug literally in its
-    # title/description; the byte-identity contract holds if both files
-    # contain the literal string.
-    assert target in scan_text, (
-        f"scan-pending-tasks.md missing the canonical prompt {target} — "
-        f"INV-1 cross-file byte-identity broken at the source side"
+    assert unquoted_slug in scan_text, (
+        f"scan-pending-tasks.md missing the canonical slug {unquoted_slug!r} — "
+        f"INV-1 cross-file byte-identity broken at the source side. "
+        f"start-pending-scan.md's CronCreate uses prompt={operational_prompt}; "
+        f"scan-pending-tasks.md must contain the same slug literal."
     )
 
 
 def test_inv1_prompt_string_byte_identical_with_stop_command(cmd_text):
-    """INV-1 cross-file pin (3rd file): the prompt string must also
-    match stop-pending-scan.md's filter target."""
+    """INV-1 cross-file byte-identity (commit-9 tightened, 3rd file):
+    the operational prompt literal must also appear in stop-pending-scan.md
+    (where it's the filter target for CronList lookup)."""
+    operational_prompt = _extract_croncreate_prompt(cmd_text)
+    unquoted_slug = operational_prompt.strip('"')
     stop_file = ROOT / "commands" / "stop-pending-scan.md"
     stop_text = stop_file.read_text(encoding="utf-8")
-    target = "/PACT:scan-pending-tasks"
-    assert target in stop_text, (
-        f"stop-pending-scan.md missing the canonical prompt {target} — "
+    assert unquoted_slug in stop_text, (
+        f"stop-pending-scan.md missing the canonical slug {unquoted_slug!r} — "
         f"INV-1 cross-file byte-identity broken at the teardown side; "
-        f"teardown would silently fail to find the cron."
+        f"teardown would silently fail to find the cron registered by "
+        f"start-pending-scan.md's CronCreate(prompt={operational_prompt})."
     )
 
 
