@@ -294,15 +294,7 @@ JSON
 
      **Bake the recommendation into the option set** using the same `(recommended)` suffix + one-line rationale convention as Step C (see C.2). Exactly ONE of Yes / No carries the suffix; its description carries a one-line rationale grounded in the criteria above. When no clear recommendation exists, apply the C.4 carve-out (mark the most-defensible option as recommended with uncertainty named in the rationale, OR omit the suffix and state "No clear recommendation; user judgment" in the question prose).
 
-     **Worked example.** Concrete pattern when findings are 2 substantive minors (convention alignment) on a small PR:
-
-     > **Before**:
-     > - **Yes** — review each item
-     > - **No** — skip to merge readiness
-     >
-     > **After**:
-     > - **Yes (recommended)** — Two substantive convention-alignment minors; small PR, low remediation cost
-     > - **No** — Skip to merge readiness
+     **Worked example.** Concrete rationale shape for 2 substantive minors on a small PR: `Yes (recommended) — Two substantive convention-alignment minors; small PR, low remediation cost`. See C.3 for the full option-block convention.
 
      - Use `AskUserQuestion` tool: "Would you like to review the minor and future recommendations?"
        - Options: **Yes** (review each item) / **No** (skip to merge readiness)
@@ -342,12 +334,7 @@ JSON
 
      **C.3 — Worked example.** <!-- ANCHOR-STABLE: C.3 --> Concrete pattern for a minor finding "Inconsistent error-log prefix across two helpers":
 
-     > **Before**:
-     > - **Yes** — Fix it in this PR
-     > - **No** — Skip for now
-     > - **More context** — Get additional details
-     >
-     > **After**:
+     > **Example**:
      > - **Yes (recommended)** — In-scope convention alignment; 2-line diff, no behavioral risk
      > - **No** — Defer; cosmetic-only inconsistency
      > - **More context** — Get additional details
