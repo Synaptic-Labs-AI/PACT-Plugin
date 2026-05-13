@@ -92,7 +92,7 @@ def _owner_is_team_member(owner: Any, team_name: str) -> bool:
     """
     if not isinstance(owner, str) or not owner:
         return False
-    if not team_name:
+    if not isinstance(team_name, str) or not team_name:
         return False
     members = _iter_members(team_name)
     if not members:
@@ -118,7 +118,7 @@ def _is_lead_owned(owner: Any, team_name: str) -> bool:
     """
     if not isinstance(owner, str) or not owner:
         return False
-    if not team_name:
+    if not isinstance(team_name, str) or not team_name:
         return False
     lead_agent_id = _read_team_lead_agent_id(team_name)
     if not lead_agent_id:

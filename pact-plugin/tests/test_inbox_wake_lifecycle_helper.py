@@ -89,6 +89,75 @@ def test_helper_imports_shared_helper_from_intentional_wait():
     assert "frozenset({'pact-secretary'" not in src
 
 
+def test_helper_imports_pact_context_for_owner_filter():
+    """The teammate-owner-classification check in `_lifecycle_relevant`
+    depends on two pact_context helpers: `_iter_members` (member name
+    lookup) and `_read_team_lead_agent_id` (leadAgentId field reader).
+    Pin the import line at the top of `wake_lifecycle.py` so accidental
+    removal during cleanup is caught at test-time.
+
+    Counter-test-by-revert: removing the import line would make
+    `_owner_is_team_member` and `_is_lead_owned` reference unbound names
+    at module load, surfacing as ImportError on test discovery — but the
+    structural invariant catches the regression at the source-text level
+    before runtime."""
+    src = (
+        Path(__file__).resolve().parent.parent
+        / "hooks" / "shared" / "wake_lifecycle.py"
+    ).read_text(encoding="utf-8")
+    assert (
+        "from shared.pact_context import _iter_members, _read_team_lead_agent_id"
+        in src
+    ), (
+        "wake_lifecycle.py must import _iter_members and "
+        "_read_team_lead_agent_id from shared.pact_context — they back "
+        "the teammate-owner-classification check in _lifecycle_relevant."
+    )
+    # The two new helpers must be defined in this module (private,
+    # underscore-prefixed). Symbol presence is the load-bearing anchor;
+    # the docstring contents are validated by the runtime tests in
+    # test_wake_lifecycle_teammate_owner_filter.py.
+    assert "def _owner_is_team_member(" in src
+    assert "def _is_lead_owned(" in src
+
+
+def test_lifecycle_relevant_documents_orphan_exclusion():
+    """The `_lifecycle_relevant` docstring must mention the teammate-
+    owner-check carve-out so future readers understand the predicate's
+    full filter chain. Pin the behavioral language so accidental rewrite
+    catches the regression at test-time."""
+    docs = wl._lifecycle_relevant.__doc__ or ""
+    assert "teammate-owner" in docs.lower() or "teammate-owner check" in docs.lower(), (
+        "Docstring must mention the teammate-owner check that excludes "
+        "unowned, orphan, and lead-owned tasks."
+    )
+
+
+def test_lifecycle_relevant_preserves_fail_conservative_audit_anchor():
+    """The fail-CONSERVATIVE asymmetry between this call site (count on
+    config-read failure) and the sibling predicates in
+    intentional_wait.py (return False on config-read failure) is
+    load-bearing for the wake mechanism. Pin a line-anchored phrase
+    from the inline comment block so future cleanup cannot silently
+    invert the posture by deleting the audit anchor."""
+    src = (
+        Path(__file__).resolve().parent.parent
+        / "hooks" / "shared" / "wake_lifecycle.py"
+    ).read_text(encoding="utf-8")
+    # The phrase "Fail-CONSERVATIVE" plus the under-arm-vs-over-arm
+    # rationale must remain inline at step 4. Pin both halves so a
+    # rewrite that keeps the keyword but drops the rationale (or vice
+    # versa) still fails.
+    assert "Fail-CONSERVATIVE" in src, (
+        "Inline comment block at step 4 must keep the Fail-CONSERVATIVE "
+        "audit anchor."
+    )
+    assert "under-arm" in src and "unrecoverable" in src, (
+        "Inline comment block at step 4 must keep the under-arm-vs-"
+        "over-arm rationale that justifies the fail-CONSERVATIVE posture."
+    )
+
+
 def test_helper_documented_pure_never_raises():
     """Pin the docstring contract — pure functions, never raise. This is
     the structural anchor that lets future cleanup remove the redundant
