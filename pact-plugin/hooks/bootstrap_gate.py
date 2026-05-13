@@ -290,6 +290,36 @@ def _check_tool_allowed(input_data: dict) -> str | None:
     if isinstance(tool_name, str) and tool_name.startswith("mcp__"):
         return None
 
+    # Bootstrap-resolving Agent dispatch exempt from PreToolUse block.
+    #
+    # The pact-secretary spawn is the call that ADDS secretary to the team
+    # config's members[] array, which is the load-bearing pre-condition for
+    # bootstrap_marker_writer.py to write the bootstrap-complete marker.
+    # Without this exempt path, fresh-session bootstrap deadlocks:
+    #
+    #   1. TeamCreate adds only team-lead to members[]
+    #   2. bootstrap_marker_writer requires `secretary` in members[] before
+    #      it will write the marker (see _team_has_secretary)
+    #   3. This gate blocks all Agent dispatch until the marker exists
+    #   4. The Agent dispatch that would ADD secretary to members[] is the
+    #      pact-secretary spawn — but it's blocked by step 3
+    #
+    # The deadlock affects every fresh team creation. Sessions that REUSE
+    # an existing team config never hit it because secretary persists in
+    # members[] from the prior session. First documented in PACT 4.1.5
+    # (2026-05-09) and reproduced in PACT 4.1.10 (this fix). Adjacent
+    # carve-outs already shipped for secretary in #716 (teachback gate)
+    # and #682 (self-completion); this PR adds the missing carve-out in
+    # the PreToolUse gate.
+    #
+    # Both colon-prefixed ("PACT:pact-secretary") and bare ("pact-secretary")
+    # subagent_type forms are accepted because the Claude Code platform may
+    # resolve either depending on plugin namespace context.
+    if tool_name == "Agent":
+        sub = input_data.get("tool_input", {}).get("subagent_type", "")
+        if sub in ("PACT:pact-secretary", "pact-secretary"):
+            return None
+
     # Blocked implementation tools
     # frozenset membership is type-safe — no isinstance guard needed
     if tool_name in _BLOCKED_TOOLS:
