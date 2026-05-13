@@ -11,7 +11,7 @@ under tmp_path, monkeypatch Path.home).
 Counter-test-by-revert expected cardinality
 -------------------------------------------
 Reverting ONLY the step-4 owner-check block in `_lifecycle_relevant`
-(keep the new helpers `_owner_is_team_member`, `_is_lead_owned`, the
+(keep the new helpers `_owner_is_known_team_member`, `_is_lead_owned`, the
 `shared.pact_context` imports, and the docstring updates) produces
 exactly **17 failures** under the current test surface:
 
@@ -61,7 +61,7 @@ exactly **17 failures** under the current test surface:
       the pre-fix default also returns True for any owner shape when
       the team config is unreadable; the test pins the post-fix
       fail-CONSERVATIVE posture as a regression guard)
-    - test_owner_is_team_member_pure_never_raises (helper-level)
+    - test_owner_is_known_team_member_pure_never_raises (helper-level)
     - test_is_lead_owned_pure_never_raises (helper-level)
     - test_is_lead_owned_requires_both_name_and_agentid_match
       (helper-level; the step-4 block is the call-site consumer, but
@@ -86,7 +86,7 @@ Exact revert procedure (byte-precise; reproduces 17-fail cardinality):
      `metadata = task.get(...)` statement that follows step 4
      remains correctly indented.
   3. KEEP: module-top imports of `_iter_members` and
-     `_read_team_lead_agent_id`, the `_owner_is_team_member` and
+     `_read_team_lead_agent_id`, the `_owner_is_known_team_member` and
      `_is_lead_owned` helper definitions, the `_lifecycle_relevant`
      docstring carve-out section, and the preceding step-4 lead-in
      comment block (lines 205-213 at HEAD — these are the
@@ -305,22 +305,22 @@ def test_umbrella_scenario_one_to_zero_transition(tmp_path, monkeypatch):
 # ---------- Helper-level pure-never-raises invariants ----------
 
 
-def test_owner_is_team_member_pure_never_raises(tmp_path, monkeypatch):
-    """`_owner_is_team_member` is pure and never raises on any shape of
+def test_owner_is_known_team_member_pure_never_raises(tmp_path, monkeypatch):
+    """`_owner_is_known_team_member` is pure and never raises on any shape of
     owner or team_name."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     for owner in (None, "", 42, [], {}, ["x"], True):
         try:
-            result = wl._owner_is_team_member(owner, "any-team")
+            result = wl._owner_is_known_team_member(owner, "any-team")
         except Exception as exc:  # pragma: no cover
-            pytest.fail(f"_owner_is_team_member raised on owner={owner!r}: {exc}")
+            pytest.fail(f"_owner_is_known_team_member raised on owner={owner!r}: {exc}")
         assert isinstance(result, bool)
     for team_name in (None, "", 42, []):
         try:
-            result = wl._owner_is_team_member("x", team_name)
+            result = wl._owner_is_known_team_member("x", team_name)
         except Exception as exc:  # pragma: no cover
             pytest.fail(
-                f"_owner_is_team_member raised on team_name={team_name!r}: {exc}"
+                f"_owner_is_known_team_member raised on team_name={team_name!r}: {exc}"
             )
         assert isinstance(result, bool)
 
