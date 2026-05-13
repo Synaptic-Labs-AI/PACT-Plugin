@@ -10,18 +10,63 @@ under tmp_path, monkeypatch Path.home).
 
 Counter-test-by-revert expected cardinality
 -------------------------------------------
-Reverting ONLY the step-4 owner-check block in `_lifecycle_relevant`
-(keep the new helpers `_owner_is_known_team_member`, `_is_lead_owned`, the
-`shared.pact_context` imports, and the docstring updates) produces
-exactly **17 failures** under the current test surface:
+Two revert protocols apply to this module. Each strips a different
+amount of the owner-classification implementation and produces a
+different empirical failure cardinality. A future reviewer following
+either protocol should reproduce the documented number exactly; a
+divergence indicates either a coverage drift or an upstream refactor
+that this docstring did not anticipate (file a follow-up issue rather
+than silently adjusting the count).
 
+Protocol 1 — body-only revert (default protocol; 17 fail)
+---------------------------------------------------------
+Delete ONLY the step-4 owner-check executable block in
+`_lifecycle_relevant`. Keep `_OwnerClassification`, `_classify_owner`,
+`_owner_is_known_team_member`, `_is_lead_owned`,
+`_warn_empty_team_config_once`, the `shared.pact_context` imports, and
+the `_lifecycle_relevant` docstring carve-out.
+
+Byte-precise procedure (reproduces 17 fail / 71 pass / 2 skip):
+
+  1. cp pact-plugin/hooks/shared/wake_lifecycle.py /tmp/wl.bak
+  2. Locate the step-4 body via `grep -n "if classification.config_readable:"
+     pact-plugin/hooks/shared/wake_lifecycle.py`. The block extends
+     from that line through the `_warn_empty_team_config_once(team_name)`
+     call inside the `elif team_name:` branch. The full delete range
+     covers the `if classification.config_readable:` branch (3 owner-
+     shape / membership / lead-owned guards) PLUS the `elif team_name:`
+     branch including the inline Fail-CONSERVATIVE / under-arm /
+     unrecoverable audit-anchor comment block AND the
+     `_warn_empty_team_config_once(team_name)` call. Replace the
+     entire deleted block with a single blank line so the `# Step 5`
+     comment and `metadata = task.get(...)` statement that follow
+     remain correctly indented.
+  3. KEEP (do NOT delete under Protocol 1): module-top imports of
+     `_iter_members` and `_read_team_lead_agent_id`; the
+     `_OwnerClassification` dataclass; `_classify_owner`;
+     `_owner_is_known_team_member`; `_is_lead_owned`;
+     `_warn_empty_team_config_once`; the `_lifecycle_relevant`
+     docstring carve-out; and the step-4 lead-in comment paragraph
+     (the `# Step 4: teammate-owner check. ...` block immediately
+     above the executable body).
+  4. find pact-plugin -name __pycache__ -type d -exec rm -rf {} +
+  5. pytest pact-plugin/tests/test_wake_lifecycle_teammate_owner_filter.py
+       pact-plugin/tests/test_inbox_wake_lifecycle_helper.py --no-header
+  6. Expect 17 failed, 71 passed, 2 skipped.
+  7. cp /tmp/wl.bak pact-plugin/hooks/shared/wake_lifecycle.py
+  8. git diff --quiet pact-plugin/hooks/shared/wake_lifecycle.py
+     (should exit 0; byte-identity restored)
+
+Breakdown of the 17 body-only failures
+--------------------------------------
   13 new-file failures (this file):
     Core edge-table cases (4):
     - test_unowned_umbrella_task_excluded
     - test_lead_owned_task_excluded
     - test_orphan_owner_excluded
     - test_umbrella_scenario_one_to_zero_transition
-      (pre-fix: count_active_tasks returns 2→1; post-fix: 1→0)
+      (without the owner check: count_active_tasks returns 2→1; with
+      it: 1→0)
 
     Adversarial-edge owner-shape cases (5 parametrize cells):
     - test_stringified_non_member_owners_excluded_as_orphan[42]
@@ -39,83 +84,88 @@ exactly **17 failures** under the current test surface:
     - test_count_active_tasks_scales_linearly_on_large_team
 
   3 legacy lockstep failures (test_inbox_wake_lifecycle_helper.py):
-    Assertions inverted from the pre-fix orphan-counted behavior to
-    the post-fix orphan-excluded behavior in the same commit as the
-    predicate change.
+    Assertions inverted from the pre-owner-check orphan-counted
+    behavior to the post-owner-check orphan-excluded behavior.
     - test_lifecycle_relevant_owner_named_secretary_without_agenttype_excluded_as_orphan
     - test_count_active_tasks_skips_signal_and_orphans
     - test_count_active_tasks_secretary_owner_without_agenttype_excluded_as_orphan
 
   1 structural audit-anchor failure (test_inbox_wake_lifecycle_helper.py):
-    The fail-CONSERVATIVE inline comment block at step 4 documents the
-    under-arm-unrecoverable vs over-arm-recoverable rationale; it lives
-    inside the step-4 block, so a pure step-4 revert deletes the audit
-    anchor along with the logic and this test flips as a TRUE
-    counter-signal (not a phantom-green source-text pin).
+    The fail-CONSERVATIVE / under-arm / unrecoverable phrases live
+    inside the step-4 `elif team_name:` branch. A body-only revert
+    deletes the audit-anchor along with the executable block; this
+    test flips as a TRUE counter-signal (not a phantom-green
+    source-text pin elsewhere in the file).
     - test_lifecycle_relevant_preserves_fail_conservative_audit_anchor
 
-  Tests that pass either way on pure step-4 revert (intentional
-  baseline / helper-level pins; NOT counted toward the 17):
-    - test_teammate_owned_task_counted (baseline; counts pre and post)
-    - test_config_unreadable_fail_conservative (passes pre and post —
-      the pre-fix default also returns True for any owner shape when
-      the team config is unreadable; the test pins the post-fix
-      fail-CONSERVATIVE posture as a regression guard)
-    - test_owner_is_known_team_member_pure_never_raises (helper-level)
-    - test_is_lead_owned_pure_never_raises (helper-level)
-    - test_is_lead_owned_requires_both_name_and_agentid_match
-      (helper-level; the step-4 block is the call-site consumer, but
-      the AND-composition lives in `_is_lead_owned` itself)
-    - test_empty_or_missing_leadagentid_does_not_misclassify_lead
-      (both parametrize cells; helper-level — pins
-      `_is_lead_owned`'s empty/null leadAgentId guard at lines 119-125
-      of wake_lifecycle.py, which is outside the step-4 block)
+Protocol 2 — full-section revert (broader protocol; 22 fail)
+------------------------------------------------------------
+Replace the entire owner-classification surface with the pre-fix
+shape. Run `git checkout main --
+pact-plugin/hooks/shared/wake_lifecycle.py
+pact-plugin/hooks/shared/pact_context.py`, then run pytest as in
+Protocol 1 step 5.
 
-Exact revert procedure (byte-precise; reproduces 17-fail cardinality):
+Expect 22 failed, 66 passed, 2 skipped. After measuring, restore via
+`cp` from the backup and `git reset HEAD --` on both files to drop
+the index drift left by the `git checkout main --` operation.
 
-  1. cp pact-plugin/hooks/shared/wake_lifecycle.py /tmp/wl.bak
-  2. Delete the contiguous `if team_name:` block (currently lines
-     214-232 at HEAD aedf77dd+; locate via `grep -n "if team_name:"
-     pact-plugin/hooks/shared/wake_lifecycle.py`). The block spans
-     from `    if team_name:` through
-     `        # else: members list empty → fail-CONSERVATIVE; fall through.`
-     inclusive — 19 lines total — and includes the 9-line inline
-     Fail-CONSERVATIVE comment block (the audit-anchor) as its first
-     body lines per commit aedf77dd's option-B relocation. Replace
-     the entire deleted block with a single blank line so the
-     `metadata = task.get(...)` statement that follows step 4
-     remains correctly indented.
-  3. KEEP: module-top imports of `_iter_members` and
-     `_read_team_lead_agent_id`, the `_owner_is_known_team_member` and
-     `_is_lead_owned` helper definitions, the `_lifecycle_relevant`
-     docstring carve-out section, and the preceding step-4 lead-in
-     comment block (lines 205-213 at HEAD — these are the
-     `# Teammate-owner check (step 4): ...` paragraph that documents
-     the predicate order).
-  4. find pact-plugin -name __pycache__ -type d -exec rm -rf {} +
-  5. pytest pact-plugin/tests/test_wake_lifecycle_teammate_owner_filter.py
-       pact-plugin/tests/test_inbox_wake_lifecycle_helper.py --no-header
-  6. Expect 17 failed, 71 passed, 2 skipped.
-  7. cp /tmp/wl.bak pact-plugin/hooks/shared/wake_lifecycle.py
-  8. git diff --quiet pact-plugin/hooks/shared/wake_lifecycle.py
-     (should exit 0; byte-identity restored)
+The 22 = 17 body-only failures (above) + 5 additional flips driven by
+the helpers themselves disappearing. The five additional flips ride
+on `AttributeError` (the test imports a helper name that no longer
+exists on the module) rather than test-assertion failures:
 
-Note: an earlier architecture-spec draft (gitignored, not in the repo)
-projected 5 fail on revert; the next round of TEST work super-sided
-it to 8 after the legacy-test lockstep update; this round of TEST
-work super-sides it again to 17 after adding adversarial-edge,
-integration, and stress coverage. The 17 = 13 new-file (4 core +
-5 stringified-owner parametrize cells + 2 fixture/call-site + 2
-integration/stress) + 3 legacy lockstep + 1 audit-anchor.
+  - test_owner_is_known_team_member_pure_never_raises
+  - test_is_lead_owned_pure_never_raises
+  - test_is_lead_owned_requires_both_name_and_agentid_match
+  - test_empty_or_missing_leadagentid_does_not_misclassify_lead[]
+  - test_empty_or_missing_leadagentid_does_not_misclassify_lead[None]
 
-Audit-anchor: when extending or refactoring this file, preserve the
-13-new-file + 3-legacy-lockstep + 1-audit-anchor cardinality so the
-counter-test-by-revert delta remains computable. If you add new unit
-cases that flip on pure step-4 revert, update the count comment above
-in lockstep. Source-text pins for non-load-bearing artifacts (an
-import line, a docstring phrase) are deliberately omitted — they are
-phantom-green-by-absence under pure step-4 revert and provide no
-counter-signal beyond what the runtime tests already cover.
+These five tests are baseline / helper-level pins under Protocol 1
+(they pass either way because the helpers still exist), but they ARE
+counter-signal under Protocol 2 (they fail when the helpers are
+removed entirely). Two-protocol classification gives a fresh reader a
+precise reading of what each test pins: behavior of the step-4
+executable block (Protocol 1 flippers), helper-surface existence
+(Protocol 2-only flippers), or true baseline (passes under both).
+
+Tests that pass under BOTH protocols (true baselines; NOT counter-
+signal under either revert):
+    - test_teammate_owned_task_counted
+        Baseline: a known teammate-owned task counts regardless of
+        whether the owner-check ever fired. Pre-owner-check, every
+        task with an owner counted (orphans included); post-owner-
+        check, only known teammates count. The teammate case sits in
+        the intersection. Pin against future inversion.
+    - test_config_unreadable_fail_conservative
+        Baseline: the wake mechanism's purpose is to surface teammate
+        work, and an unreadable config must NOT silently teardown
+        active sessions. Pre-owner-check, every task counted because
+        the carve-out did not exist; post-owner-check, the empty-
+        members fall-through preserves that posture explicitly. The
+        test pins the fall-through as a regression guard against any
+        future cleanup that inverts the unreadable-config branch to
+        fail-CLOSED.
+
+Genesis of the 17 number
+------------------------
+An earlier architecture-spec draft (gitignored, not in the repo)
+projected 5 fail on revert. The next iteration super-sided it to 8
+after a legacy-test lockstep update brought the legacy file into the
+same revert envelope. The current iteration super-sides it to 17
+after adding adversarial-edge, integration, and stress coverage:
+17 = 4 core + 9 adversarial-edge + 3 legacy lockstep + 1 audit-anchor.
+
+When extending this file, preserve the protocol-1 cardinality of 17
+and the protocol-2 cardinality of 22 so the counter-test-by-revert
+delta remains computable. If you add new unit cases that flip under
+Protocol 1, update the protocol-1 count above in lockstep; if you add
+new helper-pinning tests that flip ONLY under Protocol 2, update the
+protocol-2 count. Source-text pins for non-load-bearing artifacts (an
+import line, a docstring phrase outside the executable body) are
+deliberately omitted — they are phantom-green-by-absence under
+Protocol 1 and provide no counter-signal beyond what the runtime
+tests already cover.
 """
 
 import json
