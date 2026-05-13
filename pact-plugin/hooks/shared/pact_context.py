@@ -359,6 +359,53 @@ def _iter_members(
     return [m for m in members if isinstance(m, dict)]
 
 
+def _read_team_lead_agent_id(
+    team_name: str,
+    teams_dir: str | None = None,
+) -> str:
+    """Read the top-level ``leadAgentId`` string from a team config file.
+
+    Returns the ``leadAgentId`` value from
+    ``~/.claude/teams/{team_name}/config.json``, or ``""`` silently on any
+    of the same error paths handled by ``_iter_members``: empty team_name,
+    missing config file, I/O error, malformed JSON, non-object top-level
+    JSON, missing field, or non-string field value.
+
+    Sibling reader to ``_iter_members``. ``_iter_members`` returns only the
+    validated ``members[]`` list (by design — it discards every other
+    top-level field). Rather than widen ``_iter_members``'s return shape
+    (which ripples through its existing call sites), this helper exposes
+    the single additional field that the wake-lifecycle owner-classification
+    predicate needs (``leadAgentId``). Matches the established
+    one-helper-per-field-or-projection pattern in this module.
+
+    Silent-on-error is intentional and parallels ``_iter_members``: the
+    sole caller (``wake_lifecycle._is_lead_owned``) uses the empty string
+    as the "team config not usable" signal and composes that result with
+    the call-site fail-conservative posture.
+
+    Args:
+        team_name: Team name for config path. Empty string returns "".
+        teams_dir: Override teams directory (for testing).
+    """
+    if not team_name:
+        return ""
+    if teams_dir:
+        config_path = Path(teams_dir) / team_name / "config.json"
+    else:
+        config_path = (
+            Path.home() / ".claude" / "teams" / team_name / "config.json"
+        )
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        lead_agent_id = data.get("leadAgentId")
+    except (OSError, json.JSONDecodeError, ValueError, AttributeError, TypeError):
+        return ""
+    if not isinstance(lead_agent_id, str):
+        return ""
+    return lead_agent_id
+
+
 def _lookup_agent_in_team_config(
     agent_id: str,
     team_name: str,
