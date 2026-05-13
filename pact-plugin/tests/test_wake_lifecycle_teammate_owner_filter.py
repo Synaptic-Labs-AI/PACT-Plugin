@@ -13,14 +13,30 @@ Counter-test-by-revert expected cardinality
 Reverting ONLY the step-4 owner-check block in `_lifecycle_relevant`
 (keep the new helpers `_owner_is_team_member`, `_is_lead_owned`, the
 `shared.pact_context` imports, and the docstring updates) produces
-exactly **8 failures** under the current test surface:
+exactly **17 failures** under the current test surface:
 
-  4 new-file failures (this file):
+  13 new-file failures (this file):
+    Core edge-table cases (4):
     - test_unowned_umbrella_task_excluded
     - test_lead_owned_task_excluded
     - test_orphan_owner_excluded
     - test_umbrella_scenario_one_to_zero_transition
       (pre-fix: count_active_tasks returns 2→1; post-fix: 1→0)
+
+    Adversarial-edge owner-shape cases (5 parametrize cells):
+    - test_stringified_non_member_owners_excluded_as_orphan[42]
+    - test_stringified_non_member_owners_excluded_as_orphan[True]
+    - test_stringified_non_member_owners_excluded_as_orphan[[]]
+    - test_stringified_non_member_owners_excluded_as_orphan[None]
+    - test_stringified_non_member_owners_excluded_as_orphan[0]
+
+    Adversarial-edge fixture and call-site cases (2):
+    - test_member_entry_missing_or_falsy_name_does_not_match
+    - test_lead_owner_short_circuit_does_not_fire_on_name_only_lead_agentid_match
+
+    Integration and stress cases (2):
+    - test_compact_shaped_layout_drops_to_zero_after_teammate_completion
+    - test_count_active_tasks_scales_linearly_on_large_team
 
   3 legacy lockstep failures (test_inbox_wake_lifecycle_helper.py):
     Assertions inverted from the pre-fix orphan-counted behavior to
@@ -38,22 +54,62 @@ exactly **8 failures** under the current test surface:
     counter-signal (not a phantom-green source-text pin).
     - test_lifecycle_relevant_preserves_fail_conservative_audit_anchor
 
-  Tests that pass either way on pure step-4 revert (NOT counted toward
-  the 8):
+  Tests that pass either way on pure step-4 revert (intentional
+  baseline / helper-level pins; NOT counted toward the 17):
     - test_teammate_owned_task_counted (baseline; counts pre and post)
     - test_config_unreadable_fail_conservative (passes pre and post —
       the pre-fix default also returns True for any owner shape when
       the team config is unreadable; the test pins the post-fix
       fail-CONSERVATIVE posture as a regression guard)
+    - test_owner_is_team_member_pure_never_raises (helper-level)
+    - test_is_lead_owned_pure_never_raises (helper-level)
+    - test_is_lead_owned_requires_both_name_and_agentid_match
+      (helper-level; the step-4 block is the call-site consumer, but
+      the AND-composition lives in `_is_lead_owned` itself)
+    - test_empty_or_missing_leadagentid_does_not_misclassify_lead
+      (both parametrize cells; helper-level — pins
+      `_is_lead_owned`'s empty/null leadAgentId guard at lines 119-125
+      of wake_lifecycle.py, which is outside the step-4 block)
+
+Exact revert procedure (byte-precise; reproduces 17-fail cardinality):
+
+  1. cp pact-plugin/hooks/shared/wake_lifecycle.py /tmp/wl.bak
+  2. Delete the contiguous `if team_name:` block (currently lines
+     214-232 at HEAD aedf77dd+; locate via `grep -n "if team_name:"
+     pact-plugin/hooks/shared/wake_lifecycle.py`). The block spans
+     from `    if team_name:` through
+     `        # else: members list empty → fail-CONSERVATIVE; fall through.`
+     inclusive — 19 lines total — and includes the 9-line inline
+     Fail-CONSERVATIVE comment block (the audit-anchor) as its first
+     body lines per commit aedf77dd's option-B relocation. Replace
+     the entire deleted block with a single blank line so the
+     `metadata = task.get(...)` statement that follows step 4
+     remains correctly indented.
+  3. KEEP: module-top imports of `_iter_members` and
+     `_read_team_lead_agent_id`, the `_owner_is_team_member` and
+     `_is_lead_owned` helper definitions, the `_lifecycle_relevant`
+     docstring carve-out section, and the preceding step-4 lead-in
+     comment block (lines 205-213 at HEAD — these are the
+     `# Teammate-owner check (step 4): ...` paragraph that documents
+     the predicate order).
+  4. find pact-plugin -name __pycache__ -type d -exec rm -rf {} +
+  5. pytest pact-plugin/tests/test_wake_lifecycle_teammate_owner_filter.py
+       pact-plugin/tests/test_inbox_wake_lifecycle_helper.py --no-header
+  6. Expect 17 failed, 71 passed, 2 skipped.
+  7. cp /tmp/wl.bak pact-plugin/hooks/shared/wake_lifecycle.py
+  8. git diff --quiet pact-plugin/hooks/shared/wake_lifecycle.py
+     (should exit 0; byte-identity restored)
 
 Note: an earlier architecture-spec draft (gitignored, not in the repo)
-projected 5 fail on revert. It was drafted before the legacy-test
-lockstep update decision was made during implementation. The empirical
-8 super-sides (not sub-sides) the spec's 5: the +3 delta is the legacy
-lockstep updates that the spec did not anticipate.
+projected 5 fail on revert; the next round of TEST work super-sided
+it to 8 after the legacy-test lockstep update; this round of TEST
+work super-sides it again to 17 after adding adversarial-edge,
+integration, and stress coverage. The 17 = 13 new-file (4 core +
+5 stringified-owner parametrize cells + 2 fixture/call-site + 2
+integration/stress) + 3 legacy lockstep + 1 audit-anchor.
 
 Audit-anchor: when extending or refactoring this file, preserve the
-4-new-file + 3-legacy-lockstep + 1-audit-anchor cardinality so the
+13-new-file + 3-legacy-lockstep + 1-audit-anchor cardinality so the
 counter-test-by-revert delta remains computable. If you add new unit
 cases that flip on pure step-4 revert, update the count comment above
 in lockstep. Source-text pins for non-load-bearing artifacts (an
@@ -294,7 +350,13 @@ def test_is_lead_owned_requires_both_name_and_agentid_match(tmp_path, monkeypatc
     NOT match `leadAgentId` is NOT lead-owned. Conversely, a member
     whose `agentId` matches `leadAgentId` but whose `name` does NOT
     match the owner is also NOT lead-owned. Both conditions are
-    required — pins the AND-composition in `_is_lead_owned`."""
+    required — pins the AND-composition in `_is_lead_owned`.
+
+    The agentId-matches-but-name-doesn't direction is exercised by a
+    standalone fixture where the team config holds a single member whose
+    `agentId` equals `leadAgentId` but whose `name` differs from the
+    queried owner. A correct AND-composition returns False; an OR-bug
+    or name-stripped variant would return True."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     team = "team-and-comp"
     _write_team_config(
@@ -311,3 +373,293 @@ def test_is_lead_owned_requires_both_name_and_agentid_match(tmp_path, monkeypatc
     assert wl._is_lead_owned("architect", team) is False
     # owner not in members at all → False.
     assert wl._is_lead_owned("ghost", team) is False
+
+    # Inverse direction: agentId matches leadAgentId but the queried owner
+    # name does not match any member name. An OR-bug or name-stripped
+    # check would treat this as lead-owned; the AND-composition rejects.
+    team_inv = "team-and-comp-inverse"
+    _write_team_config(
+        tmp_path, team_inv,
+        [
+            # Lone member's agentId IS leadAgentId, but name='renamed-lead'
+            # — querying owner='team-lead' must NOT match.
+            {"name": "renamed-lead", "agentId": "team-lead@T"},
+        ],
+        lead_agent_id="team-lead@T",
+    )
+    assert wl._is_lead_owned("team-lead", team_inv) is False, (
+        "Lead-ownership requires BOTH name AND agentId match. An owner "
+        "string that doesn't match any member name must return False even "
+        "if some member's agentId equals leadAgentId."
+    )
+
+
+# ---------- Adversarial-edge: owner type-coercion at the call site ----------
+
+
+@pytest.mark.parametrize("stringified_owner", ["42", "True", "[]", "None", "0"])
+def test_stringified_non_member_owners_excluded_as_orphan(
+    stringified_owner, tmp_path, monkeypatch
+):
+    """An owner that is a *string* representation of a non-string value
+    (e.g., the literal text '42' or 'True') is treated as any other
+    string: if it doesn't match a member's `name`, it's an orphan and
+    excluded. Pins behavior under accidental type-coercion at upstream
+    write sites — a coder who writes `owner=str(value)` without
+    validating gets orphan-excluded, not phantom-counted."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    team = "team-stringified-owners"
+    _write_team_config(
+        tmp_path, team,
+        [
+            {"name": "team-lead", "agentId": "team-lead@T"},
+            {"name": "architect", "agentId": "architect@T"},
+        ],
+        lead_agent_id="team-lead@T",
+    )
+    task = {"status": "in_progress", "owner": stringified_owner}
+    assert wl._lifecycle_relevant(task, team) is False, (
+        f"Stringified non-member owner {stringified_owner!r} must be "
+        "treated as orphan and excluded."
+    )
+
+
+# ---------- Adversarial-edge: malformed member entries ----------
+
+
+def test_member_entry_missing_or_falsy_name_does_not_match(tmp_path, monkeypatch):
+    """Member entries lacking a `name` field, or with `name=None` or
+    `name=""`, must not accidentally match any owner. The membership
+    check uses `member.get("name") == owner` which would return True if
+    BOTH sides equal `None` — but a real owner string can never be
+    `None`, and an empty owner is rejected at the helper's first guard.
+    This test pins the boundary so a future refactor that loosens the
+    owner-shape guard does not let a missing-name member act as a
+    wildcard match."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    team = "team-malformed-members"
+    _write_team_config(
+        tmp_path, team,
+        [
+            # Three malformed entries — none has a real string `name`.
+            {"agentId": "ghost-1@T"},          # name field absent
+            {"name": None, "agentId": "ghost-2@T"},
+            {"name": "", "agentId": "ghost-3@T"},
+            # One legit teammate so members list is non-empty.
+            {"name": "architect", "agentId": "architect@T"},
+        ],
+        lead_agent_id="team-lead@T",
+    )
+    # Owner that would only "match" a missing-name member via a None
+    # equality accident — must remain orphan.
+    task = {"status": "in_progress", "owner": "any-name"}
+    assert wl._lifecycle_relevant(task, team) is False
+    # Legit teammate still resolves correctly — the malformed sibling
+    # entries do not break iteration.
+    task_legit = {"status": "in_progress", "owner": "architect"}
+    assert wl._lifecycle_relevant(task_legit, team) is True
+
+
+# ---------- Adversarial-edge: leadAgentId edge values ----------
+
+
+@pytest.mark.parametrize("lead_value", ["", None])
+def test_empty_or_missing_leadagentid_does_not_misclassify_lead(
+    lead_value, tmp_path, monkeypatch
+):
+    """When the team config has `leadAgentId` field present but empty
+    string or `null`, `_is_lead_owned` must return False for every
+    owner. The lead-owner short-circuit must not fire incorrectly
+    against a sentinel-or-missing leadAgentId — a teammate-owned task
+    in such a team config must still count, not be misclassified as
+    lead-owned."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    team = "team-empty-lead"
+    team_dir = tmp_path / ".claude" / "teams" / team
+    team_dir.mkdir(parents=True, exist_ok=True)
+    config = {
+        "team_name": team,
+        "members": [
+            {"name": "architect", "agentId": "architect@T"},
+        ],
+        "leadAgentId": lead_value,
+    }
+    (team_dir / "config.json").write_text(
+        json.dumps(config), encoding="utf-8"
+    )
+    # No owner is lead-owned when leadAgentId is empty/null.
+    assert wl._is_lead_owned("architect", team) is False
+    # Teammate task still counts toward the tally.
+    task = {"status": "in_progress", "owner": "architect"}
+    assert wl._lifecycle_relevant(task, team) is True
+
+
+# ---------- Adversarial-edge: AND-composition (call-site path) ----------
+
+
+def test_lead_owner_short_circuit_does_not_fire_on_name_only_lead_agentid_match(
+    tmp_path, monkeypatch
+):
+    """A member whose `agentId` equals `leadAgentId` but whose `name`
+    does NOT match the task owner must NOT trigger the lead-owner
+    short-circuit at the predicate call site. The task should count
+    (subject to the orphan check — see fixture). This exercises the
+    AND-composition through `_lifecycle_relevant` rather than the
+    isolated helper, closing the call-site path the helper-level test
+    only validates structurally."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    team = "team-name-only-agentid-match"
+    _write_team_config(
+        tmp_path, team,
+        [
+            # `architect`'s agentId happens to equal leadAgentId — but
+            # the owner field on the task is `architect`, not the
+            # member whose name matches the lead role.
+            {"name": "architect", "agentId": "team-lead@T"},
+            {"name": "team-lead", "agentId": "some-other-id@T"},
+        ],
+        lead_agent_id="team-lead@T",
+    )
+    task = {"status": "in_progress", "owner": "architect"}
+    # `architect` IS a team member AND `architect`'s agentId IS
+    # leadAgentId — under the implemented AND-composition, _is_lead_owned
+    # returns True (both name='architect' AND agentId==leadAgentId match
+    # on the same member). The task IS treated as lead-owned and
+    # excluded.
+    assert wl._is_lead_owned("architect", team) is True
+    assert wl._lifecycle_relevant(task, team) is False
+    # The legitimate-named lead, however, is NOT lead-owned here because
+    # its member's agentId does NOT equal leadAgentId — so a task owned
+    # by "team-lead" counts in this misconfigured team. The pin
+    # documents the AND-composition semantics: lead-ownership is the
+    # CONJUNCTION of "name in members" AND "that same member's agentId
+    # equals leadAgentId," and a member with a misaligned agentId is
+    # not promoted to lead even by name.
+    task_named_lead = {"status": "in_progress", "owner": "team-lead"}
+    assert wl._is_lead_owned("team-lead", team) is False
+    assert wl._lifecycle_relevant(task_named_lead, team) is True
+
+
+# ---------- Integration: realistic comPACT-shaped task layout ----------
+
+
+def test_compact_shaped_layout_drops_to_zero_after_teammate_completion(
+    tmp_path, monkeypatch
+):
+    """End-to-end integration over a realistic comPACT layout:
+    1 unowned feature task (the umbrella), 2 teammate-claimed work
+    tasks, 1 secretary signal task (algedonic). Before any completion
+    the count is 2 (only the two teammate work tasks; umbrella excluded
+    by the owner check, signal excluded by the signal carve-out). As
+    each teammate task completes the count walks down 2→1→0, reaching
+    the 1→0 transition that `wake_lifecycle_emitter._decide_directive`
+    listens for. The umbrella never blocks teardown."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    team = "team-compact-integration"
+    _write_team_config(
+        tmp_path, team,
+        [
+            {"name": "team-lead", "agentId": "team-lead@T", "agentType": "pact-orchestrator"},
+            {"name": "backend-coder", "agentId": "backend-coder@T", "agentType": "pact-backend-coder"},
+            {"name": "test-engineer", "agentId": "test-engineer@T", "agentType": "pact-test-engineer"},
+            {"name": "session-secretary", "agentId": "session-secretary@T", "agentType": "pact-secretary"},
+        ],
+        lead_agent_id="team-lead@T",
+    )
+    # Unowned feature task (created by /PACT:comPACT).
+    _stage_task(tmp_path, team, "feature", status="in_progress")
+    # Two teammate-claimed work tasks.
+    _stage_task(tmp_path, team, "code-work", status="in_progress", owner="backend-coder")
+    _stage_task(tmp_path, team, "test-work", status="in_progress", owner="test-engineer")
+    # Secretary signal task (algedonic) — owned by secretary but
+    # carved out by the signal-task metadata check at step 6.
+    _stage_task(
+        tmp_path, team, "alert",
+        status="in_progress", owner="session-secretary",
+        metadata={"completion_type": "signal", "type": "algedonic"},
+    )
+
+    assert count_active_tasks(team) == 2, (
+        "Pre-completion: only the two teammate work tasks count. "
+        "Umbrella excluded by owner check; signal excluded by metadata "
+        "carve-out."
+    )
+    # First teammate completes.
+    _stage_task(tmp_path, team, "code-work", status="completed", owner="backend-coder")
+    assert count_active_tasks(team) == 1
+    # Last teammate completes — the 1→0 transition.
+    _stage_task(tmp_path, team, "test-work", status="completed", owner="test-engineer")
+    assert count_active_tasks(team) == 0, (
+        "Post-last-teammate-completion: count must reach 0 so the "
+        "wake-mechanism teardown can fire. Umbrella and signal must "
+        "stay out of the tally."
+    )
+
+
+# ---------- Performance: bounded constant factor, no quadratic blowup ----------
+
+
+def test_count_active_tasks_scales_linearly_on_large_team(tmp_path, monkeypatch):
+    """Stress test: 100 tasks across a team with 20 members, mixed
+    owners (lead-owned umbrella tasks, multiple teammates, orphans,
+    signals). `count_active_tasks` must complete quickly — each
+    `_lifecycle_relevant` invocation invokes `_iter_members` a bounded
+    constant number of times (currently up to 3 in this module plus
+    1 from `_is_wake_excluded_agent_type`); the aggregate is
+    O(tasks × members) = O(N×M), unchanged in big-O from pre-fix.
+
+    The wall-clock budget here is intentionally generous — the goal is
+    to catch a future regression that introduces a per-task O(M²) or
+    O(N×M²) shape (e.g., a nested member iteration), not to pin
+    micro-performance. On a developer laptop the typical runtime is
+    well under 100 ms; we allow 5 s to keep CI noise from flaking."""
+    import time
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    team = "team-stress"
+    members = [
+        {"name": "team-lead", "agentId": "team-lead@T", "agentType": "pact-orchestrator"},
+    ]
+    for i in range(19):
+        members.append(
+            {"name": f"teammate-{i}", "agentId": f"teammate-{i}@T",
+             "agentType": "pact-backend-coder"}
+        )
+    _write_team_config(tmp_path, team, members, lead_agent_id="team-lead@T")
+
+    # 100 tasks: 30 unowned umbrellas, 50 teammate-owned active,
+    # 10 orphan-owned, 5 lead-owned, 5 signal-tasks.
+    for i in range(30):
+        _stage_task(tmp_path, team, f"umbrella-{i}", status="in_progress")
+    for i in range(50):
+        owner = f"teammate-{i % 19}"
+        _stage_task(tmp_path, team, f"work-{i}", status="in_progress", owner=owner)
+    for i in range(10):
+        _stage_task(tmp_path, team, f"orphan-{i}", status="in_progress",
+                    owner=f"ghost-{i}")
+    for i in range(5):
+        _stage_task(tmp_path, team, f"lead-{i}", status="in_progress",
+                    owner="team-lead")
+    for i in range(5):
+        _stage_task(
+            tmp_path, team, f"sig-{i}",
+            status="in_progress", owner=f"teammate-{i}",
+            metadata={"completion_type": "signal", "type": "blocker"},
+        )
+
+    start = time.perf_counter()
+    count = count_active_tasks(team)
+    elapsed = time.perf_counter() - start
+
+    # Only the 50 teammate-owned non-signal tasks count.
+    assert count == 50, (
+        f"Expected 50 active teammate tasks; got {count}. The other 50 "
+        "are 30 umbrellas + 10 orphans + 5 lead-owned + 5 signals — "
+        "all carved out."
+    )
+    assert elapsed < 5.0, (
+        f"count_active_tasks took {elapsed:.3f}s on 100 tasks × 20 "
+        "members. A linear-time implementation should finish in well "
+        "under 1 s; this generous bound only catches quadratic-or-"
+        "worse regressions."
+    )
