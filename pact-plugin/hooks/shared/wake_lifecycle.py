@@ -108,10 +108,10 @@ class _OwnerClassification:
     - ``agent_type``: the member's ``agentType`` string when present,
       else None. Used by the wake-excluded-agentType carve-out.
     - ``config_readable``: True iff ``_iter_members`` returned a
-      non-empty members list. False distinguishes the
-      fail-CONSERVATIVE-fall-through case (members list empty: config
-      missing, malformed JSON, or members[] absent) from the orphan
-      case (members non-empty, no name match).
+      non-empty members list. False signals the count-on-failure
+      fall-through path at the call site (members list empty: config
+      missing, malformed JSON, or members[] absent) and distinguishes
+      it from the orphan case (members non-empty, no name match).
 
     A frozen dataclass rather than a namedtuple so the field semantics
     are documented inline at the consumer's read site.
@@ -143,7 +143,7 @@ def _classify_owner(owner: Any, team_name: str) -> _OwnerClassification:
       team_name → all fields default (no classification can be made).
     - ``_iter_members`` returns ``[]`` (config missing / unreadable /
       malformed / members[] absent) → ``config_readable=False`` so the
-      call site can fail-CONSERVATIVE (count toward tally). The other
+      call site can apply its count-on-failure fall-through. The other
       fields stay False / None.
     - members non-empty, no name match → ``is_known_team_member=False``,
       ``is_lead=False``, ``agent_type=None``, ``config_readable=True``.
@@ -164,23 +164,24 @@ def _classify_owner(owner: Any, team_name: str) -> _OwnerClassification:
         return _OwnerClassification(False, False, None, False)
 
     # Read the config regardless of owner shape so the call site can
-    # distinguish "config unreadable → fail-CONSERVATIVE" from "config
-    # readable but owner is non-string / orphan → exclude". A bad-owner
-    # task under a readable config is an orphan (excluded), not a
-    # config-read failure.
+    # distinguish "config unreadable → count-on-failure fall-through"
+    # from "config readable but owner is non-string / orphan →
+    # exclude". A bad-owner task under a readable config is an orphan
+    # (excluded), not a config-read failure.
     members = _iter_members(team_name)
     if not members:
-        # Empty members list = fail-CONSERVATIVE signal at the call site
-        # (members[] empty ⇒ unreadable for classification purposes).
-        # See the inline comment block in _lifecycle_relevant for the
-        # under-arm-unrecoverable vs over-arm-recoverable asymmetry.
+        # Empty members list signals the count-on-failure fall-through
+        # at the call site (members[] empty ⇒ unreadable for
+        # classification purposes). The rationale for that posture
+        # lives in _lifecycle_relevant's step-4 elif body where the
+        # logic is exercised.
         return _OwnerClassification(False, False, None, False)
 
     if not isinstance(owner, str) or not owner:
         # Config IS readable, but the owner is missing or non-string.
         # Return is_known=False so the call site excludes the task as
         # an orphan / unowned; config_readable=True signals "the
-        # exclusion is intentional, not fail-CONSERVATIVE."
+        # exclusion is intentional, not the count-on-failure path."
         return _OwnerClassification(False, False, None, True)
 
     lead_agent_id = _read_team_lead_agent_id(team_name)
@@ -218,10 +219,12 @@ def _owner_is_known_team_member(owner: Any, team_name: str) -> bool:
     non-string owner, empty owner string, empty team_name, empty members
     list (config unreadable or members[] missing/empty), or no name
     match. Fail-CLOSED-symmetric internally — the call site
-    (``_lifecycle_relevant``) is responsible for the fail-CONSERVATIVE
-    short-circuit when the members list is empty (see the inline comment
-    block in ``_lifecycle_relevant``'s step-4 body for the asymmetry
-    rationale).
+    (``_lifecycle_relevant``, step 4) handles its own count-on-failure
+    posture when the members list is empty; see the inline rationale
+    comment inside the step-4 ``elif team_name:`` branch for the
+    asymmetry between this helper's fail-CLOSED behavior and the call
+    site's fall-through. Step labels match the ``# Step N:`` anchors
+    in ``_lifecycle_relevant``.
 
     Retained as a public-style helper for test reuse and future callers;
     after the ``_classify_owner`` refactor, ``_lifecycle_relevant`` uses
@@ -239,10 +242,12 @@ def _is_lead_owned(owner: Any, team_name: str) -> bool:
     non-string owner, empty owner string, empty team_name, empty
     leadAgentId (config unreadable or field missing), empty members
     list, or no member matches both name and lead-agentId. Fail-CLOSED-
-    symmetric internally — the call site (``_lifecycle_relevant``) is
-    responsible for the fail-CONSERVATIVE short-circuit when the members
-    list is empty (see the inline comment block in
-    ``_lifecycle_relevant``'s step-4 body for the asymmetry rationale).
+    symmetric internally — the call site (``_lifecycle_relevant``,
+    step 4) handles its own count-on-failure posture when the members
+    list is empty; see the inline rationale comment inside the step-4
+    ``elif team_name:`` branch for the asymmetry between this helper's
+    fail-CLOSED behavior and the call site's fall-through. Step labels
+    match the ``# Step N:`` anchors in ``_lifecycle_relevant``.
 
     Retained as a public-style helper for test reuse; after the
     ``_classify_owner`` refactor, ``_lifecycle_relevant`` uses the
@@ -416,21 +421,10 @@ def _lifecycle_relevant(task: Any, team_name: str = "") -> bool:
     # so a teammate-owned signal task passes step 4 and is excluded at
     # step 6; an unowned/orphan/lead-owned signal task (structurally
     # impossible today, but defended against) is excluded at step 4.
-    #
-    # Fail-CONSERVATIVE: if the team config is unreadable (members list
-    # is empty), `_classify_owner` returned `config_readable=False` and
-    # BOTH step 3 and step 4 fall through to step 5. The sibling
-    # predicates in intentional_wait.py fail-CLOSED on read errors
-    # (return False), but the failure mode here inverts the priority:
-    # under-arm (silent teardown loss while teammate work is in flight)
-    # is unrecoverable; over-arm (extra empty scans) is recoverable on
-    # the next state change. The wake-mechanism's purpose — never
-    # strand a teammate whose SendMessage needs to wake the lead — is
-    # load-bearing here, so we fail toward counting on every config-
-    # read failure. The audit-anchor invariant test pins these phrases
-    # (Fail-CONSERVATIVE, under-arm, unrecoverable) inside this body so
-    # a future agent-reader deleting step 4 also deletes the rationale
-    # rather than leaving an orphan comment.
+    # The failure-mode rationale documenting why the unreadable-config
+    # branch counts (rather than excluding) lives inside the `elif`
+    # body below so a body-only revert deletes both the logic and its
+    # justification together.
     if classification.config_readable:
         if not isinstance(owner, str) or not owner:
             return False
@@ -439,8 +433,23 @@ def _lifecycle_relevant(task: Any, team_name: str = "") -> bool:
         if classification.is_lead:
             return False
     elif team_name:
-        # Non-empty team_name but empty members list — fail-CONSERVATIVE
-        # fall-through (see the asymmetry comment above this block).
+        # Fail-CONSERVATIVE: the team config is unreadable (members
+        # list is empty), so `_classify_owner` returned
+        # `config_readable=False` and BOTH step 3 and step 4 fall
+        # through to step 5. The sibling predicates in
+        # intentional_wait.py fail-CLOSED on read errors (return False),
+        # but the failure mode here inverts the priority: under-arm
+        # (silent teardown loss while teammate work is in flight) is
+        # unrecoverable; over-arm (extra empty scans) is recoverable on
+        # the next state change. The wake-mechanism's purpose — never
+        # strand a teammate whose SendMessage needs to wake the lead —
+        # is load-bearing here, so we fail toward counting on every
+        # config-read failure. The audit-anchor invariant test pins
+        # these phrases (Fail-CONSERVATIVE, under-arm, unrecoverable)
+        # inside this `elif` body so a future agent-reader deleting
+        # step 4 also deletes the rationale rather than leaving an
+        # orphan comment.
+        #
         # One-shot observability warn per team per process so a
         # permanently-unreadable config doesn't silently keep the wake
         # mechanism armed for the entire session.
