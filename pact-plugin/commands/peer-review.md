@@ -302,7 +302,15 @@ JSON
      - After presenting all context, proceed to Step C.
 
      **Step C — Per-Recommendation Questions** (after context presented):
-     - Use `AskUserQuestion` tool with one question per recommendation
+
+     **C.1 — Pre-form a recommendation BEFORE constructing the AskUserQuestion call.** For every minor and future finding, you MUST decide which option you would recommend BEFORE you call `AskUserQuestion`. Asking the user "what do you recommend?" or constructing an option set where no option carries a `(recommended)` suffix is a protocol violation — the user-facing checkpoint surfaces your prior, it does not elicit one. Apply these criteria when forming the recommendation:
+       - **Scope** — Does fixing now stay inside this PR's stated scope, or does it expand the diff into adjacent concerns? In-scope → lean toward fix now; out-of-scope → lean toward defer/issue.
+       - **Convention alignment** — Does the finding flag a divergence from an established project convention (pinned rules, repeated patterns, audit anchors)? Convention violation → lean toward fix now even if minor.
+       - **Risk** — What is the cost of NOT addressing? Latent correctness, security, or data-integrity risk → lean toward fix now; pure ergonomics with no failure mode → lean toward defer.
+       - **Substance** — Is the change a real behavioral or contract improvement, or a stylistic/cosmetic preference? Substantive → lean toward fix now; cosmetic → lean toward defer or skip.
+
+     **C.2 — Bake the recommendation into the option set.** The recommended option's label MUST carry the `(recommended)` suffix (plugin-wide convention; precedent in `wrap-up.md` and `rePACT.md`). The option's description MUST carry a one-line rationale grounded in the criteria above. Exactly ONE option per question carries the suffix.
+
      - For each **minor** recommendation, ask "Address [recommendation] now?" with options:
        - **Yes** — Fix it in this PR
        - **No** — Skip for now
@@ -312,7 +320,27 @@ JSON
        - **Skip** — Don't track or address
        - **Address now** — Fix it in this PR
        - **More context** — Get additional details (if more detail is needed)
-     - > **Tool mapping**: Every option listed above MUST appear as a named `option` in the `AskUserQuestion` call. For minor recommendations: **Yes**, **No**, **More context**. For future recommendations: **Create GitHub issue**, **Skip**, **Address now**, **More context**. Do not omit any option and rely on the tool's built-in "Other" freeform input — each is a first-class option, not a fallback.
+     - > **Tool mapping**: Every option listed above MUST appear as a named `option` in the `AskUserQuestion` call. For minor recommendations: **Yes**, **No**, **More context**. For future recommendations: **Create GitHub issue**, **Skip**, **Address now**, **More context**. Do not omit any option and rely on the tool's built-in "Other" freeform input — each is a first-class option, not a fallback. On the option you selected as recommended, append `(recommended)` to the label and replace the generic description with a one-line rationale (e.g., "In-scope convention fix, low diff cost" or "Out-of-scope; track to avoid PR sprawl"). Do NOT append the suffix to more than one option per question.
+
+     **C.3 — Worked example.** Concrete pattern for a minor finding "Inconsistent error-log prefix across two helpers":
+
+     > **Before** (elicits "what do you recommend?"):
+     > - **Yes** — Fix it in this PR
+     > - **No** — Skip for now
+     > - **More context** — Get additional details
+     >
+     > **After** (surfaces orchestrator's prior):
+     > - **Yes (recommended)** — In-scope convention alignment; 2-line diff, no behavioral risk
+     > - **No** — Defer; cosmetic-only inconsistency
+     > - **More context** — Get additional details
+
+     **C.4 — When no clear recommendation exists.** You MUST still construct the question with the full option set — never short-circuit by skipping the question. Two acceptable shapes:
+       - Mark the **most-defensible** option as `(recommended)` and write a description that names the uncertainty (e.g., "Tentative — scope is on the boundary; lean defer if PR is already large").
+       - OR omit the `(recommended)` suffix entirely and state "No clear recommendation; user judgment" in the question prose. Use this shape sparingly; it shifts cognitive load back to the user and should appear only when the criteria genuinely don't converge.
+
+     **C.5 — Edge cases.**
+       - **Conflict with earlier session signals** — If your pre-formed recommendation contradicts a stance the user took earlier in the session (e.g., user previously said "keep this PR tight" and you now recommend "fix now"), surface the conflict explicitly in the option description (e.g., "Recommend fix now despite earlier scope-tight signal — convention violation tips balance"). Do not silently invert the signal.
+       - **Batching when shape aligns** — When multiple findings share recommendation shape (same recommended option, same rationale class, comparable scope/cost), batch them into a single `AskUserQuestion` question (e.g., "Address findings A, B, C now?") rather than asking three near-identical questions. Only batch when the rationale legitimately collapses; do NOT batch to save tool calls if findings diverge in cost or convention weight.
      - Note: Tool supports 2-4 options per question and 1-4 questions per call. If >4 recommendations exist, make multiple `AskUserQuestion` calls to cover all items.
        - **Handling "More context" responses**:
          - When user selects "More context", provide deeper explanation beyond the preemptive context (e.g., implementation specifics, examples, related patterns)
