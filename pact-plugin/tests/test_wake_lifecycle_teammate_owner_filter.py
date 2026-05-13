@@ -98,36 +98,61 @@ Breakdown of the 17 body-only failures
     source-text pin elsewhere in the file).
     - test_lifecycle_relevant_preserves_fail_conservative_audit_anchor
 
-Protocol 2 — full-section revert (broader protocol; 22 fail)
-------------------------------------------------------------
+Protocol 2 — full-section revert (broader protocol; 30 fail + 4 errors)
+-----------------------------------------------------------------------
 Replace the entire owner-classification surface with the pre-fix
 shape. Run `git checkout main --
 pact-plugin/hooks/shared/wake_lifecycle.py
 pact-plugin/hooks/shared/pact_context.py`, then run pytest as in
 Protocol 1 step 5.
 
-Expect 22 failed, 66 passed, 2 skipped. After measuring, restore via
-`cp` from the backup and `git reset HEAD --` on both files to drop
-the index drift left by the `git checkout main --` operation.
+Expect 30 failed, 4 errors, 66 passed, 2 skipped (34 broken total).
+After measuring, restore via `cp` from the backup and
+`git reset HEAD --` on both files to drop the index drift left by
+the `git checkout main --` operation.
 
-The 22 = 17 body-only failures (above) + 5 additional flips driven by
-the helpers themselves disappearing. The five additional flips ride
-on `AttributeError` (the test imports a helper name that no longer
-exists on the module) rather than test-assertion failures:
+The 34 = 17 body-only failures (above) + 13 additional flips driven
+by the helpers / dataclass / observability function disappearing.
+The 13 additional flips ride on `AttributeError` rather than test-
+assertion failures (the test imports a helper name that no longer
+exists on the module). They split between FAILs (assertion never
+reached because the body errored out) and ERRORs (fixture setup
+errors before the test body runs):
 
+  Helper-wrapper FAILs (3 — body-AttributeError on lookup):
   - test_owner_is_known_team_member_pure_never_raises
   - test_is_lead_owned_pure_never_raises
   - test_is_lead_owned_requires_both_name_and_agentid_match
+
+  Helper-wrapper FAILs (2 — body-AttributeError on `_is_lead_owned`):
   - test_empty_or_missing_leadagentid_does_not_misclassify_lead[]
   - test_empty_or_missing_leadagentid_does_not_misclassify_lead[None]
 
-These five tests are baseline / helper-level pins under Protocol 1
-(they pass either way because the helpers still exist), but they ARE
-counter-signal under Protocol 2 (they fail when the helpers are
-removed entirely). Two-protocol classification gives a fresh reader a
-precise reading of what each test pins: behavior of the step-4
-executable block (Protocol 1 flippers), helper-surface existence
-(Protocol 2-only flippers), or true baseline (passes under both).
+  Dataclass / projection FAILs (8 — direct `_classify_owner` calls):
+  - test_classify_owner_empty_team_name_returns_all_false
+  - test_classify_owner_non_string_team_name_returns_all_false
+  - test_classify_owner_empty_members_marks_config_unreadable
+  - test_classify_owner_readable_config_with_bad_owner_marks_orphan
+  - test_classify_owner_readable_config_no_name_match_marks_orphan
+  - test_classify_owner_teammate_match_marks_known_not_lead
+  - test_classify_owner_lead_match_marks_lead
+  - test_classify_owner_member_without_agenttype_yields_none_agent_type
+
+  Dedupe-fixture ERRORs (4 — fixture setup AttributeError on
+  `_EMPTY_CONFIG_WARN_TEAMS` module attribute):
+  - test_warn_empty_team_config_once_first_call_writes
+  - test_warn_empty_team_config_once_repeat_call_is_noop
+  - test_warn_empty_team_config_once_per_team_isolation
+  - test_warn_empty_team_config_once_rejects_bad_team_name
+
+These 13 tests are baseline pins under Protocol 1 (they pass either
+way because the helpers / dataclass / observability function still
+exist), but they ARE counter-signal under Protocol 2 (they fail when
+the entire owner-classification surface is removed). Two-protocol
+classification gives a fresh reader a precise reading of what each
+test pins: behavior of the step-4 executable block (Protocol 1
+flippers), helper-surface existence (Protocol 2-only flippers), or
+true baseline (passes under both).
 
 Tests that pass under BOTH protocols (true baselines; NOT counter-
 signal under either revert):
@@ -152,20 +177,26 @@ Genesis of the 17 number
 An earlier architecture-spec draft (gitignored, not in the repo)
 projected 5 fail on revert. The next iteration super-sided it to 8
 after a legacy-test lockstep update brought the legacy file into the
-same revert envelope. The current iteration super-sides it to 17
-after adding adversarial-edge, integration, and stress coverage:
+same revert envelope. A later iteration super-sided it to 17 after
+adding adversarial-edge, integration, and stress coverage:
 17 = 4 core + 9 adversarial-edge + 3 legacy lockstep + 1 audit-anchor.
+The current iteration adds 12 helper-surface / dataclass-shape /
+observability tests that are Protocol 2-only flippers (not Protocol 1
+flippers, by design). The Protocol 1 count remains 17; the Protocol 2
+count grows from 22 broken to 34 broken (30 fail + 4 errors).
 
-When extending this file, preserve the protocol-1 cardinality of 17
-and the protocol-2 cardinality of 22 so the counter-test-by-revert
-delta remains computable. If you add new unit cases that flip under
-Protocol 1, update the protocol-1 count above in lockstep; if you add
-new helper-pinning tests that flip ONLY under Protocol 2, update the
-protocol-2 count. Source-text pins for non-load-bearing artifacts (an
-import line, a docstring phrase outside the executable body) are
-deliberately omitted — they are phantom-green-by-absence under
-Protocol 1 and provide no counter-signal beyond what the runtime
-tests already cover.
+When extending this file, preserve the Protocol 1 cardinality of 17
+and the Protocol 2 cardinality of 34 broken (30 fail + 4 errors) so
+the counter-test-by-revert delta remains computable. If you add new
+unit cases that flip under Protocol 1, update the Protocol 1 count
+above in lockstep; if you add new helper-pinning tests that flip
+ONLY under Protocol 2, update the Protocol 2 count (and decide
+whether the new test will fail-by-body-AttributeError or
+error-by-fixture-AttributeError — both shapes are legitimate). Source-
+text pins for non-load-bearing artifacts (an import line, a docstring
+phrase outside the executable body) are deliberately omitted — they
+are phantom-green-by-absence under Protocol 1 and provide no counter-
+signal beyond what the runtime tests already cover.
 """
 
 import json
@@ -713,3 +744,258 @@ def test_count_active_tasks_scales_linearly_on_large_team(tmp_path, monkeypatch)
         "under 1 s; this generous bound only catches quadratic-or-"
         "worse regressions."
     )
+
+
+# ---------- Direct _classify_owner dataclass-shape coverage ----------
+#
+# `_classify_owner` is the single-read projection that consolidates the
+# wake-side owner-classification logic into one `_iter_members` +
+# `_read_team_lead_agent_id` pair. The helper wrappers
+# (`_owner_is_known_team_member`, `_is_lead_owned`) and the step-4 inline
+# check in `_lifecycle_relevant` are all consumers. The tests in this
+# section pin the dataclass shape directly so a future refactor that
+# changes a single field (e.g., flipping `config_readable` default,
+# adding a new field, dropping `agent_type`) trips a counter-signal even
+# if the wrappers and call-site continue to behave correctly via lucky
+# branch coincidence.
+
+
+def test_classify_owner_empty_team_name_returns_all_false(tmp_path, monkeypatch):
+    """Empty team_name (default-arg path) bypasses config read entirely
+    and returns the all-default classification. The call site treats
+    this as fail-CONSERVATIVE fall-through identical to the empty-
+    members case."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    result = wl._classify_owner("some-owner", "")
+    assert isinstance(result, wl._OwnerClassification)
+    assert result.is_known_team_member is False
+    assert result.is_lead is False
+    assert result.agent_type is None
+    assert result.config_readable is False
+
+
+def test_classify_owner_non_string_team_name_returns_all_false(tmp_path, monkeypatch):
+    """Non-string team_name (e.g., None, int, list) is rejected at the
+    same gate as empty team_name. The call site never reaches the
+    `_iter_members` read."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    for bad in (None, 42, [], {}, True):
+        result = wl._classify_owner("some-owner", bad)
+        assert isinstance(result, wl._OwnerClassification)
+        assert result == wl._OwnerClassification(False, False, None, False), (
+            f"team_name={bad!r} must produce the all-default classification."
+        )
+
+
+def test_classify_owner_empty_members_marks_config_unreadable(tmp_path, monkeypatch):
+    """A non-empty team_name with no config on disk (so `_iter_members`
+    returns []) signals `config_readable=False` so the call site can
+    fail-CONSERVATIVE. The other fields stay default; the owner shape
+    is not inspected once members come back empty."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    # No team config written under tmp_path; _iter_members returns [].
+    result = wl._classify_owner("some-owner", "team-no-config")
+    assert result == wl._OwnerClassification(False, False, None, False)
+
+
+def test_classify_owner_readable_config_with_bad_owner_marks_orphan(
+    tmp_path, monkeypatch
+):
+    """Config readable, but the owner is non-string or empty. The
+    classification distinguishes this from the empty-members case via
+    `config_readable=True` so the call site treats it as an intentional
+    exclusion (orphan / unowned), NOT a fail-CONSERVATIVE fall-through."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    team = "team-bad-owner"
+    _write_team_config(
+        tmp_path, team,
+        [
+            {"name": "team-lead", "agentId": "team-lead@T", "agentType": "pact-orchestrator"},
+            {"name": "architect", "agentId": "architect@T", "agentType": "pact-architect"},
+        ],
+        lead_agent_id="team-lead@T",
+    )
+    for bad_owner in (None, "", 42, [], {}, True):
+        result = wl._classify_owner(bad_owner, team)
+        assert result == wl._OwnerClassification(False, False, None, True), (
+            f"owner={bad_owner!r} under readable config must be classified "
+            "as config_readable=True / is_known_team_member=False (orphan)."
+        )
+
+
+def test_classify_owner_readable_config_no_name_match_marks_orphan(
+    tmp_path, monkeypatch
+):
+    """Config readable, owner is a non-empty string, but no member's
+    name matches. Same `(False, False, None, True)` shape as the
+    bad-owner branch; the call site excludes via the
+    `is_known_team_member=False` flag."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    team = "team-no-match"
+    _write_team_config(
+        tmp_path, team,
+        [
+            {"name": "team-lead", "agentId": "team-lead@T", "agentType": "pact-orchestrator"},
+            {"name": "architect", "agentId": "architect@T", "agentType": "pact-architect"},
+        ],
+        lead_agent_id="team-lead@T",
+    )
+    result = wl._classify_owner("ghost-owner", team)
+    assert result == wl._OwnerClassification(False, False, None, True)
+
+
+def test_classify_owner_teammate_match_marks_known_not_lead(tmp_path, monkeypatch):
+    """Owner matches a non-lead team member. Classification reports
+    `is_known_team_member=True`, `is_lead=False`, `agent_type` populated
+    from the member's recorded agentType. This is the canonical
+    teammate-task shape."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    team = "team-teammate-match"
+    _write_team_config(
+        tmp_path, team,
+        [
+            {"name": "team-lead", "agentId": "team-lead@T", "agentType": "pact-orchestrator"},
+            {"name": "architect", "agentId": "architect@T", "agentType": "pact-architect"},
+        ],
+        lead_agent_id="team-lead@T",
+    )
+    result = wl._classify_owner("architect", team)
+    assert result == wl._OwnerClassification(True, False, "pact-architect", True)
+
+
+def test_classify_owner_lead_match_marks_lead(tmp_path, monkeypatch):
+    """Owner matches the team-lead member (whose agentId equals the
+    team's leadAgentId). Classification reports `is_known_team_member=
+    True`, `is_lead=True`, `agent_type` populated. The call site uses
+    `is_lead` to short-circuit step-4 exclusion."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    team = "team-lead-match"
+    _write_team_config(
+        tmp_path, team,
+        [
+            {"name": "team-lead", "agentId": "team-lead@T", "agentType": "pact-orchestrator"},
+            {"name": "architect", "agentId": "architect@T", "agentType": "pact-architect"},
+        ],
+        lead_agent_id="team-lead@T",
+    )
+    result = wl._classify_owner("team-lead", team)
+    assert result == wl._OwnerClassification(True, True, "pact-orchestrator", True)
+
+
+def test_classify_owner_member_without_agenttype_yields_none_agent_type(
+    tmp_path, monkeypatch
+):
+    """A team member entry without an `agentType` field (or with a
+    non-string agentType) yields `agent_type=None` in the
+    classification. The wake-excluded-agentType carve-out at step 3
+    treats `None` as "no carve-out" and falls through to step 4."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    team = "team-no-agenttype"
+    _write_team_config(
+        tmp_path, team,
+        [
+            {"name": "team-lead", "agentId": "team-lead@T"},  # no agentType
+            {"name": "architect", "agentId": "architect@T", "agentType": 42},  # bad type
+        ],
+        lead_agent_id="team-lead@T",
+    )
+    # Lead match: agent_type stays None (field absent).
+    assert wl._classify_owner("team-lead", team) == wl._OwnerClassification(
+        True, True, None, True
+    )
+    # Teammate match: agent_type stays None (non-string value rejected).
+    assert wl._classify_owner("architect", team) == wl._OwnerClassification(
+        True, False, None, True
+    )
+
+
+# ---------- _warn_empty_team_config_once dedupe behavior ----------
+#
+# `_warn_empty_team_config_once` dedupes per-team within the same
+# process via a module-level set (`_EMPTY_CONFIG_WARN_TEAMS`). The
+# tests in this section pin: (a) the first call for a team produces a
+# side effect (stderr in test contexts because session_journal is
+# uninitialized), (b) the second call for the SAME team is a no-op
+# (already in the set), (c) a DIFFERENT team triggers a fresh warning.
+# Fixture clears `_EMPTY_CONFIG_WARN_TEAMS` between tests so each test
+# starts from a known-empty state.
+
+
+@pytest.fixture
+def reset_empty_config_warn_set():
+    """Module-level state isolation for `_EMPTY_CONFIG_WARN_TEAMS`.
+
+    Snapshot the current set, clear it for the test body, restore the
+    snapshot on teardown. Avoids cross-test contamination if a prior
+    test happened to warm an entry.
+    """
+    snapshot = set(wl._EMPTY_CONFIG_WARN_TEAMS)
+    wl._EMPTY_CONFIG_WARN_TEAMS.clear()
+    yield
+    wl._EMPTY_CONFIG_WARN_TEAMS.clear()
+    wl._EMPTY_CONFIG_WARN_TEAMS.update(snapshot)
+
+
+def test_warn_empty_team_config_once_first_call_writes(
+    capsys, reset_empty_config_warn_set
+):
+    """First call for a team_name produces a [WAKE-TALLY WARN] line on
+    stderr (the journal-fallback path; session_journal is uninitialized
+    in the test process so the journal-first branch returns False and
+    stderr fires). The team is added to the dedupe set."""
+    assert "team-warn-A" not in wl._EMPTY_CONFIG_WARN_TEAMS
+    wl._warn_empty_team_config_once("team-warn-A")
+    captured = capsys.readouterr()
+    assert "[WAKE-TALLY WARN]" in captured.err
+    assert "team-warn-A" in captured.err
+    assert "team-warn-A" in wl._EMPTY_CONFIG_WARN_TEAMS
+
+
+def test_warn_empty_team_config_once_repeat_call_is_noop(
+    capsys, reset_empty_config_warn_set
+):
+    """Second call for the SAME team_name is a no-op — already in the
+    dedupe set, so the function returns immediately. No stderr line,
+    no journal write attempt."""
+    wl._warn_empty_team_config_once("team-warn-dup")
+    _ = capsys.readouterr()  # drain the first-call output
+    wl._warn_empty_team_config_once("team-warn-dup")
+    captured = capsys.readouterr()
+    assert captured.err == "", (
+        "Repeat call for the same team must produce no stderr output. "
+        f"Got: {captured.err!r}"
+    )
+
+
+def test_warn_empty_team_config_once_per_team_isolation(
+    capsys, reset_empty_config_warn_set
+):
+    """Different team_names are tracked independently. team-A warning
+    does not suppress a subsequent team-B warning; the dedupe set
+    grows monotonically across distinct teams within the same
+    process."""
+    wl._warn_empty_team_config_once("team-iso-A")
+    first = capsys.readouterr()
+    assert "team-iso-A" in first.err
+
+    wl._warn_empty_team_config_once("team-iso-B")
+    second = capsys.readouterr()
+    assert "[WAKE-TALLY WARN]" in second.err
+    assert "team-iso-B" in second.err
+
+    assert {"team-iso-A", "team-iso-B"} <= wl._EMPTY_CONFIG_WARN_TEAMS
+
+
+def test_warn_empty_team_config_once_rejects_bad_team_name(
+    capsys, reset_empty_config_warn_set
+):
+    """Non-string or empty team_name returns immediately without
+    side effect. The dedupe set is not touched; no stderr line."""
+    for bad in (None, "", 42, []):
+        wl._warn_empty_team_config_once(bad)
+    captured = capsys.readouterr()
+    assert captured.err == "", (
+        f"Bad team_name inputs must produce no stderr output. "
+        f"Got: {captured.err!r}"
+    )
+    assert wl._EMPTY_CONFIG_WARN_TEAMS == set()
