@@ -292,7 +292,7 @@ JSON
        - **PR size + scope-tightness signals from the session** — If the user has expressed scope-tight preferences earlier and findings are cosmetic, recommend No. If PR is small and findings are substantive, recommend Yes.
        - **Time/cost of remediation** — If minors batch cleanly into one remediation cycle (Yes path is cheap), lean Yes. If each minor would require its own dispatch + verify cycle (Yes path is expensive) AND findings are not high-substance, lean No.
 
-     **Bake the recommendation into the option set** using the same `(recommended)` suffix + one-line rationale convention as Step C (see C.2). Exactly ONE of Yes / No carries the suffix; its description carries a one-line rationale grounded in the criteria above. When no clear recommendation exists, apply the C.4 carve-out (mark the most-defensible option as recommended with uncertainty named in the rationale, OR omit the suffix and state "No clear recommendation; user judgment" in the question prose).
+     **Bake the recommendation into the option set** using the same `(recommended)` suffix + one-line rationale convention as Step C (see C.2). When no clear recommendation exists, apply the C.4 carve-out (mark the most-defensible option as recommended with uncertainty named in the rationale, OR omit the suffix and state "No clear recommendation; user judgment" in the question prose).
 
      **Worked example.** Concrete rationale shape for 2 substantive minors on a small PR: `Yes (recommended) — Two substantive convention-alignment minors; small PR, low remediation cost`. See C.3 for the full option-block convention.
 
