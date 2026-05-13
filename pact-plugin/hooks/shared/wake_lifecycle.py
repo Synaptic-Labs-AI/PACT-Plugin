@@ -131,7 +131,11 @@ class _OwnerClassification:
 _EMPTY_CONFIG_WARN_TEAMS: set[str] = set()
 
 
-def _classify_owner(owner: Any, team_name: str) -> _OwnerClassification:
+def _classify_owner(
+    owner: Any,
+    team_name: str,
+    teams_dir: str | None = None,
+) -> _OwnerClassification:
     """Read the team config ONCE and project the four fields needed by
     ``_lifecycle_relevant``'s step 3 (wake-excluded agentType) and step 4
     (orphan / lead-owned exclusion).
@@ -155,6 +159,29 @@ def _classify_owner(owner: Any, team_name: str) -> _OwnerClassification:
     ``_iter_members`` three times per call (once explicitly + once
     inside each of two predicate helpers); now it invokes ``_iter_members``
     once and ``_read_team_lead_agent_id`` once.
+
+    Note on the ``owner: Any`` parameter type: sibling predicates in
+    ``intentional_wait.py`` (``_is_exempt_agent_type``,
+    ``_is_wake_excluded_agent_type``, ``_is_teachback_exempt_agent_type``)
+    use ``owner: str`` because their callers pre-validate the owner
+    shape upstream. ``_classify_owner`` IS the validation point — its
+    sole runtime caller (``_lifecycle_relevant``, line ~399) passes
+    ``task.get("owner")`` directly from the on-disk task JSON without an
+    upstream isinstance guard, so the actual contract accepts any
+    JSON-readable value. Narrowing the type hint to ``str`` would be a
+    type lie that a future type-checker would flag at the call site.
+    The internal ``isinstance(owner, str)`` guard below is the
+    validation that makes this safe.
+
+    Args:
+        owner: Task owner field (raw from ``task.get("owner")`` at the
+            call site; may be None, str, int, list, etc.). Internal
+            isinstance guard handles non-string shapes.
+        team_name: Team name for config path. Empty/non-string returns
+            an all-False classification.
+        teams_dir: Override teams directory (for testing). Forwarded to
+            ``_iter_members`` and ``_read_team_lead_agent_id``. Matches
+            the sibling-convention of pact_context.py helpers.
     """
     if not isinstance(team_name, str) or not team_name:
         # Empty team_name disables config classification entirely.
@@ -168,7 +195,7 @@ def _classify_owner(owner: Any, team_name: str) -> _OwnerClassification:
     # from "config readable but owner is non-string / orphan →
     # exclude". A bad-owner task under a readable config is an orphan
     # (excluded), not a config-read failure.
-    members = _iter_members(team_name)
+    members = _iter_members(team_name, teams_dir=teams_dir)
     if not members:
         # Empty members list signals the count-on-failure fall-through
         # at the call site (members[] empty ⇒ unreadable for
@@ -184,7 +211,7 @@ def _classify_owner(owner: Any, team_name: str) -> _OwnerClassification:
         # exclusion is intentional, not the count-on-failure path."
         return _OwnerClassification(False, False, None, True)
 
-    lead_agent_id = _read_team_lead_agent_id(team_name)
+    lead_agent_id = _read_team_lead_agent_id(team_name, teams_dir=teams_dir)
     is_known = False
     is_lead = False
     agent_type: str | None = None
@@ -205,7 +232,11 @@ def _classify_owner(owner: Any, team_name: str) -> _OwnerClassification:
     return _OwnerClassification(is_known, is_lead, agent_type, True)
 
 
-def _owner_is_known_team_member(owner: Any, team_name: str) -> bool:
+def _owner_is_known_team_member(
+    owner: Any,
+    team_name: str,
+    teams_dir: str | None = None,
+) -> bool:
     """Return True iff ``owner`` matches some member's ``name`` field in
     the team config.
 
@@ -228,12 +259,18 @@ def _owner_is_known_team_member(owner: Any, team_name: str) -> bool:
     Retained as a public-style helper for test reuse and future callers;
     after the ``_classify_owner`` refactor, ``_lifecycle_relevant`` uses
     the consolidated projection directly and no longer calls this
-    helper at runtime.
+    helper at runtime. The ``owner: Any`` parameter type and ``teams_dir``
+    forwarding mirror the ``_classify_owner`` signature; see that
+    helper's docstring for the rationale on accepting ``Any``.
     """
-    return _classify_owner(owner, team_name).is_known_team_member
+    return _classify_owner(owner, team_name, teams_dir=teams_dir).is_known_team_member
 
 
-def _is_lead_owned(owner: Any, team_name: str) -> bool:
+def _is_lead_owned(
+    owner: Any,
+    team_name: str,
+    teams_dir: str | None = None,
+) -> bool:
     """Return True iff ``owner`` matches a member of the team config
     whose ``agentId`` equals the team's ``leadAgentId``.
 
@@ -251,9 +288,11 @@ def _is_lead_owned(owner: Any, team_name: str) -> bool:
     Retained as a public-style helper for test reuse; after the
     ``_classify_owner`` refactor, ``_lifecycle_relevant`` uses the
     consolidated projection directly and no longer calls this helper at
-    runtime.
+    runtime. The ``owner: Any`` parameter type and ``teams_dir``
+    forwarding mirror the ``_classify_owner`` signature; see that
+    helper's docstring for the rationale on accepting ``Any``.
     """
-    return _classify_owner(owner, team_name).is_lead
+    return _classify_owner(owner, team_name, teams_dir=teams_dir).is_lead
 
 
 def _warn_empty_team_config_once(team_name: str) -> None:
