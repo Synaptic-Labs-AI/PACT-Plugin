@@ -159,7 +159,7 @@ def _classify_owner(owner: Any, team_name: str) -> _OwnerClassification:
     if not isinstance(team_name, str) or not team_name:
         # Empty team_name disables config classification entirely.
         # config_readable=False here is a stand-in for "no source of
-        # truth"; the call site treats it as fail-CONSERVATIVE
+        # truth"; the call site treats it as count-on-failure
         # fall-through identical to the empty-members case.
         return _OwnerClassification(False, False, None, False)
 
@@ -209,11 +209,10 @@ def _owner_is_known_team_member(owner: Any, team_name: str) -> bool:
     """Return True iff ``owner`` matches some member's ``name`` field in
     the team config.
 
-    Renamed from ``_owner_is_team_member`` to clarify that this helper
-    answers "does the config record a member with this name?" rather
-    than "is this owner a teammate (not the lead)?". The teammate-vs-
-    lead distinction is the OR of ``is_known_team_member`` AND
-    ``not is_lead`` — both surfaced via ``_classify_owner``.
+    Answers "does the config record a member with this name?" — distinct
+    from "is this owner a teammate (not the lead)?", which is the
+    conjunction of ``is_known_team_member`` AND ``not is_lead``. Both
+    are surfaced via ``_classify_owner``.
 
     Pure function; never raises. Returns False on every error path:
     non-string owner, empty owner string, empty team_name, empty members
@@ -348,10 +347,10 @@ def _lifecycle_relevant(task: Any, team_name: str = "") -> bool:
         tasks (created by workflow commands), orphan-owner tasks (owner
         string doesn't match any current member), and team-lead-owned
         tasks (umbrella / feature / phase records) all return False.
-        The check is fail-CONSERVATIVE at the call site when the team
-        config is unreadable (empty members list short-circuits to
-        "count") — see the inline comment block at step 4 for the
-        asymmetry rationale.
+        The check applies a count-on-failure posture at the call site
+        when the team config is unreadable (empty members list short-
+        circuits to "count") — see the inline comment block at step 4
+        for the asymmetry rationale.
       - Signal-task pattern: metadata.completion_type == "signal" AND
         metadata.type in {"blocker", "algedonic"}. Applied AFTER the
         teammate-owner check; a teammate-owned signal task passes the
