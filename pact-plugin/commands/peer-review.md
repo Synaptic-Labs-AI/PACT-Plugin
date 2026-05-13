@@ -286,8 +286,26 @@ JSON
    - **Minor + Future**:
 
      **Step A — Initial Gate Question** (Yes/No only):
+
+     **Pre-form a gate-level recommendation BEFORE constructing the AskUserQuestion call.** The gate recommendation is BINARY (Yes or No across the entire minor+future population) — distinct from Step C's per-finding recommendations. Apply these POPULATION-LEVEL criteria:
+       - **Substance of findings** — Are the minors/futures substantive (convention violations, latent risks, real ergonomic wins) or cosmetic-only (whitespace, naming preference, stylistic nits)? Substantive → recommend Yes. Cosmetic-only → recommend No.
+       - **PR size + scope-tightness signals from the session** — If the user has expressed scope-tight preferences earlier and findings are cosmetic, recommend No. If PR is small and findings are substantive, recommend Yes.
+       - **Time/cost of remediation** — If minors batch cleanly into one remediation cycle (Yes path is cheap), lean Yes. If each minor would require its own dispatch + verify cycle (Yes path is expensive) AND findings are not high-substance, lean No.
+
+     **Bake the recommendation into the option set** using the same `(recommended)` suffix + one-line rationale convention as Step C (see C.2). Exactly ONE of Yes / No carries the suffix; its description carries a one-line rationale grounded in the criteria above. When no clear recommendation exists, apply the C.4 carve-out (mark the most-defensible option as recommended with uncertainty named in the rationale, OR omit the suffix and state "No clear recommendation; user judgment" in the question prose).
+
+     **Worked example.** Concrete pattern when findings are 2 substantive minors (convention alignment) on a small PR:
+
+     > **Before** (no orchestrator prior):
+     > - **Yes** — review each item
+     > - **No** — skip to merge readiness
+     >
+     > **After** (surfaces orchestrator's prior):
+     > - **Yes (recommended)** — Two substantive convention-alignment minors; small PR, low remediation cost
+     > - **No** — Skip to merge readiness
+
      - Use `AskUserQuestion` tool: "Would you like to review the minor and future recommendations?"
-       - Options: **Yes** (review each item) / **No** (skip to merge readiness)
+       - Options: **Yes** (review each item) / **No** (skip to merge readiness) — exactly one option labeled with `(recommended)` suffix and a one-line rationale per the criteria above.
      - If **No**: Skip to step 4 directly
      - If **Yes**: Continue to Step B
 
