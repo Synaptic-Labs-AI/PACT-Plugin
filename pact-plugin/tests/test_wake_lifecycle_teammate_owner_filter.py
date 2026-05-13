@@ -13,49 +13,53 @@ Counter-test-by-revert expected cardinality
 Reverting ONLY the step-4 owner-check block in `_lifecycle_relevant`
 (keep the new helpers `_owner_is_team_member`, `_is_lead_owned`, the
 `shared.pact_context` imports, and the docstring updates) produces
-**8 failures** under the current test surface:
+exactly **8 failures** under the current test surface:
 
-  - 3 unit cases in this file:
-      * test_unowned_umbrella_task_excluded
-      * test_lead_owned_task_excluded
-      * test_orphan_owner_excluded
-    (test_teammate_owned_task_counted passes either way — teammate
-    baseline always counts; test_config_unreadable_fail_conservative
-    also passes either way — fail-conservative result matches pre-fix
-    "count any owner" default.)
+  4 new-file failures (this file):
+    - test_unowned_umbrella_task_excluded
+    - test_lead_owned_task_excluded
+    - test_orphan_owner_excluded
+    - test_umbrella_scenario_one_to_zero_transition
+      (pre-fix: count_active_tasks returns 2→1; post-fix: 1→0)
 
-  - 1 behavioral umbrella case in this file:
-      * test_umbrella_scenario_one_to_zero_transition
-    (pre-fix: count_active_tasks returns 2→1; post-fix: 1→0).
+  3 legacy lockstep failures (test_inbox_wake_lifecycle_helper.py):
+    Assertions inverted from the pre-fix orphan-counted behavior to
+    the post-fix orphan-excluded behavior in the same commit as the
+    predicate change.
+    - test_lifecycle_relevant_owner_named_secretary_without_agenttype_excluded_as_orphan
+    - test_count_active_tasks_skips_signal_and_orphans
+    - test_count_active_tasks_secretary_owner_without_agenttype_excluded_as_orphan
 
-  - 3 inverted-in-lockstep legacy cases in
-    test_inbox_wake_lifecycle_helper.py (assertions flipped from the
-    pre-fix orphan-counted behavior to the post-fix orphan-excluded
-    behavior in the same commit as the predicate change):
-      * test_lifecycle_relevant_owner_named_secretary_without_agenttype_excluded_as_orphan
-      * test_count_active_tasks_skips_signal_and_orphans
-      * test_count_active_tasks_secretary_owner_without_agenttype_excluded_as_orphan
+  1 structural audit-anchor failure (test_inbox_wake_lifecycle_helper.py):
+    The fail-CONSERVATIVE inline comment block at step 4 documents the
+    under-arm-unrecoverable vs over-arm-recoverable rationale; it lives
+    inside the step-4 block, so a pure step-4 revert deletes the audit
+    anchor along with the logic and this test flips as a TRUE
+    counter-signal (not a phantom-green source-text pin).
+    - test_lifecycle_relevant_preserves_fail_conservative_audit_anchor
 
-  - 1 structural-invariant case in test_inbox_wake_lifecycle_helper.py:
-      * test_lifecycle_relevant_preserves_fail_conservative_audit_anchor
-    (the inline §5.2-derived comment block at step 4 is removed when
-    step 4 is reverted; pin catches the audit-anchor regression).
+  Tests that pass either way on pure step-4 revert (NOT counted toward
+  the 8):
+    - test_teammate_owned_task_counted (baseline; counts pre and post)
+    - test_config_unreadable_fail_conservative (passes pre and post —
+      the pre-fix default also returns True for any owner shape when
+      the team config is unreadable; the test pins the post-fix
+      fail-CONSERVATIVE posture as a regression guard)
 
-  Tests that pass either way on pure step-4 revert and are NOT counted:
-      * test_teammate_owned_task_counted (baseline; passes pre and post)
-      * test_config_unreadable_fail_conservative (passes pre and post —
-        pre-fix default also returns True for any owner with empty
-        members list)
-      * test_helper_imports_pact_context_for_owner_filter (helpers and
-        imports remain on pure step-4 revert)
-      * test_lifecycle_relevant_documents_orphan_exclusion (docstring
-        is not part of the step-4 inline block)
+Note: an earlier architecture-spec draft (gitignored, not in the repo)
+projected 5 fail on revert. It was drafted before the legacy-test
+lockstep update decision was made during implementation. The empirical
+8 super-sides (not sub-sides) the spec's 5: the +3 delta is the legacy
+lockstep updates that the spec did not anticipate.
 
 Audit-anchor: when extending or refactoring this file, preserve the
-3-unit + 1-behavioral + 3-legacy-lockstep + 1-audit-anchor cardinality
-so the counter-test-by-revert delta remains computable. If you add new
-unit cases that flip on pure step-4 revert, update the count comment
-above in lockstep.
+4-new-file + 3-legacy-lockstep + 1-audit-anchor cardinality so the
+counter-test-by-revert delta remains computable. If you add new unit
+cases that flip on pure step-4 revert, update the count comment above
+in lockstep. Source-text pins for non-load-bearing artifacts (an
+import line, a docstring phrase) are deliberately omitted — they are
+phantom-green-by-absence under pure step-4 revert and provide no
+counter-signal beyond what the runtime tests already cover.
 """
 
 import json

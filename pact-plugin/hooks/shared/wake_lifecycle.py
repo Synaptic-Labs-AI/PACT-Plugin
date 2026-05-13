@@ -211,17 +211,16 @@ def _lifecycle_relevant(task: Any, team_name: str = "") -> bool:
     # task passes step 4 and is excluded at step 6; an unowned/orphan/
     # lead-owned signal task (structurally impossible today, but
     # defended against) is excluded at step 4.
-    #
-    # Fail-CONSERVATIVE: if the team config is unreadable (members list is
-    # empty), skip the owner-check and treat as "count toward tally." The
-    # sibling predicates in intentional_wait.py fail-CLOSED on read errors
-    # (return False), but the failure mode here inverts the priority:
-    # under-arm (silent teardown loss while teammate work is in flight) is
-    # unrecoverable; over-arm (extra empty scans) is recoverable on the next
-    # state change. The wake-mechanism's purpose — never strand a teammate
-    # whose SendMessage needs to wake the lead — is load-bearing here, so we
-    # fail toward counting on every config-read failure.
     if team_name:
+        # Fail-CONSERVATIVE: if the team config is unreadable (members list is
+        # empty), skip the owner-check and treat as "count toward tally." The
+        # sibling predicates in intentional_wait.py fail-CLOSED on read errors
+        # (return False), but the failure mode here inverts the priority:
+        # under-arm (silent teardown loss while teammate work is in flight) is
+        # unrecoverable; over-arm (extra empty scans) is recoverable on the next
+        # state change. The wake-mechanism's purpose — never strand a teammate
+        # whose SendMessage needs to wake the lead — is load-bearing here, so we
+        # fail toward counting on every config-read failure.
         members = _iter_members(team_name)
         if members:
             if not isinstance(owner, str) or not owner:
