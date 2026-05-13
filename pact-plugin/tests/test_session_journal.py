@@ -2944,6 +2944,18 @@ class TestValidateEventSchemaPerType:
         "session_end": {},  # No required fields; baseline-only.
         "cleanup_summary": {},  # No required fields; optional-only (#412 Fix B).
         "session_consolidated": {},  # No required fields; optional-only (#453 Fix B).
+        # `wake_tally_warn` is emitted by
+        # `shared.wake_lifecycle._warn_empty_team_config_once` when the
+        # step-4 owner-classification falls through fail-CONSERVATIVE
+        # (empty members list). `team_name` identifies which team's
+        # config is unreadable; `reason` is a categorical token so a
+        # future log-filter can dispatch on the failure mode. The free-
+        # form `detail` field that the production call site also passes
+        # is documentation-grade prose and is intentionally NOT required.
+        "wake_tally_warn": {
+            "team_name": "team-warn-sample",
+            "reason": "empty_team_config_fail_conservative",
+        },
     }
 
     def test_samples_mirror_required_fields_dict(self):

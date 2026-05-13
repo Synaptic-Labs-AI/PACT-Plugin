@@ -202,6 +202,7 @@ signal beyond what the runtime tests already cover.
 import json
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -999,3 +1000,58 @@ def test_warn_empty_team_config_once_rejects_bad_team_name(
         f"Got: {captured.err!r}"
     )
     assert wl._EMPTY_CONFIG_WARN_TEAMS == set()
+
+
+def test_warn_empty_team_config_once_routes_through_session_journal(
+    capsys, monkeypatch, reset_empty_config_warn_set
+):
+    """When `session_journal.append_event` succeeds, `_warn_empty_team_
+    config_once` routes the warning through the journal and suppresses
+    the stderr fallback. Pins the primary observability path.
+
+    Without this test the F5 suite only exercises the stderr-fallback
+    branch (because `session_journal` is uninitialized in the test
+    process so `append_event` returns False). A future change that
+    silently breaks the `make_event("wake_tally_warn", ...)` call or
+    flips the success-path's return-value contract would slip through
+    review: every F5 test would keep passing because the fallback fires
+    correctly. This test isolates the primary path so a regression
+    there flips a counter-signal."""
+    fake_journal = MagicMock()
+    sentinel_event = {"event_type": "wake_tally_warn", "_sentinel": True}
+    fake_journal.make_event.return_value = sentinel_event
+    fake_journal.append_event.return_value = True
+    monkeypatch.setattr(wl, "session_journal", fake_journal)
+
+    wl._warn_empty_team_config_once("team-journal-primary")
+
+    captured = capsys.readouterr()
+    assert captured.err == "", (
+        "Journal-success path must suppress the stderr fallback. "
+        f"Got stderr: {captured.err!r}"
+    )
+
+    # make_event called once with the canonical event type + team_name
+    # payload. Other fields (reason, detail) are passed through but the
+    # contract this test pins is: the event_type AND team_name reach
+    # the journal layer unmodified. Asserting on event_type and
+    # team_name only — additional fields are an implementation detail.
+    fake_journal.make_event.assert_called_once()
+    call_args = fake_journal.make_event.call_args
+    assert call_args.args[0] == "wake_tally_warn", (
+        f"Expected event_type='wake_tally_warn' as first positional arg; "
+        f"got args={call_args.args!r}"
+    )
+    assert call_args.kwargs.get("team_name") == "team-journal-primary", (
+        "Expected team_name='team-journal-primary' kwarg passed to make_event; "
+        f"got kwargs={call_args.kwargs!r}"
+    )
+
+    # append_event called exactly once with the make_event result. This
+    # pins the wire shape: whatever make_event returns is what
+    # append_event receives — no intermediate mutation.
+    fake_journal.append_event.assert_called_once_with(sentinel_event)
+
+    # Dedupe state still populated (the team-journal-primary entry is
+    # added to the set regardless of which routing path fired).
+    assert "team-journal-primary" in wl._EMPTY_CONFIG_WARN_TEAMS
