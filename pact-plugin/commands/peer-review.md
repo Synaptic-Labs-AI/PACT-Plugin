@@ -296,16 +296,16 @@ JSON
 
      **Worked example.** Concrete pattern when findings are 2 substantive minors (convention alignment) on a small PR:
 
-     > **Before** (no orchestrator prior):
+     > **Before**:
      > - **Yes** — review each item
      > - **No** — skip to merge readiness
      >
-     > **After** (surfaces orchestrator's prior):
+     > **After**:
      > - **Yes (recommended)** — Two substantive convention-alignment minors; small PR, low remediation cost
      > - **No** — Skip to merge readiness
 
      - Use `AskUserQuestion` tool: "Would you like to review the minor and future recommendations?"
-       - Options: **Yes** (review each item) / **No** (skip to merge readiness) — exactly one option labeled with `(recommended)` suffix and a one-line rationale per the criteria above.
+       - Options: **Yes** (review each item) / **No** (skip to merge readiness)
      - If **No**: Skip to step 4 directly
      - If **Yes**: Continue to Step B
 
@@ -338,16 +338,16 @@ JSON
        - **Skip** — Don't track or address
        - **Address now** — Fix it in this PR
        - **More context** — Get additional details (if more detail is needed)
-     - > **Tool mapping**: Every option listed above MUST appear as a named `option` in the `AskUserQuestion` call. For minor recommendations: **Yes**, **No**, **More context**. For future recommendations: **Create GitHub issue**, **Skip**, **Address now**, **More context**. Do not omit any option and rely on the tool's built-in "Other" freeform input — each is a first-class option, not a fallback. On the option you selected as recommended, append `(recommended)` to the label and replace the generic description with a one-line rationale (e.g., "In-scope convention fix, low diff cost" or "Out-of-scope; track to avoid PR sprawl"). Do NOT append the suffix to more than one option per question.
+     - > **Tool mapping**: Every option listed above MUST appear as a named `option` in the `AskUserQuestion` call. For minor recommendations: **Yes**, **No**, **More context**. For future recommendations: **Create GitHub issue**, **Skip**, **Address now**, **More context**. Do not omit any option and rely on the tool's built-in "Other" freeform input — each is a first-class option, not a fallback. Apply the `(recommended)` suffix + rationale per C.2 to exactly one option per question.
 
      **C.3 — Worked example.** <!-- ANCHOR-STABLE: C.3 --> Concrete pattern for a minor finding "Inconsistent error-log prefix across two helpers":
 
-     > **Before** (elicits "what do you recommend?"):
+     > **Before**:
      > - **Yes** — Fix it in this PR
      > - **No** — Skip for now
      > - **More context** — Get additional details
      >
-     > **After** (surfaces orchestrator's prior):
+     > **After**:
      > - **Yes (recommended)** — In-scope convention alignment; 2-line diff, no behavioral risk
      > - **No** — Defer; cosmetic-only inconsistency
      > - **More context** — Get additional details
