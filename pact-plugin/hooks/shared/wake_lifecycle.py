@@ -60,6 +60,7 @@ Carve-out rules:
 from typing import Any
 
 from shared.intentional_wait import _is_wake_excluded_agent_type
+from shared.pact_context import _iter_members, _read_team_lead_agent_id
 from shared.task_utils import iter_team_task_jsons, read_task_json
 
 # Signal-task types — inline literal mirrors the convention at
@@ -74,6 +75,61 @@ _SIGNAL_TASK_TYPES = ("blocker", "algedonic")
 # by the positive allowlist (conservative: only count statuses we know
 # represent in-flight work).
 _ACTIVE_STATUSES = ("pending", "in_progress")
+
+
+def _owner_is_team_member(owner: Any, team_name: str) -> bool:
+    """Return True iff ``owner`` matches some member's ``name`` field in
+    the team config.
+
+    Pure function; never raises. Returns False on every error path:
+    non-string owner, empty owner string, empty team_name, empty members
+    list (config unreadable or members[] missing/empty), or no name
+    match. Fail-CLOSED-symmetric internally — the call site
+    (``_lifecycle_relevant``) is responsible for the fail-CONSERVATIVE
+    short-circuit when the members list is empty (see the inline comment
+    block at step 4 of ``_lifecycle_relevant`` for the asymmetry
+    rationale).
+    """
+    if not isinstance(owner, str) or not owner:
+        return False
+    if not team_name:
+        return False
+    members = _iter_members(team_name)
+    if not members:
+        return False
+    for member in members:
+        if member.get("name") == owner:
+            return True
+    return False
+
+
+def _is_lead_owned(owner: Any, team_name: str) -> bool:
+    """Return True iff ``owner`` matches a member of the team config
+    whose ``agentId`` equals the team's ``leadAgentId``.
+
+    Pure function; never raises. Returns False on every error path:
+    non-string owner, empty owner string, empty team_name, empty
+    leadAgentId (config unreadable or field missing), empty members
+    list, or no member matches both name and lead-agentId. Fail-CLOSED-
+    symmetric internally — the call site (``_lifecycle_relevant``) is
+    responsible for the fail-CONSERVATIVE short-circuit when the members
+    list is empty (see the inline comment block at step 4 of
+    ``_lifecycle_relevant`` for the asymmetry rationale).
+    """
+    if not isinstance(owner, str) or not owner:
+        return False
+    if not team_name:
+        return False
+    lead_agent_id = _read_team_lead_agent_id(team_name)
+    if not lead_agent_id:
+        return False
+    members = _iter_members(team_name)
+    if not members:
+        return False
+    for member in members:
+        if member.get("name") == owner and member.get("agentId") == lead_agent_id:
+            return True
+    return False
 
 
 def _lifecycle_relevant(task: Any, team_name: str = "") -> bool:
@@ -100,8 +156,19 @@ def _lifecycle_relevant(task: Any, team_name: str = "") -> bool:
         re-introducing the predicate. Evaluated before the metadata-
         shape check so that a wake-excluded agentType task with
         corrupted metadata is still excluded once the set is non-empty.
+      - Teammate-owner check: tasks count ONLY if their owner is a
+        team-config member AND not the team-lead. Unowned umbrella
+        tasks (created by workflow commands), orphan-owner tasks (owner
+        string doesn't match any current member), and team-lead-owned
+        tasks (umbrella / feature / phase records) all return False.
+        The check is fail-CONSERVATIVE at the call site when the team
+        config is unreadable (empty members list short-circuits to
+        "count") — see the inline comment block at step 4 for the
+        asymmetry rationale.
       - Signal-task pattern: metadata.completion_type == "signal" AND
-        metadata.type in {"blocker", "algedonic"}.
+        metadata.type in {"blocker", "algedonic"}. Applied AFTER the
+        teammate-owner check; a teammate-owned signal task passes the
+        owner check and is excluded here.
     """
     if not isinstance(task, dict):
         return False
@@ -134,6 +201,36 @@ def _lifecycle_relevant(task: Any, team_name: str = "") -> bool:
     owner = task.get("owner")
     if isinstance(owner, str) and _is_wake_excluded_agent_type(owner, team_name):
         return False
+
+    # Teammate-owner check (step 4): tasks count toward the wake tally
+    # only when the owner is a non-lead member of the team. Unowned
+    # umbrella tasks (created by /PACT:orchestrate, /PACT:comPACT,
+    # /PACT:peer-review), orphan-owner tasks, and team-lead-owned tasks
+    # all return False here. The predicate flow places this BEFORE the
+    # signal-task metadata carve-out (step 6) so a teammate-owned signal
+    # task passes step 4 and is excluded at step 6; an unowned/orphan/
+    # lead-owned signal task (structurally impossible today, but
+    # defended against) is excluded at step 4.
+    #
+    # Fail-CONSERVATIVE: if the team config is unreadable (members list is
+    # empty), skip the owner-check and treat as "count toward tally." The
+    # sibling predicates in intentional_wait.py fail-CLOSED on read errors
+    # (return False), but the failure mode here inverts the priority:
+    # under-arm (silent teardown loss while teammate work is in flight) is
+    # unrecoverable; over-arm (extra empty scans) is recoverable on the next
+    # state change. The wake-mechanism's purpose — never strand a teammate
+    # whose SendMessage needs to wake the lead — is load-bearing here, so we
+    # fail toward counting on every config-read failure.
+    if team_name:
+        members = _iter_members(team_name)
+        if members:
+            if not isinstance(owner, str) or not owner:
+                return False
+            if not _owner_is_team_member(owner, team_name):
+                return False
+            if _is_lead_owned(owner, team_name):
+                return False
+        # else: members list empty → fail-CONSERVATIVE; fall through.
 
     metadata = task.get("metadata") or {}
     if not isinstance(metadata, dict):

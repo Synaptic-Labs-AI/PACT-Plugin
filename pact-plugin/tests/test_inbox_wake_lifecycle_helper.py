@@ -165,18 +165,29 @@ def test_lifecycle_relevant_secretary_owner_now_counts_post_empty_carve_out(tmp_
     )
 
 
-def test_lifecycle_relevant_owner_named_secretary_without_agenttype_counts(tmp_path, monkeypatch):
-    """A teammate spoofing owner='secretary' without the privileged
-    agentType in team config is NOT exempt — the carve-out fail-closes
-    on missing-from-config (#682 trust-boundary defense)."""
+def test_lifecycle_relevant_owner_named_secretary_without_agenttype_excluded_as_orphan(tmp_path, monkeypatch):
+    """An owner='secretary' string with no matching member in the team
+    config is an orphan owner — the teammate-owner check returns False
+    BEFORE the wake-side agentType carve-out can promote or demote it.
+    A teammate spoofing owner='secretary' to escape the wake tally hits
+    the orphan-exclusion gate; the spoof neither evades nor sneaks into
+    the privileged agentType set.
+
+    Pre-orphan-exclusion behavior: this task counted toward the active
+    tally because the wake-side agentType carve-out only fired when the
+    owner matched a member whose recorded agentType was in
+    WAKE_EXCLUDED_AGENT_TYPES — a non-member owner simply fell through.
+    Post-orphan-exclusion: orphan owners are now excluded regardless of
+    agentType. The teammate-owner check fail-CLOSES on no member-name
+    match (members list non-empty)."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     team = "team-spoof"
     _write_team_config(tmp_path, team, [
         {"name": "backend-coder-1", "agentType": "pact-backend-coder"},
     ])
     task = {"status": "in_progress", "owner": "secretary"}
-    # Not exempt → counts toward active tally.
-    assert wl._lifecycle_relevant(task, team) is True
+    # Orphan owner (not in members) → excluded from wake tally.
+    assert wl._lifecycle_relevant(task, team) is False
 
 
 def test_lifecycle_relevant_empty_team_name_counts_secretary(tmp_path, monkeypatch):
@@ -316,20 +327,24 @@ def test_count_active_tasks_counts_pending_and_in_progress(tmp_path, monkeypatch
     assert wl.count_active_tasks(team) == 2
 
 
-def test_count_active_tasks_skips_signal_only_post_empty_carve_out(tmp_path, monkeypatch):
-    """POST-EMPTY-CARVE-OUT: signal tasks are still excluded from the
-    active tally (signal-task carve-out is independent of the wake-side
-    agentType carve-out), but secretary tasks are now COUNTED because
-    WAKE_EXCLUDED_AGENT_TYPES is empty.
+def test_count_active_tasks_skips_signal_and_orphans(tmp_path, monkeypatch):
+    """Signal tasks remain excluded via the metadata-layer signal-task
+    carve-out (independent of the wake-side agentType carve-out and the
+    teammate-owner check). Orphan-owner tasks (owner string doesn't
+    match any current member) are now also excluded via the teammate-
+    owner check.
 
-    Pre-empty: count == 1 (only `real` counts; sig + sec excluded).
-    Post-empty: count == 2 (real + sec count; sig still excluded via
-    signal-task carve-out which lives at the metadata layer, not the
-    agentType layer).
+    Setup: team config lists only `session-secretary` as a member. Tasks
+    `real` (owner=x) and `sig` (owner=y) are orphans; `sec` (owner=
+    session-secretary) is a known teammate.
 
-    Counter-test-by-revert: a future re-population of
-    WAKE_EXCLUDED_AGENT_TYPES = {pact-secretary} drops the count back
-    to 1; this test must be inverted in lockstep."""
+    Pre-orphan-exclusion: count == 2 (real + sec; sig excluded only by
+    signal-task carve-out). Post-orphan-exclusion: count == 1 (sec only;
+    real is orphan-excluded, sig is signal-task-excluded, sec passes).
+
+    Counter-test-by-revert: removing the teammate-owner check from
+    `_lifecycle_relevant` would restore the count to 2 by re-counting
+    `real` (the orphan)."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     team = "team-carveouts"
     # Team config records session-secretary with the privileged agentType.
@@ -343,11 +358,10 @@ def test_count_active_tasks_skips_signal_only_post_empty_carve_out(tmp_path, mon
         metadata={"completion_type": "signal", "type": "blocker"},
     )
     _stage_task(tmp_path, team, "sec", status="in_progress", owner="session-secretary")
-    assert wl.count_active_tasks(team) == 2, (
-        "Post-empty WAKE_EXCLUDED_AGENT_TYPES: secretary tasks count "
-        "(real + sec = 2); only signal tasks are excluded via the "
-        "metadata-layer signal-task carve-out (independent of the "
-        "wake-side agentType carve-out)."
+    assert wl.count_active_tasks(team) == 1, (
+        "Only the known teammate `sec` counts: `real` is excluded as "
+        "orphan owner (not in members), `sig` is excluded by the "
+        "signal-task carve-out."
     )
 
 
@@ -383,18 +397,25 @@ def test_count_active_tasks_session_secretary_now_counts_post_empty_carve_out(tm
     )
 
 
-def test_count_active_tasks_secretary_owner_without_agenttype_counts(tmp_path, monkeypatch):
-    """Trust-boundary defense: owner='secretary' alone is not enough to
-    trigger the carve-out — the team config must record the privileged
-    agentType. A teammate spoofing owner='secretary' without team-config
-    backing counts toward the active tally (#682)."""
+def test_count_active_tasks_secretary_owner_without_agenttype_excluded_as_orphan(tmp_path, monkeypatch):
+    """Trust-boundary defense, strengthened: owner='secretary' alone is
+    not enough to count toward the wake tally — the team config must
+    record a member with that exact name. A teammate spoofing
+    owner='secretary' without a matching member is an orphan owner and
+    is excluded from the active tally.
+
+    Pre-orphan-exclusion: count == 1 (the spoof counted because the
+    agentType-only carve-out fail-closed on missing-from-config but the
+    teammate-owner check did not yet exist). Post-orphan-exclusion:
+    count == 0 (the orphan owner is filtered before reaching the
+    metadata-shape gate)."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     team = "team-spoof"
     _write_team_config(tmp_path, team, [
         {"name": "backend-coder-1", "agentType": "pact-backend-coder"},
     ])
     _stage_task(tmp_path, team, "spoof", status="in_progress", owner="secretary")
-    assert wl.count_active_tasks(team) == 1
+    assert wl.count_active_tasks(team) == 0
 
 
 def test_count_active_tasks_skips_unparseable_files(tmp_path, monkeypatch):
