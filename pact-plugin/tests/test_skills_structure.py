@@ -295,3 +295,44 @@ class TestNoFirstActionFossilInSkillBodies:
             f"exists and contradicts the current `skills:` frontmatter "
             f"preload model. Replace with current-state instructions."
         )
+
+
+class TestOrderingInvariantPhraseCount:
+    """Count-invariant pin for the 'Ordering invariant' load-bearing concept.
+
+    The metadata-write -> SendMessage -> intentional_wait ordering is restated
+    at multiple sites across the two skills that govern teammate handoff and
+    teachback. Each restatement is load-bearing for a distinct audience
+    (On Start gate, On Completion HANDOFF block, Intentional Waiting lead-side
+    mirror, pact-teachback skill body). Silent elision of any one of these
+    sites was the exact failure mode that motivated #740/#742.
+
+    The pin uses the loose concept-phrase 'Ordering invariant' (not the
+    qualified '(audit anchor)' variant) so site-specific parenthetical
+    meta-tags can evolve without false-RED, while the named concept itself
+    cannot be elided without false-RED.
+    """
+
+    EXPECTED_COUNTS = {
+        "pact-agent-teams/SKILL.md": 3,
+        "pact-teachback/SKILL.md": 1,
+    }
+
+    @pytest.mark.parametrize(
+        "rel_path,expected",
+        list(EXPECTED_COUNTS.items()),
+        ids=list(EXPECTED_COUNTS.keys()),
+    )
+    def test_ordering_invariant_phrase_count(self, rel_path, expected):
+        skill_md = SKILLS_DIR / rel_path
+        assert skill_md.is_file(), f"{rel_path} must exist"
+        text = skill_md.read_text(encoding="utf-8")
+        actual = text.count("Ordering invariant")
+        assert actual == expected, (
+            f"{rel_path} must contain the phrase 'Ordering invariant' exactly "
+            f"{expected} time(s); found {actual}. Each restatement is load-bearing "
+            f"for a distinct audience (see class docstring); silent elision of any "
+            f"site was the failure mode that motivated #740/#742. If a deliberate "
+            f"refactor changes the count, update EXPECTED_COUNTS with a comment "
+            f"naming which site was added or removed and why."
+        )

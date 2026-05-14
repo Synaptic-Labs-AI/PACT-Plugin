@@ -164,3 +164,78 @@ class TestAgentTeamsProtocolKeywords:
         assert "shutdown_request" in skill_content, (
             "SKILL.md must reference 'shutdown_request' for graceful termination"
         )
+
+
+class TestOnCompletionVerificationGateOrdering:
+    """Pin that the Step 0 verification precondition precedes the first numbered
+    HANDOFF step inside the 'On Completion — HANDOFF' section. Regression guard
+    against future edits that move, rename, or remove the verification gate."""
+
+    def _on_completion_section(self, skill_content):
+        # Line-anchored start boundary: require the header to begin a line
+        # (preceded by newline). Hardens against in-prose / code-fenced
+        # mentions that could otherwise mis-anchor the section slice.
+        marker = "\n## On Completion"
+        anchor = skill_content.find(marker)
+        assert anchor != -1, "SKILL.md must contain '## On Completion' section"
+        start = anchor + 1  # drop the leading newline matched by the anchor
+        next_h2 = skill_content.find("\n## ", start)
+        return skill_content[start : next_h2 if next_h2 != -1 else len(skill_content)]
+
+    def test_step_0_verification_precondition_present(self, skill_content):
+        section = self._on_completion_section(skill_content)
+        assert "Step 0 — Verification precondition" in section, (
+            "On Completion section must declare 'Step 0 — Verification precondition' "
+            "gating the HANDOFF write sequence"
+        )
+
+    def test_step_0_precedes_store_handoff_in_task_metadata(self, skill_content):
+        section = self._on_completion_section(skill_content)
+        step_0_idx = section.find("Step 0 — Verification precondition")
+        store_handoff_idx = section.find("Store HANDOFF in task metadata")
+        assert step_0_idx != -1, "Step 0 verification gate must be present"
+        assert store_handoff_idx != -1, "'Store HANDOFF in task metadata' step must be present"
+        assert step_0_idx < store_handoff_idx, (
+            "Step 0 verification precondition MUST precede the 'Store HANDOFF in task metadata' "
+            "step — the gate is a precondition, not a wrap-up artifact"
+        )
+
+    def test_step_0_forbids_drafting_handoff_while_tests_run(self, skill_content):
+        section = self._on_completion_section(skill_content)
+        assert "draft the handoff while tests run" in section, (
+            "Step 0 block must explicitly name the 'draft the handoff while tests run' "
+            "anti-pattern (load-bearing per issue acceptance criterion)"
+        )
+
+
+class TestOnStartTeachbackGateSendMessageVisible:
+    """Pin that the On Start teachback gate step explicitly names SendMessage as
+    a visible action, with the load-bearing ordering invariant inline. Regression
+    guard against future elision that silently strands the team-lead."""
+
+    def _on_start_section(self, skill_content):
+        # Line-anchored start boundary (see TestOnCompletionVerificationGateOrdering
+        # for rationale). Requires '## On Start' at the beginning of a line.
+        marker = "\n## On Start"
+        anchor = skill_content.find(marker)
+        assert anchor != -1, "SKILL.md must contain '## On Start' section"
+        start = anchor + 1
+        next_h2 = skill_content.find("\n## ", start)
+        return skill_content[start : next_h2 if next_h2 != -1 else len(skill_content)]
+
+    def test_teachback_gate_names_send_message_explicitly(self, skill_content):
+        section = self._on_start_section(skill_content)
+        assert "notify the team-lead via SendMessage" in section, (
+            "On Start teachback gate step must explicitly name 'notify the team-lead via "
+            "SendMessage' — eliding it strands the lead without a wake signal"
+        )
+
+    def test_teachback_gate_pins_ordering_invariant_inline(self, skill_content):
+        section = self._on_start_section(skill_content)
+        assert "metadata write FIRST" in section and "SendMessage SECOND" in section and (
+            "intentional_wait` SET THIRD" in section
+        ), (
+            "On Start teachback gate must inline the metadata→SendMessage→intentional_wait "
+            "ordering invariant; reversing Step 1 and Step 2 produces false-empty raw reads "
+            "on the lead side"
+        )
