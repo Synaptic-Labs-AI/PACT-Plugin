@@ -923,13 +923,25 @@ def test_classify_owner_member_without_agenttype_yields_none_agent_type(
 
 
 @pytest.fixture
-def reset_empty_config_warn_set():
-    """Module-level state isolation for `_EMPTY_CONFIG_WARN_TEAMS`.
+def reset_empty_config_warn_set(monkeypatch):
+    """Module-level state isolation for `_EMPTY_CONFIG_WARN_TEAMS` and
+    forced stderr-fallback routing.
 
     Snapshot the current set, clear it for the test body, restore the
     snapshot on teardown. Avoids cross-test contamination if a prior
     test happened to warm an entry.
+
+    Also forces `wl.session_journal = None` so the journal-first branch
+    inside `_warn_empty_team_config_once` short-circuits to the stderr
+    fallback. Without this, a prior test in a broad pytest sweep can
+    initialize `session_journal` such that `append_event` returns truthy,
+    suppressing the stderr line that the [WAKE-TALLY WARN] assertions in
+    this F5 suite depend on. Tests that deliberately exercise the
+    journal-success path (e.g. `routes_through_session_journal`) override
+    this with their own `monkeypatch.setattr(wl, "session_journal", ...)`
+    AFTER the fixture runs, which takes precedence cleanly.
     """
+    monkeypatch.setattr(wl, "session_journal", None)
     snapshot = set(wl._EMPTY_CONFIG_WARN_TEAMS)
     wl._EMPTY_CONFIG_WARN_TEAMS.clear()
     yield

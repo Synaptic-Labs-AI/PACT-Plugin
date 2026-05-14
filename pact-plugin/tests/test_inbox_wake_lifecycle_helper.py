@@ -93,25 +93,104 @@ def test_lifecycle_relevant_preserves_fail_conservative_audit_anchor():
     """The fail-CONSERVATIVE asymmetry between this call site (count on
     config-read failure) and the sibling predicates in
     intentional_wait.py (return False on config-read failure) is
-    load-bearing for the wake mechanism. Pin a line-anchored phrase
-    from the inline comment block so future cleanup cannot silently
-    invert the posture by deleting the audit anchor."""
-    src = (
+    load-bearing for the wake mechanism. Pin the audit-anchor phrases
+    INSIDE the step-4 ``elif team_name:`` block specifically — a free
+    file-wide substring check would pass vacuously if a future
+    contributor introduced the phrases anywhere else in the module
+    (e.g. a helper docstring, an unrelated comment). The tightened
+    anchor requires both halves of the rationale to live in the
+    executable elif-body's comment block, so a body-only revert that
+    deletes the elif block deletes the anchor with it.
+    """
+    src_path = (
         Path(__file__).resolve().parent.parent
         / "hooks" / "shared" / "wake_lifecycle.py"
-    ).read_text(encoding="utf-8")
-    # The phrase "Fail-CONSERVATIVE" plus the under-arm-vs-over-arm
-    # rationale must remain inline at step 4. Pin both halves so a
-    # rewrite that keeps the keyword but drops the rationale (or vice
-    # versa) still fails.
-    assert "Fail-CONSERVATIVE" in src, (
-        "Inline comment block at step 4 must keep the Fail-CONSERVATIVE "
-        "audit anchor."
     )
-    assert "under-arm" in src and "unrecoverable" in src, (
-        "Inline comment block at step 4 must keep the under-arm-vs-"
-        "over-arm rationale that justifies the fail-CONSERVATIVE posture."
+    src_lines = src_path.read_text(encoding="utf-8").splitlines()
+
+    # Anchor: the EXECUTABLE statement `    elif team_name:` (4-space
+    # indent + trailing colon). Docstring mentions like `elif team_name:`
+    # wrapped in backticks do not match because the indentation differs
+    # and they appear inside triple-quoted strings, not at function-body
+    # indent. We require exactly one such anchor line — duplicates would
+    # indicate either a refactor that split the predicate or a spurious
+    # paste, both of which warrant review.
+    anchor_indices = [
+        i for i, ln in enumerate(src_lines) if ln == "    elif team_name:"
+    ]
+    assert len(anchor_indices) == 1, (
+        "Expected exactly one `    elif team_name:` executable line in "
+        "wake_lifecycle.py (the step-4 fail-CONSERVATIVE branch). Found "
+        f"{len(anchor_indices)} at line numbers "
+        f"{[i + 1 for i in anchor_indices]!r}."
     )
+    anchor_idx = anchor_indices[0]
+
+    # Window: lines following the anchor that belong to the elif body.
+    # The elif body in this branch is comment-only narration plus the
+    # final `_warn_empty_team_config_once(team_name)` call. Collect
+    # lines until we hit either:
+    #   (a) a `# Step N:` outer-step marker (the next outer-step comment
+    #       at the SAME 4-space indent), which closes the elif body, or
+    #   (b) any non-comment, non-blank statement that is NOT the expected
+    #       trailing `_warn_empty_team_config_once(team_name)` call.
+    # The collected window is the executable elif body's comment block.
+    window_lines = []
+    for ln in src_lines[anchor_idx + 1:]:
+        stripped = ln.strip()
+        # Outer-step marker closes the window before consuming.
+        if stripped.startswith("# Step ") and ln.startswith("    # Step "):
+            break
+        window_lines.append(ln)
+        # Stop after the trailing _warn_empty_team_config_once call — the
+        # last executable line of the elif body.
+        if stripped == "_warn_empty_team_config_once(team_name)":
+            break
+    window_text = "\n".join(window_lines)
+
+    # The three audit-anchor phrases MUST live inside the executable
+    # elif body's window. A future revert that deletes the elif body
+    # makes window_lines empty (or near-empty), flipping these
+    # assertions to FAIL — the intended counter-signal under body-only
+    # revert.
+    assert "Fail-CONSERVATIVE" in window_text, (
+        f"`Fail-CONSERVATIVE` audit anchor must live inside the step-4 "
+        f"`elif team_name:` body (executable line {anchor_idx + 1}). "
+        f"Window starts at line {anchor_idx + 2}; collected window:\n"
+        f"{window_text!r}"
+    )
+    assert "under-arm" in window_text, (
+        f"`under-arm` rationale must live inside the step-4 `elif "
+        f"team_name:` body (executable line {anchor_idx + 1}). Window:\n"
+        f"{window_text!r}"
+    )
+    assert "unrecoverable" in window_text, (
+        f"`unrecoverable` rationale must live inside the step-4 `elif "
+        f"team_name:` body (executable line {anchor_idx + 1}). Window:\n"
+        f"{window_text!r}"
+    )
+
+    # Pin additionally that no OTHER executable site in the module
+    # contains these phrases. Docstring/comment occurrences elsewhere
+    # would create a phantom-green path where a future contributor
+    # could delete the elif body's comment block, leave the phrases in
+    # an unrelated docstring, and the assertions above would still
+    # pass. Forbid the phrases anywhere in src EXCEPT inside the
+    # window we just validated.
+    src_outside_window = "\n".join(
+        ln
+        for i, ln in enumerate(src_lines)
+        if not (anchor_idx + 1 <= i <= anchor_idx + len(window_lines))
+    )
+    for phrase in ("Fail-CONSERVATIVE", "under-arm", "unrecoverable"):
+        assert phrase not in src_outside_window, (
+            f"Phrase {phrase!r} must appear ONLY inside the step-4 "
+            f"`elif team_name:` body's comment block (lines "
+            f"{anchor_idx + 2}..{anchor_idx + 1 + len(window_lines)}). "
+            f"Found outside the window — a future contributor could "
+            f"delete the elif body's rationale and this anchor would "
+            f"still pass vacuously."
+        )
 
 
 def test_helper_documented_pure_never_raises():
