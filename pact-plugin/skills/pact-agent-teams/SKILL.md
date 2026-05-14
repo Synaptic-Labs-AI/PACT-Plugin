@@ -37,7 +37,7 @@ A reply to the user that contains content the team-lead needs to act on (a block
 1. Check `TaskList` for tasks assigned to you (by your name)
 2. Claim your assigned task: `TaskUpdate(taskId, status="in_progress")`
 3. Read the task description — it contains your full mission (CONTEXT, MISSION, INSTRUCTIONS, GUIDELINES). If upstream tasks are referenced, read them via `TaskGet`.
-4. **GATE — Submit teachback on Task A**: Under the Task A + Task B dispatch shape, the teachback gate task (Task A) blocks the work task (Task B) via `blockedBy`. Store your teachback in `metadata.teachback_submit` on Task A per the [pact-teachback](../pact-teachback/SKILL.md) skill, SET `intentional_wait{reason=awaiting_lead_completion}`, and idle. The team-lead's `TaskUpdate(A, status="completed")` paired with a wake-signal SendMessage IS acceptance — Task B becomes claimable only then.
+4. **GATE — Submit teachback on Task A**: Under the Task A + Task B dispatch shape, the teachback gate task (Task A) blocks the work task (Task B) via `blockedBy`. Store your teachback in `metadata.teachback_submit` on Task A per the [pact-teachback](../pact-teachback/SKILL.md) skill, **notify the team-lead via SendMessage**, SET `intentional_wait{reason=awaiting_lead_completion}`, and idle. **Ordering invariant**: metadata write FIRST → SendMessage SECOND → `intentional_wait` SET THIRD (load-bearing; see [pact-teachback §Ordering invariant](../pact-teachback/SKILL.md#action-store-teachback-now) for rationale). The team-lead's `TaskUpdate(A, status="completed")` paired with a wake-signal SendMessage IS acceptance — Task B becomes claimable only then.
    - **DO NOT** call `Edit`, `Write`, or `Bash` for implementation work before storing your teachback
    - See [Teachback](#teachback-conversation-verification) below for the full skill reference
 5. Begin work on Task B — check your agent memory (`~/.claude/agent-memory/<your-name>/`) for relevant patterns and knowledge as part of your working process
@@ -122,6 +122,15 @@ For consequence-level disagreements:
 ## On Completion — HANDOFF (Required)
 
 When your work is done, you store the HANDOFF and remain `in_progress`. **You do NOT mark your own tasks `completed`** — the team-lead is the authoritative completion signal.
+
+**Step 0 — Verification precondition (MUST pass before Step 1).** Do NOT begin the HANDOFF write sequence until ALL of the following are true:
+
+- All file edits for the task are complete.
+- All deliverables are staged via `git add`. (`git status` shows your intended changes in "Changes to be committed".)
+- All relevant tests have been run with exit code 0. If no tests apply to your change, you MUST state "no tests applicable" with one-line reasoning in your HANDOFF.
+- The deliverable matches every acceptance criterion in the task description. Tick each one off explicitly before proceeding.
+
+If ANY precondition is unmet, KEEP WORKING. Do not write `metadata.handoff` to "reserve a spot" or "draft the handoff while tests run." The handoff metadata write is a commitment that the work IS done, NOT a wrap-up artifact you build in parallel with finishing. See [#741](https://github.com/Synaptic-Labs-AI/PACT-Plugin/issues/741) for the umbrella tracking deferred Phase 2 enforcement (schema field, hook validation, lead-side independent verification).
 
 > **Ordering invariant** (audit anchor): the three steps below MUST execute in the order Step 1 → Step 2 → Step 3 — `metadata.handoff` write FIRST, then notify SendMessage to team-lead, then `intentional_wait` SET. This ordering is load-bearing for the team-lead's [Read-Trigger Precondition](../../protocols/pact-completion-authority.md#read-trigger-precondition): the lead must wait for teammate's wake-signal SendMessage before treating the raw `cat ~/.claude/tasks/.../{taskId}.json | jq .metadata.handoff` read as authoritative, but the SendMessage is only safe to send AFTER the metadata write has landed on disk. Reversing Step 1 and Step 2 produces false-empty raw reads on the lead side that have triggered false-positive HANDOFF rejection cycles. Reversing Step 2 and Step 3 (idle before SendMessage) silently strands the lead — they will never see the wake-signal because you went idle without sending it. Editors of this skill: do NOT re-order these steps.
 
