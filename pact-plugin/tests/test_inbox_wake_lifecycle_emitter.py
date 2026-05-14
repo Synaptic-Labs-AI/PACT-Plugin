@@ -83,7 +83,7 @@ def _write_session_context(
         }),
         encoding="utf-8",
     )
-    # Team config drives the emitter's _is_lead_session guard. Default
+    # Team config drives the emitter's is_lead_session guard. Default
     # behavior: caller's session_id IS the lead (the standard test
     # framing for these tests, which exercise lead-side behavior). Pass
     # `lead_session_id="some-other-id"` to simulate a teammate session.
@@ -495,10 +495,11 @@ def test_is_terminal_status_update_matches_completed_and_deleted():
 
 def test_emitter_guards_on_lead_session_id_structural():
     """Source-level structural pin (commit-9 tightened from substring-
-    anywhere to regex-in-code-line): the emitter must CALL `_is_lead_session`
-    (or equivalent guard against team_config.leadSessionId) before any
-    directive emit. Without this structural anchor, the emitter would
-    fire Arm/Teardown directives in teammate sessions (where they're
+    anywhere to regex-in-code-line): the emitter must CALL `is_lead_session`
+    (the public symbol lifted into shared.wake_lifecycle, or equivalent
+    guard against team_config.leadSessionId) before any Teardown directive
+    emit. Without this structural anchor, the emitter would fire
+    Arm/Teardown directives in teammate sessions (where they're
     inert at best, attacker-weaponizable at worst — a teammate session
     that arms a cron scan would scan the lead's task store from the wrong
     process).
@@ -507,11 +508,16 @@ def test_emitter_guards_on_lead_session_id_structural():
     construct (if/return/elif/while/assert), NOT just anywhere in source.
     A hostile edit removing the actual guard call but leaving a docstring
     mention would pass the prior substring check; the regex-in-code-line
-    check catches the wiring-disconnect."""
+    check catches the wiring-disconnect.
+
+    Accepts both the lifted public name `is_lead_session` and the
+    historical underscore-prefixed `_is_lead_session` for forward-compat;
+    `leadSessionId` (the config key) matches if a future refactor inlines
+    the check at the call site."""
     import re as _re
     src = (HOOK_DIR / "wake_lifecycle_emitter.py").read_text(encoding="utf-8")
     code_line_pattern = _re.compile(
-        r"^\s*(if|return|elif|while|assert)\b.*(_is_lead_session|leadSessionId)",
+        r"^\s*(if|return|elif|while|assert)\b.*(is_lead_session|leadSessionId)",
         _re.MULTILINE,
     )
     assert code_line_pattern.search(src) is not None, (
@@ -549,7 +555,7 @@ def test_no_emit_when_session_id_does_not_match_lead(tmp_path):
 
 
 def test_no_emit_when_team_config_missing(tmp_path):
-    """If team config.json is missing, _is_lead_session fail-closes —
+    """If team config.json is missing, is_lead_session fail-closes —
     no emit. Documenting the fail-closed behavior so an editing LLM
     cannot 'simplify' the guard into fail-open during refactor."""
     home = tmp_path / "home"; home.mkdir()
@@ -601,13 +607,13 @@ def test_count_active_tasks_not_called_on_metadata_only_taskupdate():
         }, "team-x")
         # Without a lead-session guard pass, _decide_directive returns
         # early; we want to specifically exercise the post-tool-name +
-        # post-task-id + non-terminal path. Bypass _is_lead_session by
+        # post-task-id + non-terminal path. Bypass is_lead_session by
         # patching it to True for this perf-invariant probe.
         # (The lead-session guard's correctness is covered separately
         # above; here we isolate the count_active_tasks ordering.)
 
     # Re-run with lead-guard bypassed to isolate the perf ordering invariant.
-    with patch.object(emitter, "_is_lead_session", return_value=True), \
+    with patch.object(emitter, "is_lead_session", return_value=True), \
          patch.object(emitter, "count_active_tasks") as mock_count:
         result = emitter._decide_directive({
             "tool_name": "TaskUpdate",
@@ -630,7 +636,7 @@ def test_count_active_tasks_called_on_terminal_status_taskupdate():
     import wake_lifecycle_emitter as emitter
 
     from unittest.mock import patch
-    with patch.object(emitter, "_is_lead_session", return_value=True), \
+    with patch.object(emitter, "is_lead_session", return_value=True), \
          patch.object(emitter, "count_active_tasks", return_value=0) as mock_count:
         emitter._decide_directive({
             "tool_name": "TaskUpdate",
@@ -650,7 +656,7 @@ def test_count_active_tasks_called_on_taskcreate():
     import wake_lifecycle_emitter as emitter
 
     from unittest.mock import patch
-    with patch.object(emitter, "_is_lead_session", return_value=True), \
+    with patch.object(emitter, "is_lead_session", return_value=True), \
          patch.object(emitter, "_extract_task_id", return_value="1"), \
          patch.object(emitter, "count_active_tasks", return_value=1) as mock_count:
         emitter._decide_directive({

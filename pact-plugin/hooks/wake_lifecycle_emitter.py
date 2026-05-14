@@ -42,15 +42,38 @@ Lifecycle automation:
   emitted.
 
 Lead-Session Guard (Layer 0 — defense-in-depth):
-- Every directive emission is gated by `_is_lead_session`, which
-  verifies that the current PostToolUse session's `session_id`
-  matches the team's `leadSessionId` from team_config.json.
-  Teammate sessions never receive the Arm/Teardown directives —
-  hook-level filtering at the emission source, correct-by-
-  construction rather than relying on the skill body's
-  Lead-Session Guard (Layer 1) as the primary defense. The skill-
-  body guard remains as backstop for user-typed manual invocation
-  from a teammate session.
+- Every Teardown directive emission is gated by `is_lead_session`,
+  which verifies that the current PostToolUse session's `session_id`
+  matches the team's `leadSessionId` from team_config.json. Teammate
+  sessions never receive the Teardown directive — hook-level filtering
+  at the emission source, correct-by-construction rather than relying
+  on the skill body's Lead-Session Guard (Layer 1) as the primary
+  defense. The skill-body guard remains as backstop for user-typed
+  manual invocation from a teammate session.
+
+Asymmetric Arm vs Teardown Guard:
+- Teardown's natural trigger source IS the lead session: terminal-status
+  TaskUpdates run under the Completion Authority model in the lead's
+  session. Suppressing teammate-side Teardown emit at the lead-session
+  guard is correct because there is no legitimate teammate-side
+  Teardown signal to preserve.
+- Arm has TWO natural trigger sources with different session locality.
+  (a) Teammate self-claim TaskUpdate(status="in_progress") per
+  pact-agent-teams §On Start lives in the TEAMMATE session — a symmetric
+  lead-session guard starves this signal entirely. (b) Lead-side
+  unowned-TaskCreate-then-TaskUpdate(owner) dispatch pattern produces
+  no in_progress transition the lead-session sees, so the lead-session
+  branch also misses it.
+- The asymmetric guard is realised by branch PLACEMENT: a teammate-Arm
+  pre-branch (`_maybe_write_teammate_arm_marker`) sits ABOVE the
+  `is_lead_session` early-return and writes a per-marker JSON file to
+  the team's `wake_inbox/` directory (the cross-session signal — the
+  in-session PostToolUse `additionalContext` targets the WRONG session
+  for the teammate path). The lead-session branch and Teardown stay
+  BELOW the lead-session guard. Lead-side drain + count-fallback lives
+  in `hooks/wake_inbox_drain.py` (UserPromptSubmit). Together they
+  cover both Arm trigger sources without re-coupling Teardown's
+  lead-only correctness (#737 Layer 0 preserved).
 
 Transition detection (post-only):
 - post = count_active_tasks(team_name) — the count AFTER the tool's
@@ -117,7 +140,9 @@ Output: hookSpecificOutput with additionalContext on transitions;
 """
 
 import json
+import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -131,7 +156,12 @@ from shared.pact_context import get_team_name
 from shared.session_state import is_safe_path_component
 from shared.task_utils import read_task_json
 from shared.tool_response import extract_tool_response
-from shared.wake_lifecycle import count_active_tasks, has_same_teammate_continuation
+from shared.wake_lifecycle import (
+    count_active_tasks,
+    has_same_teammate_continuation,
+    is_lead_session,
+)
+from shared.wake_lifecycle import _classify_owner  # noqa: F401 — owner classification for teammate-Arm pre-branch
 
 # Suppress the false "hook error" UI surface on bare exit paths.
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -169,46 +199,6 @@ _TEARDOWN_DIRECTIVE = (
 # other tools at the platform layer; this in-hook check is
 # belt-and-suspenders against future matcher widening.
 _TASK_MUTATING_TOOLS = ("TaskCreate", "TaskUpdate")
-
-
-def _is_lead_session(input_data: dict[str, Any], team_name: str) -> bool:
-    """
-    Return True iff the current session is the team's lead session.
-
-    Reads `session_id` from the PostToolUse stdin payload and
-    `leadSessionId` from ~/.claude/teams/{team_name}/config.json.
-    Mirrors the Lead-Session Guard pattern used by the start-pending-scan /
-    stop-pending-scan skill bodies (Layer 1 of the defense-in-depth model);
-    this hook-level check is Layer 0, preventing directive emission to
-    teammate sessions at the emission source. team_config is the single
-    source of truth for lead identity.
-
-    Pure function; never raises. Returns False on missing/empty
-    session_id, missing/unsafe team_name, missing config.json, malformed
-    JSON, or filesystem error. The teammate session is the expected
-    non-lead path; silent fail-open avoids UI noise on every
-    teammate Task-tool fire.
-    """
-    raw_session_id = input_data.get("session_id")
-    if not isinstance(raw_session_id, str) or not raw_session_id:
-        return False
-    if not team_name or not is_safe_path_component(team_name):
-        return False
-    try:
-        config_path = (
-            Path.home() / ".claude" / "teams" / team_name / "config.json"
-        )
-        if not config_path.exists():
-            return False
-        data = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    if not isinstance(data, dict):
-        return False
-    lead_session_id = data.get("leadSessionId")
-    if not isinstance(lead_session_id, str) or not lead_session_id:
-        return False
-    return raw_session_id == lead_session_id
 
 
 def _extract_task_id(input_data: dict[str, Any]) -> str | None:
@@ -387,6 +377,230 @@ def _emit_directive(prose: str) -> None:
     print(json.dumps(output))
 
 
+# Schema version for inbox marker JSON payloads. Bump on
+# breaking-shape changes; drain side tolerates unknown fields and
+# treats malformed JSON as a fail-conservative wake signal.
+_WAKE_INBOX_MARKER_SCHEMA_VERSION = 1
+
+# Trigger sentinel written into the marker payload for forensics. The
+# drain side consumes the file PRESENCE, not the field content, but
+# the field documents the trigger class for debug/triage.
+_TEAMMATE_SELF_CLAIM_TRIGGER = "teammate_self_claim_in_progress"
+
+
+def _maybe_write_teammate_arm_marker(
+    input_data: dict[str, Any],
+    team_name: str,
+    is_lead: bool | None = None,
+) -> None:
+    """
+    Write a wake-inbox marker iff the 6-clause asymmetric-guard
+    predicate ladder holds for this PostToolUse fire.
+
+    `is_lead` is the pre-computed result of
+    `is_lead_session(input_data, team_name)`, passed in by
+    `_decide_directive` so the team_config.json read happens at most
+    ONCE per fire (instead of twice: once here at clause 5, once at
+    the lead-session outer gate). When `is_lead is None` (the test
+    direct-invocation path), clause 5 falls back to computing the
+    check in-helper — preserves behavior for callers that don't have
+    the memoized value pre-computed. Behavior-preserving: clause 5
+    still skips the marker write when this fire originates from the
+    lead session.
+
+    The predicate ladder evaluates in ORDER below; ALL six clauses must
+    hold to write a marker. Order matters: cheap predicates first
+    (string/shape checks) before any filesystem I/O; the lead-session
+    check is clause 5 so a non-lead match still pays the predicate cost
+    but no more (clauses 1-4 are pure dict reads).
+
+      Clause 1 — team_name path-safe: non-empty AND
+                 is_safe_path_component(team_name). Mirrors the same
+                 defense already applied by `is_lead_session`.
+      Clause 2 — tool_name allowlist: tool_name in TaskCreate|TaskUpdate.
+                 Belt-and-suspenders against future hooks.json matcher
+                 widening; current matcher already filters.
+      Clause 3 — trigger semantics: for TaskUpdate, the fire is a
+                 pending->in_progress self-claim transition. For
+                 TaskCreate, the just-created task carries a teammate
+                 owner-at-create (excludes unowned umbrella TaskCreates).
+                 Status-only TaskUpdates (teachback_submit,
+                 intentional_wait, metadata-only edits) fail this clause.
+      Clause 4 — owner classification: the owner field resolves to a
+                 known team member who is NOT the team lead. Defends
+                 against hypothetical re-assignment to the lead.
+      Clause 5 — NOT lead session: positive teammate-session check.
+                 The lead-session counterpart to this path is the
+                 existing TaskCreate branch (which fires Arm directly
+                 below) and the new lead-side drain hook fallback.
+      Clause 6 — task_id present: non-empty string for the marker
+                 filename's uniqueness component.
+
+    On all six clauses passing, write the marker via O_CREAT|O_EXCL
+    atomic open. On any failure to write (FileExistsError,
+    PermissionError, any OSError), silently swallow — the wake mechanism
+    is opportunistic; a missed marker degrades to the lead-side B-1
+    count-based fallback in `wake_inbox_drain.py`, not a hard failure.
+
+    Pure side-effect helper. Never raises (outer except swallows every
+    OSError + Exception class). Returns None unconditionally — caller
+    must NOT branch on a return value.
+    """
+    try:
+        # Clause 1: team_name path-safety.
+        if not isinstance(team_name, str) or not team_name:
+            return
+        if not is_safe_path_component(team_name):
+            return
+
+        # Clause 2: tool_name allowlist.
+        tool_name = input_data.get("tool_name")
+        if tool_name not in _TASK_MUTATING_TOOLS:
+            return
+
+        tool_input = input_data.get("tool_input") or {}
+        if not isinstance(tool_input, dict):
+            return
+
+        # Clause 3: trigger semantics. For TaskUpdate, require
+        # pending->in_progress transition. For TaskCreate, require a
+        # non-empty owner-at-create field — unowned umbrella TaskCreates
+        # (per /PACT:orchestrate dispatch pattern) fail this clause.
+        if tool_name == "TaskUpdate":
+            if not _is_pending_to_in_progress_transition(input_data):
+                return
+            owner = tool_input.get("owner")
+        else:  # tool_name == "TaskCreate"
+            owner = tool_input.get("owner")
+            if not isinstance(owner, str) or not owner:
+                return
+
+        # Clause 4: owner classification. Owner must be a known team
+        # member AND NOT the lead. Reuses the consolidated owner
+        # projection from shared/wake_lifecycle.py.
+        if not isinstance(owner, str) or not owner:
+            return
+        classification = _classify_owner(owner, team_name)
+        if not classification.config_readable:
+            # Config unreadable: cannot positively classify; fail-open
+            # to "skip marker." Lead-side B-1 fallback covers the gap.
+            return
+        if not classification.is_known_team_member:
+            return
+        if classification.is_lead:
+            return
+
+        # Clause 5: positive teammate-session check. The lead-session
+        # branch handles the lead-side Arm path directly below; only
+        # teammate-side fires write the cross-session marker. The
+        # `is_lead` argument is the memoized result of
+        # `is_lead_session(input_data, team_name)` computed once by
+        # `_decide_directive` and reused at the outer-gate check below.
+        # When `is_lead is None` (direct-invocation path), fall back
+        # to computing the check in-helper — the structural pin
+        # (test_emitter_guards_on_lead_session_id_structural) requires
+        # the guard call to appear on a control-flow line.
+        if is_lead is None and is_lead_session(input_data, team_name):
+            return
+        if is_lead:
+            return
+
+        # Clause 6: task_id present.
+        task_id = _extract_task_id(input_data)
+        if not task_id:
+            return
+
+        # All six clauses hold — write the marker atomically.
+        session_id_raw = input_data.get("session_id")
+        if not isinstance(session_id_raw, str) or not session_id_raw:
+            return
+
+        now = datetime.now(timezone.utc)
+        timestamp = now.strftime("%Y%m%dT%H%M%SZ")
+        written_at = now.isoformat(timespec="milliseconds").replace(
+            "+00:00", "Z"
+        )
+
+        inbox_dir = (
+            Path.home()
+            / ".claude"
+            / "teams"
+            / team_name
+            / "wake_inbox"
+        )
+        try:
+            inbox_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError:
+            return
+
+        # Filename: {timestamp}-{session_id}-{task_id}.json — natural
+        # lexical order is chronological for the drain side. Path
+        # component safety: session_id is platform-generated UUID,
+        # task_id is platform-generated short id; both are restricted by
+        # the platform's task-id alphabet. Use a defensive replace of
+        # path separators AND embedded NUL bytes as belt-and-suspenders.
+        # NUL byte handling: a `\x00` in either field would raise
+        # `ValueError` from `os.open` (NOT `OSError`); the outer
+        # `except Exception` still catches it but the explicit NUL-strip
+        # here makes the defense visible at the sanitization step and
+        # avoids opening a fd just to have it rejected by the kernel.
+        safe_task_id = (
+            task_id.replace("/", "_").replace("\\", "_").replace("\x00", "_")
+        )
+        safe_session_id = (
+            session_id_raw.replace("/", "_")
+            .replace("\\", "_")
+            .replace("\x00", "_")
+        )
+        marker_filename = (
+            f"{timestamp}-{safe_session_id}-{safe_task_id}.json"
+        )
+        marker_path = inbox_dir / marker_filename
+
+        marker_payload = {
+            "schema_version": _WAKE_INBOX_MARKER_SCHEMA_VERSION,
+            "written_at": written_at,
+            "writer_session_id": session_id_raw,
+            "tool_name": tool_name,
+            "task_id": task_id,
+            "owner": owner,
+            "trigger": _TEAMMATE_SELF_CLAIM_TRIGGER,
+        }
+
+        # O_CREAT|O_EXCL atomic write. FileExistsError on collision is
+        # silently swallowed — another writer already signalled, no
+        # second signal needed (collisions are structurally impossible
+        # under the {timestamp, session_id, task_id} encoding but
+        # O_EXCL is belt-and-suspenders).
+        try:
+            fd = os.open(
+                str(marker_path),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            return
+        except OSError:
+            return
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(marker_payload, handle)
+        except OSError:
+            # Write failure after open — best-effort cleanup; the file
+            # may be empty but the drain side treats malformed/empty
+            # markers as wake signals (fail-conservative).
+            try:
+                os.unlink(str(marker_path))
+            except OSError:
+                pass
+            return
+    except Exception:
+        # Outer catch-all preserves the never-raises contract; teammate
+        # sessions emit on every Task-tool fire, a raise here would
+        # surface as a hook-error UI on every fire.
+        return
+
+
 def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     """
     Return the directive prose to emit, or None for no-op.
@@ -417,7 +631,27 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     sequential-first-create emit case together rule out predicates
     above (e.g. > 1) and below (e.g. >= 0).
     """
-    if not _is_lead_session(input_data, team_name):
+    # Compute `is_lead_session` ONCE per fire and thread the result
+    # through both the teammate-Arm pre-branch (clause 5) and the
+    # outer lead-session gate. team_config.json is the single source
+    # of truth; reading it twice on the same fire wastes a disk read
+    # and the lead-status cannot legitimately change mid-fire.
+    is_lead = bool(is_lead_session(input_data, team_name))
+
+    # Teammate-Arm pre-branch — runs BEFORE the lead-session early-return
+    # so the teammate self-claim signal escapes the symmetric guard via
+    # an inbox marker (the cross-session signal). Returns None in all
+    # paths: PostToolUse `additionalContext` would target the teammate's
+    # session, not the lead's. The lead-side drain hook
+    # (`wake_inbox_drain.py`, UserPromptSubmit) consumes the marker on
+    # the lead's next prompt.
+    _maybe_write_teammate_arm_marker(input_data, team_name, is_lead)
+
+    # Outer lead-session gate. Layer 0 of the defense-in-depth model;
+    # teammate sessions never reach the directive emission paths below.
+    # Uses the memoized `is_lead` from above; semantically identical
+    # to `if not is_lead_session(input_data, team_name): return None`.
+    if not is_lead:
         return None
 
     tool_name = input_data.get("tool_name")

@@ -16,6 +16,14 @@
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/bootstrap_prompt_gate.py\""
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/wake_inbox_drain.py\""
+          }
+        ]
       }
     ],
     "SessionStart": [
