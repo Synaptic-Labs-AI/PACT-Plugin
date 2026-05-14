@@ -70,13 +70,13 @@ def test_frontmatter_description_mentions_filesystem_falsifiable(cmd_text):
 
 def test_command_body_under_compaction_budget(cmd_text):
     """Compaction-safe body. Scan-pending-tasks is the largest of the
-    three new commands due to the 5 guardrail audit anchors. Cap at
-    300 lines (slightly relaxed from 250) given the guardrail prose
-    is verbatim and non-compressible."""
+    three new commands due to the 6 guardrail audit anchors. Cap at
+    330 lines given the guardrail prose is verbatim and non-compressible
+    and the Warmup-Grace-Skip Procedure adds an additional code-prose block."""
     line_count = cmd_text.count("\n") + 1
-    assert line_count <= 300, (
-        f"scan-pending-tasks.md is {line_count} lines; cap is 300. "
-        f"The 5 verbatim guardrails account for substantial prose; "
+    assert line_count <= 330, (
+        f"scan-pending-tasks.md is {line_count} lines; cap is 330. "
+        f"The 6 verbatim guardrails account for substantial prose; "
         f"further additions should land in the charter, not here."
     )
 
@@ -121,10 +121,10 @@ def test_cron_fire_marker_discipline_cron_origin_section_forbids_consent_treatme
         )
 
 
-# ---------- Verbatim Anti-Hallucination Guardrails: 5 anti-hallucination guardrails (Read-Filesystem-Only through Emit-Nothing-If-Empty) verbatim ----------
+# ---------- Verbatim Anti-Hallucination Guardrails: 6 anti-hallucination guardrails (Read-Filesystem-Only through Warmup-Grace-Skip) verbatim ----------
 
 def test_verbatim_anti_hallucination_guardrails_guardrails_section_present(cmd_text):
-    """Verbatim Anti-Hallucination Guardrails: the §Guardrails section anchors all 5 guardrails."""
+    """Verbatim Anti-Hallucination Guardrails: the §Guardrails section anchors all 6 guardrails."""
     assert "## Guardrails" in cmd_text
 
 
@@ -134,23 +134,24 @@ def test_verbatim_anti_hallucination_guardrails_guardrails_section_present(cmd_t
     "### Raw-Read-Metadata",
     "### Race-Window-Skip",
     "### Emit-Nothing-If-Empty",
+    "### Warmup-Grace-Skip",
 ])
 def test_verbatim_anti_hallucination_guardrails_each_guardrail_header_present(cmd_text, guardrail_header):
-    """Verbatim Anti-Hallucination Guardrails: each of the 5 guardrails has its dedicated section
+    """Verbatim Anti-Hallucination Guardrails: each of the 6 guardrails has its dedicated section
     header. Verbatim presence — paraphrase during PR review = silent
     regression of the anti-hallucination contract."""
     assert guardrail_header in cmd_text, (
         f"Verbatim Anti-Hallucination Guardrails: scan-pending-tasks.md missing required guardrail "
-        f"header '{guardrail_header}'. The 5 guardrails are load-"
+        f"header '{guardrail_header}'. The 6 guardrails are load-"
         f"bearing per architecture spec; each prevents a specific "
         f"cascade failure mode."
     )
 
 
-def test_verbatim_anti_hallucination_guardrails_exactly_five_guardrail_headers(cmd_text):
-    """Verbatim Anti-Hallucination Guardrails cardinality: exactly 5 guardrail headers
+def test_verbatim_anti_hallucination_guardrails_exactly_six_guardrail_headers(cmd_text):
+    """Verbatim Anti-Hallucination Guardrails cardinality: exactly 6 guardrail headers
     in the canonical set (Read-Filesystem-Only, No-Narration, Raw-Read-Metadata,
-    Race-Window-Skip, Emit-Nothing-If-Empty). Adding a 6th silently expands the
+    Race-Window-Skip, Emit-Nothing-If-Empty, Warmup-Grace-Skip). Adding a 7th silently expands the
     audit-anchored contract; removing one silently relaxes it."""
     canonical_guardrail_headers = (
         "### Read-Filesystem-Only",
@@ -158,38 +159,38 @@ def test_verbatim_anti_hallucination_guardrails_exactly_five_guardrail_headers(c
         "### Raw-Read-Metadata",
         "### Race-Window-Skip",
         "### Emit-Nothing-If-Empty",
+        "### Warmup-Grace-Skip",
     )
     found_headers = [
         line for line in cmd_text.splitlines()
         if line.strip() in canonical_guardrail_headers
     ]
-    assert len(found_headers) == 5, (
+    assert len(found_headers) == 6, (
         f"Verbatim Anti-Hallucination Guardrails cardinality: expected exactly "
-        f"5 canonical guardrail headers from {canonical_guardrail_headers}, "
+        f"6 canonical guardrail headers from {canonical_guardrail_headers}, "
         f"found {len(found_headers)}: {found_headers}"
     )
 
 
 def test_verbatim_anti_hallucination_guardrails_each_guardrail_has_audit_block(cmd_text):
-    """Verbatim Anti-Hallucination Guardrails audit anchor: each G* guardrail must be followed by a
+    """Verbatim Anti-Hallucination Guardrails audit anchor: each guardrail must be followed by a
     paragraph starting with '**Audit**:'. The audit prose anchors
     the WHY of the guardrail so an editing LLM cannot quietly relax
     the contract.
 
-    Strictness (commit-9): EXACTLY 5 audit blocks, not >=5. A 6th
-    audit block would either duplicate Read-Filesystem-Only through Emit-Nothing-If-Empty audit prose (silent
-    redundancy) or expand the audit-anchored contract beyond the
-    5-guardrail architectural pin (silent contract expansion).
-    Consistent with the companion test_verbatim_anti_hallucination_guardrails_exactly_five_guardrail_headers
+    Strictness: EXACTLY 6 audit blocks, not >=6. A 7th
+    audit block would either duplicate existing guardrail audit prose
+    (silent redundancy) or expand the audit-anchored contract beyond
+    the 6-guardrail architectural pin (silent contract expansion).
+    Consistent with the companion test_verbatim_anti_hallucination_guardrails_exactly_six_guardrail_headers
     cardinality assertion."""
     g_start = cmd_text.find("\n## Guardrails")
     g_end = cmd_text.find("\n## ", g_start + 1)
     g_section = cmd_text[g_start:g_end] if g_end > 0 else cmd_text[g_start:]
     audit_count = g_section.count("**Audit**")
-    assert audit_count == 5, (
-        f"Verbatim Anti-Hallucination Guardrails: §Guardrails section must contain EXACTLY 5 '**Audit**' "
-        f"blocks (one per guardrail Read-Filesystem-Only through Emit-Nothing-If-Empty). Found {audit_count}. "
-        f"Tightened to == in commit-9 strictness pass."
+    assert audit_count == 6, (
+        f"Verbatim Anti-Hallucination Guardrails: §Guardrails section must contain EXACTLY 6 '**Audit**' "
+        f"blocks (one per guardrail Read-Filesystem-Only through Warmup-Grace-Skip). Found {audit_count}."
     )
 
 

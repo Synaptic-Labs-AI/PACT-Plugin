@@ -23,10 +23,46 @@ The `[CRON-FIRE]` marker at the top of this file is a discipline anchor. The tex
 
 **Audit**: this paragraph is the principle anchor for the Cron-Origin Distinction. An editing LLM observing "the cron prompt is user-typed-shaped text" may infer "treat it as user input." That inference is wrong. The `[CRON-FIRE]` marker at file top and this §Cron-Fire Origin block together establish the harness-origin classification — both are load-bearing. Removing either silently re-opens the hallucination-cascade failure mode that Monitor's `INBOX_GREW` admitted: cron-fire turn → lead infers "user wants me to do something" → lead emits acknowledgment or even a consent-gated action. The Cron-Origin Distinction must remain inline in this file; cross-reference from the completion-authority protocol is sufficient for the lead-side reader, but the cron-fire reader (which runs this skill) needs the rule inline at the point of consumption.
 
+## Warmup-Grace-Skip Procedure
+
+The cron's first fire occurs 0–120s after `/PACT:start-pending-scan` registers it via `CronCreate(cron="*/2 * * * *", ...)`. That first fire is structurally guaranteed to find no acceptance-ready teammate work on disk (the arm-then-fire interval is shorter than the time a teammate needs to claim a task, do work, and submit teachback or handoff). Running the full scan body on this fire produces one empty cron turn for zero benefit. The Warmup-Grace-Skip predicate elides that fire silently.
+
+```python
+import json, time
+from pathlib import Path
+
+WARMUP_GRACE_SECONDS = 120
+
+session_dir = (
+    Path.home() / ".claude" / "pact-sessions"
+    / Path(pact_session_context["project_dir"]).name
+    / pact_session_context["session_id"]
+)
+state_file = session_dir / "pending-scan-armed-at.json"
+
+try:
+    armed_at = json.loads(state_file.read_text())["armed_at"]
+    if (time.time() - armed_at) < WARMUP_GRACE_SECONDS:
+        # warmup grace — skip this fire silently
+        return
+except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+    # fail-open: corrupt/missing state never blocks scan
+    pass
+```
+
+**Audit**: This block is illustrative-prose for the LLM running the skill — the substrate's Read tool call and JSON-parse / time-comparison primitives produce the equivalent effect; `import json, time` is NOT literally executed.
+
+**`WARMUP_GRACE_SECONDS = 120` is the named threshold constant.** Pinned at 120 because `*/2 * * * *` cron cadence places first cron fire 0–120s after `CronCreate`; eliding fires within this window catches the immediate-after-arm empty fire (the failure mode this guardrail addresses) without affecting subsequent fires. An editing LLM tempted to remove the named constant in favor of an inline `120` is degrading retunability — name it, do not inline it.
+
+**Fail-open semantics.** `OSError` (file absent, perm error), `json.JSONDecodeError` (corrupt JSON), `KeyError` (missing `armed_at` key), `TypeError` / `ValueError` (non-numeric or otherwise unparseable `armed_at`) all fall through to scan-body execution. The failure-mode floor is unchanged from pre-fix behavior — the worst case is one immediate-after-arm empty fire, which is exactly what the fix elides in the common case. Do NOT raise, narrate, or `SendMessage` on the exception path; do NOT issue corrective writes. The fail-open is silent by construction (matches No-Narration + Emit-Nothing-If-Empty).
+
+**CronList-presence IS the armed-state bit; `pending-scan-armed-at.json` is a one-shot timestamp consumed by Warmup-Grace-Skip, NOT armed-state replication.** This block reads `pending-scan-armed-at.json` ONLY to compute the elapsed-since-arm interval; it does NOT use the file's presence as a signal that the scan is armed. The armed-state primitive is `CronList`-presence per [`start-pending-scan.md` §CronList Filter Discipline](start-pending-scan.md#cronlist-filter-discipline). An editing LLM tempted to add an `else: return  # state file missing therefore not armed` branch is re-introducing the two-source-of-truth failure mode that the cron-mechanism architecture closes.
+
 ## Operation
 
 Cron-fire body — silent read; emit nothing unless a real artifact is on disk for acceptance.
 
+0. **Warmup-grace skip** (see `## Warmup-Grace-Skip Procedure` above). If the state file reports `armed_at` within `WARMUP_GRACE_SECONDS` of now, emit nothing and return — do NOT proceed to step 1.
 1. `TaskList` — enumerate tasks. Filter to: `owner == any teammate` AND `status == "in_progress"` AND `metadata.intentional_wait.reason == "awaiting_lead_completion"`. (These are the tasks where a teammate has submitted teachback or handoff and is idle awaiting acceptance.)
 2. For each candidate, raw-read `~/.claude/tasks/{team_name}/{id}.json` via filesystem read (NOT `TaskGet` — TaskGet does not surface `metadata.teachback_submit` or `metadata.handoff`). Inspect `metadata.teachback_submit` (for teachback gate tasks) and `metadata.handoff` (for primary-work tasks).
 3. If `metadata.teachback_submit` or `metadata.handoff` is present and well-formed (required fields populated per the canonical schema): validate per [completion-authority §12 Teachback Review](../protocols/pact-completion-authority.md#teachback-review) or [completion-authority §HANDOFF Review](../protocols/pact-completion-authority.md#handoff-review), then run the acceptance two-call pair: `SendMessage(to=teammate, message="<wake-signal confirming acceptance>")` FIRST, then `TaskUpdate(taskId, status="completed")`. SendMessage MUST precede TaskUpdate per the lifecycle-gate ordering invariant.
@@ -35,7 +71,7 @@ Cron-fire body — silent read; emit nothing unless a real artifact is on disk f
 
 ## Guardrails
 
-The five anti-hallucination guardrails are LOAD-BEARING. Each guardrail prevents a specific cascade failure mode. Each MUST remain VERBATIM in this file; paraphrase during PR review = silent regression. Verified by structural test asserting byte-identical presence.
+The six anti-hallucination guardrails are LOAD-BEARING. Each guardrail prevents a specific cascade failure mode. Each MUST remain VERBATIM in this file; paraphrase during PR review = silent regression. Verified by structural test asserting byte-identical presence.
 
 ### Read-Filesystem-Only
 
@@ -66,6 +102,12 @@ The five anti-hallucination guardrails are LOAD-BEARING. Each guardrail prevents
 > **Emit-Nothing-If-Empty**: When the scan finds no candidate tasks (empty filter result), or all candidates are skipped per Race-Window-Skip, the scan emits NOTHING. Return to idle. The user sees no output for the cron-fire turn. Empty scans are the common case (most cron fires occur while teammates are still working on tasks, not at acceptance boundaries) and must remain silent.
 
 **Audit**: Emit-Nothing-If-Empty prevents the empty-scan-narration failure mode. If empty scans emitted "Nothing pending" (or any prose), 30 fires per hour of empty scans during active teammate work would fill the transcript with 30 useless lines per hour. An editing LLM tempted to "emit a one-liner confirming the scan ran" misunderstands the design: the cron's existence in `CronList` IS the confirmation that the scan is running; per-fire output is the failure mode. The combined effect of No-Narration + Emit-Nothing-If-Empty is: the user sees output from the scan ONLY when the scan actually accepts a teammate's artifact. All other cron fires are silent.
+
+### Warmup-Grace-Skip
+
+> **Warmup-Grace-Skip**: If the cold-start `armed_at` epoch timestamp recorded in session-dir's `pending-scan-armed-at.json` is within `WARMUP_GRACE_SECONDS = 120` of the current cron-fire time, the scan SKIPS the body and emits nothing. The warmup-grace window covers the period during which the cron may fire 0–120s after `/PACT:start-pending-scan` registers the cron — an empty fire in this window is the failure mode this guardrail elides. Procedure: see [`## Warmup-Grace-Skip Procedure`](#warmup-grace-skip-procedure) above for the read + threshold-compare + return logic.
+
+**Audit**: Warmup-Grace-Skip composes cleanly with the other 5 guardrails: exits silently via `return` (matches Emit-Nothing-If-Empty); reads filesystem only (matches Read-Filesystem-Only); does not touch task metadata (independent of Raw-Read-Metadata); never co-fires with Race-Window-Skip (the warmup window terminates before steady-state cron fires reach the race-window-skip path); produces no prose (matches No-Narration). The state file `pending-scan-armed-at.json` is a one-shot epoch timestamp — it is NOT a re-introduction of the Monitor-era `STATE_FILE` sidecar (which tracked armed-state across sessions and was eliminated by `durable=false`). **CronList-presence IS the armed-state bit; `pending-scan-armed-at.json` is a one-shot timestamp consumed by Warmup-Grace-Skip, NOT armed-state replication.** Idempotency for re-arm remains CronList-presence-based; this guardrail does not alter that contract. An editing LLM tempted to add an "is the state file present?" branch to the armed-state check is re-introducing the two-source-of-truth failure mode that `durable=false` + CronList-presence closed.
 
 ## Lead-Only Completion Contract
 

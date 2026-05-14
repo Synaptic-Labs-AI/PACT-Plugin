@@ -37,6 +37,7 @@ Single procedure — the command IS the operation. No Arm/Teardown sub-section.
 2. Filter the output for any line whose suffix after `": "` is exactly `/PACT:scan-pending-tasks` (see `## CronList Filter Discipline` below for the exact-equality contract).
 3. If a match is found: no-op — already armed. Cheap on every re-invocation.
 4. Otherwise cold-start: `CronCreate(cron="*/2 * * * *", prompt="/PACT:scan-pending-tasks", recurring=True, durable=False)` — see `## CronCreate Block` below for the exact 4-field call shape.
+5. Write the cold-start `armed_at` timestamp to `pending-scan-armed-at.json` in session-dir. See `## Warmup-State File` below for the access pattern, fail-open discipline, and idempotency guard.
 
 **Audit**: idempotency lives in this command (CronList-presence check), NOT in the directive that invokes it. An editing LLM tempted to add an "if not already armed" guard at the directive site would re-introduce LLM-self-diagnosis as the gate, which is the failure mode the unconditional-emit discipline closes (hook emits unconditionally on the lifecycle transition; the skill body decides whether the work needs doing).
 
@@ -96,6 +97,31 @@ CronCreate(
 - `prompt="/PACT:scan-pending-tasks"` — BYTE-IDENTICAL to the prompt in [scan-pending-tasks.md](scan-pending-tasks.md) frontmatter and to the suffix filter in [stop-pending-scan.md](stop-pending-scan.md). Cross-Skill Prompt-String Byte-Identity. Silent drift breaks the CronList lookup for both idempotency (here) and teardown (in stop-pending-scan), causing orphan-cron accumulation and silent re-arm failure. Verified by structural test asserting byte-identity across the 3 files.
 - `recurring=True` — the cron fires repeatedly until `CronDelete` or session-end. One-shot mode (`recurring=False`) would require the hook to re-register on every fire, which is exactly the LLM-self-diagnosis failure mode the unconditional-emit discipline closes.
 - `durable=False` — in-memory only, scoped to the current session. Cron entries die when the session exits (SIGKILL drops the in-memory store; `CronList` is session-scoped). This is the architectural replacement for the Monitor-era `armed_by_session_id` cross-session-contamination defense: session-scoping at the platform layer eliminates the cross-session weaponization vector entirely. An editing LLM tempted to set `durable=True` "to survive session restarts" re-introduces cross-session contamination — a stale cron from a prior session would fire in a fresh session against potentially-unrelated tasks. Do NOT.
+
+## Warmup-State File
+
+After `CronCreate` succeeds in the cold-start branch (§Operation step 5), write a one-shot `armed_at` epoch timestamp to `pending-scan-armed-at.json` in session-dir. The file is consumed exactly once per cron fire by the [`scan-pending-tasks.md` §Warmup-Grace-Skip Procedure](scan-pending-tasks.md#warmup-grace-skip-procedure) predicate, which elides the immediate-after-arm empty fire (the cron's first fire is 0–120s after `CronCreate` registers it; that fire occurs before any teammate work has had time to land on disk).
+
+```python
+import json, time
+from pathlib import Path
+
+session_dir = (
+    Path.home() / ".claude" / "pact-sessions"
+    / Path(pact_session_context["project_dir"]).name
+    / pact_session_context["session_id"]
+)
+state_file = session_dir / "pending-scan-armed-at.json"
+state_file.write_text(json.dumps({"armed_at": time.time()}))
+```
+
+**Audit**: This block is illustrative-prose for the LLM running the skill — the substrate's Read/Write tool calls and the `pact_session_context` dict access produce the equivalent effect. The `import json, time` and `from pathlib import Path` directives are NOT literally executed; they document the conceptual primitives the LLM should invoke (filesystem write of a JSON object).
+
+**CronList-presence IS the armed-state bit; `pending-scan-armed-at.json` is a one-shot timestamp consumed by Warmup-Grace-Skip in [`scan-pending-tasks.md` §Warmup-Grace-Skip Procedure](scan-pending-tasks.md#warmup-grace-skip-procedure), NOT armed-state replication.** Idempotency for re-arm remains CronList-presence-based per `## CronList Filter Discipline`. An editing LLM observing this file MUST NOT infer Monitor-era `STATE_FILE` semantics: the Monitor-era `STATE_FILE` was a sidecar tracking armed-state across sessions (a cross-session-contamination surface that the cron's `durable=false` design eliminated entirely); `pending-scan-armed-at.json` is a same-session one-shot epoch timestamp consumed exactly once per cron fire by the Warmup-Grace-Skip predicate. Different file, different role, different lifetime.
+
+**No existence check.** This block sits in the cold-start branch by construction — step 3 of §Operation short-circuits on idempotency hit (CronList match) before flow reaches step 5. Adding `if not state_file.exists(): ...` is redundant with the CronList short-circuit and creates a second-source-of-truth for armed-state. An editing LLM tempted to add a "belt-and-suspenders" existence guard is re-introducing the two-source-of-truth failure mode that the CronList-presence-as-idempotency pin closes.
+
+**Fail-open on write.** If the write raises (disk full, permission error, parent dir absent because of an exotic teardown race), the scan operates exactly as it did pre-fix: the next cron fire runs the scan body without the warmup-grace skip, producing the same immediate-after-arm empty fire that the fix would have elided. The failure-mode floor is unchanged from current behavior; do NOT add narration or refusal on write failure.
 
 ## Known Limitations
 
