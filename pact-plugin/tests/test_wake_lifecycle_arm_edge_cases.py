@@ -162,15 +162,9 @@ def test_emitter_rejects_path_traversal_team_name(tmp_path):
             f"Path-traversal team_name must not write any marker; got "
             f"{[str(m) for m in markers]}"
         )
-    # And nothing escaped to higher directories under tmp_path either.
-    escaped = [
-        p for p in tmp_path.rglob("*.json")
-        if "wake_inbox" in p.parts and "..wake_inbox" not in str(p)
-        and "passwd" in str(p) or "etc" in str(p)
-    ]
-    assert escaped == [], (
-        f"Marker writer must not escape via path traversal; got {escaped}"
-    )
+    # Primary assertion above (teams_root.rglob empty) is the load-bearing
+    # falsifiable check; this earlier non-falsifiable belt-and-suspenders
+    # assertion was removed in favor of the clean rglob check.
 
 
 # ─── Emitter teammate-Arm: boundary task_id / session_id ─────────────
@@ -336,3 +330,130 @@ def test_emitter_sanitizes_separators_in_task_id_and_session_id(tmp_path):
             assert "/" not in m.name and "\\" not in m.name, (
                 f"Separators in filename {m.name!r}"
             )
+
+
+# ─── Clause-2: tool_name allowlist falsifiable coverage ─────────────
+
+
+def test_emitter_rejects_disallowed_tool_name(tmp_path):
+    """Clause 2 of the predicate ladder: tool_name must be in
+    {TaskCreate, TaskUpdate}. A PostToolUse fire from any other tool
+    (Bash, Read, Write, Edit, etc.) must NOT write a marker even if
+    every other clause would otherwise hold.
+
+    Falsifiability: stripping the clause-2 early-return in
+    `_maybe_write_teammate_arm_marker` flips this test RED while
+    leaving all other tests GREEN. Closes the coverage gap where
+    every other fixture happens to use TaskCreate or TaskUpdate,
+    leaving clause 2 belt-and-suspenders without a test.
+    """
+    sys.path.insert(0, str(HOOK_DIR))
+    import wake_lifecycle_emitter as emitter
+
+    home = tmp_path / "home"; home.mkdir()
+    os.environ["HOME"] = str(home)
+    teammate_sid = "teammate-sid"
+    team = "team-disallowed-tool"
+    teammate_owner = "backend-coder"
+    _write_session_context(
+        home, teammate_sid, "/tmp/p", team,
+        lead_session_id="lead-sid",
+        members=[
+            {"name": teammate_owner, "agentId": "agent-bc"},
+            {"name": "lead", "agentId": "agent-lead"},
+        ],
+        lead_agent_id="agent-lead",
+    )
+    tasks_dir = home / ".claude" / "tasks" / team
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    (tasks_dir / "X.json").write_text(json.dumps(
+        {"id": "X", "status": "in_progress", "owner": teammate_owner}
+    ), encoding="utf-8")
+
+    # Shape mirrors a passing teammate self-claim BUT with tool_name=Bash.
+    # All other predicate-ladder fields are populated to ensure clause 2
+    # is the ONLY discriminator under test.
+    payload = {
+        "tool_name": "Bash",
+        "session_id": teammate_sid,
+        "cwd": "/tmp/p",
+        "tool_input": {
+            "taskId": "X", "status": "in_progress", "owner": teammate_owner,
+        },
+        "tool_response": {
+            "id": "X", "status": "in_progress", "owner": teammate_owner,
+        },
+    }
+    emitter._maybe_write_teammate_arm_marker(payload, team)
+
+    inbox = home / ".claude" / "teams" / team / "wake_inbox"
+    if inbox.exists():
+        markers = list(inbox.glob("*.json"))
+        assert markers == [], (
+            f"Disallowed tool_name must not produce a marker; got {markers}"
+        )
+
+
+# ─── Clause-3: pending->in_progress transition discriminator ────────
+
+
+def test_emitter_rejects_taskupdate_without_status_transition(tmp_path):
+    """Clause 3 discriminator: a TaskUpdate WITHOUT a `status` field but
+    WITH a teammate `owner` in tool_input must NOT write a marker. Pins
+    that the transition check is load-bearing independent of the
+    owner-empty-string check in clause 4.
+
+    Falsifiability: stripping clause 3 (the pending->in_progress
+    transition check) flips this test RED. The sibling test 3
+    (`test_teammate_metadata_only_update_no_marker`) does NOT discriminate
+    clause 3 alone because its fixture has no `tool_input.owner`, so
+    clause 4 also rejects — the metadata-only fixture is doubly-guarded.
+    This test fills that gap with a non-status payload that DOES carry
+    an owner.
+    """
+    sys.path.insert(0, str(HOOK_DIR))
+    import wake_lifecycle_emitter as emitter
+
+    home = tmp_path / "home"; home.mkdir()
+    os.environ["HOME"] = str(home)
+    teammate_sid = "teammate-sid"
+    team = "team-no-status-with-owner"
+    teammate_owner = "backend-coder"
+    _write_session_context(
+        home, teammate_sid, "/tmp/p", team,
+        lead_session_id="lead-sid",
+        members=[
+            {"name": teammate_owner, "agentId": "agent-bc"},
+            {"name": "lead", "agentId": "agent-lead"},
+        ],
+        lead_agent_id="agent-lead",
+    )
+    tasks_dir = home / ".claude" / "tasks" / team
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    (tasks_dir / "X.json").write_text(json.dumps(
+        {"id": "X", "status": "in_progress", "owner": teammate_owner}
+    ), encoding="utf-8")
+
+    # TaskUpdate with NO status field but WITH owner. Represents a
+    # metadata-only update (e.g. owner reassignment, intentional_wait
+    # set) that nonetheless carries an owner string in tool_input.
+    payload = {
+        "tool_name": "TaskUpdate",
+        "session_id": teammate_sid,
+        "cwd": "/tmp/p",
+        "tool_input": {
+            "taskId": "X", "owner": teammate_owner,
+        },
+        "tool_response": {
+            "id": "X", "owner": teammate_owner,
+        },
+    }
+    emitter._maybe_write_teammate_arm_marker(payload, team)
+
+    inbox = home / ".claude" / "teams" / team / "wake_inbox"
+    if inbox.exists():
+        markers = list(inbox.glob("*.json"))
+        assert markers == [], (
+            f"TaskUpdate without status transition must not produce a "
+            f"marker; got {markers}"
+        )

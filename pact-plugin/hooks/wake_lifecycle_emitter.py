@@ -389,11 +389,24 @@ _TEAMMATE_SELF_CLAIM_TRIGGER = "teammate_self_claim_in_progress"
 
 
 def _maybe_write_teammate_arm_marker(
-    input_data: dict[str, Any], team_name: str
+    input_data: dict[str, Any],
+    team_name: str,
+    is_lead: bool | None = None,
 ) -> None:
     """
     Write a wake-inbox marker iff the 6-clause asymmetric-guard
     predicate ladder holds for this PostToolUse fire.
+
+    `is_lead` is the pre-computed result of
+    `is_lead_session(input_data, team_name)`, passed in by
+    `_decide_directive` so the team_config.json read happens at most
+    ONCE per fire (instead of twice: once here at clause 5, once at
+    the lead-session outer gate). When `is_lead is None` (the test
+    direct-invocation path), clause 5 falls back to computing the
+    check in-helper — preserves behavior for callers that don't have
+    the memoized value pre-computed. Behavior-preserving: clause 5
+    still skips the marker write when this fire originates from the
+    lead session.
 
     The predicate ladder evaluates in ORDER below; ALL six clauses must
     hold to write a marker. Order matters: cheap predicates first
@@ -479,8 +492,17 @@ def _maybe_write_teammate_arm_marker(
 
         # Clause 5: positive teammate-session check. The lead-session
         # branch handles the lead-side Arm path directly below; only
-        # teammate-side fires write the cross-session marker.
-        if is_lead_session(input_data, team_name):
+        # teammate-side fires write the cross-session marker. The
+        # `is_lead` argument is the memoized result of
+        # `is_lead_session(input_data, team_name)` computed once by
+        # `_decide_directive` and reused at the outer-gate check below.
+        # When `is_lead is None` (direct-invocation path), fall back
+        # to computing the check in-helper — the structural pin
+        # (test_emitter_guards_on_lead_session_id_structural) requires
+        # the guard call to appear on a control-flow line.
+        if is_lead is None and is_lead_session(input_data, team_name):
+            return
+        if is_lead:
             return
 
         # Clause 6: task_id present.
@@ -516,9 +538,20 @@ def _maybe_write_teammate_arm_marker(
         # component safety: session_id is platform-generated UUID,
         # task_id is platform-generated short id; both are restricted by
         # the platform's task-id alphabet. Use a defensive replace of
-        # path separators as belt-and-suspenders.
-        safe_task_id = task_id.replace("/", "_").replace("\\", "_")
-        safe_session_id = session_id_raw.replace("/", "_").replace("\\", "_")
+        # path separators AND embedded NUL bytes as belt-and-suspenders.
+        # NUL byte handling: a `\x00` in either field would raise
+        # `ValueError` from `os.open` (NOT `OSError`); the outer
+        # `except Exception` still catches it but the explicit NUL-strip
+        # here makes the defense visible at the sanitization step and
+        # avoids opening a fd just to have it rejected by the kernel.
+        safe_task_id = (
+            task_id.replace("/", "_").replace("\\", "_").replace("\x00", "_")
+        )
+        safe_session_id = (
+            session_id_raw.replace("/", "_")
+            .replace("\\", "_")
+            .replace("\x00", "_")
+        )
         marker_filename = (
             f"{timestamp}-{safe_session_id}-{safe_task_id}.json"
         )
@@ -598,6 +631,13 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     sequential-first-create emit case together rule out predicates
     above (e.g. > 1) and below (e.g. >= 0).
     """
+    # Compute `is_lead_session` ONCE per fire and thread the result
+    # through both the teammate-Arm pre-branch (clause 5) and the
+    # outer lead-session gate. team_config.json is the single source
+    # of truth; reading it twice on the same fire wastes a disk read
+    # and the lead-status cannot legitimately change mid-fire.
+    is_lead = bool(is_lead_session(input_data, team_name))
+
     # Teammate-Arm pre-branch — runs BEFORE the lead-session early-return
     # so the teammate self-claim signal escapes the symmetric guard via
     # an inbox marker (the cross-session signal). Returns None in all
@@ -605,9 +645,13 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     # session, not the lead's. The lead-side drain hook
     # (`wake_inbox_drain.py`, UserPromptSubmit) consumes the marker on
     # the lead's next prompt.
-    _maybe_write_teammate_arm_marker(input_data, team_name)
+    _maybe_write_teammate_arm_marker(input_data, team_name, is_lead)
 
-    if not is_lead_session(input_data, team_name):
+    # Outer lead-session gate. Layer 0 of the defense-in-depth model;
+    # teammate sessions never reach the directive emission paths below.
+    # Uses the memoized `is_lead` from above; semantically identical
+    # to `if not is_lead_session(input_data, team_name): return None`.
+    if not is_lead:
         return None
 
     tool_name = input_data.get("tool_name")

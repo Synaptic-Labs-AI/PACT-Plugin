@@ -25,9 +25,15 @@ cp pact-plugin/hooks/shared/wake_lifecycle.py /tmp/shared.bak
 cp pact-plugin/hooks/hooks.json /tmp/hooks.bak
 
 # Revert source-only — drain hook is a NEW file, so move it aside.
-git checkout HEAD~1 -- pact-plugin/hooks/wake_lifecycle_emitter.py \
-                       pact-plugin/hooks/shared/wake_lifecycle.py \
-                       pact-plugin/hooks/hooks.json
+# Anchor MUST resolve to the pre-fix commit. The branch carries the
+# bundled fix commit PLUS follow-on version-bump and test-additions
+# commits, so HEAD~N varies with branch state. Use `git merge-base`
+# against origin/main to resolve the pre-fix anchor independent of
+# subsequent commit count.
+PRE_FIX=$(git merge-base HEAD origin/main)
+git checkout "$PRE_FIX" -- pact-plugin/hooks/wake_lifecycle_emitter.py \
+                           pact-plugin/hooks/shared/wake_lifecycle.py \
+                           pact-plugin/hooks/hooks.json
 mv pact-plugin/hooks/wake_inbox_drain.py /tmp/drain.bak
 
 # Run the affected test scope and record cardinality.
@@ -46,10 +52,11 @@ cd "$WORKTREE"
   tests 4–7 + 10 pass. ~5 fail + 5 pass.
 - `test_wake_inbox_drain.py`: full collection error; all 6 fail.
 
-### Empirical (test-engineer, 2026-05-14, revert against HEAD~2 = main parent)
+### Empirical (test-engineer, 2026-05-14, revert against `git merge-base HEAD origin/main`)
 
-Measured by `cp`-snapshot + `git checkout HEAD~2 -- <source files>` +
-`rm wake_inbox_drain.py`, then re-running the full new-test scope.
+Measured by `cp`-snapshot + `git checkout "$PRE_FIX" -- <source files>`
+(where `PRE_FIX=$(git merge-base HEAD origin/main)`) + `rm
+wake_inbox_drain.py`, then re-running the full new-test scope.
 
 **Total: 14 failed + 7 passed.**
 

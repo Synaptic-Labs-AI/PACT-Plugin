@@ -45,9 +45,11 @@ Single-emit discipline:
   count → emit Arm. Zero count → suppressOutput.
 
 Performance hygiene:
-- Empty inbox AND non-lead session short-circuits to suppressOutput
-  before any task-store I/O. Cost on every teammate prompt: one
-  directory glob + one config.json read + one session_id compare.
+- Non-lead session short-circuits to suppressOutput before any
+  task-store I/O. Per-prompt cost on the hot teammate path: one
+  team_config.json read (inside `is_lead_session`) + one session_id
+  compare. Task-store I/O (inbox glob + `count_active_tasks`) only
+  runs in the lead session.
 
 SACROSANCT module-load failure pattern:
 - Module-load failures emit a fail-closed advisory via the stdlib-only
@@ -131,6 +133,12 @@ _SUPPRESS_OUTPUT = json.dumps({
 # defense-in-depth against parser amplification.
 _MAX_PAYLOAD_BYTES = 1024 * 1024
 
+# Bound per-marker body read at 8 KiB. The canonical marker schema is
+# 7 fields well under 1 KiB; 8 KiB is generous headroom against schema
+# growth while still capping parser-amplification risk on a corrupted
+# or hostile file under the inbox path.
+_MAX_MARKER_BYTES = 8192
+
 
 def _wake_inbox_path(team_name: str) -> Path | None:
     """Resolve the team's wake-inbox directory or return None on
@@ -163,6 +171,14 @@ def _drain_markers(inbox_dir: Path) -> int:
     Forensic value only; the drain side consumes file PRESENCE not the
     timestamp.
 
+    Size cap on marker read: the writer schema is tiny (7 fields,
+    well under 1 KiB). An attacker (or a corrupted FS) producing a
+    multi-MB file under the inbox path could amplify the drain read
+    cost on every prompt. Pre-check via `os.path.getsize` and skip
+    oversize markers (>8 KiB) — log to stderr and unlink without
+    reading. The wake intent still stands (PRESENCE is the signal)
+    so the unlink + count-as-consumed posture is preserved.
+
     Pure-after-side-effect; never raises.
     """
     if not inbox_dir.exists():
@@ -174,15 +190,31 @@ def _drain_markers(inbox_dir: Path) -> int:
     consumed = 0
     for marker in markers:
         try:
-            # Read for forensic logging only — fail-conservative on
-            # malformed JSON: still treat as a wake signal (delete +
-            # count). A truncated / corrupted marker file MEANS a
-            # teammate session attempted to write and was interrupted;
-            # the wake intent stands.
+            # Size-cap pre-check: 8 KiB is generous against the
+            # canonical 7-field payload. Oversize markers are treated
+            # as wake signals (delete + count) but the body is NOT
+            # read — protects against parser-amplification on a
+            # corrupted or hostile file.
             try:
-                marker.read_text(encoding="utf-8")
+                size = os.path.getsize(str(marker))
             except OSError:
-                pass
+                size = -1
+            if size > _MAX_MARKER_BYTES:
+                print(
+                    f"wake_inbox_drain: oversize marker "
+                    f"({size} bytes); skipping body read, unlinking",
+                    file=sys.stderr,
+                )
+            else:
+                # Read for forensic logging only — fail-conservative
+                # on malformed JSON: still treat as a wake signal
+                # (delete + count). A truncated / corrupted marker
+                # file MEANS a teammate session attempted to write
+                # and was interrupted; the wake intent stands.
+                try:
+                    marker.read_text(encoding="utf-8")
+                except OSError:
+                    pass
             os.unlink(str(marker))
             consumed += 1
         except OSError:
@@ -235,11 +267,12 @@ def _decide_and_emit(input_data: dict) -> None:
         print(_SUPPRESS_OUTPUT)
         return
 
-    # Performance hygiene: empty-inbox + non-lead-session early-out.
-    # The non-lead path is the hot common case (every teammate prompt
-    # fires this hook); short-circuit before any further I/O. Note we
-    # MUST still evaluate is_lead_session even on empty inbox for the
-    # lead-side B-1 fallback path below.
+    # Performance hygiene: non-lead-session early-out before any
+    # task-store I/O. The non-lead path is the hot common case (every
+    # teammate prompt fires this hook); short-circuit before the drain
+    # glob and the count_active_tasks fallback. `is_lead_session`
+    # itself reads team_config.json (one disk read on every prompt),
+    # which is the per-prompt cost on the hot path.
     if not is_lead_session(input_data, team_name):
         print(_SUPPRESS_OUTPUT)
         return
