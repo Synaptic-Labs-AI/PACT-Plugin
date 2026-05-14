@@ -349,8 +349,12 @@ def test_state_file_cleanup_after_crondelete_ordering(cmd_text):
     op_start = cmd_text.find("## Operation")
     op_end = cmd_text.find("\n## ", op_start + 1)
     op_section = cmd_text[op_start:op_end] if op_end > 0 else cmd_text[op_start:]
-    assert "AFTER" in op_section and "CronDelete" in op_section, (
-        "§Operation 'Ordering rationale' must explicitly justify AFTER-CronDelete sequencing"
+    assert "AFTER step 4's CronDelete" in op_section, (
+        "§Operation 'Ordering rationale' must contain the verbatim literal "
+        "\"AFTER step 4's CronDelete\" (word-ordering encoded). Substring "
+        "presence of 'AFTER' + 'CronDelete' independently does NOT pin "
+        "adjacency: a 'BEFORE CronDelete ... AFTER somewhere-else' mutation "
+        "would silently pass."
     )
 
 
