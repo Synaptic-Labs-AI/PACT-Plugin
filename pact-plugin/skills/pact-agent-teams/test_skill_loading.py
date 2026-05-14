@@ -172,10 +172,14 @@ class TestOnCompletionVerificationGateOrdering:
     against future edits that move, rename, or remove the verification gate."""
 
     def _on_completion_section(self, skill_content):
-        start = skill_content.find("## On Completion")
-        assert start != -1, "SKILL.md must contain '## On Completion' section"
-        # Slice to the next H2 (or EOF) to scope assertions to this section.
-        next_h2 = skill_content.find("\n## ", start + 1)
+        # Line-anchored start boundary: require the header to begin a line
+        # (preceded by newline). Hardens against in-prose / code-fenced
+        # mentions that could otherwise mis-anchor the section slice.
+        marker = "\n## On Completion"
+        anchor = skill_content.find(marker)
+        assert anchor != -1, "SKILL.md must contain '## On Completion' section"
+        start = anchor + 1  # drop the leading newline matched by the anchor
+        next_h2 = skill_content.find("\n## ", start)
         return skill_content[start : next_h2 if next_h2 != -1 else len(skill_content)]
 
     def test_step_0_verification_precondition_present(self, skill_content):
@@ -210,9 +214,13 @@ class TestOnStartTeachbackGateSendMessageVisible:
     guard against future elision that silently strands the team-lead."""
 
     def _on_start_section(self, skill_content):
-        start = skill_content.find("## On Start")
-        assert start != -1, "SKILL.md must contain '## On Start' section"
-        next_h2 = skill_content.find("\n## ", start + 1)
+        # Line-anchored start boundary (see TestOnCompletionVerificationGateOrdering
+        # for rationale). Requires '## On Start' at the beginning of a line.
+        marker = "\n## On Start"
+        anchor = skill_content.find(marker)
+        assert anchor != -1, "SKILL.md must contain '## On Start' section"
+        start = anchor + 1
+        next_h2 = skill_content.find("\n## ", start)
         return skill_content[start : next_h2 if next_h2 != -1 else len(skill_content)]
 
     def test_teachback_gate_names_send_message_explicitly(self, skill_content):
