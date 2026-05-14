@@ -26,6 +26,15 @@ Public surface:
     the 1->0 Teardown emit when a same-teammate continuation is staged
     for handoff. Pure function; never raises; fail-closed (returns
     False on every error path so Teardown emits unchanged).
+- is_lead_session(input_data, team_name) -> bool
+    Predicate. True iff the current PostToolUse/UserPromptSubmit
+    session's `session_id` matches the team's `leadSessionId` from
+    team_config.json. Lifted from wake_lifecycle_emitter.py to enable
+    reuse by wake_inbox_drain.py (single SSOT). Pure function; never
+    raises; silent fail-open (returns False) on missing/empty
+    session_id, missing/unsafe team_name, missing config.json,
+    malformed JSON, or filesystem error — the teammate session is the
+    expected non-lead path so no UI noise on every Task-tool fire.
 - _lifecycle_relevant(task, team_name="") -> bool
     Predicate. True iff the task counts toward the active-work tally that
     arms/tears down the wake mechanism.
@@ -67,13 +76,16 @@ Carve-out rules:
    shared.intentional_wait for the divergence rationale.
 """
 
+import json
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from shared.intentional_wait import WAKE_EXCLUDED_AGENT_TYPES
 from shared.intentional_wait import _is_wake_excluded_agent_type  # noqa: F401  # DECOUPLED-CONSTANT pin
 from shared.pact_context import _iter_members, _read_team_lead_agent_id
+from shared.session_state import is_safe_path_component
 from shared.task_utils import iter_team_task_jsons, read_task_json
 
 try:
@@ -634,3 +646,50 @@ def has_same_teammate_continuation(completed_task: Any, team_name: str) -> bool:
         return False
     except Exception:
         return False
+
+
+def is_lead_session(input_data: Any, team_name: str) -> bool:
+    """
+    Return True iff the current session is the team's lead session.
+
+    Reads `session_id` from the hook stdin payload and `leadSessionId`
+    from ~/.claude/teams/{team_name}/config.json. Single source of truth
+    for the wake-mechanism's lead-session locality check; consumed by
+    `wake_lifecycle_emitter._decide_directive` (PostToolUse) and by
+    `wake_inbox_drain.main` (UserPromptSubmit). Mirrors the Lead-Session
+    Guard pattern used by the start-pending-scan / stop-pending-scan
+    skill bodies (Layer 1 of the defense-in-depth model); this
+    hook-level check is Layer 0, preventing directive emission to
+    teammate sessions at the emission source. team_config is the
+    single source of truth for lead identity.
+
+    Pure function; never raises. Returns False on missing/empty
+    session_id, missing/unsafe team_name, missing config.json,
+    malformed JSON, or filesystem error. The teammate session is the
+    expected non-lead path; silent fail-open avoids UI noise on every
+    teammate hook fire.
+    """
+    if not isinstance(input_data, dict):
+        return False
+    raw_session_id = input_data.get("session_id")
+    if not isinstance(raw_session_id, str) or not raw_session_id:
+        return False
+    if not isinstance(team_name, str) or not team_name:
+        return False
+    if not is_safe_path_component(team_name):
+        return False
+    try:
+        config_path = (
+            Path.home() / ".claude" / "teams" / team_name / "config.json"
+        )
+        if not config_path.exists():
+            return False
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    lead_session_id = data.get("leadSessionId")
+    if not isinstance(lead_session_id, str) or not lead_session_id:
+        return False
+    return raw_session_id == lead_session_id

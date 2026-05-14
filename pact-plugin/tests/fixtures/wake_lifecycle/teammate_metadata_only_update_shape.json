@@ -1,0 +1,26 @@
+{
+  "_meta": {
+    "capture_session_id": "synthesized",
+    "capture_date": "2026-05-14",
+    "capture_method": "synthesized",
+    "issue_ref": "wake-lifecycle-arm-starvation",
+    "notes": "Synthesized TaskUpdate PostToolUse stdin shape representing a metadata-only TaskUpdate (e.g. teachback_submit, intentional_wait, handoff, progress, memory_saved). tool_input carries taskId + metadata fields but NO status field. Pins the negative-case trigger semantics for the teammate-Arm pre-branch: the predicate ladder's transition clause must reject this shape (no pending->in_progress status transition) and write NO inbox marker. Counterpart positive fixture: teammate_claim_in_progress_shape.json."
+  },
+  "tool_name": "TaskUpdate",
+  "session_id": "synthesized-teammate-session-id",
+  "cwd": "/Users/mj/Sites/collab/PACT-prompt",
+  "tool_input": {
+    "taskId": "42",
+    "metadata": {
+      "teachback_submit": {
+        "role": "backend-coder",
+        "mission": "Implement metadata-only-no-transition smoke fixture"
+      }
+    }
+  },
+  "tool_response": {
+    "id": "42",
+    "subject": "metadata-only TaskUpdate fixture for clause-3 negative case",
+    "owner": "backend-coder"
+  }
+}
