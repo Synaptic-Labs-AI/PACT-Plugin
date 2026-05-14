@@ -29,6 +29,16 @@ Public surface:
 - _lifecycle_relevant(task, team_name="") -> bool
     Predicate. True iff the task counts toward the active-work tally that
     arms/tears down the wake mechanism.
+- _owner_is_known_team_member(owner, team_name, teams_dir=None) -> bool
+- _is_lead_owned(owner, team_name, teams_dir=None) -> bool
+    Test-contract surface. Thin facades over `_classify_owner`; not
+    invoked from `_lifecycle_relevant` at runtime (the predicate
+    consumes the consolidated `_OwnerClassification` projection
+    directly for single-disk-read efficiency). RETAINED for direct
+    test reuse — do NOT delete on the assumption they are dead code.
+    See each helper's own docstring and the dedicated coverage in
+    `tests/test_wake_lifecycle_teammate_owner_filter.py` for the
+    test contract these helpers anchor.
 
 Contract: pure functions; never raise. Filesystem or JSON parse errors
 fail-open as "no active tasks" (returns 0 / False), matching the
@@ -57,10 +67,27 @@ Carve-out rules:
    shared.intentional_wait for the divergence rationale.
 """
 
+import sys
+from dataclasses import dataclass
 from typing import Any
 
-from shared.intentional_wait import _is_wake_excluded_agent_type
+from shared.intentional_wait import WAKE_EXCLUDED_AGENT_TYPES
+from shared.intentional_wait import _is_wake_excluded_agent_type  # noqa: F401  # DECOUPLED-CONSTANT pin
+from shared.pact_context import _iter_members, _read_team_lead_agent_id
 from shared.task_utils import iter_team_task_jsons, read_task_json
+
+try:
+    from shared import session_journal  # type: ignore
+except Exception:  # pragma: no cover - import guard
+    session_journal = None  # type: ignore[assignment]
+
+# DECOUPLED-CONSTANT pin: the `_is_wake_excluded_agent_type` import above is
+# preserved but unused at runtime after the _classify_owner refactor folded
+# its single call site into the consolidated owner-classification path.
+# `tests/test_inbox_wake_lifecycle_helper.py::test_helper_imports_shared_helper_from_intentional_wait`
+# pins the presence of this exact import line to enforce the DECOUPLED-
+# CONSTANT discipline (wake-side helper, NOT the self-completion-side
+# `_is_exempt_agent_type`). Keep the import; the test is the contract.
 
 # Signal-task types — inline literal mirrors the convention at
 # agent_handoff_emitter.py:78 and task_utils.find_blockers. The carve-out
@@ -74,6 +101,270 @@ _SIGNAL_TASK_TYPES = ("blocker", "algedonic")
 # by the positive allowlist (conservative: only count statuses we know
 # represent in-flight work).
 _ACTIVE_STATUSES = ("pending", "in_progress")
+
+
+@dataclass(frozen=True)
+class _OwnerClassification:
+    """Projection of the team config relevant to the owner-classification
+    decision in ``_lifecycle_relevant``.
+
+    Three fields, derived from ONE read of ``_iter_members(team_name)``
+    and ONE read of ``_read_team_lead_agent_id(team_name)``:
+
+    - ``is_known_team_member``: True iff the owner matches some
+      member's ``name`` field in the team config.
+    - ``is_lead``: True iff the owner matches a member whose ``agentId``
+      equals the team's ``leadAgentId``.
+    - ``agent_type``: the member's ``agentType`` string when present,
+      else None. Used by the wake-excluded-agentType carve-out.
+    - ``config_readable``: True iff ``_iter_members`` returned a
+      non-empty members list. False signals the count-on-failure
+      fall-through path at the call site (members list empty: config
+      missing, malformed JSON, or members[] absent) and distinguishes
+      it from the orphan case (members non-empty, no name match).
+
+    A frozen dataclass rather than a namedtuple so the field semantics
+    are documented inline at the consumer's read site.
+    """
+
+    is_known_team_member: bool
+    is_lead: bool
+    agent_type: str | None
+    config_readable: bool
+
+
+# Dedupe set for the empty-config warning. ONE warn per session per team,
+# not per task — the predicate runs on every TaskCreate/TaskUpdate via the
+# wake_lifecycle_emitter hook, so per-task warns would flood. Module-level
+# set is OK because each hook invocation is a fresh Python process (new
+# module state = clean dedupe).
+_EMPTY_CONFIG_WARN_TEAMS: set[str] = set()
+
+
+def _classify_owner(
+    owner: Any,
+    team_name: str,
+    teams_dir: str | None = None,
+) -> _OwnerClassification:
+    """Read the team config ONCE and project the four fields needed by
+    ``_lifecycle_relevant``'s step 3 (wake-excluded agentType) and step 4
+    (orphan / lead-owned exclusion).
+
+    Pure function; never raises. Returns an all-False / config_readable=
+    False classification on any error path:
+
+    - non-string owner OR empty owner OR non-string team_name OR empty
+      team_name → all fields default (no classification can be made).
+    - ``_iter_members`` returns ``[]`` (config missing / unreadable /
+      malformed / members[] absent) → ``config_readable=False`` so the
+      call site can apply its count-on-failure fall-through. The other
+      fields stay False / None.
+    - members non-empty, no name match → ``is_known_team_member=False``,
+      ``is_lead=False``, ``agent_type=None``, ``config_readable=True``.
+      The call site uses these flags to exclude the task as an orphan
+      owner.
+
+    Single source of truth for the wake-side owner classification.
+    Before this projection, ``_lifecycle_relevant`` invoked
+    ``_iter_members`` three times per call (once explicitly + once
+    inside each of two predicate helpers); now it invokes ``_iter_members``
+    once and ``_read_team_lead_agent_id`` once.
+
+    Note on the ``owner: Any`` parameter type: sibling predicates in
+    ``intentional_wait.py`` (``_is_exempt_agent_type``,
+    ``_is_wake_excluded_agent_type``, ``_is_teachback_exempt_agent_type``)
+    use ``owner: str`` because their callers pre-validate the owner
+    shape upstream. ``_classify_owner`` IS the validation point — its
+    sole runtime caller (``_lifecycle_relevant``, line ~399) passes
+    ``task.get("owner")`` directly from the on-disk task JSON without an
+    upstream isinstance guard, so the actual contract accepts any
+    JSON-readable value. Narrowing the type hint to ``str`` would be a
+    type lie that a future type-checker would flag at the call site.
+    The internal ``isinstance(owner, str)`` guard below is the
+    validation that makes this safe.
+
+    Args:
+        owner: Task owner field (raw from ``task.get("owner")`` at the
+            call site; may be None, str, int, list, etc.). Internal
+            isinstance guard handles non-string shapes.
+        team_name: Team name for config path. Empty/non-string returns
+            an all-False classification.
+        teams_dir: Override teams directory (for testing). Forwarded to
+            ``_iter_members`` and ``_read_team_lead_agent_id``. Matches
+            the sibling-convention of pact_context.py helpers.
+    """
+    if not isinstance(team_name, str) or not team_name:
+        # Empty team_name disables config classification entirely.
+        # config_readable=False here is a stand-in for "no source of
+        # truth"; the call site treats it as count-on-failure
+        # fall-through identical to the empty-members case.
+        return _OwnerClassification(False, False, None, False)
+
+    # Read the config regardless of owner shape so the call site can
+    # distinguish "config unreadable → count-on-failure fall-through"
+    # from "config readable but owner is non-string / orphan →
+    # exclude". A bad-owner task under a readable config is an orphan
+    # (excluded), not a config-read failure.
+    members = _iter_members(team_name, teams_dir=teams_dir)
+    if not members:
+        # Empty members list signals the count-on-failure fall-through
+        # at the call site (members[] empty ⇒ unreadable for
+        # classification purposes). The rationale for that posture
+        # lives in _lifecycle_relevant's step-4 elif body where the
+        # logic is exercised.
+        return _OwnerClassification(False, False, None, False)
+
+    if not isinstance(owner, str) or not owner:
+        # Config IS readable, but the owner is missing or non-string.
+        # Return is_known=False so the call site excludes the task as
+        # an orphan / unowned; config_readable=True signals "the
+        # exclusion is intentional, not the count-on-failure path."
+        return _OwnerClassification(False, False, None, True)
+
+    lead_agent_id = _read_team_lead_agent_id(team_name, teams_dir=teams_dir)
+    is_known = False
+    is_lead = False
+    agent_type: str | None = None
+    for member in members:
+        if member.get("name") != owner:
+            continue
+        is_known = True
+        member_agent_id = member.get("agentId")
+        if lead_agent_id and member_agent_id == lead_agent_id:
+            is_lead = True
+        raw_agent_type = member.get("agentType")
+        if isinstance(raw_agent_type, str):
+            agent_type = raw_agent_type
+        # First matching member wins. Duplicate-name configs are
+        # malformed; the first match is the canonical record.
+        break
+
+    return _OwnerClassification(is_known, is_lead, agent_type, True)
+
+
+def _owner_is_known_team_member(
+    owner: Any,
+    team_name: str,
+    teams_dir: str | None = None,
+) -> bool:
+    """Return True iff ``owner`` matches some member's ``name`` field in
+    the team config.
+
+    Answers "does the config record a member with this name?" — distinct
+    from "is this owner a teammate (not the lead)?", which is the
+    conjunction of ``is_known_team_member`` AND ``not is_lead``. Both
+    are surfaced via ``_classify_owner``.
+
+    Pure function; never raises. Returns False on every error path:
+    non-string owner, empty owner string, empty team_name, empty members
+    list (config unreadable or members[] missing/empty), or no name
+    match. Fail-CLOSED-symmetric internally — the call site
+    (``_lifecycle_relevant``, step 4) handles its own count-on-failure
+    posture when the members list is empty; see the inline rationale
+    comment inside the step-4 ``elif team_name:`` branch for the
+    asymmetry between this helper's fail-CLOSED behavior and the call
+    site's fall-through. Step labels match the ``# Step N:`` anchors
+    in ``_lifecycle_relevant``.
+
+    Retained as a public-style helper for test reuse and future callers;
+    after the ``_classify_owner`` refactor, ``_lifecycle_relevant`` uses
+    the consolidated projection directly and no longer calls this
+    helper at runtime. The ``owner: Any`` parameter type and ``teams_dir``
+    forwarding mirror the ``_classify_owner`` signature; see that
+    helper's docstring for the rationale on accepting ``Any``.
+    """
+    return _classify_owner(owner, team_name, teams_dir=teams_dir).is_known_team_member
+
+
+def _is_lead_owned(
+    owner: Any,
+    team_name: str,
+    teams_dir: str | None = None,
+) -> bool:
+    """Return True iff ``owner`` matches a member of the team config
+    whose ``agentId`` equals the team's ``leadAgentId``.
+
+    Pure function; never raises. Returns False on every error path:
+    non-string owner, empty owner string, empty team_name, empty
+    leadAgentId (config unreadable or field missing), empty members
+    list, or no member matches both name and lead-agentId. Fail-CLOSED-
+    symmetric internally — the call site (``_lifecycle_relevant``,
+    step 4) handles its own count-on-failure posture when the members
+    list is empty; see the inline rationale comment inside the step-4
+    ``elif team_name:`` branch for the asymmetry between this helper's
+    fail-CLOSED behavior and the call site's fall-through. Step labels
+    match the ``# Step N:`` anchors in ``_lifecycle_relevant``.
+
+    Retained as a public-style helper for test reuse; after the
+    ``_classify_owner`` refactor, ``_lifecycle_relevant`` uses the
+    consolidated projection directly and no longer calls this helper at
+    runtime. The ``owner: Any`` parameter type and ``teams_dir``
+    forwarding mirror the ``_classify_owner`` signature; see that
+    helper's docstring for the rationale on accepting ``Any``.
+    """
+    return _classify_owner(owner, team_name, teams_dir=teams_dir).is_lead
+
+
+def _warn_empty_team_config_once(team_name: str) -> None:
+    """Emit a ONE-shot per-team warning when the empty-members fall-
+    through fires at ``_lifecycle_relevant``'s step 4.
+
+    The fall-through is operationally recoverable (over-arm = extra
+    empty scans) but indicates the team config is unreadable or
+    malformed — an observability gap worth surfacing. Without this
+    signal, a permanently-unreadable config would silently keep the
+    wake mechanism armed for the entire session and only manifest as
+    "scan-pending-tasks fires don't drive teardown."
+
+    Pure-after-side-effect; never raises (warnings are best-effort by
+    design). Dedupe is per-team module-level — each hook invocation is
+    a fresh Python process so the set is empty at start and at most one
+    warning per team fires per process. The wake-mechanism hook runs on
+    every TaskCreate/TaskUpdate, so per-task warnings would flood; per-
+    team-per-process is the tightest natural granularity.
+
+    Routing: prefers ``shared.session_journal.append_event`` with event
+    type ``wake_tally_warn`` (unknown event types bypass per-type
+    schema validation by design — see ``_REQUIRED_FIELDS_BY_TYPE``
+    docstring in session_journal). Falls back to stderr with a
+    ``[WAKE-TALLY WARN]`` prefix if the journal is unreachable
+    (uninitialized session, import failure, write failure).
+    """
+    if not isinstance(team_name, str) or not team_name:
+        return
+    if team_name in _EMPTY_CONFIG_WARN_TEAMS:
+        return
+    _EMPTY_CONFIG_WARN_TEAMS.add(team_name)
+
+    journal_ok = False
+    if session_journal is not None:
+        try:
+            event = session_journal.make_event(
+                "wake_tally_warn",
+                team_name=team_name,
+                reason="empty_team_config_fail_conservative",
+                detail=(
+                    "_iter_members returned [] for team_name; step-4 "
+                    "owner-check skipped; falling through to count "
+                    "(fail-CONSERVATIVE)."
+                ),
+            )
+            journal_ok = bool(session_journal.append_event(event))
+        except Exception:
+            journal_ok = False
+
+    if not journal_ok:
+        try:
+            print(
+                "[WAKE-TALLY WARN] team_name=%r: _iter_members returned [] "
+                "at _lifecycle_relevant step 4; falling through to count "
+                "(fail-CONSERVATIVE)."
+                % team_name,
+                file=sys.stderr,
+            )
+        except Exception:
+            # Pure-never-raises contract: swallow even stderr failures.
+            pass
 
 
 def _lifecycle_relevant(task: Any, team_name: str = "") -> bool:
@@ -100,52 +391,132 @@ def _lifecycle_relevant(task: Any, team_name: str = "") -> bool:
         re-introducing the predicate. Evaluated before the metadata-
         shape check so that a wake-excluded agentType task with
         corrupted metadata is still excluded once the set is non-empty.
+      - Teammate-owner check: tasks count ONLY if their owner is a
+        team-config member AND not the team-lead. Unowned umbrella
+        tasks (created by workflow commands), orphan-owner tasks (owner
+        string doesn't match any current member), and team-lead-owned
+        tasks (umbrella / feature / phase records) all return False.
+        The check applies a count-on-failure posture at the call site
+        when the team config is unreadable (empty members list short-
+        circuits to "count") — see the inline comment block at step 4
+        for the asymmetry rationale.
       - Signal-task pattern: metadata.completion_type == "signal" AND
-        metadata.type in {"blocker", "algedonic"}.
+        metadata.type in {"blocker", "algedonic"}. Applied AFTER the
+        teammate-owner check; a teammate-owned signal task passes the
+        owner check and is excluded here.
     """
+    # Step 1: input shape gate.
     if not isinstance(task, dict):
         return False
 
+    # Step 2: status gate. Only pending / in_progress tasks count.
     if task.get("status") not in _ACTIVE_STATUSES:
         return False
 
-    # Wake-excluded agentType carve-out. Hoisted above the metadata
-    # shape check so that a wake-excluded agentType task with corrupted
-    # metadata is still excluded once the set is non-empty. The
-    # owner-shape check inside _is_wake_excluded_agent_type fail-closes
-    # on non-string owner.
+    # Steps 3 + 4 share a single read of the team config via
+    # `_classify_owner`. The projection is computed ONCE and the wake-
+    # excluded-agentType check (step 3) plus the orphan / lead-owned
+    # check (step 4) both consume its fields. Before this refactor,
+    # _lifecycle_relevant invoked `_iter_members` three times per call
+    # (once explicitly + once inside each of two predicate helpers);
+    # now it invokes `_iter_members` once and `_read_team_lead_agent_id`
+    # once via `_classify_owner`. The wake-tally posture asymmetry
+    # vs the sibling predicates in intentional_wait.py is documented
+    # inline at step 4 below (where the executable check lives).
     #
-    # DECOUPLED-CONSTANT DISCIPLINE: WAKE_EXCLUDED_AGENT_TYPES is a
-    # SEPARATE constant from SELF_COMPLETE_EXEMPT_AGENT_TYPES, and the
-    # two now DIVERGE: SELF_COMPLETE_EXEMPT contains pact-secretary
-    # (memory-save tasks self-complete without lead inspection),
-    # WAKE_EXCLUDED is empty (every teammate, including secretary,
-    # counts toward the wake tally so the lead receives all replies).
-    # The constants answer different questions for different consumers
-    # — self-completion asks "may this owner self-complete without
-    # lead inspection?" and wake-exclusion asks "should this owner's
-    # active work fire the lead's inbox-watch Monitor?" The empty
-    # WAKE_EXCLUDED set is load-bearing for secretary message coverage
-    # — re-adding pact-secretary here would re-introduce the
-    # secretary-window failure mode where the Monitor tore down before
-    # the lead could read the secretary's reply. DO NOT recouple by
-    # re-importing _is_exempt_agent_type here; the divergence is
-    # architectural intent, not a transient state.
+    # DECOUPLED-CONSTANT DISCIPLINE: the agentType check below consults
+    # `WAKE_EXCLUDED_AGENT_TYPES` (imported from intentional_wait.py),
+    # NOT `SELF_COMPLETE_EXEMPT_AGENT_TYPES`. The two constants answer
+    # different questions for different consumers — self-completion
+    # asks "may this owner self-complete without lead inspection?" and
+    # wake-exclusion asks "should this owner's active work fire the
+    # lead's inbox-watch Monitor?" `WAKE_EXCLUDED_AGENT_TYPES` is empty
+    # by design (every teammate, including secretary, counts toward
+    # the wake tally so the lead receives all replies); the empty set
+    # is load-bearing for secretary message coverage. DO NOT recouple
+    # the two policies by aliasing the constants or by re-importing
+    # `_is_exempt_agent_type` here.
     owner = task.get("owner")
-    if isinstance(owner, str) and _is_wake_excluded_agent_type(owner, team_name):
+    if not team_name:
+        # Empty team_name (default-arg / fixture path) skips both
+        # step 3 and step 4 — same fall-through behavior as the empty-
+        # members case below. Documented here so a reader investigating
+        # "what happens when team_name is empty?" sees the rationale at
+        # the call site.
+        classification = _OwnerClassification(False, False, None, False)
+    else:
+        classification = _classify_owner(owner, team_name)
+
+    # Step 3: wake-excluded agentType carve-out. Hoisted above the
+    # metadata-shape check (step 5) so that a wake-excluded agentType
+    # task with corrupted metadata is still excluded once the
+    # WAKE_EXCLUDED_AGENT_TYPES set is non-empty. Currently the set is
+    # empty so this check is a no-op for all owners; the call is
+    # retained so a future hypothetical wake-only-noisy agentType can
+    # be added to the constant without re-introducing the predicate.
+    if (
+        classification.agent_type is not None
+        and classification.agent_type in WAKE_EXCLUDED_AGENT_TYPES
+    ):
         return False
 
+    # Step 4: teammate-owner check. Tasks count toward the wake tally
+    # only when the owner is a known team member AND not the team-lead.
+    # Unowned umbrella tasks (created by /PACT:orchestrate,
+    # /PACT:comPACT, /PACT:peer-review), orphan-owner tasks, and
+    # team-lead-owned tasks all return False here. The predicate flow
+    # places this BEFORE the signal-task metadata carve-out (step 6)
+    # so a teammate-owned signal task passes step 4 and is excluded at
+    # step 6; an unowned/orphan/lead-owned signal task (structurally
+    # impossible today, but defended against) is excluded at step 4.
+    # The failure-mode rationale documenting why the unreadable-config
+    # branch counts (rather than excluding) lives inside the `elif`
+    # body below so a body-only revert deletes both the logic and its
+    # justification together.
+    if classification.config_readable:
+        if not isinstance(owner, str) or not owner:
+            return False
+        if not classification.is_known_team_member:
+            return False
+        if classification.is_lead:
+            return False
+    elif team_name:
+        # Fail-CONSERVATIVE: the team config is unreadable (members
+        # list is empty), so `_classify_owner` returned
+        # `config_readable=False` and BOTH step 3 and step 4 fall
+        # through to step 5. The sibling predicates in
+        # intentional_wait.py fail-CLOSED on read errors (return False),
+        # but the failure mode here inverts the priority: under-arm
+        # (silent teardown loss while teammate work is in flight) is
+        # unrecoverable; over-arm (extra empty scans) is recoverable on
+        # the next state change. The wake-mechanism's purpose — never
+        # strand a teammate whose SendMessage needs to wake the lead —
+        # is load-bearing here, so we fail toward counting on every
+        # config-read failure. The audit-anchor invariant test pins
+        # these phrases (Fail-CONSERVATIVE, under-arm, unrecoverable)
+        # inside this `elif` body so a future agent-reader deleting
+        # step 4 also deletes the rationale rather than leaving an
+        # orphan comment.
+        #
+        # One-shot observability warn per team per process so a
+        # permanently-unreadable config doesn't silently keep the wake
+        # mechanism armed for the entire session.
+        _warn_empty_team_config_once(team_name)
+
+    # Step 5: metadata shape gate.
     metadata = task.get("metadata") or {}
     if not isinstance(metadata, dict):
         # Malformed metadata — conservative: do not silently exempt a real
         # active task on a parse-failed metadata field. Count it.
         return True
 
-    # Signal-task carve-out (inline-literal mirror).
+    # Step 6: signal-task carve-out (inline-literal mirror of the
+    # convention at agent_handoff_emitter.py / task_utils.find_blockers).
     if metadata.get("completion_type") == "signal":
         if metadata.get("type") in _SIGNAL_TASK_TYPES:
             return False
 
+    # Step 7: counted toward active-work tally.
     return True
 
 

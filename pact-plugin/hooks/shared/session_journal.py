@@ -158,6 +158,16 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # activates the _OPTIONAL_FIELDS_BY_TYPE enforcement below (same pattern
     # as session_end and cleanup_summary).
     "session_consolidated": {},
+    # hooks/shared/wake_lifecycle.py::_warn_empty_team_config_once writes
+    # wake_tally_warn ONE-shot per team per process when the step-4
+    # owner-check fall-through fires (config unreadable, members[] empty).
+    # team_name is load-bearing — without it the warn has no actionable
+    # signal. reason is a categorical token for future log-filter
+    # dispatch ("empty_team_config_fail_conservative" today; future
+    # variants may add "malformed_team_config_json" or similar). detail
+    # is documentation-grade prose for human readers (stderr fallback)
+    # and is registered as optional in _OPTIONAL_FIELDS_BY_TYPE below.
+    "wake_tally_warn": {"team_name": str, "reason": str},
 }
 
 
@@ -222,6 +232,15 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
         "task_count": int,
         "memories_saved": int,
     },
+    # hooks/shared/wake_lifecycle.py::_warn_empty_team_config_once writes
+    # wake_tally_warn with an optional `detail` free-form prose string.
+    # The required-fields registration in _REQUIRED_FIELDS_BY_TYPE above
+    # ("wake_tally_warn": {team_name: str, reason: str}) is what
+    # ACTIVATES this optional check — _validate_event_schema short-
+    # circuits on unknown event types and would otherwise skip the
+    # optional loop. Symmetric with the session_end + cleanup_summary
+    # registration patterns.
+    "wake_tally_warn": {"detail": str},
 }
 
 

@@ -89,6 +89,110 @@ def test_helper_imports_shared_helper_from_intentional_wait():
     assert "frozenset({'pact-secretary'" not in src
 
 
+def test_lifecycle_relevant_preserves_fail_conservative_audit_anchor():
+    """The fail-CONSERVATIVE asymmetry between this call site (count on
+    config-read failure) and the sibling predicates in
+    intentional_wait.py (return False on config-read failure) is
+    load-bearing for the wake mechanism. Pin the audit-anchor phrases
+    INSIDE the step-4 ``elif team_name:`` block specifically — a free
+    file-wide substring check would pass vacuously if a future
+    contributor introduced the phrases anywhere else in the module
+    (e.g. a helper docstring, an unrelated comment). The tightened
+    anchor requires both halves of the rationale to live in the
+    executable elif-body's comment block, so a body-only revert that
+    deletes the elif block deletes the anchor with it.
+    """
+    src_path = (
+        Path(__file__).resolve().parent.parent
+        / "hooks" / "shared" / "wake_lifecycle.py"
+    )
+    src_lines = src_path.read_text(encoding="utf-8").splitlines()
+
+    # Anchor: the EXECUTABLE statement `    elif team_name:` (4-space
+    # indent + trailing colon). Docstring mentions like `elif team_name:`
+    # wrapped in backticks do not match because the indentation differs
+    # and they appear inside triple-quoted strings, not at function-body
+    # indent. We require exactly one such anchor line — duplicates would
+    # indicate either a refactor that split the predicate or a spurious
+    # paste, both of which warrant review.
+    anchor_indices = [
+        i for i, ln in enumerate(src_lines) if ln == "    elif team_name:"
+    ]
+    assert len(anchor_indices) == 1, (
+        "Expected exactly one `    elif team_name:` executable line in "
+        "wake_lifecycle.py (the step-4 fail-CONSERVATIVE branch). Found "
+        f"{len(anchor_indices)} at line numbers "
+        f"{[i + 1 for i in anchor_indices]!r}."
+    )
+    anchor_idx = anchor_indices[0]
+
+    # Window: lines following the anchor that belong to the elif body.
+    # The elif body in this branch is comment-only narration plus the
+    # final `_warn_empty_team_config_once(team_name)` call. Collect
+    # lines until we hit either:
+    #   (a) a `# Step N:` outer-step marker (the next outer-step comment
+    #       at the SAME 4-space indent), which closes the elif body, or
+    #   (b) any non-comment, non-blank statement that is NOT the expected
+    #       trailing `_warn_empty_team_config_once(team_name)` call.
+    # The collected window is the executable elif body's comment block.
+    window_lines = []
+    for ln in src_lines[anchor_idx + 1:]:
+        stripped = ln.strip()
+        # Outer-step marker closes the window before consuming.
+        if stripped.startswith("# Step ") and ln.startswith("    # Step "):
+            break
+        window_lines.append(ln)
+        # Stop after the trailing _warn_empty_team_config_once call — the
+        # last executable line of the elif body.
+        if stripped == "_warn_empty_team_config_once(team_name)":
+            break
+    window_text = "\n".join(window_lines)
+
+    # The three audit-anchor phrases MUST live inside the executable
+    # elif body's window. A future revert that deletes the elif body
+    # makes window_lines empty (or near-empty), flipping these
+    # assertions to FAIL — the intended counter-signal under body-only
+    # revert.
+    assert "Fail-CONSERVATIVE" in window_text, (
+        f"`Fail-CONSERVATIVE` audit anchor must live inside the step-4 "
+        f"`elif team_name:` body (executable line {anchor_idx + 1}). "
+        f"Window starts at line {anchor_idx + 2}; collected window:\n"
+        f"{window_text!r}"
+    )
+    assert "under-arm" in window_text, (
+        f"`under-arm` rationale must live inside the step-4 `elif "
+        f"team_name:` body (executable line {anchor_idx + 1}). Window:\n"
+        f"{window_text!r}"
+    )
+    assert "unrecoverable" in window_text, (
+        f"`unrecoverable` rationale must live inside the step-4 `elif "
+        f"team_name:` body (executable line {anchor_idx + 1}). Window:\n"
+        f"{window_text!r}"
+    )
+
+    # Pin additionally that no OTHER executable site in the module
+    # contains these phrases. Docstring/comment occurrences elsewhere
+    # would create a phantom-green path where a future contributor
+    # could delete the elif body's comment block, leave the phrases in
+    # an unrelated docstring, and the assertions above would still
+    # pass. Forbid the phrases anywhere in src EXCEPT inside the
+    # window we just validated.
+    src_outside_window = "\n".join(
+        ln
+        for i, ln in enumerate(src_lines)
+        if not (anchor_idx + 1 <= i <= anchor_idx + len(window_lines))
+    )
+    for phrase in ("Fail-CONSERVATIVE", "under-arm", "unrecoverable"):
+        assert phrase not in src_outside_window, (
+            f"Phrase {phrase!r} must appear ONLY inside the step-4 "
+            f"`elif team_name:` body's comment block (lines "
+            f"{anchor_idx + 2}..{anchor_idx + 1 + len(window_lines)}). "
+            f"Found outside the window — a future contributor could "
+            f"delete the elif body's rationale and this anchor would "
+            f"still pass vacuously."
+        )
+
+
 def test_helper_documented_pure_never_raises():
     """Pin the docstring contract — pure functions, never raise. This is
     the structural anchor that lets future cleanup remove the redundant
@@ -165,18 +269,29 @@ def test_lifecycle_relevant_secretary_owner_now_counts_post_empty_carve_out(tmp_
     )
 
 
-def test_lifecycle_relevant_owner_named_secretary_without_agenttype_counts(tmp_path, monkeypatch):
-    """A teammate spoofing owner='secretary' without the privileged
-    agentType in team config is NOT exempt — the carve-out fail-closes
-    on missing-from-config (#682 trust-boundary defense)."""
+def test_lifecycle_relevant_owner_named_secretary_without_agenttype_excluded_as_orphan(tmp_path, monkeypatch):
+    """An owner='secretary' string with no matching member in the team
+    config is an orphan owner — the teammate-owner check returns False
+    BEFORE the wake-side agentType carve-out can promote or demote it.
+    A teammate spoofing owner='secretary' to escape the wake tally hits
+    the orphan-exclusion gate; the spoof neither evades nor sneaks into
+    the privileged agentType set.
+
+    Pre-orphan-exclusion behavior: this task counted toward the active
+    tally because the wake-side agentType carve-out only fired when the
+    owner matched a member whose recorded agentType was in
+    WAKE_EXCLUDED_AGENT_TYPES — a non-member owner simply fell through.
+    Post-orphan-exclusion: orphan owners are now excluded regardless of
+    agentType. The teammate-owner check fail-CLOSES on no member-name
+    match (members list non-empty)."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     team = "team-spoof"
     _write_team_config(tmp_path, team, [
         {"name": "backend-coder-1", "agentType": "pact-backend-coder"},
     ])
     task = {"status": "in_progress", "owner": "secretary"}
-    # Not exempt → counts toward active tally.
-    assert wl._lifecycle_relevant(task, team) is True
+    # Orphan owner (not in members) → excluded from wake tally.
+    assert wl._lifecycle_relevant(task, team) is False
 
 
 def test_lifecycle_relevant_empty_team_name_counts_secretary(tmp_path, monkeypatch):
@@ -316,20 +431,24 @@ def test_count_active_tasks_counts_pending_and_in_progress(tmp_path, monkeypatch
     assert wl.count_active_tasks(team) == 2
 
 
-def test_count_active_tasks_skips_signal_only_post_empty_carve_out(tmp_path, monkeypatch):
-    """POST-EMPTY-CARVE-OUT: signal tasks are still excluded from the
-    active tally (signal-task carve-out is independent of the wake-side
-    agentType carve-out), but secretary tasks are now COUNTED because
-    WAKE_EXCLUDED_AGENT_TYPES is empty.
+def test_count_active_tasks_skips_signal_and_orphans(tmp_path, monkeypatch):
+    """Signal tasks remain excluded via the metadata-layer signal-task
+    carve-out (independent of the wake-side agentType carve-out and the
+    teammate-owner check). Orphan-owner tasks (owner string doesn't
+    match any current member) are now also excluded via the teammate-
+    owner check.
 
-    Pre-empty: count == 1 (only `real` counts; sig + sec excluded).
-    Post-empty: count == 2 (real + sec count; sig still excluded via
-    signal-task carve-out which lives at the metadata layer, not the
-    agentType layer).
+    Setup: team config lists only `session-secretary` as a member. Tasks
+    `real` (owner=x) and `sig` (owner=y) are orphans; `sec` (owner=
+    session-secretary) is a known teammate.
 
-    Counter-test-by-revert: a future re-population of
-    WAKE_EXCLUDED_AGENT_TYPES = {pact-secretary} drops the count back
-    to 1; this test must be inverted in lockstep."""
+    Pre-orphan-exclusion: count == 2 (real + sec; sig excluded only by
+    signal-task carve-out). Post-orphan-exclusion: count == 1 (sec only;
+    real is orphan-excluded, sig is signal-task-excluded, sec passes).
+
+    Counter-test-by-revert: removing the teammate-owner check from
+    `_lifecycle_relevant` would restore the count to 2 by re-counting
+    `real` (the orphan)."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     team = "team-carveouts"
     # Team config records session-secretary with the privileged agentType.
@@ -343,11 +462,10 @@ def test_count_active_tasks_skips_signal_only_post_empty_carve_out(tmp_path, mon
         metadata={"completion_type": "signal", "type": "blocker"},
     )
     _stage_task(tmp_path, team, "sec", status="in_progress", owner="session-secretary")
-    assert wl.count_active_tasks(team) == 2, (
-        "Post-empty WAKE_EXCLUDED_AGENT_TYPES: secretary tasks count "
-        "(real + sec = 2); only signal tasks are excluded via the "
-        "metadata-layer signal-task carve-out (independent of the "
-        "wake-side agentType carve-out)."
+    assert wl.count_active_tasks(team) == 1, (
+        "Only the known teammate `sec` counts: `real` is excluded as "
+        "orphan owner (not in members), `sig` is excluded by the "
+        "signal-task carve-out."
     )
 
 
@@ -383,18 +501,25 @@ def test_count_active_tasks_session_secretary_now_counts_post_empty_carve_out(tm
     )
 
 
-def test_count_active_tasks_secretary_owner_without_agenttype_counts(tmp_path, monkeypatch):
-    """Trust-boundary defense: owner='secretary' alone is not enough to
-    trigger the carve-out — the team config must record the privileged
-    agentType. A teammate spoofing owner='secretary' without team-config
-    backing counts toward the active tally (#682)."""
+def test_count_active_tasks_secretary_owner_without_agenttype_excluded_as_orphan(tmp_path, monkeypatch):
+    """Trust-boundary defense, strengthened: owner='secretary' alone is
+    not enough to count toward the wake tally — the team config must
+    record a member with that exact name. A teammate spoofing
+    owner='secretary' without a matching member is an orphan owner and
+    is excluded from the active tally.
+
+    Pre-orphan-exclusion: count == 1 (the spoof counted because the
+    agentType-only carve-out fail-closed on missing-from-config but the
+    teammate-owner check did not yet exist). Post-orphan-exclusion:
+    count == 0 (the orphan owner is filtered before reaching the
+    metadata-shape gate)."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     team = "team-spoof"
     _write_team_config(tmp_path, team, [
         {"name": "backend-coder-1", "agentType": "pact-backend-coder"},
     ])
     _stage_task(tmp_path, team, "spoof", status="in_progress", owner="secretary")
-    assert wl.count_active_tasks(team) == 1
+    assert wl.count_active_tasks(team) == 0
 
 
 def test_count_active_tasks_skips_unparseable_files(tmp_path, monkeypatch):
