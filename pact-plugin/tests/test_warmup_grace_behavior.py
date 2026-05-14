@@ -33,8 +33,6 @@ import json
 import time
 from pathlib import Path
 
-import pytest
-
 
 # Inline-duplicated predicate. Matches the skill body in
 # pact-plugin/commands/scan-pending-tasks.md §Warmup-Grace-Skip Procedure
@@ -249,19 +247,3 @@ def test_teardown_absent_state_file_tolerated(tmp_path):
         pass  # tolerated — this is the documented semantic
 
     assert not state_file.exists()
-
-
-def test_teardown_does_not_tolerate_permission_error(tmp_path):
-    """The §State-File Cleanup Block cites ONLY FileNotFoundError as
-    the tolerated exception; PermissionError MUST surface. This pin
-    catches an editing LLM tempted to broaden `except FileNotFoundError`
-    to `except OSError` or `except Exception`."""
-    state_file = tmp_path / "pending-scan-armed-at.json"
-    state_file.write_text(json.dumps({"armed_at": time.time()}))
-
-    # We assert that the try/except shape matches FileNotFoundError-only,
-    # NOT a broader OSError catch. This is a documentation-in-code pin:
-    # if the skill body widened the except clause, the test author would
-    # have updated this test in lockstep.
-    with pytest.raises(PermissionError):
-        raise PermissionError("simulated — should surface, not be swallowed")

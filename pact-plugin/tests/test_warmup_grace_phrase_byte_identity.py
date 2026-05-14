@@ -57,22 +57,37 @@ def test_phrase_present_in_scan_pending_tasks():
     )
 
 
-def test_phrase_byte_identical_across_files():
-    """Byte-identity symmetry: the prefix occurs in BOTH files. This
-    is the cross-file property that per-site presence assertions
-    cannot guarantee — they verify each site independently but allow
-    silent drift between sites (one site softening while the other
-    stays canonical).
+def test_phrase_exact_multiplicity_across_files():
+    """Exact-multiplicity pin: the load-bearing prefix appears exactly
+    once in start-pending-scan.md (§Warmup-State File audit anchor)
+    and exactly twice in scan-pending-tasks.md (§Warmup-Grace-Skip
+    Procedure audit + 6th-guardrail audit block).
 
-    If this test fails while the per-site presence tests pass, the
-    failure indicates one site has dropped or renamed the phrase
-    without the corresponding edit in the paired file."""
+    A `>= 1` assertion on both files is phantom-green on asymmetric
+    single-site drift: when one site has multiple occurrences (scan
+    has 2), mutating ONE of them to a paraphrase still leaves
+    `count >= 1` True. Pinning the exact multiplicities catches
+    single-occurrence drift in either file immediately — a
+    mismatched count surfaces as test RED with the expected-vs-
+    actual diff in the error message.
+
+    If the canonical multiplicities change (e.g., the architect
+    decides scan should have 3 occurrences), update the expected
+    counts in lockstep with the source edit per the
+    coupling-via-substring-count discipline."""
     start_count = START.read_text().count(LOAD_BEARING_PREFIX)
     scan_count = SCAN.read_text().count(LOAD_BEARING_PREFIX)
 
-    assert start_count >= 1 and scan_count >= 1, (
-        f"Byte-identity symmetry violated: prefix "
+    EXPECTED_START = 1
+    EXPECTED_SCAN = 2
+
+    assert start_count == EXPECTED_START and scan_count == EXPECTED_SCAN, (
+        f"Byte-identity multiplicity violated: prefix "
         f"'{LOAD_BEARING_PREFIX}' occurs {start_count}x in "
-        f"start-pending-scan.md and {scan_count}x in "
-        f"scan-pending-tasks.md. Both must have >=1 occurrence."
+        f"start-pending-scan.md (expected {EXPECTED_START}) and "
+        f"{scan_count}x in scan-pending-tasks.md (expected "
+        f"{EXPECTED_SCAN}). A count mismatch indicates either a "
+        f"drift in one site without the paired edit, or a "
+        f"deliberate multiplicity change that requires updating "
+        f"the expected counts in lockstep."
     )
