@@ -268,3 +268,106 @@ def test_references_section_links_to_companion_commands(cmd_text):
     assert "start-pending-scan.md" in refs_section
     assert "scan-pending-tasks.md" in refs_section
     assert "@~/" not in refs_section
+
+
+# ---------- State-File Cleanup Block: warmup-grace state-file unlink ----------
+
+def test_state_file_cleanup_block_present(cmd_text):
+    """The §State-File Cleanup Block section anchors the best-effort
+    unlink of pending-scan-armed-at.json after CronDelete."""
+    assert "## State-File Cleanup Block" in cmd_text
+
+
+def test_state_file_cleanup_block_cites_filename(cmd_text):
+    """The §State-File Cleanup Block must cite the canonical filename
+    pending-scan-armed-at.json — byte-identical with the producer
+    (start-pending-scan.md §Warmup-State File) and consumer
+    (scan-pending-tasks.md §Warmup-Grace-Skip Procedure)."""
+    block_start = cmd_text.find("\n## State-File Cleanup Block")
+    block_end = cmd_text.find("\n## ", block_start + 1)
+    block = cmd_text[block_start:block_end] if block_end > 0 else cmd_text[block_start:]
+    assert "pending-scan-armed-at.json" in block
+
+
+def test_operation_step5_unlink_state_file(cmd_text):
+    """§Operation must extend to a step 5 that unlinks
+    pending-scan-armed-at.json. Numbered list extends 0-5 (was 0-4
+    pre-fix)."""
+    op_start = cmd_text.find("## Operation")
+    op_end = cmd_text.find("\n## ", op_start + 1)
+    op_section = cmd_text[op_start:op_end] if op_end > 0 else cmd_text[op_start:]
+    assert "5." in op_section, "§Operation must contain a step 5"
+    assert "Unlink `pending-scan-armed-at.json`" in op_section, (
+        "§Operation step 5 must reference the unlink of "
+        "pending-scan-armed-at.json verbatim"
+    )
+
+
+def test_state_file_cleanup_after_id_extraction(cmd_text):
+    """§State-File Cleanup Block must appear AFTER §ID Extraction Block
+    in the file — the unlink is conceptually paired with the post-
+    CronDelete step, which itself depends on the extracted ID."""
+    id_start = cmd_text.find("\n## ID Extraction Block")
+    cleanup_start = cmd_text.find("\n## State-File Cleanup Block")
+    assert id_start >= 0 and cleanup_start >= 0
+    assert cleanup_start > id_start, (
+        "§State-File Cleanup Block must appear after §ID Extraction Block"
+    )
+
+
+def test_state_file_absent_failure_mode_entry(cmd_text):
+    """§Failure Modes must include a 'State file absent' entry
+    documenting FileNotFoundError tolerance."""
+    fm_start = cmd_text.find("\n## Failure Modes")
+    fm_end = cmd_text.find("\n## ", fm_start + 1)
+    fm_section = cmd_text[fm_start:fm_end] if fm_end > 0 else cmd_text[fm_start:]
+    assert "### State file absent" in fm_section, (
+        "§Failure Modes must include '### State file absent' entry — "
+        "documents the FileNotFoundError-tolerant teardown semantic"
+    )
+
+
+def test_state_file_cleanup_filenotfounderror_tolerated(cmd_text):
+    """§State-File Cleanup Block must explicitly cite FileNotFoundError
+    as the tolerated exception. Other exceptions (PermissionError,
+    OSError) MUST surface — an editing LLM tempted to broaden the
+    except clause re-introduces silent-swallow failure modes."""
+    block_start = cmd_text.find("\n## State-File Cleanup Block")
+    block_end = cmd_text.find("\n## ", block_start + 1)
+    block = cmd_text[block_start:block_end] if block_end > 0 else cmd_text[block_start:]
+    assert "FileNotFoundError" in block, (
+        "§State-File Cleanup Block must cite FileNotFoundError verbatim"
+    )
+
+
+def test_state_file_cleanup_after_crondelete_ordering(cmd_text):
+    """The 'Ordering rationale' paragraph in §Operation must explain
+    why step 5 (unlink) is AFTER step 4 (CronDelete) — the failure-
+    mode-strictly-less-consequential rationale. An editing LLM
+    tempted to swap to BEFORE-CronDelete is choosing the worse
+    failure mode (state file gone while cron still firing)."""
+    op_start = cmd_text.find("## Operation")
+    op_end = cmd_text.find("\n## ", op_start + 1)
+    op_section = cmd_text[op_start:op_end] if op_end > 0 else cmd_text[op_start:]
+    assert "AFTER" in op_section and "CronDelete" in op_section, (
+        "§Operation 'Ordering rationale' must explicitly justify AFTER-CronDelete sequencing"
+    )
+
+
+def test_state_file_cleanup_block_cites_session_context(cmd_text):
+    """§State-File Cleanup Block code-prose must reference
+    pact_session_context for path construction — NOT the
+    non-existent CLAUDE_SESSION_DIR env var (preparer Finding §a)."""
+    block_start = cmd_text.find("\n## State-File Cleanup Block")
+    block_end = cmd_text.find("\n## ", block_start + 1)
+    block = cmd_text[block_start:block_end] if block_end > 0 else cmd_text[block_start:]
+    assert 'pact_session_context["session_id"]' in block
+    assert 'pact_session_context["project_dir"]' in block
+
+
+def test_state_file_cleanup_does_not_use_claude_session_dir_env(cmd_text):
+    """Closes the issue-body-defect regression door: CLAUDE_SESSION_DIR
+    env var does NOT exist in this codebase. An editing LLM importing
+    the issue-body verbatim sketch would silently fall through to a
+    bad default — pin the absence."""
+    assert "CLAUDE_SESSION_DIR" not in cmd_text
