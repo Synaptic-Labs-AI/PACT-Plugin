@@ -29,6 +29,16 @@ Public surface:
 - _lifecycle_relevant(task, team_name="") -> bool
     Predicate. True iff the task counts toward the active-work tally that
     arms/tears down the wake mechanism.
+- _owner_is_known_team_member(owner, team_name, teams_dir=None) -> bool
+- _is_lead_owned(owner, team_name, teams_dir=None) -> bool
+    Test-contract surface. Thin facades over `_classify_owner`; not
+    invoked from `_lifecycle_relevant` at runtime (the predicate
+    consumes the consolidated `_OwnerClassification` projection
+    directly for single-disk-read efficiency). RETAINED for direct
+    test reuse — do NOT delete on the assumption they are dead code.
+    See each helper's own docstring and the dedicated coverage in
+    `tests/test_wake_lifecycle_teammate_owner_filter.py` for the
+    test contract these helpers anchor.
 
 Contract: pure functions; never raise. Filesystem or JSON parse errors
 fail-open as "no active tasks" (returns 0 / False), matching the
