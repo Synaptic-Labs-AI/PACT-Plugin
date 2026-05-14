@@ -431,6 +431,19 @@ def test_marker_o_excl_collision_silent(tmp_path):
     Implementation: invoke the helper directly via import (faster +
     more focused than a subprocess fire that re-derives the timestamp
     on its own).
+
+    SCOPE TRADEOFF (test-engineer note): this test is intra-process
+    and monkeypatches `emitter.datetime` to force a deterministic
+    timestamp collision. It pins the FileExistsError fail-open
+    contract in os.open(O_CREAT|O_EXCL), which IS the correct
+    falsifiable target for this helper. It does NOT directly probe
+    the scenario of two concurrent teammate subprocess fires racing
+    on the same wall-clock second. The intra-process approach was
+    chosen over subprocess concurrency because the latter is flaky
+    on slow CI. The cross-process race is structurally impossible
+    under the {timestamp, session_id, task_id} encoding (each
+    teammate session has a unique session_id) — O_EXCL is
+    belt-and-suspenders, this test pins the belt.
     """
     sys.path.insert(0, str(HOOK_DIR))
     import wake_lifecycle_emitter as emitter

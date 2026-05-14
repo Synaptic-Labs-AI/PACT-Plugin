@@ -40,28 +40,68 @@ cd "$WORKTREE"
 
 ## Expected cardinality on revert
 
-Targets pending test-engineer's empirical measurement against the merge-
-parent. Architect targets:
+### Architect §8.4 targets
 
-- **`tests/test_wake_lifecycle_arm_starvation.py`** (10 tests):
-  - Tests 1, 2, 3, 8, 9 FAIL — the teammate-Arm pre-branch is gone, so no
-    marker is written; tests asserting marker presence or filename schema
-    raise AssertionError; the O_EXCL collision test fails because
-    `_maybe_write_teammate_arm_marker` is undefined.
-  - Tests 4, 5, 6, 7 PASS — these exercise the pre-existing lead-session
-    branches (Arm on TaskCreate, re-Arm on TaskUpdate(in_progress),
-    Teardown on terminal-status, teammate-suppression on terminal-
-    status). They survive the revert because the branches below the
-    lead-session early-return are unchanged.
-  - Test 10 PASSES — the `_ARM_DIRECTIVE` literal is in the unchanged
-    pre-revert source.
-- **`tests/test_wake_inbox_drain.py`** (6 tests):
-  - Full collection error — the module file is missing. All 6 tests
-    fail at collection time.
+- `test_wake_lifecycle_arm_starvation.py`: tests 1, 2, 3, 8, 9 fail;
+  tests 4–7 + 10 pass. ~5 fail + 5 pass.
+- `test_wake_inbox_drain.py`: full collection error; all 6 fail.
 
-Total on this scope's revert: ~5 test failures + 1 collection error in
-the arm_starvation file + 1 collection error in the drain file. (4
-arm_starvation tests survive; 6 drain tests fail at collection.)
+### Empirical (test-engineer, 2026-05-14, revert against HEAD~2 = main parent)
+
+Measured by `cp`-snapshot + `git checkout HEAD~2 -- <source files>` +
+`rm wake_inbox_drain.py`, then re-running the full new-test scope.
+
+**Total: 14 failed + 7 passed.**
+
+- **`test_wake_lifecycle_arm_starvation.py` (10 tests): 3 fail + 7 pass.**
+  - FAIL: test 1 (`test_teammate_self_claim_writes_inbox_marker`),
+    test 8 (`test_marker_filename_schema`),
+    test 9 (`test_marker_o_excl_collision_silent`).
+  - PASS: tests 2, 3, 4, 5, 6, 7, 10.
+  - Architect target said tests 2 and 3 would fail on revert.
+    Empirically they pass: tests 2 (lead-owner negative) and 3
+    (metadata-only negative) assert NO marker is written, which is
+    also true on the reverted (no-marker-writer-at-all) source.
+    This is documented PHANTOM-GREEN on revert — the tests are
+    correctly coupled to the negative-case contract under the fix
+    but pass trivially on revert. They retain value as future-
+    regression guards (a hypothetical buggy implementation that
+    accidentally wrote markers for the lead-owner or metadata-only
+    cases would be caught). Same shape for test 7 (teammate-side
+    Teardown still suppressed) — pre-existing #737 symmetric guard
+    already suppresses on revert.
+- **`test_wake_inbox_drain.py` (6 tests): 6 fail (not 1 collection error).**
+  - All 6 subprocess fires return RC=2 with stderr "can't open file …
+    wake_inbox_drain.py: No such file or directory". The test
+    harness uses subprocess invocation rather than module import,
+    so the missing module surfaces as runtime subprocess-error
+    AssertionError (`assert rc == 0`) rather than pytest collection
+    error. Functionally equivalent — all 6 tests are coupled to the
+    fix.
+- **`test_wake_lifecycle_arm_edge_cases.py` (5 tests): 5 fail.**
+  - Test-engineer additions covering: drain hook fail-open on missing
+    team config; emitter path-traversal rejection (clause 1); empty
+    task_id rejection (clause 6); empty session_id rejection;
+    separator-bearing id sanitization. All 5 fail on revert because
+    `_maybe_write_teammate_arm_marker` is undefined and the drain
+    hook file is missing.
+
+### Interpretation
+
+The fix's load-bearing protection is the 14-test surface that fails on
+revert. The 7 phantom-green tests (2, 3, 4, 5, 6, 7, 10) split into:
+
+- Tests 4, 5, 6 — lead-session regression guards. Correctly pass on
+  revert (the lead-session branches below the guard are unchanged);
+  their value is forward-protection against any future Arm-path
+  refactor that breaks lead-session emit.
+- Tests 2, 3, 7 — teammate-side negative cases. Phantom-green on
+  revert (the entire teammate-side write path is gone). They will
+  catch future regressions where a buggy implementation accidentally
+  writes markers in these negative cases.
+- Test 10 — audit-anchor literal-prose pin. Passes on revert because
+  the `_ARM_DIRECTIVE` literal exists in the pre-fix emitter source
+  (the lift was a refactor; the literal itself was always present).
 
 ## Restore
 
@@ -145,11 +185,13 @@ on unowned-create-then-owner-update.
 
 ## Verification matrix
 
-| Test scope | Pass criteria | Counter-test cardinality on revert |
+| Test scope | Pass criteria | Counter-test cardinality on revert (empirical 2026-05-14) |
 |-----------|----------------|-------------------------------------|
-| `test_wake_lifecycle_arm_starvation.py` (10 tests) | All pass on fix | ~5 fail, 5 pass on revert (tests 1, 2, 3, 8, 9 fail; tests 4–7 + 10 pass — lead-session paths and audit-anchor literal survive) |
-| `test_wake_inbox_drain.py` (6 tests) | All pass on fix | Collection error on revert (module file missing); all 6 tests fail at collection |
+| `test_wake_lifecycle_arm_starvation.py` (10 tests) | All pass on fix | 3 fail (1, 8, 9), 7 pass (2, 3, 4, 5, 6, 7, 10) — negative-case tests phantom-green on revert (see Interpretation above) |
+| `test_wake_inbox_drain.py` (6 tests) | All pass on fix | 6 fail via subprocess RC=2 "No such file" (test harness uses subprocess, not import, so this surfaces as test failure rather than collection error) |
+| `test_wake_lifecycle_arm_edge_cases.py` (5 tests) | All pass on fix | 5 fail — drain fail-open, path-traversal, empty task_id, empty session_id, separator sanitization all fail on revert |
 | Existing `test_wake_lifecycle_bug_*.py` (full) | All pass on fix; no regressions | N/A — orthogonal to this PR's surface |
+| Full suite (`pytest tests/`) | 7669 passed, 10 skipped post-fix (7664 baseline + 5 edge-case additions) | — |
 
 ## Known limitations
 
