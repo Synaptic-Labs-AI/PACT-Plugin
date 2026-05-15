@@ -278,10 +278,13 @@ def test_cron_create_call_shape_cron_create_block_has_four_fields(cmd_text):
     block_end = _find_balanced_close_paren(section, open_paren_pos)
     assert block_end > block_start, "CronCreate( in §CronCreate Block has no balanced closing )"
     block = section[block_start:block_end + 1]
-    assert 'cron="*/2 * * * *"' in block, (
-        "CronCreate Call Shape/M1: §CronCreate Block must use cron='*/2 * * * *' (2-minute "
-        "cadence pinned in plan §Architecture). Tuning the cadence requires "
-        "Communication Charter §Cron-Fire Mechanism prose update in lockstep. "
+    assert 'cron="*/3 * * * *"' in block, (
+        "CronCreate Call Shape/M1: §CronCreate Block must use cron='*/3 * * * *' (3-minute "
+        "cadence; coupled in lockstep to the 180s warmup-grace constant in "
+        "scan-pending-tasks.md Step 0 — first-fire-coverage invariant). Tuning the "
+        "cadence requires updating BOTH the cron literal AND the warmup-grace literal "
+        "in scan-pending-tasks.md AND the Communication Charter §Cron-Fire Mechanism "
+        "prose in lockstep. "
         f"§CronCreate Block contents: {block!r}"
     )
     assert 'prompt="/PACT:scan-pending-tasks"' in block, (

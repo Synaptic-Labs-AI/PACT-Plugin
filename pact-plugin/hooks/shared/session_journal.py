@@ -168,6 +168,14 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # is documentation-grade prose for human readers (stderr fallback)
     # and is registered as optional in _OPTIONAL_FIELDS_BY_TYPE below.
     "wake_tally_warn": {"team_name": str, "reason": str},
+    # commands/start-pending-scan.md Step 5 writes scan_armed after the
+    # CronCreate that arms the pending-scan cron. commands/scan-pending-tasks.md
+    # Step 0 reads the latest scan_armed event timestamp and skips the
+    # scan body when elapsed-since-arm < WARMUP_GRACE_SECONDS. The grace
+    # window is coupled in lockstep to the cron interval (180s grace +
+    # */3 cron) — first-fire-coverage invariant; see start-pending-scan.md
+    # §CronCreate Block audit.
+    "scan_armed": {"armed_at": int},
 }
 
 

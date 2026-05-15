@@ -21,7 +21,7 @@ The runbook deliberately covers BOTH happy-path lifecycle and edge cases that th
 **Expected**:
 - After the first `TaskCreate` (Task A teachback gate), the PostToolUse hook `wake_lifecycle_emitter.py` fires and emits an `additionalContext` directive instructing the lead to invoke `Skill("PACT:start-pending-scan")`.
 - Directive text exactly: `First active teammate task created. Invoke Skill("PACT:start-pending-scan") before any further teammate dispatch. Idempotent — no-op if a /PACT:scan-pending-tasks cron is already registered.`
-- Lead invokes the skill; skill body's Lead-Session Guard passes (current session is lead), CronList lookup returns no match, `CronCreate(cron="*/2 * * * *", prompt="/PACT:scan-pending-tasks", recurring=True, durable=False)` succeeds.
+- Lead invokes the skill; skill body's Lead-Session Guard passes (current session is lead), CronList lookup returns no match, `CronCreate(cron="*/3 * * * *", prompt="/PACT:scan-pending-tasks", recurring=True, durable=False)` succeeds.
 - Post-Arm `CronList` shows exactly one line with suffix `: /PACT:scan-pending-tasks` and markers `(recurring) [session-only]`.
 
 **Acceptance**: `CronList` contains the cron. `CronList | grep -o '/PACT:scan-pending-tasks' | wc -l` returns `1` (exactly one entry).
@@ -37,12 +37,12 @@ The runbook deliberately covers BOTH happy-path lifecycle and edge cases that th
 
 **Acceptance**: `CronList | grep -o '/PACT:scan-pending-tasks' | wc -l` still returns `1`. No duplicate cron created.
 
-## 3. Cron-Fire Wake of Scan-Pending-Tasks (2-minute cadence)
+## 3. Cron-Fire Wake of Scan-Pending-Tasks (3-minute cadence)
 
 **Action**: After Arm, idle the lead session (no manual tool calls). Wait at the next between-tool-call boundary for the cron to fire.
 
 **Expected**:
-- Within ~2 minutes (allow up to 3 minutes for jitter — cron may fire up to 10% of its period late, max 15 minutes), the cron fires `/PACT:scan-pending-tasks` as the lead's next turn.
+- Within ~3 minutes (allow up to ~4 minutes for jitter — cron may fire up to 10% of its period late, max 15 minutes), the cron fires `/PACT:scan-pending-tasks` as the lead's next turn.
 - The fired prompt has the `[CRON-FIRE]` discipline marker at the top of the skill body (verifiable by inspection of the loaded skill content).
 - Scan body runs steps 1-5 from `scan-pending-tasks.md §Operation`:
   - Step 1: `TaskList` returns the active tasks (filtered by owner + status + intentional_wait reason).
@@ -82,7 +82,7 @@ This is the load-bearing verification — the 5 anti-hallucination guardrails ar
 
 **Action**: Have a teammate write `metadata.teachback_submit` and send the wake-SendMessage in rapid succession (back-to-back tool calls). The teammate's write may still be flushing to disk when the next cron-fire occurs.
 
-**Expected**: If the cron fires DURING the write-flush window, the raw read returns null/empty, and the scan SKIPS the task (no rejection, no SendMessage, no `TaskUpdate`). The next cron-fire (2 minutes later) re-evaluates after the write has landed.
+**Expected**: If the cron fires DURING the write-flush window, the raw read returns null/empty, and the scan SKIPS the task (no rejection, no SendMessage, no `TaskUpdate`). The next cron-fire (3 minutes later) re-evaluates after the write has landed.
 
 **Acceptance**: At least one cron-fire turn observes the empty metadata and skips silently; the subsequent cron-fire (after the write lands) accepts the artifact correctly.
 
@@ -174,7 +174,7 @@ All 11 steps pass independently. A single step failure fails the runbook and mus
 ## Failure Triage
 
 - **Step 1 / 2 fail**: hook diagnostic issue or skill body Lead-Session Guard logic regression. Inspect `wake_lifecycle_emitter.py` and `start-pending-scan.md`.
-- **Step 3 fails**: platform cron primitive issue or 2-minute cadence misconfiguration. Check `CronCreate` call shape against canonical schema.
+- **Step 3 fails**: platform cron primitive issue or 3-minute cadence misconfiguration. Check `CronCreate` call shape against canonical schema.
 - **Step 4 (any sub-step) fails**: load-bearing guardrail violation. Treat as a P0 regression; the 5 guardrails are why this mechanism exists.
 - **Step 5 fails**: completion-authority procedure regression. Inspect canonical acceptance two-call pair in `scan-pending-tasks §Lead-Only Completion Contract`.
 - **Step 6 fails**: hook-level session guard regression. Inspect `_is_lead_session` in `wake_lifecycle_emitter.py` and `_is_lead_session_at_init` in `session_init.py`.
