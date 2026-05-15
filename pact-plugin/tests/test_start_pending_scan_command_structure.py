@@ -565,6 +565,43 @@ def test_references_between_tool_call_scope(cmd_text):
     assert "not mid-tool" in overview.lower() or "mid-tool" in overview.lower()
 
 
+# ---------- Step 5 cold-start scan_armed journal write ----------
+
+
+def test_scan_armed_step_5_present_in_operation(cmd_text):
+    """Step 5 of §Operation writes a `scan_armed` event marking the
+    cold-start arm time. Coupling pair partner: Step 0 of scan-pending-
+    tasks.md reads this event timestamp and applies the 180s warmup-
+    grace skip. The two steps form the journal-event round trip; both
+    must be present or the warmup-grace skip silently degrades to
+    fail-open-only (every fire falls through Step 0 because the journal
+    has no scan_armed event).
+
+    Counter-test-by-revert: reverting Step 5 (removing the numbered
+    step OR removing the canonical `python3 "$SJ" write --type scan_armed`
+    invocation substring) falsifies this test. Reverting Step 0 in
+    scan-pending-tasks.md falsifies the partner test
+    test_warmup_grace_step_0_present_in_operation — together the pair
+    pins both ends of the journal round trip.
+    """
+    op_start = cmd_text.find("\n## Operation")
+    op_end = cmd_text.find("\n## ", op_start + 1)
+    op_section = cmd_text[op_start:op_end] if op_end > 0 else cmd_text[op_start:]
+    step_5_pos = op_section.find("\n5. ")
+    assert step_5_pos >= 0, (
+        "§Operation must contain a Step 5 (`5. `) — the cold-start "
+        "journal write that marks scan_armed timestamp."
+    )
+    # Bound Step 5 body to the next numbered step or section boundary.
+    step_5_body = op_section[step_5_pos:]
+    assert 'python3 "$SJ" write --type scan_armed' in step_5_body, (
+        "Step 5 must invoke the canonical journal write: "
+        '`python3 "$SJ" write --type scan_armed ...`. Substring check '
+        "tolerates surrounding bash idioms; the type-literal "
+        "`scan_armed` and the `write` subcommand are load-bearing."
+    )
+
+
 # ---------- Cross-link discipline ----------
 
 def test_references_section_links_to_companion_commands(cmd_text):
