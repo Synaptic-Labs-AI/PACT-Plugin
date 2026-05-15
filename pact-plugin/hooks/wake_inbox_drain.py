@@ -36,13 +36,19 @@ Lead-Session Guard (Layer 0 — defense-in-depth):
   body's Layer 1 lead-session guard remains as backstop.
 
 Single-emit discipline:
-- Drain path consumed → emit Arm; do NOT also run the fallback. Fallback
-  is the LEAD-side unowned-dispatch recovery path; if markers were
-  drained, the teammate-side signal already covered the surface and a
-  second emit would be redundant (still benign under skill-body
-  idempotency, but the single-emit shape is cleaner).
-- Drain path empty → run the count_active_tasks fallback. Positive
-  count → emit Arm. Zero count → suppressOutput.
+- Drain path consumed → emit Arm; do NOT also run the fallback or the
+  producer-side idempotency check. Fallback is the LEAD-side
+  unowned-dispatch recovery path; if markers were drained, the
+  teammate-side signal already covered the surface and a second emit
+  would be redundant (still benign under skill-body idempotency, but
+  the single-emit shape is cleaner). Drain-path markers are FRESH
+  cross-session signals — surface them regardless of armed-state.
+- Drain path empty → producer-side idempotency check on the B-1
+  fallback path: if a `scan_armed` event exists in this session's
+  journal, the cron is already armed; suppress the redundant emit. If
+  no `scan_armed` event (cold-start or post-Teardown window), run the
+  count_active_tasks fallback. Positive count → emit Arm. Zero count
+  → suppressOutput.
 
 Performance hygiene:
 - Non-lead session short-circuits to suppressOutput before any
@@ -111,6 +117,7 @@ try:
 
     import shared.pact_context as pact_context
     from shared.pact_context import get_team_name
+    from shared.session_journal import read_last_event
     from shared.session_state import is_safe_path_component
     from shared.wake_lifecycle import count_active_tasks, is_lead_session
     # Reuse the canonical _ARM_DIRECTIVE literal from the emitter so the
@@ -250,8 +257,13 @@ def _decide_and_emit(input_data: dict) -> None:
          (regardless of inbox state — teammate sessions never emit
          the Arm directive; the directive is lead-targeted).
       4. Drain markers. If drained count > 0 → emit Arm and return
-         (single-emit discipline; skip the fallback).
-      5. Fallback: count_active_tasks(team_name) >= 1 → emit Arm.
+         (single-emit discipline; skip the fallback). Drain-path
+         markers are fresh cross-session signals — surface them
+         regardless of armed-state.
+      5. Producer-side idempotency: if `scan_armed` event present in
+         this session's journal → suppressOutput (cron already armed).
+         Any journal-read failure falls through to step 6.
+      6. Fallback: count_active_tasks(team_name) >= 1 → emit Arm.
          Otherwise → suppressOutput.
 
     Pure-after-side-effect; outer main() handles exception fail-open.
@@ -281,6 +293,28 @@ def _decide_and_emit(input_data: dict) -> None:
     if drained > 0:
         _emit_arm()
         return
+
+    # Producer-side idempotency on the B-1 fallback path: a `scan_armed`
+    # journal event indicates the lead has already armed the pending-scan
+    # cron in this session, so re-emitting the Arm directive on every
+    # UserPromptSubmit while count >= 1 is redundant noise. The cron is
+    # durable=false + session-scoped (CronCreate semantics), so the
+    # scan_armed event's presence in this session's journal is equivalent
+    # to "cron currently registered" except in the post-Teardown window —
+    # which is fail-safe: a missing event correctly falls through to emit.
+    # Any read failure (journal unreadable, pact_context uninitialized,
+    # etc.) falls through to existing emit behavior — over-emit is benign
+    # under the skill body's CronList exact-suffix-match idempotency;
+    # under-emit could miss a teammate's completion-authority signal.
+    # Producer-side deterministic Python check, NOT LLM-self-diagnosis at
+    # the directive site — distinct from the failure mode that
+    # start-pending-scan.md §Audit forbids.
+    try:
+        if read_last_event("scan_armed") is not None:
+            print(_SUPPRESS_OUTPUT)
+            return
+    except Exception:
+        pass
 
     # B-1 fallback: lead-side unowned-create-then-owner-update dispatch
     # pattern produces no teammate-side write opportunity. Cover it via

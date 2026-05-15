@@ -95,6 +95,28 @@ def _write_marker(home, team_name, filename, payload):
     return target
 
 
+def _write_scan_armed_event(home, session_id, project_dir, armed_at=1715731200):
+    """Append a `scan_armed` event to the session's journal — mirrors the
+    write performed by commands/start-pending-scan.md Step 5 (the CLI
+    form `python3 session_journal.py write --type scan_armed ...`). The
+    test writes the JSONL line directly to keep the test self-contained
+    and not depend on the CLI subprocess.
+    """
+    slug = Path(project_dir).name
+    sess_dir = home / ".claude" / "pact-sessions" / slug / session_id
+    sess_dir.mkdir(parents=True, exist_ok=True)
+    journal = sess_dir / "session-journal.jsonl"
+    event = {
+        "v": 1,
+        "type": "scan_armed",
+        "ts": "2026-05-15T00:00:00Z",
+        "armed_at": armed_at,
+    }
+    with journal.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(event) + "\n")
+    return journal
+
+
 def _drain_out(payload, home):
     rc, out, err = _run_drain(
         json.dumps(payload),
@@ -321,3 +343,184 @@ def test_drain_single_emit_when_both_paths_trigger(tmp_path):
         f"stdout={out_str!r}"
     )
     assert not marker_path.exists(), "Marker must be drained"
+
+
+# ─── Producer-side idempotency tests ───────────────────────────────────
+
+
+def test_fallback_suppressed_when_scan_armed_event_present(tmp_path):
+    """Producer-side idempotency invariant. When a `scan_armed` journal
+    event exists in the lead's session-journal AND the B-1 fallback
+    path would otherwise fire (count >= 1, no markers), the hook
+    suppresses the redundant Arm directive — the cron is already armed.
+
+    Counter-test-by-revert: deleting the journal-event check in
+    wake_inbox_drain.py flips this test to RED (the hook would emit
+    Arm despite the scan_armed event being present).
+    """
+    home = tmp_path / "home"; home.mkdir()
+    lead_sid = "lead-sid"
+    pdir = "/tmp/p"
+    team = "team-scan-armed-suppress"
+    teammate_owner = "backend-coder"
+    _write_session_context(
+        home, lead_sid, pdir, team,
+        members=[
+            {"name": teammate_owner, "agentId": "agent-bc"},
+            {"name": "lead", "agentId": "agent-lead"},
+        ],
+        lead_agent_id="agent-lead",
+    )
+    _write_task(
+        home, team, "T1", status="in_progress", owner=teammate_owner,
+    )
+    _write_scan_armed_event(home, lead_sid, pdir)
+
+    out = _drain_out({
+        "session_id": lead_sid, "cwd": pdir,
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "go",
+    }, home)
+    assert out.get("suppressOutput") is True, (
+        f"scan_armed present + count >= 1 must suppressOutput "
+        f"(redundant Arm); got {out!r}"
+    )
+
+
+def test_fallback_emits_when_no_scan_armed_event(tmp_path):
+    """Baseline preservation. When no `scan_armed` event is present in
+    the journal (cold-start or post-Teardown window) AND count >= 1,
+    the hook emits exactly 1 Arm directive — the pre-fix behavior is
+    preserved on the no-event path.
+    """
+    home = tmp_path / "home"; home.mkdir()
+    lead_sid = "lead-sid"
+    pdir = "/tmp/p"
+    team = "team-scan-no-event"
+    teammate_owner = "backend-coder"
+    _write_session_context(
+        home, lead_sid, pdir, team,
+        members=[
+            {"name": teammate_owner, "agentId": "agent-bc"},
+            {"name": "lead", "agentId": "agent-lead"},
+        ],
+        lead_agent_id="agent-lead",
+    )
+    _write_task(
+        home, team, "T2", status="in_progress", owner=teammate_owner,
+    )
+    # No scan_armed event written.
+
+    rc, out_str, err = _run_drain(
+        json.dumps({
+            "session_id": lead_sid, "cwd": pdir,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        }),
+        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+    )
+    assert rc == 0, f"non-zero exit; stderr={err}"
+    arm_count = out_str.count("First active teammate task created")
+    assert arm_count == 1, (
+        f"No scan_armed event + count >= 1 must emit exactly 1 Arm "
+        f"directive; got {arm_count} in stdout={out_str!r}"
+    )
+
+
+def test_fallback_emits_when_journal_unreadable(tmp_path):
+    """Fail-conservative invariant. When the session journal exists
+    but contains malformed content (a permission error, a truncated
+    last line, etc.), the journal read returns None and the hook
+    falls through to the existing emit behavior — over-emit is benign
+    under the skill body's CronList idempotency; under-emit could miss
+    a teammate's completion-authority signal.
+
+    Approximation: write a journal whose only line is malformed JSON
+    so the scan_armed lookup yields None. The fallback path then runs
+    and emits Arm because count >= 1.
+    """
+    home = tmp_path / "home"; home.mkdir()
+    lead_sid = "lead-sid"
+    pdir = "/tmp/p"
+    team = "team-scan-journal-unreadable"
+    teammate_owner = "backend-coder"
+    _write_session_context(
+        home, lead_sid, pdir, team,
+        members=[
+            {"name": teammate_owner, "agentId": "agent-bc"},
+            {"name": "lead", "agentId": "agent-lead"},
+        ],
+        lead_agent_id="agent-lead",
+    )
+    _write_task(
+        home, team, "T3", status="in_progress", owner=teammate_owner,
+    )
+    # Write a malformed journal line — no valid scan_armed event.
+    slug = Path(pdir).name
+    sess_dir = home / ".claude" / "pact-sessions" / slug / lead_sid
+    journal = sess_dir / "session-journal.jsonl"
+    journal.write_text("{ not valid json\n", encoding="utf-8")
+
+    rc, out_str, err = _run_drain(
+        json.dumps({
+            "session_id": lead_sid, "cwd": pdir,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        }),
+        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+    )
+    assert rc == 0, f"non-zero exit; stderr={err}"
+    arm_count = out_str.count("First active teammate task created")
+    assert arm_count == 1, (
+        f"Malformed journal + count >= 1 must fall through to emit "
+        f"(fail-conservative); got {arm_count} in stdout={out_str!r}"
+    )
+
+
+def test_drain_emits_even_when_scan_armed_event_present(tmp_path):
+    """Drain-path-bypass invariant. Drain-path markers are FRESH
+    cross-session signals worth surfacing regardless of armed-state.
+    When BOTH a wake_inbox marker AND a scan_armed event exist, the
+    drain path consumes the marker and emits Arm — the producer-side
+    idempotency check is ONLY on the B-1 fallback path, not the
+    drain path.
+    """
+    home = tmp_path / "home"; home.mkdir()
+    lead_sid = "lead-sid"
+    pdir = "/tmp/p"
+    team = "team-scan-drain-bypass"
+    teammate_owner = "backend-coder"
+    _write_session_context(
+        home, lead_sid, pdir, team,
+        members=[
+            {"name": teammate_owner, "agentId": "agent-bc"},
+            {"name": "lead", "agentId": "agent-lead"},
+        ],
+        lead_agent_id="agent-lead",
+    )
+    _write_task(
+        home, team, "T4", status="in_progress", owner=teammate_owner,
+    )
+    _write_scan_armed_event(home, lead_sid, pdir)
+    marker_path = _write_marker(
+        home, team, "20260515T000100Z-fresh-T4.json",
+        {
+            "schema_version": 1,
+            "trigger": "teammate_self_claim_in_progress",
+            "tool_name": "TaskUpdate", "task_id": "T4",
+            "owner": teammate_owner,
+        },
+    )
+
+    out = _drain_out({
+        "session_id": lead_sid, "cwd": pdir,
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "go",
+    }, home)
+    hso = out.get("hookSpecificOutput")
+    assert hso is not None, (
+        f"Drain path must emit Arm even with scan_armed present; "
+        f"got {out!r}"
+    )
+    assert 'Skill("PACT:start-pending-scan")' in hso["additionalContext"]
+    assert not marker_path.exists(), "Drain must consume the marker"
