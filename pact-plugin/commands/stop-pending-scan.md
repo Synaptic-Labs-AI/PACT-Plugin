@@ -72,7 +72,7 @@ for line in cron_list_output.splitlines():
 CronList output lines are formatted as `{id} — {cron} ({recurring}) [session-only]: {prompt}`. The ID is the leading 8-character cron ID, ending at the first space.
 
 ```python
-# match_line: "eb10528d — */2 * * * * (recurring) [session-only]: /PACT:scan-pending-tasks"
+# match_line: "eb10528d — */3 * * * * (recurring) [session-only]: /PACT:scan-pending-tasks"
 cron_id = match_line.split(" ", 1)[0].strip()
 # cron_id == "eb10528d"
 CronDelete(id=cron_id)

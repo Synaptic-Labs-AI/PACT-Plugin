@@ -278,10 +278,13 @@ def test_cron_create_call_shape_cron_create_block_has_four_fields(cmd_text):
     block_end = _find_balanced_close_paren(section, open_paren_pos)
     assert block_end > block_start, "CronCreate( in §CronCreate Block has no balanced closing )"
     block = section[block_start:block_end + 1]
-    assert 'cron="*/2 * * * *"' in block, (
-        "CronCreate Call Shape/M1: §CronCreate Block must use cron='*/2 * * * *' (2-minute "
-        "cadence pinned in plan §Architecture). Tuning the cadence requires "
-        "Communication Charter §Cron-Fire Mechanism prose update in lockstep. "
+    assert 'cron="*/3 * * * *"' in block, (
+        "CronCreate Call Shape/M1: §CronCreate Block must use cron='*/3 * * * *' (3-minute "
+        "cadence; coupled in lockstep to the 180s warmup-grace constant in "
+        "scan-pending-tasks.md Step 0 — first-fire-coverage invariant). Tuning the "
+        "cadence requires updating BOTH the cron literal AND the warmup-grace literal "
+        "in scan-pending-tasks.md AND the Communication Charter §Cron-Fire Mechanism "
+        "prose in lockstep. "
         f"§CronCreate Block contents: {block!r}"
     )
     assert 'prompt="/PACT:scan-pending-tasks"' in block, (
@@ -513,6 +516,86 @@ def test_idempotency_check_precedes_cron_create(cmd_text):
     )
 
 
+# ---------- Intra-file cron literal consistency ----------
+
+
+def _extract_cron_literal_from_operation_summary(cmd_text: str) -> str:
+    """Parse the cron literal from the §Operation summary's inline
+    `CronCreate(cron="*/N * * * *", ...)` Step 4 prose.
+
+    Distinct from `_extract_croncreate_prompt`: that targets the
+    operational §CronCreate Block (Python-form, line ~100). This
+    targets the §Operation summary mention (markdown-prose, Step 4)
+    so the two surfaces can be compared for intra-file byte-identity.
+    """
+    import re
+    op_start = cmd_text.find("\n## Operation")
+    assert op_start >= 0, "Missing §Operation section"
+    op_end = cmd_text.find("\n## ", op_start + 1)
+    op_section = cmd_text[op_start:op_end] if op_end > 0 else cmd_text[op_start:]
+    m = re.search(r'CronCreate\(cron="(\*/\d+ \* \* \* \*)"', op_section)
+    assert m is not None, (
+        f"§Operation summary must contain an inline "
+        f'`CronCreate(cron="*/N * * * *", ...)` literal; got section:\n'
+        f"{op_section!r}"
+    )
+    return m.group(1)
+
+
+def _extract_cron_literal_from_croncreate_block(cmd_text: str) -> str:
+    """Parse the cron literal from the §CronCreate Block operational
+    SSOT (Python-form code block). This is what the platform receives
+    at CronCreate time."""
+    import re
+    block_start = cmd_text.find("\n## CronCreate Block")
+    assert block_start >= 0, "Missing §CronCreate Block section"
+    block_end = cmd_text.find("\n## ", block_start + 1)
+    section = cmd_text[block_start:block_end] if block_end > 0 else cmd_text[block_start:]
+    # Locate the `cron="..."` line in the Python-form code block (not the audit prose).
+    # The code block is indented; the audit prose uses backtick code spans.
+    # We anchor on the indented `    cron="..."` shape.
+    m = re.search(r'(?m)^\s+cron="(\*/\d+ \* \* \* \*)",', section)
+    assert m is not None, (
+        f"§CronCreate Block must contain an indented code-block "
+        f'`    cron="*/N * * * *",` line; got section:\n{section!r}'
+    )
+    return m.group(1)
+
+
+def test_operation_summary_matches_croncreate_block(cmd_text):
+    """Intra-file consistency: the cron literal mentioned in the
+    §Operation summary's Step 4 inline `CronCreate(cron="*/N * * * *", ...)`
+    MUST byte-match the cron literal in the operational §CronCreate Block.
+
+    Closes the phantom-green-by-multiplicity gap surfaced by the test
+    review of #766: `cron="*/N"` appears at THREE sites in this file
+    (§Operation Step 4 inline prose, §CronCreate Block code, §CronCreate
+    Block audit prose). The coupling-invariant test pins the operational
+    SSOT (§CronCreate Block). This test pins the §Operation summary
+    against that SSOT, catching documentation-drift between the
+    in-section narrative and the operational call shape.
+
+    Counter-test-by-revert: mutating the §Operation summary cron literal
+    alone (without touching §CronCreate Block) makes this test go RED.
+    Mutating only §CronCreate Block makes the existing
+    `test_cron_create_call_shape_cron_create_block_has_four_fields`
+    go RED. Mutating both in lockstep keeps this test GREEN but
+    forces the coupling-invariant test to be re-validated against
+    scan-pending-tasks.md Step 0.
+    """
+    operation_cron = _extract_cron_literal_from_operation_summary(cmd_text)
+    croncreate_cron = _extract_cron_literal_from_croncreate_block(cmd_text)
+    assert operation_cron == croncreate_cron, (
+        f"Intra-file cron literal drift in start-pending-scan.md: "
+        f"§Operation summary Step 4 says cron='{operation_cron}' but "
+        f"§CronCreate Block (operational SSOT) says cron='{croncreate_cron}'. "
+        f"The §Operation summary narrates what the §CronCreate Block "
+        f"does; drift between them silently misleads an editing LLM "
+        f"about which value is authoritative. Tune both in lockstep "
+        f"(and update the audit prose at the same time)."
+    )
+
+
 # ---------- Forbidden-token absence ----------
 
 @pytest.mark.parametrize("forbidden_slug", [
@@ -560,6 +643,43 @@ def test_references_between_tool_call_scope(cmd_text):
     overview = cmd_text[overview_start:overview_end] if overview_end > 0 else cmd_text[overview_start:]
     assert "between tool calls" in overview.lower() or "between-tool-call" in overview.lower()
     assert "not mid-tool" in overview.lower() or "mid-tool" in overview.lower()
+
+
+# ---------- Step 5 cold-start scan_armed journal write ----------
+
+
+def test_scan_armed_step_5_present_in_operation(cmd_text):
+    """Step 5 of §Operation writes a `scan_armed` event marking the
+    cold-start arm time. Coupling pair partner: Step 0 of scan-pending-
+    tasks.md reads this event timestamp and applies the 180s warmup-
+    grace skip. The two steps form the journal-event round trip; both
+    must be present or the warmup-grace skip silently degrades to
+    fail-open-only (every fire falls through Step 0 because the journal
+    has no scan_armed event).
+
+    Counter-test-by-revert: reverting Step 5 (removing the numbered
+    step OR removing the canonical `python3 "$SJ" write --type scan_armed`
+    invocation substring) falsifies this test. Reverting Step 0 in
+    scan-pending-tasks.md falsifies the partner test
+    test_warmup_grace_step_0_present_in_operation — together the pair
+    pins both ends of the journal round trip.
+    """
+    op_start = cmd_text.find("\n## Operation")
+    op_end = cmd_text.find("\n## ", op_start + 1)
+    op_section = cmd_text[op_start:op_end] if op_end > 0 else cmd_text[op_start:]
+    step_5_pos = op_section.find("\n5. ")
+    assert step_5_pos >= 0, (
+        "§Operation must contain a Step 5 (`5. `) — the cold-start "
+        "journal write that marks scan_armed timestamp."
+    )
+    # Bound Step 5 body to the next numbered step or section boundary.
+    step_5_body = op_section[step_5_pos:]
+    assert 'python3 "$SJ" write --type scan_armed' in step_5_body, (
+        "Step 5 must invoke the canonical journal write: "
+        '`python3 "$SJ" write --type scan_armed ...`. Substring check '
+        "tolerates surrounding bash idioms; the type-literal "
+        "`scan_armed` and the `write` subcommand are load-bearing."
+    )
 
 
 # ---------- Cross-link discipline ----------

@@ -308,6 +308,47 @@ def test_lead_only_completion_preservation_no_standalone_taskupdate_completed_in
         )
 
 
+# ---------- Warmup-Grace Skip: Step 0 presence ----------
+
+
+def test_warmup_grace_step_0_present_in_operation(cmd_text):
+    """The warmup-grace skip step is anchored at Step 0 of §Operation:
+    it must read `scan_armed` and compare elapsed time against the
+    warmup-grace constant (literal `180`). Coupling pair partner:
+    `cron="*/3 * * * *"` in start-pending-scan.md §CronCreate Block —
+    the two literals MUST move together (first-fire-coverage invariant).
+
+    Counter-test-by-revert: reverting Step 0 (removing the numbered
+    step OR removing either of the load-bearing literals) falsifies
+    this test. Reverting the cron literal alone falsifies the partner
+    test in test_start_pending_scan_command_structure.py — the pair
+    pins both ends of the coupling invariant.
+    """
+    op_start = cmd_text.find("\n## Operation")
+    op_end = cmd_text.find("\n## ", op_start + 1)
+    op_section = cmd_text[op_start:op_end] if op_end > 0 else cmd_text[op_start:]
+    # Locate the Step 0 numbered marker at column 0 of a line.
+    step_0_pos = op_section.find("\n0. ")
+    assert step_0_pos >= 0, (
+        "§Operation must contain a Step 0 (`0. `) — the warmup-grace skip "
+        "must be anchored at Step 0 numbering per architecture spec."
+    )
+    # Bound Step 0 body to the next numbered step (Step 1).
+    step_1_pos = op_section.find("\n1. ", step_0_pos)
+    step_0_body = op_section[step_0_pos:step_1_pos] if step_1_pos > 0 else op_section[step_0_pos:]
+    assert "scan_armed" in step_0_body, (
+        "Step 0 must reference the `scan_armed` event type by name — "
+        "the warmup-grace skip reads the latest scan_armed event from "
+        "the session journal."
+    )
+    assert "180" in step_0_body, (
+        "Step 0 must contain the literal `180` (seconds) — the warmup-"
+        "grace constant. Coupled in lockstep to the */3 cron interval "
+        "in start-pending-scan.md §CronCreate Block; tuning one without "
+        "the other re-opens the false-fire window."
+    )
+
+
 # ---------- Forbidden-token absence ----------
 
 @pytest.mark.parametrize("forbidden_slug", [

@@ -2956,6 +2956,12 @@ class TestValidateEventSchemaPerType:
             "team_name": "team-warn-sample",
             "reason": "empty_team_config_fail_conservative",
         },
+        # `scan_armed` is emitted by commands/start-pending-scan.md Step 5
+        # after CronCreate arms the pending-scan cron; `armed_at` carries
+        # the bash `$(date +%s)` epoch-seconds at arm time. Read by
+        # commands/scan-pending-tasks.md Step 0 to bound the warmup-grace
+        # skip window.
+        "scan_armed": {"armed_at": 1715731200},
     }
 
     def test_samples_mirror_required_fields_dict(self):
