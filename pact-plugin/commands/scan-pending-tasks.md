@@ -33,10 +33,15 @@ Cron-fire body — silent read; emit nothing unless a real artifact is on disk f
    SJ="{plugin_root}/hooks/shared/session_journal.py"
    SD='{session_dir}'
    ARMED_AT=$(python3 "$SJ" read-last --type scan_armed --session-dir "$SD" | python3 -c 'import json,sys; e=json.load(sys.stdin); print(e["armed_at"] if e else "")')
-   if [ -n "$ARMED_AT" ] && [ $(( $(date +%s) - ARMED_AT )) -lt 180 ]; then exit 0; fi
+   if [ -n "$ARMED_AT" ]; then
+       delta=$(( $(date +%s) - ARMED_AT ))
+       if [ $delta -ge 0 ] && [ $delta -lt 180 ]; then exit 0; fi
+   fi
    ```
 
    Fail-open: `read-last` returns literal `null` on missing journal / no events / corrupt JSONL. The `python3 -c` extraction yields empty string in those cases; `[ -n "$ARMED_AT" ]` is false; the gate falls through to Step 1.
+
+   Negative-delta guard: `[ $delta -ge 0 ]` ensures a future-dated `armed_at` (clock skew, journal corruption, adversarial write) falls through to the scan rather than triggering indefinite skip. Without the guard, `(now - future) = negative`, and any `negative -lt 180` would always be true — the warmup-grace gate becomes a kill-switch. The guard preserves fail-open semantics on the negative-delta edge case.
 
 1. `TaskList` — enumerate tasks. Filter to: `owner == any teammate` AND `status == "in_progress"` AND `metadata.intentional_wait.reason == "awaiting_lead_completion"`. (These are the tasks where a teammate has submitted teachback or handoff and is idle awaiting acceptance.)
 2. For each candidate, raw-read `~/.claude/tasks/{team_name}/{id}.json` via filesystem read (NOT `TaskGet` — TaskGet does not surface `metadata.teachback_submit` or `metadata.handoff`). Inspect `metadata.teachback_submit` (for teachback gate tasks) and `metadata.handoff` (for primary-work tasks).

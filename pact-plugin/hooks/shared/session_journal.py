@@ -78,6 +78,14 @@ _SCHEMA_VERSION = 1
 # When adding a new event type, add it here with its required field → type
 # mapping AND add a test to TestValidateEventSchemaPerType in
 # test_session_journal.py.
+#
+# Trust boundary: the WRITE path validates events against this dict (strict;
+# rejects malformed). The READ path TRUSTS disk content — it does not
+# re-validate field shapes. Downstream extractors (e.g., the Step 0 bash
+# arithmetic in commands/scan-pending-tasks.md, which assumes
+# scan_armed.armed_at is int) rely on the write-path guarantee. Loosening
+# this dict without auditing all readers will silently break extractors
+# that assume validated shape.
 _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # hooks/session_init.py writes session_start with team, session_id,
     # project_dir, worktree on the valid-stdin path only (under R3, the event
