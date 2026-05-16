@@ -559,6 +559,7 @@ def _maybe_write_teammate_arm_marker(
 
         marker_payload = {
             "schema_version": _WAKE_INBOX_MARKER_SCHEMA_VERSION,
+            "type": "arm",
             "written_at": written_at,
             "writer_session_id": session_id_raw,
             "tool_name": tool_name,

@@ -131,12 +131,12 @@ try:
     from shared.session_journal import read_last_event
     from shared.session_state import is_safe_path_component
     from shared.wake_lifecycle import count_active_tasks, is_lead_session
-    # Reuse the canonical _ARM_DIRECTIVE literal from the emitter so the
-    # directive prose has a single source of truth. The audit-anchor
-    # literal-prose pin (test in test_wake_lifecycle_bug_b_rearm.py)
-    # covers the emitter side; this import makes any future drift
+    # Reuse the canonical _ARM_DIRECTIVE / _TEARDOWN_DIRECTIVE literals
+    # from the emitter so the directive prose has a single source of
+    # truth. The audit-anchor literal-prose pins on the emitter side
+    # cover those constants; these imports make any future drift
     # immediately break the drain hook too.
-    from wake_lifecycle_emitter import _ARM_DIRECTIVE
+    from wake_lifecycle_emitter import _ARM_DIRECTIVE, _TEARDOWN_DIRECTIVE
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_advisory("module imports", _module_load_error)
 
@@ -175,48 +175,64 @@ def _wake_inbox_path(team_name: str) -> Path | None:
     return Path.home() / ".claude" / "teams" / team_name / "wake_inbox"
 
 
-def _drain_markers(inbox_dir: Path) -> int:
+def _drain_markers(inbox_dir: Path) -> dict[str, int]:
     """Drain every JSON marker in the inbox directory.
 
-    Returns the count of markers successfully consumed (read + deleted).
+    Returns a per-type consumed-count dict keyed by marker `type` field
+    ({"arm": N, "teardown": M}). Marker payloads without a `type` field,
+    with an unrecognized type, or that fail JSON parsing default to
+    `"arm"` — backward-compat with pre-type-field markers AND fail-
+    conservative on corrupt/oversize bodies (the wake intent stands;
+    Arm is the safe default because over-emit is benign under the
+    skill body's CronList exact-suffix-match idempotency).
+
     Read failures and unlink failures are silently swallowed — the drain
     is best-effort; a stuck marker stays on disk and gets re-drained
     next prompt. The skill body's CronList match makes redundant Arm
-    emits benign.
+    emits benign; redundant Teardown emits are similarly benign
+    (stop-pending-scan no-ops if no cron entry exists).
 
     Sorted-glob iteration: the marker filename schema starts with an
     ISO-8601 compact UTC timestamp, so lexical order IS chronological.
     Forensic value only; the drain side consumes file PRESENCE not the
     timestamp.
 
-    Size cap on marker read: the writer schema is tiny (7 fields,
+    Size cap on marker read: the writer schema is tiny (8 fields,
     well under 1 KiB). An attacker (or a corrupted FS) producing a
     multi-MB file under the inbox path could amplify the drain read
     cost on every prompt. Pre-check via `os.path.getsize` and skip
     oversize markers (>8 KiB) — log to stderr and unlink without
     reading. The wake intent still stands (PRESENCE is the signal)
-    so the unlink + count-as-consumed posture is preserved.
+    so the unlink + count-as-consumed-arm posture is preserved.
+    Oversize markers default to `"arm"` because the body cannot be
+    read to classify; Arm is the safe fail-conservative branch.
+
+    Backward-compat contract: existing callers that branch on a
+    truthy/falsy total can keep doing so via `sum(result.values()) > 0`;
+    the type-aware dispatch surface is opt-in.
 
     Pure-after-side-effect; never raises.
     """
+    counts: dict[str, int] = {"arm": 0, "teardown": 0}
     if not inbox_dir.exists():
-        return 0
+        return counts
     try:
         markers = sorted(inbox_dir.glob("*.json"))
     except OSError:
-        return 0
-    consumed = 0
+        return counts
     for marker in markers:
         try:
             # Size-cap pre-check: 8 KiB is generous against the
-            # canonical 7-field payload. Oversize markers are treated
+            # canonical 8-field payload. Oversize markers are treated
             # as wake signals (delete + count) but the body is NOT
             # read — protects against parser-amplification on a
-            # corrupted or hostile file.
+            # corrupted or hostile file. Defaults to "arm" because
+            # the type field cannot be classified without reading.
             try:
                 size = os.path.getsize(str(marker))
             except OSError:
                 size = -1
+            marker_type = "arm"
             if size > _MAX_MARKER_BYTES:
                 print(
                     f"wake_inbox_drain: oversize marker "
@@ -224,23 +240,31 @@ def _drain_markers(inbox_dir: Path) -> int:
                     file=sys.stderr,
                 )
             else:
-                # Read for forensic logging only — fail-conservative
-                # on malformed JSON: still treat as a wake signal
-                # (delete + count). A truncated / corrupted marker
-                # file MEANS a teammate session attempted to write
-                # and was interrupted; the wake intent stands.
+                # Read body to classify by `type` field. Fail-
+                # conservative on malformed JSON / missing field /
+                # unknown value: still treat as a wake signal (delete
+                # + count as arm). A truncated/corrupt marker MEANS a
+                # teammate session attempted to write and was
+                # interrupted; the wake intent stands and Arm is the
+                # safe default.
                 try:
-                    marker.read_text(encoding="utf-8")
-                except OSError:
+                    body_text = marker.read_text(encoding="utf-8")
+                    body = json.loads(body_text)
+                    if isinstance(body, dict):
+                        body_type = body.get("type")
+                        if body_type in ("arm", "teardown"):
+                            marker_type = body_type
+                except (OSError, json.JSONDecodeError, ValueError):
+                    # Default-to-arm already set above.
                     pass
             os.unlink(str(marker))
-            consumed += 1
+            counts[marker_type] += 1
         except OSError:
             # Couldn't unlink — leave the marker on disk; next drain
             # will retry. Do NOT count this marker as consumed so the
             # fallback can still fire if needed.
             continue
-    return consumed
+    return counts
 
 
 def _emit_arm() -> None:
@@ -256,6 +280,23 @@ def _emit_arm() -> None:
     print(json.dumps(output))
 
 
+def _emit_teardown() -> None:
+    """Print the _TEARDOWN_DIRECTIVE additionalContext payload with the
+    required hookEventName field. Caller is responsible for sys.exit(0).
+
+    Sibling of _emit_arm; reached when a type="teardown" marker drains.
+    Skill-body idempotency: stop-pending-scan no-ops if no cron entry
+    exists, so a redundant Teardown emit is benign.
+    """
+    output = {
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": _TEARDOWN_DIRECTIVE,
+        }
+    }
+    print(json.dumps(output))
+
+
 def _decide_and_emit(input_data: dict) -> None:
     """Run the drain + fallback decision tree and emit at most one
     _ARM_DIRECTIVE block.
@@ -266,8 +307,11 @@ def _decide_and_emit(input_data: dict) -> None:
          suppressOutput.
       3. Lead-session guard. Non-lead session → suppressOutput
          (regardless of inbox state — teammate sessions never emit
-         the Arm directive; the directive is lead-targeted).
-      4. Drain markers. If drained count > 0 → emit Arm and return
+         the Arm/Teardown directives; the directives are lead-targeted).
+      4. Drain markers. _drain_markers returns a per-type count dict
+         ({"arm": N, "teardown": M}). If sum > 0 → dispatch on type:
+         teardown takes precedence over arm (fresh terminal-status
+         signal outweighs stale in_progress signal); emit and return
          (single-emit discipline; skip the fallback). Drain-path
          markers are fresh cross-session signals — surface them
          regardless of armed-state.
@@ -304,8 +348,21 @@ def _decide_and_emit(input_data: dict) -> None:
         return
 
     drained = _drain_markers(inbox_dir)
-    if drained > 0:
-        _emit_arm()
+    drained_total = drained["arm"] + drained["teardown"]
+    if drained_total > 0:
+        # Type-aware dispatch surface. Teardown branch is reachable only
+        # once a teammate-side producer writes type="teardown" markers
+        # (added in a downstream commit on this branch — until that
+        # producer lands, all drained markers default to "arm" via
+        # _drain_markers' fail-conservative classification). Teardown
+        # takes precedence over Arm when both kinds drain in the same
+        # prompt: a fresh terminal-status signal reflects the most
+        # recent completion-authority state and outweighs a stale
+        # in_progress signal.
+        if drained["teardown"] > 0:
+            _emit_teardown()
+        else:
+            _emit_arm()
         return
 
     # Producer-side idempotency on the B-1 fallback path: read the most
