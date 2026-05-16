@@ -28,6 +28,8 @@ Single procedure — the command IS the operation.
 4. If a match is found: extract the leading 8-character cron ID from the line (see `## ID Extraction Block` below) and call `CronDelete(id=<extracted-id>)`.
 5. Write a `scan_disarmed` event marking the teardown time. Paired writer to the `scan_armed` event written by [start-pending-scan.md Step 5](start-pending-scan.md#operation); together they drive the producer-side idempotency check in [hooks/wake_inbox_drain.py](../hooks/wake_inbox_drain.py), which suppresses the redundant Arm directive only when `scan_armed` is strictly more recent than `scan_disarmed` (re-arm dominance under post-Teardown re-arm).
 
+   **Step 5 is conditional on Step 4**: only fires when CronList matched in Step 2 and `CronDelete` was invoked. The Step 3 no-match early-out path skips Step 5 because no `scan_armed` event was written in this session that could be paired with a disarm — writing a `scan_disarmed` without a prior `scan_armed` would surface a stale lifecycle event to the drain hook.
+
    ```bash
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] stop-pending-scan.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
