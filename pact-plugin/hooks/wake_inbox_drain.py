@@ -2,32 +2,46 @@
 """
 Location: pact-plugin/hooks/wake_inbox_drain.py
 Summary: UserPromptSubmit hook that drains the team's wake-inbox markers
-         (cross-session teammate-Arm signals) on the lead's prompts and
-         emits a single _ARM_DIRECTIVE via hookSpecificOutput.additionalContext
-         when either (a) markers are present OR (b) the count_active_tasks
-         fallback shows at least one lifecycle-relevant teammate task.
+         (cross-session teammate-Arm and teammate-Teardown signals) on
+         the lead's prompts. Drain returns per-type counts; Teardown
+         markers route to _emit_teardown (with a Tier-1 idempotency
+         check against `.teardown_request_emitted/{task_id}`) and Arm
+         markers route to _emit_arm. Falls back to a
+         count_active_tasks(team_name) >= 1 predicate for the
+         lead-side unowned-create-then-owner-update dispatch surface.
 Used by: hooks.json UserPromptSubmit hook (third entry, after
          bootstrap_marker_writer + bootstrap_prompt_gate).
 
 Role in the asymmetric-guard Arm/Teardown model:
-- wake_lifecycle_emitter.py's teammate-Arm pre-branch writes per-marker
-  JSON files to ~/.claude/teams/{team_name}/wake_inbox/ when a teammate
-  self-claims a task (TaskUpdate(status='in_progress')) or when a
-  TaskCreate carries a teammate owner-at-create. PostToolUse
-  `additionalContext` targets the teammate's session — wrong session
-  for an Arm directive — so the filesystem marker IS the cross-session
-  signal.
+- wake_lifecycle_emitter.py's teammate pre-branches write per-marker
+  JSON files to ~/.claude/teams/{team_name}/wake_inbox/ tagged with
+  `type` ∈ {"arm", "teardown"}:
+    * `_maybe_write_teammate_arm_marker` emits `type="arm"` when a
+      teammate self-claims a task (TaskUpdate(status='in_progress'))
+      or when a TaskCreate carries a teammate owner-at-create.
+    * `_maybe_write_teammate_teardown_marker` emits `type="teardown"`
+      when a self-complete-exempt teammate drives the team to a 1->0
+      lifecycle-relevant active count from its own session.
+  PostToolUse `additionalContext` targets the teammate's session —
+  wrong session for an Arm/Teardown directive — so the filesystem
+  marker IS the cross-session signal.
 - This hook (UserPromptSubmit) runs on every lead prompt. It drains
-  markers + falls back to a count_active_tasks(team_name) >= 1
-  predicate that covers the lead-side unowned-create-then-owner-update
-  dispatch pattern surface (where no teammate-side write opportunity
-  ever exists — the lead's TaskCreate is unowned, the subsequent
-  TaskUpdate(owner) carries no status transition).
-- Either trigger emits exactly one _ARM_DIRECTIVE block per prompt
-  (combined drain + fallback single-emit discipline). The skill body's
-  CronList exact-suffix-match is the single idempotency truth — a
-  redundant Arm directive is benign because start-pending-scan no-ops
-  if its cron entry already exists.
+  markers, counts them per `type`, and routes:
+    * Any `type="teardown"` drained → check the Tier-1 sidecar
+      `.teardown_request_emitted/{task_id}` marker first (de-dupes
+      against teardown_request_emitter's TaskCompleted-fired Tier-1
+      emission for the same task); if not pre-empted, write a
+      `teardown_request` journal event (tier="2") and emit
+      _TEARDOWN_DIRECTIVE.
+    * Else `type="arm"` drained OR fallback predicate positive →
+      emit _ARM_DIRECTIVE.
+  Backward-compat: legacy markers without a `type` field default to
+  "arm"; unknown / corrupt types fail-conservative to "arm".
+- Both emissions are single-shot per prompt. The skill bodies'
+  CronList exact-suffix-match (start-pending-scan) and CronDelete
+  best-effort (stop-pending-scan) provide the idempotency truth — a
+  redundant directive is benign because the skills no-op on
+  cron-already-registered / cron-already-deleted.
 
 Lead-Session Guard (Layer 0 — defense-in-depth):
 - The drain hook ONLY emits in the lead session. A teammate's

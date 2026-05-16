@@ -22,41 +22,37 @@ Lifecycle automation:
   cron entry), mid-session resume, and any cron-died-silently
   edge cases categorically. The CronList match in the skill is the
   single source of idempotency truth — no hook-side state file.
-- On TaskUpdate(status in {completed, deleted}) that drives the
-  team's lifecycle-relevant active-task count to zero, emit a
-  stop-pending-scan directive instructing the lead to invoke
-  Skill("PACT:stop-pending-scan"). Both terminal statuses end
-  active work and are treated symmetrically. EXCEPTION: when the
-  just-completed task has a same-teammate-owned active
-  continuation in its `blocks` chain (per
-  `has_same_teammate_continuation`, which reads the resolved
-  on-disk `blocks` field with `addBlocks` as forward-compat
-  fallback), the Teardown is deferred — the teammate is staged to
-  claim the next task imminently, so the 1->0 transient is
-  suppressed to avoid a phantom cron-down audit signal and a
-  brief cron-down window for inbound completion-authority work.
+- Terminal-status TaskUpdate(status in {completed, deleted}) does
+  NOT emit Teardown from this hook. The stop-pending-scan
+  directive is emitted via two sibling surfaces:
+    * Tier-1 (dominant lead-driven path): TaskCompleted handler
+      `hooks/teardown_request_emitter.py` fires on the platform's
+      terminal status transition and applies the same predicate
+      ladder (1->0 lifecycle-relevant active count + no same-
+      teammate-owned active continuation deferral).
+    * Tier-2 (carve-out fallback): for self-complete-exempt
+      teammate sessions whose terminal TaskUpdate fires in the
+      WRONG session for the lead's directive, this hook's
+      teammate-Teardown pre-branch writes a `type="teardown"`
+      marker to `wake_inbox/`, and the lead-side drain hook
+      `hooks/wake_inbox_drain.py` (UserPromptSubmit) consumes it
+      and emits the directive on the lead's next prompt.
 - On any other tool fire (TaskUpdate with neither a terminal-
   status nor a pending->in_progress transition, TaskCreate when
-  the count is zero, terminal-status TaskUpdate leaving residual
-  active tasks or a same-teammate continuation): no directive
-  emitted.
+  the count is zero): no directive emitted.
 
 Lead-Session Guard (Layer 0 — defense-in-depth):
-- Every Teardown directive emission is gated by `is_lead_session`,
-  which verifies that the current PostToolUse session's `session_id`
-  matches the team's `leadSessionId` from team_config.json. Teammate
-  sessions never receive the Teardown directive — hook-level filtering
-  at the emission source, correct-by-construction rather than relying
-  on the skill body's Lead-Session Guard (Layer 1) as the primary
-  defense. The skill-body guard remains as backstop for user-typed
-  manual invocation from a teammate session.
+- Every Arm directive emission below the `is_lead_session` early-return
+  is gated by `is_lead_session`, which verifies that the current
+  PostToolUse session's `session_id` matches the team's `leadSessionId`
+  from team_config.json. Teammate sessions never receive a directive
+  via the in-session `additionalContext` channel from this hook —
+  hook-level filtering at the emission source, correct-by-construction
+  rather than relying on the skill body's Lead-Session Guard
+  (Layer 1) as the primary defense. The skill-body guard remains as
+  backstop for user-typed manual invocation from a teammate session.
 
-Asymmetric Arm vs Teardown Guard:
-- Teardown's natural trigger source IS the lead session: terminal-status
-  TaskUpdates run under the Completion Authority model in the lead's
-  session. Suppressing teammate-side Teardown emit at the lead-session
-  guard is correct because there is no legitimate teammate-side
-  Teardown signal to preserve.
+Asymmetric Arm vs Teardown signal locality:
 - Arm has TWO natural trigger sources with different session locality.
   (a) Teammate self-claim TaskUpdate(status="in_progress") per
   pact-agent-teams §On Start lives in the TEAMMATE session — a symmetric
@@ -64,16 +60,27 @@ Asymmetric Arm vs Teardown Guard:
   unowned-TaskCreate-then-TaskUpdate(owner) dispatch pattern produces
   no in_progress transition the lead-session sees, so the lead-session
   branch also misses it.
-- The asymmetric guard is realised by branch PLACEMENT: a teammate-Arm
-  pre-branch (`_maybe_write_teammate_arm_marker`) sits ABOVE the
-  `is_lead_session` early-return and writes a per-marker JSON file to
-  the team's `wake_inbox/` directory (the cross-session signal — the
-  in-session PostToolUse `additionalContext` targets the WRONG session
-  for the teammate path). The lead-session branch and Teardown stay
-  BELOW the lead-session guard. Lead-side drain + count-fallback lives
-  in `hooks/wake_inbox_drain.py` (UserPromptSubmit). Together they
-  cover both Arm trigger sources without re-coupling Teardown's
-  lead-only correctness (#737 Layer 0 preserved).
+- Teardown has TWO trigger sources too. (a) Lead-driven terminal
+  TaskUpdate(status in {completed, deleted}) on a 1->0 transition runs
+  in the LEAD session — handled by the Tier-1 sibling hook
+  `teardown_request_emitter.py` on TaskCompleted, NOT here. (b)
+  Self-complete-exempt teammate terminal TaskUpdate (today: secretary;
+  tomorrow any agentType added to SELF_COMPLETE_EXEMPT_AGENT_TYPES)
+  runs in the TEAMMATE session — PostToolUse `additionalContext` from
+  this hook would target the wrong session. The Tier-2 carve-out path
+  is the bridge for that case.
+- Both asymmetric signals are realised by branch PLACEMENT: two
+  teammate pre-branches (`_maybe_write_teammate_arm_marker` and
+  `_maybe_write_teammate_teardown_marker`) sit ABOVE the
+  `is_lead_session` early-return and write per-marker JSON files to
+  the team's `wake_inbox/` directory (the cross-session signal). The
+  lead-session Arm branches stay BELOW the lead-session guard. The
+  retired PostToolUse Teardown branch is replaced by the Tier-1
+  TaskCompleted handler. Lead-side drain + per-type dispatch lives in
+  `hooks/wake_inbox_drain.py` (UserPromptSubmit). Together the
+  Tier-1 + Tier-2 + drain surfaces cover both Teardown trigger
+  sources while preserving the #737 Layer 0 lead-only correctness
+  invariant for the directive emission itself.
 
 Transition detection (post-only):
 - post = count_active_tasks(team_name) — the count AFTER the tool's
@@ -94,23 +101,14 @@ Transition detection (post-only):
   on `tool_input.status` per the empirical fixture constraint at
   `tests/fixtures/wake_lifecycle/task_update_production_shape.json`
   (FLAT tool_response, no statusChange.from field).
-- TaskUpdate(status in {completed, deleted}) + post == 0 + NO same-
-  teammate continuation → emit Teardown. Skill's Teardown is
-  idempotent (no-op if no /PACT:scan-pending-tasks cron is
-  registered), so over-eager emission on edge cases (terminal-
-  status update of a never-counted signal-task while post==0) is
-  benign. The same-teammate continuation guard
-  (`has_same_teammate_continuation`) defers Teardown when the
-  completing task has at least one task in its `blocks` chain (the
-  resolved on-disk field; `addBlocks` is the additive TaskUpdate
-  API parameter, normalized into `blocks` on the stored record)
-  whose owner matches and which passes `_lifecycle_relevant`,
-  suppressing the phantom 1->0 transient in canonical Two-Task
-  Dispatch handoffs.
+- TaskUpdate(status in {completed, deleted}) — no Teardown emit
+  from THIS hook. The 1->0 transition + same-teammate-continuation
+  predicate ladder lives in the Tier-1 TaskCompleted handler
+  (`teardown_request_emitter.py`). The teammate-Teardown
+  pre-branch above writes a Tier-2 carve-out marker for the
+  self-complete-exempt case (consumed by `wake_inbox_drain.py`).
 - Any other tool fire (TaskUpdate with neither in_progress nor
-  terminal status, TaskCreate at post == 0, terminal-status
-  TaskUpdate at post > 0, terminal-status TaskUpdate at post == 0
-  with same-teammate continuation): no-op.
+  terminal status, TaskCreate at post == 0): no-op.
 
 The Arm threshold (post >= 1) and `session_init.py`'s SessionStart
 Arm threshold (active_count > 0) apply the same minimum-positive-count
@@ -159,7 +157,6 @@ from shared.task_utils import read_task_json
 from shared.tool_response import extract_tool_response
 from shared.wake_lifecycle import (
     count_active_tasks,
-    has_same_teammate_continuation,
     is_lead_session,
 )
 from shared.wake_lifecycle import _classify_owner  # noqa: F401 — owner classification for teammate-Arm pre-branch
@@ -823,20 +820,24 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     - TaskCreate + post >= 1 → Arm.
     - TaskUpdate(status == in_progress) + post >= 1 → Arm. Re-Arm path
       covering cold-start (initial Arm never fired), post-Teardown
-      recovery (eager 1->0 Teardown removed the cron entry), mid-session
-      resume, and any cron-died-silently edge cases categorically. The
-      CronList match in the skill body is the single source of
-      idempotency truth — no hook-side pre-state proxy.
-    - TaskUpdate(status in {completed, deleted}) + post == 0 + NO same-
-      teammate continuation → Teardown.
+      recovery (an earlier Teardown removed the cron entry), mid-
+      session resume, and any cron-died-silently edge cases
+      categorically. The CronList match in the skill body is the
+      single source of idempotency truth — no hook-side pre-state
+      proxy.
+    - TaskUpdate(status in {completed, deleted}) → no Teardown emit
+      from THIS function. Teardown lives in two sibling hooks
+      (Tier-1 `teardown_request_emitter.py` on TaskCompleted for
+      the dominant lead-driven path; Tier-2 `wake_inbox_drain.py`
+      on UserPromptSubmit for the self-complete-exempt teammate
+      carve-out, fed by `_maybe_write_teammate_teardown_marker`).
+      The terminal-status branch here falls through to None.
 
     count_active_tasks already filters carve-outs (signal-tasks,
     self-complete-exempt owners), so post >= 1 after a TaskCreate
-    means at least one lifecycle-relevant task is active, and
-    post == 0 after a terminal-status TaskUpdate means the team
-    has no remaining lifecycle-relevant work. The Arm threshold
-    accepts any positive count; the skill body's CronList match
-    handles redundant-emit no-op cheaply. Both Arm and Teardown are
+    means at least one lifecycle-relevant task is active. The Arm
+    threshold accepts any positive count; the skill body's
+    CronList match handles redundant-emit no-op cheaply. Arm is
     idempotent in the skill layer, so any over-eager emit on edge
     cases is benign.
 
@@ -916,31 +917,25 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
         # with the TaskCreate Arm branch above.
         return _arm_or_none(team_name)
 
-    if not _is_terminal_status_update(input_data):
-        return None
-    if count_active_tasks(team_name) != 0:
-        return None
-    # Defer the 1->0 Teardown when the just-completed task has a same-
-    # teammate-owned active continuation in its `blocks` chain. The
-    # teammate is staged to claim the next task imminently, so emitting
-    # Teardown would (a) surface a phantom cron-down audit signal,
-    # and (b) leave a brief cron-down window during which inbound
-    # completion-authority work would wait for the next 0->1 transition
-    # to re-Arm. `has_same_teammate_continuation` reads `blocks` (the
-    # resolved on-disk field) with
-    # `addBlocks` as forward-compat fallback (note: `addBlocks` is the
-    # additive TaskUpdate API parameter — typically null on disk after
-    # the platform merges it into `blocks`; do NOT re-introduce
-    # `addBlocks` as the primary read field, that was a silent-inert
-    # bug). Reuses `_lifecycle_relevant` for unified active + carve-out
-    # semantics, so any future expansion of
-    # WAKE_EXCLUDED_AGENT_TYPES is handled transparently. The
-    # predicate fail-closes (returns False) on any error path, which
-    # preserves the existing Teardown emit behavior on parse failures.
-    completed_task = read_task_json(task_id, team_name)
-    if has_same_teammate_continuation(completed_task, team_name):
-        return None
-    return _TEARDOWN_DIRECTIVE
+    # Terminal-status TaskUpdate fires fall through to implicit None.
+    # The 1->0 Teardown emission lives in two sibling hooks:
+    #   - Tier-1: hooks/teardown_request_emitter.py (TaskCompleted) —
+    #     dominant lead-driven path; fires on the platform's terminal
+    #     status transition with the same predicate ladder
+    #     (1->0 transition + same-teammate-continuation deferral).
+    #   - Tier-2: hooks/wake_inbox_drain.py (UserPromptSubmit) —
+    #     carve-out fallback consuming type="teardown" markers
+    #     written by `_maybe_write_teammate_teardown_marker` above
+    #     for self-complete-exempt teammate sessions.
+    # Cross-session signal correctness: PostToolUse:TaskUpdate
+    # additionalContext targets the CURRENT session, which for
+    # secretary self-complete (and any future SELF_COMPLETE_EXEMPT
+    # agentType) is NOT the lead's session. The marker file is the
+    # only correct cross-process bridge for those carve-outs; the
+    # TaskCompleted hook is the correct surface for the dominant
+    # lead-driven path. Emitting Teardown here too would double-fire
+    # against Tier-1 on every lead-driven completion.
+    return None
 
 
 def main() -> None:
