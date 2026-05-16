@@ -268,3 +268,47 @@ def test_references_section_links_to_companion_commands(cmd_text):
     assert "start-pending-scan.md" in refs_section
     assert "scan-pending-tasks.md" in refs_section
     assert "@~/" not in refs_section
+
+
+# ---------- Step 5 paired-writer scan_disarmed journal write ----------
+
+
+def test_scan_disarmed_step_5_present_in_operation(cmd_text):
+    """Step 5 of §Operation writes a `scan_disarmed` event marking the
+    teardown time. Paired writer to the `scan_armed` event written by
+    start-pending-scan.md Step 5; together they drive the producer-side
+    idempotency check in hooks/wake_inbox_drain.py. Removing this write
+    blinds the drain hook to teardown events, re-introducing the
+    post-Teardown stale-suppression edge case — the drain hook runs in
+    a Python subprocess that CANNOT read the platform's session-scoped
+    cron store, so the journal-event read is the ONLY Python-accessible
+    signal for "cron disarmed in this session".
+
+    Counter-test-by-revert: removing the Step 5 numbered marker or the
+    canonical `python3 "$SJ" write --type scan_disarmed` invocation
+    substring from §Operation falsifies this test. Mirrors the
+    partner test `test_scan_armed_step_5_present_in_operation` in
+    test_start_pending_scan_command_structure.py — together the pair
+    pins both ends of the journal-event lifecycle (arm + disarm).
+
+    Counting unit: substring containment (`in` operator), not
+    str.count or grep -c. The contract is "the operational invocation
+    must be present"; one or more occurrences both satisfy it.
+    """
+    op_start = cmd_text.find("\n## Operation")
+    op_end = cmd_text.find("\n## ", op_start + 1)
+    op_section = cmd_text[op_start:op_end] if op_end > 0 else cmd_text[op_start:]
+    step_5_pos = op_section.find("\n5. ")
+    assert step_5_pos >= 0, (
+        "§Operation must contain a Step 5 (`5. `) — the teardown-time "
+        "journal write that marks scan_disarmed timestamp."
+    )
+    step_5_body = op_section[step_5_pos:]
+    assert 'python3 "$SJ" write --type scan_disarmed' in step_5_body, (
+        "Step 5 must invoke the canonical journal write: "
+        '`python3 "$SJ" write --type scan_disarmed ...`. Substring check '
+        "tolerates surrounding bash idioms; the type-literal "
+        "`scan_disarmed` and the `write` subcommand are load-bearing. "
+        "Removing this write blinds wake_inbox_drain.py's producer-side "
+        "idempotency check to teardown events — see §Audit prose."
+    )
