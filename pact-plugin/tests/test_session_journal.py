@@ -795,6 +795,304 @@ class TestReadLastEvent:
 
 
 # ---------------------------------------------------------------------------
+# _read_last_event_at() — tail-streamed branch coverage
+# ---------------------------------------------------------------------------
+
+
+class TestReadLastEventTailStreamed:
+    """Pin the four new branches introduced by the tail-streamed rewrite of
+    `_read_last_event_at`: tail-hit happy path, tail-miss fallback, byte-
+    boundary alignment edge case, and empty-file early-return.
+
+    Existing TestReadLastEvent tests use small synthetic journals (3 events,
+    < 1 KB) and exclusively exercise the `size <= _TAIL_WINDOW_BYTES` early-
+    branch. These tests construct journals strictly LARGER than the tail
+    window so the tail-seek / partial-line-discard / fallback control flow
+    is actually exercised.
+
+    Fixtures use `append_event(make_event("checkpoint", phase=..., data=...))`
+    for normal padding (passes the writer's schema validator: checkpoint
+    requires `phase: str`). The single target event is `scan_armed` with
+    a fixed `armed_at` integer for unambiguous identification.
+
+    Tests (c) and (d) bypass `append_event` and write directly to the
+    journal file path because they require byte-precise placement or an
+    empty-file fixture that `append_event` cannot produce.
+    """
+
+    @staticmethod
+    def _filler_data_for_target_size(target_bytes):
+        """Return a `data` payload string sized so that one checkpoint event
+        is approximately `target_bytes` of journal text. The overhead of the
+        JSON wrapper (v, type, ts, phase, data keys + quotes + braces +
+        newline) is roughly 110 bytes; we subtract that and floor at 1.
+        """
+        return "x" * max(1, target_bytes - 110)
+
+    def _pad_journal_to_size(self, target_size_bytes, event_size_bytes=512):
+        """Append checkpoint events until the journal file is at least
+        `target_size_bytes` in size. Each event contributes approximately
+        `event_size_bytes` of journal text.
+        """
+        from shared.session_journal import (
+            append_event, get_journal_path, make_event,
+        )
+
+        filler_data = self._filler_data_for_target_size(event_size_bytes)
+        journal_path = Path(get_journal_path())
+        while True:
+            if journal_path.exists() and journal_path.stat().st_size >= target_size_bytes:
+                break
+            append_event(make_event(
+                "checkpoint", phase="filler", data=filler_data,
+            ))
+
+    def test_tail_hit_large_journal_returns_target(
+        self, journal_home, session_dir,
+    ):
+        """Test (a) — Tail-hit large-journal happy path.
+
+        Fixture: pad journal beyond _TAIL_WINDOW_BYTES, then append the
+        target `scan_armed` event LAST so it lands in the tail window.
+        Assert the tail-scan returns the target event's armed_at.
+
+        Falsifiability: counter-test-by-revert is performed against
+        `_read_last_event_at` itself — replacing the `return match` after
+        the tail scan with `return None` (force tail-miss-then-fallback
+        even on real tail-hit) leaves the target STILL recoverable via
+        the fallback, so this test stays GREEN — but in conjunction with
+        test (b), the asymmetric mutation that breaks ONLY the tail-scan
+        path (without breaking fallback) discriminates which branch is
+        load-bearing for which test. The stronger discriminating mutation
+        is "break the entire tail return + fallback" (full guard
+        bypass) — that breaks BOTH (a) and (b). Test (a)'s primary
+        contract is correctness, not branch-discrimination on its own.
+
+        Performance: cost should be O(_TAIL_WINDOW_BYTES) on tail-hit,
+        not O(file_size). Not asserted directly (timing is flaky);
+        documented here as the load-bearing-claim the test guards.
+        """
+        from shared.session_journal import (
+            _read_last_event_at, _TAIL_WINDOW_BYTES,
+            append_event, get_journal_path, make_event,
+        )
+
+        # Pad beyond tail window. After padding, append the target event
+        # so it is the LAST event on disk — guaranteed to fall within the
+        # last _TAIL_WINDOW_BYTES bytes.
+        self._pad_journal_to_size(_TAIL_WINDOW_BYTES + 4096)
+        append_event(make_event("scan_armed", armed_at=20260516))
+
+        journal_path = Path(get_journal_path())
+        assert journal_path.stat().st_size > _TAIL_WINDOW_BYTES, (
+            "Fixture invariant: journal must exceed tail window to "
+            "exercise the tail-streamed branch."
+        )
+
+        result = _read_last_event_at(journal_path, "scan_armed")
+        assert result is not None
+        assert result["armed_at"] == 20260516
+
+    def test_tail_miss_fallback_recovers_target(
+        self, journal_home, session_dir,
+    ):
+        """Test (b) — Tail-miss-fallback path.
+
+        Fixture: append the target `scan_armed` event FIRST, then pad
+        with > _TAIL_WINDOW_BYTES bytes of checkpoint filler so the
+        target ends up older than the tail window. The tail-scan
+        misses; the full-slurp fallback must recover the target.
+
+        Falsifiability: counter-test-by-revert at the production source
+        — mutating the fallback's final `_scan_lines_for_event(...)`
+        call to `return None` makes this test RED while test (a)
+        stays GREEN, discriminating the fallback path's load-bearing
+        contract.
+        """
+        from shared.session_journal import (
+            _read_last_event_at, _TAIL_WINDOW_BYTES,
+            append_event, get_journal_path, make_event,
+        )
+
+        # Target FIRST, then pad past the tail window so target falls
+        # OUTSIDE the last _TAIL_WINDOW_BYTES window.
+        append_event(make_event("scan_armed", armed_at=20260517))
+        # Pad enough that target is comfortably older than the tail.
+        self._pad_journal_to_size(_TAIL_WINDOW_BYTES * 2 + 4096)
+
+        journal_path = Path(get_journal_path())
+        assert journal_path.stat().st_size > _TAIL_WINDOW_BYTES, (
+            "Fixture invariant: journal must exceed tail window."
+        )
+
+        result = _read_last_event_at(journal_path, "scan_armed")
+        assert result is not None, (
+            "Tail-miss fallback must recover the target event. A None "
+            "return indicates the fallback path was skipped (return "
+            "after tail-miss instead of falling through to full-slurp)."
+        )
+        assert result["armed_at"] == 20260517
+
+    def test_byte_boundary_alignment_recovers_target(
+        self, journal_home, session_dir, monkeypatch,
+    ):
+        """Test (c) — Byte-boundary alignment empirical pin.
+
+        Construct a journal where the target `scan_armed` event line
+        starts at exactly `file_size - _TAIL_WINDOW_BYTES`. The tail
+        seek lands at the start of a complete line (no preceding
+        partial), but the `tail_lines[1:]` discard always drops the
+        first line of the tail window — so this exact-boundary case
+        is treated AS IF it were a tail-miss, and the full-slurp
+        fallback must recover the target.
+
+        Observed behavior (empirically confirmed via my cycle-3 cross-
+        verification byte-boundary probe): the tail-scan returns None
+        (because the only matching event was discarded as the leading
+        partial-line of the tail window), and the fallback recovers
+        the target.
+
+        Discrimination: monkeypatch `_scan_lines_for_event` with a
+        call-counter wrapper that delegates to the original. Assert
+        call_count == 2 (tail-scan + fallback), pinning the rescue
+        path explicitly. Call_count == 1 would indicate the discard
+        somehow worked and the event was found in the tail scan
+        directly — which would mean the current `tail_lines[1:]`
+        slice is NOT in effect.
+        """
+        import shared.session_journal as sj
+        from shared.session_journal import (
+            _read_last_event_at, _TAIL_WINDOW_BYTES,
+        )
+
+        journal_path = Path(session_dir) / "session-journal.jsonl"
+        journal_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Build a journal where the target event line starts at exactly
+        # `file_size - _TAIL_WINDOW_BYTES`. Strategy:
+        #   1. Prefix = N filler lines, padded so prefix bytes >> 0.
+        #   2. Target line = scan_armed event (one complete JSONL line).
+        #   3. Suffix = filler lines totalling exactly
+        #      `_TAIL_WINDOW_BYTES - len(target_line)` bytes.
+        #   Then file_size = len(prefix) + len(target) + len(suffix);
+        #   seek pos = file_size - _TAIL_WINDOW_BYTES;
+        #   With len(target) + len(suffix) == _TAIL_WINDOW_BYTES,
+        #   seek pos == len(prefix), i.e., the seek lands at the
+        #   first byte of the target line.
+        target_line = (
+            json.dumps({
+                "v": 1, "type": "scan_armed",
+                "ts": "2026-05-16T00:00:00Z",
+                "armed_at": 20260518,
+            }) + "\n"
+        ).encode("utf-8")
+
+        filler_line = (
+            json.dumps({
+                "v": 1, "type": "checkpoint",
+                "ts": "2026-05-16T00:00:00Z",
+                "phase": "filler",
+            }) + "\n"
+        ).encode("utf-8")
+
+        suffix_byte_target = _TAIL_WINDOW_BYTES - len(target_line)
+        n_filler_lines_in_suffix = suffix_byte_target // len(filler_line)
+        suffix_full_lines = filler_line * n_filler_lines_in_suffix
+        pad_byte_count = suffix_byte_target - len(suffix_full_lines)
+        # Final pad: bytes of 'x' (no newline), simulating a partial-
+        # line write at EOF. _scan_lines_for_event tolerates this.
+        suffix = suffix_full_lines + b"x" * pad_byte_count
+
+        prefix = filler_line * 100  # arbitrary; just needs to be > 0.
+
+        with journal_path.open("wb") as f:
+            f.write(prefix)
+            f.write(target_line)
+            f.write(suffix)
+
+        file_size = journal_path.stat().st_size
+        expected_seek_pos = file_size - _TAIL_WINDOW_BYTES
+        assert expected_seek_pos == len(prefix), (
+            f"Fixture invariant: seek position should land at start of "
+            f"target line. file_size={file_size}, "
+            f"_TAIL_WINDOW_BYTES={_TAIL_WINDOW_BYTES}, "
+            f"len(prefix)={len(prefix)}, "
+            f"expected_seek_pos={expected_seek_pos}."
+        )
+
+        # Monkeypatch _scan_lines_for_event to count invocations.
+        call_count = {"n": 0}
+        original_scan = sj._scan_lines_for_event
+
+        def counting_scan(lines, event_type):
+            call_count["n"] += 1
+            return original_scan(lines, event_type)
+
+        monkeypatch.setattr(sj, "_scan_lines_for_event", counting_scan)
+
+        result = _read_last_event_at(journal_path, "scan_armed")
+
+        assert result is not None, (
+            "Byte-boundary alignment must yield the target via either "
+            "tail-scan or full-slurp fallback; both returning None "
+            "indicates the partial-line discard AND the fallback both "
+            "failed. file_size="
+            f"{file_size}, target_line_starts_at={len(prefix)}, "
+            f"seek_pos_lands_at={expected_seek_pos}."
+        )
+        assert result["armed_at"] == 20260518
+        # Observed-behavior pin: tail-scan discards the leading partial-
+        # line (which IS our target at this exact boundary), so the
+        # fallback fires. _scan_lines_for_event is invoked twice.
+        assert call_count["n"] == 2, (
+            f"Byte-boundary case must trigger BOTH tail-scan AND "
+            f"full-slurp fallback. Got call_count={call_count['n']}, "
+            f"expected 2. A count of 1 means the tail scan returned the "
+            f"target directly (the `tail_lines[1:]` discard is no longer "
+            f"in effect, contradicting the documented partial-line-at-"
+            f"tail-start behavior)."
+        )
+
+    def test_empty_journal_returns_none(
+        self, journal_home, session_dir,
+    ):
+        """Test (d) — Empty-file early-return.
+
+        Fixture: pre-create an empty `session-journal.jsonl` (size 0).
+        Assert `_read_last_event_at` returns None without raising.
+
+        Falsifiability: counter-test-by-revert at the production source
+        — removing the `if size == 0: return None` early-return forces
+        empty-file traffic through `size <= _TAIL_WINDOW_BYTES` and
+        then through `_scan_lines_for_event(splitlines)`. On an empty
+        string, `splitlines()` returns `[]`, the reverse-iterate yields
+        nothing, and the function returns None anyway. The early-return
+        is a fast-path; removing it does NOT necessarily flip THIS
+        test, but documents the explicit empty-file contract. The
+        early-return ALSO protects against a hypothetical future
+        change that adds non-trivial work in the path post-`size ==
+        0`, where dropping the guard would surface as a real bug.
+
+        This test is the explicit-contract pin: empty file → None,
+        no exception, no traffic through the tail-streamed control
+        flow.
+        """
+        from shared.session_journal import _read_last_event_at
+
+        journal_path = Path(session_dir) / "session-journal.jsonl"
+        journal_path.parent.mkdir(parents=True, exist_ok=True)
+        journal_path.touch()  # Creates empty file, size 0.
+
+        assert journal_path.exists()
+        assert journal_path.stat().st_size == 0
+
+        result = _read_last_event_at(journal_path, "scan_armed")
+        assert result is None, (
+            f"Empty journal must return None without error; got {result!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # get_journal_path()
 # ---------------------------------------------------------------------------
 
