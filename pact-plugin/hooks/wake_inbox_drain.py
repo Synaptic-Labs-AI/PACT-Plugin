@@ -325,19 +325,25 @@ def _decide_and_emit(input_data: dict) -> None:
     # idempotency; under-emit could miss a teammate's completion-
     # authority signal.
     #
-    # Outer-except narrowing rationale: the call surface today (eager
-    # top-level import at the wrapped-imports block above + internal
-    # `except Exception` layers inside read_last_event and its delegate
-    # _read_last_event_at) catches all currently-exercisable failures
-    # before they propagate. The narrowed `(ImportError, AttributeError,
-    # TypeError)` is a safety net for future refactors that could
-    # introduce lazy imports, missing attributes on a reshaped event
-    # dict, or unguarded comparisons; it documents WHAT we'd defend
-    # against rather than blanket-swallowing future bugs. Reviewer
-    # alternative considered: elide the outer try entirely as dead-code.
-    # We keep the narrowed catch to pin the regression-defense intent
-    # (paired with test_outer_guard_catches_unexpected_exception which
-    # monkeypatches read_last_event to raise).
+    # Outer-except rationale: the producer-side check has a strict
+    # fail-conservative contract — any unexpected failure must fall
+    # through to the existing emit behavior, not silently suppress.
+    # `except Exception` aligns the catch with the contract in the
+    # comment block above ("over-emit is benign... under-emit could miss
+    # a teammate's completion-authority signal"). A narrower catch
+    # (e.g., `(ImportError, AttributeError, TypeError)`) would let any
+    # other exception class propagate up to main()'s outer Exception
+    # handler, which prints _SUPPRESS_OUTPUT — i.e., under-emit, which
+    # is exactly the failure mode this contract forbids. The wider
+    # catch closes that future-refactor footgun.
+    #
+    # Today the call surface is benign — eager top-level imports at the
+    # wrapped-imports block above, and read_last_event has its own
+    # outer `except Exception` returning None — so this catch is
+    # functionally a no-op on the currently-exercisable paths. It pins
+    # the contract for any future refactor that introduces lazy
+    # imports, missing attributes on a reshaped event dict, or new
+    # exception classes from the journal-read path.
     #
     # Producer-side deterministic Python check, NOT LLM-self-diagnosis
     # at the directive site — distinct from the failure mode that
@@ -359,7 +365,7 @@ def _decide_and_emit(input_data: dict) -> None:
                 ):
                     print(_SUPPRESS_OUTPUT)
                     return
-    except (ImportError, AttributeError, TypeError):
+    except Exception:
         pass
 
     # B-1 fallback: lead-side unowned-create-then-owner-update dispatch
