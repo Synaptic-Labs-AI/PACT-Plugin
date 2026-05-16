@@ -57,6 +57,15 @@ from typing import Any
 _SCHEMA_VERSION = 1
 
 
+# Tail window size for `_read_last_event_at`. Reverse-scan reads at most
+# this many trailing bytes before falling back to a full-file slurp. In a
+# typical active session 32 KB covers ~100-300 JSONL entries, which is
+# the common-case window for the most-recent event of any tracked type.
+# Worst case (target event older than 32 KB from EOF) falls back to the
+# pre-optimization full-slurp cost.
+_TAIL_WINDOW_BYTES = 32 * 1024
+
+
 # Per-type required fields, derived from actual writer call sites. Every
 # entry here reflects what a production writer ACTUALLY produces (grep
 # `make_event("{type}"` in hooks/ and `write --type {type}` in commands/),
@@ -678,11 +687,43 @@ def read_last_event_from(
     return _read_last_event_at(journal, event_type)
 
 
+def _scan_lines_for_event(
+    lines: list[str],
+    event_type: str,
+) -> dict[str, Any] | None:
+    """Reverse-iterate decoded lines, returning the first matching event.
+
+    Shared by tail-window and full-slurp scan paths. Skips blank lines and
+    silently drops malformed JSON (symmetric with the pre-optimization
+    contract: corrupted lines never poison the scan).
+    """
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+            if event.get("type") == event_type:
+                return event
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return None
+
+
 def _read_last_event_at(
     journal: Path,
     event_type: str,
 ) -> dict[str, Any] | None:
     """Shared reverse-scan implementation for both implicit and explicit APIs.
+
+    Performance: reads the trailing `_TAIL_WINDOW_BYTES` first and scans
+    that window in reverse; only falls back to a full-file slurp when the
+    target event is not found in the tail window. For the steady-state
+    common case (target event written within the most recent ~100-300
+    journal entries) the per-call cost is O(_TAIL_WINDOW_BYTES) instead
+    of O(file_size). The fallback preserves the pre-optimization contract:
+    return the most recent matching event anywhere in the file, or None
+    if no such event exists.
 
     Reads with `errors="replace"` symmetric with `_read_events_at`. A single
     invalid byte sequence (e.g., from a botched write or truncated multibyte
@@ -691,24 +732,56 @@ def _read_last_event_at(
     would then return None and `session_end.py` would conclude the session
     was never paused. The replacement substitutes U+FFFD for bad bytes, so
     at most the corrupted line is dropped by the per-line `json.loads`.
+
+    Tail-window safety: line boundaries are ASCII 0x0A and cannot fall
+    inside a multibyte UTF-8 sequence, so splitting bytes on b"\\n" before
+    decoding never bisects a character. When the tail window starts mid-
+    line (file size > tail window), the leading partial line is discarded.
     """
     try:
         if not journal.exists():
             return None
 
-        for line in reversed(
-            journal.read_text(encoding="utf-8", errors="replace").splitlines()
-        ):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-                if event.get("type") == event_type:
-                    return event
-            except (json.JSONDecodeError, ValueError):
-                continue
-        return None
+        size = journal.stat().st_size
+        if size == 0:
+            return None
+
+        if size <= _TAIL_WINDOW_BYTES:
+            # Small journal: single full read, no tail-window optimization.
+            return _scan_lines_for_event(
+                journal.read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines(),
+                event_type,
+            )
+
+        # Large journal: tail-window-first, full-slurp fallback.
+        with journal.open("rb") as fh:
+            fh.seek(size - _TAIL_WINDOW_BYTES)
+            tail_bytes = fh.read()
+        tail_text = tail_bytes.decode("utf-8", errors="replace")
+        tail_lines = tail_text.splitlines()
+        # Discard the leading partial line: the tail window starts mid-
+        # file, so the first line is almost certainly truncated. Skipping
+        # it costs at most one event that an event older than the tail
+        # window would be missed by — the full-slurp fallback below
+        # catches that case.
+        if tail_lines:
+            tail_lines = tail_lines[1:]
+
+        match = _scan_lines_for_event(tail_lines, event_type)
+        if match is not None:
+            return match
+
+        # Tail miss: full-slurp fallback preserves the pre-optimization
+        # contract. The target event is older than _TAIL_WINDOW_BYTES from
+        # EOF, or absent entirely.
+        return _scan_lines_for_event(
+            journal.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines(),
+            event_type,
+        )
 
     except Exception:
         return None
