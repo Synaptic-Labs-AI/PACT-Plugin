@@ -2962,6 +2962,14 @@ class TestValidateEventSchemaPerType:
         # commands/scan-pending-tasks.md Step 0 to bound the warmup-grace
         # skip window.
         "scan_armed": {"armed_at": 1715731200},
+        # `scan_disarmed` is emitted by commands/stop-pending-scan.md after
+        # CronDelete tears down the pending-scan cron; `disarmed_at` carries
+        # the bash `$(date +%s)` epoch-seconds at teardown time. Paired
+        # writer to scan_armed; together they drive the event-model
+        # lifecycle consumed by hooks/wake_inbox_drain.py's producer-side
+        # idempotency check (suppress only when scan_armed is strictly more
+        # recent than scan_disarmed).
+        "scan_disarmed": {"disarmed_at": 1715734800},
     }
 
     def test_samples_mirror_required_fields_dict(self):

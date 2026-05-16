@@ -117,6 +117,26 @@ def _write_scan_armed_event(home, session_id, project_dir, armed_at=1715731200):
     return journal
 
 
+def _write_scan_disarmed_event(home, session_id, project_dir, disarmed_at=1715734800):
+    """Append a `scan_disarmed` event to the session's journal — mirrors
+    the write performed by commands/stop-pending-scan.md Step 5 (paired
+    writer to scan_armed). Symmetric with `_write_scan_armed_event`.
+    """
+    slug = Path(project_dir).name
+    sess_dir = home / ".claude" / "pact-sessions" / slug / session_id
+    sess_dir.mkdir(parents=True, exist_ok=True)
+    journal = sess_dir / "session-journal.jsonl"
+    event = {
+        "v": 1,
+        "type": "scan_disarmed",
+        "ts": "2026-05-15T00:01:00Z",
+        "disarmed_at": disarmed_at,
+    }
+    with journal.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(event) + "\n")
+    return journal
+
+
 def _drain_out(payload, home):
     rc, out, err = _run_drain(
         json.dumps(payload),
@@ -357,6 +377,16 @@ def test_fallback_suppressed_when_scan_armed_event_present(tmp_path):
     Counter-test-by-revert: deleting the journal-event check in
     wake_inbox_drain.py flips this test to RED (the hook would emit
     Arm despite the scan_armed event being present).
+
+    Mutation-pair partner:
+    `test_drain_emits_even_when_scan_armed_event_present` pins the
+    placement of this check — specifically that it lives ONLY on the
+    B-1 fallback path, NOT inside the drain path. The two tests
+    together pin a two-axis design decision:
+      - delete-the-check mutation → THIS test goes RED
+      - relocate-the-check-into-drain-path mutation → partner test
+        goes RED
+    Keep both green to preserve the design.
     """
     home = tmp_path / "home"; home.mkdir()
     lead_sid = "lead-sid"
@@ -427,22 +457,39 @@ def test_fallback_emits_when_no_scan_armed_event(tmp_path):
     )
 
 
-def test_fallback_emits_when_journal_unreadable(tmp_path):
-    """Fail-conservative invariant. When the session journal exists
-    but contains malformed content (a permission error, a truncated
-    last line, etc.), the journal read returns None and the hook
-    falls through to the existing emit behavior — over-emit is benign
-    under the skill body's CronList idempotency; under-emit could miss
-    a teammate's completion-authority signal.
+def test_outer_guard_catches_unexpected_exception(tmp_path):
+    """Outer-guard regression invariant. The narrowed
+    `except (ImportError, AttributeError, TypeError): pass` around the
+    journal-event read is a safety net for future refactors that could
+    introduce lazy imports, missing attributes on a reshaped event
+    dict, or unguarded comparisons. The call surface today (eager
+    top-level import + two layers of internal `except Exception`
+    inside read_last_event and _read_last_event_at) catches all
+    currently-exercisable failures BEFORE they propagate, so the outer
+    guard appears unreachable on the happy path.
 
-    Approximation: write a journal whose only line is malformed JSON
-    so the scan_armed lookup yields None. The fallback path then runs
-    and emits Arm because count >= 1.
+    This test pins the guard's behavior by monkey-patching
+    `wake_inbox_drain.read_last_event` (the bound reference inside the
+    hook module) to raise ImportError, then asserting the hook still
+    emits the Arm directive — fail-conservative on unexpected failure
+    rather than crashing.
+
+    Replaces the prior `test_fallback_emits_when_journal_unreadable`
+    which was phantom-green: it wrote malformed JSON to the journal,
+    but `_read_last_event_at`'s inner try-except absorbs malformed JSON
+    and returns None without propagating, so the outer guard was never
+    exercised. Cross-lane convergence on the same root cause from both
+    the test angle (phantom-green) and implementation angle
+    (over-broad catch).
+
+    Cannot use subprocess + monkeypatch directly (cross-process).
+    Wrapper script imports the hook, replaces the bound reference,
+    then invokes main().
     """
     home = tmp_path / "home"; home.mkdir()
     lead_sid = "lead-sid"
     pdir = "/tmp/p"
-    team = "team-scan-journal-unreadable"
+    team = "team-outer-guard"
     teammate_owner = "backend-coder"
     _write_session_context(
         home, lead_sid, pdir, team,
@@ -455,25 +502,45 @@ def test_fallback_emits_when_journal_unreadable(tmp_path):
     _write_task(
         home, team, "T3", status="in_progress", owner=teammate_owner,
     )
-    # Write a malformed journal line — no valid scan_armed event.
-    slug = Path(pdir).name
-    sess_dir = home / ".claude" / "pact-sessions" / slug / lead_sid
-    journal = sess_dir / "session-journal.jsonl"
-    journal.write_text("{ not valid json\n", encoding="utf-8")
 
-    rc, out_str, err = _run_drain(
-        json.dumps({
-            "session_id": lead_sid, "cwd": pdir,
-            "hook_event_name": "UserPromptSubmit",
-            "prompt": "go",
-        }),
-        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+    # In-process wrapper: import the hook, replace its bound
+    # `read_last_event` with a raising stub, then invoke main(). The
+    # subprocess invocation isolates HOME so the hook reads the
+    # tmp_path session context.
+    wrapper = tmp_path / "wrapper.py"
+    wrapper.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(HOOK_DIR)!r})\n"
+        "import wake_inbox_drain\n"
+        "def _raise(*_a, **_k):\n"
+        "    raise ImportError('simulated lazy-import failure')\n"
+        "wake_inbox_drain.read_last_event = _raise\n"
+        "wake_inbox_drain.main()\n",
+        encoding="utf-8",
     )
-    assert rc == 0, f"non-zero exit; stderr={err}"
+
+    payload = json.dumps({
+        "session_id": lead_sid, "cwd": pdir,
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "go",
+    })
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+    env.update({"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir})
+    proc = subprocess.run(
+        [sys.executable, str(wrapper)],
+        input=payload.encode("utf-8"),
+        capture_output=True,
+        env=env,
+        timeout=10,
+    )
+    assert proc.returncode == 0, (
+        f"non-zero exit; stderr={proc.stderr.decode('utf-8')}"
+    )
+    out_str = proc.stdout.decode("utf-8")
     arm_count = out_str.count("First active teammate task created")
     assert arm_count == 1, (
-        f"Malformed journal + count >= 1 must fall through to emit "
-        f"(fail-conservative); got {arm_count} in stdout={out_str!r}"
+        f"Outer guard must catch the simulated ImportError and fall "
+        f"through to emit; got {arm_count} in stdout={out_str!r}"
     )
 
 
@@ -484,6 +551,16 @@ def test_drain_emits_even_when_scan_armed_event_present(tmp_path):
     drain path consumes the marker and emits Arm — the producer-side
     idempotency check is ONLY on the B-1 fallback path, not the
     drain path.
+
+    Mutation-pair partner:
+    `test_fallback_suppressed_when_scan_armed_event_present` pins
+    that the check fires on the fallback path. THIS test pins that
+    the check does NOT also fire on the drain path. Together:
+      - relocate-the-check-into-drain-path mutation → THIS test
+        goes RED (drain marker would be suppressed instead of
+        surfaced)
+      - delete-the-check mutation → partner test goes RED
+    Both green pins the placement design.
     """
     home = tmp_path / "home"; home.mkdir()
     lead_sid = "lead-sid"
@@ -524,3 +601,139 @@ def test_drain_emits_even_when_scan_armed_event_present(tmp_path):
     )
     assert 'Skill("PACT:start-pending-scan")' in hso["additionalContext"]
     assert not marker_path.exists(), "Drain must consume the marker"
+
+
+# ─── scan_armed vs scan_disarmed truth-table tests ─────────────────────
+
+
+def test_fallback_emits_when_armed_then_disarmed(tmp_path):
+    """Post-Teardown re-emit invariant. When scan_armed is followed by a
+    more-recent scan_disarmed event, the suppression check falls through
+    to the emit branch — the cron is no longer armed (teardown fired),
+    so a fresh Arm directive must surface to re-arm on the next 0->1
+    transition.
+
+    Counter-test-by-revert: reverting the two-event comparison back to
+    one-event-presence ("if scan_armed is not None: suppress") flips
+    this test to RED — the stale scan_armed event would suppress the
+    needed re-arm directive.
+    """
+    home = tmp_path / "home"; home.mkdir()
+    lead_sid = "lead-sid"
+    pdir = "/tmp/p"
+    team = "team-armed-then-disarmed"
+    teammate_owner = "backend-coder"
+    _write_session_context(
+        home, lead_sid, pdir, team,
+        members=[
+            {"name": teammate_owner, "agentId": "agent-bc"},
+            {"name": "lead", "agentId": "agent-lead"},
+        ],
+        lead_agent_id="agent-lead",
+    )
+    _write_task(
+        home, team, "T5", status="in_progress", owner=teammate_owner,
+    )
+    # scan_armed at t=100, scan_disarmed at t=200 (more recent).
+    _write_scan_armed_event(home, lead_sid, pdir, armed_at=100)
+    _write_scan_disarmed_event(home, lead_sid, pdir, disarmed_at=200)
+
+    rc, out_str, err = _run_drain(
+        json.dumps({
+            "session_id": lead_sid, "cwd": pdir,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        }),
+        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+    )
+    assert rc == 0, f"non-zero exit; stderr={err}"
+    arm_count = out_str.count("First active teammate task created")
+    assert arm_count == 1, (
+        f"armed-then-disarmed + count >= 1 must emit Arm (no stale "
+        f"suppression); got {arm_count} in stdout={out_str!r}"
+    )
+
+
+def test_fallback_suppressed_when_armed_no_disarm(tmp_path):
+    """Baseline suppression invariant under the two-event model. When
+    scan_armed exists and no scan_disarmed event follows, the check
+    suppresses the redundant Arm directive — the cron is currently
+    armed. Mirrors the pre-symmetry behavior; preserved across the
+    two-event refactor.
+    """
+    home = tmp_path / "home"; home.mkdir()
+    lead_sid = "lead-sid"
+    pdir = "/tmp/p"
+    team = "team-armed-no-disarm"
+    teammate_owner = "backend-coder"
+    _write_session_context(
+        home, lead_sid, pdir, team,
+        members=[
+            {"name": teammate_owner, "agentId": "agent-bc"},
+            {"name": "lead", "agentId": "agent-lead"},
+        ],
+        lead_agent_id="agent-lead",
+    )
+    _write_task(
+        home, team, "T6", status="in_progress", owner=teammate_owner,
+    )
+    _write_scan_armed_event(home, lead_sid, pdir, armed_at=100)
+    # No scan_disarmed event.
+
+    out = _drain_out({
+        "session_id": lead_sid, "cwd": pdir,
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "go",
+    }, home)
+    assert out.get("suppressOutput") is True, (
+        f"armed + no disarm must suppress; got {out!r}"
+    )
+
+
+def test_fallback_suppressed_when_armed_disarmed_rearmed(tmp_path):
+    """Re-arm dominance invariant. When the event sequence is
+    arm -> disarm -> re-arm (scan_armed at t=300, scan_disarmed at
+    t=200, scan_armed at t=100), the most-recent-of-each-type read
+    yields scan_armed at t=300 > scan_disarmed at t=200, so suppression
+    correctly applies — the cron is currently armed.
+
+    Counter-test-by-revert: changing the strict-greater comparison to
+    `>=` or `<` would not break this test (300 > 200 holds either
+    way), but reverting to one-event-presence would also keep this
+    test green (since scan_armed exists). This test pins the
+    re-arm-dominance branch of the truth table — paired with
+    test_fallback_emits_when_armed_then_disarmed, the two tests
+    together pin the strict-greater comparison.
+    """
+    home = tmp_path / "home"; home.mkdir()
+    lead_sid = "lead-sid"
+    pdir = "/tmp/p"
+    team = "team-armed-disarmed-rearmed"
+    teammate_owner = "backend-coder"
+    _write_session_context(
+        home, lead_sid, pdir, team,
+        members=[
+            {"name": teammate_owner, "agentId": "agent-bc"},
+            {"name": "lead", "agentId": "agent-lead"},
+        ],
+        lead_agent_id="agent-lead",
+    )
+    _write_task(
+        home, team, "T7", status="in_progress", owner=teammate_owner,
+    )
+    # Event-order on disk: arm(t=100), disarm(t=200), arm(t=300).
+    # read_last_event returns the LAST event of each type by reverse
+    # scan, so scan_armed=300, scan_disarmed=200. 300 > 200 → suppress.
+    _write_scan_armed_event(home, lead_sid, pdir, armed_at=100)
+    _write_scan_disarmed_event(home, lead_sid, pdir, disarmed_at=200)
+    _write_scan_armed_event(home, lead_sid, pdir, armed_at=300)
+
+    out = _drain_out({
+        "session_id": lead_sid, "cwd": pdir,
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "go",
+    }, home)
+    assert out.get("suppressOutput") is True, (
+        f"armed-disarmed-rearmed (re-arm most recent) must suppress; "
+        f"got {out!r}"
+    )

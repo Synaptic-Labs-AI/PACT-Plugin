@@ -181,6 +181,14 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # */3 cron) — first-fire-coverage invariant; see start-pending-scan.md
     # §CronCreate Block audit.
     "scan_armed": {"armed_at": int},
+    # commands/stop-pending-scan.md writes scan_disarmed after the
+    # CronDelete that tears down the pending-scan cron. Paired writer
+    # to scan_armed; together they form the event-model lifecycle
+    # consumed by hooks/wake_inbox_drain.py — the drain hook's
+    # producer-side idempotency suppresses the redundant Arm directive
+    # only when scan_armed is strictly more recent than scan_disarmed
+    # (re-arm dominance under post-Teardown re-arm).
+    "scan_disarmed": {"disarmed_at": int},
 }
 
 

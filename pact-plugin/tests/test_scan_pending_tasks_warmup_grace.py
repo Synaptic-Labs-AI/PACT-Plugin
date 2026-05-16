@@ -20,11 +20,12 @@ fall-through by appending a sentinel `echo` after the snippet — sentinel
 present in stdout means the snippet fell through (no skip); sentinel
 absent means the snippet exited early (skip path taken).
 
-Counter-test-by-revert: reverting the literal `180` in scan-pending-
-tasks.md Step 0 to `120` (or any value < 30) flips the skip-window test
-to fall-through. Reverting the `python3 -c` extraction to `jq` (or other
-extractor) doesn't break these tests as long as the new extractor yields
-an empty string on null input — but breaks T3's structural pin first.
+Counter-test-by-revert: reverting the literal `300` in scan-pending-
+tasks.md Step 0 to a value <= (WARMUP_GRACE_SECONDS - 150) flips the
+skip-window test to fall-through. Reverting the `python3 -c` extraction
+to `jq` (or other extractor) doesn't break these tests as long as the
+new extractor yields an empty string on null input — but breaks T3's
+structural pin first.
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ SJ_PATH = PLUGIN_ROOT / "hooks" / "shared" / "session_journal.py"
 # code edit required if the warmup-grace literal in Step 0 is re-tuned.
 # Coupling pair partner: the cron interval in start-pending-scan.md
 # §CronCreate Block must be re-tuned in lockstep.
-WARMUP_GRACE_SECONDS = 180
+WARMUP_GRACE_SECONDS = 300
 
 
 def _extract_step_0_bash_block(scan_md_text: str) -> str:
@@ -143,7 +144,7 @@ def test_step_0_skips_within_grace_window(tmp_path, step_0_bash_template):
     future bump of the constant retains the in/out semantic relationship
     to the grace window (no hardcoded elapsed literal to forget about).
 
-    Counter-test-by-revert: reverting the literal `180` in Step 0 to
+    Counter-test-by-revert: reverting the literal `300` in Step 0 to
     `0` or any value <= (WARMUP_GRACE_SECONDS - 150) flips this test
     (Step 0 would no longer skip because elapsed >= grace).
     """
@@ -178,7 +179,7 @@ def test_step_0_falls_through_outside_grace_window(tmp_path, step_0_bash_templat
     Threshold is parametrically derived from WARMUP_GRACE_SECONDS for
     the same reason as the inside-window test.
 
-    Counter-test-by-revert: reverting the literal `180` in Step 0 to a
+    Counter-test-by-revert: reverting the literal `300` in Step 0 to a
     value >= (WARMUP_GRACE_SECONDS + 120) flips this test (Step 0 would
     short-circuit because elapsed < grace).
     """
@@ -255,7 +256,7 @@ def test_step_0_falls_through_when_no_journal(tmp_path, step_0_bash_template):
 def test_step_0_falls_through_on_negative_delta(tmp_path, step_0_bash_template):
     """When `armed_at` is in the future (clock skew, journal corruption,
     or adversarial write), the delta `(now - armed_at)` is negative.
-    Without the `[ $delta -ge 0 ]` guard, `negative -lt 180` would
+    Without the `[ $delta -ge 0 ]` guard, `negative -lt 300` would
     always be true and the gate would short-circuit indefinitely —
     becoming a kill-switch for the scan. With the guard, the gate
     falls through to the scan body on every negative-delta fire,

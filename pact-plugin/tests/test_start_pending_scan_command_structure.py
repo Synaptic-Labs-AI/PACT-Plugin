@@ -278,9 +278,9 @@ def test_cron_create_call_shape_cron_create_block_has_four_fields(cmd_text):
     block_end = _find_balanced_close_paren(section, open_paren_pos)
     assert block_end > block_start, "CronCreate( in §CronCreate Block has no balanced closing )"
     block = section[block_start:block_end + 1]
-    assert 'cron="*/3 * * * *"' in block, (
-        "CronCreate Call Shape/M1: §CronCreate Block must use cron='*/3 * * * *' (3-minute "
-        "cadence; coupled in lockstep to the 180s warmup-grace constant in "
+    assert 'cron="*/5 * * * *"' in block, (
+        "CronCreate Call Shape/M1: §CronCreate Block must use cron='*/5 * * * *' (5-minute "
+        "cadence; coupled in lockstep to the 300s warmup-grace constant in "
         "scan-pending-tasks.md Step 0 — first-fire-coverage invariant). Tuning the "
         "cadence requires updating BOTH the cron literal AND the warmup-grace literal "
         "in scan-pending-tasks.md AND the Communication Charter §Cron-Fire Mechanism "
@@ -651,7 +651,7 @@ def test_references_between_tool_call_scope(cmd_text):
 def test_scan_armed_step_5_present_in_operation(cmd_text):
     """Step 5 of §Operation writes a `scan_armed` event marking the
     cold-start arm time. Coupling pair partner: Step 0 of scan-pending-
-    tasks.md reads this event timestamp and applies the 180s warmup-
+    tasks.md reads this event timestamp and applies the 300s warmup-
     grace skip. The two steps form the journal-event round trip; both
     must be present or the warmup-grace skip silently degrades to
     fail-open-only (every fire falls through Step 0 because the journal

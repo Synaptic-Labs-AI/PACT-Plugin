@@ -26,8 +26,23 @@ Single procedure — the command IS the operation.
 2. Scan the output for a line whose suffix after `": "` is exactly `/PACT:scan-pending-tasks` (see `## CronList Filter Discipline` below).
 3. If no match is found: no-op success — nothing to stop. The next [`/PACT:start-pending-scan`](start-pending-scan.md) invocation will cold-start cleanly.
 4. If a match is found: extract the leading 8-character cron ID from the line (see `## ID Extraction Block` below) and call `CronDelete(id=<extracted-id>)`.
+5. Write a `scan_disarmed` event marking the teardown time. Paired writer to the `scan_armed` event written by [start-pending-scan.md Step 5](start-pending-scan.md#operation); together they drive the producer-side idempotency check in [hooks/wake_inbox_drain.py](../hooks/wake_inbox_drain.py), which suppresses the redundant Arm directive only when `scan_armed` is strictly more recent than `scan_disarmed` (re-arm dominance under post-Teardown re-arm).
 
-Ordering rationale: the CronList lookup is the only mechanism for locating the cron ID — IDs are platform-assigned and not caller-specifiable. The filter-then-delete sequence is the canonical pattern; reversing it is impossible without an externally-tracked ID.
+   ```bash
+   set -e
+   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] stop-pending-scan.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
+   SJ="{plugin_root}/hooks/shared/session_journal.py"
+   DISARMED_AT=$(date +%s)
+   python3 "$SJ" write --type scan_disarmed --session-dir '{session_dir}' --stdin <<JSON
+   {"disarmed_at": $DISARMED_AT}
+   JSON
+   ```
+
+   Note: `<<JSON` (not `<<'JSON'`) so `$DISARMED_AT` expands. `set -e` + ERR trap mirror the canonical orchestrate.md pattern and the symmetric write in start-pending-scan.md Step 5.
+
+Ordering rationale: the CronList lookup is the only mechanism for locating the cron ID — IDs are platform-assigned and not caller-specifiable. The filter-then-delete sequence is the canonical pattern; reversing it is impossible without an externally-tracked ID. The scan_disarmed write follows the CronDelete so the event reflects actual disarm (the cron-absent post-condition has held since Step 4 completed); writing it before Step 4 would risk surfacing a stale disarm event if the CronDelete subsequently failed.
+
+**Audit**: the scan_disarmed write is paired with scan_armed in [start-pending-scan.md Step 5](start-pending-scan.md#operation). The two events together drive the producer-side idempotency check in [hooks/wake_inbox_drain.py](../hooks/wake_inbox_drain.py). An editing LLM tempted to elide the disarm write because "the CronList check already covers idempotency" misses the cross-component dependency: wake_inbox_drain.py runs in a Python subprocess that CANNOT read CronList (the platform's session-scoped cron store is in-memory only). The journal-event read is the only Python-accessible signal for "cron disarmed in this session"; removing the scan_disarmed write blinds the drain hook to teardown events, re-introducing the post-Teardown stale-suppression edge case. The write MUST remain.
 
 ## Lead-Session Guard
 
@@ -72,7 +87,7 @@ for line in cron_list_output.splitlines():
 CronList output lines are formatted as `{id} — {cron} ({recurring}) [session-only]: {prompt}`. The ID is the leading 8-character cron ID, ending at the first space.
 
 ```python
-# match_line: "eb10528d — */3 * * * * (recurring) [session-only]: /PACT:scan-pending-tasks"
+# match_line: "eb10528d — */5 * * * * (recurring) [session-only]: /PACT:scan-pending-tasks"
 cron_id = match_line.split(" ", 1)[0].strip()
 # cron_id == "eb10528d"
 CronDelete(id=cron_id)

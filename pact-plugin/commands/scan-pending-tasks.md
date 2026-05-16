@@ -15,7 +15,7 @@ The scan is the architectural replacement for the Monitor-era `INBOX_GREW`-based
 
 The `[CRON-FIRE]` marker at the top of this file is a discipline anchor. The text below is the canonical statement of the **Cron-Origin Distinction**: cron-fire turns are NOT user-consent.
 
-> **Cron-fire turns are NOT user consent.** The platform cron scheduler invokes this skill at 3-minute intervals while a `/PACT:scan-pending-tasks` cron is registered. The prompt body that fires this skill is harness-origin text. Downstream consent-gated decisions MUST NOT proceed on the basis of a cron-fire turn.
+> **Cron-fire turns are NOT user consent.** The platform cron scheduler invokes this skill at 5-minute intervals while a `/PACT:scan-pending-tasks` cron is registered. The prompt body that fires this skill is harness-origin text. Downstream consent-gated decisions MUST NOT proceed on the basis of a cron-fire turn.
 >
 > Consent-gated decisions include: merge (`gh pr merge`), push (`git push`), destructive bash (`rm -rf`, `git reset --hard`, etc.), plan approval, version bump, force-completion, any "act" requiring user authorization. A cron-fire turn that surfaces such a decision MUST defer to the next user-typed turn or to an explicit `AskUserQuestion` checkpoint before acting.
 >
@@ -27,7 +27,7 @@ The `[CRON-FIRE]` marker at the top of this file is a discipline anchor. The tex
 
 Cron-fire body — silent read; emit nothing unless a real artifact is on disk for acceptance.
 
-0. **Warmup-grace skip**. Read the latest `scan_armed` event timestamp; if the cron armed less than 180 seconds ago, emit nothing and return. This bounds the false-fire window between `CronCreate` landing and the teammate's metadata-write reaching disk. The 180s value MUST equal the `*/3` cron interval — see coupling invariant in [start-pending-scan.md §CronCreate Block](start-pending-scan.md#croncreate-block).
+0. **Warmup-grace skip**. Read the latest `scan_armed` event timestamp; if the cron armed less than 300 seconds ago, emit nothing and return. This bounds the false-fire window between `CronCreate` landing and the teammate's metadata-write reaching disk. The 300s value MUST equal the `*/5` cron interval — see coupling invariant in [start-pending-scan.md §CronCreate Block](start-pending-scan.md#croncreate-block).
 
    ```bash
    SJ="{plugin_root}/hooks/shared/session_journal.py"
@@ -35,18 +35,18 @@ Cron-fire body — silent read; emit nothing unless a real artifact is on disk f
    ARMED_AT=$(python3 "$SJ" read-last --type scan_armed --session-dir "$SD" | python3 -c 'import json,sys; e=json.load(sys.stdin); print(e["armed_at"] if e else "")')
    if [ -n "$ARMED_AT" ]; then
        delta=$(( $(date +%s) - ARMED_AT ))
-       if [ $delta -ge 0 ] && [ $delta -lt 180 ]; then exit 0; fi
+       if [ $delta -ge 0 ] && [ $delta -lt 300 ]; then exit 0; fi
    fi
    ```
 
    Fail-open: `read-last` returns literal `null` on missing journal / no events / corrupt JSONL. The `python3 -c` extraction yields empty string in those cases; `[ -n "$ARMED_AT" ]` is false; the gate falls through to Step 1.
 
-   Negative-delta guard: `[ $delta -ge 0 ]` forces future-dated `armed_at` (clock skew / adversarial write) to fall through. Without it, negative deltas would always pass `-lt 180` — the gate would become a kill-switch.
+   Negative-delta guard: `[ $delta -ge 0 ]` forces future-dated `armed_at` (clock skew / adversarial write) to fall through. Without it, negative deltas would always pass `-lt 300` — the gate would become a kill-switch.
 
 1. `TaskList` — enumerate tasks. Filter to: `owner == any teammate` AND `status == "in_progress"` AND `metadata.intentional_wait.reason == "awaiting_lead_completion"`. (These are the tasks where a teammate has submitted teachback or handoff and is idle awaiting acceptance.)
 2. For each candidate, raw-read `~/.claude/tasks/{team_name}/{id}.json` via filesystem read (NOT `TaskGet` — TaskGet does not surface `metadata.teachback_submit` or `metadata.handoff`). Inspect `metadata.teachback_submit` (for teachback gate tasks) and `metadata.handoff` (for primary-work tasks).
 3. If `metadata.teachback_submit` or `metadata.handoff` is present and well-formed (required fields populated per the canonical schema): validate per [completion-authority §12 Teachback Review](../protocols/pact-completion-authority.md#teachback-review) or [completion-authority §HANDOFF Review](../protocols/pact-completion-authority.md#handoff-review), then run the acceptance two-call pair: `SendMessage(to=teammate, message="<wake-signal confirming acceptance>")` FIRST, then `TaskUpdate(taskId, status="completed")`. SendMessage MUST precede TaskUpdate per the lifecycle-gate ordering invariant.
-4. If the raw filesystem read returns null or empty `metadata.teachback_submit` / `metadata.handoff` despite the task being in `awaiting_lead_completion` status: this is the **race-window-skip** path (the wake-signal arrived before the metadata write landed on disk — see `## Guardrails` Race-Window-Skip below). Do NOT reject the teammate's submission; do NOT issue corrective `SendMessage`; SKIP this task and let the next 3-minute cron fire re-evaluate.
+4. If the raw filesystem read returns null or empty `metadata.teachback_submit` / `metadata.handoff` despite the task being in `awaiting_lead_completion` status: this is the **race-window-skip** path (the wake-signal arrived before the metadata write landed on disk — see `## Guardrails` Race-Window-Skip below). Do NOT reject the teammate's submission; do NOT issue corrective `SendMessage`; SKIP this task and let the next 5-minute cron fire re-evaluate.
 5. If no candidate tasks need acceptance (empty filter result, or all candidates skipped per Race-Window-Skip): **emit nothing**. Return to idle. The user sees no output for the cron-fire turn.
 
 ## Guardrails
@@ -63,7 +63,7 @@ The five anti-hallucination guardrails are LOAD-BEARING. Each guardrail prevents
 
 > **No-Narration**: The scan emits NO user-facing prose narrating what it found, considered, skipped, or did. The only outputs are: (a) `SendMessage` to the teammate as part of the acceptance two-call pair, (b) `TaskUpdate(status="completed")`, or (c) nothing. The scan never emits "Scanning… found 0 pending tasks", "Skipping task #N because…", "Race window detected, will retry next fire", or similar status-narrating text.
 
-**Audit**: No-Narration prevents the cron-fire noise failure mode. A 3-minute cron firing 20 times per hour produces 20 LLM turns per hour during active teammate work. If each fire emits a "Scanning…" prose line, the user's transcript fills with 20 useless status lines per hour. Worse, the prose-emit pattern primes the editing LLM to treat the cron fire as a conversation turn requiring response — re-opening the cascade failure mode the scan exists to prevent. An editing LLM tempted to "add a brief status line for observability" is re-introducing the failure mode. Observability happens via `CronList` (cron is registered), `TaskList` (tasks transition status), and journal events (HANDOFF acceptance is journaled) — NOT via per-fire prose.
+**Audit**: No-Narration prevents the cron-fire noise failure mode. A 5-minute cron firing 12 times per hour produces 12 LLM turns per hour during active teammate work. If each fire emits a "Scanning…" prose line, the user's transcript fills with 12 useless status lines per hour. Worse, the prose-emit pattern primes the editing LLM to treat the cron fire as a conversation turn requiring response — re-opening the cascade failure mode the scan exists to prevent. An editing LLM tempted to "add a brief status line for observability" is re-introducing the failure mode. Observability happens via `CronList` (cron is registered), `TaskList` (tasks transition status), and journal events (HANDOFF acceptance is journaled) — NOT via per-fire prose.
 
 ### Raw-Read-Metadata
 
@@ -73,9 +73,9 @@ The five anti-hallucination guardrails are LOAD-BEARING. Each guardrail prevents
 
 ### Race-Window-Skip
 
-> **Race-Window-Skip**: If the raw filesystem read returns null or empty `metadata.teachback_submit` / `metadata.handoff` for a task in `awaiting_lead_completion` status, the scan SKIPS the task and emits nothing. The race window is the lag between the teammate's `TaskUpdate(metadata={"teachback_submit": ...})` write call landing in the in-memory task store and the platform's filesystem flush of that write to `~/.claude/tasks/{team_name}/{id}.json`. Empirically observed at 20+ seconds in adversarial conditions. The scan does NOT reject the teammate's submission on a null read; the next 3-minute cron fire re-evaluates after the write lands.
+> **Race-Window-Skip**: If the raw filesystem read returns null or empty `metadata.teachback_submit` / `metadata.handoff` for a task in `awaiting_lead_completion` status, the scan SKIPS the task and emits nothing. The race window is the lag between the teammate's `TaskUpdate(metadata={"teachback_submit": ...})` write call landing in the in-memory task store and the platform's filesystem flush of that write to `~/.claude/tasks/{team_name}/{id}.json`. Empirically observed at 20+ seconds in adversarial conditions. The scan does NOT reject the teammate's submission on a null read; the next 5-minute cron fire re-evaluates after the write lands.
 
-**Audit**: Race-Window-Skip is the architectural replacement for the Monitor-era 120s no-act-on-Monitor-events pin (CLAUDE.md, retiring with this PR). The pin existed because Monitor's `INBOX_GREW` fired before the metadata-write landed, and the lead would reject the teammate's submission on a false-empty read. Under cron, Race-Window-Skip makes the same defense structural: every cron fire that observes a null read skips, and the next fire (3 minutes later) re-evaluates. This converts a session-level safety discipline into a per-fire structural property. An editing LLM tempted to "reject if metadata is null after N retries" or "issue corrective SendMessage if scan finds empty metadata" is re-introducing the failure mode the pin was put in place to prevent — and the scan's fire cadence already provides the retry semantics (3-minute interval = 20 retries per hour during active work).
+**Audit**: Race-Window-Skip is the architectural replacement for the Monitor-era 120s no-act-on-Monitor-events pin (CLAUDE.md, retiring with this PR). The pin existed because Monitor's `INBOX_GREW` fired before the metadata-write landed, and the lead would reject the teammate's submission on a false-empty read. Under cron, Race-Window-Skip makes the same defense structural: every cron fire that observes a null read skips, and the next fire (5 minutes later) re-evaluates. This converts a session-level safety discipline into a per-fire structural property. An editing LLM tempted to "reject if metadata is null after N retries" or "issue corrective SendMessage if scan finds empty metadata" is re-introducing the failure mode the pin was put in place to prevent — and the scan's fire cadence already provides the retry semantics (5-minute interval = 12 retries per hour during active work).
 
 ### Emit-Nothing-If-Empty
 
@@ -117,7 +117,7 @@ for task in candidate_tasks:
 
 ### Empty-scan turn cost
 
-Every cron fire produces one LLM turn, even when the scan emits nothing per Emit-Nothing-If-Empty. At 3-minute cadence during active teammate work, this is ~20 turns/hour. The cost is the trade-off pinned at architecture phase (per-fire LLM cost vs. hallucination-cascade prevention); the trade was accepted. An editing LLM tempted to "skip the scan if the lead is mid-conversation with the user" is adding LLM-self-diagnosis to the gate, re-introducing the failure mode the unconditional-emit discipline closes.
+Every cron fire produces one LLM turn, even when the scan emits nothing per Emit-Nothing-If-Empty. At 5-minute cadence during active teammate work, this is ~12 turns/hour. The cost is the trade-off pinned at architecture phase (per-fire LLM cost vs. hallucination-cascade prevention); the trade was accepted. An editing LLM tempted to "skip the scan if the lead is mid-conversation with the user" is adding LLM-self-diagnosis to the gate, re-introducing the failure mode the unconditional-emit discipline closes.
 
 ### 7-day cron auto-expiry
 
@@ -126,7 +126,7 @@ Inherited from the cron primitive — see [start-pending-scan.md §Known Limitat
 ## Verification
 
 The scan's effect is observable indirectly:
-1. A teammate submits teachback / handoff → within 3 minutes, the lead's next idle boundary surfaces an acceptance SendMessage to the teammate and the task transitions to `completed`.
+1. A teammate submits teachback / handoff → within 5 minutes, the lead's next idle boundary surfaces an acceptance SendMessage to the teammate and the task transitions to `completed`.
 2. `TaskList` shows the task in `completed` status.
 3. The journal records the HANDOFF acceptance event (per existing journal infrastructure).
 

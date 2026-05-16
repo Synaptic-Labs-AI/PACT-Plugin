@@ -44,11 +44,22 @@ Single-emit discipline:
   the single-emit shape is cleaner). Drain-path markers are FRESH
   cross-session signals — surface them regardless of armed-state.
 - Drain path empty → producer-side idempotency check on the B-1
-  fallback path: if a `scan_armed` event exists in this session's
-  journal, the cron is already armed; suppress the redundant emit. If
-  no `scan_armed` event (cold-start or post-Teardown window), run the
-  count_active_tasks fallback. Positive count → emit Arm. Zero count
-  → suppressOutput.
+  fallback path: read both `scan_armed` and `scan_disarmed` events
+  from this session's journal and compare timestamps. Suppress only
+  when `scan_armed` is present AND (`scan_disarmed` is absent OR
+  `scan_armed.armed_at` strictly greater than
+  `scan_disarmed.disarmed_at`) — i.e., the most recent lifecycle
+  event in this session was an arm, not a disarm. Otherwise (no
+  scan_armed event, or scan_disarmed is at least as recent as
+  scan_armed) run the count_active_tasks fallback. Positive count
+  → emit Arm. Zero count → suppressOutput.
+- Event-presence is the primary predicate; the timestamp comparison
+  is gated on both events having well-typed int timestamps. A
+  malformed event with `armed_at=None` is treated as if absent
+  (fail-conservative emit). Schema validation at write-time
+  (`_REQUIRED_FIELDS_BY_TYPE` in shared/session_journal.py) makes
+  this an edge case rather than a happy path, but the explicit type
+  check keeps the producer-side check robust to journal corruption.
 
 Performance hygiene:
 - Non-lead session short-circuits to suppressOutput before any
@@ -260,9 +271,12 @@ def _decide_and_emit(input_data: dict) -> None:
          (single-emit discipline; skip the fallback). Drain-path
          markers are fresh cross-session signals — surface them
          regardless of armed-state.
-      5. Producer-side idempotency: if `scan_armed` event present in
-         this session's journal → suppressOutput (cron already armed).
-         Any journal-read failure falls through to step 6.
+      5. Producer-side idempotency: read `scan_armed` and
+         `scan_disarmed` events from this session's journal.
+         Suppress only when scan_armed is present with a well-typed
+         armed_at AND (scan_disarmed is absent OR scan_armed.armed_at
+         > scan_disarmed.disarmed_at). Any journal-read failure or
+         malformed event falls through to step 6 (fail-conservative).
       6. Fallback: count_active_tasks(team_name) >= 1 → emit Arm.
          Otherwise → suppressOutput.
 
@@ -294,26 +308,58 @@ def _decide_and_emit(input_data: dict) -> None:
         _emit_arm()
         return
 
-    # Producer-side idempotency on the B-1 fallback path: a `scan_armed`
-    # journal event indicates the lead has already armed the pending-scan
-    # cron in this session, so re-emitting the Arm directive on every
-    # UserPromptSubmit while count >= 1 is redundant noise. The cron is
-    # durable=false + session-scoped (CronCreate semantics), so the
-    # scan_armed event's presence in this session's journal is equivalent
-    # to "cron currently registered" except in the post-Teardown window —
-    # which is fail-safe: a missing event correctly falls through to emit.
-    # Any read failure (journal unreadable, pact_context uninitialized,
-    # etc.) falls through to existing emit behavior — over-emit is benign
-    # under the skill body's CronList exact-suffix-match idempotency;
-    # under-emit could miss a teammate's completion-authority signal.
-    # Producer-side deterministic Python check, NOT LLM-self-diagnosis at
-    # the directive site — distinct from the failure mode that
+    # Producer-side idempotency on the B-1 fallback path: read the most
+    # recent `scan_armed` and `scan_disarmed` events from this session's
+    # journal. Suppress the redundant Arm directive only when the lead's
+    # most recent lifecycle action was an arm (not a disarm) — i.e., the
+    # cron is currently armed in this session. The strict-greater
+    # comparison ensures a re-arm following a teardown surfaces an Arm
+    # directive (re-arm dominance); only a stale arm-without-subsequent-
+    # disarm suppresses.
+    #
+    # Event-presence is the primary predicate; timestamp comparison is
+    # gated on both fields being well-typed int values. A malformed
+    # event (missing armed_at, or wrong type) is treated as if absent
+    # and falls through to the existing emit behavior — over-emit is
+    # benign under the skill body's CronList exact-suffix-match
+    # idempotency; under-emit could miss a teammate's completion-
+    # authority signal.
+    #
+    # Outer-except narrowing rationale: the call surface today (eager
+    # top-level import at the wrapped-imports block above + internal
+    # `except Exception` layers inside read_last_event and its delegate
+    # _read_last_event_at) catches all currently-exercisable failures
+    # before they propagate. The narrowed `(ImportError, AttributeError,
+    # TypeError)` is a safety net for future refactors that could
+    # introduce lazy imports, missing attributes on a reshaped event
+    # dict, or unguarded comparisons; it documents WHAT we'd defend
+    # against rather than blanket-swallowing future bugs. Reviewer
+    # alternative considered: elide the outer try entirely as dead-code.
+    # We keep the narrowed catch to pin the regression-defense intent
+    # (paired with test_outer_guard_catches_unexpected_exception which
+    # monkeypatches read_last_event to raise).
+    #
+    # Producer-side deterministic Python check, NOT LLM-self-diagnosis
+    # at the directive site — distinct from the failure mode that
     # start-pending-scan.md §Audit forbids.
     try:
-        if read_last_event("scan_armed") is not None:
-            print(_SUPPRESS_OUTPUT)
-            return
-    except Exception:
+        armed = read_last_event("scan_armed")
+        disarmed = read_last_event("scan_disarmed")
+        if armed is not None:
+            armed_at = armed.get("armed_at")
+            if isinstance(armed_at, int) and not isinstance(armed_at, bool):
+                if disarmed is None:
+                    print(_SUPPRESS_OUTPUT)
+                    return
+                disarmed_at = disarmed.get("disarmed_at")
+                if (
+                    isinstance(disarmed_at, int)
+                    and not isinstance(disarmed_at, bool)
+                    and armed_at > disarmed_at
+                ):
+                    print(_SUPPRESS_OUTPUT)
+                    return
+    except (ImportError, AttributeError, TypeError):
         pass
 
     # B-1 fallback: lead-side unowned-create-then-owner-update dispatch

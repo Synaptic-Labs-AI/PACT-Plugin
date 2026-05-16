@@ -314,8 +314,8 @@ def test_lead_only_completion_preservation_no_standalone_taskupdate_completed_in
 def test_warmup_grace_step_0_present_in_operation(cmd_text):
     """The warmup-grace skip step is anchored at Step 0 of §Operation:
     it must read `scan_armed` and compare elapsed time against the
-    warmup-grace constant (literal `180`). Coupling pair partner:
-    `cron="*/3 * * * *"` in start-pending-scan.md §CronCreate Block —
+    warmup-grace constant (literal `300`). Coupling pair partner:
+    `cron="*/5 * * * *"` in start-pending-scan.md §CronCreate Block —
     the two literals MUST move together (first-fire-coverage invariant).
 
     Counter-test-by-revert: reverting Step 0 (removing the numbered
@@ -341,9 +341,9 @@ def test_warmup_grace_step_0_present_in_operation(cmd_text):
         "the warmup-grace skip reads the latest scan_armed event from "
         "the session journal."
     )
-    assert "180" in step_0_body, (
-        "Step 0 must contain the literal `180` (seconds) — the warmup-"
-        "grace constant. Coupled in lockstep to the */3 cron interval "
+    assert "300" in step_0_body, (
+        "Step 0 must contain the literal `300` (seconds) — the warmup-"
+        "grace constant. Coupled in lockstep to the */5 cron interval "
         "in start-pending-scan.md §CronCreate Block; tuning one without "
         "the other re-opens the false-fire window."
     )
