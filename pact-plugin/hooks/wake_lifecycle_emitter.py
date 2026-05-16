@@ -152,6 +152,7 @@ if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
 import shared.pact_context as pact_context
+from shared.intentional_wait import is_self_complete_exempt
 from shared.pact_context import get_team_name
 from shared.session_state import is_safe_path_component
 from shared.task_utils import read_task_json
@@ -602,6 +603,218 @@ def _maybe_write_teammate_arm_marker(
         return
 
 
+# Trigger sentinel for Tier-2 teardown markers. Parallel to
+# _TEAMMATE_SELF_CLAIM_TRIGGER; documents the carve-out class for
+# debug/triage. The drain side consumes the `type` field; this
+# field is forensic-only.
+_TEAMMATE_SELF_COMPLETE_EXEMPT_TRIGGER = "teammate_self_complete_exempt"
+
+
+def _maybe_write_teammate_teardown_marker(
+    input_data: dict[str, Any],
+    team_name: str,
+    is_lead: bool | None = None,
+) -> None:
+    """
+    Write a wake-inbox teardown marker iff a teammate-session terminal-
+    status TaskUpdate drives the team's lifecycle-relevant active-task
+    count to zero AND the just-completed task is is_self_complete_exempt
+    (signal-task or memory-save carve-out).
+
+    Sibling to `_maybe_write_teammate_arm_marker` (L391): same call
+    shape, same `is_lead` memoization protocol, same predicate-ladder
+    discipline (cheap checks before filesystem I/O). The marker shape
+    is `{schema_version, type: "teardown", task_id, team_name, owner,
+    timestamp_ms, trigger}` — `type` field is the drain-side dispatch
+    key (the consumer at wake_inbox_drain.py classifies by this value).
+
+    Tier-2 fallback path covered:
+    - Carve-out teammates (today `pact-secretary`; tomorrow any
+      agentType added to SELF_COMPLETE_EXEMPT_AGENT_TYPES) call
+      TaskUpdate(status="completed") in their OWN session. PostToolUse
+      `additionalContext` from a teammate session would target the
+      WRONG session for the lead's Teardown directive — the marker
+      file is the only correct cross-session bridge.
+    - The Tier-1 TaskCompleted handler (`teardown_request_emitter.py`)
+      catches the dominant lead-driven path; it cannot fire here
+      because the teammate, not the lead, is the TaskCompleted hook
+      caller's session.
+
+    Predicate ladder (all six clauses must hold):
+      Clause 1 — team_name path-safe: non-empty AND
+                 is_safe_path_component(team_name). Mirrors the same
+                 defense applied by `_maybe_write_teammate_arm_marker`.
+      Clause 2 — tool_name == "TaskUpdate": Teardown trigger only fires
+                 on terminal-status TaskUpdate. Belt-and-suspenders
+                 against future hooks.json matcher widening.
+      Clause 3 — `_is_terminal_status_update(input_data)`: the just-
+                 completed task is transitioning to completed/deleted.
+                 Status-only TaskUpdates (metadata edits) fail this.
+      Clause 4 — `count_active_tasks(team_name) == 0`: 1->0 transition;
+                 the team has no remaining lifecycle-relevant work.
+      Clause 5 — `is_lead is False`: positive teammate-session check.
+                 The lead-side Tier-1 path handles the lead-driven case;
+                 this writer is teammate-side only. When `is_lead is
+                 None` (test direct-invocation path), fall back to
+                 computing `is_lead_session(input_data, team_name)`.
+      Clause 6 — task_id present AND `is_self_complete_exempt(task,
+                 team_name)`: the carve-out witness. The completed task
+                 belongs to an exempt agent type (secretary today) OR
+                 is a signal-task (blocker/algedonic). Reads the task
+                 JSON to evaluate.
+
+    Pure side-effect helper. Never raises (outer except swallows every
+    OSError + Exception class). Returns None unconditionally.
+    """
+    try:
+        # Clause 1: team_name path-safety.
+        if not isinstance(team_name, str) or not team_name:
+            return
+        if not is_safe_path_component(team_name):
+            return
+
+        # Clause 2: tool_name == TaskUpdate.
+        tool_name = input_data.get("tool_name")
+        if tool_name != "TaskUpdate":
+            return
+
+        # Clause 3: terminal-status transition.
+        if not _is_terminal_status_update(input_data):
+            return
+
+        # Clause 4: 1->0 active-task transition.
+        # count_active_tasks filters signal-tasks + self-complete-
+        # exempt owners via its lifecycle-relevant filter.
+        if count_active_tasks(team_name) != 0:
+            return
+
+        # Clause 5: positive teammate-session check. The `is_lead`
+        # argument is the memoized result computed once by
+        # `_decide_directive`; when None (direct-invocation path), fall
+        # back to computing the check in-helper. Mirrors clause 5 of
+        # `_maybe_write_teammate_arm_marker`.
+        if is_lead is None and is_lead_session(input_data, team_name):
+            return
+        if is_lead:
+            return
+
+        # Clause 6: task_id present AND carve-out witness.
+        # `is_self_complete_exempt` has two OR-combined surfaces (per
+        # shared/intentional_wait.py:410): (1) team-config agentType
+        # in SELF_COMPLETE_EXEMPT_AGENT_TYPES (today pact-secretary),
+        # (2) signal-task metadata (completion_type="signal" AND
+        # type in {blocker, algedonic}). Tier-2 wants surface (1)
+        # ONLY — signal-tasks are filtered out of count_active_tasks'
+        # lifecycle-relevant tally (per shared/wake_lifecycle.py), so
+        # they NEVER drive a real 1->0 transition; emitting a Teardown
+        # marker on a signal-task completion would surface a phantom
+        # Teardown directive. Excluding signal-tasks here keeps the
+        # architecture's §4.4 invariant intact: "signal-tasks don't
+        # drive cron". Explicit metadata check (inline-literal mirror
+        # of the pattern at agent_handoff_emitter.py:300) excludes
+        # them BEFORE the broader is_self_complete_exempt call.
+        task_id = _extract_task_id(input_data)
+        if not task_id:
+            return
+        completed_task = read_task_json(task_id, team_name)
+        if not isinstance(completed_task, dict) or not completed_task:
+            return
+        task_metadata = completed_task.get("metadata") or {}
+        if isinstance(task_metadata, dict):
+            if task_metadata.get("completion_type") == "signal":
+                signal_type = task_metadata.get("type")
+                if signal_type in ("blocker", "algedonic"):
+                    return
+        if not is_self_complete_exempt(completed_task, team_name):
+            return
+
+        # All six clauses hold — write the marker atomically.
+        session_id_raw = input_data.get("session_id")
+        if not isinstance(session_id_raw, str) or not session_id_raw:
+            return
+
+        owner = completed_task.get("owner")
+        if not isinstance(owner, str) or not owner:
+            owner = "unknown"
+
+        now = datetime.now(timezone.utc)
+        timestamp = now.strftime("%Y%m%dT%H%M%SZ")
+        timestamp_ms = int(now.timestamp() * 1000)
+        written_at = now.isoformat(timespec="milliseconds").replace(
+            "+00:00", "Z"
+        )
+
+        inbox_dir = (
+            Path.home()
+            / ".claude"
+            / "teams"
+            / team_name
+            / "wake_inbox"
+        )
+        try:
+            inbox_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError:
+            return
+
+        # Filename: {timestamp}-teardown-{session_id}-{task_id}.json —
+        # the `-teardown-` infix is forensic; the drain side dispatches
+        # on the marker payload's `type` field, not the filename. Path
+        # component safety: same NUL + path-separator strip as the Arm
+        # marker writer.
+        safe_task_id = (
+            task_id.replace("/", "_").replace("\\", "_").replace("\x00", "_")
+        )
+        safe_session_id = (
+            session_id_raw.replace("/", "_")
+            .replace("\\", "_")
+            .replace("\x00", "_")
+        )
+        marker_filename = (
+            f"{timestamp}-teardown-{safe_session_id}-{safe_task_id}.json"
+        )
+        marker_path = inbox_dir / marker_filename
+
+        marker_payload = {
+            "schema_version": _WAKE_INBOX_MARKER_SCHEMA_VERSION,
+            "type": "teardown",
+            "written_at": written_at,
+            "writer_session_id": session_id_raw,
+            "tool_name": tool_name,
+            "task_id": task_id,
+            "team_name": team_name,
+            "owner": owner,
+            "timestamp_ms": timestamp_ms,
+            "trigger": _TEAMMATE_SELF_COMPLETE_EXEMPT_TRIGGER,
+        }
+
+        # O_CREAT|O_EXCL atomic write. FileExistsError on collision is
+        # silently swallowed — another writer already signalled.
+        try:
+            fd = os.open(
+                str(marker_path),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            return
+        except OSError:
+            return
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(marker_payload, handle)
+        except OSError:
+            try:
+                os.unlink(str(marker_path))
+            except OSError:
+                pass
+            return
+    except Exception:
+        # Outer catch-all preserves the never-raises contract; teammate
+        # sessions emit on every Task-tool fire, a raise here would
+        # surface as a hook-error UI on every fire.
+        return
+
+
 def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     """
     Return the directive prose to emit, or None for no-op.
@@ -647,6 +860,18 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     # (`wake_inbox_drain.py`, UserPromptSubmit) consumes the marker on
     # the lead's next prompt.
     _maybe_write_teammate_arm_marker(input_data, team_name, is_lead)
+
+    # Teammate-Teardown pre-branch — sibling to the Arm pre-branch.
+    # Covers the Tier-2 carve-out path: when a self-complete-exempt
+    # teammate (today secretary, tomorrow any agentType added to
+    # SELF_COMPLETE_EXEMPT_AGENT_TYPES) drives a 1->0 transition from
+    # its own session, PostToolUse `additionalContext` cannot reach
+    # the lead. The marker file is the cross-session bridge; the lead-
+    # side drain hook (wake_inbox_drain.py UserPromptSubmit) consumes
+    # it and emits the Teardown directive. The dominant lead-driven
+    # path is covered by the Tier-1 TaskCompleted handler
+    # (teardown_request_emitter.py); this fallback is the carve-out.
+    _maybe_write_teammate_teardown_marker(input_data, team_name, is_lead)
 
     # Outer lead-session gate. Layer 0 of the defense-in-depth model;
     # teammate sessions never reach the directive emission paths below.

@@ -118,7 +118,10 @@ def _emit_load_failure_advisory(stage: str, error: BaseException) -> NoReturn:
 
 # ─── fail-closed wrapper around cross-package imports ───────────────────────
 try:
+    import errno
     import os
+    import re
+    from typing import Any
     from pathlib import Path
 
     # Ensure shared package import resolves under the hooks directory.
@@ -128,7 +131,7 @@ try:
 
     import shared.pact_context as pact_context
     from shared.pact_context import get_team_name
-    from shared.session_journal import read_last_event
+    from shared.session_journal import append_event, make_event, read_last_event
     from shared.session_state import is_safe_path_component
     from shared.wake_lifecycle import count_active_tasks, is_lead_session
     # Reuse the canonical _ARM_DIRECTIVE / _TEARDOWN_DIRECTIVE literals
@@ -175,16 +178,30 @@ def _wake_inbox_path(team_name: str) -> Path | None:
     return Path.home() / ".claude" / "teams" / team_name / "wake_inbox"
 
 
-def _drain_markers(inbox_dir: Path) -> dict[str, int]:
+def _drain_markers(inbox_dir: Path) -> dict[str, Any]:
     """Drain every JSON marker in the inbox directory.
 
-    Returns a per-type consumed-count dict keyed by marker `type` field
-    ({"arm": N, "teardown": M}). Marker payloads without a `type` field,
-    with an unrecognized type, or that fail JSON parsing default to
-    `"arm"` — backward-compat with pre-type-field markers AND fail-
-    conservative on corrupt/oversize bodies (the wake intent stands;
-    Arm is the safe default because over-emit is benign under the
-    skill body's CronList exact-suffix-match idempotency).
+    Returns a dispatch dict with per-type consumed counts AND per-type
+    task_id lists captured from successfully-classified marker bodies:
+      {
+        "arm": <int count>,
+        "teardown": <int count>,
+        "teardown_task_ids": <list[str] captured from drained
+                              type="teardown" markers (deduplicated)>,
+      }
+    The `teardown_task_ids` list enables the Tier-1/Tier-2 double-
+    emission guard at the caller (each id is checked against the
+    shared `.teardown_request_emitted/{task_id}` sidecar marker dir
+    before _emit_teardown fires). Arm markers do NOT carry task_ids in
+    the return value — the caller doesn't need per-task identity for
+    the Arm directive emission.
+
+    Marker payloads without a `type` field, with an unrecognized type,
+    or that fail JSON parsing default to `"arm"` — backward-compat
+    with pre-type-field markers AND fail-conservative on corrupt/
+    oversize bodies (the wake intent stands; Arm is the safe default
+    because over-emit is benign under the skill body's CronList exact-
+    suffix-match idempotency).
 
     Read failures and unlink failures are silently swallowed — the drain
     is best-effort; a stuck marker stays on disk and gets re-drained
@@ -213,13 +230,18 @@ def _drain_markers(inbox_dir: Path) -> dict[str, int]:
 
     Pure-after-side-effect; never raises.
     """
-    counts: dict[str, int] = {"arm": 0, "teardown": 0}
+    result: dict[str, Any] = {
+        "arm": 0,
+        "teardown": 0,
+        "teardown_task_ids": [],
+    }
     if not inbox_dir.exists():
-        return counts
+        return result
     try:
         markers = sorted(inbox_dir.glob("*.json"))
     except OSError:
-        return counts
+        return result
+    seen_teardown_ids: set[str] = set()
     for marker in markers:
         try:
             # Size-cap pre-check: 8 KiB is generous against the
@@ -233,6 +255,7 @@ def _drain_markers(inbox_dir: Path) -> dict[str, int]:
             except OSError:
                 size = -1
             marker_type = "arm"
+            marker_task_id: str | None = None
             if size > _MAX_MARKER_BYTES:
                 print(
                     f"wake_inbox_drain: oversize marker "
@@ -254,17 +277,31 @@ def _drain_markers(inbox_dir: Path) -> dict[str, int]:
                         body_type = body.get("type")
                         if body_type in ("arm", "teardown"):
                             marker_type = body_type
+                        if marker_type == "teardown":
+                            raw_task_id = body.get("task_id")
+                            if (
+                                isinstance(raw_task_id, str)
+                                and raw_task_id
+                            ):
+                                marker_task_id = raw_task_id
                 except (OSError, json.JSONDecodeError, ValueError):
                     # Default-to-arm already set above.
                     pass
             os.unlink(str(marker))
-            counts[marker_type] += 1
+            result[marker_type] += 1
+            if (
+                marker_type == "teardown"
+                and marker_task_id is not None
+                and marker_task_id not in seen_teardown_ids
+            ):
+                seen_teardown_ids.add(marker_task_id)
+                result["teardown_task_ids"].append(marker_task_id)
         except OSError:
             # Couldn't unlink — leave the marker on disk; next drain
             # will retry. Do NOT count this marker as consumed so the
             # fallback can still fire if needed.
             continue
-    return counts
+    return result
 
 
 def _emit_arm() -> None:
@@ -295,6 +332,78 @@ def _emit_teardown() -> None:
         }
     }
     print(json.dumps(output))
+
+
+def _sanitize_path_component(value: str) -> str:
+    """Strip path-traversal fragments from a value destined for
+    filesystem joins. Byte-identical to
+    teardown_request_emitter._sanitize_path_component / agent_handoff_
+    emitter._sanitize_path_component — see those modules' docstrings
+    for the full rationale.
+    """
+    return re.sub(r"[/\\\x00-\x1f]|\.\.", "", value)
+
+
+def _teardown_marker_dir(team_name: str) -> Path:
+    """Per-team Teardown-emit marker directory path.
+
+    SHARED with teardown_request_emitter.py — both Tier-1 (TaskCompleted
+    handler) and Tier-2 (this drain) check + claim the same
+    ~/.claude/teams/{team}/.teardown_request_emitted/{task_id}
+    sidecar marker for cross-tier double-emission prevention.
+    """
+    return Path.home() / ".claude" / "teams" / team_name / ".teardown_request_emitted"
+
+
+def _already_emitted_teardown(team_name: str, task_id: str) -> bool:
+    """Test-and-set the per-(team, task_id) Teardown-emit marker.
+
+    Copy-pasted from teardown_request_emitter._already_emitted with
+    `_teardown_marker_dir` substituted as the dir provider, per the
+    helper_location_elevation_pattern memory ("elevate on 3rd consumer").
+    The shared marker dir means a Tier-1 fire that already created the
+    marker for `task_id` causes this predicate to return True here,
+    suppressing the Tier-2 double-emit.
+
+    Returns True iff a prior fire (this tier OR Tier-1) already
+    created the marker. Returns False on fresh fires — the marker is
+    created as a side-effect of this call, atomic at the kernel level
+    via O_CREAT|O_EXCL.
+
+    Fail-open: on any OSError other than EEXIST, returns False so the
+    caller emits. Data-integrity over duplication-prevention when the
+    marker subsystem breaks. Symmetric with the Tier-1 helper.
+    """
+    if (
+        not team_name
+        or team_name in (".", "..")
+        or not task_id
+        or task_id in (".", "..")
+    ):
+        return False
+
+    marker_dir = _teardown_marker_dir(team_name)
+    if marker_dir.is_symlink():
+        return False
+    try:
+        marker_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError:
+        return False
+
+    marker_path = marker_dir / task_id
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(
+            str(marker_path),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+            0o600,
+        )
+        os.close(fd)
+        return False  # we created it; proceed with emit
+    except OSError as e:
+        if e.errno == errno.EEXIST:
+            return True  # prior fire (this tier or Tier-1) owns it
+        return False  # any other error → fail-open, emit anyway
 
 
 def _decide_and_emit(input_data: dict) -> None:
@@ -350,16 +459,71 @@ def _decide_and_emit(input_data: dict) -> None:
     drained = _drain_markers(inbox_dir)
     drained_total = drained["arm"] + drained["teardown"]
     if drained_total > 0:
-        # Type-aware dispatch surface. Teardown branch is reachable only
-        # once a teammate-side producer writes type="teardown" markers
-        # (added in a downstream commit on this branch — until that
-        # producer lands, all drained markers default to "arm" via
-        # _drain_markers' fail-conservative classification). Teardown
-        # takes precedence over Arm when both kinds drain in the same
-        # prompt: a fresh terminal-status signal reflects the most
-        # recent completion-authority state and outweighs a stale
-        # in_progress signal.
+        # Type-aware dispatch surface. Teardown takes precedence over
+        # Arm when both kinds drain in the same prompt: a fresh
+        # terminal-status signal reflects the most recent completion-
+        # authority state and outweighs a stale in_progress signal.
         if drained["teardown"] > 0:
+            # Tier-1 / Tier-2 double-emission guard: each drained
+            # teardown task_id is checked against the SHARED
+            # .teardown_request_emitted/{task_id} sidecar marker dir
+            # (also claimed by teardown_request_emitter.py). If Tier-1
+            # already fired for the same (team, task_id), the marker
+            # exists and the predicate returns True — suppressing the
+            # Tier-2 emit. The first unclaimed id (if any) wins the
+            # marker here and triggers the journal write + directive.
+            #
+            # Multiple teardown markers in one drain may come from
+            # Stop-sweep secondary firings on the same task or from
+            # genuinely-distinct carve-out completions on the same
+            # prompt-boundary. Either way, ONE journal event + ONE
+            # additionalContext directive per drain is the correct
+            # shape (the directive is wake-hint, not per-task work).
+            teardown_task_ids = drained.get("teardown_task_ids") or []
+            claimed_task_id: str | None = None
+            for tid in teardown_task_ids:
+                if not _already_emitted_teardown(team_name, tid):
+                    claimed_task_id = tid
+                    break
+
+            # When the drained markers carry NO task_ids (oversize or
+            # corrupt-body fallback path classified them as teardown
+            # via... wait, that can't happen — only successfully-
+            # classified bodies with isinstance(body, dict) reach the
+            # teardown branch). The empty case here covers a future
+            # refactor that drops task_ids; fail-conservative emit
+            # without journal write rather than silent suppression.
+            if not teardown_task_ids:
+                _emit_teardown()
+                return
+
+            if claimed_task_id is None:
+                # Every drained id was pre-claimed by Tier-1.
+                # Suppress — Tier-1 has already done the work.
+                print(_SUPPRESS_OUTPUT)
+                return
+
+            # Write the journal event keyed to the FIRST claimed id;
+            # the marker write inside _already_emitted_teardown above
+            # already locked the sidecar for this id, so a subsequent
+            # Tier-1 fire for the same id will be suppressed there.
+            try:
+                append_event(
+                    make_event(
+                        "teardown_request",
+                        task_id=claimed_task_id,
+                        team_name=team_name,
+                        tier="2",
+                        reason="wake_inbox_drained",
+                    )
+                )
+            except Exception:
+                # Journal write is the falsifiable trace, but the
+                # directive emission is the wake-signal. Fail-
+                # conservative: emit the directive even if the
+                # journal write fails — under-emit on the lead's
+                # directive is the worse failure mode.
+                pass
             _emit_teardown()
         else:
             _emit_arm()
