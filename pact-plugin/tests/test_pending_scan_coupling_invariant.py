@@ -11,15 +11,15 @@ The architect's spec preamble states:
     first-fire coverage of the false-fire window.
 
 The existing structural tests pin each side INDEPENDENTLY:
-- test_warmup_grace_step_0_present_in_operation pins the literal `180`
+- test_warmup_grace_step_0_present_in_operation pins the literal `300`
   in scan-pending-tasks.md Step 0 (via substring containment).
 - test_cron_create_call_shape_cron_create_block_has_four_fields pins the
-  literal `cron="*/3 * * * *"` in start-pending-scan.md §CronCreate Block.
+  literal `cron="*/5 * * * *"` in start-pending-scan.md §CronCreate Block.
 
 What neither pins: the MATHEMATICAL coupling — that the grace-seconds equal
 the cron-minutes * 60. A future PR that lockstep-bumps both numbers to a
-NON-equal pair (e.g., `*/5` cron + 180s grace, re-opening the false-fire
-window for the [180, 300) range) would pass both existing tests.
+NON-equal pair (e.g., `*/7` cron + 300s grace, re-opening the false-fire
+window for the [300, 420) range) would pass both existing tests.
 
 This test parses both numerics structurally and asserts equality, surviving
 any lockstep cadence retuning while catching asymmetric drift in EITHER
@@ -49,7 +49,7 @@ def _extract_grace_seconds_from_step_0(scan_md_text: str) -> int:
     """Parse the warmup-grace integer from scan-pending-tasks.md Step 0
     bash block. The bash gate's load-bearing literal is the `-lt N`
     comparison: this is the runtime decision boundary, not a prose
-    mention. Prose mentions of `180s` are documentation, not enforcement.
+    mention. Prose mentions of `300s` are documentation, not enforcement.
     """
     op_start = scan_md_text.find("\n## Operation")
     assert op_start >= 0, "scan-pending-tasks.md missing §Operation"
@@ -106,8 +106,8 @@ def test_warmup_grace_equals_cron_interval():
 
     Counter-test discipline (documented at file head): mutating
     EITHER surface independently fails this test; mutating both to
-    a non-equal pair (e.g., `*/5` cron + 180s grace) also fails this
-    test; mutating both to an equal pair (e.g., `*/5` cron + 300s
+    a non-equal pair (e.g., `*/7` cron + 300s grace) also fails this
+    test; mutating both to an equal pair (e.g., `*/7` cron + 420s
     grace) preserves this test BUT breaks the per-side pins,
     forcing atomic-commit awareness.
     """

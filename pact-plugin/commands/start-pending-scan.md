@@ -1,21 +1,21 @@
 ---
-description: Arm the lead's pending-task scan — register a cron entry that fires `/PACT:scan-pending-tasks` every 3 minutes while the lead holds active teammate work. Hook-invoked on first active teammate task; user-invoked manually for debug or recovery.
+description: Arm the lead's pending-task scan — register a cron entry that fires `/PACT:scan-pending-tasks` every 5 minutes while the lead holds active teammate work. Hook-invoked on first active teammate task; user-invoked manually for debug or recovery.
 ---
 # Start Pending Scan
 
-Arm the lead-side scan mechanism: a single recurring cron entry fires `/PACT:scan-pending-tasks` every 3 minutes between tool calls, opening an idle boundary where the platform's `useInboxPoller` delivers queued teammate messages and the scan reads completion-authority artifacts directly off disk.
+Arm the lead-side scan mechanism: a single recurring cron entry fires `/PACT:scan-pending-tasks` every 5 minutes between tool calls, opening an idle boundary where the platform's `useInboxPoller` delivers queued teammate messages and the scan reads completion-authority artifacts directly off disk.
 
 ## Overview
 
 > **Cron is an alarm clock, not a mailbox.** On every cron fire, run the scan body and return to idle. The cron prompt is a harness-origin invocation — see `## Cron-Fire Origin` below; it is NOT user input and MUST NOT be treated as user consent for downstream consent-gated decisions (merge, push, destructive bash, etc.).
 >
-> **Wake surfaces between tool calls within a turn, not mid-tool.** Platform cron events queue during a long-running tool and fire when the tool returns. The scan's promise is "tasks surface at most one 3-minute interval after they land on disk," NOT "instant interrupt anywhere." For multi-tool turns the cron reliably opens an idle boundary between tools; for single long tools (e.g., a 90-second blocking sleep) the lead is effectively unwakeable until the tool returns.
+> **Wake surfaces between tool calls within a turn, not mid-tool.** Platform cron events queue during a long-running tool and fire when the tool returns. The scan's promise is "tasks surface at most one 5-minute interval after they land on disk," NOT "instant interrupt anywhere." For multi-tool turns the cron reliably opens an idle boundary between tools; for single long tools (e.g., a 90-second blocking sleep) the lead is effectively unwakeable until the tool returns.
 
-Problem this solves: during long-running operations, the platform's `useInboxPoller` only delivers queued `SendMessage` between tool calls; long blocking tool calls leave inbound completion-authority signals stuck until the next idle boundary. See [Communication Charter §Cron-Fire Mechanism](../protocols/pact-communication-charter.md#cron-fire-mechanism). The cron-fire forces a turn at the next between-tool-call boundary, bounding latency by the 3-minute fire interval rather than by the next opportunistic idle.
+Problem this solves: during long-running operations, the platform's `useInboxPoller` only delivers queued `SendMessage` between tool calls; long blocking tool calls leave inbound completion-authority signals stuck until the next idle boundary. See [Communication Charter §Cron-Fire Mechanism](../protocols/pact-communication-charter.md#cron-fire-mechanism). The cron-fire forces a turn at the next between-tool-call boundary, bounding latency by the 5-minute fire interval rather than by the next opportunistic idle.
 
 Single-cron model. Lifetime is scoped to the period during which the lead holds assigned, uncompleted teammate tasks. Lifecycle is hook-driven: arm on 0→1 active-task transition; teardown on 1→0 last-active-task transition.
 
-**Audit**: both alarm-clock paragraphs are non-negotiable. The first paragraph prevents two failure modes: (a) an editing LLM treating the cron prompt as user-typed input and thereby letting cron fires drive consent-gated decisions — the `[CRON-FIRE]` marker in `scan-pending-tasks.md` plus the §Cron-Origin Distinction clause in the completion-authority protocol are the structural enforcement; (b) the woken lead emitting acknowledgment text on every cron fire instead of returning to silent idle when nothing is pending (No-Narration + Emit-Nothing-If-Empty in the scan body cover this — see [scan-pending-tasks.md §Guardrails](scan-pending-tasks.md#guardrails)). The second paragraph prevents an editing LLM from inferring mid-tool interrupt from "scan fires every 3 minutes" — the substrate's actual capability is between-tool, not anywhere. Removing either paragraph silently overpromises the mechanism.
+**Audit**: both alarm-clock paragraphs are non-negotiable. The first paragraph prevents two failure modes: (a) an editing LLM treating the cron prompt as user-typed input and thereby letting cron fires drive consent-gated decisions — the `[CRON-FIRE]` marker in `scan-pending-tasks.md` plus the §Cron-Origin Distinction clause in the completion-authority protocol are the structural enforcement; (b) the woken lead emitting acknowledgment text on every cron fire instead of returning to silent idle when nothing is pending (No-Narration + Emit-Nothing-If-Empty in the scan body cover this — see [scan-pending-tasks.md §Guardrails](scan-pending-tasks.md#guardrails)). The second paragraph prevents an editing LLM from inferring mid-tool interrupt from "scan fires every 5 minutes" — the substrate's actual capability is between-tool, not anywhere. Removing either paragraph silently overpromises the mechanism.
 
 ## When to Invoke
 
@@ -36,8 +36,8 @@ Single procedure — the command IS the operation. No Arm/Teardown sub-section.
 1. `CronList` — read all cron entries registered in the current session.
 2. Filter the output for any line whose suffix after `": "` is exactly `/PACT:scan-pending-tasks` (see `## CronList Filter Discipline` below for the exact-equality contract).
 3. If a match is found: no-op — already armed. Cheap on every re-invocation.
-4. Otherwise cold-start: `CronCreate(cron="*/3 * * * *", prompt="/PACT:scan-pending-tasks", recurring=True, durable=False)` — see `## CronCreate Block` below for the exact 4-field call shape.
-5. Write a `scan_armed` event marking the cold-start time. Read by [scan-pending-tasks.md Step 0](scan-pending-tasks.md#operation) to bound the warmup-grace skip window. The 180s grace MUST equal the `*/3` cron interval — see coupling invariant in `## CronCreate Block` below.
+4. Otherwise cold-start: `CronCreate(cron="*/5 * * * *", prompt="/PACT:scan-pending-tasks", recurring=True, durable=False)` — see `## CronCreate Block` below for the exact 4-field call shape.
+5. Write a `scan_armed` event marking the cold-start time. Read by [scan-pending-tasks.md Step 0](scan-pending-tasks.md#operation) to bound the warmup-grace skip window. The 300s grace MUST equal the `*/5` cron interval — see coupling invariant in `## CronCreate Block` below.
 
    ```bash
    set -e
@@ -97,7 +97,7 @@ Exactly 4 named fields. No additional arguments.
 
 ```python
 CronCreate(
-    cron="*/3 * * * *",
+    cron="*/5 * * * *",
     prompt="/PACT:scan-pending-tasks",
     recurring=True,
     durable=False,
@@ -105,7 +105,7 @@ CronCreate(
 ```
 
 **Audit**: each field is load-bearing.
-- `cron="*/3 * * * *"` — every 3 minutes. The 3-minute cadence is the architecturally-pinned trade-off (per-fire LLM-turn cost vs. latency for completion-authority work); shrinking to `*/1` triples the per-hour cost without proportional benefit, expanding to `*/5` extends worst-case latency past the user-perceived "this should have completed by now" threshold. **Coupling invariant**: cron interval and warmup-grace constant in [scan-pending-tasks.md Step 0](scan-pending-tasks.md#operation) (literal `180` seconds) are coupled — setting them equal guarantees 100% first-fire coverage of the false-fire window (CronCreate → teammate metadata-write). An editing LLM tempted to tune one without the other re-opens the false-fire window. Tune both in lockstep, and update Communication Charter §Cron-Fire Mechanism in step.
+- `cron="*/5 * * * *"` — every 5 minutes. The 5-minute cadence is the architecturally-pinned trade-off (cron-fire noise vs. worst-case latency for completion-authority work). Prior architectural choice was `*/3` (3-minute cadence); empirical session data (`pact-da2323ae`, 2026-05-15) showed ~20 fires/hour during active teammate work was noisier than warranted — a per-fire LLM-turn cost compounded across multi-hour orchestrations to user-visible noise. Retuning to `*/5` reduces fires by ~40% (12 fires/hour) and accepts the worst-case acceptance latency increase from 3 to 5 minutes as the calibrated trade-off. Shrinking BACK to `*/3` or `*/1` re-introduces the noise; expanding to `*/7` or `*/10` extends worst-case latency past the user-perceived "this should have completed by now" threshold. **Coupling invariant**: cron interval and warmup-grace constant in [scan-pending-tasks.md Step 0](scan-pending-tasks.md#operation) (literal `300` seconds) are coupled — setting them equal guarantees 100% first-fire coverage of the false-fire window (CronCreate → teammate metadata-write). An editing LLM tempted to tune one without the other re-opens the false-fire window. Tune both in lockstep, and update Communication Charter §Cron-Fire Mechanism in step.
 - `prompt="/PACT:scan-pending-tasks"` — BYTE-IDENTICAL to the prompt in [scan-pending-tasks.md](scan-pending-tasks.md) frontmatter and to the suffix filter in [stop-pending-scan.md](stop-pending-scan.md). Cross-Skill Prompt-String Byte-Identity. Silent drift breaks the CronList lookup for both idempotency (here) and teardown (in stop-pending-scan), causing orphan-cron accumulation and silent re-arm failure. Verified by structural test asserting byte-identity across the 3 files.
 - `recurring=True` — the cron fires repeatedly until `CronDelete` or session-end. One-shot mode (`recurring=False`) would require the hook to re-register on every fire, which is exactly the LLM-self-diagnosis failure mode the unconditional-emit discipline closes.
 - `durable=False` — in-memory only, scoped to the current session. Cron entries die when the session exits (SIGKILL drops the in-memory store; `CronList` is session-scoped). This is the architectural replacement for the Monitor-era `armed_by_session_id` cross-session-contamination defense: session-scoping at the platform layer eliminates the cross-session weaponization vector entirely. An editing LLM tempted to set `durable=True` "to survive session restarts" re-introduces cross-session contamination — a stale cron from a prior session would fire in a fresh session against potentially-unrelated tasks. Do NOT.
@@ -125,7 +125,7 @@ Confirm scan armed:
 1. `CronList` output contains a line with suffix `: /PACT:scan-pending-tasks`.
 2. The line's recurring marker is `(recurring)` and the durability marker is `[session-only]`.
 
-See dogfood runbook `pact-plugin/tests/runbooks/pending-scan-dogfood.md` for end-to-end verification (fresh-session arm via first-active-task transition, cron fires at the next 3-minute boundary, scan-output discipline verified, teardown via last-active-task transition).
+See dogfood runbook `pact-plugin/tests/runbooks/pending-scan-dogfood.md` for end-to-end verification (fresh-session arm via first-active-task transition, cron fires at the next 5-minute boundary, scan-output discipline verified, teardown via last-active-task transition).
 
 ## References
 
