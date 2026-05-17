@@ -693,3 +693,95 @@ def is_lead_session(input_data: Any, team_name: str) -> bool:
     if not isinstance(lead_session_id, str) or not lead_session_id:
         return False
     return raw_session_id == lead_session_id
+
+
+def is_lead_emit_authorized(input_data: Any, team_name: str = "") -> bool:
+    """
+    Return True iff this PostToolUse / TaskCompleted hook fire originated
+    in the lead session (not an in-process teammate frame).
+
+    Discriminator: ``payload.get('agent_id') is None``. The Claude Code
+    platform stamps the in-process subagent's ``agent_id`` field on every
+    PostToolUse / TaskCompleted stdin payload when the fire originates
+    inside a Task-tool-spawned in-process teammate frame; lead-session
+    fires omit the field. The session_id of an in-process teammate equals
+    the lead's session_id (Claude Code does not re-issue session_ids per
+    subagent frame), so the legacy ``session_id == leadSessionId`` check
+    in :func:`is_lead_session` misclassifies in-process teammate fires as
+    lead fires. This predicate is the canonical replacement for the four
+    surfaces in the symmetric corridor: wake_lifecycle_emitter (PostToolUse),
+    wake_inbox_drain (UserPromptSubmit; see :func:`is_lead_drain_authorized`
+    for the drain-side delegate), teardown_request_emitter (TaskCompleted),
+    and session_init (SessionStart; see :func:`is_lead_at_session_start`
+    for the SessionStart-specific field).
+
+    Same field-presence convention as ``dispatch_helpers.trustworthy_actor_name``
+    (PreToolUse) and ``pact_context.resolve_agent_name`` — long-standing
+    consumers that empirically demonstrate the field IS present in the
+    hook stdin shape for in-process teammates and absent for lead fires.
+
+    Pure function; never raises. Returns False on non-dict input. The
+    ``team_name`` parameter is vestigial under the field-presence
+    discriminator (no team_config disk read needed) but is retained for
+    signature uniformity with :func:`is_lead_session`; the dominant call
+    shape passes ``team_name`` so changing the arity would be a wider
+    blast radius than the +1 unused parameter.
+    """
+    if not isinstance(input_data, dict):
+        return False
+    return input_data.get("agent_id") is None
+
+
+def is_lead_drain_authorized(input_data: Any, team_name: str = "") -> bool:
+    """
+    Return True iff this UserPromptSubmit hook fire originated in the
+    lead session (not an in-process teammate frame).
+
+    Discriminator: ``payload.get('agent_id') is None``. Bytes-identical
+    body to :func:`is_lead_emit_authorized`. Per Claude Code platform
+    docs, UserPromptSubmit does NOT fire in subagent frames at all, so
+    this predicate is semantically always-True for any fire that
+    actually arrives at the wake_inbox_drain hook. Retained as a
+    distinct symbol from :func:`is_lead_emit_authorized` for two
+    reasons: (1) documentation symmetry across the 4-site corridor
+    (lead-side vs teammate-side semantic surface is identically shaped
+    even when one side is currently empty); (2) future-extension
+    surface — if a future platform change starts firing
+    UserPromptSubmit in subagent frames, the drain-side predicate body
+    can diverge from the emit-side predicate without disturbing the
+    emit-side callers.
+
+    Pure function; never raises. Returns False on non-dict input.
+    ``team_name`` parameter is vestigial; see :func:`is_lead_emit_authorized`
+    docstring for the retention rationale.
+    """
+    if not isinstance(input_data, dict):
+        return False
+    return input_data.get("agent_id") is None
+
+
+def is_lead_at_session_start(input_data: Any, team_name: str = "") -> bool:
+    """
+    Return True iff this SessionStart hook fire originated in the lead
+    session (not an in-process teammate frame).
+
+    Discriminator: ``payload.get('agent_type') is None``. SessionStart
+    stdin carries a different actor-discriminator field than PostToolUse
+    / TaskCompleted: per Claude Code platform docs, SessionStart's
+    in-subagent frame stamps ``agent_type`` (the agent-CLASS string from
+    the agent registry, e.g. ``"pact-secretary"``), not ``agent_id``.
+    The lead-session SessionStart fire omits the field. See
+    ``pact_context.py:288-305`` for the established sibling convention
+    distinguishing ``agent_id`` (per-instance identifier) from
+    ``agent_type`` (agent-class string) across hook events.
+
+    Pure function; never raises. Returns False on non-dict input. The
+    field-presence body matches :func:`is_lead_emit_authorized` in
+    structure but reads a different key for the SessionStart event
+    class. ``team_name`` parameter is vestigial; see
+    :func:`is_lead_emit_authorized` docstring for the retention
+    rationale.
+    """
+    if not isinstance(input_data, dict):
+        return False
+    return input_data.get("agent_type") is None
