@@ -147,7 +147,7 @@ try:
     from shared.pact_context import get_team_name
     from shared.session_journal import append_event, make_event, read_last_event
     from shared.session_state import is_safe_path_component
-    from shared.wake_lifecycle import count_active_tasks, is_lead_session
+    from shared.wake_lifecycle import count_active_tasks, is_lead_drain_authorized
     # Reuse the canonical _ARM_DIRECTIVE / _TEARDOWN_DIRECTIVE literals
     # from the emitter so the directive prose has a single source of
     # truth. The audit-anchor literal-prose pins on the emitter side
@@ -510,10 +510,17 @@ def _decide_and_emit(input_data: dict) -> None:
     # Performance hygiene: non-lead-session early-out before any
     # task-store I/O. The non-lead path is the hot common case (every
     # teammate prompt fires this hook); short-circuit before the drain
-    # glob and the count_active_tasks fallback. `is_lead_session`
-    # itself reads team_config.json (one disk read on every prompt),
-    # which is the per-prompt cost on the hot path.
-    if not is_lead_session(input_data, team_name):
+    # glob and the count_active_tasks fallback. `is_lead_drain_authorized`
+    # checks `agent_id` field-presence on the stdin payload (O(1) dict
+    # lookup, no filesystem I/O), so the per-prompt cost on the hot
+    # path is now zero disk reads — an improvement over the legacy
+    # `is_lead_session` body which read team_config.json each fire.
+    # Semantically a no-op under current platform behavior because
+    # UserPromptSubmit does not fire in in-process subagent frames
+    # per Claude Code docs; this migration is documentation-symmetry
+    # with the emit-side callsites in the corridor, plus a future-
+    # extension surface if UserPromptSubmit semantics ever change.
+    if not is_lead_drain_authorized(input_data, team_name):
         print(_SUPPRESS_OUTPUT)
         return
 
