@@ -6,9 +6,14 @@ Summary: Shared helper for inbox-wake lifecycle hooks. Counts active teammate
          agentTypes do not count toward the wake-mechanism's "any active work"
          signal).
 Used by: pact-plugin/hooks/wake_lifecycle_emitter.py (PostToolUse hook on
-         TaskCreate / TaskUpdate), and
+         TaskCreate / TaskUpdate),
          pact-plugin/hooks/session_init.py (resume-with-active-tasks Arm
-         directive emission).
+         directive emission),
+         pact-plugin/hooks/wake_inbox_drain.py (UserPromptSubmit drain),
+         and pact-plugin/hooks/teardown_request_emitter.py (TaskCompleted
+         Teardown Gate 0; calls the `is_lead_session` delegate today —
+         migration to `is_lead_emit_authorized` is tracked separately
+         pending TaskCompleted-stdin empirical capture).
 
 Public surface:
 - count_active_tasks(team_name) -> int
@@ -27,14 +32,45 @@ Public surface:
     for handoff. Pure function; never raises; fail-closed (returns
     False on every error path so Teardown emits unchanged).
 - is_lead_session(input_data, team_name) -> bool
-    Predicate. True iff the current PostToolUse/UserPromptSubmit
-    session's `session_id` matches the team's `leadSessionId` from
-    team_config.json. Lifted from wake_lifecycle_emitter.py to enable
-    reuse by wake_inbox_drain.py (single SSOT). Pure function; never
-    raises; silent fail-open (returns False) on missing/empty
-    session_id, missing/unsafe team_name, missing config.json,
-    malformed JSON, or filesystem error — the teammate session is the
-    expected non-lead path so no UI noise on every Task-tool fire.
+    Predicate. Backward-compat delegate to `is_lead_emit_authorized`.
+    Returns True iff this PostToolUse / TaskCompleted hook fire
+    originated in the lead session (not an in-process teammate frame),
+    using the platform-stamped `agent_id` field-presence discriminator
+    (`input_data.get('agent_id') is None`). The legacy body
+    (`session_id == leadSessionId` via team_config read) misclassified
+    in-process teammate fires as lead fires because the Claude Code
+    platform does not re-issue `session_id` per in-process subagent
+    frame. Retained as a thin delegate to minimize blast radius for
+    any caller outside the symmetric corridor; the four corridor sites
+    have migrated to the explicit emit / drain / at-session-start
+    helpers below. Pure function; never raises; returns False on
+    non-dict input.
+- is_lead_emit_authorized(input_data, team_name="") -> bool
+    Predicate. True iff this PostToolUse / TaskCompleted hook fire
+    originated in the lead session. Discriminator:
+    `input_data.get('agent_id') is None`. Canonical replacement for
+    `is_lead_session` at PostToolUse + TaskCompleted callsites.
+    Consumed by wake_lifecycle_emitter.py and (planned) by
+    teardown_request_emitter.py. Pure function; never raises; returns
+    False on non-dict input. `team_name` is vestigial under the
+    field-presence discriminator but retained for signature uniformity.
+- is_lead_drain_authorized(input_data, team_name="") -> bool
+    Predicate. True iff this UserPromptSubmit hook fire originated in
+    the lead session. Bytes-identical body to
+    `is_lead_emit_authorized`; held as a distinct symbol for
+    documentation symmetry across the corridor and future-extension
+    surface (UserPromptSubmit does not fire in subagent frames today
+    per Claude Code docs, so the predicate is semantically always-True
+    for any fire that actually arrives at wake_inbox_drain.py).
+    Consumed by wake_inbox_drain.py. Pure function; never raises.
+- is_lead_at_session_start(input_data, team_name="") -> bool
+    Predicate. True iff this SessionStart hook fire originated in the
+    lead session. Discriminator: `input_data.get('agent_type') is None`
+    — SessionStart's in-subagent frame stamps `agent_type` (agent-class
+    string) rather than `agent_id` per platform docs; see
+    `pact_context.py:288-308` for the sibling-event field-handling
+    convention. Consumed by session_init.py. Pure function; never
+    raises; returns False on non-dict input.
 - _lifecycle_relevant(task, team_name="") -> bool
     Predicate. True iff the task counts toward the active-work tally that
     arms/tears down the wake mechanism.

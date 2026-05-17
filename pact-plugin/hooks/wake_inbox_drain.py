@@ -44,9 +44,12 @@ Role in the asymmetric-guard Arm/Teardown model:
   cron-already-registered / cron-already-deleted.
 
 Lead-Session Guard (Layer 0 — defense-in-depth):
-- The drain hook ONLY emits in the lead session. A teammate's
-  UserPromptSubmit fires this hook too, but `is_lead_session` returns
-  False there and the hook short-circuits to suppressOutput. The skill
+- The drain hook ONLY emits in the lead session. The Layer 0 check
+  is `is_lead_drain_authorized`, which checks
+  `input_data.get('agent_id') is None` — the platform stamps
+  `agent_id` on in-process subagent frames, so a teammate's
+  UserPromptSubmit (if it ever fired in subagent — it does not, per
+  Claude Code docs) would short-circuit to suppressOutput. The skill
   body's Layer 1 lead-session guard remains as backstop.
 
 Single-emit discipline:
@@ -78,9 +81,9 @@ Single-emit discipline:
 Performance hygiene:
 - Non-lead session short-circuits to suppressOutput before any
   task-store I/O. Per-prompt cost on the hot teammate path: one
-  team_config.json read (inside `is_lead_session`) + one session_id
-  compare. Task-store I/O (inbox glob + `count_active_tasks`) only
-  runs in the lead session.
+  O(1) dict lookup (inside `is_lead_drain_authorized`); zero
+  filesystem I/O. Task-store I/O (inbox glob + `count_active_tasks`)
+  only runs in the lead session.
 
 SACROSANCT module-load failure pattern:
 - Module-load failures emit a fail-closed advisory via the stdlib-only
@@ -179,11 +182,14 @@ def _wake_inbox_path(team_name: str) -> Path | None:
     """Resolve the team's wake-inbox directory or return None on
     path-safety failure.
 
-    Path-traversal defense: `is_safe_path_component(team_name)` is the
-    same allowlist applied by `is_lead_session` and the teammate-Arm
-    pre-branch in the emitter. team_name is read from
-    pact-session-context.json which is itself written by trusted
-    plugin code; this re-check is belt-and-suspenders.
+    Path-traversal defense: `is_safe_path_component(team_name)` is
+    the same allowlist applied by the teammate-Arm pre-branch in the
+    emitter. team_name is read from pact-session-context.json which
+    is itself written by trusted plugin code; this re-check is
+    belt-and-suspenders. (Note: the wake_lifecycle.is_lead_*
+    predicates no longer read team_config and thus no longer
+    re-apply this allowlist — the allowlist surface contracted to
+    the path-using callsites.)
     """
     if not isinstance(team_name, str) or not team_name:
         return None
