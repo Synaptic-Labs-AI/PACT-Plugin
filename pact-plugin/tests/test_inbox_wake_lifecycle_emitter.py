@@ -319,6 +319,27 @@ def test_arm_on_create_owned_by_secretary_post_empty_carve_out(tmp_path):
 
 
 # ---------- Teardown directive (1 -> 0) ----------
+#
+# Migrated post-#763 C5 retirement (wake_lifecycle_emitter PostToolUse
+# Teardown branch deleted; Tier-1 teardown_request_emitter on
+# TaskCompleted hook is the new dominant path):
+#   - test_teardown_includes_best_effort_clause →
+#     test_wake_lifecycle_emitter.py::TestTeardownDirectiveAuditAnchor
+#     ::test_teardown_directive_includes_best_effort_clause (pins
+#     "best-effort" + "tolerat" prose against the SSOT directive).
+#   - test_teardown_directive_contains_precondition_phrase →
+#     test_wake_lifecycle_emitter.py::TestTeardownDirectiveAuditAnchor
+#     ::test_teardown_directive_describes_last_active_task (pins
+#     "Last active teammate task completed" prose).
+#   - test_teardown_emitted_on_last_active_completion →
+#     test_teardown_request_emitter.py::TestGate3ActiveTaskCountTransition
+#     ::test_count_zero_proceeds + test_native_hooks_integration.py
+#     ::TestLeadDrivenCompletionFiresTier1Only
+#     ::test_lead_terminal_taskupdate_emits_tier1_event.
+#   - test_teardown_emits_on_signal_task_completion_at_post_zero →
+#     covered by Tier-1 Gate 3 semantics (signal-tasks are filtered
+#     upstream by count_active_tasks); no dedicated migration target
+#     because the gate logic subsumes the case.
 
 def test_no_teardown_when_other_active_remains(tmp_path):
     home = tmp_path / "home"; home.mkdir()
@@ -880,6 +901,19 @@ class TestArmDirectiveOnParallelTaskCreateRace:
     `_meta` blocks of `task_create_parallel_burst_first.json` and
     `task_create_parallel_burst_second.json` — that's the right surface
     for the issue cite per the no-issue-refs-in-test-names axiom.
+
+    Migrated post-#763 C5 retirement (this class lost 2 Teardown-side
+    tests when the PostToolUse Teardown branch was deleted):
+      - test_teardown_emits_on_terminal_update_to_zero →
+        test_teardown_request_emitter.py::TestGate3ActiveTaskCountTransition
+        ::test_count_zero_proceeds (Tier-1 1->0 emit).
+      - test_teardown_sequence_after_parallel_burst_arm →
+        test_native_hooks_integration.py::TestLeadDrivenCompletion
+        FiresTier1Only::test_parallel_burst_then_drain_lifecycle_symmetry
+        (full 2->1->0 lifecycle: intermediate suppresses via Gate 3,
+        final emits exactly 1 event). The Arm side of the parallel-
+        burst race coverage stays here — the migration only covered
+        the post-C5 Teardown half.
     """
 
     @staticmethod

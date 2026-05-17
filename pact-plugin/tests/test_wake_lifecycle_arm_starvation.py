@@ -307,6 +307,18 @@ def test_lead_session_arm_still_fires_on_taskupdate_in_progress(tmp_path):
     assert 'Skill("PACT:start-pending-scan")' in hso["additionalContext"]
 
 
+# Migrated post-#763 C5 retirement:
+#   - test_lead_session_teardown_still_fires_on_terminal_status →
+#     test_teardown_request_emitter.py::TestGate3ActiveTaskCountTransition
+#     ::test_count_zero_proceeds (Tier-1 emits on lead-driven completion
+#     1->0 transition) + test_native_hooks_integration.py::
+#     TestLeadDrivenCompletionFiresTier1Only::test_lead_terminal_taskupdate
+#     _emits_tier1_event (cross-tier integration coverage).
+#   The retired PostToolUse Teardown branch fired in wake_lifecycle_emitter;
+#   post-C5 Teardown emission moved to teardown_request_emitter on the
+#   native TaskCompleted hook.
+
+
 def test_teammate_terminal_status_no_marker_and_no_directive(tmp_path):
     """Test 7 — Teammate-side Teardown still suppressed by lead-session
     early-return; pre-branch's clause-3 also rejects terminal-status
