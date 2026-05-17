@@ -307,34 +307,6 @@ def test_lead_session_arm_still_fires_on_taskupdate_in_progress(tmp_path):
     assert 'Skill("PACT:start-pending-scan")' in hso["additionalContext"]
 
 
-def test_lead_session_teardown_still_fires_on_terminal_status(tmp_path):
-    """Test 6 — Teardown lead-only gate preserved (#737 Layer 0). Lead-
-    session TaskUpdate(status=completed) with count=0 emits Teardown.
-    """
-    home = tmp_path / "home"; home.mkdir()
-    sid = "lead-sid"
-    pdir = "/tmp/p"
-    team = "team-lead-teardown"
-    _write_session_context(home, sid, pdir, team)
-    # Task on disk reflects post-state (completed) so count == 0.
-    _write_task(home, team, "Z", status="completed", owner="backend-coder")
-
-    out = _emit_output({
-        "tool_name": "TaskUpdate",
-        "session_id": sid, "cwd": pdir,
-        "tool_input": {"taskId": "Z", "status": "completed"},
-        "tool_response": {
-            "id": "Z", "status": "completed", "owner": "backend-coder",
-        },
-    }, home)
-    hso = out.get("hookSpecificOutput")
-    assert hso is not None, (
-        f"Lead-session terminal TaskUpdate must emit Teardown; got {out!r}"
-    )
-    assert hso["hookEventName"] == "PostToolUse"
-    assert 'Skill("PACT:stop-pending-scan")' in hso["additionalContext"]
-
-
 def test_teammate_terminal_status_no_marker_and_no_directive(tmp_path):
     """Test 7 — Teammate-side Teardown still suppressed by lead-session
     early-return; pre-branch's clause-3 also rejects terminal-status

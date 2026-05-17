@@ -420,14 +420,30 @@ class TestLayer3_HooksJsonInvariants:
             f"runtime error on the platform firing the event."
         )
 
-    def test_taskcompleted_binds_only_to_agent_handoff_emitter(self):
+    def test_taskcompleted_binds_only_to_agent_handoff_and_teardown_emitters(self):
+        """TaskCompleted is the platform's native hook for terminal-status
+        completions. Two journal-writers bind to it:
+          - agent_handoff_emitter.py (writes agent_handoff events)
+          - teardown_request_emitter.py (writes teardown_request events
+            per #763 C2 — Tier-1 of the native-hooks Teardown integration)
+
+        Both fire in parallel per Claude Code's hooks dispatch model
+        (memory `Claude Code Platform Knowledge`). The two emitters are
+        orthogonal: agent_handoff is HANDOFF-gated; teardown_request is
+        1->0-active-task-transition-gated. No inter-handler coupling.
+        """
         hooks_config = _load_hooks_json()
         paths = _hook_script_paths_for_event(hooks_config, "TaskCompleted")
-        basenames = [p.name for p in paths]
-        assert basenames == ["agent_handoff_emitter.py"], (
-            f"TaskCompleted must bind only to agent_handoff_emitter.py; "
-            f"actual: {basenames}. Post-#538 this hook is the sole "
-            f"journal-writer for agent_handoff events."
+        basenames = sorted(p.name for p in paths)
+        expected = sorted([
+            "agent_handoff_emitter.py",
+            "teardown_request_emitter.py",
+        ])
+        assert basenames == expected, (
+            f"TaskCompleted must bind only to agent_handoff_emitter.py + "
+            f"teardown_request_emitter.py; actual: {basenames}. Adding a "
+            f"third TaskCompleted handler requires explicit design review "
+            f"per the dual-emitter invariant (parallel-fire orthogonality)."
         )
 
     def test_teammateidle_binds_only_to_teammate_idle(self):
@@ -470,26 +486,45 @@ class TestLayer4_CounterTestByRevert:
     """
 
     def test_reverting_taskcompleted_binding_flips_layer3_taskcompleted_test(self):
-        """Target: TestLayer3_HooksJsonInvariants::test_taskcompleted_binds_only_to_agent_handoff_emitter.
+        """Target: TestLayer3_HooksJsonInvariants::test_taskcompleted_binds_only_to_agent_handoff_and_teardown_emitters.
 
-        Revert shape: re-add handoff_gate.py as TaskCompleted binding.
-        Expected: Layer 3 test would see `handoff_gate.py` among bindings
-        and fail. We assert this by recreating its assertion against the
-        mutated config.
+        Revert shape: re-add handoff_gate.py as a third TaskCompleted
+        binding (which the Layer 3 invariant forbids). Expected: the
+        mutated config produces a basenames list that does NOT match
+        the canonical dual-emitter pair, so the Layer 3 assertion
+        would fail. Mutation injects a duplicate command block rather
+        than renaming existing emitters — preserves both legitimate
+        bindings while introducing the forbidden third.
         """
         raw = _HOOKS_JSON.read_text(encoding="utf-8")
-        reverted_raw = raw.replace(
-            "agent_handoff_emitter.py", "handoff_gate.py"
-        )
-        reverted_config = json.loads(reverted_raw)
-        paths = _hook_script_paths_for_event(reverted_config, "TaskCompleted")
-        basenames = [p.name for p in paths]
-        assert basenames == ["handoff_gate.py"], (
-            "counter-test setup failed — expected the revert mutation to "
-            "produce handoff_gate.py binding"
+        config = json.loads(raw)
+        # In-memory revert: append a third handler binding to the
+        # TaskCompleted block. Pre-revert there are 2 bindings; post-
+        # revert there are 3.
+        tc_blocks = config.get("hooks", {}).get("TaskCompleted", [])
+        assert tc_blocks, "fixture pre-condition failed: TaskCompleted block missing"
+        tc_blocks[0].setdefault("hooks", []).append({
+            "type": "command",
+            "command": 'python3 "${CLAUDE_PLUGIN_ROOT}/hooks/handoff_gate.py"',
+        })
+        paths = _hook_script_paths_for_event(config, "TaskCompleted")
+        basenames = sorted(p.name for p in paths)
+        # Counter-test setup assertion: the revert mutation produced
+        # the expected 3-handler list.
+        assert basenames == sorted([
+            "agent_handoff_emitter.py",
+            "teardown_request_emitter.py",
+            "handoff_gate.py",
+        ]), (
+            "counter-test setup failed — expected the revert mutation "
+            f"to produce 3 bindings; got {basenames}"
         )
         # Discriminative assertion: the Layer 3 invariant MUST fail here.
-        assert basenames != ["agent_handoff_emitter.py"], (
+        canonical_pair = sorted([
+            "agent_handoff_emitter.py",
+            "teardown_request_emitter.py",
+        ])
+        assert basenames != canonical_pair, (
             "Layer 3 TaskCompleted invariant did not flip on revert — "
             "counter-test is NOT discriminative. Test is phantom-green."
         )

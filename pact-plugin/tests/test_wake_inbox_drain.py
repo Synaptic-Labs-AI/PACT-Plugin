@@ -1054,3 +1054,461 @@ def test_outer_guard_catches_arbitrary_exception(tmp_path, exception_class):
         f"producer-side except block; re-narrow the except clause "
         f"to (ImportError, AttributeError, TypeError) regression."
     )
+
+
+# =============================================================================
+# C0 consumer side + C4 type-aware dispatch tests for #763
+# =============================================================================
+#
+# C0 (consumer): _drain_markers handles per-type accounting. Pre-C0
+# markers (no `type` field) default to "arm" for backward-compat.
+# Corrupt or unknown-type markers also default to "arm" (fail-
+# conservative — produce a wake signal even on a malformed marker).
+#
+# C4 (dispatch): _decide_and_emit routes type="teardown" markers to
+# _emit_teardown (which prints the _TEARDOWN_DIRECTIVE additionalContext)
+# AND writes a teardown_request journal event with tier="2", reason=
+# "wake_inbox_drained". When both arm + teardown markers drain in one
+# fire, teardown takes precedence (it reflects the most recent
+# completion-authority state).
+#
+# Counter-test-by-revert for C4 dispatch: removing the `type` field
+# read from _drain_markers flips test_drain_dispatch_on_type_field
+# results (all markers route to _emit_arm, even type="teardown" ones).
+
+
+class TestArmMarkerTypeFieldBackwardCompat:
+    """C0 consumer side: pre-C0 markers (no `type` field) drain as arm.
+    Corrupt JSON markers and unknown-type markers ALSO drain as arm
+    (fail-conservative). The default is the architecture's hinge:
+    legacy markers on disk during the upgrade window must not be lost.
+    """
+
+    def test_drain_marker_without_type_field_treated_as_arm(self, tmp_path):
+        """A marker without a `type` field (pre-C0 shape) drains as
+        an arm signal — wake_inbox_drain emits _ARM_DIRECTIVE.
+        """
+        home = tmp_path / "home"; home.mkdir()
+        lead_sid = "lead-sid"
+        pdir = "/tmp/p"
+        team = "team-c0-bw-no-type"
+        _write_session_context(home, lead_sid, pdir, team)
+        _write_marker(
+            home, team, "20260516T160000Z-x-T1.json",
+            {
+                # Pre-C0 marker shape — no `type` field.
+                "schema_version": 1,
+                "trigger": "teammate_self_claim_in_progress",
+                "tool_name": "TaskUpdate",
+                "task_id": "T1",
+                "owner": "backend-coder",
+            },
+        )
+
+        out = _drain_out({
+            "session_id": lead_sid, "cwd": pdir,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        }, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Pre-C0 marker must drain as arm; got {out!r}"
+        )
+        assert "PACT:start-pending-scan" in hso.get("additionalContext", ""), (
+            f"Drain output must invoke start-pending-scan (arm); got {hso!r}"
+        )
+
+    def test_drain_marker_with_unknown_type_treated_as_arm(self, tmp_path):
+        """Unknown `type` tokens (e.g. "purple", "halt") drain as arm.
+        Fail-conservative dispatch — producing a wake signal on an
+        unexpected token is safer than dropping it (the operator can
+        always re-run /PACT:stop-pending-scan if the cron is already
+        retired).
+        """
+        home = tmp_path / "home"; home.mkdir()
+        lead_sid = "lead-sid"
+        pdir = "/tmp/p"
+        team = "team-c0-bw-unknown-type"
+        _write_session_context(home, lead_sid, pdir, team)
+        _write_marker(
+            home, team, "20260516T160100Z-x-T2.json",
+            {
+                "schema_version": 1, "type": "purple_unknown_token",
+                "trigger": "teammate_self_claim_in_progress",
+                "tool_name": "TaskUpdate", "task_id": "T2",
+                "owner": "backend-coder",
+            },
+        )
+
+        out = _drain_out({
+            "session_id": lead_sid, "cwd": pdir,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        }, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Unknown-type marker must drain (fail-conservative arm); "
+            f"got {out!r}"
+        )
+        assert "PACT:start-pending-scan" in hso.get("additionalContext", ""), (
+            f"Drain output must default to arm on unknown type; got {hso!r}"
+        )
+
+
+class TestDrainDispatchOnTypeField:
+    """C4 dispatch: _drain_markers returns per-type count dict;
+    _decide_and_emit routes based on the type token. Arm markers go to
+    _emit_arm (existing behavior); Teardown markers go to _emit_teardown
+    (new) and write a teardown_request journal event.
+    """
+
+    def test_arm_marker_routes_to_emit_arm(self, tmp_path):
+        """A type="arm" marker drains via the arm path — output
+        contains _ARM_DIRECTIVE prose (start-pending-scan).
+        """
+        home = tmp_path / "home"; home.mkdir()
+        lead_sid = "lead-sid"
+        pdir = "/tmp/p"
+        team = "team-c4-arm-routes"
+        _write_session_context(home, lead_sid, pdir, team)
+        _write_marker(
+            home, team, "20260516T160200Z-x-T3.json",
+            {
+                "schema_version": 1, "type": "arm",
+                "trigger": "teammate_self_claim_in_progress",
+                "tool_name": "TaskUpdate", "task_id": "T3",
+                "owner": "backend-coder",
+            },
+        )
+
+        out = _drain_out({
+            "session_id": lead_sid, "cwd": pdir,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        }, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None
+        assert "PACT:start-pending-scan" in hso.get("additionalContext", "")
+        assert "PACT:stop-pending-scan" not in hso.get("additionalContext", "")
+
+    def test_teardown_marker_routes_to_emit_teardown(self, tmp_path):
+        """A type="teardown" marker drains via the teardown path —
+        output contains _TEARDOWN_DIRECTIVE prose (stop-pending-scan).
+        This is the C4 net-new dispatch branch.
+        """
+        home = tmp_path / "home"; home.mkdir()
+        lead_sid = "lead-sid"
+        pdir = "/tmp/p"
+        team = "team-c4-teardown-routes"
+        _write_session_context(home, lead_sid, pdir, team)
+        _write_marker(
+            home, team, "20260516T160300Z-x-T4.json",
+            {
+                "schema_version": 1, "type": "teardown",
+                "task_id": "T4",
+                "team_name": team,
+                "owner": "secretary",
+                "timestamp_ms": 1715792180000,
+                "trigger": "self_complete_exempt_or_stop_sweep",
+            },
+        )
+
+        out = _drain_out({
+            "session_id": lead_sid, "cwd": pdir,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        }, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Teardown marker must produce hookSpecificOutput; got {out!r}"
+        )
+        assert "PACT:stop-pending-scan" in hso.get("additionalContext", ""), (
+            f"Drain must emit Teardown directive; got {hso!r}"
+        )
+        assert "PACT:start-pending-scan" not in hso.get("additionalContext", ""), (
+            f"Teardown path must NOT emit Arm prose; got {hso!r}"
+        )
+
+    def test_drain_consumes_teardown_marker_file(self, tmp_path):
+        """The teardown marker file is unlinked from wake_inbox after
+        drain. The disk must reflect successful consumption.
+        """
+        home = tmp_path / "home"; home.mkdir()
+        lead_sid = "lead-sid"
+        pdir = "/tmp/p"
+        team = "team-c4-teardown-consumed"
+        _write_session_context(home, lead_sid, pdir, team)
+        marker_path = _write_marker(
+            home, team, "20260516T160400Z-x-T5.json",
+            {
+                "schema_version": 1, "type": "teardown",
+                "task_id": "T5",
+                "team_name": team,
+                "owner": "secretary",
+                "timestamp_ms": 1715792240000,
+                "trigger": "self_complete_exempt_or_stop_sweep",
+            },
+        )
+
+        _drain_out({
+            "session_id": lead_sid, "cwd": pdir,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        }, home)
+        assert not marker_path.exists(), (
+            "Teardown marker must be unlinked after drain"
+        )
+
+
+class TestTeardownDrainEmitsJournalEvent:
+    """C4 journal-write: when a teardown marker drains, a
+    teardown_request event is written to the journal with tier="2",
+    reason="wake_inbox_drained". The event is the falsifiable trace
+    that Tier-4 cron staleness can replay from.
+    """
+
+    def test_single_teardown_marker_writes_one_event(self, tmp_path):
+        """One teardown marker drains -> one teardown_request event in
+        the journal with tier="2" reason="wake_inbox_drained".
+        """
+        home = tmp_path / "home"; home.mkdir()
+        lead_sid = "lead-sid"
+        pdir = "/tmp/p"
+        team = "team-c4-journal-single"
+        _write_session_context(home, lead_sid, pdir, team)
+        _write_marker(
+            home, team, "20260516T160500Z-x-T6.json",
+            {
+                "schema_version": 1, "type": "teardown",
+                "task_id": "T6",
+                "team_name": team,
+                "owner": "secretary",
+                "timestamp_ms": 1715792300000,
+                "trigger": "self_complete_exempt_or_stop_sweep",
+            },
+        )
+
+        _drain_out({
+            "session_id": lead_sid, "cwd": pdir,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        }, home)
+
+        # Read the journal for the lead's session.
+        slug = Path(pdir).name
+        journal = (
+            home / ".claude" / "pact-sessions" / slug / lead_sid
+            / "session-journal.jsonl"
+        )
+        assert journal.exists(), "Journal file must be created on drain"
+        teardown_events = [
+            json.loads(line)
+            for line in journal.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+            and json.loads(line).get("type") == "teardown_request"
+        ]
+        assert len(teardown_events) == 1, (
+            f"Single teardown drain must write exactly 1 event; "
+            f"got {teardown_events!r}"
+        )
+        ev = teardown_events[0]
+        assert ev.get("tier") == "2", (
+            f"Tier-2 emission must carry tier='2'; got tier={ev.get('tier')!r}"
+        )
+        assert ev.get("reason") == "wake_inbox_drained", (
+            f"Tier-2 reason must be 'wake_inbox_drained'; "
+            f"got {ev.get('reason')!r}"
+        )
+
+    def test_multiple_teardown_markers_same_drain_writes_one_event(
+        self, tmp_path,
+    ):
+        """Stop-sweep secondary firings may produce N markers per
+        drain pass (one per re-entrant TaskCompleted fire in a teammate
+        session). The journal event is written ONCE per drain to
+        avoid N-fold pollution.
+
+        Pins architect refinement Q1 resolution (per teachback
+        coordination with backend-coder-1).
+        """
+        home = tmp_path / "home"; home.mkdir()
+        lead_sid = "lead-sid"
+        pdir = "/tmp/p"
+        team = "team-c4-journal-multi"
+        _write_session_context(home, lead_sid, pdir, team)
+        for idx, task_id in enumerate(["T7a", "T7b", "T7c"]):
+            _write_marker(
+                home, team,
+                f"20260516T16060{idx}Z-x-{task_id}.json",
+                {
+                    "schema_version": 1, "type": "teardown",
+                    "task_id": task_id,
+                    "team_name": team,
+                    "owner": "secretary",
+                    "timestamp_ms": 1715792400000 + idx,
+                    "trigger": "self_complete_exempt_or_stop_sweep",
+                },
+            )
+
+        _drain_out({
+            "session_id": lead_sid, "cwd": pdir,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        }, home)
+
+        slug = Path(pdir).name
+        journal = (
+            home / ".claude" / "pact-sessions" / slug / lead_sid
+            / "session-journal.jsonl"
+        )
+        teardown_events = [
+            json.loads(line)
+            for line in journal.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+            and json.loads(line).get("type") == "teardown_request"
+        ]
+        assert len(teardown_events) == 1, (
+            f"Multiple teardown markers in same drain must produce "
+            f"exactly 1 journal event (ONE-per-drain cardinality per "
+            f"architect Q1 resolution); got {len(teardown_events)}: "
+            f"{teardown_events!r}"
+        )
+
+    def test_event_team_name_matches_drain_team(self, tmp_path):
+        """The journal event's team_name matches the lead's team —
+        not the team_name field FROM the marker (which could be
+        spoofed). Pins the producer-side authority chain.
+        """
+        home = tmp_path / "home"; home.mkdir()
+        lead_sid = "lead-sid"
+        pdir = "/tmp/p"
+        team = "team-c4-journal-team-name"
+        _write_session_context(home, lead_sid, pdir, team)
+        _write_marker(
+            home, team, "20260516T160700Z-x-T8.json",
+            {
+                "schema_version": 1, "type": "teardown",
+                "task_id": "T8",
+                "team_name": team,
+                "owner": "secretary",
+                "timestamp_ms": 1715792500000,
+                "trigger": "self_complete_exempt_or_stop_sweep",
+            },
+        )
+
+        _drain_out({
+            "session_id": lead_sid, "cwd": pdir,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        }, home)
+
+        slug = Path(pdir).name
+        journal = (
+            home / ".claude" / "pact-sessions" / slug / lead_sid
+            / "session-journal.jsonl"
+        )
+        events = [
+            json.loads(line)
+            for line in journal.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+            and json.loads(line).get("type") == "teardown_request"
+        ]
+        assert len(events) == 1
+        assert events[0].get("team_name") == team
+
+
+class TestMixedArmTeardownDrain:
+    """C4 precedence rule: when a drain consumes BOTH arm and teardown
+    markers in the same UserPromptSubmit, teardown takes precedence.
+    The teardown reflects the most recent completion-authority state.
+    """
+
+    def test_both_marker_types_drained_teardown_takes_precedence(
+        self, tmp_path,
+    ):
+        """Drain has both arm + teardown markers; the emitted directive
+        is Teardown (stop-pending-scan), NOT Arm (start-pending-scan).
+        The cron should be retired, not armed.
+        """
+        home = tmp_path / "home"; home.mkdir()
+        lead_sid = "lead-sid"
+        pdir = "/tmp/p"
+        team = "team-c4-mixed-precedence"
+        _write_session_context(home, lead_sid, pdir, team)
+        _write_marker(
+            home, team, "20260516T160800Z-x-T9a.json",
+            {
+                "schema_version": 1, "type": "arm",
+                "trigger": "teammate_self_claim_in_progress",
+                "tool_name": "TaskUpdate", "task_id": "T9a",
+                "owner": "backend-coder",
+            },
+        )
+        _write_marker(
+            home, team, "20260516T160801Z-x-T9b.json",
+            {
+                "schema_version": 1, "type": "teardown",
+                "task_id": "T9b",
+                "team_name": team,
+                "owner": "secretary",
+                "timestamp_ms": 1715792500000,
+                "trigger": "self_complete_exempt_or_stop_sweep",
+            },
+        )
+
+        out = _drain_out({
+            "session_id": lead_sid, "cwd": pdir,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        }, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None
+        ac = hso.get("additionalContext", "")
+        assert "PACT:stop-pending-scan" in ac, (
+            f"Mixed drain: teardown must take precedence; got {hso!r}"
+        )
+        # Arm prose must NOT appear in the same output — single-emit
+        # discipline preserved.
+        assert "PACT:start-pending-scan" not in ac, (
+            f"Mixed drain: Arm must NOT also emit; got {hso!r}"
+        )
+
+    def test_both_marker_files_consumed(self, tmp_path):
+        """Mixed-drain consumes ALL markers, not just the teardown one.
+        Leaving arm markers on disk would re-fire on the next prompt
+        and confuse the lifecycle.
+        """
+        home = tmp_path / "home"; home.mkdir()
+        lead_sid = "lead-sid"
+        pdir = "/tmp/p"
+        team = "team-c4-mixed-consume"
+        _write_session_context(home, lead_sid, pdir, team)
+        arm_marker = _write_marker(
+            home, team, "20260516T160900Z-x-Aa.json",
+            {
+                "schema_version": 1, "type": "arm",
+                "trigger": "teammate_self_claim_in_progress",
+                "tool_name": "TaskUpdate", "task_id": "Aa",
+                "owner": "backend-coder",
+            },
+        )
+        teardown_marker = _write_marker(
+            home, team, "20260516T160901Z-x-Tb.json",
+            {
+                "schema_version": 1, "type": "teardown",
+                "task_id": "Tb",
+                "team_name": team,
+                "owner": "secretary",
+                "timestamp_ms": 1715792600000,
+                "trigger": "self_complete_exempt_or_stop_sweep",
+            },
+        )
+
+        _drain_out({
+            "session_id": lead_sid, "cwd": pdir,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        }, home)
+        assert not arm_marker.exists(), "Arm marker must be drained"
+        assert not teardown_marker.exists(), "Teardown marker must be drained"
+
