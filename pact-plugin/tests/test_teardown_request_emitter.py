@@ -1396,3 +1396,60 @@ class TestExitContract:
             assert rc == 0, (
                 f"Non-dict stdin {bad!r} must exit 0; got rc={rc}"
             )
+
+
+# =============================================================================
+# TestStatusDeletedTier1 — disk-fallback accepts both terminal statuses
+# =============================================================================
+
+
+class TestStatusDeletedTier1:
+    """Gate 1 disk-fallback must accept BOTH terminal statuses
+    ("completed", "deleted") symmetric with the retired PostToolUse
+    Teardown branch's _TERMINAL_STATUSES set. Lead-driven
+    TaskUpdate(status="deleted") on a 1->0 transition does not produce
+    a TaskCompleted platform hook event, so the disk-fallback is the
+    only Tier-1 path that can fire for the delete case (Tier-2's
+    teammate-Teardown producer also misses it via lead-session early-
+    return). Without "deleted" in the fallback set the deletion path
+    drops the Teardown directive entirely.
+
+    Counter-test-by-revert: narrowing the disk-fallback back to
+    `status == "completed"` only flips this test RED.
+    """
+
+    def test_status_deleted_lead_driven_emits_teardown_request(
+        self, tmp_path,
+    ):
+        """Lead-driven TaskUpdate(status="deleted") on a 1->0 transition
+        with no TaskCompleted platform event proceeds through the disk-
+        fallback and emits a Tier-1 teardown_request event.
+        """
+        home = tmp_path / "home"; home.mkdir()
+        lead_sid = "lead-sid"
+        pdir = "/tmp/p"
+        team = "team-f1-deleted-fallback"
+        _write_session_context(home, lead_sid, pdir, team)
+        # Task on disk shows the terminal status "deleted".
+        _write_task(home, team, "D1", status="deleted", owner="backend-coder")
+
+        rc, out, err = _run_emitter_subprocess(
+            json.dumps({
+                "session_id": lead_sid,
+                "cwd": pdir,
+                # No hook_event_name — exercise the disk-status fallback.
+                "task_id": "D1",
+                "team_name": team,
+                "teammate_name": "backend-coder",
+            }),
+            env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+        )
+        assert rc == 0, f"hook must exit 0; stderr={err}"
+        events = _read_journal_events(
+            home, pdir, lead_sid, event_type="teardown_request",
+        )
+        assert len(events) == 1, (
+            f"Disk-fallback path: deleted disk-status must proceed to "
+            f"emit (symmetric with completed); got events={events!r}, "
+            f"stdout={out!r}"
+        )

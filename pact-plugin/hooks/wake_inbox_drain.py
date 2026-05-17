@@ -298,6 +298,26 @@ def _drain_markers(inbox_dir: Path) -> dict[str, Any]:
                                 and raw_task_id
                             ):
                                 marker_task_id = raw_task_id
+                            else:
+                                # Malformed teardown marker: type field
+                                # says "teardown" but task_id is missing,
+                                # empty, or non-string. Demote to "arm"
+                                # so the downstream branch does not emit
+                                # a Teardown directive WITHOUT going
+                                # through the Tier-1/Tier-2 dedup guard
+                                # (which keys on task_id). The wake intent
+                                # still stands; Arm is the fail-
+                                # conservative default that aligns with
+                                # the corrupt-body fallback above. Log
+                                # to stderr so the disk-corruption /
+                                # producer-bug signal is not silent.
+                                marker_type = "arm"
+                                print(
+                                    f"wake_inbox_drain: teardown marker "
+                                    f"missing task_id ({marker.name}); "
+                                    f"demoting to arm signal",
+                                    file=sys.stderr,
+                                )
                 except (OSError, json.JSONDecodeError, ValueError):
                     # Default-to-arm already set above.
                     pass
@@ -477,6 +497,27 @@ def _decide_and_emit(input_data: dict) -> None:
         # Arm when both kinds drain in the same prompt: a fresh
         # terminal-status signal reflects the most recent completion-
         # authority state and outweighs a stale in_progress signal.
+        #
+        # Same-prompt arm+teardown disambiguation: when BOTH marker
+        # kinds drain together AND the team still has lifecycle-
+        # relevant work on disk (count_active_tasks > 0), the teardown
+        # marker is STALER than the arm. Concrete race: teammate Y
+        # completes terminal task Z (writes teardown marker when count
+        # was 0); teammate X then claims a new task A (writes arm
+        # marker); lead UserPromptSubmit drains both in one pass. The
+        # arm signal reflects current state; the teardown is stale.
+        # Demote teardown to arm in that case — single-emit discipline
+        # preserved, cron stays armed, and the next Tier-1 fire (or a
+        # later carve-out completion at count=0) handles the eventual
+        # Teardown. Without this check the lead is told to tear down
+        # cron while task A is active.
+        if (
+            drained["arm"] > 0
+            and drained["teardown"] > 0
+            and count_active_tasks(team_name) > 0
+        ):
+            _emit_arm()
+            return
         if drained["teardown"] > 0:
             # Tier-1 / Tier-2 double-emission guard: each drained
             # teardown task_id is checked against the SHARED

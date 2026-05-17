@@ -307,13 +307,21 @@ def main() -> None:
         # status fallback. Templates agent_handoff_emitter.py:281-289.
         # The string-literal compare fail-closes on non-string values
         # (None, int, bool compare unequal to "TaskCompleted").
+        # Disk-status fallback accepts BOTH terminal statuses
+        # ("completed", "deleted") symmetric with the retired PostToolUse
+        # Teardown branch's _TERMINAL_STATUSES set at
+        # wake_lifecycle_emitter.py:267. Lead-driven
+        # TaskUpdate(status="deleted") on a 1->0 transition produces no
+        # TaskCompleted hook event, so without "deleted" in this set the
+        # deletion path drops the Teardown directive entirely (Tier-2
+        # also misses it via its lead-session early-return).
         hook_event = input_data.get("hook_event_name", "")
         task_data: dict = {}
         if hook_event != "TaskCompleted":
             task_data = read_task_json(task_id, team_name)
             if not isinstance(task_data, dict):
                 task_data = {}
-            if task_data.get("status") != "completed":
+            if task_data.get("status") not in ("completed", "deleted"):
                 print(_SUPPRESS_OUTPUT)
                 sys.exit(0)
 

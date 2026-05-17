@@ -1512,3 +1512,170 @@ class TestMixedArmTeardownDrain:
         assert not arm_marker.exists(), "Arm marker must be drained"
         assert not teardown_marker.exists(), "Teardown marker must be drained"
 
+
+class TestArmTeardownRaceDisambiguation:
+    """Same-prompt arm+teardown disambiguation. When BOTH marker kinds
+    drain together AND the team still has lifecycle-relevant work on
+    disk (count_active_tasks > 0), the teardown marker is STALER than
+    the arm and the directive emitted MUST be Arm, not Teardown.
+
+    Concrete race the disambiguation defends against: teammate Y
+    completes terminal task Z (writes teardown marker when count was
+    0); teammate X then claims a new task A (writes arm marker); lead
+    UserPromptSubmit drains both in one pass. Without this guard the
+    lead is told to tear down cron while task A is active.
+
+    Counter-test-by-revert: removing the `count_active_tasks(...) > 0`
+    check in `_decide_and_emit` flips this test RED (teardown wins
+    instead of arm).
+    """
+
+    def test_same_prompt_arm_plus_teardown_emits_arm_when_count_nonzero(
+        self, tmp_path,
+    ):
+        """Mixed drain + active task on disk → emit ARM (cron stays
+        armed). The stale teardown marker yields to the fresh arm
+        marker because the team is still active.
+        """
+        home = tmp_path / "home"; home.mkdir()
+        lead_sid = "lead-sid"
+        pdir = "/tmp/p"
+        team = "team-f2-race-disambiguation"
+        teammate_owner = "backend-coder"
+        _write_session_context(
+            home, lead_sid, pdir, team,
+            members=[
+                {"name": teammate_owner, "agentId": "agent-bc"},
+                {"name": "lead", "agentId": "agent-lead"},
+            ],
+            lead_agent_id="agent-lead",
+        )
+        # Active lifecycle-relevant task on disk — the team is NOT idle
+        # despite the stale teardown marker.
+        _write_task(
+            home, team, "A_active",
+            status="in_progress", owner=teammate_owner,
+        )
+        # Stale teardown marker (written when count was 0, before the
+        # arm marker landed for the new task).
+        teardown_marker = _write_marker(
+            home, team, "20260516T160600Z-x-Z_stale.json",
+            {
+                "schema_version": 1, "type": "teardown",
+                "task_id": "Z_stale",
+                "team_name": team,
+                "owner": "secretary",
+                "timestamp_ms": 1715792300000,
+                "trigger": "self_complete_exempt_or_stop_sweep",
+            },
+        )
+        # Fresh arm marker (written when teammate X claimed task
+        # A_active).
+        arm_marker = _write_marker(
+            home, team, "20260516T160700Z-x-A_active.json",
+            {
+                "schema_version": 1, "type": "arm",
+                "trigger": "teammate_self_claim_in_progress",
+                "tool_name": "TaskUpdate", "task_id": "A_active",
+                "owner": teammate_owner,
+            },
+        )
+
+        out = _drain_out({
+            "session_id": lead_sid, "cwd": pdir,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        }, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Mixed drain with active tasks must emit a directive; "
+            f"got {out!r}"
+        )
+        ac = hso.get("additionalContext", "")
+        assert "PACT:start-pending-scan" in ac, (
+            f"Mixed drain + count>0 must emit ARM (cron stays armed); "
+            f"got additionalContext={ac!r}"
+        )
+        # The stale teardown signal must NOT win the dispatch.
+        assert "PACT:stop-pending-scan" not in ac, (
+            f"Mixed drain + count>0 must NOT emit Teardown — "
+            f"the stale teardown marker yields to the fresh arm; "
+            f"got additionalContext={ac!r}"
+        )
+        # Both markers still get consumed (cleanup invariant preserved
+        # from the existing mixed-drain test).
+        assert not teardown_marker.exists(), (
+            "Stale teardown marker must be drained even when arm wins"
+        )
+        assert not arm_marker.exists(), (
+            "Arm marker must be drained on the emit path"
+        )
+
+
+class TestMalformedTeardownMarkerDemotedToArm:
+    """Defensive classifier: a marker with `type="teardown"` but no
+    valid `task_id` field cannot participate in the Tier-1/Tier-2
+    dedup invariant (which keys on task_id). The classifier demotes
+    such malformed markers to "arm" so the wake intent still stands
+    via the safe fail-conservative default — emit Arm via the existing
+    path, not Teardown via a dedup-bypassing fallback.
+
+    Counter-test-by-revert: removing the demote-to-arm branch in
+    `_drain_markers` flips this test RED — the marker would then
+    count as teardown and trigger _emit_teardown() without going
+    through `_already_emitted_teardown`.
+    """
+
+    def test_teardown_marker_missing_task_id_emits_arm_not_teardown(
+        self, tmp_path,
+    ):
+        """A solitary `type="teardown"` marker with NO task_id field
+        is classified as a wake signal (Arm) — NOT a Teardown — so the
+        directive emitted is start-pending-scan, not stop-pending-scan.
+        """
+        home = tmp_path / "home"; home.mkdir()
+        lead_sid = "lead-sid"
+        pdir = "/tmp/p"
+        team = "team-f3-malformed-teardown"
+        _write_session_context(home, lead_sid, pdir, team)
+        # Marker says "teardown" but task_id is absent — malformed
+        # producer or schema drift.
+        malformed = _write_marker(
+            home, team, "20260516T161000Z-x-noid.json",
+            {
+                "schema_version": 1, "type": "teardown",
+                # task_id intentionally omitted.
+                "team_name": team,
+                "owner": "secretary",
+                "timestamp_ms": 1715792700000,
+                "trigger": "self_complete_exempt_or_stop_sweep",
+            },
+        )
+
+        out = _drain_out({
+            "session_id": lead_sid, "cwd": pdir,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        }, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Malformed teardown marker must still emit a wake signal; "
+            f"got {out!r}"
+        )
+        ac = hso.get("additionalContext", "")
+        # Malformed → demoted to arm → Arm directive emitted.
+        assert "PACT:start-pending-scan" in ac, (
+            f"Malformed teardown marker must demote to Arm directive; "
+            f"got additionalContext={ac!r}"
+        )
+        # And MUST NOT emit Teardown — that would bypass the
+        # Tier-1/Tier-2 dedup invariant.
+        assert "PACT:stop-pending-scan" not in ac, (
+            f"Malformed teardown marker must NOT emit Teardown "
+            f"(dedup invariant bypass); got additionalContext={ac!r}"
+        )
+        # Marker is consumed regardless of classification.
+        assert not malformed.exists(), (
+            "Malformed marker must be drained"
+        )
+
