@@ -459,36 +459,69 @@ def test_emitter_guards_on_lead_session_id_structural():
     )
 
 
-def test_no_emit_when_session_id_does_not_match_lead(tmp_path):
-    """Behavioral pin: a teammate-session TaskCreate that would
-    otherwise emit Arm must be suppressed by the lead-session guard.
-    Synthesize a session_id distinct from the team config's
-    leadSessionId; verify the emit is suppressOutput."""
+def test_no_emit_when_in_process_teammate_frame(tmp_path):
+    """Behavioral pin: an in-process teammate-frame TaskCreate that
+    would otherwise emit Arm must be suppressed by the field-presence
+    lead-session guard. The platform stamps `agent_id` on stdin for
+    in-process subagent fires; is_lead_emit_authorized classifies the
+    payload as teammate-frame (agent_id present -> not lead) and the
+    emit is suppressed.
+
+    Pre-Option-5 (legacy session_id-equality body) this test
+    synthesized teammate-frame via a session_id distinct from
+    team_config.leadSessionId; under the field-presence discriminator
+    the session_id comparison is irrelevant and agent_id presence is
+    the actor-discriminator. See test_p0_in_process_teammate_self_*
+    in test_wake_arm_in_process_teammate_field_presence.py for the
+    bug-fix-path coverage (#611 root: in-process teammates inherit
+    the lead's session_id, so session_id mismatch is no longer a
+    reliable teammate-frame proxy).
+    """
     home = tmp_path / "home"; home.mkdir()
     teammate_sid = "teammate-session-id"
     lead_sid = "lead-session-id"
     pdir = "/tmp/proj"
     team = "team-guard"
     # Session context: caller is the teammate; team config: lead is OTHER.
+    # Both session_id distinction AND agent_id field-presence classify
+    # this as teammate-frame; the field-presence check is the canonical
+    # post-Option-5 path.
     _write_session_context(home, teammate_sid, pdir, team, lead_session_id=lead_sid)
     _write_task(home, team, "task-x", status="in_progress", owner="x")
     payload = {
         "tool_name": "TaskCreate",
         "session_id": teammate_sid,
+        "agent_id": "agent-teammate-uuid",
         "cwd": pdir,
         "tool_input": {"taskId": "task-x"},
         "tool_response": {"task": {"id": "task-x"}},
     }
     out = _emit_output(payload, home)
     assert out == {"suppressOutput": True}, (
-        f"Teammate-session TaskCreate must be suppressed; got {out!r}"
+        f"In-process teammate-frame TaskCreate must be suppressed; "
+        f"got {out!r}"
     )
 
 
-def test_no_emit_when_team_config_missing(tmp_path):
-    """If team config.json is missing, is_lead_session fail-closes —
-    no emit. Documenting the fail-closed behavior so an editing LLM
-    cannot 'simplify' the guard into fail-open during refactor."""
+def test_emit_proceeds_when_team_config_missing_post_option_5(tmp_path):
+    """Post-Option-5 semantic shift: the field-presence predicate body
+    in is_lead_emit_authorized does NOT read team_config.json — the
+    `team_name` parameter is vestigial. With no agent_id in the
+    payload, the predicate returns True (lead frame), and the emit
+    proceeds even when team_config.json is missing.
+
+    Pre-Option-5 (legacy session_id-equality body) this test pinned
+    the fail-closed semantic: missing team_config -> can't compare
+    leadSessionId -> return False -> suppress. The new body has no
+    team_config dependency, so the fail-closed pin is obsolete. This
+    test now documents the new fail-OPEN semantic on missing config,
+    deliberately as a counter to refactors that might try to
+    reintroduce a team_config read for "defense-in-depth" — the
+    predicate's correctness rests on the platform's agent_id stamping
+    contract, not on team_config presence. A regression that
+    reintroduced team_config-coupling here would re-introduce the
+    legacy misclassification of in-process teammates (#611 root).
+    """
     home = tmp_path / "home"; home.mkdir()
     sid = "s"; pdir = "/tmp/p"; team = "team-no-config"
     # Write only the session-context, NOT the team config.
@@ -502,12 +535,20 @@ def test_no_emit_when_team_config_missing(tmp_path):
         }), encoding="utf-8",
     )
     _write_task(home, team, "task-x", status="in_progress", owner="x")
+    # Lead-frame payload (no agent_id).
     payload = {
         "tool_name": "TaskCreate", "session_id": sid, "cwd": pdir,
         "tool_input": {"taskId": "task-x"}, "tool_response": {"task": {"id": "task-x"}},
     }
     out = _emit_output(payload, home)
-    assert out == {"suppressOutput": True}
+    # Under Option 5: predicate returns True (lead frame), emit proceeds.
+    hso = out.get("hookSpecificOutput")
+    assert hso is not None, (
+        f"Lead-frame TaskCreate must emit Arm directive even when "
+        f"team_config is absent (predicate has no config dependency); "
+        f"got {out!r}"
+    )
+    assert hso.get("hookEventName") == "PostToolUse"
 
 
 # ---------- Perf reorder (arch2-M2) ----------

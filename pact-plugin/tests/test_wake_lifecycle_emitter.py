@@ -176,7 +176,7 @@ class TestArmMarkerTypeFieldRetrofit:
 
         _emit_output({
             "tool_name": "TaskUpdate",
-            "session_id": teammate_sid, "cwd": pdir,
+            "session_id": teammate_sid, "agent_id": "agent-bc", "cwd": pdir,
             "tool_input": {
                 "taskId": "C0a", "status": "in_progress", "owner": teammate_owner,
             },
@@ -213,7 +213,7 @@ class TestArmMarkerTypeFieldRetrofit:
 
         _emit_output({
             "tool_name": "TaskUpdate",
-            "session_id": teammate_sid, "cwd": pdir,
+            "session_id": teammate_sid, "agent_id": "agent-bc", "cwd": pdir,
             "tool_input": {
                 "taskId": "C0b", "status": "in_progress", "owner": teammate_owner,
             },
@@ -249,7 +249,7 @@ class TestArmMarkerTypeFieldRetrofit:
 
         _emit_output({
             "tool_name": "TaskUpdate",
-            "session_id": teammate_sid, "cwd": pdir,
+            "session_id": teammate_sid, "agent_id": "agent-bc", "cwd": pdir,
             "tool_input": {
                 "taskId": "C0c", "status": "in_progress", "owner": teammate_owner,
             },
@@ -321,7 +321,7 @@ class TestTeammateTeardownMarkerSelfCompleteExempt:
 
         _emit_output({
             "tool_name": "TaskUpdate",
-            "session_id": teammate_sid, "cwd": pdir,
+            "session_id": teammate_sid, "agent_id": "agent-bc", "cwd": pdir,
             "tool_input": {
                 "taskId": "C3a", "status": "completed",
                 "owner": secretary_name,
@@ -370,7 +370,7 @@ class TestTeammateTeardownMarkerSelfCompleteExempt:
 
         _emit_output({
             "tool_name": "TaskUpdate",
-            "session_id": teammate_sid, "cwd": pdir,
+            "session_id": teammate_sid, "agent_id": "agent-bc", "cwd": pdir,
             "tool_input": {
                 "taskId": "C3sig", "status": "completed", "owner": signaller,
             },
@@ -418,7 +418,7 @@ class TestTeammateTeardownMarkerSelfCompleteExempt:
 
         _emit_output({
             "tool_name": "TaskUpdate",
-            "session_id": teammate_sid, "cwd": pdir,
+            "session_id": teammate_sid, "agent_id": "agent-bc", "cwd": pdir,
             "tool_input": {
                 "taskId": "C3nc", "status": "completed", "owner": teammate_owner,
             },
@@ -515,7 +515,7 @@ class TestTeammateTeardownMarkerSelfCompleteExempt:
 
         _emit_output({
             "tool_name": "TaskUpdate",
-            "session_id": teammate_sid, "cwd": pdir,
+            "session_id": teammate_sid, "agent_id": "agent-bc", "cwd": pdir,
             "tool_input": {
                 "taskId": "C3p", "status": "completed",
                 "owner": secretary_name,
@@ -583,7 +583,7 @@ class TestArmMarkerStillProducedSideBySide:
 
         _emit_output({
             "tool_name": "TaskUpdate",
-            "session_id": teammate_sid, "cwd": pdir,
+            "session_id": teammate_sid, "agent_id": "agent-bc", "cwd": pdir,
             "tool_input": {
                 "taskId": "C3rg", "status": "in_progress",
                 "owner": teammate_owner,

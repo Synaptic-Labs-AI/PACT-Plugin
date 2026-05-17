@@ -131,6 +131,11 @@ def test_teammate_self_claim_writes_inbox_marker(tmp_path):
     suppressOutput; nothing reaches stdout but the marker is on disk.
     """
     fixture = _load_fixture("teammate_claim_in_progress_shape.json")
+    # Post-Option-5 (#611/#778): inject agent_id to mark the fixture
+    # as an in-process teammate frame. The fixture file itself omits
+    # agent_id to remain usable as a lead-frame Bug B re-Arm sample;
+    # this adaptation is local to the teammate-frame test scope.
+    fixture["agent_id"] = "agent-teammate-uuid"
     home = tmp_path / "home"; home.mkdir()
     teammate_sid = fixture["session_id"]
     lead_sid = "lead-session-id"
@@ -370,6 +375,10 @@ def test_marker_filename_schema(tmp_path):
     is chronological order for the drain side.
     """
     fixture = _load_fixture("teammate_claim_in_progress_shape.json")
+    # Post-Option-5 (#611/#778): inject agent_id for teammate-frame
+    # classification under field-presence semantics. See sibling
+    # test_teammate_self_claim_writes_inbox_marker for rationale.
+    fixture["agent_id"] = "agent-teammate-uuid"
     home = tmp_path / "home"; home.mkdir()
     teammate_sid = fixture["session_id"]
     team = "team-marker-schema"
@@ -467,6 +476,7 @@ def test_marker_o_excl_collision_silent(tmp_path):
         payload = {
             "tool_name": "TaskUpdate",
             "session_id": teammate_sid,
+            "agent_id": "agent-bc",
             "cwd": pdir,
             "tool_input": {
                 "taskId": "ABC", "status": "in_progress",

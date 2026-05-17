@@ -275,7 +275,9 @@ def test_fallback_suppressed_in_teammate_session(tmp_path):
     )
 
     out = _drain_out({
-        "session_id": teammate_sid, "cwd": pdir,
+        "session_id": teammate_sid,
+        "agent_id": "agent-bc",
+        "cwd": pdir,
         "hook_event_name": "UserPromptSubmit",
         "prompt": "go",
     }, home)
