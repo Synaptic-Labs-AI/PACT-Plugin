@@ -76,16 +76,13 @@ Carve-out rules:
    shared.intentional_wait for the divergence rationale.
 """
 
-import json
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from shared.intentional_wait import WAKE_EXCLUDED_AGENT_TYPES
 from shared.intentional_wait import _is_wake_excluded_agent_type  # noqa: F401  # DECOUPLED-CONSTANT pin
 from shared.pact_context import _iter_members, _read_team_lead_agent_id
-from shared.session_state import is_safe_path_component
 from shared.task_utils import iter_team_task_jsons, read_task_json
 
 try:
@@ -650,49 +647,38 @@ def has_same_teammate_continuation(completed_task: Any, team_name: str) -> bool:
 
 def is_lead_session(input_data: Any, team_name: str) -> bool:
     """
-    Return True iff the current session is the team's lead session.
+    Return True iff this PostToolUse / TaskCompleted hook fire originated
+    in the lead session (not an in-process teammate frame).
 
-    Reads `session_id` from the hook stdin payload and `leadSessionId`
-    from ~/.claude/teams/{team_name}/config.json. Single source of truth
-    for the wake-mechanism's lead-session locality check; consumed by
-    `wake_lifecycle_emitter._decide_directive` (PostToolUse) and by
-    `wake_inbox_drain.main` (UserPromptSubmit). Mirrors the Lead-Session
-    Guard pattern used by the start-pending-scan / stop-pending-scan
-    skill bodies (Layer 1 of the defense-in-depth model); this
-    hook-level check is Layer 0, preventing directive emission to
-    teammate sessions at the emission source. team_config is the
-    single source of truth for lead identity.
+    Backward-compat delegate to :func:`is_lead_emit_authorized` — the
+    canonical predicate under the field-presence discriminator. The
+    legacy body (``session_id == leadSessionId`` via team_config read)
+    misclassified in-process teammate fires as lead fires because the
+    Claude Code platform does NOT re-issue ``session_id`` per
+    in-process subagent frame: a teammate Task-tool-spawned in the
+    lead's frame inherits the lead's ``session_id``. The actor-
+    discriminator that distinguishes lead from in-process teammate at
+    the hook-stdin layer is ``payload.get('agent_id')`` — None for
+    lead fires, str for in-process teammate fires. The session_id
+    equality check was symptomatically silent (the read succeeded and
+    returned True for both lead and in-process teammate), so the
+    miscategorization went latent for the lifetime of the hook until
+    the in-process secretary self-claim path exposed it.
 
-    Pure function; never raises. Returns False on missing/empty
-    session_id, missing/unsafe team_name, missing config.json,
-    malformed JSON, or filesystem error. The teammate session is the
-    expected non-lead path; silent fail-open avoids UI noise on every
-    teammate hook fire.
+    Retained as a thin delegate (rather than removed) to minimize the
+    blast radius for any caller outside the symmetric corridor that
+    references the original symbol. The four corridor sites
+    (wake_lifecycle_emitter, wake_inbox_drain, teardown_request_emitter,
+    session_init) migrate to the explicit emit / drain / at-session-
+    start helpers in subsequent commits; this delegate keeps any
+    unforeseen consumer correct without a coordinated multi-site flip.
+
+    Pure function; never raises. Returns False on non-dict input. The
+    ``team_name`` parameter is vestigial under the field-presence
+    discriminator (no team_config disk read needed) but retained for
+    signature uniformity with prior callers.
     """
-    if not isinstance(input_data, dict):
-        return False
-    raw_session_id = input_data.get("session_id")
-    if not isinstance(raw_session_id, str) or not raw_session_id:
-        return False
-    if not isinstance(team_name, str) or not team_name:
-        return False
-    if not is_safe_path_component(team_name):
-        return False
-    try:
-        config_path = (
-            Path.home() / ".claude" / "teams" / team_name / "config.json"
-        )
-        if not config_path.exists():
-            return False
-        data = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    if not isinstance(data, dict):
-        return False
-    lead_session_id = data.get("leadSessionId")
-    if not isinstance(lead_session_id, str) or not lead_session_id:
-        return False
-    return raw_session_id == lead_session_id
+    return is_lead_emit_authorized(input_data, team_name)
 
 
 def is_lead_emit_authorized(input_data: Any, team_name: str = "") -> bool:
