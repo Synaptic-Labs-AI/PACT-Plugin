@@ -417,6 +417,32 @@ def _already_emitted_teardown(team_name: str, task_id: str) -> bool:
         return False
 
     marker_dir = _teardown_marker_dir(team_name)
+    marker_path = marker_dir / task_id
+    # Pre-claimed fast path: when this predicate is called from
+    # _decide_and_emit's loop over `teardown_task_ids`, every id whose
+    # marker was already created by Tier-1 will hit this branch with
+    # one cheap stat syscall instead of falling through to mkdir +
+    # O_EXCL open (~3 syscalls). The race window between this exists()
+    # check and the O_EXCL open below is BENIGN — a marker that
+    # appears in the gap still produces the correct return True via
+    # EEXIST. Semantics unchanged; cost is one stat per fresh-fire id
+    # (negligible) in exchange for ~2 saved syscalls per pre-claimed
+    # id under storm conditions. Only matters under theoretical storm
+    # of N pre-claimed ids in one drain.
+    try:
+        if marker_path.exists():
+            return True
+    except OSError:
+        # Stat failure (e.g. permission denied on the parent) — fall
+        # through to the full mkdir+open path which has its own fail-
+        # open behavior.
+        pass
+    # Symlink-on-dir defense-in-depth (mirrors teardown_request_emitter
+    # Tier-1): a TOCTOU window exists between is_symlink() and
+    # mkdir(exist_ok=True); the structural defense is O_NOFOLLOW on
+    # the final O_EXCL open below, not this pre-check. Same-user trust
+    # model keeps this acceptable; the pre-check is a fast-fail for the
+    # cooperative case.
     if marker_dir.is_symlink():
         return False
     try:
@@ -424,7 +450,8 @@ def _already_emitted_teardown(team_name: str, task_id: str) -> bool:
     except OSError:
         return False
 
-    marker_path = marker_dir / task_id
+    # O_NOFOLLOW is the load-bearing structural defense (intermediate-
+    # symlink coverage on top of O_EXCL's trailing-symlink refusal).
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(

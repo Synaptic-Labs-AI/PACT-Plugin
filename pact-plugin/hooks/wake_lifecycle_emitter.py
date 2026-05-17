@@ -375,10 +375,18 @@ def _emit_directive(prose: str) -> None:
     print(json.dumps(output))
 
 
-# Schema version for inbox marker JSON payloads. Bump on
+# Schema version for inbox marker JSON payloads. Bump on additive OR
 # breaking-shape changes; drain side tolerates unknown fields and
-# treats malformed JSON as a fail-conservative wake signal.
-_WAKE_INBOX_MARKER_SCHEMA_VERSION = 1
+# treats malformed JSON as a fail-conservative wake signal. Version 2
+# coincides with the additive `type` field (`"arm"` | `"teardown"`)
+# introduced for the Tier-2 carve-out path — pre-v2 markers lack the
+# field and default to `"arm"` on the drain side, preserving backward
+# compatibility for any markers written by an older session. The pin
+# sets precedent: future additive changes (e.g., extra trigger tokens,
+# routing metadata) bump this in lockstep so the wire-format snapshot
+# remains an inspectable forensic field, even though no drain-side
+# consumer branches on it today.
+_WAKE_INBOX_MARKER_SCHEMA_VERSION = 2
 
 # Trigger sentinel written into the marker payload for forensics. The
 # drain side consumes the file PRESENCE, not the field content, but

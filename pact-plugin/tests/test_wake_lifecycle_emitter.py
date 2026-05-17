@@ -475,12 +475,21 @@ class TestTeammateTeardownMarkerSelfCompleteExempt:
 
     def test_teardown_marker_payload_shape(self, tmp_path):
         """Pin the C3 marker payload shape per architect spec:
-        schema_version: 1, type: "teardown", task_id, team_name,
-        owner, timestamp_ms (int), trigger (categorical token).
+        schema_version: positive int, type: "teardown", task_id,
+        team_name, owner, timestamp_ms (int), trigger (categorical
+        token).
 
         Without this pin a refactor that drops team_name (used by C4
         drain to write the journal event) would silently break the
         Tier-2 path.
+
+        schema_version is asserted as ANY positive int rather than the
+        literal current value — version bumps (e.g., the v1 → v2 bump
+        for the additive `type` field) are tracked at the constant
+        definition (wake_lifecycle_emitter._WAKE_INBOX_MARKER_SCHEMA_
+        VERSION) and the producer-side comment. This test pins the
+        wire-format contract (field present, positive integer) not
+        the version number — future bumps don't ripple here.
         """
         home = tmp_path / "home"; home.mkdir()
         teammate_sid = "teammate-sid"
@@ -522,7 +531,13 @@ class TestTeammateTeardownMarkerSelfCompleteExempt:
         assert len(teardown_markers) == 1
         m = teardown_markers[0]
         # Required-shape fields:
-        assert m.get("schema_version") == 1
+        # schema_version contract: positive int (rejects None / 0 / negatives
+        # / non-int). The literal version number is tracked at the constant
+        # definition, not pinned here.
+        sv = m.get("schema_version")
+        assert isinstance(sv, int) and not isinstance(sv, bool) and sv > 0, (
+            f"schema_version must be a positive int; got {sv!r}"
+        )
         assert m.get("type") == "teardown"
         assert m.get("task_id") == "C3p"
         assert m.get("team_name") == team

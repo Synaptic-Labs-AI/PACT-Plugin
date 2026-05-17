@@ -205,9 +205,16 @@ def _already_emitted(team_name: str, task_id: str) -> bool:
         return False
 
     marker_dir = _marker_dir(team_name)
-    # Symlink-containment pre-check: refuse a pre-planted symlink at the
-    # marker dir. Fail-open emit rather than risk writing to an
-    # attacker-controlled location.
+    # Symlink-on-dir defense-in-depth: a TOCTOU window exists between
+    # this is_symlink() check and the mkdir(exist_ok=True) below, so
+    # this pre-check is NOT a structural containment guarantee — it is
+    # a fast-fail for the cooperative case. The load-bearing structural
+    # defense is O_NOFOLLOW on the final O_EXCL open below, which
+    # refuses to follow any symlink at the marker_path component
+    # regardless of what races may have swapped the marker_dir. Under
+    # the same-user trust model this defense-in-depth posture is fine;
+    # under a different threat model the pre-check would need a
+    # dirfd-based open to actually contain symlink swaps.
     if marker_dir.is_symlink():
         return False
     try:
@@ -216,10 +223,14 @@ def _already_emitted(team_name: str, task_id: str) -> bool:
         return False
 
     marker_path = marker_dir / task_id
-    # O_NOFOLLOW defends against a pre-planted symlink at the marker
-    # path; mirrors the agent_handoff_emitter Sec-M1 pattern. POSIX
-    # O_CREAT|O_EXCL already refuses to follow a trailing symlink;
-    # O_NOFOLLOW is defense-in-depth + intermediate-symlink coverage.
+    # O_NOFOLLOW is the load-bearing structural defense against a pre-
+    # planted symlink at the marker path; mirrors the
+    # agent_handoff_emitter Sec-M1 pattern. POSIX O_CREAT|O_EXCL already
+    # refuses to follow a trailing symlink; O_NOFOLLOW adds intermediate-
+    # symlink coverage. Together with the (racy) is_symlink pre-check
+    # above this forms layered defense-in-depth — the pre-check filters
+    # the cooperative case cheaply, O_NOFOLLOW filters the adversarial
+    # case structurally.
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(
