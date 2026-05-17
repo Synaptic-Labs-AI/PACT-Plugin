@@ -198,6 +198,16 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # only when scan_armed is strictly more recent than scan_disarmed
     # (re-arm dominance under post-Teardown re-arm).
     "scan_disarmed": {"disarmed_at": int},
+    # hooks/teardown_request_emitter.py writes teardown_request after
+    # the lead-driven TaskUpdate(status="completed") drives the team's
+    # lifecycle-relevant active-task count to 0 (Tier-1 fast path), AND
+    # hooks/wake_inbox_drain.py writes teardown_request after draining
+    # a type="teardown" wake_inbox marker (Tier-2 carve-out fallback).
+    # The event is the falsifiable trace; the additionalContext
+    # directive is the wake-hint. Required fields are the minimum
+    # identity carrier: task_id pins the specific completion;
+    # team_name pins the cron binding the directive will tear down.
+    "teardown_request": {"task_id": str, "team_name": str},
 }
 
 
@@ -271,6 +281,14 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # optional loop. Symmetric with the session_end + cleanup_summary
     # registration patterns.
     "wake_tally_warn": {"detail": str},
+    # hooks/teardown_request_emitter.py (Tier-1) and
+    # hooks/wake_inbox_drain.py (Tier-2) write teardown_request with
+    # optional `tier` ("1" | "2") attributing the emission path, and
+    # optional `reason` categorizing the trigger
+    # ("lead_terminal_taskupdate" | "wake_inbox_drained" |
+    # "self_complete_exempt" — extend with new categorical tokens as
+    # paths are added). Audit-only fields; no behavioral consumer.
+    "teardown_request": {"tier": str, "reason": str},
 }
 
 

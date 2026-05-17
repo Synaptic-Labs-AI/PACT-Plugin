@@ -243,25 +243,6 @@ def test_arm_includes_idempotency_clause(tmp_path):
     assert "cron" in additional.lower()
 
 
-def test_teardown_includes_best_effort_clause(tmp_path):
-    """Symmetric to Arm idempotency: pin the best-effort clause + the
-    tolerance rationale for missing-cron-entry scenarios."""
-    home = tmp_path / "home"; home.mkdir()
-    sid = "s"; pdir = "/tmp/p"; team = "t"
-    _write_session_context(home, sid, pdir, team)
-    _write_task(home, team, "1", status="completed", owner="x")
-    out = _emit_output({
-        "tool_name": "TaskUpdate", "session_id": sid, "cwd": pdir,
-        "tool_input": {"taskId": "1", "status": "completed"},
-        "tool_response": {"id": "1", "status": "completed"},
-    }, home)
-    additional = out["hookSpecificOutput"]["additionalContext"]
-    assert "best-effort" in additional.lower()
-    # Cron teardown tolerates a missing cron entry (stop-pending-scan
-    # is idempotent / ignore-if-absent per CronDelete by Extracted ID).
-    assert "tolerat" in additional.lower()
-
-
 def test_arm_directive_contains_precondition_phrase(tmp_path):
     """Pin the canonical Arm precondition prose so an editing LLM
     stripping it for terseness loses the directive's WHY-context.
@@ -276,20 +257,6 @@ def test_arm_directive_contains_precondition_phrase(tmp_path):
         "tool_input": {"taskId": "1"}, "tool_response": {"task": {"id": "1"}},
     }, home)
     assert "First active teammate task created" in out["hookSpecificOutput"]["additionalContext"]
-
-
-def test_teardown_directive_contains_precondition_phrase(tmp_path):
-    """Pin the canonical Teardown precondition prose."""
-    home = tmp_path / "home"; home.mkdir()
-    sid = "s"; pdir = "/tmp/p"; team = "t"
-    _write_session_context(home, sid, pdir, team)
-    _write_task(home, team, "1", status="completed", owner="x")
-    out = _emit_output({
-        "tool_name": "TaskUpdate", "session_id": sid, "cwd": pdir,
-        "tool_input": {"taskId": "1", "status": "completed"},
-        "tool_response": {"id": "1", "status": "completed"},
-    }, home)
-    assert "Last active teammate task completed" in out["hookSpecificOutput"]["additionalContext"]
 
 
 def test_no_op_on_create_of_signal_task(tmp_path):
@@ -352,22 +319,27 @@ def test_arm_on_create_owned_by_secretary_post_empty_carve_out(tmp_path):
 
 
 # ---------- Teardown directive (1 -> 0) ----------
-
-def test_teardown_emitted_on_last_active_completion(tmp_path):
-    home = tmp_path / "home"; home.mkdir()
-    sid = "s"; pdir = "/tmp/p"; team = "t"
-    _write_session_context(home, sid, pdir, team)
-    # Task on disk is now completed (post-state); pre-state was active.
-    _write_task(home, team, "1", status="completed", owner="x")
-    out = _emit_output({
-        "tool_name": "TaskUpdate", "session_id": sid, "cwd": pdir,
-        "tool_input": {"taskId": "1", "status": "completed"},
-        "tool_response": {"id": "1", "status": "completed"},
-    }, home)
-    hso = out["hookSpecificOutput"]
-    assert hso["hookEventName"] == "PostToolUse"
-    assert "Skill(\"PACT:stop-pending-scan\")" in hso["additionalContext"]
-
+#
+# Migrated post-#763 C5 retirement (wake_lifecycle_emitter PostToolUse
+# Teardown branch deleted; Tier-1 teardown_request_emitter on
+# TaskCompleted hook is the new dominant path):
+#   - test_teardown_includes_best_effort_clause →
+#     test_wake_lifecycle_emitter.py::TestTeardownDirectiveAuditAnchor
+#     ::test_teardown_directive_includes_best_effort_clause (pins
+#     "best-effort" + "tolerat" prose against the SSOT directive).
+#   - test_teardown_directive_contains_precondition_phrase →
+#     test_wake_lifecycle_emitter.py::TestTeardownDirectiveAuditAnchor
+#     ::test_teardown_directive_describes_last_active_task (pins
+#     "Last active teammate task completed" prose).
+#   - test_teardown_emitted_on_last_active_completion →
+#     test_teardown_request_emitter.py::TestGate3ActiveTaskCountTransition
+#     ::test_count_zero_proceeds + test_native_hooks_integration.py
+#     ::TestLeadDrivenCompletionFiresTier1Only
+#     ::test_lead_terminal_taskupdate_emits_tier1_event.
+#   - test_teardown_emits_on_signal_task_completion_at_post_zero →
+#     covered by Tier-1 Gate 3 semantics (signal-tasks are filtered
+#     upstream by count_active_tasks); no dedicated migration target
+#     because the gate logic subsumes the case.
 
 def test_no_teardown_when_other_active_remains(tmp_path):
     home = tmp_path / "home"; home.mkdir()
@@ -397,32 +369,6 @@ def test_no_teardown_on_non_status_taskupdate(tmp_path):
     assert out == {"suppressOutput": True}
 
 
-def test_teardown_emits_on_signal_task_completion_at_post_zero(tmp_path):
-    """A1 simplification (see emitter docstring): post-only transition
-    detector emits Teardown on any status=completed TaskUpdate when
-    post==0, including the signal-task completion case where the task
-    never contributed to the active count. stop-pending-scan is
-    idempotent (no-op if cron entry absent), so this over-eager emit
-    is benign by design — replaces the prior hypothetical_pre filter."""
-    home = tmp_path / "home"; home.mkdir()
-    sid = "s"; pdir = "/tmp/p"; team = "t"
-    _write_session_context(home, sid, pdir, team)
-    _write_task(
-        home, team, "sig",
-        status="completed",
-        owner="x",
-        metadata={"completion_type": "signal", "type": "algedonic"},
-    )
-    out = _emit_output({
-        "tool_name": "TaskUpdate", "session_id": sid, "cwd": pdir,
-        "tool_input": {"taskId": "sig", "status": "completed"},
-        "tool_response": {"id": "sig", "status": "completed"},
-    }, home)
-    hso = out["hookSpecificOutput"]
-    assert hso["hookEventName"] == "PostToolUse"
-    assert "Skill(\"PACT:stop-pending-scan\")" in hso["additionalContext"]
-
-
 # ---------- _decide_directive direct unit coverage ----------
 
 def test_decide_directive_module_importable():
@@ -443,31 +389,16 @@ def test_decide_directive_module_importable():
 
 
 # ---------- Terminal-status detection covers deleted (be-F2) ----------
-
-def test_teardown_emitted_on_status_deleted_at_post_zero(tmp_path):
-    """Both terminal statuses — `completed` and `deleted` — must trigger
-    Teardown when the team's active count drops to zero. A status=deleted
-    transition is structurally equivalent to status=completed for the
-    wake-lifecycle (the task is no longer active work). Without this,
-    a deleted-task TaskUpdate at post-zero leaves a phantom Monitor
-    armed against an inbox no one is watching."""
-    home = tmp_path / "home"; home.mkdir()
-    sid = "s"; pdir = "/tmp/p"; team = "t"
-    _write_session_context(home, sid, pdir, team)
-    # Task on disk is deleted (post-state); pre-state was active.
-    _write_task(home, team, "1", status="deleted", owner="x")
-    out = _emit_output({
-        "tool_name": "TaskUpdate", "session_id": sid, "cwd": pdir,
-        "tool_input": {"taskId": "1", "status": "deleted"},
-        "tool_response": {"id": "1", "status": "deleted"},
-    }, home)
-    hso = out.get("hookSpecificOutput")
-    assert hso is not None, (
-        "Expected Teardown directive on status=deleted at post-zero "
-        f"(be-F2). Actual emit: {out!r}"
-    )
-    assert hso["hookEventName"] == "PostToolUse"
-    assert "Skill(\"PACT:stop-pending-scan\")" in hso["additionalContext"]
+# NOTE (#763 C5 retirement): the PostToolUse-fire Teardown coverage for
+# status=deleted was deleted alongside the PostToolUse Teardown branch
+# retirement. Lead-driven `TaskUpdate(status="deleted")` Teardown
+# emission is currently UNCOVERED post-C5: TaskCompleted hook fires only
+# on completion (not on delete), and the marker writer's
+# _is_terminal_status_update predicate still recognises both, but the
+# Tier-1 emitter's Gate 1 fallback checks `status != "completed"` only.
+# Flagged in #763's stage-ready HANDOFF as an open question for follow-up.
+# `_is_terminal_status_update` itself is still pinned by the unit test
+# directly below.
 
 
 def test_is_terminal_status_update_matches_completed_and_deleted():
@@ -970,6 +901,19 @@ class TestArmDirectiveOnParallelTaskCreateRace:
     `_meta` blocks of `task_create_parallel_burst_first.json` and
     `task_create_parallel_burst_second.json` — that's the right surface
     for the issue cite per the no-issue-refs-in-test-names axiom.
+
+    Migrated post-#763 C5 retirement (this class lost 2 Teardown-side
+    tests when the PostToolUse Teardown branch was deleted):
+      - test_teardown_emits_on_terminal_update_to_zero →
+        test_teardown_request_emitter.py::TestGate3ActiveTaskCountTransition
+        ::test_count_zero_proceeds (Tier-1 1->0 emit).
+      - test_teardown_sequence_after_parallel_burst_arm →
+        test_native_hooks_integration.py::TestLeadDrivenCompletion
+        FiresTier1Only::test_parallel_burst_then_drain_lifecycle_symmetry
+        (full 2->1->0 lifecycle: intermediate suppresses via Gate 3,
+        final emits exactly 1 event). The Arm side of the parallel-
+        burst race coverage stays here — the migration only covered
+        the post-C5 Teardown half.
     """
 
     @staticmethod
@@ -1046,31 +990,6 @@ class TestArmDirectiveOnParallelTaskCreateRace:
         assert hso["hookEventName"] == "PostToolUse"
         assert "Skill(\"PACT:start-pending-scan\")" in hso["additionalContext"]
 
-    def test_teardown_emits_on_terminal_update_to_zero(self, tmp_path):
-        """No-regression guard for the Teardown threshold (count == 0).
-        This PR explicitly does NOT change Teardown; the test must pass
-        under both the reverted strict-equality Arm and the relaxed
-        positive-bound Arm."""
-        home = tmp_path / "home"
-        home.mkdir()
-        sid = "pact-2877fe69"
-        pdir = "/Users/mj/Sites/collab/PACT-prompt"
-        team = "team-race"
-        _write_session_context(home, sid, pdir, team)
-        _write_task(home, team, "10", status="completed", owner="backend-coder")
-
-        out = _emit_output({
-            "tool_name": "TaskUpdate",
-            "session_id": sid,
-            "cwd": pdir,
-            "tool_input": {"taskId": "10", "status": "completed"},
-            "tool_response": {"id": "10", "status": "completed"},
-        }, home)
-        hso = out.get("hookSpecificOutput")
-        assert hso is not None, f"Expected Teardown; got {out!r}."
-        assert hso["hookEventName"] == "PostToolUse"
-        assert "Skill(\"PACT:stop-pending-scan\")" in hso["additionalContext"]
-
     def test_teardown_no_emit_on_terminal_update_with_residual(self, tmp_path):
         """No-regression guard against accidentally relaxing Teardown
         symmetrically with the Arm change. With one residual active task
@@ -1141,56 +1060,6 @@ class TestArmDirectiveOnParallelTaskCreateRace:
         )
         assert hso["hookEventName"] == "PostToolUse"
         assert "Skill(\"PACT:start-pending-scan\")" in hso["additionalContext"]
-
-    def test_teardown_sequence_after_parallel_burst_arm(self, tmp_path):
-        """Lifecycle-symmetric guard for the Teardown side of the race
-        window. Sequence: parallel burst raises count 0->2 (Arm fires) ->
-        first task completes 2->1 (Teardown must NOT fire; residual
-        active remains) -> second task completes 1->0 (Teardown fires).
-        Pins that the Teardown threshold (count == 0) is unaffected by
-        the relaxed Arm threshold, and that a parallel-burst-then-drain
-        lifecycle terminates cleanly."""
-        first_fixture = self._load_fixture("task_create_parallel_burst_first.json")
-        home, team = self._setup_session(tmp_path, first_fixture)
-        sid = first_fixture["session_id"]
-        pdir = first_fixture["cwd"]
-
-        # State after parallel burst: both task files on disk, in_progress.
-        _write_task(home, team, "10", status="in_progress", owner="backend-coder")
-        _write_task(home, team, "11", status="in_progress", owner="test-engineer")
-
-        # First completion 2 -> 1: residual active task remains; no Teardown.
-        _write_task(home, team, "10", status="completed", owner="backend-coder")
-        out_first_complete = _emit_output({
-            "tool_name": "TaskUpdate",
-            "session_id": sid,
-            "cwd": pdir,
-            "tool_input": {"taskId": "10", "status": "completed"},
-            "tool_response": {"id": "10", "status": "completed"},
-        }, home)
-        assert out_first_complete == {"suppressOutput": True}, (
-            f"Expected suppressOutput when residual active task remains "
-            f"(2 -> 1 transition); got {out_first_complete!r}. If this "
-            f"emits Teardown, the Teardown threshold has been relaxed "
-            f"symmetrically with the Arm change — see #637 review TE-1."
-        )
-
-        # Second completion 1 -> 0: Teardown fires.
-        _write_task(home, team, "11", status="completed", owner="test-engineer")
-        out_final = _emit_output({
-            "tool_name": "TaskUpdate",
-            "session_id": sid,
-            "cwd": pdir,
-            "tool_input": {"taskId": "11", "status": "completed"},
-            "tool_response": {"id": "11", "status": "completed"},
-        }, home)
-        hso = out_final.get("hookSpecificOutput")
-        assert hso is not None, (
-            f"Expected Teardown directive on terminal 1 -> 0 transition "
-            f"after parallel-burst Arm; got {out_final!r}."
-        )
-        assert hso["hookEventName"] == "PostToolUse"
-        assert "Skill(\"PACT:stop-pending-scan\")" in hso["additionalContext"]
 
     def test_arm_emits_when_parallel_burst_includes_signal_task(self, tmp_path):
         """Predicate-invariance under the count_active_tasks signal-task

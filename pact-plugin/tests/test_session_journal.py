@@ -3268,6 +3268,16 @@ class TestValidateEventSchemaPerType:
         # idempotency check (suppress only when scan_armed is strictly more
         # recent than scan_disarmed).
         "scan_disarmed": {"disarmed_at": 1715734800},
+        # `teardown_request` is the falsifiable trace for the 1->0 active-
+        # task transition that retires the pending-scan cron. Written by
+        # hooks/teardown_request_emitter.py (Tier-1, lead-session
+        # TaskCompleted handler) and by hooks/wake_inbox_drain.py (Tier-2,
+        # carve-out fallback that drains a type="teardown" wake_inbox
+        # marker). The additionalContext directive is the wake-hint; the
+        # event is the source of truth that Tier-4 cron staleness fallback
+        # can replay from. task_id pins the specific completion; team_name
+        # pins the cron binding the directive will tear down.
+        "teardown_request": {"task_id": "T1", "team_name": "team-x"},
     }
 
     def test_samples_mirror_required_fields_dict(self):
@@ -3503,6 +3513,9 @@ class TestValidateEventSchemaPerType:
         ("remediation", "items", {"k": "v"}, "list", "dict"),
         # bool field fed an int (bool fields currently only consolidation_completed)
         ("session_paused", "consolidation_completed", 1, "bool", "int"),
+        # teardown_request required str fields fed an int
+        ("teardown_request", "task_id", 42, "str", "int"),
+        ("teardown_request", "team_name", 42, "str", "int"),
     ]
 
     @pytest.mark.parametrize(
@@ -4229,3 +4242,269 @@ class TestValidateOptionalFieldTypes:
         ok, reason = _validate_event_schema(event)
         assert ok is True, f"full payload should pass; got {reason!r}"
         assert reason == "ok"
+
+
+# =============================================================================
+# teardown_request journal event schema tests (covers C1 of #763)
+# =============================================================================
+#
+# The `teardown_request` event is the falsifiable trace for the 1->0 active-
+# task transition that retires the pending-scan cron. Written by two
+# producers: hooks/teardown_request_emitter.py (Tier-1) and hooks/wake_inbox_
+# drain.py (Tier-2). These tests pin the schema contract at the journal
+# boundary so a regression in either producer (e.g. dropping team_name or
+# passing the wrong type) is rejected before it lands on disk.
+
+
+class TestTeardownRequestSchemaRoundTrip:
+    """Required + optional fields validate and round-trip through
+    append + read.
+
+    The schema is pinned at C1 in shared/session_journal.py:
+      _REQUIRED_FIELDS_BY_TYPE["teardown_request"] = {
+          "task_id": str, "team_name": str,
+      }
+      _OPTIONAL_FIELDS_BY_TYPE["teardown_request"] = {
+          "tier": str,    # "1" (TaskCompleted-driven) | "2" (wake_inbox-drained)
+          "reason": str,  # e.g. "lead_terminal_taskupdate" | "wake_inbox_drained"
+      }
+    """
+
+    def test_make_event_with_required_fields_validates(self):
+        """Minimum required-only payload passes per-type validation."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "teardown_request",
+            task_id="task-42",
+            team_name="pact-test",
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True, f"required-only payload should pass; got {reason!r}"
+        assert reason == "ok"
+
+    def test_make_event_with_optional_fields_validates(self):
+        """Full payload including tier + reason optional fields validates."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "teardown_request",
+            task_id="task-42",
+            team_name="pact-test",
+            tier="1",
+            reason="lead_terminal_taskupdate",
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True, f"full payload should pass; got {reason!r}"
+        assert reason == "ok"
+
+    def test_append_then_read_last_returns_same_event(
+        self, journal_home, session_dir, journal_file,
+    ):
+        """End-to-end: write a teardown_request via append_event and read
+        it back via read_events. The on-disk shape preserves both required
+        and optional fields.
+        """
+        from shared.session_journal import append_event, make_event, read_events
+
+        event = make_event(
+            "teardown_request",
+            task_id="task-99",
+            team_name="pact-test",
+            tier="2",
+            reason="wake_inbox_drained",
+        )
+        assert append_event(event) is True
+        events = read_events("teardown_request")
+        assert len(events) == 1
+        roundtripped = events[0]
+        assert roundtripped["task_id"] == "task-99"
+        assert roundtripped["team_name"] == "pact-test"
+        assert roundtripped["tier"] == "2"
+        assert roundtripped["reason"] == "wake_inbox_drained"
+
+    def test_tier_1_and_tier_2_both_validate(self):
+        """Both Tier-1 ('1') and Tier-2 ('2') values for the optional
+        tier field validate. Pins the production-callsite invariant that
+        producers emit one of these two literals.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        for tier_value in ("1", "2"):
+            event = make_event(
+                "teardown_request",
+                task_id="t1",
+                team_name="team-x",
+                tier=tier_value,
+            )
+            ok, reason = _validate_event_schema(event)
+            assert ok is True, (
+                f"tier={tier_value!r} should pass; got {reason!r}"
+            )
+
+    def test_schema_registered_in_required_fields(self):
+        """teardown_request is registered in _REQUIRED_FIELDS_BY_TYPE with
+        task_id and team_name as str. Pins the dict entry so a future
+        refactor that drops the entry trips this test (without it, the
+        validator's unknown-type short-circuit would silently accept
+        malformed payloads).
+        """
+        from shared.session_journal import _REQUIRED_FIELDS_BY_TYPE
+
+        assert _REQUIRED_FIELDS_BY_TYPE.get("teardown_request") == {
+            "task_id": str,
+            "team_name": str,
+        }
+
+    def test_optional_fields_registered(self):
+        """teardown_request optional fields registered in _OPTIONAL_FIELDS_
+        BY_TYPE. Without this entry, the optional-field loop would
+        silently accept wrong-typed tier/reason values.
+        """
+        from shared.session_journal import _OPTIONAL_FIELDS_BY_TYPE
+
+        assert _OPTIONAL_FIELDS_BY_TYPE.get("teardown_request") == {
+            "tier": str,
+            "reason": str,
+        }
+
+
+class TestTeardownRequestSchemaRejectsMalformed:
+    """Validation rejects missing-required, wrong-type, and None-required
+    payloads. Each path exercises a distinct validator branch.
+    """
+
+    def test_missing_task_id_rejected(self):
+        """Missing required task_id is rejected with the canonical reason
+        string format. A producer that forgets to pass task_id (the
+        identity carrier) must not land on disk.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event("teardown_request", team_name="team-x")
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+        assert reason == (
+            "missing required field 'task_id' for type 'teardown_request'"
+        )
+
+    def test_missing_team_name_rejected(self):
+        """Missing required team_name is rejected. team_name pins the
+        cron binding the directive will tear down — a payload without it
+        has no actionable target.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event("teardown_request", task_id="t1")
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+        assert reason == (
+            "missing required field 'team_name' for type 'teardown_request'"
+        )
+
+    def test_none_task_id_rejected(self):
+        """Explicit task_id=None is rejected (validator treats None as
+        absent for required fields).
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "teardown_request", task_id=None, team_name="team-x",
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+        assert reason == (
+            "missing required field 'task_id' for type 'teardown_request'"
+        )
+
+    def test_none_team_name_rejected(self):
+        """Explicit team_name=None is rejected — symmetric with None
+        task_id; covers the validator's
+        `field not in event or event[field] is None` branch.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "teardown_request", task_id="t1", team_name=None,
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+        assert reason == (
+            "missing required field 'team_name' for type 'teardown_request'"
+        )
+
+    def test_wrong_type_for_required_task_id_rejected(self):
+        """task_id=int is rejected with both expected and actual types
+        in the reason string.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "teardown_request", task_id=42, team_name="team-x",
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+        assert reason == (
+            "field 'task_id' for type 'teardown_request' must be str, "
+            "got int"
+        )
+
+    def test_wrong_type_for_required_team_name_rejected(self):
+        """team_name=int is rejected with the canonical reason format."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "teardown_request", task_id="t1", team_name=42,
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+        assert reason == (
+            "field 'team_name' for type 'teardown_request' must be str, "
+            "got int"
+        )
+
+    def test_wrong_type_for_optional_tier_rejected(self):
+        """tier=int is rejected by the optional-field type check. Pins
+        the contract that tier is a str discriminator ('1' / '2'), NOT
+        an int (which would invite unsafe arithmetic on consumer side).
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "teardown_request",
+            task_id="t1", team_name="team-x", tier=1,
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+        assert reason == (
+            "optional field 'tier' for type 'teardown_request' must be "
+            "str, got int"
+        )
+
+    def test_wrong_type_for_optional_reason_rejected(self):
+        """reason=int is rejected. reason carries the categorical token
+        identifying the producer path ('lead_terminal_taskupdate',
+        'wake_inbox_drained', etc.); a non-str value poisons audit
+        consumers that switch on the token.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "teardown_request",
+            task_id="t1", team_name="team-x", reason=42,
+        )
+        ok, reason_msg = _validate_event_schema(event)
+        assert ok is False
+        assert reason_msg == (
+            "optional field 'reason' for type 'teardown_request' must be "
+            "str, got int"
+        )
+
+    def test_append_event_rejects_missing_required(self, journal_home):
+        """End-to-end: append_event returns False for a malformed
+        teardown_request payload; nothing lands on disk.
+        """
+        from shared.session_journal import append_event, make_event
+
+        bad_event = make_event("teardown_request", task_id="t1")  # missing team_name
+        assert append_event(bad_event) is False

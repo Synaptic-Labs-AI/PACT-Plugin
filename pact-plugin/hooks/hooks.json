@@ -149,6 +149,14 @@
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/agent_handoff_emitter.py\""
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/teardown_request_emitter.py\""
+          }
+        ]
       }
     ],
     "TeammateIdle": [

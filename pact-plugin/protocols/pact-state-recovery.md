@@ -37,6 +37,7 @@ Events are JSONL entries with common fields `v` (schema version), `type`, and `t
 | `checkpoint` | orchestrate command | Workflow-specific snapshot | Fast recovery point |
 | `agent_dispatch` | orchestrate, comPACT | `agent`, `task_id`, `domain` | Track active agents |
 | `agent_handoff` | agent_handoff_emitter hook | `agent`, `task_subject`, `handoff` (dict) | Completed work (GC-proof HANDOFF store) |
+| `teardown_request` | teardown_request_emitter hook (Tier-1, TaskCompleted); wake_inbox_drain hook (Tier-2, UserPromptSubmit) | `task_id`, `team_name`, optional `tier` (`"1"` \| `"2"`) + `reason` | Falsifiable trace for stop-pending-scan emission; pairs with the `additionalContext` wake-hint |
 | `commit` | orchestrate, comPACT | `hash`, `message` | Track committed work |
 | `s2_state_seeded` | orchestrate command | `boundaries`, `conventions` | Restore S2 coordination state |
 | `review_dispatch` | peer-review command | `reviewers`, `pr_number` | Track review phase |
