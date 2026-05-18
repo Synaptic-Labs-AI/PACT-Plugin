@@ -554,6 +554,58 @@ def test_emit_proceeds_when_team_config_missing_post_option_5(tmp_path):
     assert hso.get("hookEventName") == "PostToolUse"
 
 
+def test_suppress_proceeds_when_team_config_missing_teammate_frame(tmp_path):
+    """Defense-in-depth completeness pin (sibling to the lead-frame test
+    above): the predicate body has zero team_config dependency for the
+    teammate-frame path as well as the lead-frame path. With agent_id
+    present on the payload (teammate frame), the predicate returns
+    False (not lead) and the suppress path engages regardless of
+    team_config presence.
+
+    Pre-Option-5 (legacy session_id-equality body) this combination
+    would have read team_config to compare leadSessionId and then
+    fail-closed on missing-config (suppress). The new body has no
+    team_config read at all, so the suppress path is reached via
+    field-presence alone; team_config absence is irrelevant.
+
+    A regression that reintroduced team_config-coupling asymmetrically
+    (e.g., reading config only on the teammate-frame branch as a
+    "defense-in-depth" addition) would change the failure-mode for
+    teammate-frame + missing-config. This test pins the symmetric
+    fail-open-by-construction behavior across BOTH frames.
+    """
+    home = tmp_path / "home"; home.mkdir()
+    sid = "s"; pdir = "/tmp/p"; team = "team-no-config-teammate"
+    # Write only the session-context, NOT the team config.
+    slug = Path(pdir).name
+    sess_dir = home / ".claude" / "pact-sessions" / slug / sid
+    sess_dir.mkdir(parents=True)
+    (sess_dir / "pact-session-context.json").write_text(
+        json.dumps({
+            "team_name": team, "session_id": sid, "project_dir": pdir,
+            "plugin_root": "", "started_at": "2026-04-30T00:00:00Z",
+        }), encoding="utf-8",
+    )
+    _write_task(home, team, "task-x", status="in_progress", owner="x")
+    # Teammate-frame payload: agent_id present.
+    payload = {
+        "tool_name": "TaskCreate",
+        "session_id": sid,
+        "agent_id": "agent-teammate-uuid",
+        "cwd": pdir,
+        "tool_input": {"taskId": "task-x"},
+        "tool_response": {"task": {"id": "task-x"}},
+    }
+    out = _emit_output(payload, home)
+    # Under Option 5: predicate returns False (teammate frame); suppress
+    # path engages regardless of team_config presence.
+    assert out == {"suppressOutput": True}, (
+        f"Teammate-frame TaskCreate must suppressOutput even when "
+        f"team_config is absent (predicate has no config dependency); "
+        f"got {out!r}"
+    )
+
+
 # ---------- Perf reorder (arch2-M2) ----------
 
 def test_count_active_tasks_not_called_on_metadata_only_taskupdate():

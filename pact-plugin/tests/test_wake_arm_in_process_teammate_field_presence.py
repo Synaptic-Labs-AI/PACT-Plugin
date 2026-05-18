@@ -646,3 +646,152 @@ def test_p1_inline_is_lead_session_at_init_removed_from_session_init():
         "Legacy inline `_is_lead_session_at_init` definition must not "
         "reappear in session_init.py (consolidated to shared helper)"
     )
+
+
+# ─── Edge-case unit tests for the field-presence predicates ─────────────
+#
+# Direct in-process calls to is_lead_emit_authorized / is_lead_drain_authorized
+# / is_lead_at_session_start exercising the discriminator under a sweep of
+# input values (empty string, explicit None, falsy non-None, list, str,
+# missing key). The bodies are `payload.get("agent_id") is None` (emit +
+# drain) and `payload.get("agent_type") is None` (session-start), so:
+#
+#   - missing key       -> .get(...) returns None -> True  (lead frame)
+#   - explicit None     -> .get(...) returns None -> True  (lead frame)
+#   - "" (empty string) -> .get(...) returns ""   -> False (teammate frame)
+#   - 0 (falsy int)     -> .get(...) returns 0    -> False (teammate frame)
+#   - [] (empty list)   -> .get(...) returns []   -> False (teammate frame)
+#   - "any-str"         -> .get(...) returns str  -> False (teammate frame)
+#
+# These pin the discriminator semantic as identity-vs-None, not truthiness.
+# A regression that "simplified" `is None` to `not …` would flip the 0/""/[]
+# rows and re-introduce a misclassification path; this sweep catches that.
+
+
+from shared.wake_lifecycle import (  # noqa: E402
+    is_lead_at_session_start,
+    is_lead_drain_authorized,
+    is_lead_emit_authorized,
+)
+
+
+_AGENT_ID_KEY_LEAD_CASES = [
+    pytest.param({}, id="missing_key"),
+    pytest.param({"agent_id": None}, id="explicit_None"),
+]
+_AGENT_ID_KEY_TEAMMATE_CASES = [
+    pytest.param({"agent_id": ""}, id="empty_string"),
+    pytest.param({"agent_id": 0}, id="falsy_int_zero"),
+    pytest.param({"agent_id": []}, id="empty_list"),
+    pytest.param({"agent_id": "any-str-uuid"}, id="nonempty_string"),
+]
+
+_AGENT_TYPE_KEY_LEAD_CASES = [
+    pytest.param({}, id="missing_key"),
+    pytest.param({"agent_type": None}, id="explicit_None"),
+]
+_AGENT_TYPE_KEY_TEAMMATE_CASES = [
+    pytest.param({"agent_type": ""}, id="empty_string"),
+    pytest.param({"agent_type": 0}, id="falsy_int_zero"),
+    pytest.param({"agent_type": []}, id="empty_list"),
+    pytest.param({"agent_type": "pact-secretary"}, id="nonempty_string"),
+]
+
+
+@pytest.mark.parametrize("payload", _AGENT_ID_KEY_LEAD_CASES)
+def test_is_lead_emit_authorized_returns_true_when_agent_id_is_None(payload):
+    """`agent_id` missing or explicitly None classifies as lead frame
+    (identity-vs-None semantic; NOT truthiness)."""
+    assert is_lead_emit_authorized(payload) is True
+
+
+@pytest.mark.parametrize("payload", _AGENT_ID_KEY_TEAMMATE_CASES)
+def test_is_lead_emit_authorized_returns_false_when_agent_id_is_present(payload):
+    """Any non-None `agent_id` value classifies as teammate frame —
+    including falsy values ("" / 0 / []). The discriminator pins
+    identity-vs-None, not truthiness; a regression flipping to
+    `not payload.get("agent_id")` would misclassify these as lead."""
+    assert is_lead_emit_authorized(payload) is False
+
+
+@pytest.mark.parametrize("payload", _AGENT_ID_KEY_LEAD_CASES)
+def test_is_lead_drain_authorized_returns_true_when_agent_id_is_None(payload):
+    """Drain-side predicate mirrors emit-side: agent_id None -> lead."""
+    assert is_lead_drain_authorized(payload) is True
+
+
+@pytest.mark.parametrize("payload", _AGENT_ID_KEY_TEAMMATE_CASES)
+def test_is_lead_drain_authorized_returns_false_when_agent_id_is_present(payload):
+    """Drain-side predicate mirrors emit-side: any non-None agent_id ->
+    teammate (identity-vs-None semantic)."""
+    assert is_lead_drain_authorized(payload) is False
+
+
+@pytest.mark.parametrize("payload", _AGENT_TYPE_KEY_LEAD_CASES)
+def test_is_lead_at_session_start_returns_true_when_agent_type_is_None(payload):
+    """SessionStart predicate uses `agent_type` field. None -> lead."""
+    assert is_lead_at_session_start(payload) is True
+
+
+@pytest.mark.parametrize("payload", _AGENT_TYPE_KEY_TEAMMATE_CASES)
+def test_is_lead_at_session_start_returns_false_when_agent_type_is_present(payload):
+    """SessionStart predicate uses `agent_type` field. Any non-None
+    value -> teammate (identity-vs-None semantic; falsy values
+    "", 0, [] still classify as teammate)."""
+    assert is_lead_at_session_start(payload) is False
+
+
+# Non-dict input — pure-never-raises contract returns False for all three.
+@pytest.mark.parametrize(
+    "predicate",
+    [is_lead_emit_authorized, is_lead_drain_authorized, is_lead_at_session_start],
+    ids=["emit", "drain", "session_start"],
+)
+@pytest.mark.parametrize(
+    "non_dict_input",
+    [None, "string", 42, [], (), object()],
+    ids=["None", "string", "int", "list", "tuple", "object"],
+)
+def test_predicates_return_false_on_non_dict_input(predicate, non_dict_input):
+    """All three predicates honor the pure-never-raises contract on
+    non-dict input by returning False (teammate-frame fallback;
+    fail-closed at this layer because non-dict input is malformed
+    stdin which never legitimately reaches the predicate)."""
+    assert predicate(non_dict_input) is False
+
+
+# ─── Property-style symmetry pin: emit ≡ drain bytecode ─────────────────
+
+
+def test_is_lead_emit_authorized_and_drain_authorized_share_bytecode_body():
+    """The drain-side and emit-side predicates have BYTE-IDENTICAL bodies
+    (both read `payload.get("agent_id") is None`). The is_lead_drain_authorized
+    docstring explicitly declares "Bytes-identical body to
+    is_lead_emit_authorized." This pin enforces that the two predicates
+    remain bytecode-equivalent so that an editing-LLM cannot silently
+    diverge them without surfacing the asymmetry.
+
+    UserPromptSubmit does NOT fire in subagent frames per Claude Code
+    platform docs (so is_lead_drain_authorized is semantically
+    always-True for any fire that actually reaches the drain), but the
+    drain-side predicate is retained as a distinct symbol for
+    documentation symmetry across the 4-site corridor + future-extension
+    surface if the platform ever starts firing UserPromptSubmit in
+    subagent frames.
+
+    The pin uses bytecode equality (`__code__.co_code`) rather than
+    source equality — bytecode survives whitespace / comment / variable-
+    name diffs that don't affect semantics. If a future divergence is
+    deliberate (per the docstring's future-extension surface), this test
+    will fail loudly and force the divergence to be acknowledged.
+    """
+    assert (
+        is_lead_emit_authorized.__code__.co_code
+        == is_lead_drain_authorized.__code__.co_code
+    ), (
+        "is_lead_emit_authorized and is_lead_drain_authorized must have "
+        "byte-identical bytecode bodies per the drain-side docstring's "
+        "'Bytes-identical body' declaration. If divergence is intentional "
+        "(per the future-extension surface), update both the docstring "
+        "and this test."
+    )
