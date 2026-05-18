@@ -21,13 +21,13 @@ Signature function (P0):
 10. Marker_version part of digest input (regression — bumping version
     invalidates pre-bump markers automatically)
 
-Dormant-coupling regression (P0 — architect §13 load-bearing assumption):
+Dormant-coupling regression (P0 — bootstrap requires the orchestrator
+to run TaskCreate and TeamCreate on prompt 1 of a fresh session;
+adding either to _BLOCKED_TOOLS would deadlock bootstrap by denying
+the only ritual actions that create the team config the marker
+writer needs to verify):
 11. _BLOCKED_TOOLS in bootstrap_gate.py does NOT contain TaskCreate
 12. _BLOCKED_TOOLS in bootstrap_gate.py does NOT contain TeamCreate
-    (Both invariants ensure the orchestrator can run TeamCreate on
-    prompt 1 of a fresh session — without them, the gate denies the
-    only ritual action that creates the team config the writer
-    needs to verify, deadlocking bootstrap.)
 """
 
 import hashlib

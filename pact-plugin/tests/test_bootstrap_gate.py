@@ -87,6 +87,19 @@ _SESSION_ID = "test-session"
 _PROJECT_DIR = "/test/project"
 _SLUG = "project"
 
+# Canonical deny-reason literal — independent of bootstrap_gate._DENY_REASON.
+# Hard-coded here so byte-identity tests anchor on this literal rather than
+# self-comparing against the imported constant (which would silently pass if
+# both the constant and the assertion target alias the same mutated string).
+# Any intentional change to the deny reason must update BOTH this literal AND
+# bootstrap_gate._DENY_REASON — that two-site edit is the load-bearing review
+# surface for deny-reason drift.
+_CANONICAL_DENY_REASON_LITERAL = (
+    "PACT bootstrap required. Invoke Skill(\"PACT:bootstrap\") first. "
+    "Code-editing tools (Edit, Write) and agent dispatch (Agent) are blocked "
+    "until bootstrap completes. Bash, Read, Glob, Grep are available."
+)
+
 
 # =============================================================================
 # Helpers
@@ -676,7 +689,7 @@ class TestCanonicalSecretarySpawnCarveOut:
     → caller returns _DENY_REASON).
     """
 
-    # --- I-6: positive case — all five bindings match → allow ---
+    # --- Positive case: all five bindings match → allow ---
 
     def test_secretary_spawn_allowed_when_members_lacks_secretary(
         self, monkeypatch, tmp_path,
@@ -691,7 +704,7 @@ class TestCanonicalSecretarySpawnCarveOut:
         result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
         assert result is None
 
-    # --- I-2: subagent_type mismatch → predicate False → deny ---
+    # --- subagent_type mismatch → predicate False → deny ---
 
     def test_non_secretary_agent_still_blocked(self, monkeypatch, tmp_path):
         """subagent_type != 'pact-secretary' → predicate False → deny."""
@@ -706,7 +719,7 @@ class TestCanonicalSecretarySpawnCarveOut:
         ))
         assert result == _DENY_REASON
 
-    # --- I-3: name mismatch → predicate False → deny (name-impostor blocked) ---
+    # --- Name mismatch → predicate False → deny (name-impostor blocked) ---
 
     def test_secretary_spawn_with_wrong_name_blocked(self, monkeypatch, tmp_path):
         """name != 'secretary' → predicate False → deny.
@@ -726,7 +739,7 @@ class TestCanonicalSecretarySpawnCarveOut:
         ))
         assert result == _DENY_REASON
 
-    # --- I-4: cross-team injection → predicate False → deny ---
+    # --- Cross-team injection → predicate False → deny ---
 
     def test_secretary_spawn_with_wrong_team_blocked(self, monkeypatch, tmp_path):
         """tool_input.team_name != get_team_name() → predicate False → deny.
@@ -747,7 +760,7 @@ class TestCanonicalSecretarySpawnCarveOut:
         ))
         assert result == _DENY_REASON
 
-    # --- I-5: one-shot closure — secretary already in members[] → deny ---
+    # --- One-shot closure: secretary already in members[] → deny ---
 
     def test_carve_out_closes_after_secretary_in_members(
         self, monkeypatch, tmp_path,
@@ -769,7 +782,7 @@ class TestCanonicalSecretarySpawnCarveOut:
         result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
         assert result == _DENY_REASON
 
-    # --- I-7: end-to-end fresh-session repro ---
+    # --- End-to-end fresh-session repro ---
 
     def test_fresh_session_repro_end_to_end(self, monkeypatch, tmp_path):
         """Fresh-session bootstrap: Agent(secretary) allowed; Agent(other) denied.
@@ -795,7 +808,7 @@ class TestCanonicalSecretarySpawnCarveOut:
         ))
         assert other_agent_result == _DENY_REASON
 
-    # --- I-B4: fail-closed posture on team-config read error ---
+    # --- Fail-closed posture on team-config read error ---
 
     def test_predicate_fail_closed_on_team_has_secretary_oserror(
         self, monkeypatch, tmp_path,
@@ -1183,30 +1196,132 @@ class TestImportDiscipline:
     """
 
     def test_team_has_secretary_imported_locally_not_at_module_load(self):
-        """No top-level `from bootstrap_marker_writer import` line in
-        bootstrap_gate.py. The local import inside
-        _is_canonical_secretary_spawn is the only legal form.
+        """No module-scope reference to ``bootstrap_marker_writer`` in
+        bootstrap_gate.py — neither as an Import / ImportFrom statement
+        nor as a dynamic ``__import__`` / ``importlib.import_module``
+        call. The local import inside ``_is_canonical_secretary_spawn``
+        is the only legal form.
+
+        AST-based walk closes the source-grep gap empirically
+        demonstrated during review: a top-level
+        ``_bmw = __import__('bootstrap_marker_writer')`` bypasses the
+        old string-prefix grep yet still triggers the exact deadlock
+        (ImportError: cannot import 'is_marker_set' from
+        'bootstrap_gate') the discipline is meant to prevent. The AST
+        walk catches every module-scope reference regardless of the
+        import idiom used.
+
+        Module scope means the statement runs at import time. Indented
+        statements inside function / class bodies are NOT module-scope
+        because they only execute when the function / class body is
+        invoked, which happens after module load completes.
         """
+        import ast
+
         gate_path = (
             Path(__file__).parent.parent / "hooks" / "bootstrap_gate.py"
         )
         source = gate_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(gate_path))
 
-        for raw_line in source.splitlines():
-            stripped = raw_line.lstrip()
-            # Top-level lines have no leading whitespace; indented lines
-            # (inside def / try / class) are not module-load-time imports.
-            if raw_line == stripped and (
-                stripped.startswith("from bootstrap_marker_writer")
-                or stripped.startswith("import bootstrap_marker_writer")
-            ):
-                pytest.fail(
-                    f"bootstrap_gate.py contains a top-level import of "
-                    f"bootstrap_marker_writer: {raw_line!r}. This would "
-                    f"deadlock module load with bootstrap_marker_writer's "
-                    f"top-level `from bootstrap_gate import is_marker_set`. "
-                    f"Use a LOCAL import inside _is_canonical_secretary_spawn."
+        target = "bootstrap_marker_writer"
+
+        def _check_node(node, context_description):
+            # `import bootstrap_marker_writer` or `import bootstrap_marker_writer as bm`
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == target or alias.name.endswith(f".{target}"):
+                        pytest.fail(
+                            f"bootstrap_gate.py {context_description} "
+                            f"`import {alias.name}` at line {node.lineno}. "
+                            f"This would deadlock module load with "
+                            f"bootstrap_marker_writer's top-level "
+                            f"`from bootstrap_gate import is_marker_set`. "
+                            f"Use a LOCAL import inside "
+                            f"_is_canonical_secretary_spawn."
+                        )
+            # `from bootstrap_marker_writer import ...` or
+            # `from .bootstrap_marker_writer import ...`
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                # node.module is None for `from . import X`; module is the
+                # dotted name otherwise. Check the leaf segment to catch
+                # both absolute and relative forms.
+                leaf = module.split(".")[-1] if module else ""
+                if module == target or leaf == target:
+                    pytest.fail(
+                        f"bootstrap_gate.py {context_description} "
+                        f"`from {module} import ...` at line {node.lineno}. "
+                        f"This would deadlock module load with "
+                        f"bootstrap_marker_writer's top-level "
+                        f"`from bootstrap_gate import is_marker_set`. "
+                        f"Use a LOCAL import inside "
+                        f"_is_canonical_secretary_spawn."
+                    )
+            # `__import__('bootstrap_marker_writer')` or
+            # `importlib.import_module('bootstrap_marker_writer')`
+            elif isinstance(node, ast.Call):
+                func = node.func
+                is_builtin_import = (
+                    isinstance(func, ast.Name) and func.id == "__import__"
                 )
+                is_importlib_import_module = (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == "import_module"
+                )
+                if (is_builtin_import or is_importlib_import_module) and node.args:
+                    first_arg = node.args[0]
+                    if (
+                        isinstance(first_arg, ast.Constant)
+                        and isinstance(first_arg.value, str)
+                        and (
+                            first_arg.value == target
+                            or first_arg.value.endswith(f".{target}")
+                        )
+                    ):
+                        call_name = (
+                            "__import__"
+                            if is_builtin_import
+                            else "importlib.import_module"
+                        )
+                        pytest.fail(
+                            f"bootstrap_gate.py {context_description} "
+                            f"`{call_name}({first_arg.value!r})` at line "
+                            f"{node.lineno}. Dynamic import at module "
+                            f"scope deadlocks the same way as a static "
+                            f"top-level import. Use a LOCAL import "
+                            f"inside _is_canonical_secretary_spawn."
+                        )
+
+        # Walk only module-scope statements + the body of any module-scope
+        # try/except wrapper (the existing fail-closed import block is one).
+        # We deliberately do NOT recurse into FunctionDef / ClassDef bodies
+        # because those run after module load completes — the local import
+        # inside _is_canonical_secretary_spawn lives there and is legal.
+        def _walk_module_scope(body):
+            for stmt in body:
+                for sub in ast.walk(stmt):
+                    if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        # Stop descent at function / class boundaries.
+                        continue
+                if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                    _check_node(stmt, "contains module-scope")
+                elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                    _check_node(stmt.value, "contains module-scope call")
+                elif isinstance(stmt, ast.Assign):
+                    # `_bmw = __import__('bootstrap_marker_writer')`
+                    if isinstance(stmt.value, ast.Call):
+                        _check_node(stmt.value, "contains module-scope assignment with call")
+                elif isinstance(stmt, ast.Try):
+                    # The existing fail-closed wrapper at module top is a
+                    # try block — its body executes at module load time.
+                    _walk_module_scope(stmt.body)
+                    for handler in stmt.handlers:
+                        _walk_module_scope(handler.body)
+                    _walk_module_scope(stmt.orelse)
+                    _walk_module_scope(stmt.finalbody)
+
+        _walk_module_scope(tree.body)
 
 
 # =============================================================================
@@ -1749,12 +1864,12 @@ class TestCanonicalSecretarySpawnAdversarial:
         second = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
         assert second == _DENY_REASON
 
-    # --- Same-turn duplicate-dispatch (spec §10.3 accepted residual) -------
+    # --- Same-turn duplicate-dispatch: accepted-residual benign behavior ----
 
     def test_same_turn_duplicate_dispatch_is_benign(
         self, monkeypatch, tmp_path,
     ):
-        """Pin spec §10.3 accepted-residual: same-turn duplicate
+        """Pin the accepted-residual behavior: same-turn duplicate
         Agent(secretary) dispatch is benign under platform serialization.
         If a future PR adds strict one-shot enforcement (sidecar marker /
         state primitive), this test WILL break by design — that's the
@@ -1806,13 +1921,21 @@ class TestCanonicalSecretarySpawnAdversarial:
         """Across every failure mode (wrong binding, missing key,
         every caught exception type), the user-visible
         permissionDecisionReason is BYTE-IDENTICAL to the canonical
-        _DENY_REASON. No leakage of exception detail, no path leakage,
-        no scenario-specific message variant.
+        deny-reason literal pinned independently in
+        ``_CANONICAL_DENY_REASON_LITERAL``.
+
+        Two-sided assertion: the result MUST equal the independent
+        literal AND ``_DENY_REASON`` MUST equal the same literal.
+        The independent literal is what closes the self-comparison
+        gap — comparing ``result == _DENY_REASON`` alone passes even
+        if both sides are mutated in lockstep, because they alias the
+        same in-memory string. The independent literal anchors the
+        byte content outside the module under test.
 
         Mental revert: a future "helpful" patch that customizes the
         deny reason per-scenario (e.g., "name mismatch detected") would
-        flunk this test. The canonical _DENY_REASON is the only
-        approved user-visible string for the carve-out's deny path.
+        flunk this test. The canonical literal is the only approved
+        user-visible string for the carve-out's deny path.
         """
         from bootstrap_gate import _check_tool_allowed, _DENY_REASON
         import bootstrap_marker_writer
@@ -1852,10 +1975,36 @@ class TestCanonicalSecretarySpawnAdversarial:
             )
 
         result = _check_tool_allowed(input_data)
-        assert result == _DENY_REASON, (
+        assert result == _CANONICAL_DENY_REASON_LITERAL, (
             f"scenario={scenario}: deny reason drifted from canonical "
-            f"_DENY_REASON. Got {result!r}."
+            f"literal. Got {result!r}."
         )
+        assert _DENY_REASON == _CANONICAL_DENY_REASON_LITERAL, (
+            f"scenario={scenario}: bootstrap_gate._DENY_REASON drifted "
+            f"from canonical literal. Got {_DENY_REASON!r}."
+        )
+
+    def test_deny_reason_constant_matches_canonical_literal(self):
+        """Independent-literal pin on ``bootstrap_gate._DENY_REASON``.
+
+        Closes the self-comparison gap: every other deny-reason test
+        in this file asserts ``result == _DENY_REASON``, which passes
+        even if both sides are mutated in lockstep (they alias the
+        same string). This test compares ``_DENY_REASON`` against an
+        independent literal hard-coded in the test file. A future
+        single-byte change to the constant in bootstrap_gate.py
+        (e.g., dropping the word "are" from "Bash, Read, Glob, Grep
+        are available") flunks this test even though every other
+        deny-reason test continues to pass.
+
+        Any intentional change to the canonical deny reason must
+        update BOTH the constant in bootstrap_gate.py AND the literal
+        below — that explicit two-site edit is the load-bearing
+        review surface.
+        """
+        from bootstrap_gate import _DENY_REASON
+
+        assert _DENY_REASON == _CANONICAL_DENY_REASON_LITERAL
 
     def test_deny_reason_excludes_exception_detail(
         self, monkeypatch, tmp_path,
