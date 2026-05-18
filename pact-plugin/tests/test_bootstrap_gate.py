@@ -1324,6 +1324,90 @@ class TestImportDiscipline:
         _walk_module_scope(tree.body)
 
 
+class TestCanonicalSecretaryConstantPin:
+    """Structural pin: the canonical-secretary `name` literal MUST match
+    byte-for-byte across the carve-out's 3-way mirror surface
+    (bootstrap_gate.py `_SECRETARY_NAME`, bootstrap_marker_writer.py
+    `_SECRETARY_NAME`, and the canonical `name="secretary"` literal in
+    commands/bootstrap.md Step 2).
+
+    Drift between any pair silently breaks the carve-out's one-shot
+    binding (5): `NOT _team_has_secretary(team_name)`. If marker_writer's
+    `_SECRETARY_NAME` diverged from gate's, marker_writer would compare
+    `member.get("name")` to a different literal than the one the
+    orchestrator-emitted spawn would actually write into members[], so
+    `_team_has_secretary` would return False forever — the carve-out would
+    stay open and re-fire on every subsequent canonical spawn,
+    re-introducing the brittleness BE-F1 flagged in PR #790 review.
+    """
+
+    def _read_constant(self, py_path, name):
+        """Return the string value of a module-scope `NAME = "literal"`
+        assignment via AST. Returns None if not found, raises on
+        non-string literal (drift would surface as a clear error)."""
+        import ast
+        tree = ast.parse(py_path.read_text(encoding="utf-8"), filename=str(py_path))
+        for stmt in tree.body:
+            if isinstance(stmt, ast.Assign):
+                for target in stmt.targets:
+                    if isinstance(target, ast.Name) and target.id == name:
+                        value = stmt.value
+                        assert isinstance(value, ast.Constant) and isinstance(value.value, str), (
+                            f"{py_path.name}: `{name}` MUST be a top-level string-literal "
+                            f"assignment (got {ast.dump(value)})"
+                        )
+                        return value.value
+        return None
+
+    def test_secretary_name_literal_matches_across_files(self):
+        """3-way mirror pin: `_SECRETARY_NAME` in bootstrap_gate.py ==
+        `_SECRETARY_NAME` in bootstrap_marker_writer.py == canonical
+        `name="secretary"` literal in commands/bootstrap.md Step 2.
+
+        Counter-test (executed at review time): mutating either
+        `_SECRETARY_NAME` constant to e.g. "secretari" produces RED with
+        the exact divergence reported in the failure message; mutating
+        the bootstrap.md literal produces RED on the markdown leg.
+        """
+        hooks_dir = Path(__file__).parent.parent / "hooks"
+        commands_dir = Path(__file__).parent.parent / "commands"
+
+        gate_value = self._read_constant(hooks_dir / "bootstrap_gate.py", "_SECRETARY_NAME")
+        writer_value = self._read_constant(
+            hooks_dir / "bootstrap_marker_writer.py", "_SECRETARY_NAME"
+        )
+        assert gate_value is not None, (
+            "bootstrap_gate.py: top-level `_SECRETARY_NAME` constant missing — "
+            "carve-out predicate references it at function-call time"
+        )
+        assert writer_value is not None, (
+            "bootstrap_marker_writer.py: top-level `_SECRETARY_NAME` constant missing — "
+            "_team_has_secretary references it at function-call time"
+        )
+        assert gate_value == writer_value, (
+            f"Canonical-secretary name literal drift between bootstrap_gate.py "
+            f"(`_SECRETARY_NAME={gate_value!r}`) and bootstrap_marker_writer.py "
+            f"(`_SECRETARY_NAME={writer_value!r}`); bootstrap_gate carve-out's "
+            f"one-shot semantic will break in production if these diverge — "
+            f"_team_has_secretary returns False forever, carve-out stays open."
+        )
+
+        # Markdown leg: canonical spawn literal in bootstrap.md Step 2.
+        # Substring rather than regex — the surrounding `Agent(...)` call
+        # may reformat without breaking the contract, but the literal
+        # `name="<value>"` MUST remain present byte-for-byte.
+        bootstrap_md = (commands_dir / "bootstrap.md").read_text(encoding="utf-8")
+        canonical_spawn_literal = f'name="{gate_value}"'
+        assert canonical_spawn_literal in bootstrap_md, (
+            f"Canonical-secretary name literal drift: bootstrap.md does not "
+            f"contain {canonical_spawn_literal!r} (the constant value matched "
+            f"between bootstrap_gate.py and bootstrap_marker_writer.py is "
+            f"{gate_value!r}). The orchestrator-emitted spawn literal MUST "
+            f"match the constants the verifier reads, or the carve-out's "
+            f"binding (3) fails and bootstrap deadlocks."
+        )
+
+
 # =============================================================================
 # Adversarial / edge-case / fuzz coverage (#789)
 # =============================================================================
