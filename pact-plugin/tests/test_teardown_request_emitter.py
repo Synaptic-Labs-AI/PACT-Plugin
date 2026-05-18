@@ -264,19 +264,22 @@ class TestGate0LeadSessionGuard:
     they correctly classify the session_id-mismatched payload as
     lead-fire (no agent_id present → is_lead = True) and emit the
     teardown directive, contradicting the suppress-expectation. The
-    tests auto-flip to xpass once #781 lands the empirically-correct
-    discriminator AND the payload synthesis here is updated to match
-    it; pytest will surface the xpass and the xfail marker can be
-    lifted.
+    xfail markers use strict=True so that once #781 lands the
+    empirically-correct discriminator AND the payload synthesis here
+    is updated to match it, pytest will surface the resulting xpass
+    as XPASS(strict) → hard CI failure → forces removal of the
+    xfail marker. strict=False would let the deferral rot silently.
     """
 
     @pytest.mark.xfail(
         reason=(
             "deferred to #781: TaskCompleted-stdin agent_id capture "
             "+ teardown_request_emitter.py migration to "
-            "is_lead_emit_authorized"
+            "is_lead_emit_authorized. strict=True so the marker MUST "
+            "be lifted (paired with payload migration) when #781 "
+            "lands; silent xpass would let the deferral rot."
         ),
-        strict=False,
+        strict=True,
     )
     def test_teammate_session_suppresses_emission(self, tmp_path):
         """A TaskCompleted fire in a teammate session (session_id !=
@@ -320,9 +323,11 @@ class TestGate0LeadSessionGuard:
         reason=(
             "deferred to #781: TaskCompleted-stdin agent_id capture "
             "+ teardown_request_emitter.py migration to "
-            "is_lead_emit_authorized"
+            "is_lead_emit_authorized. strict=True so the marker MUST "
+            "be lifted (paired with payload migration) when #781 "
+            "lands; silent xpass would let the deferral rot."
         ),
-        strict=False,
+        strict=True,
     )
     def test_teammate_session_writes_no_journal_event(self, tmp_path):
         """The teammate-session fire MUST NOT write a teardown_request
@@ -370,9 +375,11 @@ class TestGate0LeadSessionGuard:
         reason=(
             "deferred to #781: TaskCompleted-stdin agent_id capture "
             "+ teardown_request_emitter.py migration to "
-            "is_lead_emit_authorized"
+            "is_lead_emit_authorized. strict=True so the marker MUST "
+            "be lifted (paired with payload migration) when #781 "
+            "lands; silent xpass would let the deferral rot."
         ),
-        strict=False,
+        strict=True,
     )
     def test_teammate_session_does_not_create_marker(self, tmp_path):
         """Idempotency marker dir is NOT created on Gate-0 short-circuit.
@@ -1273,11 +1280,12 @@ class TestExitContract:
             "delegate the payload classifies as lead-fire and emits "
             "the teardown directive instead of suppressOutput. Gates "
             "1-4 rows are correct but unreachable because the test "
-            "short-circuits on the Gate-0 assertion failure. Auto-flips "
-            "to xpass once #781 lands the empirically-correct "
-            "discriminator + this test's Gate-0 payload is updated."
+            "short-circuits on the Gate-0 assertion failure. strict=True "
+            "so the marker MUST be lifted (paired with Gate-0 payload "
+            "migration) when #781 lands; silent xpass would let the "
+            "deferral rot."
         ),
-        strict=False,
+        strict=True,
     )
     def test_all_gate_failure_paths_exit_zero(self, tmp_path):
         """Every Gate-0..Gate-4 short-circuit path exits 0 with

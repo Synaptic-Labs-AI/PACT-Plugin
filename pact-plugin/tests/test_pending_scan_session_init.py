@@ -217,12 +217,14 @@ def test_session_init_imports_or_calls_lead_session_guard(src):
     substring check; the regex-in-code-line check catches the
     wiring-disconnect.
 
-    Legacy `_is_lead_session_at_init` (inline; removed at
-    consolidation commit) and `leadSessionId` (team_config-coupled
-    comparison; pre-Option-5 body) symbols are also matched to keep
-    the pin valid across the consolidation boundary; under the
-    current source only `is_lead_at_session_start` should appear in
-    the control-flow line.
+    Tight pin: matches ONLY the canonical post-Option-5 symbol
+    `is_lead_at_session_start`. The legacy symbols
+    `_is_lead_session_at_init` (inline; consolidated to shared
+    helper) and `leadSessionId` (team_config-coupled comparison;
+    pre-Option-5 body) are intentionally NOT in the tolerance band:
+    the corridor migration is settled, and a regression reintroducing
+    either legacy symbol in a control-flow line should fail this
+    test loudly rather than silently passing.
 
     Defense-in-depth Layer 0 (per plan §Architecture Lead-Session
     Guard at Directive Emission) catches misdirected directive
@@ -232,14 +234,10 @@ def test_session_init_imports_or_calls_lead_session_guard(src):
     """
     import re as _re
     # Strict: the guard symbol must appear inside an if/return/elif/while/assert
-    # statement in the source. Matches the canonical post-Option-5
-    # `is_lead_at_session_start(` predicate call OR the legacy
-    # `_is_lead_session_at_init(` / `leadSessionId` symbols (tolerated
-    # for the consolidation boundary; should not appear under current
-    # source).
+    # statement in the source. Matches ONLY `is_lead_at_session_start`
+    # — legacy alternates dropped post-corridor-migration.
     code_line_pattern = _re.compile(
-        r"^\s*(if|return|elif|while|assert)\b.*"
-        r"(is_lead_at_session_start|_is_lead_session|leadSessionId)",
+        r"^\s*(if|return|elif|while|assert)\b.*is_lead_at_session_start",
         _re.MULTILINE,
     )
     assert code_line_pattern.search(src) is not None, (
@@ -259,35 +257,45 @@ def test_session_init_does_not_emit_arm_directive_from_in_process_teammate_frame
     teammate-frame (agent_type present -> not lead) and suppresses
     the Arm prose.
 
-    Pre-Option-5 (legacy session_id-equality at_init body) this test
-    synthesized teammate-frame via session_id distinct from
-    team_config.leadSessionId; under the field-presence discriminator
-    the session_id comparison is irrelevant for SessionStart and
-    agent_type presence is the actor-discriminator. See plan
-    §Components Affected for the corridor split: SessionStart uses
-    agent_type (not agent_id) per platform docs.
+    Discriminative setup (post-peer-review tightening): the in-process
+    teammate SHARES the lead's session_id (the actual #611 bug pattern).
+    Under the legacy session_id-equality at_init body this test would
+    FAIL — the matching session_id classifies the payload as lead-frame
+    and emission proceeds. Under Option-5 (#611/#778) the agent_type
+    field-presence is the sole actor-discriminator and emission is
+    correctly suppressed.
+
+    The earlier formulation synthesized teammate-frame via session_id
+    distinct from team_config.leadSessionId AND agent_type set; that
+    setup passed under BOTH legacy and Option-5 bodies (DUAL signals)
+    so it was not discriminative for the field-presence migration.
+    See plan §Components Affected for the corridor split: SessionStart
+    uses agent_type (not agent_id) per platform docs.
     """
     home = tmp_path / "home"; home.mkdir()
-    teammate_sid = "feedface-teammate-session"
-    lead_sid = "abcdef01-lead-session-other"
+    # Shared session_id is the #611 bug pattern: in-process teammates
+    # inherit the lead's session_id; only agent_type discriminates.
+    # NOTE: team_name MUST match what generate_team_name() derives
+    # from the session_id (first 8 chars of session_id prefixed with
+    # "pact-"); otherwise the active-tasks count is zero and the
+    # lead-session guard branch is not reached.
+    shared_sid = "abcdef01-shared-session-id"
     pdir = "/tmp/pi-non-lead"
-    team = "pact-feedface"
-    # Stage pact-session context with teammate session_id.
-    _stage_pact_session(home, team, teammate_sid, pdir)
-    # Stage team config — content immaterial under Option 5 (predicate
-    # has no team_config dependency) but kept for consistency with
-    # other test setups.
+    team = "pact-abcdef01"
+    _stage_pact_session(home, team, shared_sid, pdir)
+    # Stage team config with the SAME session_id as the lead's; a
+    # session_id-equality body would classify this as lead-fire.
     import json as _json
     team_dir = home / ".claude" / "teams" / team
     team_dir.mkdir(parents=True, exist_ok=True)
     (team_dir / "config.json").write_text(
-        _json.dumps({"leadSessionId": lead_sid}),
+        _json.dumps({"leadSessionId": shared_sid}),
         encoding="utf-8",
     )
     _stage_active_task(home, team)
     # In-process teammate-frame SessionStart: payload carries agent_type.
     out = _run_session_init(
-        home, teammate_sid, pdir, agent_type="pact-secretary",
+        home, shared_sid, pdir, agent_type="pact-secretary",
     )
     additional = out.get("hookSpecificOutput", {}).get("additionalContext", "")
     assert _ARM_DIRECTIVE_PHRASE not in additional, (

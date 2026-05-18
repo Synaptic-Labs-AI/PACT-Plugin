@@ -441,14 +441,17 @@ def test_emitter_guards_on_lead_session_id_structural():
     mention would pass the prior substring check; the regex-in-code-line
     check catches the wiring-disconnect.
 
-    Accepts both the lifted public name `is_lead_session` and the
-    historical underscore-prefixed `_is_lead_session` for forward-compat;
-    `leadSessionId` (the config key) matches if a future refactor inlines
-    the check at the call site."""
+    Accepts the canonical Option-5 symbol `is_lead_emit_authorized`,
+    the backward-compat delegate `is_lead_session` (still callable for
+    callers outside the symmetric corridor), the historical
+    underscore-prefixed `_is_lead_session` (pre-lift forward-compat),
+    and `leadSessionId` (the config key) for the case where a future
+    refactor inlines the check at the call site."""
     import re as _re
     src = (HOOK_DIR / "wake_lifecycle_emitter.py").read_text(encoding="utf-8")
     code_line_pattern = _re.compile(
-        r"^\s*(if|return|elif|while|assert)\b.*(is_lead_session|leadSessionId)",
+        r"^\s*(if|return|elif|while|assert)\b.*"
+        r"(is_lead_session|is_lead_emit_authorized|leadSessionId)",
         _re.MULTILINE,
     )
     assert code_line_pattern.search(src) is not None, (
