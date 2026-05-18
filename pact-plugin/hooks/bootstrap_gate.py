@@ -131,14 +131,20 @@ _BLOCKED_TOOLS = frozenset({
     "NotebookEdit",
 })
 
-# Canonical secretary spawn identity. Mirrors
-# bootstrap_marker_writer._SECRETARY_NAME (the producer-side constant) and
-# the literal at commands/bootstrap.md Step 2 (the canonical-spawn shape
-# the orchestrator emits). The two strings are load-bearing: any drift
-# silently breaks the carve-out below and re-introduces the
-# bootstrap-deadlock these constants are here to prevent. Future
-# canonical-name changes are CROSS-FILE atomic edits across this file,
-# bootstrap_marker_writer.py, and commands/bootstrap.md.
+# Canonical secretary spawn identity. Both strings are load-bearing for the
+# carve-out below; any drift silently re-introduces the bootstrap-deadlock
+# these constants are here to prevent.
+#
+# _SECRETARY_NAME mirrors bootstrap_marker_writer._SECRETARY_NAME (the
+# producer-side constant at marker_writer.py:103) and the literal at
+# commands/bootstrap.md Step 2. Cross-file atomic edits required across
+# this file, bootstrap_marker_writer.py, AND commands/bootstrap.md.
+#
+# _SECRETARY_AGENT_TYPE is the canonical agentType from
+# commands/bootstrap.md Step 2 — no producer-side mirror in
+# bootstrap_marker_writer (which keys on member name, not agentType).
+# Cross-file atomic edits required across this file AND
+# commands/bootstrap.md only.
 _SECRETARY_NAME = "secretary"
 _SECRETARY_AGENT_TYPE = "pact-secretary"
 
@@ -165,6 +171,10 @@ def _is_canonical_secretary_spawn(input_data: dict) -> bool:
       2. tool_input.subagent_type == "pact-secretary" (_SECRETARY_AGENT_TYPE)
       3. tool_input.name == "secretary" (_SECRETARY_NAME, canonical literal)
       4. tool_input.team_name == pact_context.get_team_name()
+         (note: get_team_name() returns the disk team_name lowercased per
+         pact_context.py:221; the binding is case-INsensitive against the
+         disk value. Current session-slug naming is lowercase-by-
+         construction, so this normalization is unreachable in practice.)
       5. NOT _team_has_secretary(team_name) — one-shot semantic; flips to
          False the moment the spawned secretary lands in members[].
 
@@ -208,7 +218,7 @@ def _is_canonical_secretary_spawn(input_data: dict) -> bool:
         # See SACROSANCT block in this docstring.
         from bootstrap_marker_writer import _team_has_secretary
         return not _team_has_secretary(expected_team)
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, ImportError):
         return False
 
 
