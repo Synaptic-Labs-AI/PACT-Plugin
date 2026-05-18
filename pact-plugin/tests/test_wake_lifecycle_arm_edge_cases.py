@@ -457,3 +457,150 @@ def test_emitter_rejects_taskupdate_without_status_transition(tmp_path):
             f"TaskUpdate without status transition must not produce a "
             f"marker; got {markers}"
         )
+
+
+# ─── Producer-side task_id path-safety allowlist ──────────────────────
+
+
+import pytest  # noqa: E402 — late import; sibling tests above import sys/os at top
+
+
+_UNSAFE_TASK_ID_PARAMS = [
+    ("../foo",          "parent_traversal"),
+    ("/etc/passwd",     "absolute_path"),
+    ("foo/bar",         "embedded_slash"),
+    ("foo\\bar",        "embedded_backslash"),
+    ("foo\x00bar",      "embedded_nul"),
+    (".",               "dot_literal"),
+    ("..",              "dotdot_literal"),
+    ("foo bar",         "embedded_space"),
+    ("foo;rm -rf /",    "shell_metachar"),
+    ("foo\n../bar",     "embedded_newline_traversal"),
+]
+
+
+@pytest.mark.parametrize(
+    "unsafe_task_id",
+    [p[0] for p in _UNSAFE_TASK_ID_PARAMS],
+    ids=[p[1] for p in _UNSAFE_TASK_ID_PARAMS],
+)
+def test_extract_task_id_rejects_unsafe_path_components(unsafe_task_id):
+    """Producer-side allowlist: `_extract_task_id` rejects task_ids
+    that fail `is_safe_path_component`. This prevents path-traversal
+    payloads from propagating to downstream sinks (marker filenames,
+    Teardown sidecar Path-joins, journal event bodies) where the
+    weakest sink would otherwise become the bypass.
+
+    Probes all 8 probe positions (tool_input.taskId / task_id,
+    tool_response nested + flat .id / .taskId / .task_id) by mutating
+    the payload to place the unsafe value at each position with a
+    safe fallback absent. Expected: `_extract_task_id` returns None,
+    not the unsafe string.
+
+    Falsifiability: removing the `is_safe_path_component` check from
+    `_extract_task_id` flips this test RED for every parameterized
+    payload.
+    """
+    sys.path.insert(0, str(HOOK_DIR))
+    import wake_lifecycle_emitter as emitter
+
+    # Position 1: tool_input.taskId
+    assert emitter._extract_task_id({
+        "tool_input": {"taskId": unsafe_task_id},
+    }) is None, f"tool_input.taskId={unsafe_task_id!r} must be rejected"
+
+    # Position 2: tool_input.task_id (snake_case fallback)
+    assert emitter._extract_task_id({
+        "tool_input": {"task_id": unsafe_task_id},
+    }) is None, f"tool_input.task_id={unsafe_task_id!r} must be rejected"
+
+    # Position 3: tool_response.task.id (nested production-typical)
+    assert emitter._extract_task_id({
+        "tool_response": {"task": {"id": unsafe_task_id}},
+    }) is None, f"tool_response.task.id={unsafe_task_id!r} must be rejected"
+
+    # Position 4: tool_response.task.taskId
+    assert emitter._extract_task_id({
+        "tool_response": {"task": {"taskId": unsafe_task_id}},
+    }) is None, (
+        f"tool_response.task.taskId={unsafe_task_id!r} must be rejected"
+    )
+
+    # Position 5: tool_response.task.task_id
+    assert emitter._extract_task_id({
+        "tool_response": {"task": {"task_id": unsafe_task_id}},
+    }) is None, (
+        f"tool_response.task.task_id={unsafe_task_id!r} must be rejected"
+    )
+
+    # Position 6: tool_response.id (flat fallback for TaskUpdate)
+    assert emitter._extract_task_id({
+        "tool_response": {"id": unsafe_task_id},
+    }) is None, f"tool_response.id={unsafe_task_id!r} must be rejected"
+
+    # Position 7: tool_response.taskId
+    assert emitter._extract_task_id({
+        "tool_response": {"taskId": unsafe_task_id},
+    }) is None, f"tool_response.taskId={unsafe_task_id!r} must be rejected"
+
+    # Position 8: tool_response.task_id
+    assert emitter._extract_task_id({
+        "tool_response": {"task_id": unsafe_task_id},
+    }) is None, f"tool_response.task_id={unsafe_task_id!r} must be rejected"
+
+
+@pytest.mark.parametrize(
+    "safe_task_id",
+    ["12", "task-5", "S2", "L4", "abc_123", "0", "TaskUpdate-22"],
+    ids=[
+        "integer_string", "kebab_alpha", "single_letter_num",
+        "letter_num_short", "snake_alphanum", "zero_string", "mixed_case",
+    ],
+)
+def test_extract_task_id_accepts_safe_path_components(safe_task_id):
+    """Regression backstop: the producer-side allowlist must NOT
+    reject the task_id shapes that legitimately appear in PACT
+    production traffic (integer-as-string, alpha-suffix patterns
+    like "S2"/"L4", kebab/snake forms). A regression that tightened
+    the regex too far (e.g. dropping `-` or `_`) would flip these
+    RED.
+    """
+    sys.path.insert(0, str(HOOK_DIR))
+    import wake_lifecycle_emitter as emitter
+
+    assert emitter._extract_task_id({
+        "tool_input": {"taskId": safe_task_id},
+    }) == safe_task_id
+
+    # Whitespace stripping still works around the allowlist check.
+    assert emitter._extract_task_id({
+        "tool_input": {"taskId": f"  {safe_task_id}  "},
+    }) == safe_task_id
+
+
+def test_extract_task_id_returns_none_when_all_probes_fail():
+    """Sanity backstop: empty/missing payload returns None without
+    raising. Pre-existing behavior preserved through the producer-side
+    allowlist refactor.
+    """
+    sys.path.insert(0, str(HOOK_DIR))
+    import wake_lifecycle_emitter as emitter
+
+    assert emitter._extract_task_id({}) is None
+    assert emitter._extract_task_id({"tool_input": {}}) is None
+    assert emitter._extract_task_id({"tool_response": {}}) is None
+    assert emitter._extract_task_id({
+        "tool_input": {"taskId": ""},
+        "tool_response": {"id": ""},
+    }) is None
+    # Non-string types (legacy schema drift defense): integers, bools,
+    # lists, dicts in the probe positions all reject.
+    assert emitter._extract_task_id({
+        "tool_input": {"taskId": 42},
+    }) is None
+    assert emitter._extract_task_id({
+        "tool_input": {"taskId": True},
+    }) is None
+    assert emitter._extract_task_id({
+        "tool_input": {"taskId": ["nested"]},
+    }) is None

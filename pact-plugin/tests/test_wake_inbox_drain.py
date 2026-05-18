@@ -1681,3 +1681,103 @@ class TestMalformedTeardownMarkerDemotedToArm:
             "Malformed marker must be drained"
         )
 
+    @pytest.mark.parametrize(
+        "unsafe_task_id",
+        [
+            "../foo",          # parent-dir traversal
+            "/etc/passwd",     # absolute-path
+            "foo/bar",         # embedded separator
+            "foo\\bar",        # embedded backslash (Windows-style)
+            "foo\x00bar",      # embedded NUL
+            ".",               # current-dir literal
+            "..",              # parent-dir literal
+            " ",               # whitespace-only (post-strip empty would already reject; pre-strip whitespace IS rejected by allowlist)
+            "foo bar",         # embedded space
+            "foo;rm -rf /",    # shell-metachar payload
+        ],
+        ids=[
+            "parent_traversal", "absolute_path", "embedded_slash",
+            "embedded_backslash", "embedded_nul", "dot_literal",
+            "dotdot_literal", "whitespace_only", "embedded_space",
+            "shell_metachar",
+        ],
+    )
+    def test_teardown_marker_unsafe_task_id_demoted_to_arm(
+        self, tmp_path, unsafe_task_id,
+    ):
+        """Drain-side defense-in-depth: a teardown marker whose task_id
+        body field fails `is_safe_path_component` is demoted to arm,
+        same as the missing-task_id case. Path-traversal payloads
+        (`"../foo"`, `"/etc/passwd"`), embedded separators / NUL bytes,
+        and the `.`/`..` literals must NOT reach `_already_emitted_
+        teardown`'s `marker_dir / task_id` Path-join.
+
+        The producer-side guard at `wake_lifecycle_emitter._extract_task_id`
+        already rejects these at extraction time. This drain-side guard
+        is belt-and-suspenders against a direct marker writer
+        (buggy/malicious code path bypassing the producer) shipping a
+        path-traversal payload to the wake_inbox.
+        """
+        home = tmp_path / "home"; home.mkdir()
+        lead_sid = "lead-sid-unsafe-tid"
+        pdir = "/tmp/p"
+        team = "team-unsafe-task-id-demote"
+        _write_session_context(home, lead_sid, pdir, team)
+        malformed = _write_marker(
+            home, team, "20260518T000000Z-x-unsafe.json",
+            {
+                "schema_version": 1, "type": "teardown",
+                "task_id": unsafe_task_id,
+                "team_name": team,
+                "owner": "secretary",
+                "timestamp_ms": 1715792700000,
+                "trigger": "self_complete_exempt_or_stop_sweep",
+            },
+        )
+
+        out = _drain_out({
+            "session_id": lead_sid, "cwd": pdir,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        }, home)
+        hso = out.get("hookSpecificOutput")
+        assert hso is not None, (
+            f"Unsafe-task_id teardown marker must still emit a wake "
+            f"signal; got {out!r}"
+        )
+        ac = hso.get("additionalContext", "")
+        assert "PACT:start-pending-scan" in ac, (
+            f"Unsafe-task_id teardown marker must demote to Arm "
+            f"directive (path-safety guard); got additionalContext={ac!r}"
+        )
+        assert "PACT:stop-pending-scan" not in ac, (
+            f"Unsafe-task_id teardown marker must NOT emit Teardown "
+            f"(path-traversal payload must not reach the dedup path-"
+            f"join); got additionalContext={ac!r}"
+        )
+        # Marker is consumed regardless of classification — never leaves
+        # the unsafe payload on disk.
+        assert not malformed.exists(), (
+            "Unsafe-task_id marker must be drained"
+        )
+
+        # No sidecar Teardown-emit marker should have been created at
+        # the path-traversal target. Verify the team's
+        # `.teardown_request_emitted/` directory does not contain a
+        # file resolved from the unsafe task_id.
+        marker_dir = (
+            home / ".claude" / "teams" / team / ".teardown_request_emitted"
+        )
+        if marker_dir.exists():
+            # Any file under marker_dir is acceptable only if its name
+            # would not represent a path-traversal materialization. The
+            # demote-to-arm path should not create any file here at all,
+            # but defense-in-depth check: ensure no file is named after
+            # the unsafe payload.
+            for child in marker_dir.iterdir():
+                assert child.name != unsafe_task_id, (
+                    f"Unsafe task_id payload {unsafe_task_id!r} "
+                    f"materialized into the Teardown-emit dir as "
+                    f"{child!r}; drain-side guard failed"
+                )
+

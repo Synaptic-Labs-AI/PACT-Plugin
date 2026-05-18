@@ -302,17 +302,28 @@ def _drain_markers(inbox_dir: Path) -> dict[str, Any]:
                             if (
                                 isinstance(raw_task_id, str)
                                 and raw_task_id
+                                and is_safe_path_component(raw_task_id)
                             ):
                                 marker_task_id = raw_task_id
                             else:
                                 # Malformed teardown marker: type field
                                 # says "teardown" but task_id is missing,
-                                # empty, or non-string. Demote to "arm"
-                                # so the downstream branch does not emit
-                                # a Teardown directive WITHOUT going
+                                # empty, non-string, or fails the path-
+                                # safety allowlist (defense-in-depth
+                                # against a buggy/malicious marker writer
+                                # bypassing the producer-side guard in
+                                # `wake_lifecycle_emitter._extract_task_id`;
+                                # the marker body stores the raw extracted
+                                # task_id, but a direct writer to the
+                                # wake_inbox could still ship a path-
+                                # traversal payload). Demote to "arm" so
+                                # the downstream branch does not emit a
+                                # Teardown directive WITHOUT going
                                 # through the Tier-1/Tier-2 dedup guard
-                                # (which keys on task_id). The wake intent
-                                # still stands; Arm is the fail-
+                                # (which keys on task_id and would have
+                                # path-joined the unsafe value at
+                                # `_already_emitted_teardown`). The wake
+                                # intent still stands; Arm is the fail-
                                 # conservative default that aligns with
                                 # the corrupt-body fallback above. Log
                                 # to stderr so the disk-corruption /
@@ -320,8 +331,9 @@ def _drain_markers(inbox_dir: Path) -> dict[str, Any]:
                                 marker_type = "arm"
                                 print(
                                     f"wake_inbox_drain: teardown marker "
-                                    f"missing task_id ({marker.name}); "
-                                    f"demoting to arm signal",
+                                    f"missing or unsafe task_id "
+                                    f"({marker.name}); demoting to arm "
+                                    f"signal",
                                     file=sys.stderr,
                                 )
                 except (OSError, json.JSONDecodeError, ValueError):

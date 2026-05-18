@@ -237,32 +237,56 @@ def _extract_task_id(input_data: dict[str, Any]) -> str | None:
     propagate to a TaskStop call with a syntactically-valid-but-
     semantically-empty id and fail downstream; rejecting at the
     source is cheaper. Returns None if no probe matches.
+
+    Producer-side path-safety allowlist: extracted task_ids are
+    validated against `is_safe_path_component` before return. The
+    task_id flows into marker filenames (wake_inbox + Teardown sidecar)
+    and journal event bodies. Rejecting path-traversal payloads
+    (`"../foo"`, `"/etc/passwd"`, `"foo\x00bar"`) at the extraction
+    boundary means every downstream sink inherits sanitization-by-
+    construction — preferable to per-sink re-validation which is
+    asymmetry-prone (the weakest sink becomes the bypass; see
+    `patterns_symmetric_sanitization` security memory). Under the
+    platform task system, legitimate task_ids match the allowlist
+    `[A-Za-z0-9_-]+` (integer-as-string + alpha suffix patterns
+    like "S2", "L4"), so the producer-side rejection has zero
+    false-positives against real traffic.
     """
+    def _accept(raw: object) -> str | None:
+        if not isinstance(raw, str):
+            return None
+        stripped = raw.strip()
+        if not stripped:
+            return None
+        if not is_safe_path_component(stripped):
+            return None
+        return stripped
+
     tool_input = input_data.get("tool_input") or {}
     if isinstance(tool_input, dict):
-        tid = tool_input.get("taskId") or tool_input.get("task_id")
-        if isinstance(tid, str) and tid.strip():
-            return tid.strip()
+        tid = _accept(tool_input.get("taskId") or tool_input.get("task_id"))
+        if tid is not None:
+            return tid
 
     tool_response = extract_tool_response(input_data)
     if isinstance(tool_response, dict):
         nested_task = tool_response.get("task") or {}
         if isinstance(nested_task, dict):
-            tid = (
+            tid = _accept(
                 nested_task.get("id")
                 or nested_task.get("taskId")
                 or nested_task.get("task_id")
             )
-            if isinstance(tid, str) and tid.strip():
-                return tid.strip()
+            if tid is not None:
+                return tid
 
-        tid = (
+        tid = _accept(
             tool_response.get("id")
             or tool_response.get("taskId")
             or tool_response.get("task_id")
         )
-        if isinstance(tid, str) and tid.strip():
-            return tid.strip()
+        if tid is not None:
+            return tid
 
     return None
 
