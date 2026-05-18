@@ -53,11 +53,14 @@ in-process subagent sharing the lead's session_id); the test file
 naturally extends as the corridor grows.
 """
 
+import ast
+import inspect
 import json
 import os
 import re
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -760,16 +763,50 @@ def test_predicates_return_false_on_non_dict_input(predicate, non_dict_input):
     assert predicate(non_dict_input) is False
 
 
-# ─── Property-style symmetry pin: emit ≡ drain bytecode ─────────────────
+# ─── Property-style symmetry pin: emit ≡ drain AST body ─────────────────
 
 
-def test_is_lead_emit_authorized_and_drain_authorized_share_bytecode_body():
-    """The drain-side and emit-side predicates have BYTE-IDENTICAL bodies
-    (both read `payload.get("agent_id") is None`). The is_lead_drain_authorized
+def _function_body_ast_dump(fn) -> list[str]:
+    """Return the function's body as a list of `ast.dump` strings,
+    excluding the leading docstring statement.
+
+    `inspect.getsource(fn)` -> `textwrap.dedent` (normalize indentation
+    for methods that came from a class) -> `ast.parse` -> traverse the
+    first module statement (the FunctionDef) -> `ast.dump` each body
+    statement with `include_attributes=False` so line / column
+    coordinates do not leak into the comparison.
+
+    The leading docstring (a bare `Expr` whose `value` is a `Constant`
+    of type `str`) is stripped: the docstring is documentation, not
+    semantic code, and the two predicates intentionally have
+    different docstrings (each documents its own corridor site). The
+    behavioral body — the statements that actually execute when the
+    predicate is called — is what the symmetry contract pins.
+    """
+    src = textwrap.dedent(inspect.getsource(fn))
+    tree = ast.parse(src)
+    body = tree.body[0].body
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    return [
+        ast.dump(node, annotate_fields=True, include_attributes=False)
+        for node in body
+    ]
+
+
+def test_is_lead_emit_authorized_and_drain_authorized_share_ast_body():
+    """The drain-side and emit-side predicates have STRUCTURALLY-IDENTICAL
+    behavioral bodies (both read `payload.get("agent_id") is None` after
+    the `isinstance` non-dict guard). The is_lead_drain_authorized
     docstring explicitly declares "Bytes-identical body to
     is_lead_emit_authorized." This pin enforces that the two predicates
-    remain bytecode-equivalent so that an editing-LLM cannot silently
-    diverge them without surfacing the asymmetry.
+    remain AST-equivalent so an editing-LLM cannot silently diverge
+    them without surfacing the asymmetry.
 
     UserPromptSubmit does NOT fire in subagent frames per Claude Code
     platform docs (so is_lead_drain_authorized is semantically
@@ -779,19 +816,35 @@ def test_is_lead_emit_authorized_and_drain_authorized_share_bytecode_body():
     surface if the platform ever starts firing UserPromptSubmit in
     subagent frames.
 
-    The pin uses bytecode equality (`__code__.co_code`) rather than
-    source equality — bytecode survives whitespace / comment / variable-
-    name diffs that don't affect semantics. If a future divergence is
-    deliberate (per the docstring's future-extension surface), this test
-    will fail loudly and force the divergence to be acknowledged.
+    The pin uses AST-level structural equivalence (`ast.dump` of each
+    body statement with `include_attributes=False`) rather than
+    `__code__.co_code` byte-equality. `co_code` is a CPython
+    implementation detail: opcode renumbering between minor Python
+    versions (e.g., 3.13 -> 3.14) flips raw-bytecode-equal assertions
+    to False even when the two functions remain semantically
+    equivalent. AST equivalence is Python-version-stable across the
+    supported CPython range AND preserves the symmetry intent —
+    structural identity of the source-level statement tree. Docstrings
+    are stripped before comparison (documentation, not behavior); all
+    other node attributes (including the `Constant(value='agent_id')`
+    field-key literal) are preserved, so a field-rename regression
+    (e.g., `agent_id` -> `agentId` on one side only) still fails this
+    test.
+
+    Counter-test for this pin: temporarily flip is_lead_drain_authorized's
+    return statement to a semantically-different body (e.g.,
+    `return False`); re-run; assertion FAILS with the AST divergence
+    surfaced in the assertion-message body dumps. Restore byte-
+    identically after.
     """
-    assert (
-        is_lead_emit_authorized.__code__.co_code
-        == is_lead_drain_authorized.__code__.co_code
-    ), (
+    emit_body = _function_body_ast_dump(is_lead_emit_authorized)
+    drain_body = _function_body_ast_dump(is_lead_drain_authorized)
+    assert emit_body == drain_body, (
         "is_lead_emit_authorized and is_lead_drain_authorized must have "
-        "byte-identical bytecode bodies per the drain-side docstring's "
-        "'Bytes-identical body' declaration. If divergence is intentional "
-        "(per the future-extension surface), update both the docstring "
-        "and this test."
+        "AST-equivalent behavioral bodies (docstrings excluded) per the "
+        "drain-side docstring's 'Bytes-identical body' declaration. If "
+        "divergence is intentional (per the future-extension surface), "
+        "update both the docstring and this test.\n"
+        f"emit body: {emit_body!r}\n"
+        f"drain body: {drain_body!r}"
     )
