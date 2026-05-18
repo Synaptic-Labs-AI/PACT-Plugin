@@ -87,6 +87,19 @@ _SESSION_ID = "test-session"
 _PROJECT_DIR = "/test/project"
 _SLUG = "project"
 
+# Canonical deny-reason literal — independent of bootstrap_gate._DENY_REASON.
+# Hard-coded here so byte-identity tests anchor on this literal rather than
+# self-comparing against the imported constant (which would silently pass if
+# both the constant and the assertion target alias the same mutated string).
+# Any intentional change to the deny reason must update BOTH this literal AND
+# bootstrap_gate._DENY_REASON — that two-site edit is the load-bearing review
+# surface for deny-reason drift.
+_CANONICAL_DENY_REASON_LITERAL = (
+    "PACT bootstrap required. Invoke Skill(\"PACT:bootstrap\") first. "
+    "Code-editing tools (Edit, Write) and agent dispatch (Agent) are blocked "
+    "until bootstrap completes. Bash, Read, Glob, Grep are available."
+)
+
 
 # =============================================================================
 # Helpers
@@ -588,6 +601,244 @@ class TestBlockedToolSet:
 
 
 # =============================================================================
+# Canonical secretary spawn carve-out (#789)
+# =============================================================================
+
+
+def _setup_pact_session_with_team(monkeypatch, tmp_path, team_name="t1",
+                                  members=None, with_marker=False,
+                                  plugin_version="9.9.9"):
+    """Set up a PACT session whose context carries a non-empty team_name and
+    a matching team config at ~/.claude/teams/{team_name}/config.json.
+
+    Mirrors _setup_pact_session but adds the team-config sidecar that
+    _team_has_secretary reads via shared.pact_context._iter_members. The
+    monkeypatched Path.home means the team config lands under tmp_path.
+
+    members: list of member dicts to embed at config.members[]. Defaults
+    to a fresh-team shape (no secretary entry) which is the precondition
+    the carve-out exists to handle.
+    """
+    import shared.pact_context as ctx_module
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    session_dir = tmp_path / ".claude" / "pact-sessions" / _SLUG / _SESSION_ID
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    plugin_root = tmp_path / "plugin"
+    (plugin_root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"version": plugin_version}), encoding="utf-8"
+    )
+
+    context_file = session_dir / "pact-session-context.json"
+    context_file.write_text(json.dumps({
+        "team_name": team_name,
+        "session_id": _SESSION_ID,
+        "project_dir": _PROJECT_DIR,
+        "plugin_root": str(plugin_root),
+        "started_at": "2026-01-01T00:00:00Z",
+    }), encoding="utf-8")
+
+    teams_dir = tmp_path / ".claude" / "teams" / team_name
+    teams_dir.mkdir(parents=True, exist_ok=True)
+    config = {"members": members if members is not None else []}
+    (teams_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+    monkeypatch.setattr(ctx_module, "_context_path", context_file)
+    monkeypatch.setattr(ctx_module, "_cache", None)
+
+    if with_marker:
+        _write_f24_marker(session_dir, plugin_root, plugin_version=plugin_version)
+
+    return session_dir
+
+
+def _canonical_secretary_input(team_name="t1", overrides=None):
+    """Build the canonical Agent(secretary) PreToolUse input.
+
+    overrides: dict merged into tool_input to forge mismatched bindings
+    in negative tests.
+    """
+    tool_input = {
+        "subagent_type": "pact-secretary",
+        "name": "secretary",
+        "team_name": team_name,
+    }
+    if overrides:
+        tool_input.update(overrides)
+    return {
+        "hook_event_name": "PreToolUse",
+        "session_id": _SESSION_ID,
+        "tool_name": "Agent",
+        "tool_input": tool_input,
+    }
+
+
+class TestCanonicalSecretarySpawnCarveOut:
+    """#789: the canonical secretary spawn is allowed even when the
+    bootstrap marker is absent — without this carve-out, the gate denies
+    the only dispatch that could clear its own deny condition (the
+    secretary spawn populates the team members[] entry that the marker
+    writer requires before writing the marker).
+
+    Five conjunctive bindings (tool_name, subagent_type, name, team_name,
+    NOT _team_has_secretary). Each test below mentally reverts ONE
+    binding and confirms the carve-out closes (predicate returns False
+    → caller returns _DENY_REASON).
+    """
+
+    # --- Positive case: all five bindings match → allow ---
+
+    def test_secretary_spawn_allowed_when_members_lacks_secretary(
+        self, monkeypatch, tmp_path,
+    ):
+        """All 5 bindings match + no secretary in members[] → allow."""
+        from bootstrap_gate import _check_tool_allowed
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        assert result is None
+
+    # --- subagent_type mismatch → predicate False → deny ---
+
+    def test_non_secretary_agent_still_blocked(self, monkeypatch, tmp_path):
+        """subagent_type != 'pact-secretary' → predicate False → deny."""
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(
+            team_name="t1", overrides={"subagent_type": "pact-architect"},
+        ))
+        assert result == _DENY_REASON
+
+    # --- Name mismatch → predicate False → deny (name-impostor blocked) ---
+
+    def test_secretary_spawn_with_wrong_name_blocked(self, monkeypatch, tmp_path):
+        """name != 'secretary' → predicate False → deny.
+
+        An attacker (or a stale orchestrator) dispatching pact-secretary
+        with a non-canonical name (e.g., 'sec', 'secretari') is denied.
+        The literal name is load-bearing per commands/bootstrap.md Step 2.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(
+            team_name="t1", overrides={"name": "secretari"},
+        ))
+        assert result == _DENY_REASON
+
+    # --- Cross-team injection → predicate False → deny ---
+
+    def test_secretary_spawn_with_wrong_team_blocked(self, monkeypatch, tmp_path):
+        """tool_input.team_name != get_team_name() → predicate False → deny.
+
+        Cross-team injection defense: tool_input is LLM-controlled and a
+        prompt-injected dispatch could claim a different team_name to
+        ride the carve-out. The binding compares against the disk-derived
+        session context, not against tool_input.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(
+            team_name="other-team",
+        ))
+        assert result == _DENY_REASON
+
+    # --- One-shot closure: secretary already in members[] → deny ---
+
+    def test_carve_out_closes_after_secretary_in_members(
+        self, monkeypatch, tmp_path,
+    ):
+        """_team_has_secretary(team_name) == True → predicate False → deny.
+
+        The one-shot semantic: once the canonical spawn has landed and
+        the secretary entry is in members[], the carve-out cannot fire a
+        second time in the same session. The marker writer's
+        UserPromptSubmit hook handles the next turn from there.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1",
+            members=[{"id": "sec-1", "name": "secretary", "type": "pact-secretary"}],
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        assert result == _DENY_REASON
+
+    # --- End-to-end fresh-session repro ---
+
+    def test_fresh_session_repro_end_to_end(self, monkeypatch, tmp_path):
+        """Fresh-session bootstrap: Agent(secretary) allowed; Agent(other) denied.
+
+        Mirrors the issue's acceptance criterion. No marker on disk; team
+        config exists but lacks the secretary entry. The canonical spawn
+        passes the gate; any other Agent dispatch (e.g., a non-canonical
+        subagent_type) is denied as before.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        secretary_result = _check_tool_allowed(
+            _canonical_secretary_input(team_name="t1")
+        )
+        assert secretary_result is None
+
+        other_agent_result = _check_tool_allowed(_canonical_secretary_input(
+            team_name="t1", overrides={"subagent_type": "pact-architect"},
+        ))
+        assert other_agent_result == _DENY_REASON
+
+    # --- Fail-closed posture on team-config read error ---
+
+    def test_predicate_fail_closed_on_team_has_secretary_oserror(
+        self, monkeypatch, tmp_path,
+    ):
+        """_team_has_secretary raising OSError → predicate False → deny.
+
+        The predicate catches (OSError, ValueError, KeyError, TypeError,
+        AttributeError) and returns False. Caller falls through to the
+        existing _BLOCKED_TOOLS deny path, so the user sees the canonical
+        _DENY_REASON rather than the load-failure variant.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+        import bootstrap_marker_writer
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        def _boom(team_name):
+            raise OSError("simulated disk error")
+
+        monkeypatch.setattr(
+            bootstrap_marker_writer, "_team_has_secretary", _boom,
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        assert result == _DENY_REASON
+
+
+# =============================================================================
 # Deny reason content — P2 priority
 # =============================================================================
 
@@ -923,3 +1174,949 @@ class TestAuditAnchorParity:
             f"shape={shape} emit MUST carry hookEventName=='PreToolUse'; "
             f"got {hso!r}"
         )
+
+
+# =============================================================================
+# Import discipline — #789 reciprocal-cycle defense
+# =============================================================================
+
+
+class TestImportDiscipline:
+    """Structural pin: bootstrap_gate.py MUST NOT import
+    _team_has_secretary from bootstrap_marker_writer at module-load
+    time. bootstrap_marker_writer imports is_marker_set from this module
+    at its OWN top-level; a reciprocal top-level import here would
+    deadlock module load and route every tool call through the
+    fail-closed deny path.
+
+    The carve-out predicate (_is_canonical_secretary_spawn) uses a
+    LOCAL import (inside the function body) to break the cycle —
+    enforced here as a source-level invariant so a future refactor
+    can't silently re-introduce the deadlock.
+    """
+
+    def test_team_has_secretary_imported_locally_not_at_module_load(self):
+        """No module-scope reference to ``bootstrap_marker_writer`` in
+        bootstrap_gate.py — neither as an Import / ImportFrom statement
+        nor as a dynamic ``__import__`` / ``importlib.import_module``
+        call. The local import inside ``_is_canonical_secretary_spawn``
+        is the only legal form.
+
+        AST-based walk closes the source-grep gap empirically
+        demonstrated during review: a top-level
+        ``_bmw = __import__('bootstrap_marker_writer')`` bypasses the
+        old string-prefix grep yet still triggers the exact deadlock
+        (ImportError: cannot import 'is_marker_set' from
+        'bootstrap_gate') the discipline is meant to prevent. The AST
+        walk catches every module-scope reference regardless of the
+        import idiom used.
+
+        Module scope means the statement runs at import time. Indented
+        statements inside function / class bodies are NOT module-scope
+        because they only execute when the function / class body is
+        invoked, which happens after module load completes.
+        """
+        import ast
+
+        gate_path = (
+            Path(__file__).parent.parent / "hooks" / "bootstrap_gate.py"
+        )
+        source = gate_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(gate_path))
+
+        target = "bootstrap_marker_writer"
+
+        def _check_node(node, context_description):
+            # `import bootstrap_marker_writer` or `import bootstrap_marker_writer as bm`
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == target or alias.name.endswith(f".{target}"):
+                        pytest.fail(
+                            f"bootstrap_gate.py {context_description} "
+                            f"`import {alias.name}` at line {node.lineno}. "
+                            f"This would deadlock module load with "
+                            f"bootstrap_marker_writer's top-level "
+                            f"`from bootstrap_gate import is_marker_set`. "
+                            f"Use a LOCAL import inside "
+                            f"_is_canonical_secretary_spawn."
+                        )
+            # `from bootstrap_marker_writer import ...` or
+            # `from .bootstrap_marker_writer import ...`
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                # node.module is None for `from . import X`; module is the
+                # dotted name otherwise. Check the leaf segment to catch
+                # both absolute and relative forms.
+                leaf = module.split(".")[-1] if module else ""
+                if module == target or leaf == target:
+                    pytest.fail(
+                        f"bootstrap_gate.py {context_description} "
+                        f"`from {module} import ...` at line {node.lineno}. "
+                        f"This would deadlock module load with "
+                        f"bootstrap_marker_writer's top-level "
+                        f"`from bootstrap_gate import is_marker_set`. "
+                        f"Use a LOCAL import inside "
+                        f"_is_canonical_secretary_spawn."
+                    )
+            # `__import__('bootstrap_marker_writer')` or
+            # `importlib.import_module('bootstrap_marker_writer')`
+            elif isinstance(node, ast.Call):
+                func = node.func
+                is_builtin_import = (
+                    isinstance(func, ast.Name) and func.id == "__import__"
+                )
+                is_importlib_import_module = (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == "import_module"
+                )
+                if (is_builtin_import or is_importlib_import_module) and node.args:
+                    first_arg = node.args[0]
+                    if (
+                        isinstance(first_arg, ast.Constant)
+                        and isinstance(first_arg.value, str)
+                        and (
+                            first_arg.value == target
+                            or first_arg.value.endswith(f".{target}")
+                        )
+                    ):
+                        call_name = (
+                            "__import__"
+                            if is_builtin_import
+                            else "importlib.import_module"
+                        )
+                        pytest.fail(
+                            f"bootstrap_gate.py {context_description} "
+                            f"`{call_name}({first_arg.value!r})` at line "
+                            f"{node.lineno}. Dynamic import at module "
+                            f"scope deadlocks the same way as a static "
+                            f"top-level import. Use a LOCAL import "
+                            f"inside _is_canonical_secretary_spawn."
+                        )
+
+        # Walk only module-scope statements + the body of any module-scope
+        # try/except wrapper (the existing fail-closed import block is one).
+        # We deliberately do NOT recurse into FunctionDef / ClassDef bodies
+        # because those run after module load completes — the local import
+        # inside _is_canonical_secretary_spawn lives there and is legal.
+        def _walk_module_scope(body):
+            for stmt in body:
+                for sub in ast.walk(stmt):
+                    if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        # Stop descent at function / class boundaries.
+                        continue
+                if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                    _check_node(stmt, "contains module-scope")
+                elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                    _check_node(stmt.value, "contains module-scope call")
+                elif isinstance(stmt, ast.Assign):
+                    # `_bmw = __import__('bootstrap_marker_writer')`
+                    if isinstance(stmt.value, ast.Call):
+                        _check_node(stmt.value, "contains module-scope assignment with call")
+                elif isinstance(stmt, ast.Try):
+                    # The existing fail-closed wrapper at module top is a
+                    # try block — its body executes at module load time.
+                    _walk_module_scope(stmt.body)
+                    for handler in stmt.handlers:
+                        _walk_module_scope(handler.body)
+                    _walk_module_scope(stmt.orelse)
+                    _walk_module_scope(stmt.finalbody)
+
+        _walk_module_scope(tree.body)
+
+
+class TestCanonicalSecretaryConstantPin:
+    """Structural pin: the canonical-secretary `name` literal MUST match
+    byte-for-byte across the carve-out's 3-way mirror surface
+    (bootstrap_gate.py `_SECRETARY_NAME`, bootstrap_marker_writer.py
+    `_SECRETARY_NAME`, and the canonical `name="secretary"` literal in
+    commands/bootstrap.md Step 2).
+
+    Drift between any pair silently breaks the carve-out's one-shot
+    binding (5): `NOT _team_has_secretary(team_name)`. If marker_writer's
+    `_SECRETARY_NAME` diverged from gate's, marker_writer would compare
+    `member.get("name")` to a different literal than the one the
+    orchestrator-emitted spawn would actually write into members[], so
+    `_team_has_secretary` would return False forever — the carve-out would
+    stay open and re-fire on every subsequent canonical spawn,
+    re-introducing the brittleness BE-F1 flagged in PR #790 review.
+    """
+
+    def _read_constant(self, py_path, name):
+        """Return the string value of a module-scope `NAME = "literal"`
+        assignment via AST. Returns None if not found, raises on
+        non-string literal (drift would surface as a clear error)."""
+        import ast
+        tree = ast.parse(py_path.read_text(encoding="utf-8"), filename=str(py_path))
+        for stmt in tree.body:
+            if isinstance(stmt, ast.Assign):
+                for target in stmt.targets:
+                    if isinstance(target, ast.Name) and target.id == name:
+                        value = stmt.value
+                        assert isinstance(value, ast.Constant) and isinstance(value.value, str), (
+                            f"{py_path.name}: `{name}` MUST be a top-level string-literal "
+                            f"assignment (got {ast.dump(value)})"
+                        )
+                        return value.value
+        return None
+
+    def test_secretary_name_literal_matches_across_files(self):
+        """3-way mirror pin: `_SECRETARY_NAME` in bootstrap_gate.py ==
+        `_SECRETARY_NAME` in bootstrap_marker_writer.py == canonical
+        `name="secretary"` literal in commands/bootstrap.md Step 2.
+
+        Counter-test (executed at review time): mutating either
+        `_SECRETARY_NAME` constant to e.g. "secretari" produces RED with
+        the exact divergence reported in the failure message; mutating
+        the bootstrap.md literal produces RED on the markdown leg.
+        """
+        hooks_dir = Path(__file__).parent.parent / "hooks"
+        commands_dir = Path(__file__).parent.parent / "commands"
+
+        gate_value = self._read_constant(hooks_dir / "bootstrap_gate.py", "_SECRETARY_NAME")
+        writer_value = self._read_constant(
+            hooks_dir / "bootstrap_marker_writer.py", "_SECRETARY_NAME"
+        )
+        assert gate_value is not None, (
+            "bootstrap_gate.py: top-level `_SECRETARY_NAME` constant missing — "
+            "carve-out predicate references it at function-call time"
+        )
+        assert writer_value is not None, (
+            "bootstrap_marker_writer.py: top-level `_SECRETARY_NAME` constant missing — "
+            "_team_has_secretary references it at function-call time"
+        )
+        assert gate_value == writer_value, (
+            f"Canonical-secretary name literal drift between bootstrap_gate.py "
+            f"(`_SECRETARY_NAME={gate_value!r}`) and bootstrap_marker_writer.py "
+            f"(`_SECRETARY_NAME={writer_value!r}`); bootstrap_gate carve-out's "
+            f"one-shot semantic will break in production if these diverge — "
+            f"_team_has_secretary returns False forever, carve-out stays open."
+        )
+
+        # Markdown leg: canonical spawn literal in bootstrap.md Step 2.
+        # Substring rather than regex — the surrounding `Agent(...)` call
+        # may reformat without breaking the contract, but the literal
+        # `name="<value>"` MUST remain present byte-for-byte.
+        bootstrap_md = (commands_dir / "bootstrap.md").read_text(encoding="utf-8")
+        canonical_spawn_literal = f'name="{gate_value}"'
+        assert canonical_spawn_literal in bootstrap_md, (
+            f"Canonical-secretary name literal drift: bootstrap.md does not "
+            f"contain {canonical_spawn_literal!r} (the constant value matched "
+            f"between bootstrap_gate.py and bootstrap_marker_writer.py is "
+            f"{gate_value!r}). The orchestrator-emitted spawn literal MUST "
+            f"match the constants the verifier reads, or the carve-out's "
+            f"binding (3) fails and bootstrap deadlocks."
+        )
+
+
+# =============================================================================
+# Adversarial / edge-case / fuzz coverage (#789)
+# =============================================================================
+
+
+class TestCanonicalSecretarySpawnAdversarial:
+    """Adversarial / edge-case coverage layered on top of the
+    directly-coupled per-binding tests in TestCanonicalSecretarySpawnCarveOut.
+
+    These tests probe the carve-out predicate's attack surface where the
+    directly-coupled tests are silent: malformed tool_input shapes,
+    encoding edge cases on the canonical literals, exception envelope
+    tightness (only 5 listed exception types are caught; everything else
+    propagates), get_team_name edge values (empty / None / whitespace),
+    and deny-reason content invariance under failure modes.
+
+    Each test's docstring describes the mental-revert that produces RED
+    on the targeted invariant.
+    """
+
+    # --- Tool-input shape manipulation -------------------------------------
+
+    @pytest.mark.parametrize(
+        "tool_input_value",
+        [
+            None,
+            [],
+            ["subagent_type", "pact-secretary"],
+            "pact-secretary",
+            42,
+            True,
+        ],
+        ids=[
+            "none",
+            "empty_list",
+            "list_value",
+            "string_value",
+            "int_value",
+            "bool_value",
+        ],
+    )
+    def test_non_dict_tool_input_denies(
+        self, monkeypatch, tmp_path, tool_input_value,
+    ):
+        """tool_input is not a dict → predicate returns False → deny.
+
+        The predicate's explicit `isinstance(tool_input, dict)` guard
+        rejects non-dict shapes before any binding check. Mental revert:
+        remove the isinstance guard and the next `.get(...)` raises
+        AttributeError, which IS caught by the broad except envelope —
+        but the resulting False still denies. The isinstance guard is
+        load-bearing for code clarity, not behavior; this test confirms
+        deny under all non-dict shapes regardless.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        input_data = {
+            "hook_event_name": "PreToolUse",
+            "session_id": _SESSION_ID,
+            "tool_name": "Agent",
+            "tool_input": tool_input_value,
+        }
+        result = _check_tool_allowed(input_data)
+        assert result == _DENY_REASON
+
+    @pytest.mark.parametrize(
+        "missing_key",
+        ["subagent_type", "name", "team_name"],
+    )
+    def test_tool_input_missing_required_key_denies(
+        self, monkeypatch, tmp_path, missing_key,
+    ):
+        """tool_input missing one of (subagent_type, name, team_name) →
+        predicate returns False → deny.
+
+        `.get(missing_key)` returns None, which compares unequal to the
+        expected literal/disk-derived value. Mental revert: replacing
+        the binding's `!=` with `not ==` would not change behavior; but
+        replacing `_SECRETARY_NAME` with None (silently dropping the
+        constant) would make missing-name spawns ALLOW. Defends that
+        the constant is non-None.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        canonical = {
+            "subagent_type": "pact-secretary",
+            "name": "secretary",
+            "team_name": "t1",
+        }
+        canonical.pop(missing_key)
+        input_data = {
+            "hook_event_name": "PreToolUse",
+            "session_id": _SESSION_ID,
+            "tool_name": "Agent",
+            "tool_input": canonical,
+        }
+        result = _check_tool_allowed(input_data)
+        assert result == _DENY_REASON
+
+    @pytest.mark.parametrize(
+        "binding,wrong_type_value",
+        [
+            ("subagent_type", 123),
+            ("subagent_type", None),
+            ("subagent_type", ["pact-secretary"]),
+            ("name", False),
+            ("name", 0),
+            ("name", {"value": "secretary"}),
+            ("team_name", []),
+            ("team_name", 3.14),
+        ],
+    )
+    def test_wrong_value_type_on_binding_denies(
+        self, monkeypatch, tmp_path, binding, wrong_type_value,
+    ):
+        """Wrong value TYPE on a binding (int/None/list/dict where str
+        is expected) → != comparison against the string constant → deny.
+
+        Confirms the carve-out doesn't accidentally truthy-coerce
+        non-string values (e.g., `1 == "secretary"` is False — good).
+        Mental revert: changing the `!=` checks to `not bool(value)`
+        would allow truthy non-string values; this test catches that.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(
+            team_name="t1", overrides={binding: wrong_type_value},
+        ))
+        assert result == _DENY_REASON
+
+    def test_missing_tool_name_denies(self, monkeypatch, tmp_path):
+        """input_data missing `tool_name` key entirely → predicate
+        returns False (binding 1 fails on `.get` → None != "Agent") →
+        deny via the existing _BLOCKED_TOOLS fall-through (which also
+        misses on empty tool_name, but that's existing behavior).
+        """
+        from bootstrap_gate import _check_tool_allowed
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        input_data = {
+            "hook_event_name": "PreToolUse",
+            "session_id": _SESSION_ID,
+            "tool_input": {
+                "subagent_type": "pact-secretary",
+                "name": "secretary",
+                "team_name": "t1",
+            },
+        }
+        result = _check_tool_allowed(input_data)
+        # Missing tool_name → "" → not in _BLOCKED_TOOLS → allow (None).
+        # The carve-out predicate returns False (binding 1 fails); the
+        # missing-tool_name path is the existing behavior tested at line
+        # ~340 of TestCheckToolAllowed. This test pins that the
+        # carve-out does NOT accidentally allow a missing-tool_name
+        # request as if it were the canonical spawn.
+        assert result is None
+
+    # --- Encoding edge cases on canonical literals -------------------------
+
+    @pytest.mark.parametrize(
+        "wrong_name",
+        [
+            "SECRETARY",
+            "Secretary",
+            "secretary ",
+            " secretary",
+            "secretary\n",
+            "secretary\t",
+            "secretary\x00",
+            "secretary​",
+            "secretari",
+            "secretaries",
+            "secretary-1",
+            "secеretary",
+        ],
+        ids=[
+            "uppercase",
+            "title_case",
+            "trailing_space",
+            "leading_space",
+            "trailing_newline",
+            "trailing_tab",
+            "embedded_null",
+            "zero_width_space",
+            "typo_drop_y",
+            "trailing_s",
+            "trailing_suffix",
+            "cyrillic_e_lookalike",
+        ],
+    )
+    def test_name_canonical_literal_is_case_and_whitespace_sensitive(
+        self, monkeypatch, tmp_path, wrong_name,
+    ):
+        """name binding is BYTE-EXACT equality against _SECRETARY_NAME.
+
+        No normalization, no casefold, no strip, no Unicode-fold. Any
+        deviation (case, whitespace, lookalike Unicode, null byte,
+        zero-width space) closes the carve-out. Mental revert: changing
+        `tool_input.get("name") != _SECRETARY_NAME` to
+        `tool_input.get("name", "").strip().lower() != _SECRETARY_NAME`
+        would allow several of these and is the kind of "helpful"
+        refactor that silently widens the attack surface.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(
+            team_name="t1", overrides={"name": wrong_name},
+        ))
+        assert result == _DENY_REASON
+
+    @pytest.mark.parametrize(
+        "wrong_type",
+        [
+            "PACT-SECRETARY",
+            "pact_secretary",
+            "pact-Secretary",
+            "pact-secretary ",
+            "pact-secretary\x00",
+            "PACT:secretary",
+            "secretary",
+        ],
+        ids=[
+            "uppercase",
+            "underscore_separator",
+            "title_case_word",
+            "trailing_space",
+            "embedded_null",
+            "colon_separator",
+            "missing_prefix",
+        ],
+    )
+    def test_subagent_type_canonical_literal_is_byte_exact(
+        self, monkeypatch, tmp_path, wrong_type,
+    ):
+        """subagent_type binding is BYTE-EXACT equality against
+        _SECRETARY_AGENT_TYPE. Case, separator, and prefix variations
+        all close the carve-out. Mirrors the name-binding tightness pin.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(
+            team_name="t1", overrides={"subagent_type": wrong_type},
+        ))
+        assert result == _DENY_REASON
+
+    @pytest.mark.parametrize(
+        "wrong_team",
+        [
+            "T1",
+            "t1 ",
+            " t1",
+            "t1\n",
+            "t1\x00",
+            "t１",
+            "t1-",
+            "",
+        ],
+        ids=[
+            "uppercase",
+            "trailing_space",
+            "leading_space",
+            "trailing_newline",
+            "embedded_null",
+            "fullwidth_digit_one",
+            "trailing_dash",
+            "empty_string",
+        ],
+    )
+    def test_team_name_binding_is_byte_exact(
+        self, monkeypatch, tmp_path, wrong_team,
+    ):
+        """team_name binding compares tool_input.team_name == disk-derived
+        get_team_name(). BYTE-EXACT — no normalization. Case-sensitivity
+        is intentional per spec B1 (tight equality binding).
+
+        The fullwidth_digit_one row (U+FF11) is a Unicode digit that
+        renders visually like ASCII '1' but is a different code point.
+        Tests defend against any future "helpful" Unicode normalization
+        that would treat lookalikes as equivalent.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(
+            team_name=wrong_team,
+        ))
+        assert result == _DENY_REASON
+
+    def test_bytes_value_on_name_binding_denies(
+        self, monkeypatch, tmp_path,
+    ):
+        """name = b'secretary' (bytes, not str) → != "secretary" → deny.
+
+        Python: `b'secretary' != 'secretary'` is True. Defends that the
+        predicate doesn't decode bytes to str silently.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(
+            team_name="t1", overrides={"name": b"secretary"},
+        ))
+        assert result == _DENY_REASON
+
+    # --- Exception envelope tightness --------------------------------------
+
+    @pytest.mark.parametrize(
+        "exc_type",
+        [OSError, ValueError, KeyError, TypeError, AttributeError],
+        ids=lambda e: e.__name__,
+    )
+    def test_listed_exception_types_caught_and_deny(
+        self, monkeypatch, tmp_path, exc_type,
+    ):
+        """Each of the 5 listed exception types raised by
+        _team_has_secretary is CAUGHT by the predicate's broad except
+        → predicate returns False → _check_tool_allowed returns
+        _DENY_REASON. Pins the catch-set width exactly.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+        import bootstrap_marker_writer
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        def _raiser(team_name):
+            raise exc_type("simulated")
+
+        monkeypatch.setattr(
+            bootstrap_marker_writer, "_team_has_secretary", _raiser,
+        )
+        result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        assert result == _DENY_REASON
+
+    @pytest.mark.parametrize(
+        "exc_type",
+        [RuntimeError, MemoryError, NotImplementedError, AssertionError],
+        ids=lambda e: e.__name__,
+    )
+    def test_unlisted_exception_propagates_out_of_predicate(
+        self, monkeypatch, tmp_path, exc_type,
+    ):
+        """Exception types NOT in the predicate's catch tuple PROPAGATE
+        out of `_is_canonical_secretary_spawn` and reach the caller.
+        This is the spec's deliberate fail-closed-scope-tightness: the
+        5 catch-types cover benign disk-read failures; wider catches
+        would mask genuine bugs (RuntimeError, AssertionError).
+
+        Mental revert: widening the except clause to
+        `except Exception` would absorb these and silently mask defects
+        that should propagate to main()'s _emit_load_failure_deny path.
+
+        Pin via direct predicate call (not _check_tool_allowed), because
+        _check_tool_allowed itself has no exception handler — exceptions
+        propagate to main()'s outer try/except where they're routed to
+        the load-failure deny path. We assert the EXCEPTION ESCAPES the
+        predicate here; main()-level deny is covered by
+        TestFailClosedGateLogic.
+        """
+        from bootstrap_gate import _is_canonical_secretary_spawn
+        import bootstrap_marker_writer
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        def _raiser(team_name):
+            raise exc_type("simulated")
+
+        monkeypatch.setattr(
+            bootstrap_marker_writer, "_team_has_secretary", _raiser,
+        )
+
+        # Build the canonical input that gets us PAST bindings 1-4 so
+        # the predicate reaches the local-import + call site where the
+        # raise happens.
+        input_data = _canonical_secretary_input(team_name="t1")
+        with pytest.raises(exc_type):
+            _is_canonical_secretary_spawn(input_data)
+
+    def test_unlisted_exception_in_main_routes_to_load_failure_deny(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """End-to-end: an unlisted exception propagating from the
+        predicate through _check_tool_allowed lands at main()'s outer
+        try/except (line 391-396), which routes to
+        _emit_load_failure_deny. User sees the LOAD-FAILURE deny text
+        ("PACT bootstrap_gate runtime failure — blocking for safety...")
+        NOT the canonical _DENY_REASON. Confirms the fail-closed routing
+        for genuine-bug exceptions while preserving deny semantics.
+        """
+        import bootstrap_marker_writer
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        def _raiser(team_name):
+            raise RuntimeError("genuine bug")
+
+        monkeypatch.setattr(
+            bootstrap_marker_writer, "_team_has_secretary", _raiser,
+        )
+
+        exit_code, output = _run_main(_canonical_secretary_input(team_name="t1"), capsys)
+        assert exit_code == 2
+        hso = output["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "deny"
+        # Load-failure deny text differs from the canonical _DENY_REASON.
+        # Pin both invariants:
+        assert "runtime failure" in hso["permissionDecisionReason"]
+        assert "PACT bootstrap required" not in hso["permissionDecisionReason"]
+
+    # --- Predicate state edge values ---------------------------------------
+
+    @pytest.mark.parametrize(
+        "configured_team_name",
+        ["", None],
+        ids=["empty_string", "none_value"],
+    )
+    def test_empty_or_none_disk_team_name_denies(
+        self, monkeypatch, tmp_path, configured_team_name,
+    ):
+        """get_team_name returns falsy → predicate's `if not expected_team`
+        branch returns False → deny.
+
+        Defends an attacker dispatching `Agent(secretary, team_name="")`
+        in a fresh session whose context_path is missing/empty. The
+        predicate refuses to compare against a falsy team_name to avoid
+        the accidental == "" match.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+        import shared.pact_context as ctx_module
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+        # Override get_team_name to return the falsy value.
+        monkeypatch.setattr(
+            ctx_module, "get_team_name", lambda: configured_team_name,
+        )
+
+        # Match the falsy value on tool_input side as well to confirm
+        # the predicate's GUARD on falsy disk-value closes the carve-out
+        # even when tool_input would otherwise match.
+        result = _check_tool_allowed(_canonical_secretary_input(
+            team_name=configured_team_name if configured_team_name else "",
+        ))
+        assert result == _DENY_REASON
+
+    def test_get_team_name_returning_dict_denies_safely(
+        self, monkeypatch, tmp_path,
+    ):
+        """get_team_name returning non-string (dict) → comparison
+        operates on the wrong type → != is True → predicate returns
+        False → deny. Confirms no AttributeError on `not expected_team`
+        for non-string truthy values.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+        import shared.pact_context as ctx_module
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+        monkeypatch.setattr(
+            ctx_module, "get_team_name", lambda: {"team": "t1"},
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        assert result == _DENY_REASON
+
+    def test_carve_out_can_fire_then_close_within_session(
+        self, monkeypatch, tmp_path,
+    ):
+        """One-shot closure: with the same session set up, a FIRST
+        _check_tool_allowed call observes members=[] → ALLOW; mutating
+        the team config to include the secretary entry mid-test causes
+        a SECOND call to DENY. Pins one-shot semantic at the session
+        level, not just the call level.
+
+        Distinct from `test_carve_out_closes_after_secretary_in_members`
+        (CODE-phase test) which observes deny when members already
+        contains secretary. This test observes the TRANSITION.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        # First call — fresh, carve-out fires.
+        first = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        assert first is None
+
+        # Simulate the spawn landing in members[] by rewriting the
+        # team config (matching how the platform's team-config
+        # maintenance would update it).
+        teams_dir = tmp_path / ".claude" / "teams" / "t1"
+        config_file = teams_dir / "config.json"
+        config_file.write_text(
+            json.dumps({"members": [
+                {"id": "sec-1", "name": "secretary", "type": "pact-secretary"},
+            ]}),
+            encoding="utf-8",
+        )
+
+        # Second call — secretary now in members[], carve-out closes.
+        second = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        assert second == _DENY_REASON
+
+    # --- Same-turn duplicate-dispatch: accepted-residual benign behavior ----
+
+    def test_same_turn_duplicate_dispatch_is_benign(
+        self, monkeypatch, tmp_path,
+    ):
+        """Pin the accepted-residual behavior: same-turn duplicate
+        Agent(secretary) dispatch is benign under platform serialization.
+        If a future PR adds strict one-shot enforcement (sidecar marker /
+        state primitive), this test WILL break by design — that's the
+        regression door. Remove this test as part of any strict-one-shot
+        work, not silently.
+
+        Scenario: between the first dispatch's PreToolUse firing and the
+        platform's members[] write landing on disk, the LLM emits a
+        SECOND Agent(secretary) dispatch in the same turn. Both observe
+        members=[] (the first write hasn't flushed yet); both fire the
+        carve-out → both ALLOW. Downstream consumers tolerate the
+        resulting duplicate member entry; this is a benign duplicate
+        spawn, not a security risk.
+
+        Pin the benign behavior so future strict-one-shot enforcement
+        causes this test to break loudly rather than silently change
+        observable behavior.
+        """
+        from bootstrap_gate import _check_tool_allowed
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        # Two sequential dispatches without any members[] mutation in
+        # between (modeling the not-yet-flushed-to-disk race).
+        first = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        second = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        assert first is None
+        assert second is None
+
+    # --- Deny-reason content invariance ------------------------------------
+
+    @pytest.mark.parametrize(
+        "scenario,overrides,exc_setup",
+        [
+            ("wrong_subagent_type", {"subagent_type": "pact-architect"}, None),
+            ("wrong_name", {"name": "secretari"}, None),
+            ("wrong_team", {"team_name": "other-team"}, None),
+            ("missing_subagent_type", None, "missing_subagent_type"),
+            ("oserror_in_team_has_secretary", None, "oserror"),
+            ("valueerror_in_team_has_secretary", None, "valueerror"),
+            ("keyerror_in_team_has_secretary", None, "keyerror"),
+        ],
+    )
+    def test_deny_reason_is_byte_identical_across_failure_modes(
+        self, monkeypatch, tmp_path, scenario, overrides, exc_setup,
+    ):
+        """Across every failure mode (wrong binding, missing key,
+        every caught exception type), the user-visible
+        permissionDecisionReason is BYTE-IDENTICAL to the canonical
+        deny-reason literal pinned independently in
+        ``_CANONICAL_DENY_REASON_LITERAL``.
+
+        Two-sided assertion: the result MUST equal the independent
+        literal AND ``_DENY_REASON`` MUST equal the same literal.
+        The independent literal is what closes the self-comparison
+        gap — comparing ``result == _DENY_REASON`` alone passes even
+        if both sides are mutated in lockstep, because they alias the
+        same in-memory string. The independent literal anchors the
+        byte content outside the module under test.
+
+        Mental revert: a future "helpful" patch that customizes the
+        deny reason per-scenario (e.g., "name mismatch detected") would
+        flunk this test. The canonical literal is the only approved
+        user-visible string for the carve-out's deny path.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+        import bootstrap_marker_writer
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        if exc_setup == "oserror":
+            monkeypatch.setattr(
+                bootstrap_marker_writer, "_team_has_secretary",
+                lambda team_name: (_ for _ in ()).throw(OSError("x")),
+            )
+            input_data = _canonical_secretary_input(team_name="t1")
+        elif exc_setup == "valueerror":
+            monkeypatch.setattr(
+                bootstrap_marker_writer, "_team_has_secretary",
+                lambda team_name: (_ for _ in ()).throw(ValueError("x")),
+            )
+            input_data = _canonical_secretary_input(team_name="t1")
+        elif exc_setup == "keyerror":
+            monkeypatch.setattr(
+                bootstrap_marker_writer, "_team_has_secretary",
+                lambda team_name: (_ for _ in ()).throw(KeyError("x")),
+            )
+            input_data = _canonical_secretary_input(team_name="t1")
+        elif exc_setup == "missing_subagent_type":
+            input_data = {
+                "hook_event_name": "PreToolUse",
+                "session_id": _SESSION_ID,
+                "tool_name": "Agent",
+                "tool_input": {"name": "secretary", "team_name": "t1"},
+            }
+        else:
+            input_data = _canonical_secretary_input(
+                team_name="t1", overrides=overrides,
+            )
+
+        result = _check_tool_allowed(input_data)
+        assert result == _CANONICAL_DENY_REASON_LITERAL, (
+            f"scenario={scenario}: deny reason drifted from canonical "
+            f"literal. Got {result!r}."
+        )
+        assert _DENY_REASON == _CANONICAL_DENY_REASON_LITERAL, (
+            f"scenario={scenario}: bootstrap_gate._DENY_REASON drifted "
+            f"from canonical literal. Got {_DENY_REASON!r}."
+        )
+
+    def test_deny_reason_constant_matches_canonical_literal(self):
+        """Independent-literal pin on ``bootstrap_gate._DENY_REASON``.
+
+        Closes the self-comparison gap: every other deny-reason test
+        in this file asserts ``result == _DENY_REASON``, which passes
+        even if both sides are mutated in lockstep (they alias the
+        same string). This test compares ``_DENY_REASON`` against an
+        independent literal hard-coded in the test file. A future
+        single-byte change to the constant in bootstrap_gate.py
+        (e.g., dropping the word "are" from "Bash, Read, Glob, Grep
+        are available") flunks this test even though every other
+        deny-reason test continues to pass.
+
+        Any intentional change to the canonical deny reason must
+        update BOTH the constant in bootstrap_gate.py AND the literal
+        below — that explicit two-site edit is the load-bearing
+        review surface.
+        """
+        from bootstrap_gate import _DENY_REASON
+
+        assert _DENY_REASON == _CANONICAL_DENY_REASON_LITERAL
+
+    def test_deny_reason_excludes_exception_detail(
+        self, monkeypatch, tmp_path,
+    ):
+        """When _team_has_secretary raises with a sensitive-looking
+        message, the user-visible deny reason MUST NOT leak the
+        exception text. Pins that the carve-out's catch returns False
+        and the caller's _DENY_REASON path is used — no formatted
+        error string ever reaches the user.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+        import bootstrap_marker_writer
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        sensitive = "secret-token-deadbeef /Users/victim/.ssh/id_rsa"
+
+        def _raiser(team_name):
+            raise OSError(sensitive)
+
+        monkeypatch.setattr(
+            bootstrap_marker_writer, "_team_has_secretary", _raiser,
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        assert result == _DENY_REASON
+        assert sensitive not in result
+        assert "deadbeef" not in result
+        assert "/Users/" not in result
