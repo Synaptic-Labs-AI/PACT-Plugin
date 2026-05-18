@@ -208,6 +208,25 @@ try:
     HAS_HYPOTHESIS = True
 except ImportError:
     HAS_HYPOTHESIS = False
+    # Stubs so the class body below collects cleanly when hypothesis is
+    # absent. The class is skipped via @pytest.mark.skipif so the stubs
+    # are never invoked at runtime.
+    def given(*args, **kwargs):
+        def _decorator(func):
+            return func
+        return _decorator
+
+    def settings(*args, **kwargs):
+        def _decorator(func):
+            return func
+        return _decorator
+
+    class _StStub:
+        @staticmethod
+        def integers(*args, **kwargs):
+            return None
+
+    st = _StStub()
 
 
 @pytest.mark.skipif(not HAS_HYPOTHESIS, reason="hypothesis not installed")
