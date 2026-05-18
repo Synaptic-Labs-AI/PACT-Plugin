@@ -6,14 +6,16 @@ Summary: Shared helper for inbox-wake lifecycle hooks. Counts active teammate
          agentTypes do not count toward the wake-mechanism's "any active work"
          signal).
 Used by: pact-plugin/hooks/wake_lifecycle_emitter.py (PostToolUse hook on
-         TaskCreate / TaskUpdate),
+         TaskCreate / TaskUpdate; consumes `is_lead_emit_authorized`),
          pact-plugin/hooks/session_init.py (resume-with-active-tasks Arm
-         directive emission),
-         pact-plugin/hooks/wake_inbox_drain.py (UserPromptSubmit drain),
-         and pact-plugin/hooks/teardown_request_emitter.py (TaskCompleted
+         directive emission; consumes `is_lead_at_session_start`),
+         pact-plugin/hooks/wake_inbox_drain.py (UserPromptSubmit drain;
+         consumes `is_lead_drain_authorized`), and
+         pact-plugin/hooks/teardown_request_emitter.py (TaskCompleted
          Teardown Gate 0; calls the `is_lead_session` delegate today —
-         migration to `is_lead_emit_authorized` is tracked separately
-         pending TaskCompleted-stdin empirical capture).
+         migration to `is_lead_emit_authorized` deferred to #781 pending
+         TaskCompleted-stdin empirical capture of the actor-discriminator
+         field).
 
 Public surface:
 - count_active_tasks(team_name) -> int
@@ -50,10 +52,13 @@ Public surface:
     originated in the lead session. Discriminator:
     `input_data.get('agent_id') is None`. Canonical replacement for
     `is_lead_session` at PostToolUse + TaskCompleted callsites.
-    Consumed by wake_lifecycle_emitter.py and (planned) by
-    teardown_request_emitter.py. Pure function; never raises; returns
-    False on non-dict input. `team_name` is vestigial under the
-    field-presence discriminator but retained for signature uniformity.
+    Consumed directly by wake_lifecycle_emitter.py; consumption by
+    teardown_request_emitter.py is deferred to #781 (that callsite
+    still routes through the `is_lead_session` delegate today pending
+    TaskCompleted-stdin empirical capture). Pure function; never
+    raises; returns False on non-dict input. `team_name` is vestigial
+    under the field-presence discriminator but retained for signature
+    uniformity.
 - is_lead_drain_authorized(input_data, team_name="") -> bool
     Predicate. True iff this UserPromptSubmit hook fire originated in
     the lead session. Bytes-identical body to

@@ -640,7 +640,7 @@ def test_count_active_tasks_not_called_on_metadata_only_taskupdate():
         # above; here we isolate the count_active_tasks ordering.)
 
     # Re-run with lead-guard bypassed to isolate the perf ordering invariant.
-    with patch.object(emitter, "is_lead_session", return_value=True), \
+    with patch.object(emitter, "is_lead_emit_authorized", return_value=True), \
          patch.object(emitter, "count_active_tasks") as mock_count:
         result = emitter._decide_directive({
             "tool_name": "TaskUpdate",
@@ -663,7 +663,7 @@ def test_count_active_tasks_called_on_terminal_status_taskupdate():
     import wake_lifecycle_emitter as emitter
 
     from unittest.mock import patch
-    with patch.object(emitter, "is_lead_session", return_value=True), \
+    with patch.object(emitter, "is_lead_emit_authorized", return_value=True), \
          patch.object(emitter, "count_active_tasks", return_value=0) as mock_count:
         emitter._decide_directive({
             "tool_name": "TaskUpdate",
@@ -683,7 +683,7 @@ def test_count_active_tasks_called_on_taskcreate():
     import wake_lifecycle_emitter as emitter
 
     from unittest.mock import patch
-    with patch.object(emitter, "is_lead_session", return_value=True), \
+    with patch.object(emitter, "is_lead_emit_authorized", return_value=True), \
          patch.object(emitter, "_extract_task_id", return_value="1"), \
          patch.object(emitter, "count_active_tasks", return_value=1) as mock_count:
         emitter._decide_directive({
