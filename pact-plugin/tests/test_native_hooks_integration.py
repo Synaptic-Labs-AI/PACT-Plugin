@@ -364,7 +364,7 @@ class TestSecretarySelfCompleteFiresTier2Only:
             WAKE_LIFECYCLE_EMITTER,
             json.dumps({
                 "tool_name": "TaskUpdate",
-                "session_id": teammate_sid, "cwd": pdir,
+                "session_id": teammate_sid, "agent_id": "agent-sec", "cwd": pdir,
                 "tool_input": {
                     "taskId": "S1", "status": "completed",
                     "owner": "secretary",
@@ -437,7 +437,7 @@ class TestSecretarySelfCompleteFiresTier2Only:
             WAKE_LIFECYCLE_EMITTER,
             json.dumps({
                 "tool_name": "TaskUpdate",
-                "session_id": teammate_sid, "cwd": pdir,
+                "session_id": teammate_sid, "agent_id": "agent-sec", "cwd": pdir,
                 "tool_input": {
                     "taskId": "S2", "status": "completed",
                     "owner": "secretary",

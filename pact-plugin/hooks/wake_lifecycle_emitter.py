@@ -42,15 +42,18 @@ Lifecycle automation:
   the count is zero): no directive emitted.
 
 Lead-Session Guard (Layer 0 — defense-in-depth):
-- Every Arm directive emission below the `is_lead_session` early-return
-  is gated by `is_lead_session`, which verifies that the current
-  PostToolUse session's `session_id` matches the team's `leadSessionId`
-  from team_config.json. Teammate sessions never receive a directive
-  via the in-session `additionalContext` channel from this hook —
-  hook-level filtering at the emission source, correct-by-construction
-  rather than relying on the skill body's Lead-Session Guard
-  (Layer 1) as the primary defense. The skill-body guard remains as
-  backstop for user-typed manual invocation from a teammate session.
+- Every Arm directive emission below the `is_lead_emit_authorized`
+  early-return is gated by `is_lead_emit_authorized`, which classifies
+  the current PostToolUse fire as lead-context via the platform-stamped
+  `agent_id` field-presence discriminator on the hook-stdin payload
+  (None for lead fires; str for in-process teammate fires that inherit
+  the lead's session_id under Claude Code's in-process subagent model).
+  Teammate sessions never receive a directive via the in-session
+  `additionalContext` channel from this hook — hook-level filtering at
+  the emission source, correct-by-construction rather than relying on
+  the skill body's Lead-Session Guard (Layer 1) as the primary defense.
+  The skill-body guard remains as backstop for user-typed manual
+  invocation from a teammate session.
 
 Asymmetric Arm vs Teardown signal locality:
 - Arm has TWO natural trigger sources with different session locality.
@@ -72,7 +75,7 @@ Asymmetric Arm vs Teardown signal locality:
 - Both asymmetric signals are realised by branch PLACEMENT: two
   teammate pre-branches (`_maybe_write_teammate_arm_marker` and
   `_maybe_write_teammate_teardown_marker`) sit ABOVE the
-  `is_lead_session` early-return and write per-marker JSON files to
+  `is_lead_emit_authorized` early-return and write per-marker JSON files to
   the team's `wake_inbox/` directory (the cross-session signal). The
   lead-session Arm branches stay BELOW the lead-session guard. The
   retired PostToolUse Teardown branch is replaced by the Tier-1
@@ -157,7 +160,7 @@ from shared.task_utils import read_task_json
 from shared.tool_response import extract_tool_response
 from shared.wake_lifecycle import (
     count_active_tasks,
-    is_lead_session,
+    is_lead_emit_authorized,
 )
 from shared.wake_lifecycle import _classify_owner  # noqa: F401 — owner classification for teammate-Arm pre-branch
 
@@ -234,32 +237,56 @@ def _extract_task_id(input_data: dict[str, Any]) -> str | None:
     propagate to a TaskStop call with a syntactically-valid-but-
     semantically-empty id and fail downstream; rejecting at the
     source is cheaper. Returns None if no probe matches.
+
+    Producer-side path-safety allowlist: extracted task_ids are
+    validated against `is_safe_path_component` before return. The
+    task_id flows into marker filenames (wake_inbox + Teardown sidecar)
+    and journal event bodies. Rejecting path-traversal payloads
+    (`"../foo"`, `"/etc/passwd"`, `"foo\x00bar"`) at the extraction
+    boundary means every downstream sink inherits sanitization-by-
+    construction — preferable to per-sink re-validation which is
+    asymmetry-prone (the weakest sink becomes the bypass; see
+    `patterns_symmetric_sanitization` security memory). Under the
+    platform task system, legitimate task_ids match the allowlist
+    `[A-Za-z0-9_-]+` (integer-as-string + alpha suffix patterns
+    like "S2", "L4"), so the producer-side rejection has zero
+    false-positives against real traffic.
     """
+    def _accept(raw: object) -> str | None:
+        if not isinstance(raw, str):
+            return None
+        stripped = raw.strip()
+        if not stripped:
+            return None
+        if not is_safe_path_component(stripped):
+            return None
+        return stripped
+
     tool_input = input_data.get("tool_input") or {}
     if isinstance(tool_input, dict):
-        tid = tool_input.get("taskId") or tool_input.get("task_id")
-        if isinstance(tid, str) and tid.strip():
-            return tid.strip()
+        tid = _accept(tool_input.get("taskId") or tool_input.get("task_id"))
+        if tid is not None:
+            return tid
 
     tool_response = extract_tool_response(input_data)
     if isinstance(tool_response, dict):
         nested_task = tool_response.get("task") or {}
         if isinstance(nested_task, dict):
-            tid = (
+            tid = _accept(
                 nested_task.get("id")
                 or nested_task.get("taskId")
                 or nested_task.get("task_id")
             )
-            if isinstance(tid, str) and tid.strip():
-                return tid.strip()
+            if tid is not None:
+                return tid
 
-        tid = (
+        tid = _accept(
             tool_response.get("id")
             or tool_response.get("taskId")
             or tool_response.get("task_id")
         )
-        if isinstance(tid, str) and tid.strip():
-            return tid.strip()
+        if tid is not None:
+            return tid
 
     return None
 
@@ -404,15 +431,17 @@ def _maybe_write_teammate_arm_marker(
     predicate ladder holds for this PostToolUse fire.
 
     `is_lead` is the pre-computed result of
-    `is_lead_session(input_data, team_name)`, passed in by
-    `_decide_directive` so the team_config.json read happens at most
-    ONCE per fire (instead of twice: once here at clause 5, once at
-    the lead-session outer gate). When `is_lead is None` (the test
-    direct-invocation path), clause 5 falls back to computing the
-    check in-helper — preserves behavior for callers that don't have
-    the memoized value pre-computed. Behavior-preserving: clause 5
-    still skips the marker write when this fire originates from the
-    lead session.
+    `is_lead_emit_authorized(input_data, team_name)`, passed in by
+    `_decide_directive` so the predicate evaluates at most ONCE per
+    fire (instead of twice: once here at clause 5, once at the lead-
+    session outer gate). The check itself is O(1) (single dict lookup
+    on `agent_id` field-presence; no filesystem I/O), so the memoize
+    threading is structural-clarity rather than performance-critical.
+    When `is_lead is None` (the test direct-invocation path), clause 5
+    falls back to computing the check in-helper — preserves behavior
+    for callers that don't have the memoized value pre-computed.
+    Behavior-preserving: clause 5 still skips the marker write when
+    this fire originates from the lead session.
 
     The predicate ladder evaluates in ORDER below; ALL six clauses must
     hold to write a marker. Order matters: cheap predicates first
@@ -421,8 +450,10 @@ def _maybe_write_teammate_arm_marker(
     but no more (clauses 1-4 are pure dict reads).
 
       Clause 1 — team_name path-safe: non-empty AND
-                 is_safe_path_component(team_name). Mirrors the same
-                 defense already applied by `is_lead_session`.
+                 is_safe_path_component(team_name). Required because
+                 the marker-write path joins team_name into a path
+                 segment; `is_lead_emit_authorized` itself reads no
+                 filesystem so does not enforce this defense.
       Clause 2 — tool_name allowlist: tool_name in TaskCreate|TaskUpdate.
                  Belt-and-suspenders against future hooks.json matcher
                  widening; current matcher already filters.
@@ -500,13 +531,13 @@ def _maybe_write_teammate_arm_marker(
         # branch handles the lead-side Arm path directly below; only
         # teammate-side fires write the cross-session marker. The
         # `is_lead` argument is the memoized result of
-        # `is_lead_session(input_data, team_name)` computed once by
-        # `_decide_directive` and reused at the outer-gate check below.
-        # When `is_lead is None` (direct-invocation path), fall back
-        # to computing the check in-helper — the structural pin
+        # `is_lead_emit_authorized(input_data, team_name)` computed once
+        # by `_decide_directive` and reused at the outer-gate check
+        # below. When `is_lead is None` (direct-invocation path), fall
+        # back to computing the check in-helper — the structural pin
         # (test_emitter_guards_on_lead_session_id_structural) requires
         # the guard call to appear on a control-flow line.
-        if is_lead is None and is_lead_session(input_data, team_name):
+        if is_lead is None and is_lead_emit_authorized(input_data, team_name):
             return
         if is_lead:
             return
@@ -661,7 +692,7 @@ def _maybe_write_teammate_teardown_marker(
                  The lead-side Tier-1 path handles the lead-driven case;
                  this writer is teammate-side only. When `is_lead is
                  None` (test direct-invocation path), fall back to
-                 computing `is_lead_session(input_data, team_name)`.
+                 computing `is_lead_emit_authorized(input_data, team_name)`.
       Clause 6 — task_id present AND `is_self_complete_exempt(task,
                  team_name)`: the carve-out witness. The completed task
                  belongs to an exempt agent type (secretary today) OR
@@ -698,7 +729,7 @@ def _maybe_write_teammate_teardown_marker(
         # `_decide_directive`; when None (direct-invocation path), fall
         # back to computing the check in-helper. Mirrors clause 5 of
         # `_maybe_write_teammate_arm_marker`.
-        if is_lead is None and is_lead_session(input_data, team_name):
+        if is_lead is None and is_lead_emit_authorized(input_data, team_name):
             return
         if is_lead:
             return
@@ -854,12 +885,15 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     sequential-first-create emit case together rule out predicates
     above (e.g. > 1) and below (e.g. >= 0).
     """
-    # Compute `is_lead_session` ONCE per fire and thread the result
-    # through both the teammate-Arm pre-branch (clause 5) and the
-    # outer lead-session gate. team_config.json is the single source
-    # of truth; reading it twice on the same fire wastes a disk read
-    # and the lead-status cannot legitimately change mid-fire.
-    is_lead = bool(is_lead_session(input_data, team_name))
+    # Compute `is_lead_emit_authorized` ONCE per fire and thread the
+    # result through both the teammate-Arm pre-branch (clause 5) and
+    # the outer lead-session gate. The check is O(1) (single dict
+    # lookup on `agent_id` field-presence; no filesystem I/O) so the
+    # per-fire cost is negligible, but threading the memoized result
+    # keeps the call shape unambiguous at the structural pin and
+    # avoids two evaluations of an identical predicate on the same
+    # immutable input.
+    is_lead = bool(is_lead_emit_authorized(input_data, team_name))
 
     # Teammate-Arm pre-branch — runs BEFORE the lead-session early-return
     # so the teammate self-claim signal escapes the symmetric guard via
@@ -885,7 +919,7 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     # Outer lead-session gate. Layer 0 of the defense-in-depth model;
     # teammate sessions never reach the directive emission paths below.
     # Uses the memoized `is_lead` from above; semantically identical
-    # to `if not is_lead_session(input_data, team_name): return None`.
+    # to `if not is_lead_emit_authorized(input_data, team_name): return None`.
     if not is_lead:
         return None
 

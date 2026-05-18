@@ -125,8 +125,25 @@ def _stage_active_task(home: Path, team: str) -> None:
     )
 
 
-def _run_session_init(home: Path, sid: str, pdir: str, source: str = "resume") -> dict:
-    payload = json.dumps({"session_id": sid, "cwd": pdir, "source": source})
+def _run_session_init(
+    home: Path,
+    sid: str,
+    pdir: str,
+    source: str = "resume",
+    agent_type: str | None = None,
+) -> dict:
+    """Run session_init.py with synthesized SessionStart stdin.
+
+    `agent_type` is the platform-stamped actor-discriminator field for
+    SessionStart fires; set to a non-None value to synthesize an
+    in-process teammate-frame SessionStart (e.g., the in-process
+    subagent's SessionStart fire). Lead-frame fires omit the field
+    (default None).
+    """
+    payload_dict: dict = {"session_id": sid, "cwd": pdir, "source": source}
+    if agent_type is not None:
+        payload_dict["agent_type"] = agent_type
+    payload = json.dumps(payload_dict)
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
     env.update({"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir})
     proc = subprocess.run(
@@ -183,72 +200,112 @@ def test_session_init_emits_arm_directive_when_active_tasks_present(tmp_path):
 # ---------- Lead-Session Guard at Directive Emission Layer 0: hook-level session guard ----------
 
 def test_session_init_imports_or_calls_lead_session_guard(src):
-    """Lead-Session Guard at Directive Emission Layer 0 (structural tier; commit-9 tightened from
-    OR-permissive substring-anywhere to regex-in-code-line): session_init.py
-    must CALL a lead-session guard before emitting the Arm directive.
-    The guard compares the incoming session_id to team_config.leadSessionId;
-    a mismatch suppresses emission so a teammate session never receives
-    the Arm prose.
+    """Lead-Session Guard at Directive Emission Layer 0 (structural
+    tier): session_init.py must CALL a lead-session guard before
+    emitting the Arm directive. Under Option 5 (#611/#778) the guard
+    is the shared helper `is_lead_at_session_start(input_data,
+    team_name)` from shared.wake_lifecycle, which checks `agent_type`
+    field-presence on stdin (SessionStart uses agent_type rather than
+    PostToolUse's agent_id per Claude Code platform docs). A
+    teammate-frame fire carrying agent_type suppresses emission so
+    teammate sessions never receive the Arm prose.
 
-    Tightening over the prior OR-permissive substring check: require the
-    guard symbol to appear within a control-flow construct (if-statement
-    or return-statement etc.), NOT just anywhere in source. A hostile edit
-    that removes the actual guard call but leaves a docstring mention
-    of `_is_lead_session` would have passed the prior substring check;
-    the regex-in-code-line check catches the wiring-disconnect.
+    The guard symbol must appear within a control-flow construct
+    (if-statement or return-statement etc.), NOT just anywhere in
+    source. A hostile edit that removes the actual guard call but
+    leaves a docstring mention of the guard would pass a permissive
+    substring check; the regex-in-code-line check catches the
+    wiring-disconnect.
 
-    Defense-in-depth Layer 0 (per plan §Architecture Lead-Session Guard at Directive Emission) catches
-    misdirected directive emission at the source. Layers 1 (skill-body
-    Lead-Session Guard) and 2 (platform CronCreate session-scoping) both
-    assume Layer 0 is in place but must remain effective even if it isn't."""
+    Tight pin: matches ONLY the canonical post-Option-5 symbol
+    `is_lead_at_session_start`. The legacy symbols
+    `_is_lead_session_at_init` (inline; consolidated to shared
+    helper) and `leadSessionId` (team_config-coupled comparison;
+    pre-Option-5 body) are intentionally NOT in the tolerance band:
+    the corridor migration is settled, and a regression reintroducing
+    either legacy symbol in a control-flow line should fail this
+    test loudly rather than silently passing.
+
+    Defense-in-depth Layer 0 (per plan §Architecture Lead-Session
+    Guard at Directive Emission) catches misdirected directive
+    emission at the source. Layers 1 (skill-body Lead-Session Guard)
+    and 2 (platform CronCreate session-scoping) both assume Layer 0
+    is in place but must remain effective even if it isn't.
+    """
     import re as _re
     # Strict: the guard symbol must appear inside an if/return/elif/while/assert
-    # statement in the source. Matches either the canonical
-    # `_is_lead_session_at_init(` predicate call or a direct
-    # `leadSessionId` comparison expression.
+    # statement in the source. Matches ONLY `is_lead_at_session_start`
+    # — legacy alternates dropped post-corridor-migration.
     code_line_pattern = _re.compile(
-        r"^\s*(if|return|elif|while|assert)\b.*(_is_lead_session|leadSessionId)",
+        r"^\s*(if|return|elif|while|assert)\b.*is_lead_at_session_start",
         _re.MULTILINE,
     )
     assert code_line_pattern.search(src) is not None, (
-        "Lead-Session Guard at Directive Emission Layer 0 strict: session_init.py missing guard CALL within "
-        "control-flow construct (if/return/elif/while/assert). The prior "
-        "OR-permissive substring check passed on mere docstring mentions; "
-        "the strict check requires the guard to appear in actual code. "
-        "Expected pattern: `if ... _is_lead_session_at_init(...)` or "
-        "equivalent leadSessionId comparison in a code line."
+        "Lead-Session Guard at Directive Emission Layer 0 strict: "
+        "session_init.py missing guard CALL within control-flow "
+        "construct (if/return/elif/while/assert). Expected pattern "
+        "(post-Option-5): `if ... is_lead_at_session_start(...)`."
     )
 
 
-def test_session_init_does_not_emit_arm_directive_from_non_lead_session(tmp_path):
-    """Lead-Session Guard at Directive Emission Layer 0 (behavior tier): a teammate-session session_init
-    payload must NOT produce the Arm directive prose. Stage the team
-    config with a DIFFERENT leadSessionId than the incoming
-    session_id; expect no Arm prose in additionalContext."""
+def test_session_init_does_not_emit_arm_directive_from_in_process_teammate_frame(tmp_path):
+    """Lead-Session Guard at Directive Emission Layer 0 (behavior
+    tier): a teammate-frame session_init payload must NOT produce
+    the Arm directive prose. Under Option 5 (#611/#778) the platform
+    stamps `agent_type` on stdin for in-process subagent SessionStart
+    fires; is_lead_at_session_start classifies the payload as
+    teammate-frame (agent_type present -> not lead) and suppresses
+    the Arm prose.
+
+    Discriminative setup (post-peer-review tightening): the in-process
+    teammate SHARES the lead's session_id (the actual #611 bug pattern).
+    Under the legacy session_id-equality at_init body this test would
+    FAIL — the matching session_id classifies the payload as lead-frame
+    and emission proceeds. Under Option-5 (#611/#778) the agent_type
+    field-presence is the sole actor-discriminator and emission is
+    correctly suppressed.
+
+    The earlier formulation synthesized teammate-frame via session_id
+    distinct from team_config.leadSessionId AND agent_type set; that
+    setup passed under BOTH legacy and Option-5 bodies (DUAL signals)
+    so it was not discriminative for the field-presence migration.
+    See plan §Components Affected for the corridor split: SessionStart
+    uses agent_type (not agent_id) per platform docs.
+    """
     home = tmp_path / "home"; home.mkdir()
-    teammate_sid = "feedface-teammate-session"
-    lead_sid = "abcdef01-lead-session-other"
+    # Shared session_id is the #611 bug pattern: in-process teammates
+    # inherit the lead's session_id; only agent_type discriminates.
+    # NOTE: team_name MUST match what generate_team_name() derives
+    # from the session_id (first 8 chars of session_id prefixed with
+    # "pact-"); otherwise the active-tasks count is zero and the
+    # lead-session guard branch is not reached.
+    shared_sid = "abcdef01-shared-session-id"
     pdir = "/tmp/pi-non-lead"
-    team = "pact-feedface"
-    # Stage pact-session context with teammate session_id.
-    _stage_pact_session(home, team, teammate_sid, pdir)
-    # Stage team config recording lead_sid as the lead (NOT teammate_sid).
+    team = "pact-abcdef01"
+    _stage_pact_session(home, team, shared_sid, pdir)
+    # Stage team config with the SAME session_id as the lead's; a
+    # session_id-equality body would classify this as lead-fire.
     import json as _json
     team_dir = home / ".claude" / "teams" / team
     team_dir.mkdir(parents=True, exist_ok=True)
     (team_dir / "config.json").write_text(
-        _json.dumps({"leadSessionId": lead_sid}),
+        _json.dumps({"leadSessionId": shared_sid}),
         encoding="utf-8",
     )
     _stage_active_task(home, team)
-    out = _run_session_init(home, teammate_sid, pdir)
+    # In-process teammate-frame SessionStart: payload carries agent_type.
+    out = _run_session_init(
+        home, shared_sid, pdir, agent_type="pact-secretary",
+    )
     additional = out.get("hookSpecificOutput", {}).get("additionalContext", "")
     assert _ARM_DIRECTIVE_PHRASE not in additional, (
-        "Lead-Session Guard at Directive Emission Layer 0 broken: session_init emitted Arm directive "
-        "from non-lead session. The hook must compare session_id to "
-        "team_config.leadSessionId and suppress emission on mismatch."
+        "Lead-Session Guard at Directive Emission Layer 0 broken: "
+        "session_init emitted Arm directive from in-process teammate "
+        "frame. The hook must check agent_type field-presence and "
+        "suppress emission when teammate-frame."
     )
     assert 'Skill("PACT:start-pending-scan")' not in additional, (
-        "Lead-Session Guard at Directive Emission Layer 0 broken: session_init emitted start-pending-scan "
-        "slug from non-lead session."
+        "Lead-Session Guard at Directive Emission Layer 0 broken: "
+        "session_init emitted start-pending-scan slug from in-process "
+        "teammate frame."
     )

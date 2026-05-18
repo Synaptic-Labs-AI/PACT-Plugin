@@ -441,14 +441,17 @@ def test_emitter_guards_on_lead_session_id_structural():
     mention would pass the prior substring check; the regex-in-code-line
     check catches the wiring-disconnect.
 
-    Accepts both the lifted public name `is_lead_session` and the
-    historical underscore-prefixed `_is_lead_session` for forward-compat;
-    `leadSessionId` (the config key) matches if a future refactor inlines
-    the check at the call site."""
+    Accepts the canonical Option-5 symbol `is_lead_emit_authorized`,
+    the backward-compat delegate `is_lead_session` (still callable for
+    callers outside the symmetric corridor), the historical
+    underscore-prefixed `_is_lead_session` (pre-lift forward-compat),
+    and `leadSessionId` (the config key) for the case where a future
+    refactor inlines the check at the call site."""
     import re as _re
     src = (HOOK_DIR / "wake_lifecycle_emitter.py").read_text(encoding="utf-8")
     code_line_pattern = _re.compile(
-        r"^\s*(if|return|elif|while|assert)\b.*(is_lead_session|leadSessionId)",
+        r"^\s*(if|return|elif|while|assert)\b.*"
+        r"(is_lead_session|is_lead_emit_authorized|leadSessionId)",
         _re.MULTILINE,
     )
     assert code_line_pattern.search(src) is not None, (
@@ -459,36 +462,69 @@ def test_emitter_guards_on_lead_session_id_structural():
     )
 
 
-def test_no_emit_when_session_id_does_not_match_lead(tmp_path):
-    """Behavioral pin: a teammate-session TaskCreate that would
-    otherwise emit Arm must be suppressed by the lead-session guard.
-    Synthesize a session_id distinct from the team config's
-    leadSessionId; verify the emit is suppressOutput."""
+def test_no_emit_when_in_process_teammate_frame(tmp_path):
+    """Behavioral pin: an in-process teammate-frame TaskCreate that
+    would otherwise emit Arm must be suppressed by the field-presence
+    lead-session guard. The platform stamps `agent_id` on stdin for
+    in-process subagent fires; is_lead_emit_authorized classifies the
+    payload as teammate-frame (agent_id present -> not lead) and the
+    emit is suppressed.
+
+    Pre-Option-5 (legacy session_id-equality body) this test
+    synthesized teammate-frame via a session_id distinct from
+    team_config.leadSessionId; under the field-presence discriminator
+    the session_id comparison is irrelevant and agent_id presence is
+    the actor-discriminator. See test_p0_in_process_teammate_self_*
+    in test_wake_arm_in_process_teammate_field_presence.py for the
+    bug-fix-path coverage (#611 root: in-process teammates inherit
+    the lead's session_id, so session_id mismatch is no longer a
+    reliable teammate-frame proxy).
+    """
     home = tmp_path / "home"; home.mkdir()
     teammate_sid = "teammate-session-id"
     lead_sid = "lead-session-id"
     pdir = "/tmp/proj"
     team = "team-guard"
     # Session context: caller is the teammate; team config: lead is OTHER.
+    # Both session_id distinction AND agent_id field-presence classify
+    # this as teammate-frame; the field-presence check is the canonical
+    # post-Option-5 path.
     _write_session_context(home, teammate_sid, pdir, team, lead_session_id=lead_sid)
     _write_task(home, team, "task-x", status="in_progress", owner="x")
     payload = {
         "tool_name": "TaskCreate",
         "session_id": teammate_sid,
+        "agent_id": "agent-teammate-uuid",
         "cwd": pdir,
         "tool_input": {"taskId": "task-x"},
         "tool_response": {"task": {"id": "task-x"}},
     }
     out = _emit_output(payload, home)
     assert out == {"suppressOutput": True}, (
-        f"Teammate-session TaskCreate must be suppressed; got {out!r}"
+        f"In-process teammate-frame TaskCreate must be suppressed; "
+        f"got {out!r}"
     )
 
 
-def test_no_emit_when_team_config_missing(tmp_path):
-    """If team config.json is missing, is_lead_session fail-closes —
-    no emit. Documenting the fail-closed behavior so an editing LLM
-    cannot 'simplify' the guard into fail-open during refactor."""
+def test_emit_proceeds_when_team_config_missing_post_option_5(tmp_path):
+    """Post-Option-5 semantic shift: the field-presence predicate body
+    in is_lead_emit_authorized does NOT read team_config.json — the
+    `team_name` parameter is vestigial. With no agent_id in the
+    payload, the predicate returns True (lead frame), and the emit
+    proceeds even when team_config.json is missing.
+
+    Pre-Option-5 (legacy session_id-equality body) this test pinned
+    the fail-closed semantic: missing team_config -> can't compare
+    leadSessionId -> return False -> suppress. The new body has no
+    team_config dependency, so the fail-closed pin is obsolete. This
+    test now documents the new fail-OPEN semantic on missing config,
+    deliberately as a counter to refactors that might try to
+    reintroduce a team_config read for "defense-in-depth" — the
+    predicate's correctness rests on the platform's agent_id stamping
+    contract, not on team_config presence. A regression that
+    reintroduced team_config-coupling here would re-introduce the
+    legacy misclassification of in-process teammates (#611 root).
+    """
     home = tmp_path / "home"; home.mkdir()
     sid = "s"; pdir = "/tmp/p"; team = "team-no-config"
     # Write only the session-context, NOT the team config.
@@ -502,12 +538,72 @@ def test_no_emit_when_team_config_missing(tmp_path):
         }), encoding="utf-8",
     )
     _write_task(home, team, "task-x", status="in_progress", owner="x")
+    # Lead-frame payload (no agent_id).
     payload = {
         "tool_name": "TaskCreate", "session_id": sid, "cwd": pdir,
         "tool_input": {"taskId": "task-x"}, "tool_response": {"task": {"id": "task-x"}},
     }
     out = _emit_output(payload, home)
-    assert out == {"suppressOutput": True}
+    # Under Option 5: predicate returns True (lead frame), emit proceeds.
+    hso = out.get("hookSpecificOutput")
+    assert hso is not None, (
+        f"Lead-frame TaskCreate must emit Arm directive even when "
+        f"team_config is absent (predicate has no config dependency); "
+        f"got {out!r}"
+    )
+    assert hso.get("hookEventName") == "PostToolUse"
+
+
+def test_suppress_proceeds_when_team_config_missing_teammate_frame(tmp_path):
+    """Defense-in-depth completeness pin (sibling to the lead-frame test
+    above): the predicate body has zero team_config dependency for the
+    teammate-frame path as well as the lead-frame path. With agent_id
+    present on the payload (teammate frame), the predicate returns
+    False (not lead) and the suppress path engages regardless of
+    team_config presence.
+
+    Pre-Option-5 (legacy session_id-equality body) this combination
+    would have read team_config to compare leadSessionId and then
+    fail-closed on missing-config (suppress). The new body has no
+    team_config read at all, so the suppress path is reached via
+    field-presence alone; team_config absence is irrelevant.
+
+    A regression that reintroduced team_config-coupling asymmetrically
+    (e.g., reading config only on the teammate-frame branch as a
+    "defense-in-depth" addition) would change the failure-mode for
+    teammate-frame + missing-config. This test pins the symmetric
+    fail-open-by-construction behavior across BOTH frames.
+    """
+    home = tmp_path / "home"; home.mkdir()
+    sid = "s"; pdir = "/tmp/p"; team = "team-no-config-teammate"
+    # Write only the session-context, NOT the team config.
+    slug = Path(pdir).name
+    sess_dir = home / ".claude" / "pact-sessions" / slug / sid
+    sess_dir.mkdir(parents=True)
+    (sess_dir / "pact-session-context.json").write_text(
+        json.dumps({
+            "team_name": team, "session_id": sid, "project_dir": pdir,
+            "plugin_root": "", "started_at": "2026-04-30T00:00:00Z",
+        }), encoding="utf-8",
+    )
+    _write_task(home, team, "task-x", status="in_progress", owner="x")
+    # Teammate-frame payload: agent_id present.
+    payload = {
+        "tool_name": "TaskCreate",
+        "session_id": sid,
+        "agent_id": "agent-teammate-uuid",
+        "cwd": pdir,
+        "tool_input": {"taskId": "task-x"},
+        "tool_response": {"task": {"id": "task-x"}},
+    }
+    out = _emit_output(payload, home)
+    # Under Option 5: predicate returns False (teammate frame); suppress
+    # path engages regardless of team_config presence.
+    assert out == {"suppressOutput": True}, (
+        f"Teammate-frame TaskCreate must suppressOutput even when "
+        f"team_config is absent (predicate has no config dependency); "
+        f"got {out!r}"
+    )
 
 
 # ---------- Perf reorder (arch2-M2) ----------
@@ -544,7 +640,7 @@ def test_count_active_tasks_not_called_on_metadata_only_taskupdate():
         # above; here we isolate the count_active_tasks ordering.)
 
     # Re-run with lead-guard bypassed to isolate the perf ordering invariant.
-    with patch.object(emitter, "is_lead_session", return_value=True), \
+    with patch.object(emitter, "is_lead_emit_authorized", return_value=True), \
          patch.object(emitter, "count_active_tasks") as mock_count:
         result = emitter._decide_directive({
             "tool_name": "TaskUpdate",
@@ -567,7 +663,7 @@ def test_count_active_tasks_called_on_terminal_status_taskupdate():
     import wake_lifecycle_emitter as emitter
 
     from unittest.mock import patch
-    with patch.object(emitter, "is_lead_session", return_value=True), \
+    with patch.object(emitter, "is_lead_emit_authorized", return_value=True), \
          patch.object(emitter, "count_active_tasks", return_value=0) as mock_count:
         emitter._decide_directive({
             "tool_name": "TaskUpdate",
@@ -587,7 +683,7 @@ def test_count_active_tasks_called_on_taskcreate():
     import wake_lifecycle_emitter as emitter
 
     from unittest.mock import patch
-    with patch.object(emitter, "is_lead_session", return_value=True), \
+    with patch.object(emitter, "is_lead_emit_authorized", return_value=True), \
          patch.object(emitter, "_extract_task_id", return_value="1"), \
          patch.object(emitter, "count_active_tasks", return_value=1) as mock_count:
         emitter._decide_directive({

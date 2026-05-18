@@ -457,3 +457,227 @@ def test_emitter_rejects_taskupdate_without_status_transition(tmp_path):
             f"TaskUpdate without status transition must not produce a "
             f"marker; got {markers}"
         )
+
+
+# ─── Producer-side task_id path-safety allowlist ──────────────────────
+
+
+import pytest  # noqa: E402 — late import; sibling tests above import sys/os at top
+
+
+_UNSAFE_TASK_ID_PARAMS = [
+    ("../foo",          "parent_traversal"),
+    ("/etc/passwd",     "absolute_path"),
+    ("foo/bar",         "embedded_slash"),
+    ("foo\\bar",        "embedded_backslash"),
+    ("foo\x00bar",      "embedded_nul"),
+    (".",               "dot_literal"),
+    ("..",              "dotdot_literal"),
+    ("foo bar",         "embedded_space"),
+    ("foo;rm -rf /",    "shell_metachar"),
+    ("foo\n../bar",     "embedded_newline_traversal"),
+    # ─── Unicode test-discipline regression-pins ────────────────────
+    #
+    # ALL payloads below MUST be rejected by `is_safe_path_component`
+    # under the current allowlist `[A-Za-z0-9_-]+` (ASCII-only ranges,
+    # no `\w` shorthand). Rejection is structurally guaranteed: the
+    # character class `[A-Za-z]` covers ONLY U+0041-U+005A and
+    # U+0061-U+007A, so every codepoint above U+007F (and a few below
+    # like U+0085) fails the regex; `.fullmatch()` requires the entire
+    # string to match, so even one Unicode character anywhere flips
+    # the result to None.
+    #
+    # These cases are TEST-DISCIPLINE pins, not behavioral coverage.
+    # They go RED if a future maintainer widens the regex to
+    # `[\w-]+` (Unicode-aware via re's default UNICODE flag) under
+    # the rubric of "support international project names" or similar.
+    # Two failure-class cross-references from the institutional
+    # pattern library:
+    #
+    #   - `patterns_unicode_line_terminators_in_llm_output`: U+2028 /
+    #     U+2029 / U+0085 are the canonical Unicode line-terminator
+    #     class that bypasses C0-only (\\x00-\\x1F) sanitizers in LLM
+    #     output filters. Here they pin the ALLOWLIST direction of
+    #     the same class — sibling concern, not transitive (the LLM-
+    #     output memory describes a sanitizer-bypass primitive; this
+    #     pin guards against allowlist widening that would re-enable
+    #     the same codepoints as a path-component bypass).
+    #
+    #   - `patterns_splitlines_split_oracle_asymmetry`: the gate-vs-
+    #     parser asymmetry when `str.splitlines()` recognizes U+2028 /
+    #     U+2029 / U+0085 but `str.split("\\n")` does not. Sibling
+    #     class — this pin does not directly test the asymmetry, but
+    #     freezes the upstream allowlist at ASCII-only so the same
+    #     codepoint set cannot reach any downstream `.splitlines()`
+    #     consumer through this code path.
+    #
+    # Counter-test: temporarily flip
+    # `SAFE_PATH_COMPONENT_RE = re.compile(r"[\\w\\-]+")` (Unicode-
+    # aware via `re` default UNICODE flag) and re-run. The non-ASCII
+    # cases below go RED; restore byte-identical after the counter-
+    # test. Falsifies "the allowlist is ASCII-only" with a single-
+    # commit revert.
+    #
+    # Counter-test stratification (empirically derived 2026-05-18 —
+    # the 2/6 RED split under Tier-1 widening is INTENTIONAL coverage
+    # of two distinct regression severities, NOT redundant cases):
+    #
+    #   - Tier 1 widening: regex → `[\\w\\-]+` (Unicode-aware via re's
+    #     default UNICODE flag) → admits HOMOGLYPHS (Cyrillic 'р'
+    #     U+0440, Greek 'ο' U+03BF). 2 of 6 cases guard this rank:
+    #     `cyrillic_p_homoglyph`, `greek_omicron_homoglyph`.
+    #
+    #   - Tier 2 widening: regex → `.+` minus path separators (or
+    #     `[^/]+` etc.) → admits LINE TERMINATORS (U+2028, U+2029,
+    #     U+0085) and FORMAT chars (U+FEFF). 4 of 6 cases guard this
+    #     rank: `u2028_line_separator`, `u2029_paragraph_separator`,
+    #     `u0085_next_line`, `leading_bom_zwnbsp`. These codepoints
+    #     are NOT `\\w` characters even in Unicode mode (line
+    #     separators + format category), so they survive the Tier-1
+    #     counter-test but die under Tier-2.
+    #
+    # Both ranks are load-bearing. Do NOT delete "redundant-looking"
+    # Unicode cases without re-running the counter-test against the
+    # candidate regex — a future maintainer running ONLY the Tier-1
+    # counter-test will see 2/6 RED and may incorrectly conclude the
+    # 4 Tier-2 cases are dead weight. They are not.
+    ("task injection",         "u2028_line_separator"),
+    ("task injection",         "u2029_paragraph_separator"),
+    ("taskinjection",         "u0085_next_line"),
+    # Cyrillic homoglyph: U+0440 'р' looks like Latin 'p'. The full
+    # string reads "taskрaud" to a human, but is taskрaud to the regex.
+    ("taskрaud",               "cyrillic_p_homoglyph"),
+    # Greek omicron: U+03BF 'ο' looks like Latin 'o'. Reads as
+    # "taskοck" / "taskock" to a human but contains a Greek codepoint.
+    ("taskοck",                "greek_omicron_homoglyph"),
+    # BOM / zero-width no-break space U+FEFF prepended; visually
+    # identical to "taskid" but starts with an invisible codepoint.
+    ("﻿taskid",                "leading_bom_zwnbsp"),
+]
+
+
+@pytest.mark.parametrize(
+    "unsafe_task_id",
+    [p[0] for p in _UNSAFE_TASK_ID_PARAMS],
+    ids=[p[1] for p in _UNSAFE_TASK_ID_PARAMS],
+)
+def test_extract_task_id_rejects_unsafe_path_components(unsafe_task_id):
+    """Producer-side allowlist: `_extract_task_id` rejects task_ids
+    that fail `is_safe_path_component`. This prevents path-traversal
+    payloads from propagating to downstream sinks (marker filenames,
+    Teardown sidecar Path-joins, journal event bodies) where the
+    weakest sink would otherwise become the bypass.
+
+    Probes all 8 probe positions (tool_input.taskId / task_id,
+    tool_response nested + flat .id / .taskId / .task_id) by mutating
+    the payload to place the unsafe value at each position with a
+    safe fallback absent. Expected: `_extract_task_id` returns None,
+    not the unsafe string.
+
+    Falsifiability: removing the `is_safe_path_component` check from
+    `_extract_task_id` flips this test RED for every parameterized
+    payload.
+    """
+    sys.path.insert(0, str(HOOK_DIR))
+    import wake_lifecycle_emitter as emitter
+
+    # Position 1: tool_input.taskId
+    assert emitter._extract_task_id({
+        "tool_input": {"taskId": unsafe_task_id},
+    }) is None, f"tool_input.taskId={unsafe_task_id!r} must be rejected"
+
+    # Position 2: tool_input.task_id (snake_case fallback)
+    assert emitter._extract_task_id({
+        "tool_input": {"task_id": unsafe_task_id},
+    }) is None, f"tool_input.task_id={unsafe_task_id!r} must be rejected"
+
+    # Position 3: tool_response.task.id (nested production-typical)
+    assert emitter._extract_task_id({
+        "tool_response": {"task": {"id": unsafe_task_id}},
+    }) is None, f"tool_response.task.id={unsafe_task_id!r} must be rejected"
+
+    # Position 4: tool_response.task.taskId
+    assert emitter._extract_task_id({
+        "tool_response": {"task": {"taskId": unsafe_task_id}},
+    }) is None, (
+        f"tool_response.task.taskId={unsafe_task_id!r} must be rejected"
+    )
+
+    # Position 5: tool_response.task.task_id
+    assert emitter._extract_task_id({
+        "tool_response": {"task": {"task_id": unsafe_task_id}},
+    }) is None, (
+        f"tool_response.task.task_id={unsafe_task_id!r} must be rejected"
+    )
+
+    # Position 6: tool_response.id (flat fallback for TaskUpdate)
+    assert emitter._extract_task_id({
+        "tool_response": {"id": unsafe_task_id},
+    }) is None, f"tool_response.id={unsafe_task_id!r} must be rejected"
+
+    # Position 7: tool_response.taskId
+    assert emitter._extract_task_id({
+        "tool_response": {"taskId": unsafe_task_id},
+    }) is None, f"tool_response.taskId={unsafe_task_id!r} must be rejected"
+
+    # Position 8: tool_response.task_id
+    assert emitter._extract_task_id({
+        "tool_response": {"task_id": unsafe_task_id},
+    }) is None, f"tool_response.task_id={unsafe_task_id!r} must be rejected"
+
+
+@pytest.mark.parametrize(
+    "safe_task_id",
+    ["12", "task-5", "S2", "L4", "abc_123", "0", "TaskUpdate-22"],
+    ids=[
+        "integer_string", "kebab_alpha", "single_letter_num",
+        "letter_num_short", "snake_alphanum", "zero_string", "mixed_case",
+    ],
+)
+def test_extract_task_id_accepts_safe_path_components(safe_task_id):
+    """Regression backstop: the producer-side allowlist must NOT
+    reject the task_id shapes that legitimately appear in PACT
+    production traffic (integer-as-string, alpha-suffix patterns
+    like "S2"/"L4", kebab/snake forms). A regression that tightened
+    the regex too far (e.g. dropping `-` or `_`) would flip these
+    RED.
+    """
+    sys.path.insert(0, str(HOOK_DIR))
+    import wake_lifecycle_emitter as emitter
+
+    assert emitter._extract_task_id({
+        "tool_input": {"taskId": safe_task_id},
+    }) == safe_task_id
+
+    # Whitespace stripping still works around the allowlist check.
+    assert emitter._extract_task_id({
+        "tool_input": {"taskId": f"  {safe_task_id}  "},
+    }) == safe_task_id
+
+
+def test_extract_task_id_returns_none_when_all_probes_fail():
+    """Sanity backstop: empty/missing payload returns None without
+    raising. Pre-existing behavior preserved through the producer-side
+    allowlist refactor.
+    """
+    sys.path.insert(0, str(HOOK_DIR))
+    import wake_lifecycle_emitter as emitter
+
+    assert emitter._extract_task_id({}) is None
+    assert emitter._extract_task_id({"tool_input": {}}) is None
+    assert emitter._extract_task_id({"tool_response": {}}) is None
+    assert emitter._extract_task_id({
+        "tool_input": {"taskId": ""},
+        "tool_response": {"id": ""},
+    }) is None
+    # Non-string types (legacy schema drift defense): integers, bools,
+    # lists, dicts in the probe positions all reject.
+    assert emitter._extract_task_id({
+        "tool_input": {"taskId": 42},
+    }) is None
+    assert emitter._extract_task_id({
+        "tool_input": {"taskId": True},
+    }) is None
+    assert emitter._extract_task_id({
+        "tool_input": {"taskId": ["nested"]},
+    }) is None

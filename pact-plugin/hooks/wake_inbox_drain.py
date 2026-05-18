@@ -44,9 +44,12 @@ Role in the asymmetric-guard Arm/Teardown model:
   cron-already-registered / cron-already-deleted.
 
 Lead-Session Guard (Layer 0 — defense-in-depth):
-- The drain hook ONLY emits in the lead session. A teammate's
-  UserPromptSubmit fires this hook too, but `is_lead_session` returns
-  False there and the hook short-circuits to suppressOutput. The skill
+- The drain hook ONLY emits in the lead session. The Layer 0 check
+  is `is_lead_drain_authorized`, which checks
+  `input_data.get('agent_id') is None` — the platform stamps
+  `agent_id` on in-process subagent frames, so a teammate's
+  UserPromptSubmit (if it ever fired in subagent — it does not, per
+  Claude Code docs) would short-circuit to suppressOutput. The skill
   body's Layer 1 lead-session guard remains as backstop.
 
 Single-emit discipline:
@@ -78,9 +81,9 @@ Single-emit discipline:
 Performance hygiene:
 - Non-lead session short-circuits to suppressOutput before any
   task-store I/O. Per-prompt cost on the hot teammate path: one
-  team_config.json read (inside `is_lead_session`) + one session_id
-  compare. Task-store I/O (inbox glob + `count_active_tasks`) only
-  runs in the lead session.
+  O(1) dict lookup (inside `is_lead_drain_authorized`); zero
+  filesystem I/O. Task-store I/O (inbox glob + `count_active_tasks`)
+  only runs in the lead session.
 
 SACROSANCT module-load failure pattern:
 - Module-load failures emit a fail-closed advisory via the stdlib-only
@@ -147,7 +150,7 @@ try:
     from shared.pact_context import get_team_name
     from shared.session_journal import append_event, make_event, read_last_event
     from shared.session_state import is_safe_path_component
-    from shared.wake_lifecycle import count_active_tasks, is_lead_session
+    from shared.wake_lifecycle import count_active_tasks, is_lead_drain_authorized
     # Reuse the canonical _ARM_DIRECTIVE / _TEARDOWN_DIRECTIVE literals
     # from the emitter so the directive prose has a single source of
     # truth. The audit-anchor literal-prose pins on the emitter side
@@ -179,11 +182,14 @@ def _wake_inbox_path(team_name: str) -> Path | None:
     """Resolve the team's wake-inbox directory or return None on
     path-safety failure.
 
-    Path-traversal defense: `is_safe_path_component(team_name)` is the
-    same allowlist applied by `is_lead_session` and the teammate-Arm
-    pre-branch in the emitter. team_name is read from
-    pact-session-context.json which is itself written by trusted
-    plugin code; this re-check is belt-and-suspenders.
+    Path-traversal defense: `is_safe_path_component(team_name)` is
+    the same allowlist applied by the teammate-Arm pre-branch in the
+    emitter. team_name is read from pact-session-context.json which
+    is itself written by trusted plugin code; this re-check is
+    belt-and-suspenders. (Note: the wake_lifecycle.is_lead_*
+    predicates no longer read team_config and thus no longer
+    re-apply this allowlist — the allowlist surface contracted to
+    the path-using callsites.)
     """
     if not isinstance(team_name, str) or not team_name:
         return None
@@ -296,17 +302,28 @@ def _drain_markers(inbox_dir: Path) -> dict[str, Any]:
                             if (
                                 isinstance(raw_task_id, str)
                                 and raw_task_id
+                                and is_safe_path_component(raw_task_id)
                             ):
                                 marker_task_id = raw_task_id
                             else:
                                 # Malformed teardown marker: type field
                                 # says "teardown" but task_id is missing,
-                                # empty, or non-string. Demote to "arm"
-                                # so the downstream branch does not emit
-                                # a Teardown directive WITHOUT going
+                                # empty, non-string, or fails the path-
+                                # safety allowlist (defense-in-depth
+                                # against a buggy/malicious marker writer
+                                # bypassing the producer-side guard in
+                                # `wake_lifecycle_emitter._extract_task_id`;
+                                # the marker body stores the raw extracted
+                                # task_id, but a direct writer to the
+                                # wake_inbox could still ship a path-
+                                # traversal payload). Demote to "arm" so
+                                # the downstream branch does not emit a
+                                # Teardown directive WITHOUT going
                                 # through the Tier-1/Tier-2 dedup guard
-                                # (which keys on task_id). The wake intent
-                                # still stands; Arm is the fail-
+                                # (which keys on task_id and would have
+                                # path-joined the unsafe value at
+                                # `_already_emitted_teardown`). The wake
+                                # intent still stands; Arm is the fail-
                                 # conservative default that aligns with
                                 # the corrupt-body fallback above. Log
                                 # to stderr so the disk-corruption /
@@ -314,8 +331,9 @@ def _drain_markers(inbox_dir: Path) -> dict[str, Any]:
                                 marker_type = "arm"
                                 print(
                                     f"wake_inbox_drain: teardown marker "
-                                    f"missing task_id ({marker.name}); "
-                                    f"demoting to arm signal",
+                                    f"missing or unsafe task_id "
+                                    f"({marker.name}); demoting to arm "
+                                    f"signal",
                                     file=sys.stderr,
                                 )
                 except (OSError, json.JSONDecodeError, ValueError):
@@ -510,10 +528,17 @@ def _decide_and_emit(input_data: dict) -> None:
     # Performance hygiene: non-lead-session early-out before any
     # task-store I/O. The non-lead path is the hot common case (every
     # teammate prompt fires this hook); short-circuit before the drain
-    # glob and the count_active_tasks fallback. `is_lead_session`
-    # itself reads team_config.json (one disk read on every prompt),
-    # which is the per-prompt cost on the hot path.
-    if not is_lead_session(input_data, team_name):
+    # glob and the count_active_tasks fallback. `is_lead_drain_authorized`
+    # checks `agent_id` field-presence on the stdin payload (O(1) dict
+    # lookup, no filesystem I/O), so the per-prompt cost on the hot
+    # path is now zero disk reads — an improvement over the legacy
+    # `is_lead_session` body which read team_config.json each fire.
+    # Semantically a no-op under current platform behavior because
+    # UserPromptSubmit does not fire in in-process subagent frames
+    # per Claude Code docs; this migration is documentation-symmetry
+    # with the emit-side callsites in the corridor, plus a future-
+    # extension surface if UserPromptSubmit semantics ever change.
+    if not is_lead_drain_authorized(input_data, team_name):
         print(_SUPPRESS_OUTPUT)
         return
 
