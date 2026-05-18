@@ -476,6 +476,83 @@ _UNSAFE_TASK_ID_PARAMS = [
     ("foo bar",         "embedded_space"),
     ("foo;rm -rf /",    "shell_metachar"),
     ("foo\n../bar",     "embedded_newline_traversal"),
+    # ─── Unicode test-discipline regression-pins ────────────────────
+    #
+    # ALL payloads below MUST be rejected by `is_safe_path_component`
+    # under the current allowlist `[A-Za-z0-9_-]+` (ASCII-only ranges,
+    # no `\w` shorthand). Rejection is structurally guaranteed: the
+    # character class `[A-Za-z]` covers ONLY U+0041-U+005A and
+    # U+0061-U+007A, so every codepoint above U+007F (and a few below
+    # like U+0085) fails the regex; `.fullmatch()` requires the entire
+    # string to match, so even one Unicode character anywhere flips
+    # the result to None.
+    #
+    # These cases are TEST-DISCIPLINE pins, not behavioral coverage.
+    # They go RED if a future maintainer widens the regex to
+    # `[\w-]+` (Unicode-aware via re's default UNICODE flag) under
+    # the rubric of "support international project names" or similar.
+    # Two failure-class cross-references from the institutional
+    # pattern library:
+    #
+    #   - `patterns_unicode_line_terminators_in_llm_output`: U+2028 /
+    #     U+2029 / U+0085 are the canonical Unicode line-terminator
+    #     class that bypasses C0-only (\\x00-\\x1F) sanitizers in LLM
+    #     output filters. Here they pin the ALLOWLIST direction of
+    #     the same class — sibling concern, not transitive (the LLM-
+    #     output memory describes a sanitizer-bypass primitive; this
+    #     pin guards against allowlist widening that would re-enable
+    #     the same codepoints as a path-component bypass).
+    #
+    #   - `patterns_splitlines_split_oracle_asymmetry`: the gate-vs-
+    #     parser asymmetry when `str.splitlines()` recognizes U+2028 /
+    #     U+2029 / U+0085 but `str.split("\\n")` does not. Sibling
+    #     class — this pin does not directly test the asymmetry, but
+    #     freezes the upstream allowlist at ASCII-only so the same
+    #     codepoint set cannot reach any downstream `.splitlines()`
+    #     consumer through this code path.
+    #
+    # Counter-test: temporarily flip
+    # `SAFE_PATH_COMPONENT_RE = re.compile(r"[\\w\\-]+")` (Unicode-
+    # aware via `re` default UNICODE flag) and re-run. The non-ASCII
+    # cases below go RED; restore byte-identical after the counter-
+    # test. Falsifies "the allowlist is ASCII-only" with a single-
+    # commit revert.
+    #
+    # Counter-test stratification (empirically derived 2026-05-18 —
+    # the 2/6 RED split under Tier-1 widening is INTENTIONAL coverage
+    # of two distinct regression severities, NOT redundant cases):
+    #
+    #   - Tier 1 widening: regex → `[\\w\\-]+` (Unicode-aware via re's
+    #     default UNICODE flag) → admits HOMOGLYPHS (Cyrillic 'р'
+    #     U+0440, Greek 'ο' U+03BF). 2 of 6 cases guard this rank:
+    #     `cyrillic_p_homoglyph`, `greek_omicron_homoglyph`.
+    #
+    #   - Tier 2 widening: regex → `.+` minus path separators (or
+    #     `[^/]+` etc.) → admits LINE TERMINATORS (U+2028, U+2029,
+    #     U+0085) and FORMAT chars (U+FEFF). 4 of 6 cases guard this
+    #     rank: `u2028_line_separator`, `u2029_paragraph_separator`,
+    #     `u0085_next_line`, `leading_bom_zwnbsp`. These codepoints
+    #     are NOT `\\w` characters even in Unicode mode (line
+    #     separators + format category), so they survive the Tier-1
+    #     counter-test but die under Tier-2.
+    #
+    # Both ranks are load-bearing. Do NOT delete "redundant-looking"
+    # Unicode cases without re-running the counter-test against the
+    # candidate regex — a future maintainer running ONLY the Tier-1
+    # counter-test will see 2/6 RED and may incorrectly conclude the
+    # 4 Tier-2 cases are dead weight. They are not.
+    ("task injection",         "u2028_line_separator"),
+    ("task injection",         "u2029_paragraph_separator"),
+    ("taskinjection",         "u0085_next_line"),
+    # Cyrillic homoglyph: U+0440 'р' looks like Latin 'p'. The full
+    # string reads "taskрaud" to a human, but is taskрaud to the regex.
+    ("taskрaud",               "cyrillic_p_homoglyph"),
+    # Greek omicron: U+03BF 'ο' looks like Latin 'o'. Reads as
+    # "taskοck" / "taskock" to a human but contains a Greek codepoint.
+    ("taskοck",                "greek_omicron_homoglyph"),
+    # BOM / zero-width no-break space U+FEFF prepended; visually
+    # identical to "taskid" but starts with an invisible codepoint.
+    ("﻿taskid",                "leading_bom_zwnbsp"),
 ]
 
 
