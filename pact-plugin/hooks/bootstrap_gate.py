@@ -131,6 +131,17 @@ _BLOCKED_TOOLS = frozenset({
     "NotebookEdit",
 })
 
+# Canonical secretary spawn identity. Mirrors
+# bootstrap_marker_writer._SECRETARY_NAME (the producer-side constant) and
+# the literal at commands/bootstrap.md Step 2 (the canonical-spawn shape
+# the orchestrator emits). The two strings are load-bearing: any drift
+# silently breaks the carve-out below and re-introduces the
+# bootstrap-deadlock these constants are here to prevent. Future
+# canonical-name changes are CROSS-FILE atomic edits across this file,
+# bootstrap_marker_writer.py, and commands/bootstrap.md.
+_SECRETARY_NAME = "secretary"
+_SECRETARY_AGENT_TYPE = "pact-secretary"
+
 # Marker schema constants (MARKER_SCHEMA_VERSION, MARKER_MAX_BYTES) and
 # the signature function (expected_marker_signature) live in
 # shared/marker_schema.py — the SSOT shared by producer
@@ -141,6 +152,64 @@ _DENY_REASON = (
     "Code-editing tools (Edit, Write) and agent dispatch (Agent) are blocked "
     "until bootstrap completes. Bash, Read, Glob, Grep are available."
 )
+
+
+def _is_canonical_secretary_spawn(input_data: dict) -> bool:
+    """Audit anchor: canonical secretary spawn carve-out for #789.
+
+    True iff this Agent call is the canonical bootstrap-secretary spawn
+    that commands/bootstrap.md Step 2 prescribes. ALL FIVE BINDINGS must
+    match for the carve-out to fire:
+
+      1. tool_name == "Agent"
+      2. tool_input.subagent_type == "pact-secretary" (_SECRETARY_AGENT_TYPE)
+      3. tool_input.name == "secretary" (_SECRETARY_NAME, canonical literal)
+      4. tool_input.team_name == pact_context.get_team_name()
+      5. NOT _team_has_secretary(team_name) — one-shot semantic; flips to
+         False the moment the spawned secretary lands in members[].
+
+    Binding (1) is a hardcoded literal. Bindings (2) and (3) compare
+    against module constants, not tool_input-derived values. Binding (4)
+    compares against a disk-derived value (session context), closing
+    cross-team injection. Binding (5) is a disk read of the team config
+    members[]; True after first successful dispatch, so the carve-out
+    fires at most once per session.
+
+    On ANY disk-read exception, returns False — caller falls through to
+    the existing _BLOCKED_TOOLS deny path so the user sees the canonical
+    _DENY_REASON ("PACT bootstrap required...") rather than the
+    load-failure variant. Mirrors is_marker_set's silent-on-exception
+    style.
+
+    SACROSANCT — local-import discipline: _team_has_secretary is imported
+    LOCALLY (function-call time, not module-load time) to break the
+    reciprocal cycle with bootstrap_marker_writer, which imports
+    is_marker_set from this module at its own top-level. Reciprocal
+    top-level import here would deadlock module load and route every
+    tool call through the fail-closed deny path.
+    """
+    try:
+        if input_data.get("tool_name") != "Agent":
+            return False
+        tool_input = input_data.get("tool_input") or {}
+        if not isinstance(tool_input, dict):
+            return False
+        if tool_input.get("subagent_type") != _SECRETARY_AGENT_TYPE:
+            return False
+        if tool_input.get("name") != _SECRETARY_NAME:
+            return False
+        expected_team = pact_context.get_team_name()
+        if not expected_team or tool_input.get("team_name") != expected_team:
+            return False
+        # Local-import: reciprocal-cycle prevention. bootstrap_marker_writer
+        # imports is_marker_set from this module at its OWN top-level; a
+        # reciprocal top-level import here would deadlock module load and
+        # silently route every tool call through the fail-closed deny path.
+        # See SACROSANCT block in this docstring.
+        from bootstrap_marker_writer import _team_has_secretary
+        return not _team_has_secretary(expected_team)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
 
 
 def is_marker_set(session_dir: "Path | None") -> bool:
@@ -285,6 +354,16 @@ def _check_tool_allowed(input_data: dict) -> str | None:
 
     # Lead session, no marker — check tool classification
     tool_name = input_data.get("tool_name", "")
+
+    # Canonical secretary spawn carve-out (#789). The bootstrap ritual's
+    # Agent(secretary) dispatch is the ONLY action that populates the
+    # precondition (`secretary` in team members[]) that the marker writer
+    # requires; without this carve-out the gate denies the only dispatch
+    # that could clear its own deny condition — bootstrap deadlock. The
+    # predicate is one-shot by construction (binding 5 flips False the
+    # moment the spawn lands in members[]).
+    if _is_canonical_secretary_spawn(input_data):
+        return None
 
     # MCP tools always allowed (external integrations)
     if isinstance(tool_name, str) and tool_name.startswith("mcp__"):

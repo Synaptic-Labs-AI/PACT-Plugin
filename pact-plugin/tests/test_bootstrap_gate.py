@@ -588,6 +588,244 @@ class TestBlockedToolSet:
 
 
 # =============================================================================
+# Canonical secretary spawn carve-out (#789)
+# =============================================================================
+
+
+def _setup_pact_session_with_team(monkeypatch, tmp_path, team_name="t1",
+                                  members=None, with_marker=False,
+                                  plugin_version="9.9.9"):
+    """Set up a PACT session whose context carries a non-empty team_name and
+    a matching team config at ~/.claude/teams/{team_name}/config.json.
+
+    Mirrors _setup_pact_session but adds the team-config sidecar that
+    _team_has_secretary reads via shared.pact_context._iter_members. The
+    monkeypatched Path.home means the team config lands under tmp_path.
+
+    members: list of member dicts to embed at config.members[]. Defaults
+    to a fresh-team shape (no secretary entry) which is the precondition
+    the carve-out exists to handle.
+    """
+    import shared.pact_context as ctx_module
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    session_dir = tmp_path / ".claude" / "pact-sessions" / _SLUG / _SESSION_ID
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    plugin_root = tmp_path / "plugin"
+    (plugin_root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"version": plugin_version}), encoding="utf-8"
+    )
+
+    context_file = session_dir / "pact-session-context.json"
+    context_file.write_text(json.dumps({
+        "team_name": team_name,
+        "session_id": _SESSION_ID,
+        "project_dir": _PROJECT_DIR,
+        "plugin_root": str(plugin_root),
+        "started_at": "2026-01-01T00:00:00Z",
+    }), encoding="utf-8")
+
+    teams_dir = tmp_path / ".claude" / "teams" / team_name
+    teams_dir.mkdir(parents=True, exist_ok=True)
+    config = {"members": members if members is not None else []}
+    (teams_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+    monkeypatch.setattr(ctx_module, "_context_path", context_file)
+    monkeypatch.setattr(ctx_module, "_cache", None)
+
+    if with_marker:
+        _write_f24_marker(session_dir, plugin_root, plugin_version=plugin_version)
+
+    return session_dir
+
+
+def _canonical_secretary_input(team_name="t1", overrides=None):
+    """Build the canonical Agent(secretary) PreToolUse input.
+
+    overrides: dict merged into tool_input to forge mismatched bindings
+    in negative tests.
+    """
+    tool_input = {
+        "subagent_type": "pact-secretary",
+        "name": "secretary",
+        "team_name": team_name,
+    }
+    if overrides:
+        tool_input.update(overrides)
+    return {
+        "hook_event_name": "PreToolUse",
+        "session_id": _SESSION_ID,
+        "tool_name": "Agent",
+        "tool_input": tool_input,
+    }
+
+
+class TestCanonicalSecretarySpawnCarveOut:
+    """#789: the canonical secretary spawn is allowed even when the
+    bootstrap marker is absent — without this carve-out, the gate denies
+    the only dispatch that could clear its own deny condition (the
+    secretary spawn populates the team members[] entry that the marker
+    writer requires before writing the marker).
+
+    Five conjunctive bindings (tool_name, subagent_type, name, team_name,
+    NOT _team_has_secretary). Each test below mentally reverts ONE
+    binding and confirms the carve-out closes (predicate returns False
+    → caller returns _DENY_REASON).
+    """
+
+    # --- I-6: positive case — all five bindings match → allow ---
+
+    def test_secretary_spawn_allowed_when_members_lacks_secretary(
+        self, monkeypatch, tmp_path,
+    ):
+        """All 5 bindings match + no secretary in members[] → allow."""
+        from bootstrap_gate import _check_tool_allowed
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        assert result is None
+
+    # --- I-2: subagent_type mismatch → predicate False → deny ---
+
+    def test_non_secretary_agent_still_blocked(self, monkeypatch, tmp_path):
+        """subagent_type != 'pact-secretary' → predicate False → deny."""
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(
+            team_name="t1", overrides={"subagent_type": "pact-architect"},
+        ))
+        assert result == _DENY_REASON
+
+    # --- I-3: name mismatch → predicate False → deny (name-impostor blocked) ---
+
+    def test_secretary_spawn_with_wrong_name_blocked(self, monkeypatch, tmp_path):
+        """name != 'secretary' → predicate False → deny.
+
+        An attacker (or a stale orchestrator) dispatching pact-secretary
+        with a non-canonical name (e.g., 'sec', 'secretari') is denied.
+        The literal name is load-bearing per commands/bootstrap.md Step 2.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(
+            team_name="t1", overrides={"name": "secretari"},
+        ))
+        assert result == _DENY_REASON
+
+    # --- I-4: cross-team injection → predicate False → deny ---
+
+    def test_secretary_spawn_with_wrong_team_blocked(self, monkeypatch, tmp_path):
+        """tool_input.team_name != get_team_name() → predicate False → deny.
+
+        Cross-team injection defense: tool_input is LLM-controlled and a
+        prompt-injected dispatch could claim a different team_name to
+        ride the carve-out. The binding compares against the disk-derived
+        session context, not against tool_input.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(
+            team_name="other-team",
+        ))
+        assert result == _DENY_REASON
+
+    # --- I-5: one-shot closure — secretary already in members[] → deny ---
+
+    def test_carve_out_closes_after_secretary_in_members(
+        self, monkeypatch, tmp_path,
+    ):
+        """_team_has_secretary(team_name) == True → predicate False → deny.
+
+        The one-shot semantic: once the canonical spawn has landed and
+        the secretary entry is in members[], the carve-out cannot fire a
+        second time in the same session. The marker writer's
+        UserPromptSubmit hook handles the next turn from there.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1",
+            members=[{"id": "sec-1", "name": "secretary", "type": "pact-secretary"}],
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        assert result == _DENY_REASON
+
+    # --- I-7: end-to-end fresh-session repro ---
+
+    def test_fresh_session_repro_end_to_end(self, monkeypatch, tmp_path):
+        """Fresh-session bootstrap: Agent(secretary) allowed; Agent(other) denied.
+
+        Mirrors the issue's acceptance criterion. No marker on disk; team
+        config exists but lacks the secretary entry. The canonical spawn
+        passes the gate; any other Agent dispatch (e.g., a non-canonical
+        subagent_type) is denied as before.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        secretary_result = _check_tool_allowed(
+            _canonical_secretary_input(team_name="t1")
+        )
+        assert secretary_result is None
+
+        other_agent_result = _check_tool_allowed(_canonical_secretary_input(
+            team_name="t1", overrides={"subagent_type": "pact-architect"},
+        ))
+        assert other_agent_result == _DENY_REASON
+
+    # --- I-B4: fail-closed posture on team-config read error ---
+
+    def test_predicate_fail_closed_on_team_has_secretary_oserror(
+        self, monkeypatch, tmp_path,
+    ):
+        """_team_has_secretary raising OSError → predicate False → deny.
+
+        The predicate catches (OSError, ValueError, KeyError, TypeError,
+        AttributeError) and returns False. Caller falls through to the
+        existing _BLOCKED_TOOLS deny path, so the user sees the canonical
+        _DENY_REASON rather than the load-failure variant.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+        import bootstrap_marker_writer
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        def _boom(team_name):
+            raise OSError("simulated disk error")
+
+        monkeypatch.setattr(
+            bootstrap_marker_writer, "_team_has_secretary", _boom,
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        assert result == _DENY_REASON
+
+
+# =============================================================================
 # Deny reason content — P2 priority
 # =============================================================================
 
@@ -923,3 +1161,49 @@ class TestAuditAnchorParity:
             f"shape={shape} emit MUST carry hookEventName=='PreToolUse'; "
             f"got {hso!r}"
         )
+
+
+# =============================================================================
+# Import discipline — #789 reciprocal-cycle defense
+# =============================================================================
+
+
+class TestImportDiscipline:
+    """Structural pin: bootstrap_gate.py MUST NOT import
+    _team_has_secretary from bootstrap_marker_writer at module-load
+    time. bootstrap_marker_writer imports is_marker_set from this module
+    at its OWN top-level; a reciprocal top-level import here would
+    deadlock module load and route every tool call through the
+    fail-closed deny path.
+
+    The carve-out predicate (_is_canonical_secretary_spawn) uses a
+    LOCAL import (inside the function body) to break the cycle —
+    enforced here as a source-level invariant so a future refactor
+    can't silently re-introduce the deadlock.
+    """
+
+    def test_team_has_secretary_imported_locally_not_at_module_load(self):
+        """No top-level `from bootstrap_marker_writer import` line in
+        bootstrap_gate.py. The local import inside
+        _is_canonical_secretary_spawn is the only legal form.
+        """
+        gate_path = (
+            Path(__file__).parent.parent / "hooks" / "bootstrap_gate.py"
+        )
+        source = gate_path.read_text(encoding="utf-8")
+
+        for raw_line in source.splitlines():
+            stripped = raw_line.lstrip()
+            # Top-level lines have no leading whitespace; indented lines
+            # (inside def / try / class) are not module-load-time imports.
+            if raw_line == stripped and (
+                stripped.startswith("from bootstrap_marker_writer")
+                or stripped.startswith("import bootstrap_marker_writer")
+            ):
+                pytest.fail(
+                    f"bootstrap_gate.py contains a top-level import of "
+                    f"bootstrap_marker_writer: {raw_line!r}. This would "
+                    f"deadlock module load with bootstrap_marker_writer's "
+                    f"top-level `from bootstrap_gate import is_marker_set`. "
+                    f"Use a LOCAL import inside _is_canonical_secretary_spawn."
+                )

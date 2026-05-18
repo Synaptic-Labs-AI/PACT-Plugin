@@ -152,3 +152,21 @@ class TestBlockedToolsBootstrapInvariant:
             "to create the team config the writer hook reads to verify "
             "secretary membership before stamping the marker."
         )
+
+    def test_blocked_tools_still_contains_Agent(self):
+        """#789 invariant: the canonical-secretary carve-out lives at
+        the PREDICATE level (_is_canonical_secretary_spawn inside
+        _check_tool_allowed), NOT at the blocklist level. ``Agent`` MUST
+        remain in _BLOCKED_TOOLS so every non-canonical Agent dispatch
+        (any subagent_type, name, or team_name that doesn't match all
+        five carve-out bindings) still falls into the deny path.
+
+        Removing ``Agent`` from _BLOCKED_TOOLS would silently bypass the
+        gate for arbitrary Agent calls during the bootstrap window.
+        """
+        from bootstrap_gate import _BLOCKED_TOOLS
+        assert "Agent" in _BLOCKED_TOOLS, (
+            "Agent must remain in _BLOCKED_TOOLS. The #789 carve-out is "
+            "a PREDICATE-level allow for the canonical secretary spawn; "
+            "the blocklist still gates every other Agent dispatch."
+        )
