@@ -11988,3 +11988,417 @@ class TestTokenLifecycleExtensions:
             "Negative discriminator: git status retired the token "
             "(Block 1 op_type filter regressed)"
         )
+
+    # ------------------------------------------------------------------
+    # SEC-S2 op_type symmetry (#797 cycle-2)
+    #
+    # Extends Layer 1 token retirement from merge-only to op_type-symmetric
+    # via LAYER1_SUCCESS_STDOUT_PATTERNS lookup table at
+    # shared/merge_guard_common.py. Each new op_type (close, branch-delete,
+    # force-push) has a positive test + a pair-revert sentinel per F2
+    # phantom-green mitigation discipline. force-push uses Block 3 = None
+    # (2-block degradation); its Block 2 structural defense is pinned via
+    # the 7th test. The SSOT-pin test (test_sec_s2_lookup_table_ssot_pin)
+    # enforces atomic-coupling between table mutations and this test
+    # corpus per CLAUDE.md "Coupling-via-substring-count: atomic-commit
+    # rule" applied to dict-key cardinality.
+    # ------------------------------------------------------------------
+
+    def _write_session_token(self, tmp_path, op_type, session_id="test-session"):
+        """Helper: directly write a token with the given op_type +
+        session_id, bypassing write_token's sparse-context guard.
+
+        SEC-S2 fixtures need to test op_type-symmetric retirement across
+        merge / close / branch-delete / force-push, but write_token's
+        sparse-context guard accepts any one of {pr_number, branch,
+        operation_type}. Direct write ensures the test fixture matches
+        exactly the op_type under test without relying on write_token's
+        classification path.
+        """
+        from shared.merge_guard_common import MAX_USES
+
+        now = time.time()
+        token_data = {
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {"operation_type": op_type},
+            "session_id": session_id,
+            "max_uses": MAX_USES,
+            "uses_remaining": MAX_USES,
+        }
+        token_path = tmp_path / f"merge-authorized-{op_type}-token"
+        token_path.write_text(json.dumps(token_data))
+        return token_path
+
+    def test_sec_s2_close_op_retirement_positive(self, tmp_path):
+        """SEC-S2: gh pr close success retires the close-typed token.
+
+        Block 3 substring "Closed pull request" (per
+        LAYER1_SUCCESS_STDOUT_PATTERNS["close"]) gates retirement.
+
+        # counter-test: change LAYER1_SUCCESS_STDOUT_PATTERNS["close"] to
+        #               "wrong substring" in merge_guard_common.py → close
+        #               command produces stdout without the new (wrong)
+        #               substring; Block 3 rejects; token NOT retired.
+        # expected RED cardinality: {1}
+        """
+        from merge_guard_post import main
+
+        token = self._write_session_token(tmp_path, "close", session_id="s-close")
+        envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr close 42"},
+            "tool_response": {
+                "stdout": "✓ Closed pull request #42",
+                "stderr": "",
+                "interrupted": False,
+            },
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("merge_guard_post.get_session_id", return_value="s-close"), \
+             patch("sys.stdin", io.StringIO(envelope)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 0
+
+        assert not token.exists(), "SEC-S2: close-typed token not retired"
+        consumed = list(tmp_path.glob("merge-authorized-*.consumed"))
+        assert len(consumed) == 1, "SEC-S2: expected exactly one .consumed"
+
+    def test_sec_s2_close_op_retirement_pair_revert(self, tmp_path):
+        """SEC-S2 pair-revert sentinel (close op_type).
+
+        Phase 1: gh pr close success → close-typed token retires.
+        Phase 2: gh issue close (NOT classified as close op_type by
+        detect_command_operation_type — the classifier targets `gh pr
+        close` specifically) → close-typed token NOT retired.
+
+        # counter-test: revert Block 1 op_type filter in merge_guard_post
+        #               (`if op_type not in LAYER1_SUCCESS_STDOUT_PATTERNS`)
+        #               → phase 2 falls through and retires the token
+        #               on the misclassified gh-issue-close command.
+        # expected RED cardinality: {1} (phase 2 fails)
+        """
+        from merge_guard_post import main
+
+        # Phase 1 — positive: gh pr close retires
+        self._write_session_token(tmp_path, "close", session_id="s-pair-close")
+        positive_envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr close 42"},
+            "tool_response": {
+                "stdout": "✓ Closed pull request #42",
+                "stderr": "",
+                "interrupted": False,
+            },
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("merge_guard_post.get_session_id", return_value="s-pair-close"), \
+             patch("sys.stdin", io.StringIO(positive_envelope)):
+            with pytest.raises(SystemExit):
+                main()
+        phase1_consumed = list(tmp_path.glob("merge-authorized-*.consumed"))
+        assert len(phase1_consumed) == 1, (
+            "Pair-revert phase 1 (positive): close command did NOT retire"
+        )
+
+        # Phase 2 — negative: gh issue close does NOT retire
+        token2 = self._write_session_token(
+            tmp_path, "close", session_id="s-pair-close"
+        )
+        # Rename to avoid collision with the now-.consumed first token
+        token2_new = tmp_path / "merge-authorized-close-token-phase2"
+        token2.rename(token2_new)
+        negative_envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh issue close 42"},
+            "tool_response": {
+                "stdout": "✓ Closed issue #42",
+                "stderr": "",
+                "interrupted": False,
+            },
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("merge_guard_post.get_session_id", return_value="s-pair-close"), \
+             patch("sys.stdin", io.StringIO(negative_envelope)):
+            with pytest.raises(SystemExit):
+                main()
+        assert token2_new.exists(), (
+            "Pair-revert phase 2 (negative): gh issue close erroneously "
+            "retired close-typed token (Block 1 op_type filter regressed)"
+        )
+
+    def test_sec_s2_branch_delete_op_retirement_positive(self, tmp_path):
+        """SEC-S2: git branch -D success retires branch-delete-typed token.
+
+        Block 3 substring "Deleted branch" gates retirement.
+
+        # counter-test: change LAYER1_SUCCESS_STDOUT_PATTERNS["branch-delete"]
+        #               to a wrong-substring → token NOT retired.
+        # expected RED cardinality: {1}
+        """
+        from merge_guard_post import main
+
+        token = self._write_session_token(
+            tmp_path, "branch-delete", session_id="s-bd"
+        )
+        envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "git branch -D feat/x"},
+            "tool_response": {
+                "stdout": "Deleted branch feat/x (was a1b2c3d).",
+                "stderr": "",
+                "interrupted": False,
+            },
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("merge_guard_post.get_session_id", return_value="s-bd"), \
+             patch("sys.stdin", io.StringIO(envelope)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 0
+
+        assert not token.exists(), "SEC-S2: branch-delete token not retired"
+        consumed = list(tmp_path.glob("merge-authorized-*.consumed"))
+        assert len(consumed) == 1
+
+    def test_sec_s2_branch_delete_op_retirement_pair_revert(self, tmp_path):
+        """SEC-S2 pair-revert sentinel (branch-delete op_type).
+
+        Phase 1: git branch -D feat/x → retires.
+        Phase 2: git branch -d feat/x (lowercase -d is safe-delete; NOT
+        classified as branch-delete by detect_command_operation_type) →
+        does NOT retire.
+
+        # counter-test: relax classifier to misclassify `git branch -d` as
+        #               branch-delete → phase 2 retires (false-positive
+        #               retirement on safe-delete).
+        # expected RED cardinality: {1} (phase 2 fails)
+        """
+        from merge_guard_post import main
+
+        # Phase 1 — positive
+        self._write_session_token(
+            tmp_path, "branch-delete", session_id="s-pair-bd"
+        )
+        positive_envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "git branch -D feat/x"},
+            "tool_response": {
+                "stdout": "Deleted branch feat/x (was a1b2c3d).",
+                "stderr": "",
+                "interrupted": False,
+            },
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("merge_guard_post.get_session_id", return_value="s-pair-bd"), \
+             patch("sys.stdin", io.StringIO(positive_envelope)):
+            with pytest.raises(SystemExit):
+                main()
+        assert len(list(tmp_path.glob("*.consumed"))) == 1, (
+            "Pair-revert phase 1: git branch -D did NOT retire"
+        )
+
+        # Phase 2 — negative: lowercase -d is safe-delete
+        token2 = self._write_session_token(
+            tmp_path, "branch-delete", session_id="s-pair-bd"
+        )
+        token2_new = tmp_path / "merge-authorized-bd-phase2"
+        token2.rename(token2_new)
+        negative_envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "git branch -d feat/x"},
+            "tool_response": {
+                "stdout": "Deleted branch feat/x (was a1b2c3d).",
+                "stderr": "",
+                "interrupted": False,
+            },
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("merge_guard_post.get_session_id", return_value="s-pair-bd"), \
+             patch("sys.stdin", io.StringIO(negative_envelope)):
+            with pytest.raises(SystemExit):
+                main()
+        assert token2_new.exists(), (
+            "Pair-revert phase 2: safe-delete `git branch -d` erroneously "
+            "retired branch-delete-typed token (classifier regressed)"
+        )
+
+    def test_sec_s2_force_push_op_retirement_positive(self, tmp_path):
+        """SEC-S2: git push --force success retires force-push-typed token
+        via 2-block predicate (Block 3 skipped because table value is None).
+
+        Force-push uses Block 3 = None — git push --force emits primarily
+        to stderr, not stdout, so substring-matching stdout is structurally
+        fragile. Block 2's platform-success implication carries the
+        retirement decision for force-push.
+
+        # counter-test: change LAYER1_SUCCESS_STDOUT_PATTERNS["force-push"]
+        #               from None to a fixed string (e.g., "Everything
+        #               up-to-date") that does NOT appear in the empty
+        #               stdout → Block 3 rejects; token NOT retired.
+        # expected RED cardinality: {1}
+        """
+        from merge_guard_post import main
+
+        token = self._write_session_token(
+            tmp_path, "force-push", session_id="s-fp"
+        )
+        envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "git push --force origin feat/x"},
+            "tool_response": {
+                # Empty stdout (force-push output goes to stderr).
+                "stdout": "",
+                "stderr": "+ abc1234...def5678 feat/x -> feat/x (forced update)",
+                "interrupted": False,
+            },
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("merge_guard_post.get_session_id", return_value="s-fp"), \
+             patch("sys.stdin", io.StringIO(envelope)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 0
+
+        assert not token.exists(), (
+            "SEC-S2: force-push token not retired via 2-block predicate"
+        )
+        consumed = list(tmp_path.glob("merge-authorized-*.consumed"))
+        assert len(consumed) == 1
+
+    def test_sec_s2_force_push_op_retirement_pair_revert(self, tmp_path):
+        """SEC-S2 pair-revert sentinel (force-push op_type).
+
+        Phase 1: git push --force → retires.
+        Phase 2: git push --force-with-lease (safe variant; classifier
+        explicitly excludes via negative-lookahead) → does NOT retire.
+
+        # counter-test: relax classifier negative-lookahead to misclassify
+        #               --force-with-lease as force-push → phase 2 retires
+        #               (false-positive retirement on safe variant).
+        # expected RED cardinality: {1} (phase 2 fails)
+        """
+        from merge_guard_post import main
+
+        # Phase 1 — positive
+        self._write_session_token(
+            tmp_path, "force-push", session_id="s-pair-fp"
+        )
+        positive_envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "git push --force origin feat/x"},
+            "tool_response": {
+                "stdout": "",
+                "stderr": "+ abc...def feat/x -> feat/x (forced update)",
+                "interrupted": False,
+            },
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("merge_guard_post.get_session_id", return_value="s-pair-fp"), \
+             patch("sys.stdin", io.StringIO(positive_envelope)):
+            with pytest.raises(SystemExit):
+                main()
+        assert len(list(tmp_path.glob("*.consumed"))) == 1, (
+            "Pair-revert phase 1: git push --force did NOT retire"
+        )
+
+        # Phase 2 — negative: --force-with-lease is safe variant
+        token2 = self._write_session_token(
+            tmp_path, "force-push", session_id="s-pair-fp"
+        )
+        token2_new = tmp_path / "merge-authorized-fp-phase2"
+        token2.rename(token2_new)
+        negative_envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "git push --force-with-lease origin feat/x"},
+            "tool_response": {
+                "stdout": "",
+                "stderr": "+ abc...def feat/x -> feat/x (forced update)",
+                "interrupted": False,
+            },
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("merge_guard_post.get_session_id", return_value="s-pair-fp"), \
+             patch("sys.stdin", io.StringIO(negative_envelope)):
+            with pytest.raises(SystemExit):
+                main()
+        assert token2_new.exists(), (
+            "Pair-revert phase 2: --force-with-lease erroneously retired "
+            "force-push token (classifier negative-lookahead regressed)"
+        )
+
+    def test_sec_s2_force_push_block2_structural_defense(self, tmp_path):
+        """SEC-S2 force-push Block 2 fail-case (OQ-TE-3).
+
+        Force-push has Block 3 = None — the 3-block predicate degrades to
+        2 blocks (Block 1 op_type match + Block 2 platform success). This
+        test pins Block 2 (interrupted=True rejection) as the structural
+        defense for force-push: with Block 3 absent, Block 2 carries the
+        success-implication load alone.
+
+        # counter-test: remove the `interrupted is True` check in Block 2
+        #               of the Bash branch → interrupted force-push retires
+        #               the token despite user cancellation. Force-push is
+        #               more exposed to this regression than merge/close/
+        #               branch-delete because Block 3 cannot substring-
+        #               reject it.
+        # expected RED cardinality: {1}
+        """
+        from merge_guard_post import main
+
+        token = self._write_session_token(
+            tmp_path, "force-push", session_id="s-fp-int"
+        )
+        envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "git push --force origin feat/x"},
+            "tool_response": {
+                "stdout": "",
+                "stderr": "",
+                "interrupted": True,  # User cancellation
+            },
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("merge_guard_post.get_session_id", return_value="s-fp-int"), \
+             patch("sys.stdin", io.StringIO(envelope)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 0
+
+        assert token.exists(), (
+            "SEC-S2 force-push Block 2 violated: interrupted force-push "
+            "retired the token (Block 2 was the only structural defense "
+            "since Block 3 is None for force-push)"
+        )
+        consumed = list(tmp_path.glob("merge-authorized-*.consumed"))
+        assert len(consumed) == 0
+
+    def test_sec_s2_lookup_table_ssot_pin(self):
+        """SEC-S2 lookup-table SSOT pin: atomic-coupling enforcement.
+
+        Pins the exact contents of LAYER1_SUCCESS_STDOUT_PATTERNS. Any
+        mutation to the table (add op_type, remove op_type, change
+        substring) MUST update this test in the same commit per CLAUDE.md
+        "Coupling-via-substring-count: atomic-commit rule" generalized to
+        dict-key cardinality.
+
+        # counter-test: add a new key (e.g., "tag-delete": "Deleted tag")
+        #               to LAYER1_SUCCESS_STDOUT_PATTERNS without updating
+        #               this test → assertion fails.
+        # counter-test: change LAYER1_SUCCESS_STDOUT_PATTERNS["force-push"]
+        #               from None to a fixed string → assertion fails.
+        # expected RED cardinality: {1}
+        """
+        from shared.merge_guard_common import LAYER1_SUCCESS_STDOUT_PATTERNS
+
+        assert LAYER1_SUCCESS_STDOUT_PATTERNS == {
+            "merge": "Merged pull request",
+            "close": "Closed pull request",
+            "branch-delete": "Deleted branch",
+            "force-push": None,
+        }, (
+            "SEC-S2 lookup-table SSOT drift: "
+            "LAYER1_SUCCESS_STDOUT_PATTERNS mutated without atomic update "
+            "to this pin"
+        )
