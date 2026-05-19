@@ -5082,8 +5082,32 @@ class TestSessionScoping:
             result, path = find_valid_token(token_dir=tmp_path)
         assert result is not None
 
-    def test_token_without_session_accepted_by_any_session(self, tmp_path):
-        """Token without session_id is accepted regardless of current session."""
+    def test_token_without_session_REJECTED_when_current_session_known(self, tmp_path):
+        """SEC-S1 cycle-2 inversion: token without session_id is REJECTED
+        when the current session is known.
+
+        Pre-cycle-2 (cycle-1 short-circuit predicate
+        `if current_session and token_session and current_session != token_session`):
+        the AND-short-circuit on `not token_session` left tokens with empty
+        session_id through — the bypass surface SEC-S1 closes.
+
+        Cycle-2 revised asymmetric predicate at merge_guard_pre.py:633:
+        `if current_session: if not token_session or current_session != token_session: continue`
+        — when current_session IS populated, both an empty token_session AND
+        a foreign token_session reject. Graceful-degradation preserved at
+        :5068 (test_no_session_id_accepts_any_token): when current_session
+        is empty, any valid token still accepted.
+
+        See architect §3 (asymmetric predicate design) + Task #33 HANDOFF
+        for the design rationale.
+
+        # counter-test: remove the inner `if not token_session` half of the
+        #               predicate at merge_guard_pre.py:643 → empty token_
+        #               session falls through to acceptance (the cycle-1
+        #               attack surface re-opens); assertion `result is None`
+        #               FAILS because result is a valid token dict.
+        # expected RED cardinality: {1}
+        """
         from merge_guard_pre import find_valid_token
 
         now = time.time()
@@ -5096,7 +5120,86 @@ class TestSessionScoping:
 
         with patch("merge_guard_pre.get_session_id", return_value="session-abc"):
             result, path = find_valid_token(token_dir=tmp_path)
-        assert result is not None
+        assert result is None
+
+    def test_sec_s1_rejects_empty_token_session_when_current_session_known(
+        self, tmp_path
+    ):
+        """SEC-S1 cycle-2: explicit empty-token_session rejection.
+
+        Parallel to test_token_without_session_REJECTED_when_current_session_known
+        but uses an explicit empty `session_id` field (vs. the missing field
+        in :5086). Pins the same fail-CLOSED behavior for both shapes:
+          - {"session_id": ""}   (this test)
+          - {} (no session_id)   (:5086)
+        Both are bypass-surface attacker shapes under the cycle-1 predicate;
+        both reject under cycle-2.
+
+        # counter-test: revert merge_guard_pre.py:633-644 to the cycle-1
+        #               short-circuit predicate
+        #                   `if current_session and token_session and
+        #                    current_session != token_session: continue`
+        #               → empty token_session AND-short-circuits to NOT
+        #               continue → token accepted; assertion FAILS.
+        # NOTE: removing ONLY the inner `if not token_session` half is NOT
+        # load-bearing for this fixture — `current_session != ""` is also
+        # True so the surviving half still rejects. The cycle-1 short-
+        # circuit revert is the discriminative mutation (verified during
+        # TEST-phase cp-revert-test-restore sampling).
+        # expected RED cardinality: {1}
+        """
+        from merge_guard_pre import find_valid_token
+
+        now = time.time()
+        token_data = {
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {},
+            "session_id": "",  # Explicit empty string (attacker-written shape)
+        }
+        (tmp_path / "merge-authorized-55555").write_text(json.dumps(token_data))
+
+        with patch("merge_guard_pre.get_session_id", return_value="real-session-abc"):
+            result, path = find_valid_token(token_dir=tmp_path)
+        assert result is None
+        # Token NOT cleaned up — it may be valid for some other session
+        # context (preserves the cycle-1 don't-cleanup-foreign convention)
+        assert (tmp_path / "merge-authorized-55555").exists()
+
+    def test_sec_s1_rejects_foreign_token_session_when_current_session_known(
+        self, tmp_path
+    ):
+        """SEC-S1 cycle-2: foreign-session rejection under populated current.
+
+        This is the cycle-1 behavior preserved verbatim (foreign session
+        always rejected) but anchored under the new asymmetric predicate
+        framing. Documents that the AND-tightening at
+        merge_guard_pre.py:643 (`if not token_session OR current_session
+        != token_session`) preserves the foreign-session rejection half
+        exactly while ADDING the empty-token_session rejection half.
+
+        # counter-test: remove the inner `current_session != token_session`
+        #               half of the predicate at merge_guard_pre.py:643 →
+        #               foreign-session token would fall through to
+        #               acceptance; assertion FAILS.
+        # expected RED cardinality: {1}
+        """
+        from merge_guard_pre import find_valid_token
+
+        now = time.time()
+        token_data = {
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {},
+            "session_id": "other-session-B",
+        }
+        (tmp_path / "merge-authorized-66666").write_text(json.dumps(token_data))
+
+        with patch("merge_guard_pre.get_session_id", return_value="real-session-A"):
+            result, path = find_valid_token(token_dir=tmp_path)
+        assert result is None
+        # Token NOT cleaned up — it may be valid for its own session
+        assert (tmp_path / "merge-authorized-66666").exists()
 
 
 # =============================================================================
