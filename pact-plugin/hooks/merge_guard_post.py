@@ -45,6 +45,7 @@ from shared.merge_guard_common import (
     TOKEN_PREFIX,
     MAX_USES,
     USE_MARKER_SUFFIX,
+    LAYER1_SUCCESS_STDOUT_PATTERNS,
     cleanup_consumed_tokens as _cleanup_consumed_tokens,
     cleanup_unused_tokens as _cleanup_unused_tokens,
     detect_command_operation_type,
@@ -306,24 +307,40 @@ def write_token(context: dict, token_dir: Path | None = None) -> str | None:
         return None
 
 
-def _retire_token_for_command(command: str, token_dir: Path | None = None) -> bool:
+def _retire_token_for_command(
+    command: str,
+    op_type: str,
+    token_dir: Path | None = None,
+) -> bool:
     """Atomically retire (rename to .consumed) the consuming token for a
-    successful merge command. Observer-style per architect §13.4 — never
-    raises; never blocks the caller; degrades to no-op on any failure
-    (the TTL/MAX_USES safety net catches the token through the existing
-    expiry path).
+    successful destructive command. Observer-style per architect §13.4 —
+    never raises; never blocks the caller; degrades to no-op on any
+    failure (the TTL/MAX_USES safety net catches the token through the
+    existing expiry path).
 
     Supports invariant I-2: successful operation immediately retires the
     token regardless of MAX_USES counter.
+
+    SEC-S2 cycle-2: extended from merge-only to op_type-symmetric. Caller
+    supplies the validated op_type (matching one of the keys in
+    LAYER1_SUCCESS_STDOUT_PATTERNS). The op_type is filtered against the
+    token's stored `operation_type` for symmetric retirement across
+    merge/close/branch-delete/force-push.
 
     Emits a path-annotated stderr forensic log when retirement is
     observed (BC-NIT addressed: log line distinguishes "direct"
     rename-by-this-session from "race-recover" observed-by-this-session
     where another path — Layer 5 cleanup, _consume_token terminal
-    rename, or cleanup_orphan_tokens unlink — won the race).
+    rename, or cleanup_orphan_tokens unlink — won the race). SEC-S2
+    extends the annotation with op_type so forensic operators can
+    distinguish merge vs close vs branch-delete vs force-push retirement.
 
     Args:
-        command: The Bash command string. Filtered to merge op-type by caller.
+        command: The Bash command string. Filtered by caller via Block 1.
+        op_type: The validated op_type (caller has confirmed it is in
+            LAYER1_SUCCESS_STDOUT_PATTERNS). Required positional — caller
+            always knows op_type by the time it calls this helper; an
+            optional default could mask a missing-op_type bug.
         token_dir: Override token directory (defaults to TOKEN_DIR).
 
     Returns:
@@ -351,11 +368,12 @@ def _retire_token_for_command(command: str, token_dir: Path | None = None) -> bo
         ctx = token_data.get("context", {})
         if not isinstance(ctx, dict):
             continue
-        # Match by op_type — context-specific PR-number matching belongs
-        # to the PRE side's _token_matches_command. For Layer 1 retirement,
-        # op_type == "merge" + session-scope is the minimum to retire (a
-        # subsequent merge would need a fresh token anyway).
-        if ctx.get("operation_type") != "merge":
+        # SEC-S2: match by op_type (parameterized) rather than hard-coded
+        # "merge". Context-specific PR-number matching belongs to the
+        # PRE side's _token_matches_command; for Layer 1 retirement,
+        # op_type match + session-scope is the minimum to retire (a
+        # subsequent op of the same type would need a fresh token anyway).
+        if ctx.get("operation_type") != op_type:
             continue
         # Session scope (mirrors merge_guard_pre.py session check)
         token_session = token_data.get("session_id", "")
@@ -364,8 +382,9 @@ def _retire_token_for_command(command: str, token_dir: Path | None = None) -> bo
         try:
             os.rename(path, path + ".consumed")
             print(
-                f"[security] merge-authorization token retired (via direct) "
-                f"on successful gh pr merge",
+                f"[security] merge-authorization token retired "
+                f"(via direct, op_type={op_type}) on successful "
+                f"{op_type} command",
                 file=sys.stderr,
             )
             return True
@@ -377,8 +396,9 @@ def _retire_token_for_command(command: str, token_dir: Path | None = None) -> bo
             # rename ourselves; the path-annotated log line distinguishes
             # this from "direct" for forensic precision.
             print(
-                f"[security] merge-authorization token retired (via race-recover) "
-                f"on successful gh pr merge",
+                f"[security] merge-authorization token retired "
+                f"(via race-recover, op_type={op_type}) on successful "
+                f"{op_type} command",
                 file=sys.stderr,
             )
             return True
@@ -402,21 +422,26 @@ def main():
         tool_response = extract_tool_response(input_data)
 
         # Layer 1 Bash branch (invariant I-2 per #797): on successful
-        # `gh pr merge` PostToolUse, retire the consuming token so it
-        # cannot be reused for a subsequent merge command.
+        # destructive Bash PostToolUse, retire the consuming token so it
+        # cannot be reused for a subsequent same-op-type command.
+        #
+        # SEC-S2 cycle-2: extended from merge-only to op_type-symmetric.
+        # The lookup table LAYER1_SUCCESS_STDOUT_PATTERNS (in
+        # shared/merge_guard_common.py) drives both Block 1 op_type
+        # acceptance and Block 3 stdout-pattern matching per op_type.
+        # force-push uses None in the table — Block 3 is skipped for
+        # that op_type, the 3-block predicate degrades to 2 blocks
+        # (fail-closed-on-no-signal per architect §5 rationale).
         #
         # 3-block named-with-early-return REJECT pattern (architect §3.2,
         # modeled on wake_lifecycle_emitter.py:255-291). NOT a first-match-
         # wins dispatch precedence — each block independently short-
         # circuits to no-op on its own reject condition. Structurally
-        # equivalent to a flat AND chain but inspectable per-block (each
-        # filter is independently testable as one of the supporting tests).
+        # equivalent to a flat AND chain but inspectable per-block.
         #
         # Observer-style per architect §13.4: token retirement is
         # observation, NOT a permission decision. The Bash branch always
-        # exits 0 / suppressOutput regardless of retirement outcome. Never
-        # promote to fail-closed — that would break tool-call flow for
-        # benign commands.
+        # exits 0 / suppressOutput regardless of retirement outcome.
         #
         # Hook stdin envelope (§13.6 deferred verification): the canonical
         # platform-shape per Claude Code Agent SDK docs is
@@ -426,17 +451,21 @@ def main():
         # against the running plugin in-session" pin). Field-name
         # mismatch degrades to no-retirement (fail-closed-on-uncertainty);
         # the existing TOKEN_TTL/MAX_USES safety net still bounds the
-        # token. A post-merge §13.7 follow-up will fossilize the actual
-        # production envelope via #612 logging-shim methodology.
+        # token.
         tool_name = input_data.get("tool_name", "")
         if tool_name == "Bash":
             command = (
                 tool_input.get("command", "") if isinstance(tool_input, dict) else ""
             )
 
-            # Block 1 — Command-shape filter (cheap; rejects non-merge
-            # commands without touching tool_response).
-            if detect_command_operation_type(command) != "merge":
+            # Block 1 — Command-shape filter (SEC-S2: extends from merge-
+            # only to all op_types in LAYER1_SUCCESS_STDOUT_PATTERNS).
+            # An op_type of None (classifier didn't recognize the command)
+            # OR an op_type not in the table is rejected. The `in` check
+            # against the dict keys is the SSOT for which op_types Layer 1
+            # observes.
+            op_type = detect_command_operation_type(command)
+            if op_type not in LAYER1_SUCCESS_STDOUT_PATTERNS:
                 print(_SUPPRESS_OUTPUT)
                 sys.exit(0)
 
@@ -452,28 +481,33 @@ def main():
                 print(_SUPPRESS_OUTPUT)
                 sys.exit(0)
 
-            # Block 3 — gh CLI semantic signal (stdout pattern). The gh
-            # CLI prints "Merged pull request" (also "Squashed and merged
-            # pull request") on successful merge. Defense-in-depth
-            # against a hypothetical future gh release that exits 0
-            # without merging. Substring match catches both forms.
-            stdout_text = tool_response.get("stdout", "")
-            if not isinstance(stdout_text, str):
-                print(_SUPPRESS_OUTPUT)
-                sys.exit(0)
-            if "Merged pull request" not in stdout_text:
-                print(_SUPPRESS_OUTPUT)
-                sys.exit(0)
+            # Block 3 — gh CLI / git semantic signal via lookup table
+            # (SEC-S2). Each op_type maps to its canonical success
+            # substring. A None value means "skip Block 3 for this
+            # op_type" — the predicate degrades to 2 blocks. force-push
+            # uses None because git push --force emits primarily to
+            # STDERR not STDOUT; substring-matching STDOUT for force-push
+            # is structurally fragile. Block 2's platform-success
+            # implication is the load-bearing check for force-push
+            # (fail-closed-on-no-signal — no retirement degrades to
+            # TTL/MAX_USES safety net, NOT bypass).
+            expected_substring = LAYER1_SUCCESS_STDOUT_PATTERNS[op_type]
+            if expected_substring is not None:
+                stdout_text = tool_response.get("stdout", "")
+                if not isinstance(stdout_text, str):
+                    print(_SUPPRESS_OUTPUT)
+                    sys.exit(0)
+                if expected_substring not in stdout_text:
+                    print(_SUPPRESS_OUTPUT)
+                    sys.exit(0)
 
-            # All 3 blocks passed → retire the consuming token. The
-            # return value is intentionally NOT used to gate exit — this
-            # is an OBSERVER hook, not a permission gate. The retirement
-            # outcome is logged for forensic visibility only.
+            # All applicable blocks passed → retire the consuming token.
             # Observer-style call: stderr forensic log is emitted INSIDE
-            # _retire_token_for_command with path-annotation ("direct" or
-            # "race-recover") for forensic precision per BC-NIT fix.
+            # _retire_token_for_command with path-annotation
+            # ("(via direct, op_type=X)" or "(via race-recover, op_type=X)")
+            # for forensic precision per BC-NIT + SEC-S2 OQ-BC-3.
             # Return value is intentionally NOT used to gate exit.
-            _retire_token_for_command(command)
+            _retire_token_for_command(command, op_type)
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
         # Fall through to existing AskUserQuestion path.

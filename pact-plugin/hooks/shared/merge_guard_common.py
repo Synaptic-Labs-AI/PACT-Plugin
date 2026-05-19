@@ -86,6 +86,23 @@ USE_MARKER_SUFFIX = ".use-"
 # the primary check is TOKEN_TTL expiry (invariant I-3).
 ORPHAN_TOKEN_MAX_AGE_SECONDS = 3600
 
+# Layer 1 Block 3 (gh CLI / git semantic signal) per op_type — SEC-S2 cycle-2.
+# Each value is a substring that MUST appear in tool_response.stdout for the
+# op_type's successful invocation to retire the consuming token. A value of
+# None means "skip Block 3 for this op_type": the 3-block predicate degrades
+# to 2 blocks (Block 1 op_type match + Block 2 platform success signal).
+# force-push uses None because git push --force emits primarily to STDERR;
+# the empty-STDOUT case is fail-closed-on-no-signal (no retirement degrades
+# to TTL/MAX_USES safety net). New op_types: add 1 entry + tests; no other
+# changes required (lookup table is the SSOT, mirrors DANGEROUS_PATTERNS
+# convention).
+LAYER1_SUCCESS_STDOUT_PATTERNS: dict[str, str | None] = {
+    "merge": "Merged pull request",
+    "close": "Closed pull request",
+    "branch-delete": "Deleted branch",
+    "force-push": None,
+}
+
 # -----------------------------------------------------------------------------
 # Regex prefix constants — shared between DANGEROUS_PATTERNS (read-side) and
 # detect_command_operation_type (both sides). Centralized here so the

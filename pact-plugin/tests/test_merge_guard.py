@@ -11852,9 +11852,10 @@ class TestTokenLifecycleExtensions:
 
         write_token({"operation_type": "merge"}, token_dir=tmp_path)
         # First retire-attempt — race-recover scenario.
-        first = _retire_token_for_command("gh pr merge 42", token_dir=tmp_path)
+        # SEC-S2: op_type is now a required positional argument.
+        first = _retire_token_for_command("gh pr merge 42", "merge", token_dir=tmp_path)
         # Second retire-attempt against the (already-retired) directory.
-        second = _retire_token_for_command("gh pr merge 42", token_dir=tmp_path)
+        second = _retire_token_for_command("gh pr merge 42", "merge", token_dir=tmp_path)
 
         # First retires; second sees no candidate (the .consumed sibling
         # is skipped by the path.endswith(".consumed") filter) → False.
