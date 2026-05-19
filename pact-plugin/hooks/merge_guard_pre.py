@@ -52,6 +52,7 @@ try:
         MAX_USES,
         USE_MARKER_SUFFIX,
         cleanup_consumed_tokens as _cleanup_consumed_tokens,
+        cleanup_orphan_tokens as _cleanup_orphan_tokens,
         detect_command_operation_type,
         # Regex prefix constants relocated to shared so the read-side
         # DANGEROUS_PATTERNS bank and the shared classifier compose against
@@ -666,6 +667,13 @@ def find_valid_token(token_dir: Path | None = None) -> tuple[dict, str] | tuple[
 
     # Clean up stale consumed tokens while we're scanning
     _cleanup_consumed_tokens(token_dir)
+
+    # Layer 3 (cross-cutting disk hygiene): reap unconsumed tokens older
+    # than ORPHAN_TOKEN_MAX_AGE_SECONDS (12x TOKEN_TTL). Primary trigger
+    # — runs on every dangerous-Bash precheck so orphans are bounded
+    # within ~1h of the next destructive command. Fail-open by
+    # construction; cleanup_orphan_tokens swallows all OSError paths.
+    _cleanup_orphan_tokens(token_dir)
 
     return valid_token, valid_path
 

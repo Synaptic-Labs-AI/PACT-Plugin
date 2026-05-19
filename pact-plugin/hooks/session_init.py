@@ -92,6 +92,10 @@ from shared.claude_md_manager import (
     strip_orphan_kernel_block,
     _strip_legacy_lines,
 )
+from shared.merge_guard_common import (
+    TOKEN_DIR,
+    cleanup_orphan_tokens as _cleanup_orphan_tokens,
+)
 from shared.session_resume import (
     update_session_info,
     restore_last_session,
@@ -794,6 +798,20 @@ def main():
                 system_messages.append(kernel_strip_msg)
             else:
                 context_parts.append(kernel_strip_msg)
+
+        # 3e. Layer 3 (cross-cutting disk hygiene per #797): reap
+        # unconsumed merge-authorization tokens older than
+        # ORPHAN_TOKEN_MAX_AGE_SECONDS (12x TOKEN_TTL). Secondary trigger
+        # — eager cleanup at session start so orphans don't accumulate
+        # across long sessions where no dangerous-Bash command is run
+        # (the primary trigger in merge_guard_pre.find_valid_token only
+        # fires on dangerous-Bash precheck). Fail-open: cleanup_orphan_tokens
+        # swallows all OSError paths; this try/except is belt-and-suspenders
+        # for any TOKEN_DIR resolution flake.
+        try:
+            _cleanup_orphan_tokens(TOKEN_DIR)
+        except Exception:
+            pass  # Fail-open: never block session init for disk hygiene.
 
         # 4. Check for stale pinned context
         staleness_msg = check_pinned_staleness()
