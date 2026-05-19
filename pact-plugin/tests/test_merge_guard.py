@@ -11071,12 +11071,16 @@ class TestTokenLifecycleInvariants:
     def test_post_main_bash_branch_no_op_on_non_merge_command(self, tmp_path):
         """Layer 1 Block-1 filter: non-merge commands are no-op.
 
-        Feed merge_guard_post.main() a Bash payload with `git status`
-        — a pre-existing unused token must remain unused.
+        Fixture forces Block 1 to be the LOAD-BEARING discriminator: the
+        command is non-merge (`git log`) but the stdout contains "Merged
+        pull request" (realistic — git log of a merge commit). Block 3
+        stdout-pattern would NOT reject (substring present), so the only
+        thing keeping retirement from firing is Block 1's op-type filter.
 
         # counter-test: change `!= "merge"` to `== "merge"` in Block 1
-        #               of the Bash branch → git-status invocation
-        #               retires the token (false-positive retirement).
+        #               of the Bash branch → git-log invocation falls
+        #               through Blocks 1-3 and retires the token
+        #               (false-positive retirement).
         # expected RED cardinality: {1}
         """
         from merge_guard_post import write_token, main
@@ -11084,9 +11088,11 @@ class TestTokenLifecycleInvariants:
         write_token({"operation_type": "merge"}, token_dir=tmp_path)
         envelope = json.dumps({
             "tool_name": "Bash",
-            "tool_input": {"command": "git status"},
+            "tool_input": {"command": "git log --oneline -5"},
             "tool_response": {
-                "stdout": "On branch main",
+                # Realistic git log of a merge commit — Block 3 substring
+                # IS present, so Block 1 is forced to be the discriminator.
+                "stdout": "abc1234 Merged pull request #42 from feat/x",
                 "stderr": "",
                 "interrupted": False,
             },
@@ -11478,105 +11484,205 @@ class TestTokenLifecycleExtensions:
         """§13.6 envelope-divergence: STRING-shape tool_response (the
         failed-Bash route per Agent SDK) MUST NOT retire the token.
 
-        At the platform layer, failed Bash routes to PostToolUseFailure
-        (not PostToolUse), so a string tool_response should never reach
-        this hook in production. This test pins the Block 2 isinstance
-        guard as defense-in-depth against a future Agent SDK envelope
-        change that delivers strings to PostToolUse(matcher=Bash).
+        Pair-revert structure (closes negative-assertion phantom-green
+        class per pair-revert discipline pattern):
+          Phase 1 — correct dict envelope → assert .consumed APPEARS
+                    (positive discriminator; fails if Bash branch absent)
+          Phase 2 — string envelope → assert .consumed does NOT appear
+                    (negative discriminator; the existing scenario)
 
-        # counter-test: remove `if not isinstance(tool_response, dict):`
-        #               in Block 2 of the Bash branch → string-shape would
-        #               proceed past Block 2, raising AttributeError on
-        #               `.get("interrupted")`; observer-exception swallows
-        #               it but the test would observe NO retirement
-        #               (which would still pass — false-green!). The
-        #               DISCRIMINATIVE assertion is that exit code is 0
-        #               AND no .consumed appears.
+        Pair-revert of the entire Bash branch breaks phase 1 — no
+        retirement happens for any input — and phase 2 still vacuously
+        passes; pair-revert thus produces RED on the positive half,
+        catching the absent-branch regression that the original recipe's
+        "discriminative" assertion failed to discriminate.
+
+        Block 2 isinstance guard mutation alone does NOT produce RED
+        because the AttributeError-fallback on string.get() produces the
+        same observable outcome (exit 0, no .consumed) as the guard.
+        This test guards against branch-absent / branch-broken
+        regressions, not against guard-only mutations.
+
+        # counter-test: revert the Bash branch in merge_guard_post.main()
+        #               to its pre-C4 state (no Bash handling) → phase 1
+        #               assertion `.consumed APPEARS` FAILS because no
+        #               retirement fires; phase 2 still passes vacuously.
         # expected RED cardinality: {1}
         """
         from merge_guard_post import write_token, main
 
+        # Phase 1 — positive discriminator: correct envelope retires token
         write_token({"operation_type": "merge"}, token_dir=tmp_path)
-        envelope = json.dumps({
+        positive_envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr merge 42 --squash"},
+            "tool_response": {
+                "stdout": "Merged pull request #42",
+                "stderr": "",
+                "interrupted": False,
+            },
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(positive_envelope)):
+            with pytest.raises(SystemExit):
+                main()
+        phase1_consumed = list(tmp_path.glob("merge-authorized-*.consumed"))
+        assert len(phase1_consumed) == 1, (
+            "phase 1 positive discriminator: correct envelope did NOT "
+            "retire the token; Bash branch absent or non-functional"
+        )
+
+        # Phase 2 — negative: string-shape envelope must NOT retire
+        write_token({"operation_type": "merge"}, token_dir=tmp_path)
+        unused_before = [
+            t for t in tmp_path.glob("merge-authorized-*")
+            if not str(t).endswith(".consumed") and ".use-" not in t.name
+        ]
+        assert len(unused_before) == 1
+        string_envelope = json.dumps({
             "tool_name": "Bash",
             "tool_input": {"command": "gh pr merge 42"},
             "tool_response": "Error: Exit code 1\nfailed to merge",
         })
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
-             patch("sys.stdin", io.StringIO(envelope)):
-            with pytest.raises(SystemExit) as exc_info:
+             patch("sys.stdin", io.StringIO(string_envelope)):
+            with pytest.raises(SystemExit):
                 main()
-        assert exc_info.value.code == 0
-
-        consumed = list(tmp_path.glob("merge-authorized-*.consumed"))
-        assert len(consumed) == 0, (
+        # Fresh token still unused (only the phase-1 token is .consumed)
+        unused_after = [
+            t for t in tmp_path.glob("merge-authorized-*")
+            if not str(t).endswith(".consumed") and ".use-" not in t.name
+        ]
+        assert len(unused_after) == 1, (
             "§13.6 envelope-divergence: string-shape tool_response retired "
             "the token; Block 2 isinstance guard breached"
         )
 
     def test_block2_rejects_empty_dict_tool_response(self, tmp_path):
         """§13.6 envelope-divergence: empty-dict tool_response MUST NOT
-        retire the token. The Block 2 interrupted check would treat empty
-        dict's `.get("interrupted")` as None (not True) — so Block 2 alone
-        does not catch this — Block 3 stdout `.get("stdout", "")` returns
-        "" which the `"Merged pull request" not in ""` test rejects.
+        retire the token (Block 3 stdout-pattern catches missing stdout).
 
-        # counter-test: change Block 3 to `if False:` → empty-dict
-        #               tool_response would proceed to retirement despite
-        #               missing stdout signal.
+        Pair-revert structure (closes negative-assertion phantom-green):
+          Phase 1 — correct dict envelope → assert .consumed APPEARS
+          Phase 2 — empty-dict envelope → assert no new .consumed
+
+        Pair-revert of the Bash branch breaks phase 1. Block-3-only
+        mutation (`if False:` in stdout check) does not produce RED on
+        phase 1 — correct envelope still retires — and phase 2 would
+        proceed to retirement, producing RED there. So this pair pin
+        detects BOTH absent-branch regression (phase 1) and Block 3
+        relaxation (phase 2).
+
+        # counter-test (Bash-branch revert): phase 1 FAILS — no
+        #               retirement on correct envelope.
+        # counter-test (Block 3 → `if False:`): phase 2 FAILS — empty
+        #               dict envelope retires the token.
         # expected RED cardinality: {1}
         """
         from merge_guard_post import write_token, main
 
+        # Phase 1 — positive discriminator
         write_token({"operation_type": "merge"}, token_dir=tmp_path)
-        envelope = json.dumps({
+        positive_envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr merge 42 --squash"},
+            "tool_response": {
+                "stdout": "Merged pull request #42",
+                "stderr": "",
+                "interrupted": False,
+            },
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(positive_envelope)):
+            with pytest.raises(SystemExit):
+                main()
+        phase1_consumed = list(tmp_path.glob("merge-authorized-*.consumed"))
+        assert len(phase1_consumed) == 1, (
+            "phase 1 positive discriminator: correct envelope did NOT "
+            "retire the token"
+        )
+
+        # Phase 2 — negative: empty-dict envelope must NOT retire
+        write_token({"operation_type": "merge"}, token_dir=tmp_path)
+        empty_envelope = json.dumps({
             "tool_name": "Bash",
             "tool_input": {"command": "gh pr merge 42"},
             "tool_response": {},
         })
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
-             patch("sys.stdin", io.StringIO(envelope)):
-            with pytest.raises(SystemExit) as exc_info:
+             patch("sys.stdin", io.StringIO(empty_envelope)):
+            with pytest.raises(SystemExit):
                 main()
-        assert exc_info.value.code == 0
-
-        consumed = list(tmp_path.glob("merge-authorized-*.consumed"))
-        assert len(consumed) == 0, (
+        unused_after = [
+            t for t in tmp_path.glob("merge-authorized-*")
+            if not str(t).endswith(".consumed") and ".use-" not in t.name
+        ]
+        assert len(unused_after) == 1, (
             "§13.6 envelope-divergence: empty-dict tool_response retired "
             "the token"
         )
 
     def test_block3_rejects_none_stdout(self, tmp_path):
         """§13.6 envelope-divergence: malformed dict with stdout=None
-        (non-string type) MUST NOT retire the token. The
-        `isinstance(stdout_text, str)` guard in Block 3 catches this.
+        MUST NOT retire the token. The `isinstance(stdout_text, str)`
+        guard in Block 3 catches this.
 
-        # counter-test: remove `if not isinstance(stdout_text, str):`
-        #               in Block 3 → `None not in None` would raise
-        #               TypeError; observer-except swallows; assertion
-        #               that exit 0 and no .consumed holds.
+        Pair-revert structure (closes negative-assertion phantom-green):
+          Phase 1 — correct dict envelope → assert .consumed APPEARS
+          Phase 2 — None-stdout envelope → assert no new .consumed
+
+        Pair-revert of the Bash branch breaks phase 1. Block 3
+        isinstance mutation alone does NOT produce RED on phase 2
+        because the TypeError fallback still produces exit 0 + no
+        .consumed (same as the guard's success path).
+
+        # counter-test (Bash-branch revert): phase 1 FAILS — no
+        #               retirement on correct envelope.
         # expected RED cardinality: {1}
         """
         from merge_guard_post import write_token, main
 
+        # Phase 1 — positive discriminator
         write_token({"operation_type": "merge"}, token_dir=tmp_path)
-        envelope = json.dumps({
+        positive_envelope = json.dumps({
             "tool_name": "Bash",
-            "tool_input": {"command": "gh pr merge 42"},
+            "tool_input": {"command": "gh pr merge 42 --squash"},
             "tool_response": {
-                "stdout": None,  # Malformed
+                "stdout": "Merged pull request #42",
                 "stderr": "",
                 "interrupted": False,
             },
         })
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
-             patch("sys.stdin", io.StringIO(envelope)):
-            with pytest.raises(SystemExit) as exc_info:
+             patch("sys.stdin", io.StringIO(positive_envelope)):
+            with pytest.raises(SystemExit):
                 main()
-        assert exc_info.value.code == 0
+        phase1_consumed = list(tmp_path.glob("merge-authorized-*.consumed"))
+        assert len(phase1_consumed) == 1, (
+            "phase 1 positive discriminator: correct envelope did NOT "
+            "retire the token"
+        )
 
-        consumed = list(tmp_path.glob("merge-authorized-*.consumed"))
-        assert len(consumed) == 0, (
+        # Phase 2 — negative: None-stdout envelope must NOT retire
+        write_token({"operation_type": "merge"}, token_dir=tmp_path)
+        malformed_envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr merge 42"},
+            "tool_response": {
+                "stdout": None,  # Malformed type
+                "stderr": "",
+                "interrupted": False,
+            },
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(malformed_envelope)):
+            with pytest.raises(SystemExit):
+                main()
+        unused_after = [
+            t for t in tmp_path.glob("merge-authorized-*")
+            if not str(t).endswith(".consumed") and ".use-" not in t.name
+        ]
+        assert len(unused_after) == 1, (
             "§13.6 envelope-divergence: None-stdout retired the token; "
             "Block 3 isinstance guard breached"
         )
