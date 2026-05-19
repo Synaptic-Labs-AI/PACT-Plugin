@@ -628,12 +628,20 @@ def find_valid_token(token_dir: Path | None = None) -> tuple[dict, str] | tuple[
                 _safe_remove(token_path)
                 continue
 
-            # Session scoping: if both sides have session IDs, they must match
+            # Session scoping (SEC-S1 cycle-2 revised asymmetric predicate).
             token_session = token_data.get("session_id", "")
-            if current_session and token_session and current_session != token_session:
-                # Token from a different session — skip (don't clean up,
-                # it may be valid for its own session)
-                continue
+            if current_session:
+                # SEC-S1 cycle-2: gate ONLY when current_session is populated.
+                # When current_session=="" (no PACT context), preserve
+                # graceful-degradation per architect §3 revised design.
+                # Cycle-1 fail-OPEN-on-either-empty AND-short-circuit WAS
+                # itself the attack surface — populated current_session +
+                # empty token_session let attacker-written tokens through.
+                # See test_merge_guard.py:5068 (test_no_session_id_accepts_any_token)
+                # for the preserved invariant; :5086 inversion is the SEC-S1
+                # fix landing.
+                if not token_session or current_session != token_session:
+                    continue
 
             # Slot-claim filter (#720 Bug C). If max_uses > 1 and all use
             # slots are already claimed, the token is fully consumed even
