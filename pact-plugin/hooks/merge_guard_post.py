@@ -316,6 +316,12 @@ def _retire_token_for_command(command: str, token_dir: Path | None = None) -> bo
     Supports invariant I-2: successful operation immediately retires the
     token regardless of MAX_USES counter.
 
+    Emits a path-annotated stderr forensic log when retirement is
+    observed (BC-NIT addressed: log line distinguishes "direct"
+    rename-by-this-session from "race-recover" observed-by-this-session
+    where another path — Layer 5 cleanup, _consume_token terminal
+    rename, or cleanup_orphan_tokens unlink — won the race).
+
     Args:
         command: The Bash command string. Filtered to merge op-type by caller.
         token_dir: Override token directory (defaults to TOKEN_DIR).
@@ -357,11 +363,24 @@ def _retire_token_for_command(command: str, token_dir: Path | None = None) -> bo
             continue
         try:
             os.rename(path, path + ".consumed")
+            print(
+                f"[security] merge-authorization token retired (via direct) "
+                f"on successful gh pr merge",
+                file=sys.stderr,
+            )
             return True
         except (FileNotFoundError, OSError):
             # Concurrent retire (Layer 5 cleanup, _consume_token terminal
-            # rename, or another PostToolUse fire) won the race — the
-            # token IS retired, just not by us. Treat as success.
+            # rename, or another PostToolUse fire) won the race, OR
+            # cleanup_orphan_tokens unlinked the token entirely. Either way
+            # the token is no longer authorizable. We did NOT perform the
+            # rename ourselves; the path-annotated log line distinguishes
+            # this from "direct" for forensic precision.
+            print(
+                f"[security] merge-authorization token retired (via race-recover) "
+                f"on successful gh pr merge",
+                file=sys.stderr,
+            )
             return True
     return False
 
@@ -450,13 +469,11 @@ def main():
             # return value is intentionally NOT used to gate exit — this
             # is an OBSERVER hook, not a permission gate. The retirement
             # outcome is logged for forensic visibility only.
-            retired = _retire_token_for_command(command)
-            if retired:
-                print(
-                    f"[security] merge-authorization token retired on "
-                    f"successful gh pr merge",
-                    file=sys.stderr,
-                )
+            # Observer-style call: stderr forensic log is emitted INSIDE
+            # _retire_token_for_command with path-annotation ("direct" or
+            # "race-recover") for forensic precision per BC-NIT fix.
+            # Return value is intentionally NOT used to gate exit.
+            _retire_token_for_command(command)
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
         # Fall through to existing AskUserQuestion path.
