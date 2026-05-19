@@ -256,7 +256,7 @@ def test_arm_directive_contains_precondition_phrase(tmp_path):
         "tool_name": "TaskCreate", "session_id": sid, "cwd": pdir,
         "tool_input": {"taskId": "1"}, "tool_response": {"task": {"id": "1"}},
     }, home)
-    assert "First active teammate task created" in out["hookSpecificOutput"]["additionalContext"]
+    assert "Active teammate work detected" in out["hookSpecificOutput"]["additionalContext"]
 
 
 def test_no_op_on_create_of_signal_task(tmp_path):
@@ -330,7 +330,7 @@ def test_arm_on_create_owned_by_secretary_post_empty_carve_out(tmp_path):
 #   - test_teardown_directive_contains_precondition_phrase →
 #     test_wake_lifecycle_emitter.py::TestTeardownDirectiveAuditAnchor
 #     ::test_teardown_directive_describes_last_active_task (pins
-#     "Last active teammate task completed" prose).
+#     "No active teammate work remaining" prose).
 #   - test_teardown_emitted_on_last_active_completion →
 #     test_teardown_request_emitter.py::TestGate3ActiveTaskCountTransition
 #     ::test_count_zero_proceeds + test_native_hooks_integration.py

@@ -20,7 +20,7 @@ The runbook deliberately covers BOTH happy-path lifecycle and edge cases that th
 
 **Expected**:
 - After the first `TaskCreate` (Task A teachback gate), the PostToolUse hook `wake_lifecycle_emitter.py` fires and emits an `additionalContext` directive instructing the lead to invoke `Skill("PACT:start-pending-scan")`.
-- Directive text exactly: `First active teammate task created. Invoke Skill("PACT:start-pending-scan") before any further teammate dispatch. Idempotent — no-op if a /PACT:scan-pending-tasks cron is already registered.`
+- Directive text exactly: `Active teammate work detected. You MUST invoke Skill("PACT:start-pending-scan") before your next tool call. This is a non-negotiable lifecycle gate. Idempotent — no-op if a /PACT:scan-pending-tasks cron is already registered.`
 - Lead invokes the skill; skill body's Lead-Session Guard passes (current session is lead), CronList lookup returns no match, `CronCreate(cron="*/5 * * * *", prompt="/PACT:scan-pending-tasks", recurring=True, durable=False)` succeeds.
 - Post-Arm `CronList` shows exactly one line with suffix `: /PACT:scan-pending-tasks` and markers `(recurring) [session-only]`.
 
@@ -120,7 +120,7 @@ This is the load-bearing verification — the 5 anti-hallucination guardrails ar
 
 **Expected**:
 - PostToolUse hook detects the 1→0 transition and emits a stop-pending-scan directive.
-- Directive text exactly: `Last active teammate task completed. Invoke Skill("PACT:stop-pending-scan") to delete the /PACT:scan-pending-tasks cron. Best-effort — tolerates a cron that was already auto-deleted (7-day expiry) or never registered.`
+- Directive text exactly: `No active teammate work remaining. You MUST invoke Skill("PACT:stop-pending-scan") before your next tool call to delete the /PACT:scan-pending-tasks cron. This is a non-negotiable lifecycle gate. Best-effort — tolerates a cron that was already auto-deleted (7-day expiry) or never registered.`
 - Lead invokes the skill; skill body's CronList lookup finds the match; `CronDelete(id=<extracted-8-char-id>)` succeeds.
 - Post-Teardown `CronList` shows no match for `/PACT:scan-pending-tasks`.
 

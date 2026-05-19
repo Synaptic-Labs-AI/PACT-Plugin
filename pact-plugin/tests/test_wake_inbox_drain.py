@@ -361,7 +361,7 @@ def test_drain_single_emit_when_both_paths_trigger(tmp_path):
     assert rc == 0, f"non-zero exit; stderr={err}"
     # Exactly one additionalContext block: the JSON stdout contains
     # _ARM_DIRECTIVE prose exactly once.
-    arm_count = out_str.count("First active teammate task created")
+    arm_count = out_str.count("Active teammate work detected")
     assert arm_count == 1, (
         f"Expected exactly 1 _ARM_DIRECTIVE emit; got {arm_count} in "
         f"stdout={out_str!r}"
@@ -454,7 +454,7 @@ def test_fallback_emits_when_no_scan_armed_event(tmp_path):
         env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
     )
     assert rc == 0, f"non-zero exit; stderr={err}"
-    arm_count = out_str.count("First active teammate task created")
+    arm_count = out_str.count("Active teammate work detected")
     assert arm_count == 1, (
         f"No scan_armed event + count >= 1 must emit exactly 1 Arm "
         f"directive; got {arm_count} in stdout={out_str!r}"
@@ -541,7 +541,7 @@ def test_outer_guard_catches_unexpected_exception(tmp_path):
         f"non-zero exit; stderr={proc.stderr.decode('utf-8')}"
     )
     out_str = proc.stdout.decode("utf-8")
-    arm_count = out_str.count("First active teammate task created")
+    arm_count = out_str.count("Active teammate work detected")
     assert arm_count == 1, (
         f"Outer guard must catch the simulated ImportError and fall "
         f"through to emit; got {arm_count} in stdout={out_str!r}"
@@ -651,7 +651,7 @@ def test_fallback_emits_when_armed_then_disarmed(tmp_path):
         env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
     )
     assert rc == 0, f"non-zero exit; stderr={err}"
-    arm_count = out_str.count("First active teammate task created")
+    arm_count = out_str.count("Active teammate work detected")
     assert arm_count == 1, (
         f"armed-then-disarmed + count >= 1 must emit Arm (no stale "
         f"suppression); got {arm_count} in stdout={out_str!r}"
@@ -790,7 +790,7 @@ def test_fallback_emits_when_armed_at_equals_disarmed_at(tmp_path):
         env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
     )
     assert rc == 0, f"non-zero exit; stderr={err}"
-    arm_count = out_str.count("First active teammate task created")
+    arm_count = out_str.count("Active teammate work detected")
     assert arm_count == 1, (
         f"Same-second armed_at == disarmed_at must fall through to "
         f"count_active_tasks fallback (fail-conservative emit); got "
@@ -882,7 +882,7 @@ def test_fallback_emits_when_armed_at_is_bool(tmp_path):
         env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
     )
     assert rc == 0, f"non-zero exit; stderr={err}"
-    arm_count = out_str.count("First active teammate task created")
+    arm_count = out_str.count("Active teammate work detected")
     assert arm_count == 1, (
         f"armed_at=bool(True) must be rejected by the bool-guard and "
         f"fall through to count_active_tasks (fail-conservative emit); "
@@ -947,7 +947,7 @@ def test_fallback_emits_when_disarmed_at_is_bool(tmp_path):
         env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
     )
     assert rc == 0, f"non-zero exit; stderr={err}"
-    arm_count = out_str.count("First active teammate task created")
+    arm_count = out_str.count("Active teammate work detected")
     assert arm_count == 1, (
         f"disarmed_at=bool(False) must be rejected by the disarmed-at "
         f"bool-guard; the hook should fall through to the fallback "
@@ -1046,7 +1046,7 @@ def test_outer_guard_catches_arbitrary_exception(tmp_path, exception_class):
         f"stderr={proc.stderr.decode('utf-8')}"
     )
     out_str = proc.stdout.decode("utf-8")
-    arm_count = out_str.count("First active teammate task created")
+    arm_count = out_str.count("Active teammate work detected")
     assert arm_count == 1, (
         f"Widened-except contract violation for {exception_class.__name__}: "
         f"the producer-side guard must catch the exception and fall "

@@ -264,14 +264,14 @@ class TestAuditAnchorRegressionGuards:
         import wake_lifecycle_emitter as emitter
         # The exact directive prose — pin per memory feedback_491
         # literal-phrase regression guard pattern.
-        assert "First active teammate task created" in emitter._ARM_DIRECTIVE
+        assert "Active teammate work detected" in emitter._ARM_DIRECTIVE
         assert 'Skill("PACT:start-pending-scan")' in emitter._ARM_DIRECTIVE
         assert "Idempotent" in emitter._ARM_DIRECTIVE
 
     def test_teardown_directive_constant_unchanged(self):
         sys.path.insert(0, str(HOOK_DIR))
         import wake_lifecycle_emitter as emitter
-        assert "Last active teammate task completed" in emitter._TEARDOWN_DIRECTIVE
+        assert "No active teammate work remaining" in emitter._TEARDOWN_DIRECTIVE
         assert 'Skill("PACT:stop-pending-scan")' in emitter._TEARDOWN_DIRECTIVE
         assert "Best-effort" in emitter._TEARDOWN_DIRECTIVE
 

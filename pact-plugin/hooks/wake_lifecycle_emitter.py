@@ -183,17 +183,20 @@ _MAX_PAYLOAD_BYTES = 1024 * 1024
 # applicability). Idempotency is enforced in the skill body via
 # CronList exact-suffix-match; there is no hook-side STATE_FILE.
 _ARM_DIRECTIVE = (
-    'First active teammate task created. '
-    'Invoke Skill("PACT:start-pending-scan") before any further teammate '
-    'dispatch. Idempotent — no-op if a /PACT:scan-pending-tasks cron is '
+    'Active teammate work detected. '
+    'You MUST invoke Skill("PACT:start-pending-scan") before your next '
+    'tool call. This is a non-negotiable lifecycle gate. '
+    'Idempotent — no-op if a /PACT:scan-pending-tasks cron is '
     'already registered.'
 )
 
 _TEARDOWN_DIRECTIVE = (
-    'Last active teammate task completed. '
-    'Invoke Skill("PACT:stop-pending-scan") to delete the '
-    '/PACT:scan-pending-tasks cron. Best-effort — tolerates a cron that '
-    'was already auto-deleted (7-day expiry) or never registered.'
+    'No active teammate work remaining. '
+    'You MUST invoke Skill("PACT:stop-pending-scan") before your next '
+    'tool call to delete the /PACT:scan-pending-tasks cron. '
+    'This is a non-negotiable lifecycle gate. '
+    'Best-effort — tolerates a cron that was already auto-deleted '
+    '(7-day expiry) or never registered.'
 )
 
 # Tools accepted by _decide_directive. The hooks.json matcher prunes

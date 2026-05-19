@@ -13,7 +13,7 @@ Best-effort cleanup. Tolerates an already-absent cron entry — the platform's s
 
 | Trigger | Site |
 |---|---|
-| Last active teammate task reaches terminal status (`completed` or `deleted`; PostToolUse hook detects 1→0 transition) | `wake_lifecycle_emitter.py` `additionalContext` directive |
+| No active teammate work remaining (TaskCompleted hook detects 1→0 transition on terminal status; emitted via `teardown_request_emitter.py`) | `teardown_request_emitter.py` `additionalContext` directive |
 | Session-end safety net (count already 0; redundant-but-correct hook-silent-fail catch) | `/wrap-up` command body Skill invocation |
 | User-typed manual invocation (silence scan noise mid-session, e.g., during long-running solo work) | `/PACT:stop-pending-scan` slash invocation |
 
