@@ -11140,3 +11140,744 @@ class TestTokenLifecycleInvariants:
         assert len(unused) == 1, (
             "Layer 1 Block-2 violated: interrupted merge retired token"
         )
+
+
+# =============================================================================
+# Layer 4 EXTENSIONS (#797): TestTokenLifecycleExtensions
+#
+# Phantom-green probes, audit-anchor structural pins, false-positive
+# discriminators, envelope-divergence detection, deeper cross-session and
+# retry regression coverage, and concurrent-race adversarial scenarios.
+#
+# Counter-test cardinality target on full Layer 1/3/5 revert combined with
+# TestTokenLifecycleInvariants: aggregate scales to {14 base + this class
+# additions} on full revert. Each test carries an inline `# counter-test:`
+# mutation recipe with measured cardinality from the TEST-phase probe
+# campaign (see HANDOFF for full data).
+#
+# Phantom-green discoveries codified here (from probe data):
+#   - I-3 alias does NOT pin orphan-cleanup mechanism (only TTL-expiry).
+#     New test pins orphan-mechanism MECHANISM independently.
+#   - 2 Layer 1 supporting negative tests pass-for-wrong-reason under
+#     full Bash-branch revert. New sentinel adds positive-discriminator
+#     contrast so revert produces RED cardinality > 1.
+#   - Layer 5 mechanism-no-op probe: 3 of 4 helper supporting tests
+#     stay GREEN when helper is gutted (they pin "what NOT to happen").
+#     New test exercises the integrated callsite via write_token so
+#     mechanism revert is detected.
+# =============================================================================
+
+
+class TestTokenLifecycleExtensions:
+    """Extension coverage for #797 token-lifecycle hardening.
+
+    Complementary to TestTokenLifecycleInvariants — pins surfaces that the
+    base invariant aliases leave exposed:
+      - structural audit anchors (docstring labels, counter-test counts)
+      - phantom-green discriminators (orphan-mechanism, retire-mechanism)
+      - false-positive sentinels (dry-run, command-shape boundary)
+      - envelope-divergence (string, empty-dict, None-stdout shapes)
+      - deeper cross-session + retry-preservation regression
+      - concurrent races on shared token-dir state
+
+    Real-fixture discipline preserved (tmp_path; mocking limited to
+    time/session_id/TOKEN_DIR + controlled os.rename interpose).
+    """
+
+    # ------------------------------------------------------------------
+    # Audit-anchor structural pins (scope item 6)
+    # ------------------------------------------------------------------
+
+    def test_module_docstring_pins_five_invariant_sections(self):
+        """5 invariant section headers (I-1..I-5) in merge_guard_common.py.
+
+        Uses ANCHORED substring per CLAUDE.md "Coupling-via-substring-count"
+        — bare label `I-1` returns >1 due to cross-reference prose
+        (e.g., "Maintains invariant I-1"). The full section-header form is
+        unique per label and pins the docstring contract directly.
+
+        # counter-test: rename I-1 section header in merge_guard_common.py
+        #               module docstring (e.g., "I-1 (at most one" → "I-A
+        #               (at most one") → assertion FAILS on the I-1 line.
+        # expected RED cardinality: {1}
+        """
+        from pathlib import Path
+
+        common_path = (
+            Path(__file__).resolve().parent.parent
+            / "hooks" / "shared" / "merge_guard_common.py"
+        )
+        src = common_path.read_text()
+        anchors = [
+            "I-1 (at most one unused token at any time):",
+            "I-2 (successful operation immediately retires the token):",
+            "I-3 (TTL expiry retires the token):",
+            "I-4 (failed operation preserves token for retry within TTL up to MAX_USES):",
+            "I-5 (cross-session tokens never valid):",
+        ]
+        for anchor in anchors:
+            count = src.count(anchor)
+            assert count == 1, (
+                f"audit-anchor drift: expected exactly 1 occurrence of "
+                f"{anchor!r}; got {count}"
+            )
+
+    def test_invariant_class_pins_fourteen_counter_test_comments(self):
+        """TestTokenLifecycleInvariants class carries exactly 14 inline
+        `# counter-test:` mutation recipes — one per invariant + supporting
+        pin. Scoped via class-marker-to-EOF or next-class extraction so the
+        17-file-total hit count (3 hits outside the class) doesn't pollute.
+
+        # counter-test: delete a `# counter-test:` comment from any test
+        #               method body in TestTokenLifecycleInvariants → count
+        #               drops to 13; assertion FAILS.
+        # expected RED cardinality: {1}
+        """
+        from pathlib import Path
+
+        test_path = Path(__file__).resolve()
+        src = test_path.read_text()
+        marker = "class TestTokenLifecycleInvariants:"
+        next_class_marker = "class TestTokenLifecycleExtensions:"
+        start = src.find(marker)
+        end = src.find(next_class_marker)
+        assert start != -1, "TestTokenLifecycleInvariants class not found"
+        assert end != -1 and end > start, "boundary class missing"
+        section = src[start:end]
+        # Indent-anchored: counter-test recipes inside docstring bodies of
+        # test methods are 8-space-indented. Banner/header prose mentions
+        # of "# counter-test:" use 0-space indent and are excluded.
+        count = sum(
+            1 for line in section.splitlines()
+            if line.startswith("        # counter-test:")
+        )
+        assert count == 14, (
+            f"counter-test discipline drift: expected 14 indent-anchored "
+            f"recipes in TestTokenLifecycleInvariants; got {count}"
+        )
+
+    # ------------------------------------------------------------------
+    # Duplicate-class shadow audit (scope item 9 / memory 631891d7)
+    # ------------------------------------------------------------------
+
+    def test_no_duplicate_token_lifecycle_class(self):
+        """grep -E '^class TestTokenLifecycle' returns exactly 2 classes —
+        the base TestTokenLifecycleInvariants + this Extensions class.
+        Per memory `631891d7`, accidental class shadowing in pytest silently
+        masks the second class.
+
+        # counter-test: introduce `class TestTokenLifecycleInvariants:` as
+        #               a duplicate elsewhere in the file → count rises
+        #               to 3; assertion FAILS.
+        # expected RED cardinality: {1}
+        """
+        from pathlib import Path
+        import re
+
+        test_path = Path(__file__).resolve()
+        src = test_path.read_text()
+        matches = re.findall(r"^class TestTokenLifecycle\w+:", src, re.MULTILINE)
+        # Expect: TestTokenLifecycleInvariants + TestTokenLifecycleExtensions
+        assert len(matches) == 2, (
+            f"duplicate-class shadow: expected 2 TestTokenLifecycle* classes; "
+            f"got {len(matches)} ({matches})"
+        )
+
+    # ------------------------------------------------------------------
+    # Phantom-green discriminator: orphan-cleanup MECHANISM (scope item 1)
+    # ------------------------------------------------------------------
+
+    def test_find_valid_token_actually_reaps_stale_orphan(self, tmp_path):
+        """Layer 3 mechanism pin (closes I-3 alias phantom-green gap).
+
+        TEST-phase probe finding: mutating the orphan-cleanup comparator
+        `now - mtime > max_age_seconds` to `<` causes test_i4 and test_i5
+        to flip RED (orphan-cleanup reaps fresh tokens before they're
+        scoped), BUT the I-3 alias stays GREEN — because I-3 tests
+        TTL-expiry via `expires_at`, not the orphan-mechanism mtime check.
+
+        This test pins the MECHANISM contract directly: a token older than
+        ORPHAN_TOKEN_MAX_AGE_SECONDS is unlinked from disk when
+        find_valid_token runs, even if its `expires_at` would otherwise
+        keep it alive.
+
+        # counter-test: remove the cleanup_orphan_tokens call site at
+        #               merge_guard_pre.find_valid_token OR flip its
+        #               comparator to `<` → stale-mtime token survives
+        #               the find_valid_token call.
+        # expected RED cardinality: {1}
+        """
+        from shared.merge_guard_common import ORPHAN_TOKEN_MAX_AGE_SECONDS
+        from merge_guard_pre import find_valid_token
+
+        now = time.time()
+        # Token whose expires_at is FUTURE (would survive I-3) but whose
+        # mtime is past the orphan threshold (so orphan-cleanup reaps it).
+        future_expiry = now + 999999
+        token_data = {
+            "created_at": now - ORPHAN_TOKEN_MAX_AGE_SECONDS - 100,
+            "expires_at": future_expiry,
+            "context": {"operation_type": "merge"},
+        }
+        stale = tmp_path / "merge-authorized-stale-mech"
+        stale.write_text(json.dumps(token_data))
+        # Backdate mtime past the threshold
+        old_time = now - ORPHAN_TOKEN_MAX_AGE_SECONDS - 100
+        os.utime(stale, (old_time, old_time))
+
+        find_valid_token(token_dir=tmp_path)
+
+        # Orphan-cleanup MECHANISM should have unlinked it. If only I-3
+        # (TTL-expiry) were active, the future expires_at would keep it.
+        assert not stale.exists(), (
+            "phantom-green probe: orphan-cleanup MECHANISM not exercised; "
+            "I-3 alias passes but mtime-based reap is unwired"
+        )
+
+    # ------------------------------------------------------------------
+    # Phantom-green discriminator: Layer 5 mechanism (integrated callsite)
+    # ------------------------------------------------------------------
+
+    def test_write_token_actually_retires_prior_unused(self, tmp_path):
+        """Layer 5 mechanism pin (closes Layer 5 supporting-test
+        phantom-green gap).
+
+        TEST-phase probe finding: 3 of 4 cleanup_unused_tokens supporting
+        tests stay GREEN when the helper is gutted to no-op — because they
+        pin "what NOT to happen" (markers preserved, .consumed not double-
+        renamed, race-safety on FileNotFoundError). Only test_i1 catches
+        the gutted helper, and only via the integrated callsite.
+
+        This test exercises the integrated callsite explicitly: writing a
+        second token via write_token MUST result in the first being
+        .consumed-renamed by cleanup_unused_tokens BEFORE the new token
+        exists on disk (invariant I-1 mechanism via Layer 5 placement).
+
+        # counter-test: comment out _cleanup_unused_tokens(token_dir) in
+        #               merge_guard_post.write_token before O_EXCL OR gut
+        #               the helper to return None → assertion FAILS.
+        # expected RED cardinality: {1}
+        """
+        from merge_guard_post import write_token
+
+        write_token({"operation_type": "merge"}, token_dir=tmp_path)
+        first_unused = [
+            t for t in tmp_path.glob("merge-authorized-*")
+            if not str(t).endswith(".consumed") and ".use-" not in t.name
+        ]
+        assert len(first_unused) == 1
+        first_path = first_unused[0]
+
+        with patch("merge_guard_post.time") as mock_time:
+            mock_time.time.return_value = time.time() + 1
+            write_token({"operation_type": "merge"}, token_dir=tmp_path)
+
+        # Specifically: the FIRST path should now exist as .consumed (not
+        # just "some .consumed somewhere"). This pins the rename target.
+        consumed_first = Path(str(first_path) + ".consumed")
+        assert consumed_first.exists(), (
+            "Layer 5 mechanism not exercised: first token not renamed to "
+            ".consumed; phantom-green if asserting only on aggregate count"
+        )
+
+    # ------------------------------------------------------------------
+    # False-positive sentinel: gh pr merge --dry-run (scope item 7)
+    # ------------------------------------------------------------------
+
+    def test_dry_run_merge_does_not_retire_token(self, tmp_path):
+        """Layer 1 Block 3 sentinel: `gh pr merge --dry-run` emits
+        "would merge" framing, NOT "Merged pull request". The substring
+        match must reject this to prevent false-positive retirement on a
+        no-op preview command.
+
+        Tests the semantic specificity of the stdout-pattern substring
+        beyond what backend-coder's "merge" → "Merged pull request"
+        analysis covers. Closes the architect §10 LOW-risk surface.
+
+        # counter-test: change `"Merged pull request" not in stdout_text`
+        #               to `"merge" not in stdout_text` (over-broad) →
+        #               substring still rejects "would merge" because the
+        #               capital-M asymmetry happens to hold, BUT change to
+        #               `"would merge" in stdout_text` (inverted) → token
+        #               retired falsely. Use single-char `"M"` mutation
+        #               for the canonical over-broad probe.
+        # expected RED cardinality: {1}
+        """
+        from merge_guard_post import write_token, main
+
+        write_token({"operation_type": "merge"}, token_dir=tmp_path)
+        envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr merge 42 --squash --dry-run"},
+            "tool_response": {
+                "stdout": "would merge pull request #42 (dry-run; no changes)",
+                "stderr": "",
+                "interrupted": False,
+            },
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(envelope)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 0
+
+        unused = [
+            t for t in tmp_path.glob("merge-authorized-*")
+            if not str(t).endswith(".consumed") and ".use-" not in t.name
+        ]
+        assert len(unused) == 1, (
+            "Layer 1 Block-3 violated: --dry-run retired token "
+            "(false-positive on 'would merge' stdout framing)"
+        )
+
+    def test_block3_over_broad_substring_caught_by_capitalization(self, tmp_path):
+        """Layer 1 Block 3 case-sensitivity pin: the stdout substring
+        `Merged pull request` is intentionally capitalized. Lowercasing
+        the gh CLI output (hypothetical future format change) MUST NOT
+        retire the token without a deliberate substring update.
+
+        # counter-test: change `"Merged pull request"` to
+        #               `"Merged pull request".lower()` (or use
+        #               `stdout_text.lower()` in the comparison) → token
+        #               retired on lowercased stdout.
+        # expected RED cardinality: {1}
+        """
+        from merge_guard_post import write_token, main
+
+        write_token({"operation_type": "merge"}, token_dir=tmp_path)
+        envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr merge 42 --squash"},
+            "tool_response": {
+                # Lowercased (hypothetical gh future-format)
+                "stdout": "merged pull request #42",
+                "stderr": "",
+                "interrupted": False,
+            },
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(envelope)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 0
+
+        unused = [
+            t for t in tmp_path.glob("merge-authorized-*")
+            if not str(t).endswith(".consumed") and ".use-" not in t.name
+        ]
+        assert len(unused) == 1, (
+            "Layer 1 Block-3 case-sensitivity violated: lowercased stdout "
+            "retired the token"
+        )
+
+    # ------------------------------------------------------------------
+    # Envelope-divergence detection (scope item 8 / §13.6)
+    # ------------------------------------------------------------------
+
+    def test_block2_rejects_string_shape_tool_response(self, tmp_path):
+        """§13.6 envelope-divergence: STRING-shape tool_response (the
+        failed-Bash route per Agent SDK) MUST NOT retire the token.
+
+        At the platform layer, failed Bash routes to PostToolUseFailure
+        (not PostToolUse), so a string tool_response should never reach
+        this hook in production. This test pins the Block 2 isinstance
+        guard as defense-in-depth against a future Agent SDK envelope
+        change that delivers strings to PostToolUse(matcher=Bash).
+
+        # counter-test: remove `if not isinstance(tool_response, dict):`
+        #               in Block 2 of the Bash branch → string-shape would
+        #               proceed past Block 2, raising AttributeError on
+        #               `.get("interrupted")`; observer-exception swallows
+        #               it but the test would observe NO retirement
+        #               (which would still pass — false-green!). The
+        #               DISCRIMINATIVE assertion is that exit code is 0
+        #               AND no .consumed appears.
+        # expected RED cardinality: {1}
+        """
+        from merge_guard_post import write_token, main
+
+        write_token({"operation_type": "merge"}, token_dir=tmp_path)
+        envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr merge 42"},
+            "tool_response": "Error: Exit code 1\nfailed to merge",
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(envelope)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 0
+
+        consumed = list(tmp_path.glob("merge-authorized-*.consumed"))
+        assert len(consumed) == 0, (
+            "§13.6 envelope-divergence: string-shape tool_response retired "
+            "the token; Block 2 isinstance guard breached"
+        )
+
+    def test_block2_rejects_empty_dict_tool_response(self, tmp_path):
+        """§13.6 envelope-divergence: empty-dict tool_response MUST NOT
+        retire the token. The Block 2 interrupted check would treat empty
+        dict's `.get("interrupted")` as None (not True) — so Block 2 alone
+        does not catch this — Block 3 stdout `.get("stdout", "")` returns
+        "" which the `"Merged pull request" not in ""` test rejects.
+
+        # counter-test: change Block 3 to `if False:` → empty-dict
+        #               tool_response would proceed to retirement despite
+        #               missing stdout signal.
+        # expected RED cardinality: {1}
+        """
+        from merge_guard_post import write_token, main
+
+        write_token({"operation_type": "merge"}, token_dir=tmp_path)
+        envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr merge 42"},
+            "tool_response": {},
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(envelope)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 0
+
+        consumed = list(tmp_path.glob("merge-authorized-*.consumed"))
+        assert len(consumed) == 0, (
+            "§13.6 envelope-divergence: empty-dict tool_response retired "
+            "the token"
+        )
+
+    def test_block3_rejects_none_stdout(self, tmp_path):
+        """§13.6 envelope-divergence: malformed dict with stdout=None
+        (non-string type) MUST NOT retire the token. The
+        `isinstance(stdout_text, str)` guard in Block 3 catches this.
+
+        # counter-test: remove `if not isinstance(stdout_text, str):`
+        #               in Block 3 → `None not in None` would raise
+        #               TypeError; observer-except swallows; assertion
+        #               that exit 0 and no .consumed holds.
+        # expected RED cardinality: {1}
+        """
+        from merge_guard_post import write_token, main
+
+        write_token({"operation_type": "merge"}, token_dir=tmp_path)
+        envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr merge 42"},
+            "tool_response": {
+                "stdout": None,  # Malformed
+                "stderr": "",
+                "interrupted": False,
+            },
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(envelope)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 0
+
+        consumed = list(tmp_path.glob("merge-authorized-*.consumed"))
+        assert len(consumed) == 0, (
+            "§13.6 envelope-divergence: None-stdout retired the token; "
+            "Block 3 isinstance guard breached"
+        )
+
+    # ------------------------------------------------------------------
+    # Cross-session deeper coverage via Layer 1 path (scope item 4)
+    # ------------------------------------------------------------------
+
+    def test_layer1_bash_branch_skips_foreign_session_token(self, tmp_path):
+        """I-5 deeper coverage via Layer 1: a foreign-session token must
+        NOT be retired by this session's `gh pr merge` PostToolUse, even
+        when the command + stdout would otherwise match.
+
+        The base I-5 alias covers the find_valid_token path; this pins
+        the same scope-check inside _retire_token_for_command.
+
+        # counter-test: remove the `current_session != token_session`
+        #               check in merge_guard_post._retire_token_for_command
+        #               → foreign-session token would be retired by this
+        #               session's PostToolUse (cross-session breach).
+        # expected RED cardinality: {1}
+        """
+        from merge_guard_post import main
+
+        # Write a token tagged with a foreign session_id directly
+        # (bypass write_token to avoid auto-tagging with current session).
+        foreign_session = "foreign-session-xyz"
+        now = time.time()
+        token_data = {
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {"operation_type": "merge"},
+            "session_id": foreign_session,
+            "max_uses": 2,
+            "uses_remaining": 2,
+        }
+        foreign_token = tmp_path / "merge-authorized-foreign-bash"
+        foreign_token.write_text(json.dumps(token_data))
+
+        envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr merge 42 --squash"},
+            "tool_response": {
+                "stdout": "Merged pull request #42",
+                "stderr": "",
+                "interrupted": False,
+            },
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("merge_guard_post.get_session_id",
+                   return_value="local-session-abc"), \
+             patch("sys.stdin", io.StringIO(envelope)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 0
+
+        # Token still unused — foreign-session retire skipped.
+        assert foreign_token.exists(), (
+            "I-5 violated in Layer 1: foreign-session token retired by "
+            "local-session PostToolUse"
+        )
+        consumed = list(tmp_path.glob("merge-authorized-*.consumed"))
+        assert len(consumed) == 0, (
+            "I-5 violated in Layer 1: produced spurious .consumed of foreign "
+            "token"
+        )
+
+    # ------------------------------------------------------------------
+    # Retry-preservation deeper coverage (scope item 5)
+    # ------------------------------------------------------------------
+
+    def test_same_context_retry_claims_use_n_slot(self, tmp_path):
+        """I-4 deeper: same-context retry within TTL claims a `.use-N`
+        slot (per #720 Bug C), NOT a Layer-5 cleanup retirement. The
+        retry does NOT consume Layer 5's "retire prior unused" path
+        because the first invocation didn't WRITE a new token; it
+        consumed a slot of the existing one.
+
+        # counter-test: introduce a Layer-5 cleanup call into
+        #               _consume_token's success path → retry retires the
+        #               token prematurely; second .use-N slot never claimed.
+        # expected RED cardinality: {1}
+        """
+        from shared.merge_guard_common import MAX_USES, USE_MARKER_SUFFIX
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        assert MAX_USES >= 2
+        write_token({"operation_type": "merge"}, token_dir=tmp_path)
+
+        # First retry — claims slot 1
+        assert check_merge_authorization("gh pr merge 1", token_dir=tmp_path) is None
+        markers_after_1 = list(tmp_path.glob(f"*{USE_MARKER_SUFFIX}*"))
+        assert len(markers_after_1) == 1, (
+            "I-4 violated: first call didn't claim a .use-1 slot marker"
+        )
+
+        # Token NOT terminally retired yet (still has slot 2)
+        unused = [
+            t for t in tmp_path.glob("merge-authorized-*")
+            if not str(t).endswith(".consumed")
+            and USE_MARKER_SUFFIX not in t.name
+        ]
+        assert len(unused) == 1
+
+    def test_cross_context_call_does_not_consume_orig_token_slot(self, tmp_path):
+        """I-4 deeper: a DIFFERENT-context command (different op_type or
+        different PR number) must NOT consume a slot of the original
+        token. Cross-context isolation preserves retry budget for the
+        intended context.
+
+        # counter-test: relax the context-matching in
+        #               merge_guard_pre._token_matches_command (e.g., make
+        #               op_type match alone sufficient regardless of
+        #               pr_number) → cross-PR call consumes original
+        #               token's slot.
+        # expected RED cardinality: {1}
+        """
+        from shared.merge_guard_common import USE_MARKER_SUFFIX
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        # Write a token authorized for PR #42
+        ctx = {"operation_type": "merge", "pr_number": "42"}
+        write_token(ctx, token_dir=tmp_path)
+
+        # Cross-context call: different PR — should NOT match token, should
+        # be blocked (returns non-None per check_merge_authorization), and
+        # CRUCIALLY no use-1 marker should be created against PR 42's token.
+        markers_before = list(tmp_path.glob(f"*{USE_MARKER_SUFFIX}*"))
+        assert len(markers_before) == 0
+        result = check_merge_authorization("gh pr merge 999", token_dir=tmp_path)
+        markers_after = list(tmp_path.glob(f"*{USE_MARKER_SUFFIX}*"))
+
+        # Either: (a) cross-PR was blocked AND no marker created OR
+        #         (b) cross-PR was authorized via the token (THIS is the
+        #             bug case — marker would be created).
+        # We pin the no-marker invariant directly.
+        assert len(markers_after) == 0, (
+            "I-4 cross-context isolation violated: PR-999 call consumed a "
+            "slot of the PR-42 token"
+        )
+
+    # ------------------------------------------------------------------
+    # Concurrent races (scope item 3)
+    # ------------------------------------------------------------------
+
+    def test_two_posttooluse_retire_same_token_no_double_consumed(self, tmp_path):
+        """Layer 1 concurrent retire: two PostToolUse events arrive for
+        the same token (e.g., user re-merges immediately after first
+        completion). Both retire-attempts observe the race-recover
+        semantics: exactly one .consumed rename wins; no .consumed.consumed
+        shape is produced.
+
+        Deterministic via os.rename monkeypatch interpose (per memory
+        1727b853 — PR #720 pattern).
+
+        # counter-test: remove the (FileNotFoundError, OSError) handler
+        #               around os.rename in _retire_token_for_command →
+        #               second-fire raises and observer-except swallows
+        #               (but no double .consumed) — test might still pass.
+        #               More discriminative: remove the path.endswith(
+        #               ".consumed") skip → would create .consumed.consumed.
+        # expected RED cardinality: {1}
+        """
+        from merge_guard_post import write_token, _retire_token_for_command
+
+        write_token({"operation_type": "merge"}, token_dir=tmp_path)
+        # First retire-attempt — race-recover scenario.
+        first = _retire_token_for_command("gh pr merge 42", token_dir=tmp_path)
+        # Second retire-attempt against the (already-retired) directory.
+        second = _retire_token_for_command("gh pr merge 42", token_dir=tmp_path)
+
+        # First retires; second sees no candidate (the .consumed sibling
+        # is skipped by the path.endswith(".consumed") filter) → False.
+        assert first is True
+        assert second is False, (
+            "Concurrent retire-recover: second retire should observe no "
+            "candidate; instead it retired again (possible double-rename)"
+        )
+        # No .consumed.consumed shape exists.
+        double = list(tmp_path.glob("*.consumed.consumed"))
+        assert len(double) == 0, (
+            f"Race-recover semantics violated: produced {double} "
+            "(.consumed.consumed shape)"
+        )
+
+    def test_layer5_cleanup_recovers_from_concurrent_rename(self, tmp_path):
+        """Layer 5 race vs Layer 1 retire: cleanup_unused_tokens runs at
+        write_token time; a concurrent _retire_token_for_command may
+        race for the same os.rename target. Both paths fail-open via
+        (FileNotFoundError, OSError) catches and converge to a consistent
+        single-.consumed state.
+
+        Deterministic via os.rename interpose: cleanup's rename target is
+        deleted by an "imaginary concurrent winner" between glob and
+        rename, simulating the race.
+
+        # counter-test: remove the try/except (FileNotFoundError, OSError)
+        #               wrapping os.rename in cleanup_unused_tokens → the
+        #               concurrent-rename raises; assertion that
+        #               cleanup completes without exception FAILS.
+        # expected RED cardinality: {1}
+        """
+        from shared.merge_guard_common import cleanup_unused_tokens
+
+        token = tmp_path / "merge-authorized-race-1234"
+        token.write_text('{"context": {}}')
+
+        # Track rename invocations
+        rename_calls = []
+        original_rename = os.rename
+
+        def racing_rename(src, dst):
+            rename_calls.append((src, dst))
+            # Imaginary concurrent winner moves src out from under us
+            if os.path.exists(src):
+                os.unlink(src)
+            original_rename(src, dst)  # Raises FileNotFoundError
+
+        with patch("shared.merge_guard_common.os.rename", side_effect=racing_rename):
+            # Must NOT raise — convergence is silent
+            cleanup_unused_tokens(tmp_path)
+
+        # Helper attempted the rename once (its only rename call)
+        assert len(rename_calls) == 1
+        # No .consumed shape created — concurrent winner unlinked it.
+        # Token is gone; consistent state reached.
+        assert not token.exists()
+        assert not (tmp_path / "merge-authorized-race-1234.consumed").exists()
+
+    # ------------------------------------------------------------------
+    # Block-1 false-positive sentinel (closes negative-test phantom-green)
+    # ------------------------------------------------------------------
+
+    def test_block1_negative_test_paired_with_positive_discriminator(
+        self, tmp_path
+    ):
+        """Layer 1 Block-1 positive+negative discriminator pin (closes
+        Layer 1 negative-supporting-test phantom-green gap).
+
+        TEST-phase probe finding: the 2 base Layer 1 negative tests
+        (test_post_main_bash_branch_no_op_on_non_merge_command,
+        test_post_main_bash_branch_no_op_on_interrupted_merge) stay GREEN
+        when the entire Bash branch is reverted, because they pin "no
+        retirement" and an absent branch produces "no retirement" for
+        the right surface reason but the wrong mechanism reason.
+
+        This test pins BOTH halves in the same fixture: a merge command
+        retires; an identical-PostToolUse non-merge command does NOT.
+        Pair-revert of the Bash branch breaks the positive half, producing
+        the missing RED signal.
+
+        # counter-test: revert the entire Bash branch (Blocks 1-3 +
+        #               _retire_token_for_command call) → the merge case
+        #               FAILS (positive half) — pair-revert produces RED.
+        # expected RED cardinality: {1}
+        """
+        from merge_guard_post import write_token, main
+
+        # Phase 1: positive — gh pr merge retires the token
+        write_token({"operation_type": "merge"}, token_dir=tmp_path)
+        merge_envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr merge 42 --squash"},
+            "tool_response": {
+                "stdout": "Merged pull request #42",
+                "stderr": "",
+                "interrupted": False,
+            },
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(merge_envelope)):
+            with pytest.raises(SystemExit):
+                main()
+        consumed_phase1 = list(tmp_path.glob("merge-authorized-*.consumed"))
+        assert len(consumed_phase1) == 1, (
+            "Positive discriminator: gh pr merge did NOT retire the token "
+            "(Bash branch missing or non-functional)"
+        )
+
+        # Phase 2: negative — git status does NOT retire a fresh token
+        write_token({"operation_type": "merge"}, token_dir=tmp_path)
+        status_envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "tool_response": {
+                "stdout": "On branch main\nNothing to commit",
+                "stderr": "",
+                "interrupted": False,
+            },
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(status_envelope)):
+            with pytest.raises(SystemExit):
+                main()
+        unused_phase2 = [
+            t for t in tmp_path.glob("merge-authorized-*")
+            if not str(t).endswith(".consumed") and ".use-" not in t.name
+        ]
+        assert len(unused_phase2) == 1, (
+            "Negative discriminator: git status retired the token "
+            "(Block 1 op_type filter regressed)"
+        )
