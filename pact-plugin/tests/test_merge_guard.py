@@ -917,12 +917,20 @@ class TestIntegration:
                 pre_main()
         assert exc_info.value.code == 0  # Allowed
 
-    def test_multiple_valid_tokens(self, tmp_path):
-        """Multiple valid tokens: aggregate budget is MAX_USES per token.
+    def test_second_write_retires_first_per_I1(self, tmp_path):
+        """I-1 enforcement: second write_token atomically retires the first.
 
-        Each token authorizes MAX_USES identical-context operations via
-        per-use slot markers. Two merge tokens therefore authorize
-        2*MAX_USES merge operations; the next merge command blocks.
+        Per invariant I-1 (at most one unused token at any time),
+        write_token calls cleanup_unused_tokens() before os.open(O_EXCL),
+        atomically renaming any prior unused token to .consumed. The
+        aggregate authorization budget is therefore MAX_USES of the
+        surviving token only, not 2*MAX_USES across two coexisting tokens.
+
+        # counter-test: revert the cleanup_unused_tokens(token_dir) call
+        #               in merge_guard_post.write_token before O_EXCL →
+        #               this test goes RED on len(unused) == 1 assertion
+        #               (would be 2 unused tokens coexisting).
+        # expected RED cardinality: {1}
         """
         from shared.merge_guard_common import MAX_USES
         from merge_guard_post import write_token
@@ -934,14 +942,24 @@ class TestIntegration:
             mock_time.time.return_value = time.time() + 1
             write_token({"operation_type": "merge"}, token_dir=tmp_path)
 
-        tokens = list(tmp_path.glob("merge-authorized-*"))
-        assert len(tokens) >= 2
+        # I-1: exactly one unused token after the second write; the first
+        # has been atomically retired to .consumed by cleanup_unused_tokens.
+        all_files = list(tmp_path.glob("merge-authorized-*"))
+        unused = [
+            t for t in all_files
+            if not str(t).endswith(".consumed") and ".use-" not in t.name
+        ]
+        consumed = [t for t in all_files if str(t).endswith(".consumed")]
+        assert len(unused) == 1, f"I-1 violated: {len(unused)} unused tokens"
+        assert len(consumed) == 1, (
+            f"Expected 1 .consumed (the retired first), got {len(consumed)}"
+        )
 
-        # Two tokens × MAX_USES slots each: all should authorize merges.
-        for _ in range(2 * MAX_USES):
+        # Aggregate budget is MAX_USES (of the surviving token), not 2*MAX_USES.
+        for _ in range(MAX_USES):
             assert check_merge_authorization("gh pr merge 1", token_dir=tmp_path) is None
 
-        # Next operation: blocked (aggregate budget exhausted)
+        # Next operation: blocked (the surviving token's budget is exhausted).
         result = check_merge_authorization("gh pr merge 3", token_dir=tmp_path)
         assert result is not None
 
@@ -2418,7 +2436,21 @@ class TestTokenEdgeCases:
             os.chmod(str(readonly_dir), 0o755)
 
     def test_write_token_collision_uses_fallback(self, tmp_path):
-        """When first filename exists, fallback with microsecond suffix is used."""
+        """O_EXCL fallback path remains reachable for true same-microsecond races.
+
+        Layer 5 (invariant I-1) retires unused tokens before O_EXCL, so an
+        unused pre-existing token cannot cause O_EXCL to fail under normal
+        use. The microsecond-suffix fallback path is still needed for the
+        true race between cleanup completion and O_EXCL, or for any
+        scenario where cleanup is bypassed (e.g., concurrent writer in a
+        different process landed a file in the microsecond window).
+
+        Simulate the latter by stubbing cleanup_unused_tokens to no-op
+        for the duration of one write_token call — this models a
+        cleanup-failure or concurrent-race scenario and pins the O_EXCL
+        fallback behavior independently of Layer 5.
+        """
+        import merge_guard_post
         from merge_guard_post import write_token
 
         # Pre-create the file that write_token will try to create
@@ -2427,7 +2459,11 @@ class TestTokenEdgeCases:
         preexisting = tmp_path / f"merge-authorized-{timestamp}"
         preexisting.write_text("taken")
 
-        with patch("merge_guard_post.time") as mock_time:
+        # Stub Layer 5 cleanup so the collision survives to O_EXCL. This
+        # mirrors a transient cleanup failure or a true concurrent-writer
+        # race on the microsecond window.
+        with patch.object(merge_guard_post, "_cleanup_unused_tokens", lambda _td: None), \
+             patch("merge_guard_post.time") as mock_time:
             mock_time.time.return_value = now
             result = write_token({"test": True, "operation_type": "merge"}, token_dir=tmp_path)
 
@@ -5109,7 +5145,16 @@ class TestTokenWriteExceptionHandling:
     """Tests for write_token's exception handling during file operations."""
 
     def test_double_collision_returns_none(self, tmp_path):
-        """When both primary and fallback filenames exist, returns None."""
+        """When both primary and fallback filenames exist, returns None.
+
+        Layer 5 (I-1) retires unused tokens before O_EXCL, so under
+        normal use the primary O_EXCL cannot collide with a pre-existing
+        unused token. This test pins the double-collision returns-None
+        behavior independently of Layer 5 by stubbing cleanup so the
+        collision survives to O_EXCL (mirroring a transient cleanup
+        failure or a concurrent same-microsecond race).
+        """
+        import merge_guard_post
         from merge_guard_post import write_token
 
         now = time.time()
@@ -5122,7 +5167,8 @@ class TestTokenWriteExceptionHandling:
         primary.write_text("taken")
         fallback.write_text("taken")
 
-        with patch("merge_guard_post.time") as mock_time:
+        with patch.object(merge_guard_post, "_cleanup_unused_tokens", lambda _td: None), \
+             patch("merge_guard_post.time") as mock_time:
             mock_time.time.return_value = now
             result = write_token({"test": True, "operation_type": "merge"}, token_dir=tmp_path)
 

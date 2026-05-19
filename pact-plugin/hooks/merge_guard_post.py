@@ -35,6 +35,7 @@ from shared.merge_guard_common import (
     TOKEN_DIR,
     MAX_USES,
     cleanup_consumed_tokens as _cleanup_consumed_tokens,
+    cleanup_unused_tokens as _cleanup_unused_tokens,
     detect_command_operation_type,
 )
 from shared.tool_response import extract_tool_response
@@ -250,6 +251,14 @@ def write_token(context: dict, token_dir: Path | None = None) -> str | None:
         token_data["session_id"] = session_id
 
     token_path = token_dir / f"merge-authorized-{timestamp}"
+
+    # Layer 5 (invariant I-1): atomically retire any prior unused token
+    # immediately before the new one is created. Placement BEFORE the
+    # O_EXCL create is invariant-critical — placing it AFTER would leave
+    # a window where two unused tokens coexist on disk. POSIX rename
+    # atomicity provides race-safety against concurrent writers and
+    # against the read-side _consume_token retirement path.
+    _cleanup_unused_tokens(token_dir)
 
     try:
         # Write with secure permissions using os.open for atomic creation
