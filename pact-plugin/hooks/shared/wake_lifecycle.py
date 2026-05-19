@@ -76,6 +76,19 @@ Public surface:
     `pact_context.py:288-308` for the sibling-event field-handling
     convention. Consumed by session_init.py. Pure function; never
     raises; returns False on non-dict input.
+- is_lead_at_task_completed(input_data, team_name="") -> bool
+    Predicate. True iff this TaskCompleted hook fire originated in the
+    lead session. Discriminator: `input_data.get('agent_id') is None`
+    — TaskCompleted's in-subagent frame stamps `agent_id` per Claude
+    Code platform docs (code.claude.com/docs/en/hooks.md documents
+    `agent_id` as conditionally-present on TaskCompleted subagent
+    frames, identical pattern to PostToolUse). Cell-1/cell-3 backstop
+    per #781 architect §2 2x2 decision table and R3 Outcome A
+    (documented-schema falsification gate result). Consumed by
+    teardown_request_emitter.py Gate 0. Pure function; never raises;
+    returns False on non-dict input. `team_name` parameter is
+    vestigial under the field-presence discriminator but retained for
+    signature uniformity with the 4 sibling helpers.
 - _lifecycle_relevant(task, team_name="") -> bool
     Predicate. True iff the task counts toward the active-work tally that
     arms/tears down the wake mechanism.
@@ -812,3 +825,49 @@ def is_lead_at_session_start(input_data: Any, team_name: str = "") -> bool:
     if not isinstance(input_data, dict):
         return False
     return input_data.get("agent_type") is None
+
+
+def is_lead_at_task_completed(input_data: Any, team_name: str = "") -> bool:
+    """
+    Return True iff this TaskCompleted hook fire originated in the lead
+    session (not an in-process teammate frame).
+
+    Discriminator: ``payload.get('agent_id') is None``. Per Claude Code
+    platform documentation (``code.claude.com/docs/en/hooks.md``,
+    TaskCompleted section): ``agent_id`` is *Present only when the hook
+    fires inside a subagent context. Distinguishes subagent task
+    completions from main-thread task completions.* The lead-session
+    TaskCompleted fire omits the field; in-process teammate frames
+    carry the platform-stamped per-instance UUID. Same field as the
+    PostToolUse sibling :func:`is_lead_emit_authorized` (identical
+    discriminator across both event classes).
+
+    This is the cell-1/cell-3 backstop body per the #781 architect
+    §2 2x2 decision table: dimension A (does teammate-context
+    TaskCompleted carry ``agent_id``?) resolved to YES by R3 Outcome
+    A (upstream-docs falsification gate result, 2026-05-19). Cells 1
+    and 3 collapse to a single-field predicate identical to the
+    production-proven PostToolUse pattern; cells 2 and 4 are
+    fossilized-bug-defense fallbacks not reached under the documented
+    schema. The captured-fixture provenance upgrade is a post-merge
+    follow-up; this body ships with documented-schema authority.
+
+    Consumed by ``teardown_request_emitter.py`` Gate 0 (callsite
+    migration is the C3b commit). The previous Gate 0 routed through
+    the :func:`is_lead_session` backward-compat delegate (also
+    ``agent_id is None`` body via delegation) — semantically equivalent
+    today; the rename to this helper makes the per-event partition
+    convention explicit at the callsite and documents the TaskCompleted
+    discriminator choice in one place.
+
+    Pure function; never raises. Returns False on non-dict input
+    (SEC-S1 observe-only invariant: ambiguous-actor returns the
+    non-emitting branch; the helper is a routing primitive, NOT a
+    deny gate). The ``team_name`` parameter is vestigial under the
+    field-presence discriminator but retained for signature uniformity
+    with the four sibling helpers; see :func:`is_lead_emit_authorized`
+    docstring for the retention rationale.
+    """
+    if not isinstance(input_data, dict):
+        return False
+    return input_data.get("agent_id") is None
