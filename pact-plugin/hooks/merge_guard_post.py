@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/merge_guard_post.py
-Summary: PostToolUse hook matching AskUserQuestion — writes a short-lived
-         authorization token when the user approves a merge, close (with branch
-         deletion), force push, or branch delete question.
-Used by: hooks.json PostToolUse hook (matcher: AskUserQuestion)
+Summary: PostToolUse hook matching AskUserQuestion + Bash — writes a short-lived
+         authorization token on AskUserQuestion approval; retires the consuming
+         token on successful `gh pr merge` Bash invocation.
+Used by: hooks.json PostToolUse hook (matcher: AskUserQuestion|Bash)
 
-This hook is part of the merge guard system. When AskUserQuestion is used to
-confirm a merge, close (with branch deletion), force push, or branch deletion,
-and the user answers affirmatively, a token file is written to ~/.claude/. The
-companion hook (merge_guard_pre.py) checks for this token before allowing
-dangerous commands.
+This hook is part of the merge guard system. Two PostToolUse branches:
 
-Input: JSON from stdin with tool_input (AskUserQuestion questions array) and tool_response (answers dict)
-Output: None (side effect: writes token file on approval)
+  AskUserQuestion branch (existing): when AskUserQuestion confirms a merge,
+  close, force push, or branch deletion and the user answers affirmatively,
+  a token file is written to ~/.claude/. The companion hook (merge_guard_pre.py)
+  checks for this token before allowing dangerous commands.
+
+  Bash branch (Layer 1 per #797, invariant I-2): on successful `gh pr merge`
+  PostToolUse, the consuming token is atomically retired (.consumed) so it
+  cannot be reused for a subsequent merge command. Observer-style by design
+  per architect §13.4 — never blocks the tool call; retirement is observation,
+  not permission decision.
+
+Input: JSON from stdin with tool_name (AskUserQuestion or Bash), tool_input,
+       and tool_response.
+Output: None (side effect: writes or retires token file).
 """
 
+import glob
 import json
 import os
 import re
@@ -33,7 +42,9 @@ from shared.error_output import hook_error_json
 from shared.merge_guard_common import (
     TOKEN_TTL,
     TOKEN_DIR,
+    TOKEN_PREFIX,
     MAX_USES,
+    USE_MARKER_SUFFIX,
     cleanup_consumed_tokens as _cleanup_consumed_tokens,
     cleanup_unused_tokens as _cleanup_unused_tokens,
     detect_command_operation_type,
@@ -295,6 +306,66 @@ def write_token(context: dict, token_dir: Path | None = None) -> str | None:
         return None
 
 
+def _retire_token_for_command(command: str, token_dir: Path | None = None) -> bool:
+    """Atomically retire (rename to .consumed) the consuming token for a
+    successful merge command. Observer-style per architect §13.4 — never
+    raises; never blocks the caller; degrades to no-op on any failure
+    (the TTL/MAX_USES safety net catches the token through the existing
+    expiry path).
+
+    Supports invariant I-2: successful operation immediately retires the
+    token regardless of MAX_USES counter.
+
+    Args:
+        command: The Bash command string. Filtered to merge op-type by caller.
+        token_dir: Override token directory (defaults to TOKEN_DIR).
+
+    Returns:
+        True if a token was retired (or concurrently retired by another
+        path — race-recover treats both as success). False if no matching
+        token was found.
+    """
+    if token_dir is None:
+        token_dir = TOKEN_DIR
+    pattern = str(token_dir / f"{TOKEN_PREFIX}*")
+    current_session = get_session_id()
+    for path in glob.glob(pattern):
+        basename = os.path.basename(path)
+        # Skip terminal-rename siblings and per-use markers (mirrors the
+        # scan-pattern in merge_guard_pre.find_valid_token).
+        if path.endswith(".consumed"):
+            continue
+        if USE_MARKER_SUFFIX in basename:
+            continue
+        try:
+            with open(path, "r") as f:
+                token_data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        ctx = token_data.get("context", {})
+        if not isinstance(ctx, dict):
+            continue
+        # Match by op_type — context-specific PR-number matching belongs
+        # to the PRE side's _token_matches_command. For Layer 1 retirement,
+        # op_type == "merge" + session-scope is the minimum to retire (a
+        # subsequent merge would need a fresh token anyway).
+        if ctx.get("operation_type") != "merge":
+            continue
+        # Session scope (mirrors merge_guard_pre.py session check)
+        token_session = token_data.get("session_id", "")
+        if current_session and token_session and current_session != token_session:
+            continue
+        try:
+            os.rename(path, path + ".consumed")
+            return True
+        except (FileNotFoundError, OSError):
+            # Concurrent retire (Layer 5 cleanup, _consume_token terminal
+            # rename, or another PostToolUse fire) won the race — the
+            # token IS retired, just not by us. Treat as success.
+            return True
+    return False
+
+
 def main():
     """Main entry point for the PostToolUse hook."""
     try:
@@ -310,6 +381,85 @@ def main():
         # falls back to legacy `tool_output` for envelope-rename robustness,
         # warns on dual-envelope payloads (envelope-confusion smell).
         tool_response = extract_tool_response(input_data)
+
+        # Layer 1 Bash branch (invariant I-2 per #797): on successful
+        # `gh pr merge` PostToolUse, retire the consuming token so it
+        # cannot be reused for a subsequent merge command.
+        #
+        # 3-block named-with-early-return REJECT pattern (architect §3.2,
+        # modeled on wake_lifecycle_emitter.py:255-291). NOT a first-match-
+        # wins dispatch precedence — each block independently short-
+        # circuits to no-op on its own reject condition. Structurally
+        # equivalent to a flat AND chain but inspectable per-block (each
+        # filter is independently testable as one of the supporting tests).
+        #
+        # Observer-style per architect §13.4: token retirement is
+        # observation, NOT a permission decision. The Bash branch always
+        # exits 0 / suppressOutput regardless of retirement outcome. Never
+        # promote to fail-closed — that would break tool-call flow for
+        # benign commands.
+        #
+        # Hook stdin envelope (§13.6 deferred verification): the canonical
+        # platform-shape per Claude Code Agent SDK docs is
+        # `tool_response: {stdout: str, stderr: str, interrupted: bool}`
+        # for successful Bash. In-session smoke-test instrumentation is
+        # structurally not viable (CLAUDE.md "Hooks cannot be smoke-tested
+        # against the running plugin in-session" pin). Field-name
+        # mismatch degrades to no-retirement (fail-closed-on-uncertainty);
+        # the existing TOKEN_TTL/MAX_USES safety net still bounds the
+        # token. A post-merge §13.7 follow-up will fossilize the actual
+        # production envelope via #612 logging-shim methodology.
+        tool_name = input_data.get("tool_name", "")
+        if tool_name == "Bash":
+            command = (
+                tool_input.get("command", "") if isinstance(tool_input, dict) else ""
+            )
+
+            # Block 1 — Command-shape filter (cheap; rejects non-merge
+            # commands without touching tool_response).
+            if detect_command_operation_type(command) != "merge":
+                print(_SUPPRESS_OUTPUT)
+                sys.exit(0)
+
+            # Block 2 — Platform-level success signal (dict-shape +
+            # non-interrupted). PostToolUse only fires on tool-call
+            # success at the platform layer (failed Bash routes to
+            # PostToolUseFailure per Agent SDK); the dict-shape vs
+            # non-dict asymmetry is a structural success boundary.
+            if not isinstance(tool_response, dict):
+                print(_SUPPRESS_OUTPUT)
+                sys.exit(0)
+            if tool_response.get("interrupted") is True:
+                print(_SUPPRESS_OUTPUT)
+                sys.exit(0)
+
+            # Block 3 — gh CLI semantic signal (stdout pattern). The gh
+            # CLI prints "Merged pull request" (also "Squashed and merged
+            # pull request") on successful merge. Defense-in-depth
+            # against a hypothetical future gh release that exits 0
+            # without merging. Substring match catches both forms.
+            stdout_text = tool_response.get("stdout", "")
+            if not isinstance(stdout_text, str):
+                print(_SUPPRESS_OUTPUT)
+                sys.exit(0)
+            if "Merged pull request" not in stdout_text:
+                print(_SUPPRESS_OUTPUT)
+                sys.exit(0)
+
+            # All 3 blocks passed → retire the consuming token. The
+            # return value is intentionally NOT used to gate exit — this
+            # is an OBSERVER hook, not a permission gate. The retirement
+            # outcome is logged for forensic visibility only.
+            retired = _retire_token_for_command(command)
+            if retired:
+                print(
+                    f"[security] merge-authorization token retired on "
+                    f"successful gh pr merge",
+                    file=sys.stderr,
+                )
+            print(_SUPPRESS_OUTPUT)
+            sys.exit(0)
+        # Fall through to existing AskUserQuestion path.
 
         # Extract question from AskUserQuestion schema:
         # tool_input: {"questions": [{"question": "...", ...}]}

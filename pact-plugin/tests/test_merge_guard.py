@@ -2822,16 +2822,52 @@ class TestMergeGuardHooksRegistration:
         )
 
     def test_merge_guard_post_in_posttooluse_askuserquestion(self, hooks_config):
-        """merge_guard_post.py must be registered under PostToolUse AskUserQuestion."""
-        entries = hooks_config["hooks"].get("PostToolUse", [])
-        ask_hooks = []
-        for entry in entries:
-            if entry.get("matcher") == "AskUserQuestion":
-                for hook in entry.get("hooks", []):
-                    ask_hooks.append(hook.get("command", ""))
+        """merge_guard_post.py must be registered under PostToolUse for
+        both AskUserQuestion AND Bash (matcher widened per #797 Layer 1).
 
-        assert any("merge_guard_post.py" in cmd for cmd in ask_hooks), (
+        The matcher is a regex-style alternation `AskUserQuestion|Bash`
+        so the same hook handles BOTH tool events: token write on
+        AskUserQuestion approval, token retirement on successful Bash
+        `gh pr merge`.
+        """
+        entries = hooks_config["hooks"].get("PostToolUse", [])
+        matched_hooks = []
+        for entry in entries:
+            matcher = entry.get("matcher", "")
+            # Accept any matcher pattern that includes AskUserQuestion as
+            # an alternation alternative or as the literal value.
+            if "AskUserQuestion" in matcher.split("|"):
+                for hook in entry.get("hooks", []):
+                    matched_hooks.append(hook.get("command", ""))
+
+        assert any("merge_guard_post.py" in cmd for cmd in matched_hooks), (
             "merge_guard_post.py not found in PostToolUse AskUserQuestion hooks"
+        )
+
+    def test_merge_guard_post_matcher_includes_bash(self, hooks_config):
+        """merge_guard_post.py matcher must also include Bash (Layer 1 #797).
+
+        Layer 1 invariant I-2 requires PostToolUse(Bash) to retire the
+        consuming token on successful gh pr merge. The matcher widening
+        from `AskUserQuestion` to `AskUserQuestion|Bash` is the
+        registration half of the atomic registration+handler pair.
+
+        # counter-test: revert hooks.json matcher to just `AskUserQuestion`
+        #               → this test goes RED; Layer 1 handler never fires.
+        # expected RED cardinality: {1}
+        """
+        entries = hooks_config["hooks"].get("PostToolUse", [])
+        bash_alternation_found = False
+        for entry in entries:
+            matcher = entry.get("matcher", "")
+            if "Bash" in matcher.split("|"):
+                for hook in entry.get("hooks", []):
+                    if "merge_guard_post.py" in hook.get("command", ""):
+                        bash_alternation_found = True
+                        break
+        assert bash_alternation_found, (
+            "merge_guard_post.py matcher must include Bash alternation "
+            "for Layer 1 I-2 enforcement"
         )
 
     def test_merge_guard_pre_is_synchronous(self, hooks_config):
@@ -2847,10 +2883,16 @@ class TestMergeGuardHooksRegistration:
                         )
 
     def test_merge_guard_post_is_synchronous(self, hooks_config):
-        """merge_guard_post.py must be synchronous — token must be written before next tool."""
+        """merge_guard_post.py must be synchronous — token must be written
+        before next tool call AND retirement must complete before next
+        Bash precheck reads the token store (Layer 1 #797).
+        """
         entries = hooks_config["hooks"].get("PostToolUse", [])
         for entry in entries:
-            if entry.get("matcher") == "AskUserQuestion":
+            matcher = entry.get("matcher", "")
+            # Match the widened `AskUserQuestion|Bash` alternation as well
+            # as legacy literal `AskUserQuestion`.
+            if "AskUserQuestion" in matcher.split("|"):
                 for hook in entry.get("hooks", []):
                     if "merge_guard_post.py" in hook.get("command", ""):
                         assert hook.get("async", False) is not True, (
