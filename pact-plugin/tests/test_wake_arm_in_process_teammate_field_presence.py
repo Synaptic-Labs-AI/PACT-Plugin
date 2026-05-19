@@ -44,8 +44,10 @@ revert technique per pact-testing-strategies bundled-commit guidance
 keeps these tests in place while the source rolls back; expected RED
 cardinality >=3 across the P0 behavioral tests on revert.
 
-4th site (teardown_request_emitter.py) deferred to #781 — see xfail
-markers on the 4 affected pre-existing tests for the deferred surface.
+4th site (teardown_request_emitter.py) consumes the per-event sibling
+``is_lead_at_task_completed`` (TaskCompleted-event-class `agent_id is
+None` discriminator); see TestGate0LeadSessionGuard in
+test_teardown_request_emitter.py for the behavioral coverage.
 
 The filename uses "in_process_teammate" rather than the discovery
 instance "secretary" because the #611 bug class is general (any
@@ -382,8 +384,9 @@ def test_p0_lead_fire_taskupdate_completed_suppressoutput_post_c5(tmp_path):
     out = _emit_output(payload, home)
     assert out == {"suppressOutput": True}, (
         f"Lead-frame 1->0 TaskUpdate(completed) must suppressOutput "
-        f"post-C5; the Teardown emit path moved to TaskCompleted hook "
-        f"(teardown_request_emitter.py, deferred to #781). Got {out!r}"
+        f"post-C5; the Teardown emit path lives on the TaskCompleted "
+        f"hook (teardown_request_emitter.py via "
+        f"is_lead_at_task_completed). Got {out!r}"
     )
 
 

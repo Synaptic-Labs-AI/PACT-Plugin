@@ -40,11 +40,22 @@ import pytest
 HOOK_DIR = Path(__file__).resolve().parent.parent / "hooks"
 EMITTER = HOOK_DIR / "teardown_request_emitter.py"
 
-# Verbatim TaskCompleted stdin shape captured during PREPARE-phase probes
-# of #551 — pinned as a fixture so future emitter changes are tested
-# against what the platform actually delivers, not a synthetic guess.
-# Same shape as test_emitter_real_disk.PLATFORM_STDIN_SHAPE; duplicated
-# here to keep this module's fixture co-located.
+# Synthesized TaskCompleted teammate-context stdin shape (in-PR backstop
+# per #781 architect §3 step 2 + §4 ROADMAP). _meta.capture_method:
+# "synthesized" — the captured-fixture upgrade to "logging-shim"
+# provenance is the post-merge follow-up commit. Carries `agent_id` per
+# R3 Outcome A (claude-code-guide upstream-docs falsification gate:
+# code.claude.com/docs/en/hooks.md documents `agent_id` as
+# conditionally-present on TaskCompleted subagent frames — "Present
+# only when the hook fires inside a subagent context. Distinguishes
+# subagent task completions from main-thread task completions").
+# Under the new `is_lead_at_task_completed` predicate
+# (`agent_id is None`), this payload classifies as teammate-frame
+# (agent_id present → False → suppress directive). The lead-context
+# shape mirrors this minus the `agent_id` key — schema-pin tests below
+# assert the 10-key teammate-frame shape; lead-context coverage relies
+# on the absence-of-agent_id behavior tested in
+# `test_lead_session_proceeds_past_gate0`.
 PLATFORM_TASKCOMPLETED_STDIN_SHAPE = {
     "session_id": "1fb6500d-25ba-48c6-af00-5f92024644d0",
     "transcript_path": (
@@ -59,6 +70,7 @@ PLATFORM_TASKCOMPLETED_STDIN_SHAPE = {
     "task_description": "diagnostic probe payload",
     "teammate_name": "backend-coder",
     "team_name": "pact-1fb6500d",
+    "agent_id": "subagent-12ab34cd-5e6f-7890-abcd-ef1234567890",
 }
 
 
@@ -190,21 +202,24 @@ class TestStdinShapePin:
     """
 
     def test_pins_taskcompleted_stdin_keys(self):
-        """The platform delivers exactly these 9 top-level fields on a
-        TaskCompleted hook fire. Producers/consumers of stdin must not
-        silently drop any.
+        """The platform delivers exactly these 10 top-level fields on a
+        TaskCompleted teammate-context hook fire. Lead-context fires
+        omit `agent_id` (per R3 Outcome A documented conditional
+        presence). Producers/consumers of stdin must not silently drop
+        any field; the schema-pin codifies the teammate-frame shape.
         """
         expected_keys = {
             "session_id", "transcript_path", "cwd", "hook_event_name",
             "task_id", "task_subject", "task_description",
-            "teammate_name", "team_name",
+            "teammate_name", "team_name", "agent_id",
         }
         assert set(PLATFORM_TASKCOMPLETED_STDIN_SHAPE.keys()) == expected_keys
 
     def test_pins_taskcompleted_stdin_value_types(self):
         """Each stdin field's value type is pinned. A platform change
         that switches task_id from str to int (or task_description from
-        str to dict) trips this.
+        str to dict) trips this. `agent_id` is `str` on teammate-frame
+        fires (the per-instance UUID); absent on lead-frame fires.
         """
         type_pins = {
             "session_id": str,
@@ -216,6 +231,7 @@ class TestStdinShapePin:
             "task_description": str,
             "teammate_name": str,
             "team_name": str,
+            "agent_id": str,
         }
         for field, expected_type in type_pins.items():
             assert isinstance(
@@ -248,43 +264,34 @@ class TestGate0LeadSessionGuard:
     Stop-sweeps. The marker dedup (Gate 2) is the second line of
     defense; Gate 0 is the first.
 
-    Deferred to #781: the 3 Gate-0 tests below + the Gate-0 row of
-    TestExitContract.test_all_gate_failure_paths_exit_zero synthesize
-    teammate context via session_id != leadSessionId — the legacy
-    buggy discriminator that misclassified in-process teammates
-    sharing the lead's session_id. teardown_request_emitter.py:301
-    still calls the `is_lead_session` backward-compat delegate (which
-    now field-presence-checks agent_id) because TaskCompleted's
-    documented stdin schema lists `teammate_name` rather than
-    `agent_id`; the discriminator choice for this 4th corridor site
-    (teammate_name vs agent_id vs belt-and-suspenders) is deferred to
-    issue #781 pending empirical TaskCompleted-stdin capture via
-    logging-shim. Under the legacy session_id-equality body these
-    tests were GREEN; under the new agent_id-field-presence delegate
-    they correctly classify the session_id-mismatched payload as
-    lead-fire (no agent_id present → is_lead = True) and emit the
-    teardown directive, contradicting the suppress-expectation. The
-    xfail markers use strict=True so that once #781 lands the
-    empirically-correct discriminator AND the payload synthesis here
-    is updated to match it, pytest will surface the resulting xpass
-    as XPASS(strict) → hard CI failure → forces removal of the
-    xfail marker. strict=False would let the deferral rot silently.
+    Discriminator (I1): ``agent_id is None`` per the per-event sibling
+    family in ``shared/wake_lifecycle.py``. The
+    ``is_lead_at_task_completed`` helper at ``teardown_request_emitter.py:301``
+    classifies the fire as lead-frame when the stdin payload omits
+    ``agent_id``, and as teammate-frame when ``agent_id`` carries the
+    platform-stamped per-instance UUID (R3 Outcome A: documented at
+    ``code.claude.com/docs/en/hooks.md`` — "Present only when the hook
+    fires inside a subagent context"). Teammate-context test payloads
+    below synthesize this by including ``agent_id`` explicitly; the
+    lead-frame comparator ``test_lead_session_proceeds_past_gate0``
+    omits it. Test names are aliased ``*_per_agent_id_none_discriminator``
+    per cbcfd589 §AUDIT named-invariant convention so the discriminator
+    is visible at the test-symbol layer.
     """
 
-    @pytest.mark.xfail(
-        reason=(
-            "deferred to #781: TaskCompleted-stdin agent_id capture "
-            "+ teardown_request_emitter.py migration to "
-            "is_lead_emit_authorized. strict=True so the marker MUST "
-            "be lifted (paired with payload migration) when #781 "
-            "lands; silent xpass would let the deferral rot."
-        ),
-        strict=True,
-    )
-    def test_teammate_session_suppresses_emission(self, tmp_path):
-        """A TaskCompleted fire in a teammate session (session_id !=
-        leadSessionId) emits no journal event and produces only
-        suppressOutput stdout.
+    def test_teammate_session_suppresses_emission_per_agent_id_none_discriminator(
+        self, tmp_path,
+    ):
+        """A TaskCompleted fire in a teammate-frame (stdin carries the
+        platform-stamped ``agent_id`` per-instance UUID) emits no
+        journal event and produces only suppressOutput stdout. The
+        ``agent_id is None`` discriminator at Gate 0 classifies any
+        agent_id-bearing payload as non-lead and short-circuits.
+
+        Renamed from ``test_teammate_session_suppresses_emission`` per
+        cbcfd589 §AUDIT named-invariant convention — the new name
+        encodes the per-event discriminator the test pins (I1 =
+        ``agent_id is None`` for the TaskCompleted event class).
         """
         home = tmp_path / "home"; home.mkdir()
         teammate_sid = "teammate-sid"
@@ -309,6 +316,7 @@ class TestGate0LeadSessionGuard:
             "task_id": "T1",
             "team_name": team,
             "teammate_name": "backend-coder",
+            "agent_id": "subagent-T1-teammate-frame-uuid",
         }
         rc, out, err = _run_emitter_subprocess(
             json.dumps(payload),
@@ -319,22 +327,17 @@ class TestGate0LeadSessionGuard:
             f"Teammate-session fire must suppressOutput; got {out!r}"
         )
 
-    @pytest.mark.xfail(
-        reason=(
-            "deferred to #781: TaskCompleted-stdin agent_id capture "
-            "+ teardown_request_emitter.py migration to "
-            "is_lead_emit_authorized. strict=True so the marker MUST "
-            "be lifted (paired with payload migration) when #781 "
-            "lands; silent xpass would let the deferral rot."
-        ),
-        strict=True,
-    )
-    def test_teammate_session_writes_no_journal_event(self, tmp_path):
-        """The teammate-session fire MUST NOT write a teardown_request
-        event to the journal. The journal write is the falsifiable
-        primitive; an unread additionalContext is recoverable, an
-        on-disk journal event is not (Tier-4 cron would replay a
-        phantom Teardown).
+    def test_teammate_session_writes_no_journal_event_per_agent_id_none_discriminator(
+        self, tmp_path,
+    ):
+        """The teammate-frame fire (stdin carries ``agent_id``) MUST
+        NOT write a teardown_request event to the journal. The journal
+        write is the falsifiable primitive; an unread additionalContext
+        is recoverable, an on-disk journal event is not (Tier-4 cron
+        would replay a phantom Teardown).
+
+        Renamed from ``test_teammate_session_writes_no_journal_event``
+        per cbcfd589 §AUDIT named-invariant convention.
         """
         home = tmp_path / "home"; home.mkdir()
         teammate_sid = "teammate-sid"
@@ -360,6 +363,7 @@ class TestGate0LeadSessionGuard:
                 "task_id": "T2",
                 "team_name": team,
                 "teammate_name": "backend-coder",
+                "agent_id": "subagent-T2-teammate-frame-uuid",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -371,20 +375,16 @@ class TestGate0LeadSessionGuard:
             f"event; got {events!r}"
         )
 
-    @pytest.mark.xfail(
-        reason=(
-            "deferred to #781: TaskCompleted-stdin agent_id capture "
-            "+ teardown_request_emitter.py migration to "
-            "is_lead_emit_authorized. strict=True so the marker MUST "
-            "be lifted (paired with payload migration) when #781 "
-            "lands; silent xpass would let the deferral rot."
-        ),
-        strict=True,
-    )
-    def test_teammate_session_does_not_create_marker(self, tmp_path):
-        """Idempotency marker dir is NOT created on Gate-0 short-circuit.
-        Creating it prematurely (e.g. moving the marker write above the
-        guard) would permanently suppress the lead-side fire's emission.
+    def test_teammate_session_does_not_create_marker_per_agent_id_none_discriminator(
+        self, tmp_path,
+    ):
+        """Idempotency marker dir is NOT created on Gate-0 short-circuit
+        (teammate-frame fire). Creating it prematurely (e.g. moving the
+        marker write above the guard) would permanently suppress the
+        lead-side fire's emission.
+
+        Renamed from ``test_teammate_session_does_not_create_marker``
+        per cbcfd589 §AUDIT named-invariant convention.
         """
         home = tmp_path / "home"; home.mkdir()
         teammate_sid = "teammate-sid"
@@ -410,6 +410,7 @@ class TestGate0LeadSessionGuard:
                 "task_id": "T3",
                 "team_name": team,
                 "teammate_name": "backend-coder",
+                "agent_id": "subagent-T3-teammate-frame-uuid",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -1224,8 +1225,14 @@ class TestJournalEventShape:
     def test_no_stdin_field_leaks_into_event(self, tmp_path):
         """The emitted journal event MUST NOT carry stdin fields that
         weren't explicitly forwarded (transcript_path, cwd,
-        task_description, task_subject, teammate_name,
-        hook_event_name). Mirrors agent_handoff_emitter.py discipline.
+        task_description, task_subject, teammate_name, hook_event_name,
+        agent_id). Mirrors agent_handoff_emitter.py discipline.
+
+        Test scenario is a LEAD-FRAME fire (asserts a journal event
+        IS written), so the spread of PLATFORM_TASKCOMPLETED_STDIN_SHAPE
+        drops the teammate-frame ``agent_id`` field — otherwise Gate 0
+        would classify the fire as teammate-frame (`agent_id is None`
+        is False) and short-circuit before the journal write.
         """
         home = tmp_path / "home"; home.mkdir()
         lead_sid = "lead-sid"
@@ -1234,9 +1241,13 @@ class TestJournalEventShape:
         _write_session_context(home, lead_sid, pdir, team)
         _write_task(home, team, "T21", status="completed", owner="backend-coder")
 
+        lead_frame_payload = {
+            k: v for k, v in PLATFORM_TASKCOMPLETED_STDIN_SHAPE.items()
+            if k != "agent_id"
+        }
         _run_emitter_subprocess(
             json.dumps({
-                **PLATFORM_TASKCOMPLETED_STDIN_SHAPE,
+                **lead_frame_payload,
                 "session_id": lead_sid,
                 "cwd": pdir,
                 "task_id": "T21",
@@ -1251,7 +1262,7 @@ class TestJournalEventShape:
         event = events[0]
         for leaked_field in (
             "transcript_path", "cwd", "task_description", "task_subject",
-            "teammate_name", "hook_event_name", "session_id",
+            "teammate_name", "hook_event_name", "session_id", "agent_id",
         ):
             assert leaked_field not in event, (
                 f"stdin field {leaked_field!r} leaked into journal "
@@ -1272,30 +1283,22 @@ class TestExitContract:
     task resolves).
     """
 
-    @pytest.mark.xfail(
-        reason=(
-            "deferred to #781: Gate-0 row of the parametric sweep "
-            "synthesizes teammate context via session_id mismatch "
-            "(legacy discriminator); under the agent_id field-presence "
-            "delegate the payload classifies as lead-fire and emits "
-            "the teardown directive instead of suppressOutput. Gates "
-            "1-4 rows are correct but unreachable because the test "
-            "short-circuits on the Gate-0 assertion failure. strict=True "
-            "so the marker MUST be lifted (paired with Gate-0 payload "
-            "migration) when #781 lands; silent xpass would let the "
-            "deferral rot."
-        ),
-        strict=True,
-    )
-    def test_all_gate_failure_paths_exit_zero(self, tmp_path):
+    def test_all_gate_failure_paths_exit_zero_per_agent_id_none_discriminator(
+        self, tmp_path,
+    ):
         """Every Gate-0..Gate-4 short-circuit path exits 0 with
         suppressOutput stdout. Parametric coverage over the 5 gates.
+        Gate-0 row synthesizes a teammate-frame fire via ``agent_id``
+        presence per the I1 discriminator.
+
+        Renamed from ``test_all_gate_failure_paths_exit_zero`` per
+        cbcfd589 §AUDIT named-invariant convention.
         """
         home = tmp_path / "home"; home.mkdir()
         lead_sid = "lead-sid"
         pdir = "/tmp/p"
 
-        # Gate 0: teammate-session fire
+        # Gate 0: teammate-frame fire (agent_id present)
         team_0 = "team-exit-gate0"
         _write_session_context(
             home, "teammate-sid", pdir, team_0,
@@ -1313,6 +1316,7 @@ class TestExitContract:
                 "hook_event_name": "TaskCompleted",
                 "task_id": "G0", "team_name": team_0,
                 "teammate_name": "backend-coder",
+                "agent_id": "subagent-G0-teammate-frame-uuid",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )

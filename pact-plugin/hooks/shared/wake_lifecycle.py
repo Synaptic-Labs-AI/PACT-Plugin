@@ -12,10 +12,7 @@ Used by: pact-plugin/hooks/wake_lifecycle_emitter.py (PostToolUse hook on
          pact-plugin/hooks/wake_inbox_drain.py (UserPromptSubmit drain;
          consumes `is_lead_drain_authorized`), and
          pact-plugin/hooks/teardown_request_emitter.py (TaskCompleted
-         Teardown Gate 0; calls the `is_lead_session` delegate today —
-         migration to `is_lead_emit_authorized` deferred to #781 pending
-         TaskCompleted-stdin empirical capture of the actor-discriminator
-         field).
+         Teardown Gate 0; consumes `is_lead_at_task_completed`).
 
 Public surface:
 - count_active_tasks(team_name) -> int
@@ -43,22 +40,20 @@ Public surface:
     in-process teammate fires as lead fires because the Claude Code
     platform does not re-issue `session_id` per in-process subagent
     frame. Retained as a thin delegate to minimize blast radius for
-    any caller outside the symmetric corridor; the four corridor sites
-    have migrated to the explicit emit / drain / at-session-start
-    helpers below. Pure function; never raises; returns False on
-    non-dict input.
+    any caller outside the symmetric corridor; all four corridor sites
+    have migrated to the explicit emit / drain / at-session-start /
+    at-task-completed helpers below. Pure function; never raises;
+    returns False on non-dict input.
 - is_lead_emit_authorized(input_data, team_name="") -> bool
-    Predicate. True iff this PostToolUse / TaskCompleted hook fire
-    originated in the lead session. Discriminator:
-    `input_data.get('agent_id') is None`. Canonical replacement for
-    `is_lead_session` at PostToolUse + TaskCompleted callsites.
-    Consumed directly by wake_lifecycle_emitter.py; consumption by
-    teardown_request_emitter.py is deferred to #781 (that callsite
-    still routes through the `is_lead_session` delegate today pending
-    TaskCompleted-stdin empirical capture). Pure function; never
-    raises; returns False on non-dict input. `team_name` is vestigial
-    under the field-presence discriminator but retained for signature
-    uniformity.
+    Predicate. True iff this PostToolUse hook fire originated in the
+    lead session. Discriminator: `input_data.get('agent_id') is None`.
+    Canonical replacement for `is_lead_session` at PostToolUse
+    callsites; consumed directly by wake_lifecycle_emitter.py. The
+    TaskCompleted sibling lives at `is_lead_at_task_completed` (same
+    body, distinct symbol for the per-event partition convention).
+    Pure function; never raises; returns False on non-dict input.
+    `team_name` is vestigial under the field-presence discriminator
+    but retained for signature uniformity.
 - is_lead_drain_authorized(input_data, team_name="") -> bool
     Predicate. True iff this UserPromptSubmit hook fire originated in
     the lead session. Bytes-identical body to
@@ -721,11 +716,12 @@ def is_lead_session(input_data: Any, team_name: str) -> bool:
 
     Retained as a thin delegate (rather than removed) to minimize the
     blast radius for any caller outside the symmetric corridor that
-    references the original symbol. The four corridor sites
+    references the original symbol. All four corridor sites
     (wake_lifecycle_emitter, wake_inbox_drain, teardown_request_emitter,
-    session_init) migrate to the explicit emit / drain / at-session-
-    start helpers in subsequent commits; this delegate keeps any
-    unforeseen consumer correct without a coordinated multi-site flip.
+    session_init) consume the explicit emit / drain / at-session-start
+    / at-task-completed helpers per the per-event partition convention;
+    this delegate keeps any unforeseen consumer correct without
+    requiring a coordinated multi-site flip.
 
     Pure function; never raises. Returns False on non-dict input. The
     ``team_name`` parameter is vestigial under the field-presence
@@ -737,23 +733,24 @@ def is_lead_session(input_data: Any, team_name: str) -> bool:
 
 def is_lead_emit_authorized(input_data: Any, team_name: str = "") -> bool:
     """
-    Return True iff this PostToolUse / TaskCompleted hook fire originated
-    in the lead session (not an in-process teammate frame).
+    Return True iff this PostToolUse hook fire originated in the lead
+    session (not an in-process teammate frame).
 
     Discriminator: ``payload.get('agent_id') is None``. The Claude Code
     platform stamps the in-process subagent's ``agent_id`` field on every
-    PostToolUse / TaskCompleted stdin payload when the fire originates
-    inside a Task-tool-spawned in-process teammate frame; lead-session
-    fires omit the field. The session_id of an in-process teammate equals
-    the lead's session_id (Claude Code does not re-issue session_ids per
+    PostToolUse stdin payload when the fire originates inside a
+    Task-tool-spawned in-process teammate frame; lead-session fires omit
+    the field. The session_id of an in-process teammate equals the
+    lead's session_id (Claude Code does not re-issue session_ids per
     subagent frame), so the legacy ``session_id == leadSessionId`` check
     in :func:`is_lead_session` misclassifies in-process teammate fires as
-    lead fires. This predicate is the canonical replacement for the four
-    surfaces in the symmetric corridor: wake_lifecycle_emitter (PostToolUse),
-    wake_inbox_drain (UserPromptSubmit; see :func:`is_lead_drain_authorized`
-    for the drain-side delegate), teardown_request_emitter (TaskCompleted),
-    and session_init (SessionStart; see :func:`is_lead_at_session_start`
-    for the SessionStart-specific field).
+    lead fires. This predicate is the PostToolUse-specific entry of the
+    per-event sibling family; the TaskCompleted sibling lives at
+    :func:`is_lead_at_task_completed` (same body, distinct symbol for
+    callsite clarity), the UserPromptSubmit sibling at
+    :func:`is_lead_drain_authorized`, and the SessionStart sibling at
+    :func:`is_lead_at_session_start` (reads ``agent_type`` rather than
+    ``agent_id`` per the event-class's stdin schema).
 
     Same field-presence convention as ``dispatch_helpers.trustworthy_actor_name``
     (PreToolUse) and ``pact_context.resolve_agent_name`` — long-standing
@@ -852,13 +849,13 @@ def is_lead_at_task_completed(input_data: Any, team_name: str = "") -> bool:
     schema. The captured-fixture provenance upgrade is a post-merge
     follow-up; this body ships with documented-schema authority.
 
-    Consumed by ``teardown_request_emitter.py`` Gate 0 (callsite
-    migration is the C3b commit). The previous Gate 0 routed through
-    the :func:`is_lead_session` backward-compat delegate (also
-    ``agent_id is None`` body via delegation) — semantically equivalent
-    today; the rename to this helper makes the per-event partition
-    convention explicit at the callsite and documents the TaskCompleted
-    discriminator choice in one place.
+    Consumed by ``teardown_request_emitter.py`` Gate 0 (line 301).
+    The previous Gate 0 routed through the :func:`is_lead_session`
+    backward-compat delegate (also ``agent_id is None`` body via
+    delegation) — semantically equivalent at the callsite; the
+    explicit binding here documents the TaskCompleted discriminator
+    choice in one place and aligns the corridor with the per-event
+    partition convention.
 
     Pure function; never raises. Returns False on non-dict input
     (SEC-S1 observe-only invariant: ambiguous-actor returns the

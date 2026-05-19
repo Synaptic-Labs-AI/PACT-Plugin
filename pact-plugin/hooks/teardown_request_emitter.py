@@ -27,7 +27,7 @@ NOT responsible for:
   (Tier-4 cron-staleness fallback is a separate surface).
 
 Emission invariant: write exactly one teardown_request event iff
-(0)  is_lead_session(input_data, team_name) — defense-in-depth Gate 0
+(0)  is_lead_at_task_completed(input_data, team_name) — defense-in-depth Gate 0
 AND
 (1)  hook_event_name == "TaskCompleted" OR (fallback) disk-read task
      status == "completed" — primary transition signal + fallback
@@ -112,7 +112,7 @@ from shared.task_utils import read_task_json
 from shared.wake_lifecycle import (
     count_active_tasks,
     has_same_teammate_continuation,
-    is_lead_session,
+    is_lead_at_task_completed,
 )
 
 # Reuse the canonical _TEARDOWN_DIRECTIVE literal from the emitter so the
@@ -297,8 +297,16 @@ def main() -> None:
 
         # Gate 0 — defense-in-depth lead-session check. Mirrors
         # wake_lifecycle_emitter.py:654; teammate-session input never
-        # reaches the journal write or directive emission paths.
-        if not is_lead_session(input_data, team_name):
+        # reaches the journal write or directive emission paths. Uses
+        # the per-event `is_lead_at_task_completed` discriminator
+        # (`agent_id is None`) per #781 architect §1+§2 + R3 Outcome A
+        # (claude-code-guide upstream-docs falsification gate confirmed
+        # `agent_id` conditional-presence on TaskCompleted subagent
+        # frames). Semantically equivalent to the prior `is_lead_session`
+        # backward-compat delegate at this callsite today (the delegate
+        # body is identical), but binds the per-event partition
+        # convention explicitly at the callsite.
+        if not is_lead_at_task_completed(input_data, team_name):
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
