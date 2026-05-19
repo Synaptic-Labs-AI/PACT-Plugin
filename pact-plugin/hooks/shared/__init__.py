@@ -55,7 +55,10 @@ from .merge_guard_common import (
     TOKEN_DIR,
     TOKEN_PREFIX,
     MAX_USES,
+    ORPHAN_TOKEN_MAX_AGE_SECONDS,
     cleanup_consumed_tokens,
+    cleanup_unused_tokens,
+    cleanup_orphan_tokens,
     detect_command_operation_type,
 )
 from .error_output import hook_error_json
@@ -139,7 +142,10 @@ __all__ = [
     "TOKEN_DIR",
     "TOKEN_PREFIX",
     "MAX_USES",
+    "ORPHAN_TOKEN_MAX_AGE_SECONDS",
     "cleanup_consumed_tokens",
+    "cleanup_unused_tokens",
+    "cleanup_orphan_tokens",
     "detect_command_operation_type",
     "hook_error_json",
     "check_pr_state",
