@@ -14,7 +14,7 @@ those smoke tests, per the test-engineer ENGAGEMENT rule.
 | Surface  | Class                                            | Scope                   |
 |----------|--------------------------------------------------|-------------------------|
 | TS-1     | TestIsLeadAtTaskCompletedPureContract            | helper pure-fn          |
-| TS-2     | TestSiblingDiscriminatorParity                   | helper×helper           |
+| TS-2     | TestSiblingDiscriminatorDivergence               | per-event partition     |
 | TS-3     | TestObserveOnlyInvariant                         | SEC-S1 routing          |
 | TS-4     | TestVestigialTeamNameKwargAcceptance             | signature parity        |
 | TS-5     | TestDiscriminatorI1NamedInvariantPin             | named-invariant         |
@@ -24,7 +24,7 @@ those smoke tests, per the test-engineer ENGAGEMENT rule.
 | TS-9     | TestFalseTransitionClaimAbsenceAcrossSites       | #738 site sweep         |
 | TS-10    | TestRiskElevenStrictXfailMechanismIntegrity      | rename + count          |
 | TS-11    | TestPerPayloadSemanticReviewDiscipline           | phantom-green doc pin   |
-| TS-12-14 | TestPostMergeFollowUpSpecs (docstring-only)      | spec, post-merge        |
+| TS-12    | TestPostMergeFollowUpSpecs                       | fixture-parity (live)   |
 
 # Backend-coder smoke-vs-test-engineer-comprehensive split (ENGAGEMENT rule)
 
