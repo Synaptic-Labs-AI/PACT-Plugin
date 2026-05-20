@@ -41,10 +41,11 @@ HOOK_DIR = Path(__file__).resolve().parent.parent / "hooks"
 EMITTER = HOOK_DIR / "teardown_request_emitter.py"
 
 # Synthesized TaskCompleted teammate-context stdin shape (in-PR backstop
-# for the #781 helper migration). Provenance is "synthesized-from-
-# documented-schema" per PLATFORM_TASKCOMPLETED_STDIN_SHAPE_META below;
-# the captured-fixture upgrade to "logging-shim" provenance is the
-# post-merge follow-up commit. Carries `agent_id` per the upstream
+# for the is_lead_at_task_completed helper migration). Provenance is
+# "synthesized-from-documented-schema" per
+# PLATFORM_TASKCOMPLETED_STDIN_SHAPE_META below; the captured-fixture
+# upgrade to "logging-shim" provenance is the post-merge follow-up
+# commit. Carries `agent_id` per the upstream
 # Claude Code documentation (code.claude.com/docs/en/hooks.md
 # documents `agent_id` as conditionally-present on TaskCompleted
 # subagent frames — "Present only when the hook fires inside a
@@ -409,7 +410,7 @@ class TestGate0LeadSessionGuard:
     ``is_lead_at_task_completed`` helper at ``teardown_request_emitter.py:301``
     classifies the fire as lead-frame when the stdin payload omits
     ``agent_id``, and as teammate-frame when ``agent_id`` carries the
-    platform-stamped per-instance UUID (R3 Outcome A: documented at
+    platform-stamped per-instance UUID (documented at
     ``code.claude.com/docs/en/hooks.md`` — "Present only when the hook
     fires inside a subagent context"). Teammate-context test payloads
     below synthesize this by including ``agent_id`` explicitly; the
