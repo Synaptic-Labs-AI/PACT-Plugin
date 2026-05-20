@@ -1116,20 +1116,18 @@ class TestPerPayloadSemanticReviewDiscipline:
 
 
 # =============================================================================
-# TS-12, TS-13, TS-14: POST-MERGE FOLLOW-UP SPECS (docstring-only, skipped)
+# TS-12: Captured-fixture parity (activated against in-session captures)
 # =============================================================================
 
 
 class TestPostMergeFollowUpSpecs:
-    """Specifications for post-capture follow-up tests. The 3 paired-
-    fixture tests (TS-12) ACTIVATED in this dispatch: the post-merge
-    capture campaign happened IN-SESSION on 2026-05-20, the paired
-    captured fixtures landed in
-    pact-plugin/tests/fixtures/wake_lifecycle/, and these tests now
-    assert against the real captured shapes. The 2 remaining stubs
-    (TS-13 #786 PostToolUse falsifier, TS-14 #806 SubagentStop)
-    remain skipped because their event-class captures are
-    intentionally out of scope for this PR.
+    """Captured-fixture parity tests. The 3 tests in this class assert
+    that the captured TaskCompleted stdin fixtures under
+    pact-plugin/tests/fixtures/wake_lifecycle/ match the empirical
+    schema (lead-frame omits teammate_name + team_name; teammate-frame
+    carries both), and that the is_lead_at_task_completed helper
+    classifies each fixture correctly per the empirical-grounded
+    predicate body.
 
     Activation history:
     1. The in-session TaskCompleted capture campaign landed 3 real
@@ -1139,10 +1137,14 @@ class TestPostMergeFollowUpSpecs:
        pact-plugin/tests/fixtures/wake_lifecycle/
        taskcompleted_{lead,teammate}_context_shape.json with
        `_meta.capture_method: "logging-shim"`.
-    3. The TS-12 spec-stubs in this class were ACTIVATED (skip
-       removed; assertions implemented).
-    4. TS-13 + TS-14 stubs remain skipped (their captures are
-       follow-up issues, out of this PR's scope).
+    3. The 3 spec-stubs in this class were ACTIVATED (skip removed;
+       assertions implemented against the captured fixtures).
+
+    Sibling event-class audits (PostToolUse falsifier, SubagentStop
+    discriminator) were originally planned alongside the TaskCompleted
+    captures here but are tracked separately as their own follow-up
+    issues; see the removal-comment after the last test method below
+    for the canonical record.
     """
 
     # ---- TS-12: Captured-fixture parity specs (ACTIVATED) ----
