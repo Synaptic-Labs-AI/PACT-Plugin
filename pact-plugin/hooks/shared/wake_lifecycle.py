@@ -73,17 +73,22 @@ Public surface:
     raises; returns False on non-dict input.
 - is_lead_at_task_completed(input_data, team_name="") -> bool
     Predicate. True iff this TaskCompleted hook fire originated in the
-    lead session. Discriminator: `input_data.get('agent_id') is None`
-    — TaskCompleted's in-subagent frame stamps `agent_id` per Claude
-    Code platform docs (code.claude.com/docs/en/hooks.md documents
-    `agent_id` as conditionally-present on TaskCompleted subagent
-    frames, identical pattern to PostToolUse). Cell-1/cell-3 backstop
-    per #781 architect §2 2x2 decision table and R3 Outcome A
-    (documented-schema falsification gate result). Consumed by
+    lead session. Discriminator: `input_data.get('teammate_name') is None`
+    — per empirical TaskCompleted captures landed via the in-repo shim
+    at `pact-plugin/tests/runbooks/install_taskcompleted_logging_shim.sh`,
+    `teammate_name` is present on teammate-driven completions and absent
+    on lead-driven completions. Upstream Claude Code docs
+    (`code.claude.com/docs/en/hooks.md`) document `agent_id` as
+    conditionally present in the "Common input fields" section ("only
+    when the hook fires inside a subagent call"), but are silent on
+    whether TaskCompleted fires in subagent context. Empirically,
+    TaskCompleted does NOT fire in subagent context for in-team teammate
+    task completions, so `agent_id` never appears on TaskCompleted stdin
+    and is unsuitable as a discriminator. Consumed by
     teardown_request_emitter.py Gate 0. Pure function; never raises;
-    returns False on non-dict input. `team_name` parameter is
-    vestigial under the field-presence discriminator but retained for
-    signature uniformity with the 4 sibling helpers.
+    returns False on non-dict input. `team_name` parameter is vestigial
+    under the field-presence discriminator but retained for signature
+    uniformity with the 4 sibling helpers.
 - _lifecycle_relevant(task, team_name="") -> bool
     Predicate. True iff the task counts toward the active-work tally that
     arms/tears down the wake mechanism.
@@ -829,33 +834,48 @@ def is_lead_at_task_completed(input_data: Any, team_name: str = "") -> bool:
     Return True iff this TaskCompleted hook fire originated in the lead
     session (not an in-process teammate frame).
 
-    Discriminator: ``payload.get('agent_id') is None``. Per Claude Code
-    platform documentation (``code.claude.com/docs/en/hooks.md``,
-    TaskCompleted section): ``agent_id`` is *Present only when the hook
-    fires inside a subagent context. Distinguishes subagent task
-    completions from main-thread task completions.* The lead-session
-    TaskCompleted fire omits the field; in-process teammate frames
-    carry the platform-stamped per-instance UUID. Same field as the
-    PostToolUse sibling :func:`is_lead_emit_authorized` (identical
-    discriminator across both event classes).
+    Discriminator: ``payload.get('teammate_name') is None``. Empirical
+    provenance: 3 real TaskCompleted captures landed 2026-05-20 via the
+    in-repo TaskCompleted shim at
+    ``pact-plugin/tests/runbooks/install_taskcompleted_logging_shim.sh``.
+    The captures show two distinct stdin shapes:
 
-    This is the cell-1/cell-3 backstop body per the #781 architect
-    §2 2x2 decision table: dimension A (does teammate-context
-    TaskCompleted carry ``agent_id``?) resolved to YES by R3 Outcome
-    A (upstream-docs falsification gate result, 2026-05-19). Cells 1
-    and 3 collapse to a single-field predicate identical to the
-    production-proven PostToolUse pattern; cells 2 and 4 are
-    fossilized-bug-defense fallbacks not reached under the documented
-    schema. The captured-fixture provenance upgrade is a post-merge
-    follow-up; this body ships with documented-schema authority.
+    - Teammate-driven completion (the teammate self-completes its own
+      task; e.g. secretary completing a teachback task): ``teammate_name``
+      and ``team_name`` are PRESENT, ``agent_id`` is ABSENT.
+    - Lead-driven completion (the lead completes a teammate task or its
+      own task): ``teammate_name`` and ``team_name`` are ABSENT,
+      ``agent_id`` is ABSENT. ``agent_type`` may be present
+      (e.g. ``PACT:pact-orchestrator``) but is not used as a
+      discriminator here.
 
-    Consumed by ``teardown_request_emitter.py`` Gate 0 (line 309).
-    The previous Gate 0 routed through the :func:`is_lead_session`
-    backward-compat delegate (also ``agent_id is None`` body via
-    delegation) — semantically equivalent at the callsite; the
-    explicit binding here documents the TaskCompleted discriminator
-    choice in one place and aligns the corridor with the per-event
-    partition convention.
+    Therefore ``teammate_name`` PRESENCE is the lead-vs-teammate
+    discriminator at TaskCompleted: present = teammate-driven (suppress
+    directive); absent = lead-driven (emit directive).
+
+    Upstream Claude Code documentation
+    (``code.claude.com/docs/en/hooks.md``) lists ``agent_id`` in the
+    "Common input fields" section as conditionally present "only when
+    the hook fires inside a subagent call". The docs are silent on
+    whether TaskCompleted fires in subagent context. Empirically,
+    TaskCompleted does NOT fire in subagent context for in-team
+    teammate task completions, so ``agent_id`` never appears on
+    TaskCompleted stdin and is unsuitable as a discriminator. This is
+    why ``is_lead_at_task_completed`` reads ``teammate_name`` rather
+    than ``agent_id`` (the sibling PostToolUse predicate
+    :func:`is_lead_emit_authorized` reads ``agent_id`` because
+    PostToolUse DOES fire in subagent context and the field IS present
+    there — the per-event partition reflects each event's actual stdin
+    schema, not a uniform-field assumption).
+
+    Consumed by ``teardown_request_emitter.py`` Gate 0. The previous
+    Gate 0 routed through the :func:`is_lead_session` backward-compat
+    delegate (``agent_id is None`` body via delegation, also incorrect
+    on TaskCompleted but symptomatically silent because ``agent_id``
+    is always absent — the legacy delegate treated every TaskCompleted
+    fire as lead-context, including teammate self-completes); the
+    empirical capture campaign surfaced the mis-classification and the
+    explicit binding here corrects it.
 
     Pure function; never raises. Returns False on non-dict input
     (SEC-S1 observe-only invariant: ambiguous-actor returns the
@@ -867,4 +887,4 @@ def is_lead_at_task_completed(input_data: Any, team_name: str = "") -> bool:
     """
     if not isinstance(input_data, dict):
         return False
-    return input_data.get("agent_id") is None
+    return input_data.get("teammate_name") is None

@@ -299,13 +299,15 @@ def main() -> None:
         # wake_lifecycle_emitter.py:654; teammate-session input never
         # reaches the journal write or directive emission paths. Uses
         # the per-event `is_lead_at_task_completed` discriminator
-        # (`agent_id is None`) per #781 architect §1+§2 + R3 Outcome A
-        # (claude-code-guide upstream-docs falsification gate confirmed
-        # `agent_id` conditional-presence on TaskCompleted subagent
-        # frames). Semantically equivalent to the prior `is_lead_session`
-        # backward-compat delegate at this callsite today (the delegate
-        # body is identical), but binds the per-event partition
-        # convention explicitly at the callsite.
+        # (`teammate_name is None`) per empirical TaskCompleted captures
+        # landed via the in-repo shim at
+        # pact-plugin/tests/runbooks/install_taskcompleted_logging_shim.sh.
+        # Captures show teammate-driven completions carry `teammate_name`
+        # and lead-driven completions omit it; `agent_id` empirically
+        # never appears on TaskCompleted stdin (the field is documented
+        # in the upstream "Common input fields" section as conditional
+        # on subagent context, but TaskCompleted does not fire in
+        # subagent context for in-team teammate task completions).
         if not is_lead_at_task_completed(input_data, team_name):
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
