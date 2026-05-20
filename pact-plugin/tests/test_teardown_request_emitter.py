@@ -41,20 +41,21 @@ HOOK_DIR = Path(__file__).resolve().parent.parent / "hooks"
 EMITTER = HOOK_DIR / "teardown_request_emitter.py"
 
 # Synthesized TaskCompleted teammate-context stdin shape (in-PR backstop
-# per #781 architect §3 step 2 + §4 ROADMAP). _meta.capture_method:
-# "synthesized" — the captured-fixture upgrade to "logging-shim"
-# provenance is the post-merge follow-up commit. Carries `agent_id` per
-# R3 Outcome A (claude-code-guide upstream-docs falsification gate:
-# code.claude.com/docs/en/hooks.md documents `agent_id` as
-# conditionally-present on TaskCompleted subagent frames — "Present
-# only when the hook fires inside a subagent context. Distinguishes
-# subagent task completions from main-thread task completions").
-# Under the new `is_lead_at_task_completed` predicate
-# (`agent_id is None`), this payload classifies as teammate-frame
-# (agent_id present → False → suppress directive). The lead-context
-# shape mirrors this minus the `agent_id` key — schema-pin tests below
-# assert the 10-key teammate-frame shape; lead-context coverage relies
-# on the absence-of-agent_id behavior tested in
+# for the #781 helper migration). Provenance is "synthesized-from-
+# documented-schema" per PLATFORM_TASKCOMPLETED_STDIN_SHAPE_META below;
+# the captured-fixture upgrade to "logging-shim" provenance is the
+# post-merge follow-up commit. Carries `agent_id` per the upstream
+# Claude Code documentation (code.claude.com/docs/en/hooks.md
+# documents `agent_id` as conditionally-present on TaskCompleted
+# subagent frames — "Present only when the hook fires inside a
+# subagent context. Distinguishes subagent task completions from
+# main-thread task completions"). Under the new
+# `is_lead_at_task_completed` predicate (`agent_id is None`), this
+# payload classifies as teammate-frame (agent_id present → False →
+# suppress directive). The lead-context shape (see
+# LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE below) mirrors this minus
+# the `agent_id` key; lead-context coverage is via the paired schema-
+# pin class TestLeadFrameStdinShapePin AND the behavioral
 # `test_lead_session_proceeds_past_gate0`.
 PLATFORM_TASKCOMPLETED_STDIN_SHAPE = {
     "session_id": "1fb6500d-25ba-48c6-af00-5f92024644d0",
@@ -70,7 +71,32 @@ PLATFORM_TASKCOMPLETED_STDIN_SHAPE = {
     "task_description": "diagnostic probe payload",
     "teammate_name": "backend-coder",
     "team_name": "pact-1fb6500d",
-    "agent_id": "subagent-12ab34cd-5e6f-7890-abcd-ef1234567890",
+    "agent_id": "subagent-T0-teammate-frame-uuid",
+}
+
+# Lead-frame counterpart to PLATFORM_TASKCOMPLETED_STDIN_SHAPE — the
+# same 9 documented keys with `agent_id` ABSENT. Per the upstream
+# Claude Code documentation, lead-context TaskCompleted fires omit
+# the `agent_id` field entirely; the `is_lead_at_task_completed`
+# predicate's `agent_id is None` body classifies a key-absent payload
+# as lead-frame (True → emit). Paired with TestLeadFrameStdinShapePin
+# below to canary lead-frame schema drift (lead-only field additions
+# would otherwise slip past the teammate-frame canary).
+LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE = {
+    "session_id": "1fb6500d-25ba-48c6-af00-5f92024644d0",
+    "transcript_path": (
+        "/Users/example/.claude/projects/"
+        "-Users-example-Sites-collab-PACT-Plugin/"
+        "1fb6500d-25ba-48c6-af00-5f92024644d0.jsonl"
+    ),
+    "cwd": "/Users/example/Sites/collab/PACT-Plugin",
+    "hook_event_name": "TaskCompleted",
+    "task_id": "42",
+    "task_subject": "PROBE: capture real TaskCompleted stdin shape",
+    "task_description": "diagnostic probe payload",
+    "teammate_name": "backend-coder",
+    "team_name": "pact-1fb6500d",
+    # NOTE: no `agent_id` key — defines the lead-frame schema.
 }
 
 
@@ -190,11 +216,33 @@ def _read_journal_events(home, project_dir, session_id, event_type=None):
 # =============================================================================
 
 
+#: Provenance metadata for PLATFORM_TASKCOMPLETED_STDIN_SHAPE. The
+#: synthesized payload above is derived from upstream Claude Code
+#: platform documentation (code.claude.com/docs/en/hooks.md,
+#: TaskCompleted section) rather than captured-from-production via
+#: logging-shim. The post-merge follow-up upgrades provenance to
+#: capture-from-production fixtures (paired lead + teammate-context
+#: shapes); this in-PR stopgap is documented-schema-grounded.
+PLATFORM_TASKCOMPLETED_STDIN_SHAPE_META = {
+    "capture_method": "synthesized-from-documented-schema",
+    "ground_truth_source": "code.claude.com/docs/en/hooks.md",
+    "provenance_upgrade": "post-merge follow-up via logging-shim capture campaign",
+}
+
+
 class TestStdinShapePin:
-    """Pin the verbatim TaskCompleted stdin shape against a captured-
-    from-production fixture. Future platform changes (Claude Code adding
-    or removing fields) trip this test BEFORE silent production
-    breakage. Mirrors test_emitter_real_disk.TestStdinShapePin.
+    """Pin the verbatim TaskCompleted teammate-frame stdin shape against
+    the synthesized payload derived from upstream Claude Code platform
+    documentation (post-merge follow-up upgrades provenance to logging-
+    shim capture-from-production fixtures). Future platform changes
+    (Claude Code adding or removing fields) trip this test BEFORE
+    silent production breakage. Mirrors test_emitter_real_disk.
+    TestStdinShapePin.
+
+    Provenance: see PLATFORM_TASKCOMPLETED_STDIN_SHAPE_META adjacent to
+    the payload definition. The synthesized shape is grounded in the
+    upstream docs' TaskCompleted section, NOT a live-capture fixture
+    today; the post-merge follow-up promotes the captured payload.
 
     Counter-test-by-revert: changing the PLATFORM_TASKCOMPLETED_STDIN_
     SHAPE keys flips these tests RED — the canary for stdin schema
@@ -204,9 +252,10 @@ class TestStdinShapePin:
     def test_pins_taskcompleted_stdin_keys(self):
         """The platform delivers exactly these 10 top-level fields on a
         TaskCompleted teammate-context hook fire. Lead-context fires
-        omit `agent_id` (per R3 Outcome A documented conditional
-        presence). Producers/consumers of stdin must not silently drop
-        any field; the schema-pin codifies the teammate-frame shape.
+        omit `agent_id` (per the upstream Claude Code documentation's
+        conditional-presence semantics for the `agent_id` field).
+        Producers/consumers of stdin must not silently drop any field;
+        the schema-pin codifies the teammate-frame shape.
         """
         expected_keys = {
             "session_id", "transcript_path", "cwd", "hook_event_name",
@@ -248,6 +297,97 @@ class TestStdinShapePin:
         primary path from silently breaking.
         """
         assert PLATFORM_TASKCOMPLETED_STDIN_SHAPE["hook_event_name"] == (
+            "TaskCompleted"
+        )
+
+
+# =============================================================================
+# TestLeadFrameStdinShapePin — paired canary for the 9-key lead-frame
+# shape (the schema-pin's lead-context arm; without this, a lead-only
+# field addition would slip past TestStdinShapePin's teammate-frame
+# canary).
+# =============================================================================
+
+
+class TestLeadFrameStdinShapePin:
+    """Pin the verbatim TaskCompleted LEAD-frame stdin shape against
+    LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE. Lead-context fires omit
+    `agent_id` per upstream Claude Code documentation; this paired
+    pin codifies the 9-key shape so a future platform change that
+    adds a lead-only field trips RED before silent production breakage.
+
+    Why pair this with TestStdinShapePin: the existing teammate-frame
+    pin alone canary's only the 10-key shape that carries `agent_id`.
+    A platform change adding a NEW lead-only field would not affect
+    that teammate-frame set and would slip silently. The paired pin
+    closes the gap.
+
+    Counter-test-by-revert: changing the
+    LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE keys flips these tests
+    RED — the canary for lead-frame stdin schema drift.
+    """
+
+    def test_pins_lead_frame_taskcompleted_stdin_keys(self):
+        """The platform delivers exactly these 9 top-level fields on a
+        TaskCompleted lead-context hook fire — no `agent_id` key. Any
+        platform change adding/removing a lead-frame field trips this.
+        """
+        expected_keys = {
+            "session_id", "transcript_path", "cwd", "hook_event_name",
+            "task_id", "task_subject", "task_description",
+            "teammate_name", "team_name",
+        }
+        assert set(
+            LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE.keys()
+        ) == expected_keys
+
+    def test_lead_frame_omits_agent_id_key(self):
+        """The discriminator `is_lead_at_task_completed` body is
+        `input_data.get("agent_id") is None`. The lead-frame fixture
+        MUST omit `agent_id` entirely (key-absent), NOT carry it as
+        `None`-valued — both shapes classify as lead under `is None`,
+        but the documented schema is key-absent and the pin enforces
+        that documented shape.
+        """
+        assert "agent_id" not in LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE, (
+            "LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE must omit `agent_id` "
+            "entirely per the documented lead-context schema. Carrying "
+            "`agent_id: None` would still classify as lead under the "
+            "`is None` predicate but would not match the documented "
+            "key-absent shape."
+        )
+
+    def test_lead_frame_value_types_match_documented_schema(self):
+        """Each lead-frame stdin field's value type is pinned. A
+        platform change that switches task_id from str to int (or
+        task_description from str to dict) trips this. Same 9 type
+        pins as the teammate-frame minus `agent_id`.
+        """
+        type_pins = {
+            "session_id": str,
+            "transcript_path": str,
+            "cwd": str,
+            "hook_event_name": str,
+            "task_id": str,
+            "task_subject": str,
+            "task_description": str,
+            "teammate_name": str,
+            "team_name": str,
+        }
+        for field, expected_type in type_pins.items():
+            assert isinstance(
+                LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE[field], expected_type
+            ), (
+                f"lead-frame {field} expected {expected_type.__name__}, "
+                f"got "
+                f"{type(LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE[field]).__name__}"
+            )
+
+    def test_lead_frame_hook_event_name_is_taskcompleted(self):
+        """The primary transition signal is the literal 'TaskCompleted'
+        on lead-frame fires too. Same literal as the teammate-frame.
+        """
+        assert LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE["hook_event_name"] == (
             "TaskCompleted"
         )
 

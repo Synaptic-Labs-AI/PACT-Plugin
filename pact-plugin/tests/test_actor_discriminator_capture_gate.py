@@ -109,6 +109,61 @@ class TestIsLeadAtTaskCompletedPureContract:
         else:
             assert wl.is_lead_at_task_completed(bad_input, "any-team") is False
 
+    # F1-test (cycle-2 adoption): pin the isinstance-gate behavior
+    # across dict-subclass / Mapping-subclass shapes.
+    # `isinstance(_, dict)` is True for OrderedDict + defaultdict
+    # (dict subclasses) — they traverse the gate and the
+    # agent_id-presence path classifies normally. It is False for
+    # types.MappingProxyType (a separate Mapping protocol
+    # implementation, NOT a dict subclass) — those traverse the
+    # isinstance-False short-circuit and ALWAYS return False
+    # (teammate) even when the underlying mapping has no agent_id key.
+    # Academic for Claude Code stdin (always plain `dict`), but
+    # pinning rules out a future "treat all Mappings as dict" edit
+    # that would silently change the asymmetry.
+    def test_ordered_dict_with_agent_id_classifies_as_teammate(self):
+        from collections import OrderedDict
+        payload = OrderedDict(
+            {"agent_id": "subagent-mapping-teammate-frame-uuid"}
+        )
+        assert wl.is_lead_at_task_completed(payload, "team-x") is False
+
+    def test_defaultdict_with_agent_id_classifies_as_teammate(self):
+        from collections import defaultdict
+        payload = defaultdict(str)
+        payload["agent_id"] = "subagent-mapping-teammate-frame-uuid"
+        assert wl.is_lead_at_task_completed(payload, "team-x") is False
+
+    def test_mapping_proxy_type_with_agent_id_short_circuits_to_false(self):
+        """MappingProxyType is NOT a dict subclass — isinstance gate
+        returns False → helper returns False (teammate). This is
+        academic for Claude Code stdin but pinning the asymmetry
+        prevents a future 'treat all Mappings as dict' edit from
+        silently changing the gate semantics.
+        """
+        from types import MappingProxyType
+        payload = MappingProxyType(
+            {"agent_id": "subagent-mapping-teammate-frame-uuid"}
+        )
+        assert wl.is_lead_at_task_completed(payload, "team-x") is False
+
+    def test_mapping_proxy_type_empty_short_circuits_to_false(self):
+        """MappingProxyType({}) is a `key-absent` Mapping shape that
+        SHOULD classify as lead under the documented schema (no
+        agent_id → lead), but the isinstance gate's strict dict-only
+        check causes False (teammate) instead. This is the academic
+        false-positive surfaced by the bias-disclosed review finding;
+        pinning it documents the asymmetric isinstance-gate behavior
+        so a future Mapping-aware edit is deliberate.
+        """
+        from types import MappingProxyType
+        payload = MappingProxyType({})
+        # NOTE: would return True under a Mapping-aware predicate;
+        # the isinstance(_, dict) gate returns False instead.
+        # Document the asymmetry — do NOT relax the gate without a
+        # paired audit.
+        assert wl.is_lead_at_task_completed(payload, "team-x") is False
+
     def test_lead_frame_empty_payload_classifies_as_lead(self):
         """Edge case for SEC-S1: bare `{}` passes the isinstance gate
         AND has no `agent_id` key → True (lead). This is the documented
@@ -133,7 +188,7 @@ class TestIsLeadAtTaskCompletedPureContract:
             "task_id": "T1",
             "team_name": "team-x",
             "teammate_name": "backend-coder",
-            "agent_id": "subagent-12ab34cd-5e6f-7890-abcd-ef1234567890",
+            "agent_id": "subagent-pure-contract-teammate-frame-uuid",
         }
         assert wl.is_lead_at_task_completed(payload, "team-x") is False
 
@@ -213,10 +268,13 @@ class TestSiblingDiscriminatorParity:
     @pytest.mark.parametrize("payload", [
         {},
         {"agent_id": None},
-        {"agent_id": "subagent-uuid-1"},
+        {"agent_id": "subagent-parity-1-teammate-frame-uuid"},
         {"agent_id": ""},
         {"hook_event_name": "TaskCompleted"},
-        {"teammate_name": "backend-coder", "agent_id": "subagent-x"},
+        {
+            "teammate_name": "backend-coder",
+            "agent_id": "subagent-parity-2-teammate-frame-uuid",
+        },
         {"team_name": "team-x"},
         {"session_id": "sid", "task_id": "T"},
     ])
@@ -248,7 +306,9 @@ class TestSiblingDiscriminatorParity:
         from collapsing the per-event partition convention.
         """
         # Payload with agent_id present but agent_type absent.
-        payload_agent_id_only = {"agent_id": "subagent-x"}
+        payload_agent_id_only = {
+            "agent_id": "subagent-partition-teammate-frame-uuid",
+        }
         # TaskCompleted/PostToolUse classify as teammate (agent_id present).
         assert wl.is_lead_at_task_completed(payload_agent_id_only) is False
         assert wl.is_lead_emit_authorized(payload_agent_id_only) is False
@@ -335,7 +395,7 @@ class TestObserveOnlyInvariant:
         assert wl.is_lead_at_task_completed({}, "team-x") is True
         # Teammate-frame agent_id STAYS teammate regardless of env.
         assert wl.is_lead_at_task_completed(
-            {"agent_id": "subagent-x"}, "team-x",
+            {"agent_id": "subagent-environ-teammate-frame-uuid"}, "team-x",
         ) is False
 
 
@@ -646,6 +706,33 @@ class TestDirectiveByteIdentityOnPactSkillLiterals:
 # TS-9: TestFalseTransitionClaimAbsenceAcrossSites — #738 site sweep
 # =============================================================================
 
+# F2-test (cycle-2 adoption): explicit allowlist of permitted fixture
+# files that legitimately carry the retired-prose literal as task-
+# subject content (NOT directive prose). The sweep below skips any
+# .json file under `fixtures/` AND filters its hits against this
+# allowlist; any future fixture that grows a hit MUST be explicitly
+# added here with a one-line rationale. This makes the "why is this
+# fixture exempt?" question discoverable from a single grep.
+#
+# Rationale (per cycle-2 finding F2-test): the two fixture files
+# below carry "First active teammate task" as a `subject` field on
+# synthetic task records used for stdin-shape probes. These are
+# task subjects, not directive prose; they predate the #738 rewrite
+# and remain valid synthetic test data. A future reader grepping
+# for the retired literal would otherwise have to re-derive why
+# these 2 hits don't trip the discipline — the allowlist documents
+# the exemption inline.
+FIXTURE_PROSE_ALLOWLIST = {
+    "task_create_production_shape.json": (
+        "carries 'First active teammate task' as a synthetic task "
+        "`subject` field, not directive prose"
+    ),
+    "task_update_production_shape.json": (
+        "carries 'First active teammate task' as a synthetic task "
+        "`subject` field, not directive prose"
+    ),
+}
+
 
 class TestFalseTransitionClaimAbsenceAcrossSites:
     """#738 root cause: the original directives' "First active teammate
@@ -750,6 +837,51 @@ class TestFalseTransitionClaimAbsenceAcrossSites:
             f"Retired #738 prose {retired_prose!r} found in runbooks. "
             f"The directive-prose rewrite expected zero hits. Hits:\n"
             + "\n".join(hits)
+        )
+
+    def test_fixture_prose_allowlist_matches_disk_state(self):
+        """F2-test (cycle-2): pin the FIXTURE_PROSE_ALLOWLIST against
+        the actual disk state. Every fixture file under
+        pact-plugin/tests/fixtures/ that carries the retired prose
+        literal MUST appear in the allowlist; every allowlist entry
+        MUST exist on disk. A future fixture refactor that adds OR
+        removes a permitted fixture surface trips this pin and forces
+        an allowlist update — keeping the documented exemption in
+        sync with reality per SEC-AC-2 verify-against-disk discipline.
+        """
+        fixtures_root = PLUGIN_ROOT / "tests" / "fixtures"
+        if not fixtures_root.exists():
+            pytest.skip("fixtures dir not present in this checkout")
+        retired_literals = (
+            "First active teammate task created",
+            "Last active teammate task completed",
+            # Truncated fixture-subject form (see allowlist rationale):
+            "First active teammate task",
+        )
+        actual_hits = set()
+        for path in fixtures_root.rglob("*.json"):
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            if any(lit in text for lit in retired_literals):
+                actual_hits.add(path.name)
+        allowlisted = set(FIXTURE_PROSE_ALLOWLIST.keys())
+        missing_from_allowlist = actual_hits - allowlisted
+        stale_allowlist_entries = allowlisted - actual_hits
+        assert not missing_from_allowlist, (
+            f"Fixture files carry retired-prose literals but are NOT in "
+            f"FIXTURE_PROSE_ALLOWLIST: {sorted(missing_from_allowlist)}. "
+            f"Either remove the prose from the fixture, OR add the "
+            f"file to FIXTURE_PROSE_ALLOWLIST with a rationale."
+        )
+        assert not stale_allowlist_entries, (
+            f"FIXTURE_PROSE_ALLOWLIST entries do not match any disk "
+            f"file with retired-prose content: "
+            f"{sorted(stale_allowlist_entries)}. Either the fixture "
+            f"was renamed/deleted (remove from allowlist) OR the prose "
+            f"was scrubbed (remove from allowlist — exemption no longer "
+            f"needed)."
         )
 
 
@@ -915,13 +1047,24 @@ class TestPerPayloadSemanticReviewDiscipline:
         # ~3 schema-pin / leaked-field references. Order-of-magnitude
         # bound: 15 < count < 60 (forgiving range that surfaces both
         # massive sweeps and silent deletions).
+        #
+        # F3-test (cycle-2) empirical anchor: validated current count
+        # at 27 on the post-D1 worktree (bbe57f43); subsequent edits to
+        # test_teardown_request_emitter.py may shift this slightly but
+        # the order-of-magnitude bound has 33 headroom for additions
+        # and 12 floor below current — false-trip requires either a
+        # fixture-refactor-scale change (~33+ new teammate-context
+        # stubs) OR a silent deletion of ~12+ existing ones, either
+        # of which warrants the discipline reminder.
         assert 15 < teammate_name_uses < 60, (
             f"Order-of-magnitude check on teammate_name uses in "
             f"test_teardown_request_emitter.py: expected ~21+ lead-"
             f"frame stubs + ~3 schema-pin refs + 4 teammate-frame "
-            f"stubs ≈ 28. Got {teammate_name_uses}. A wildly different "
-            f"count suggests a mechanical sweep happened — re-run the "
-            f"per-payload semantic classification before merging."
+            f"stubs ≈ 28 (validated empirically at 27 on post-D1 "
+            f"worktree bbe57f43). Got {teammate_name_uses}. A wildly "
+            f"different count suggests a mechanical sweep happened — "
+            f"re-run the per-payload semantic classification before "
+            f"merging."
         )
 
 
