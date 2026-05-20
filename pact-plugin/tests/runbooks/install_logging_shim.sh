@@ -1,4 +1,12 @@
 #!/bin/bash
+# DEVELOPMENT USE ONLY — NOT FOR PRODUCTION INSTALLATION.
+# This installer wraps a live plugin-cache hook so the shim captures raw
+# stdin from EVERY hook fire across ALL Claude Code sessions sharing the
+# plugin cache (verified empirically — see #814). Captures land under
+# /tmp/pact-hook-stdin-captures/ and persist until manually removed.
+# Inspect captures for sensitive data + clean /tmp before sharing any
+# captures externally. See #814 for safety-hardening tracking.
+#
 # Install a logging-shim wrapper around wake_lifecycle_emitter.py to capture
 # raw PostToolUse stdin from the next session's hook fires. The capture target
 # is /tmp/pact-hook-stdin-captures/wake_lifecycle_emitter/{ISO_timestamp}Z-pid{N}.json.
@@ -24,6 +32,8 @@
 #   6. Promote captures to fixtures under pact-plugin/tests/fixtures/wake_lifecycle/
 #      with hand-added _meta block (capture_method="logging-shim").
 #   7. Uninstall by restoring the .preshim.bak.
+#   8. Before sharing any captures externally:
+#      rm -rf /tmp/pact-hook-stdin-captures/
 
 set -euo pipefail
 
