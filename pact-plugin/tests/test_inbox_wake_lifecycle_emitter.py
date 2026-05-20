@@ -1095,7 +1095,7 @@ class TestArmDirectiveOnParallelTaskCreateRace:
         home = tmp_path / "home"
         home.mkdir()
         sid = "pact-2877fe69"
-        pdir = "/Users/mj/Sites/collab/PACT-prompt"
+        pdir = "/Users/example/Sites/collab/PACT-Plugin"
         team = "team-race"
         _write_session_context(home, sid, pdir, team)
         _write_task(home, team, "10", status="completed", owner="backend-coder")

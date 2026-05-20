@@ -8,7 +8,7 @@
   },
   "tool_name": "TaskCreate",
   "session_id": "pact-2877fe69",
-  "cwd": "/Users/mj/Sites/collab/PACT-prompt",
+  "cwd": "/Users/example/Sites/collab/PACT-Plugin",
   "tool_input": {
     "subject": "Second task in parallel-batch dispatch",
     "description": "Companion task in the same parallel TaskCreate batch.",

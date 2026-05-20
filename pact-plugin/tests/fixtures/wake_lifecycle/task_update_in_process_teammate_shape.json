@@ -9,7 +9,7 @@
   "tool_name": "TaskUpdate",
   "session_id": "pact-shared-session-id",
   "agent_id": "agent-secretary-uuid-7f3a",
-  "cwd": "/Users/mj/Sites/collab/PACT-prompt",
+  "cwd": "/Users/example/Sites/collab/PACT-Plugin",
   "tool_input": {
     "taskId": "12",
     "status": "in_progress",

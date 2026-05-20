@@ -37,7 +37,7 @@ git checkout "$PRE_FIX" -- pact-plugin/hooks/wake_lifecycle_emitter.py \
 mv pact-plugin/hooks/wake_inbox_drain.py /tmp/drain.bak
 
 # Run the affected test scope and record cardinality.
-cd pact-plugin && /Users/mj/.pyenv/versions/3.12.7/bin/python -m pytest \
+cd pact-plugin && python -m pytest \
     tests/test_wake_lifecycle_arm_starvation.py \
     tests/test_wake_inbox_drain.py \
     -v 2>&1 | tail -40
