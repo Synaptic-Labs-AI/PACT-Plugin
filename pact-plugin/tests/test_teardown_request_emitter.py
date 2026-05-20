@@ -40,64 +40,84 @@ import pytest
 HOOK_DIR = Path(__file__).resolve().parent.parent / "hooks"
 EMITTER = HOOK_DIR / "teardown_request_emitter.py"
 
-# Synthesized TaskCompleted teammate-context stdin shape (in-PR backstop
-# for the is_lead_at_task_completed helper migration). Provenance is
-# "synthesized-from-documented-schema" per
-# PLATFORM_TASKCOMPLETED_STDIN_SHAPE_META below; the captured-fixture
-# upgrade to "logging-shim" provenance is the post-merge follow-up
-# commit. Carries `agent_id` per the upstream
-# Claude Code documentation (code.claude.com/docs/en/hooks.md
-# documents `agent_id` as conditionally-present on TaskCompleted
-# subagent frames — "Present only when the hook fires inside a
-# subagent context. Distinguishes subagent task completions from
-# main-thread task completions"). Under the new
-# `is_lead_at_task_completed` predicate (`agent_id is None`), this
-# payload classifies as teammate-frame (agent_id present → False →
-# suppress directive). The lead-context shape (see
-# LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE below) mirrors this minus
-# the `agent_id` key; lead-context coverage is via the paired schema-
-# pin class TestLeadFrameStdinShapePin AND the behavioral
-# `test_lead_session_proceeds_past_gate0`.
+# Captured TaskCompleted teammate-context stdin shape. Mirrors the
+# empirical capture promoted to
+# pact-plugin/tests/fixtures/wake_lifecycle/taskcompleted_teammate_context_shape.json
+# (10 keys; carries `teammate_name` + `team_name` identifying the
+# agent that owned the completing task). Provenance: "logging-shim"
+# per PLATFORM_TASKCOMPLETED_STDIN_SHAPE_META below.
+#
+# Discriminator semantics: under the captured-grounded
+# `is_lead_at_task_completed` predicate body (`teammate_name is None`),
+# this payload classifies as teammate-frame (teammate_name present
+# → False → suppress directive). The lead-context counterpart (see
+# LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE below) carries 8 keys with
+# neither `teammate_name` nor `team_name`. Empirical absence of those
+# two fields IS the lead-context signature; the upstream Claude Code
+# docs' "Common input fields" section lists the common keys but is
+# silent on which TaskCompleted-specific fields are conditional —
+# the discriminator was determined by in-session capture (2026-05-20)
+# rather than docs-extrapolation. Lead-context coverage is via the
+# paired schema-pin class TestLeadFrameStdinShapePin AND the
+# behavioral `test_lead_session_proceeds_past_gate0`.
 PLATFORM_TASKCOMPLETED_STDIN_SHAPE = {
-    "session_id": "1fb6500d-25ba-48c6-af00-5f92024644d0",
+    "session_id": "00000000-0000-0000-0000-000000000000",
     "transcript_path": (
         "/Users/example/.claude/projects/"
         "-Users-example-Sites-collab-PACT-Plugin/"
-        "1fb6500d-25ba-48c6-af00-5f92024644d0.jsonl"
+        "00000000-0000-0000-0000-000000000000.jsonl"
     ),
-    "cwd": "/Users/example/Sites/collab/PACT-Plugin",
+    "cwd": (
+        "/Users/example/Sites/collab/PACT-Plugin/.worktrees/feature-example"
+    ),
+    "agent_type": "PACT:pact-orchestrator",
     "hook_event_name": "TaskCompleted",
-    "task_id": "42",
-    "task_subject": "PROBE: capture real TaskCompleted stdin shape",
-    "task_description": "diagnostic probe payload",
-    "teammate_name": "backend-coder",
-    "team_name": "pact-1fb6500d",
-    "agent_id": "subagent-T0-teammate-frame-uuid",
+    "task_id": "45",
+    "task_subject": (
+        "example teammate-driven TaskCompleted fire — captures the "
+        "teammate-frame stdin shape for fixture-parity testing"
+    ),
+    "task_description": (
+        "Example task description for a teammate-driven "
+        "TaskUpdate(status=\"completed\") fire."
+    ),
+    "teammate_name": "secretary",
+    "team_name": "pact-00000000",
 }
 
-# Lead-frame counterpart to PLATFORM_TASKCOMPLETED_STDIN_SHAPE — the
-# same 9 documented keys with `agent_id` ABSENT. Per the upstream
-# Claude Code documentation, lead-context TaskCompleted fires omit
-# the `agent_id` field entirely; the `is_lead_at_task_completed`
-# predicate's `agent_id is None` body classifies a key-absent payload
-# as lead-frame (True → emit). Paired with TestLeadFrameStdinShapePin
-# below to canary lead-frame schema drift (lead-only field additions
-# would otherwise slip past the teammate-frame canary).
+# Lead-frame counterpart to PLATFORM_TASKCOMPLETED_STDIN_SHAPE — 8 keys
+# with NEITHER `teammate_name` NOR `team_name`. Mirrors the empirical
+# capture promoted to
+# pact-plugin/tests/fixtures/wake_lifecycle/taskcompleted_lead_context_shape.json
+# (captured 2026-05-20). Under the `is_lead_at_task_completed`
+# predicate body (`teammate_name is None`), a key-absent payload
+# classifies as lead-frame (True → emit). Paired with
+# TestLeadFrameStdinShapePin below to canary lead-frame schema drift
+# (lead-only field additions would otherwise slip past the
+# teammate-frame canary).
 LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE = {
-    "session_id": "1fb6500d-25ba-48c6-af00-5f92024644d0",
+    "session_id": "00000000-0000-0000-0000-000000000000",
     "transcript_path": (
         "/Users/example/.claude/projects/"
         "-Users-example-Sites-collab-PACT-Plugin/"
-        "1fb6500d-25ba-48c6-af00-5f92024644d0.jsonl"
+        "00000000-0000-0000-0000-000000000000.jsonl"
     ),
-    "cwd": "/Users/example/Sites/collab/PACT-Plugin",
+    "cwd": (
+        "/Users/example/Sites/collab/PACT-Plugin/.worktrees/feature-example"
+    ),
+    "agent_type": "PACT:pact-orchestrator",
     "hook_event_name": "TaskCompleted",
-    "task_id": "42",
-    "task_subject": "PROBE: capture real TaskCompleted stdin shape",
-    "task_description": "diagnostic probe payload",
-    "teammate_name": "backend-coder",
-    "team_name": "pact-1fb6500d",
-    # NOTE: no `agent_id` key — defines the lead-frame schema.
+    "task_id": "46",
+    "task_subject": (
+        "example lead-driven TaskCompleted fire — captures the "
+        "lead-frame stdin shape for fixture-parity testing"
+    ),
+    "task_description": (
+        "Example task description for a lead-driven "
+        "TaskUpdate(status=\"completed\") fire."
+    ),
+    # NOTE: no `teammate_name`, no `team_name` — empirical absence of
+    # these two fields IS the lead-frame signature.
 }
 
 
@@ -217,33 +237,38 @@ def _read_journal_events(home, project_dir, session_id, event_type=None):
 # =============================================================================
 
 
-#: Provenance metadata for PLATFORM_TASKCOMPLETED_STDIN_SHAPE. The
-#: synthesized payload above is derived from upstream Claude Code
-#: platform documentation (code.claude.com/docs/en/hooks.md,
-#: TaskCompleted section) rather than captured-from-production via
-#: logging-shim. The post-merge follow-up upgrades provenance to
-#: capture-from-production fixtures (paired lead + teammate-context
-#: shapes); this in-PR stopgap is documented-schema-grounded.
+#: Provenance metadata for PLATFORM_TASKCOMPLETED_STDIN_SHAPE +
+#: LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE. Both constants mirror
+#: captured TaskCompleted stdin payloads landed in
+#: pact-plugin/tests/fixtures/wake_lifecycle/ on 2026-05-20 via the
+#: in-repo TaskCompleted logging-shim (see
+#: pact-plugin/tests/runbooks/install_taskcompleted_logging_shim.sh).
+#: Capture-from-production replaced the prior synthesized-from-docs
+#: provenance; see the captured fixture _meta blocks for full
+#: provenance details (capture date, sanitization notes, cross-
+#: validation against upstream docs).
 PLATFORM_TASKCOMPLETED_STDIN_SHAPE_META = {
-    "capture_method": "synthesized-from-documented-schema",
-    "ground_truth_source": "code.claude.com/docs/en/hooks.md",
-    "provenance_upgrade": "post-merge follow-up via logging-shim capture campaign",
+    "capture_method": "logging-shim",
+    "ground_truth_source": (
+        "captured 2026-05-20 via in-repo shim; cross-validated against "
+        "upstream Claude Code docs 'Common input fields' section at "
+        "code.claude.com/docs/en/hooks.md"
+    ),
 }
 
 
 class TestStdinShapePin:
     """Pin the verbatim TaskCompleted teammate-frame stdin shape against
-    the synthesized payload derived from upstream Claude Code platform
-    documentation (post-merge follow-up upgrades provenance to logging-
-    shim capture-from-production fixtures). Future platform changes
-    (Claude Code adding or removing fields) trip this test BEFORE
-    silent production breakage. Mirrors test_emitter_real_disk.
-    TestStdinShapePin.
+    the captured-from-production payload landed via in-repo logging-shim
+    on 2026-05-20. Future platform changes (Claude Code adding or
+    removing fields) trip this test BEFORE silent production breakage.
+    Mirrors test_emitter_real_disk.TestStdinShapePin.
 
     Provenance: see PLATFORM_TASKCOMPLETED_STDIN_SHAPE_META adjacent to
-    the payload definition. The synthesized shape is grounded in the
-    upstream docs' TaskCompleted section, NOT a live-capture fixture
-    today; the post-merge follow-up promotes the captured payload.
+    the payload definition. The shape is captured-grounded; the
+    corresponding fixture file at
+    pact-plugin/tests/fixtures/wake_lifecycle/taskcompleted_teammate_context_shape.json
+    carries the same shape with sanitized example-placeholder values.
 
     Counter-test-by-revert: changing the PLATFORM_TASKCOMPLETED_STDIN_
     SHAPE keys flips these tests RED — the canary for stdin schema
@@ -252,36 +277,36 @@ class TestStdinShapePin:
 
     def test_pins_taskcompleted_stdin_keys(self):
         """The platform delivers exactly these 10 top-level fields on a
-        TaskCompleted teammate-context hook fire. Lead-context fires
-        omit `agent_id` (per the upstream Claude Code documentation's
-        conditional-presence semantics for the `agent_id` field).
-        Producers/consumers of stdin must not silently drop any field;
-        the schema-pin codifies the teammate-frame shape.
+        TaskCompleted teammate-context hook fire (empirically captured
+        2026-05-20). Lead-context fires omit `teammate_name` AND
+        `team_name`. Producers/consumers of stdin must not silently
+        drop any field; the schema-pin codifies the teammate-frame
+        shape.
         """
         expected_keys = {
-            "session_id", "transcript_path", "cwd", "hook_event_name",
-            "task_id", "task_subject", "task_description",
-            "teammate_name", "team_name", "agent_id",
+            "session_id", "transcript_path", "cwd", "agent_type",
+            "hook_event_name", "task_id", "task_subject",
+            "task_description", "teammate_name", "team_name",
         }
         assert set(PLATFORM_TASKCOMPLETED_STDIN_SHAPE.keys()) == expected_keys
 
     def test_pins_taskcompleted_stdin_value_types(self):
         """Each stdin field's value type is pinned. A platform change
         that switches task_id from str to int (or task_description from
-        str to dict) trips this. `agent_id` is `str` on teammate-frame
-        fires (the per-instance UUID); absent on lead-frame fires.
+        str to dict) trips this. `teammate_name` + `team_name` are
+        `str` on teammate-frame fires; both absent on lead-frame fires.
         """
         type_pins = {
             "session_id": str,
             "transcript_path": str,
             "cwd": str,
+            "agent_type": str,
             "hook_event_name": str,
             "task_id": str,
             "task_subject": str,
             "task_description": str,
             "teammate_name": str,
             "team_name": str,
-            "agent_id": str,
         }
         for field, expected_type in type_pins.items():
             assert isinstance(
@@ -303,7 +328,7 @@ class TestStdinShapePin:
 
 
 # =============================================================================
-# TestLeadFrameStdinShapePin — paired canary for the 9-key lead-frame
+# TestLeadFrameStdinShapePin — paired canary for the 8-key lead-frame
 # shape (the schema-pin's lead-context arm; without this, a lead-only
 # field addition would slip past TestStdinShapePin's teammate-frame
 # canary).
@@ -312,16 +337,17 @@ class TestStdinShapePin:
 
 class TestLeadFrameStdinShapePin:
     """Pin the verbatim TaskCompleted LEAD-frame stdin shape against
-    LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE. Lead-context fires omit
-    `agent_id` per upstream Claude Code documentation; this paired
-    pin codifies the 9-key shape so a future platform change that
-    adds a lead-only field trips RED before silent production breakage.
+    LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE (8 keys; neither
+    `teammate_name` nor `team_name` present). Empirically captured
+    2026-05-20 via the in-repo logging-shim. This paired pin codifies
+    the lead-frame shape so a future platform change that adds a
+    lead-only field trips RED before silent production breakage.
 
-    Why pair this with TestStdinShapePin: the existing teammate-frame
-    pin alone canary's only the 10-key shape that carries `agent_id`.
-    A platform change adding a NEW lead-only field would not affect
-    that teammate-frame set and would slip silently. The paired pin
-    closes the gap.
+    Why pair this with TestStdinShapePin: the teammate-frame pin alone
+    canary's only the 10-key shape that carries `teammate_name` +
+    `team_name`. A platform change adding a NEW lead-only field would
+    not affect that teammate-frame set and would slip silently. The
+    paired pin closes the gap.
 
     Counter-test-by-revert: changing the
     LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE keys flips these tests
@@ -329,51 +355,70 @@ class TestLeadFrameStdinShapePin:
     """
 
     def test_pins_lead_frame_taskcompleted_stdin_keys(self):
-        """The platform delivers exactly these 9 top-level fields on a
-        TaskCompleted lead-context hook fire — no `agent_id` key. Any
-        platform change adding/removing a lead-frame field trips this.
+        """The platform delivers exactly these 8 top-level fields on a
+        TaskCompleted lead-context hook fire — neither `teammate_name`
+        nor `team_name` key. Any platform change adding/removing a
+        lead-frame field trips this.
         """
         expected_keys = {
-            "session_id", "transcript_path", "cwd", "hook_event_name",
-            "task_id", "task_subject", "task_description",
-            "teammate_name", "team_name",
+            "session_id", "transcript_path", "cwd", "agent_type",
+            "hook_event_name", "task_id", "task_subject",
+            "task_description",
         }
         assert set(
             LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE.keys()
         ) == expected_keys
 
-    def test_lead_frame_omits_agent_id_key(self):
+    def test_lead_frame_omits_teammate_name_key(self):
         """The discriminator `is_lead_at_task_completed` body is
-        `input_data.get("agent_id") is None`. The lead-frame fixture
-        MUST omit `agent_id` entirely (key-absent), NOT carry it as
-        `None`-valued — both shapes classify as lead under `is None`,
-        but the documented schema is key-absent and the pin enforces
-        that documented shape.
+        `input_data.get("teammate_name") is None`. The lead-frame
+        fixture MUST omit `teammate_name` entirely (key-absent), NOT
+        carry it as `None`-valued — both shapes classify as lead
+        under `is None`, but the empirical captured schema is
+        key-absent and the pin enforces that captured shape.
         """
-        assert "agent_id" not in LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE, (
-            "LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE must omit `agent_id` "
-            "entirely per the documented lead-context schema. Carrying "
-            "`agent_id: None` would still classify as lead under the "
-            "`is None` predicate but would not match the documented "
-            "key-absent shape."
+        assert (
+            "teammate_name" not in LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE
+        ), (
+            "LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE must omit "
+            "`teammate_name` entirely per the empirical lead-context "
+            "schema. Carrying `teammate_name: None` would still classify "
+            "as lead under the `is None` predicate but would not match "
+            "the captured key-absent shape."
         )
 
-    def test_lead_frame_value_types_match_documented_schema(self):
+    def test_lead_frame_omits_team_name_key(self):
+        """Paired with the `teammate_name` omission: the empirical
+        capture shows lead-context TaskCompleted fires omit BOTH
+        teammate_name AND team_name. Pinning team_name absence too so
+        a platform change adding only team_name to lead frames (and
+        not teammate_name) would still trip RED.
+        """
+        assert (
+            "team_name" not in LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE
+        ), (
+            "LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE must omit "
+            "`team_name` entirely per the empirical lead-context "
+            "schema. The captured lead-frame fixture shows both "
+            "teammate_name and team_name absent on lead fires."
+        )
+
+    def test_lead_frame_value_types_match_captured_schema(self):
         """Each lead-frame stdin field's value type is pinned. A
         platform change that switches task_id from str to int (or
-        task_description from str to dict) trips this. Same 9 type
-        pins as the teammate-frame minus `agent_id`.
+        task_description from str to dict) trips this. Same 8 type
+        pins as the teammate-frame minus `teammate_name` +
+        `team_name`.
         """
         type_pins = {
             "session_id": str,
             "transcript_path": str,
             "cwd": str,
+            "agent_type": str,
             "hook_event_name": str,
             "task_id": str,
             "task_subject": str,
             "task_description": str,
-            "teammate_name": str,
-            "team_name": str,
         }
         for field, expected_type in type_pins.items():
             assert isinstance(
@@ -405,34 +450,40 @@ class TestGate0LeadSessionGuard:
     Stop-sweeps. The marker dedup (Gate 2) is the second line of
     defense; Gate 0 is the first.
 
-    Discriminator (I1): ``agent_id is None`` per the per-event sibling
-    family in ``shared/wake_lifecycle.py``. The
-    ``is_lead_at_task_completed`` helper at ``teardown_request_emitter.py:301``
-    classifies the fire as lead-frame when the stdin payload omits
-    ``agent_id``, and as teammate-frame when ``agent_id`` carries the
-    platform-stamped per-instance UUID (documented at
-    ``code.claude.com/docs/en/hooks.md`` — "Present only when the hook
-    fires inside a subagent context"). Teammate-context test payloads
-    below synthesize this by including ``agent_id`` explicitly; the
-    lead-frame comparator ``test_lead_session_proceeds_past_gate0``
-    omits it. Test names are aliased ``*_per_agent_id_none_discriminator``
-    per cbcfd589 §AUDIT named-invariant convention so the discriminator
+    Discriminator (I1): ``teammate_name is None`` per the per-event
+    sibling family in ``shared/wake_lifecycle.py``. The
+    ``is_lead_at_task_completed`` helper at
+    ``teardown_request_emitter.py:301`` classifies the fire as lead-
+    frame when the stdin payload omits ``teammate_name``, and as
+    teammate-frame when ``teammate_name`` carries the agent that
+    owned the completing task. Empirical provenance: captured
+    2026-05-20 via in-repo TaskCompleted shim; see
+    ``shared/wake_lifecycle.py`` ``is_lead_at_task_completed``
+    docstring for full empirical context including why
+    ``agent_id``-based extrapolation was invalidated.
+
+    Teammate-context test payloads below synthesize this by including
+    ``teammate_name`` explicitly; the lead-frame comparator
+    ``test_lead_session_proceeds_past_gate0`` omits it. Test names
+    are aliased ``*_per_teammate_name_none_discriminator`` per
+    cbcfd589 §AUDIT named-invariant convention so the discriminator
     is visible at the test-symbol layer.
     """
 
-    def test_teammate_session_suppresses_emission_per_agent_id_none_discriminator(
+    def test_teammate_session_suppresses_emission_per_teammate_name_none_discriminator(
         self, tmp_path,
     ):
-        """A TaskCompleted fire in a teammate-frame (stdin carries the
-        platform-stamped ``agent_id`` per-instance UUID) emits no
-        journal event and produces only suppressOutput stdout. The
-        ``agent_id is None`` discriminator at Gate 0 classifies any
-        agent_id-bearing payload as non-lead and short-circuits.
+        """A TaskCompleted fire in a teammate-frame (stdin carries
+        ``teammate_name`` identifying the agent that owned the task)
+        emits no journal event and produces only suppressOutput
+        stdout. The ``teammate_name is None`` discriminator at Gate 0
+        classifies any teammate_name-bearing payload as non-lead and
+        short-circuits.
 
         Renamed from ``test_teammate_session_suppresses_emission`` per
         cbcfd589 §AUDIT named-invariant convention — the new name
         encodes the per-event discriminator the test pins (I1 =
-        ``agent_id is None`` for the TaskCompleted event class).
+        ``teammate_name is None`` for the TaskCompleted event class).
         """
         home = tmp_path / "home"; home.mkdir()
         teammate_sid = "teammate-sid"
@@ -457,7 +508,6 @@ class TestGate0LeadSessionGuard:
             "task_id": "T1",
             "team_name": team,
             "teammate_name": "backend-coder",
-            "agent_id": "subagent-T1-teammate-frame-uuid",
         }
         rc, out, err = _run_emitter_subprocess(
             json.dumps(payload),
@@ -468,10 +518,10 @@ class TestGate0LeadSessionGuard:
             f"Teammate-session fire must suppressOutput; got {out!r}"
         )
 
-    def test_teammate_session_writes_no_journal_event_per_agent_id_none_discriminator(
+    def test_teammate_session_writes_no_journal_event_per_teammate_name_none_discriminator(
         self, tmp_path,
     ):
-        """The teammate-frame fire (stdin carries ``agent_id``) MUST
+        """The teammate-frame fire (stdin carries ``teammate_name``) MUST
         NOT write a teardown_request event to the journal. The journal
         write is the falsifiable primitive; an unread additionalContext
         is recoverable, an on-disk journal event is not (Tier-4 cron
@@ -504,7 +554,6 @@ class TestGate0LeadSessionGuard:
                 "task_id": "T2",
                 "team_name": team,
                 "teammate_name": "backend-coder",
-                "agent_id": "subagent-T2-teammate-frame-uuid",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -516,7 +565,7 @@ class TestGate0LeadSessionGuard:
             f"event; got {events!r}"
         )
 
-    def test_teammate_session_does_not_create_marker_per_agent_id_none_discriminator(
+    def test_teammate_session_does_not_create_marker_per_teammate_name_none_discriminator(
         self, tmp_path,
     ):
         """Idempotency marker dir is NOT created on Gate-0 short-circuit
@@ -551,7 +600,6 @@ class TestGate0LeadSessionGuard:
                 "task_id": "T3",
                 "team_name": team,
                 "teammate_name": "backend-coder",
-                "agent_id": "subagent-T3-teammate-frame-uuid",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -580,7 +628,6 @@ class TestGate0LeadSessionGuard:
                 "hook_event_name": "TaskCompleted",
                 "task_id": "T4",
                 "team_name": team,
-                "teammate_name": "backend-coder",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -637,7 +684,6 @@ class TestGate1HookEventNamePrimaryDiskFallback:
                 "hook_event_name": "TaskCompleted",
                 "task_id": "T5",
                 "team_name": team,
-                "teammate_name": "backend-coder",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -672,7 +718,6 @@ class TestGate1HookEventNamePrimaryDiskFallback:
                 # disk-status fallback.
                 "task_id": "T6",
                 "team_name": team,
-                "teammate_name": "backend-coder",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -708,7 +753,6 @@ class TestGate1HookEventNamePrimaryDiskFallback:
                 # No hook_event_name, disk shows in_progress.
                 "task_id": "T7",
                 "team_name": team,
-                "teammate_name": "backend-coder",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -759,7 +803,6 @@ class TestGate2IdempotencyMarker:
                 "hook_event_name": "TaskCompleted",
                 "task_id": "T8",
                 "team_name": team,
-                "teammate_name": "backend-coder",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -793,7 +836,6 @@ class TestGate2IdempotencyMarker:
             "hook_event_name": "TaskCompleted",
             "task_id": "T9",
             "team_name": team,
-            "teammate_name": "backend-coder",
         }
         env_extra = {"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir}
         # First fire — should emit.
@@ -837,7 +879,6 @@ class TestGate2IdempotencyMarker:
                 "hook_event_name": "TaskCompleted",
                 "task_id": "T10",
                 "team_name": team,
-                "teammate_name": "backend-coder",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -870,7 +911,6 @@ class TestGate2IdempotencyMarker:
                 "hook_event_name": "TaskCompleted",
                 "task_id": "T11",
                 "team_name": team,
-                "teammate_name": "backend-coder",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -923,7 +963,6 @@ class TestGate3ActiveTaskCountTransition:
                 "hook_event_name": "TaskCompleted",
                 "task_id": "T12",
                 "team_name": team,
-                "teammate_name": "backend-coder",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -963,7 +1002,6 @@ class TestGate3ActiveTaskCountTransition:
                 "hook_event_name": "TaskCompleted",
                 "task_id": "T13",
                 "team_name": team,
-                "teammate_name": "backend-coder",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -1027,7 +1065,6 @@ class TestGate4SameTeammateContinuationDeferral:
                 "hook_event_name": "TaskCompleted",
                 "task_id": "T15",
                 "team_name": team,
-                "teammate_name": "backend-coder",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -1064,7 +1101,6 @@ class TestGate4SameTeammateContinuationDeferral:
                 "hook_event_name": "TaskCompleted",
                 "task_id": "T17",
                 "team_name": team,
-                "teammate_name": "backend-coder",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -1107,7 +1143,6 @@ class TestGate4SameTeammateContinuationDeferral:
                 "hook_event_name": "TaskCompleted",
                 "task_id": "TA",
                 "team_name": team,
-                "teammate_name": "backend-coder",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -1152,7 +1187,6 @@ class TestGate4SameTeammateContinuationDeferral:
                 "hook_event_name": "TaskCompleted",
                 "task_id": "TR",
                 "team_name": team,
-                "teammate_name": "backend-coder",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -1228,7 +1262,6 @@ class TestGate4SameTeammateContinuationDeferral:
             "hook_event_name": "TaskCompleted",
             "task_id": "TM",
             "team_name": team,
-            "teammate_name": "backend-coder",
         })
 
         # Reset module-level pact_context cache between parametrized runs.
@@ -1290,7 +1323,6 @@ class TestJournalEventShape:
                 "hook_event_name": "TaskCompleted",
                 "task_id": "T18",
                 "team_name": team,
-                "teammate_name": "backend-coder",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -1320,7 +1352,6 @@ class TestJournalEventShape:
                 "hook_event_name": "TaskCompleted",
                 "task_id": "T19",
                 "team_name": team,
-                "teammate_name": "backend-coder",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -1350,7 +1381,6 @@ class TestJournalEventShape:
                 "hook_event_name": "TaskCompleted",
                 "task_id": "T20",
                 "team_name": team,
-                "teammate_name": "backend-coder",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -1366,14 +1396,16 @@ class TestJournalEventShape:
     def test_no_stdin_field_leaks_into_event(self, tmp_path):
         """The emitted journal event MUST NOT carry stdin fields that
         weren't explicitly forwarded (transcript_path, cwd,
-        task_description, task_subject, teammate_name, hook_event_name,
-        agent_id). Mirrors agent_handoff_emitter.py discipline.
+        task_description, task_subject, teammate_name, team_name,
+        hook_event_name, agent_type). Mirrors agent_handoff_emitter.py
+        discipline.
 
         Test scenario is a LEAD-FRAME fire (asserts a journal event
-        IS written), so the spread of PLATFORM_TASKCOMPLETED_STDIN_SHAPE
-        drops the teammate-frame ``agent_id`` field — otherwise Gate 0
-        would classify the fire as teammate-frame (`agent_id is None`
-        is False) and short-circuit before the journal write.
+        IS written), so the spread uses LEAD_PLATFORM_TASKCOMPLETED_
+        STDIN_SHAPE which omits the teammate-frame `teammate_name` +
+        `team_name` fields — otherwise Gate 0 would classify the fire
+        as teammate-frame (`teammate_name is None` is False) and
+        short-circuit before the journal write.
         """
         home = tmp_path / "home"; home.mkdir()
         lead_sid = "lead-sid"
@@ -1382,17 +1414,15 @@ class TestJournalEventShape:
         _write_session_context(home, lead_sid, pdir, team)
         _write_task(home, team, "T21", status="completed", owner="backend-coder")
 
-        lead_frame_payload = {
-            k: v for k, v in PLATFORM_TASKCOMPLETED_STDIN_SHAPE.items()
-            if k != "agent_id"
-        }
         _run_emitter_subprocess(
             json.dumps({
-                **lead_frame_payload,
+                **LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE,
                 "session_id": lead_sid,
                 "cwd": pdir,
                 "task_id": "T21",
-                "team_name": team,
+                # NOTE: team_name comes from CLAUDE_PROJECT_DIR-rooted
+                # session-context resolution in the hook, not from the
+                # stdin payload (which is lead-frame and omits it).
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -1401,9 +1431,15 @@ class TestJournalEventShape:
         )
         assert len(events) == 1
         event = events[0]
+        # team_name is an explicit forwarded field (the emitter writes
+        # it deliberately at make_event(team_name=team_name) — see
+        # teardown_request_emitter.py:389). Excluded from this leak
+        # check; the test inventories stdin fields that should NOT be
+        # forwarded incidentally.
         for leaked_field in (
             "transcript_path", "cwd", "task_description", "task_subject",
-            "teammate_name", "hook_event_name", "session_id", "agent_id",
+            "teammate_name", "hook_event_name", "session_id",
+            "agent_type",
         ):
             assert leaked_field not in event, (
                 f"stdin field {leaked_field!r} leaked into journal "
@@ -1424,13 +1460,13 @@ class TestExitContract:
     task resolves).
     """
 
-    def test_all_gate_failure_paths_exit_zero_per_agent_id_none_discriminator(
+    def test_all_gate_failure_paths_exit_zero_per_teammate_name_none_discriminator(
         self, tmp_path,
     ):
         """Every Gate-0..Gate-4 short-circuit path exits 0 with
         suppressOutput stdout. Parametric coverage over the 5 gates.
-        Gate-0 row synthesizes a teammate-frame fire via ``agent_id``
-        presence per the I1 discriminator.
+        Gate-0 row synthesizes a teammate-frame fire via
+        ``teammate_name`` presence per the I1 discriminator.
 
         Renamed from ``test_all_gate_failure_paths_exit_zero`` per
         cbcfd589 §AUDIT named-invariant convention.
@@ -1439,7 +1475,7 @@ class TestExitContract:
         lead_sid = "lead-sid"
         pdir = "/tmp/p"
 
-        # Gate 0: teammate-frame fire (agent_id present)
+        # Gate 0: teammate-frame fire (teammate_name present)
         team_0 = "team-exit-gate0"
         _write_session_context(
             home, "teammate-sid", pdir, team_0,
@@ -1457,7 +1493,6 @@ class TestExitContract:
                 "hook_event_name": "TaskCompleted",
                 "task_id": "G0", "team_name": team_0,
                 "teammate_name": "backend-coder",
-                "agent_id": "subagent-G0-teammate-frame-uuid",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -1560,7 +1595,6 @@ class TestExitContract:
                 "session_id": lead_sid, "cwd": pdir,
                 "hook_event_name": "TaskCompleted",
                 "task_id": "T22", "team_name": team,
-                "teammate_name": "backend-coder",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -1652,7 +1686,6 @@ class TestStatusDeletedTier1:
                 # No hook_event_name — exercise the disk-status fallback.
                 "task_id": "D1",
                 "team_name": team,
-                "teammate_name": "backend-coder",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
