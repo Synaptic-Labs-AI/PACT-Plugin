@@ -849,7 +849,7 @@ def is_lead_at_task_completed(input_data: Any, team_name: str = "") -> bool:
     schema. The captured-fixture provenance upgrade is a post-merge
     follow-up; this body ships with documented-schema authority.
 
-    Consumed by ``teardown_request_emitter.py`` Gate 0 (line 301).
+    Consumed by ``teardown_request_emitter.py`` Gate 0 (line 309).
     The previous Gate 0 routed through the :func:`is_lead_session`
     backward-compat delegate (also ``agent_id is None`` body via
     delegation) — semantically equivalent at the callsite; the
