@@ -162,7 +162,7 @@ from shared.wake_lifecycle import (
     count_active_tasks,
     is_lead_context,
 )
-from shared.wake_lifecycle import _classify_owner  # noqa: F401 — owner classification for teammate-Arm pre-branch
+from shared.wake_lifecycle import _classify_owner
 
 # Suppress the false "hook error" UI surface on bare exit paths.
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})

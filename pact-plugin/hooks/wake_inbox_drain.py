@@ -46,12 +46,12 @@ Role in the asymmetric-guard Arm/Teardown model:
 Lead-Context Guard (Layer 0 — defense-in-depth):
 - The drain hook ONLY emits in the lead context. The Layer 0 check
   is `is_lead_context`, the consolidated compound discriminator
-  (`agent_id is None and teammate_name is None`) shared across the
-  4 wake-lifecycle hook sites — the platform stamps `agent_id` on
-  in-process subagent frames, so a teammate's UserPromptSubmit (if
-  it ever fired in subagent — it does not, per Claude Code docs)
-  would short-circuit to suppressOutput. The skill body's Layer 1
-  lead-session guard remains as backstop.
+  (`'agent_id' not in stdin and 'teammate_name' not in stdin`)
+  shared across the 4 wake-lifecycle hook sites — the platform
+  stamps `agent_id` on in-process subagent frames, so a teammate's
+  UserPromptSubmit (if it ever fired in subagent — it does not, per
+  Claude Code docs) would short-circuit to suppressOutput. The skill
+  body's Layer 1 lead-session guard remains as backstop.
 
 Single-emit discipline:
 - Drain path consumed → emit Arm; do NOT also run the fallback or the

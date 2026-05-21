@@ -655,8 +655,8 @@ def is_lead_context(stdin: Any, team_name: str = "") -> bool:
     Return True iff this hook fire originated in the lead context (not
     an in-process teammate frame).
 
-    Discriminator (compound): ``stdin.get('agent_id') is None`` AND
-    ``stdin.get('teammate_name') is None``.
+    Discriminator (compound): ``'agent_id' not in stdin`` AND
+    ``'teammate_name' not in stdin``.
 
     Empirical provenance (PR audit, 2026-05-20):
 
@@ -676,11 +676,11 @@ def is_lead_context(stdin: Any, team_name: str = "") -> bool:
     Compound-check rationale across the 4 wake-lifecycle-hooked events:
 
     - PostToolUse: teammate-frame stamps ``agent_id``; lead-frame omits
-      both fields → ``agent_id is None`` short-circuits the and-chain
-      to False on teammate-frame; True on lead-frame.
+      both fields → ``'agent_id' not in stdin`` short-circuits the
+      and-chain to False on teammate-frame; True on lead-frame.
     - TaskCompleted: teammate-frame stamps ``teammate_name``;
-      lead-frame omits both → ``teammate_name is None`` discriminates;
-      True on lead-frame.
+      lead-frame omits both → ``'teammate_name' not in stdin``
+      discriminates; True on lead-frame.
     - UserPromptSubmit: no teammate-fire path exists empirically;
       every fire is lead-context with neither field present → True.
     - SessionStart: no teammate-fire path exists empirically for the
@@ -706,6 +706,14 @@ def is_lead_context(stdin: Any, team_name: str = "") -> bool:
     empirically demonstrate field-presence discrimination on the same
     actor-discriminator family in the hook stdin shape.
 
+    Implementation note: uses true key-presence (``'k' not in stdin``)
+    rather than value-is-None (``stdin.get('k') is None``) to close the
+    latent platform-contract dependency on never emitting explicit-null
+    for unset fields. Empirical captures confirm key-absence is the
+    production schema; this tightening is defense-in-depth against
+    hypothetical future platform serialization changes that might
+    serialize an unset field as an explicit ``null``.
+
     Pure function; never raises. Returns False on non-dict input
     (SEC-S1 observe-only invariant: ambiguous-actor returns the
     non-emitting branch; the helper is a routing primitive, not a
@@ -718,4 +726,4 @@ def is_lead_context(stdin: Any, team_name: str = "") -> bool:
     """
     if not isinstance(stdin, dict):
         return False
-    return stdin.get("agent_id") is None and stdin.get("teammate_name") is None
+    return "agent_id" not in stdin and "teammate_name" not in stdin

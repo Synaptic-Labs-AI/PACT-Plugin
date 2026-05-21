@@ -158,7 +158,7 @@ def _write_session_context(
     members=None,
     lead_agent_id=None,
 ):
-    """Write a session-context file + team-config so is_lead_session and
+    """Write a session-context file + team-config so is_lead_context and
     count_active_tasks resolve correctly under the test HOME.
     """
     slug = Path(project_dir).name

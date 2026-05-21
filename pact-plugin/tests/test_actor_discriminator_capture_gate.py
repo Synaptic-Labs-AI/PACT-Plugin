@@ -233,29 +233,6 @@ class TestIsLeadContextPureContract:
         payload = {"agent_id": adversarial_agent_id}
         assert wl.is_lead_context(payload, "team-x") is False
 
-    @pytest.mark.parametrize("none_equivalent", [None])
-    def test_teammate_name_explicitly_none_classifies_as_lead(
-        self, none_equivalent,
-    ):
-        """An explicit `"teammate_name": None` (rather than key-absent)
-        still classifies as lead — `dict.get("teammate_name") is None`
-        returns True both for missing key AND explicit-None value.
-        Both shapes match the empirical lead-context schema (the
-        captured lead fixture is key-absent; explicit-None is the
-        in-Python equivalent). Same holds for agent_id under the
-        compound check.
-        """
-        assert wl.is_lead_context(
-            {"teammate_name": none_equivalent}, "team-x",
-        ) is True
-        assert wl.is_lead_context(
-            {"agent_id": none_equivalent}, "team-x",
-        ) is True
-        assert wl.is_lead_context(
-            {"teammate_name": none_equivalent, "agent_id": none_equivalent},
-            "team-x",
-        ) is True
-
     def test_other_fields_irrelevant_to_classification(self):
         """The compound discriminator reads ONLY `agent_id` and
         `teammate_name`. Other fields (`session_id`, `task_id`,
@@ -1366,13 +1343,32 @@ class TestCounterTestMechanismDocumentation:
     def test_compound_predicate_is_canonical_under_empirical_schema(self):
         """The compound predicate is the canonical body under the
         empirical-grounded schema. Pin that the helper body remains
-        COMPOUND (`agent_id is None AND teammate_name is None` or
-        equivalent shape); if a future edit silently drops one half
-        of the compound, this test flags the drift.
+        COMPOUND (two key-presence reads joined by `and`); if a
+        future edit silently drops one half of the compound OR
+        regresses to the legacy value-is-None expression style, this
+        test flags the drift.
+
+        Specificity note: this regex matches any two-field-key-presence
+        body shape, not the specific {agent_id, teammate_name} pair.
+        The specific-field-name invariant is enforced by
+        TestDiscriminatorNamedInvariantPin (TS-5)
+        ``test_helper_body_reads_both_field_presence_fields``; together
+        they pin both shape AND content. Layered coverage: drift in
+        either dimension trips a distinct test, making the regression
+        signal precise.
+
+        Form pin: the regex matches ONLY the tightened
+        `"X" not in stdin` form, NOT the legacy `stdin.get("X") is None`
+        form. The tightening from value-is-None to true key-presence
+        closes a latent platform-contract dependency on never emitting
+        explicit-null for unset fields; pinning the canonical new form
+        ensures any future regression to value-is-None fails loudly.
 
         Counter-test-by-revert: replacing the body with a single-field
-        check (e.g., `return stdin.get("teammate_name") is None`)
-        flips this test RED.
+        check (e.g., `return "teammate_name" not in stdin`) flips
+        this test RED; reverting EITHER half to `stdin.get("X") is None`
+        also flips it RED (the and-chain must be two key-presence
+        reads, both in the tightened form).
         """
         body_src = inspect.getsource(wl.is_lead_context)
         # Strip docstring.
@@ -1381,20 +1377,23 @@ class TestCounterTestMechanismDocumentation:
             if line.strip() and not line.strip().startswith('"""')
             and not line.strip().startswith("Discriminator")
         ]
-        # Look for an `and <param>.get("<other>")` shape — two
-        # field-presence reads joined by `and`. Match any param name
-        # (the helper signature variable is `stdin` post-consolidation
-        # but historically `input_data`; tolerate either or any future
-        # rename).
+        # Look for an `and "<field>" not in <param>` shape - the
+        # tightened key-presence form joined by `and`. This is the
+        # canonical post-S1 expression style; the legacy
+        # `<param>.get("<field>") is None` form is intentionally NOT
+        # matched (a regression to that form would re-introduce the
+        # platform-contract dependency the tightening closed).
         compound_pattern = re.compile(
-            r'and\s+\w+\.get\(["\'][\w_]+["\']\)\s+is\s+None'
+            r'\band\s+["\'][\w_]+["\']\s+not\s+in\s+\w+'
         )
         is_compound = any(compound_pattern.search(line) for line in body_lines)
         assert is_compound, (
-            "is_lead_context body must remain COMPOUND (two field-"
-            "presence reads joined by `and`). The empirical-grounded "
-            "schema requires reading both `agent_id` and `teammate_name`; "
-            "dropping one half re-introduces the pre-consolidation "
-            "misclassification class (the per-event partition this "
-            "consolidation collapsed)."
+            "is_lead_context body must remain COMPOUND in the "
+            "tightened key-presence form (two `\"X\" not in stdin` "
+            "reads joined by `and`). The empirical-grounded schema "
+            "requires reading both `agent_id` and `teammate_name` via "
+            "true key-presence; dropping one half re-introduces the "
+            "pre-consolidation misclassification class, and regressing "
+            "to the legacy value-is-None form re-introduces the latent "
+            "platform-contract dependency the S1 tightening closed."
         )

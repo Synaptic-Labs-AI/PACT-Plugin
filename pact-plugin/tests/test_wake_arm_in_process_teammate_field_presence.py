@@ -686,21 +686,21 @@ def test_p1_inline_is_lead_session_at_init_removed_from_session_init():
 from shared.wake_lifecycle import is_lead_context  # noqa: E402
 
 
-# Lead-context cases: BOTH fields must be missing or explicit None for
-# the compound AND-chain to return True.
+# Lead-context cases: BOTH fields must be ABSENT (key-not-in) for the
+# compound AND-chain to return True. The tightened predicate uses
+# `"X" not in stdin` (true key-presence) rather than value-is-None;
+# explicit-None values now classify as teammate-context (the field
+# is present-but-null, which the platform-contract tightening
+# intentionally rejects). Empirical lead-context shape per the
+# PR-audit capture campaign is key-absent on both fields.
 _LEAD_CONTEXT_CASES = [
     pytest.param({}, id="both_keys_missing"),
-    pytest.param({"agent_id": None}, id="agent_id_explicit_None"),
-    pytest.param({"teammate_name": None}, id="teammate_name_explicit_None"),
-    pytest.param(
-        {"agent_id": None, "teammate_name": None},
-        id="both_explicit_None",
-    ),
 ]
 
-# Teammate-context cases: at least one field is present (non-None) -
-# the compound AND-chain returns False. Exercise both fields under
-# the truthiness-vs-identity discipline.
+# Teammate-context cases: at least one field is present with a value -
+# the compound AND-chain returns False. Exercise both fields under the
+# discriminator semantic: field-presence is the gate, not
+# value-truthiness.
 _TEAMMATE_CONTEXT_CASES = [
     pytest.param({"agent_id": ""}, id="agent_id_empty_string"),
     pytest.param({"agent_id": 0}, id="agent_id_falsy_int_zero"),
@@ -718,19 +718,22 @@ _TEAMMATE_CONTEXT_CASES = [
 
 @pytest.mark.parametrize("payload", _LEAD_CONTEXT_CASES)
 def test_is_lead_context_returns_true_on_lead_context(payload):
-    """Both discriminator fields missing or explicit None classifies
-    as lead context (identity-vs-None semantic on the compound
-    AND-chain; NOT truthiness)."""
+    """Both discriminator keys absent classifies as lead context
+    (true key-presence semantic on the compound AND-chain). The
+    tightened predicate requires absent-key; explicit-None values
+    now classify as teammate-context (present-but-null is a present
+    field per the platform-contract tightening)."""
     assert is_lead_context(payload) is True
 
 
 @pytest.mark.parametrize("payload", _TEAMMATE_CONTEXT_CASES)
 def test_is_lead_context_returns_false_when_either_field_present(payload):
-    """Any non-None value on EITHER discriminator field classifies as
-    teammate context - including falsy values ("" / 0 / []). The
-    discriminator pins identity-vs-None on each half of the compound
-    check; a regression flipping to `not payload.get(...)` would
-    misclassify the falsy rows as lead."""
+    """ANY value on EITHER discriminator key - including explicit-None
+    and falsy values ("" / 0 / []) - classifies as teammate context
+    under the tightened key-presence predicate. The discriminator pins
+    key-presence (not value-truthiness, not value-identity-vs-None);
+    a regression flipping to `not payload.get(...)` or to value-is-None
+    would misclassify rows in this set as lead."""
     assert is_lead_context(payload) is False
 
 

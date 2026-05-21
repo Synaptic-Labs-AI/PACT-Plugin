@@ -298,12 +298,12 @@ def main() -> None:
         # Gate 0 — defense-in-depth lead-context check. Mirrors
         # wake_lifecycle_emitter.py outer gate; teammate-context input
         # never reaches the journal write or directive emission paths.
-        # The compound `is_lead_context` discriminator (`agent_id is
-        # None and teammate_name is None`) is the consolidated lead-
-        # vs-teammate classifier across the 4 wake-lifecycle hook
-        # sites — empirical provenance and SessionStart-specific
-        # follow-up scope are documented at the helper definition in
-        # shared/wake_lifecycle.py.
+        # The compound `is_lead_context` discriminator (`'agent_id'
+        # not in stdin and 'teammate_name' not in stdin`) is the
+        # consolidated lead-vs-teammate classifier across the 4
+        # wake-lifecycle hook sites — empirical provenance and
+        # SessionStart-specific follow-up scope are documented at the
+        # helper definition in shared/wake_lifecycle.py.
         if not is_lead_context(input_data, team_name):
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)

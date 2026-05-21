@@ -876,9 +876,9 @@ def main():
             #
             # Lead-Context Guard (Layer 0 of the defense-in-depth model
             # for scan-firing-only-in-lead-context): the
-            # `is_lead_context` predicate (compound `agent_id is None
-            # and teammate_name is None`) filters directive emission to
-            # lead-context only. Empirically the in-process subagent
+            # `is_lead_context` predicate (compound `'agent_id' not in
+            # stdin and 'teammate_name' not in stdin`) filters directive
+            # emission to lead-context only. Empirically the in-process subagent
             # model produces no teammate-fire path for SessionStart, so
             # every fire reaching this branch is lead-context under
             # current platform behavior; the broader per-event schema
