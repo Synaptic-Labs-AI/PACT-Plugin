@@ -43,6 +43,28 @@ Cron-fire body — silent read; emit nothing unless a real artifact is on disk f
 
    Negative-delta guard: `[ $delta -ge 0 ]` forces future-dated `armed_at` (clock skew / adversarial write) to fall through. Without it, negative deltas would always pass `-lt 300` — the gate would become a kill-switch.
 
+0.5. **Self-correcting teardown check**. Read the latest `teardown_request`, `scan_armed`, and `scan_disarmed` event timestamps; if a `teardown_request` event landed AFTER the current arm AND has not yet been processed via `scan_disarmed`, invoke `Skill("PACT:stop-pending-scan")` and return without continuing to Step 1. This is the **self-correcting fallback path** that catches orchestrator non-compliance with the `_TEARDOWN_DIRECTIVE` `additionalContext` channel — the orchestrator persona's scope-boundary clause excludes inbound `additionalContext` from MUST-binding (see memory `a7bcd37f`), so the cron-fire body itself enforces teardown via the trusted in-band channel + journal source-of-truth pair. Bounds compliance latency to ≤5 minutes regardless of `additionalContext`-directive handling. Charter cross-reference: [§Cron-Fire Mechanism Teardown trigger sites](../protocols/pact-communication-charter.md#cron-fire-mechanism).
+
+   ```bash
+   SJ="{plugin_root}/hooks/shared/session_journal.py"
+   SD='{session_dir}'
+   LATEST_TEARDOWN_REQUEST=$(python3 "$SJ" read-last --type teardown_request --session-dir "$SD" | python3 -c 'import json,sys,datetime; e=json.load(sys.stdin); print(int(datetime.datetime.strptime(e["ts"],"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()) if e else "")')
+   LATEST_SCAN_ARMED=$(python3 "$SJ" read-last --type scan_armed --session-dir "$SD" | python3 -c 'import json,sys; e=json.load(sys.stdin); print(e["armed_at"] if e else "")')
+   LATEST_SCAN_DISARMED=$(python3 "$SJ" read-last --type scan_disarmed --session-dir "$SD" | python3 -c 'import json,sys; e=json.load(sys.stdin); print(e["disarmed_at"] if e else "")')
+   if [ -n "$LATEST_TEARDOWN_REQUEST" ] && [ -n "$LATEST_SCAN_ARMED" ] && \
+      [ "$LATEST_TEARDOWN_REQUEST" -gt "$LATEST_SCAN_ARMED" ] && \
+      { [ -z "$LATEST_SCAN_DISARMED" ] || \
+        [ "$LATEST_TEARDOWN_REQUEST" -gt "$LATEST_SCAN_DISARMED" ]; }; then
+       exit 0
+   fi
+   ```
+
+   When the bash exits 0 here, the scan body's LLM-side action is: invoke `Skill("PACT:stop-pending-scan")` and return without executing Steps 1+. The `stop-pending-scan` body is idempotent (CronList no-op on absent; `scan_disarmed` writes are benign; latest-event semantics dominate). Precedent: `commands/wrap-up.md:98` invokes the same skill from a sibling command. Multiple consecutive cron-fires hitting this branch before `stop-pending-scan` completes write multiple `scan_disarmed` events — benign; the latest dominates.
+
+   Fail-open: `read-last` returns literal `null` on missing journal / no events / corrupt JSONL. The `python3 -c` extractors yield empty string in those cases; `[ -n "$VAR" ]` is false; the gate falls through to Step 1.
+
+   ISO→epoch conversion: `teardown_request.ts` is stamped as an ISO-8601 UTC string by `session_journal.make_event` (format literal `"%Y-%m-%dT%H:%M:%SZ"`), while `scan_armed.armed_at` and `scan_disarmed.disarmed_at` are integer unix-epoch seconds. The teardown extractor uses `python3 strptime(...).replace(tzinfo=utc).timestamp()` to convert ISO→epoch inline, making all three operands integer-comparable. A future editor MUST NOT add `set -e` or an `ERR` trap to this block — empty-operand `-gt` would abort the cron-fire turn, breaking fail-open and reintroducing the compliance gap Option D exists to close. A future editor MUST NOT switch the extractor to `fromisoformat` without verifying Python version baseline (3.11+ required for `Z`-suffix handling); the explicit-format `strptime` is portable to 3.7+.
+
 1. `TaskList` — enumerate tasks. Filter to: `owner == any teammate` AND `status == "in_progress"` AND `metadata.intentional_wait.reason == "awaiting_lead_completion"`. (These are the tasks where a teammate has submitted teachback or handoff and is idle awaiting acceptance.)
 2. For each candidate, raw-read `~/.claude/tasks/{team_name}/{id}.json` via filesystem read (NOT `TaskGet` — TaskGet does not surface `metadata.teachback_submit` or `metadata.handoff`). Inspect `metadata.teachback_submit` (for teachback gate tasks) and `metadata.handoff` (for primary-work tasks).
 3. If `metadata.teachback_submit` or `metadata.handoff` is present and well-formed (required fields populated per the canonical schema): validate per [completion-authority §12 Teachback Review](../protocols/pact-completion-authority.md#teachback-review) or [completion-authority §HANDOFF Review](../protocols/pact-completion-authority.md#handoff-review), then run the acceptance two-call pair: `SendMessage(to=teammate, message="<wake-signal confirming acceptance>")` FIRST, then `TaskUpdate(taskId, status="completed")`. SendMessage MUST precede TaskUpdate per the lifecycle-gate ordering invariant.
@@ -61,7 +83,7 @@ The five anti-hallucination guardrails are LOAD-BEARING. Each guardrail prevents
 
 ### No-Narration
 
-> **No-Narration**: The scan emits NO user-facing prose narrating what it found, considered, skipped, or did. The only outputs are: (a) `SendMessage` to the teammate as part of the acceptance two-call pair, (b) `TaskUpdate(status="completed")`, or (c) nothing. The scan never emits "Scanning… found 0 pending tasks", "Skipping task #N because…", "Race window detected, will retry next fire", or similar status-narrating text.
+> **No-Narration**: The scan emits NO user-facing prose narrating what it found, considered, skipped, or did. The only outputs are: (a) `SendMessage` to the teammate as part of the acceptance two-call pair, (b) `TaskUpdate(status="completed")`, (c) `Skill("PACT:stop-pending-scan")` invocation when Step 0.5 self-correcting teardown fires, or (d) nothing. The scan never emits "Scanning… found 0 pending tasks", "Skipping task #N because…", "Race window detected, will retry next fire", or similar status-narrating text.
 
 **Audit**: No-Narration prevents the cron-fire noise failure mode. A 5-minute cron firing 12 times per hour produces 12 LLM turns per hour during active teammate work. If each fire emits a "Scanning…" prose line, the user's transcript fills with 12 useless status lines per hour. Worse, the prose-emit pattern primes the editing LLM to treat the cron fire as a conversation turn requiring response — re-opening the cascade failure mode the scan exists to prevent. An editing LLM tempted to "add a brief status line for observability" is re-introducing the failure mode. Observability happens via `CronList` (cron is registered), `TaskList` (tasks transition status), and journal events (HANDOFF acceptance is journaled) — NOT via per-fire prose.
 
