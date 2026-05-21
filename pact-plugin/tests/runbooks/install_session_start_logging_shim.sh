@@ -40,10 +40,11 @@
 #   3. Inspect /tmp/pact-hook-stdin-captures/sessionstart/session_init/
 #      for captures.
 #   4. Audit the captured payload for the actual discriminator field —
-#      current `is_lead_at_session_start` assumes `agent_type` presence
-#      on teammate-frame SessionStart fires; this campaign empirically
-#      verifies whether that assumption holds (and whether SessionStart
-#      even has a teammate-fire path).
+#      the consolidated `is_lead_context` helper checks compound
+#      field-presence on `agent_id` AND `teammate_name`; this campaign
+#      empirically verifies whether the SessionStart event class
+#      stamps either field on teammate-frame fires (and whether
+#      SessionStart even has a teammate-fire path).
 #   5. Promote captures to fixtures under
 #      pact-plugin/tests/fixtures/wake_lifecycle/ with hand-added _meta
 #      block (capture_method="logging-shim").

@@ -110,7 +110,7 @@ This is the load-bearing verification — the 5 anti-hallucination guardrails ar
 
 **Action**: In a second concurrent PACT session (with a teammate-typed agent role, NOT the lead) that shares the same `team_name`, trigger a `TaskCreate` or `TaskUpdate(status="in_progress")` event. Observe whether `wake_lifecycle_emitter.py` emits the Arm directive.
 
-**Expected**: No Arm directive emitted in the teammate session — the hook's `is_lead_emit_authorized` check fails (the platform-stamped `agent_id` field is present on the teammate-frame PostToolUse stdin payload, so `agent_id is None` returns False), and the hook exits with `suppressOutput`.
+**Expected**: No Arm directive emitted in the teammate session — the hook's `is_lead_context` check fails (the platform-stamped `agent_id` field is present on the teammate-frame PostToolUse stdin payload, triggering the compound discriminator's teammate-context branch), and the hook exits with `suppressOutput`.
 
 **Acceptance**: The teammate session sees no `start-pending-scan` directive in `additionalContext`. No spurious cron is registered in the teammate's session.
 
@@ -177,6 +177,6 @@ All 11 steps pass independently. A single step failure fails the runbook and mus
 - **Step 3 fails**: platform cron primitive issue or 5-minute cadence misconfiguration. Check `CronCreate` call shape against canonical schema.
 - **Step 4 (any sub-step) fails**: load-bearing guardrail violation. Treat as a P0 regression; the 5 guardrails are why this mechanism exists.
 - **Step 5 fails**: completion-authority procedure regression. Inspect canonical acceptance two-call pair in `scan-pending-tasks §Lead-Only Completion Contract`.
-- **Step 6 fails**: hook-level session guard regression. Inspect `is_lead_emit_authorized` (consumed by `wake_lifecycle_emitter.py` for PostToolUse fires), `is_lead_at_task_completed` (consumed by `teardown_request_emitter.py:309` for TaskCompleted fires), and `is_lead_at_session_start` (consumed by `session_init.py` for SessionStart fires) — all defined in `shared/wake_lifecycle.py`.
+- **Step 6 fails**: hook-level lead-context guard regression. Inspect `is_lead_context` — consumed by `wake_lifecycle_emitter.py` for PostToolUse fires, `teardown_request_emitter.py` for TaskCompleted fires, and `session_init.py` for SessionStart fires — defined in `shared/wake_lifecycle.py`.
 - **Step 7 / 8 / 9 fail**: lifecycle predicate regression. Inspect `count_active_tasks` and `has_same_teammate_continuation` in `shared/wake_lifecycle.py`.
 - **Step 10 / 11 fail**: structural-test territory; the corresponding test suite should have caught this in CI. Re-run `test_scan_pending_tasks_command_structure.py`.
