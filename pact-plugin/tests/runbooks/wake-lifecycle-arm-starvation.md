@@ -37,7 +37,7 @@ git checkout "$PRE_FIX" -- pact-plugin/hooks/wake_lifecycle_emitter.py \
 mv pact-plugin/hooks/wake_inbox_drain.py /tmp/drain.bak
 
 # Run the affected test scope and record cardinality.
-cd pact-plugin && /Users/mj/.pyenv/versions/3.12.7/bin/python -m pytest \
+cd pact-plugin && python -m pytest \
     tests/test_wake_lifecycle_arm_starvation.py \
     tests/test_wake_inbox_drain.py \
     -v 2>&1 | tail -40
@@ -206,11 +206,13 @@ on unowned-create-then-owner-update.
    pinned context: the running session uses the OLD hook code. V1 and
    V2 validation must run in a fresh post-merge session.
 
-2. **#738 prose bug is co-resident, not co-fixed.** The architecture
-   spec §6 resolved the apparent #738 contradiction by source walk
-   (`_lifecycle_relevant` step 4 correctly excludes lead-owned tasks).
-   The "First active teammate task created" prose is provably-false on
-   re-fires; that's a separate prose-bug ticket and does NOT block #754.
+2. **Arm directive prose is transition-neutral.** The directive reads
+   "Active teammate work detected." — it does NOT claim a 0→1 transition.
+   The emit is unconditional on every TaskCreate (and pending→in_progress
+   TaskUpdate) where `count_active_tasks >= 1`; the skill body's
+   `CronList` exact-suffix-match is the single source of idempotency
+   truth. `_lifecycle_relevant` step 4 excludes lead-owned tasks so
+   lead-self-dispatch does not drive the Arm count.
 
 3. **Counter-test cardinality is a target, not a measurement.** Test-
    engineer empirically records the actual revert cardinality in the

@@ -8,7 +8,7 @@
   },
   "tool_name": "TaskCreate",
   "session_id": "pact-56ce3a2a",
-  "cwd": "/Users/mj/Sites/collab/PACT-prompt",
+  "cwd": "/Users/example/Sites/collab/PACT-Plugin",
   "tool_input": {
     "subject": "First active teammate task",
     "description": "Initial work item dispatched to a teammate.",

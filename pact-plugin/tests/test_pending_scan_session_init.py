@@ -66,10 +66,10 @@ def test_directive_includes_active_task_trigger_phrase(src):
 def test_directive_emitted_only_when_count_positive(src):
     """Guard the emission with a positive-count check. The directive
     must NOT fire on sessions with zero active teammate tasks. The
-    gate expression may include additional conjuncts (e.g., the Lead-Session Guard at Directive Emission
-    Layer 0 lead-session guard `_is_lead_session_at_init(...)`) — what
-    is load-bearing is the `active_count > 0` predicate participating
-    in the if-test."""
+    gate expression may include additional conjuncts (e.g., the
+    Lead-Context Guard at Directive Emission Layer 0
+    `is_lead_context(...)`) — what is load-bearing is the
+    `active_count > 0` predicate participating in the if-test."""
     assert "active_count > 0" in src
     # And the gate must use an `if` statement (not a ternary/while/etc.).
     import re as _re
@@ -131,18 +131,26 @@ def _run_session_init(
     pdir: str,
     source: str = "resume",
     agent_type: str | None = None,
+    agent_id: str | None = None,
+    teammate_name: str | None = None,
 ) -> dict:
     """Run session_init.py with synthesized SessionStart stdin.
 
-    `agent_type` is the platform-stamped actor-discriminator field for
-    SessionStart fires; set to a non-None value to synthesize an
-    in-process teammate-frame SessionStart (e.g., the in-process
-    subagent's SessionStart fire). Lead-frame fires omit the field
-    (default None).
+    Under the consolidated is_lead_context discriminator, an
+    in-process teammate-frame is synthesized by setting either
+    `agent_id` or `teammate_name`. The pre-consolidation
+    `agent_type` parameter is retained for callers that exercise
+    auxiliary platform-frame schema bits (it does not influence the
+    actor-discriminator under the compound check). Lead-frame fires
+    omit all three (default None).
     """
     payload_dict: dict = {"session_id": sid, "cwd": pdir, "source": source}
     if agent_type is not None:
         payload_dict["agent_type"] = agent_type
+    if agent_id is not None:
+        payload_dict["agent_id"] = agent_id
+    if teammate_name is not None:
+        payload_dict["teammate_name"] = teammate_name
     payload = json.dumps(payload_dict)
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
     env.update({"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir})
@@ -199,16 +207,14 @@ def test_session_init_emits_arm_directive_when_active_tasks_present(tmp_path):
 
 # ---------- Lead-Session Guard at Directive Emission Layer 0: hook-level session guard ----------
 
-def test_session_init_imports_or_calls_lead_session_guard(src):
-    """Lead-Session Guard at Directive Emission Layer 0 (structural
-    tier): session_init.py must CALL a lead-session guard before
-    emitting the Arm directive. Under Option 5 (#611/#778) the guard
-    is the shared helper `is_lead_at_session_start(input_data,
-    team_name)` from shared.wake_lifecycle, which checks `agent_type`
-    field-presence on stdin (SessionStart uses agent_type rather than
-    PostToolUse's agent_id per Claude Code platform docs). A
-    teammate-frame fire carrying agent_type suppresses emission so
-    teammate sessions never receive the Arm prose.
+def test_session_init_imports_or_calls_lead_context_guard(src):
+    """Lead-Context Guard at Directive Emission Layer 0 (structural
+    tier): session_init.py must CALL a lead-context guard before
+    emitting the Arm directive. The consolidated helper is
+    `is_lead_context(stdin, team_name)` from shared.wake_lifecycle,
+    which checks compound `agent_id` + `teammate_name` field-presence
+    on stdin. A teammate-frame fire carrying either field suppresses
+    emission so teammate sessions never receive the Arm prose.
 
     The guard symbol must appear within a control-flow construct
     (if-statement or return-statement etc.), NOT just anywhere in
@@ -217,68 +223,69 @@ def test_session_init_imports_or_calls_lead_session_guard(src):
     substring check; the regex-in-code-line check catches the
     wiring-disconnect.
 
-    Tight pin: matches ONLY the canonical post-Option-5 symbol
-    `is_lead_at_session_start`. The legacy symbols
-    `_is_lead_session_at_init` (inline; consolidated to shared
-    helper) and `leadSessionId` (team_config-coupled comparison;
-    pre-Option-5 body) are intentionally NOT in the tolerance band:
-    the corridor migration is settled, and a regression reintroducing
-    either legacy symbol in a control-flow line should fail this
-    test loudly rather than silently passing.
+    Tight pin: matches ONLY the canonical consolidated symbol
+    `is_lead_context`. The legacy symbols `_is_lead_session_at_init`
+    (inline; consolidated to shared helper) and `leadSessionId`
+    (team_config-coupled comparison; pre-consolidation body) are
+    intentionally NOT in the tolerance band: the consolidation is
+    settled, and a regression reintroducing either legacy symbol in
+    a control-flow line should fail this test loudly rather than
+    silently passing.
 
-    Defense-in-depth Layer 0 (per plan §Architecture Lead-Session
+    Defense-in-depth Layer 0 (per plan §Architecture Lead-Context
     Guard at Directive Emission) catches misdirected directive
-    emission at the source. Layers 1 (skill-body Lead-Session Guard)
+    emission at the source. Layers 1 (skill-body Lead-Context Guard)
     and 2 (platform CronCreate session-scoping) both assume Layer 0
     is in place but must remain effective even if it isn't.
     """
     import re as _re
-    # Strict: the guard symbol must appear inside an if/return/elif/while/assert
-    # statement in the source. Matches ONLY `is_lead_at_session_start`
-    # — legacy alternates dropped post-corridor-migration.
+    # Strict: the guard symbol must appear inside an
+    # if/return/elif/while/assert statement in the source. Matches
+    # ONLY `is_lead_context` — legacy alternates dropped post-
+    # consolidation.
     code_line_pattern = _re.compile(
-        r"^\s*(if|return|elif|while|assert)\b.*is_lead_at_session_start",
+        r"^\s*(if|return|elif|while|assert)\b.*is_lead_context",
         _re.MULTILINE,
     )
     assert code_line_pattern.search(src) is not None, (
-        "Lead-Session Guard at Directive Emission Layer 0 strict: "
+        "Lead-Context Guard at Directive Emission Layer 0 strict: "
         "session_init.py missing guard CALL within control-flow "
-        "construct (if/return/elif/while/assert). Expected pattern "
-        "(post-Option-5): `if ... is_lead_at_session_start(...)`."
+        "construct (if/return/elif/while/assert). Expected pattern: "
+        "`if ... is_lead_context(...)`."
     )
 
 
 def test_session_init_does_not_emit_arm_directive_from_in_process_teammate_frame(tmp_path):
-    """Lead-Session Guard at Directive Emission Layer 0 (behavior
+    """Lead-Context Guard at Directive Emission Layer 0 (behavior
     tier): a teammate-frame session_init payload must NOT produce
-    the Arm directive prose. Under Option 5 (#611/#778) the platform
-    stamps `agent_type` on stdin for in-process subagent SessionStart
-    fires; is_lead_at_session_start classifies the payload as
-    teammate-frame (agent_type present -> not lead) and suppresses
-    the Arm prose.
+    the Arm directive prose. Under the consolidated discriminator
+    the platform stamps `agent_id` (or `teammate_name`) on stdin for
+    in-process subagent fires; is_lead_context classifies the
+    payload as teammate-frame (either field present -> not lead) and
+    suppresses the Arm prose.
 
     Discriminative setup (post-peer-review tightening): the in-process
     teammate SHARES the lead's session_id (the actual #611 bug pattern).
     Under the legacy session_id-equality at_init body this test would
     FAIL — the matching session_id classifies the payload as lead-frame
-    and emission proceeds. Under Option-5 (#611/#778) the agent_type
-    field-presence is the sole actor-discriminator and emission is
-    correctly suppressed.
+    and emission proceeds. Under the consolidated is_lead_context the
+    compound field-presence on `agent_id` / `teammate_name` is the
+    actor-discriminator and emission is correctly suppressed.
 
     The earlier formulation synthesized teammate-frame via session_id
-    distinct from team_config.leadSessionId AND agent_type set; that
-    setup passed under BOTH legacy and Option-5 bodies (DUAL signals)
-    so it was not discriminative for the field-presence migration.
-    See plan §Components Affected for the corridor split: SessionStart
-    uses agent_type (not agent_id) per platform docs.
+    distinct from team_config.leadSessionId AND auxiliary platform
+    fields; that setup passed under BOTH legacy and consolidated
+    bodies (DUAL signals) so it was not discriminative for the
+    field-presence migration.
     """
     home = tmp_path / "home"; home.mkdir()
     # Shared session_id is the #611 bug pattern: in-process teammates
-    # inherit the lead's session_id; only agent_type discriminates.
+    # inherit the lead's session_id; only the compound field-presence
+    # discriminates.
     # NOTE: team_name MUST match what generate_team_name() derives
     # from the session_id (first 8 chars of session_id prefixed with
     # "pact-"); otherwise the active-tasks count is zero and the
-    # lead-session guard branch is not reached.
+    # lead-context guard branch is not reached.
     shared_sid = "abcdef01-shared-session-id"
     pdir = "/tmp/pi-non-lead"
     team = "pact-abcdef01"
@@ -293,19 +300,21 @@ def test_session_init_does_not_emit_arm_directive_from_in_process_teammate_frame
         encoding="utf-8",
     )
     _stage_active_task(home, team)
-    # In-process teammate-frame SessionStart: payload carries agent_type.
+    # In-process teammate-frame SessionStart: payload carries agent_id
+    # (the compound discriminator's primary field for in-process
+    # subagent fires per the empirical capture campaign).
     out = _run_session_init(
-        home, shared_sid, pdir, agent_type="pact-secretary",
+        home, shared_sid, pdir, agent_id="subagent-some-uuid",
     )
     additional = out.get("hookSpecificOutput", {}).get("additionalContext", "")
     assert _ARM_DIRECTIVE_PHRASE not in additional, (
-        "Lead-Session Guard at Directive Emission Layer 0 broken: "
+        "Lead-Context Guard at Directive Emission Layer 0 broken: "
         "session_init emitted Arm directive from in-process teammate "
-        "frame. The hook must check agent_type field-presence and "
-        "suppress emission when teammate-frame."
+        "frame. The hook must check compound agent_id+teammate_name "
+        "field-presence and suppress emission when teammate-frame."
     )
     assert 'Skill("PACT:start-pending-scan")' not in additional, (
-        "Lead-Session Guard at Directive Emission Layer 0 broken: "
+        "Lead-Context Guard at Directive Emission Layer 0 broken: "
         "session_init emitted start-pending-scan slug from in-process "
         "teammate frame."
     )

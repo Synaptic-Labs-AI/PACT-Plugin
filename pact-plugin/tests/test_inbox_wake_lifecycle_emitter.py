@@ -83,7 +83,7 @@ def _write_session_context(
         }),
         encoding="utf-8",
     )
-    # Team config drives the emitter's is_lead_session guard. Default
+    # Team config drives the emitter's lead-context guard. Default
     # behavior: caller's session_id IS the lead (the standard test
     # framing for these tests, which exercise lead-side behavior). Pass
     # `lead_session_id="some-other-id"` to simulate a teammate session.
@@ -256,7 +256,7 @@ def test_arm_directive_contains_precondition_phrase(tmp_path):
         "tool_name": "TaskCreate", "session_id": sid, "cwd": pdir,
         "tool_input": {"taskId": "1"}, "tool_response": {"task": {"id": "1"}},
     }, home)
-    assert "First active teammate task created" in out["hookSpecificOutput"]["additionalContext"]
+    assert "Active teammate work detected" in out["hookSpecificOutput"]["additionalContext"]
 
 
 def test_no_op_on_create_of_signal_task(tmp_path):
@@ -330,7 +330,7 @@ def test_arm_on_create_owned_by_secretary_post_empty_carve_out(tmp_path):
 #   - test_teardown_directive_contains_precondition_phrase →
 #     test_wake_lifecycle_emitter.py::TestTeardownDirectiveAuditAnchor
 #     ::test_teardown_directive_describes_last_active_task (pins
-#     "Last active teammate task completed" prose).
+#     "No active teammate work remaining" prose).
 #   - test_teardown_emitted_on_last_active_completion →
 #     test_teardown_request_emitter.py::TestGate3ActiveTaskCountTransition
 #     ::test_count_zero_proceeds + test_native_hooks_integration.py
@@ -424,57 +424,55 @@ def test_is_terminal_status_update_matches_completed_and_deleted():
 
 # ---------- Lead-session guard (sec-M5 / te-MED-1) ----------
 
-def test_emitter_guards_on_lead_session_id_structural():
-    """Source-level structural pin (commit-9 tightened from substring-
-    anywhere to regex-in-code-line): the emitter must CALL `is_lead_session`
-    (the public symbol lifted into shared.wake_lifecycle, or equivalent
-    guard against team_config.leadSessionId) before any Teardown directive
-    emit. Without this structural anchor, the emitter would fire
-    Arm/Teardown directives in teammate sessions (where they're
-    inert at best, attacker-weaponizable at worst — a teammate session
-    that arms a cron scan would scan the lead's task store from the wrong
+def test_emitter_guards_on_lead_context_structural():
+    """Source-level structural pin: the emitter must CALL
+    `is_lead_context` (or equivalent guard against
+    team_config.leadSessionId) before any Teardown directive emit.
+    Without this structural anchor, the emitter would fire
+    Arm/Teardown directives in teammate sessions (where they're inert
+    at best, attacker-weaponizable at worst — a teammate session that
+    arms a cron scan would scan the lead's task store from the wrong
     process).
 
-    Tightening: require the guard symbol to appear within a control-flow
-    construct (if/return/elif/while/assert), NOT just anywhere in source.
-    A hostile edit removing the actual guard call but leaving a docstring
-    mention would pass the prior substring check; the regex-in-code-line
-    check catches the wiring-disconnect.
+    Require the guard symbol to appear within a control-flow
+    construct (if/return/elif/while/assert), NOT just anywhere in
+    source. A hostile edit removing the actual guard call but leaving
+    a docstring mention would pass a substring check; the
+    regex-in-code-line check catches the wiring-disconnect.
 
-    Accepts the canonical Option-5 symbol `is_lead_emit_authorized`,
-    the backward-compat delegate `is_lead_session` (still callable for
-    callers outside the symmetric corridor), the historical
-    underscore-prefixed `_is_lead_session` (pre-lift forward-compat),
-    and `leadSessionId` (the config key) for the case where a future
-    refactor inlines the check at the call site."""
+    Accepts the canonical consolidated symbol `is_lead_context` and
+    `leadSessionId` (the config key) for the case where a future
+    refactor inlines the check at the call site. The pre-consolidation
+    per-event helpers were retired."""
     import re as _re
     src = (HOOK_DIR / "wake_lifecycle_emitter.py").read_text(encoding="utf-8")
     code_line_pattern = _re.compile(
         r"^\s*(if|return|elif|while|assert)\b.*"
-        r"(is_lead_session|is_lead_emit_authorized|leadSessionId)",
+        r"(is_lead_context|leadSessionId)",
         _re.MULTILINE,
     )
     assert code_line_pattern.search(src) is not None, (
-        "Lead-Session Guard at Directive Emission Layer 0 strict: wake_lifecycle_emitter.py missing guard "
-        "CALL within control-flow construct (if/return/elif/while/assert). "
-        "The prior substring check passed on docstring mentions; "
-        "the strict check requires the guard to appear in actual code."
+        "Lead-Context Guard at Directive Emission Layer 0 strict: "
+        "wake_lifecycle_emitter.py missing guard CALL within "
+        "control-flow construct (if/return/elif/while/assert). The "
+        "prior substring check passed on docstring mentions; the "
+        "strict check requires the guard to appear in actual code."
     )
 
 
 def test_no_emit_when_in_process_teammate_frame(tmp_path):
     """Behavioral pin: an in-process teammate-frame TaskCreate that
     would otherwise emit Arm must be suppressed by the field-presence
-    lead-session guard. The platform stamps `agent_id` on stdin for
-    in-process subagent fires; is_lead_emit_authorized classifies the
+    lead-context guard. The platform stamps `agent_id` on stdin for
+    in-process subagent fires; is_lead_context classifies the
     payload as teammate-frame (agent_id present -> not lead) and the
     emit is suppressed.
 
-    Pre-Option-5 (legacy session_id-equality body) this test
-    synthesized teammate-frame via a session_id distinct from
-    team_config.leadSessionId; under the field-presence discriminator
-    the session_id comparison is irrelevant and agent_id presence is
-    the actor-discriminator. See test_p0_in_process_teammate_self_*
+    Pre-consolidation legacy bodies synthesized teammate-frame via a
+    session_id distinct from team_config.leadSessionId; under the
+    field-presence compound discriminator the session_id comparison
+    is irrelevant and agent_id (or teammate_name) presence is the
+    actor-discriminator. See test_p0_in_process_teammate_self_*
     in test_wake_arm_in_process_teammate_field_presence.py for the
     bug-fix-path coverage (#611 root: in-process teammates inherit
     the lead's session_id, so session_id mismatch is no longer a
@@ -507,11 +505,12 @@ def test_no_emit_when_in_process_teammate_frame(tmp_path):
 
 
 def test_emit_proceeds_when_team_config_missing_post_option_5(tmp_path):
-    """Post-Option-5 semantic shift: the field-presence predicate body
-    in is_lead_emit_authorized does NOT read team_config.json — the
-    `team_name` parameter is vestigial. With no agent_id in the
-    payload, the predicate returns True (lead frame), and the emit
-    proceeds even when team_config.json is missing.
+    """Post-consolidation semantic shift: the field-presence predicate
+    body in is_lead_context does NOT read team_config.json — the
+    `team_name` parameter is vestigial. With neither agent_id nor
+    teammate_name in the payload, the predicate returns True (lead
+    frame), and the emit proceeds even when team_config.json is
+    missing.
 
     Pre-Option-5 (legacy session_id-equality body) this test pinned
     the fail-closed semantic: missing team_config -> can't compare
@@ -632,15 +631,15 @@ def test_count_active_tasks_not_called_on_metadata_only_taskupdate():
             "tool_input": {"taskId": "1", "owner": "y"},
             "tool_response": {"id": "1"},
         }, "team-x")
-        # Without a lead-session guard pass, _decide_directive returns
+        # Without a lead-context guard pass, _decide_directive returns
         # early; we want to specifically exercise the post-tool-name +
-        # post-task-id + non-terminal path. Bypass is_lead_session by
+        # post-task-id + non-terminal path. Bypass is_lead_context by
         # patching it to True for this perf-invariant probe.
-        # (The lead-session guard's correctness is covered separately
+        # (The lead-context guard's correctness is covered separately
         # above; here we isolate the count_active_tasks ordering.)
 
     # Re-run with lead-guard bypassed to isolate the perf ordering invariant.
-    with patch.object(emitter, "is_lead_emit_authorized", return_value=True), \
+    with patch.object(emitter, "is_lead_context", return_value=True), \
          patch.object(emitter, "count_active_tasks") as mock_count:
         result = emitter._decide_directive({
             "tool_name": "TaskUpdate",
@@ -663,7 +662,7 @@ def test_count_active_tasks_called_on_terminal_status_taskupdate():
     import wake_lifecycle_emitter as emitter
 
     from unittest.mock import patch
-    with patch.object(emitter, "is_lead_emit_authorized", return_value=True), \
+    with patch.object(emitter, "is_lead_context", return_value=True), \
          patch.object(emitter, "count_active_tasks", return_value=0) as mock_count:
         emitter._decide_directive({
             "tool_name": "TaskUpdate",
@@ -683,7 +682,7 @@ def test_count_active_tasks_called_on_taskcreate():
     import wake_lifecycle_emitter as emitter
 
     from unittest.mock import patch
-    with patch.object(emitter, "is_lead_emit_authorized", return_value=True), \
+    with patch.object(emitter, "is_lead_context", return_value=True), \
          patch.object(emitter, "_extract_task_id", return_value="1"), \
          patch.object(emitter, "count_active_tasks", return_value=1) as mock_count:
         emitter._decide_directive({
@@ -1095,7 +1094,7 @@ class TestArmDirectiveOnParallelTaskCreateRace:
         home = tmp_path / "home"
         home.mkdir()
         sid = "pact-2877fe69"
-        pdir = "/Users/mj/Sites/collab/PACT-prompt"
+        pdir = "/Users/example/Sites/collab/PACT-Plugin"
         team = "team-race"
         _write_session_context(home, sid, pdir, team)
         _write_task(home, team, "10", status="completed", owner="backend-coder")

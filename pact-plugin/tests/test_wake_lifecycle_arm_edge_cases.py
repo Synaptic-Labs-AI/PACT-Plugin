@@ -108,7 +108,7 @@ def test_drain_suppresses_when_team_name_unresolvable(tmp_path):
     # Must NOT carry an additionalContext with Arm prose.
     hso = payload.get("hookSpecificOutput", {})
     if "additionalContext" in hso:
-        assert "First active teammate task created" not in (
+        assert "Active teammate work detected" not in (
             hso["additionalContext"]
         ), "Missing team config must not emit a false-positive Arm"
 

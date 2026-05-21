@@ -518,6 +518,6 @@ def test_arm_directive_audit_anchor_literal_prose():
     """
     sys.path.insert(0, str(HOOK_DIR))
     import wake_lifecycle_emitter as emitter
-    assert "First active teammate task created" in emitter._ARM_DIRECTIVE
+    assert "Active teammate work detected" in emitter._ARM_DIRECTIVE
     assert 'Skill("PACT:start-pending-scan")' in emitter._ARM_DIRECTIVE
     assert "Idempotent" in emitter._ARM_DIRECTIVE

@@ -1,0 +1,21 @@
+{
+  "_meta": {
+    "capture_method": "logging-shim",
+    "capture_date": "2026-05-20",
+    "capture_session_id": "pact-00000000",
+    "issue_ref": "#781",
+    "empirical_verification_date": "2026-05-20",
+    "delta_from_lead_shape": "+teammate_name +team_name",
+    "notes": "Captured via in-repo TaskCompleted shim (pact-plugin/tests/runbooks/install_taskcompleted_logging_shim.sh) during in-session capture experiment on 2026-05-20. This is the TEAMMATE-frame TaskCompleted stdin shape: 10 keys, with `teammate_name` and `team_name` identifying who owned the completing task. The empirical presence of `teammate_name` IS the teammate-context signature under the wake-lifecycle layer's compound field-presence check (`agent_id is None and teammate_name is None` returns False when teammate_name is present). Sibling-shape relationship: this shape EQUALS the lead-frame shape (taskcompleted_lead_context_shape.json, 8 keys) plus exactly two fields — `teammate_name` and `team_name` — per the `delta_from_lead_shape` _meta key. A future reader comparing the two fixtures should see no other field-level differences. Sanitized: real session_id/transcript_path/cwd/task_subject/task_description/team_name replaced with example-placeholder values; payload shape preserved verbatim."
+  },
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "/Users/example/.claude/projects/-Users-example-Sites-collab-PACT-Plugin/00000000-0000-0000-0000-000000000000.jsonl",
+  "cwd": "/Users/example/Sites/collab/PACT-Plugin/.worktrees/feature-example",
+  "agent_type": "PACT:pact-orchestrator",
+  "hook_event_name": "TaskCompleted",
+  "task_id": "45",
+  "task_subject": "example teammate-driven TaskCompleted fire — captures the teammate-frame stdin shape for fixture-parity testing",
+  "task_description": "Example task description for a teammate-driven TaskUpdate(status=\"completed\") fire. The fire originates from a teammate completing its own task; the empirical stdin shape carries `teammate_name` identifying the agent that owned the task plus `team_name` identifying the lead team. Used as the canonical teammate-frame fixture for TaskCompleted hook tests.",
+  "teammate_name": "secretary",
+  "team_name": "pact-00000000"
+}

@@ -20,7 +20,7 @@ The runbook deliberately covers BOTH happy-path lifecycle and edge cases that th
 
 **Expected**:
 - After the first `TaskCreate` (Task A teachback gate), the PostToolUse hook `wake_lifecycle_emitter.py` fires and emits an `additionalContext` directive instructing the lead to invoke `Skill("PACT:start-pending-scan")`.
-- Directive text exactly: `First active teammate task created. Invoke Skill("PACT:start-pending-scan") before any further teammate dispatch. Idempotent — no-op if a /PACT:scan-pending-tasks cron is already registered.`
+- Directive text exactly: `Active teammate work detected. You MUST invoke Skill("PACT:start-pending-scan") before your next tool call. This is a non-negotiable lifecycle gate. Idempotent — no-op if a /PACT:scan-pending-tasks cron is already registered.`
 - Lead invokes the skill; skill body's Lead-Session Guard passes (current session is lead), CronList lookup returns no match, `CronCreate(cron="*/5 * * * *", prompt="/PACT:scan-pending-tasks", recurring=True, durable=False)` succeeds.
 - Post-Arm `CronList` shows exactly one line with suffix `: /PACT:scan-pending-tasks` and markers `(recurring) [session-only]`.
 
@@ -110,7 +110,7 @@ This is the load-bearing verification — the 5 anti-hallucination guardrails ar
 
 **Action**: In a second concurrent PACT session (with a teammate-typed agent role, NOT the lead) that shares the same `team_name`, trigger a `TaskCreate` or `TaskUpdate(status="in_progress")` event. Observe whether `wake_lifecycle_emitter.py` emits the Arm directive.
 
-**Expected**: No Arm directive emitted in the teammate session — the hook's `_is_lead_session` check fails (session_id != team_config.leadSessionId), and the hook exits with `suppressOutput`.
+**Expected**: No Arm directive emitted in the teammate session — the hook's `is_lead_context` check fails (the platform-stamped `agent_id` field is present on the teammate-frame PostToolUse stdin payload, triggering the compound discriminator's teammate-context branch), and the hook exits with `suppressOutput`.
 
 **Acceptance**: The teammate session sees no `start-pending-scan` directive in `additionalContext`. No spurious cron is registered in the teammate's session.
 
@@ -120,7 +120,7 @@ This is the load-bearing verification — the 5 anti-hallucination guardrails ar
 
 **Expected**:
 - PostToolUse hook detects the 1→0 transition and emits a stop-pending-scan directive.
-- Directive text exactly: `Last active teammate task completed. Invoke Skill("PACT:stop-pending-scan") to delete the /PACT:scan-pending-tasks cron. Best-effort — tolerates a cron that was already auto-deleted (7-day expiry) or never registered.`
+- Directive text exactly: `No active teammate work remaining. You MUST invoke Skill("PACT:stop-pending-scan") before your next tool call to delete the /PACT:scan-pending-tasks cron. This is a non-negotiable lifecycle gate. Best-effort — tolerates a cron that was already auto-deleted (7-day expiry) or never registered.`
 - Lead invokes the skill; skill body's CronList lookup finds the match; `CronDelete(id=<extracted-8-char-id>)` succeeds.
 - Post-Teardown `CronList` shows no match for `/PACT:scan-pending-tasks`.
 
@@ -177,6 +177,6 @@ All 11 steps pass independently. A single step failure fails the runbook and mus
 - **Step 3 fails**: platform cron primitive issue or 5-minute cadence misconfiguration. Check `CronCreate` call shape against canonical schema.
 - **Step 4 (any sub-step) fails**: load-bearing guardrail violation. Treat as a P0 regression; the 5 guardrails are why this mechanism exists.
 - **Step 5 fails**: completion-authority procedure regression. Inspect canonical acceptance two-call pair in `scan-pending-tasks §Lead-Only Completion Contract`.
-- **Step 6 fails**: hook-level session guard regression. Inspect `_is_lead_session` in `wake_lifecycle_emitter.py` and `_is_lead_session_at_init` in `session_init.py`.
+- **Step 6 fails**: hook-level lead-context guard regression. Inspect `is_lead_context` — consumed by `wake_lifecycle_emitter.py` for PostToolUse fires, `teardown_request_emitter.py` for TaskCompleted fires, and `session_init.py` for SessionStart fires — defined in `shared/wake_lifecycle.py`.
 - **Step 7 / 8 / 9 fail**: lifecycle predicate regression. Inspect `count_active_tasks` and `has_same_teammate_continuation` in `shared/wake_lifecycle.py`.
 - **Step 10 / 11 fail**: structural-test territory; the corresponding test suite should have caught this in CI. Re-run `test_scan_pending_tasks_command_structure.py`.

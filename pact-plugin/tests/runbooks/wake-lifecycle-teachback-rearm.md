@@ -187,7 +187,7 @@ Sequence:
 
 Pass criteria:
   - Lead's next turn carries the Arm directive
-    ("First active teammate task created. Invoke Skill(\"PACT:start-pending-scan\")...").
+    ("Active teammate work detected. You MUST invoke Skill(\"PACT:start-pending-scan\")...").
   - Cron entry is re-created via start-pending-scan's CronCreate call
     (4-field shape per CronCreate Call Shape).
 
@@ -209,7 +209,7 @@ Sequence:
 
 Pass criteria:
   - Teardown directive emitted as expected
-    ("Last active teammate task completed. Invoke Skill(\"PACT:stop-pending-scan\")...").
+    ("No active teammate work remaining. You MUST invoke Skill(\"PACT:stop-pending-scan\")...").
   - CronList no longer shows a line with suffix `: /PACT:scan-pending-tasks`
     after stop-pending-scan skill invocation.
 

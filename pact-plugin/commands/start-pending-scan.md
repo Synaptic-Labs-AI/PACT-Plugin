@@ -21,7 +21,7 @@ Single-cron model. Lifetime is scoped to the period during which the lead holds 
 
 | Trigger | Site |
 |---|---|
-| First active teammate task created (PostToolUse hook detects 0→1 transition) | `wake_lifecycle_emitter.py` `additionalContext` directive |
+| Active teammate work detected (PostToolUse hook fires on TaskCreate with lifecycle-relevant active count ≥1; idempotent on every fire) | `wake_lifecycle_emitter.py` `additionalContext` directive |
 | Teammate claims a task off the queue while no cron is registered (PostToolUse hook detects pending→in_progress transition) | `wake_lifecycle_emitter.py` `additionalContext` directive |
 | Resume into a session with active tasks already on disk | `session_init.py` `additionalContext` directive |
 | User-typed manual invocation (debug, recovery) | `/PACT:start-pending-scan` slash invocation |

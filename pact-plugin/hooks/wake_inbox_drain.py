@@ -43,11 +43,12 @@ Role in the asymmetric-guard Arm/Teardown model:
   redundant directive is benign because the skills no-op on
   cron-already-registered / cron-already-deleted.
 
-Lead-Session Guard (Layer 0 — defense-in-depth):
-- The drain hook ONLY emits in the lead session. The Layer 0 check
-  is `is_lead_drain_authorized`, which checks
-  `input_data.get('agent_id') is None` — the platform stamps
-  `agent_id` on in-process subagent frames, so a teammate's
+Lead-Context Guard (Layer 0 — defense-in-depth):
+- The drain hook ONLY emits in the lead context. The Layer 0 check
+  is `is_lead_context`, the consolidated compound discriminator
+  (`'agent_id' not in stdin and 'teammate_name' not in stdin`)
+  shared across the 4 wake-lifecycle hook sites — the platform
+  stamps `agent_id` on in-process subagent frames, so a teammate's
   UserPromptSubmit (if it ever fired in subagent — it does not, per
   Claude Code docs) would short-circuit to suppressOutput. The skill
   body's Layer 1 lead-session guard remains as backstop.
@@ -80,10 +81,10 @@ Single-emit discipline:
 
 Performance hygiene:
 - Non-lead session short-circuits to suppressOutput before any
-  task-store I/O. Per-prompt cost on the hot teammate path: one
-  O(1) dict lookup (inside `is_lead_drain_authorized`); zero
-  filesystem I/O. Task-store I/O (inbox glob + `count_active_tasks`)
-  only runs in the lead session.
+  task-store I/O. Per-prompt cost on the hot teammate path: compound
+  O(1) dict lookup (inside `is_lead_context`); zero filesystem I/O.
+  Task-store I/O (inbox glob + `count_active_tasks`) only runs in
+  the lead context.
 
 SACROSANCT module-load failure pattern:
 - Module-load failures emit a fail-closed advisory via the stdlib-only
@@ -150,7 +151,7 @@ try:
     from shared.pact_context import get_team_name
     from shared.session_journal import append_event, make_event, read_last_event
     from shared.session_state import is_safe_path_component
-    from shared.wake_lifecycle import count_active_tasks, is_lead_drain_authorized
+    from shared.wake_lifecycle import count_active_tasks, is_lead_context
     # Reuse the canonical _ARM_DIRECTIVE / _TEARDOWN_DIRECTIVE literals
     # from the emitter so the directive prose has a single source of
     # truth. The audit-anchor literal-prose pins on the emitter side
@@ -525,20 +526,21 @@ def _decide_and_emit(input_data: dict) -> None:
         print(_SUPPRESS_OUTPUT)
         return
 
-    # Performance hygiene: non-lead-session early-out before any
+    # Performance hygiene: non-lead-context early-out before any
     # task-store I/O. The non-lead path is the hot common case (every
     # teammate prompt fires this hook); short-circuit before the drain
-    # glob and the count_active_tasks fallback. `is_lead_drain_authorized`
-    # checks `agent_id` field-presence on the stdin payload (O(1) dict
-    # lookup, no filesystem I/O), so the per-prompt cost on the hot
-    # path is now zero disk reads — an improvement over the legacy
-    # `is_lead_session` body which read team_config.json each fire.
-    # Semantically a no-op under current platform behavior because
-    # UserPromptSubmit does not fire in in-process subagent frames
-    # per Claude Code docs; this migration is documentation-symmetry
-    # with the emit-side callsites in the corridor, plus a future-
-    # extension surface if UserPromptSubmit semantics ever change.
-    if not is_lead_drain_authorized(input_data, team_name):
+    # glob and the count_active_tasks fallback. `is_lead_context`
+    # checks `agent_id` and `teammate_name` field-presence on the stdin
+    # payload (compound O(1) dict lookup, no filesystem I/O), so the
+    # per-prompt cost on the hot path is now zero disk reads — an
+    # improvement over the prior leadSessionId-comparison body which
+    # read team_config.json each fire. Semantically a no-op under
+    # current platform behavior because UserPromptSubmit does not fire
+    # in in-process subagent frames per Claude Code docs; this
+    # migration is documentation-symmetry with the emit-side callsites
+    # in the corridor, plus a future-extension surface if
+    # UserPromptSubmit semantics ever change.
+    if not is_lead_context(input_data, team_name):
         print(_SUPPRESS_OUTPUT)
         return
 

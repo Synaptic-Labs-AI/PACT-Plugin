@@ -8,7 +8,7 @@
   },
   "tool_name": "TaskUpdate",
   "session_id": "8159e827-ac41-4e77-84dd-6d804ac6c633",
-  "cwd": "/Users/mj/Sites/collab/PACT-prompt",
+  "cwd": "/Users/example/Sites/collab/PACT-Plugin",
   "tool_input": {
     "taskId": "20",
     "status": "in_progress",

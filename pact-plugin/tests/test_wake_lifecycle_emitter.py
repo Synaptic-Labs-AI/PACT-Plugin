@@ -795,7 +795,7 @@ class TestRetiredPostToolUseTeardownDoesNotFire:
         # Pin the actual SSOT directive prose so a future renamer
         # of stop-pending-scan trips this regression guard.
         assert "PACT:stop-pending-scan" in pre_c5_simulated_directive
-        assert "Last active teammate task completed" in pre_c5_simulated_directive
+        assert "No active teammate work remaining" in pre_c5_simulated_directive
 
 
 # =============================================================================
@@ -825,14 +825,14 @@ class TestTeardownDirectiveAuditAnchor:
         import wake_lifecycle_emitter as emitter
         assert 'Skill("PACT:stop-pending-scan")' in emitter._TEARDOWN_DIRECTIVE
 
-    def test_teardown_directive_describes_last_active_task(self):
-        """Pin the categorical-token prose ("Last active teammate task
-        completed") that the lead's parser keys off. Drift here would
+    def test_teardown_directive_describes_no_active_work_remaining(self):
+        """Pin the categorical-token prose ("No active teammate work
+        remaining") that the lead's parser keys off. Drift here would
         produce ambiguous downstream UX.
         """
         sys.path.insert(0, str(HOOK_DIR))
         import wake_lifecycle_emitter as emitter
-        assert "Last active teammate task completed" in emitter._TEARDOWN_DIRECTIVE
+        assert "No active teammate work remaining" in emitter._TEARDOWN_DIRECTIVE
 
     def test_teardown_directive_describes_cron_deletion(self):
         """The directive prose describes WHAT will happen on
@@ -865,5 +865,110 @@ class TestTeardownDirectiveAuditAnchor:
         assert "tolerat" in directive_lower, (
             f"Teardown directive must signal cron-tolerance "
             f"(already-deleted, never-registered); got "
+            f"{emitter._TEARDOWN_DIRECTIVE!r}"
+        )
+
+
+# =============================================================================
+# TestDirectiveAntiSofteningGuard — pins binding-clause + transition-neutral
+# opening across BOTH directives. Regression guard against a future editor
+# softening the prose back to advisory phrasing ("Invoke ...") or
+# re-introducing the transition-claim opening ("First active teammate task
+# created" / "Last active teammate task completed") that #738 identified
+# as provably-false on multi-fire.
+# =============================================================================
+
+
+class TestDirectiveAntiSofteningGuard:
+    """Pins the non-negotiable-binding shape of both directives.
+
+    The directive prose carries TWO load-bearing properties beyond the
+    skill-invocation literal: (a) `You MUST` binding clause that hooks
+    the orchestrator persona's literal-compliance reflex; (b) explicit
+    `non-negotiable lifecycle gate` protocol-class label that routes
+    the directive into the persona's lifecycle-gate handling. Removing
+    either reverts the directive to advisory tone, the #760 failure
+    mode (lead skips the directive when a teammate-action message
+    competes for the same turn).
+
+    Inverse property: the transition-claim openings the historical
+    directives carried ("First active teammate task created", "Last
+    active teammate task completed") are absent. The hook emits
+    unconditionally on every TaskCreate/TaskUpdate where
+    `count_active_tasks >= 1`; a transition-claim opening is
+    provably-false after the first fire (#738 root cause).
+    """
+
+    def test_arm_directive_carries_you_must_binding(self):
+        """`_ARM_DIRECTIVE` must contain the literal `You MUST` binding
+        clause. Softening to `Invoke ...` (advisory) reverts the #760
+        fix and re-opens the literal-compliance-bypass failure mode.
+        """
+        sys.path.insert(0, str(HOOK_DIR))
+        import wake_lifecycle_emitter as emitter
+        assert "You MUST" in emitter._ARM_DIRECTIVE, (
+            f"Arm directive must carry `You MUST` binding clause; "
+            f"got {emitter._ARM_DIRECTIVE!r}"
+        )
+
+    def test_teardown_directive_carries_you_must_binding(self):
+        """`_TEARDOWN_DIRECTIVE` must contain the literal `You MUST`
+        binding clause. Symmetric with the Arm pin.
+        """
+        sys.path.insert(0, str(HOOK_DIR))
+        import wake_lifecycle_emitter as emitter
+        assert "You MUST" in emitter._TEARDOWN_DIRECTIVE, (
+            f"Teardown directive must carry `You MUST` binding clause; "
+            f"got {emitter._TEARDOWN_DIRECTIVE!r}"
+        )
+
+    def test_arm_directive_labels_non_negotiable_lifecycle_gate(self):
+        """`_ARM_DIRECTIVE` must label itself a `non-negotiable
+        lifecycle gate`. The label routes the directive into the
+        persona's lifecycle-gate handling per #760 §Strengthen-binding.
+        """
+        sys.path.insert(0, str(HOOK_DIR))
+        import wake_lifecycle_emitter as emitter
+        assert "non-negotiable lifecycle gate" in emitter._ARM_DIRECTIVE, (
+            f"Arm directive must label itself a non-negotiable "
+            f"lifecycle gate; got {emitter._ARM_DIRECTIVE!r}"
+        )
+
+    def test_teardown_directive_labels_non_negotiable_lifecycle_gate(self):
+        """`_TEARDOWN_DIRECTIVE` must label itself a `non-negotiable
+        lifecycle gate`. Symmetric with the Arm pin.
+        """
+        sys.path.insert(0, str(HOOK_DIR))
+        import wake_lifecycle_emitter as emitter
+        assert "non-negotiable lifecycle gate" in emitter._TEARDOWN_DIRECTIVE, (
+            f"Teardown directive must label itself a non-negotiable "
+            f"lifecycle gate; got {emitter._TEARDOWN_DIRECTIVE!r}"
+        )
+
+    def test_arm_directive_omits_first_active_transition_claim(self):
+        """`_ARM_DIRECTIVE` must NOT carry the `First active teammate
+        task created` transition claim. The hook emits unconditionally
+        on every TaskCreate where `count_active_tasks >= 1`; a
+        transition claim is provably-false after the first fire
+        (#738 root cause).
+        """
+        sys.path.insert(0, str(HOOK_DIR))
+        import wake_lifecycle_emitter as emitter
+        assert "First active teammate task created" not in emitter._ARM_DIRECTIVE, (
+            f"Arm directive must NOT claim `First active teammate task "
+            f"created` (#738: provably-false on re-fire); got "
+            f"{emitter._ARM_DIRECTIVE!r}"
+        )
+
+    def test_teardown_directive_omits_last_active_transition_claim(self):
+        """`_TEARDOWN_DIRECTIVE` must NOT carry the `Last active
+        teammate task completed` transition claim. Symmetric with
+        the Arm pin under the unconditional-emission discipline.
+        """
+        sys.path.insert(0, str(HOOK_DIR))
+        import wake_lifecycle_emitter as emitter
+        assert "Last active teammate task completed" not in emitter._TEARDOWN_DIRECTIVE, (
+            f"Teardown directive must NOT claim `Last active teammate "
+            f"task completed` (#738: provably-false on re-fire); got "
             f"{emitter._TEARDOWN_DIRECTIVE!r}"
         )

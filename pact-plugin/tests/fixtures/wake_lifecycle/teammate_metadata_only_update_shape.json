@@ -8,7 +8,7 @@
   },
   "tool_name": "TaskUpdate",
   "session_id": "synthesized-teammate-session-id",
-  "cwd": "/Users/mj/Sites/collab/PACT-prompt",
+  "cwd": "/Users/example/Sites/collab/PACT-Plugin",
   "tool_input": {
     "taskId": "42",
     "metadata": {
