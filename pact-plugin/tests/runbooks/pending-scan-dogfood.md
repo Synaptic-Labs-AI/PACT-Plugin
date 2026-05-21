@@ -167,9 +167,60 @@ grep -o '/PACT:scan-pending-tasks' \
 
 **Acceptance**: At least one occurrence per file (per-file `grep -o ... | wc -l` returns `>= 1` for each of the 3 files).
 
+## 12. Step 0.5 Self-Correcting Teardown — Empirical Verification
+
+This step empirically verifies the Option D self-correcting fallback path that catches orchestrator non-compliance with the `_TEARDOWN_DIRECTIVE` `additionalContext` channel. See architecture doc `docs/architecture/819-cron-self-teardown.md` and memory `a7bcd37f` for the architectural tension this section dogfoods.
+
+### 12a. Simulate Orchestrator Non-Compliance
+
+**Action**: With the cron armed (after Step 1) and a teammate task active, trigger a 1→0 transition (have the teammate complete the last active task). The `wake_lifecycle_emitter.py` PostToolUse hook will write a `teardown_request` event to the journal AND emit the `_TEARDOWN_DIRECTIVE` `additionalContext`. **As the orchestrator, do NOT act on the directive.** Continue with whatever non-teardown action would naturally follow (e.g., continue conversation with the user, run an unrelated tool call).
+
+**Expected**:
+- The journal contains a `teardown_request` event with `ts` AFTER the latest `scan_armed.armed_at`.
+- `CronList` still contains the `/PACT:scan-pending-tasks` entry (no Teardown has been invoked).
+- No `scan_disarmed` event has been written.
+
+**Acceptance**: `python3 pact-plugin/hooks/shared/session_journal.py read-last --type teardown_request --session-dir <SD>` returns a populated event with ISO `ts`. `CronList | grep -o '/PACT:scan-pending-tasks' | wc -l` returns `1`.
+
+### 12b. Wait for Next Cron-Fire Within 5 Minutes
+
+**Action**: Idle for up to 5 minutes (allow up to ~6 minutes for cron jitter). The next cron-fire of `/PACT:scan-pending-tasks` will execute Step 0.5.
+
+**Expected**:
+- Step 0's warmup-grace check passes (more than 300s have elapsed since the latest `scan_armed`).
+- Step 0.5's bash block computes: `LATEST_TEARDOWN_REQUEST > LATEST_SCAN_ARMED` is TRUE; `LATEST_SCAN_DISARMED` is empty (no prior disarm in this arm cycle); the condition fires; the bash exits 0.
+- The scan-body LLM-side action: invoke `Skill("PACT:stop-pending-scan")` and return without continuing to Steps 1+.
+- `stop-pending-scan` body executes: `CronList` lookup finds the match; `CronDelete` succeeds; `scan_disarmed` event is written.
+
+**Acceptance**: Within 5 minutes of 12a, post-cron-fire `CronList | grep -o '/PACT:scan-pending-tasks' | wc -l` returns `0` AND `python3 pact-plugin/hooks/shared/session_journal.py read-last --type scan_disarmed --session-dir <SD>` returns a populated event with `disarmed_at` greater than the `teardown_request.ts` (converted to epoch).
+
+### 12c. No-Narration Discipline Across Self-Teardown Fire
+
+**Action**: Observe the lead session transcript across the Step 0.5 fire from 12b.
+
+**Expected**: No prose lines like "Detected pending teardown, invoking stop…", "Self-correcting…", or any narrative output. The only user-visible output across the fire turn is the `Skill("PACT:stop-pending-scan")` invocation itself (which the scan body discipline allows per the No-Narration allowed-outputs list item (c) per §No-Narration in `scan-pending-tasks.md` and the §Scan Discipline mirror in `pact-communication-charter.md`).
+
+**Acceptance**: No status-narrating prose in the transcript across the self-teardown fire turn.
+
+### 12d. Idempotency Across Repeat Fires (Edge Case)
+
+**Action**: Re-arm the cron (spawn a new teammate task to trigger the Arm hook). Have the teammate complete to trigger another 1→0 transition (writes a new `teardown_request`). Wait for the next Step 0.5 fire and observe.
+
+**Expected**: Step 0.5 fires again (the new `teardown_request.ts` > new `scan_armed.armed_at`). The cycle is independent of the prior 12a-12c cycle; latest-event semantics select the most recent triple. No interference from prior cycle's events.
+
+**Acceptance**: Re-arm cycle's self-teardown fires correctly; `scan_disarmed` event written; cron deleted.
+
+### 12e. Strptime Format Coupling Verification
+
+**Action**: Inspect the ISO format literal in the Step 0.5 bash block. Compare against `session_journal.py` `make_event` line 325.
+
+**Expected**: Both contain the identical literal `"%Y-%m-%dT%H:%M:%SZ"`. Any drift would silently break the ISO→epoch conversion.
+
+**Acceptance**: `grep -c '%Y-%m-%dT%H:%M:%SZ' pact-plugin/commands/scan-pending-tasks.md` returns `1` (Step 0.5 contains it). `grep -c '%Y-%m-%dT%H:%M:%SZ' pact-plugin/hooks/shared/session_journal.py` returns >=1 (`make_event` and any callers contain it). The literal must match BYTE-IDENTICAL across both files.
+
 ## Pass Criteria
 
-All 11 steps pass independently. A single step failure fails the runbook and must be triaged before merging the next PACT release.
+All 12 steps pass independently. A single step failure fails the runbook and must be triaged before merging the next PACT release.
 
 ## Failure Triage
 

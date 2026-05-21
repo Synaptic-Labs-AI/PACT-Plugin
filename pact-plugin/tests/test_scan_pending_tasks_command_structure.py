@@ -349,6 +349,43 @@ def test_warmup_grace_step_0_present_in_operation(cmd_text):
     )
 
 
+def test_step_0_5_self_teardown_present_in_operation(cmd_text):
+    """§Operation must contain a Step 0.5 self-correcting teardown
+    check, anchored at literal "0.5. " numbering per architecture spec.
+    The block must reference `teardown_request`, `scan_armed`, and
+    `scan_disarmed` event types by name; must include the ISO→epoch
+    conversion via strptime format literal '%Y-%m-%dT%H:%M:%SZ';
+    must invoke Skill("PACT:stop-pending-scan") on fire (LLM-side prose).
+    """
+    op_start = cmd_text.find("\n## Operation")
+    op_end = cmd_text.find("\n## ", op_start + 1)
+    op_section = cmd_text[op_start:op_end] if op_end > 0 else cmd_text[op_start:]
+    step_0_5_pos = op_section.find("\n0.5. ")
+    assert step_0_5_pos >= 0, (
+        "§Operation must contain a Step 0.5 numbered marker (`\\n0.5. `) — "
+        "the self-correcting teardown check is anchored at Step 0.5 "
+        "numbering per architecture spec."
+    )
+    step_1_pos = op_section.find("\n1. ", step_0_5_pos)
+    step_0_5_body = op_section[step_0_5_pos:step_1_pos] if step_1_pos > 0 else op_section[step_0_5_pos:]
+    for token in ("teardown_request", "scan_armed", "scan_disarmed"):
+        assert token in step_0_5_body, (
+            f"Step 0.5 must reference `{token}` event type by name."
+        )
+    assert "%Y-%m-%dT%H:%M:%SZ" in step_0_5_body, (
+        "Step 0.5 must contain the ISO format literal `%Y-%m-%dT%H:%M:%SZ` "
+        "matching session_journal.make_event line 325 — the ISO→epoch "
+        "conversion is the load-bearing fix for the heterogeneous-timestamp "
+        "bug (PREPARE §3.4). Drift between this literal and make_event's "
+        "format string breaks the comparison silently."
+    )
+    assert 'Skill("PACT:stop-pending-scan")' in step_0_5_body, (
+        "Step 0.5 LLM-side prose must invoke Skill(\"PACT:stop-pending-scan\") "
+        "on bash exit-0 — the bash itself cannot invoke the skill; the "
+        "LLM-side action is the precedent established by wrap-up.md:98."
+    )
+
+
 # ---------- Forbidden-token absence ----------
 
 @pytest.mark.parametrize("forbidden_slug", [
