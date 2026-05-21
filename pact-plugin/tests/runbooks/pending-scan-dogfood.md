@@ -182,9 +182,9 @@ This step empirically verifies the Option D self-correcting fallback path that c
 
 **Acceptance**: `python3 pact-plugin/hooks/shared/session_journal.py read-last --type teardown_request --session-dir <SD>` returns a populated event with ISO `ts`. `CronList | grep -o '/PACT:scan-pending-tasks' | wc -l` returns `1`.
 
-### 12b. Wait for Next Cron-Fire Within 5 Minutes
+### 12b. Wait for Next Cron-Fire (Journal-Event-Anchored)
 
-**Action**: Idle for up to 5 minutes (allow up to ~6 minutes for cron jitter). The next cron-fire of `/PACT:scan-pending-tasks` will execute Step 0.5.
+**Action**: Wait until the `scan_disarmed` event appears in the journal, typically within ~6 minutes (allow up to ~15 minutes worst-case under platform load). The next cron-fire of `/PACT:scan-pending-tasks` will execute Step 0.5.
 
 **Expected**:
 - Step 0's warmup-grace check passes (more than 300s have elapsed since the latest `scan_armed`).
@@ -192,7 +192,7 @@ This step empirically verifies the Option D self-correcting fallback path that c
 - The scan-body LLM-side action: invoke `Skill("PACT:stop-pending-scan")` and return without continuing to Steps 1+.
 - `stop-pending-scan` body executes: `CronList` lookup finds the match; `CronDelete` succeeds; `scan_disarmed` event is written.
 
-**Acceptance**: Within 5 minutes of 12a, post-cron-fire `CronList | grep -o '/PACT:scan-pending-tasks' | wc -l` returns `0` AND `python3 pact-plugin/hooks/shared/session_journal.py read-last --type scan_disarmed --session-dir <SD>` returns a populated event with `disarmed_at` greater than the `teardown_request.ts` (converted to epoch).
+**Acceptance**: Once the `scan_disarmed` event appears in the journal (typically within ~6 minutes of 12a), `CronList | grep -o '/PACT:scan-pending-tasks' | wc -l` returns `0` AND `python3 pact-plugin/hooks/shared/session_journal.py read-last --type scan_disarmed --session-dir <SD>` returns a populated event with `disarmed_at` greater than the `teardown_request.ts` (converted to epoch).
 
 ### 12c. No-Narration Discipline Across Self-Teardown Fire
 
