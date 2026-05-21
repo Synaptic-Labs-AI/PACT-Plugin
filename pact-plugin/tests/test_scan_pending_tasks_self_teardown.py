@@ -387,3 +387,96 @@ def test_step_0_5_iso_to_epoch_conversion_round_trip(
         f"format literal mismatch with session_journal.make_event). "
         f"stdout={result.stdout!r} stderr={result.stderr!r}"
     )
+
+
+def test_step_0_5_double_fire_before_disarm_is_idempotent(
+    tmp_path, step_0_5_bash_template
+):
+    """Double-disarm idempotency contract: multiple consecutive cron-fires
+    hitting Step 0.5 BEFORE `stop-pending-scan` has written `scan_disarmed`
+    must each fire (exit 0) deterministically. The architecture spec's
+    audit prose (scan-pending-tasks.md Step 0.5 line 62) claims:
+
+        Multiple consecutive cron-fires hitting this branch before
+        `stop-pending-scan` completes write multiple `scan_disarmed`
+        events — benign; the latest dominates.
+
+    The doc-only claim covers the post-disarm-write side (latest dominates),
+    but doesn't pin the PRE-disarm side: between the LLM-side action firing
+    `Skill("PACT:stop-pending-scan")` and that skill actually completing
+    its `scan_disarmed` write, additional cron fires can land in the same
+    (scan_armed, teardown_request) window with NO `scan_disarmed` event
+    yet written. Each such fire must deterministically choose to fire
+    Step 0.5 (not flap to fall-through).
+
+    This test exercises two consecutive Step 0.5 evaluations on the
+    SAME journal state (no events added between them; the bash is purely
+    a function of the latest-event triple). Both must fire and produce
+    byte-identical sentinel-absent output. The test would catch:
+
+      - Any subtle non-determinism in the bash (e.g., a future edit that
+        introduces a `read-last`-and-mutate pattern would diverge across
+        calls).
+      - Any side effect from one invocation that affects the next
+        (e.g., a future edit that touches a marker file before exit).
+      - Drift in the latest-event read semantics that would yield
+        different results across consecutive same-input reads.
+
+    Counter-test-by-revert: inserting a side-effect (e.g., `touch
+    /tmp/step-0-5-already-fired; [ -e /tmp/step-0-5-already-fired ] &&
+    exit 1`) into Step 0.5's bash would cause the second invocation to
+    fail-through (sentinel present). This test catches that exact
+    regression pattern.
+
+    This is the documentation-in-code partner to the audit-prose claim;
+    making the property falsifiable. Per
+    feedback_documentation_in_code_tests memory.
+    """
+    session_dir = tmp_path / "session"
+    now = int(time.time())
+    _write_journal(session_dir, "scan_armed", {"armed_at": now - 200})
+    _write_teardown_request(session_dir, now - 100)
+    # NOTE: No scan_disarmed event written yet — Step 0.5 must fire each time.
+
+    bash_body = _render_step_0_5(step_0_5_bash_template, PLUGIN_ROOT, session_dir)
+
+    # First fire — should fire Step 0.5 (sentinel absent).
+    result1 = _run_step_0_5(bash_body)
+    assert result1.returncode == 0, (
+        f"First Step 0.5 invocation exit code expected 0, got "
+        f"{result1.returncode}. stderr={result1.stderr!r}"
+    )
+    assert SENTINEL not in result1.stdout, (
+        f"First Step 0.5 invocation should have FIRED. "
+        f"stdout={result1.stdout!r}"
+    )
+
+    # Second fire — same journal state, no scan_disarmed yet — must
+    # ALSO fire Step 0.5 (sentinel absent).
+    result2 = _run_step_0_5(bash_body)
+    assert result2.returncode == 0, (
+        f"Second Step 0.5 invocation exit code expected 0, got "
+        f"{result2.returncode}. stderr={result2.stderr!r}"
+    )
+    assert SENTINEL not in result2.stdout, (
+        f"Second Step 0.5 invocation on UNCHANGED journal state should "
+        f"have FIRED again (idempotent decision on same input). Sentinel "
+        f"{SENTINEL!r} present in stdout indicates Step 0.5 is no longer "
+        f"a pure function of latest-event-triple state — a regression "
+        f"that would break the double-disarm-is-benign architectural "
+        f"claim (scan-pending-tasks.md Step 0.5 audit prose line ~62). "
+        f"stdout={result2.stdout!r}"
+    )
+
+    # Determinism check: both invocations must produce byte-identical
+    # stdout/stderr/returncode given identical inputs. A divergence here
+    # would surface non-deterministic state-mutation introduced by a
+    # future edit.
+    assert result1.stdout == result2.stdout, (
+        f"Step 0.5 must produce deterministic output on identical inputs. "
+        f"First stdout={result1.stdout!r}; second stdout={result2.stdout!r}"
+    )
+    assert result1.returncode == result2.returncode, (
+        f"Step 0.5 must produce deterministic exit codes on identical "
+        f"inputs. First rc={result1.returncode}; second rc={result2.returncode}"
+    )

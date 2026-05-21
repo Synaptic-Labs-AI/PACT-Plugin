@@ -216,7 +216,7 @@ This step empirically verifies the Option D self-correcting fallback path that c
 
 **Expected**: Both contain the identical literal `"%Y-%m-%dT%H:%M:%SZ"`. Any drift would silently break the ISO→epoch conversion.
 
-**Acceptance**: `grep -c '%Y-%m-%dT%H:%M:%SZ' pact-plugin/commands/scan-pending-tasks.md` returns `1` (Step 0.5 contains it). `grep -c '%Y-%m-%dT%H:%M:%SZ' pact-plugin/hooks/shared/session_journal.py` returns >=1 (`make_event` and any callers contain it). The literal must match BYTE-IDENTICAL across both files.
+**Acceptance**: `grep -c '%Y-%m-%dT%H:%M:%SZ' pact-plugin/commands/scan-pending-tasks.md` returns `>=2` (Step 0.5 bash extractor + audit prose both reference the literal by design). `grep -c '%Y-%m-%dT%H:%M:%SZ' pact-plugin/hooks/shared/session_journal.py` returns `>=1` (`make_event` and any callers contain it). The literal must match BYTE-IDENTICAL across both files.
 
 ## Pass Criteria
 
