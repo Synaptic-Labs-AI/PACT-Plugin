@@ -36,7 +36,8 @@ P1 structural pins:
        files (wake_lifecycle.py + wake_inbox_drain.py); `agent_type`
        appears in session_init.py per the SessionStart field-split.
   P1-2 Inline `_is_lead_session_at_init` symbol fully removed from
-       session_init.py (replaced by `is_lead_at_session_start` import).
+       session_init.py (replaced by `is_lead_context` import from the
+       consolidated shared helper).
 
 Counter-test-by-revert anchor (per plan §Coverage Guards HARD): revert
 target is commit fc37bc04 (the predicate body change). Source-only
@@ -44,10 +45,10 @@ revert technique per pact-testing-strategies bundled-commit guidance
 keeps these tests in place while the source rolls back; expected RED
 cardinality >=3 across the P0 behavioral tests on revert.
 
-4th site (teardown_request_emitter.py) consumes the per-event sibling
-``is_lead_at_task_completed`` (TaskCompleted-event-class `agent_id is
-None` discriminator); see TestGate0LeadSessionGuard in
-test_teardown_request_emitter.py for the behavioral coverage.
+4th site (teardown_request_emitter.py) consumes the same consolidated
+``is_lead_context`` helper at TaskCompleted Gate 0; see
+TestGate0LeadSessionGuard in test_teardown_request_emitter.py for the
+behavioral coverage.
 
 The filename uses "in_process_teammate" rather than the discovery
 instance "secretary" because the #611 bug class is general (any
@@ -353,9 +354,9 @@ def test_p0_lead_fire_taskupdate_completed_suppressoutput_post_c5(tmp_path):
     to #781 for field-presence migration).
 
     This is the discriminator-correctness baseline for lead-frame
-    completed transitions: agent_id is absent in lead-frame stdin,
-    is_lead_emit_authorized classifies the fire as lead, and the
-    post-C5 hook body has no remaining Teardown emit path here.
+    completed transitions: both agent_id and teammate_name are absent
+    in lead-frame stdin, is_lead_context classifies the fire as lead,
+    and the post-C5 hook body has no remaining Teardown emit path here.
 
     A regression that re-introduced a PostToolUse:TaskUpdate Teardown
     branch (e.g., a "fix" inverting the C5 retirement) would emit a
@@ -385,8 +386,8 @@ def test_p0_lead_fire_taskupdate_completed_suppressoutput_post_c5(tmp_path):
     assert out == {"suppressOutput": True}, (
         f"Lead-frame 1->0 TaskUpdate(completed) must suppressOutput "
         f"post-C5; the Teardown emit path lives on the TaskCompleted "
-        f"hook (teardown_request_emitter.py via "
-        f"is_lead_at_task_completed). Got {out!r}"
+        f"hook (teardown_request_emitter.py via is_lead_context). "
+        f"Got {out!r}"
     )
 
 
@@ -413,8 +414,8 @@ def test_p0_lead_drain_emits_arm_directive_on_teammate_written_marker(tmp_path):
     scan_armed on actual CronCreate landing — the drain has no cron
     visibility).
 
-    Lead-frame UPS payload carries NO agent_id (UPS doesn't fire in
-    subagent per Claude Code docs); is_lead_drain_authorized
+    Lead-frame UPS payload carries neither agent_id nor teammate_name
+    (UPS doesn't fire in subagent per Claude Code docs); is_lead_context
     classifies the fire as lead -> drain proceeds.
     """
     home = tmp_path / "home"; home.mkdir()
@@ -613,30 +614,30 @@ def test_p1_agent_id_appears_in_postooluse_corridor_files():
     )
 
 
-def test_p1_agent_type_appears_in_session_init():
-    """SessionStart uses `agent_type` (agent-class string) rather than
-    `agent_id` (per-instance identifier) per Claude Code platform docs.
-    session_init.py's lead-session guard must reference the
-    SessionStart-appropriate predicate (is_lead_at_session_start) which
-    encodes the agent_type field-presence body.
+def test_p1_lead_context_helper_imported_in_session_init():
+    """session_init.py's lead-context guard must reference the
+    consolidated is_lead_context helper (the compound agent_id +
+    teammate_name field-presence predicate). The pre-consolidation
+    SessionStart-specific is_lead_at_session_start helper was retired
+    in favor of the unified empirical-surface check.
     """
     session_init_src = SESSION_INIT_PY.read_text(encoding="utf-8")
-    assert "is_lead_at_session_start" in session_init_src, (
-        "session_init.py must import / call is_lead_at_session_start "
-        "(the SessionStart-specific agent_type field-presence predicate)"
+    assert "is_lead_context" in session_init_src, (
+        "session_init.py must import / call is_lead_context "
+        "(the consolidated compound field-presence predicate)"
     )
 
 
-# ─── P1-2: inline _is_lead_session_at_init symbol removed ───────────────
+# --- P1-2: inline _is_lead_session_at_init symbol removed ---
 
 
 def test_p1_inline_is_lead_session_at_init_removed_from_session_init():
     """The legacy inline `_is_lead_session_at_init` symbol was
-    consolidated into the shared `is_lead_at_session_start` helper.
-    Its definition must NOT reappear in session_init.py; a regression
-    that re-inlines the symbol (e.g., an editor accidentally reverting
-    the consolidation) would reintroduce the session_id-equality
-    misclassification at SessionStart.
+    consolidated into the shared `is_lead_context` helper. Its
+    definition must NOT reappear in session_init.py; a regression
+    that re-inlines the symbol (e.g., an editor accidentally
+    reverting the consolidation) would reintroduce the
+    session_id-equality misclassification at SessionStart.
 
     Pin checks for the function-definition pattern, not a docstring
     mention — a comment or audit-anchor that references the legacy
@@ -654,200 +655,95 @@ def test_p1_inline_is_lead_session_at_init_removed_from_session_init():
     )
 
 
-# ─── Edge-case unit tests for the field-presence predicates ─────────────
+# --- Edge-case unit tests for the consolidated field-presence predicate ---
 #
-# Direct in-process calls to is_lead_emit_authorized / is_lead_drain_authorized
-# / is_lead_at_session_start exercising the discriminator under a sweep of
-# input values (empty string, explicit None, falsy non-None, list, str,
-# missing key). The bodies are `payload.get("agent_id") is None` (emit +
-# drain) and `payload.get("agent_type") is None` (session-start), so:
+# Direct in-process calls to is_lead_context exercising the compound
+# discriminator under a sweep of input values across BOTH fields
+# (agent_id and teammate_name). The body is
+# `stdin.get("agent_id") is None and stdin.get("teammate_name") is None`,
+# so the per-field expectations are:
 #
-#   - missing key       -> .get(...) returns None -> True  (lead frame)
-#   - explicit None     -> .get(...) returns None -> True  (lead frame)
-#   - "" (empty string) -> .get(...) returns ""   -> False (teammate frame)
-#   - 0 (falsy int)     -> .get(...) returns 0    -> False (teammate frame)
-#   - [] (empty list)   -> .get(...) returns []   -> False (teammate frame)
-#   - "any-str"         -> .get(...) returns str  -> False (teammate frame)
+#   - missing key       -> .get(...) returns None -> True half (lead)
+#   - explicit None     -> .get(...) returns None -> True half (lead)
+#   - "" (empty string) -> .get(...) returns ""   -> False half (teammate)
+#   - 0 (falsy int)     -> .get(...) returns 0    -> False half (teammate)
+#   - [] (empty list)   -> .get(...) returns []   -> False half (teammate)
+#   - "any-str"         -> .get(...) returns str  -> False half (teammate)
 #
-# These pin the discriminator semantic as identity-vs-None, not truthiness.
-# A regression that "simplified" `is None` to `not …` would flip the 0/""/[]
-# rows and re-introduce a misclassification path; this sweep catches that.
+# Under the compound AND-chain, the overall classification is lead iff
+# BOTH halves are True (i.e., both fields are missing or explicit None).
+# This sweep pins the identity-vs-None semantic across both halves
+# simultaneously — a regression that "simplified" `is None` to `not ...`
+# would flip the 0/""/[] rows and re-introduce a misclassification path.
+#
+# Sweep collapse rationale: prior per-event sibling helpers
+# (is_lead_emit_authorized / is_lead_drain_authorized /
+# is_lead_at_session_start) were consolidated into a single compound
+# is_lead_context; the historical three per-event parametrized sweeps
+# now collapse into one parametrized sweep over the compound helper.
 
 
-from shared.wake_lifecycle import (  # noqa: E402
-    is_lead_at_session_start,
-    is_lead_drain_authorized,
-    is_lead_emit_authorized,
-)
+from shared.wake_lifecycle import is_lead_context  # noqa: E402
 
 
-_AGENT_ID_KEY_LEAD_CASES = [
-    pytest.param({}, id="missing_key"),
-    pytest.param({"agent_id": None}, id="explicit_None"),
-]
-_AGENT_ID_KEY_TEAMMATE_CASES = [
-    pytest.param({"agent_id": ""}, id="empty_string"),
-    pytest.param({"agent_id": 0}, id="falsy_int_zero"),
-    pytest.param({"agent_id": []}, id="empty_list"),
-    pytest.param({"agent_id": "any-str-uuid"}, id="nonempty_string"),
-]
-
-_AGENT_TYPE_KEY_LEAD_CASES = [
-    pytest.param({}, id="missing_key"),
-    pytest.param({"agent_type": None}, id="explicit_None"),
-]
-_AGENT_TYPE_KEY_TEAMMATE_CASES = [
-    pytest.param({"agent_type": ""}, id="empty_string"),
-    pytest.param({"agent_type": 0}, id="falsy_int_zero"),
-    pytest.param({"agent_type": []}, id="empty_list"),
-    pytest.param({"agent_type": "pact-secretary"}, id="nonempty_string"),
+# Lead-context cases: BOTH fields must be missing or explicit None for
+# the compound AND-chain to return True.
+_LEAD_CONTEXT_CASES = [
+    pytest.param({}, id="both_keys_missing"),
+    pytest.param({"agent_id": None}, id="agent_id_explicit_None"),
+    pytest.param({"teammate_name": None}, id="teammate_name_explicit_None"),
+    pytest.param(
+        {"agent_id": None, "teammate_name": None},
+        id="both_explicit_None",
+    ),
 ]
 
-
-@pytest.mark.parametrize("payload", _AGENT_ID_KEY_LEAD_CASES)
-def test_is_lead_emit_authorized_returns_true_when_agent_id_is_None(payload):
-    """`agent_id` missing or explicitly None classifies as lead frame
-    (identity-vs-None semantic; NOT truthiness)."""
-    assert is_lead_emit_authorized(payload) is True
-
-
-@pytest.mark.parametrize("payload", _AGENT_ID_KEY_TEAMMATE_CASES)
-def test_is_lead_emit_authorized_returns_false_when_agent_id_is_present(payload):
-    """Any non-None `agent_id` value classifies as teammate frame —
-    including falsy values ("" / 0 / []). The discriminator pins
-    identity-vs-None, not truthiness; a regression flipping to
-    `not payload.get("agent_id")` would misclassify these as lead."""
-    assert is_lead_emit_authorized(payload) is False
-
-
-@pytest.mark.parametrize("payload", _AGENT_ID_KEY_LEAD_CASES)
-def test_is_lead_drain_authorized_returns_true_when_agent_id_is_None(payload):
-    """Drain-side predicate mirrors emit-side: agent_id None -> lead."""
-    assert is_lead_drain_authorized(payload) is True
+# Teammate-context cases: at least one field is present (non-None) -
+# the compound AND-chain returns False. Exercise both fields under
+# the truthiness-vs-identity discipline.
+_TEAMMATE_CONTEXT_CASES = [
+    pytest.param({"agent_id": ""}, id="agent_id_empty_string"),
+    pytest.param({"agent_id": 0}, id="agent_id_falsy_int_zero"),
+    pytest.param({"agent_id": []}, id="agent_id_empty_list"),
+    pytest.param({"agent_id": "any-str-uuid"}, id="agent_id_nonempty_string"),
+    pytest.param({"teammate_name": ""}, id="teammate_name_empty_string"),
+    pytest.param({"teammate_name": 0}, id="teammate_name_falsy_int_zero"),
+    pytest.param({"teammate_name": []}, id="teammate_name_empty_list"),
+    pytest.param(
+        {"teammate_name": "secretary"},
+        id="teammate_name_nonempty_string",
+    ),
+]
 
 
-@pytest.mark.parametrize("payload", _AGENT_ID_KEY_TEAMMATE_CASES)
-def test_is_lead_drain_authorized_returns_false_when_agent_id_is_present(payload):
-    """Drain-side predicate mirrors emit-side: any non-None agent_id ->
-    teammate (identity-vs-None semantic)."""
-    assert is_lead_drain_authorized(payload) is False
+@pytest.mark.parametrize("payload", _LEAD_CONTEXT_CASES)
+def test_is_lead_context_returns_true_on_lead_context(payload):
+    """Both discriminator fields missing or explicit None classifies
+    as lead context (identity-vs-None semantic on the compound
+    AND-chain; NOT truthiness)."""
+    assert is_lead_context(payload) is True
 
 
-@pytest.mark.parametrize("payload", _AGENT_TYPE_KEY_LEAD_CASES)
-def test_is_lead_at_session_start_returns_true_when_agent_type_is_None(payload):
-    """SessionStart predicate uses `agent_type` field. None -> lead."""
-    assert is_lead_at_session_start(payload) is True
+@pytest.mark.parametrize("payload", _TEAMMATE_CONTEXT_CASES)
+def test_is_lead_context_returns_false_when_either_field_present(payload):
+    """Any non-None value on EITHER discriminator field classifies as
+    teammate context - including falsy values ("" / 0 / []). The
+    discriminator pins identity-vs-None on each half of the compound
+    check; a regression flipping to `not payload.get(...)` would
+    misclassify the falsy rows as lead."""
+    assert is_lead_context(payload) is False
 
 
-@pytest.mark.parametrize("payload", _AGENT_TYPE_KEY_TEAMMATE_CASES)
-def test_is_lead_at_session_start_returns_false_when_agent_type_is_present(payload):
-    """SessionStart predicate uses `agent_type` field. Any non-None
-    value -> teammate (identity-vs-None semantic; falsy values
-    "", 0, [] still classify as teammate)."""
-    assert is_lead_at_session_start(payload) is False
-
-
-# Non-dict input — pure-never-raises contract returns False for all three.
-@pytest.mark.parametrize(
-    "predicate",
-    [is_lead_emit_authorized, is_lead_drain_authorized, is_lead_at_session_start],
-    ids=["emit", "drain", "session_start"],
-)
+# Non-dict input - pure-never-raises contract returns False on the
+# isinstance(_, dict) short-circuit.
 @pytest.mark.parametrize(
     "non_dict_input",
     [None, "string", 42, [], (), object()],
     ids=["None", "string", "int", "list", "tuple", "object"],
 )
-def test_predicates_return_false_on_non_dict_input(predicate, non_dict_input):
-    """All three predicates honor the pure-never-raises contract on
+def test_is_lead_context_returns_false_on_non_dict_input(non_dict_input):
+    """The compound predicate honors the pure-never-raises contract on
     non-dict input by returning False (teammate-frame fallback;
     fail-closed at this layer because non-dict input is malformed
     stdin which never legitimately reaches the predicate)."""
-    assert predicate(non_dict_input) is False
-
-
-# ─── Property-style symmetry pin: emit ≡ drain AST body ─────────────────
-
-
-def _function_body_ast_dump(fn) -> list[str]:
-    """Return the function's body as a list of `ast.dump` strings,
-    excluding the leading docstring statement.
-
-    `inspect.getsource(fn)` -> `textwrap.dedent` (normalize indentation
-    for methods that came from a class) -> `ast.parse` -> traverse the
-    first module statement (the FunctionDef) -> `ast.dump` each body
-    statement with `include_attributes=False` so line / column
-    coordinates do not leak into the comparison.
-
-    The leading docstring (a bare `Expr` whose `value` is a `Constant`
-    of type `str`) is stripped: the docstring is documentation, not
-    semantic code, and the two predicates intentionally have
-    different docstrings (each documents its own corridor site). The
-    behavioral body — the statements that actually execute when the
-    predicate is called — is what the symmetry contract pins.
-    """
-    src = textwrap.dedent(inspect.getsource(fn))
-    tree = ast.parse(src)
-    body = tree.body[0].body
-    if (
-        body
-        and isinstance(body[0], ast.Expr)
-        and isinstance(body[0].value, ast.Constant)
-        and isinstance(body[0].value.value, str)
-    ):
-        body = body[1:]
-    return [
-        ast.dump(node, annotate_fields=True, include_attributes=False)
-        for node in body
-    ]
-
-
-def test_is_lead_emit_authorized_and_drain_authorized_share_ast_body():
-    """The drain-side and emit-side predicates have STRUCTURALLY-IDENTICAL
-    behavioral bodies (both read `payload.get("agent_id") is None` after
-    the `isinstance` non-dict guard). The is_lead_drain_authorized
-    docstring explicitly declares "Bytes-identical body to
-    is_lead_emit_authorized." This pin enforces that the two predicates
-    remain AST-equivalent so an editing-LLM cannot silently diverge
-    them without surfacing the asymmetry.
-
-    UserPromptSubmit does NOT fire in subagent frames per Claude Code
-    platform docs (so is_lead_drain_authorized is semantically
-    always-True for any fire that actually reaches the drain), but the
-    drain-side predicate is retained as a distinct symbol for
-    documentation symmetry across the 4-site corridor + future-extension
-    surface if the platform ever starts firing UserPromptSubmit in
-    subagent frames.
-
-    The pin uses AST-level structural equivalence (`ast.dump` of each
-    body statement with `include_attributes=False`) rather than
-    `__code__.co_code` byte-equality. `co_code` is a CPython
-    implementation detail: opcode renumbering between minor Python
-    versions (e.g., 3.13 -> 3.14) flips raw-bytecode-equal assertions
-    to False even when the two functions remain semantically
-    equivalent. AST equivalence is Python-version-stable across the
-    supported CPython range AND preserves the symmetry intent —
-    structural identity of the source-level statement tree. Docstrings
-    are stripped before comparison (documentation, not behavior); all
-    other node attributes (including the `Constant(value='agent_id')`
-    field-key literal) are preserved, so a field-rename regression
-    (e.g., `agent_id` -> `agentId` on one side only) still fails this
-    test.
-
-    Counter-test for this pin: temporarily flip is_lead_drain_authorized's
-    return statement to a semantically-different body (e.g.,
-    `return False`); re-run; assertion FAILS with the AST divergence
-    surfaced in the assertion-message body dumps. Restore byte-
-    identically after.
-    """
-    emit_body = _function_body_ast_dump(is_lead_emit_authorized)
-    drain_body = _function_body_ast_dump(is_lead_drain_authorized)
-    assert emit_body == drain_body, (
-        "is_lead_emit_authorized and is_lead_drain_authorized must have "
-        "AST-equivalent behavioral bodies (docstrings excluded) per the "
-        "drain-side docstring's 'Bytes-identical body' declaration. If "
-        "divergence is intentional (per the future-extension surface), "
-        "update both the docstring and this test.\n"
-        f"emit body: {emit_body!r}\n"
-        f"drain body: {drain_body!r}"
-    )
+    assert is_lead_context(non_dict_input) is False

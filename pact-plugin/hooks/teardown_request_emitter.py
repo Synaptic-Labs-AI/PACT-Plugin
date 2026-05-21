@@ -27,7 +27,7 @@ NOT responsible for:
   (Tier-4 cron-staleness fallback is a separate surface).
 
 Emission invariant: write exactly one teardown_request event iff
-(0)  is_lead_at_task_completed(input_data, team_name) — defense-in-depth Gate 0
+(0)  is_lead_context(input_data, team_name) — defense-in-depth Gate 0
 AND
 (1)  hook_event_name == "TaskCompleted" OR (fallback) disk-read task
      status == "completed" — primary transition signal + fallback
@@ -112,7 +112,7 @@ from shared.task_utils import read_task_json
 from shared.wake_lifecycle import (
     count_active_tasks,
     has_same_teammate_continuation,
-    is_lead_at_task_completed,
+    is_lead_context,
 )
 
 # Reuse the canonical _TEARDOWN_DIRECTIVE literal from the emitter so the
@@ -295,20 +295,16 @@ def main() -> None:
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
-        # Gate 0 — defense-in-depth lead-session check. Mirrors
-        # wake_lifecycle_emitter.py:654; teammate-session input never
-        # reaches the journal write or directive emission paths. Uses
-        # the per-event `is_lead_at_task_completed` discriminator
-        # (`teammate_name is None`) per empirical TaskCompleted captures
-        # landed via the in-repo shim at
-        # pact-plugin/tests/runbooks/install_taskcompleted_logging_shim.sh.
-        # Captures show teammate-driven completions carry `teammate_name`
-        # and lead-driven completions omit it; `agent_id` empirically
-        # never appears on TaskCompleted stdin (the field is documented
-        # in the upstream "Common input fields" section as conditional
-        # on subagent context, but TaskCompleted does not fire in
-        # subagent context for in-team teammate task completions).
-        if not is_lead_at_task_completed(input_data, team_name):
+        # Gate 0 — defense-in-depth lead-context check. Mirrors
+        # wake_lifecycle_emitter.py outer gate; teammate-context input
+        # never reaches the journal write or directive emission paths.
+        # The compound `is_lead_context` discriminator (`agent_id is
+        # None and teammate_name is None`) is the consolidated lead-
+        # vs-teammate classifier across the 4 wake-lifecycle hook
+        # sites — empirical provenance and SessionStart-specific
+        # follow-up scope are documented at the helper definition in
+        # shared/wake_lifecycle.py.
+        if not is_lead_context(input_data, team_name):
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 

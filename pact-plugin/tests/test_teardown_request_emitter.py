@@ -8,7 +8,7 @@ _TEARDOWN_DIRECTIVE additionalContext for the lead's next turn. This
 replaces the PostToolUse:TaskUpdate Teardown branch retired in C5.
 
 Gates (mirrors agent_handoff_emitter.py:281-329):
-  Gate 0 — lead-session guard (is_lead_session)
+  Gate 0 — lead-context guard (is_lead_context)
   Gate 1 — transition signal (hook_event_name=="TaskCompleted",
            disk-status fallback)
   Gate 2 — sidecar O_EXCL marker idempotency
@@ -47,10 +47,10 @@ EMITTER = HOOK_DIR / "teardown_request_emitter.py"
 # agent that owned the completing task). Provenance: "logging-shim"
 # per PLATFORM_TASKCOMPLETED_STDIN_SHAPE_META below.
 #
-# Discriminator semantics: under the captured-grounded
-# `is_lead_at_task_completed` predicate body (`teammate_name is None`),
+# Discriminator semantics: under the consolidated `is_lead_context`
+# predicate body (`agent_id is None and teammate_name is None`),
 # this payload classifies as teammate-frame (teammate_name present
-# → False → suppress directive). The lead-context counterpart (see
+# -> False -> suppress directive). The lead-context counterpart (see
 # LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE below) carries 8 keys with
 # neither `teammate_name` nor `team_name`. Empirical absence of those
 # two fields IS the lead-context signature; the upstream Claude Code
@@ -89,8 +89,9 @@ PLATFORM_TASKCOMPLETED_STDIN_SHAPE = {
 # with NEITHER `teammate_name` NOR `team_name`. Mirrors the empirical
 # capture promoted to
 # pact-plugin/tests/fixtures/wake_lifecycle/taskcompleted_lead_context_shape.json
-# (captured 2026-05-20). Under the `is_lead_at_task_completed`
-# predicate body (`teammate_name is None`), a key-absent payload
+# (captured 2026-05-20). Under the consolidated `is_lead_context`
+# predicate body (`agent_id is None and teammate_name is None`), a
+# both-keys-absent payload
 # classifies as lead-frame (True → emit). Paired with
 # TestLeadFrameStdinShapePin below to canary lead-frame schema drift
 # (lead-only field additions would otherwise slip past the
@@ -370,12 +371,12 @@ class TestLeadFrameStdinShapePin:
         ) == expected_keys
 
     def test_lead_frame_omits_teammate_name_key(self):
-        """The discriminator `is_lead_at_task_completed` body is
-        `input_data.get("teammate_name") is None`. The lead-frame
-        fixture MUST omit `teammate_name` entirely (key-absent), NOT
-        carry it as `None`-valued — both shapes classify as lead
-        under `is None`, but the empirical captured schema is
-        key-absent and the pin enforces that captured shape.
+        """The consolidated discriminator `is_lead_context` body is
+        `stdin.get("agent_id") is None and stdin.get("teammate_name") is None`.
+        The lead-frame fixture MUST omit `teammate_name` entirely
+        (key-absent), NOT carry it as `None`-valued — both shapes
+        classify as lead under `is None`, but the empirical captured
+        schema is key-absent and the pin enforces that captured shape.
         """
         assert (
             "teammate_name" not in LEAD_PLATFORM_TASKCOMPLETED_STDIN_SHAPE
@@ -450,27 +451,25 @@ class TestGate0LeadSessionGuard:
     Stop-sweeps. The marker dedup (Gate 2) is the second line of
     defense; Gate 0 is the first.
 
-    Discriminator (I1): ``teammate_name is None`` per the per-event
-    sibling family in ``shared/wake_lifecycle.py``. The
-    ``is_lead_at_task_completed`` helper at
-    ``teardown_request_emitter.py:301`` classifies the fire as lead-
-    frame when the stdin payload omits ``teammate_name``, and as
-    teammate-frame when ``teammate_name`` carries the agent that
-    owned the completing task. Empirical provenance: captured
-    2026-05-20 via in-repo TaskCompleted shim; see
-    ``shared/wake_lifecycle.py`` ``is_lead_at_task_completed``
-    docstring for full empirical context including why
-    ``agent_id``-based extrapolation was invalidated.
+    Discriminator: compound field-presence on `agent_id` AND
+    `teammate_name` per the consolidated helper in
+    ``shared/wake_lifecycle.py``. The ``is_lead_context`` helper
+    classifies the fire as lead-frame when the stdin payload omits
+    BOTH fields, and as teammate-frame when EITHER field carries an
+    identifier. Empirical provenance: captured 2026-05-20 via
+    in-repo TaskCompleted shim across multiple hook events; see
+    ``shared/wake_lifecycle.py`` ``is_lead_context`` docstring for
+    full empirical context.
 
     Teammate-context test payloads below synthesize this by including
-    ``teammate_name`` explicitly; the lead-frame comparator
-    ``test_lead_session_proceeds_past_gate0`` omits it. Test names
-    are aliased ``*_per_teammate_name_none_discriminator`` per
-    cbcfd589 §AUDIT named-invariant convention so the discriminator
-    is visible at the test-symbol layer.
+    ``teammate_name`` (or ``agent_id``) explicitly; the lead-frame
+    comparator ``test_lead_session_proceeds_past_gate0`` omits both.
+    Test names are aliased ``*_per_field_presence_discriminator`` per
+    the named-invariant convention so the discriminator is visible at
+    the test-symbol layer.
     """
 
-    def test_teammate_session_suppresses_emission_per_teammate_name_none_discriminator(
+    def test_teammate_session_suppresses_emission_per_field_presence_discriminator(
         self, tmp_path,
     ):
         """A TaskCompleted fire in a teammate-frame (stdin carries
@@ -518,7 +517,7 @@ class TestGate0LeadSessionGuard:
             f"Teammate-session fire must suppressOutput; got {out!r}"
         )
 
-    def test_teammate_session_writes_no_journal_event_per_teammate_name_none_discriminator(
+    def test_teammate_session_writes_no_journal_event_per_field_presence_discriminator(
         self, tmp_path,
     ):
         """The teammate-frame fire (stdin carries ``teammate_name``) MUST
@@ -565,7 +564,7 @@ class TestGate0LeadSessionGuard:
             f"event; got {events!r}"
         )
 
-    def test_teammate_session_does_not_create_marker_per_teammate_name_none_discriminator(
+    def test_teammate_session_does_not_create_marker_per_field_presence_discriminator(
         self, tmp_path,
     ):
         """Idempotency marker dir is NOT created on Gate-0 short-circuit
@@ -1460,7 +1459,7 @@ class TestExitContract:
     task resolves).
     """
 
-    def test_all_gate_failure_paths_exit_zero_per_teammate_name_none_discriminator(
+    def test_all_gate_failure_paths_exit_zero_per_field_presence_discriminator(
         self, tmp_path,
     ):
         """Every Gate-0..Gate-4 short-circuit path exits 0 with

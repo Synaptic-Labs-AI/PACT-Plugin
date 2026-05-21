@@ -164,6 +164,11 @@ class TestLeadDrivenCompletionFiresTier1Only:
     def test_lead_terminal_taskupdate_emits_tier1_event(self, tmp_path):
         """Fire TaskCompleted in the lead's session; assert exactly one
         teardown_request event written with tier="1".
+
+        Lead-driven completion stdin shape per the empirical capture
+        (PR audit 2026-05-20): omits BOTH `agent_id` and
+        `teammate_name` (these fields identify a teammate-frame fire;
+        a lead completing a task on disk does not stamp either).
         """
         home = tmp_path / "home"; home.mkdir()
         lead_sid = "lead-sid"
@@ -177,8 +182,10 @@ class TestLeadDrivenCompletionFiresTier1Only:
             json.dumps({
                 "session_id": lead_sid, "cwd": pdir,
                 "hook_event_name": "TaskCompleted",
-                "task_id": "L1", "team_name": team,
-                "teammate_name": "backend-coder",
+                "task_id": "L1",
+                # Lead-frame stdin: neither agent_id nor teammate_name.
+                # The disk-record owner (backend-coder) is unrelated to
+                # the actor-discriminator field-presence semantic.
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -265,6 +272,9 @@ class TestLeadDrivenCompletionFiresTier1Only:
 
         # First completion 2 -> 1: T1 completes; T2 still in_progress
         # → Tier-1 Gate 3 sees count==1 → no emit.
+        # Lead-frame stdin per the consolidated discriminator: omit
+        # both agent_id and teammate_name. The disk-record owner is
+        # unrelated to the actor-discriminator semantic.
         _write_task(home, team, "T1", status="completed", owner="backend-coder")
         _write_task(home, team, "T2", status="in_progress", owner="test-engineer")
         rc1, out1, _ = _run_hook(
@@ -272,8 +282,7 @@ class TestLeadDrivenCompletionFiresTier1Only:
             json.dumps({
                 "session_id": lead_sid, "cwd": pdir,
                 "hook_event_name": "TaskCompleted",
-                "task_id": "T1", "team_name": team,
-                "teammate_name": "backend-coder",
+                "task_id": "T1",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )
@@ -297,8 +306,7 @@ class TestLeadDrivenCompletionFiresTier1Only:
             json.dumps({
                 "session_id": lead_sid, "cwd": pdir,
                 "hook_event_name": "TaskCompleted",
-                "task_id": "T2", "team_name": team,
-                "teammate_name": "test-engineer",
+                "task_id": "T2",
             }),
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
         )

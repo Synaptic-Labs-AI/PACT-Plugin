@@ -1,51 +1,53 @@
 """
 Comprehensive TEST-phase coverage for the actor-discriminator-capture-gate
-bundle (#781 #786 #760 #738).
+bundle.
 
-Backend-coder shipped SMOKE coverage: 4 lifted strict-xfail tests
-in test_teardown_request_emitter.py (renamed `*_per_teammate_name_none_discriminator`),
-6 anti-softening pin tests in test_wake_lifecycle_emitter.py
-(TestDirectiveAntiSofteningGuard), plus the 4-leg helper-behavior probe in
-the prior-phase HANDOFF. This file owns the SUBSTANTIVE coverage layer atop
-those smoke tests, per the test-engineer ENGAGEMENT rule.
+Backend-coder shipped SMOKE coverage: 4 lifted strict-xfail tests in
+test_teardown_request_emitter.py (renamed
+`*_per_field_presence_discriminator`), 6 anti-softening pin tests in
+test_wake_lifecycle_emitter.py (TestDirectiveAntiSofteningGuard), plus
+the helper-behavior probe in the prior-phase HANDOFF. This file owns
+the SUBSTANTIVE coverage layer atop those smoke tests, per the
+test-engineer ENGAGEMENT rule.
 
-# Coverage map (per cbcfd589 audit-surface-enumeration discipline)
+# Coverage map (audit-surface-enumeration discipline)
 
 | Surface  | Class                                            | Scope                   |
 |----------|--------------------------------------------------|-------------------------|
-| TS-1     | TestIsLeadAtTaskCompletedPureContract            | helper pure-fn          |
-| TS-2     | TestSiblingDiscriminatorDivergence               | per-event partition     |
+| TS-1     | TestIsLeadContextPureContract                    | helper pure-fn          |
+| TS-2     | TestIsLeadContextContract                        | compound discriminator  |
 | TS-3     | TestObserveOnlyInvariant                         | SEC-S1 routing          |
 | TS-4     | TestVestigialTeamNameKwargAcceptance             | signature parity        |
-| TS-5     | TestDiscriminatorI1NamedInvariantPin             | named-invariant         |
+| TS-5     | TestDiscriminatorNamedInvariantPin               | named-invariant         |
 | TS-6     | TestTeardownCallsiteWiringPin                    | callsite import         |
 | TS-7     | TestAgentHandoffEmitterSiblingPreservation       | SEC-AC-3                |
 | TS-8     | TestDirectiveByteIdentityOnPactSkillLiterals     | SEC-AC-7                |
-| TS-9     | TestFalseTransitionClaimAbsenceAcrossSites       | #738 site sweep         |
+| TS-9     | TestFalseTransitionClaimAbsenceAcrossSites       | site sweep              |
 | TS-10    | TestRiskElevenStrictXfailMechanismIntegrity      | rename + count          |
 | TS-11    | TestPerPayloadSemanticReviewDiscipline           | phantom-green doc pin   |
 | TS-12    | TestPostMergeFollowUpSpecs                       | fixture-parity (live)   |
+| TS-15    | TestCounterTestMechanismDocumentation            | discriminative-NOTE     |
 
-# Backend-coder smoke-vs-test-engineer-comprehensive split (ENGAGEMENT rule)
+# Backend-coder smoke vs test-engineer comprehensive split (ENGAGEMENT rule)
 
 - BACKEND-CODER SMOKE (already shipped, NOT duplicated here):
-  - 4 lifted Gate-0 behavioral xfail tests in test_teardown_request_emitter.py
+  - 4 lifted Gate-0 behavioral tests in test_teardown_request_emitter.py
   - 6 anti-softening prose pins in test_wake_lifecycle_emitter.py
-  - 4-leg helper-behavior probe in the helper pure-addition handoff
+  - Helper-behavior probe in the helper-addition handoff
     (lead-frame {}, teammate, non-dict)
 - TEST-ENGINEER COMPREHENSIVE (this file):
-  - Pathological-input sweep on the helper (mirrors test_inbox_wake_lifecycle_helper.py)
-  - Cross-helper parity invariant (proves the per-event partition convention)
+  - Pathological-input sweep on the consolidated helper
+  - Compound-discriminator contract across 4 hooked events
   - Production-source structural pins (callsite, sibling preservation, prose)
-  - Edit-time site enumeration for the #738 false-claim absence
+  - Edit-time site enumeration for the retired-prose false-claim absence
   - Phantom-green discipline as in-code documentation pattern
-  - Post-merge spec stubs for #786/#806/captured-fixture parity
+  - Captured-fixture parity (TaskCompleted lead/teammate)
 
-# Counter-test-by-revert cardinality targets (post-directive-rewrite baseline)
+# Counter-test-by-revert cardinality targets
 
 Cardinality is documented per-test where measurable. Repeat the SOURCE-ONLY
 revert mechanism per pact-testing-strategies:
-   git checkout <callsite-migration-sha>^ -- <path>  # restore prior shape
+   git checkout <prior-sha> -- <path>  # restore prior shape
    pytest tests/test_actor_discriminator_capture_gate.py -q
    git diff --quiet -- <path> && echo OK             # restore-integrity AC
 """
@@ -71,23 +73,22 @@ WAKE_LIFECYCLE_SHARED = HOOKS_DIR / "shared" / "wake_lifecycle.py"
 
 
 # =============================================================================
-# TS-1: TestIsLeadAtTaskCompletedPureContract — pathological-input sweep
+# TS-1: TestIsLeadContextPureContract — pathological-input sweep
 # =============================================================================
 
 
-class TestIsLeadAtTaskCompletedPureContract:
-    """SEC-S1 pure-function contract for is_lead_at_task_completed.
+class TestIsLeadContextPureContract:
+    """SEC-S1 pure-function contract for is_lead_context.
 
-    The four sibling helpers in shared/wake_lifecycle.py codify a
-    pure-function-never-raises invariant (see is_lead_emit_authorized
-    docstring + test_inbox_wake_lifecycle_helper.py
-    test_lifecycle_relevant_never_raises pattern). The 5th sibling
-    MUST honor the same contract — any future edit introducing an
-    exception path is a SEC-S1 violation.
+    The compound is_lead_context helper in shared/wake_lifecycle.py
+    codifies a pure-function-never-raises invariant (see
+    test_inbox_wake_lifecycle_helper.py test_lifecycle_relevant_never_raises
+    pattern). Any future edit introducing an exception path is a
+    SEC-S1 violation.
 
     Counter-test-by-revert: replacing the body with
     `raise ValueError("forced")` flips every test in this class RED.
-    Cardinality target: {≥6 RED} on body-mutation.
+    Cardinality target: {>=6 RED} on body-mutation.
     """
 
     @pytest.mark.parametrize("bad_input", [
@@ -99,37 +100,38 @@ class TestIsLeadAtTaskCompletedPureContract:
         """SEC-S1 invariant: any non-dict input returns False rather than
         raising. Mirrors the test_lifecycle_relevant_never_raises pattern
         in test_inbox_wake_lifecycle_helper.py. The {} case is included
-        to confirm the isinstance gate AND the teammate_name-absent path
+        to confirm the isinstance gate AND the both-fields-absent path
         both traverse cleanly.
         """
         # `{}` is a dict and the isinstance gate lets it through; verify
-        # it is classified as lead (no teammate_name present).
+        # it is classified as lead (neither agent_id nor teammate_name
+        # present).
         if bad_input == {}:
-            assert wl.is_lead_at_task_completed(bad_input, "any-team") is True
+            assert wl.is_lead_context(bad_input, "any-team") is True
         else:
-            assert wl.is_lead_at_task_completed(bad_input, "any-team") is False
+            assert wl.is_lead_context(bad_input, "any-team") is False
 
     # Pin the isinstance-gate behavior across dict-subclass /
     # Mapping-subclass shapes. `isinstance(_, dict)` is True for
     # OrderedDict + defaultdict (dict subclasses) — they traverse the
-    # gate and the teammate_name-presence path classifies normally. It
+    # gate and the field-presence path classifies normally. It
     # is False for types.MappingProxyType (a separate Mapping protocol
     # implementation, NOT a dict subclass) — those traverse the
     # isinstance-False short-circuit and ALWAYS return False (teammate)
-    # even when the underlying mapping has no teammate_name key.
-    # Academic for Claude Code stdin (always plain `dict`), but
-    # pinning rules out a future "treat all Mappings as dict" edit
-    # that would silently change the asymmetry.
+    # even when the underlying mapping has neither field. Academic
+    # for Claude Code stdin (always plain `dict`), but pinning rules
+    # out a future "treat all Mappings as dict" edit that would
+    # silently change the asymmetry.
     def test_ordered_dict_with_teammate_name_classifies_as_teammate(self):
         from collections import OrderedDict
         payload = OrderedDict({"teammate_name": "secretary"})
-        assert wl.is_lead_at_task_completed(payload, "team-x") is False
+        assert wl.is_lead_context(payload, "team-x") is False
 
     def test_defaultdict_with_teammate_name_classifies_as_teammate(self):
         from collections import defaultdict
         payload = defaultdict(str)
         payload["teammate_name"] = "secretary"
-        assert wl.is_lead_at_task_completed(payload, "team-x") is False
+        assert wl.is_lead_context(payload, "team-x") is False
 
     def test_mapping_proxy_type_with_teammate_name_short_circuits_to_false(self):
         """MappingProxyType is NOT a dict subclass — isinstance gate
@@ -140,15 +142,15 @@ class TestIsLeadAtTaskCompletedPureContract:
         """
         from types import MappingProxyType
         payload = MappingProxyType({"teammate_name": "secretary"})
-        assert wl.is_lead_at_task_completed(payload, "team-x") is False
+        assert wl.is_lead_context(payload, "team-x") is False
 
     def test_mapping_proxy_type_empty_short_circuits_to_false(self):
         """MappingProxyType({}) is a `key-absent` Mapping shape that
-        SHOULD classify as lead under the empirical schema (no
-        teammate_name → lead), but the isinstance gate's strict dict-
-        only check causes False (teammate) instead. Pinning documents
-        the asymmetric isinstance-gate behavior so a future Mapping-
-        aware edit is deliberate.
+        SHOULD classify as lead under the empirical schema (neither
+        field -> lead), but the isinstance gate's strict dict-only
+        check causes False (teammate) instead. Pinning documents the
+        asymmetric isinstance-gate behavior so a future Mapping-aware
+        edit is deliberate.
         """
         from types import MappingProxyType
         payload = MappingProxyType({})
@@ -156,23 +158,22 @@ class TestIsLeadAtTaskCompletedPureContract:
         # the isinstance(_, dict) gate returns False instead.
         # Document the asymmetry — do NOT relax the gate without a
         # paired audit.
-        assert wl.is_lead_at_task_completed(payload, "team-x") is False
+        assert wl.is_lead_context(payload, "team-x") is False
 
     def test_lead_frame_empty_payload_classifies_as_lead(self):
         """Edge case for SEC-S1: bare `{}` passes the isinstance gate
-        AND has no `teammate_name` key → True (lead). Matches the
-        empirical lead-frame TaskCompleted shape (lead fires omit both
-        teammate_name and team_name). Pinning the edge so a future
+        AND has neither `agent_id` nor `teammate_name` key -> True
+        (lead). Matches the empirical lead-frame shape (lead fires
+        omit both discriminator fields). Pinning the edge so a future
         "guard against missing fields" predicate edit fails loudly.
         """
-        assert wl.is_lead_at_task_completed({}, "team-x") is True
+        assert wl.is_lead_context({}, "team-x") is True
 
     def test_teammate_frame_teammate_name_string_classifies_as_teammate(self):
         """Empirical platform path: teammate-context TaskCompleted
         stdin carries `teammate_name` identifying the agent that owned
-        the task (captured 2026-05-20).
-        `teammate_name is None` returns False → classified as teammate
-        (suppress).
+        the task (captured 2026-05-20). teammate_name present ->
+        classified as teammate (suppress).
         """
         payload = {
             "session_id": "shared-lead-sid",
@@ -181,7 +182,20 @@ class TestIsLeadAtTaskCompletedPureContract:
             "team_name": "team-x",
             "teammate_name": "secretary",
         }
-        assert wl.is_lead_at_task_completed(payload, "team-x") is False
+        assert wl.is_lead_context(payload, "team-x") is False
+
+    def test_teammate_frame_agent_id_string_classifies_as_teammate(self):
+        """Empirical platform path: teammate-context PostToolUse /
+        UserPromptSubmit / SessionStart stdin carries `agent_id`
+        identifying the in-process subagent fire (captured 2026-05-20).
+        agent_id present -> classified as teammate (suppress).
+        """
+        payload = {
+            "session_id": "shared-lead-sid",
+            "hook_event_name": "PostToolUse",
+            "agent_id": "subagent-some-uuid",
+        }
+        assert wl.is_lead_context(payload, "team-x") is False
 
     @pytest.mark.parametrize("adversarial_teammate_name", [
         "", " ", "0", "False", "null", "None",
@@ -192,16 +206,32 @@ class TestIsLeadAtTaskCompletedPureContract:
     def test_truthy_or_present_teammate_name_classifies_as_teammate(
         self, adversarial_teammate_name,
     ):
-        """The discriminator is `teammate_name is None`, NOT
-        `not teammate_name` and NOT `teammate_name` truthy-check. Any
-        non-None string value — including empty-string, whitespace,
-        embedded null, multiline — classifies as teammate. Pinning
-        this rules out a future well-intended "guard against empty
-        teammate_name" edit that would silently re-introduce
-        false-classification.
+        """The discriminator is field-presence (`is None`), NOT
+        `not teammate_name` and NOT truthy-check. Any non-None string
+        value — including empty-string, whitespace, embedded null,
+        multiline — classifies as teammate. Pinning this rules out a
+        future well-intended "guard against empty teammate_name" edit
+        that would silently re-introduce false-classification.
         """
         payload = {"teammate_name": adversarial_teammate_name}
-        assert wl.is_lead_at_task_completed(payload, "team-x") is False
+        assert wl.is_lead_context(payload, "team-x") is False
+
+    @pytest.mark.parametrize("adversarial_agent_id", [
+        "", " ", "0", "False", "null", "None",
+        "X" * 1000,  # very long
+        "subagent-" + chr(0) + "-embedded-null",  # null byte
+        "subagent-\n-newline", "subagent-\t-tab",
+    ])
+    def test_truthy_or_present_agent_id_classifies_as_teammate(
+        self, adversarial_agent_id,
+    ):
+        """Mirror of the teammate_name sweep: the discriminator is
+        field-presence on agent_id too. Any non-None string value
+        classifies as teammate. Pins the identity-vs-None semantic
+        on the agent_id half of the compound check.
+        """
+        payload = {"agent_id": adversarial_agent_id}
+        assert wl.is_lead_context(payload, "team-x") is False
 
     @pytest.mark.parametrize("none_equivalent", [None])
     def test_teammate_name_explicitly_none_classifies_as_lead(
@@ -212,185 +242,178 @@ class TestIsLeadAtTaskCompletedPureContract:
         returns True both for missing key AND explicit-None value.
         Both shapes match the empirical lead-context schema (the
         captured lead fixture is key-absent; explicit-None is the
-        in-Python equivalent).
+        in-Python equivalent). Same holds for agent_id under the
+        compound check.
         """
-        assert wl.is_lead_at_task_completed(
+        assert wl.is_lead_context(
             {"teammate_name": none_equivalent}, "team-x",
+        ) is True
+        assert wl.is_lead_context(
+            {"agent_id": none_equivalent}, "team-x",
+        ) is True
+        assert wl.is_lead_context(
+            {"teammate_name": none_equivalent, "agent_id": none_equivalent},
+            "team-x",
         ) is True
 
     def test_other_fields_irrelevant_to_classification(self):
-        """The discriminator reads ONLY `teammate_name`. Other fields
-        (`agent_id`, `session_id`, `task_id`, `team_name`, …) do not
-        influence classification. Pinning this prevents a future
-        "consult agent_id as a secondary signal" edit from re-
-        introducing the docs-extrapolated discriminator the empirical
-        capture invalidated.
+        """The compound discriminator reads ONLY `agent_id` and
+        `teammate_name`. Other fields (`session_id`, `task_id`,
+        `team_name`, `agent_type`, …) do not influence classification.
+        Pinning this prevents a future "consult agent_type as a
+        secondary signal" edit from re-introducing the per-event
+        partition the consolidation collapsed.
         """
         payload = {
-            # Other fields populated, including the previously-tried
-            # agent_id discriminator…
+            # Other fields populated, including a previously-tried
+            # agent_type discriminator…
             "session_id": "any",
             "task_id": "T1",
             "team_name": "team-x",
-            "agent_id": "subagent-some-uuid",
-            # …but teammate_name absent → must classify as lead.
+            "agent_type": "pact-secretary",
+            # …but neither agent_id nor teammate_name -> must
+            # classify as lead.
         }
-        assert wl.is_lead_at_task_completed(payload, "team-x") is True
+        assert wl.is_lead_context(payload, "team-x") is True
 
 
 # =============================================================================
-# TS-2: TestSiblingDiscriminatorDivergence — per-event partition invariant
-# (empirical: each event class uses ITS OWN discriminator field; uniform-
-# field assumption was falsified by 2026-05-20 in-session capture).
+# TS-2: TestIsLeadContextContract — compound field-presence discriminator
+# (empirical: lead-context lacks both agent_id and teammate_name; teammate-
+# context carries at least one; single helper unifies the per-event check).
 # =============================================================================
 
 
-class TestSiblingDiscriminatorDivergence:
-    """The five is_lead_* sibling helpers DIVERGE on which field they
-    read, by design. Empirical capture (2026-05-20) confirmed each
-    event class carries a different actor-discriminator field; an
-    earlier draft of this class asserted PARITY between TaskCompleted
-    and PostToolUse on `agent_id`, but that draft was falsified by the
-    capture (TaskCompleted does not fire in subagent context, so
-    `agent_id` never appears on its stdin; the captured discriminator
-    is `teammate_name` instead).
+class TestIsLeadContextContract:
+    """The single compound is_lead_context helper classifies the
+    actor-context of any hook-stdin payload by checking field-presence
+    on BOTH `agent_id` and `teammate_name`. A lead-context fire has
+    NEITHER field stamped; a teammate-context fire has at least one.
 
-    The per-event partition is:
+    Empirical provenance: the PR #808 capture campaign on 2026-05-20
+    landed 121 UserPromptSubmit captures, 5 SessionStart captures + 2
+    negative Agent() probes, and paired lead/teammate-frame
+    PostToolUse + TaskCompleted captures via in-repo logging shims
+    (pact-plugin/tests/runbooks/install_*_logging_shim.sh). The
+    per-event partition assumption (different field per event class)
+    was falsified by the cross-event capture; the unified compound
+    check holds across all 4 event classes empirically.
 
-    +-------------------------+--------------------------+--------------------+
-    | Helper                  | Event class              | Discriminator      |
-    +=========================+==========================+====================+
-    | is_lead_emit_authorized | PostToolUse              | agent_id           |
-    | is_lead_drain_authorized| UserPromptSubmit         | agent_id           |
-    | is_lead_at_session_start| SessionStart             | agent_type         |
-    | is_lead_at_task_completed| TaskCompleted           | teammate_name      |
-    | is_lead_session         | backward-compat delegate | (delegates to     |
-    |                         |                          |  is_lead_emit_     |
-    |                         |                          |  authorized)       |
-    +-------------------------+--------------------------+--------------------+
+    Regression-canary purpose: if a future hook event stamps either
+    `agent_id` or `teammate_name` on a lead-frame fire, this contract
+    catches it via fail-closed semantics (the helper classifies the
+    fire as teammate and the downstream Gate-0 suppresses emission).
+    The reverse direction — a teammate-context fire that omits both
+    fields — would phantom-classify as lead and re-introduce the #611
+    in-process subagent misclassification class; the contract rows
+    below pin both directions.
 
-    Counter-test-by-revert: if a future edit re-unifies two helpers on
-    the same field (e.g., changes is_lead_at_task_completed back to
-    read `agent_id`), the divergence tests below trip RED — the
-    regression is loud, not silent.
+    Follow-up: #812 tracks the cross-event capture-fixture parity work.
+
+    Counter-test-by-revert: if a future edit drops one half of the
+    compound check (e.g., reverts to `teammate_name is None` only),
+    the agent_id-only rows below trip RED — the regression is loud,
+    not silent.
     """
 
-    def test_task_completed_helper_reads_teammate_name_not_agent_id(self):
-        """`is_lead_at_task_completed` reads `teammate_name`, not
-        `agent_id`. Verify via a payload where the two fields would
-        give OPPOSITE answers: agent_id present but teammate_name
-        absent → if the helper reads teammate_name, returns True (lead);
-        if it reads agent_id, returns False (teammate).
-        """
-        payload = {"agent_id": "subagent-some-uuid"}
-        # Reads teammate_name (absent → None → True/lead).
-        assert wl.is_lead_at_task_completed(payload, "team-x") is True, (
-            "is_lead_at_task_completed must read `teammate_name`, not "
-            "`agent_id`. Empirical capture (2026-05-20) showed agent_id "
-            "never appears on TaskCompleted stdin; teammate_name "
-            "presence is the lead-vs-teammate discriminator."
-        )
-        # Inverse: teammate_name present but agent_id absent → teammate.
-        payload_inv = {"teammate_name": "secretary"}
-        assert wl.is_lead_at_task_completed(payload_inv, "team-x") is False
+    # Captured-fixture path (TaskCompleted has both frames captured).
+    _FIXTURE_DIR = (Path(__file__).resolve().parent
+                    / "fixtures" / "wake_lifecycle")
 
-    def test_post_tool_use_helper_reads_agent_id_not_teammate_name(self):
-        """`is_lead_emit_authorized` (PostToolUse) reads `agent_id`,
-        not `teammate_name`. Verify via the opposite-answer payload:
-        teammate_name present but agent_id absent → if it reads
-        agent_id, returns True (lead); if it reads teammate_name,
-        returns False (teammate).
+    def test_lead_frame_posttooluse_classified_as_lead(self):
+        """PostToolUse lead-frame: lead fires omit both agent_id and
+        teammate_name. The compound check classifies as lead.
         """
-        payload = {"teammate_name": "backend-coder"}
-        # Reads agent_id (absent → None → True/lead).
-        assert wl.is_lead_emit_authorized(payload, "team-x") is True, (
-            "is_lead_emit_authorized must read `agent_id`, not "
-            "`teammate_name`. `agent_id` is the documented field in "
-            "the 'Common input fields' section "
-            "(code.claude.com/docs/en/hooks.md); empirically PostToolUse "
-            "stdin carries agent_id in subagent context — see the "
-            "`is_lead_emit_authorized` docstring in shared/wake_lifecycle.py."
-        )
-        # Inverse: agent_id present → teammate.
-        payload_inv = {"agent_id": "subagent-some-uuid"}
-        assert wl.is_lead_emit_authorized(payload_inv, "team-x") is False
-
-    def test_session_start_helper_reads_agent_type_not_agent_id(self):
-        """`is_lead_at_session_start` reads `agent_type` (agent-CLASS
-        string like 'pact-secretary'), not `agent_id` (per-instance
-        UUID). Pinning this asymmetry prevents a future "unify all
-        is_lead_* on the same field" edit from collapsing the
-        per-event partition convention.
-        """
-        # Payload with agent_id present but agent_type absent.
-        payload_agent_id_only = {"agent_id": "subagent-some-uuid"}
-        # SessionStart reads agent_type (absent → True/lead).
-        assert wl.is_lead_at_session_start(payload_agent_id_only) is True
-
-        # Inverse: agent_type present → teammate.
-        payload_agent_type_only = {"agent_type": "pact-secretary"}
-        assert wl.is_lead_at_session_start(payload_agent_type_only) is False
-
-    def test_three_helpers_diverge_on_same_three_field_payload(self):
-        """Single payload exercises the divergence across the 3
-        per-event helpers simultaneously. A payload carrying ONE of
-        each discriminator field forces each helper to read its own
-        field — re-unification of any two would flip the assertion.
-        """
-        # All 3 discriminator fields present.
         payload = {
-            "teammate_name": "secretary",
-            "agent_id": "subagent-some-uuid",
-            "agent_type": "pact-secretary",
+            "hook_event_name": "PostToolUse",
+            "session_id": "lead-sid",
+            "tool_name": "TaskUpdate",
+            # Neither agent_id nor teammate_name present.
         }
-        # TaskCompleted reads teammate_name (present → teammate).
-        assert wl.is_lead_at_task_completed(payload, "team-x") is False
-        # PostToolUse reads agent_id (present → teammate).
-        assert wl.is_lead_emit_authorized(payload, "team-x") is False
-        # SessionStart reads agent_type (present → teammate).
-        assert wl.is_lead_at_session_start(payload) is False
+        assert wl.is_lead_context(payload, "team-x") is True
 
-        # Remove only teammate_name: TaskCompleted flips lead, others
-        # stay teammate.
-        payload_no_teammate = {
-            k: v for k, v in payload.items() if k != "teammate_name"
-        }
-        assert wl.is_lead_at_task_completed(payload_no_teammate, "team-x") is True
-        assert wl.is_lead_emit_authorized(payload_no_teammate, "team-x") is False
-        assert wl.is_lead_at_session_start(payload_no_teammate) is False
-
-        # Remove only agent_id from the original: PostToolUse flips,
-        # others stay where they were under the all-present payload.
-        payload_no_agent_id = {
-            k: v for k, v in payload.items() if k != "agent_id"
-        }
-        assert wl.is_lead_at_task_completed(payload_no_agent_id, "team-x") is False
-        assert wl.is_lead_emit_authorized(payload_no_agent_id, "team-x") is True
-        assert wl.is_lead_at_session_start(payload_no_agent_id) is False
-
-        # Remove only agent_type: SessionStart flips, others stay.
-        payload_no_agent_type = {
-            k: v for k, v in payload.items() if k != "agent_type"
-        }
-        assert wl.is_lead_at_task_completed(payload_no_agent_type, "team-x") is False
-        assert wl.is_lead_emit_authorized(payload_no_agent_type, "team-x") is False
-        assert wl.is_lead_at_session_start(payload_no_agent_type) is True
-
-    def test_legacy_delegate_is_lead_session_still_matches_emit_authorized(self):
-        """is_lead_session is a backward-compat thin delegate to
-        is_lead_emit_authorized — its body is a single pass-through
-        return statement, which is the rename-is-body-preserving
-        rationale for the callsite-migration commit's 0-RED counter-
-        test (auditor-endorsed via 8-payload body-identity proof). Any
-        future edit that diverges these two breaks the corridor.
+    def test_teammate_frame_posttooluse_classified_as_teammate(self):
+        """PostToolUse teammate-frame: in-process subagent fires carry
+        `agent_id` (per Claude Code platform docs + empirical capture).
+        The compound check classifies as teammate.
         """
-        for payload in [{}, {"agent_id": "x"}, {"agent_id": None}, None, 42]:
-            a = wl.is_lead_session(payload, "team-x")
-            b = wl.is_lead_emit_authorized(payload, "team-x")
-            assert a == b, (
-                f"is_lead_session/is_lead_emit_authorized parity broken "
-                f"on payload={payload!r}: delegate={a}, primary={b}"
-            )
+        payload = {
+            "hook_event_name": "PostToolUse",
+            "session_id": "shared-sid",
+            "agent_id": "subagent-some-uuid",
+            "tool_name": "TaskUpdate",
+        }
+        assert wl.is_lead_context(payload, "team-x") is False
+
+    def test_lead_frame_taskcompleted_classified_as_lead(self):
+        """TaskCompleted lead-frame: from the captured-from-production
+        fixture (taskcompleted_lead_context_shape.json). The compound
+        check must classify as lead.
+        """
+        fixture_path = self._FIXTURE_DIR / "taskcompleted_lead_context_shape.json"
+        assert fixture_path.exists(), (
+            f"Lead-frame TaskCompleted fixture must exist at "
+            f"{fixture_path}; in-session capture campaign landed it "
+            f"on 2026-05-20."
+        )
+        payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+        assert wl.is_lead_context(payload, "team-x") is True, (
+            "Captured lead-frame TaskCompleted fixture must classify "
+            "as lead under the compound discriminator (empirical "
+            "schema: lead fires omit both agent_id and teammate_name)."
+        )
+
+    def test_teammate_frame_taskcompleted_classified_as_teammate(self):
+        """TaskCompleted teammate-frame: from the captured-from-
+        production fixture (taskcompleted_teammate_context_shape.json).
+        Carries `teammate_name`. The compound check must classify as
+        teammate.
+        """
+        fixture_path = (self._FIXTURE_DIR
+                        / "taskcompleted_teammate_context_shape.json")
+        assert fixture_path.exists(), (
+            f"Teammate-frame TaskCompleted fixture must exist at "
+            f"{fixture_path}; in-session capture campaign landed it "
+            f"on 2026-05-20."
+        )
+        payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+        assert wl.is_lead_context(payload, "team-x") is False, (
+            "Captured teammate-frame TaskCompleted fixture must "
+            "classify as teammate under the compound discriminator "
+            "(empirical schema: teammate fires carry teammate_name)."
+        )
+
+    def test_lead_frame_userpromptsubmit_classified_as_lead(self):
+        """UserPromptSubmit lead-frame: no teammate path exists
+        empirically (UPS does not fire in subagent context per Claude
+        Code platform docs; the PR #808 capture campaign confirmed 121
+        UPS captures, all lead-frame with neither field). The compound
+        check classifies as lead.
+        """
+        payload = {
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "lead-sid",
+            "prompt": "any prompt text",
+            # Neither agent_id nor teammate_name present (empirical).
+        }
+        assert wl.is_lead_context(payload, "team-x") is True
+
+    def test_lead_frame_sessionstart_classified_as_lead(self):
+        """SessionStart lead-frame: no teammate path exists empirically
+        within the captured campaign (5 SessionStart captures + 2
+        negative Agent() probes confirmed in-process subagent
+        SessionStart does not stamp the discriminator fields the way
+        PostToolUse / TaskCompleted do; see task #63/#64 deliverables
+        + follow-up #812 for the cross-event audit). The compound
+        check classifies the empirical shape as lead.
+        """
+        payload = {
+            "hook_event_name": "SessionStart",
+            "session_id": "lead-sid",
+            "source": "startup",
+            # Neither agent_id nor teammate_name present (empirical).
+        }
+        assert wl.is_lead_context(payload, "team-x") is True
 
 
 # =============================================================================
@@ -418,24 +441,33 @@ class TestObserveOnlyInvariant:
         might `return x or "lead"` (string, truthy) and pass
         `if not is_lead:` callers — pinning bool prevents this.
         """
-        for payload in [{}, {"teammate_name": "x"}, {"teammate_name": None}]:
-            result = wl.is_lead_at_task_completed(payload)
+        for payload in [
+            {},
+            {"teammate_name": "x"},
+            {"teammate_name": None},
+            {"agent_id": "x"},
+            {"agent_id": None},
+        ]:
+            result = wl.is_lead_context(payload)
             assert result is True or result is False, (
                 f"Return type must be bool literal True/False; "
                 f"got {result!r} of type {type(result).__name__}"
             )
 
     def test_helper_makes_no_filesystem_reads(self, tmp_path, monkeypatch):
-        """The helper is pure — `teammate_name`-presence on the in-
-        memory dict is the discriminator; no team_config read, no
-        journal read, no marker read. Monkeypatching Path.home to an
-        empty tmp_path AND filesystem ops must not affect the result.
+        """The helper is pure — field-presence on the in-memory dict
+        is the discriminator; no team_config read, no journal read,
+        no marker read. Monkeypatching Path.home to an empty tmp_path
+        AND filesystem ops must not affect the result.
         """
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         # Even with a wildly wrong HOME, the helper must work.
-        assert wl.is_lead_at_task_completed({}, "team-x") is True
-        assert wl.is_lead_at_task_completed(
+        assert wl.is_lead_context({}, "team-x") is True
+        assert wl.is_lead_context(
             {"teammate_name": "secretary"}, "team-x",
+        ) is False
+        assert wl.is_lead_context(
+            {"agent_id": "subagent-some-uuid"}, "team-x",
         ) is False
 
     def test_helper_does_not_consult_environ(self, monkeypatch):
@@ -445,12 +477,16 @@ class TestObserveOnlyInvariant:
         """
         # Set adversarial env vars that a misguided edit might consult.
         monkeypatch.setenv("CLAUDE_TEAMMATE_NAME", "lead-pretender")
+        monkeypatch.setenv("CLAUDE_AGENT_ID", "lead-pretender-uuid")
         monkeypatch.setenv("PACT_OVERRIDE_DISCRIMINATOR", "true")
         # Lead-frame {} STAYS lead regardless of env.
-        assert wl.is_lead_at_task_completed({}, "team-x") is True
-        # Teammate-frame teammate_name STAYS teammate regardless of env.
-        assert wl.is_lead_at_task_completed(
+        assert wl.is_lead_context({}, "team-x") is True
+        # Teammate-frame STAYS teammate regardless of env (both halves).
+        assert wl.is_lead_context(
             {"teammate_name": "secretary"}, "team-x",
+        ) is False
+        assert wl.is_lead_context(
+            {"agent_id": "subagent-some-uuid"}, "team-x",
         ) is False
 
 
@@ -460,9 +496,10 @@ class TestObserveOnlyInvariant:
 
 
 class TestVestigialTeamNameKwargAcceptance:
-    """The 5 sibling helpers share `(input_data, team_name="")` for
-    signature uniformity (architect §1 retention rationale). The
-    team_name parameter is vestigial under the field-presence
+    """The compound is_lead_context helper accepts a vestigial
+    `team_name=""` kwarg for signature uniformity with the surrounding
+    corridor (a holdover from the pre-consolidation per-event helpers).
+    The team_name parameter is vestigial under the field-presence
     discriminator (no team_config read needed). Pinning the call
     shapes ensures a future "drop the unused parameter" refactor is
     deliberate, not accidental — the corridor's call sites rely on
@@ -470,15 +507,15 @@ class TestVestigialTeamNameKwargAcceptance:
     """
 
     def test_accepts_positional_team_name(self):
-        assert wl.is_lead_at_task_completed({}, "team-x") is True
+        assert wl.is_lead_context({}, "team-x") is True
 
     def test_accepts_keyword_team_name(self):
-        assert wl.is_lead_at_task_completed({}, team_name="team-x") is True
+        assert wl.is_lead_context({}, team_name="team-x") is True
 
     def test_team_name_defaults_to_empty_string(self):
-        """Default value pinned. Sibling helpers all default to "".
+        """Default value pinned at the empty-string sentinel.
         """
-        sig = inspect.signature(wl.is_lead_at_task_completed)
+        sig = inspect.signature(wl.is_lead_context)
         assert sig.parameters["team_name"].default == ""
 
     def test_team_name_value_does_not_affect_result(self):
@@ -488,83 +525,88 @@ class TestVestigialTeamNameKwargAcceptance:
         override" leak.
         """
         for team in ["", "team-x", "pact-00000000", "team-with-special!@#$"]:
-            assert wl.is_lead_at_task_completed({}, team) is True
-            assert wl.is_lead_at_task_completed(
+            assert wl.is_lead_context({}, team) is True
+            assert wl.is_lead_context(
                 {"teammate_name": "secretary"}, team,
+            ) is False
+            assert wl.is_lead_context(
+                {"agent_id": "subagent-some-uuid"}, team,
             ) is False
 
 
 # =============================================================================
-# TS-5: TestDiscriminatorI1NamedInvariantPin — cbcfd589 audit anchor
+# TS-5: TestDiscriminatorNamedInvariantPin — field-presence audit anchor
 # =============================================================================
 
 
-class TestDiscriminatorI1NamedInvariantPin:
-    """I1 = "teammate_name is None" — the named invariant the lifted
-    Gate-0 tests in test_teardown_request_emitter.py encode in their
-    `*_per_teammate_name_none_discriminator` suffixes (cbcfd589 §AUDIT
-    discipline; the named-invariant rename shipped with the empirical-
-    grounded predicate body fix).
+class TestDiscriminatorNamedInvariantPin:
+    """The named invariant for is_lead_context is field-presence on
+    BOTH `agent_id` and `teammate_name`. The lifted Gate-0 tests in
+    test_teardown_request_emitter.py encode this in their
+    `*_per_field_presence_discriminator` suffixes (audit-surface-
+    enumeration discipline; the named-invariant rename shipped with
+    the helper consolidation).
 
     These structural assertions pin the invariant name AT the helper
     so the rename convention is self-consistent. If a future edit
-    swaps the discriminator (e.g., back to `agent_id is None` or to
-    a compound `teammate_name is None AND agent_id is None`), it MUST
-    also update the suffix — these tests force that coupling visible.
+    drops one half of the compound check (e.g., back to
+    `teammate_name is None` only) or rotates one field, it MUST also
+    update the suffix — these tests force that coupling visible.
     """
 
-    def test_helper_body_reads_teammate_name_field_only(self):
+    def test_helper_body_reads_both_field_presence_fields(self):
         """Source-level structural pin: the helper body MUST reference
-        `teammate_name` and MUST NOT reference `agent_id`, `agent_type`,
-        or `tmuxPaneId` (other candidate discriminators across the
-        sibling helpers). Drift would mean the empirical-grounded
-        body has been silently swapped without updating the I1
-        named-invariant tests.
+        BOTH `agent_id` and `teammate_name` and MUST NOT reference
+        `agent_type` or `tmuxPaneId` (other candidate discriminators
+        from the pre-consolidation per-event partition). Drift means
+        the compound body has been silently rolled back to a single-
+        field check without updating the suffix discipline.
 
-        Counter-test-by-revert: replacing `teammate_name` with
-        `agent_id` in the helper body flips this test RED with a
-        specific assertion message identifying the wrong field.
+        Counter-test-by-revert: dropping `agent_id` from the helper
+        body flips this test RED with a specific assertion message
+        identifying the missing field.
         """
-        src = inspect.getsource(wl.is_lead_at_task_completed)
+        src = inspect.getsource(wl.is_lead_context)
         # Strip the docstring so we only inspect the executable body.
         body = src.split('"""')[-1] if '"""' in src else src
-        assert 'teammate_name' in body, (
-            f"is_lead_at_task_completed body must reference "
-            f"'teammate_name'; got body excerpt={body!r}"
-        )
-        forbidden = ("agent_id", "agent_type", "tmuxPaneId")
+        for required in ("agent_id", "teammate_name"):
+            assert required in body, (
+                f"is_lead_context body must reference {required!r} "
+                f"(compound field-presence discriminator); got body "
+                f"excerpt={body!r}"
+            )
+        forbidden = ("agent_type", "tmuxPaneId")
         for f in forbidden:
             assert f not in body, (
-                f"is_lead_at_task_completed body MUST NOT reference {f!r} "
-                f"(empirical capture established teammate_name as the "
-                f"discriminator; the other fields read different events' "
-                f"actor-discriminators). A swap to {f!r} would silently "
-                f"invalidate the I1 named-invariant tests' "
-                f"`_per_teammate_name_none_discriminator` suffix without "
-                f"forcing test-renames. Body excerpt: {body!r}"
+                f"is_lead_context body MUST NOT reference {f!r} "
+                f"(the empirical-grounded compound check reads "
+                f"agent_id + teammate_name; agent_type was the "
+                f"SessionStart-specific discriminator from the "
+                f"pre-consolidation partition and is NOT part of the "
+                f"unified check). Body excerpt: {body!r}"
             )
 
     def test_renamed_gate0_tests_carry_per_invariant_suffix(self):
-        """Pin the cbcfd589 audit-surface-enumeration convention: the 4
-        lifted Gate-0/ExitContract tests carry the
-        `_per_teammate_name_none_discriminator` suffix. If a future
-        edit rotates the discriminator, the test names MUST rotate
+        """Pin the audit-surface-enumeration convention: the 4 lifted
+        Gate-0/ExitContract tests carry the
+        `_per_field_presence_discriminator` suffix. If a future edit
+        rotates the discriminator, the test names MUST rotate
         accordingly — these structural pins force the coupling visible.
         """
         teardown_test_src = (PLUGIN_ROOT / "tests"
                              / "test_teardown_request_emitter.py").read_text()
         expected_suffixed_names = [
-            "test_teammate_session_suppresses_emission_per_teammate_name_none_discriminator",
-            "test_teammate_session_writes_no_journal_event_per_teammate_name_none_discriminator",
-            "test_teammate_session_does_not_create_marker_per_teammate_name_none_discriminator",
-            "test_all_gate_failure_paths_exit_zero_per_teammate_name_none_discriminator",
+            "test_teammate_session_suppresses_emission_per_field_presence_discriminator",
+            "test_teammate_session_writes_no_journal_event_per_field_presence_discriminator",
+            "test_teammate_session_does_not_create_marker_per_field_presence_discriminator",
+            "test_all_gate_failure_paths_exit_zero_per_field_presence_discriminator",
         ]
         for name in expected_suffixed_names:
             assert name in teardown_test_src, (
                 f"Expected renamed test {name!r} not found in "
-                f"test_teardown_request_emitter.py. The cbcfd589 §AUDIT "
-                f"named-invariant rename was reverted or the discriminator "
-                f"was silently swapped without updating the suffix."
+                f"test_teardown_request_emitter.py. The named-invariant "
+                f"rename was reverted or the discriminator was silently "
+                f"swapped without updating the suffix."
             )
 
 
@@ -574,77 +616,87 @@ class TestDiscriminatorI1NamedInvariantPin:
 
 
 class TestTeardownCallsiteWiringPin:
-    """Pin the production wiring at teardown_request_emitter.py:301
-    after the callsite-migration commit. The Gate-0 check MUST call
-    `is_lead_at_task_completed`, NOT the legacy `is_lead_session`
-    delegate. Production-source structural pin; complements the
-    behavioral lifted-xfail tests.
+    """Pin the production wiring of the Gate-0 lead-context check in
+    teardown_request_emitter.py. The Gate-0 check MUST call
+    `is_lead_context` — the legacy per-event helpers
+    (is_lead_at_task_completed and the other 4) have been deleted by
+    the consolidation. Production-source structural pin; complements
+    the behavioral lifted Gate-0 tests.
 
-    Counter-test-by-revert: `git checkout <callsite-migration-sha>^ --
-    pact-plugin/hooks/teardown_request_emitter.py` restores the
-    `is_lead_session` call and flips these tests RED. Cardinality
-    target: {3 RED} (import, call, invariant comment).
+    Counter-test-by-revert: a checkout restoring the prior callsite
+    would import a deleted symbol and fail at collect time; these
+    pins catch a less obvious regression — a future edit that calls
+    a re-introduced legacy delegate or routes through the wrong
+    helper name.
     """
 
-    def test_imports_is_lead_at_task_completed_from_shared(self):
-        """The import statement must bring is_lead_at_task_completed
-        into scope. Mirrors the test_pending_scan_session_init.py
+    def test_imports_is_lead_context_from_shared(self):
+        """The import statement must bring is_lead_context into scope.
+        Mirrors the test_pending_scan_session_init.py
         `test_session_init_imports_or_calls_lead_session_guard` pattern.
         """
         src = TEARDOWN_EMITTER.read_text(encoding="utf-8")
-        # Tolerate `from shared.wake_lifecycle import (... is_lead_at_task_completed ...)`
-        assert "is_lead_at_task_completed" in src, (
-            "teardown_request_emitter.py must import "
-            "is_lead_at_task_completed from shared.wake_lifecycle"
+        # Tolerate `from shared.wake_lifecycle import (... is_lead_context ...)`
+        assert "is_lead_context" in src, (
+            "teardown_request_emitter.py must import is_lead_context "
+            "from shared.wake_lifecycle"
         )
 
-    def test_callsite_uses_is_lead_at_task_completed_not_legacy_delegate(self):
+    def test_callsite_uses_is_lead_context_not_legacy_helper(self):
         """The actual call expression must be
-        `is_lead_at_task_completed(input_data, team_name)`, not the
-        legacy `is_lead_session(input_data, team_name)`. Pattern
-        regex-anchored to a control-flow statement to rule out
-        commentary-only references.
+        `is_lead_context(input_data, team_name)`, not any of the
+        deleted legacy per-event helpers. Pattern regex-anchored to a
+        control-flow statement to rule out commentary-only references.
         """
         src = TEARDOWN_EMITTER.read_text(encoding="utf-8")
-        # Match `if not is_lead_at_task_completed(...)` or similar.
+        # Match `if not is_lead_context(...)` or similar.
         call_pattern = re.compile(
-            r"^\s*(if|return|elif|while|assert)\b.*is_lead_at_task_completed\b\s*\(",
+            r"^\s*(if|return|elif|while|assert)\b.*is_lead_context\b\s*\(",
             re.MULTILINE,
         )
         assert call_pattern.search(src), (
             "Expected a control-flow statement calling "
-            "is_lead_at_task_completed(...) in teardown_request_emitter.py; "
-            "the callsite migration may have regressed to is_lead_session."
+            "is_lead_context(...) in teardown_request_emitter.py; the "
+            "callsite migration may have regressed to a deleted helper."
         )
-        # Negative pin: no LIVE call to the legacy delegate at Gate 0.
-        # Allow `is_lead_session` to appear in commentary, but NOT in a
-        # `if not is_lead_session(` shape (the previous Gate 0 form).
-        legacy_call_pattern = re.compile(
-            r"^\s*if\s+not\s+is_lead_session\s*\(",
-            re.MULTILINE,
-        )
-        assert not legacy_call_pattern.search(src), (
-            "teardown_request_emitter.py still calls "
-            "`if not is_lead_session(` — the callsite migration was reverted."
-        )
+        # Negative pin: no LIVE call to any of the deleted legacy
+        # helpers at Gate 0. Allow them to appear in commentary, but
+        # NOT in a control-flow shape (the previous Gate 0 forms).
+        legacy_names = [
+            "is_lead_session",
+            "is_lead_emit_authorized",
+            "is_lead_drain_authorized",
+            "is_lead_at_session_start",
+            "is_lead_at_task_completed",
+        ]
+        for name in legacy_names:
+            legacy_call_pattern = re.compile(
+                r"^\s*(if|return|elif|while|assert)\b.*\b" + name + r"\b\s*\(",
+                re.MULTILINE,
+            )
+            assert not legacy_call_pattern.search(src), (
+                f"teardown_request_emitter.py contains a control-flow "
+                f"call to deleted legacy helper {name!r} — the "
+                f"consolidation to is_lead_context was reverted."
+            )
 
     def test_callsite_passes_input_data_and_team_name_positionally(self):
         """Pinning the call signature shape — `(input_data, team_name)`,
-        matching the sibling-helper uniform signature. A future
-        "drop the unused team_name" refactor would need to update this
-        test, making the change deliberate.
+        matching the helper's uniform signature. A future "drop the
+        unused team_name" refactor would need to update this test,
+        making the change deliberate.
         """
         src = TEARDOWN_EMITTER.read_text(encoding="utf-8")
         # Two-arg call with input_data + team_name in some order.
         # Tolerate whitespace + keyword form.
         call_shape = re.compile(
-            r"is_lead_at_task_completed\s*\(\s*input_data\s*,\s*team_name\s*\)",
+            r"is_lead_context\s*\(\s*input_data\s*,\s*team_name\s*\)",
         )
         assert call_shape.search(src), (
-            "Expected call shape `is_lead_at_task_completed(input_data, "
+            "Expected call shape `is_lead_context(input_data, "
             "team_name)` at the Gate-0 callsite in "
-            "teardown_request_emitter.py. The signature-uniformity contract "
-            "may have been broken (TS-4)."
+            "teardown_request_emitter.py. The signature-uniformity "
+            "contract may have been broken (TS-4)."
         )
 
 
@@ -654,19 +706,19 @@ class TestTeardownCallsiteWiringPin:
 
 
 class TestAgentHandoffEmitterSiblingPreservation:
-    """SEC-AC-3 architect §6: agent_handoff_emitter.py (the sibling
-    TaskCompleted hook at :262) MUST continue reading
-    `task_data.get("owner") or input_data.get("teammate_name")` —
-    NOT migrate to the new is_lead_* helper.
+    """SEC-AC-3 sibling preservation: agent_handoff_emitter.py (the
+    sibling TaskCompleted hook) MUST continue reading
+    `task_data.get("owner") or input_data.get("teammate_name")` — NOT
+    migrate to the consolidated is_lead_context helper.
 
     The two TaskCompleted hooks answer semantically distinct questions:
-    teardown_request_emitter asks "is this fire from the LEAD session?"
+    teardown_request_emitter asks "is this fire from the LEAD context?"
     (routing); agent_handoff_emitter asks "is this fire on a task
     OWNED by an agent?" (content). Aligning the discriminators would
     conflate the two and silence the journal write in teammate frames.
 
-    Counter-test-by-revert: editing agent_handoff_emitter.py:262 to
-    use is_lead_at_task_completed flips both tests RED.
+    Counter-test-by-revert: editing agent_handoff_emitter.py to use
+    is_lead_context flips both tests RED.
     """
 
     def test_agent_handoff_emitter_still_reads_task_data_owner(self):
@@ -680,21 +732,15 @@ class TestAgentHandoffEmitterSiblingPreservation:
             "would silence the journal write in teammate frames."
         )
 
-    def test_agent_handoff_emitter_does_not_call_is_lead_at_task_completed(self):
-        """Negative pin: agent_handoff_emitter.py MUST NOT call any
-        is_lead_* helper at Gate 0. Its discriminator is owner-based,
-        not actor-based.
+    def test_agent_handoff_emitter_does_not_call_is_lead_context(self):
+        """Negative pin: agent_handoff_emitter.py MUST NOT call the
+        is_lead_context helper at Gate 0. Its discriminator is
+        owner-based, not actor-based.
         """
         src = AGENT_HANDOFF_EMITTER.read_text(encoding="utf-8")
         # Forbid the function-call shape; tolerate docstring/comment
         # mentions if they appear.
-        forbidden_calls = [
-            "is_lead_at_task_completed(",
-            "is_lead_emit_authorized(",
-            "is_lead_session(",
-            "is_lead_drain_authorized(",
-            "is_lead_at_session_start(",
-        ]
+        forbidden_calls = ["is_lead_context("]
         for f in forbidden_calls:
             assert f not in src, (
                 f"agent_handoff_emitter.py contains a call to {f!r} — "
@@ -759,25 +805,24 @@ class TestDirectiveByteIdentityOnPactSkillLiterals:
 
 
 # =============================================================================
-# TS-9: TestFalseTransitionClaimAbsenceAcrossSites — #738 site sweep
+# TS-9: TestFalseTransitionClaimAbsenceAcrossSites — retired-prose sweep
 # =============================================================================
 
-# F2-test (cycle-2 adoption): explicit allowlist of permitted fixture
-# files that legitimately carry the retired-prose literal as task-
-# subject content (NOT directive prose). The sweep below skips any
-# .json file under `fixtures/` AND filters its hits against this
-# allowlist; any future fixture that grows a hit MUST be explicitly
-# added here with a one-line rationale. This makes the "why is this
-# fixture exempt?" question discoverable from a single grep.
+# Explicit allowlist of permitted fixture files that legitimately carry
+# the retired-prose literal as task-subject content (NOT directive
+# prose). The sweep below skips any .json file under `fixtures/` AND
+# filters its hits against this allowlist; any future fixture that
+# grows a hit MUST be explicitly added here with a one-line rationale.
+# This makes the "why is this fixture exempt?" question discoverable
+# from a single grep.
 #
-# Rationale (per cycle-2 finding F2-test): the two fixture files
-# below carry "First active teammate task" as a `subject` field on
-# synthetic task records used for stdin-shape probes. These are
-# task subjects, not directive prose; they predate the #738 rewrite
-# and remain valid synthetic test data. A future reader grepping
-# for the retired literal would otherwise have to re-derive why
-# these 2 hits don't trip the discipline — the allowlist documents
-# the exemption inline.
+# Rationale: the two fixture files below carry "First active teammate
+# task" as a `subject` field on synthetic task records used for
+# stdin-shape probes. These are task subjects, not directive prose;
+# they predate the directive-prose rewrite and remain valid synthetic
+# test data. A future reader grepping for the retired literal would
+# otherwise have to re-derive why these 2 hits don't trip the
+# discipline — the allowlist documents the exemption inline.
 FIXTURE_PROSE_ALLOWLIST = {
     "task_create_production_shape.json": (
         "carries 'First active teammate task' as a synthetic task "
@@ -791,13 +836,13 @@ FIXTURE_PROSE_ALLOWLIST = {
 
 
 class TestFalseTransitionClaimAbsenceAcrossSites:
-    """#738 root cause: the original directives' "First active teammate
-    task created" / "Last active teammate task completed" prefixes are
-    provably-false on multi-fire (the predicate is `count >= 1`, not
-    a 0→1 transition). The directive-prose rewrite removed the false
-    claim; this class pins the absence across the EDIT-TIME enumerated
-    site surface so a future "restore the friendly transition prefix"
-    edit fails loudly.
+    """Root cause of the directive-prose rewrite: the original
+    directives' "First active teammate task created" / "Last active
+    teammate task completed" prefixes are provably-false on multi-fire
+    (the predicate is `count >= 1`, not a 0->1 transition). The
+    directive-prose rewrite removed the false claim; this class pins
+    the absence across the EDIT-TIME enumerated site surface so a
+    future "restore the friendly transition prefix" edit fails loudly.
 
     The directive-prose commit verified retired-prose disk-grep zero
     in production hooks/commands/protocols/skills at commit time; this
@@ -862,10 +907,11 @@ class TestFalseTransitionClaimAbsenceAcrossSites:
                             hits.append(f"{path}:{i}: {line.strip()[:120]}")
                             break
         assert not hits, (
-            f"Retired #738 prose {retired_prose!r} found in the "
-            f"production-source surface (hooks/commands/protocols/skills). "
-            f"The directive-prose rewrite expected zero hits here. "
-            f"Hits:\n" + "\n".join(hits)
+            f"Retired transition-claim prose {retired_prose!r} found "
+            f"in the production-source surface "
+            f"(hooks/commands/protocols/skills). The directive-prose "
+            f"rewrite expected zero hits here. Hits:\n"
+            + "\n".join(hits)
         )
 
     @pytest.mark.parametrize("retired_prose", [
@@ -890,9 +936,9 @@ class TestFalseTransitionClaimAbsenceAcrossSites:
                         hits.append(f"{path}:{i}: {line.strip()[:120]}")
                         break
         assert not hits, (
-            f"Retired #738 prose {retired_prose!r} found in runbooks. "
-            f"The directive-prose rewrite expected zero hits. Hits:\n"
-            + "\n".join(hits)
+            f"Retired transition-claim prose {retired_prose!r} found "
+            f"in runbooks. The directive-prose rewrite expected zero "
+            f"hits. Hits:\n" + "\n".join(hits)
         )
 
     def test_fixture_prose_allowlist_matches_disk_state(self):
@@ -995,17 +1041,17 @@ class TestRiskElevenStrictXfailMechanismIntegrity:
         )
 
     def test_renamed_tests_are_collected_and_pass(self):
-        """The 4 cbcfd589-renamed tests
-        (`*_per_teammate_name_none_discriminator`) are collected by pytest
-        and pass under the new predicate. This is a meta-test — if the
-        test names don't exist or they fail, the migration is
+        """The 4 lifted Gate-0/ExitContract tests
+        (`*_per_field_presence_discriminator`) are collected by pytest
+        and pass under the consolidated predicate. This is a meta-test —
+        if the test names don't exist or they fail, the migration is
         incomplete.
         """
         expected = [
-            "test_teammate_session_suppresses_emission_per_teammate_name_none_discriminator",
-            "test_teammate_session_writes_no_journal_event_per_teammate_name_none_discriminator",
-            "test_teammate_session_does_not_create_marker_per_teammate_name_none_discriminator",
-            "test_all_gate_failure_paths_exit_zero_per_teammate_name_none_discriminator",
+            "test_teammate_session_suppresses_emission_per_field_presence_discriminator",
+            "test_teammate_session_writes_no_journal_event_per_field_presence_discriminator",
+            "test_teammate_session_does_not_create_marker_per_field_presence_discriminator",
+            "test_all_gate_failure_paths_exit_zero_per_field_presence_discriminator",
         ]
         src = (PLUGIN_ROOT / "tests"
                / "test_teardown_request_emitter.py").read_text()
@@ -1013,9 +1059,8 @@ class TestRiskElevenStrictXfailMechanismIntegrity:
         assert not missing, (
             f"Expected renamed tests not found in "
             f"test_teardown_request_emitter.py: {missing}. The "
-            f"cbcfd589 §AUDIT named-invariant rename was reverted "
-            f"or the discriminator was swapped without updating "
-            f"the suffix."
+            f"named-invariant rename was reverted or the "
+            f"discriminator was swapped without updating the suffix."
         )
 
 
@@ -1125,8 +1170,8 @@ class TestPostMergeFollowUpSpecs:
     that the captured TaskCompleted stdin fixtures under
     pact-plugin/tests/fixtures/wake_lifecycle/ match the empirical
     schema (lead-frame omits teammate_name + team_name; teammate-frame
-    carries both), and that the is_lead_at_task_completed helper
-    classifies each fixture correctly per the empirical-grounded
+    carries both), and that the is_lead_context helper classifies
+    each fixture correctly per the empirical-grounded compound
     predicate body.
 
     Activation history:
@@ -1177,9 +1222,9 @@ class TestPostMergeFollowUpSpecs:
             "with teammate_name absence on lead frames)."
         )
         # Helper classifies as lead.
-        assert wl.is_lead_at_task_completed(data) is True, (
+        assert wl.is_lead_context(data) is True, (
             "Captured lead-frame fixture must classify as lead under "
-            "the empirical-grounded predicate body."
+            "the empirical-grounded compound predicate body."
         )
 
     def test_captured_teammate_context_fixture_shape(self):
@@ -1211,10 +1256,10 @@ class TestPostMergeFollowUpSpecs:
             "team_name (paired with teammate_name presence)."
         )
         # Helper classifies as teammate.
-        assert wl.is_lead_at_task_completed(data) is False, (
+        assert wl.is_lead_context(data) is False, (
             "Captured teammate-frame fixture must classify as teammate "
             "(suppress directive) under the empirical-grounded "
-            "predicate body."
+            "compound predicate body."
         )
 
     def test_lead_and_teammate_fixtures_paired_via_meta_provenance(self):
@@ -1249,8 +1294,8 @@ class TestPostMergeFollowUpSpecs:
         )
         # Also pin both fixtures classify per-frame correctly under
         # the helper (the paired assertion the discipline protects).
-        assert wl.is_lead_at_task_completed(lead) is True
-        assert wl.is_lead_at_task_completed(teammate) is False
+        assert wl.is_lead_context(lead) is True
+        assert wl.is_lead_context(teammate) is False
 
     # The #786 PostToolUse falsifier + #806 SubagentStop audit
     # stubs that previously lived here were REMOVED in this
@@ -1270,56 +1315,47 @@ class TestPostMergeFollowUpSpecs:
 
 class TestCounterTestMechanismDocumentation:
     """DISCRIMINATIVE-vs-NON-DISCRIMINATIVE counter-test discipline:
-    for COMPOUND predicates, an adversarial reviewer can mutate a
+    for compound predicates, an adversarial reviewer can mutate a
     non-discriminative sub-clause and get false-RED / false-confidence.
     The mitigation is an inline `# counter-test:` NOTE specifying
     WHICH mutation is discriminative.
 
-    The current empirical-grounded predicate is single-field
-    (`teammate_name is None`) so the discriminative mutation is
-    unambiguous; the NOTE is not load-bearing today. But if a future
-    follow-up swaps to a compound form (e.g., `teammate_name is None
-    AND agent_id is None`), the predicate becomes COMPOUND and the
-    discipline applies.
-
-    This test class pins the discipline: the helper docstring MUST
-    document which field is the discriminator + the empirical
-    provenance; if the helper body changes to compound form, the
-    inline NOTE shape MUST appear. Today the body is single-field, so
-    the test asserts the documentation-in-code discipline exists at
-    the helper docstring level rather than the inline-comment level.
+    The consolidated is_lead_context body is compound (`agent_id is
+    None AND teammate_name is None`), so the discipline applies: the
+    helper docstring MUST document both fields + the empirical
+    provenance, and the body MUST remain compound (a future "simplify
+    to single-field" revert would silently drop one half of the
+    actor-discrimination surface).
     """
 
     def test_helper_docstring_documents_discriminator_choice(self):
-        """The helper docstring MUST document WHICH field is the
-        discriminator and WHY (the empirical-capture provenance from
-        2026-05-20 + the per-event partition convention). This is the
-        load-bearing documentation surface; an inline `# counter-test:`
-        NOTE becomes additionally load-bearing only under compound-
-        predicate forms.
+        """The helper docstring MUST document both discriminator
+        fields and WHY (the empirical-capture provenance from
+        2026-05-20). This is the load-bearing documentation surface;
+        without it a future docs-extrapolation revert could lose the
+        rationale trail.
         """
-        docstring = wl.is_lead_at_task_completed.__doc__ or ""
-        # Pin the canonical references. The discriminator field MUST
-        # be named explicitly; the empirical-capture anchor pins the
-        # rationale (rather than docs-extrapolation, which was the
-        # earlier and falsified-by-capture approach).
+        docstring = wl.is_lead_context.__doc__ or ""
+        # Pin the canonical references: both compound fields named
+        # explicitly + the empirical-capture anchor.
         required_substrings = [
-            "teammate_name",       # which field
+            "agent_id",
+            "teammate_name",
         ]
         # Empirical-capture anchor: tolerate prose variants that
-        # name the in-repo shim OR the capture date.
+        # name the in-repo shim, "empirical", or the capture verb.
         capture_anchor_pattern = re.compile(
             r"captures?|captured|empirical|logging[- ]?shim", re.IGNORECASE,
         )
         for s in required_substrings:
             assert s in docstring, (
-                f"is_lead_at_task_completed docstring must reference "
-                f"{s!r} per the discriminative-NOTE discipline. "
+                f"is_lead_context docstring must reference {s!r} per "
+                f"the compound-discriminator documentation discipline. "
                 f"Docstring excerpt: {docstring[:300]!r}"
             )
         assert capture_anchor_pattern.search(docstring), (
-            f"is_lead_at_task_completed docstring must reference the "
-            f"empirical-capture provenance (case-insensitive match on "
+            f"is_lead_context docstring must reference the empirical-"
+            f"capture provenance (case-insensitive match on "
             f"`capture` / `captured` / `empirical` / `logging-shim`). "
             f"The capture anchor is the load-bearing audit anchor — "
             f"without it, a future docs-extrapolation revert could "
@@ -1327,34 +1363,38 @@ class TestCounterTestMechanismDocumentation:
             f"{docstring[:400]!r}"
         )
 
-    def test_compound_predicate_contingency_unreached_under_empirical_schema(
-        self,
-    ):
-        """The compound-predicate contingency is unreached under the
-        empirical-grounded schema that currently ships. Pin that the
-        helper body is still SINGLE-FIELD; if a future edit silently
-        swaps to compound form (`teammate_name is None AND agent_id
-        is None` or similar) without filing the follow-up, this test
-        flags the drift.
+    def test_compound_predicate_is_canonical_under_empirical_schema(self):
+        """The compound predicate is the canonical body under the
+        empirical-grounded schema. Pin that the helper body remains
+        COMPOUND (`agent_id is None AND teammate_name is None` or
+        equivalent shape); if a future edit silently drops one half
+        of the compound, this test flags the drift.
+
+        Counter-test-by-revert: replacing the body with a single-field
+        check (e.g., `return stdin.get("teammate_name") is None`)
+        flips this test RED.
         """
-        body_src = inspect.getsource(wl.is_lead_at_task_completed)
+        body_src = inspect.getsource(wl.is_lead_context)
         # Strip docstring.
         body_lines = [
             line for line in body_src.splitlines()
             if line.strip() and not line.strip().startswith('"""')
             and not line.strip().startswith("Discriminator")
         ]
-        # Look for an `and input_data.get("<other>")` shape (any
-        # second discriminator field added to the single-field
-        # predicate).
+        # Look for an `and <param>.get("<other>")` shape — two
+        # field-presence reads joined by `and`. Match any param name
+        # (the helper signature variable is `stdin` post-consolidation
+        # but historically `input_data`; tolerate either or any future
+        # rename).
         compound_pattern = re.compile(
-            r'and\s+input_data\.get\(["\'][\w_]+["\']\)\s+is\s+None'
+            r'and\s+\w+\.get\(["\'][\w_]+["\']\)\s+is\s+None'
         )
         is_compound = any(compound_pattern.search(line) for line in body_lines)
-        assert not is_compound, (
-            "is_lead_at_task_completed body has been swapped to "
-            "compound form without filing a follow-up. Compound-"
-            "predicate swap requires: predicate body swap + payload "
-            "swap + counter-test cardinality re-measure + update this "
-            "test's discriminator-NOTE pin to allow compound form."
+        assert is_compound, (
+            "is_lead_context body must remain COMPOUND (two field-"
+            "presence reads joined by `and`). The empirical-grounded "
+            "schema requires reading both `agent_id` and `teammate_name`; "
+            "dropping one half re-introduces the pre-consolidation "
+            "misclassification class (the per-event partition this "
+            "consolidation collapsed)."
         )
