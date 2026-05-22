@@ -317,6 +317,21 @@ def test_step_0_5_falls_through_when_no_journal(tmp_path, step_0_5_bash_template
         f"stdout indicates the gate fired spuriously on empty "
         f"extractors. stdout={result.stdout!r}"
     )
+    # Stderr-cleanliness invariant: the `[ -n "$VAR" ]` guards are what
+    # make the empty-extractor case fall through cleanly. If a future
+    # editor strips a guard, the bash `-gt` test would receive an empty
+    # operand and emit `[: : integer expected` to stderr — the gate
+    # would STILL fall through (because the failed `-gt` evaluates to
+    # false), so the sentinel-in-stdout assertion would not catch the
+    # regression. Pinning stderr cleanliness catches the guard-strip
+    # case at the structural-invariant level.
+    assert "integer expected" not in result.stderr, (
+        f"Step 0.5 fall-through path must be stderr-clean — the "
+        f"`[ -n \"$VAR\" ]` guards close BEFORE the integer `-gt` "
+        f"comparison reaches empty operands. Presence of `integer "
+        f"expected` in stderr indicates a guard was stripped and the "
+        f"`-gt` test ran with an empty operand. stderr={result.stderr!r}"
+    )
 
 
 def test_step_0_5_falls_through_when_only_teardown_request_no_arm(
@@ -344,6 +359,19 @@ def test_step_0_5_falls_through_when_only_teardown_request_no_arm(
         f"(defensive guard against ill-formed journal state). "
         f"Sentinel {SENTINEL!r} absent in stdout indicates the gate "
         f"fired without an arm anchor. stdout={result.stdout!r}"
+    )
+    # Stderr-cleanliness invariant: see test_step_0_5_falls_through_
+    # when_no_journal for the full rationale. This test exercises the
+    # `[ -n "$LATEST_SCAN_ARMED" ]` guard specifically — stripping it
+    # would let the `-gt` comparison receive empty `$LATEST_SCAN_ARMED`
+    # and emit `integer expected` to stderr, without changing the
+    # sentinel-in-stdout outcome.
+    assert "integer expected" not in result.stderr, (
+        f"Step 0.5 fall-through path must be stderr-clean — the "
+        f"`[ -n \"$LATEST_SCAN_ARMED\" ]` guard closes BEFORE the "
+        f"integer `-gt` comparison reaches an empty operand. Presence "
+        f"of `integer expected` in stderr indicates the guard was "
+        f"stripped. stderr={result.stderr!r}"
     )
 
 
@@ -479,4 +507,53 @@ def test_step_0_5_double_fire_before_disarm_is_idempotent(
     assert result1.returncode == result2.returncode, (
         f"Step 0.5 must produce deterministic exit codes on identical "
         f"inputs. First rc={result1.returncode}; second rc={result2.returncode}"
+    )
+
+
+def test_step_0_5_falls_through_on_same_second_teardown_request_and_scan_armed(
+    tmp_path, step_0_5_bash_template
+):
+    """Pin the `-gt` (strict greater-than) semantic for the same-second
+    edge case: when `teardown_request.ts` and `scan_armed.armed_at`
+    land at the same epoch second, `LATEST_TEARDOWN_REQUEST -gt
+    LATEST_SCAN_ARMED` must evaluate FALSE (because `N -gt N` is
+    false in bash) and Step 0.5 must fall through.
+
+    Architect rationale (§9.1): equality is conservative — a teardown
+    that landed in the same wall-clock second as the arm is treated
+    as part of the arm cycle rather than a pending-teardown signal;
+    if the teardown is real, the next cron-fire (5+ minutes later)
+    will catch it via a later `teardown_request` write.
+
+    Counter-test-by-revert: mutating bash `-gt` to `-ge` in the Step
+    0.5 block flips this test (sentinel would be absent — the gate
+    would fire on the same-second case, violating the conservative
+    contract). Restoring `-gt` makes the test pass again. This pins
+    the operator choice against a future-editor 'consistency with
+    Step 0's `[ $delta -ge 0 ]`' temptation.
+    """
+    session_dir = tmp_path / "session"
+    # Use a deterministic anchor epoch for byte-stable reproduction
+    # across test runs; the test does not depend on real wall-clock
+    # time.
+    anchor_epoch = int(datetime.datetime(
+        2026, 5, 22, 2, 0, 0, tzinfo=datetime.timezone.utc
+    ).timestamp())
+    _write_journal(session_dir, "scan_armed", {"armed_at": anchor_epoch})
+    _write_teardown_request(session_dir, anchor_epoch)  # same second
+
+    bash_body = _render_step_0_5(step_0_5_bash_template, PLUGIN_ROOT, session_dir)
+    result = _run_step_0_5(bash_body)
+
+    assert result.returncode == 0, (
+        f"Step 0.5 exit code expected 0, got {result.returncode}. "
+        f"stderr={result.stderr!r}"
+    )
+    assert SENTINEL in result.stdout, (
+        f"Step 0.5 should have FALLEN THROUGH on same-second equality "
+        f"(teardown_request(anchor) == scan_armed(anchor)). `-gt` is "
+        f"strict; equality must NOT fire the gate. Sentinel {SENTINEL!r} "
+        f"absent in stdout indicates the operator was loosened to `-ge` "
+        f"or equivalent, violating the conservative-equality contract. "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
     )
