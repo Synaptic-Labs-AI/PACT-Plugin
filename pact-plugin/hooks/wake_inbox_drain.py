@@ -139,6 +139,7 @@ try:
     import errno
     import os
     import re
+    from datetime import datetime, timezone
     from typing import Any
     from pathlib import Path
 
@@ -166,6 +167,13 @@ _SUPPRESS_OUTPUT = json.dumps({
     "suppressOutput": True,
     "hookSpecificOutput": {"hookEventName": "UserPromptSubmit"},
 })
+
+# Byte-coupled with session_journal.make_event's ts format literal and
+# with the strptime literal in scan-pending-tasks.md Step 0 / Step 0.5.
+# All three sites parse the auto-stamped `ts` ISO-8601 UTC string into
+# an integer epoch via this literal; drift between sites silently breaks
+# the cross-component comparison contract.
+_TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
 # Bound stdin payload at 1 MB. UserPromptSubmit payloads carry the user's
 # prompt text + session metadata; a 1 MB cap is generous and serves as
@@ -682,17 +690,37 @@ def _decide_and_emit(input_data: dict) -> None:
         armed = read_last_event("scan_armed")
         disarmed = read_last_event("scan_disarmed")
         if armed is not None:
-            armed_at = armed.get("armed_at")
-            if isinstance(armed_at, int) and not isinstance(armed_at, bool):
+            armed_ts = armed.get("ts")
+            armed_epoch: int | None = None
+            if isinstance(armed_ts, str) and armed_ts:
+                try:
+                    armed_epoch = int(
+                        datetime.strptime(armed_ts, _TS_FMT)
+                        .replace(tzinfo=timezone.utc)
+                        .timestamp()
+                    )
+                except (TypeError, ValueError):
+                    # Fail-conservative: malformed scan_armed.ts falls
+                    # through to count_active_tasks B-1 fallback.
+                    armed_epoch = None
+            if armed_epoch is not None:
                 if disarmed is None:
                     print(_SUPPRESS_OUTPUT)
                     return
-                disarmed_at = disarmed.get("disarmed_at")
-                if (
-                    isinstance(disarmed_at, int)
-                    and not isinstance(disarmed_at, bool)
-                    and armed_at > disarmed_at
-                ):
+                disarmed_ts = disarmed.get("ts")
+                disarmed_epoch: int | None = None
+                if isinstance(disarmed_ts, str) and disarmed_ts:
+                    try:
+                        disarmed_epoch = int(
+                            datetime.strptime(disarmed_ts, _TS_FMT)
+                            .replace(tzinfo=timezone.utc)
+                            .timestamp()
+                        )
+                    except (TypeError, ValueError):
+                        # Fail-conservative: malformed scan_disarmed.ts
+                        # falls through to count_active_tasks B-1.
+                        disarmed_epoch = None
+                if disarmed_epoch is not None and armed_epoch > disarmed_epoch:
                     print(_SUPPRESS_OUTPUT)
                     return
     except Exception:

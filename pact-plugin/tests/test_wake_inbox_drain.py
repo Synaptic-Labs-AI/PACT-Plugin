@@ -12,6 +12,7 @@ Counter-test-by-revert: see
 tests/runbooks/wake-lifecycle-arm-starvation.md.
 """
 
+import datetime
 import json
 import os
 import subprocess
@@ -22,6 +23,21 @@ import pytest
 
 HOOK_DIR = Path(__file__).resolve().parent.parent / "hooks"
 DRAIN = HOOK_DIR / "wake_inbox_drain.py"
+
+# Byte-coupled with session_journal.make_event's ts format and with the
+# `_TS_FMT` literal in wake_inbox_drain.py producer-side idempotency
+# check. Used by `_iso_ts` to render integer-epoch helper arguments as
+# canonical ISO strings the consumer's strptime can parse.
+ISO_FORMAT_LITERAL = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _iso_ts(epoch_seconds: int) -> str:
+    """Render an integer-epoch as the canonical ISO-8601 UTC string
+    that wake_inbox_drain.py's strptime literal parses
+    (`%Y-%m-%dT%H:%M:%SZ`)."""
+    return datetime.datetime.fromtimestamp(
+        epoch_seconds, tz=datetime.timezone.utc
+    ).strftime(ISO_FORMAT_LITERAL)
 
 
 def _run_drain(stdin_payload, env_extra=None):
@@ -97,12 +113,23 @@ def _write_marker(home, team_name, filename, payload):
     return target
 
 
-def _write_scan_armed_event(home, session_id, project_dir, armed_at=1715731200):
+_DEFAULT_SCAN_ARMED_TS = _iso_ts(1715731200)
+_DEFAULT_SCAN_DISARMED_TS = _iso_ts(1715734800)
+
+
+def _write_scan_armed_event(home, session_id, project_dir, ts=_DEFAULT_SCAN_ARMED_TS):
     """Append a `scan_armed` event to the session's journal — mirrors the
     write performed by commands/start-pending-scan.md Step 5 (the CLI
     form `python3 session_journal.py write --type scan_armed ...`). The
     test writes the JSONL line directly to keep the test self-contained
     and not depend on the CLI subprocess.
+
+    `ts` is the auto-stamped ISO-8601 UTC timestamp matching
+    `session_journal.make_event`'s format literal; the producer-side
+    idempotency check in `wake_inbox_drain.py:684+` parses it via
+    strptime to int epoch. Callers may override `ts` to control the
+    comparison branch under test (use `_iso_ts(epoch)` for integer-
+    epoch readability).
     """
     slug = Path(project_dir).name
     sess_dir = home / ".claude" / "pact-sessions" / slug / session_id
@@ -111,18 +138,21 @@ def _write_scan_armed_event(home, session_id, project_dir, armed_at=1715731200):
     event = {
         "v": 1,
         "type": "scan_armed",
-        "ts": "2026-05-15T00:00:00Z",
-        "armed_at": armed_at,
+        "ts": ts,
     }
     with journal.open("a", encoding="utf-8") as f:
         f.write(json.dumps(event) + "\n")
     return journal
 
 
-def _write_scan_disarmed_event(home, session_id, project_dir, disarmed_at=1715734800):
+def _write_scan_disarmed_event(home, session_id, project_dir, ts=_DEFAULT_SCAN_DISARMED_TS):
     """Append a `scan_disarmed` event to the session's journal — mirrors
     the write performed by commands/stop-pending-scan.md Step 5 (paired
     writer to scan_armed). Symmetric with `_write_scan_armed_event`.
+
+    `ts` is the auto-stamped ISO-8601 UTC timestamp; the producer-side
+    idempotency check parses it via strptime to int epoch. Callers may
+    override `ts` to control the comparison branch under test.
     """
     slug = Path(project_dir).name
     sess_dir = home / ".claude" / "pact-sessions" / slug / session_id
@@ -131,8 +161,7 @@ def _write_scan_disarmed_event(home, session_id, project_dir, disarmed_at=171573
     event = {
         "v": 1,
         "type": "scan_disarmed",
-        "ts": "2026-05-15T00:01:00Z",
-        "disarmed_at": disarmed_at,
+        "ts": ts,
     }
     with journal.open("a", encoding="utf-8") as f:
         f.write(json.dumps(event) + "\n")
@@ -639,8 +668,8 @@ def test_fallback_emits_when_armed_then_disarmed(tmp_path):
         home, team, "T5", status="in_progress", owner=teammate_owner,
     )
     # scan_armed at t=100, scan_disarmed at t=200 (more recent).
-    _write_scan_armed_event(home, lead_sid, pdir, armed_at=100)
-    _write_scan_disarmed_event(home, lead_sid, pdir, disarmed_at=200)
+    _write_scan_armed_event(home, lead_sid, pdir, ts=_iso_ts(100))
+    _write_scan_disarmed_event(home, lead_sid, pdir, ts=_iso_ts(200))
 
     rc, out_str, err = _run_drain(
         json.dumps({
@@ -681,7 +710,7 @@ def test_fallback_suppressed_when_armed_no_disarm(tmp_path):
     _write_task(
         home, team, "T6", status="in_progress", owner=teammate_owner,
     )
-    _write_scan_armed_event(home, lead_sid, pdir, armed_at=100)
+    _write_scan_armed_event(home, lead_sid, pdir, ts=_iso_ts(100))
     # No scan_disarmed event.
 
     out = _drain_out({
@@ -728,9 +757,9 @@ def test_fallback_suppressed_when_armed_disarmed_rearmed(tmp_path):
     # Event-order on disk: arm(t=100), disarm(t=200), arm(t=300).
     # read_last_event returns the LAST event of each type by reverse
     # scan, so scan_armed=300, scan_disarmed=200. 300 > 200 → suppress.
-    _write_scan_armed_event(home, lead_sid, pdir, armed_at=100)
-    _write_scan_disarmed_event(home, lead_sid, pdir, disarmed_at=200)
-    _write_scan_armed_event(home, lead_sid, pdir, armed_at=300)
+    _write_scan_armed_event(home, lead_sid, pdir, ts=_iso_ts(100))
+    _write_scan_disarmed_event(home, lead_sid, pdir, ts=_iso_ts(200))
+    _write_scan_armed_event(home, lead_sid, pdir, ts=_iso_ts(300))
 
     out = _drain_out({
         "session_id": lead_sid, "cwd": pdir,
@@ -746,13 +775,14 @@ def test_fallback_suppressed_when_armed_disarmed_rearmed(tmp_path):
 # ─── Strict-greater equality-boundary test ─────────────────────────────
 
 
-def test_fallback_emits_when_armed_at_equals_disarmed_at(tmp_path):
-    """Strict-greater equality-boundary invariant. When scan_armed.armed_at
-    is exactly equal to scan_disarmed.disarmed_at (same-second arm-then-
-    disarm via `$(date +%s)`), the comparator `armed_at > disarmed_at`
-    evaluates False and falls through to the count_active_tasks fallback
-    — fail-conservative emit. Same-second timestamp collisions are
-    realistic at second-resolution epoch sources.
+def test_fallback_emits_when_armed_ts_equals_disarmed_ts(tmp_path):
+    """Strict-greater equality-boundary invariant. When scan_armed.ts is
+    exactly equal to scan_disarmed.ts (same-second arm-then-disarm at
+    second-resolution `%Y-%m-%dT%H:%M:%SZ` precision), the comparator
+    `armed_epoch > disarmed_epoch` evaluates False and the hook falls
+    through to the count_active_tasks fallback — fail-conservative
+    emit. Same-second timestamp collisions are realistic at second-
+    resolution epoch sources.
 
     Counter-test-by-revert: mutating the operator from `>` to `>=` at
     wake_inbox_drain.py flips this test (the equality case would
@@ -777,9 +807,11 @@ def test_fallback_emits_when_armed_at_equals_disarmed_at(tmp_path):
     _write_task(
         home, team, "T8", status="in_progress", owner=teammate_owner,
     )
-    # Same-second collision: armed_at == disarmed_at == 200.
-    _write_scan_armed_event(home, lead_sid, pdir, armed_at=200)
-    _write_scan_disarmed_event(home, lead_sid, pdir, disarmed_at=200)
+    # Same-second collision: scan_armed.ts == scan_disarmed.ts (both
+    # render to the same ISO string at second resolution).
+    same_second_ts = _iso_ts(200)
+    _write_scan_armed_event(home, lead_sid, pdir, ts=same_second_ts)
+    _write_scan_disarmed_event(home, lead_sid, pdir, ts=same_second_ts)
 
     rc, out_str, err = _run_drain(
         json.dumps({
@@ -792,25 +824,29 @@ def test_fallback_emits_when_armed_at_equals_disarmed_at(tmp_path):
     assert rc == 0, f"non-zero exit; stderr={err}"
     arm_count = out_str.count("Active teammate work detected")
     assert arm_count == 1, (
-        f"Same-second armed_at == disarmed_at must fall through to "
-        f"count_active_tasks fallback (fail-conservative emit); got "
-        f"{arm_count} Arm directives in stdout={out_str!r}. "
+        f"Same-second scan_armed.ts == scan_disarmed.ts must fall "
+        f"through to count_active_tasks fallback (fail-conservative "
+        f"emit); got {arm_count} Arm directives in stdout={out_str!r}. "
         f"A 0 count here indicates the strict-greater operator was "
         f"weakened to `>=` — equality now suppresses incorrectly."
     )
 
 
-# ─── Bool-vs-int discrimination parametric tests ───────────────────────
+# ─── Malformed-ts discrimination parametric tests ──────────────────────
 
 
 def _write_event_with_value(home, session_id, project_dir, event_type, field, value):
     """Append a journal event with a raw field value. Bypasses
     session_journal.py's write-side schema validator, which would reject
     bool-in-int fields per _REQUIRED_FIELDS_BY_TYPE. The hook-layer
-    bool-discrimination guards in wake_inbox_drain.py are defense-in-
+    fail-conservative guards in wake_inbox_drain.py are defense-in-
     depth against this exact path: a malformed event on disk (corrupted
     journal, out-of-band writer, future schema drift). This helper
     simulates that disk state directly.
+
+    The `field`/`value` pair OVERRIDES any default field in the event
+    dict (including `ts`) — the caller's assignment is the last
+    statement in the dict literal so caller-supplied values win.
     """
     slug = Path(project_dir).name
     sess_dir = home / ".claude" / "pact-sessions" / slug / session_id
@@ -827,31 +863,40 @@ def _write_event_with_value(home, session_id, project_dir, event_type, field, va
     return journal
 
 
-def test_fallback_emits_when_armed_at_is_bool(tmp_path):
-    """Bool-vs-int discrimination invariant for armed_at. Python's
-    `True`/`False` are instances of `int` (since `bool` subclasses
-    `int`), so a naive `isinstance(armed_at, int)` check would let bool
-    values flow through the timestamp comparison as 1 or 0. The
-    `not isinstance(armed_at, bool)` clause rejects bool values as
-    malformed; the hook falls through to count_active_tasks (fail-
-    conservative emit).
+def test_fallback_emits_when_armed_ts_is_malformed_falls_through_to_count_path(tmp_path):
+    """Fail-conservative-on-malformed-ts invariant for scan_armed.
 
-    Counter-test-by-revert: removing `not isinstance(armed_at, bool)`
-    from wake_inbox_drain.py flips this test — the bool True (==int 1)
-    would pass the int check; with disarmed absent the hook would
-    short-circuit-suppress; this test would see 0 Arm directives
-    instead of 1.
+    Pre-#821 failure mode (bool-vs-int): Python `bool` subclassed `int`,
+    so a naive `isinstance(armed_at, int)` check would let bool values
+    flow through the timestamp comparison as 1 or 0; the
+    `not isinstance(armed_at, bool)` clause rejected them as malformed.
 
-    Defense-in-depth: the write-side schema validator at
-    session_journal.py _validate_event_schema also rejects bool-in-int
-    (pinned by test_session_journal.py). This test pins the
-    INDEPENDENT hook-layer guard, which defends against journal
-    corruption / out-of-band writes that bypass the validator.
+    Post-#821 failure mode (ts-string-malformation): the consumer reads
+    `scan_armed.ts` (auto-stamped ISO string) and parses via strptime.
+    A writer-bug or journal-corruption that lands `ts=42` / `ts=True` /
+    `ts=None` / `ts=""` / unparseable string must NOT cause the
+    producer-side idempotency check to suppress incorrectly. The
+    `isinstance(armed_ts, str) and armed_ts` guard rejects non-str /
+    empty; strptime's `try/except (TypeError, ValueError)` catches
+    unparseable strings; in both cases `armed_epoch` is None and the
+    hook falls through to count_active_tasks (fail-conservative emit).
+
+    Counter-test-by-revert: removing the inner `try/except` around the
+    strptime call OR removing the `isinstance(armed_ts, str) and
+    armed_ts` guard would let malformed ts crash up through the outer
+    `except Exception` and suppress (under-emit). The discrimination
+    here is the same as the pre-#821 bool-guard: defense-in-depth
+    against journal corruption that bypasses the write-side validator.
+
+    Distinct from the symmetric ..._disarmed_ts_... test: the armed-
+    side malformation hits the OUTER arm-presence branch (the inner
+    block never enters); the disarmed-side malformation hits the INNER
+    branch comparator (the outer block has already validated armed).
     """
     home = tmp_path / "home"; home.mkdir()
     lead_sid = "lead-sid"
     pdir = "/tmp/p"
-    team = "team-armed-bool"
+    team = "team-armed-malformed-ts"
     teammate_owner = "backend-coder"
     _write_session_context(
         home, lead_sid, pdir, team,
@@ -864,14 +909,15 @@ def test_fallback_emits_when_armed_at_is_bool(tmp_path):
     _write_task(
         home, team, "T9", status="in_progress", owner=teammate_owner,
     )
-    # armed_at as Python bool True → JSON true → loaded back as
-    # Python bool True (isinstance(True, int) is True; isinstance(True,
-    # bool) is True). With the bool-guard intact, this event is treated
-    # as malformed and the hook falls through to the fallback.
-    _write_event_with_value(home, lead_sid, pdir, "scan_armed", "armed_at", True)
-    # No scan_disarmed event; without the bool-guard, the bool True
-    # would short-circuit-suppress at the `disarmed is None → suppress`
-    # branch (since `isinstance(True, int)` is True).
+    # armed.ts as integer 42 (not str) → isinstance(armed_ts, str) is
+    # False → armed_epoch stays None → hook falls through to
+    # count_active_tasks. Without the str guard or the inner
+    # try/except, the integer would crash strptime (TypeError) and the
+    # outer Exception handler would suppress.
+    _write_event_with_value(home, lead_sid, pdir, "scan_armed", "ts", 42)
+    # No scan_disarmed event; without the malformed-ts guard, the
+    # crash would propagate to outer suppress and this test would see
+    # 0 Arm directives instead of 1.
 
     rc, out_str, err = _run_drain(
         json.dumps({
@@ -884,42 +930,55 @@ def test_fallback_emits_when_armed_at_is_bool(tmp_path):
     assert rc == 0, f"non-zero exit; stderr={err}"
     arm_count = out_str.count("Active teammate work detected")
     assert arm_count == 1, (
-        f"armed_at=bool(True) must be rejected by the bool-guard and "
-        f"fall through to count_active_tasks (fail-conservative emit); "
-        f"got {arm_count} Arm directives in stdout={out_str!r}. "
-        f"A 0 count here indicates `not isinstance(armed_at, bool)` "
-        f"was removed — bool True flowed through the int check and "
-        f"suppressed Arm incorrectly."
+        f"scan_armed.ts=int(42) must be rejected by the malformed-ts "
+        f"guard and fall through to count_active_tasks "
+        f"(fail-conservative emit); got {arm_count} Arm directives in "
+        f"stdout={out_str!r}. A 0 count here indicates the "
+        f"`isinstance(armed_ts, str)` guard or the inner strptime "
+        f"try/except was removed — the malformed ts crashed up to "
+        f"outer suppress and under-emit incorrectly."
     )
 
 
-def test_fallback_emits_when_disarmed_at_is_bool(tmp_path):
-    """Bool-vs-int discrimination invariant for disarmed_at. Symmetric
-    pin to test_fallback_emits_when_armed_at_is_bool but targeted at
-    the disarmed_at guard at the inner-branch comparison
-    `isinstance(disarmed_at, int) and not isinstance(disarmed_at, bool)
-    and armed_at > disarmed_at`.
+def test_fallback_emits_when_disarmed_ts_is_malformed_falls_through_to_count_path(tmp_path):
+    """Fail-conservative-on-malformed-ts invariant for scan_disarmed.
+    Symmetric pin to
+    test_fallback_emits_when_armed_ts_is_malformed_falls_through_to_count_path
+    but targeted at the INNER-branch comparator guard on
+    `disarmed_ts` parsing.
 
-    Fixture shape: armed_at is a well-typed int (so the outer arm-
-    presence branch is entered) AND disarmed_at is a bool. The inner
-    bool-guard on disarmed_at rejects it; the comparison is skipped;
-    the hook falls through to the fallback emit path.
+    Pre-#821 failure mode (bool-vs-int): Python bool False (==int 0)
+    passing through `isinstance(disarmed_at, int)` would suppress when
+    `armed_at > 0`; the `not isinstance(disarmed_at, bool)` clause
+    rejected it.
 
-    Counter-test-by-revert: removing `not isinstance(disarmed_at,
-    bool)` from wake_inbox_drain.py flips this test. The bool False
-    (==int 0) would pass the int check; the comparison
-    `armed_at(100) > disarmed_at(False==0)` is True; the hook
-    short-circuit-suppresses. Without the bool-guard, this test sees
-    0 Arm directives instead of 1.
+    Post-#821 failure mode (ts-string-malformation): the consumer
+    parses `scan_disarmed.ts` via strptime; the inner
+    `isinstance(disarmed_ts, str) and disarmed_ts` guard +
+    `try/except (TypeError, ValueError)` keep `disarmed_epoch` None on
+    malformed input. With `disarmed_epoch is None`, the `armed_epoch >
+    disarmed_epoch` comparison is skipped and the hook falls through
+    to the fallback emit path.
 
-    Distinct from the armed_at test: the disarmed_at guard is at a
+    Fixture shape: armed_ts is a well-typed ISO string (so the outer
+    arm-presence branch is entered AND armed_epoch is well-typed),
+    AND disarmed_ts is a non-str (`False`). The inner guard rejects;
+    the comparison is skipped; the hook falls through to fail-
+    conservative emit.
+
+    Distinct from the armed_ts test: the disarmed_ts guard is at a
     SEPARATE site (the inner branch); removing one guard does not
     affect the other. Two tests pin two sites independently.
+
+    Counter-test-by-revert: removing the inner str-guard or the inner
+    strptime try/except on disarmed_ts lets the bool/non-str crash
+    propagate to outer suppress (under-emit) — this test sees 0 Arm
+    directives instead of 1.
     """
     home = tmp_path / "home"; home.mkdir()
     lead_sid = "lead-sid"
     pdir = "/tmp/p"
-    team = "team-disarmed-bool"
+    team = "team-disarmed-malformed-ts"
     teammate_owner = "backend-coder"
     _write_session_context(
         home, lead_sid, pdir, team,
@@ -932,11 +991,13 @@ def test_fallback_emits_when_disarmed_at_is_bool(tmp_path):
     _write_task(
         home, team, "T10", status="in_progress", owner=teammate_owner,
     )
-    # armed_at is a well-typed int; disarmed_at is bool False.
-    # Without the bool-guard, isinstance(False, int) is True and
-    # armed_at(100) > disarmed_at(0==False) suppresses incorrectly.
-    _write_scan_armed_event(home, lead_sid, pdir, armed_at=100)
-    _write_event_with_value(home, lead_sid, pdir, "scan_disarmed", "disarmed_at", False)
+    # scan_armed.ts is well-typed ISO; scan_disarmed.ts is bool False.
+    # Without the inner str-guard or strptime try/except,
+    # strptime(False, FMT) would raise TypeError → propagate to outer
+    # except → suppress (under-emit). With both guards, disarmed_epoch
+    # is None and the hook falls through to count_active_tasks.
+    _write_scan_armed_event(home, lead_sid, pdir, ts=_iso_ts(100))
+    _write_event_with_value(home, lead_sid, pdir, "scan_disarmed", "ts", False)
 
     rc, out_str, err = _run_drain(
         json.dumps({
@@ -949,12 +1010,13 @@ def test_fallback_emits_when_disarmed_at_is_bool(tmp_path):
     assert rc == 0, f"non-zero exit; stderr={err}"
     arm_count = out_str.count("Active teammate work detected")
     assert arm_count == 1, (
-        f"disarmed_at=bool(False) must be rejected by the disarmed-at "
-        f"bool-guard; the hook should fall through to the fallback "
-        f"emit; got {arm_count} Arm directives in stdout={out_str!r}. "
-        f"A 0 count here indicates `not isinstance(disarmed_at, bool)` "
-        f"was removed — bool False flowed through the int check, "
-        f"armed_at(100) > 0 suppressed Arm incorrectly."
+        f"scan_disarmed.ts=bool(False) must be rejected by the inner "
+        f"malformed-ts guard; the hook should fall through to the "
+        f"fallback emit; got {arm_count} Arm directives in "
+        f"stdout={out_str!r}. A 0 count here indicates the inner "
+        f"`isinstance(disarmed_ts, str)` guard or the inner strptime "
+        f"try/except was removed — the malformed ts crashed up to "
+        f"outer suppress and under-emit incorrectly."
     )
 
 
