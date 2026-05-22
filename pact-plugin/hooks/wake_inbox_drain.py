@@ -63,21 +63,24 @@ Single-emit discipline:
   cross-session signals — surface them regardless of armed-state.
 - Drain path empty → producer-side idempotency check on the B-1
   fallback path: read both `scan_armed` and `scan_disarmed` events
-  from this session's journal and compare timestamps. Suppress only
-  when `scan_armed` is present AND (`scan_disarmed` is absent OR
-  `scan_armed.armed_at` strictly greater than
-  `scan_disarmed.disarmed_at`) — i.e., the most recent lifecycle
-  event in this session was an arm, not a disarm. Otherwise (no
-  scan_armed event, or scan_disarmed is at least as recent as
-  scan_armed) run the count_active_tasks fallback. Positive count
-  → emit Arm. Zero count → suppressOutput.
+  from this session's journal and compare their auto-stamped `ts`
+  fields (parsed via `strptime` to int epoch). Suppress only when
+  `scan_armed` is present AND (`scan_disarmed` is absent OR
+  `scan_armed.ts` parsed-epoch strictly greater than `scan_disarmed.ts`
+  parsed-epoch) — i.e., the most recent lifecycle event in this
+  session was an arm, not a disarm. Otherwise (no scan_armed event,
+  or scan_disarmed is at least as recent as scan_armed) run the
+  count_active_tasks fallback. Positive count → emit Arm. Zero count
+  → suppressOutput.
 - Event-presence is the primary predicate; the timestamp comparison
-  is gated on both events having well-typed int timestamps. A
-  malformed event with `armed_at=None` is treated as if absent
-  (fail-conservative emit). Schema validation at write-time
+  is gated on both events having well-typed ISO-string `ts` fields
+  that parse successfully via strptime. A malformed event with `ts`
+  missing / non-str / unparseable is treated as if absent (fail-
+  conservative emit). Schema validation at write-time
   (`_REQUIRED_FIELDS_BY_TYPE` in shared/session_journal.py) makes
-  this an edge case rather than a happy path, but the explicit type
-  check keeps the producer-side check robust to journal corruption.
+  this an edge case rather than a happy path, but the explicit
+  per-side str-guard + strptime try/except keeps the producer-side
+  check robust to journal corruption.
 
 Performance hygiene:
 - Non-lead session short-circuits to suppressOutput before any
@@ -515,9 +518,11 @@ def _decide_and_emit(input_data: dict) -> None:
       5. Producer-side idempotency: read `scan_armed` and
          `scan_disarmed` events from this session's journal.
          Suppress only when scan_armed is present with a well-typed
-         armed_at AND (scan_disarmed is absent OR scan_armed.armed_at
-         > scan_disarmed.disarmed_at). Any journal-read failure or
-         malformed event falls through to step 6 (fail-conservative).
+         ISO-string `ts` (parsed via strptime) AND (scan_disarmed
+         is absent OR scan_armed.ts parsed-epoch > scan_disarmed.ts
+         parsed-epoch). Any journal-read failure or malformed `ts`
+         (non-str, empty, or unparseable) falls through to step 6
+         (fail-conservative).
       6. Fallback: count_active_tasks(team_name) >= 1 → emit Arm.
          Otherwise → suppressOutput.
 
@@ -656,12 +661,14 @@ def _decide_and_emit(input_data: dict) -> None:
     # disarm suppresses.
     #
     # Event-presence is the primary predicate; timestamp comparison is
-    # gated on both fields being well-typed int values. A malformed
-    # event (missing armed_at, or wrong type) is treated as if absent
-    # and falls through to the existing emit behavior — over-emit is
-    # benign under the skill body's CronList exact-suffix-match
-    # idempotency; under-emit could miss a teammate's completion-
-    # authority signal.
+    # gated on both events carrying a well-typed ISO-string `ts` that
+    # parses successfully via strptime against `_TS_FMT`. A malformed
+    # event (missing ts, non-str, empty, or unparseable) is treated as
+    # if absent and falls through to the existing emit behavior —
+    # over-emit is benign under the skill body's CronList exact-suffix-
+    # match idempotency; under-emit could miss a teammate's completion-
+    # authority signal. The per-side str-guard + inner strptime
+    # try/except keep the comparator fail-conservative on malformed ts.
     #
     # Outer-except rationale: the producer-side check has a strict
     # fail-conservative contract — any unexpected failure must fall

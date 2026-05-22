@@ -176,7 +176,7 @@ This step empirically verifies the Option D self-correcting fallback path that c
 **Action**: With the cron armed (after Step 1) and a teammate task active, trigger a 1→0 transition (have the teammate complete the last active task). The `wake_lifecycle_emitter.py` PostToolUse hook will write a `teardown_request` event to the journal AND emit the `_TEARDOWN_DIRECTIVE` `additionalContext`. **As the orchestrator, do NOT act on the directive.** Continue with whatever non-teardown action would naturally follow (e.g., continue conversation with the user, run an unrelated tool call).
 
 **Expected**:
-- The journal contains a `teardown_request` event with `ts` AFTER the latest `scan_armed.armed_at`.
+- The journal contains a `teardown_request` event with `ts` AFTER the latest `scan_armed.ts`.
 - `CronList` still contains the `/PACT:scan-pending-tasks` entry (no Teardown has been invoked).
 - No `scan_disarmed` event has been written.
 
@@ -192,7 +192,7 @@ This step empirically verifies the Option D self-correcting fallback path that c
 - The scan-body LLM-side action: invoke `Skill("PACT:stop-pending-scan")` and return without continuing to Steps 1+.
 - `stop-pending-scan` body executes: `CronList` lookup finds the match; `CronDelete` succeeds; `scan_disarmed` event is written.
 
-**Acceptance**: Once the `scan_disarmed` event appears in the journal (typically within ~6 minutes of 12a), `CronList | grep -o '/PACT:scan-pending-tasks' | wc -l` returns `0` AND `python3 pact-plugin/hooks/shared/session_journal.py read-last --type scan_disarmed --session-dir <SD>` returns a populated event with `disarmed_at` greater than the `teardown_request.ts` (converted to epoch).
+**Acceptance**: Once the `scan_disarmed` event appears in the journal (typically within ~6 minutes of 12a), `CronList | grep -o '/PACT:scan-pending-tasks' | wc -l` returns `0` AND `python3 pact-plugin/hooks/shared/session_journal.py read-last --type scan_disarmed --session-dir <SD>` returns a populated event with `ts` greater than the `teardown_request.ts` (compared via strptime → epoch).
 
 ### 12c. No-Narration Discipline Across Self-Teardown Fire
 
@@ -206,7 +206,7 @@ This step empirically verifies the Option D self-correcting fallback path that c
 
 **Action**: Re-arm the cron (spawn a new teammate task to trigger the Arm hook). Have the teammate complete to trigger another 1→0 transition (writes a new `teardown_request`). Wait for the next Step 0.5 fire and observe.
 
-**Expected**: Step 0.5 fires again (the new `teardown_request.ts` > new `scan_armed.armed_at`). The cycle is independent of the prior 12a-12c cycle; latest-event semantics select the most recent triple. No interference from prior cycle's events.
+**Expected**: Step 0.5 fires again (the new `teardown_request.ts` > new `scan_armed.ts`, both compared via strptime → epoch). The cycle is independent of the prior 12a-12c cycle; latest-event semantics select the most recent triple. No interference from prior cycle's events.
 
 **Acceptance**: Re-arm cycle's self-teardown fires correctly; `scan_disarmed` event written; cron deleted.
 
