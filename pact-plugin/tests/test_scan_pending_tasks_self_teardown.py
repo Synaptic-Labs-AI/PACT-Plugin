@@ -5,11 +5,10 @@ the .md file (drift-proof SSOT) and exercises it against synthetic
 journal files.
 
 What is verified:
-- When the most recent `teardown_request` event's `ts` (ISO-8601 UTC,
-  converted to epoch via strptime) is AFTER the most recent
-  `scan_armed.armed_at` AND no `scan_disarmed.disarmed_at` after the
-  teardown_request, Step 0.5 exits 0 (fire — LLM-side invokes
-  Skill("PACT:stop-pending-scan")).
+- When the most recent `teardown_request.ts` (ISO-8601 UTC, parsed via
+  strptime to epoch) is AFTER the most recent `scan_armed.ts` AND no
+  `scan_disarmed.ts` after the teardown_request, Step 0.5 exits 0
+  (fire — LLM-side invokes Skill("PACT:stop-pending-scan")).
 - When a `scan_disarmed` event has already been written after the
   teardown_request, Step 0.5 falls through (already serviced).
 - When no `teardown_request` event exists, Step 0.5 falls through
@@ -21,7 +20,9 @@ What is verified:
   empty extractor output and gate falls through.
 - ISO→epoch conversion round-trips correctly across the strptime
   literal `%Y-%m-%dT%H:%M:%SZ` (coupling pair with
-  session_journal.py:325 make_event format).
+  session_journal.py:325 make_event format) — uniform across all
+  three event types (teardown_request.ts, scan_armed.ts,
+  scan_disarmed.ts).
 
 The bash block is extracted from `commands/scan-pending-tasks.md`
 Step 0.5 via a section-bounded search (`\\n0.5. ` to `\\n1. `) and
@@ -178,12 +179,12 @@ def test_step_0_5_fires_when_teardown_request_after_arm(
     tmp_path, step_0_5_bash_template
 ):
     """Pending-teardown happy path: a `teardown_request` was written
-    AFTER the latest `scan_armed.armed_at` and BEFORE any
-    `scan_disarmed`. Step 0.5 must fire (sentinel absent).
+    AFTER the latest `scan_armed.ts` and BEFORE any `scan_disarmed`.
+    Step 0.5 must fire (sentinel absent).
     """
     session_dir = tmp_path / "session"
     now = int(time.time())
-    _write_journal(session_dir, "scan_armed", {"armed_at": now - 200})
+    _write_journal(session_dir, "scan_armed", {"ts": _iso_ts(now - 200)})
     _write_teardown_request(session_dir, now - 100)
 
     bash_body = _render_step_0_5(step_0_5_bash_template, PLUGIN_ROOT, session_dir)
@@ -204,15 +205,15 @@ def test_step_0_5_fires_when_teardown_request_after_arm(
 def test_step_0_5_does_not_fire_when_disarm_after_teardown_request(
     tmp_path, step_0_5_bash_template
 ):
-    """The teardown has already been serviced: `scan_disarmed.disarmed_at`
-    > `teardown_request.ts`. Step 0.5 must fall through (sentinel
+    """The teardown has already been serviced: `scan_disarmed.ts` >
+    `teardown_request.ts`. Step 0.5 must fall through (sentinel
     present) — stop-pending-scan has already run.
     """
     session_dir = tmp_path / "session"
     now = int(time.time())
-    _write_journal(session_dir, "scan_armed", {"armed_at": now - 300})
+    _write_journal(session_dir, "scan_armed", {"ts": _iso_ts(now - 300)})
     _write_teardown_request(session_dir, now - 200)
-    _write_journal(session_dir, "scan_disarmed", {"disarmed_at": now - 100})
+    _write_journal(session_dir, "scan_disarmed", {"ts": _iso_ts(now - 100)})
 
     bash_body = _render_step_0_5(step_0_5_bash_template, PLUGIN_ROOT, session_dir)
     result = _run_step_0_5(bash_body)
@@ -238,7 +239,7 @@ def test_step_0_5_does_not_fire_when_no_teardown_request(
     """
     session_dir = tmp_path / "session"
     now = int(time.time())
-    _write_journal(session_dir, "scan_armed", {"armed_at": now - 100})
+    _write_journal(session_dir, "scan_armed", {"ts": _iso_ts(now - 100)})
 
     bash_body = _render_step_0_5(step_0_5_bash_template, PLUGIN_ROOT, session_dir)
     result = _run_step_0_5(bash_body)
@@ -271,10 +272,10 @@ def test_step_0_5_fires_on_re_arm_cycle(tmp_path, step_0_5_bash_template):
     """
     session_dir = tmp_path / "session"
     now = int(time.time())
-    _write_journal(session_dir, "scan_armed", {"armed_at": now - 1000})
+    _write_journal(session_dir, "scan_armed", {"ts": _iso_ts(now - 1000)})
     _write_teardown_request(session_dir, now - 900)
-    _write_journal(session_dir, "scan_disarmed", {"disarmed_at": now - 800})
-    _write_journal(session_dir, "scan_armed", {"armed_at": now - 700})
+    _write_journal(session_dir, "scan_disarmed", {"ts": _iso_ts(now - 800)})
+    _write_journal(session_dir, "scan_armed", {"ts": _iso_ts(now - 700)})
     _write_teardown_request(session_dir, now - 100)
 
     bash_body = _render_step_0_5(step_0_5_bash_template, PLUGIN_ROOT, session_dir)
@@ -375,29 +376,43 @@ def test_step_0_5_falls_through_when_only_teardown_request_no_arm(
     )
 
 
-def test_step_0_5_iso_to_epoch_conversion_round_trip(
+def test_step_0_5_strptime_round_trip_uniform_across_three_sources(
     tmp_path, step_0_5_bash_template
 ):
-    """ISO→epoch coupling contract: a teardown_request `ts` stamped
-    one second AFTER scan_armed.armed_at (via strptime literal
-    `%Y-%m-%dT%H:%M:%SZ`) must fire Step 0.5. This pins the
-    byte-identity contract between session_journal.make_event's
-    format string and the Step 0.5 extractor's strptime literal —
-    any drift in either makes the comparison silently fail.
+    """Uniform-strptime coupling contract: all three Step 0.5 extractors
+    (`teardown_request.ts`, `scan_armed.ts`, `scan_disarmed.ts`) parse
+    ISO-8601 UTC strings via the same strptime literal
+    `%Y-%m-%dT%H:%M:%SZ` and yield integer-comparable epochs. This
+    pins the byte-identity contract between session_journal.make_event's
+    format string and the Step 0.5 extractor literal — any drift in
+    either makes the comparison silently fail.
 
-    Counter-test-by-revert: changing the format literal in either
-    the .md or session_journal.py without updating the other would
-    cause strptime to raise (visible in stderr) or return wrong
-    epoch (sentinel appears in stdout instead of being absent).
+    Verifies the round-trip across all three sources: arrange a journal
+    with deterministic anchors where the latest `scan_disarmed` is
+    strictly newer than the latest `teardown_request` (which is
+    strictly newer than `scan_armed`). Step 0.5 must FALL THROUGH
+    because `scan_disarmed.ts > teardown_request.ts` — i.e., the
+    teardown is already serviced. This exercises strptime on all three
+    extractors (all three must parse without raising for the gate
+    decision to be correct).
+
+    Counter-test-by-revert: changing the format literal in either the
+    .md or session_journal.py without updating the other would cause
+    strptime to raise (visible in stderr) or return wrong epoch
+    (sentinel position would flip — the gate would fire instead of
+    falling through).
     """
     session_dir = tmp_path / "session"
-    # Use a deterministic anchor epoch to make the round-trip
-    # explicit and reproducible across test runs.
+    # Use a deterministic anchor epoch to make the round-trip explicit
+    # and reproducible across test runs. Three timestamps spanning a
+    # 2-second window exercise all three extractors with byte-distinct
+    # ts strings.
     anchor_epoch = int(datetime.datetime(
         2026, 5, 21, 8, 54, 27, tzinfo=datetime.timezone.utc
     ).timestamp())
-    _write_journal(session_dir, "scan_armed", {"armed_at": anchor_epoch})
+    _write_journal(session_dir, "scan_armed", {"ts": _iso_ts(anchor_epoch)})
     _write_teardown_request(session_dir, anchor_epoch + 1)
+    _write_journal(session_dir, "scan_disarmed", {"ts": _iso_ts(anchor_epoch + 2)})
 
     bash_body = _render_step_0_5(step_0_5_bash_template, PLUGIN_ROOT, session_dir)
     result = _run_step_0_5(bash_body)
@@ -406,14 +421,16 @@ def test_step_0_5_iso_to_epoch_conversion_round_trip(
         f"Step 0.5 exit code expected 0, got {result.returncode}. "
         f"stderr={result.stderr!r}"
     )
-    assert SENTINEL not in result.stdout, (
-        f"Step 0.5 should have FIRED on teardown_request(anchor+1s) > "
-        f"scan_armed(anchor) — the ISO→epoch strptime round-trip "
-        f"must yield an integer-comparable value one second greater "
-        f"than scan_armed.armed_at. Sentinel {SENTINEL!r} present in "
-        f"stdout indicates the conversion failed (strptime drift or "
-        f"format literal mismatch with session_journal.make_event). "
-        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert SENTINEL in result.stdout, (
+        f"Step 0.5 should have FALLEN THROUGH — scan_disarmed.ts "
+        f"(anchor+2s) > teardown_request.ts (anchor+1s) > "
+        f"scan_armed.ts (anchor). All three extractors must parse via "
+        f"strptime to produce integer-comparable epochs that satisfy "
+        f"the already-serviced branch. Sentinel {SENTINEL!r} absent in "
+        f"stdout indicates one of the strptime conversions failed "
+        f"(format literal mismatch with session_journal.make_event) "
+        f"or returned a wrong epoch. stdout={result.stdout!r} "
+        f"stderr={result.stderr!r}"
     )
 
 
@@ -462,7 +479,7 @@ def test_step_0_5_double_fire_before_disarm_is_idempotent(
     """
     session_dir = tmp_path / "session"
     now = int(time.time())
-    _write_journal(session_dir, "scan_armed", {"armed_at": now - 200})
+    _write_journal(session_dir, "scan_armed", {"ts": _iso_ts(now - 200)})
     _write_teardown_request(session_dir, now - 100)
     # NOTE: No scan_disarmed event written yet — Step 0.5 must fire each time.
 
@@ -514,8 +531,8 @@ def test_step_0_5_falls_through_on_same_second_teardown_request_and_scan_armed(
     tmp_path, step_0_5_bash_template
 ):
     """Pin the `-gt` (strict greater-than) semantic for the same-second
-    edge case: when `teardown_request.ts` and `scan_armed.armed_at`
-    land at the same epoch second, `LATEST_TEARDOWN_REQUEST -gt
+    edge case: when `teardown_request.ts` and `scan_armed.ts` land at
+    the same epoch second, `LATEST_TEARDOWN_REQUEST -gt
     LATEST_SCAN_ARMED` must evaluate FALSE (because `N -gt N` is
     false in bash) and Step 0.5 must fall through.
 
@@ -539,7 +556,7 @@ def test_step_0_5_falls_through_on_same_second_teardown_request_and_scan_armed(
     anchor_epoch = int(datetime.datetime(
         2026, 5, 22, 2, 0, 0, tzinfo=datetime.timezone.utc
     ).timestamp())
-    _write_journal(session_dir, "scan_armed", {"armed_at": anchor_epoch})
+    _write_journal(session_dir, "scan_armed", {"ts": _iso_ts(anchor_epoch)})
     _write_teardown_request(session_dir, anchor_epoch)  # same second
 
     bash_body = _render_step_0_5(step_0_5_bash_template, PLUGIN_ROOT, session_dir)

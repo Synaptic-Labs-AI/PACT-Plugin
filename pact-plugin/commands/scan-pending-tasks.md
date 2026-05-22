@@ -32,7 +32,7 @@ Cron-fire body — silent read; emit nothing unless a real artifact is on disk f
    ```bash
    SJ="{plugin_root}/hooks/shared/session_journal.py"
    SD='{session_dir}'
-   ARMED_AT=$(python3 "$SJ" read-last --type scan_armed --session-dir "$SD" | python3 -c 'import json,sys; e=json.load(sys.stdin); print(e["armed_at"] if e else "")')
+   ARMED_AT=$(python3 "$SJ" read-last --type scan_armed --session-dir "$SD" | python3 -c 'import json,sys,datetime; e=json.load(sys.stdin); print(int(datetime.datetime.strptime(e["ts"],"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()) if e else "")')
    if [ -n "$ARMED_AT" ]; then
        delta=$(( $(date +%s) - ARMED_AT ))
        if [ $delta -ge 0 ] && [ $delta -lt 300 ]; then exit 0; fi
@@ -49,8 +49,8 @@ Cron-fire body — silent read; emit nothing unless a real artifact is on disk f
    SJ="{plugin_root}/hooks/shared/session_journal.py"
    SD='{session_dir}'
    LATEST_TEARDOWN_REQUEST=$(python3 "$SJ" read-last --type teardown_request --session-dir "$SD" | python3 -c 'import json,sys,datetime; e=json.load(sys.stdin); print(int(datetime.datetime.strptime(e["ts"],"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()) if e else "")')
-   LATEST_SCAN_ARMED=$(python3 "$SJ" read-last --type scan_armed --session-dir "$SD" | python3 -c 'import json,sys; e=json.load(sys.stdin); print(e["armed_at"] if e else "")')
-   LATEST_SCAN_DISARMED=$(python3 "$SJ" read-last --type scan_disarmed --session-dir "$SD" | python3 -c 'import json,sys; e=json.load(sys.stdin); print(e["disarmed_at"] if e else "")')
+   LATEST_SCAN_ARMED=$(python3 "$SJ" read-last --type scan_armed --session-dir "$SD" | python3 -c 'import json,sys,datetime; e=json.load(sys.stdin); print(int(datetime.datetime.strptime(e["ts"],"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()) if e else "")')
+   LATEST_SCAN_DISARMED=$(python3 "$SJ" read-last --type scan_disarmed --session-dir "$SD" | python3 -c 'import json,sys,datetime; e=json.load(sys.stdin); print(int(datetime.datetime.strptime(e["ts"],"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()) if e else "")')
    if [ -n "$LATEST_TEARDOWN_REQUEST" ] && [ -n "$LATEST_SCAN_ARMED" ] && \
       [ "$LATEST_TEARDOWN_REQUEST" -gt "$LATEST_SCAN_ARMED" ] && \
       { [ -z "$LATEST_SCAN_DISARMED" ] || \
