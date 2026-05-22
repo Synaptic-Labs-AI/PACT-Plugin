@@ -32,26 +32,32 @@ Counter-test-by-revert validation (documented in test docstrings):
   preserved); pinned per-side tests would also need updating.
 - Mutating BOTH but to a NON-equal pair (asymmetric drift): test FAILS.
 
-ISO-8601 timestamp-format coupling (added 2026-05-21, PR #819 TEST gap-fill):
+Strptime-not-string-compare coupling (post-#821 ts unification):
 
-The Step 0.5 self-correcting teardown check (introduced by #819) reads
-`teardown_request.ts` as an ISO-8601 UTC string and converts to integer
-epoch via `strptime` for comparison against integer-epoch `scan_armed.armed_at`
-and `scan_disarmed.disarmed_at`. The format literal `%Y-%m-%dT%H:%M:%SZ`
-must match BYTE-IDENTICAL across four sites:
+Under #821's ts-unification (folded into PR #820), the three pending-scan
+lifecycle events (`scan_armed`, `scan_disarmed`, `teardown_request`) all
+carry only the auto-stamped ISO-8601 `ts` field; the prior integer-epoch
+`armed_at`/`disarmed_at` fields are deleted. All three consumer sites
+(scan-pending-tasks.md Step 0, Step 0.5, and wake_inbox_drain.py:685+
+producer-side idempotency check) parse `ts` uniformly via strptime to
+int-epoch before comparing.
 
-  - session_journal.py make_event (line 325, upstream SSOT — stamps the ts)
-  - scan-pending-tasks.md Step 0.5 bash extractor (consumer — parses the ts)
-  - test_scan_pending_tasks_self_teardown.py ISO_FORMAT_LITERAL (test fixture)
-  - test_scan_pending_tasks_command_structure.py structural pin (assertion)
+The 4-site byte-identity coupling chain collapses to 2 sites:
 
-Per-site tests pin each literal independently; this cross-site equality
-test catches the silent-drift failure mode where one site is updated and
-the others are not. Empirically: a future Python 3.11+ baseline bump
-might tempt a switch to `fromisoformat` (Z-suffix supported only in 3.11+);
-without coordinated update of the format literal across all 4 sites,
-strptime in the .md would silently fail to parse and Step 0.5 would
-fall through to its fail-open behavior — defeating the compliance fix.
+  - session_journal.py `make_event` (upstream SSOT — stamps `ts` via
+    `strftime(\"%Y-%m-%dT%H:%M:%SZ\")`)
+  - the uniform-strptime extractor pattern across Step 0 / Step 0.5 /
+    wake_inbox_drain.py:685+ (consumers — parse `ts` via the same literal)
+
+The remaining structural defense in this file is the strptime-not-string-
+compare invariant: the Python consumer at wake_inbox_drain.py:685+ MUST
+parse `scan_armed.ts` and `scan_disarmed.ts` via strptime — direct
+lexical string comparison would coincidentally match epoch ordering under
+the canonical `%Y-%m-%dT%H:%M:%SZ` format but silently break under any
+future format drift (sub-second fractions, mixed TZ suffixes, or a
+fromisoformat switch on a Python 3.11+ baseline). This file's pin is
+counterpart to scan-pending-tasks.md:66 audit prose's "direct lexical
+comparison ... breaks silently under format drift" forecloseure.
 """
 
 from __future__ import annotations
@@ -186,110 +192,109 @@ def test_cron_interval_is_positive_integer():
     )
 
 
-def test_iso_format_literal_byte_identical_across_step_0_5_coupling_sites():
-    """The ISO-8601 timestamp format literal `%Y-%m-%dT%H:%M:%SZ` must be
-    byte-identical across four sites that participate in the Step 0.5
-    self-correcting teardown ISO→epoch conversion chain:
+def test_python_consumer_parses_ts_via_strptime_not_string_compare():
+    """Code-shape invariant: the wake_inbox_drain.py producer-side
+    idempotency check MUST parse `scan_armed.ts` and `scan_disarmed.ts`
+    via strptime before comparing — direct lexical string comparison
+    of the ISO-8601 `ts` strings would coincidentally match epoch
+    ordering under the canonical `%Y-%m-%dT%H:%M:%SZ` format but
+    silently break under any format drift (sub-second fractions, mixed
+    TZ suffixes, or any future format relaxation including a 3.11+
+    `fromisoformat` switch).
 
-      1. session_journal.py make_event (upstream SSOT — stamps `ts`)
-      2. scan-pending-tasks.md Step 0.5 bash extractor (consumer — parses `ts`)
-      3. test_scan_pending_tasks_self_teardown.py ISO_FORMAT_LITERAL
-         (test fixture that round-trips through strftime/strptime)
-      4. test_scan_pending_tasks_command_structure.py structural pin
-         (asserts the literal is present in the .md)
+    This pin guards against the future-editor 'simplification':
 
-    Per-site tests pin each literal INDEPENDENTLY. None of them catch
-    the silent-drift failure mode: site 1 (make_event) is updated to a
-    new format string while one of sites 2-4 is left at the old format.
-    The bash strptime in site 2 would then fail to parse make_event's
-    new shape, the variable would yield empty string, the `-n` guard
-    would close, and Step 0.5 would silently fall through to fail-open —
-    defeating the compliance fix that #819 exists to deliver.
+        armed_ts = armed.get(\"ts\")
+        disarmed_ts = disarmed.get(\"ts\")
+        if armed_ts > disarmed_ts:   # direct lex compare — silently broken under drift
+            print(_SUPPRESS_OUTPUT)
 
-    This test asserts the literal is present and equal at all four
-    sites. A coordinated update to all four passes; a partial update
-    fails loudly, surfacing the coupling for the editor.
+    The architecturally-correct shape (which this test pins) is:
 
-    Counter-test-by-revert discipline:
-    - Mutating ONLY make_event format literal: test FAILS.
-    - Mutating ONLY the .md extractor format literal: test FAILS.
-    - Mutating ONLY one test file's literal: test FAILS.
-    - Coordinated mutation of all four: test PASSES; the dependent
-      per-site pins (structural + runtime + make_event tests) would
-      also need updating, forcing atomic-commit awareness of the
-      coupling.
+        armed_ts = armed.get(\"ts\")
+        armed_epoch = int(datetime.strptime(armed_ts, _TS_FMT)
+                          .replace(tzinfo=timezone.utc).timestamp())
+        ...  symmetric for disarmed  ...
+        if armed_epoch > disarmed_epoch:
 
-    Why this matters specifically for #819: Option D's compliance
-    latency bound (≤5 minutes) depends on the strptime parse SUCCEEDING.
-    A silent strptime failure due to format drift yields the same
-    user-visible behavior as the pre-Option-D state (no self-teardown,
-    orchestrator must manually invoke). The runtime round-trip test
-    (test_step_0_5_iso_to_epoch_conversion_round_trip) catches the
-    failure when round-tripped through the test's own fixture, but
-    only the cross-site equality test catches drift in make_event
-    itself (site 1) — the upstream SSOT.
+    Span-delimited assertion (per architect §10.3): the strptime calls
+    MUST appear inside the producer-side idempotency-check region —
+    the `try:` block enclosing `read_last_event(\"scan_armed\")` /
+    `read_last_event(\"scan_disarmed\")` / `except Exception: pass`.
+    A coarse whole-file `count(\"strptime\") >= 2` would phantom-green
+    a strptime→lex-compare mutant because the surrounding docstrings
+    and comments mention `strptime` 7+ times. The span-delimited form
+    counts only the production CALL sites, catching the mutant cleanly.
+
+    Counter-test-by-revert (mutant-survival, empirically verified at
+    commit (e) staging time): replacing strptime-via-comparison with
+    direct string comparison in wake_inbox_drain.py:685+ causes this
+    test to fail because the strptime count INSIDE the span drops
+    from 2 to 0 (the docstring/comment mentions outside the span are
+    unaffected and remain at 7+; the span-delimited form correctly
+    surfaces the mutant).
+
+    This test REPLACES the prior 4-site byte-identity coupling pin
+    (`test_iso_format_literal_byte_identical_across_step_0_5_coupling_sites`,
+    retired in this same commit per architect §3.4 Q4). The retiring
+    test's rationale collapsed under #821's ts-unification: the
+    4-site chain reduced to 2 sites, and per-site presence pins
+    (`test_step_0_5_audit_prose_forbids_set_e_and_fromisoformat` below
+    and the structural pin in test_scan_pending_tasks_command_structure.py)
+    cover the format-literal presence side. What was NOT pinned by
+    any prior test is the code-shape invariant in the Python consumer
+    — that's this test's contribution.
     """
-    # The canonical SSOT is `make_event` in session_journal.py: it stamps
-    # the `ts` field on every journaled event. Anchor by `make_event`'s
-    # `strftime(...)` call shape rather than by line number (line-anchored
-    # pins drift across unrelated edits).
-    sj_text = SESSION_JOURNAL_PY.read_text(encoding="utf-8")
-    make_event_match = re.search(
-        r"def make_event\b.*?strftime\(\"([^\"]+)\"\)",
-        sj_text, re.DOTALL,
-    )
-    assert make_event_match is not None, (
-        "session_journal.py must define `make_event` with a `strftime(\"...\")` "
-        "call stamping the `ts` field. The make_event function is the upstream "
-        "SSOT for the Step 0.5 ISO→epoch coupling chain."
-    )
-    make_event_literal = make_event_match.group(1)
-    assert make_event_literal == ISO_FORMAT_LITERAL_CANONICAL, (
-        f"session_journal.py `make_event` strftime literal "
-        f"({make_event_literal!r}) MUST equal the canonical ISO format "
-        f"literal ({ISO_FORMAT_LITERAL_CANONICAL!r}). make_event is the "
-        f"upstream SSOT — any change here cascades through all Step 0.5 "
-        f"coupling sites and silently breaks the bash strptime parse."
-    )
+    src = (ROOT / "hooks" / "wake_inbox_drain.py").read_text(encoding="utf-8")
 
-    # The bash extractor in scan-pending-tasks.md must contain the literal
-    # inside the Step 0.5 fenced bash block (not merely anywhere in the
-    # file — a comment containing the literal would phantom-green a real
-    # extractor drift).
-    scan_text = SCAN_MD.read_text(encoding="utf-8")
-    op_start = scan_text.find("\n## Operation")
-    step_0_5_pos = scan_text.find("\n0.5. ", op_start)
-    step_1_pos = scan_text.find("\n1. ", step_0_5_pos)
-    step_0_5_body = scan_text[step_0_5_pos:step_1_pos] if step_1_pos > 0 else scan_text[step_0_5_pos:]
-    bash_match = re.search(r"```bash\n(.*?)```", step_0_5_body, re.DOTALL)
-    assert bash_match is not None, "Step 0.5 must contain a fenced ```bash``` block"
-    bash_body = bash_match.group(1)
-    assert ISO_FORMAT_LITERAL_CANONICAL in bash_body, (
-        f"scan-pending-tasks.md Step 0.5 bash extractor MUST contain the "
-        f"canonical ISO format literal {ISO_FORMAT_LITERAL_CANONICAL!r} "
-        f"inside the fenced ```bash``` block (not merely in surrounding "
-        f"prose). The bash strptime call is the consumer of make_event's "
-        f"stamped `ts`; drift breaks the parse and silently fail-opens "
-        f"Step 0.5. Bash body:\n{bash_body!r}"
+    # Delimit the producer-side idempotency-check span by its structural
+    # markers: the `try:` line preceding the `read_last_event("scan_armed")`
+    # call, and the `except Exception:` line that closes the block. Both
+    # are unique within the file (only the producer-side check reads both
+    # scan_armed and scan_disarmed via read_last_event). Anchoring on the
+    # `read_last_event("scan_armed")` call (rather than a free-floating
+    # `try:`) makes the span robust against future unrelated try/except
+    # blocks.
+    armed_anchor = src.find('read_last_event("scan_armed")')
+    assert armed_anchor >= 0, (
+        "wake_inbox_drain.py must contain a `read_last_event(\"scan_armed\")` "
+        "call in the producer-side idempotency check. The span-delimited "
+        "strptime pin cannot apply without this anchor."
     )
-
-    # Test fixtures must also pin the literal (the canonical fixture
-    # constant + the structural assertion). These keep the two ends of
-    # the chain in sync with the SSOT.
-    fixture_text = TEST_SELF_TEARDOWN_PY.read_text(encoding="utf-8")
-    assert ISO_FORMAT_LITERAL_CANONICAL in fixture_text, (
-        f"test_scan_pending_tasks_self_teardown.py MUST pin the canonical "
-        f"ISO format literal {ISO_FORMAT_LITERAL_CANONICAL!r} as its "
-        f"ISO_FORMAT_LITERAL constant. The runtime round-trip test "
-        f"depends on this fixture matching make_event's stamped shape."
+    # Walk backward from the anchor to the nearest `try:` keyword (the
+    # `try:` opening the producer-side block) — this is the span start.
+    span_start = src.rfind("\n    try:\n", 0, armed_anchor)
+    assert span_start >= 0, (
+        "wake_inbox_drain.py must wrap the `read_last_event(\"scan_armed\")` "
+        "call in a `try:` block — the outer fail-conservative catch is the "
+        "load-bearing producer-side guard, and the span-delimited strptime "
+        "pin uses this `try:` as the span-start anchor."
     )
+    # Walk forward from the anchor to the matching `except Exception:` —
+    # this is the span end.
+    span_end = src.find("\n    except Exception:\n", armed_anchor)
+    assert span_end >= 0, (
+        "wake_inbox_drain.py producer-side `try:` block must close with "
+        "`except Exception:` — the wider catch is the fail-conservative "
+        "contract that keeps emit-on-malformed-journal-event correct. "
+        "The span-delimited strptime pin uses this `except` as the "
+        "span-end anchor."
+    )
+    span = src[span_start:span_end]
 
-    structural_text = TEST_COMMAND_STRUCTURE_PY.read_text(encoding="utf-8")
-    assert ISO_FORMAT_LITERAL_CANONICAL in structural_text, (
-        f"test_scan_pending_tasks_command_structure.py MUST contain the "
-        f"canonical ISO format literal {ISO_FORMAT_LITERAL_CANONICAL!r} "
-        f"in its structural pin asserting Step 0.5's .md contains the "
-        f"literal. This is the .md ↔ test pin half of the coupling chain."
+    # The strptime calls MUST appear inside this span. Outside-the-span
+    # mentions (docstrings, surrounding comments, this file's docstring
+    # block) don't count — those don't enforce the code-shape invariant.
+    span_strptime_count = span.count("strptime")
+    assert span_strptime_count >= 2, (
+        "wake_inbox_drain.py producer-side idempotency check (span: "
+        "`try:` through `except Exception:` enclosing the "
+        "`read_last_event(\"scan_armed\")` / `read_last_event(\"scan_disarmed\")` "
+        "calls) must parse BOTH scan_armed.ts and scan_disarmed.ts via "
+        "strptime. A count < 2 inside the span suggests at least one side "
+        "is using direct lexical string comparison — which would silently "
+        "break under any future ts format drift. Counted "
+        f"{span_strptime_count} strptime occurrence(s) inside the span."
     )
 
 
