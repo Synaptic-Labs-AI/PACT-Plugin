@@ -59,7 +59,7 @@ Cron-fire body — silent read; emit nothing unless a real artifact is on disk f
    fi
    ```
 
-   When the bash exits 0 here, the scan body's LLM-side action is: invoke `Skill("PACT:stop-pending-scan")` and return without executing Steps 1+. The `stop-pending-scan` body is idempotent (CronList no-op on absent; `scan_disarmed` writes are benign; latest-event semantics dominate). Precedent: `commands/wrap-up.md:98` invokes the same skill from a sibling command. Multiple consecutive cron-fires hitting this branch before `stop-pending-scan` completes write multiple `scan_disarmed` events — benign; the latest dominates.
+   When the bash exits 0 here, the scan body's LLM-side action is: invoke `Skill("PACT:stop-pending-scan")` and return without executing Steps 1+. The `stop-pending-scan` body is idempotent (CronList no-op on absent; `scan_disarmed` writes are benign; latest-event semantics dominate). Precedent: `commands/wrap-up.md:98` invokes the same skill from a sibling command. Multiple consecutive cron-fires hitting this branch before `stop-pending-scan` completes EACH write would result in multiple `scan_disarmed` events — benign; the latest dominates.
 
    Fail-open: `read-last` returns literal `null` on missing journal / no events / corrupt JSONL. The `python3 -c` extractors yield empty string in those cases; `[ -n "$VAR" ]` is false; the gate falls through to Step 1.
 
