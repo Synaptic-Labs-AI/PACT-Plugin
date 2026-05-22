@@ -3255,19 +3255,21 @@ class TestValidateEventSchemaPerType:
             "reason": "empty_team_config_fail_conservative",
         },
         # `scan_armed` is emitted by commands/start-pending-scan.md Step 5
-        # after CronCreate arms the pending-scan cron; `armed_at` carries
-        # the bash `$(date +%s)` epoch-seconds at arm time. Read by
+        # after CronCreate arms the pending-scan cron. No type-specific
+        # required fields — the arm time is carried by the auto-stamped
+        # `ts` ISO-8601 string (set by make_event), parsed via strptime at
         # commands/scan-pending-tasks.md Step 0 to bound the warmup-grace
         # skip window.
-        "scan_armed": {"armed_at": 1715731200},
+        "scan_armed": {},
         # `scan_disarmed` is emitted by commands/stop-pending-scan.md after
-        # CronDelete tears down the pending-scan cron; `disarmed_at` carries
-        # the bash `$(date +%s)` epoch-seconds at teardown time. Paired
-        # writer to scan_armed; together they drive the event-model
-        # lifecycle consumed by hooks/wake_inbox_drain.py's producer-side
-        # idempotency check (suppress only when scan_armed is strictly more
-        # recent than scan_disarmed).
-        "scan_disarmed": {"disarmed_at": 1715734800},
+        # CronDelete tears down the pending-scan cron. No type-specific
+        # required fields — the teardown time is carried by the auto-
+        # stamped `ts` (parsed via strptime). Paired writer to scan_armed;
+        # together they drive the event-model lifecycle consumed by
+        # hooks/wake_inbox_drain.py's producer-side idempotency check
+        # (suppress only when scan_armed.ts is strictly more recent than
+        # scan_disarmed.ts).
+        "scan_disarmed": {},
         # `teardown_request` is the falsifiable trace for the 1->0 active-
         # task transition that retires the pending-scan cron. Written by
         # hooks/teardown_request_emitter.py (Tier-1, lead-session
@@ -3327,7 +3329,7 @@ class TestValidateEventSchemaPerType:
 
     @pytest.mark.parametrize(
         "event_type",
-        [t for t, f in _SAMPLES.items() if f],  # Skip session_end (no required fields).
+        [t for t, f in _SAMPLES.items() if f],  # Skip empty-sample types (no required fields).
     )
     def test_missing_single_required_field_rejected(self, event_type):
         """Validation rejects when ANY single required field is missing.

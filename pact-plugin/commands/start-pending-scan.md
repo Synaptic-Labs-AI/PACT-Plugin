@@ -43,13 +43,12 @@ Single procedure — the command IS the operation. No Arm/Teardown sub-section.
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] start-pending-scan.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    SJ="{plugin_root}/hooks/shared/session_journal.py"
-   ARMED_AT=$(date +%s)
-   python3 "$SJ" write --type scan_armed --session-dir '{session_dir}' --stdin <<JSON
-   {"armed_at": $ARMED_AT}
+   python3 "$SJ" write --type scan_armed --session-dir '{session_dir}' --stdin <<'JSON'
+   {}
    JSON
    ```
 
-   Note: `<<JSON` (not `<<'JSON'`) so `$ARMED_AT` expands. `set -e` + ERR trap mirror the canonical orchestrate.md pattern.
+   Note: the heredoc body is `{}` — the arm time is carried by the auto-stamped `ts` field set by `make_event`, parsed via `strptime` at the consumer side. `<<'JSON'` (quoted delimiter) is safe because there are no shell expansions in the payload. `set -e` + ERR trap mirror the canonical orchestrate.md pattern.
 
 **Audit**: idempotency lives in this command (CronList-presence check), NOT in the directive that invokes it. An editing LLM tempted to add an "if not already armed" guard at the directive site would re-introduce LLM-self-diagnosis as the gate, which is the failure mode the unconditional-emit discipline closes (hook emits unconditionally on the lifecycle transition; the skill body decides whether the work needs doing).
 

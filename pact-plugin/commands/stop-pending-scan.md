@@ -34,13 +34,12 @@ Single procedure — the command IS the operation.
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] stop-pending-scan.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    SJ="{plugin_root}/hooks/shared/session_journal.py"
-   DISARMED_AT=$(date +%s)
-   python3 "$SJ" write --type scan_disarmed --session-dir '{session_dir}' --stdin <<JSON
-   {"disarmed_at": $DISARMED_AT}
+   python3 "$SJ" write --type scan_disarmed --session-dir '{session_dir}' --stdin <<'JSON'
+   {}
    JSON
    ```
 
-   Note: `<<JSON` (not `<<'JSON'`) so `$DISARMED_AT` expands. `set -e` + ERR trap mirror the canonical orchestrate.md pattern and the symmetric write in start-pending-scan.md Step 5.
+   Note: the heredoc body is `{}` — the teardown time is carried by the auto-stamped `ts` field set by `make_event`, parsed via `strptime` at the consumer side. `<<'JSON'` (quoted delimiter) is safe because there are no shell expansions in the payload. `set -e` + ERR trap mirror the canonical orchestrate.md pattern and the symmetric write in start-pending-scan.md Step 5.
 
 Ordering rationale: the CronList lookup is the only mechanism for locating the cron ID — IDs are platform-assigned and not caller-specifiable. The filter-then-delete sequence is the canonical pattern; reversing it is impossible without an externally-tracked ID. The scan_disarmed write follows the CronDelete so the event reflects actual disarm (the cron-absent post-condition has held since Step 4 completed); writing it before Step 4 would risk surfacing a stale disarm event if the CronDelete subsequently failed.
 
