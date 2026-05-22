@@ -864,7 +864,7 @@ def _write_event_with_value(home, session_id, project_dir, event_type, field, va
 
 
 def test_fallback_emits_when_armed_ts_is_malformed_falls_through_to_count_path(tmp_path):
-    """Fail-conservative-on-malformed-ts invariant for scan_armed.
+    """Fail-conservative-on-malformed-ts COMPOSITE invariant for scan_armed.
 
     Pre-#821 failure mode (bool-vs-int): Python `bool` subclassed `int`,
     so a naive `isinstance(armed_at, int)` check would let bool values
@@ -875,18 +875,39 @@ def test_fallback_emits_when_armed_ts_is_malformed_falls_through_to_count_path(t
     `scan_armed.ts` (auto-stamped ISO string) and parses via strptime.
     A writer-bug or journal-corruption that lands `ts=42` / `ts=True` /
     `ts=None` / `ts=""` / unparseable string must NOT cause the
-    producer-side idempotency check to suppress incorrectly. The
-    `isinstance(armed_ts, str) and armed_ts` guard rejects non-str /
-    empty; strptime's `try/except (TypeError, ValueError)` catches
-    unparseable strings; in both cases `armed_epoch` is None and the
-    hook falls through to count_active_tasks (fail-conservative emit).
+    producer-side idempotency check to suppress incorrectly.
 
-    Counter-test-by-revert: removing the inner `try/except` around the
-    strptime call OR removing the `isinstance(armed_ts, str) and
-    armed_ts` guard would let malformed ts crash up through the outer
-    `except Exception` and suppress (under-emit). The discrimination
-    here is the same as the pre-#821 bool-guard: defense-in-depth
-    against journal corruption that bypasses the write-side validator.
+    Layered defense (composite invariant — what this test pins):
+
+      1. Outer `try: ... except Exception:` (wake_inbox_drain.py ~696/733):
+         catch-all for the producer-side block; on ANY raise inside the
+         block (including TypeError from strptime(42, FMT)), execution
+         falls through to count_active_tasks (fail-conservative emit).
+         THIS is the load-bearer that the documented `ts=42` scenario
+         exercises directly — even with the inner str-guard and inner
+         try/except both stripped, the outer catch still produces the
+         correct fall-through behavior.
+
+      2. `isinstance(armed_ts, str) and armed_ts` str-guard +
+         inner `try/except (TypeError, ValueError)` around strptime:
+         defense-in-depth REDUNDANCY layers that short-circuit cleanly
+         (no raise → no outer catch needed) when ts is recognizably
+         malformed. Good engineering for future failure modes not yet
+         anticipated by the current test suite (e.g., a future ts shape
+         that strptime accepts but yields a nonsense epoch); NOT
+         independent load-bearers for the documented `ts=42` scenario.
+
+    Counter-test-by-revert (empirical, verified by TEST phase):
+      - Strip only the str-guard: test STILL passes (inner try/except
+        catches the strptime TypeError).
+      - Strip the str-guard AND the inner try/except: test STILL passes
+        (outer `except Exception:` catches the propagating TypeError).
+      - Strip the outer `except Exception:`: test FAILS — the
+        malformed-ts TypeError now propagates to main()'s top-level
+        catch which prints _SUPPRESS_OUTPUT (under-emit, 0 Arm
+        directives observed).
+    Conclusion: the outer catch is the contract this test pins; the
+    inner layers are honest defense-in-depth, not pinned by this test.
 
     Distinct from the symmetric ..._disarmed_ts_... test: the armed-
     side malformation hits the OUTER arm-presence branch (the inner
@@ -911,13 +932,16 @@ def test_fallback_emits_when_armed_ts_is_malformed_falls_through_to_count_path(t
     )
     # armed.ts as integer 42 (not str) → isinstance(armed_ts, str) is
     # False → armed_epoch stays None → hook falls through to
-    # count_active_tasks. Without the str guard or the inner
-    # try/except, the integer would crash strptime (TypeError) and the
-    # outer Exception handler would suppress.
+    # count_active_tasks. Even with the str-guard and inner try/except
+    # both stripped, the outer `except Exception:` catches the
+    # propagating TypeError from strptime(42, FMT) and the hook still
+    # falls through — see composite-invariant docstring above for the
+    # layered counter-test-by-revert recipe.
     _write_event_with_value(home, lead_sid, pdir, "scan_armed", "ts", 42)
-    # No scan_disarmed event; without the malformed-ts guard, the
-    # crash would propagate to outer suppress and this test would see
-    # 0 Arm directives instead of 1.
+    # No scan_disarmed event. The outer `except Exception:` is the
+    # load-bearer this test pins; removing it would propagate the
+    # malformed-ts TypeError to main()'s top-level catch which prints
+    # _SUPPRESS_OUTPUT (under-emit, 0 Arm directives).
 
     rc, out_str, err = _run_drain(
         json.dumps({
@@ -930,21 +954,24 @@ def test_fallback_emits_when_armed_ts_is_malformed_falls_through_to_count_path(t
     assert rc == 0, f"non-zero exit; stderr={err}"
     arm_count = out_str.count("Active teammate work detected")
     assert arm_count == 1, (
-        f"scan_armed.ts=int(42) must be rejected by the malformed-ts "
-        f"guard and fall through to count_active_tasks "
-        f"(fail-conservative emit); got {arm_count} Arm directives in "
-        f"stdout={out_str!r}. A 0 count here indicates the "
-        f"`isinstance(armed_ts, str)` guard or the inner strptime "
-        f"try/except was removed — the malformed ts crashed up to "
-        f"outer suppress and under-emit incorrectly."
+        f"scan_armed.ts=int(42) must fall through to "
+        f"count_active_tasks (fail-conservative emit) via the "
+        f"composite-layered defense (str-guard, inner strptime "
+        f"try/except, outer `except Exception:`); got {arm_count} "
+        f"Arm directives in stdout={out_str!r}. A 0 count here "
+        f"indicates the outer `except Exception:` was removed — "
+        f"the malformed-ts TypeError propagated to main()'s "
+        f"top-level catch which prints _SUPPRESS_OUTPUT, causing "
+        f"under-emit incorrectly. See the composite-invariant "
+        f"docstring above for which layer this test pins."
     )
 
 
 def test_fallback_emits_when_disarmed_ts_is_malformed_falls_through_to_count_path(tmp_path):
-    """Fail-conservative-on-malformed-ts invariant for scan_disarmed.
+    """Fail-conservative-on-malformed-ts COMPOSITE invariant for scan_disarmed.
     Symmetric pin to
     test_fallback_emits_when_armed_ts_is_malformed_falls_through_to_count_path
-    but targeted at the INNER-branch comparator guard on
+    but targeted at the INNER-branch malformed-ts handling on
     `disarmed_ts` parsing.
 
     Pre-#821 failure mode (bool-vs-int): Python bool False (==int 0)
@@ -953,27 +980,46 @@ def test_fallback_emits_when_disarmed_ts_is_malformed_falls_through_to_count_pat
     rejected it.
 
     Post-#821 failure mode (ts-string-malformation): the consumer
-    parses `scan_disarmed.ts` via strptime; the inner
-    `isinstance(disarmed_ts, str) and disarmed_ts` guard +
-    `try/except (TypeError, ValueError)` keep `disarmed_epoch` None on
-    malformed input. With `disarmed_epoch is None`, the `armed_epoch >
-    disarmed_epoch` comparison is skipped and the hook falls through
-    to the fallback emit path.
+    parses `scan_disarmed.ts` via strptime; the disarmed-side defense
+    is layered identically to the armed-side:
+
+      1. Outer `try: ... except Exception:` (wake_inbox_drain.py
+         catching the producer-side block): the load-bearer that
+         catches a propagating strptime TypeError when disarmed.ts is
+         non-str (e.g., bool False). THIS is the layer the documented
+         `disarmed_ts=False` scenario exercises directly.
+
+      2. Inner `isinstance(disarmed_ts, str) and disarmed_ts` guard +
+         `try/except (TypeError, ValueError)` around strptime: defense-
+         in-depth REDUNDANCY that short-circuits cleanly on
+         recognizably-malformed disarmed_ts, sparing the outer catch.
+         NOT independently load-bearing for the documented scenario.
 
     Fixture shape: armed_ts is a well-typed ISO string (so the outer
     arm-presence branch is entered AND armed_epoch is well-typed),
-    AND disarmed_ts is a non-str (`False`). The inner guard rejects;
-    the comparison is skipped; the hook falls through to fail-
+    AND disarmed_ts is a non-str (`False`). The composite defense
+    causes the comparator to be skipped (whether via inner short-
+    circuit or outer catch); the hook falls through to fail-
     conservative emit.
 
-    Distinct from the armed_ts test: the disarmed_ts guard is at a
-    SEPARATE site (the inner branch); removing one guard does not
-    affect the other. Two tests pin two sites independently.
+    Distinct from the armed_ts test: the disarmed_ts handling lives at
+    a SEPARATE site (the inner branch of the producer-side block) —
+    even though the OUTER `except Exception:` catches both sides, the
+    symmetric pin pair pins the structural symmetry of the
+    armed-side and disarmed-side parsing patterns.
 
-    Counter-test-by-revert: removing the inner str-guard or the inner
-    strptime try/except on disarmed_ts lets the bool/non-str crash
-    propagate to outer suppress (under-emit) — this test sees 0 Arm
-    directives instead of 1.
+    Counter-test-by-revert (empirical, verified by TEST phase):
+      - Strip only the disarmed-side str-guard: test STILL passes
+        (inner try/except catches the strptime TypeError).
+      - Strip the disarmed-side str-guard AND the inner try/except:
+        test STILL passes (outer `except Exception:` catches the
+        propagating TypeError).
+      - Strip the outer `except Exception:`: test FAILS — the
+        malformed disarmed-ts TypeError propagates to main()'s top-
+        level catch which prints _SUPPRESS_OUTPUT (under-emit, 0 Arm
+        directives observed).
+    Conclusion: the outer catch is the contract this test pins; the
+    inner disarmed-side layers are honest defense-in-depth.
     """
     home = tmp_path / "home"; home.mkdir()
     lead_sid = "lead-sid"
@@ -992,10 +1038,12 @@ def test_fallback_emits_when_disarmed_ts_is_malformed_falls_through_to_count_pat
         home, team, "T10", status="in_progress", owner=teammate_owner,
     )
     # scan_armed.ts is well-typed ISO; scan_disarmed.ts is bool False.
-    # Without the inner str-guard or strptime try/except,
-    # strptime(False, FMT) would raise TypeError → propagate to outer
-    # except → suppress (under-emit). With both guards, disarmed_epoch
-    # is None and the hook falls through to count_active_tasks.
+    # Even with the inner str-guard and inner try/except both stripped,
+    # the propagating strptime(False, FMT) TypeError is caught by the
+    # OUTER `except Exception:` block — execution falls through to
+    # count_active_tasks (fail-conservative emit). The outer catch is
+    # the load-bearer this test pins; see composite-invariant
+    # docstring above for the layered counter-test-by-revert recipe.
     _write_scan_armed_event(home, lead_sid, pdir, ts=_iso_ts(100))
     _write_event_with_value(home, lead_sid, pdir, "scan_disarmed", "ts", False)
 
@@ -1010,13 +1058,16 @@ def test_fallback_emits_when_disarmed_ts_is_malformed_falls_through_to_count_pat
     assert rc == 0, f"non-zero exit; stderr={err}"
     arm_count = out_str.count("Active teammate work detected")
     assert arm_count == 1, (
-        f"scan_disarmed.ts=bool(False) must be rejected by the inner "
-        f"malformed-ts guard; the hook should fall through to the "
-        f"fallback emit; got {arm_count} Arm directives in "
-        f"stdout={out_str!r}. A 0 count here indicates the inner "
-        f"`isinstance(disarmed_ts, str)` guard or the inner strptime "
-        f"try/except was removed — the malformed ts crashed up to "
-        f"outer suppress and under-emit incorrectly."
+        f"scan_disarmed.ts=bool(False) must fall through to the "
+        f"fallback emit (fail-conservative) via the composite-layered "
+        f"defense (disarmed-side str-guard, inner strptime try/except, "
+        f"outer `except Exception:`); got {arm_count} Arm directives "
+        f"in stdout={out_str!r}. A 0 count here indicates the outer "
+        f"`except Exception:` was removed — the malformed disarmed-ts "
+        f"TypeError propagated to main()'s top-level catch which "
+        f"prints _SUPPRESS_OUTPUT, causing under-emit incorrectly. "
+        f"See the composite-invariant docstring above for which "
+        f"layer this test pins."
     )
 
 
