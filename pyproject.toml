@@ -1,5 +1,5 @@
 [project]
 name = "pact-plugin"
-version = "4.2.14"
+dynamic = ["version"]
 requires-python = ">=3.7"
 description = "Orchestration harness that turns Claude Code into a coordinated team of specialist AI agents"
