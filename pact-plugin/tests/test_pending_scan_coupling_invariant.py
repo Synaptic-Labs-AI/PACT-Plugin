@@ -62,6 +62,7 @@ comparison ... breaks silently under format drift" forecloseure.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -218,170 +219,249 @@ def test_python_consumer_parses_ts_via_strptime_not_string_compare():
         ...  symmetric for disarmed  ...
         if armed_epoch > disarmed_epoch:
 
-    USE-based result-binding pin (F4 hardening per secretary memory
-    `fa044ba5`, applied 2026-05-23 in commit-i/j): the prior
-    presence-based pin asserted `count(\"strptime\") >= 2` inside the
-    span, which is PHANTOM-GREEN against a decoy mutant of the form
+    USE-based AST Call-node pin (per secretary memory `fa044ba5`,
+    promoted to form-(c) in commit-l). Earlier iterations of this pin
+    walked a regression ladder:
 
-        _ = datetime.strptime(armed_ts, _TS_FMT)
-        _ = datetime.strptime(disarmed_ts, _TS_FMT)
-        if armed_ts > disarmed_ts:   # silent lex compare; decoys satisfy count
+      - Original presence-based pin: `count("strptime") >= 2` inside
+        the span. Phantom-greens any decoy `_ = datetime.strptime(...)`
+        because the decoy preserves the call count while the
+        comparator falls back to direct lex compare.
 
-    The decoy preserves the strptime CALL count (and even a
-    `strptime(.*_TS_FMT.*)` paren+arg form-(a) pin), but the result is
-    discarded into `_` while the comparator falls back to direct lex
-    compare on the raw ts strings. The fix per `fa044ba5` is the
-    result-binding pattern form-(b): require an `<name>_epoch` binding
-    on the LHS of an `int(...datetime.strptime(...,_TS_FMT...))`
-    assignment. Decoys assigned to `_` (or any non-`_epoch` name) no
-    longer satisfy the pin. The full match shape is:
+      - form-(b) result-binding regex (commit-i/j, superseded):
+        `\\w+_epoch\\s*=\\s*int\\s*\\(\\s*\\n?\\s*datetime\\.strptime\\([^)]*_TS_FMT`
+        against the span. Closed the bare-decoy vector but phantom-
+        greens any Row-4 mutant of the shape:
 
-        <name>_epoch = int(
-            datetime.strptime(<ts>, _TS_FMT)
+            armed_epoch = int(datetime.strptime(armed_ts, _TS_FMT)
+                              .replace(tzinfo=timezone.utc).timestamp())
+            armed_epoch = armed_ts   # OVERWRITE — value discarded
             ...
+            if armed_epoch > disarmed_epoch:   # silent lex compare
 
-    enforced via regex `\\w+_epoch\\s*=\\s*int\\s*\\(\\s*\\n?\\s*datetime\\.strptime\\([^)]*_TS_FMT`
-    against the span-delimited producer-side block. The result-binding
-    form is what the comparator actually consumes — pinning it pins
-    the load-bearing CONTRACT rather than just the presence of an
-    `strptime` token. Form-(c) AST-Call-node assertion (per `fa044ba5`)
-    is strongest but adds `ast` import + ~15 LOC of node-walking;
-    form-(b) is the minimum-viable upgrade that closes the empirical
-    decoy-strptime vector.
+        The regex matches the decoy result-binding line, satisfies
+        `>= 2`, and never inspects subsequent re-assignment of the
+        same `_epoch` Name. Empirically verified phantom-green
+        against the producer-side span via /tmp probe during the
+        commit-l fold (form-(b) regex returned 2 matches on a Row-4
+        mutant where the comparator does string compare).
 
-    Span-delimited assertion (per architect §10.3): the result-binding
-    matches MUST appear inside the producer-side idempotency-check
-    region — the `try:` block enclosing `read_last_event(\"scan_armed\")`
-    / `read_last_event(\"scan_disarmed\")` / `except Exception: pass`.
-    A coarse whole-file regex would still phantom-green a mutant
-    because the surrounding docstrings + comments may reference the
-    result-binding pattern as prose (this test's own docstring above
-    contains `armed_epoch = int(datetime.strptime(...))` as
-    illustrative example). The span-delimited form counts only the
-    production CALL sites inside the producer-side try-block.
+      - form-(c) AST Call-node pin (commit-l, current): parse the
+        whole module via `ast.parse`, locate the FunctionDef whose
+        body contains a `read_last_event(<event_name>)` Call to
+        BOTH `scan_armed` and `scan_disarmed`, find the Try node
+        whose body wraps both reads, then collect EVERY Assign /
+        AnnAssign within that Try whose target Name matches
+        `\\w+_epoch`. For each such assignment, classify the RHS:
 
-    Counter-test-by-revert (CUMULATIVE strip, empirical, verified
-    during F4 fold). Each row strips MORE of the load-bearing shape
-    than the prior row — these are NOT 3 independent strips. The
-    cumulative framing matches the discipline established for the
-    Q2 retargeted-test docstrings in commit-g (per secretary
-    `0d19dfbd`).
+          GOOD: `int(<chain ending in datetime.strptime(<ts>, _TS_FMT)>)`
+                — walks chained `.replace(...).timestamp()` attribute
+                Calls back to the strptime Call, asserts the function
+                is `datetime.strptime` and one arg is the Name
+                `_TS_FMT`.
+
+          BAD : anything else, EXCEPT the fail-conservative literal
+                `<name>_epoch = None` reset (allowed; the comparator
+                gates on `is not None` so a None reset is correct).
+
+        The test PASSES iff:
+          (a) BOTH `armed_epoch` and `disarmed_epoch` have at least
+              one GOOD assignment inside the span.
+          (b) NO assignment to ANY `\\w+_epoch` target inside the
+              span has a BAD RHS that is not literal None.
+
+        Condition (b) is what closes Row-4: a decoy GOOD assignment
+        followed by `armed_epoch = armed_ts` (Name RHS, not None
+        and not int(strptime(...))) triggers the BAD-overwrite
+        rejection. The hostile mutant cannot smuggle a string
+        comparator behind a decoy without leaving a BAD assignment
+        the AST walk catches.
+
+        Strictly more general than the rejected hybrid regex
+        alternative (form-(b) + forbid `\\w+_epoch\\s*=\\s*\\w+_ts\\b`),
+        which only catches overwrites whose RHS Name has a `_ts`
+        suffix. Empirically falsified against a Row-4 mutant whose
+        overwrite used the arbitrary Name `armed_raw` (phantom-green
+        under hybrid, FAIL under form-(c)).
+
+    Span localization (architect §10.3): the AST walk restricts to
+    assignments inside the Try whose body Calls `read_last_event` for
+    BOTH `scan_armed` and `scan_disarmed`. Docstrings / comments /
+    other code at module scope cannot satisfy the pin even if they
+    quote a result-binding shape verbatim (this docstring contains
+    `armed_epoch = int(datetime.strptime(...))` as illustrative
+    example — it is module-level prose, not inside the producer Try
+    AST, so does not contribute to the count).
+
+    Counter-test-by-revert ladder (CUMULATIVE strip, each row
+    incorporates the prior; empirical verification recipe in
+    commit-l). Cardinality per row references what form-(c) detects.
 
       Row 1 (replace strptime CALLS with direct lex compare, no
-        decoys — naive future-editor 'simplification'): test FAILS
-        because the result-binding matches drop from 2 to 0 inside
-        the span.
+        decoys — naive future-editor 'simplification'): FAIL
+        because no GOOD `_epoch` assignments exist inside the span;
+        condition (a) violated.
 
-      Row 2 (CUMULATIVE: replace strptime CALLS with direct lex
-        compare AND add decoy `_ = datetime.strptime(...,_TS_FMT)`
-        references inside the span — hostile-actor decoy bypass of
-        the OLD presence-based pin): test STILL FAILS under the
-        F4 result-binding pin because `_` does not match
-        `\\w+_epoch`. The OLD presence-based `count(\\\"strptime\\\") >= 2`
-        pin would PHANTOM-GREEN at this row; the F4 hardening is
-        precisely the defense against this.
+      Row 2 (CUMULATIVE: lex compare AND add decoy
+        `_ = datetime.strptime(...,_TS_FMT)` references): FAIL
+        because `_` does not match `\\w+_epoch` — the decoy does not
+        even register with the AST walk. Condition (a) still
+        violated; presence-based pin would PHANTOM-GREEN here.
 
-      Row 3 (CUMULATIVE: replace strptime CALLS with direct lex
-        compare AND add decoys AND rename the decoy LHS to
-        something matching `\\w+_epoch` like `_epoch =
-        datetime.strptime(...,_TS_FMT)` — but WITHOUT the
-        `int(...timestamp())` shape): test STILL FAILS because the
-        result-binding regex requires the `int(\\s*\\n?\\s*datetime.strptime`
-        shape; a bare `_epoch = datetime.strptime(...)` lacks
-        `int(` on the RHS and does not match.
+      Row 3 (CUMULATIVE: rename decoy LHS to `_epoch =
+        datetime.strptime(...,_TS_FMT)` WITHOUT the `int(...)`
+        wrapper): FAIL because the RHS is a bare strptime Call, not
+        the required `int(...)` outer Call; classified BAD, condition
+        (b) violated.
 
-      Row 4 (CUMULATIVE: replace strptime CALLS with direct lex
-        compare AND add full result-binding decoys
+      Row 4 (CUMULATIVE: full GOOD decoy
         `_epoch = int(datetime.strptime(...,_TS_FMT).timestamp())`
-        whose values are then DISCARDED — the comparator still
-        uses raw lex compare): test would PHANTOM-GREEN. This is
-        the residual phantom-green vector form-(b) does not close;
-        form-(c) AST-Call-node assertion would close it by
-        requiring the binding result to be threaded into the
-        comparator. NOT addressed in this fold; F4-future-extension
-        candidate if a Row-4-shape mutant is observed in the wild.
+        followed by overwrite `_epoch = <name>_ts` and lex compare):
+        FAIL under form-(c) because the overwrite is classified BAD
+        (RHS is a Name, not None and not int(strptime(...))) and
+        condition (b) catches it. PHANTOM-GREEN under the prior
+        form-(b) regex — closing this is the commit-l contribution.
 
-    What this test pins: the COMPOSITE invariant that the
-    producer-side block produces and consumes an `_epoch` binding
-    from `int(datetime.strptime(<ts>,_TS_FMT)...)` — the
-    load-bearing comparator pipeline shape. Each individual layer
-    (strptime presence, result-binding shape, _epoch name pattern,
-    int+timestamp threading) is partially redundant by design;
-    cumulative strip of all 3 form-(b)-detectable layers is the
-    minimum mutation that breaks detection.
+      Row 5 (residual, NOT closed by form-(c)): a mutant that
+        produces a GOOD assignment AND uses the resulting `_epoch`
+        name in the comparator, BUT the strptime call's first arg
+        is a SHADOW variable rebound to a different string before
+        the call:
+
+            armed_ts = "1970-01-01T00:00:00Z"   # shadow
+            armed_epoch = int(datetime.strptime(armed_ts, _TS_FMT)
+                              .replace(tzinfo=timezone.utc).timestamp())
+
+        The AST walk classifies this GOOD because it does not
+        data-flow the arg back to `armed.get("ts")`. Closing Row 5
+        requires full data-flow analysis (taint from `armed.get("ts")`
+        through the strptime arg) — out of scope for a structural
+        AST pin. F4-future-extension candidate if a Row-5-shape
+        mutant is observed in the wild; deferred as a residual.
+
+    What this test pins: the COMPOSITE invariant that EVERY `_epoch`
+    assignment inside the producer-side Try produces the load-bearing
+    int+strptime+_TS_FMT shape (or the fail-conservative None reset)
+    — the comparator pipeline cannot be silently rerouted around the
+    binding without leaving an AST violation.
 
     This test REPLACES the prior 4-site byte-identity coupling pin
     (`test_iso_format_literal_byte_identical_across_step_0_5_coupling_sites`,
-    retired in this same commit per architect §3.4 Q4). The retiring
-    test's rationale collapsed under #821's ts-unification: the
-    4-site chain reduced to 2 sites, and per-site presence pins
+    retired per architect §3.4 Q4 when #821's ts-unification reduced
+    the 4-site chain to 2 sites). Per-site presence pins
     (`test_step_0_5_audit_prose_forbids_set_e_and_fromisoformat` below
     and the structural pin in test_scan_pending_tasks_command_structure.py)
-    cover the format-literal presence side. What was NOT pinned by
-    any prior test is the code-shape invariant in the Python consumer
-    — that's this test's contribution. The F4 hardening (commit-i/j)
-    upgrades the original presence-based span-delimited pin to a
-    USE-based result-binding pin per `fa044ba5`.
+    cover the format-literal presence side. The Python consumer code-
+    shape invariant — that's this test's contribution.
     """
     src = (ROOT / "hooks" / "wake_inbox_drain.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
 
-    # Delimit the producer-side idempotency-check span by its structural
-    # markers: the `try:` line preceding the `read_last_event("scan_armed")`
-    # call, and the `except Exception:` line that closes the block. Both
-    # are unique within the file (only the producer-side check reads both
-    # scan_armed and scan_disarmed via read_last_event). Anchoring on the
-    # `read_last_event("scan_armed")` call (rather than a free-floating
-    # `try:`) makes the span robust against future unrelated try/except
-    # blocks.
-    armed_anchor = src.find('read_last_event("scan_armed")')
-    assert armed_anchor >= 0, (
-        "wake_inbox_drain.py must contain a `read_last_event(\"scan_armed\")` "
-        "call in the producer-side idempotency check. The span-delimited "
-        "strptime pin cannot apply without this anchor."
-    )
-    # Walk backward from the anchor to the nearest `try:` keyword (the
-    # `try:` opening the producer-side block) — this is the span start.
-    span_start = src.rfind("\n    try:\n", 0, armed_anchor)
-    assert span_start >= 0, (
-        "wake_inbox_drain.py must wrap the `read_last_event(\"scan_armed\")` "
-        "call in a `try:` block — the outer fail-conservative catch is the "
-        "load-bearing producer-side guard, and the span-delimited strptime "
-        "pin uses this `try:` as the span-start anchor."
-    )
-    # Walk forward from the anchor to the matching `except Exception:` —
-    # this is the span end.
-    span_end = src.find("\n    except Exception:\n", armed_anchor)
-    assert span_end >= 0, (
-        "wake_inbox_drain.py producer-side `try:` block must close with "
-        "`except Exception:` — the wider catch is the fail-conservative "
-        "contract that keeps emit-on-malformed-journal-event correct. "
-        "The span-delimited strptime pin uses this `except` as the "
-        "span-end anchor."
-    )
-    span = src[span_start:span_end]
+    # Span localization via AST: find the FunctionDef containing a
+    # `read_last_event("scan_armed")` Call, then the Try inside it whose
+    # body Calls `read_last_event` for both `scan_armed` and `scan_disarmed`.
+    # AST inspection (not source-string match) is robust against quote
+    # style, formatting, and unrelated future try/except blocks.
+    def _try_reads(node):
+        names = set()
+        for sub in ast.walk(node):
+            if (isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Name)
+                and sub.func.id == "read_last_event"
+                and len(sub.args) == 1
+                and isinstance(sub.args[0], ast.Constant)):
+                names.add(sub.args[0].value)
+        return names
 
-    # F4 USE-based result-binding pin: require `<name>_epoch = int(
-    # datetime.strptime(<ts>, _TS_FMT) ...)` shape inside the span.
-    # Pinning the result-binding (rather than the bare strptime call)
-    # closes the decoy-strptime phantom-green vector — see docstring
-    # above for the empirical 4-row cumulative-strip recipe.
-    result_binding_pattern = re.compile(
-        r"\w+_epoch\s*=\s*int\s*\(\s*\n?\s*datetime\.strptime\([^)]*_TS_FMT"
+    fn_node = None
+    for fn in ast.walk(tree):
+        if isinstance(fn, ast.FunctionDef) and "scan_armed" in _try_reads(fn):
+            fn_node = fn
+            break
+    assert fn_node is not None, (
+        "wake_inbox_drain.py must contain a function whose body Calls "
+        "`read_last_event(\"scan_armed\")` — the producer-side idempotency "
+        "check anchor. The form-(c) AST pin cannot locate the span without it."
     )
-    result_binding_matches = result_binding_pattern.findall(span)
-    assert len(result_binding_matches) >= 2, (
-        "wake_inbox_drain.py producer-side idempotency check (span: "
-        "`try:` through `except Exception:` enclosing the "
+
+    try_node = None
+    for node in ast.walk(fn_node):
+        if isinstance(node, ast.Try) and {"scan_armed", "scan_disarmed"}.issubset(_try_reads(node)):
+            if try_node is None or node.lineno < try_node.lineno:
+                try_node = node
+    assert try_node is not None, (
+        "wake_inbox_drain.py producer-side function must wrap the "
         "`read_last_event(\"scan_armed\")` / `read_last_event(\"scan_disarmed\")` "
-        "calls) must produce and consume an `<name>_epoch` binding from "
-        "`int(datetime.strptime(<ts>, _TS_FMT) ...)` for BOTH "
-        "scan_armed.ts and scan_disarmed.ts. A match count < 2 inside "
-        "the span suggests at least one side has been mutated to direct "
-        "lexical string comparison (potentially with decoy strptime "
-        "references that bypass a presence-based count pin) — which "
-        "would silently break under any future ts format drift. Matched "
-        f"{len(result_binding_matches)} result-binding occurrence(s) "
-        f"inside the span: {result_binding_matches!r}."
+        "calls in a single Try block — the outer fail-conservative catch is "
+        "the load-bearing producer-side guard, and the form-(c) AST pin uses "
+        "this Try as the span."
+    )
+
+    # Classify the RHS of an `<name>_epoch = ...` assignment. GOOD iff the
+    # RHS is `int(<chain ending in datetime.strptime(<ts>, _TS_FMT)>)`. The
+    # walk descends through `.replace(...).timestamp()` attribute-Call chains
+    # back to the strptime Call.
+    def _is_good_epoch_rhs(value):
+        if not (isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Name)
+                and value.func.id == "int"
+                and len(value.args) == 1):
+            return False
+        cur = value.args[0]
+        while isinstance(cur, ast.Call) and isinstance(cur.func, ast.Attribute):
+            if (cur.func.attr == "strptime"
+                and isinstance(cur.func.value, ast.Name)
+                and cur.func.value.id == "datetime"):
+                return any(isinstance(a, ast.Name) and a.id == "_TS_FMT"
+                           for a in cur.args)
+            cur = cur.func.value
+        return False
+
+    # Collect every (Ann)Assign in the Try whose target is `\w+_epoch`.
+    epoch_name_re = re.compile(r"^\w*_epoch$")
+    epoch_assigns = []  # list of (lineno, target_id, is_good, is_none_reset)
+    for node in ast.walk(try_node):
+        if isinstance(node, ast.Assign):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name) and epoch_name_re.match(tgt.id):
+                    is_none = isinstance(node.value, ast.Constant) and node.value.value is None
+                    epoch_assigns.append((node.lineno, tgt.id, _is_good_epoch_rhs(node.value), is_none))
+        elif isinstance(node, ast.AnnAssign):
+            if (isinstance(node.target, ast.Name)
+                and epoch_name_re.match(node.target.id)
+                and node.value is not None):
+                is_none = isinstance(node.value, ast.Constant) and node.value.value is None
+                epoch_assigns.append((node.lineno, node.target.id, _is_good_epoch_rhs(node.value), is_none))
+
+    # Condition (b): no BAD non-None RHS in the span. Catches Row-4 mutants
+    # where a GOOD decoy is followed by `<name>_epoch = <name>_ts` overwrite.
+    violations = [(ln, nm) for ln, nm, good, none_reset in epoch_assigns
+                  if not good and not none_reset]
+    assert not violations, (
+        "wake_inbox_drain.py producer-side Try (the block wrapping "
+        "`read_last_event(\"scan_armed\")` / `read_last_event(\"scan_disarmed\")`) "
+        "contains `<name>_epoch = ...` assignments whose RHS is neither "
+        "`int(datetime.strptime(<ts>, _TS_FMT)...)` nor the fail-conservative "
+        "literal `None` reset. This is the Row-4 phantom-green vector: a "
+        "decoy result-binding shape can satisfy a regex pin while the actual "
+        "comparator falls back to direct lex compare on the raw ts strings — "
+        "silently broken under any future ts format drift. Violations "
+        f"(lineno, target): {violations!r}. Restore the int(strptime(...)) "
+        "shape, or use literal `None` for the fail-conservative path."
+    )
+
+    # Condition (a): both armed_epoch and disarmed_epoch must have at least
+    # one GOOD assignment in the span (both sides of the comparator wired
+    # through strptime).
+    good_names = {nm for _, nm, good, _ in epoch_assigns if good}
+    missing = {"armed_epoch", "disarmed_epoch"} - good_names
+    assert not missing, (
+        "wake_inbox_drain.py producer-side Try must contain at least one "
+        "`<name>_epoch = int(datetime.strptime(<ts>, _TS_FMT)...)` "
+        "assignment for EACH of `armed_epoch` and `disarmed_epoch` — both "
+        "sides of the `armed_epoch > disarmed_epoch` comparator must be "
+        f"wired through strptime. Missing GOOD bindings for: {sorted(missing)}. "
+        f"Found GOOD bindings for: {sorted(good_names)}."
     )
 
 
