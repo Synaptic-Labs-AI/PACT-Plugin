@@ -195,12 +195,13 @@ def test_cron_interval_is_positive_integer():
 def test_python_consumer_parses_ts_via_strptime_not_string_compare():
     """Code-shape invariant: the wake_inbox_drain.py producer-side
     idempotency check MUST parse `scan_armed.ts` and `scan_disarmed.ts`
-    via strptime before comparing — direct lexical string comparison
-    of the ISO-8601 `ts` strings would coincidentally match epoch
-    ordering under the canonical `%Y-%m-%dT%H:%M:%SZ` format but
-    silently break under any format drift (sub-second fractions, mixed
-    TZ suffixes, or any future format relaxation including a 3.11+
-    `fromisoformat` switch).
+    via strptime AND thread the result through `int(...timestamp())`
+    to produce an `_epoch` binding before comparing — direct lexical
+    string comparison of the ISO-8601 `ts` strings would coincidentally
+    match epoch ordering under the canonical `%Y-%m-%dT%H:%M:%SZ`
+    format but silently break under any format drift (sub-second
+    fractions, mixed TZ suffixes, or any future format relaxation
+    including a 3.11+ `fromisoformat` switch).
 
     This pin guards against the future-editor 'simplification':
 
@@ -217,22 +218,97 @@ def test_python_consumer_parses_ts_via_strptime_not_string_compare():
         ...  symmetric for disarmed  ...
         if armed_epoch > disarmed_epoch:
 
-    Span-delimited assertion (per architect §10.3): the strptime calls
-    MUST appear inside the producer-side idempotency-check region —
-    the `try:` block enclosing `read_last_event(\"scan_armed\")` /
-    `read_last_event(\"scan_disarmed\")` / `except Exception: pass`.
-    A coarse whole-file `count(\"strptime\") >= 2` would phantom-green
-    a strptime→lex-compare mutant because the surrounding docstrings
-    and comments mention `strptime` 7+ times. The span-delimited form
-    counts only the production CALL sites, catching the mutant cleanly.
+    USE-based result-binding pin (F4 hardening per secretary memory
+    `fa044ba5`, applied 2026-05-23 in commit-i/j): the prior
+    presence-based pin asserted `count(\"strptime\") >= 2` inside the
+    span, which is PHANTOM-GREEN against a decoy mutant of the form
 
-    Counter-test-by-revert (mutant-survival, empirically verified at
-    commit (e) staging time): replacing strptime-via-comparison with
-    direct string comparison in wake_inbox_drain.py:685+ causes this
-    test to fail because the strptime count INSIDE the span drops
-    from 2 to 0 (the docstring/comment mentions outside the span are
-    unaffected and remain at 7+; the span-delimited form correctly
-    surfaces the mutant).
+        _ = datetime.strptime(armed_ts, _TS_FMT)
+        _ = datetime.strptime(disarmed_ts, _TS_FMT)
+        if armed_ts > disarmed_ts:   # silent lex compare; decoys satisfy count
+
+    The decoy preserves the strptime CALL count (and even a
+    `strptime(.*_TS_FMT.*)` paren+arg form-(a) pin), but the result is
+    discarded into `_` while the comparator falls back to direct lex
+    compare on the raw ts strings. The fix per `fa044ba5` is the
+    result-binding pattern form-(b): require an `<name>_epoch` binding
+    on the LHS of an `int(...datetime.strptime(...,_TS_FMT...))`
+    assignment. Decoys assigned to `_` (or any non-`_epoch` name) no
+    longer satisfy the pin. The full match shape is:
+
+        <name>_epoch = int(
+            datetime.strptime(<ts>, _TS_FMT)
+            ...
+
+    enforced via regex `\\w+_epoch\\s*=\\s*int\\s*\\(\\s*\\n?\\s*datetime\\.strptime\\([^)]*_TS_FMT`
+    against the span-delimited producer-side block. The result-binding
+    form is what the comparator actually consumes — pinning it pins
+    the load-bearing CONTRACT rather than just the presence of an
+    `strptime` token. Form-(c) AST-Call-node assertion (per `fa044ba5`)
+    is strongest but adds `ast` import + ~15 LOC of node-walking;
+    form-(b) is the minimum-viable upgrade that closes the empirical
+    decoy-strptime vector.
+
+    Span-delimited assertion (per architect §10.3): the result-binding
+    matches MUST appear inside the producer-side idempotency-check
+    region — the `try:` block enclosing `read_last_event(\"scan_armed\")`
+    / `read_last_event(\"scan_disarmed\")` / `except Exception: pass`.
+    A coarse whole-file regex would still phantom-green a mutant
+    because the surrounding docstrings + comments may reference the
+    result-binding pattern as prose (this test's own docstring above
+    contains `armed_epoch = int(datetime.strptime(...))` as
+    illustrative example). The span-delimited form counts only the
+    production CALL sites inside the producer-side try-block.
+
+    Counter-test-by-revert (CUMULATIVE strip, empirical, verified
+    during F4 fold). Each row strips MORE of the load-bearing shape
+    than the prior row — these are NOT 3 independent strips. The
+    cumulative framing matches the discipline established for the
+    Q2 retargeted-test docstrings in commit-g (per secretary
+    `0d19dfbd`).
+
+      Row 1 (replace strptime CALLS with direct lex compare, no
+        decoys — naive future-editor 'simplification'): test FAILS
+        because the result-binding matches drop from 2 to 0 inside
+        the span.
+
+      Row 2 (CUMULATIVE: replace strptime CALLS with direct lex
+        compare AND add decoy `_ = datetime.strptime(...,_TS_FMT)`
+        references inside the span — hostile-actor decoy bypass of
+        the OLD presence-based pin): test STILL FAILS under the
+        F4 result-binding pin because `_` does not match
+        `\\w+_epoch`. The OLD presence-based `count(\\\"strptime\\\") >= 2`
+        pin would PHANTOM-GREEN at this row; the F4 hardening is
+        precisely the defense against this.
+
+      Row 3 (CUMULATIVE: replace strptime CALLS with direct lex
+        compare AND add decoys AND rename the decoy LHS to
+        something matching `\\w+_epoch` like `_epoch =
+        datetime.strptime(...,_TS_FMT)` — but WITHOUT the
+        `int(...timestamp())` shape): test STILL FAILS because the
+        result-binding regex requires the `int(\\s*\\n?\\s*datetime.strptime`
+        shape; a bare `_epoch = datetime.strptime(...)` lacks
+        `int(` on the RHS and does not match.
+
+      Row 4 (CUMULATIVE: replace strptime CALLS with direct lex
+        compare AND add full result-binding decoys
+        `_epoch = int(datetime.strptime(...,_TS_FMT).timestamp())`
+        whose values are then DISCARDED — the comparator still
+        uses raw lex compare): test would PHANTOM-GREEN. This is
+        the residual phantom-green vector form-(b) does not close;
+        form-(c) AST-Call-node assertion would close it by
+        requiring the binding result to be threaded into the
+        comparator. NOT addressed in this fold; F4-future-extension
+        candidate if a Row-4-shape mutant is observed in the wild.
+
+    What this test pins: the COMPOSITE invariant that the
+    producer-side block produces and consumes an `_epoch` binding
+    from `int(datetime.strptime(<ts>,_TS_FMT)...)` — the
+    load-bearing comparator pipeline shape. Each individual layer
+    (strptime presence, result-binding shape, _epoch name pattern,
+    int+timestamp threading) is partially redundant by design;
+    cumulative strip of all 3 form-(b)-detectable layers is the
+    minimum mutation that breaks detection.
 
     This test REPLACES the prior 4-site byte-identity coupling pin
     (`test_iso_format_literal_byte_identical_across_step_0_5_coupling_sites`,
@@ -243,7 +319,9 @@ def test_python_consumer_parses_ts_via_strptime_not_string_compare():
     and the structural pin in test_scan_pending_tasks_command_structure.py)
     cover the format-literal presence side. What was NOT pinned by
     any prior test is the code-shape invariant in the Python consumer
-    — that's this test's contribution.
+    — that's this test's contribution. The F4 hardening (commit-i/j)
+    upgrades the original presence-based span-delimited pin to a
+    USE-based result-binding pin per `fa044ba5`.
     """
     src = (ROOT / "hooks" / "wake_inbox_drain.py").read_text(encoding="utf-8")
 
@@ -282,19 +360,28 @@ def test_python_consumer_parses_ts_via_strptime_not_string_compare():
     )
     span = src[span_start:span_end]
 
-    # The strptime calls MUST appear inside this span. Outside-the-span
-    # mentions (docstrings, surrounding comments, this file's docstring
-    # block) don't count — those don't enforce the code-shape invariant.
-    span_strptime_count = span.count("strptime")
-    assert span_strptime_count >= 2, (
+    # F4 USE-based result-binding pin: require `<name>_epoch = int(
+    # datetime.strptime(<ts>, _TS_FMT) ...)` shape inside the span.
+    # Pinning the result-binding (rather than the bare strptime call)
+    # closes the decoy-strptime phantom-green vector — see docstring
+    # above for the empirical 4-row cumulative-strip recipe.
+    result_binding_pattern = re.compile(
+        r"\w+_epoch\s*=\s*int\s*\(\s*\n?\s*datetime\.strptime\([^)]*_TS_FMT"
+    )
+    result_binding_matches = result_binding_pattern.findall(span)
+    assert len(result_binding_matches) >= 2, (
         "wake_inbox_drain.py producer-side idempotency check (span: "
         "`try:` through `except Exception:` enclosing the "
         "`read_last_event(\"scan_armed\")` / `read_last_event(\"scan_disarmed\")` "
-        "calls) must parse BOTH scan_armed.ts and scan_disarmed.ts via "
-        "strptime. A count < 2 inside the span suggests at least one side "
-        "is using direct lexical string comparison — which would silently "
-        "break under any future ts format drift. Counted "
-        f"{span_strptime_count} strptime occurrence(s) inside the span."
+        "calls) must produce and consume an `<name>_epoch` binding from "
+        "`int(datetime.strptime(<ts>, _TS_FMT) ...)` for BOTH "
+        "scan_armed.ts and scan_disarmed.ts. A match count < 2 inside "
+        "the span suggests at least one side has been mutated to direct "
+        "lexical string comparison (potentially with decoy strptime "
+        "references that bypass a presence-based count pin) — which "
+        "would silently break under any future ts format drift. Matched "
+        f"{len(result_binding_matches)} result-binding occurrence(s) "
+        f"inside the span: {result_binding_matches!r}."
     )
 
 

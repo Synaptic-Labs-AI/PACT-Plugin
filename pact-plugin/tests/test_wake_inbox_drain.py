@@ -1111,6 +1111,262 @@ def test_fallback_emits_when_disarmed_ts_is_malformed_falls_through_to_count_pat
     )
 
 
+# ─── Format-drift fall-through coverage (F6 from PR #820 peer-review) ──
+
+
+@pytest.mark.parametrize(
+    "drifted_ts_armed",
+    [
+        # Sub-second-fraction: strptime against `_TS_FMT = '%Y-%m-%dT%H:%M:%SZ'`
+        # raises ValueError on the trailing `.123` — fall-through expected.
+        "2026-05-15T00:00:00.123Z",
+        # Sub-second-fraction (3-digit milliseconds variant).
+        "2026-05-15T00:00:00.999Z",
+        # Mixed TZ: explicit `+00:00` offset suffix instead of `Z`. strptime
+        # against `Z`-anchored `_TS_FMT` raises ValueError on the `+00:00`.
+        "2026-05-15T00:00:00+00:00",
+        # Mixed TZ: non-zero offset. Same fail-conservative behavior.
+        "2026-05-15T00:00:00-05:00",
+        # Future-relaxation candidate: `fromisoformat`-shape with no tz suffix
+        # at all. strptime against Z-anchored format raises ValueError.
+        "2026-05-15T00:00:00",
+        # Trailing whitespace inside the string (a writer-bug variant that
+        # `isinstance(ts, str) and ts` passes but strptime rejects).
+        "2026-05-15T00:00:00Z ",
+    ],
+    ids=[
+        "subsecond_3digit",
+        "subsecond_999",
+        "mixed_tz_plus0000",
+        "mixed_tz_minus0500",
+        "no_tz_suffix",
+        "trailing_whitespace",
+    ],
+)
+def test_fallback_emits_when_armed_ts_format_drifts_falls_through_to_count_path(
+    tmp_path, drifted_ts_armed
+):
+    """Format-drift fail-conservative COMPOSITE invariant for scan_armed.ts.
+
+    F6 finding from PR #820 peer-review (test-engineer Task #45): the
+    Q3 audit-prose ban on `fromisoformat` switching (and the architect
+    §3.3 binding decision against direct lex compare) BOTH rest on a
+    behavioral claim — that any `ts` shape that doesn't match the
+    canonical `%Y-%m-%dT%H:%M:%SZ` literal MUST cause the producer-
+    side idempotency check to fall through to count_active_tasks
+    (fail-conservative emit), NOT to crash, suppress incorrectly, or
+    silently misorder events. The format-drift behavior is the
+    architectural-correctness defense the strptime-not-lex-compare
+    pin (test_python_consumer_parses_ts_via_strptime_not_string_compare)
+    relies on — but until F6, no test EXERCISED the fall-through
+    behavior under format drift; only the audit-prose ban and the
+    strptime-presence pin defended the same surface structurally.
+
+    Fixture: write a `scan_armed` event with a drifted-format `ts` on
+    disk (parametrized across 6 representative drift shapes covering
+    sub-second fractions, mixed TZ suffixes, no-TZ-suffix, and
+    trailing-whitespace bug). No `scan_disarmed` event. The hook must
+    fall through to count_active_tasks (1 in-progress teammate task
+    → 1 Arm directive emit).
+
+    Layered defense (COMPOSITE invariant — what this test pins):
+
+      1. Outer `try: ... except Exception:` (wake_inbox_drain.py
+         ~696/733): catches ANY raise from the producer-side block;
+         strptime's ValueError on drifted `ts` propagates here in the
+         worst case.
+      2. Inner `try/except (TypeError, ValueError)` around strptime
+         (wake_inbox_drain.py ~717/720): catches ValueError directly,
+         sets `armed_epoch = None`, falls through cleanly without
+         escalating to the outer catch. This is the layer most
+         exercised by format-drift inputs (the str-guard at
+         `isinstance(armed_ts, str) and armed_ts` passes — all 6
+         parametrized drift shapes ARE non-empty strings — so
+         the strptime call IS reached and raises ValueError, caught
+         by the inner try/except).
+      3. `isinstance(armed_ts, str) and armed_ts` str-guard
+         (wake_inbox_drain.py ~716): defense-in-depth for non-str
+         malformed-ts (covered by the sibling _is_malformed_ test);
+         not the load-bearing layer for format-drift since drifted
+         shapes are str-typed.
+
+    Counter-test-by-revert (CUMULATIVE strip, empirical, verified
+    during F6 fold). Each row strips LAYERS ON TOP OF the prior
+    row — these are NOT independent strips. The cumulative framing
+    matches the discipline established for the Q2 retargeted-test
+    docstrings in commit-g (per secretary `0d19dfbd`).
+
+      Row 1 (strip ONLY the inner `try/except (TypeError, ValueError)`):
+        test STILL passes for all 6 parametrized drift shapes —
+        strptime's ValueError propagates past the inner catch but
+        the outer `except Exception:` still catches it, and
+        fall-through to count_active_tasks still occurs.
+
+      Row 2 (CUMULATIVE: strip the inner try/except AND narrow the
+        outer `except Exception:` to `except ImportError:`): test
+        FAILS for all 6 parametrized drift shapes — the ValueError
+        now propagates past both layers to main()'s top-level
+        catch which prints _SUPPRESS_OUTPUT (under-emit, 0 Arm
+        directives observed).
+
+    What this test pins: the COMPOSITE invariant that format-drifted
+    `ts` falls through to count_active_tasks. This DEFENDS the
+    behavioral claim that the Q3 audit-prose ban rests on —
+    `fromisoformat` switching (or any format relaxation that introduces
+    drift between writer and reader) is fail-conservative, not
+    silently-broken. Pairs with the F4 strptime-not-lex-compare pin
+    in test_pending_scan_coupling_invariant.py: F4 pins the STRUCTURAL
+    shape (consumer uses strptime CALL with result-binding); F6 pins
+    the BEHAVIORAL outcome (drifted format → fall-through).
+    Together they form the test-coverage defense for the
+    architectural decision to use strptime rather than lex compare.
+
+    Symmetric pin for scan_disarmed.ts in
+    test_fallback_emits_when_disarmed_ts_format_drifts_falls_through_to_count_path.
+    """
+    home = tmp_path / "home"; home.mkdir()
+    lead_sid = "lead-sid"
+    pdir = "/tmp/p"
+    team = f"team-armed-format-drift"
+    teammate_owner = "backend-coder"
+    _write_session_context(
+        home, lead_sid, pdir, team,
+        members=[
+            {"name": teammate_owner, "agentId": "agent-bc"},
+            {"name": "lead", "agentId": "agent-lead"},
+        ],
+        lead_agent_id="agent-lead",
+    )
+    _write_task(
+        home, team, "T-fd", status="in_progress", owner=teammate_owner,
+    )
+    # armed.ts is a str (passes isinstance check) but does NOT match the
+    # canonical _TS_FMT → strptime raises ValueError → inner
+    # try/except catches → armed_epoch stays None → hook falls
+    # through to count_active_tasks (fail-conservative emit).
+    _write_event_with_value(
+        home, lead_sid, pdir, "scan_armed", "ts", drifted_ts_armed,
+    )
+    # No scan_disarmed event.
+
+    rc, out_str, err = _run_drain(
+        json.dumps({
+            "session_id": lead_sid, "cwd": pdir,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        }),
+        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+    )
+    assert rc == 0, f"non-zero exit; stderr={err}"
+    arm_count = out_str.count("Active teammate work detected")
+    assert arm_count == 1, (
+        f"scan_armed.ts={drifted_ts_armed!r} (format-drift shape) MUST "
+        f"fall through to count_active_tasks (fail-conservative emit) "
+        f"via the composite-layered defense (inner strptime "
+        f"try/except + outer `except Exception:`); got {arm_count} Arm "
+        f"directives in stdout={out_str!r}. A 0 count here indicates "
+        f"the inner try/except AND the outer except Exception were "
+        f"BOTH stripped cumulatively — the strptime ValueError "
+        f"propagated to main()'s top-level catch which prints "
+        f"_SUPPRESS_OUTPUT, causing under-emit incorrectly. This is "
+        f"the BEHAVIORAL counterpart to the F4 strptime-not-lex-compare "
+        f"structural pin in test_pending_scan_coupling_invariant.py; "
+        f"the Q3 audit-prose ban on fromisoformat (and the architect "
+        f"§3.3 binding against direct lex compare) rests on this "
+        f"format-drift fall-through behavior being load-bearing."
+    )
+
+
+@pytest.mark.parametrize(
+    "drifted_ts_disarmed",
+    [
+        "2026-05-15T00:00:00.123Z",
+        "2026-05-15T00:00:00.999Z",
+        "2026-05-15T00:00:00+00:00",
+        "2026-05-15T00:00:00-05:00",
+        "2026-05-15T00:00:00",
+        "2026-05-15T00:00:00Z ",
+    ],
+    ids=[
+        "subsecond_3digit",
+        "subsecond_999",
+        "mixed_tz_plus0000",
+        "mixed_tz_minus0500",
+        "no_tz_suffix",
+        "trailing_whitespace",
+    ],
+)
+def test_fallback_emits_when_disarmed_ts_format_drifts_falls_through_to_count_path(
+    tmp_path, drifted_ts_disarmed
+):
+    """Format-drift fail-conservative COMPOSITE invariant for
+    scan_disarmed.ts. Symmetric pin to
+    test_fallback_emits_when_armed_ts_format_drifts_falls_through_to_count_path
+    targeting the INNER-branch comparator's disarmed-side strptime
+    parse.
+
+    Fixture: armed.ts is well-typed canonical ISO; disarmed.ts is a
+    drifted-format str. The arm-presence guard passes; the inner
+    armed-side strptime succeeds; armed_epoch is well-typed. Then
+    the inner disarmed-side strptime raises ValueError on the
+    drifted disarmed.ts; the disarmed-side inner try/except catches;
+    disarmed_epoch stays None; the
+    `disarmed_epoch is not None and armed_epoch > disarmed_epoch`
+    comparison is skipped; the hook falls through to
+    count_active_tasks.
+
+    Counter-test-by-revert cumulative recipe is symmetric to the
+    armed-side test — see armed-side docstring for the layered
+    defense and the empirical cumulative-strip rows.
+    """
+    home = tmp_path / "home"; home.mkdir()
+    lead_sid = "lead-sid"
+    pdir = "/tmp/p"
+    team = "team-disarmed-format-drift"
+    teammate_owner = "backend-coder"
+    _write_session_context(
+        home, lead_sid, pdir, team,
+        members=[
+            {"name": teammate_owner, "agentId": "agent-bc"},
+            {"name": "lead", "agentId": "agent-lead"},
+        ],
+        lead_agent_id="agent-lead",
+    )
+    _write_task(
+        home, team, "T-fd", status="in_progress", owner=teammate_owner,
+    )
+    # armed.ts is well-typed canonical; disarmed.ts is format-drift.
+    _write_scan_armed_event(home, lead_sid, pdir, ts=_iso_ts(100))
+    _write_event_with_value(
+        home, lead_sid, pdir, "scan_disarmed", "ts", drifted_ts_disarmed,
+    )
+
+    rc, out_str, err = _run_drain(
+        json.dumps({
+            "session_id": lead_sid, "cwd": pdir,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        }),
+        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+    )
+    assert rc == 0, f"non-zero exit; stderr={err}"
+    arm_count = out_str.count("Active teammate work detected")
+    assert arm_count == 1, (
+        f"scan_disarmed.ts={drifted_ts_disarmed!r} (format-drift shape) "
+        f"MUST fall through to count_active_tasks (fail-conservative "
+        f"emit) via the composite-layered defense (disarmed-side inner "
+        f"strptime try/except + outer `except Exception:`); got "
+        f"{arm_count} Arm directives in stdout={out_str!r}. A 0 count "
+        f"here indicates the inner disarmed-side try/except AND the "
+        f"outer except Exception were BOTH stripped cumulatively — "
+        f"the strptime ValueError propagated to main()'s top-level "
+        f"catch which prints _SUPPRESS_OUTPUT, causing under-emit "
+        f"incorrectly. Pairs with the F4 strptime-not-lex-compare "
+        f"structural pin; F6 BEHAVIORAL defense for the format-drift "
+        f"fall-through invariant."
+    )
+
+
 # ─── Widened-except contract test (Finding-2) ──────────────────────────
 
 
