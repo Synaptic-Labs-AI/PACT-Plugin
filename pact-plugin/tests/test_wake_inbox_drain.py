@@ -1132,6 +1132,14 @@ def test_fallback_emits_when_disarmed_ts_is_malformed_falls_through_to_count_pat
         "2026-05-15T00:00:00",
         # Trailing whitespace inside the string (a writer-bug variant that
         # `isinstance(ts, str) and ts` passes but strptime rejects).
+        # EMPIRICAL: `datetime.strptime('2026-05-15T00:00:00Z ',
+        # '%Y-%m-%dT%H:%M:%SZ')` raises `ValueError: unconverted data
+        # remains:  ` on Python 3.9.6 / 3.12.7 / 3.13.5 / 3.14.5
+        # (verified 2026-05-24). This case exercises the inner
+        # try/except (TypeError, ValueError) fall-through path as the
+        # docstring claims — NOT a valid-parse-no-disarm path. Pin
+        # blocks future re-investigation of an earlier phantom claim
+        # that strptime silently ignores trailing whitespace.
         "2026-05-15T00:00:00Z ",
     ],
     ids=[
