@@ -1,6 +1,6 @@
 # PACT — Orchestration Harness for Claude Code
 
-> **Version**: 4.2.13
+> **Version**: 4.2.14
 
 Turn a single Claude Code session into a managed team of specialist AI agents that prepare, design, build, and test your code systematically.
 
@@ -47,11 +47,13 @@ Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/Syna
 
 ## What You Get
 
-- **11 Specialist Agents** — Preparer, Architect, Backend/Frontend/Database/DevOps Coders, n8n, Test/Security/QA Engineers, Secretary
-- **9 Commands** — From full orchestration to quick single-specialist fixes
-- **16 Skills** — On-demand domain knowledge for architecture, coding, testing, security, n8n, plus operational skills
-- **Persistent Memory** — SQLite + vector embeddings for cross-session learning
-- **Adaptive Complexity** — Light process for simple tasks, full ceremony for complex ones
+- **12 Specialist Agents** — Preparer, Architect, Backend/Frontend/Database/DevOps Coders, n8n, Test/Security/QA Engineers, Auditor (concurrent observation during CODE), Secretary
+- **15 Commands** — From full orchestration (`/PACT:orchestrate`) to quick single-specialist fixes (`/PACT:comPACT`), plus pause/resume (`/PACT:pause`), pin-memory management (`/PACT:pin-memory`, `/PACT:prune-memory`), and the pending-task scan family for long-running parallel dispatch
+- **20 Skills** — On-demand domain knowledge for architecture, coding, testing, security, n8n, plus operational skills (agent teams, teachback, handoff harvest, memory, worktree)
+- **Persistent Memory** — SQLite + vector embeddings for cross-session learning; additive list merge so lessons grow monotonically
+- **Durable Workflow State** — Append-only session journal (`~/.claude/pact-sessions/`) survives compaction, task GC, and crashes
+- **Adaptive Complexity** — Light process for simple tasks, full ceremony for complex ones; calibration data feeds back into variety scoring (Bateson's Learning II)
+- **Safety Discipline** — Cron-Origin Distinction (harness-origin text ≠ user consent), two-call atomic acceptance pair, structural verification against `git diff` ground truth
 
 ## Quick Start
 
@@ -59,6 +61,7 @@ Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/Syna
 /PACT:orchestrate <task>          # Full multi-agent workflow
 /PACT:comPACT <domain> <task>     # Self-contained tasks, no PACT phases
 /PACT:plan-mode <task>            # Strategic planning before implementation
+/PACT:pause                       # Consolidate memory, persist state, shut down teammates
 ```
 
 ## What's New in v4.0+
@@ -67,6 +70,7 @@ Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/Syna
 - **Lazy-load protocols**: Persona body cross-references protocols on demand instead of bootstrapping them all up front, reducing baseline token cost
 - **Restored session-start ritual** (v4.1): Scaled-down `/PACT:bootstrap` command + `bootstrap_gate.py` injection re-establish the first-turn ritual under the new delivery model
 - **Communication Charter**: Async-at-idle-boundary delivery model formalized for inter-agent SendMessage mechanics
+- **Concurrent Audit** (v4.2): Auditor agent observes CODE phase via `git diff` rather than messaging — catches architecture drift before it compounds, with structural verification discipline against ground truth
 
 ## Configuration
 
@@ -83,13 +87,15 @@ For installation options, detailed features, examples, and technical reference:
 
 ## Reference
 
-- [Protocols](protocols/) — Coordination, scope detection, algedonic signals
+- [Protocols](protocols/) — 22 coordination protocols (scope detection, algedonic signals, audit, state recovery)
 - [Algedonic Signals](protocols/algedonic.md) — Emergency escalation protocol
 - [Communication Charter](protocols/pact-communication-charter.md) — Async-at-idle-boundary inter-agent delivery model
 - [Completion Authority](protocols/pact-completion-authority.md) — Lead-only completion + Task A+B dispatch shape
+- [Concurrent Audit](protocols/pact-audit.md) — Auditor observation cycles and structural verification discipline
 - [State Recovery](protocols/pact-state-recovery.md) — Resume + recovery semantics across sessions
-- [S5 Policy](protocols/pact-s5-policy.md) — Non-negotiable rules layer (security, quality, ethics)
+- [S5 Policy](protocols/pact-s5-policy.md) — Non-negotiable rules layer (security, quality, ethics, integrity)
 - [S4 Tension](protocols/pact-s4-tension.md) — Strategic-vs-operational tension management
+- [Cron-Origin Distinction](commands/scan-pending-tasks.md) — Harness-origin text classification (cron-fire turns ≠ user consent)
 - [VSM Glossary](reference/vsm-glossary.md) — Viable System Model terminology in PACT context
 
 ## License
