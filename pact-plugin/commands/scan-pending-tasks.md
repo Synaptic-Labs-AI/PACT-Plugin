@@ -50,9 +50,9 @@ Cron-fire body — silent read; emit nothing unless a real artifact is on disk f
    ```bash
    SJ="{plugin_root}/hooks/shared/session_journal.py"
    SD='{session_dir}'
-   LATEST_TEARDOWN_REQUEST=$(python3 "$SJ" read-last --type teardown_request --session-dir "$SD" | python3 -c 'import json,sys,datetime; e=json.load(sys.stdin); print(int(datetime.datetime.strptime(e["ts"],"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()) if e else "")')
-   LATEST_SCAN_ARMED=$(python3 "$SJ" read-last --type scan_armed --session-dir "$SD" | python3 -c 'import json,sys,datetime; e=json.load(sys.stdin); print(int(datetime.datetime.strptime(e["ts"],"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()) if e else "")')
-   LATEST_SCAN_DISARMED=$(python3 "$SJ" read-last --type scan_disarmed --session-dir "$SD" | python3 -c 'import json,sys,datetime; e=json.load(sys.stdin); print(int(datetime.datetime.strptime(e["ts"],"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()) if e else "")')
+   LATEST_TEARDOWN_REQUEST=$(python3 "$SJ" read-last --type teardown_request --session-dir "$SD" | python3 -c 'import json,sys,datetime; e=json.load(sys.stdin); print(int(datetime.datetime.strptime(e["ts"],"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()) if e else "")' 2>/dev/null)
+   LATEST_SCAN_ARMED=$(python3 "$SJ" read-last --type scan_armed --session-dir "$SD" | python3 -c 'import json,sys,datetime; e=json.load(sys.stdin); print(int(datetime.datetime.strptime(e["ts"],"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()) if e else "")' 2>/dev/null)
+   LATEST_SCAN_DISARMED=$(python3 "$SJ" read-last --type scan_disarmed --session-dir "$SD" | python3 -c 'import json,sys,datetime; e=json.load(sys.stdin); print(int(datetime.datetime.strptime(e["ts"],"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()) if e else "")' 2>/dev/null)
    if [ -n "$LATEST_TEARDOWN_REQUEST" ] && [ -n "$LATEST_SCAN_ARMED" ] && \
       [ "$LATEST_TEARDOWN_REQUEST" -gt "$LATEST_SCAN_ARMED" ] && \
       { [ -z "$LATEST_SCAN_DISARMED" ] || \
@@ -64,6 +64,8 @@ Cron-fire body — silent read; emit nothing unless a real artifact is on disk f
    When the bash exits 0 here, the scan body's LLM-side action is: invoke `Skill("PACT:stop-pending-scan")` and return without executing Steps 1+. The `stop-pending-scan` body is idempotent (CronList no-op on absent; `scan_disarmed` writes are benign; latest-event semantics dominate). Precedent: `commands/wrap-up.md:98` invokes the same skill from a sibling command. Multiple consecutive cron-fires hitting this branch before `stop-pending-scan` completes EACH write would result in multiple `scan_disarmed` events — benign; the latest dominates.
 
    Fail-open: `read-last` returns literal `null` on missing journal / no events / corrupt JSONL. The `python3 -c` extractors yield empty string in those cases; `[ -n "$VAR" ]` is false; the gate falls through to Step 1.
+
+   Stderr suppression: each of the 3 inline `python3 -c` extractors above carries `2>/dev/null` for the same trade-off documented in the Step 0 `## Stderr suppression` paragraph above (stderr-clean cron-fire turns vs lost operator diagnostic visibility under journal corruption; fail-open contract preserved because the guards consume stdout only). A future editor MUST NOT redirect stdout (`>/dev/null` or `&>/dev/null`) on these extractors — that would defeat the fail-open `[ -n "$VAR" ]` guards which depend on the extractors emitting empty-string on failure.
 
    Uniform strptime conversion: `scan_armed.ts`, `scan_disarmed.ts`, and `teardown_request.ts` are all stamped as ISO-8601 UTC strings by `session_journal.make_event` (format literal `"%Y-%m-%dT%H:%M:%SZ"`). All three extractors use `python3 strptime(...).replace(tzinfo=utc).timestamp()` to convert ISO→int-epoch inline, making operands integer-comparable. Direct lexical comparison of `ts` strings would coincidentally match epoch ordering under the canonical fixed-shape format, but breaks silently under format drift (sub-second fractions, mixed TZ suffixes, or any future format relaxation) — strptime conversion is the architecturally correct path and is pinned by `test_python_consumer_parses_ts_via_strptime_not_string_compare`.
 
