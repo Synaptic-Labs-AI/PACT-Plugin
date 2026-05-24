@@ -32,7 +32,7 @@ Cron-fire body — silent read; emit nothing unless a real artifact is on disk f
    ```bash
    SJ="{plugin_root}/hooks/shared/session_journal.py"
    SD='{session_dir}'
-   ARMED_AT=$(python3 "$SJ" read-last --type scan_armed --session-dir "$SD" | python3 -c 'import json,sys; e=json.load(sys.stdin); print(e["armed_at"] if e else "")')
+   ARMED_AT=$(python3 "$SJ" read-last --type scan_armed --session-dir "$SD" | python3 -c 'import json,sys,datetime; e=json.load(sys.stdin); print(int(datetime.datetime.strptime(e["ts"],"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()) if e else "")' 2>/dev/null)
    if [ -n "$ARMED_AT" ]; then
        delta=$(( $(date +%s) - ARMED_AT ))
        if [ $delta -ge 0 ] && [ $delta -lt 300 ]; then exit 0; fi
@@ -41,7 +41,39 @@ Cron-fire body — silent read; emit nothing unless a real artifact is on disk f
 
    Fail-open: `read-last` returns literal `null` on missing journal / no events / corrupt JSONL. The `python3 -c` extraction yields empty string in those cases; `[ -n "$ARMED_AT" ]` is false; the gate falls through to Step 1.
 
-   Negative-delta guard: `[ $delta -ge 0 ]` forces future-dated `armed_at` (clock skew / adversarial write) to fall through. Without it, negative deltas would always pass `-lt 300` — the gate would become a kill-switch.
+   Stderr suppression: the `2>/dev/null` redirect on the inner `python3 -c` extractor silences Python tracebacks (TypeError / ValueError / KeyError) that would otherwise surface in the cron-fire LLM-turn output when the journal contains a malformed `ts` (writer-bug, schema-drift, or corruption — e.g., `ts=42`, `ts=null`, `ts=""`, unparseable string). The fail-open contract is preserved unchanged: the extractor's stdout is still empty on failure, `[ -n "$ARMED_AT" ]` is still false, and the gate still falls through to Step 1. Trade-off: stderr-clean cron-fire turns (no traceback noise to the user) vs lost operator diagnostic visibility under journal corruption (a malformed `ts` no longer surfaces as a visible Python traceback; the only signal is the silent fall-through). Acceptable because the fail-open behavior is intentional and the journal-shape contract is pinned at write time by `session_journal.py`'s `_validate_event_schema`. A future editor MUST NOT redirect stdout (`>/dev/null` or `&>/dev/null`) — that would defeat the fail-open guard which depends on the extractor emitting empty-string on failure.
+
+   Negative-delta guard: `[ $delta -ge 0 ]` forces a future-dated `scan_armed.ts` (clock skew / adversarial write) to fall through. Without it, negative deltas would always pass `-lt 300` — the gate would become a kill-switch.
+
+0.5. **Self-correcting teardown check**. Read the latest `teardown_request`, `scan_armed`, and `scan_disarmed` event timestamps; if a `teardown_request` event landed AFTER the current arm AND has not yet been processed via `scan_disarmed`, invoke `Skill("PACT:stop-pending-scan")` and return without continuing to Step 1. This is the **self-correcting fallback path** that catches orchestrator non-compliance with the `_TEARDOWN_DIRECTIVE` `additionalContext` channel — the orchestrator persona's scope-boundary clause excludes inbound `additionalContext` from MUST-binding (see memory `a7bcd37f`), so the cron-fire body itself enforces teardown via the trusted in-band channel + journal source-of-truth pair. Bounds compliance latency to ≤1 cron interval (5min nominal, up to ~6min with typical jitter, 15min worst-case) regardless of `additionalContext`-directive handling. Charter cross-reference: [§Cron-Fire Mechanism Teardown trigger sites](../protocols/pact-communication-charter.md#cron-fire-mechanism).
+
+   ```bash
+   SJ="{plugin_root}/hooks/shared/session_journal.py"
+   SD='{session_dir}'
+   LATEST_TEARDOWN_REQUEST=$(python3 "$SJ" read-last --type teardown_request --session-dir "$SD" | python3 -c 'import json,sys,datetime; e=json.load(sys.stdin); print(int(datetime.datetime.strptime(e["ts"],"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()) if e else "")' 2>/dev/null)
+   LATEST_SCAN_ARMED=$(python3 "$SJ" read-last --type scan_armed --session-dir "$SD" | python3 -c 'import json,sys,datetime; e=json.load(sys.stdin); print(int(datetime.datetime.strptime(e["ts"],"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()) if e else "")' 2>/dev/null)
+   LATEST_SCAN_DISARMED=$(python3 "$SJ" read-last --type scan_disarmed --session-dir "$SD" | python3 -c 'import json,sys,datetime; e=json.load(sys.stdin); print(int(datetime.datetime.strptime(e["ts"],"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()) if e else "")' 2>/dev/null)
+   if [ -n "$LATEST_TEARDOWN_REQUEST" ] && [ -n "$LATEST_SCAN_ARMED" ] && \
+      [ "$LATEST_TEARDOWN_REQUEST" -gt "$LATEST_SCAN_ARMED" ] && \
+      { [ -z "$LATEST_SCAN_DISARMED" ] || \
+        [ "$LATEST_TEARDOWN_REQUEST" -gt "$LATEST_SCAN_DISARMED" ]; }; then
+       exit 0
+   fi
+   ```
+
+   When the bash exits 0 here, the scan body's LLM-side action is: invoke `Skill("PACT:stop-pending-scan")` and return without executing Steps 1+. The `stop-pending-scan` body is idempotent (CronList no-op on absent; `scan_disarmed` writes are benign; latest-event semantics dominate). Precedent: `commands/wrap-up.md:98` invokes the same skill from a sibling command. Multiple consecutive cron-fires hitting this branch before `stop-pending-scan` completes EACH write would result in multiple `scan_disarmed` events — benign; the latest dominates.
+
+   Fail-open: `read-last` returns literal `null` on missing journal / no events / corrupt JSONL. The `python3 -c` extractors yield empty string in those cases; `[ -n "$VAR" ]` is false; the gate falls through to Step 1.
+
+   Stderr suppression: each of the 3 inline `python3 -c` extractors above carries `2>/dev/null` for the same trade-off documented in the Step 0 `## Stderr suppression` paragraph above (stderr-clean cron-fire turns vs lost operator diagnostic visibility under journal corruption; fail-open contract preserved because the guards consume stdout only). A future editor MUST NOT redirect stdout (`>/dev/null` or `&>/dev/null`) on these extractors — that would defeat the fail-open `[ -n "$VAR" ]` guards which depend on the extractors emitting empty-string on failure.
+
+   Uniform strptime conversion: `scan_armed.ts`, `scan_disarmed.ts`, and `teardown_request.ts` are all stamped as ISO-8601 UTC strings by `session_journal.make_event` (format literal `"%Y-%m-%dT%H:%M:%SZ"`). All three extractors use `python3 strptime(...).replace(tzinfo=utc).timestamp()` to convert ISO→int-epoch inline, making operands integer-comparable. Direct lexical comparison of `ts` strings would coincidentally match epoch ordering under the canonical fixed-shape format, but breaks silently under format drift (sub-second fractions, mixed TZ suffixes, or any future format relaxation) — strptime conversion is the architecturally correct path and is pinned by `test_python_consumer_parses_ts_via_strptime_not_string_compare`.
+
+   A future editor MUST NOT add `set -e`, `set -o pipefail`, or an `ERR` trap to this block — empty-operand `-gt` would abort the cron-fire turn, breaking fail-open and reintroducing the compliance gap Option D exists to close.
+
+   A future editor MUST NOT wrap the `python3 -c` extractors in `try/except` to silence parse errors — empty-string-on-failure is the fail-open contract; swallowing exceptions with a default value silently breaks it.
+
+   A future editor MUST NOT switch the extractor to `fromisoformat` without verifying Python version baseline (3.11+ required for `Z`-suffix handling); the explicit-format `strptime` is portable to 3.7+. If a future Python baseline bump to 3.11+ makes `fromisoformat` viable, coordinate the switch across the 2 coupled sites (`session_journal.py` `make_event` SSOT + the uniform-strptime extractor pattern in Step 0 / Step 0.5 / `wake_inbox_drain.py:685-694`) AND update `test_python_consumer_parses_ts_via_strptime_not_string_compare`'s canonical literal.
 
 1. `TaskList` — enumerate tasks. Filter to: `owner == any teammate` AND `status == "in_progress"` AND `metadata.intentional_wait.reason == "awaiting_lead_completion"`. (These are the tasks where a teammate has submitted teachback or handoff and is idle awaiting acceptance.)
 2. For each candidate, raw-read `~/.claude/tasks/{team_name}/{id}.json` via filesystem read (NOT `TaskGet` — TaskGet does not surface `metadata.teachback_submit` or `metadata.handoff`). Inspect `metadata.teachback_submit` (for teachback gate tasks) and `metadata.handoff` (for primary-work tasks).
@@ -61,7 +93,7 @@ The five anti-hallucination guardrails are LOAD-BEARING. Each guardrail prevents
 
 ### No-Narration
 
-> **No-Narration**: The scan emits NO user-facing prose narrating what it found, considered, skipped, or did. The only outputs are: (a) `SendMessage` to the teammate as part of the acceptance two-call pair, (b) `TaskUpdate(status="completed")`, or (c) nothing. The scan never emits "Scanning… found 0 pending tasks", "Skipping task #N because…", "Race window detected, will retry next fire", or similar status-narrating text.
+> **No-Narration**: The scan emits NO user-facing prose narrating what it found, considered, skipped, or did. The only outputs are: (a) `SendMessage` to the teammate as part of the acceptance two-call pair, (b) `TaskUpdate(status="completed")`, (c) `Skill("PACT:stop-pending-scan")` invocation when Step 0.5 self-correcting teardown fires, or (d) nothing. The scan never emits "Scanning… found 0 pending tasks", "Skipping task #N because…", "Race window detected, will retry next fire", or similar status-narrating text.
 
 **Audit**: No-Narration prevents the cron-fire noise failure mode. A 5-minute cron firing 12 times per hour produces 12 LLM turns per hour during active teammate work. If each fire emits a "Scanning…" prose line, the user's transcript fills with 12 useless status lines per hour. Worse, the prose-emit pattern primes the editing LLM to treat the cron fire as a conversation turn requiring response — re-opening the cascade failure mode the scan exists to prevent. An editing LLM tempted to "add a brief status line for observability" is re-introducing the failure mode. Observability happens via `CronList` (cron is registered), `TaskList` (tasks transition status), and journal events (HANDOFF acceptance is journaled) — NOT via per-fire prose.
 

@@ -91,7 +91,8 @@ _TAIL_WINDOW_BYTES = 32 * 1024
 # Trust boundary: write path validates events against this dict; read path
 # trusts disk content. Loosening this dict without auditing all readers
 # will silently break extractors assuming validated shape (e.g., Step 0
-# bash in commands/scan-pending-tasks.md assumes scan_armed.armed_at:int).
+# bash in commands/scan-pending-tasks.md assumes scan_armed.ts is the
+# auto-stamped ISO-8601 string from make_event, parsed via strptime).
 _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # hooks/session_init.py writes session_start with team, session_id,
     # project_dir, worktree on the valid-stdin path only (under R3, the event
@@ -184,20 +185,24 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     "wake_tally_warn": {"team_name": str, "reason": str},
     # commands/start-pending-scan.md Step 5 writes scan_armed after the
     # CronCreate that arms the pending-scan cron. commands/scan-pending-tasks.md
-    # Step 0 reads the latest scan_armed event timestamp and skips the
-    # scan body when elapsed-since-arm < WARMUP_GRACE_SECONDS. The grace
-    # window is coupled in lockstep to the cron interval (300s grace +
-    # */5 cron) — first-fire-coverage invariant; see start-pending-scan.md
-    # §CronCreate Block audit.
-    "scan_armed": {"armed_at": int},
+    # Step 0 reads the latest scan_armed event's auto-stamped `ts` (parsed
+    # via strptime → epoch) and skips the scan body when elapsed-since-arm
+    # < WARMUP_GRACE_SECONDS. The grace window is coupled in lockstep to
+    # the cron interval (300s grace + */5 cron) — first-fire-coverage
+    # invariant; see start-pending-scan.md §CronCreate Block audit. No
+    # type-specific required fields — `ts` is supplied by the make_event
+    # auto-stamp path (matches session_end / cleanup_summary precedent).
+    "scan_armed": {},
     # commands/stop-pending-scan.md writes scan_disarmed after the
     # CronDelete that tears down the pending-scan cron. Paired writer
     # to scan_armed; together they form the event-model lifecycle
     # consumed by hooks/wake_inbox_drain.py — the drain hook's
     # producer-side idempotency suppresses the redundant Arm directive
-    # only when scan_armed is strictly more recent than scan_disarmed
-    # (re-arm dominance under post-Teardown re-arm).
-    "scan_disarmed": {"disarmed_at": int},
+    # only when scan_armed.ts is strictly more recent than
+    # scan_disarmed.ts (re-arm dominance under post-Teardown re-arm).
+    # No type-specific required fields — `ts` is supplied by the
+    # make_event auto-stamp path.
+    "scan_disarmed": {},
     # hooks/teardown_request_emitter.py writes teardown_request after
     # the lead-driven TaskUpdate(status="completed") drives the team's
     # lifecycle-relevant active-task count to 0 (Tier-1 fast path), AND

@@ -63,21 +63,24 @@ Single-emit discipline:
   cross-session signals — surface them regardless of armed-state.
 - Drain path empty → producer-side idempotency check on the B-1
   fallback path: read both `scan_armed` and `scan_disarmed` events
-  from this session's journal and compare timestamps. Suppress only
-  when `scan_armed` is present AND (`scan_disarmed` is absent OR
-  `scan_armed.armed_at` strictly greater than
-  `scan_disarmed.disarmed_at`) — i.e., the most recent lifecycle
-  event in this session was an arm, not a disarm. Otherwise (no
-  scan_armed event, or scan_disarmed is at least as recent as
-  scan_armed) run the count_active_tasks fallback. Positive count
-  → emit Arm. Zero count → suppressOutput.
+  from this session's journal and compare their auto-stamped `ts`
+  fields (parsed via `strptime` to int epoch). Suppress only when
+  `scan_armed` is present AND (`scan_disarmed` is absent OR
+  `scan_armed.ts` parsed-epoch strictly greater than `scan_disarmed.ts`
+  parsed-epoch) — i.e., the most recent lifecycle event in this
+  session was an arm, not a disarm. Otherwise (no scan_armed event,
+  or scan_disarmed is at least as recent as scan_armed) run the
+  count_active_tasks fallback. Positive count → emit Arm. Zero count
+  → suppressOutput.
 - Event-presence is the primary predicate; the timestamp comparison
-  is gated on both events having well-typed int timestamps. A
-  malformed event with `armed_at=None` is treated as if absent
-  (fail-conservative emit). Schema validation at write-time
+  is gated on both events having well-typed ISO-string `ts` fields
+  that parse successfully via strptime. A malformed event with `ts`
+  missing / non-str / unparseable is treated as if absent (fail-
+  conservative emit). Schema validation at write-time
   (`_REQUIRED_FIELDS_BY_TYPE` in shared/session_journal.py) makes
-  this an edge case rather than a happy path, but the explicit type
-  check keeps the producer-side check robust to journal corruption.
+  this an edge case rather than a happy path, but the explicit
+  per-side str-guard + strptime try/except keeps the producer-side
+  check robust to journal corruption.
 
 Performance hygiene:
 - Non-lead session short-circuits to suppressOutput before any
@@ -139,6 +142,7 @@ try:
     import errno
     import os
     import re
+    from datetime import datetime, timezone
     from typing import Any
     from pathlib import Path
 
@@ -166,6 +170,13 @@ _SUPPRESS_OUTPUT = json.dumps({
     "suppressOutput": True,
     "hookSpecificOutput": {"hookEventName": "UserPromptSubmit"},
 })
+
+# Byte-coupled with session_journal.make_event's ts format literal and
+# with the strptime literal in scan-pending-tasks.md Step 0 / Step 0.5.
+# All three sites parse the auto-stamped `ts` ISO-8601 UTC string into
+# an integer epoch via this literal; drift between sites silently breaks
+# the cross-component comparison contract.
+_TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
 # Bound stdin payload at 1 MB. UserPromptSubmit payloads carry the user's
 # prompt text + session metadata; a 1 MB cap is generous and serves as
@@ -507,9 +518,11 @@ def _decide_and_emit(input_data: dict) -> None:
       5. Producer-side idempotency: read `scan_armed` and
          `scan_disarmed` events from this session's journal.
          Suppress only when scan_armed is present with a well-typed
-         armed_at AND (scan_disarmed is absent OR scan_armed.armed_at
-         > scan_disarmed.disarmed_at). Any journal-read failure or
-         malformed event falls through to step 6 (fail-conservative).
+         ISO-string `ts` (parsed via strptime) AND (scan_disarmed
+         is absent OR scan_armed.ts parsed-epoch > scan_disarmed.ts
+         parsed-epoch). Any journal-read failure or malformed `ts`
+         (non-str, empty, or unparseable) falls through to step 6
+         (fail-conservative).
       6. Fallback: count_active_tasks(team_name) >= 1 → emit Arm.
          Otherwise → suppressOutput.
 
@@ -648,12 +661,28 @@ def _decide_and_emit(input_data: dict) -> None:
     # disarm suppresses.
     #
     # Event-presence is the primary predicate; timestamp comparison is
-    # gated on both fields being well-typed int values. A malformed
-    # event (missing armed_at, or wrong type) is treated as if absent
-    # and falls through to the existing emit behavior — over-emit is
-    # benign under the skill body's CronList exact-suffix-match
-    # idempotency; under-emit could miss a teammate's completion-
-    # authority signal.
+    # gated on both events carrying a well-typed ISO-string `ts` that
+    # parses successfully via strptime against `_TS_FMT`. A malformed
+    # event (missing ts, non-str, empty, or unparseable) is treated as
+    # if absent and falls through to the existing emit behavior —
+    # over-emit is benign under the skill body's CronList exact-suffix-
+    # match idempotency; under-emit could miss a teammate's completion-
+    # authority signal. Layered defense (COMPOSITE invariant): the
+    # malformed-ts fall-through is pinned by the composite of three
+    # layers — (1) the per-side `isinstance(ts, str) and ts` guard,
+    # (2) the inner `try: strptime / except (TypeError, ValueError)`,
+    # and (3) the OUTER `except Exception:` below. For the documented
+    # malformed-ts cases (ts=42, ts=False, ts=None, ts='', unparseable
+    # str), stripping any 1 or 2 layers leaves the fall-through intact;
+    # ONLY the cumulative strip of all 3 layers breaks it. The outer
+    # catch is the cheapest single layer to break the invariant under
+    # cumulative strip; the inner str-guard + inner try/except are
+    # honest defense-in-depth — short-circuiting cleanly when ts is
+    # recognizably malformed (sparing the outer catch) AND coverage
+    # for future unknown failure modes (e.g., a future ts shape that
+    # strptime accepts but yields a nonsense epoch). See the
+    # CUMULATIVE 3-row counter-test recipe in test_wake_inbox_drain.py
+    # Q2 retargeted test docstrings (post-F1+D1 reframe).
     #
     # Outer-except rationale: the producer-side check has a strict
     # fail-conservative contract — any unexpected failure must fall
@@ -682,17 +711,37 @@ def _decide_and_emit(input_data: dict) -> None:
         armed = read_last_event("scan_armed")
         disarmed = read_last_event("scan_disarmed")
         if armed is not None:
-            armed_at = armed.get("armed_at")
-            if isinstance(armed_at, int) and not isinstance(armed_at, bool):
+            armed_ts = armed.get("ts")
+            armed_epoch: int | None = None
+            if isinstance(armed_ts, str) and armed_ts:
+                try:
+                    armed_epoch = int(
+                        datetime.strptime(armed_ts, _TS_FMT)
+                        .replace(tzinfo=timezone.utc)
+                        .timestamp()
+                    )
+                except (TypeError, ValueError):
+                    # Fail-conservative: malformed scan_armed.ts falls
+                    # through to count_active_tasks B-1 fallback.
+                    armed_epoch = None
+            if armed_epoch is not None:
                 if disarmed is None:
                     print(_SUPPRESS_OUTPUT)
                     return
-                disarmed_at = disarmed.get("disarmed_at")
-                if (
-                    isinstance(disarmed_at, int)
-                    and not isinstance(disarmed_at, bool)
-                    and armed_at > disarmed_at
-                ):
+                disarmed_ts = disarmed.get("ts")
+                disarmed_epoch: int | None = None
+                if isinstance(disarmed_ts, str) and disarmed_ts:
+                    try:
+                        disarmed_epoch = int(
+                            datetime.strptime(disarmed_ts, _TS_FMT)
+                            .replace(tzinfo=timezone.utc)
+                            .timestamp()
+                        )
+                    except (TypeError, ValueError):
+                        # Fail-conservative: malformed scan_disarmed.ts
+                        # falls through to count_active_tasks B-1.
+                        disarmed_epoch = None
+                if disarmed_epoch is not None and armed_epoch > disarmed_epoch:
                     print(_SUPPRESS_OUTPUT)
                     return
     except Exception:

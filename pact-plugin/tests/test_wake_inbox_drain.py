@@ -12,6 +12,7 @@ Counter-test-by-revert: see
 tests/runbooks/wake-lifecycle-arm-starvation.md.
 """
 
+import datetime
 import json
 import os
 import subprocess
@@ -22,6 +23,21 @@ import pytest
 
 HOOK_DIR = Path(__file__).resolve().parent.parent / "hooks"
 DRAIN = HOOK_DIR / "wake_inbox_drain.py"
+
+# Byte-coupled with session_journal.make_event's ts format and with the
+# `_TS_FMT` literal in wake_inbox_drain.py producer-side idempotency
+# check. Used by `_iso_ts` to render integer-epoch helper arguments as
+# canonical ISO strings the consumer's strptime can parse.
+ISO_FORMAT_LITERAL = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _iso_ts(epoch_seconds: int) -> str:
+    """Render an integer-epoch as the canonical ISO-8601 UTC string
+    that wake_inbox_drain.py's strptime literal parses
+    (`%Y-%m-%dT%H:%M:%SZ`)."""
+    return datetime.datetime.fromtimestamp(
+        epoch_seconds, tz=datetime.timezone.utc
+    ).strftime(ISO_FORMAT_LITERAL)
 
 
 def _run_drain(stdin_payload, env_extra=None):
@@ -97,12 +113,23 @@ def _write_marker(home, team_name, filename, payload):
     return target
 
 
-def _write_scan_armed_event(home, session_id, project_dir, armed_at=1715731200):
+_DEFAULT_SCAN_ARMED_TS = _iso_ts(1715731200)
+_DEFAULT_SCAN_DISARMED_TS = _iso_ts(1715734800)
+
+
+def _write_scan_armed_event(home, session_id, project_dir, ts=_DEFAULT_SCAN_ARMED_TS):
     """Append a `scan_armed` event to the session's journal — mirrors the
     write performed by commands/start-pending-scan.md Step 5 (the CLI
     form `python3 session_journal.py write --type scan_armed ...`). The
     test writes the JSONL line directly to keep the test self-contained
     and not depend on the CLI subprocess.
+
+    `ts` is the auto-stamped ISO-8601 UTC timestamp matching
+    `session_journal.make_event`'s format literal; the producer-side
+    idempotency check in `wake_inbox_drain.py:684+` parses it via
+    strptime to int epoch. Callers may override `ts` to control the
+    comparison branch under test (use `_iso_ts(epoch)` for integer-
+    epoch readability).
     """
     slug = Path(project_dir).name
     sess_dir = home / ".claude" / "pact-sessions" / slug / session_id
@@ -111,18 +138,21 @@ def _write_scan_armed_event(home, session_id, project_dir, armed_at=1715731200):
     event = {
         "v": 1,
         "type": "scan_armed",
-        "ts": "2026-05-15T00:00:00Z",
-        "armed_at": armed_at,
+        "ts": ts,
     }
     with journal.open("a", encoding="utf-8") as f:
         f.write(json.dumps(event) + "\n")
     return journal
 
 
-def _write_scan_disarmed_event(home, session_id, project_dir, disarmed_at=1715734800):
+def _write_scan_disarmed_event(home, session_id, project_dir, ts=_DEFAULT_SCAN_DISARMED_TS):
     """Append a `scan_disarmed` event to the session's journal — mirrors
     the write performed by commands/stop-pending-scan.md Step 5 (paired
     writer to scan_armed). Symmetric with `_write_scan_armed_event`.
+
+    `ts` is the auto-stamped ISO-8601 UTC timestamp; the producer-side
+    idempotency check parses it via strptime to int epoch. Callers may
+    override `ts` to control the comparison branch under test.
     """
     slug = Path(project_dir).name
     sess_dir = home / ".claude" / "pact-sessions" / slug / session_id
@@ -131,8 +161,7 @@ def _write_scan_disarmed_event(home, session_id, project_dir, disarmed_at=171573
     event = {
         "v": 1,
         "type": "scan_disarmed",
-        "ts": "2026-05-15T00:01:00Z",
-        "disarmed_at": disarmed_at,
+        "ts": ts,
     }
     with journal.open("a", encoding="utf-8") as f:
         f.write(json.dumps(event) + "\n")
@@ -639,8 +668,8 @@ def test_fallback_emits_when_armed_then_disarmed(tmp_path):
         home, team, "T5", status="in_progress", owner=teammate_owner,
     )
     # scan_armed at t=100, scan_disarmed at t=200 (more recent).
-    _write_scan_armed_event(home, lead_sid, pdir, armed_at=100)
-    _write_scan_disarmed_event(home, lead_sid, pdir, disarmed_at=200)
+    _write_scan_armed_event(home, lead_sid, pdir, ts=_iso_ts(100))
+    _write_scan_disarmed_event(home, lead_sid, pdir, ts=_iso_ts(200))
 
     rc, out_str, err = _run_drain(
         json.dumps({
@@ -681,7 +710,7 @@ def test_fallback_suppressed_when_armed_no_disarm(tmp_path):
     _write_task(
         home, team, "T6", status="in_progress", owner=teammate_owner,
     )
-    _write_scan_armed_event(home, lead_sid, pdir, armed_at=100)
+    _write_scan_armed_event(home, lead_sid, pdir, ts=_iso_ts(100))
     # No scan_disarmed event.
 
     out = _drain_out({
@@ -728,9 +757,9 @@ def test_fallback_suppressed_when_armed_disarmed_rearmed(tmp_path):
     # Event-order on disk: arm(t=100), disarm(t=200), arm(t=300).
     # read_last_event returns the LAST event of each type by reverse
     # scan, so scan_armed=300, scan_disarmed=200. 300 > 200 → suppress.
-    _write_scan_armed_event(home, lead_sid, pdir, armed_at=100)
-    _write_scan_disarmed_event(home, lead_sid, pdir, disarmed_at=200)
-    _write_scan_armed_event(home, lead_sid, pdir, armed_at=300)
+    _write_scan_armed_event(home, lead_sid, pdir, ts=_iso_ts(100))
+    _write_scan_disarmed_event(home, lead_sid, pdir, ts=_iso_ts(200))
+    _write_scan_armed_event(home, lead_sid, pdir, ts=_iso_ts(300))
 
     out = _drain_out({
         "session_id": lead_sid, "cwd": pdir,
@@ -746,13 +775,14 @@ def test_fallback_suppressed_when_armed_disarmed_rearmed(tmp_path):
 # ─── Strict-greater equality-boundary test ─────────────────────────────
 
 
-def test_fallback_emits_when_armed_at_equals_disarmed_at(tmp_path):
-    """Strict-greater equality-boundary invariant. When scan_armed.armed_at
-    is exactly equal to scan_disarmed.disarmed_at (same-second arm-then-
-    disarm via `$(date +%s)`), the comparator `armed_at > disarmed_at`
-    evaluates False and falls through to the count_active_tasks fallback
-    — fail-conservative emit. Same-second timestamp collisions are
-    realistic at second-resolution epoch sources.
+def test_fallback_emits_when_armed_ts_equals_disarmed_ts(tmp_path):
+    """Strict-greater equality-boundary invariant. When scan_armed.ts is
+    exactly equal to scan_disarmed.ts (same-second arm-then-disarm at
+    second-resolution `%Y-%m-%dT%H:%M:%SZ` precision), the comparator
+    `armed_epoch > disarmed_epoch` evaluates False and the hook falls
+    through to the count_active_tasks fallback — fail-conservative
+    emit. Same-second timestamp collisions are realistic at second-
+    resolution epoch sources.
 
     Counter-test-by-revert: mutating the operator from `>` to `>=` at
     wake_inbox_drain.py flips this test (the equality case would
@@ -777,9 +807,11 @@ def test_fallback_emits_when_armed_at_equals_disarmed_at(tmp_path):
     _write_task(
         home, team, "T8", status="in_progress", owner=teammate_owner,
     )
-    # Same-second collision: armed_at == disarmed_at == 200.
-    _write_scan_armed_event(home, lead_sid, pdir, armed_at=200)
-    _write_scan_disarmed_event(home, lead_sid, pdir, disarmed_at=200)
+    # Same-second collision: scan_armed.ts == scan_disarmed.ts (both
+    # render to the same ISO string at second resolution).
+    same_second_ts = _iso_ts(200)
+    _write_scan_armed_event(home, lead_sid, pdir, ts=same_second_ts)
+    _write_scan_disarmed_event(home, lead_sid, pdir, ts=same_second_ts)
 
     rc, out_str, err = _run_drain(
         json.dumps({
@@ -792,25 +824,29 @@ def test_fallback_emits_when_armed_at_equals_disarmed_at(tmp_path):
     assert rc == 0, f"non-zero exit; stderr={err}"
     arm_count = out_str.count("Active teammate work detected")
     assert arm_count == 1, (
-        f"Same-second armed_at == disarmed_at must fall through to "
-        f"count_active_tasks fallback (fail-conservative emit); got "
-        f"{arm_count} Arm directives in stdout={out_str!r}. "
+        f"Same-second scan_armed.ts == scan_disarmed.ts must fall "
+        f"through to count_active_tasks fallback (fail-conservative "
+        f"emit); got {arm_count} Arm directives in stdout={out_str!r}. "
         f"A 0 count here indicates the strict-greater operator was "
         f"weakened to `>=` — equality now suppresses incorrectly."
     )
 
 
-# ─── Bool-vs-int discrimination parametric tests ───────────────────────
+# ─── Malformed-ts discrimination parametric tests ──────────────────────
 
 
 def _write_event_with_value(home, session_id, project_dir, event_type, field, value):
     """Append a journal event with a raw field value. Bypasses
     session_journal.py's write-side schema validator, which would reject
     bool-in-int fields per _REQUIRED_FIELDS_BY_TYPE. The hook-layer
-    bool-discrimination guards in wake_inbox_drain.py are defense-in-
+    fail-conservative guards in wake_inbox_drain.py are defense-in-
     depth against this exact path: a malformed event on disk (corrupted
     journal, out-of-band writer, future schema drift). This helper
     simulates that disk state directly.
+
+    The `field`/`value` pair OVERRIDES any default field in the event
+    dict (including `ts`) — the caller's assignment is the last
+    statement in the dict literal so caller-supplied values win.
     """
     slug = Path(project_dir).name
     sess_dir = home / ".claude" / "pact-sessions" / slug / session_id
@@ -827,31 +863,78 @@ def _write_event_with_value(home, session_id, project_dir, event_type, field, va
     return journal
 
 
-def test_fallback_emits_when_armed_at_is_bool(tmp_path):
-    """Bool-vs-int discrimination invariant for armed_at. Python's
-    `True`/`False` are instances of `int` (since `bool` subclasses
-    `int`), so a naive `isinstance(armed_at, int)` check would let bool
-    values flow through the timestamp comparison as 1 or 0. The
-    `not isinstance(armed_at, bool)` clause rejects bool values as
-    malformed; the hook falls through to count_active_tasks (fail-
-    conservative emit).
+def test_fallback_emits_when_armed_ts_is_malformed_falls_through_to_count_path(tmp_path):
+    """Fail-conservative-on-malformed-ts COMPOSITE invariant for scan_armed.
 
-    Counter-test-by-revert: removing `not isinstance(armed_at, bool)`
-    from wake_inbox_drain.py flips this test — the bool True (==int 1)
-    would pass the int check; with disarmed absent the hook would
-    short-circuit-suppress; this test would see 0 Arm directives
-    instead of 1.
+    Pre-#821 failure mode (bool-vs-int): Python `bool` subclassed `int`,
+    so a naive `isinstance(armed_at, int)` check would let bool values
+    flow through the timestamp comparison as 1 or 0; the
+    `not isinstance(armed_at, bool)` clause rejected them as malformed.
 
-    Defense-in-depth: the write-side schema validator at
-    session_journal.py _validate_event_schema also rejects bool-in-int
-    (pinned by test_session_journal.py). This test pins the
-    INDEPENDENT hook-layer guard, which defends against journal
-    corruption / out-of-band writes that bypass the validator.
+    Post-#821 failure mode (ts-string-malformation): the consumer reads
+    `scan_armed.ts` (auto-stamped ISO string) and parses via strptime.
+    A writer-bug or journal-corruption that lands `ts=42` / `ts=True` /
+    `ts=None` / `ts=""` / unparseable string must NOT cause the
+    producer-side idempotency check to suppress incorrectly.
+
+    Layered defense (composite invariant — what this test pins):
+
+      1. Outer `try: ... except Exception:` (wake_inbox_drain.py ~696/733):
+         catch-all for the producer-side block; on ANY raise inside the
+         block (including TypeError from strptime(42, FMT)), execution
+         falls through to count_active_tasks (fail-conservative emit).
+         THIS is the load-bearer that the documented `ts=42` scenario
+         exercises directly — even with the inner str-guard and inner
+         try/except both stripped, the outer catch still produces the
+         correct fall-through behavior.
+
+      2. `isinstance(armed_ts, str) and armed_ts` str-guard +
+         inner `try/except (TypeError, ValueError)` around strptime:
+         defense-in-depth REDUNDANCY layers that short-circuit cleanly
+         (no raise → no outer catch needed) when ts is recognizably
+         malformed. Good engineering for future failure modes not yet
+         anticipated by the current test suite (e.g., a future ts shape
+         that strptime accepts but yields a nonsense epoch); NOT
+         independent load-bearers for the documented `ts=42` scenario.
+
+    Counter-test-by-revert (CUMULATIVE strip, empirical, verified by
+    review-phase F1 probe). Each row strips LAYERS ON TOP OF the prior
+    row's mutation — these are NOT 3 independent strips.
+
+      Row 1 (strip only the str-guard): test STILL passes. The inner
+        try/except catches the strptime TypeError raised on ts=42.
+
+      Row 2 (CUMULATIVE: strip the str-guard AND the inner try/except):
+        test STILL passes. The outer `except Exception:` catches the
+        propagating TypeError.
+
+      Row 3 (CUMULATIVE: strip the str-guard AND the inner try/except
+        AND narrow the outer `except Exception:` to `except ImportError:`):
+        test FAILS. With all three layers stripped, the malformed-ts
+        TypeError now propagates past the producer-side block to
+        main()'s top-level catch which prints _SUPPRESS_OUTPUT
+        (under-emit, 0 Arm directives observed).
+
+    What this test pins: the COMPOSITE invariant that the malformed-ts
+    fall-through must hold. The outer catch is the cheapest single
+    layer to remove that breaks the invariant (under Row 3's
+    cumulative mutation), but Row 1 + Row 2 demonstrate that the
+    str-guard and inner try/except are honest defense-in-depth —
+    they short-circuit cleanly when ts is recognizably malformed,
+    sparing the outer catch, AND they are robust against future
+    hypothetical refactors that might widen / narrow / replace the
+    outer catch.
+
+    Distinct from the symmetric ..._disarmed_ts_... test: the armed-
+    side malformation hits the arm-presence guard (`if armed is not
+    None`) and the inner armed-ts parse block never executes the
+    happy path; the disarmed-side malformation hits the inner-branch
+    comparator (the arm-presence guard has already validated armed).
     """
     home = tmp_path / "home"; home.mkdir()
     lead_sid = "lead-sid"
     pdir = "/tmp/p"
-    team = "team-armed-bool"
+    team = "team-armed-malformed-ts"
     teammate_owner = "backend-coder"
     _write_session_context(
         home, lead_sid, pdir, team,
@@ -864,14 +947,19 @@ def test_fallback_emits_when_armed_at_is_bool(tmp_path):
     _write_task(
         home, team, "T9", status="in_progress", owner=teammate_owner,
     )
-    # armed_at as Python bool True → JSON true → loaded back as
-    # Python bool True (isinstance(True, int) is True; isinstance(True,
-    # bool) is True). With the bool-guard intact, this event is treated
-    # as malformed and the hook falls through to the fallback.
-    _write_event_with_value(home, lead_sid, pdir, "scan_armed", "armed_at", True)
-    # No scan_disarmed event; without the bool-guard, the bool True
-    # would short-circuit-suppress at the `disarmed is None → suppress`
-    # branch (since `isinstance(True, int)` is True).
+    # armed.ts as integer 42 (not str) → isinstance(armed_ts, str) is
+    # False → armed_epoch stays None → hook falls through to
+    # count_active_tasks. The composite defense (str-guard + inner
+    # try/except + outer `except Exception:`) means stripping any 1
+    # or 2 layers leaves the fall-through intact; ONLY the cumulative
+    # 3-layer strip breaks it — see composite-invariant docstring
+    # above for the empirical CUMULATIVE counter-test-by-revert recipe.
+    _write_event_with_value(home, lead_sid, pdir, "scan_armed", "ts", 42)
+    # No scan_disarmed event. The composite invariant pinned: the
+    # malformed-ts fall-through must hold. Cumulative strip of all
+    # 3 layers (str-guard + inner try/except + outer except Exception)
+    # would propagate the TypeError to main()'s top-level catch which
+    # prints _SUPPRESS_OUTPUT (under-emit, 0 Arm directives).
 
     rc, out_str, err = _run_drain(
         json.dumps({
@@ -884,42 +972,96 @@ def test_fallback_emits_when_armed_at_is_bool(tmp_path):
     assert rc == 0, f"non-zero exit; stderr={err}"
     arm_count = out_str.count("Active teammate work detected")
     assert arm_count == 1, (
-        f"armed_at=bool(True) must be rejected by the bool-guard and "
-        f"fall through to count_active_tasks (fail-conservative emit); "
-        f"got {arm_count} Arm directives in stdout={out_str!r}. "
-        f"A 0 count here indicates `not isinstance(armed_at, bool)` "
-        f"was removed — bool True flowed through the int check and "
-        f"suppressed Arm incorrectly."
+        f"scan_armed.ts=int(42) must fall through to "
+        f"count_active_tasks (fail-conservative emit) via the "
+        f"composite-layered defense (str-guard + inner strptime "
+        f"try/except + outer `except Exception:`); got {arm_count} "
+        f"Arm directives in stdout={out_str!r}. A 0 count here "
+        f"indicates ALL THREE layers were stripped cumulatively — "
+        f"the malformed-ts TypeError propagated past the producer-"
+        f"side block to main()'s top-level catch which prints "
+        f"_SUPPRESS_OUTPUT, causing under-emit incorrectly. See the "
+        f"composite-invariant docstring above for the CUMULATIVE "
+        f"counter-test-by-revert recipe (each layer individually is "
+        f"defense-in-depth; only the 3-layer cumulative strip breaks "
+        f"the invariant)."
     )
 
 
-def test_fallback_emits_when_disarmed_at_is_bool(tmp_path):
-    """Bool-vs-int discrimination invariant for disarmed_at. Symmetric
-    pin to test_fallback_emits_when_armed_at_is_bool but targeted at
-    the disarmed_at guard at the inner-branch comparison
-    `isinstance(disarmed_at, int) and not isinstance(disarmed_at, bool)
-    and armed_at > disarmed_at`.
+def test_fallback_emits_when_disarmed_ts_is_malformed_falls_through_to_count_path(tmp_path):
+    """Fail-conservative-on-malformed-ts COMPOSITE invariant for scan_disarmed.
+    Symmetric pin to
+    test_fallback_emits_when_armed_ts_is_malformed_falls_through_to_count_path
+    but targeted at the INNER-branch malformed-ts handling on
+    `disarmed_ts` parsing.
 
-    Fixture shape: armed_at is a well-typed int (so the outer arm-
-    presence branch is entered) AND disarmed_at is a bool. The inner
-    bool-guard on disarmed_at rejects it; the comparison is skipped;
-    the hook falls through to the fallback emit path.
+    Pre-#821 failure mode (bool-vs-int): Python bool False (==int 0)
+    passing through `isinstance(disarmed_at, int)` would suppress when
+    `armed_at > 0`; the `not isinstance(disarmed_at, bool)` clause
+    rejected it.
 
-    Counter-test-by-revert: removing `not isinstance(disarmed_at,
-    bool)` from wake_inbox_drain.py flips this test. The bool False
-    (==int 0) would pass the int check; the comparison
-    `armed_at(100) > disarmed_at(False==0)` is True; the hook
-    short-circuit-suppresses. Without the bool-guard, this test sees
-    0 Arm directives instead of 1.
+    Post-#821 failure mode (ts-string-malformation): the consumer
+    parses `scan_disarmed.ts` via strptime; the disarmed-side defense
+    is layered identically to the armed-side:
 
-    Distinct from the armed_at test: the disarmed_at guard is at a
-    SEPARATE site (the inner branch); removing one guard does not
-    affect the other. Two tests pin two sites independently.
+      1. Outer `try: ... except Exception:` (wake_inbox_drain.py
+         catching the producer-side block): the load-bearer that
+         catches a propagating strptime TypeError when disarmed.ts is
+         non-str (e.g., bool False). THIS is the layer the documented
+         `disarmed_ts=False` scenario exercises directly.
+
+      2. Inner `isinstance(disarmed_ts, str) and disarmed_ts` guard +
+         `try/except (TypeError, ValueError)` around strptime: defense-
+         in-depth REDUNDANCY that short-circuits cleanly on
+         recognizably-malformed disarmed_ts, sparing the outer catch.
+         NOT independently load-bearing for the documented scenario.
+
+    Fixture shape: armed_ts is a well-typed ISO string (so the
+    arm-presence guard `if armed is not None` AND the armed-side
+    str-guard both pass), AND disarmed_ts is a non-str (`False`). The
+    disarmed-side composite defense causes the comparator to be
+    skipped (whether via disarmed-side inner short-circuit or outer
+    catch); the hook falls through to fail-conservative emit.
+
+    Distinct from the armed_ts test: the disarmed_ts handling lives at
+    a SEPARATE site (the inner-branch comparator of the producer-side
+    block, AFTER the arm-presence guard has validated armed) — even
+    though the same OUTER `except Exception:` catches both sides, the
+    symmetric pin pair pins the structural symmetry of the armed-side
+    and disarmed-side parsing patterns.
+
+    Counter-test-by-revert (CUMULATIVE strip, empirical, verified by
+    review-phase F1 probe). Each row strips LAYERS ON TOP OF the prior
+    row's mutation — these are NOT 3 independent strips.
+
+      Row 1 (strip only the disarmed-side str-guard): test STILL
+        passes. The disarmed-side inner try/except catches the
+        strptime TypeError raised on ts=False.
+
+      Row 2 (CUMULATIVE: strip the disarmed-side str-guard AND the
+        disarmed-side inner try/except): test STILL passes. The outer
+        `except Exception:` catches the propagating TypeError.
+
+      Row 3 (CUMULATIVE: strip the disarmed-side str-guard AND the
+        disarmed-side inner try/except AND narrow the outer
+        `except Exception:` to `except ImportError:`): test FAILS.
+        With all three layers stripped, the malformed disarmed-ts
+        TypeError now propagates past the producer-side block to
+        main()'s top-level catch which prints _SUPPRESS_OUTPUT
+        (under-emit, 0 Arm directives observed).
+
+    What this test pins: the COMPOSITE invariant that the disarmed-
+    side malformed-ts fall-through must hold. The outer catch is the
+    cheapest single layer to remove that breaks the invariant (under
+    Row 3's cumulative mutation), but the disarmed-side str-guard
+    and inner try/except are honest defense-in-depth — they short-
+    circuit cleanly when disarmed_ts is recognizably malformed,
+    sparing the outer catch.
     """
     home = tmp_path / "home"; home.mkdir()
     lead_sid = "lead-sid"
     pdir = "/tmp/p"
-    team = "team-disarmed-bool"
+    team = "team-disarmed-malformed-ts"
     teammate_owner = "backend-coder"
     _write_session_context(
         home, lead_sid, pdir, team,
@@ -932,11 +1074,15 @@ def test_fallback_emits_when_disarmed_at_is_bool(tmp_path):
     _write_task(
         home, team, "T10", status="in_progress", owner=teammate_owner,
     )
-    # armed_at is a well-typed int; disarmed_at is bool False.
-    # Without the bool-guard, isinstance(False, int) is True and
-    # armed_at(100) > disarmed_at(0==False) suppresses incorrectly.
-    _write_scan_armed_event(home, lead_sid, pdir, armed_at=100)
-    _write_event_with_value(home, lead_sid, pdir, "scan_disarmed", "disarmed_at", False)
+    # scan_armed.ts is well-typed ISO; scan_disarmed.ts is bool False.
+    # The composite defense (disarmed-side str-guard + disarmed-side
+    # inner try/except + outer `except Exception:`) means stripping
+    # any 1 or 2 layers leaves the fall-through intact; ONLY the
+    # cumulative 3-layer strip breaks it — see composite-invariant
+    # docstring above for the empirical CUMULATIVE counter-test-by-
+    # revert recipe.
+    _write_scan_armed_event(home, lead_sid, pdir, ts=_iso_ts(100))
+    _write_event_with_value(home, lead_sid, pdir, "scan_disarmed", "ts", False)
 
     rc, out_str, err = _run_drain(
         json.dumps({
@@ -949,12 +1095,283 @@ def test_fallback_emits_when_disarmed_at_is_bool(tmp_path):
     assert rc == 0, f"non-zero exit; stderr={err}"
     arm_count = out_str.count("Active teammate work detected")
     assert arm_count == 1, (
-        f"disarmed_at=bool(False) must be rejected by the disarmed-at "
-        f"bool-guard; the hook should fall through to the fallback "
-        f"emit; got {arm_count} Arm directives in stdout={out_str!r}. "
-        f"A 0 count here indicates `not isinstance(disarmed_at, bool)` "
-        f"was removed — bool False flowed through the int check, "
-        f"armed_at(100) > 0 suppressed Arm incorrectly."
+        f"scan_disarmed.ts=bool(False) must fall through to the "
+        f"fallback emit (fail-conservative) via the composite-layered "
+        f"defense (disarmed-side str-guard + disarmed-side inner "
+        f"strptime try/except + outer `except Exception:`); got "
+        f"{arm_count} Arm directives in stdout={out_str!r}. A 0 count "
+        f"here indicates ALL THREE layers were stripped cumulatively "
+        f"— the malformed disarmed-ts TypeError propagated past the "
+        f"producer-side block to main()'s top-level catch which "
+        f"prints _SUPPRESS_OUTPUT, causing under-emit incorrectly. "
+        f"See the composite-invariant docstring above for the "
+        f"CUMULATIVE counter-test-by-revert recipe (each layer "
+        f"individually is defense-in-depth; only the 3-layer "
+        f"cumulative strip breaks the invariant)."
+    )
+
+
+# ─── Format-drift fall-through coverage (F6 from PR #820 peer-review) ──
+
+
+@pytest.mark.parametrize(
+    "drifted_ts_armed",
+    [
+        # Sub-second-fraction: strptime against `_TS_FMT = '%Y-%m-%dT%H:%M:%SZ'`
+        # raises ValueError on the trailing `.123` — fall-through expected.
+        "2026-05-15T00:00:00.123Z",
+        # Sub-second-fraction (3-digit milliseconds variant).
+        "2026-05-15T00:00:00.999Z",
+        # Mixed TZ: explicit `+00:00` offset suffix instead of `Z`. strptime
+        # against `Z`-anchored `_TS_FMT` raises ValueError on the `+00:00`.
+        "2026-05-15T00:00:00+00:00",
+        # Mixed TZ: non-zero offset. Same fail-conservative behavior.
+        "2026-05-15T00:00:00-05:00",
+        # Future-relaxation candidate: `fromisoformat`-shape with no tz suffix
+        # at all. strptime against Z-anchored format raises ValueError.
+        "2026-05-15T00:00:00",
+        # Trailing whitespace inside the string (a writer-bug variant that
+        # `isinstance(ts, str) and ts` passes but strptime rejects).
+        # EMPIRICAL: `datetime.strptime('2026-05-15T00:00:00Z ',
+        # '%Y-%m-%dT%H:%M:%SZ')` raises `ValueError: unconverted data
+        # remains:  ` on Python 3.9.6 / 3.12.7 / 3.13.5 / 3.14.5
+        # (verified 2026-05-24). This case exercises the inner
+        # try/except (TypeError, ValueError) fall-through path as the
+        # docstring claims — NOT a valid-parse-no-disarm path. Pin
+        # blocks future re-investigation of an earlier phantom claim
+        # that strptime silently ignores trailing whitespace.
+        "2026-05-15T00:00:00Z ",
+    ],
+    ids=[
+        "subsecond_3digit",
+        "subsecond_999",
+        "mixed_tz_plus0000",
+        "mixed_tz_minus0500",
+        "no_tz_suffix",
+        "trailing_whitespace",
+    ],
+)
+def test_fallback_emits_when_armed_ts_format_drifts_falls_through_to_count_path(
+    tmp_path, drifted_ts_armed
+):
+    """Format-drift fail-conservative COMPOSITE invariant for scan_armed.ts.
+
+    F6 finding from PR #820 peer-review (test-engineer Task #45): the
+    Q3 audit-prose ban on `fromisoformat` switching (and the architect
+    §3.3 binding decision against direct lex compare) BOTH rest on a
+    behavioral claim — that any `ts` shape that doesn't match the
+    canonical `%Y-%m-%dT%H:%M:%SZ` literal MUST cause the producer-
+    side idempotency check to fall through to count_active_tasks
+    (fail-conservative emit), NOT to crash, suppress incorrectly, or
+    silently misorder events. The format-drift behavior is the
+    architectural-correctness defense the strptime-not-lex-compare
+    pin (test_python_consumer_parses_ts_via_strptime_not_string_compare)
+    relies on — but until F6, no test EXERCISED the fall-through
+    behavior under format drift; only the audit-prose ban and the
+    strptime-presence pin defended the same surface structurally.
+
+    Fixture: write a `scan_armed` event with a drifted-format `ts` on
+    disk (parametrized across 6 representative drift shapes covering
+    sub-second fractions, mixed TZ suffixes, no-TZ-suffix, and
+    trailing-whitespace bug). No `scan_disarmed` event. The hook must
+    fall through to count_active_tasks (1 in-progress teammate task
+    → 1 Arm directive emit).
+
+    Layered defense (COMPOSITE invariant — what this test pins):
+
+      1. Outer `try: ... except Exception:` (wake_inbox_drain.py
+         ~696/733): catches ANY raise from the producer-side block;
+         strptime's ValueError on drifted `ts` propagates here in the
+         worst case.
+      2. Inner `try/except (TypeError, ValueError)` around strptime
+         (wake_inbox_drain.py ~717/720): catches ValueError directly,
+         sets `armed_epoch = None`, falls through cleanly without
+         escalating to the outer catch. This is the layer most
+         exercised by format-drift inputs (the str-guard at
+         `isinstance(armed_ts, str) and armed_ts` passes — all 6
+         parametrized drift shapes ARE non-empty strings — so
+         the strptime call IS reached and raises ValueError, caught
+         by the inner try/except).
+      3. `isinstance(armed_ts, str) and armed_ts` str-guard
+         (wake_inbox_drain.py ~716): defense-in-depth for non-str
+         malformed-ts (covered by the sibling _is_malformed_ test);
+         not the load-bearing layer for format-drift since drifted
+         shapes are str-typed.
+
+    Counter-test-by-revert (CUMULATIVE strip, empirical, verified
+    during F6 fold). Each row strips LAYERS ON TOP OF the prior
+    row — these are NOT independent strips. The cumulative framing
+    matches the discipline established for the Q2 retargeted-test
+    docstrings in commit-g (per secretary `0d19dfbd`).
+
+      Row 1 (strip ONLY the inner `try/except (TypeError, ValueError)`):
+        test STILL passes for all 6 parametrized drift shapes —
+        strptime's ValueError propagates past the inner catch but
+        the outer `except Exception:` still catches it, and
+        fall-through to count_active_tasks still occurs.
+
+      Row 2 (CUMULATIVE: strip the inner try/except AND narrow the
+        outer `except Exception:` to `except ImportError:`): test
+        FAILS for all 6 parametrized drift shapes — the ValueError
+        now propagates past both layers to main()'s top-level
+        catch which prints _SUPPRESS_OUTPUT (under-emit, 0 Arm
+        directives observed).
+
+    What this test pins: the COMPOSITE invariant that format-drifted
+    `ts` falls through to count_active_tasks. This DEFENDS the
+    behavioral claim that the Q3 audit-prose ban rests on —
+    `fromisoformat` switching (or any format relaxation that introduces
+    drift between writer and reader) is fail-conservative, not
+    silently-broken. Pairs with the F4 strptime-not-lex-compare pin
+    in test_pending_scan_coupling_invariant.py: F4 pins the STRUCTURAL
+    shape (consumer uses strptime CALL with result-binding); F6 pins
+    the BEHAVIORAL outcome (drifted format → fall-through).
+    Together they form the test-coverage defense for the
+    architectural decision to use strptime rather than lex compare.
+
+    Symmetric pin for scan_disarmed.ts in
+    test_fallback_emits_when_disarmed_ts_format_drifts_falls_through_to_count_path.
+    """
+    home = tmp_path / "home"; home.mkdir()
+    lead_sid = "lead-sid"
+    pdir = "/tmp/p"
+    team = f"team-armed-format-drift"
+    teammate_owner = "backend-coder"
+    _write_session_context(
+        home, lead_sid, pdir, team,
+        members=[
+            {"name": teammate_owner, "agentId": "agent-bc"},
+            {"name": "lead", "agentId": "agent-lead"},
+        ],
+        lead_agent_id="agent-lead",
+    )
+    _write_task(
+        home, team, "T-fd", status="in_progress", owner=teammate_owner,
+    )
+    # armed.ts is a str (passes isinstance check) but does NOT match the
+    # canonical _TS_FMT → strptime raises ValueError → inner
+    # try/except catches → armed_epoch stays None → hook falls
+    # through to count_active_tasks (fail-conservative emit).
+    _write_event_with_value(
+        home, lead_sid, pdir, "scan_armed", "ts", drifted_ts_armed,
+    )
+    # No scan_disarmed event.
+
+    rc, out_str, err = _run_drain(
+        json.dumps({
+            "session_id": lead_sid, "cwd": pdir,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        }),
+        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+    )
+    assert rc == 0, f"non-zero exit; stderr={err}"
+    arm_count = out_str.count("Active teammate work detected")
+    assert arm_count == 1, (
+        f"scan_armed.ts={drifted_ts_armed!r} (format-drift shape) MUST "
+        f"fall through to count_active_tasks (fail-conservative emit) "
+        f"via the composite-layered defense (inner strptime "
+        f"try/except + outer `except Exception:`); got {arm_count} Arm "
+        f"directives in stdout={out_str!r}. A 0 count here indicates "
+        f"the inner try/except AND the outer except Exception were "
+        f"BOTH stripped cumulatively — the strptime ValueError "
+        f"propagated to main()'s top-level catch which prints "
+        f"_SUPPRESS_OUTPUT, causing under-emit incorrectly. This is "
+        f"the BEHAVIORAL counterpart to the F4 strptime-not-lex-compare "
+        f"structural pin in test_pending_scan_coupling_invariant.py; "
+        f"the Q3 audit-prose ban on fromisoformat (and the architect "
+        f"§3.3 binding against direct lex compare) rests on this "
+        f"format-drift fall-through behavior being load-bearing."
+    )
+
+
+@pytest.mark.parametrize(
+    "drifted_ts_disarmed",
+    [
+        "2026-05-15T00:00:00.123Z",
+        "2026-05-15T00:00:00.999Z",
+        "2026-05-15T00:00:00+00:00",
+        "2026-05-15T00:00:00-05:00",
+        "2026-05-15T00:00:00",
+        "2026-05-15T00:00:00Z ",
+    ],
+    ids=[
+        "subsecond_3digit",
+        "subsecond_999",
+        "mixed_tz_plus0000",
+        "mixed_tz_minus0500",
+        "no_tz_suffix",
+        "trailing_whitespace",
+    ],
+)
+def test_fallback_emits_when_disarmed_ts_format_drifts_falls_through_to_count_path(
+    tmp_path, drifted_ts_disarmed
+):
+    """Format-drift fail-conservative COMPOSITE invariant for
+    scan_disarmed.ts. Symmetric pin to
+    test_fallback_emits_when_armed_ts_format_drifts_falls_through_to_count_path
+    targeting the INNER-branch comparator's disarmed-side strptime
+    parse.
+
+    Fixture: armed.ts is well-typed canonical ISO; disarmed.ts is a
+    drifted-format str. The arm-presence guard passes; the inner
+    armed-side strptime succeeds; armed_epoch is well-typed. Then
+    the inner disarmed-side strptime raises ValueError on the
+    drifted disarmed.ts; the disarmed-side inner try/except catches;
+    disarmed_epoch stays None; the
+    `disarmed_epoch is not None and armed_epoch > disarmed_epoch`
+    comparison is skipped; the hook falls through to
+    count_active_tasks.
+
+    Counter-test-by-revert cumulative recipe is symmetric to the
+    armed-side test — see armed-side docstring for the layered
+    defense and the empirical cumulative-strip rows.
+    """
+    home = tmp_path / "home"; home.mkdir()
+    lead_sid = "lead-sid"
+    pdir = "/tmp/p"
+    team = "team-disarmed-format-drift"
+    teammate_owner = "backend-coder"
+    _write_session_context(
+        home, lead_sid, pdir, team,
+        members=[
+            {"name": teammate_owner, "agentId": "agent-bc"},
+            {"name": "lead", "agentId": "agent-lead"},
+        ],
+        lead_agent_id="agent-lead",
+    )
+    _write_task(
+        home, team, "T-fd", status="in_progress", owner=teammate_owner,
+    )
+    # armed.ts is well-typed canonical; disarmed.ts is format-drift.
+    _write_scan_armed_event(home, lead_sid, pdir, ts=_iso_ts(100))
+    _write_event_with_value(
+        home, lead_sid, pdir, "scan_disarmed", "ts", drifted_ts_disarmed,
+    )
+
+    rc, out_str, err = _run_drain(
+        json.dumps({
+            "session_id": lead_sid, "cwd": pdir,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+        }),
+        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+    )
+    assert rc == 0, f"non-zero exit; stderr={err}"
+    arm_count = out_str.count("Active teammate work detected")
+    assert arm_count == 1, (
+        f"scan_disarmed.ts={drifted_ts_disarmed!r} (format-drift shape) "
+        f"MUST fall through to count_active_tasks (fail-conservative "
+        f"emit) via the composite-layered defense (disarmed-side inner "
+        f"strptime try/except + outer `except Exception:`); got "
+        f"{arm_count} Arm directives in stdout={out_str!r}. A 0 count "
+        f"here indicates the inner disarmed-side try/except AND the "
+        f"outer except Exception were BOTH stripped cumulatively — "
+        f"the strptime ValueError propagated to main()'s top-level "
+        f"catch which prints _SUPPRESS_OUTPUT, causing under-emit "
+        f"incorrectly. Pairs with the F4 strptime-not-lex-compare "
+        f"structural pin; F6 BEHAVIORAL defense for the format-drift "
+        f"fall-through invariant."
     )
 
 
