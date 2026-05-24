@@ -667,8 +667,22 @@ def _decide_and_emit(input_data: dict) -> None:
     # if absent and falls through to the existing emit behavior —
     # over-emit is benign under the skill body's CronList exact-suffix-
     # match idempotency; under-emit could miss a teammate's completion-
-    # authority signal. The per-side str-guard + inner strptime
-    # try/except keep the comparator fail-conservative on malformed ts.
+    # authority signal. Layered defense (COMPOSITE invariant): the
+    # malformed-ts fall-through is pinned by the composite of three
+    # layers — (1) the per-side `isinstance(ts, str) and ts` guard,
+    # (2) the inner `try: strptime / except (TypeError, ValueError)`,
+    # and (3) the OUTER `except Exception:` below. For the documented
+    # malformed-ts cases (ts=42, ts=False, ts=None, ts='', unparseable
+    # str), stripping any 1 or 2 layers leaves the fall-through intact;
+    # ONLY the cumulative strip of all 3 layers breaks it. The outer
+    # catch is the cheapest single layer to break the invariant under
+    # cumulative strip; the inner str-guard + inner try/except are
+    # honest defense-in-depth — short-circuiting cleanly when ts is
+    # recognizably malformed (sparing the outer catch) AND coverage
+    # for future unknown failure modes (e.g., a future ts shape that
+    # strptime accepts but yields a nonsense epoch). See the
+    # CUMULATIVE 3-row counter-test recipe in test_wake_inbox_drain.py
+    # Q2 retargeted test docstrings (post-F1+D1 reframe).
     #
     # Outer-except rationale: the producer-side check has a strict
     # fail-conservative contract — any unexpected failure must fall

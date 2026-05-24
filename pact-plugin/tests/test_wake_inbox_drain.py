@@ -897,22 +897,39 @@ def test_fallback_emits_when_armed_ts_is_malformed_falls_through_to_count_path(t
          that strptime accepts but yields a nonsense epoch); NOT
          independent load-bearers for the documented `ts=42` scenario.
 
-    Counter-test-by-revert (empirical, verified by TEST phase):
-      - Strip only the str-guard: test STILL passes (inner try/except
-        catches the strptime TypeError).
-      - Strip the str-guard AND the inner try/except: test STILL passes
-        (outer `except Exception:` catches the propagating TypeError).
-      - Strip the outer `except Exception:`: test FAILS — the
-        malformed-ts TypeError now propagates to main()'s top-level
-        catch which prints _SUPPRESS_OUTPUT (under-emit, 0 Arm
-        directives observed).
-    Conclusion: the outer catch is the contract this test pins; the
-    inner layers are honest defense-in-depth, not pinned by this test.
+    Counter-test-by-revert (CUMULATIVE strip, empirical, verified by
+    review-phase F1 probe). Each row strips LAYERS ON TOP OF the prior
+    row's mutation — these are NOT 3 independent strips.
+
+      Row 1 (strip only the str-guard): test STILL passes. The inner
+        try/except catches the strptime TypeError raised on ts=42.
+
+      Row 2 (CUMULATIVE: strip the str-guard AND the inner try/except):
+        test STILL passes. The outer `except Exception:` catches the
+        propagating TypeError.
+
+      Row 3 (CUMULATIVE: strip the str-guard AND the inner try/except
+        AND narrow the outer `except Exception:` to `except ImportError:`):
+        test FAILS. With all three layers stripped, the malformed-ts
+        TypeError now propagates past the producer-side block to
+        main()'s top-level catch which prints _SUPPRESS_OUTPUT
+        (under-emit, 0 Arm directives observed).
+
+    What this test pins: the COMPOSITE invariant that the malformed-ts
+    fall-through must hold. The outer catch is the cheapest single
+    layer to remove that breaks the invariant (under Row 3's
+    cumulative mutation), but Row 1 + Row 2 demonstrate that the
+    str-guard and inner try/except are honest defense-in-depth —
+    they short-circuit cleanly when ts is recognizably malformed,
+    sparing the outer catch, AND they are robust against future
+    hypothetical refactors that might widen / narrow / replace the
+    outer catch.
 
     Distinct from the symmetric ..._disarmed_ts_... test: the armed-
-    side malformation hits the OUTER arm-presence branch (the inner
-    block never enters); the disarmed-side malformation hits the INNER
-    branch comparator (the outer block has already validated armed).
+    side malformation hits the arm-presence guard (`if armed is not
+    None`) and the inner armed-ts parse block never executes the
+    happy path; the disarmed-side malformation hits the inner-branch
+    comparator (the arm-presence guard has already validated armed).
     """
     home = tmp_path / "home"; home.mkdir()
     lead_sid = "lead-sid"
@@ -932,16 +949,17 @@ def test_fallback_emits_when_armed_ts_is_malformed_falls_through_to_count_path(t
     )
     # armed.ts as integer 42 (not str) → isinstance(armed_ts, str) is
     # False → armed_epoch stays None → hook falls through to
-    # count_active_tasks. Even with the str-guard and inner try/except
-    # both stripped, the outer `except Exception:` catches the
-    # propagating TypeError from strptime(42, FMT) and the hook still
-    # falls through — see composite-invariant docstring above for the
-    # layered counter-test-by-revert recipe.
+    # count_active_tasks. The composite defense (str-guard + inner
+    # try/except + outer `except Exception:`) means stripping any 1
+    # or 2 layers leaves the fall-through intact; ONLY the cumulative
+    # 3-layer strip breaks it — see composite-invariant docstring
+    # above for the empirical CUMULATIVE counter-test-by-revert recipe.
     _write_event_with_value(home, lead_sid, pdir, "scan_armed", "ts", 42)
-    # No scan_disarmed event. The outer `except Exception:` is the
-    # load-bearer this test pins; removing it would propagate the
-    # malformed-ts TypeError to main()'s top-level catch which prints
-    # _SUPPRESS_OUTPUT (under-emit, 0 Arm directives).
+    # No scan_disarmed event. The composite invariant pinned: the
+    # malformed-ts fall-through must hold. Cumulative strip of all
+    # 3 layers (str-guard + inner try/except + outer except Exception)
+    # would propagate the TypeError to main()'s top-level catch which
+    # prints _SUPPRESS_OUTPUT (under-emit, 0 Arm directives).
 
     rc, out_str, err = _run_drain(
         json.dumps({
@@ -956,14 +974,17 @@ def test_fallback_emits_when_armed_ts_is_malformed_falls_through_to_count_path(t
     assert arm_count == 1, (
         f"scan_armed.ts=int(42) must fall through to "
         f"count_active_tasks (fail-conservative emit) via the "
-        f"composite-layered defense (str-guard, inner strptime "
-        f"try/except, outer `except Exception:`); got {arm_count} "
+        f"composite-layered defense (str-guard + inner strptime "
+        f"try/except + outer `except Exception:`); got {arm_count} "
         f"Arm directives in stdout={out_str!r}. A 0 count here "
-        f"indicates the outer `except Exception:` was removed — "
-        f"the malformed-ts TypeError propagated to main()'s "
-        f"top-level catch which prints _SUPPRESS_OUTPUT, causing "
-        f"under-emit incorrectly. See the composite-invariant "
-        f"docstring above for which layer this test pins."
+        f"indicates ALL THREE layers were stripped cumulatively — "
+        f"the malformed-ts TypeError propagated past the producer-"
+        f"side block to main()'s top-level catch which prints "
+        f"_SUPPRESS_OUTPUT, causing under-emit incorrectly. See the "
+        f"composite-invariant docstring above for the CUMULATIVE "
+        f"counter-test-by-revert recipe (each layer individually is "
+        f"defense-in-depth; only the 3-layer cumulative strip breaks "
+        f"the invariant)."
     )
 
 
@@ -995,31 +1016,47 @@ def test_fallback_emits_when_disarmed_ts_is_malformed_falls_through_to_count_pat
          recognizably-malformed disarmed_ts, sparing the outer catch.
          NOT independently load-bearing for the documented scenario.
 
-    Fixture shape: armed_ts is a well-typed ISO string (so the outer
-    arm-presence branch is entered AND armed_epoch is well-typed),
-    AND disarmed_ts is a non-str (`False`). The composite defense
-    causes the comparator to be skipped (whether via inner short-
-    circuit or outer catch); the hook falls through to fail-
-    conservative emit.
+    Fixture shape: armed_ts is a well-typed ISO string (so the
+    arm-presence guard `if armed is not None` AND the armed-side
+    str-guard both pass), AND disarmed_ts is a non-str (`False`). The
+    disarmed-side composite defense causes the comparator to be
+    skipped (whether via disarmed-side inner short-circuit or outer
+    catch); the hook falls through to fail-conservative emit.
 
     Distinct from the armed_ts test: the disarmed_ts handling lives at
-    a SEPARATE site (the inner branch of the producer-side block) —
-    even though the OUTER `except Exception:` catches both sides, the
-    symmetric pin pair pins the structural symmetry of the
-    armed-side and disarmed-side parsing patterns.
+    a SEPARATE site (the inner-branch comparator of the producer-side
+    block, AFTER the arm-presence guard has validated armed) — even
+    though the same OUTER `except Exception:` catches both sides, the
+    symmetric pin pair pins the structural symmetry of the armed-side
+    and disarmed-side parsing patterns.
 
-    Counter-test-by-revert (empirical, verified by TEST phase):
-      - Strip only the disarmed-side str-guard: test STILL passes
-        (inner try/except catches the strptime TypeError).
-      - Strip the disarmed-side str-guard AND the inner try/except:
-        test STILL passes (outer `except Exception:` catches the
-        propagating TypeError).
-      - Strip the outer `except Exception:`: test FAILS — the
-        malformed disarmed-ts TypeError propagates to main()'s top-
-        level catch which prints _SUPPRESS_OUTPUT (under-emit, 0 Arm
-        directives observed).
-    Conclusion: the outer catch is the contract this test pins; the
-    inner disarmed-side layers are honest defense-in-depth.
+    Counter-test-by-revert (CUMULATIVE strip, empirical, verified by
+    review-phase F1 probe). Each row strips LAYERS ON TOP OF the prior
+    row's mutation — these are NOT 3 independent strips.
+
+      Row 1 (strip only the disarmed-side str-guard): test STILL
+        passes. The disarmed-side inner try/except catches the
+        strptime TypeError raised on ts=False.
+
+      Row 2 (CUMULATIVE: strip the disarmed-side str-guard AND the
+        disarmed-side inner try/except): test STILL passes. The outer
+        `except Exception:` catches the propagating TypeError.
+
+      Row 3 (CUMULATIVE: strip the disarmed-side str-guard AND the
+        disarmed-side inner try/except AND narrow the outer
+        `except Exception:` to `except ImportError:`): test FAILS.
+        With all three layers stripped, the malformed disarmed-ts
+        TypeError now propagates past the producer-side block to
+        main()'s top-level catch which prints _SUPPRESS_OUTPUT
+        (under-emit, 0 Arm directives observed).
+
+    What this test pins: the COMPOSITE invariant that the disarmed-
+    side malformed-ts fall-through must hold. The outer catch is the
+    cheapest single layer to remove that breaks the invariant (under
+    Row 3's cumulative mutation), but the disarmed-side str-guard
+    and inner try/except are honest defense-in-depth — they short-
+    circuit cleanly when disarmed_ts is recognizably malformed,
+    sparing the outer catch.
     """
     home = tmp_path / "home"; home.mkdir()
     lead_sid = "lead-sid"
@@ -1038,12 +1075,12 @@ def test_fallback_emits_when_disarmed_ts_is_malformed_falls_through_to_count_pat
         home, team, "T10", status="in_progress", owner=teammate_owner,
     )
     # scan_armed.ts is well-typed ISO; scan_disarmed.ts is bool False.
-    # Even with the inner str-guard and inner try/except both stripped,
-    # the propagating strptime(False, FMT) TypeError is caught by the
-    # OUTER `except Exception:` block — execution falls through to
-    # count_active_tasks (fail-conservative emit). The outer catch is
-    # the load-bearer this test pins; see composite-invariant
-    # docstring above for the layered counter-test-by-revert recipe.
+    # The composite defense (disarmed-side str-guard + disarmed-side
+    # inner try/except + outer `except Exception:`) means stripping
+    # any 1 or 2 layers leaves the fall-through intact; ONLY the
+    # cumulative 3-layer strip breaks it — see composite-invariant
+    # docstring above for the empirical CUMULATIVE counter-test-by-
+    # revert recipe.
     _write_scan_armed_event(home, lead_sid, pdir, ts=_iso_ts(100))
     _write_event_with_value(home, lead_sid, pdir, "scan_disarmed", "ts", False)
 
@@ -1060,14 +1097,17 @@ def test_fallback_emits_when_disarmed_ts_is_malformed_falls_through_to_count_pat
     assert arm_count == 1, (
         f"scan_disarmed.ts=bool(False) must fall through to the "
         f"fallback emit (fail-conservative) via the composite-layered "
-        f"defense (disarmed-side str-guard, inner strptime try/except, "
-        f"outer `except Exception:`); got {arm_count} Arm directives "
-        f"in stdout={out_str!r}. A 0 count here indicates the outer "
-        f"`except Exception:` was removed — the malformed disarmed-ts "
-        f"TypeError propagated to main()'s top-level catch which "
+        f"defense (disarmed-side str-guard + disarmed-side inner "
+        f"strptime try/except + outer `except Exception:`); got "
+        f"{arm_count} Arm directives in stdout={out_str!r}. A 0 count "
+        f"here indicates ALL THREE layers were stripped cumulatively "
+        f"— the malformed disarmed-ts TypeError propagated past the "
+        f"producer-side block to main()'s top-level catch which "
         f"prints _SUPPRESS_OUTPUT, causing under-emit incorrectly. "
-        f"See the composite-invariant docstring above for which "
-        f"layer this test pins."
+        f"See the composite-invariant docstring above for the "
+        f"CUMULATIVE counter-test-by-revert recipe (each layer "
+        f"individually is defense-in-depth; only the 3-layer "
+        f"cumulative strip breaks the invariant)."
     )
 
 

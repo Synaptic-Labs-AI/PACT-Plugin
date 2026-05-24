@@ -3686,6 +3686,86 @@ class TestValidateEventSchemaPerType:
         ) in result.stderr
         assert not journal_file.exists() or journal_file.read_text() == ""
 
+    def test_legacy_scan_armed_with_armed_at_extra_field_validates_bc_safe(self):
+        """BC-safety migration contract for #821 ts-unification (DELETE
+        path per architect Q1 binding).
+
+        #821 deleted `armed_at` from _REQUIRED_FIELDS_BY_TYPE["scan_armed"]
+        (the schema entry is now `{}`) and the writer at
+        commands/start-pending-scan.md Step 5 no longer emits the
+        `armed_at` field. The DELETE-vs-DEPRECATE binding decision rests
+        on the lenient-validator contract: an OLD journal event from
+        before #821 carrying BOTH the auto-stamped `ts` ISO string AND
+        the now-deprecated `armed_at: int` extra field MUST still pass
+        `_validate_event_schema` so post-#821 readers can continue
+        consuming legacy journals without rewrite.
+
+        Symmetric pin for `scan_disarmed.disarmed_at`.
+
+        Counter-test-by-revert: if a future refactor changes
+        `_validate_event_schema` from open-schema (extras pass silently)
+        to closed-schema (extras rejected), this test FAILS — and the
+        failure message names the BC-safety contract that broke.
+
+        This test SUPPLEMENTS the side-effect coverage at
+        TestReadLastEventTailStreamed lines ~884/919 (which write
+        `make_event("scan_armed", armed_at=N)` as a unique-identifier
+        marker for tail-window position-recovery tests) by EXPLICITLY
+        pinning the migration contract rather than relying on it as an
+        unintended-consequence pass.
+
+        References:
+          - architect #821 §3.1 Q1 (schema entry `{}` not REMOVE,
+            relies on lenient validator for BC).
+          - PREPARE #821 §4 (lenient-validator empirical probe) + §7
+            (live-journal byte-identity evidence).
+          - The producer-side idempotency check at
+            hooks/wake_inbox_drain.py:~696-734 reads only `ts`, not
+            `armed_at` — a legacy event's extra `armed_at` is
+            ignored.
+        """
+        from shared.session_journal import _validate_event_schema
+
+        legacy_scan_armed_event = {
+            "v": 1,
+            "type": "scan_armed",
+            "ts": "2026-05-18T23:37:44Z",
+            "armed_at": 1779147464,  # pre-#821 integer-epoch field
+        }
+        ok, reason = _validate_event_schema(legacy_scan_armed_event)
+        assert ok is True, (
+            f"Legacy scan_armed event with `armed_at` extra field MUST "
+            f"validate (BC-safety migration contract per architect "
+            f"#821 §3.1 Q1). Got ok={ok}, reason={reason!r}. A False "
+            f"result here indicates _validate_event_schema has shifted "
+            f"from open-schema (extras pass silently) to closed-schema "
+            f"(extras rejected) — the #821 DELETE-vs-DEPRECATE binding "
+            f"decision rests on lenient-validator behavior; this "
+            f"regression would break readers consuming legacy journals."
+        )
+        assert reason == "ok", (
+            f"BC-safety: lenient validator must return 'ok' for "
+            f"legacy event with `armed_at` extra; got {reason!r}."
+        )
+
+        legacy_scan_disarmed_event = {
+            "v": 1,
+            "type": "scan_disarmed",
+            "ts": "2026-05-19T07:34:35Z",
+            "disarmed_at": 1779176075,  # pre-#821 integer-epoch field
+        }
+        ok, reason = _validate_event_schema(legacy_scan_disarmed_event)
+        assert ok is True, (
+            f"Legacy scan_disarmed event with `disarmed_at` extra "
+            f"field MUST validate (BC-safety migration contract per "
+            f"architect #821 §3.1 Q1, symmetric to scan_armed). Got "
+            f"ok={ok}, reason={reason!r}."
+        )
+        assert reason == "ok", (
+            f"BC-safety: lenient validator must return 'ok' for "
+            f"legacy event with `disarmed_at` extra; got {reason!r}."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Per-type optional-field validation (BR-M2)

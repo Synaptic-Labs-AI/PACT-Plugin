@@ -18,11 +18,13 @@ What is verified:
   decision; Step 0.5 fires on the latest teardown_request.
 - Fail-open contract: empty session dir / no scan_armed event causes
   empty extractor output and gate falls through.
-- ISO→epoch conversion round-trips correctly across the strptime
-  literal `%Y-%m-%dT%H:%M:%SZ` (coupling pair with
-  session_journal.py:325 make_event format) — uniform across all
-  three event types (teardown_request.ts, scan_armed.ts,
-  scan_disarmed.ts).
+- Uniform-strptime parsing round-trips correctly across the canonical
+  `%Y-%m-%dT%H:%M:%SZ` format literal (coupling pair with
+  session_journal.py:325 make_event format) — under #821's
+  ts-unification, all three pending-scan event types
+  (teardown_request.ts, scan_armed.ts, scan_disarmed.ts) carry only
+  the auto-stamped `ts` field and are parsed uniformly via strptime
+  → int epoch for `-gt` comparison.
 
 The bash block is extracted from `commands/scan-pending-tasks.md`
 Step 0.5 via a section-bounded search (`\\n0.5. ` to `\\n1. `) and
@@ -54,8 +56,9 @@ SJ_PATH = PLUGIN_ROOT / "hooks" / "shared" / "session_journal.py"
 
 # Coupling pair partner: this literal MUST equal session_journal.py:325
 # `make_event` ts format. Any drift between the two silently breaks the
-# ISO→epoch conversion in Step 0.5 (the read returns a string the bash
-# integer comparison cannot parse).
+# uniform-strptime parsing in Step 0.5 (the read returns a string the
+# bash strptime call cannot match, yielding empty output and gate
+# fall-through under the fail-open contract).
 ISO_FORMAT_LITERAL = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -126,8 +129,8 @@ def _write_journal(session_dir: Path, event_type: str, payload: dict) -> Path:
     This helper is intentionally independent from the one in
     test_scan_pending_tasks_warmup_grace.py — its `ts` value is
     deliberately distinct (matches make_event format vs. the older
-    test's `+00:00` shape) so the Step 0.5 ISO→epoch conversion is
-    exercised against the canonical on-disk shape.
+    test's `+00:00` shape) so the Step 0.5 uniform-strptime parsing
+    is exercised against the canonical on-disk shape.
     """
     session_dir.mkdir(parents=True, exist_ok=True)
     journal = session_dir / "session-journal.jsonl"
@@ -379,13 +382,15 @@ def test_step_0_5_falls_through_when_only_teardown_request_no_arm(
 def test_step_0_5_strptime_round_trip_uniform_across_three_sources(
     tmp_path, step_0_5_bash_template
 ):
-    """Uniform-strptime coupling contract: all three Step 0.5 extractors
-    (`teardown_request.ts`, `scan_armed.ts`, `scan_disarmed.ts`) parse
-    ISO-8601 UTC strings via the same strptime literal
-    `%Y-%m-%dT%H:%M:%SZ` and yield integer-comparable epochs. This
-    pins the byte-identity contract between session_journal.make_event's
-    format string and the Step 0.5 extractor literal — any drift in
-    either makes the comparison silently fail.
+    """Uniform-strptime coupling contract: under #821's ts-unification,
+    all three Step 0.5 extractors (`teardown_request.ts`,
+    `scan_armed.ts`, `scan_disarmed.ts`) parse the auto-stamped
+    ISO-8601 UTC `ts` field via the same strptime literal
+    `%Y-%m-%dT%H:%M:%SZ` and yield int epochs for `-gt` comparison.
+    This pins the byte-identity contract between
+    session_journal.make_event's format string and the Step 0.5
+    extractor literal — any drift in either makes the comparison
+    silently fail.
 
     Verifies the round-trip across all three sources: arrange a journal
     with deterministic anchors where the latest `scan_disarmed` is
@@ -424,9 +429,10 @@ def test_step_0_5_strptime_round_trip_uniform_across_three_sources(
     assert SENTINEL in result.stdout, (
         f"Step 0.5 should have FALLEN THROUGH — scan_disarmed.ts "
         f"(anchor+2s) > teardown_request.ts (anchor+1s) > "
-        f"scan_armed.ts (anchor). All three extractors must parse via "
-        f"strptime to produce integer-comparable epochs that satisfy "
-        f"the already-serviced branch. Sentinel {SENTINEL!r} absent in "
+        f"scan_armed.ts (anchor). All three extractors must parse the "
+        f"auto-stamped `ts` field uniformly via strptime to produce "
+        f"int epochs that satisfy the already-serviced branch. "
+        f"Sentinel {SENTINEL!r} absent in "
         f"stdout indicates one of the strptime conversions failed "
         f"(format literal mismatch with session_journal.make_event) "
         f"or returned a wrong epoch. stdout={result.stdout!r} "

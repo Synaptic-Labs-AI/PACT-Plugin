@@ -214,7 +214,7 @@ This step empirically verifies the Option D self-correcting fallback path that c
 
 **Action**: Inspect the ISO format literal in the Step 0.5 bash block. Compare against `session_journal.py` `make_event` line 325.
 
-**Expected**: Both contain the identical literal `"%Y-%m-%dT%H:%M:%SZ"`. Any drift would silently break the ISO→epoch conversion.
+**Expected**: Both contain the identical literal `"%Y-%m-%dT%H:%M:%SZ"`. Under #821's ts-unification, all three pending-scan events (scan_armed, scan_disarmed, teardown_request) carry only the auto-stamped `ts` field, and the Step 0 / Step 0.5 bash extractors parse all three via strptime against this literal. Any drift between this literal and make_event's format string would silently break the uniform-strptime parsing.
 
 **Acceptance**: `grep -c '%Y-%m-%dT%H:%M:%SZ' pact-plugin/commands/scan-pending-tasks.md` returns `>=2` (Step 0.5 bash extractor + audit prose both reference the literal by design). `grep -c '%Y-%m-%dT%H:%M:%SZ' pact-plugin/hooks/shared/session_journal.py` returns `>=1` (`make_event` and any callers contain it). The literal must match BYTE-IDENTICAL across both files.
 
