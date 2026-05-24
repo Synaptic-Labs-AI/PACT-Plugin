@@ -339,6 +339,33 @@ def test_python_consumer_parses_ts_via_strptime_not_string_compare():
         AST pin. F4-future-extension candidate if a Row-5-shape
         mutant is observed in the wild; deferred as a residual.
 
+    Span localization anchor stability (parallel to Row 5): the
+    span localization walk above keys on two string literals — the
+    function name `read_last_event` and the Constant arg
+    `"scan_armed"` (the first walk that finds the producer
+    FunctionDef; the inner Try walk also gates on both `"scan_armed"`
+    and `"scan_disarmed"`). If a future refactor renames either the
+    journal-read helper (e.g., `read_last_event` →
+    `read_latest_event_of_type`) or the lifecycle event-type strings,
+    the AST walk fails LOUD via the two asserts below — message text
+    explicitly names the expected function/Constant pair so the
+    future-editor's grep target is the assert message itself.
+    Alternative anchors considered: (i) a `_decide_and_emit`-style
+    FunctionDef-name anchor (more stable across journal-API rename
+    but couples to producer function name, which the same refactor
+    might also rename); (ii) a `# Producer-side deterministic Python
+    check` comment-block anchor (least stable — comment text drifts
+    freely). Current anchor is most-specific-to-producer-semantics
+    but co-fragile with journal-API name. Trade-off accepted: the
+    failure mode is fail-loud not silent, parallel to the Row-5
+    decision. Closing this residual would require either a fallback
+    chain of alternative anchors (added complexity, additional code
+    paths to maintain) or coupling the test to a less-specific anchor
+    (loses Row-2/3/4 phantom-green resolution). Empirically verified
+    fail-loud-on-rename via cp-revert-restore probe. Deferred as a
+    residual; future-extension candidate if a journal-API rename
+    actually lands.
+
     What this test pins: the COMPOSITE invariant that EVERY `_epoch`
     assignment inside the producer-side Try produces the load-bearing
     int+strptime+_TS_FMT shape (or the fail-conservative None reset)
