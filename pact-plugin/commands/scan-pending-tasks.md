@@ -32,7 +32,7 @@ Cron-fire body — silent read; emit nothing unless a real artifact is on disk f
    ```bash
    SJ="{plugin_root}/hooks/shared/session_journal.py"
    SD='{session_dir}'
-   ARMED_AT=$(python3 "$SJ" read-last --type scan_armed --session-dir "$SD" | python3 -c 'import json,sys,datetime; e=json.load(sys.stdin); print(int(datetime.datetime.strptime(e["ts"],"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()) if e else "")')
+   ARMED_AT=$(python3 "$SJ" read-last --type scan_armed --session-dir "$SD" | python3 -c 'import json,sys,datetime; e=json.load(sys.stdin); print(int(datetime.datetime.strptime(e["ts"],"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()) if e else "")' 2>/dev/null)
    if [ -n "$ARMED_AT" ]; then
        delta=$(( $(date +%s) - ARMED_AT ))
        if [ $delta -ge 0 ] && [ $delta -lt 300 ]; then exit 0; fi
@@ -40,6 +40,8 @@ Cron-fire body — silent read; emit nothing unless a real artifact is on disk f
    ```
 
    Fail-open: `read-last` returns literal `null` on missing journal / no events / corrupt JSONL. The `python3 -c` extraction yields empty string in those cases; `[ -n "$ARMED_AT" ]` is false; the gate falls through to Step 1.
+
+   Stderr suppression: the `2>/dev/null` redirect on the inner `python3 -c` extractor silences Python tracebacks (TypeError / ValueError / KeyError) that would otherwise surface in the cron-fire LLM-turn output when the journal contains a malformed `ts` (writer-bug, schema-drift, or corruption — e.g., `ts=42`, `ts=null`, `ts=""`, unparseable string). The fail-open contract is preserved unchanged: the extractor's stdout is still empty on failure, `[ -n "$ARMED_AT" ]` is still false, and the gate still falls through to Step 1. Trade-off: stderr-clean cron-fire turns (no traceback noise to the user) vs lost operator diagnostic visibility under journal corruption (a malformed `ts` no longer surfaces as a visible Python traceback; the only signal is the silent fall-through). Acceptable because the fail-open behavior is intentional and the journal-shape contract is pinned at write time by `session_journal.py`'s `_validate_event_schema`. A future editor MUST NOT redirect stdout (`>/dev/null` or `&>/dev/null`) — that would defeat the fail-open guard which depends on the extractor emitting empty-string on failure.
 
    Negative-delta guard: `[ $delta -ge 0 ]` forces a future-dated `scan_armed.ts` (clock skew / adversarial write) to fall through. Without it, negative deltas would always pass `-lt 300` — the gate would become a kill-switch.
 
