@@ -4,18 +4,18 @@ Location: pact-plugin/hooks/session_init.py
 Summary: SessionStart hook that initializes PACT environment.
 Used by: Claude Code settings.json SessionStart hook
 
-Performs:
+Performs PACT environment initialization:
 0. Checks if ~/.claude/teams is in additionalDirectories (emits setup tip if not configured)
 1. Creates plugin symlinks for @reference resolution
 3. Ensures project CLAUDE.md exists with memory sections
 3b. One-time migration: wraps existing project CLAUDE.md in PACT_MANAGED boundary (#404)
-3c. Strips orphan PACT_ROUTING blocks from project CLAUDE.md (sunsets before v4.2.x)
-4. Checks for stale pinned context (delegated to staleness.py)
+3d. Strips obsolete PACT_START/PACT_END kernel block from ~/.claude/CLAUDE.md (sunsets before v5.0.0)
+4. Checks for stale pinned context entries in project CLAUDE.md (delegated to staleness.py)
 5. Generates session-unique PACT team name and reminds orchestrator to create it
 5b. Writes session resume info (resume command, team, timestamp) to project CLAUDE.md
 6. Checks for in_progress Tasks (resumption context via Task integration)
-7. Restores last session snapshot
-8. Checks for paused work from previous /PACT:pause invocation
+7. Restores last session snapshot for cross-session continuity
+8. Checks for paused work from previous session's /PACT:pause
 
 Note: Plan detection (scanning docs/plans/) was removed from session startup
 to reduce latency. Plan detection is deferred to /PACT:orchestrate, which
@@ -90,7 +90,6 @@ from shared.claude_md_manager import (
     migrate_to_managed_structure,
     resolve_project_claude_md_path,
     strip_orphan_kernel_block,
-    _strip_legacy_lines,
 )
 from shared.merge_guard_common import (
     TOKEN_DIR,
@@ -397,9 +396,8 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
         # either a corrupted Session-dir match or a fallback-regex hit
         # on a half-written SESSION_START block. The lock serializes
         # against the writer. Re-entrancy is safe: this read at step 5a
-        # runs AFTER strip_orphan_routing_markers (step 3c) released
-        # its lock, and BEFORE update_session_info (step 5b) acquires
-        # its own. No nesting; fail-open on TimeoutError per file_lock
+        # runs BEFORE update_session_info (step 5b) acquires its own
+        # lock. No nesting; fail-open on TimeoutError per file_lock
         # contract.
         try:
             with file_lock(claude_md):
@@ -548,90 +546,6 @@ def _build_safety_net_context(team_name: str | None) -> str:
     )
 
 
-# SUNSET BEFORE v4.2.x: this function strips orphan PACT_ROUTING markers
-# left over from v3.21.x and earlier. Run unconditionally on every
-# SessionStart for v4.0.x and v4.1.x to ensure upgraded users get the
-# stale prose cleaned out without needing a manual migration step. Once
-# the v4.0.0 release has been in the field long enough that resumed
-# users will have hit at least one v4.0.x SessionStart, this can be
-# deleted along with its caller in main().
-_PACT_ROUTING_BLOCK_RE = re.compile(
-    r"<!-- PACT_ROUTING_START:.*?<!-- PACT_ROUTING_END -->\s*",
-    re.DOTALL,
-)
-# Single-marker patterns for orphan-marker handling (extension): match a
-# lone PACT_ROUTING_START or PACT_ROUTING_END line that survives without
-# its pair. The proper-pair regex above runs first and consumes both
-# markers when ordered correctly; these run after to clean up the
-# remaining cases — orphan-single AND reversed-pair (END before START)
-# both reduce to "lone markers remain" after the proper-pair pass.
-_PACT_ROUTING_START_LINE_RE = re.compile(
-    r"<!-- PACT_ROUTING_START:[^>]*-->\s*",
-)
-_PACT_ROUTING_END_LINE_RE = re.compile(
-    r"<!-- PACT_ROUTING_END -->\s*",
-)
-
-
-def strip_orphan_routing_markers() -> str | None:
-    """Strip stale PACT_ROUTING markers from project CLAUDE.md and apply
-    the every-session legacy-lines pass.
-
-    v4.0.0 retired the routing-block injection — but upgraded users still
-    have a `<!-- PACT_ROUTING_START -->...<!-- PACT_ROUTING_END -->` block
-    in their project CLAUDE.md from prior plugin versions. Strip it here
-    on every SessionStart. The cleanup also handles orphan single markers
-    (just one of START/END present) and reversed pairs (END before START)
-    by treating any leftover marker after the proper-pair pass as an
-    orphan to remove. Idempotent no-op when no markers are present.
-
-    Also runs `_strip_legacy_lines` every session — restores the v3.x
-    symmetry where stale orchestrator-loader prose was scrubbed every
-    SessionStart, not only on the one-time PACT_MANAGED migration.
-
-    Returns a status string on change so session_init surfaces it via
-    additionalContext, or None when no action was taken. Fail-open on
-    every error path (lock timeout, symlink, OS error) — the next session
-    start will retry.
-    """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    if not project_dir:
-        return None
-    target_file, source = resolve_project_claude_md_path(project_dir)
-    if source == "new_default":
-        return None
-    try:
-        with file_lock(target_file):
-            if target_file.is_symlink():
-                return None
-            try:
-                content = target_file.read_text(encoding="utf-8")
-            except OSError:
-                return None
-            # Step 1: strip proper-pair routing blocks (the common case).
-            new_content = _PACT_ROUTING_BLOCK_RE.sub("", content)
-            # Step 2: any START or END markers remaining are orphans
-            # (single-marker survivors, or reversed pairs that step 1
-            # could not match because END appeared before START). Strip
-            # them line-by-line so the surrounding user prose is preserved.
-            new_content = _PACT_ROUTING_START_LINE_RE.sub("", new_content)
-            new_content = _PACT_ROUTING_END_LINE_RE.sub("", new_content)
-            # Step 3: apply legacy-lines pass every session (symmetry
-            # restoration). Strips stale orchestrator-loader prose that
-            # accumulates from older plugin versions.
-            new_content = _strip_legacy_lines(new_content)
-            if new_content == content:
-                return None
-            try:
-                target_file.write_text(new_content, encoding="utf-8")
-                os.chmod(str(target_file), 0o600)
-                return "Stripped stale PACT_ROUTING block from project CLAUDE.md"
-            except OSError:
-                return None
-    except TimeoutError:
-        return None
-
-
 def _clear_bootstrap_marker(session_path: Path) -> None:
     """Unlink the bootstrap-complete marker at ``session_path``.
 
@@ -661,16 +575,22 @@ def main():
     1. Creates plugin symlinks for @reference resolution
     3. Ensures project CLAUDE.md exists with memory sections
     3b. One-time migration: wraps existing project CLAUDE.md in PACT_MANAGED boundary (#404)
-    3c. Strips orphan PACT_ROUTING blocks from project CLAUDE.md (sunsets before v4.2.x)
-    4. Checks for stale pinned context entries in project CLAUDE.md
+    3d. Strips obsolete PACT_START/PACT_END kernel block from ~/.claude/CLAUDE.md (sunsets before v5.0.0)
+    4. Checks for stale pinned context entries in project CLAUDE.md (delegated to staleness.py)
     5. Generates session-unique PACT team name and reminds orchestrator to create it
+    5b. Writes session resume info (resume command, team, timestamp) to project CLAUDE.md
     6. Checks for in_progress Tasks (resumption context via Task integration)
     7. Restores last session snapshot for cross-session continuity
     8. Checks for paused work from previous session's /PACT:pause
 
-    Memory initialization (dependencies, migrations, embedding catch-up) is
-    now lazy-loaded on first memory operation to reduce startup cost for
-    non-memory users.
+    Note: Plan detection (scanning docs/plans/) was removed from session startup
+    to reduce latency. Plan detection is deferred to /PACT:orchestrate, which
+    checks docs/plans/ when it actually needs plan context.
+
+    Note: Memory-related initialization (dependency installation, embedding
+    migration, pending embedding catch-up) is now lazy-loaded on first memory
+    operation via pact-memory/scripts/memory_init.py. This reduces startup
+    cost for non-memory users.
     """
     # Pre-declare team_name so the outer except block can reference whatever
     # was captured before the exception fired. The assignment inside the try
@@ -781,11 +701,7 @@ def main():
             else:
                 context_parts.append(migration_msg)
 
-        # 3c. SUNSET BEFORE v4.2.x: strip orphan PACT_ROUTING blocks left
-        # over from v3.21.x and earlier. Idempotent no-op once stripped.
-        orphan_strip_msg = strip_orphan_routing_markers()
-        if orphan_strip_msg:
-            context_parts.append(orphan_strip_msg)
+        # Step 3c retired in v4.2.15 — orphan-stripper sunset; see git log for context.
 
         # 3d. SUNSET BEFORE v5.0.0: strip the obsolete PACT_START/PACT_END
         # kernel block from ~/.claude/CLAUDE.md (v3.x kernel-in-home-dir

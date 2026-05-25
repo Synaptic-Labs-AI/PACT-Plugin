@@ -11,7 +11,6 @@ Race-Window-Skip: bootstrap marker clear-on-clear-source AND not-clear-on-resume
 Emit-Nothing-If-Empty: orchestrator persona references Skill("PACT:bootstrap")
 G6: orchestrator persona includes pin-memory mid-session directive (F2)
 G7: Lead-Side HALT Fan-Out byte-equal at two sites
-G8: strip_orphan_routing_markers fail-open on lock timeout
 
 Y1 (auditor YELLOW-1): _TEACHBACK_REMINDER cross-file consistency with
                        skills/pact-teachback/SKILL.md — both reference
@@ -380,90 +379,6 @@ class TestLeadSideHaltFanOutByteEqualAtTwoSites:
             f"--- {self.PROTOCOL_PATH.name} ---\n{protocol_block}\n"
             "Both must remain byte-equal so the persona's mention and "
             "the protocol's authoritative anchor teach the same shape."
-        )
-
-
-# =============================================================================
-# G8: strip_orphan_routing_markers lock-timeout fail-open
-# =============================================================================
-
-
-class TestStripOrphanRoutingMarkersLockTimeout:
-    """Plan scenario strip_orphan_routing_markers_lock_timeout_skips.
-
-    When file_lock raises a TimeoutError (concurrent writer holds the
-    lock for >5s), the stripper MUST fail-open to None so session start
-    does not block. The kernel-block sibling has the same fail-open
-    contract.
-
-    Source-level pin: rather than running the function (which routes
-    through pact_context module-level state and creates test-isolation
-    fragility against test_staleness when interleaved with test_check_pin_caps),
-    we assert the structural invariant that the function body wraps
-    its file_lock acquisition in a try/except TimeoutError block that
-    returns None. Any drift (catching only OSError, or letting
-    TimeoutError propagate) fails this test."""
-
-    SESSION_INIT_PATH = (
-        Path(__file__).parent.parent / "hooks" / "session_init.py"
-    )
-
-    @pytest.fixture
-    def session_init_text(self):
-        return self.SESSION_INIT_PATH.read_text(encoding="utf-8")
-
-    def _extract_function_body(self, text: str, func_name: str) -> str:
-        """Extract the body of `def func_name(...)` up to the next
-        top-level def or end-of-file. Returns empty string if not
-        found."""
-        match = re.search(
-            rf'^def {re.escape(func_name)}\(.*?\) ?->.*?:\n(.*?)(?=\n^def |\Z)',
-            text,
-            re.MULTILINE | re.DOTALL,
-        )
-        return match.group(1) if match else ""
-
-    def test_strip_orphan_routing_markers_catches_timeout(
-        self, session_init_text
-    ):
-        """strip_orphan_routing_markers body must include
-        `except TimeoutError:` that returns None — fail-open contract
-        on lock-timeout. Without this, a transient lock contention
-        from a concurrent writer would propagate and crash session
-        startup."""
-        body = self._extract_function_body(
-            session_init_text, "strip_orphan_routing_markers"
-        )
-        assert body, (
-            "strip_orphan_routing_markers function body could not be "
-            "extracted from session_init.py — the function may be "
-            "missing or its signature changed."
-        )
-        # The fail-open clause must appear textually in the body.
-        # Tolerant of formatting (whitespace, different indent levels).
-        assert re.search(
-            r'except\s+TimeoutError\s*:\s*\n\s*return\s+None',
-            body,
-        ), (
-            "strip_orphan_routing_markers must include "
-            "`except TimeoutError: return None` to fail-open on lock "
-            "contention. Without this, a contended file_lock raises "
-            "TimeoutError out of the SessionStart hot path."
-        )
-
-    def test_strip_orphan_routing_markers_uses_file_lock(
-        self, session_init_text
-    ):
-        """The function body must acquire file_lock around its
-        read-mutate-write — the lock is the safety boundary that
-        TimeoutError defends."""
-        body = self._extract_function_body(
-            session_init_text, "strip_orphan_routing_markers"
-        )
-        assert "file_lock(" in body, (
-            "strip_orphan_routing_markers must use file_lock(...) for "
-            "its read-mutate-write cycle. Without it, concurrent "
-            "session_init runs could partial-strip the routing block."
         )
 
 
