@@ -4,18 +4,18 @@ Location: pact-plugin/hooks/session_init.py
 Summary: SessionStart hook that initializes PACT environment.
 Used by: Claude Code settings.json SessionStart hook
 
-Performs:
+Performs PACT environment initialization:
 0. Checks if ~/.claude/teams is in additionalDirectories (emits setup tip if not configured)
 1. Creates plugin symlinks for @reference resolution
 3. Ensures project CLAUDE.md exists with memory sections
 3b. One-time migration: wraps existing project CLAUDE.md in PACT_MANAGED boundary (#404)
 3d. Strips obsolete PACT_START/PACT_END kernel block from ~/.claude/CLAUDE.md (sunsets before v5.0.0)
-4. Checks for stale pinned context (delegated to staleness.py)
+4. Checks for stale pinned context entries in project CLAUDE.md (delegated to staleness.py)
 5. Generates session-unique PACT team name and reminds orchestrator to create it
 5b. Writes session resume info (resume command, team, timestamp) to project CLAUDE.md
 6. Checks for in_progress Tasks (resumption context via Task integration)
-7. Restores last session snapshot
-8. Checks for paused work from previous /PACT:pause invocation
+7. Restores last session snapshot for cross-session continuity
+8. Checks for paused work from previous session's /PACT:pause
 
 Note: Plan detection (scanning docs/plans/) was removed from session startup
 to reduce latency. Plan detection is deferred to /PACT:orchestrate, which
@@ -576,16 +576,21 @@ def main():
     3. Ensures project CLAUDE.md exists with memory sections
     3b. One-time migration: wraps existing project CLAUDE.md in PACT_MANAGED boundary (#404)
     3d. Strips obsolete PACT_START/PACT_END kernel block from ~/.claude/CLAUDE.md (sunsets before v5.0.0)
-    4. Checks for stale pinned context entries in project CLAUDE.md
+    4. Checks for stale pinned context entries in project CLAUDE.md (delegated to staleness.py)
     5. Generates session-unique PACT team name and reminds orchestrator to create it
     5b. Writes session resume info (resume command, team, timestamp) to project CLAUDE.md
     6. Checks for in_progress Tasks (resumption context via Task integration)
     7. Restores last session snapshot for cross-session continuity
     8. Checks for paused work from previous session's /PACT:pause
 
-    Memory initialization (dependencies, migrations, embedding catch-up) is
-    now lazy-loaded on first memory operation to reduce startup cost for
-    non-memory users.
+    Note: Plan detection (scanning docs/plans/) was removed from session startup
+    to reduce latency. Plan detection is deferred to /PACT:orchestrate, which
+    checks docs/plans/ when it actually needs plan context.
+
+    Note: Memory-related initialization (dependency installation, embedding
+    migration, pending embedding catch-up) is now lazy-loaded on first memory
+    operation via pact-memory/scripts/memory_init.py. This reduces startup
+    cost for non-memory users.
     """
     # Pre-declare team_name so the outer except block can reference whatever
     # was captured before the exception fired. The assignment inside the try
