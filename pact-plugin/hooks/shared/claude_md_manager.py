@@ -293,10 +293,6 @@ def strip_orphan_kernel_block() -> str | None:
     that resumed users will have hit at least one v4.x SessionStart, this
     function and its caller can be deleted.
 
-    Renamed from the v3.x `remove_stale_kernel_block` to mirror the
-    `strip_orphan_*` naming used by the sibling project-CLAUDE.md cleanup
-    in session_init.py.
-
     Hardening:
     - Symlink guard inside the lock (TOCTOU defense): refuses to operate
       if `~/.claude/CLAUDE.md` is a symlink. Practical exploitability is
