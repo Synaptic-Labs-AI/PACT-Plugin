@@ -578,6 +578,7 @@ def main():
     3d. Strips obsolete PACT_START/PACT_END kernel block from ~/.claude/CLAUDE.md (sunsets before v5.0.0)
     4. Checks for stale pinned context entries in project CLAUDE.md
     5. Generates session-unique PACT team name and reminds orchestrator to create it
+    5b. Writes session resume info (resume command, team, timestamp) to project CLAUDE.md
     6. Checks for in_progress Tasks (resumption context via Task integration)
     7. Restores last session snapshot for cross-session continuity
     8. Checks for paused work from previous session's /PACT:pause
