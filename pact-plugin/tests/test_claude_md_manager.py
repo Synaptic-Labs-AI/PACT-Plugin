@@ -2215,8 +2215,8 @@ class TestStripLegacyLines:
 
     Direct coverage so a regression in the legacy-stripping logic
     produces a targeted failure rather than masked signal from the
-    indirect call sites in `_build_migrated_content` and the every-
-    session pass inside `strip_orphan_routing_markers`.
+    indirect call site in `_build_migrated_content` (the one-time
+    PACT_MANAGED migration).
     """
 
     # The exact stale line the v3.16.2 template carried. Pinned here as a
@@ -2286,10 +2286,9 @@ class TestStripLegacyLines:
 
     def test_idempotent_across_two_invocations(self):
         """Applying `_strip_legacy_lines` twice is the same as applying it
-        once — the function is pure and deterministic. This matches the
-        expectation of shared helper usage (`_build_migrated_content` and
-        the every-session pass inside `strip_orphan_routing_markers` both
-        call it; running both consecutively must not corrupt content).
+        once — the function is pure and deterministic. This guarantees that
+        repeated `_build_migrated_content` invocations on an already-migrated
+        file cannot corrupt content.
         """
         from shared.claude_md_manager import _strip_legacy_lines
 
