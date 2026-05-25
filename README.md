@@ -60,7 +60,7 @@ PACT is delivered through the `--agent` flag — `claude --agent PACT:pact-orche
 
 Add the agent setting to your project's `.claude/settings.json` so every session in that repo opens with the orchestrator persona:
 
-```
+```json
 {
   "agent": "PACT:pact-orchestrator"
 }
@@ -249,7 +249,7 @@ The Auditor runs alongside coders during the CODE phase, observing via `git diff
 
 Specialists persist after their phase, available as consultants for follow-up questions. Reviewers become fixers. No wasted context.
 
-### Telegram bridge (optional)
+### Telegram notifications
 
 Stay connected to your Claude Code sessions from your phone. Get notifications, answer blocking questions, and send voice replies — all from Telegram. Run `/PACT:telegram-setup` to enable.
 
@@ -323,7 +323,7 @@ PACT registers hooks across 11 Claude Code event surfaces, including `SessionSta
 | `pin_caps_gate.py` | PreToolUse (Edit/Write) | Enforce caps on CLAUDE.md pinned-memory section |
 | `postcompact_archive.py` | PostCompact | Archive pre-compaction state for recovery |
 | `wake_inbox_drain.py` | UserPromptSubmit | Drain pending inbox events |
-| `auditor_reminder.py` | PostToolUse (Agent) | Surface auditor presence/skip decisions |
+| `auditor_reminder.py` | SubagentStart + PostToolUse:Agent | Surface auditor presence/skip decisions |
 
 See [`pact-plugin/hooks/hooks.json`](pact-plugin/hooks/hooks.json) for the full registration matrix; the [`hooks/`](pact-plugin/hooks/) directory contains the 29 top-level hooks plus `shared/` utilities and a `refresh/` subsystem for transcript replay and checkpoint reconstruction.
 
@@ -335,7 +335,7 @@ Twenty-two protocols cover agent communication, phase transitions, scope detecti
 
 PACT maintains a per-session append-only JSONL journal at `~/.claude/pact-sessions/{slug}/{session_id}/session-journal.jsonl`. Implementation in [`pact-plugin/hooks/shared/session_journal.py`](pact-plugin/hooks/shared/session_journal.py).
 
-- **Schema-versioned events** with per-type required-field validation. Event types include `session_start`, `session_end`, `session_paused`, `session_consolidated`, `variety_assessed`, `phase_transition`, `checkpoint`, `agent_dispatch`, `agent_handoff`, `commit`, `s2_state_seeded`, `review_dispatch`, `review_finding`, `remediation`, `pr_ready`, `teardown_request`, `scan_armed`
+- **Schema-versioned events** with per-type required-field validation. Event types include `session_start`, `session_end`, `session_paused`, `session_consolidated`, `variety_assessed`, `phase_transition`, `checkpoint`, `agent_dispatch`, `agent_handoff`, `commit`, `s2_state_seeded`, `review_dispatch`, `review_finding`, `remediation`, `pr_ready`, `teardown_request`, `scan_armed` (see [`pact-plugin/hooks/shared/session_journal.py`](pact-plugin/hooks/shared/session_journal.py) for the complete registry of 20 types)
 - **Append-only with `fcntl.flock(LOCK_EX)`** advisory locking around short-write loops to handle concurrent hooks + orchestrator CLI calls safely
 - **Tail-window reverse scan** (32 KB) for fast `read-last` operations; falls back to full-file slurp when needed
 - **Best-effort durability** — no `fsync` per write (hot path), but cross-process visibility is immediate after lock release
@@ -364,7 +364,7 @@ PACT uses Gordon Pask's Conversation Theory to ensure shared understanding betwe
 
 Add the following to your `settings.json` (global `~/.claude/settings.json` or project-level `.claude/settings.json`):
 
-```
+```json
 {
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
@@ -664,7 +664,7 @@ PACT-Plugin/
 │   ├── reference/              # VSM glossary
 │   ├── telegram/               # Telegram bridge MCP server
 │   ├── templates/              # Settings and environment-model templates
-│   └── tests/                  # 146 test files
+│   └── tests/                  # 147 test files
 └── docs/
 ```
 
@@ -720,7 +720,7 @@ PACT v4.0 is a **breaking change**. The orchestrator persona delivery model migr
 1. **Restore plain-`claude` ergonomics via one of three paths**:
   - **Per-project (recommended for your PACT projects)** — add to your project's `.claude/settings.json`:
 
-```
+```json
 {
   "agent": "PACT:pact-orchestrator"
 }
