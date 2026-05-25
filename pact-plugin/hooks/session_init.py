@@ -9,6 +9,7 @@ Performs:
 1. Creates plugin symlinks for @reference resolution
 3. Ensures project CLAUDE.md exists with memory sections
 3b. One-time migration: wraps existing project CLAUDE.md in PACT_MANAGED boundary (#404)
+3d. Strips obsolete PACT_START/PACT_END kernel block from ~/.claude/CLAUDE.md (sunsets before v5.0.0)
 4. Checks for stale pinned context (delegated to staleness.py)
 5. Generates session-unique PACT team name and reminds orchestrator to create it
 5b. Writes session resume info (resume command, team, timestamp) to project CLAUDE.md
