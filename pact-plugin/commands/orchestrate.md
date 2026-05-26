@@ -83,7 +83,7 @@ A_id = TaskCreate(
 )
 TaskUpdate(A_id, owner="{teammate-name}")
 
-# 2. Create Task B (primary work)
+# 2. Create Task B (primary work) — per-dispatch variety stamping per pact-variety.md
 B_id = TaskCreate(
     subject="{role}: {primary mission}",
     description="{full mission per Recommended Agent Prompting Structure}\n\n"
@@ -91,7 +91,20 @@ B_id = TaskCreate(
                 "After staging artifacts, write metadata.handoff, send notify SendMessage to team-lead, "
                 "SET intentional_wait{reason=awaiting_lead_completion}. Idle. Lead will mark "
                 "completed after HANDOFF validation. If team-lead rejects, team-lead writes metadata.handoff_rejection; "
-                "revise on this same task.\n\nUpstream: TEACHBACK Task #{A_id}."
+                "revise on this same task.\n\nUpstream: TEACHBACK Task #{A_id}.",
+    metadata={
+        "variety": {
+            "novelty":               N,
+            "novelty_rationale":     "<1-sentence: why this score for THIS dispatch's novelty>",
+            "scope":                 N,
+            "scope_rationale":       "<1-sentence: why this score for THIS dispatch's scope>",
+            "uncertainty":           N,
+            "uncertainty_rationale": "<1-sentence: why this score for THIS dispatch's uncertainty>",
+            "risk":                  N,
+            "risk_rationale":        "<1-sentence: why this score for THIS dispatch's risk>",
+            "total":                 N
+        }
+    }
 )
 TaskUpdate(B_id, owner="{teammate-name}", addBlockedBy=[A_id])
 TaskUpdate(A_id, addBlocks=[B_id])

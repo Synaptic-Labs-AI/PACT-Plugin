@@ -486,11 +486,18 @@ Teammate self-completion carve-outs (predicate-witnessed): signal-tasks (`metada
 
 ### Teachback Review
 
-Each specialist dispatch is a Task A (TEACHBACK) + Task B (work) pair with `blockedBy=[A]` — see §11 for the canonical sequence. Teammate claims A, writes `metadata.teachback_submit` (4 fields per [pact-teachback](../skills/pact-teachback/SKILL.md)), idles on `awaiting_lead_completion`. **Read-Trigger Precondition**: wait for teammate's wake-signal SendMessage BEFORE the raw JSON read — see [pact-completion-authority §Read-Trigger Precondition](../protocols/pact-completion-authority.md#read-trigger-precondition) for the 4-point rule (Monitor `INBOX_GREW` is alarm-clock not content marker; raw read MUST follow SendMessage receipt; mitigation for residual race). Then read the payload via raw JSON (TaskGet is metadata-blind), apply Validating Incoming Teachbacks below, then accept via the Acceptance two-call atomic pair above; acceptance auto-unblocks Task B. Do NOT mark Task B `completed` or `pending` yourself — the teammate claims on wake.
+Each specialist dispatch is a Task A (TEACHBACK) + Task B (work) pair with `blockedBy=[A]` — see §11 for the canonical sequence. Teammate claims A, writes `metadata.teachback_submit` (5 canonical fields per [pact-teachback](../skills/pact-teachback/SKILL.md)), idles on `awaiting_lead_completion`. **Read-Trigger Precondition**: wait for teammate's wake-signal SendMessage BEFORE the raw JSON read — see [pact-completion-authority §Read-Trigger Precondition](../protocols/pact-completion-authority.md#read-trigger-precondition) for the 4-point rule (Monitor `INBOX_GREW` is alarm-clock not content marker; raw read MUST follow SendMessage receipt; mitigation for residual race). Then read the payload via raw JSON (TaskGet is metadata-blind), apply Validating Incoming Teachbacks below, then accept via the Acceptance two-call atomic pair above; acceptance auto-unblocks Task B. Do NOT mark Task B `completed` or `pending` yourself — the teammate claims on wake.
 
 #### Validating Incoming Teachbacks
 
 When an agent sends a TEACHBACK, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase.
+
+**Then validate `variety_acknowledgment`** (5th canonical field per [pact-variety §variety_acknowledgment](../protocols/pact-variety.md#variety_acknowledgment--teammate-verification-workflow)). The teammate has judged your per-dimension variety rationales on Task B against THIS dispatch's actual work. Read `metadata.teachback_submit.variety_acknowledgment.rationale_articulates_this_dispatch`:
+
+- **`"yes"`**: standard teachback acceptance proceeds.
+- **`"no"` or `"concern"`**: teammate has flagged a smell in your variety scoring. Read `concern` for the specific rationale they're flagging. You have two corrective options before acceptance — *orchestrator-side correction* (re-stamp `metadata.variety` on Task B with refined per-dimension rationales, THEN accept; teammate's acknowledgment becomes part of the audit trail) OR *teammate-side correction* (reject the teachback via `metadata.teachback_rejection` explaining why the variety scoring stands; teammate revises). Prefer orchestrator-side when the teammate's flag is correct; reserve teammate-side for when the flag is erroneous.
+
+If teammate flags persist across 3+ rejection cycles after correction attempts, the standard imPACT escalation applies — see [pact-completion-authority.md §META-BLOCK](../protocols/pact-completion-authority.md#meta-block). The 3-cycle bound is the existing protocol's bound; this gate inherits, does not redefine.
 
 #### Validating Method Reconstruction
 

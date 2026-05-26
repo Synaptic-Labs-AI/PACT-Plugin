@@ -21,20 +21,13 @@ of Task A. Task B (the primary work) is `blockedBy=[A]` and stays hidden
 in your TaskList until the team-lead accepts your teachback by transitioning
 Task A to `completed`.
 
-The baseline 4-field payload (Step 1 below) is the L1 (procedure-level) gate.
-At high-variety dispatches, an optional 5th nested field
-`reasoning_reconstruction` enables the L1.5 (method-level) gate — see
-[pact-ct-teachback.md §When to Method-Reconstruct](../../protocols/pact-ct-teachback.md#when-to-method-reconstruct).
-The variety-band thresholds live at the SSOT in `hooks/shared/variety_scorer.py`
-(constants `COMPACT_MAX`, `ORCHESTRATE_MAX`, `PLAN_MODE_MAX` and the
-`route_workflow` function); do not hard-code the 6 / 10 / 14 thresholds in
-skill prose or teachback payloads.
+The 5 canonical fields (Step 1) are the L1 (procedure-level) gate; the optional `reasoning_reconstruction` nested field enables the L1.5 (method-level) gate at high-variety dispatches — see [pact-ct-teachback.md §When to Method-Reconstruct](../../protocols/pact-ct-teachback.md#when-to-method-reconstruct). Variety-band thresholds live at the SSOT in `hooks/shared/variety_scorer.py` (`COMPACT_MAX` / `ORCHESTRATE_MAX` / `PLAN_MODE_MAX` + `route_workflow`); do not hard-code the 6 / 10 / 14 thresholds.
 
 ## Action: store teachback now
 
 > **Ordering invariant** (audit anchor): the three steps below MUST execute in the order Step 1 → Step 2 → Step 3 — `metadata.teachback_submit` write FIRST, then notify SendMessage, then `intentional_wait` SET. This ordering is load-bearing for the team-lead's [Read-Trigger Precondition](../../protocols/pact-completion-authority.md#read-trigger-precondition): the lead must wait for teammate's wake-signal SendMessage before treating the raw JSON read as authoritative, but the SendMessage is only safe to send AFTER the metadata write has landed on disk. Reversing Step 1 and Step 2 produces false-empty raw reads on the lead side that have triggered false-positive teachback rejection cycles. Reversing Step 2 and Step 3 (idle before SendMessage) silently strands the lead — they will never see the wake-signal because you went idle without sending it. Editors of this skill: do NOT re-order these steps.
 
-**Step 1 — write the teachback to task metadata** (4 fields + 1 optional nested field):
+**Step 1 — write the teachback to task metadata** (5 canonical fields + 1 optional nested field):
 
 ```
 TaskUpdate(taskId, metadata={"teachback_submit": {
@@ -42,6 +35,10 @@ TaskUpdate(taskId, metadata={"teachback_submit": {
     "most_likely_wrong": "<the part of your understanding you are least confident about>",
     "least_confident_item": "<one specific assumption you'd like the team-lead to confirm>",
     "first_action": "<the first concrete step you will take after teachback approval>",
+    "variety_acknowledgment": {                  # REQUIRED — see trigger paragraph below the JSON
+        "rationale_articulates_this_dispatch": "yes" | "no" | "concern",
+        "concern": "<required when value != 'yes'; names the smell>"
+    },
 
     # OPTIONAL: include per §When to Method-Reconstruct in pact-ct-teachback.md
     # (required at variety >= 11; recommended at 7-10; skipped at 4-6)
@@ -52,6 +49,8 @@ TaskUpdate(taskId, metadata={"teachback_submit": {
     }
 }})
 ```
+
+Before composing your teachback, read Task B's `metadata.variety` (via Task A's `blocks[0]`). Judge each of the four per-dimension rationales against THIS dispatch's complexity and record `yes` / `no` / `concern`; when not `yes`, name the smell in `concern`. Full review workflow: [`protocols/pact-variety.md` §Variety Calibration Record](../../protocols/pact-variety.md#variety-calibration-record).
 
 **Step 2 — notify the team-lead** (lightweight prose, NOT the full payload):
 
@@ -82,9 +81,9 @@ Do NOT begin Task B until Task A's status transitions to `completed`. The team-l
 
 ## When to include reasoning_reconstruction
 
-Include the nested `reasoning_reconstruction` sub-object whenever the dispatching task's variety score is **11 or higher** (`ROUTE_PLAN_MODE` or `ROUTE_RESEARCH_SPIKE` per `hooks/shared/variety_scorer.py`). At variety 7-10 (`ROUTE_ORCHESTRATE`) it is **recommended but not required** — the team-lead may SendMessage requesting reconstruction on follow-up if upstream decisions are non-trivial. At variety 4-6 (`ROUTE_COMPACT`) it is **skipped** — absence is the expected default.
+Include the nested `reasoning_reconstruction` sub-object whenever the dispatching task's variety score is **11+** (`ROUTE_PLAN_MODE` / `ROUTE_RESEARCH_SPIKE`). At variety 7-10 (`ROUTE_ORCHESTRATE`) it is **recommended but not required** — the lead may request reconstruction on follow-up if upstream decisions are non-trivial. At variety 4-6 (`ROUTE_COMPACT`) it is **skipped** — absence is the expected default.
 
-The three sub-keys are three distinct cognitive operations on the upstream agent's HANDOFF: `decision_attribution` restates what the upstream decided and their stated reason, `assumption_trace` lists the falsifiable propositions the upstream's reasoning depends on, and `contingency_clause` names a concrete alternative if those assumptions are false. Vague answers ("the architect chose this because it makes sense", "we'd need to redo it") are lead-side reject signals. See [pact-ct-teachback.md §When to Method-Reconstruct](../../protocols/pact-ct-teachback.md#when-to-method-reconstruct) for the full variety-band gate.
+The three sub-keys are three cognitive operations on the upstream's HANDOFF: `decision_attribution` restates what the upstream decided and why; `assumption_trace` lists the falsifiable propositions the reasoning depends on; `contingency_clause` names a concrete alternative if those assumptions are false. Vague answers are lead-side reject signals — see [pact-ct-teachback.md §When to Method-Reconstruct](../../protocols/pact-ct-teachback.md#when-to-method-reconstruct) for anti-pattern examples + the full variety-band gate.
 
 If you are dispatched as an owner in `TEACHBACK_EXEMPT_AGENT_TYPES` (currently `{pact-secretary}` per `hooks/shared/intentional_wait.py`), the entire teachback gate is bypassed — including this sub-field. No carve-out logic needed.
 

@@ -161,7 +161,24 @@ A_id = TaskCreate(
                 "Mission for Task B: see Task #{B_id}."
 )
 TaskUpdate(A_id, owner="{reviewer-name}")
-B_id = TaskCreate(subject="{reviewer-type}: review {feature}", description="<full review mission>")
+# Create Task B — per-dispatch variety stamping per pact-variety.md
+B_id = TaskCreate(
+    subject="{reviewer-type}: review {feature}",
+    description="<full review mission>",
+    metadata={
+        "variety": {
+            "novelty":               N,
+            "novelty_rationale":     "<1-sentence: why this score for THIS dispatch's novelty>",
+            "scope":                 N,
+            "scope_rationale":       "<1-sentence: why this score for THIS dispatch's scope>",
+            "uncertainty":           N,
+            "uncertainty_rationale": "<1-sentence: why this score for THIS dispatch's uncertainty>",
+            "risk":                  N,
+            "risk_rationale":        "<1-sentence: why this score for THIS dispatch's risk>",
+            "total":                 N
+        }
+    }
+)
 TaskUpdate(B_id, owner="{reviewer-name}", addBlockedBy=[A_id])
 TaskUpdate(A_id, addBlocks=[B_id])
 ```
@@ -173,8 +190,24 @@ The `Agent()` `prompt` does NOT change shape — the Teachback-Gated Dispatch is
 **Dispatch reviewers** — for each reviewer, follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
 1. `TaskCreate(subject="{reviewer-type}: TEACHBACK for review of {feature}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
-2. `TaskCreate(subject="{reviewer-type}: review {feature}", description=<see below>)` — Task B.
+2. `TaskCreate(subject="{reviewer-type}: review {feature}", description=<see below>, metadata=<see below>)` — Task B.
    - Task B's `description` carries the review mission: "Review this PR. Focus: [domain-specific review criteria]…"
+   - Task B's `metadata` carries per-dispatch variety stamping per pact-variety.md (D11 4-rationale schema):
+     ```json
+     {
+       "variety": {
+         "novelty":               N,
+         "novelty_rationale":     "<1-sentence: why this score for THIS dispatch's novelty>",
+         "scope":                 N,
+         "scope_rationale":       "<1-sentence: why this score for THIS dispatch's scope>",
+         "uncertainty":           N,
+         "uncertainty_rationale": "<1-sentence: why this score for THIS dispatch's uncertainty>",
+         "risk":                  N,
+         "risk_rationale":        "<1-sentence: why this score for THIS dispatch's risk>",
+         "total":                 N
+       }
+     }
+     ```
 3. `TaskUpdate(A_id, owner="{reviewer-name}", addBlocks=[B_id])`
 4. `TaskUpdate(B_id, owner="{reviewer-name}", addBlockedBy=[A_id])`
 5. Spawn the reviewer with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({reviewer-name})` marker on its own line so routing detects the teammate spawn (team protocol + teachback content arrive via spawn-time skills frontmatter, not a per-prompt directive):
