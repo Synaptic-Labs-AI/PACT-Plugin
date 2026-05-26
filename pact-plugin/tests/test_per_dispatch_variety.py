@@ -20,11 +20,12 @@ test_task_lifecycle_gate.py alongside the integration tests, mirroring
 the existing _validate_handoff_schema co-location pattern. This file is
 the traversal-helper surface only.
 
-Divergence-computation helper + its tests are intentionally deferred to
-the wrap-up retrospective integration commit per lead resolution (the
-helper's canonical home is shared/variety_divergence.py, consumed by
-wrap-up.md; introducing it here in this commit and then refactoring would
-create inter-commit churn).
+Divergence-computation helper + its tests live in the second half of
+this file (class TestVarietyDivergence). The helper's canonical home is
+shared/variety_divergence.py, consumed by wrap-up.md §4 Orchestration
+Retrospective composer. Tests cover the architect3 §4.3 catalog: positive
+surfacing (overshoot / undershoot), negative (within-threshold), and edge
+cases (None feature variety, empty dispatches, mixed coverage per D8).
 """
 
 import json
@@ -365,3 +366,196 @@ class TestMultiBlockTraversal:
         assert tlg._resolve_required_band_via_blocks(
             {"blocks": ["low", "high"]}, "test-team"
         ) == "skipped"
+
+
+# =============================================================================
+# Divergence-computation helper (shared/variety_divergence.py)
+# =============================================================================
+#
+# Pure-function math consumed by wrap-up.md §4 Orchestration Retrospective
+# composer. Tests pin the architect3 §4.3 catalog: positive surfacing
+# (overshoot / undershoot), negative (within-threshold), and edge cases
+# (None feature variety, empty dispatches, mixed coverage per D8).
+# =============================================================================
+
+
+from shared.variety_divergence import (  # noqa: E402
+    DEFAULT_THRESHOLD,
+    compute_variety_divergence,
+)
+
+
+class TestVarietyDivergence:
+    """Architect3 §4.3 catalog for compute_variety_divergence."""
+
+    # ----- Positive surfacing (architect3 §4.3 cases 1-2) ---------------
+
+    def test_overshoot_surfaced(self):
+        """Feature 9, dispatches [5,5,5,5,5] → delta 4 surfaced overshoot."""
+        result = compute_variety_divergence(9, [5, 5, 5, 5, 5])
+        assert result["surfaced"] is True
+        assert result["direction"] == "overshot"
+        assert result["delta"] == 4
+        assert result["mean"] == 5
+        assert result["max"] == 5
+        assert result["min"] == 5
+        assert result["coverage"] == 1.0
+        assert result["reason"] is None
+
+    def test_undershoot_surfaced(self):
+        """Feature 5, dispatches [8,8,8] → delta 3 surfaced undershoot."""
+        result = compute_variety_divergence(5, [8, 8, 8])
+        assert result["surfaced"] is True
+        assert result["direction"] == "undershot"
+        assert result["delta"] == 3
+        assert result["mean"] == 8
+
+    # ----- Negative (within-threshold) (architect3 §4.3 cases 3-4) ------
+
+    def test_within_threshold_zero_delta(self):
+        """Feature 8, dispatches [7,8,9] → delta 0, surfaced=False."""
+        result = compute_variety_divergence(8, [7, 8, 9])
+        assert result["surfaced"] is False
+        assert result["direction"] is None
+        assert result["delta"] == 0
+        assert result["mean"] == 8
+        assert result["reason"] == "within_threshold"
+
+    def test_within_threshold_symmetric_spread(self):
+        """Feature 8, dispatches [6,8,10] → mean 8 delta 0, surfaced=False.
+        The max/min spread is wide but mean lands on feature_variety."""
+        result = compute_variety_divergence(8, [6, 8, 10])
+        assert result["surfaced"] is False
+        assert result["delta"] == 0
+        assert result["max"] == 10
+        assert result["min"] == 6
+
+    def test_within_threshold_delta_one(self):
+        """Boundary: delta=1 (below default threshold=2) is NOT surfaced.
+        Pins the threshold semantic against an inclusive-vs-exclusive
+        drift (`>=` not `>`)."""
+        result = compute_variety_divergence(9, [8, 8, 8])
+        assert result["surfaced"] is False
+        assert result["delta"] == 1
+        assert result["reason"] == "within_threshold"
+
+    def test_threshold_boundary_delta_two_surfaced(self):
+        """Boundary: delta=2 IS surfaced (>= threshold). Counter-pin to
+        the delta=1 case above."""
+        result = compute_variety_divergence(10, [8, 8, 8])
+        assert result["surfaced"] is True
+        assert result["delta"] == 2
+        assert result["direction"] == "overshot"
+
+    # ----- Edge cases (architect3 §4.3 cases 5-7) -----------------------
+
+    def test_feature_variety_none(self):
+        """Feature variety None → surfaced=False, reason=feature_variety_missing.
+        Stats still computed over the stamped dispatches."""
+        result = compute_variety_divergence(None, [5, 5, 5])
+        assert result["surfaced"] is False
+        assert result["direction"] is None
+        assert result["delta"] is None
+        assert result["reason"] == "feature_variety_missing"
+        assert result["mean"] == 5
+
+    def test_empty_dispatches(self):
+        """Empty dispatch list → surfaced=False, reason=no_dispatches_stamped,
+        coverage=0.0, all stats None."""
+        result = compute_variety_divergence(9, [])
+        assert result["surfaced"] is False
+        assert result["coverage"] == 0.0
+        assert result["mean"] is None
+        assert result["max"] is None
+        assert result["min"] is None
+        assert result["reason"] == "no_dispatches_stamped"
+
+    def test_mixed_coverage(self):
+        """3 stamped + 2 unstamped → coverage=0.6; math over the 3 stamped.
+        Per D8 partial-corpus handling."""
+        result = compute_variety_divergence(
+            9, [9, 9, 9], total_pact_dispatch_count=5,
+        )
+        assert result["coverage"] == 0.6
+        assert result["mean"] == 9
+        assert result["delta"] == 0
+        assert result["surfaced"] is False
+
+    def test_total_count_zero_falls_back(self):
+        """total_pact_dispatch_count=0 (defensive) falls back to assuming
+        all known dispatches stamped (coverage=1.0 when len>0). Avoids
+        division by zero."""
+        result = compute_variety_divergence(
+            8, [8, 8], total_pact_dispatch_count=0,
+        )
+        assert result["coverage"] == 1.0
+        assert result["surfaced"] is False
+
+    def test_total_count_negative_falls_back(self):
+        """total_pact_dispatch_count negative (defensive against caller
+        bugs) falls back to the all-stamped assumption."""
+        result = compute_variety_divergence(
+            8, [8, 8], total_pact_dispatch_count=-1,
+        )
+        assert result["coverage"] == 1.0
+
+    # ----- Threshold parameterization -----------------------------------
+
+    def test_custom_threshold_loosened(self):
+        """threshold=3 — delta=2 is NOT surfaced (delta < threshold)."""
+        result = compute_variety_divergence(10, [8, 8, 8], threshold=3)
+        assert result["surfaced"] is False
+        assert result["delta"] == 2
+
+    def test_custom_threshold_tightened(self):
+        """threshold=1 — delta=1 IS surfaced. The knob per §6.2 lets
+        future calibration loosen or tighten without code change."""
+        result = compute_variety_divergence(9, [8, 8, 8], threshold=1)
+        assert result["surfaced"] is True
+        assert result["delta"] == 1
+        assert result["direction"] == "overshot"
+
+    def test_default_threshold_constant(self):
+        """DEFAULT_THRESHOLD is exposed and equals 2. Pins the
+        SSOT-via-import discipline (no hard-coded 2 in test code)."""
+        assert DEFAULT_THRESHOLD == 2
+
+    # ----- Stable-key contract ------------------------------------------
+
+    def test_return_dict_has_stable_keys(self):
+        """Every return path returns the SAME 8 keys; downstream LLM-prose
+        composer in wrap-up.md §4 reads them by name. Counter-pin against
+        a future refactor that adds variant keys per branch."""
+        expected_keys = {
+            "coverage", "mean", "max", "min",
+            "delta", "surfaced", "direction", "reason",
+        }
+        for args in (
+            (9, [5, 5, 5, 5, 5]),       # overshoot
+            (5, [8, 8, 8]),             # undershoot
+            (8, [7, 8, 9]),             # within
+            (None, [5, 5, 5]),          # feature missing
+            (9, []),                    # empty
+            (9, [9, 9], 5),             # mixed coverage
+        ):
+            result = compute_variety_divergence(*args)
+            assert set(result.keys()) == expected_keys, (
+                f"key set drift on args {args}: {set(result.keys())}"
+            )
+
+    def test_surfaced_direction_pairing(self):
+        """When surfaced=True, direction is "overshot" or "undershot",
+        never None. When surfaced=False, direction is None. Pins the
+        boolean-pair semantic the lead carry-forward affirmed."""
+        for feature, dispatches in ((9, [5, 5, 5]), (5, [9, 9, 9])):
+            result = compute_variety_divergence(feature, dispatches)
+            assert result["surfaced"] is True
+            assert result["direction"] in ("overshot", "undershot")
+        for feature, dispatches in (
+            (8, [7, 8, 9]),         # within
+            (None, [5, 5, 5]),      # feature missing
+            (9, []),                # empty
+        ):
+            result = compute_variety_divergence(feature, dispatches)
+            assert result["surfaced"] is False
+            assert result["direction"] is None

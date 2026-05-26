@@ -36,21 +36,54 @@ This is the deep-clean pass. Pass 1 (workflow-level HANDOFF review) is the prima
 
 Perform a brief self-assessment. Compare your initial variety assessment and orchestration decisions against actual outcomes. This calibrates future judgment.
 
-**Answer these four questions:**
+**Answer these six questions:**
 
 1. **Variety accuracy**: Was the initial variety score close to actual complexity? Over/under by how much?
 2. **Phase efficiency**: Did any phases need to be re-run (imPACT)? Were any skipped phases needed after all?
 3. **Specialist fit**: Were specialists well-matched to tasks? Any that should have been different?
 4. **Estimation pattern**: Does this match a recurring pattern from prior sessions? (Search pact-memory for `orchestration_calibration` entries)
+5. **Variety divergence**: Was per-dispatch variety distribution materially different from feature variety? Use the pure helper `from shared.variety_divergence import compute_variety_divergence` — pass `feature_variety` (`TaskGet(feature_task_id).metadata.variety.total`) and `dispatch_varieties` (list of `metadata.variety.total` across all pact-* work tasks created during the cycle; Task B tasks, NOT Task A teachback tasks). The returned dict carries `coverage`, `mean`, `max`, `min`, `delta`, `surfaced`, `direction`, `reason`. Surface this question only when `surfaced` is True; when `coverage` is 0.0 omit with the note "Per-dispatch variety not available — session pre-dates per-dispatch stamping." See [pact-variety.md §Variety Calibration Record](../protocols/pact-variety.md#variety-calibration-record) for the schema; sample output below.
+6. **Variety acknowledgment signals**: How many teammates flagged the orchestrator's variety scoring as cargo-culted ("no") or concerning ("concern")? Iterate teachback tasks (Task A subjects) and read `metadata.teachback_submit.variety_acknowledgment.rationale_articulates_this_dispatch`. Compute `cargo_cult_signal_rate = (ack_no + ack_concern) / total_teachbacks`. **Dual-trigger surfacing**: surface this question when EITHER `cargo_cult_signal_rate >= 0.20` (one in five teammates flagged) OR any single `"no"` is present. Pull the `concern` text from acute `"no"` flags into the output to make the surfaced rationale visible. See [pact-variety.md §Variety Acknowledgment Signal](../protocols/pact-variety.md#variety-acknowledgment-signal-wrap-up-aggregation) for the full aggregation spec.
+
+**Sample output for question 5 (variety divergence)** when `surfaced=True`:
+```
+**Variety divergence** (question 5):
+- Feature variety: 9
+- Per-dispatch distribution: 5 dispatches; mean=6, min=4, max=8
+- Coverage: 4 of 5 dispatches stamped (1 missing variety)
+- Delta (feature vs mean): 3 → SURFACED (>= 2 threshold)
+- Direction: feature OVERSHOT — actual dispatch complexity was lower than estimated
+- Calibration note: revisit aggregate scoping; sub-dispatches were simpler than feature-level estimate suggested
+```
+
+**Sample output for question 6 (variety acknowledgment signals)** when the dual-trigger fires:
+```
+**Variety acknowledgment signals** (question 6):
+- Teachbacks reviewed: 8 total
+- Teammate flags: 6 "yes", 1 "no", 1 "concern" — signal rate 25%
+- Coverage: 8 of 8 teachbacks acknowledged (100%)
+- Acute flags:
+  - Task #14 (architect: review PR ...) — teammate flagged "no":
+    "novelty_rationale repeats feature description verbatim"
+- Calibration note: surfaces residual cargo-cult risk in variety scoring;
+  inspect per-dispatch rationales for the flagged tasks
+```
 
 **Save as pact-memory** (delegate to secretary):
 ```
 context: "Orchestration retrospective for {feature}"
 goal: "Calibrate orchestration judgment via second-order observation"
-decisions: ["Variety scored {X}, actual was {Y}", "Specialist {Z} was {well/poorly} matched because {reason}"]
+decisions: [
+  "Variety scored {X}, actual was {Y}",
+  "Specialist {Z} was {well/poorly} matched because {reason}",
+  "Per-dispatch variety: feature {N}, mean {M}, delta {D} {SURFACED/within-threshold}",  # only when coverage >= 50%
+  "Variety acknowledgment: {ack_yes} yes, {ack_no} no, {ack_concern} concern (signal rate {rate}%)"  # only when question 6 surfaces
+]
 lessons_learned: ["Pattern: {any recurring observation}"]
-entities: ["orchestration_calibration", "{domain}"]
+entities: ["orchestration_calibration", "{domain}", "variety_acknowledgment", "cargo_cult_signal"]
 ```
+
+The `Per-dispatch variety` decision row is omitted when `coverage < 0.5`; the `Variety acknowledgment` decision row is appended only when question 6's dual-trigger fired. The `variety_acknowledgment` and `cargo_cult_signal` entities are added only when question 6 surfaces.
 
 **Skip when**: Session was trivial (single comPACT, no variety assessment performed).
 
