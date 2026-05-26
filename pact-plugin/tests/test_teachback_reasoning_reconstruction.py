@@ -16,11 +16,15 @@ extension (issue #832). Coverage:
     rejects partial / empty.
 
 The schema validator under test (`_validate_reasoning_reconstruction`) lives
-in this module — the architect spec (docs/architecture/feat-832-method-level-teachback.md
-§3.2) documents the logic as judgment-tier prose for the lead; the
+in this module — `pact-orchestrator.md §12 Validating Method Reconstruction`
+(committed SSOT) documents the logic as judgment-tier prose for the lead; the
 mechanical schema gate is what this module exercises. When a future PR
 moves the validator into shared/, switch the import and delete the local
-copy.
+copy. NOTE: the AST-scan in
+TestVarietyTrigger.test_constants_imported_not_literal walks Path(__file__)
+only — when the validator migrates, the migrating PR MUST extend the
+AST-scan path to also walk the new validator module, or hard-coded
+6 / 10 / 14 literals could land in shared/ undetected.
 """
 
 from __future__ import annotations

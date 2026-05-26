@@ -57,6 +57,8 @@ Proceeding unless corrected.
 
 Keep teachbacks concise — 3-6 bullet points (or 4-7 when method reconstruction is included). The goal is to surface misunderstandings, not to restate the entire handoff. The method-reconstruction bullet is **optional below variety 11** and **required at variety ≥ 11**; see [When to Method-Reconstruct](#when-to-method-reconstruct) for the variety-band gate.
 
+> Note: protocol prose uses capitalized labels (`Decision attribution`, `Assumption trace`, `Contingency clause`); the schema gate keys on the underscore_separated form (`decision_attribution`, `assumption_trace`, `contingency_clause`). Both shapes describe the same triangle — prose labels for human-readable surfaces, JSON keys for mechanical surfaces (SKILL.md, orchestrator.md §12, tests).
+
 #### When to Teachback
 
 | Situation | Teachback? |
@@ -76,6 +78,14 @@ The L1.5 gate runs against the dispatching task's variety score (see `hooks/shar
 | 7–10 | `ROUTE_ORCHESTRATE` (orchestrate) | **Recommended** — teammate may include; lead MAY ask for it on follow-up | Accept teachback; lead may SendMessage requesting reconstruction on follow-up if upstream decisions are non-trivial. |
 | 11–14 | `ROUTE_PLAN_MODE` (plan-mode + orchestrate) | **Required** — teammate MUST include; absence is rejection signal | Reject teachback with `metadata.teachback_rejection{reason="missing_reasoning_reconstruction"}` plus a correction SendMessage. |
 | 15–16 | `ROUTE_RESEARCH_SPIKE` (research-spike) | **Required** (treated identically to plan-mode) | Same as plan-mode — reject on absence. |
+
+The lead-side validation gate emits one of 3 rejection reasons in `metadata.teachback_rejection.reason`:
+
+| Reason enum | Trigger | Source gate |
+|---|---|---|
+| `missing_reasoning_reconstruction` | Required-band teachback omits the field | Presence gate (variety ≥ 11) |
+| `malformed_reasoning_reconstruction` | Field present but not a 3-key dict | Schema gate |
+| `empty_reasoning_reconstruction_field` | Sub-key missing, non-string, or empty/whitespace | Schema gate |
 
 The `variety_score=None` handling is a **transitional permissiveness**. v4.3+ SHOULD deprecate the None-tolerance and require `variety_score` on every feature task at dispatch time (enforced via `task_lifecycle_gate` or a new dispatch-time predicate). Tracked under [issue #828](https://github.com/Synaptic-Labs-AI/PACT-Plugin/issues/828) (v4.3+ deprecation roadmap). The conservative-now / fail-loud-later trajectory aligns with the user's pinned preference for surfacing failures early without breaking pre-existing dispatch state in this PR. Until that deprecation lands, `variety_score=None` is treated as the **Recommended band** (equivalent to variety 7–10).
 

@@ -86,6 +86,18 @@ You will prepare:
 - **Testing strategy**: Unit, integration, and system testing approaches
 - **Deployment plan**: Environment specifications and release procedures
 
+## 7. Spec Completeness — No-Touch List Enumeration
+
+When writing a "files NOT touched" list in architecture docs (the surface that bounds the blast radius of in-scope edits), apply this 3-step discipline to avoid missing sibling structural pins on the same in-scope file:
+
+1. **Grep tests/ for the in-scope file stem**: `grep -lr "<file-stem>" pact-plugin/tests/` (and any per-language equivalent) to surface ALL tests that touch the file. The match set is the full pin universe to triage, not just the pins you remember.
+2. **Categorize each hit by pin type**: phrase-count (e.g., `EXPECTED_COUNTS`-style structural-phrase pins), character-budget (e.g., `MAX_SKILL_CHARS`-style size ceilings), presence-marker (e.g., required-substring pins), byte-equality (e.g., docstring-parity pins), AST-shape (e.g., import-discipline scans). One in-scope file can have multiple sibling pins in the same test file or across different test files; enumerate all.
+3. **Decide BEFORE CODE phase** whether the planned edit (a) preserves the pin unchanged, (b) requires an in-same-commit pin update with justification, or (c) surfaces a pin gap (flag-and-confirm via teachback or SendMessage to lead before proceeding).
+
+**Failure mode this discipline prevents**: spec-vs-implementation drift where the no-touch list enumerates ONE pin category (e.g., phrase-count) but silently omits another category (e.g., character-budget) on the SAME in-scope file. The omitted pin trips at CODE execution time, forcing a flag-and-confirm round-trip and a scope expansion the spec did not pre-authorize. The 3-step grep+categorize+decide sweep is cheap (typically <60 seconds) and pre-empts the mid-implementation surprise.
+
+**Example** (PR #834, issue #832 method-level teachback): the architect spec's no-touch list enumerated `test_skills_structure.py::EXPECTED_COUNTS` (phrase-count pin on `pact-teachback/SKILL.md`) but omitted the sibling `test_agents_structure.py::TestTeachbackMicroSkillExtraction::MAX_SKILL_CHARS` (character-budget pin on the same file). The CODE-phase agent tripped the size budget at Commit B (legitimate prose growth from 4531 → 7023 chars) and surfaced it via flag-and-confirm. The right resolution (budget bump 5000 → 7500 with honest v4.2.x comment in the same commit) was clean — but step 1 of the discipline above would have pre-empted the surprise.
+
 # DESIGN GUIDELINES
 
 - **Design for Change**: Create flexible architectures with clear extension points

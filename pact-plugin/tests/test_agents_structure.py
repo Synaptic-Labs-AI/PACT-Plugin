@@ -468,6 +468,11 @@ class TestTeachbackMicroSkillExtraction:
     # accommodate reasoning_reconstruction field schema + variety-band
     # gate + L1.5 paragraph; budget ceiling provides ~480-char headroom
     # for future small edits.
+    #
+    # Tighten-back trigger: if a future PR removes optional content
+    # (e.g., #828 v4.3+ deprecation of None-tolerance lets us drop
+    # the transitional permissiveness paragraph), reduce MAX_SKILL_CHARS
+    # to keep this budget a meaningful ceiling and not a ratchet.
     MAX_SKILL_CHARS = 7500
 
     # Key protocol elements that must be in the extracted skill.
