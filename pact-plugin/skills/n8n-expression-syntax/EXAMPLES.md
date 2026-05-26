@@ -1,3 +1,5 @@
+<!-- planning-artifact-exempt-file: references n8n workflow templates by external template ID (e.g., #2947); external-project provenance, not PACT-plugin planning artifacts -->
+
 # n8n Expression Examples
 
 Real working examples from n8n workflows.

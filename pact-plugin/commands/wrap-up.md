@@ -63,6 +63,7 @@ Perform a brief self-assessment. Compare your initial variety assessment and orc
 - Teammate flags: 6 "yes", 1 "no", 1 "concern" — signal rate 25%
 - Coverage: 8 of 8 teachbacks acknowledged (100%)
 - Acute flags:
+  <!-- planning-artifact-exempt: fictional sample-output demonstrating retrospective acute-flag shape; `Task #14` is example data, not a real task ref -->
   - Task #14 (architect: review PR ...) — teammate flagged "no":
     "novelty_rationale repeats feature description verbatim"
 - Calibration note: surfaces residual cargo-cult risk in variety scoring;

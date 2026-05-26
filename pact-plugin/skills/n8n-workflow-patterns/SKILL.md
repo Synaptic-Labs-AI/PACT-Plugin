@@ -3,6 +3,8 @@ name: n8n-workflow-patterns
 description: Proven workflow architectural patterns from real n8n workflows. Use when building new workflows, designing workflow structure, choosing workflow patterns, planning workflow architecture, or asking about webhook processing, HTTP API integration, database operations, AI agent workflows, or scheduled tasks.
 ---
 
+<!-- planning-artifact-exempt-file: documents n8n workflow templates by external template ID (e.g., #2947); refs are external-project provenance, not PACT-plugin planning artifacts -->
+
 # n8n Workflow Patterns
 
 Proven architectural patterns for building n8n workflows.
