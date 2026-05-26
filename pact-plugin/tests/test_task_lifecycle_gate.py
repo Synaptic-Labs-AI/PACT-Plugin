@@ -2201,3 +2201,380 @@ class TestValidateTeachbackSubmitSchema:
             )
         )
         assert result is None
+
+
+# =============================================================================
+# variety_acknowledgment_schema_invalid_at_write_time — D10 schema check
+# forwarded from R2 (completion-time) to write-time
+# =============================================================================
+
+
+def test_variety_ack_schema_invalid_at_write_time_fires_on_string(
+    tmp_path, monkeypatch, pact_context,
+):
+    """variety_acknowledgment as a free-text STRING instead of OBJECT →
+    fires at write-time (not just completion-time)."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=8,
+    )
+    tb = _well_formed_teachback_submit(
+        variety_acknowledgment="I think the scoring is fine",
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": tb},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "variety_acknowledgment_schema_invalid_at_write_time"
+        for rule, _ in advisories
+    ), f"expected write-time schema advisory, got: {advisories}"
+
+
+def test_variety_ack_schema_invalid_at_write_time_fires_on_invalid_enum(
+    tmp_path, monkeypatch, pact_context,
+):
+    """variety_acknowledgment with invalid enum value → fires."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=8,
+    )
+    tb = _well_formed_teachback_submit(
+        variety_acknowledgment={"rationale_articulates_this_dispatch": "maybe"},
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": tb},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "variety_acknowledgment_schema_invalid_at_write_time"
+        for rule, _ in advisories
+    )
+
+
+def test_variety_ack_schema_silent_at_write_time_on_well_formed(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Well-formed variety_acknowledgment → write-time schema advisory silent.
+    Disjoint with R5 (which fires on absent, not present-but-malformed)."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=8,
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": _well_formed_teachback_submit()},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "variety_acknowledgment_schema_invalid_at_write_time"
+        for rule, _ in advisories
+    )
+
+
+def test_variety_ack_schema_silent_when_field_absent(
+    tmp_path, monkeypatch, pact_context,
+):
+    """variety_acknowledgment absent → R5 fires for presence; the
+    schema-at-write-time rule does NOT fire (disjoint trigger)."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=8,
+    )
+    tb = _well_formed_teachback_submit()
+    tb.pop("variety_acknowledgment")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": tb},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    rules = {rule for rule, _ in advisories}
+    assert "variety_acknowledgment_missing" in rules
+    assert "variety_acknowledgment_schema_invalid_at_write_time" not in rules
+
+
+# =============================================================================
+# reasoning_reconstruction_in_handoff — cross-slot mistake (wrong slot)
+# =============================================================================
+
+
+def test_reasoning_reconstruction_in_handoff_fires_when_nested_in_handoff(
+    tmp_path, monkeypatch, pact_context,
+):
+    """reasoning_reconstruction placed inside metadata.handoff → fires.
+    Cross-slot: belongs on teachback_submit, not handoff."""
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {
+                "handoff": {
+                    "produced": "x",
+                    "decisions": "x",
+                    "reasoning_chain": "x",
+                    "uncertainty": "x",
+                    "integration": "x",
+                    "open_questions": "x",
+                    "reasoning_reconstruction": {
+                        "decision_attribution": "x",
+                        "assumption_trace": "x",
+                        "contingency_clause": "x",
+                    },
+                },
+            },
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "reasoning_reconstruction_in_handoff"
+        for rule, _ in advisories
+    ), f"expected cross-slot advisory, got: {advisories}"
+
+
+def test_reasoning_reconstruction_in_handoff_silent_when_only_on_teachback(
+    tmp_path, monkeypatch, pact_context,
+):
+    """reasoning_reconstruction placed on teachback_submit (correct slot)
+    AND handoff has reasoning_chain but no reasoning_reconstruction →
+    cross-slot advisory silent."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=8,
+    )
+    tb = _well_formed_teachback_submit(reasoning_reconstruction={
+        "decision_attribution": "x",
+        "assumption_trace": "x",
+        "contingency_clause": "x",
+    })
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": tb},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "reasoning_reconstruction_in_handoff"
+        for rule, _ in advisories
+    )
+
+
+def test_reasoning_reconstruction_in_handoff_silent_when_no_handoff(
+    pact_context,
+):
+    """No handoff at all → cross-slot advisory silent."""
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "reasoning_reconstruction_in_handoff"
+        for rule, _ in advisories
+    )
+
+
+# =============================================================================
+# reasoning_reconstruction_subkeys_invalid — wrong 3 sub-key names / shapes
+# =============================================================================
+
+
+def test_reasoning_reconstruction_subkeys_invalid_fires_on_wrong_names(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Non-canonical sub-key names (e.g. what-I-learned) → fires."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=8,
+    )
+    tb = _well_formed_teachback_submit(reasoning_reconstruction={
+        "what-I-learned": "x",
+        "falsification-attempts": "y",
+        "most-likely-wrong-prediction": "z",
+    })
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": tb},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "reasoning_reconstruction_subkeys_invalid"
+        for rule, _ in advisories
+    ), f"expected subkeys advisory, got: {advisories}"
+
+
+def test_reasoning_reconstruction_subkeys_invalid_fires_on_empty_subkey(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Canonical keys but empty sub-key value → fires."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=8,
+    )
+    tb = _well_formed_teachback_submit(reasoning_reconstruction={
+        "decision_attribution": "x",
+        "assumption_trace": "",
+        "contingency_clause": "x",
+    })
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": tb},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "reasoning_reconstruction_subkeys_invalid"
+        for rule, _ in advisories
+    )
+
+
+def test_reasoning_reconstruction_subkeys_silent_on_well_formed(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Well-formed 3-sub-key triangle → silent."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=8,
+    )
+    tb = _well_formed_teachback_submit(reasoning_reconstruction={
+        "decision_attribution": "x",
+        "assumption_trace": "x",
+        "contingency_clause": "x",
+    })
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": tb},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "reasoning_reconstruction_subkeys_invalid"
+        for rule, _ in advisories
+    )
+
+
+def test_reasoning_reconstruction_subkeys_silent_when_field_absent(
+    tmp_path, monkeypatch, pact_context,
+):
+    """reasoning_reconstruction not provided → subkeys rule silent (R3
+    handles the band-required case independently)."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=8,
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": _well_formed_teachback_submit()},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "reasoning_reconstruction_subkeys_invalid"
+        for rule, _ in advisories
+    )
+
+
+# =============================================================================
+# intentional_wait_nested_in_teachback_submit — cross-key mistake
+# =============================================================================
+
+
+def test_intentional_wait_nested_in_teachback_submit_fires_when_nested(
+    tmp_path, monkeypatch, pact_context,
+):
+    """intentional_wait placed INSIDE teachback_submit → fires.
+    Cross-key: must be sibling top-level metadata key per Step 3."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=8,
+    )
+    tb = _well_formed_teachback_submit()
+    tb["intentional_wait"] = {
+        "reason": "awaiting_lead_completion",
+        "expected_resolver": "lead",
+        "since": "2026-05-26T19:45:40+00:00",
+    }
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": tb},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "intentional_wait_nested_in_teachback_submit"
+        for rule, _ in advisories
+    ), f"expected cross-key advisory, got: {advisories}"
+
+
+def test_intentional_wait_silent_when_top_level_sibling(
+    tmp_path, monkeypatch, pact_context,
+):
+    """intentional_wait as a sibling top-level metadata key (canonical Step 3
+    placement) → cross-key advisory silent."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=8,
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {
+                "teachback_submit": _well_formed_teachback_submit(),
+                "intentional_wait": {
+                    "reason": "awaiting_lead_completion",
+                    "expected_resolver": "lead",
+                    "since": "2026-05-26T19:45:40+00:00",
+                },
+            },
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "intentional_wait_nested_in_teachback_submit"
+        for rule, _ in advisories
+    )
