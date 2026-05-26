@@ -420,12 +420,19 @@ class TestStructuralVerificationDiscipline:
         section = agent_content[start:end]
         assert "file inspection beats HANDOFF inference" in section
 
-    def test_agent_cites_pr_501_incident(self, agent_content):
-        """Discipline cites the triggering incident so the rule's context survives compaction."""
+    def test_agent_cites_phantom_symmetric_claim_discipline(self, agent_content):
+        """Discipline cites the triggering incident so the rule's context survives compaction.
+
+        The behavioral anchor `PHANTOM-SYMMETRIC-CLAIM` names the failure-mode
+        shape (four-layer agreement on a fabricated structural claim) that
+        motivated the rule. The name survives planning-artifact scrubs and
+        is the durable discipline content; provenance SHAs / PR refs are
+        incidental and forbidden in `agents/*.md` per the LLM-load distinction.
+        """
         start = agent_content.index("STRUCTURAL VERIFICATION DISCIPLINE")
         end = agent_content.index("## SIGNAL FORMAT", start)
         section = agent_content[start:end]
-        assert "bef7f24" in section or "PR #501" in section
+        assert "PHANTOM-SYMMETRIC-CLAIM" in section
 
     def test_agent_signal_format_evidence_field_upgraded(self, agent_content):
         """Agent's Evidence field requires structural ACs be cited via git diff."""
