@@ -2669,6 +2669,71 @@ def test_multi_rule_concurrent_emission_cross_slot_with_teachback_violation(
     assert "reasoning_reconstruction_in_handoff" in rules
 
 
+def test_multi_rule_concurrent_emission_all_four_advisory_rules_fire_together(
+    tmp_path, monkeypatch, pact_context,
+):
+    """One TaskUpdate carrying FOUR distinct violations across BOTH the
+    teachback_submit slot AND the handoff slot must emit FOUR advisories
+    on the same evaluation pass — the 4-way superset of the 3-rule and
+    2-rule cross-slot fixtures above. Pins the structural property that
+    R7 + R8 + R9 + R10 emit at FOUR independent code paths with no
+    short-circuit dispatcher consolidation: a teammate making all 4
+    mistakes at once learns about all 4, not just the first match.
+
+    Violations:
+      - teachback_submit.variety_acknowledgment as STRING
+        → variety_acknowledgment_schema_invalid_at_write_time (R7)
+      - handoff.reasoning_reconstruction nested in wrong slot
+        → reasoning_reconstruction_in_handoff (R8)
+      - teachback_submit.reasoning_reconstruction with wrong sub-key names
+        → reasoning_reconstruction_subkeys_invalid (R9)
+      - teachback_submit.intentional_wait nested instead of sibling
+        → intentional_wait_nested_in_teachback_submit (R10)
+    """
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=8,
+    )
+    tb = _well_formed_teachback_submit(
+        variety_acknowledgment="I think the scoring is fine",
+        reasoning_reconstruction={
+            "what-I-learned": "x",
+            "falsification-attempts": "y",
+            "most-likely-wrong-prediction": "z",
+        },
+    )
+    tb["intentional_wait"] = {
+        "reason": "awaiting_lead_completion",
+        "expected_resolver": "lead",
+        "since": "2026-05-26T20:00:00+00:00",
+    }
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {
+                "teachback_submit": tb,
+                "handoff": {
+                    "produced": "x", "decisions": "x", "reasoning_chain": "x",
+                    "uncertainty": "x", "integration": "x", "open_questions": "x",
+                    "reasoning_reconstruction": {
+                        "decision_attribution": "x",
+                        "assumption_trace": "x",
+                        "contingency_clause": "x",
+                    },
+                },
+            },
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    rules = {rule for rule, _ in advisories}
+    assert "variety_acknowledgment_schema_invalid_at_write_time" in rules
+    assert "reasoning_reconstruction_in_handoff" in rules
+    assert "reasoning_reconstruction_subkeys_invalid" in rules
+    assert "intentional_wait_nested_in_teachback_submit" in rules
+
+
 # =============================================================================
 # 10|11 variety-band boundary disambiguation — pin the exact cut so that
 # future variety_scorer threshold changes (e.g. PLAN_MODE_MIN export) are

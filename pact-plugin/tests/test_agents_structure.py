@@ -477,7 +477,7 @@ class TestTeachbackMicroSkillExtraction:
     # Mistakes table whose rows align 1:1 with the runtime advisory rules
     # in task_lifecycle_gate.py, and a four-band threshold table folded
     # into the When-to-Method-Reconstruct section. Budget ceiling
-    # provides ~810-char headroom for future small edits.
+    # provides ~620-char headroom for future small edits.
     #
     # Tighten-back trigger: if a future PR removes optional content
     # (e.g., if a future PR removes the transitional permissiveness
