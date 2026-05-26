@@ -114,11 +114,11 @@ try:
     from shared.session_journal import append_event, make_event
     from shared.task_utils import read_task_json
     from shared.teachback_schema import (
-        REASONING_RECONSTRUCTION_REQUIRED_MIN as _REASONING_RECONSTRUCTION_REQUIRED_MIN,
-        REQUIRED_FIELDS as _TEACHBACK_REQUIRED_FIELDS,
-        REQUIRED_SUBKEYS as _TEACHBACK_REQUIRED_SUBKEYS,
-        VARIETY_ACK_VALID_VALUES as _VARIETY_ACK_VALID_VALUES,
-        validate_reasoning_reconstruction as _validate_reasoning_reconstruction,
+        TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN,
+        TEACHBACK_REQUIRED_FIELDS,
+        TEACHBACK_REQUIRED_SUBKEYS,
+        TEACHBACK_VARIETY_ACK_VALID_VALUES,
+        validate_reasoning_reconstruction,
     )
     from shared.tool_response import extract_tool_response
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
@@ -160,11 +160,12 @@ _HANDOFF_REQUIRED_FIELDS = (
     "open_questions",
 )
 
-# Teachback schema constants (_TEACHBACK_REQUIRED_FIELDS,
-# _VARIETY_ACK_VALID_VALUES, _REASONING_RECONSTRUCTION_REQUIRED_MIN) and the
-# reasoning_reconstruction validator are imported from shared.teachback_schema
-# (SSOT). _TEACHBACK_REQUIRED_SUBKEYS and _validate_reasoning_reconstruction
-# are consumed by the write-time advisory rules below.
+# Teachback schema constants (TEACHBACK_REQUIRED_FIELDS,
+# TEACHBACK_VARIETY_ACK_VALID_VALUES, TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN)
+# and the reasoning_reconstruction validator are imported from
+# shared.teachback_schema (SSOT). TEACHBACK_REQUIRED_SUBKEYS and
+# validate_reasoning_reconstruction are consumed by the write-time advisory
+# rules below.
 
 # Required per-dimension rationale fields on metadata.variety (D11).
 # 4-tuple. Each rationale is one sentence explaining THIS dispatch's score
@@ -367,10 +368,10 @@ def _validate_variety_acknowledgment(ack: object) -> str | None:
     if not isinstance(ack, dict):
         return f"must be object, got {type(ack).__name__}"
     value = ack.get("rationale_articulates_this_dispatch")
-    if value not in _VARIETY_ACK_VALID_VALUES:
+    if value not in TEACHBACK_VARIETY_ACK_VALID_VALUES:
         return (
             f"rationale_articulates_this_dispatch must be one of "
-            f"{_VARIETY_ACK_VALID_VALUES}, got {value!r}"
+            f"{TEACHBACK_VARIETY_ACK_VALID_VALUES}, got {value!r}"
         )
     if value != "yes":
         concern = ack.get("concern")
@@ -395,7 +396,7 @@ def _validate_teachback_submit_schema(teachback: object) -> str | None:
             f"metadata.teachback_submit must be object, "
             f"got {type(teachback).__name__}"
         )
-    missing = [f for f in _TEACHBACK_REQUIRED_FIELDS if f not in teachback]
+    missing = [f for f in TEACHBACK_REQUIRED_FIELDS if f not in teachback]
     if missing:
         return (
             f"metadata.teachback_submit missing required fields: "
@@ -404,7 +405,7 @@ def _validate_teachback_submit_schema(teachback: object) -> str | None:
     # Non-empty-string check on the 4 string fields; variety_acknowledgment
     # is a dict, validated by the dedicated sub-validator below.
     string_fields = tuple(
-        f for f in _TEACHBACK_REQUIRED_FIELDS if f != "variety_acknowledgment"
+        f for f in TEACHBACK_REQUIRED_FIELDS if f != "variety_acknowledgment"
     )
     empty = [
         f for f in string_fields
@@ -494,7 +495,7 @@ def _resolve_required_band_via_blocks(
     total = variety.get("total")
     if not isinstance(total, int) or isinstance(total, bool):
         return "unresolvable"
-    if total >= _REASONING_RECONSTRUCTION_REQUIRED_MIN:
+    if total >= TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN:
         return "required"
     if total >= 7:
         return "recommended"
@@ -759,7 +760,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
             task_id = tool_input.get("taskId", "") or ""
             advisories.append((
                 "reasoning_reconstruction_in_handoff",
-                f"PACT task_lifecycle_gate: Teachback Task {task_id} "
+                f"PACT task_lifecycle_gate: Task {task_id} "
                 "placed reasoning_reconstruction inside metadata.handoff. "
                 "It belongs at top-level on metadata.teachback_submit. "
                 "The handoff has reasoning_chain (sender's view); the "
@@ -809,7 +810,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                             "Per D10, variety_acknowledgment is an OBJECT "
                             "(NOT a free-text string) with "
                             f"rationale_articulates_this_dispatch in "
-                            f"{_VARIETY_ACK_VALID_VALUES} + concern "
+                            f"{TEACHBACK_VARIETY_ACK_VALID_VALUES} + concern "
                             "(when != 'yes'). See pact-teachback skill "
                             "Common mistakes row 1.",
                         ))
@@ -821,7 +822,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                 # will reject with malformed_reasoning_reconstruction or
                 # empty_reasoning_reconstruction_field.
                 if "reasoning_reconstruction" in incoming_teachback:
-                    rr_problem = _validate_reasoning_reconstruction(
+                    rr_problem = validate_reasoning_reconstruction(
                         incoming_teachback["reasoning_reconstruction"]
                     )
                     if rr_problem:
@@ -830,7 +831,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                             f"PACT task_lifecycle_gate: Teachback Task "
                             f"{task_id} reasoning_reconstruction "
                             f"rejected — {rr_problem}. Canonical 3 "
-                            f"sub-keys are {_TEACHBACK_REQUIRED_SUBKEYS} "
+                            f"sub-keys are {TEACHBACK_REQUIRED_SUBKEYS} "
                             "as non-empty strings. Lead will reject with "
                             "the same reason enum. See pact-teachback "
                             "skill Common mistakes row 3.",

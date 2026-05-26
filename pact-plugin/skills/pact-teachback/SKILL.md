@@ -81,7 +81,7 @@ TaskUpdate(taskId, metadata={"teachback_submit": {
     # ANTI-PATTERN: a free-text STRING here is rejected. variety_acknowledgment
     # MUST be an OBJECT with the 2 keys shown below. The runtime advisory
     # `variety_acknowledgment_schema_invalid_at_write_time` fires at TaskUpdate
-    # if you submit a string. See Common mistakes row 1.
+    # if you submit a string. See pact-teachback skill Common mistakes row 1.
     "variety_acknowledgment": {                  # REQUIRED — see trigger paragraph below the JSON
         "rationale_articulates_this_dispatch": "yes" | "no" | "concern",
         "concern": "<required when value != 'yes'; names the smell>"
@@ -93,7 +93,7 @@ TaskUpdate(taskId, metadata={"teachback_submit": {
     # reasoning_reconstruction (your reconstruction of the upstream's
     # reasoning). Symmetric concept, different slot. The runtime advisory
     # `reasoning_reconstruction_in_handoff` fires if you place it on the
-    # handoff. See Common mistakes row 2.
+    # handoff. See pact-teachback skill Common mistakes row 2.
 
     # OPTIONAL: include per §When to Method-Reconstruct in pact-ct-teachback.md
     # (required at variety >= 11; recommended at 7-10; skipped at 4-6)
@@ -103,7 +103,7 @@ TaskUpdate(taskId, metadata={"teachback_submit": {
     # "most-likely-wrong-prediction") is rejected as
     # reasoning_reconstruction_subkeys_invalid at write time and as
     # malformed_reasoning_reconstruction at lead-side completion-time review.
-    # See Common mistakes row 3.
+    # See pact-teachback skill Common mistakes row 3.
     "reasoning_reconstruction": {
         "decision_attribution": "I understand <upstream agent> chose <decision> because <their stated reason>",
         "assumption_trace":     "This reasoning depends on <assumption A>, <assumption B>, ...",
@@ -134,7 +134,7 @@ SendMessage(
 > reads `metadata.intentional_wait` directly and does not descend into
 > nested objects. Your idle is unprotected. The runtime advisory
 > `intentional_wait_nested_in_teachback_submit` fires at write time. See
-> Common mistakes row 4.
+> pact-teachback skill Common mistakes row 4.
 
 **Step 3 — SET `intentional_wait` and idle**:
 
@@ -171,7 +171,7 @@ Include the nested `reasoning_reconstruction` sub-object whenever the dispatchin
 |---|---|---|---|
 | 4–6 | `ROUTE_COMPACT` | Skipped — not expected | Accept teachback; absence is the expected default. |
 | 7–10 | `ROUTE_ORCHESTRATE` | Recommended (NOT required) | Accept teachback; lead MAY SendMessage requesting reconstruction on follow-up if upstream decisions are non-trivial. |
-| 11–14 | `ROUTE_PLAN_MODE` | REQUIRED | Reject teachback with `metadata.teachback_rejection{reason="missing_reasoning_reconstruction"}` plus a correction SendMessage. |
+| 11–14 | `ROUTE_PLAN_MODE` (plan-mode + orchestrate) | REQUIRED | Reject teachback with `metadata.teachback_rejection{reason="missing_reasoning_reconstruction"}` plus a correction SendMessage. |
 | 15–16 | `ROUTE_RESEARCH_SPIKE` | REQUIRED (treated identically to plan-mode) | Same as `ROUTE_PLAN_MODE` — reject on absence. |
 
 Source of truth for the band cuts: `hooks/shared/variety_scorer.py` (`COMPACT_MAX` / `ORCHESTRATE_MAX` / `PLAN_MODE_MAX`); this table mirrors the SSOT at [pact-ct-teachback.md §When to Method-Reconstruct](../../protocols/pact-ct-teachback.md#when-to-method-reconstruct) — do not paraphrase the `ROUTE_*` literals. Variety **10** is the TOP of `ROUTE_ORCHESTRATE` (recommended-not-required); variety **11** is the BOTTOM of `ROUTE_PLAN_MODE` (required). The 10|11 boundary is the cut.

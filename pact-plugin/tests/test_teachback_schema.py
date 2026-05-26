@@ -2,11 +2,11 @@
 and the reasoning_reconstruction sub-key validator.
 
 Pins:
-  - REQUIRED_FIELDS: canonical 5-tuple (4 string fields + variety_acknowledgment)
-  - REQUIRED_SUBKEYS: canonical 3-tuple (decision_attribution / assumption_trace /
+  - TEACHBACK_REQUIRED_FIELDS: canonical 5-tuple (4 string fields + variety_acknowledgment)
+  - TEACHBACK_REQUIRED_SUBKEYS: canonical 3-tuple (decision_attribution / assumption_trace /
     contingency_clause)
-  - VARIETY_ACK_VALID_VALUES: 3-tuple enum (yes / no / concern)
-  - REASONING_RECONSTRUCTION_REQUIRED_MIN: 11 (variety-band threshold mirror)
+  - TEACHBACK_VARIETY_ACK_VALID_VALUES: 3-tuple enum (yes / no / concern)
+  - TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN: 11 (variety-band threshold mirror)
   - validate_reasoning_reconstruction:
       - None on well-formed 3-sub-key triangle of non-empty strings
       - "malformed_reasoning_reconstruction" on not-dict / wrong-keys
@@ -23,10 +23,10 @@ from __future__ import annotations
 import pytest
 
 from shared.teachback_schema import (
-    REASONING_RECONSTRUCTION_REQUIRED_MIN,
-    REQUIRED_FIELDS,
-    REQUIRED_SUBKEYS,
-    VARIETY_ACK_VALID_VALUES,
+    TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN,
+    TEACHBACK_REQUIRED_FIELDS,
+    TEACHBACK_REQUIRED_SUBKEYS,
+    TEACHBACK_VARIETY_ACK_VALID_VALUES,
     validate_reasoning_reconstruction,
 )
 
@@ -41,11 +41,11 @@ class TestConstants:
     and pact-orchestrator §12 prose edits."""
 
     def test_required_fields_is_5_tuple(self):
-        assert isinstance(REQUIRED_FIELDS, tuple)
-        assert len(REQUIRED_FIELDS) == 5
+        assert isinstance(TEACHBACK_REQUIRED_FIELDS, tuple)
+        assert len(TEACHBACK_REQUIRED_FIELDS) == 5
 
     def test_required_fields_exact_names(self):
-        assert REQUIRED_FIELDS == (
+        assert TEACHBACK_REQUIRED_FIELDS == (
             "understanding",
             "most_likely_wrong",
             "least_confident_item",
@@ -54,26 +54,26 @@ class TestConstants:
         )
 
     def test_required_subkeys_is_3_tuple(self):
-        assert isinstance(REQUIRED_SUBKEYS, tuple)
-        assert len(REQUIRED_SUBKEYS) == 3
+        assert isinstance(TEACHBACK_REQUIRED_SUBKEYS, tuple)
+        assert len(TEACHBACK_REQUIRED_SUBKEYS) == 3
 
     def test_required_subkeys_exact_names(self):
-        assert REQUIRED_SUBKEYS == (
+        assert TEACHBACK_REQUIRED_SUBKEYS == (
             "decision_attribution",
             "assumption_trace",
             "contingency_clause",
         )
 
     def test_variety_ack_valid_values_exact(self):
-        assert VARIETY_ACK_VALID_VALUES == ("yes", "no", "concern")
+        assert TEACHBACK_VARIETY_ACK_VALID_VALUES == ("yes", "no", "concern")
 
     def test_required_min_threshold_is_11(self):
         # Mirror of variety_scorer: ORCHESTRATE_MAX=10, PLAN_MODE_MAX=14
         # → plan-mode-and-above starts at >= 11.
         from shared.variety_scorer import ORCHESTRATE_MAX, PLAN_MODE_MAX
 
-        assert REASONING_RECONSTRUCTION_REQUIRED_MIN == ORCHESTRATE_MAX + 1
-        assert REASONING_RECONSTRUCTION_REQUIRED_MIN <= PLAN_MODE_MAX
+        assert TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN == ORCHESTRATE_MAX + 1
+        assert TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN <= PLAN_MODE_MAX
 
 
 # ============================================================================
@@ -151,7 +151,8 @@ class TestValidatorMalformed:
         )
 
     def test_substituted_key_returns_malformed(self):
-        # Mirrors PR #834 cycle-3 wrong-shape (`what-I-learned` etc.)
+        # Mirrors observed wrong-shape pattern (substituting non-canonical
+        # sub-key names like `what-I-learned`).
         rr = {
             "what-I-learned": "x",
             "falsification-attempts": "y",

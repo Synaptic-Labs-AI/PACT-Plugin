@@ -14,29 +14,29 @@ When the 5-field shape, 3-sub-key triangle, or threshold changes, this is
 the only Python edit site. Prose in skills/pact-teachback/SKILL.md mirrors
 these values via grep-at-edit-time alignment.
 
-Public surface:
-- REQUIRED_FIELDS — canonical 5-tuple per D10 (4 string fields +
-  variety_acknowledgment dict).
-- REQUIRED_SUBKEYS — canonical 3-tuple for reasoning_reconstruction per
-  pact-ct-teachback.md §When to Method-Reconstruct.
-- VARIETY_ACK_VALID_VALUES — enum tuple for
-  variety_acknowledgment.rationale_articulates_this_dispatch.
-- REASONING_RECONSTRUCTION_REQUIRED_MIN — variety band threshold (>= 11
-  → REQUIRED). Sourced from variety_scorer.PLAN_MODE_MAX + 1 semantics;
-  align via grep-at-edit-time until variety_scorer.py exports an explicit
-  PLAN_MODE_MIN.
-- validate_reasoning_reconstruction(rr) — pure validator returning None
-  on well-formed input or a reason-enum string on rejection.
-
 Contract: pure module; no I/O, no global state, no platform dependencies.
 Functions never raise.
+
+Public surface:
+- TEACHBACK_REQUIRED_FIELDS — canonical 5-tuple per D10 (4 string fields +
+  variety_acknowledgment dict).
+- TEACHBACK_REQUIRED_SUBKEYS — canonical 3-tuple for reasoning_reconstruction
+  per pact-ct-teachback.md §When to Method-Reconstruct.
+- TEACHBACK_VARIETY_ACK_VALID_VALUES — enum tuple for
+  variety_acknowledgment.rationale_articulates_this_dispatch.
+- TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN — variety band threshold
+  (>= 11 → REQUIRED). Sourced from variety_scorer.PLAN_MODE_MAX + 1
+  semantics; align via grep-at-edit-time until variety_scorer.py exports
+  an explicit PLAN_MODE_MIN.
+- validate_reasoning_reconstruction(rr) — pure validator returning None
+  on well-formed input or a reason-enum string on rejection.
 """
 
 from __future__ import annotations
 
 
 # Canonical 5 field names per D10. 4 string fields + variety_acknowledgment dict.
-REQUIRED_FIELDS: tuple[str, ...] = (
+TEACHBACK_REQUIRED_FIELDS: tuple[str, ...] = (
     "understanding",
     "most_likely_wrong",
     "least_confident_item",
@@ -46,7 +46,7 @@ REQUIRED_FIELDS: tuple[str, ...] = (
 
 # Canonical 3 sub-keys for reasoning_reconstruction per pact-ct-teachback.md
 # §When to Method-Reconstruct. Each value is a non-empty string at submit time.
-REQUIRED_SUBKEYS: tuple[str, ...] = (
+TEACHBACK_REQUIRED_SUBKEYS: tuple[str, ...] = (
     "decision_attribution",
     "assumption_trace",
     "contingency_clause",
@@ -55,13 +55,13 @@ REQUIRED_SUBKEYS: tuple[str, ...] = (
 # Allowed enum values for variety_acknowledgment.rationale_articulates_this_dispatch
 # per D10. Object schema:
 #   {rationale_articulates_this_dispatch: <enum>, concern: <str when != yes>}.
-VARIETY_ACK_VALID_VALUES: tuple[str, ...] = ("yes", "no", "concern")
+TEACHBACK_VARIETY_ACK_VALID_VALUES: tuple[str, ...] = ("yes", "no", "concern")
 
 # REQUIRED-band threshold for reasoning_reconstruction. Per variety_scorer.py:
 # PLAN_MODE_MAX = 14, ORCHESTRATE_MAX = 10 → plan-mode-and-above starts at >= 11.
 # When variety_scorer.py exports an explicit PLAN_MODE_MIN, this should be
 # replaced with `from shared.variety_scorer import PLAN_MODE_MIN`.
-REASONING_RECONSTRUCTION_REQUIRED_MIN: int = 11
+TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN: int = 11
 
 
 def validate_reasoning_reconstruction(rr: object) -> str | None:
@@ -69,7 +69,7 @@ def validate_reasoning_reconstruction(rr: object) -> str | None:
     rejection-reason enum string.
 
     Schema:
-      - dict with exactly REQUIRED_SUBKEYS as keys
+      - dict with exactly TEACHBACK_REQUIRED_SUBKEYS as keys
       - each value: non-empty string (after .strip())
 
     Returns the reason string for the lead-side rejection enum mapping:
@@ -82,9 +82,9 @@ def validate_reasoning_reconstruction(rr: object) -> str | None:
     """
     if not isinstance(rr, dict):
         return "malformed_reasoning_reconstruction"
-    if set(rr.keys()) != set(REQUIRED_SUBKEYS):
+    if set(rr.keys()) != set(TEACHBACK_REQUIRED_SUBKEYS):
         return "malformed_reasoning_reconstruction"
-    for key in REQUIRED_SUBKEYS:
+    for key in TEACHBACK_REQUIRED_SUBKEYS:
         value = rr[key]
         if not isinstance(value, str) or not value.strip():
             return "empty_reasoning_reconstruction_field"

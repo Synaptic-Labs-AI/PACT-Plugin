@@ -19,7 +19,8 @@ The schema sub-key validator now lives in shared/teachback_schema.py
 (SSOT). This module's `_validate_reasoning_reconstruction` wraps the
 shared validator with the lead-side band-routing logic that combines
 sub-key validation with variety-band-driven missing-reconstruction
-rejection. _REQUIRED_SUBKEYS is imported from shared (canonical 3-tuple).
+rejection. TEACHBACK_REQUIRED_SUBKEYS is imported from shared (canonical
+3-tuple).
 NOTE: the AST-scan in TestVarietyTrigger.test_constants_imported_not_literal
 walks Path(__file__) only — if band thresholds (6 / 10 / 14) are migrated
 out of variety_scorer.py into another module in a future PR, the scan
@@ -36,7 +37,7 @@ import pytest
 
 from shared.intentional_wait import TEACHBACK_EXEMPT_AGENT_TYPES
 from shared.teachback_schema import (
-    REQUIRED_SUBKEYS as _REQUIRED_SUBKEYS,
+    TEACHBACK_REQUIRED_SUBKEYS,
     validate_reasoning_reconstruction as _validate_subkeys,
 )
 from shared.variety_scorer import (
@@ -147,7 +148,7 @@ class TestSchemaShape:
         assert reason is None
 
     def test_field_present_requires_3_keys(self):
-        partial = {k: "ok" for k in _REQUIRED_SUBKEYS[:2]}
+        partial = {k: "ok" for k in TEACHBACK_REQUIRED_SUBKEYS[:2]}
         verdict, reason = _validate_reasoning_reconstruction(
             _payload(reconstruction=partial), dispatching_variety_score=5
         )
@@ -155,7 +156,7 @@ class TestSchemaShape:
         assert reason == "malformed_reasoning_reconstruction"
 
     def test_field_present_rejects_extra_keys(self):
-        extra = {k: "ok" for k in _REQUIRED_SUBKEYS}
+        extra = {k: "ok" for k in TEACHBACK_REQUIRED_SUBKEYS}
         extra["surprise_key"] = "shouldnt be here"
         verdict, reason = _validate_reasoning_reconstruction(
             _payload(reconstruction=extra), dispatching_variety_score=5
@@ -164,7 +165,7 @@ class TestSchemaShape:
         assert reason == "malformed_reasoning_reconstruction"
 
     def test_each_subkey_must_be_string(self):
-        bad = dict.fromkeys(_REQUIRED_SUBKEYS, "ok")
+        bad = dict.fromkeys(TEACHBACK_REQUIRED_SUBKEYS, "ok")
         bad["assumption_trace"] = ["list", "not", "string"]
         verdict, reason = _validate_reasoning_reconstruction(
             _payload(reconstruction=bad), dispatching_variety_score=5
@@ -173,7 +174,7 @@ class TestSchemaShape:
         assert reason == "empty_reasoning_reconstruction_field"
 
     def test_each_subkey_must_be_nonempty(self):
-        bad = dict.fromkeys(_REQUIRED_SUBKEYS, "ok")
+        bad = dict.fromkeys(TEACHBACK_REQUIRED_SUBKEYS, "ok")
         bad["contingency_clause"] = "   "  # whitespace-only also rejected
         verdict, reason = _validate_reasoning_reconstruction(
             _payload(reconstruction=bad), dispatching_variety_score=5
@@ -445,7 +446,7 @@ def test_payload_json_round_trip_preserves_triangle():
     payload = _payload(reconstruction=_well_formed_triangle())
     serialized = json.dumps({"teachback_submit": payload})
     restored = json.loads(serialized)["teachback_submit"]
-    assert set(restored["reasoning_reconstruction"].keys()) == set(_REQUIRED_SUBKEYS)
+    assert set(restored["reasoning_reconstruction"].keys()) == set(TEACHBACK_REQUIRED_SUBKEYS)
     verdict, _ = _validate_reasoning_reconstruction(
         restored, dispatching_variety_score=PLAN_MODE_MAX
     )
