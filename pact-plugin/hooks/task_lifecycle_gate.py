@@ -34,6 +34,21 @@ Rule coverage:
     → advisory + completion_disputed writeback
   - handoff_schema_invalid — metadata.handoff present but malformed
     (disjoint with handoff_missing)
+  - teachback_submit_missing — Teachback Task completed without
+    metadata.teachback_submit payload
+  - teachback_submit_schema_invalid — metadata.teachback_submit present
+    but malformed against the 5-field canonical schema (disjoint with
+    teachback_submit_missing)
+  - reasoning_reconstruction_missing_at_required_band — Teachback
+    submitted at REQUIRED band (Task B variety.total >= 11) without
+    reasoning_reconstruction
+  - reasoning_reconstruction_band_unresolvable — band traversal failed
+    (missing blocks, missing Task B, missing variety); fail-open advisory
+    documents the gap without blocking lifecycle
+  - variety_missing_on_dispatch_task — pact-* work Task created without
+    metadata.variety OR with malformed per-dimension rationales
+  - variety_acknowledgment_missing — Teachback submitted without
+    variety_acknowledgment field (D10 teammate verification)
   - Every gate decision emits a session_journal lifecycle_decision event
 """
 
@@ -125,6 +140,47 @@ _HANDOFF_REQUIRED_FIELDS = (
     "integration",
     "open_questions",
 )
+
+# Required teachback_submit schema fields (advisory if present-but-malformed).
+# 5-tuple per D10: 4 string fields + variety_acknowledgment dict. Mirrors the
+# canonical schema documented in pact-plugin/skills/pact-teachback/SKILL.md.
+# When the 5-field shape changes, update this constant AND the SKILL.md docs
+# together (single SSOT-style mirror; grep-at-edit-time is the alignment
+# mechanism until a shared schema module materializes — see design doc §6.4).
+_TEACHBACK_REQUIRED_FIELDS = (
+    "understanding",
+    "most_likely_wrong",
+    "least_confident_item",
+    "first_action",
+    "variety_acknowledgment",
+)
+
+# Required per-dimension rationale fields on metadata.variety (D11).
+# 4-tuple. Each rationale is one sentence explaining THIS dispatch's score
+# on THAT dimension. Cargo-cult-via-single-rationale (D4 legacy) is no longer
+# schema-conformant; four distinct rationales force four fresh articulations.
+_VARIETY_REQUIRED_RATIONALES = (
+    "novelty_rationale",
+    "scope_rationale",
+    "uncertainty_rationale",
+    "risk_rationale",
+)
+
+# Allowed enum values for variety_acknowledgment.rationale_articulates_this_dispatch
+# per D10. "yes" → all four rationales articulate this dispatch's complexity.
+# "no" → teammate flags cargo-cult or scoring defect. "concern" → softer
+# signal; teammate has reservation but is not certain.
+_VARIETY_ACK_VALID_VALUES = ("yes", "no", "concern")
+
+# REQUIRED-band threshold for reasoning_reconstruction (Task B variety.total).
+# Sourced from variety_scorer.PLAN_MODE_MAX + 1 semantics: PLAN_MODE_MAX=14,
+# ORCHESTRATE_MAX=10 → plan-mode-and-above starts at >= 11. Kept module-local
+# until the variety_scorer.py SSOT migration trajectory lands an explicit
+# PLAN_MODE_MIN export, at which point this should be replaced with:
+#     from shared.variety_scorer import PLAN_MODE_MIN
+# Until then, align via grep gate at edit time — see design doc §6.5 for
+# the SSOT-migration rationale.
+_REASONING_RECONSTRUCTION_REQUIRED_MIN = 11
 
 
 # Canonical Teachback Task subject pattern: `<teammate-name>: TEACHBACK
@@ -304,6 +360,152 @@ def _validate_handoff_schema(handoff: object) -> str | None:
     return None
 
 
+def _validate_variety_acknowledgment(ack: object) -> str | None:
+    """Return None if variety_acknowledgment is well-formed per D10, or a
+    short reason string. Pure function; never raises.
+
+    Schema:
+      - must be dict
+      - rationale_articulates_this_dispatch: enum 'yes' | 'no' | 'concern'
+      - concern: non-empty string when value != 'yes'; optional/empty when 'yes'
+    """
+    if not isinstance(ack, dict):
+        return f"must be object, got {type(ack).__name__}"
+    value = ack.get("rationale_articulates_this_dispatch")
+    if value not in _VARIETY_ACK_VALID_VALUES:
+        return (
+            f"rationale_articulates_this_dispatch must be one of "
+            f"{_VARIETY_ACK_VALID_VALUES}, got {value!r}"
+        )
+    if value != "yes":
+        concern = ack.get("concern")
+        if not isinstance(concern, str) or not concern.strip():
+            return (
+                "concern field required (non-empty string) when "
+                "rationale_articulates_this_dispatch != 'yes'"
+            )
+    return None
+
+
+def _validate_teachback_submit_schema(teachback: object) -> str | None:
+    """Return None if teachback_submit is well-formed, or a short reason
+    string. Mirrors _validate_handoff_schema.
+
+    Validates the 5 canonical fields per pact-teachback skill (4 string
+    fields + variety_acknowledgment dict per D10). reasoning_reconstruction
+    is checked separately at R3 dispatch time, not here.
+    """
+    if not isinstance(teachback, dict):
+        return (
+            f"metadata.teachback_submit must be object, "
+            f"got {type(teachback).__name__}"
+        )
+    missing = [f for f in _TEACHBACK_REQUIRED_FIELDS if f not in teachback]
+    if missing:
+        return (
+            f"metadata.teachback_submit missing required fields: "
+            f"{', '.join(missing)}"
+        )
+    # Non-empty-string check on the 4 string fields; variety_acknowledgment
+    # is a dict, validated by the dedicated sub-validator below.
+    string_fields = tuple(
+        f for f in _TEACHBACK_REQUIRED_FIELDS if f != "variety_acknowledgment"
+    )
+    empty = [
+        f for f in string_fields
+        if not isinstance(teachback.get(f), str) or not teachback[f].strip()
+    ]
+    if empty:
+        return (
+            f"metadata.teachback_submit fields empty/non-string: "
+            f"{', '.join(empty)}"
+        )
+    ack_problem = _validate_variety_acknowledgment(
+        teachback.get("variety_acknowledgment")
+    )
+    if ack_problem:
+        return (
+            f"metadata.teachback_submit.variety_acknowledgment "
+            f"{ack_problem}"
+        )
+    return None
+
+
+def _validate_variety_schema(variety: object) -> str | None:
+    """Return None if metadata.variety is well-formed per D11, or a short
+    reason string. Pure function; never raises.
+
+    Validates the four per-dimension rationale fields (presence +
+    non-empty string). Dimension score range checks (1-4) are the
+    orchestrator's authority; this hook is defense-in-depth for the
+    cargo-cult-prevention property D11 codifies.
+    """
+    if not isinstance(variety, dict):
+        return f"must be object, got {type(variety).__name__}"
+    missing = [
+        r for r in _VARIETY_REQUIRED_RATIONALES if r not in variety
+    ]
+    if missing:
+        return (
+            f"missing required per-dimension rationales: "
+            f"{', '.join(missing)}"
+        )
+    empty = [
+        r for r in _VARIETY_REQUIRED_RATIONALES
+        if not isinstance(variety.get(r), str) or not variety[r].strip()
+    ]
+    if empty:
+        return (
+            f"per-dimension rationales empty/non-string: "
+            f"{', '.join(empty)}"
+        )
+    return None
+
+
+def _resolve_required_band_via_blocks(
+    task_a: dict, team_name: str
+) -> str:
+    """Resolve the REQUIRED band for reasoning_reconstruction from Task A
+    via blocks traversal to Task B.
+
+    Returns one of:
+      - "required": Task B.metadata.variety.total >= 11
+      - "recommended": 7 <= total <= 10
+      - "skipped": total <= 6
+      - "unresolvable": blocks link missing, Task B file missing, or
+        variety absent/malformed on Task B (fail-open: caller emits a
+        separate band_unresolvable advisory documenting the gap)
+    """
+    blocks = task_a.get("blocks")
+    if not isinstance(blocks, list) or not blocks:
+        return "unresolvable"
+    # Convention: Task A blocks Task B (the work task). The first blocked
+    # ID is the canonical work-task pointer in the Teachback-Gated Dispatch
+    # shape — multi-block teachback tasks are not in current convention.
+    task_b_id = blocks[0]
+    if not isinstance(task_b_id, str) or not task_b_id:
+        return "unresolvable"
+    if not team_name:
+        return "unresolvable"
+    task_b = read_task_json(task_b_id, team_name)
+    if not task_b:
+        return "unresolvable"
+    metadata = task_b.get("metadata")
+    if not isinstance(metadata, dict):
+        return "unresolvable"
+    variety = metadata.get("variety")
+    if not isinstance(variety, dict):
+        return "unresolvable"
+    total = variety.get("total")
+    if not isinstance(total, int) or isinstance(total, bool):
+        return "unresolvable"
+    if total >= _REASONING_RECONSTRUCTION_REQUIRED_MIN:
+        return "required"
+    if total >= 7:
+        return "recommended"
+    return "skipped"
+
+
 def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
     """Return list of (rule, message) advisory tuples. Empty list → ALLOW
     silently.
@@ -383,6 +585,43 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                 "Work tasks must block on teachback acceptance.",
             ))
 
+        # R4: variety_missing_on_dispatch_task (D11-refined).
+        # Same discriminator pattern as work_addblockedby_missing
+        # (not-teachback + pact-* owner + not exempt). Single rule with
+        # two trigger paths (absent variety OR malformed per-dimension
+        # rationales); distinct message text per path, same rule name —
+        # the lead-side correction is the same (re-stamp variety) in
+        # either case. Clause order mirrors L575-580: cheap dict-lookups
+        # first, disk-touching exempt-check last.
+        if (
+            not is_teachback
+            and owner.startswith("pact-")
+            and not is_teachback_exempt(owner, team_name)
+        ):
+            incoming_variety = (
+                tool_input.get("metadata") or {}
+            ).get("variety")
+            if not incoming_variety:
+                advisories.append((
+                    "variety_missing_on_dispatch_task",
+                    f"PACT task_lifecycle_gate: pact-* Task created "
+                    f"(owner={owner!r}) without metadata.variety. "
+                    "Per-dispatch variety stamping is required for hook "
+                    "band-resolution. See orchestrate / comPACT / "
+                    "peer-review dispatch surfaces.",
+                ))
+            else:
+                schema_problem = _validate_variety_schema(incoming_variety)
+                if schema_problem:
+                    advisories.append((
+                        "variety_missing_on_dispatch_task",
+                        f"PACT task_lifecycle_gate: pact-* Task created "
+                        f"(owner={owner!r}) with malformed "
+                        f"metadata.variety — {schema_problem}. Per D11 "
+                        "schema, all four per-dimension rationales must "
+                        "be present as non-empty strings.",
+                    ))
+
     # ③ TaskUpdate-to-completed rules — paired-send, handoff presence,
     # handoff schema, self-completion
     if tool_name == "TaskUpdate" and tool_input.get("status") == "completed":
@@ -429,8 +668,32 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                         f"metadata.handoff schema is invalid — {schema_problem}.",
                     ))
 
-        # Teachback completion requires a paired wake-SendMessage to owner
+        # Teachback-subject completion-time checks: teachback_submit presence
+        # + schema, then paired wake-SendMessage. R1/R2 are disjoint by the
+        # same handoff_missing/handoff_schema_invalid pattern at L607-613:
+        #   teachback_submit missing/empty → R1, skip schema check.
+        #   present but malformed → R2.
         if is_teachback and owner:
+            teachback_submit = metadata.get("teachback_submit")
+            if not teachback_submit:
+                advisories.append((
+                    "teachback_submit_missing",
+                    f"PACT task_lifecycle_gate: Teachback Task {task_id} "
+                    f"completed without metadata.teachback_submit. The "
+                    "teammate skipped the canonical teachback gate "
+                    "(pact-teachback skill).",
+                ))
+            else:
+                schema_problem = _validate_teachback_submit_schema(
+                    teachback_submit
+                )
+                if schema_problem:
+                    advisories.append((
+                        "teachback_submit_schema_invalid",
+                        f"PACT task_lifecycle_gate: Teachback Task {task_id} "
+                        f"{schema_problem}.",
+                    ))
+
             if not _has_paired_sendmessage(owner, PAIRED_SENDMESSAGE_WINDOW_S):
                 advisories.append((
                     "completion_no_paired_send",
@@ -460,6 +723,76 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                 "intentionally to clear.",
             ))
             _writeback_dispute(task_id)
+
+    # ④ TaskUpdate write-time rules — R3 + R5 fire when a teammate writes
+    # metadata.teachback_submit (NOT at completion). Co-located: both rules
+    # share one read_task_json(task_a) for the subject + blocks traversal.
+    # Gated on status != "completed" so R3/R5 do not double up with R1/R2
+    # in the rare case a teammate bundles teachback_submit + completion in
+    # one TaskUpdate (R1/R2 cover the completion-time surface; R3/R5 are
+    # the teammate-facing first-line write-time correction).
+    if (
+        tool_name == "TaskUpdate"
+        and tool_input.get("status") != "completed"
+    ):
+        incoming_teachback = (
+            incoming_metadata.get("teachback_submit")
+            if isinstance(incoming_metadata, dict)
+            else None
+        )
+        if isinstance(incoming_teachback, dict):
+            task_id = tool_input.get("taskId", "") or ""
+            # Shared task_a disk read — both R3 and R5 consume this one
+            # read (R3 needs blocks for traversal, R5 only needs subject).
+            task_a = read_task_json(task_id, team_name) if team_name else {}
+            subject = task_a.get("subject") or ""
+            if _is_teachback_subject(subject):
+                # R5 (D10): variety_acknowledgment presence check.
+                # Presence-only at write-time; full schema validation is
+                # R2's job at lead-completion-pair moment. Same two-surface
+                # asymmetry as R3 vs lead-side rejection-cycle.
+                if "variety_acknowledgment" not in incoming_teachback:
+                    advisories.append((
+                        "variety_acknowledgment_missing",
+                        f"PACT task_lifecycle_gate: Teachback Task "
+                        f"{task_id} submitted without "
+                        "variety_acknowledgment. Per D10, the teammate "
+                        "must record judgment of the orchestrator's "
+                        "variety scoring before lead-side teachback "
+                        "review. See pact-teachback skill.",
+                    ))
+
+                # R3: reasoning_reconstruction required at >= 11 band.
+                # Traversal helper returns "required" | "recommended" |
+                # "skipped" | "unresolvable". Fail-open: traversal
+                # failure emits a separate band_unresolvable advisory
+                # rather than no signal — the gap is documented but
+                # not blocking.
+                band = _resolve_required_band_via_blocks(task_a, team_name)
+                if band == "required":
+                    rr = incoming_teachback.get("reasoning_reconstruction")
+                    if not isinstance(rr, dict) or not rr:
+                        advisories.append((
+                            "reasoning_reconstruction_missing_at_required_band",
+                            f"PACT task_lifecycle_gate: Teachback Task "
+                            f"{task_id} submitted at REQUIRED band "
+                            "(Task B variety >= 11) without "
+                            "reasoning_reconstruction. Per "
+                            "pact-ct-teachback.md §When to "
+                            "Method-Reconstruct, lead will reject; "
+                            "revise before submission.",
+                        ))
+                elif band == "unresolvable":
+                    advisories.append((
+                        "reasoning_reconstruction_band_unresolvable",
+                        f"PACT task_lifecycle_gate: Teachback Task "
+                        f"{task_id} cannot resolve variety band — "
+                        "Task A.blocks link missing OR Task B file "
+                        "missing OR Task B.metadata.variety absent. "
+                        "Hook advisory skipped; lead should enforce "
+                        "variety stamping via teachback_addblocks_missing "
+                        "+ variety_missing_on_dispatch_task upstream.",
+                    ))
 
     return advisories
 
