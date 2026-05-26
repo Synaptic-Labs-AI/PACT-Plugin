@@ -212,7 +212,15 @@ def _block_exempt_indices(lines: list[str]) -> set[int]:
     only lines BETWEEN them are exempt. Unmatched block-start (no closing
     marker before end-of-file) raises no error and exempts to EOF — the
     permissive choice given the scanner's overall lean toward false-
-    negative over false-positive."""
+    negative over false-positive.
+
+    Two-layer marker-line design: this function returns ONLY the
+    between-marker line indices. The marker-line exemption itself
+    (the start/end marker lines may legitimately quote an exempt
+    token in their reason text) is handled by the companion
+    `_line_is_exempt` below, which composes this function's result
+    with same-line inline markers, marker-lines themselves, and
+    preceding-line markers."""
     exempt: set[int] = set()
     in_block = False
     for idx, line in enumerate(lines):
@@ -225,6 +233,47 @@ def _block_exempt_indices(lines: list[str]) -> set[int]:
         if in_block:
             exempt.add(idx)
     return exempt
+
+
+def _unmatched_block_start_lines(lines: list[str]) -> list[int]:
+    """Return the 1-based line number(s) of `planning-artifact-exempt-block:`
+    start marker(s) that leave the exempt region still-open at EOF (i.e.,
+    cause silent exemption to EOF).
+
+    Matches the existing `_block_exempt_indices` parser's actual semantics,
+    which uses a single-level boolean (`in_block`) rather than a stack:
+
+      - A start while not in_block opens the region.
+      - A start while already in_block is a no-op (already exempting).
+      - An end while in_block closes the region.
+      - An end while not in_block is inert (orphan).
+
+    Under this semantic, the stealth-exempt-to-EOF condition holds iff
+    `in_block` is still True at EOF. The OFFENDING start is the one that
+    opened the currently-unclosed region — i.e., the most recent start
+    that transitioned in_block False→True without a subsequent end.
+
+    Scope: only unmatched STARTS are reported. Orphan ENDs are inert per
+    the existing parser and not a stealth-exempt risk. Inner repeat-starts
+    inside an already-open block are also not flagged — they do not change
+    the stealth-exempt set; the one to fix is the still-open outer start.
+
+    See `test_block_exempt_unmatched_start_exempts_to_eof` (existing) for
+    the load-bearing pin of the permissive-by-design parser; this helper
+    is an ADDITIVE lint surface that reports the offending start so a PR
+    can fail-fast rather than ship a silent EOF-exemption."""
+    in_block = False
+    open_at: int | None = None
+    for idx, line in enumerate(lines):
+        if _EXEMPT_BLOCK_START.search(line):
+            if not in_block:
+                in_block = True
+                open_at = idx + 1
+            continue
+        if _EXEMPT_BLOCK_END.search(line):
+            in_block = False
+            open_at = None
+    return [open_at] if open_at is not None else []
 
 
 def _line_is_exempt(
@@ -326,6 +375,57 @@ class TestPlanningArtifactScrub:
     message names every violation with file:line + pattern + suggestion
     so a contributor can fix or exempt without re-running locally.
     """
+
+    @pytest.mark.parametrize(
+        "directory",
+        LLM_LOADED_DIRECTORIES,
+        ids=lambda p: p.name,
+    )
+    def test_no_unmatched_block_markers(self, directory: Path):
+        """A `planning-artifact-exempt-block:` start with no matching
+        `planning-artifact-exempt-block-end` before EOF silently exempts
+        every subsequent line in the file (permissive-by-design parser
+        behavior, see `test_block_exempt_unmatched_start_exempts_to_eof`).
+
+        That behavior is intentional and preserved, but a STRAY unmatched
+        start is the stealth-exempt failure mode: a single forgotten
+        block-start at the top of a long LLM-loaded markdown file would
+        silently disable ALL planning-artifact enforcement below it,
+        without any same-PR signal.
+
+        This additive lint walks the same four LLM-loaded directories as
+        `test_directory_is_clean` and fails when any .md file contains
+        an unmatched block-start. Intentional matched start+end pairs
+        remain silent. Whole-file exempt markers do NOT silence this
+        lint — an unmatched block-start inside a whole-file-exempt file
+        is still a structural defect worth surfacing."""
+        if not directory.is_dir():
+            return
+        offenders: list[tuple[Path, list[int]]] = []
+        for md_path in sorted(directory.rglob("*.md")):
+            try:
+                text = md_path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            unmatched = _unmatched_block_start_lines(text.splitlines())
+            if unmatched:
+                offenders.append((md_path, unmatched))
+        if not offenders:
+            return
+        joined = "\n".join(
+            f"  {p.relative_to(PACT_PLUGIN_ROOT)}: unmatched "
+            f"planning-artifact-exempt-block: start at line(s) "
+            f"{', '.join(str(n) for n in lines)}"
+            for p, lines in offenders
+        )
+        pytest.fail(
+            f"\n{len(offenders)} file(s) in {directory.name}/ contain an "
+            f"unmatched `<!-- planning-artifact-exempt-block: ... -->` "
+            f"start marker (silently exempts to EOF):\n{joined}\n\n"
+            "Either close the block with `<!-- planning-artifact-exempt-"
+            "block-end -->` or remove the start marker if it was not "
+            "intentional."
+        )
 
     @pytest.mark.parametrize(
         "directory",
@@ -518,6 +618,103 @@ class TestScannerSelfDiscipline:
         assert any(
             v.pattern_name == "bug_letter" for v in violations
         ), f"expected bug_letter hit, got: {violations}"
+
+    def test_unmatched_block_start_fires_on_orphan_start(self, tmp_path):
+        """One block-start, no end → returns the start's line number.
+        Pins the additive lint surface introduced for the stealth-exempt
+        failure mode."""
+        md = self._write_md(
+            tmp_path,
+            "Some intro line.\n"
+            "<!-- planning-artifact-exempt-block: stealth -->\n"
+            "More content below.\n",
+        )
+        unmatched = _unmatched_block_start_lines(
+            md.read_text(encoding="utf-8").splitlines()
+        )
+        assert unmatched == [2], (
+            f"expected unmatched start at line 2, got {unmatched}"
+        )
+
+    def test_unmatched_block_silent_on_matched_pair(self, tmp_path):
+        """A well-formed start+end pair leaves the lint silent."""
+        md = self._write_md(
+            tmp_path,
+            "<!-- planning-artifact-exempt-block: legitimate -->\n"
+            "Exempt body.\n"
+            "<!-- planning-artifact-exempt-block-end -->\n"
+            "Tail content.\n",
+        )
+        unmatched = _unmatched_block_start_lines(
+            md.read_text(encoding="utf-8").splitlines()
+        )
+        assert unmatched == [], (
+            f"matched pair should not fire, got {unmatched}"
+        )
+
+    def test_unmatched_block_silent_on_orphan_end(self, tmp_path):
+        """Orphan block-end (no preceding start) is INERT per the
+        existing parser — does not exempt anything, not a stealth-exempt
+        risk, so the lint correctly does not fire."""
+        md = self._write_md(
+            tmp_path,
+            "Some content.\n"
+            "<!-- planning-artifact-exempt-block-end -->\n"
+            "More content.\n",
+        )
+        unmatched = _unmatched_block_start_lines(
+            md.read_text(encoding="utf-8").splitlines()
+        )
+        assert unmatched == [], (
+            f"orphan end should not fire, got {unmatched}"
+        )
+
+    def test_unmatched_block_silent_on_start_start_end(self, tmp_path):
+        """start-start-end mirrors the existing parser's single-level
+        boolean: the second start is a no-op (already in_block), the
+        lone end closes the region, tail is NOT exempt. This sequence
+        does not stealth-exempt anything, so the lint correctly stays
+        silent — matching `_block_exempt_indices` semantics exactly.
+
+        Counter-pin against a stack-based interpretation that would
+        spuriously report the inner start as unmatched."""
+        md = self._write_md(
+            tmp_path,
+            "<!-- planning-artifact-exempt-block: outer -->\n"
+            "Outer body.\n"
+            "<!-- planning-artifact-exempt-block: inner-noop -->\n"
+            "Inner body.\n"
+            "<!-- planning-artifact-exempt-block-end -->\n"
+            "Tail (NOT exempted per single-level boolean semantic).\n",
+        )
+        unmatched = _unmatched_block_start_lines(
+            md.read_text(encoding="utf-8").splitlines()
+        )
+        assert unmatched == [], (
+            f"start-start-end should leave nothing open per single-level "
+            f"boolean semantic, got {unmatched}"
+        )
+
+    def test_unmatched_block_reports_open_after_close_reopen(self, tmp_path):
+        """A close-then-reopen sequence (start-end-start) leaves the
+        SECOND start opening a still-unclosed region: the lint correctly
+        reports the second start as the offender, NOT the first
+        (already-closed) start."""
+        md = self._write_md(
+            tmp_path,
+            "<!-- planning-artifact-exempt-block: legitimate -->\n"
+            "Body 1.\n"
+            "<!-- planning-artifact-exempt-block-end -->\n"
+            "Gap line.\n"
+            "<!-- planning-artifact-exempt-block: stray-reopen -->\n"
+            "Tail (stealth-exempted to EOF).\n",
+        )
+        unmatched = _unmatched_block_start_lines(
+            md.read_text(encoding="utf-8").splitlines()
+        )
+        assert unmatched == [5], (
+            f"expected unmatched start at line 5 (the reopen), got {unmatched}"
+        )
 
     def test_pattern_catalog_is_non_empty(self):
         """Defensive — guards against a future refactor that drops all
