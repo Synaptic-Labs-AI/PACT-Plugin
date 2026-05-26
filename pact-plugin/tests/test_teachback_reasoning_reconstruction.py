@@ -393,17 +393,17 @@ class TestLeadSideConsistencyCheck:
             assert reason == "malformed_reasoning_reconstruction"
 
     def test_pr_802_trace_round_trip_accepted_at_plan_mode(self):
-        """Empirical-validation integration smoke: the literal PR #802 trace
-        from preparer doc §3.2 (the ORPHAN_TOKEN_MAX_AGE_SECONDS / TOKEN_TTL
-        × 24 / 300s contingency triangle) MUST be accepted by the schema
-        gate at the Required band.
+        """Empirical-validation integration smoke: the PR #802 trace
+        (ORPHAN_TOKEN_MAX_AGE_SECONDS / TOKEN_TTL × 24 / 300s contingency
+        triangle) MUST be accepted by the schema gate at the Required band.
 
-        Source: docs/preparation/feat-832-method-level-teachback.md §3.2.
-        Provenance is verbatim — this is the canonical exemplar cited in
-        the protocol documents (pact-ct-teachback.md, pact-orchestrator.md
-        §12 Internal-consistency gate). The point of this case is to prove
-        the schema gate accepts the exemplar the documentation cites, not
-        to re-test the well-formed-triangle accept path (covered above).
+        Source: pact-plugin/agents/pact-orchestrator.md §12
+        Internal-consistency gate examples (committed SSOT). The triangle
+        ENCODES the same exemplar as the protocol prose; not byte-equal
+        (the case prose is expanded for test clarity). The point of this
+        case (distinct from the abstract well-formed-triangle accepts
+        above) is to prove the schema gate accepts the canonical exemplar
+        that the protocol documentation cites.
         """
         pr_802_trace = {
             "decision_attribution": (
