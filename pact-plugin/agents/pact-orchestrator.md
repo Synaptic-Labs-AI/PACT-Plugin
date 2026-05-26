@@ -513,6 +513,8 @@ When the teachback payload includes the optional `reasoning_reconstruction` sub-
 | 15–16 | `ROUTE_RESEARCH_SPIKE` | Same as `ROUTE_PLAN_MODE` — reject on absence. |
 | `None` / missing / non-int | — | Treat as `ROUTE_ORCHESTRATE` (transitional permissiveness; a future plugin version may deprecate the None-tolerance and require `variety_score` on every feature task at dispatch time). |
 
+> Note — surface asymmetry vs hook advisory: the lead-side `None`/missing row above maps to `ROUTE_ORCHESTRATE` (accept-on-absence) at teachback review time. The hook's write-time counterpart (`_resolve_required_band_via_blocks` in `hooks/task_lifecycle_gate.py`) returns `"unresolvable"` for the same data conditions and emits a distinct `reasoning_reconstruction_band_unresolvable` advisory documenting the gap. The two behaviors are complementary — lead-side is transitional permissiveness on lookup failure; hook-side is visibility-without-blocking at the teammate's write moment — not contradictory.
+
 **Schema gate** (runs only when `reasoning_reconstruction` is present and non-null):
 
 - Must be a JSON object with exactly 3 keys: `decision_attribution`, `assumption_trace`, `contingency_clause`. Partial / extra keys → reject with `reason="malformed_reasoning_reconstruction"`.
