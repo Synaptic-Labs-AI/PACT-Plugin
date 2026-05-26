@@ -487,7 +487,7 @@ git checkout <sha> -- <source-file-1> <source-file-2> ...
 git diff --quiet -- <source-file-1> <source-file-2>  # exits 0
 ```
 
-The two cardinalities are not interchangeable. Empirical example from PR #683 commit `a84ef650b8` (bundled predicate refactor + retargeted tests): `git revert -n` produced `{1 fail}` (only the pre-existing categorical-invariant test broke); source-only revert produced `{33 fail + 1 collection error}` — the 33 retargeted tests are the protection, and only the source-only technique surfaces them.
+The two cardinalities are not interchangeable. Empirical example from a bundled predicate refactor + retargeted tests: `git revert -n` produced `{1 fail}` (only the pre-existing categorical-invariant test broke); source-only revert produced `{33 fail + 1 collection error}` — the 33 retargeted tests are the protection, and only the source-only technique surfaces them.
 
 **Rule for Verification Matrices**: when documenting the expected cardinality for a bundled commit, specify the technique and the expected count. Example row:
 

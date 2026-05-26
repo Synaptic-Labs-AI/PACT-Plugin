@@ -123,7 +123,7 @@ The completion-authority protocol contract (`protocols/pact-completion-authority
 1. `SendMessage(to=teammate, message="<wake-signal>")` FIRST — wakes the teammate, confirms acceptance reaches them.
 2. `TaskUpdate(taskId, status="completed")` SECOND — releases the teachback gate / closes the work task.
 
-This ordering is load-bearing per the SendMessage-FIRST ordering invariant (PR #692). The scan adheres verbatim; no shortcuts.
+This ordering is load-bearing per the SendMessage-FIRST ordering invariant. The scan adheres verbatim; no shortcuts.
 
 **Audit**: an editing LLM tempted to "just mark the task completed since the metadata is already there" is bypassing completion authority. The two-call pair is the canonical acceptance procedure — bypassing the SendMessage half leaves the teammate idle on `awaiting_lead_completion` with no wake-signal to claim the next task, which is the silent-strand failure mode. The scan is NOT a shortcut for completion; it is the canonical procedure invoked at cron cadence instead of at idle-poll cadence. Same procedure, different trigger.
 
