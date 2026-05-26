@@ -455,7 +455,7 @@ class TestTeachbackMicroSkillExtraction:
 
     # Micro-skill size budget: teachback protocol should be compact.
     # Measured in characters (not bytes). Budget tracks legitimate growth
-    # of the protocol surface. Current value (5000) accommodates the
+    # of the protocol surface. Earlier value (5000) accommodated the
     # 4-field structured payload (understanding / most_likely_wrong /
     # least_confident_item / first_action), the Task A / Task B dispatch
     # framing, the idle-on-awaiting_lead_completion contract, and the
@@ -463,7 +463,12 @@ class TestTeachbackMicroSkillExtraction:
     # (load-bearing wake-signal SendMessage callout to anchor the
     # ordering invariant for the lead-side raw-metadata-read decision —
     # wording-reviewed and approved during the Bug C dispatch).
-    MAX_SKILL_CHARS = 5000
+    #
+    # v4.2.x (#832 — method-level teachback): bumped to 7500 to
+    # accommodate reasoning_reconstruction field schema + variety-band
+    # gate + L1.5 paragraph; budget ceiling provides ~480-char headroom
+    # for future small edits.
+    MAX_SKILL_CHARS = 7500
 
     # Key protocol elements that must be in the extracted skill.
     # Presence-only checks are deliberately strict — any drop indicates
