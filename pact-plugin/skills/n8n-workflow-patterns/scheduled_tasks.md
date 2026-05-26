@@ -1,3 +1,5 @@
+<!-- planning-artifact-exempt-file: references n8n workflow templates by external template ID (e.g., #2947); external-project provenance, not PACT-plugin planning artifacts -->
+
 # Scheduled Tasks Pattern
 
 **Use Case**: Recurring automation workflows that run automatically on a schedule.

@@ -1,3 +1,5 @@
+<!-- planning-artifact-exempt-file: documents n8n external-tracker issue numbers (e.g., #304, #306, #338); refs are external-project provenance, not PACT-plugin planning artifacts -->
+
 # False Positives Guide
 
 When validation warnings are acceptable and how to handle them.

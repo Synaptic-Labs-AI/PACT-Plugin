@@ -7,6 +7,8 @@ description: |
   Triggers: memory, save memory, search memory, lessons learned, remember, recall
 ---
 
+<!-- planning-artifact-exempt-file: skill body demonstrates memory-entry shape via fictional examples that intentionally include PR/issue refs and version markers; these are example data, not real planning artifacts -->
+
 # PACT Memory Skill
 
 Persistent memory system for PACT framework agents. Store and retrieve context,

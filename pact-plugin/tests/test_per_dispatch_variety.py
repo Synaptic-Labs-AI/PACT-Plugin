@@ -1,0 +1,561 @@
+"""
+Per-dispatch variety stamping — traversal-helper coverage.
+
+Covers _resolve_required_band_via_blocks in task_lifecycle_gate.py: the
+disk-based traversal from Task A (teachback subject) through blocks[0] to
+Task B's metadata.variety.total. This is the helper that R3 consumes to
+decide whether reasoning_reconstruction is REQUIRED.
+
+Test surface architecture (per the design doc §4.2):
+  - All 4 return values exercised: "required", "recommended", "skipped",
+    "unresolvable".
+  - All fail-open paths: blocks missing, blocks empty, Task B id
+    non-string, Task B file missing, Task B missing metadata, Task B
+    missing variety, variety.total non-int.
+  - Defensive: Task A is {} (read_task_json returned empty) → unresolvable.
+  - Defensive: team_name is "" → unresolvable.
+
+Schema-validator pure-function tests (the D10 + D11 validators) live in
+test_task_lifecycle_gate.py alongside the integration tests, mirroring
+the existing _validate_handoff_schema co-location pattern. This file is
+the traversal-helper surface only.
+
+Divergence-computation helper + its tests live in the second half of
+this file (class TestVarietyDivergence). The helper's canonical home is
+shared/variety_divergence.py, consumed by wrap-up.md §4 Orchestration
+Retrospective composer. Tests cover the architect3 §4.3 catalog: positive
+surfacing (overshoot / undershoot), negative (within-threshold), and edge
+cases (None feature variety, empty dispatches, mixed coverage per D8).
+"""
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
+
+import task_lifecycle_gate as tlg  # noqa: E402
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+
+def _well_formed_variety(**overrides):
+    """Return a well-formed metadata.variety dict per D11."""
+    payload = {
+        "novelty": 2,
+        "novelty_rationale": "x",
+        "scope": 2,
+        "scope_rationale": "x",
+        "uncertainty": 2,
+        "uncertainty_rationale": "x",
+        "risk": 2,
+        "risk_rationale": "x",
+        "total": 8,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _seed_task_b(
+    tmp_path, monkeypatch, team_name, task_b_id,
+    metadata=None,
+):
+    """Seed Task B at ~/.claude/tasks/{team_name}/{task_b_id}.json with
+    the given metadata dict (or empty if None)."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    tasks_dir = tmp_path / ".claude" / "tasks" / team_name
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    task_b = {
+        "id": task_b_id,
+        "subject": "implement foo",
+        "owner": "pact-backend-coder",
+        "metadata": metadata if metadata is not None else {},
+    }
+    (tasks_dir / f"{task_b_id}.json").write_text(
+        json.dumps(task_b), encoding="utf-8"
+    )
+
+
+# =============================================================================
+# Return-value coverage: required / recommended / skipped
+# =============================================================================
+
+
+class TestRequiredBandResolution:
+    """The 3 successful-resolution return values: required, recommended,
+    skipped. Each exercises the variety.total threshold logic."""
+
+    def test_required_at_min_threshold(self, tmp_path, monkeypatch):
+        """total = 11 → required (inclusive lower bound for REQUIRED band).
+        Pinned via _REASONING_RECONSTRUCTION_REQUIRED_MIN."""
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": _well_formed_variety(total=11)},
+        )
+        task_a = {"blocks": ["2"]}
+        assert tlg._resolve_required_band_via_blocks(
+            task_a, "test-team"
+        ) == "required"
+
+    def test_required_at_high_score(self, tmp_path, monkeypatch):
+        """total = 16 (max possible) → required."""
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": _well_formed_variety(total=16)},
+        )
+        task_a = {"blocks": ["2"]}
+        assert tlg._resolve_required_band_via_blocks(
+            task_a, "test-team"
+        ) == "required"
+
+    def test_recommended_at_lower_threshold(self, tmp_path, monkeypatch):
+        """total = 7 → recommended (inclusive lower bound for the
+        recommended band per variety_scorer.COMPACT_MAX = 6)."""
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": _well_formed_variety(total=7)},
+        )
+        task_a = {"blocks": ["2"]}
+        assert tlg._resolve_required_band_via_blocks(
+            task_a, "test-team"
+        ) == "recommended"
+
+    def test_recommended_at_upper_threshold(self, tmp_path, monkeypatch):
+        """total = 10 → recommended (inclusive upper bound per
+        variety_scorer.ORCHESTRATE_MAX = 10)."""
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": _well_formed_variety(total=10)},
+        )
+        task_a = {"blocks": ["2"]}
+        assert tlg._resolve_required_band_via_blocks(
+            task_a, "test-team"
+        ) == "recommended"
+
+    def test_skipped_at_upper_threshold(self, tmp_path, monkeypatch):
+        """total = 6 → skipped (inclusive upper bound per
+        variety_scorer.COMPACT_MAX = 6)."""
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": _well_formed_variety(total=6)},
+        )
+        task_a = {"blocks": ["2"]}
+        assert tlg._resolve_required_band_via_blocks(
+            task_a, "test-team"
+        ) == "skipped"
+
+    def test_skipped_at_min_score(self, tmp_path, monkeypatch):
+        """total = 4 (min possible per variety_scorer.MIN_SCORE) → skipped."""
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": _well_formed_variety(total=4)},
+        )
+        task_a = {"blocks": ["2"]}
+        assert tlg._resolve_required_band_via_blocks(
+            task_a, "test-team"
+        ) == "skipped"
+
+    def test_band_threshold_constants_aligned_with_variety_scorer(self):
+        """Pin the alignment between _REASONING_RECONSTRUCTION_REQUIRED_MIN
+        and variety_scorer.ORCHESTRATE_MAX. PLAN_MODE_MIN-implied threshold
+        is ORCHESTRATE_MAX + 1 = 11. If variety_scorer's thresholds shift
+        and this module's constant doesn't, this test fails and the drift
+        is surfaced. The design doc §6.5 codifies this as a grep-at-edit-
+        time discipline until the SSOT migration trajectory lands."""
+        from shared import variety_scorer
+
+        assert (
+            tlg._REASONING_RECONSTRUCTION_REQUIRED_MIN
+            == variety_scorer.ORCHESTRATE_MAX + 1
+        ), (
+            "module-local constant drifted from variety_scorer SSOT — "
+            "see task_lifecycle_gate.py inline comment + design doc §6.5"
+        )
+
+
+# =============================================================================
+# Fail-open paths: every "unresolvable" return path
+# =============================================================================
+
+
+class TestBandUnresolvableFailOpen:
+    """All paths returning "unresolvable". Fail-open by design: each
+    failure mode keeps traversal silent so the caller can emit the
+    band_unresolvable advisory documenting the gap."""
+
+    def test_task_a_empty_dict(self):
+        """read_task_json returns {} → no `blocks` key → unresolvable."""
+        assert tlg._resolve_required_band_via_blocks(
+            {}, "test-team"
+        ) == "unresolvable"
+
+    def test_blocks_key_absent(self):
+        """Task A has no blocks key → unresolvable."""
+        assert tlg._resolve_required_band_via_blocks(
+            {"subject": "x"}, "test-team"
+        ) == "unresolvable"
+
+    def test_blocks_empty_list(self):
+        """Task A.blocks = [] → unresolvable."""
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": []}, "test-team"
+        ) == "unresolvable"
+
+    def test_blocks_is_not_list(self):
+        """Task A.blocks = "2" (string, not list) → unresolvable."""
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": "2"}, "test-team"
+        ) == "unresolvable"
+
+    def test_blocks_first_id_non_string(self):
+        """Task A.blocks = [123] (int, not string) → unresolvable."""
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": [123]}, "test-team"
+        ) == "unresolvable"
+
+    def test_blocks_first_id_empty_string(self):
+        """Task A.blocks = [""] → unresolvable."""
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": [""]}, "test-team"
+        ) == "unresolvable"
+
+    def test_empty_team_name(self):
+        """team_name = "" → unresolvable (cannot resolve disk path)."""
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, ""
+        ) == "unresolvable"
+
+    def test_task_b_file_missing(self, tmp_path, monkeypatch):
+        """Task A.blocks=['999'] but no 999.json on disk → unresolvable."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        # Create the team directory but no task file
+        (tmp_path / ".claude" / "tasks" / "test-team").mkdir(parents=True)
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["999"]}, "test-team"
+        ) == "unresolvable"
+
+    def test_task_b_missing_metadata(self, tmp_path, monkeypatch):
+        """Task B exists but no metadata key → unresolvable."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        tasks_dir = tmp_path / ".claude" / "tasks" / "test-team"
+        tasks_dir.mkdir(parents=True)
+        task_b = {"id": "2", "subject": "x", "owner": "x"}
+        (tasks_dir / "2.json").write_text(json.dumps(task_b), encoding="utf-8")
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "unresolvable"
+
+    def test_task_b_metadata_not_dict(self, tmp_path, monkeypatch):
+        """Task B.metadata is a string → unresolvable."""
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2", metadata="not a dict",
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "unresolvable"
+
+    def test_task_b_missing_variety(self, tmp_path, monkeypatch):
+        """Task B.metadata is empty dict, no variety key → unresolvable."""
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2", metadata={},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "unresolvable"
+
+    def test_task_b_variety_not_dict(self, tmp_path, monkeypatch):
+        """Task B.metadata.variety is a string → unresolvable."""
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": "not a dict"},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "unresolvable"
+
+    def test_variety_total_missing(self, tmp_path, monkeypatch):
+        """Task B.metadata.variety has no `total` key → unresolvable."""
+        variety = _well_formed_variety()
+        variety.pop("total")
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": variety},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "unresolvable"
+
+    def test_variety_total_non_int_string(self, tmp_path, monkeypatch):
+        """Task B.metadata.variety.total = "twelve" → unresolvable."""
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": _well_formed_variety(total="twelve")},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "unresolvable"
+
+    def test_variety_total_bool_rejected(self, tmp_path, monkeypatch):
+        """Task B.metadata.variety.total = True → unresolvable.
+        Defensive: bool is a subclass of int in Python; reject explicitly.
+        """
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": _well_formed_variety(total=True)},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "unresolvable"
+
+    def test_variety_total_float(self, tmp_path, monkeypatch):
+        """Task B.metadata.variety.total = 12.5 → unresolvable. The
+        traversal accepts ints only; floats indicate malformed data."""
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": _well_formed_variety(total=12.5)},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "unresolvable"
+
+
+# =============================================================================
+# Multi-block defensiveness: first-block convention
+# =============================================================================
+
+
+class TestMultiBlockTraversal:
+    """The traversal takes blocks[0] as the canonical Task B pointer.
+    Multi-block teachback tasks are not in current convention; this pins
+    the behavior so a future schema change explicitly opts in."""
+
+    def test_first_block_is_canonical_work_task(
+        self, tmp_path, monkeypatch,
+    ):
+        """blocks = ['2', '999'] — first id resolves; second is ignored.
+        If '2' exists with REQUIRED-band variety, the helper returns
+        required regardless of '999' being absent."""
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": _well_formed_variety(total=12)},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2", "999"]}, "test-team"
+        ) == "required"
+
+    def test_first_block_dominates_even_if_skipped(
+        self, tmp_path, monkeypatch,
+    ):
+        """blocks = ['low', 'high'] — first resolves to skipped; second
+        is ignored even if it would have been required. Pins the
+        first-block convention against a future "max-over-blocks" drift."""
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "low",
+            metadata={"variety": _well_formed_variety(total=4)},
+        )
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "high",
+            metadata={"variety": _well_formed_variety(total=15)},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["low", "high"]}, "test-team"
+        ) == "skipped"
+
+
+# =============================================================================
+# Divergence-computation helper (shared/variety_divergence.py)
+# =============================================================================
+#
+# Pure-function math consumed by wrap-up.md §4 Orchestration Retrospective
+# composer. Tests pin the architect3 §4.3 catalog: positive surfacing
+# (overshoot / undershoot), negative (within-threshold), and edge cases
+# (None feature variety, empty dispatches, mixed coverage per D8).
+# =============================================================================
+
+
+from shared.variety_divergence import (  # noqa: E402
+    DEFAULT_THRESHOLD,
+    compute_variety_divergence,
+)
+
+
+class TestVarietyDivergence:
+    """Architect3 §4.3 catalog for compute_variety_divergence."""
+
+    # ----- Positive surfacing (architect3 §4.3 cases 1-2) ---------------
+
+    def test_overshoot_surfaced(self):
+        """Feature 9, dispatches [5,5,5,5,5] → delta 4 surfaced overshoot."""
+        result = compute_variety_divergence(9, [5, 5, 5, 5, 5])
+        assert result["surfaced"] is True
+        assert result["direction"] == "overshot"
+        assert result["delta"] == 4
+        assert result["mean"] == 5
+        assert result["max"] == 5
+        assert result["min"] == 5
+        assert result["coverage"] == 1.0
+        assert result["reason"] is None
+
+    def test_undershoot_surfaced(self):
+        """Feature 5, dispatches [8,8,8] → delta 3 surfaced undershoot."""
+        result = compute_variety_divergence(5, [8, 8, 8])
+        assert result["surfaced"] is True
+        assert result["direction"] == "undershot"
+        assert result["delta"] == 3
+        assert result["mean"] == 8
+
+    # ----- Negative (within-threshold) (architect3 §4.3 cases 3-4) ------
+
+    def test_within_threshold_zero_delta(self):
+        """Feature 8, dispatches [7,8,9] → delta 0, surfaced=False."""
+        result = compute_variety_divergence(8, [7, 8, 9])
+        assert result["surfaced"] is False
+        assert result["direction"] is None
+        assert result["delta"] == 0
+        assert result["mean"] == 8
+        assert result["reason"] == "within_threshold"
+
+    def test_within_threshold_symmetric_spread(self):
+        """Feature 8, dispatches [6,8,10] → mean 8 delta 0, surfaced=False.
+        The max/min spread is wide but mean lands on feature_variety."""
+        result = compute_variety_divergence(8, [6, 8, 10])
+        assert result["surfaced"] is False
+        assert result["delta"] == 0
+        assert result["max"] == 10
+        assert result["min"] == 6
+
+    def test_within_threshold_delta_one(self):
+        """Boundary: delta=1 (below default threshold=2) is NOT surfaced.
+        Pins the threshold semantic against an inclusive-vs-exclusive
+        drift (`>=` not `>`)."""
+        result = compute_variety_divergence(9, [8, 8, 8])
+        assert result["surfaced"] is False
+        assert result["delta"] == 1
+        assert result["reason"] == "within_threshold"
+
+    def test_threshold_boundary_delta_two_surfaced(self):
+        """Boundary: delta=2 IS surfaced (>= threshold). Counter-pin to
+        the delta=1 case above."""
+        result = compute_variety_divergence(10, [8, 8, 8])
+        assert result["surfaced"] is True
+        assert result["delta"] == 2
+        assert result["direction"] == "overshot"
+
+    # ----- Edge cases (architect3 §4.3 cases 5-7) -----------------------
+
+    def test_feature_variety_none(self):
+        """Feature variety None → surfaced=False, reason=feature_variety_missing.
+        Stats still computed over the stamped dispatches."""
+        result = compute_variety_divergence(None, [5, 5, 5])
+        assert result["surfaced"] is False
+        assert result["direction"] is None
+        assert result["delta"] is None
+        assert result["reason"] == "feature_variety_missing"
+        assert result["mean"] == 5
+
+    def test_empty_dispatches(self):
+        """Empty dispatch list → surfaced=False, reason=no_dispatches_stamped,
+        coverage=0.0, all stats None."""
+        result = compute_variety_divergence(9, [])
+        assert result["surfaced"] is False
+        assert result["coverage"] == 0.0
+        assert result["mean"] is None
+        assert result["max"] is None
+        assert result["min"] is None
+        assert result["reason"] == "no_dispatches_stamped"
+
+    def test_mixed_coverage(self):
+        """3 stamped + 2 unstamped → coverage=0.6; math over the 3 stamped.
+        Per D8 partial-corpus handling."""
+        result = compute_variety_divergence(
+            9, [9, 9, 9], total_pact_dispatch_count=5,
+        )
+        assert result["coverage"] == 0.6
+        assert result["mean"] == 9
+        assert result["delta"] == 0
+        assert result["surfaced"] is False
+
+    def test_total_count_zero_falls_back(self):
+        """total_pact_dispatch_count=0 (defensive) falls back to assuming
+        all known dispatches stamped (coverage=1.0 when len>0). Avoids
+        division by zero."""
+        result = compute_variety_divergence(
+            8, [8, 8], total_pact_dispatch_count=0,
+        )
+        assert result["coverage"] == 1.0
+        assert result["surfaced"] is False
+
+    def test_total_count_negative_falls_back(self):
+        """total_pact_dispatch_count negative (defensive against caller
+        bugs) falls back to the all-stamped assumption."""
+        result = compute_variety_divergence(
+            8, [8, 8], total_pact_dispatch_count=-1,
+        )
+        assert result["coverage"] == 1.0
+
+    # ----- Threshold parameterization -----------------------------------
+
+    def test_custom_threshold_loosened(self):
+        """threshold=3 — delta=2 is NOT surfaced (delta < threshold)."""
+        result = compute_variety_divergence(10, [8, 8, 8], threshold=3)
+        assert result["surfaced"] is False
+        assert result["delta"] == 2
+
+    def test_custom_threshold_tightened(self):
+        """threshold=1 — delta=1 IS surfaced. The knob per §6.2 lets
+        future calibration loosen or tighten without code change."""
+        result = compute_variety_divergence(9, [8, 8, 8], threshold=1)
+        assert result["surfaced"] is True
+        assert result["delta"] == 1
+        assert result["direction"] == "overshot"
+
+    def test_default_threshold_constant(self):
+        """DEFAULT_THRESHOLD is exposed and equals 2. Pins the
+        SSOT-via-import discipline (no hard-coded 2 in test code)."""
+        assert DEFAULT_THRESHOLD == 2
+
+    # ----- Stable-key contract ------------------------------------------
+
+    def test_return_dict_has_stable_keys(self):
+        """Every return path returns the SAME 8 keys; downstream LLM-prose
+        composer in wrap-up.md §4 reads them by name. Counter-pin against
+        a future refactor that adds variant keys per branch."""
+        expected_keys = {
+            "coverage", "mean", "max", "min",
+            "delta", "surfaced", "direction", "reason",
+        }
+        for args in (
+            (9, [5, 5, 5, 5, 5]),       # overshoot
+            (5, [8, 8, 8]),             # undershoot
+            (8, [7, 8, 9]),             # within
+            (None, [5, 5, 5]),          # feature missing
+            (9, []),                    # empty
+            (9, [9, 9], 5),             # mixed coverage
+        ):
+            result = compute_variety_divergence(*args)
+            assert set(result.keys()) == expected_keys, (
+                f"key set drift on args {args}: {set(result.keys())}"
+            )
+
+    def test_surfaced_direction_pairing(self):
+        """When surfaced=True, direction is "overshot" or "undershot",
+        never None. When surfaced=False, direction is None. Pins the
+        boolean-pair semantic the lead carry-forward affirmed."""
+        for feature, dispatches in ((9, [5, 5, 5]), (5, [9, 9, 9])):
+            result = compute_variety_divergence(feature, dispatches)
+            assert result["surfaced"] is True
+            assert result["direction"] in ("overshot", "undershot")
+        for feature, dispatches in (
+            (8, [7, 8, 9]),         # within
+            (None, [5, 5, 5]),      # feature missing
+            (9, []),                # empty
+        ):
+            result = compute_variety_divergence(feature, dispatches)
+            assert result["surfaced"] is False
+            assert result["direction"] is None

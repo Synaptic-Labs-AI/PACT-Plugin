@@ -87,12 +87,14 @@ for line in cron_list_output.splitlines():
 
 CronList output lines are formatted as `{id} — {cron} ({recurring}) [session-only]: {prompt}`. The ID is the leading 8-character cron ID, ending at the first space.
 
+<!-- planning-artifact-exempt-block: `eb10528d` is sample CronList output demonstrating cron-id parsing; operational example data, not a git SHA or planning artifact -->
 ```python
 # match_line: "eb10528d — */5 * * * * (recurring) [session-only]: /PACT:scan-pending-tasks"
 cron_id = match_line.split(" ", 1)[0].strip()
 # cron_id == "eb10528d"
 CronDelete(id=cron_id)
 ```
+<!-- planning-artifact-exempt-block-end -->
 
 **Audit**: cron IDs are platform-assigned random 8-character lowercase-hex strings. Empirically verified shape via canonical CronList output probe. The extraction uses `split(" ", 1)[0]` to take the first whitespace-delimited token — robust against alternate em-dash whitespace or future format-tweak variations. An editing LLM tempted to use a fixed-width slice (`match_line[:8]`) would silently break if the platform ever extends ID length; the whitespace-tokenization form survives format evolution as long as the ID remains the leading token. If `CronDelete` returns a not-found error (e.g., the cron auto-expired between the CronList read and the CronDelete call), tolerate and return success — the teardown's purpose is to ensure the cron is absent, and an already-absent cron satisfies that goal.
 

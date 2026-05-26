@@ -1,3 +1,5 @@
+<!-- planning-artifact-exempt-file: documents n8n workflow templates by external template ID (e.g., #2947); refs are external-project provenance, not PACT-plugin planning artifacts -->
+
 # n8n Workflow Patterns
 
 Proven architectural patterns for building n8n workflows.

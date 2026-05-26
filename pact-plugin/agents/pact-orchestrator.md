@@ -486,15 +486,55 @@ Teammate self-completion carve-outs (predicate-witnessed): signal-tasks (`metada
 
 ### Teachback Review
 
-Each specialist dispatch is a Task A (TEACHBACK) + Task B (work) pair with `blockedBy=[A]` — see §11 for the canonical sequence. Teammate claims A, writes `metadata.teachback_submit` (4 fields per [pact-teachback](../skills/pact-teachback/SKILL.md)), idles on `awaiting_lead_completion`. **Read-Trigger Precondition**: wait for teammate's wake-signal SendMessage BEFORE the raw JSON read — see [pact-completion-authority §Read-Trigger Precondition](../protocols/pact-completion-authority.md#read-trigger-precondition) for the 4-point rule (Monitor `INBOX_GREW` is alarm-clock not content marker; raw read MUST follow SendMessage receipt; mitigation for residual race). Then read the payload via raw JSON (TaskGet is metadata-blind), apply Validating Incoming Teachbacks below, then accept via the Acceptance two-call atomic pair above; acceptance auto-unblocks Task B. Do NOT mark Task B `completed` or `pending` yourself — the teammate claims on wake.
+Each specialist dispatch is a Task A (TEACHBACK) + Task B (work) pair with `blockedBy=[A]` — see §11 for the canonical sequence. Teammate claims A, writes `metadata.teachback_submit` (5 canonical fields per [pact-teachback](../skills/pact-teachback/SKILL.md)), idles on `awaiting_lead_completion`. **Read-Trigger Precondition**: wait for teammate's wake-signal SendMessage BEFORE the raw JSON read — see [pact-completion-authority §Read-Trigger Precondition](../protocols/pact-completion-authority.md#read-trigger-precondition) for the 4-point rule (Monitor `INBOX_GREW` is alarm-clock not content marker; raw read MUST follow SendMessage receipt; mitigation for residual race). Then read the payload via raw JSON (TaskGet is metadata-blind), apply Validating Incoming Teachbacks below, then accept via the Acceptance two-call atomic pair above; acceptance auto-unblocks Task B. Do NOT mark Task B `completed` or `pending` yourself — the teammate claims on wake.
 
 #### Validating Incoming Teachbacks
 
 When an agent sends a TEACHBACK, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase.
 
+**Then validate `variety_acknowledgment`** (5th canonical field per [pact-variety §variety_acknowledgment](../protocols/pact-variety.md#variety_acknowledgment--teammate-verification-workflow)). The teammate has judged your per-dimension variety rationales on Task B against THIS dispatch's actual work. Read `metadata.teachback_submit.variety_acknowledgment.rationale_articulates_this_dispatch`:
+
+- **`"yes"`**: standard teachback acceptance proceeds.
+- **`"no"` or `"concern"`**: teammate has flagged a smell in your variety scoring. Read `concern` for the specific rationale they're flagging. You have two corrective options before acceptance — *orchestrator-side correction* (re-stamp `metadata.variety` on Task B with refined per-dimension rationales, THEN accept; teammate's acknowledgment becomes part of the audit trail) OR *teammate-side correction* (reject the teachback via `metadata.teachback_rejection` explaining why the variety scoring stands; teammate revises). Prefer orchestrator-side when the teammate's flag is correct; reserve teammate-side for when the flag is erroneous.
+
+If teammate flags persist across 3+ rejection cycles after correction attempts, the standard imPACT escalation applies — see [pact-completion-authority.md §META-BLOCK](../protocols/pact-completion-authority.md#meta-block). The 3-cycle bound is the existing protocol's bound; this gate inherits, does not redefine.
+
+#### Validating Method Reconstruction
+
+When the teachback payload includes the optional `reasoning_reconstruction` sub-object (3 keys: `decision_attribution`, `assumption_trace`, `contingency_clause`), apply the L1.5 (method-level) gate. The check runs AFTER Validating Incoming Teachbacks above. It is a **self-consistency probe on the triangle, NOT a correctness check on the upstream's reasoning** — you are checking that the receiver performed three distinct cognitive operations on the upstream HANDOFF, not that the upstream was right.
+
+**Presence gate** (variety-band-driven; bands from `hooks/shared/variety_scorer.py`):
+
+| Dispatching task's variety score | Workflow route | `reasoning_reconstruction` absent → |
+|---|---|---|
+| 4–6 | `ROUTE_COMPACT` | Accept teachback (absence is the expected default). |
+| 7–10 | `ROUTE_ORCHESTRATE` | Accept teachback (recommended-not-required; you MAY SendMessage requesting reconstruction on follow-up). |
+| 11–14 | `ROUTE_PLAN_MODE` | Reject teachback with `metadata.teachback_rejection{reason="missing_reasoning_reconstruction"}` + correction SendMessage. |
+| 15–16 | `ROUTE_RESEARCH_SPIKE` | Same as `ROUTE_PLAN_MODE` — reject on absence. |
+| `None` / missing / non-int | — | Treat as `ROUTE_ORCHESTRATE` (transitional permissiveness; a future plugin version may deprecate the None-tolerance and require `variety_score` on every feature task at dispatch time). |
+
+> Note — surface asymmetry vs hook advisory: the lead-side `None`/missing row above maps to `ROUTE_ORCHESTRATE` (accept-on-absence) at teachback review time. The hook's write-time counterpart (`_resolve_required_band_via_blocks` in `hooks/task_lifecycle_gate.py`) returns `"unresolvable"` for the same data conditions and emits a distinct `reasoning_reconstruction_band_unresolvable` advisory documenting the gap. The two behaviors are complementary — lead-side is transitional permissiveness on lookup failure; hook-side is visibility-without-blocking at the teammate's write moment — not contradictory.
+
+**Schema gate** (runs only when `reasoning_reconstruction` is present and non-null):
+
+- Must be a JSON object with exactly 3 keys: `decision_attribution`, `assumption_trace`, `contingency_clause`. Partial / extra keys → reject with `reason="malformed_reasoning_reconstruction"`.
+- Each value must be a non-empty string. Empty string / non-string → reject with `reason="empty_reasoning_reconstruction_field"`.
+
+**Internal-consistency gate** (judgment-only; no automation at this layer — future plugin evolution may add hook-level semantic probes). On read, ask yourself:
+
+- **(a) Decision attribution** — does it name a *specific* upstream decision and the upstream's *stated* reason? Anti-pattern: "the architect chose the approach because it makes sense". Pattern: "the architect chose `ORPHAN_TOKEN_MAX_AGE_SECONDS = 86400` because the issue body states `TOKEN_TTL × 24 ≈ 24 hours`".
+- **(b) Assumption trace** — does it list ≥ 1 *falsifiable* proposition checkable in 30s against constraints? Anti-pattern: "this depends on the architect being right". Pattern: "this depends on (a) `TOKEN_TTL` being on the order of 1 hour, and (b) a stale-attack buffer being the primary security objective".
+- **(c) Contingency clause** — does it name a *non-trivial* alternative? Anti-pattern: "if those assumptions change, the decision should change". Pattern: "if `TOKEN_TTL` is actually 300s, the 24× multiplier yields 2 hours, not 24 — re-frame as disk-hygiene threshold, not stale-attack window".
+
+If the (a)(b)(c) prompts surface a flagged assumption that turns out to be false, the teammate has already done the heavy lifting — the contingency clause names the answer. Your job is to: (1) recognize the contingency clause as the actual answer, (2) SendMessage the teammate with the correction OR cross-dispatch the upstream architect with the assumption flag, (3) pause teachback acceptance until the correction lands.
+
+**Rejection path** reuses the existing two-call atomic pair from Completion Authority above: SendMessage FIRST (wake-signal), TaskUpdate SECOND (writes `metadata.teachback_rejection` with `reason` + `corrections`). The `metadata.teachback_rejection` shape is unchanged — only the `reason` enum gains the new values (`missing_reasoning_reconstruction`, `malformed_reasoning_reconstruction`, `empty_reasoning_reconstruction_field`).
+
+This is the L1.5 entailment-mesh discipline — distinct from L2 (purpose) verification (which still runs only at final gates per [pact-ct-teachback §Agreement Verification](../protocols/pact-ct-teachback.md#agreement-verification-orchestrator-side)).
+
 #### Expected Agent HANDOFF Format
 
-Every agent delivers a structured HANDOFF (6 fields: `produced`, `decisions`, `reasoning_chain`, `uncertainty`, `integration`, `open_questions`) stored in `metadata.handoff`. See [pact-agent-teams §HANDOFF Format](../skills/pact-agent-teams/SKILL.md#handoff-format) for the full schema. If `validate_handoff` warns about a missing HANDOFF, extract available context from the agent's response and update the task. On receipt, **wait for teammate's wake-signal SendMessage** (per [pact-completion-authority §Read-Trigger Precondition](../protocols/pact-completion-authority.md#read-trigger-precondition)) before treating the raw `metadata.handoff` read as authoritative — `TaskGet` is metadata-blind AND raw reads racing the platform-side write produce false-empty responses that have triggered false-positive HANDOFF rejection cycles. Then inspect `metadata.handoff` (raw JSON read) and follow the Completion Authority two-call atomic pair. Do NOT dispatch downstream phases against a teammate-owned task you have not yet marked completed.
+Every agent delivers a structured HANDOFF (6 fields: `produced`, `decisions`, `reasoning_chain`, `uncertainty`, `integration`, `open_questions`) stored in `metadata.handoff`. See [pact-agent-teams §HANDOFF Format](../skills/pact-agent-teams/SKILL.md#handoff-format) for the full schema. If `validate_handoff` warns about a missing HANDOFF, extract available context from the agent's response and update the task. On receipt, **wait for teammate's wake-signal SendMessage** (per [pact-completion-authority §Read-Trigger Precondition](../protocols/pact-completion-authority.md#read-trigger-precondition)) before treating the raw `metadata.handoff` read as authoritative — `TaskGet` is metadata-blind AND raw reads racing the platform-side write produce false-empty responses that have triggered false-positive HANDOFF rejection cycles. Then inspect `metadata.handoff` (raw JSON read) and follow the Completion Authority two-call atomic pair. Do NOT dispatch downstream phases against a teammate-owned task you have not yet marked completed. Note: HANDOFF's `reasoning_chain` (sender's view) is the symmetric counterpart to teachback's `reasoning_reconstruction` (receiver's parallel reconstruction) — see [pact-ct-teachback §Relationship to Existing Protocols](../protocols/pact-ct-teachback.md#relationship-to-existing-protocols).
 
 ### Intentional Waiting (orchestrator responsibilities)
 

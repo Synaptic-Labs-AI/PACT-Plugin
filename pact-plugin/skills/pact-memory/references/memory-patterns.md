@@ -1,3 +1,5 @@
+<!-- planning-artifact-exempt-file: documents memory-entry patterns via fictional example data (PR refs, version markers) that intentionally model real memory content; these are example strings, not real planning artifacts -->
+
 # PACT Memory Usage Patterns
 
 This document provides patterns and examples for effective use of the PACT Memory

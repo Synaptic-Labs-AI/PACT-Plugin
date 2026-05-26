@@ -938,3 +938,1266 @@ def test_canonical_tool_response_takes_precedence_over_legacy():
     assert any(rule == "handoff_missing" for rule, _ in advisories), (
         "canonical tool_response must take precedence over legacy tool_output"
     )
+
+
+# =============================================================================
+# Helpers for per-dispatch variety / teachback_submit tests
+# =============================================================================
+
+
+def _well_formed_variety_ack(value="yes", concern=""):
+    """Return a well-formed variety_acknowledgment dict per D10."""
+    if value == "yes":
+        return {"rationale_articulates_this_dispatch": "yes"}
+    return {
+        "rationale_articulates_this_dispatch": value,
+        "concern": concern or "novelty_rationale appears copied from feature",
+    }
+
+
+def _well_formed_teachback_submit(**overrides):
+    """Return a well-formed 5-field teachback_submit payload."""
+    payload = {
+        "understanding": "x",
+        "most_likely_wrong": "x",
+        "least_confident_item": "x",
+        "first_action": "x",
+        "variety_acknowledgment": _well_formed_variety_ack("yes"),
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _well_formed_variety(**overrides):
+    """Return a well-formed metadata.variety dict per D11."""
+    payload = {
+        "novelty": 2,
+        "novelty_rationale": "novelty rationale text",
+        "scope": 2,
+        "scope_rationale": "scope rationale text",
+        "uncertainty": 2,
+        "uncertainty_rationale": "uncertainty rationale text",
+        "risk": 2,
+        "risk_rationale": "risk rationale text",
+        "total": 8,
+    }
+    payload.update(overrides)
+    return payload
+
+
+# =============================================================================
+# teachback_submit_missing (R1) — Teachback completion without teachback_submit
+# =============================================================================
+
+
+def test_advisory_when_teachback_completed_without_teachback_submit(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Teachback subject task completed with empty metadata.teachback_submit
+    → R1 fires. Disjoint from R2 (no schema check on missing payload).
+    Paired-send setup mirrors the existing completion_no_paired_send tests
+    so we isolate R1 from completion_no_paired_send."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_team_inbox(
+        tmp_path, monkeypatch, owner="preparer", team_name="test-team",
+        paired_offset_seconds=30,
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "1",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "preparer",
+                "metadata": {},
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(rule == "teachback_submit_missing" for rule, _ in advisories), (
+        f"expected teachback_submit_missing, got: {advisories}"
+    )
+    # Disjoint with R2
+    assert not any(
+        rule == "teachback_submit_schema_invalid" for rule, _ in advisories
+    )
+
+
+def test_silent_when_teachback_completed_with_well_formed_submit(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Well-formed 5-field teachback_submit → R1 silent, R2 silent."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_team_inbox(
+        tmp_path, monkeypatch, owner="preparer", team_name="test-team",
+        paired_offset_seconds=30,
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "1",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "preparer",
+                "metadata": {
+                    "teachback_submit": _well_formed_teachback_submit(),
+                },
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "teachback_submit_missing" for rule, _ in advisories
+    )
+    assert not any(
+        rule == "teachback_submit_schema_invalid" for rule, _ in advisories
+    )
+
+
+def test_silent_on_non_teachback_subject_without_teachback_submit(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Non-teachback subject completed without teachback_submit → R1 silent.
+    R1 is gated on _is_teachback_subject; non-teachback completions never
+    fire R1 (handoff_missing covers work-task completions)."""
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "1",
+                "subject": "implement foo",
+                "owner": "pact-backend-coder",
+                "metadata": {"handoff": {
+                    "produced": "x",
+                    "decisions": "x",
+                    "reasoning_chain": "x",
+                    "uncertainty": "x",
+                    "integration": "x",
+                    "open_questions": "x",
+                }},
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "teachback_submit_missing" for rule, _ in advisories
+    )
+
+
+def test_silent_on_in_progress_update_without_teachback_submit(
+    pact_context,
+):
+    """TaskUpdate with status='in_progress' on teachback subject lacking
+    teachback_submit → R1 silent (R1 fires only at completion)."""
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "in_progress"},
+        "tool_response": {
+            "task": {
+                "id": "1",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "preparer",
+                "metadata": {},
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "teachback_submit_missing" for rule, _ in advisories
+    )
+
+
+# =============================================================================
+# teachback_submit_schema_invalid (R2) — disjoint from R1 (present-but-malformed)
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "understanding",
+        "most_likely_wrong",
+        "least_confident_item",
+        "first_action",
+        "variety_acknowledgment",
+    ],
+)
+def test_advisory_when_teachback_submit_missing_required_field(
+    missing_field, tmp_path, monkeypatch, pact_context,
+):
+    """Present teachback_submit missing one required field → R2 fires.
+    Covers the architect2 Task #25 deviation case (canonical-field omission)
+    AND the D10 variety_acknowledgment-missing case."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_team_inbox(
+        tmp_path, monkeypatch, owner="preparer", team_name="test-team",
+        paired_offset_seconds=30,
+    )
+    tb = _well_formed_teachback_submit()
+    tb.pop(missing_field)
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "1",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "preparer",
+                "metadata": {"teachback_submit": tb},
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "teachback_submit_schema_invalid" for rule, _ in advisories
+    ), f"expected R2 for missing {missing_field}, got: {advisories}"
+    # Disjoint with R1
+    assert not any(
+        rule == "teachback_submit_missing" for rule, _ in advisories
+    )
+
+
+def test_advisory_when_teachback_submit_is_non_dict(
+    tmp_path, monkeypatch, pact_context,
+):
+    """teachback_submit is a string → R2 fires (type mismatch)."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_team_inbox(
+        tmp_path, monkeypatch, owner="preparer", team_name="test-team",
+        paired_offset_seconds=30,
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "1",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "preparer",
+                "metadata": {"teachback_submit": "hello"},
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "teachback_submit_schema_invalid" for rule, _ in advisories
+    )
+
+
+def test_advisory_when_teachback_submit_field_is_empty_string(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Required field present but empty string → R2 fires."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_team_inbox(
+        tmp_path, monkeypatch, owner="preparer", team_name="test-team",
+        paired_offset_seconds=30,
+    )
+    tb = _well_formed_teachback_submit(most_likely_wrong="")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "1",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "preparer",
+                "metadata": {"teachback_submit": tb},
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "teachback_submit_schema_invalid" for rule, _ in advisories
+    )
+
+
+def test_advisory_when_teachback_uses_non_canonical_label(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Canonical-label deviation (`questions_or_concerns` instead of
+    `least_confident_item`) → R2 fires. The empirical case that motivated
+    R2 in the first place."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_team_inbox(
+        tmp_path, monkeypatch, owner="preparer", team_name="test-team",
+        paired_offset_seconds=30,
+    )
+    tb = _well_formed_teachback_submit()
+    tb.pop("least_confident_item")
+    tb["questions_or_concerns"] = "..."
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "1",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "preparer",
+                "metadata": {"teachback_submit": tb},
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "teachback_submit_schema_invalid" for rule, _ in advisories
+    )
+
+
+@pytest.mark.parametrize(
+    "ack_shape,description",
+    [
+        ("string-not-dict", "non-dict variety_acknowledgment"),
+        ({"rationale_articulates_this_dispatch": "maybe"}, "invalid enum value"),
+        ({"rationale_articulates_this_dispatch": "no"}, "missing concern for no"),
+        ({"rationale_articulates_this_dispatch": "no", "concern": ""}, "empty concern for no"),
+    ],
+)
+def test_advisory_when_variety_ack_is_malformed(
+    ack_shape, description, tmp_path, monkeypatch, pact_context,
+):
+    """Malformed variety_acknowledgment → R2 fires (D10 schema check via
+    sub-validator). Covers non-dict, invalid enum, missing concern, and
+    empty concern."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_team_inbox(
+        tmp_path, monkeypatch, owner="preparer", team_name="test-team",
+        paired_offset_seconds=30,
+    )
+    tb = _well_formed_teachback_submit(variety_acknowledgment=ack_shape)
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "1",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "preparer",
+                "metadata": {"teachback_submit": tb},
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "teachback_submit_schema_invalid" for rule, _ in advisories
+    ), f"expected R2 for {description}, got: {advisories}"
+
+
+def test_silent_when_variety_ack_is_well_formed_with_concern(
+    tmp_path, monkeypatch, pact_context,
+):
+    """variety_acknowledgment with value='no' and non-empty concern is
+    well-formed → R2 silent. This is the teammate-flag-orchestrator case."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_team_inbox(
+        tmp_path, monkeypatch, owner="preparer", team_name="test-team",
+        paired_offset_seconds=30,
+    )
+    tb = _well_formed_teachback_submit(
+        variety_acknowledgment=_well_formed_variety_ack(
+            "no", concern="novelty_rationale appears copied from feature"
+        )
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "1",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "preparer",
+                "metadata": {"teachback_submit": tb},
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "teachback_submit_schema_invalid" for rule, _ in advisories
+    )
+
+
+def test_silent_when_extra_reasoning_reconstruction_present(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Extra fields beyond the 5 canonical (e.g., reasoning_reconstruction)
+    are permitted → R2 silent. The validator checks required-presence, not
+    schema exclusivity."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_team_inbox(
+        tmp_path, monkeypatch, owner="preparer", team_name="test-team",
+        paired_offset_seconds=30,
+    )
+    tb = _well_formed_teachback_submit(
+        reasoning_reconstruction={
+            "decision_attribution": "x",
+            "assumption_trace": "x",
+            "contingency_clause": "x",
+        }
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "1",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "preparer",
+                "metadata": {"teachback_submit": tb},
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "teachback_submit_schema_invalid" for rule, _ in advisories
+    )
+
+
+# =============================================================================
+# variety_missing_on_dispatch_task (R4) — D11-refined: absent + malformed paths
+# =============================================================================
+
+
+def test_advisory_when_pact_work_task_created_without_variety(
+    pact_context,
+):
+    """TaskCreate pact-* work task without metadata.variety → R4 advisory.
+    Mirrors work_addblockedby_missing trigger shape (same discriminators)
+    but checks the variety field instead of addBlockedBy."""
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskCreate",
+        "tool_input": {
+            "subject": "implement foo",
+            "owner": "pact-backend-coder",
+            "addBlockedBy": ["41"],
+            # no metadata.variety
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "variety_missing_on_dispatch_task" for rule, _ in advisories
+    )
+
+
+@pytest.mark.parametrize(
+    "missing_rationale",
+    [
+        "novelty_rationale",
+        "scope_rationale",
+        "uncertainty_rationale",
+        "risk_rationale",
+    ],
+)
+def test_advisory_when_variety_missing_per_dimension_rationale(
+    missing_rationale, pact_context,
+):
+    """D11 schema: missing any per-dimension rationale → R4 fires (same
+    rule, malformed-path message). Covers all four rationale fields."""
+    pact_context(team_name="test-team", session_id="test-session")
+    variety = _well_formed_variety()
+    variety.pop(missing_rationale)
+    payload = {
+        "tool_name": "TaskCreate",
+        "tool_input": {
+            "subject": "implement foo",
+            "owner": "pact-backend-coder",
+            "addBlockedBy": ["41"],
+            "metadata": {"variety": variety},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "variety_missing_on_dispatch_task" for rule, _ in advisories
+    ), f"expected R4 for missing {missing_rationale}, got: {advisories}"
+
+
+def test_advisory_when_variety_rationale_is_empty_string(
+    pact_context,
+):
+    """D11: empty-string per-dimension rationale → R4 fires."""
+    pact_context(team_name="test-team", session_id="test-session")
+    variety = _well_formed_variety(scope_rationale="")
+    payload = {
+        "tool_name": "TaskCreate",
+        "tool_input": {
+            "subject": "implement foo",
+            "owner": "pact-backend-coder",
+            "addBlockedBy": ["41"],
+            "metadata": {"variety": variety},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "variety_missing_on_dispatch_task" for rule, _ in advisories
+    )
+
+
+def test_silent_when_variety_well_formed(pact_context):
+    """Full D11 schema (4 dim scores + 4 rationales + total) → R4 silent."""
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskCreate",
+        "tool_input": {
+            "subject": "implement foo",
+            "owner": "pact-backend-coder",
+            "addBlockedBy": ["41"],
+            "metadata": {"variety": _well_formed_variety()},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "variety_missing_on_dispatch_task" for rule, _ in advisories
+    )
+
+
+def test_silent_r4_on_teachback_subject_without_variety(pact_context):
+    """Teachback subject TaskCreate without variety → R4 silent. Teachback
+    tasks are not work tasks; variety stamping convention applies to
+    Task B (work tasks) only."""
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskCreate",
+        "tool_input": {
+            "subject": "backend-coder: TEACHBACK for foo",
+            "owner": "pact-backend-coder",
+            "addBlocks": ["42"],
+            # no metadata.variety
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "variety_missing_on_dispatch_task" for rule, _ in advisories
+    )
+
+
+def test_silent_r4_on_teachback_exempt_secretary(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Teachback-exempt agentType (pact-secretary) → R4 silent. Secretary
+    dispatches are single-task, not subject to variety stamping."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    team_dir = tmp_path / ".claude" / "teams" / "test-team"
+    team_dir.mkdir(parents=True)
+    (team_dir / "config.json").write_text(
+        json.dumps({
+            "team_name": "test-team",
+            "members": [
+                {"name": "pact-secretary", "agentType": "pact-secretary"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    payload = {
+        "tool_name": "TaskCreate",
+        "tool_input": {
+            "subject": "secretary: harvest HANDOFFs",
+            "owner": "pact-secretary",
+            # no metadata.variety
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "variety_missing_on_dispatch_task" for rule, _ in advisories
+    )
+
+
+def test_silent_r4_on_non_pact_owner(pact_context):
+    """Non-pact-* owner → R4 silent (R4 is gated on the same pact-* prefix
+    as work_addblockedby_missing)."""
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskCreate",
+        "tool_input": {
+            "subject": "implement foo",
+            "owner": "custom-name",
+            # no metadata.variety
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "variety_missing_on_dispatch_task" for rule, _ in advisories
+    )
+
+
+def test_silent_r4_does_not_detect_cargo_cult_rationales(pact_context):
+    """All 4 rationales identical / cargo-culted → R4 SILENT. R4 only
+    enforces presence + non-empty; cargo-cult detection is D10's teammate
+    adversarial review (variety_acknowledgment) + wrap-up retrospective
+    signal aggregation. Pins the contract: hooks do NOT do heuristic
+    cargo-cult detection."""
+    pact_context(team_name="test-team", session_id="test-session")
+    variety = _well_formed_variety(
+        novelty_rationale="matches feature complexity",
+        scope_rationale="matches feature complexity",
+        uncertainty_rationale="matches feature complexity",
+        risk_rationale="matches feature complexity",
+    )
+    payload = {
+        "tool_name": "TaskCreate",
+        "tool_input": {
+            "subject": "implement foo",
+            "owner": "pact-backend-coder",
+            "addBlockedBy": ["41"],
+            "metadata": {"variety": variety},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "variety_missing_on_dispatch_task" for rule, _ in advisories
+    )
+
+
+def test_advisory_r4_on_d4_legacy_single_rationale(pact_context):
+    """Legacy D4 single-rationale schema (just `rationale`) without the 4
+    per-dimension rationales → R4 fires (missing D11 fields). Demonstrates
+    R4 catches the legacy-shape migration path."""
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskCreate",
+        "tool_input": {
+            "subject": "implement foo",
+            "owner": "pact-backend-coder",
+            "addBlockedBy": ["41"],
+            "metadata": {"variety": {
+                "novelty": 2,
+                "scope": 2,
+                "uncertainty": 2,
+                "risk": 2,
+                "total": 8,
+                "rationale": "legacy single-rationale schema",
+            }},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "variety_missing_on_dispatch_task" for rule, _ in advisories
+    )
+
+
+# =============================================================================
+# R3 + R5 write-time branch — TaskUpdate writing teachback_submit metadata
+# =============================================================================
+
+
+def _setup_blocks_pair(
+    tmp_path, monkeypatch, team_name, task_a_id, task_b_id,
+    variety_total=12, include_variety=True, variety=None,
+):
+    """Seed two task JSONs in ~/.claude/tasks/{team_name}/: Task A
+    (teachback subject) blocks Task B (work task with variety.total).
+    Used by R3 + R5 branch tests."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    tasks_dir = tmp_path / ".claude" / "tasks" / team_name
+    tasks_dir.mkdir(parents=True)
+    task_a = {
+        "id": task_a_id,
+        "subject": "preparer: TEACHBACK for foo",
+        "owner": "preparer",
+        "blocks": [task_b_id],
+        "metadata": {},
+    }
+    (tasks_dir / f"{task_a_id}.json").write_text(
+        json.dumps(task_a), encoding="utf-8"
+    )
+    if include_variety:
+        if variety is None:
+            variety = _well_formed_variety(total=variety_total)
+        task_b = {
+            "id": task_b_id,
+            "subject": "implement foo",
+            "owner": "pact-backend-coder",
+            "metadata": {"variety": variety},
+        }
+    else:
+        task_b = {
+            "id": task_b_id,
+            "subject": "implement foo",
+            "owner": "pact-backend-coder",
+            "metadata": {},
+        }
+    (tasks_dir / f"{task_b_id}.json").write_text(
+        json.dumps(task_b), encoding="utf-8"
+    )
+
+
+# ---------- R3 cases ----------
+
+
+def test_r3_advisory_at_required_band_without_reasoning_reconstruction(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Task B.variety.total=12 → REQUIRED band; teachback_submit lacks
+    reasoning_reconstruction → R3 fires."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=12,
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": _well_formed_teachback_submit()},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "reasoning_reconstruction_missing_at_required_band"
+        for rule, _ in advisories
+    ), f"expected R3, got: {advisories}"
+
+
+def test_r3_advisory_at_required_band_with_malformed_reasoning(
+    tmp_path, monkeypatch, pact_context,
+):
+    """REQUIRED band; reasoning_reconstruction is a string instead of
+    dict → R3 fires (malformed treated as missing per architect3 §4.1)."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=12,
+    )
+    tb = _well_formed_teachback_submit(reasoning_reconstruction="not a dict")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": tb},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "reasoning_reconstruction_missing_at_required_band"
+        for rule, _ in advisories
+    )
+
+
+def test_r3_silent_at_required_band_with_well_formed_reasoning(
+    tmp_path, monkeypatch, pact_context,
+):
+    """REQUIRED band; well-formed reasoning_reconstruction triangle → R3
+    silent."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=12,
+    )
+    tb = _well_formed_teachback_submit(reasoning_reconstruction={
+        "decision_attribution": "x",
+        "assumption_trace": "x",
+        "contingency_clause": "x",
+    })
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": tb},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "reasoning_reconstruction_missing_at_required_band"
+        for rule, _ in advisories
+    )
+
+
+def test_r3_silent_at_recommended_band(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Task B.variety.total=8 → recommended band; no reasoning_reconstruction
+    required → R3 silent."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=8,
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": _well_formed_teachback_submit()},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "reasoning_reconstruction_missing_at_required_band"
+        for rule, _ in advisories
+    )
+
+
+def test_r3_silent_at_skipped_band(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Task B.variety.total=5 → skipped band; R3 silent."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=5,
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": _well_formed_teachback_submit()},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "reasoning_reconstruction_missing_at_required_band"
+        for rule, _ in advisories
+    )
+
+
+def test_r3_band_unresolvable_when_blocks_missing(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Task A has no blocks → band_unresolvable advisory (fail-open per
+    architect3 carry-forward #2)."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    tasks_dir = tmp_path / ".claude" / "tasks" / "test-team"
+    tasks_dir.mkdir(parents=True)
+    task_a = {
+        "id": "1",
+        "subject": "preparer: TEACHBACK for foo",
+        "owner": "preparer",
+        "blocks": [],  # empty
+        "metadata": {},
+    }
+    (tasks_dir / "1.json").write_text(json.dumps(task_a), encoding="utf-8")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": _well_formed_teachback_submit()},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "reasoning_reconstruction_band_unresolvable"
+        for rule, _ in advisories
+    )
+    # R3 itself silent in unresolvable path
+    assert not any(
+        rule == "reasoning_reconstruction_missing_at_required_band"
+        for rule, _ in advisories
+    )
+
+
+def test_r3_band_unresolvable_when_task_b_missing(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Task A.blocks=['999'] but no 999.json on disk → band_unresolvable."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    tasks_dir = tmp_path / ".claude" / "tasks" / "test-team"
+    tasks_dir.mkdir(parents=True)
+    task_a = {
+        "id": "1",
+        "subject": "preparer: TEACHBACK for foo",
+        "owner": "preparer",
+        "blocks": ["999"],
+        "metadata": {},
+    }
+    (tasks_dir / "1.json").write_text(json.dumps(task_a), encoding="utf-8")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": _well_formed_teachback_submit()},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "reasoning_reconstruction_band_unresolvable"
+        for rule, _ in advisories
+    )
+
+
+def test_r3_band_unresolvable_when_variety_absent_on_task_b(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Task B exists but lacks metadata.variety → band_unresolvable."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", include_variety=False,
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": _well_formed_teachback_submit()},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "reasoning_reconstruction_band_unresolvable"
+        for rule, _ in advisories
+    )
+
+
+def test_r3_band_unresolvable_when_variety_total_non_int(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Task B.variety.total is a string → band_unresolvable."""
+    pact_context(team_name="test-team", session_id="test-session")
+    variety = _well_formed_variety()
+    variety["total"] = "twelve"
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2",
+        variety=variety,
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": _well_formed_teachback_submit()},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "reasoning_reconstruction_band_unresolvable"
+        for rule, _ in advisories
+    )
+
+
+# ---------- R5 cases ----------
+
+
+def test_r5_advisory_when_variety_ack_missing(
+    tmp_path, monkeypatch, pact_context,
+):
+    """teachback_submit lacks variety_acknowledgment → R5 fires.
+    Presence-only check at write-time; full schema validation happens at
+    completion-time via R2 (two-surface asymmetry)."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=8,
+    )
+    tb = _well_formed_teachback_submit()
+    tb.pop("variety_acknowledgment")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": tb},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "variety_acknowledgment_missing" for rule, _ in advisories
+    )
+
+
+def test_r5_silent_when_variety_ack_present(
+    tmp_path, monkeypatch, pact_context,
+):
+    """variety_acknowledgment present (with value 'yes') → R5 silent."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=8,
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": _well_formed_teachback_submit()},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "variety_acknowledgment_missing" for rule, _ in advisories
+    )
+
+
+def test_r5_silent_when_variety_ack_present_with_concern(
+    tmp_path, monkeypatch, pact_context,
+):
+    """variety_acknowledgment with value='no' + concern → R5 silent (R5
+    only checks presence; R2 catches schema defects at completion)."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=8,
+    )
+    tb = _well_formed_teachback_submit(
+        variety_acknowledgment=_well_formed_variety_ack(
+            "no", concern="novelty_rationale appears cargo-culted"
+        )
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": tb},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "variety_acknowledgment_missing" for rule, _ in advisories
+    )
+
+
+def test_r5_silent_on_non_teachback_subject(
+    tmp_path, monkeypatch, pact_context,
+):
+    """TaskUpdate writing teachback_submit on NON-teachback subject → R5
+    silent (subject-pattern gate filters)."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    tasks_dir = tmp_path / ".claude" / "tasks" / "test-team"
+    tasks_dir.mkdir(parents=True)
+    task = {
+        "id": "1",
+        "subject": "implement foo",  # NOT a teachback subject
+        "owner": "pact-backend-coder",
+        "blocks": [],
+        "metadata": {},
+    }
+    (tasks_dir / "1.json").write_text(json.dumps(task), encoding="utf-8")
+    tb = _well_formed_teachback_submit()
+    tb.pop("variety_acknowledgment")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": tb},
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "variety_acknowledgment_missing" for rule, _ in advisories
+    )
+
+
+def test_r3_r5_silent_when_status_completed(
+    tmp_path, monkeypatch, pact_context,
+):
+    """R3 + R5 are gated on status != 'completed' (two-surface asymmetry
+    per design doc §6.1: R1/R2 cover completion-time; R3/R5 cover write-
+    time only). When a teammate atypically bundles teachback_submit +
+    status=completed in one TaskUpdate, R3/R5 stay silent and R1/R2 (with
+    schema validator) cover the same defect class."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety_total=12,
+    )
+    _setup_team_inbox(
+        tmp_path, monkeypatch, owner="preparer", team_name="test-team",
+        paired_offset_seconds=30,
+    )
+    tb = _well_formed_teachback_submit()
+    tb.pop("variety_acknowledgment")  # would normally fire R5
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "status": "completed",
+            "metadata": {"teachback_submit": tb},
+        },
+        "tool_response": {
+            "task": {
+                "id": "1",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "preparer",
+                "metadata": {"teachback_submit": tb},
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    # R3 + R5 silent (write-time-only branch skipped on completion)
+    assert not any(
+        rule == "reasoning_reconstruction_missing_at_required_band"
+        for rule, _ in advisories
+    )
+    assert not any(
+        rule == "variety_acknowledgment_missing" for rule, _ in advisories
+    )
+    # R2 catches the missing variety_acknowledgment at completion-time
+    assert any(
+        rule == "teachback_submit_schema_invalid" for rule, _ in advisories
+    )
+
+
+# =============================================================================
+# Pure-function tests: schema validators (D10 + D11)
+# =============================================================================
+
+
+class TestValidateVarietyAcknowledgment:
+    """Pure-function tests for _validate_variety_acknowledgment (D10)."""
+
+    def test_yes_without_concern_is_valid(self):
+        assert tlg._validate_variety_acknowledgment(
+            {"rationale_articulates_this_dispatch": "yes"}
+        ) is None
+
+    def test_yes_with_empty_concern_is_valid(self):
+        assert tlg._validate_variety_acknowledgment(
+            {"rationale_articulates_this_dispatch": "yes", "concern": ""}
+        ) is None
+
+    def test_no_with_concern_is_valid(self):
+        assert tlg._validate_variety_acknowledgment(
+            {"rationale_articulates_this_dispatch": "no", "concern": "x"}
+        ) is None
+
+    def test_concern_value_with_concern_is_valid(self):
+        assert tlg._validate_variety_acknowledgment(
+            {"rationale_articulates_this_dispatch": "concern", "concern": "x"}
+        ) is None
+
+    def test_non_dict_rejected(self):
+        result = tlg._validate_variety_acknowledgment("yes")
+        assert result is not None
+        assert "must be object" in result
+
+    def test_invalid_enum_rejected(self):
+        result = tlg._validate_variety_acknowledgment(
+            {"rationale_articulates_this_dispatch": "maybe"}
+        )
+        assert result is not None
+        assert "maybe" in result
+
+    def test_no_without_concern_rejected(self):
+        result = tlg._validate_variety_acknowledgment(
+            {"rationale_articulates_this_dispatch": "no"}
+        )
+        assert result is not None
+        assert "concern" in result
+
+    def test_concern_value_with_empty_concern_rejected(self):
+        result = tlg._validate_variety_acknowledgment(
+            {"rationale_articulates_this_dispatch": "concern", "concern": ""}
+        )
+        assert result is not None
+        assert "concern" in result
+
+
+class TestValidateVarietySchema:
+    """Pure-function tests for _validate_variety_schema (D11)."""
+
+    def test_full_d11_schema_valid(self):
+        assert tlg._validate_variety_schema(_well_formed_variety()) is None
+
+    @pytest.mark.parametrize(
+        "missing_field",
+        [
+            "novelty_rationale",
+            "scope_rationale",
+            "uncertainty_rationale",
+            "risk_rationale",
+        ],
+    )
+    def test_missing_rationale_rejected(self, missing_field):
+        variety = _well_formed_variety()
+        variety.pop(missing_field)
+        result = tlg._validate_variety_schema(variety)
+        assert result is not None
+        assert missing_field in result
+
+    def test_empty_rationale_rejected(self):
+        result = tlg._validate_variety_schema(
+            _well_formed_variety(novelty_rationale="")
+        )
+        assert result is not None
+        assert "novelty_rationale" in result
+
+    def test_non_string_rationale_rejected(self):
+        result = tlg._validate_variety_schema(
+            _well_formed_variety(scope_rationale=42)
+        )
+        assert result is not None
+        assert "scope_rationale" in result
+
+    def test_non_dict_rejected(self):
+        result = tlg._validate_variety_schema("not a dict")
+        assert result is not None
+        assert "must be object" in result
+
+    def test_extra_legacy_rationale_field_permitted(self):
+        """Legacy D4 `rationale` field present alongside D11 4-tuple → valid.
+        D11 validates required-presence, not exclusivity."""
+        variety = _well_formed_variety(rationale="legacy field still there")
+        assert tlg._validate_variety_schema(variety) is None
+
+
+class TestValidateTeachbackSubmitSchema:
+    """Pure-function tests for _validate_teachback_submit_schema (D10)."""
+
+    def test_full_5_field_payload_valid(self):
+        assert tlg._validate_teachback_submit_schema(
+            _well_formed_teachback_submit()
+        ) is None
+
+    def test_non_dict_rejected(self):
+        result = tlg._validate_teachback_submit_schema("hello")
+        assert result is not None
+        assert "must be object" in result
+
+    @pytest.mark.parametrize(
+        "missing_field",
+        [
+            "understanding",
+            "most_likely_wrong",
+            "least_confident_item",
+            "first_action",
+            "variety_acknowledgment",
+        ],
+    )
+    def test_missing_required_field_rejected(self, missing_field):
+        tb = _well_formed_teachback_submit()
+        tb.pop(missing_field)
+        result = tlg._validate_teachback_submit_schema(tb)
+        assert result is not None
+        assert missing_field in result
+
+    def test_empty_string_field_rejected(self):
+        result = tlg._validate_teachback_submit_schema(
+            _well_formed_teachback_submit(understanding="")
+        )
+        assert result is not None
+        assert "understanding" in result
+
+    def test_malformed_ack_rejected(self):
+        result = tlg._validate_teachback_submit_schema(
+            _well_formed_teachback_submit(
+                variety_acknowledgment={"rationale_articulates_this_dispatch": "maybe"}
+            )
+        )
+        assert result is not None
+        assert "variety_acknowledgment" in result
+
+    def test_extra_reasoning_reconstruction_field_permitted(self):
+        result = tlg._validate_teachback_submit_schema(
+            _well_formed_teachback_submit(
+                reasoning_reconstruction={
+                    "decision_attribution": "x",
+                    "assumption_trace": "x",
+                    "contingency_clause": "x",
+                }
+            )
+        )
+        assert result is None

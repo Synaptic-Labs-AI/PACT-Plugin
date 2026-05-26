@@ -185,8 +185,24 @@ A_id = TaskCreate(
 )
 TaskUpdate(A_id, owner="{specialist-name}")
 
-# 2. Create Task B (primary work)
-B_id = TaskCreate(subject="{specialist}: {sub-task}", description="<full mission>")
+# 2. Create Task B (primary work) — per-dispatch variety stamping per pact-variety.md
+B_id = TaskCreate(
+    subject="{specialist}: {sub-task}",
+    description="<full mission>",
+    metadata={
+        "variety": {
+            "novelty":               N,
+            "novelty_rationale":     "<1-sentence: why this score for THIS dispatch's novelty>",
+            "scope":                 N,
+            "scope_rationale":       "<1-sentence: why this score for THIS dispatch's scope>",
+            "uncertainty":           N,
+            "uncertainty_rationale": "<1-sentence: why this score for THIS dispatch's uncertainty>",
+            "risk":                  N,
+            "risk_rationale":        "<1-sentence: why this score for THIS dispatch's risk>",
+            "total":                 N
+        }
+    }
+)
 TaskUpdate(B_id, owner="{specialist-name}", addBlockedBy=[A_id])
 TaskUpdate(A_id, addBlocks=[B_id])
 
@@ -209,8 +225,24 @@ The `Agent()` `prompt` does NOT change shape — the Teachback-Gated Dispatch is
 When the task contains multiple independent items, invoke multiple specialists together with boundary context. For each specialist needed, follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
 1. `TaskCreate(subject="{specialist-name}: TEACHBACK for {sub-task}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
-2. `TaskCreate(subject="{specialist-name}: {sub-task}", description=<see below>)` — Task B.
+2. `TaskCreate(subject="{specialist-name}: {sub-task}", description=<see below>, metadata=<see below>)` — Task B.
    - Task B's `description` carries the comPACT-concurrent mission: "comPACT mode (concurrent): You are one of [N] specialists working concurrently.\nYou are working in a git worktree at [worktree_path].\nNote: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your HANDOFF instead.\n\nYOUR SCOPE: [specific sub-task]\nOTHER AGENTS' SCOPE: [what others handle]\n\nWork directly from this task description.\nIf upstream task IDs are provided, read via `TaskGet` for prior decisions.\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nStay within your assigned scope.\n\nTesting: New unit tests for logic changes. Fix broken existing tests. Run test suite before HANDOFF.\n\nIf you hit a blocker, STOP and `SendMessage` it to the team-lead.\n\nTask: [this agent's specific sub-task]"
+   - Task B's `metadata` carries per-dispatch variety stamping per pact-variety.md (D11 4-rationale schema):
+     ```json
+     {
+       "variety": {
+         "novelty":               N,
+         "novelty_rationale":     "<1-sentence: why this score for THIS dispatch's novelty>",
+         "scope":                 N,
+         "scope_rationale":       "<1-sentence: why this score for THIS dispatch's scope>",
+         "uncertainty":           N,
+         "uncertainty_rationale": "<1-sentence: why this score for THIS dispatch's uncertainty>",
+         "risk":                  N,
+         "risk_rationale":        "<1-sentence: why this score for THIS dispatch's risk>",
+         "total":                 N
+       }
+     }
+     ```
 3. `TaskUpdate(A_id, owner="{specialist-name}", addBlocks=[B_id])`
 4. `TaskUpdate(B_id, owner="{specialist-name}", addBlockedBy=[A_id])`
 5. **Journal event**: Write `agent_dispatch` before spawning each specialist:
@@ -253,8 +285,24 @@ Use a single specialist agent only when:
 **Dispatch the specialist** — follow the steps for [Teachback-Gated Dispatch](#teachback-gated-dispatch):
 
 1. `TaskCreate(subject="{specialist-name}: TEACHBACK for {task}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
-2. `TaskCreate(subject="{specialist-name}: {task}", description=<see below>)` — Task B.
+2. `TaskCreate(subject="{specialist-name}: {task}", description=<see below>, metadata=<see below>)` — Task B.
    - Task B's `description` carries the comPACT mission: "comPACT mode: Work directly from this task description.\nYou are working in a git worktree at [worktree_path].\nNote: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your HANDOFF instead.\nIf upstream task IDs are provided, read via `TaskGet` for prior decisions.\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nFocus on the task at hand.\n\nTesting: New unit tests for logic changes (optional for trivial changes). Fix broken existing tests. Run test suite before HANDOFF.\n\n> Smoke vs comprehensive tests: These are verification tests. Comprehensive coverage is TEST phase work.\n\nIf you hit a blocker, STOP and `SendMessage` it to the team-lead.\n\nTask: [user's task description]"
+   - Task B's `metadata` carries per-dispatch variety stamping per pact-variety.md (D11 4-rationale schema):
+     ```json
+     {
+       "variety": {
+         "novelty":               N,
+         "novelty_rationale":     "<1-sentence: why this score for THIS dispatch's novelty>",
+         "scope":                 N,
+         "scope_rationale":       "<1-sentence: why this score for THIS dispatch's scope>",
+         "uncertainty":           N,
+         "uncertainty_rationale": "<1-sentence: why this score for THIS dispatch's uncertainty>",
+         "risk":                  N,
+         "risk_rationale":        "<1-sentence: why this score for THIS dispatch's risk>",
+         "total":                 N
+       }
+     }
+     ```
 3. `TaskUpdate(A_id, owner="{specialist-name}", addBlocks=[B_id])`
 4. `TaskUpdate(B_id, owner="{specialist-name}", addBlockedBy=[A_id])`
 5. **Journal event**: Write `agent_dispatch` before spawning:

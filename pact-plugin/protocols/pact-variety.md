@@ -120,4 +120,68 @@ CalibrationRecord:
 4. Computes the full CalibrationRecord and saves to pact-memory
 5. If drift exceeds 2 in any dimension, notes as significant for future Learning II queries
 
+#### Per-Dispatch Variety Stamping
+
+The feature-level CalibrationRecord above coexists with per-dispatch variety stamping. Every primary work task (Task B in the Teachback-Gated Dispatch shape) receives `metadata.variety` at `TaskCreate`-time using the per-dimension rationale schema. The orchestrator scores THIS dispatch's complexity afresh — NOT inherited from feature variety, NOT capped by feature variety.
+
+**Per-dispatch schema** (stamped at TaskCreate-time on each Task B):
+
+```
+{
+  "variety": {
+    "novelty":               1-4,
+    "novelty_rationale":     "<1-sentence: why this score for THIS dispatch's novelty>",
+    "scope":                 1-4,
+    "scope_rationale":       "<1-sentence: why this score for THIS dispatch's scope>",
+    "uncertainty":           1-4,
+    "uncertainty_rationale": "<1-sentence: why this score for THIS dispatch's uncertainty>",
+    "risk":                  1-4,
+    "risk_rationale":        "<1-sentence: why this score for THIS dispatch's risk>",
+    "total":                 4-16
+  }
+}
+```
+
+**Why per-dimension rationales (not a single rationale)**: A single rationale field tolerates cargo-cult ("matches feature complexity" satisfies it). Four distinct rationale fields, one per dimension, force the orchestrator to articulate four independent judgments — cargo-culting all four with one phrase is mechanically incoherent (cannot coherently explain why novelty AND scope AND uncertainty AND risk are simultaneously "the same as feature" without exposing the copy-paste).
+
+#### variety_acknowledgment — Teammate Verification Workflow
+
+The teammate becomes the peer reviewer of the orchestrator's variety scoring. The teachback canonical schema includes a required `variety_acknowledgment` sub-field stored alongside the 4 existing teachback fields:
+
+```
+"variety_acknowledgment": {
+  "rationale_articulates_this_dispatch": "yes" | "no" | "concern",
+  "concern": "<required when value != 'yes'; names the smell>"
+}
+```
+
+**Teammate workflow** (extends pact-teachback skill's Step 1 metadata write):
+
+1. After claiming Task A and reading the task description, the teammate reads `metadata.variety` on Task B (resolved via `Task A.blocks[0]`) BEFORE composing the teachback_submit payload.
+2. Teammate judges each of the four per-dimension rationales against THIS dispatch's actual work — does `novelty_rationale` articulate why THIS dispatch is novel, or does it copy feature-level language? Same check for `scope_rationale`, `uncertainty_rationale`, `risk_rationale`.
+3. Teammate records the judgment in `metadata.teachback_submit.variety_acknowledgment`:
+   - `"yes"` — all four rationales articulate THIS dispatch's complexity; `concern` field omitted or empty.
+   - `"no"` — one or more rationales appear cargo-culted or wrong; teammate names the smell in `concern`.
+   - `"concern"` — softer signal; teammate has reservation but not certain; names the doubt in `concern`.
+
+**Lead workflow** (extends teachback review):
+
+The lead reviews `variety_acknowledgment` as part of teachback acceptance per [pact-completion-authority.md §Teachback Review](pact-completion-authority.md#teachback-review). Two acceptance paths:
+
+- **`"yes"`**: standard teachback acceptance; lead marks Task A completed + sends paired wake-SendMessage.
+- **`"no"` or `"concern"`**: lead has two corrective options before acceptance:
+  - *Orchestrator-side correction* (preferred when teammate's flag is correct): re-stamp `metadata.variety` on Task B via TaskUpdate with refined per-dimension rationales, THEN accept the teachback. The teammate's acknowledgment becomes part of the audit trail; no rejection needed.
+  - *Teammate-side correction* (when teammate's flag is erroneous): reject the teachback via `metadata.teachback_rejection` with reason explaining why the variety scoring stands as-is; teammate revises and resubmits.
+
+**META-BLOCK escalation at 3+ rejection cycles**: if teammate flags persist across 3+ cycles after lead correction attempts, the standard imPACT META-BLOCK escalation applies — see [pact-completion-authority.md §META-BLOCK](pact-completion-authority.md#meta-block). The 3-cycle bound is the existing protocol's bound; per-dispatch variety stamping inherits, does not redefine.
+
+#### Variety Acknowledgment Signal (Wrap-Up Aggregation)
+
+At wrap-up time, the secretary aggregates `variety_acknowledgment` flag rates across the session's dispatch corpus. Two triggers surface a calibration concern in the orchestration retrospective:
+
+- **Rate trigger**: if more than 20% of teachbacks recorded `"no"` or `"concern"`, flag the orchestrator's variety scoring as potentially miscalibrated for this session's dispatch shape.
+- **Single-no trigger**: a single `"no"` flag (stronger signal than `"concern"`) on a load-bearing dispatch surfaces the specific dispatch + smell in the retrospective, even when rate-trigger does not fire.
+
+The aggregation feeds back into Learning II calibration data alongside the feature-level CalibrationRecord — per-dispatch acknowledgment rates are a leading indicator of orchestrator-side scoring drift.
+
 ---

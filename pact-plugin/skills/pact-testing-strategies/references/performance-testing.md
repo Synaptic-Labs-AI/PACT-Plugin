@@ -516,6 +516,7 @@ jobs:
         run: sleep 30
 
       - name: Run k6 load test
+        <!-- planning-artifact-exempt: external GitHub Action version pin (grafana/k6-action), not a PACT-plugin planning artifact -->
         uses: grafana/k6-action@v0.3.0
         with:
           filename: tests/load/api-load-test.js

@@ -45,6 +45,7 @@ Cron-fire body — silent read; emit nothing unless a real artifact is on disk f
 
    Negative-delta guard: `[ $delta -ge 0 ]` forces a future-dated `scan_armed.ts` (clock skew / adversarial write) to fall through. Without it, negative deltas would always pass `-lt 300` — the gate would become a kill-switch.
 
+<!-- planning-artifact-exempt: memory ID `a7bcd37f` is behavioral provenance (looks up the canonical scope-boundary memory entry); operational identifier, not a planning artifact -->
 0.5. **Self-correcting teardown check**. Read the latest `teardown_request`, `scan_armed`, and `scan_disarmed` event timestamps; if a `teardown_request` event landed AFTER the current arm AND has not yet been processed via `scan_disarmed`, invoke `Skill("PACT:stop-pending-scan")` and return without continuing to Step 1. This is the **self-correcting fallback path** that catches orchestrator non-compliance with the `_TEARDOWN_DIRECTIVE` `additionalContext` channel — the orchestrator persona's scope-boundary clause excludes inbound `additionalContext` from MUST-binding (see memory `a7bcd37f`), so the cron-fire body itself enforces teardown via the trusted in-band channel + journal source-of-truth pair. Bounds compliance latency to ≤1 cron interval (5min nominal, up to ~6min with typical jitter, 15min worst-case) regardless of `additionalContext`-directive handling. Charter cross-reference: [§Cron-Fire Mechanism Teardown trigger sites](../protocols/pact-communication-charter.md#cron-fire-mechanism).
 
    ```bash
@@ -123,7 +124,7 @@ The completion-authority protocol contract (`protocols/pact-completion-authority
 1. `SendMessage(to=teammate, message="<wake-signal>")` FIRST — wakes the teammate, confirms acceptance reaches them.
 2. `TaskUpdate(taskId, status="completed")` SECOND — releases the teachback gate / closes the work task.
 
-This ordering is load-bearing per the SendMessage-FIRST ordering invariant (PR #692). The scan adheres verbatim; no shortcuts.
+This ordering is load-bearing per the SendMessage-FIRST ordering invariant. The scan adheres verbatim; no shortcuts.
 
 **Audit**: an editing LLM tempted to "just mark the task completed since the metadata is already there" is bypassing completion authority. The two-call pair is the canonical acceptance procedure — bypassing the SendMessage half leaves the teammate idle on `awaiting_lead_completion` with no wake-signal to claim the next task, which is the silent-strand failure mode. The scan is NOT a shortcut for completion; it is the canonical procedure invoked at cron cadence instead of at idle-poll cadence. Same procedure, different trigger.
 

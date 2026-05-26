@@ -378,7 +378,7 @@ When a checkpoint surfaces tension, apply the Resolution Protocol above.
 ## Conversation Theory: Teachback Protocol
 
 > **Source**: Gordon Pask's Conversation Theory, applied to LLM multi-agent systems.
-> **Phase**: CT Phase 1 (v3.6.0) — additive, no existing mechanisms changed.
+> **Phase**: CT Phase 1.5 (additive, L1.5 method-level extension)
 
 ### Core Principle
 
@@ -393,9 +393,10 @@ For LLM agents, **conversation IS cognition**. Understanding doesn't exist insid
 | **P-individual** | A coherent specialist perspective (agent instance with context). Emphasizes the perspective, not the process. |
 | **Conversation continuation** | A handoff that requires the receiver to complete the conversation, not just read it. |
 | **Teachback** | Receiver restates understanding to verify construction succeeded. |
-| **Agreement level** | Depth of shared understanding: L0 (topic — what), L1 (procedure — how), L2 (purpose — why). |
+| **Agreement level** | Depth of shared understanding: L0 (topic — what), L1 (procedure — how), **L1.5 (method — how & why-it-stays-true)**, L2 (purpose — why). |
 | **Entailment mesh** | Network of connected concepts where understanding one entails understanding others. |
-| **Reasoning chain** | How decisions connect — "X because Y, which required Z." A fragment of the entailment mesh. |
+| **Reasoning chain** | How decisions connect — "X because Y, which required Z." A fragment of the entailment mesh (sender's view). |
+| **Method reconstruction** | The receiver's parallel restatement of the upstream's load-bearing decision, the assumptions it depends on, and the contingency if those assumptions change. The L1.5 verification gate — see [Teachback Format](#teachback-format) and [When to Method-Reconstruct](#when-to-method-reconstruct). |
 
 ### Teachback Mechanism
 
@@ -424,10 +425,16 @@ Blocking teachback (wait for confirmation before working) would serialize everyt
 - Key constraints: {constraints I'm working within}
 - Interfaces: {interfaces I'll produce or consume}
 - Approach: {my intended approach, briefly}
+- Method reconstruction (when variety ≥ 11):
+    - Decision attribution: "I understand {upstream agent} chose {decision} because {their stated reason}"
+    - Assumption trace: "This reasoning depends on {assumption A}, {assumption B}, ..."
+    - Contingency clause: "If {assumption A or B} changes, the decision should change to {alternative}"
 Proceeding unless corrected.
 ```
 
-Keep teachbacks concise — 3-6 bullet points. The goal is to surface misunderstandings, not to restate the entire handoff.
+Keep teachbacks concise — 3-6 bullet points (or 4-7 when method reconstruction is included). The goal is to surface misunderstandings, not to restate the entire handoff. The method-reconstruction bullet is **optional below variety 11** and **required at variety ≥ 11**; see [When to Method-Reconstruct](#when-to-method-reconstruct) for the variety-band gate.
+
+> Note: protocol prose uses capitalized labels (`Decision attribution`, `Assumption trace`, `Contingency clause`); the schema gate keys on the underscore_separated form (`decision_attribution`, `assumption_trace`, `contingency_clause`). Both shapes describe the same triangle — prose labels for human-readable surfaces, JSON keys for mechanical surfaces (SKILL.md, orchestrator.md §12, tests).
 
 #### When to Teachback
 
@@ -438,9 +445,32 @@ Keep teachbacks concise — 3-6 bullet points. The goal is to surface misunderst
 | Self-claimed follow-up task | Yes — restate understanding of the new task |
 | Consultant question (peer asks you something) | No — conversational exchange, not task dispatch |
 
+#### When to Method-Reconstruct
+
+The L1.5 gate runs against the dispatching task's variety score (see `hooks/shared/variety_scorer.py` — `COMPACT_MAX`, `ORCHESTRATE_MAX`, `PLAN_MODE_MAX`, and `route_workflow`). Constants live at the SSOT; do not hard-code the 6 / 10 / 14 thresholds in skill prose, doc prose, or test code.
+
+| Variety score | Workflow route | Method reconstruction | Lead behavior on absence |
+|---|---|---|---|
+| 4–6 | `ROUTE_COMPACT` (comPACT) | **Skipped** — not required, not recommended | Accept teachback; absence is the expected default. |
+| 7–10 | `ROUTE_ORCHESTRATE` (orchestrate) | **Recommended** — teammate may include; lead MAY ask for it on follow-up | Accept teachback; lead may SendMessage requesting reconstruction on follow-up if upstream decisions are non-trivial. |
+| 11–14 | `ROUTE_PLAN_MODE` (plan-mode + orchestrate) | **Required** — teammate MUST include; absence is rejection signal | Reject teachback with `metadata.teachback_rejection{reason="missing_reasoning_reconstruction"}` plus a correction SendMessage. |
+| 15–16 | `ROUTE_RESEARCH_SPIKE` (research-spike) | **Required** (treated identically to plan-mode) | Same as plan-mode — reject on absence. |
+
+The lead-side validation gate emits one of 3 rejection reasons in `metadata.teachback_rejection.reason`:
+
+| Reason enum | Trigger | Source gate |
+|---|---|---|
+| `missing_reasoning_reconstruction` | Required-band teachback omits the field | Presence gate (variety ≥ 11) |
+| `malformed_reasoning_reconstruction` | Field present but not a 3-key dict | Schema gate |
+| `empty_reasoning_reconstruction_field` | Sub-key missing, non-string, or empty/whitespace | Schema gate |
+
+The `variety_score=None` handling is a **transitional permissiveness**. A future plugin version SHOULD deprecate the None-tolerance and require `variety_score` on every feature task at dispatch time (enforced via `task_lifecycle_gate` or a new dispatch-time predicate). The conservative-now / fail-loud-later trajectory surfaces failures early without breaking pre-existing dispatch state. Until that deprecation lands, `variety_score=None` is treated as the **Recommended band** (equivalent to variety 7–10).
+
+The `TEACHBACK_EXEMPT_AGENT_TYPES` exemption (currently `{pact-secretary}`, defined in `hooks/shared/intentional_wait.py`) covers method reconstruction too — exempt owners bypass the entire teachback gate, including the L1.5 sub-field. No new helper or constant is required.
+
 #### Cost
 
-One extra `SendMessage` per agent dispatch (~100-200 tokens). Cheap insurance against the most dangerous failure mode: **misunderstanding disguised as agreement** — where an agent proceeds with wrong understanding, undetected until TEST phase.
+One extra `SendMessage` per agent dispatch (~100-200 tokens). Cheap insurance against the most dangerous failure mode: **misunderstanding disguised as agreement** — where an agent proceeds with wrong understanding, undetected until TEST phase. When method reconstruction is required (variety ≥ 11), an additional ~50-100 tokens per teachback round-trip.
 
 ### Agreement Verification (Orchestrator-Side)
 
@@ -479,6 +509,7 @@ If the specialist has been shut down or is unresponsive when agreement verificat
 - **S4 Checkpoints**: Agreement verification extends S4 checkpoints with a CT-informed question. Both run at phase boundaries; S4 asks "is our plan valid?" while CT asks "do we share understanding?"
 - **HANDOFF format**: Teachback doesn't change the handoff format. It adds a verification conversation on top of the existing document-based handoff.
 - **`SendMessage` prefix convention**: Teachback messages follow the existing `[{sender}→{recipient}]` prefix convention.
+- **Reasoning chain ↔ Method reconstruction**: HANDOFF's `reasoning_chain` (sender's view of their own derivation) and teachback's `reasoning_reconstruction` (receiver's parallel reconstruction) are explicitly symmetric — sender states, receiver reconstructs. Together they give symmetric entailment-mesh discipline across the handoff boundary.
 - **Conversation Failure Taxonomy**: See [pact-workflows.md](pact-workflows.md) (imPACT section) for diagnosing communication failures between agents.
 
 ---
@@ -884,6 +915,70 @@ CalibrationRecord:
 3. Asks the team-lead for a brief difficulty assessment (higher, lower, or about the same)
 4. Computes the full CalibrationRecord and saves to pact-memory
 5. If drift exceeds 2 in any dimension, notes as significant for future Learning II queries
+
+#### Per-Dispatch Variety Stamping
+
+The feature-level CalibrationRecord above coexists with per-dispatch variety stamping. Every primary work task (Task B in the Teachback-Gated Dispatch shape) receives `metadata.variety` at `TaskCreate`-time using the per-dimension rationale schema. The orchestrator scores THIS dispatch's complexity afresh — NOT inherited from feature variety, NOT capped by feature variety.
+
+**Per-dispatch schema** (stamped at TaskCreate-time on each Task B):
+
+```
+{
+  "variety": {
+    "novelty":               1-4,
+    "novelty_rationale":     "<1-sentence: why this score for THIS dispatch's novelty>",
+    "scope":                 1-4,
+    "scope_rationale":       "<1-sentence: why this score for THIS dispatch's scope>",
+    "uncertainty":           1-4,
+    "uncertainty_rationale": "<1-sentence: why this score for THIS dispatch's uncertainty>",
+    "risk":                  1-4,
+    "risk_rationale":        "<1-sentence: why this score for THIS dispatch's risk>",
+    "total":                 4-16
+  }
+}
+```
+
+**Why per-dimension rationales (not a single rationale)**: A single rationale field tolerates cargo-cult ("matches feature complexity" satisfies it). Four distinct rationale fields, one per dimension, force the orchestrator to articulate four independent judgments — cargo-culting all four with one phrase is mechanically incoherent (cannot coherently explain why novelty AND scope AND uncertainty AND risk are simultaneously "the same as feature" without exposing the copy-paste).
+
+#### variety_acknowledgment — Teammate Verification Workflow
+
+The teammate becomes the peer reviewer of the orchestrator's variety scoring. The teachback canonical schema includes a required `variety_acknowledgment` sub-field stored alongside the 4 existing teachback fields:
+
+```
+"variety_acknowledgment": {
+  "rationale_articulates_this_dispatch": "yes" | "no" | "concern",
+  "concern": "<required when value != 'yes'; names the smell>"
+}
+```
+
+**Teammate workflow** (extends pact-teachback skill's Step 1 metadata write):
+
+1. After claiming Task A and reading the task description, the teammate reads `metadata.variety` on Task B (resolved via `Task A.blocks[0]`) BEFORE composing the teachback_submit payload.
+2. Teammate judges each of the four per-dimension rationales against THIS dispatch's actual work — does `novelty_rationale` articulate why THIS dispatch is novel, or does it copy feature-level language? Same check for `scope_rationale`, `uncertainty_rationale`, `risk_rationale`.
+3. Teammate records the judgment in `metadata.teachback_submit.variety_acknowledgment`:
+   - `"yes"` — all four rationales articulate THIS dispatch's complexity; `concern` field omitted or empty.
+   - `"no"` — one or more rationales appear cargo-culted or wrong; teammate names the smell in `concern`.
+   - `"concern"` — softer signal; teammate has reservation but not certain; names the doubt in `concern`.
+
+**Lead workflow** (extends teachback review):
+
+The lead reviews `variety_acknowledgment` as part of teachback acceptance per [pact-completion-authority.md §Teachback Review](pact-completion-authority.md#teachback-review). Two acceptance paths:
+
+- **`"yes"`**: standard teachback acceptance; lead marks Task A completed + sends paired wake-SendMessage.
+- **`"no"` or `"concern"`**: lead has two corrective options before acceptance:
+  - *Orchestrator-side correction* (preferred when teammate's flag is correct): re-stamp `metadata.variety` on Task B via TaskUpdate with refined per-dimension rationales, THEN accept the teachback. The teammate's acknowledgment becomes part of the audit trail; no rejection needed.
+  - *Teammate-side correction* (when teammate's flag is erroneous): reject the teachback via `metadata.teachback_rejection` with reason explaining why the variety scoring stands as-is; teammate revises and resubmits.
+
+**META-BLOCK escalation at 3+ rejection cycles**: if teammate flags persist across 3+ cycles after lead correction attempts, the standard imPACT META-BLOCK escalation applies — see [pact-completion-authority.md §META-BLOCK](pact-completion-authority.md#meta-block). The 3-cycle bound is the existing protocol's bound; per-dispatch variety stamping inherits, does not redefine.
+
+#### Variety Acknowledgment Signal (Wrap-Up Aggregation)
+
+At wrap-up time, the secretary aggregates `variety_acknowledgment` flag rates across the session's dispatch corpus. Two triggers surface a calibration concern in the orchestration retrospective:
+
+- **Rate trigger**: if more than 20% of teachbacks recorded `"no"` or `"concern"`, flag the orchestrator's variety scoring as potentially miscalibrated for this session's dispatch shape.
+- **Single-no trigger**: a single `"no"` flag (stronger signal than `"concern"`) on a load-bearing dispatch surfaces the specific dispatch + smell in the retrospective, even when rate-trigger does not fire.
+
+The aggregation feeds back into Learning II calibration data alongside the feature-level CalibrationRecord — per-dispatch acknowledgment rates are a leading indicator of orchestrator-side scoring drift.
 
 ---
 
@@ -1853,7 +1948,7 @@ The auditor operates primarily through file observation, not messaging. This min
 
 Before emitting GREEN on any **structural acceptance criterion**, the auditor MUST verify the claim against `git diff` ground truth. Pattern-matching on HANDOFF prose, commit messages, or coder self-attestation alone is NOT sufficient evidence. Four internally-consistent layers of prose can all be wrong together; the diff is evidence.
 
-**Rationale**: This instantiates the general rule **`file inspection beats HANDOFF inference`**, established during PR #371 calibration (memory `bcead760`, 2026-04-08) and re-materialized at the auditor layer in PR #501 (memory `bb101a99`, 2026-04-21): "Auditor GREEN signal, coder HANDOFF narrative, and commit message body can all pattern-match to self-attestation without any of them verifying against git diff." HANDOFF narrative is a retrieval aid, not ground truth. The specific failure mode this rule prevents is the PHANTOM-SYMMETRIC-CLAIM variant: in PR #501 commit `bef7f24` (corrected in `7ed354e`), four layers — the coder's HANDOFF prose, the commit message body, the coder's self-attestation messages, and the audit signal — all agreed on a fabricated structural claim (three mirror-added skips at a specific line range) while the actual diff contained one.
+**Rationale**: This instantiates the general rule **`file inspection beats HANDOFF inference`**, established during prior audit calibrations and re-materialized at the auditor layer in subsequent retrospectives: "Auditor GREEN signal, coder HANDOFF narrative, and commit message body can all pattern-match to self-attestation without any of them verifying against git diff." HANDOFF narrative is a retrieval aid, not ground truth. The specific failure mode this rule prevents is the PHANTOM-SYMMETRIC-CLAIM variant: in a documented case, four layers — the coder's HANDOFF prose, the commit message body, the coder's self-attestation messages, and the audit signal — all agreed on a fabricated structural claim (three mirror-added skips at a specific line range) while the actual diff contained one.
 
 **Structural ACs** (diff-verifiable): countable or locatable artifacts — "all files in one commit", "N skips at lines Y–Z", "function `foo` untouched", "helper extracted into a new file", "added after the existing imports block". If the AC contains a count, a line range, a path, or a touched/untouched/added/removed verb, it is structural.
 
