@@ -468,11 +468,22 @@ class TestTeachbackMicroSkillExtraction:
     # schema + variety-band gate + L1.5 paragraph; budget ceiling
     # provides ~480-char headroom for future small edits.
     #
+    # Bumped to 16000 to accommodate the schema-clarity restructure:
+    # canonical-shape block at top of file (combined-payload reading
+    # example showing both top-level metadata keys as siblings), four
+    # inline anti-pattern callouts (variety_acknowledgment STRING shape,
+    # reasoning_reconstruction in handoff slot, wrong sub-key names,
+    # intentional_wait nested in teachback_submit), a four-row Common
+    # Mistakes table whose rows align 1:1 with the runtime advisory rules
+    # in task_lifecycle_gate.py, and a four-band threshold table folded
+    # into the When-to-Method-Reconstruct section. Budget ceiling
+    # provides ~810-char headroom for future small edits.
+    #
     # Tighten-back trigger: if a future PR removes optional content
     # (e.g., if a future PR removes the transitional permissiveness
     # paragraph), reduce MAX_SKILL_CHARS to keep this budget a
     # meaningful ceiling and not a ratchet.
-    MAX_SKILL_CHARS = 7500
+    MAX_SKILL_CHARS = 16000
 
     # Key protocol elements that must be in the extracted skill.
     # Presence-only checks are deliberately strict — any drop indicates
