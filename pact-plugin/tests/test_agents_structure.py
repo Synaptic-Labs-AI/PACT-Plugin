@@ -464,15 +464,14 @@ class TestTeachbackMicroSkillExtraction:
     # ordering invariant for the lead-side raw-metadata-read decision —
     # wording-reviewed and approved during the Bug C dispatch).
     #
-    # v4.2.x (#832 — method-level teachback): bumped to 7500 to
-    # accommodate reasoning_reconstruction field schema + variety-band
-    # gate + L1.5 paragraph; budget ceiling provides ~480-char headroom
-    # for future small edits.
+    # Bumped to 7500 to accommodate reasoning_reconstruction field
+    # schema + variety-band gate + L1.5 paragraph; budget ceiling
+    # provides ~480-char headroom for future small edits.
     #
     # Tighten-back trigger: if a future PR removes optional content
-    # (e.g., #828 v4.3+ deprecation of None-tolerance lets us drop
-    # the transitional permissiveness paragraph), reduce MAX_SKILL_CHARS
-    # to keep this budget a meaningful ceiling and not a ratchet.
+    # (e.g., if a future PR removes the transitional permissiveness
+    # paragraph), reduce MAX_SKILL_CHARS to keep this budget a
+    # meaningful ceiling and not a ratchet.
     MAX_SKILL_CHARS = 7500
 
     # Key protocol elements that must be in the extracted skill.

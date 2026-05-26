@@ -504,14 +504,14 @@ When the teachback payload includes the optional `reasoning_reconstruction` sub-
 | 7–10 | `ROUTE_ORCHESTRATE` | Accept teachback (recommended-not-required; you MAY SendMessage requesting reconstruction on follow-up). |
 | 11–14 | `ROUTE_PLAN_MODE` | Reject teachback with `metadata.teachback_rejection{reason="missing_reasoning_reconstruction"}` + correction SendMessage. |
 | 15–16 | `ROUTE_RESEARCH_SPIKE` | Same as `ROUTE_PLAN_MODE` — reject on absence. |
-| `None` / missing / non-int | — | Treat as `ROUTE_ORCHESTRATE` (transitional permissiveness; v4.3+ deprecation tracked at [#828](https://github.com/Synaptic-Labs-AI/PACT-Plugin/issues/828)). |
+| `None` / missing / non-int | — | Treat as `ROUTE_ORCHESTRATE` (transitional permissiveness; a future plugin version may deprecate the None-tolerance and require `variety_score` on every feature task at dispatch time). |
 
 **Schema gate** (runs only when `reasoning_reconstruction` is present and non-null):
 
 - Must be a JSON object with exactly 3 keys: `decision_attribution`, `assumption_trace`, `contingency_clause`. Partial / extra keys → reject with `reason="malformed_reasoning_reconstruction"`.
 - Each value must be a non-empty string. Empty string / non-string → reject with `reason="empty_reasoning_reconstruction_field"`.
 
-**Internal-consistency gate** (judgment-only; no automation in this version — see [#832](https://github.com/Synaptic-Labs-AI/PACT-Plugin/issues/832) for future hook escalation). On read, ask yourself:
+**Internal-consistency gate** (judgment-only; no automation at this layer — future plugin evolution may add hook-level semantic probes). On read, ask yourself:
 
 - **(a) Decision attribution** — does it name a *specific* upstream decision and the upstream's *stated* reason? Anti-pattern: "the architect chose the approach because it makes sense". Pattern: "the architect chose `ORPHAN_TOKEN_MAX_AGE_SECONDS = 86400` because the issue body states `TOKEN_TTL × 24 ≈ 24 hours`".
 - **(b) Assumption trace** — does it list ≥ 1 *falsifiable* proposition checkable in 30s against constraints? Anti-pattern: "this depends on the architect being right". Pattern: "this depends on (a) `TOKEN_TTL` being on the order of 1 hour, and (b) a stale-attack buffer being the primary security objective".
@@ -521,7 +521,7 @@ If the (a)(b)(c) prompts surface a flagged assumption that turns out to be false
 
 **Rejection path** reuses the existing two-call atomic pair from Completion Authority above: SendMessage FIRST (wake-signal), TaskUpdate SECOND (writes `metadata.teachback_rejection` with `reason` + `corrections`). The `metadata.teachback_rejection` shape is unchanged — only the `reason` enum gains the new values (`missing_reasoning_reconstruction`, `malformed_reasoning_reconstruction`, `empty_reasoning_reconstruction_field`).
 
-This is the L1.5 entailment-mesh discipline #832 codifies — distinct from L2 (purpose) verification (which still runs only at final gates per [pact-ct-teachback §Agreement Verification](../protocols/pact-ct-teachback.md#agreement-verification-orchestrator-side)).
+This is the L1.5 entailment-mesh discipline — distinct from L2 (purpose) verification (which still runs only at final gates per [pact-ct-teachback §Agreement Verification](../protocols/pact-ct-teachback.md#agreement-verification-orchestrator-side)).
 
 #### Expected Agent HANDOFF Format
 

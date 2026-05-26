@@ -1,7 +1,7 @@
 ## Conversation Theory: Teachback Protocol
 
 > **Source**: Gordon Pask's Conversation Theory, applied to LLM multi-agent systems.
-> **Phase**: CT Phase 1.5 (v4.2.x — additive, L1.5 method-level extension)
+> **Phase**: CT Phase 1.5 (additive, L1.5 method-level extension)
 
 ### Core Principle
 
@@ -87,7 +87,7 @@ The lead-side validation gate emits one of 3 rejection reasons in `metadata.teac
 | `malformed_reasoning_reconstruction` | Field present but not a 3-key dict | Schema gate |
 | `empty_reasoning_reconstruction_field` | Sub-key missing, non-string, or empty/whitespace | Schema gate |
 
-The `variety_score=None` handling is a **transitional permissiveness**. v4.3+ SHOULD deprecate the None-tolerance and require `variety_score` on every feature task at dispatch time (enforced via `task_lifecycle_gate` or a new dispatch-time predicate). Tracked under [issue #828](https://github.com/Synaptic-Labs-AI/PACT-Plugin/issues/828) (v4.3+ deprecation roadmap). The conservative-now / fail-loud-later trajectory aligns with the user's pinned preference for surfacing failures early without breaking pre-existing dispatch state in this PR. Until that deprecation lands, `variety_score=None` is treated as the **Recommended band** (equivalent to variety 7–10).
+The `variety_score=None` handling is a **transitional permissiveness**. A future plugin version SHOULD deprecate the None-tolerance and require `variety_score` on every feature task at dispatch time (enforced via `task_lifecycle_gate` or a new dispatch-time predicate). The conservative-now / fail-loud-later trajectory surfaces failures early without breaking pre-existing dispatch state. Until that deprecation lands, `variety_score=None` is treated as the **Recommended band** (equivalent to variety 7–10).
 
 The `TEACHBACK_EXEMPT_AGENT_TYPES` exemption (currently `{pact-secretary}`, defined in `hooks/shared/intentional_wait.py`) covers method reconstruction too — exempt owners bypass the entire teachback gate, including the L1.5 sub-field. No new helper or constant is required.
 

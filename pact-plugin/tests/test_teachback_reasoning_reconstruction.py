@@ -1,7 +1,7 @@
 """Tests for the optional reasoning_reconstruction field on metadata.teachback_submit.
 
-Pins the schema and variety-band gate for the L1.5 method-level teachback
-extension (issue #832). Coverage:
+Pins the schema and variety-band gate for the L1.5 method-level
+extension. Coverage:
 
   - Schema: optional parent key (absent / null both valid)
   - Schema: when present, must be dict with exactly 3 string keys
@@ -359,8 +359,8 @@ class TestLeadSideConsistencyCheck:
 
     Architect §3.2 (a)(b)(c) internal-consistency prompts are
     judgment-only — NOT exercised by automated tests in this PR; per
-    §7.4 and the coder-discretion lean accepted in TEACHBACK on Task #9.
-    Future PostToolUse hook escalation (#832) MAY add semantic probes.
+    §7.4 and the coder-discretion lean accepted during teachback gate review.
+    Future PostToolUse hook escalation MAY add semantic probes.
     """
 
     def test_well_formed_triangle_accepted_at_required_band(self):
@@ -396,10 +396,10 @@ class TestLeadSideConsistencyCheck:
             assert verdict == "reject", f"band {score} accepted malformed payload"
             assert reason == "malformed_reasoning_reconstruction"
 
-    def test_pr_802_trace_round_trip_accepted_at_plan_mode(self):
-        """Empirical-validation integration smoke: the PR #802 trace
-        (ORPHAN_TOKEN_MAX_AGE_SECONDS / TOKEN_TTL × 24 / 300s contingency
-        triangle) MUST be accepted by the schema gate at the Required band.
+    def test_canonical_exemplar_round_trip_accepted_at_plan_mode(self):
+        """Empirical-validation integration smoke: the canonical
+        ORPHAN_TOKEN_MAX_AGE_SECONDS / TOKEN_TTL × 24 / 300s contingency
+        exemplar MUST be accepted by the schema gate at the Required band.
 
         Source: pact-plugin/agents/pact-orchestrator.md §12
         Internal-consistency gate examples (committed SSOT). The triangle
@@ -409,7 +409,7 @@ class TestLeadSideConsistencyCheck:
         above) is to prove the schema gate accepts the canonical exemplar
         that the protocol documentation cites.
         """
-        pr_802_trace = {
+        canonical_exemplar = {
             "decision_attribution": (
                 "I understand the architect chose ORPHAN_TOKEN_MAX_AGE_SECONDS = 86400 "
                 "(24 hours) because the issue body states 'TOKEN_TTL × 24 ≈ 24 hours' — "
@@ -431,7 +431,7 @@ class TestLeadSideConsistencyCheck:
             ),
         }
         verdict, reason = _validate_reasoning_reconstruction(
-            _payload(reconstruction=pr_802_trace),
+            _payload(reconstruction=canonical_exemplar),
             dispatching_variety_score=PLAN_MODE_MAX,
         )
         assert verdict == "accept"
