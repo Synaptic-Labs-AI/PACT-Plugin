@@ -392,6 +392,47 @@ class TestLeadSideConsistencyCheck:
             assert verdict == "reject", f"band {score} accepted malformed payload"
             assert reason == "malformed_reasoning_reconstruction"
 
+    def test_pr_802_trace_round_trip_accepted_at_plan_mode(self):
+        """Empirical-validation integration smoke: the literal PR #802 trace
+        from preparer doc §3.2 (the ORPHAN_TOKEN_MAX_AGE_SECONDS / TOKEN_TTL
+        × 24 / 300s contingency triangle) MUST be accepted by the schema
+        gate at the Required band.
+
+        Source: docs/preparation/feat-832-method-level-teachback.md §3.2.
+        Provenance is verbatim — this is the canonical exemplar cited in
+        the protocol documents (pact-ct-teachback.md, pact-orchestrator.md
+        §12 Internal-consistency gate). The point of this case is to prove
+        the schema gate accepts the exemplar the documentation cites, not
+        to re-test the well-formed-triangle accept path (covered above).
+        """
+        pr_802_trace = {
+            "decision_attribution": (
+                "I understand the architect chose ORPHAN_TOKEN_MAX_AGE_SECONDS = 86400 "
+                "(24 hours) because the issue body states 'TOKEN_TTL × 24 ≈ 24 hours' — "
+                "i.e., the architect wants the cleanup window to be 24× the per-token "
+                "TTL to provide a stale-attack buffer well beyond normal token lifetime."
+            ),
+            "assumption_trace": (
+                "This reasoning depends on (a) TOKEN_TTL being on the order of 1 hour "
+                "(so 24× lands at the 24-hour magnitude the issue body cites), and "
+                "(b) a 'stale-attack buffer' being the primary security objective for "
+                "the cleanup helper (not disk hygiene, not session-scope containment)."
+            ),
+            "contingency_clause": (
+                "If TOKEN_TTL is actually substantially smaller (e.g., 300s, the "
+                "merge-guard token TTL I saw in passing while reading the file), the "
+                "24× multiplier yields 2 hours, not 24 — in which case the security "
+                "framing collapses and the cleanup magnitude should be re-derived from "
+                "FIRST principles (disk hygiene, not stale-attack window)."
+            ),
+        }
+        verdict, reason = _validate_reasoning_reconstruction(
+            _payload(reconstruction=pr_802_trace),
+            dispatching_variety_score=PLAN_MODE_MAX,
+        )
+        assert verdict == "accept"
+        assert reason is None
+
 
 # ============================================================================
 # JSON round-trip smoke (the payload is real metadata that lands on disk
