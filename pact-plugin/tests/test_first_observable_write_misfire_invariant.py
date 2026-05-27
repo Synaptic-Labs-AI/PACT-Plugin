@@ -54,12 +54,19 @@ MULTI_WRITE_PROTOCOL_RULES: tuple[str, ...] = (
 )
 
 
-def _find_taskcreate_branch(tree: ast.AST) -> ast.If | None:
-    """Return the `if tool_name == "TaskCreate":` AST node inside
-    evaluate_lifecycle, or None if not found. The lookup is structural —
-    matches an If whose test compares the Name `tool_name` against the
-    string constant `"TaskCreate"`.
+def _find_taskcreate_branches(tree: ast.AST) -> list[ast.If]:
+    """Return ALL `if tool_name == "TaskCreate":` AST nodes in the file,
+    not just the first one matched. The single-branch assumption from
+    the original implementation was a refactor-fragility hazard: if a
+    future refactor introduces a sibling dispatcher function with its
+    own TaskCreate branch and a denylisted rule moves into that second
+    branch, returning only the first branch would silently pass the
+    invariant.
+
+    The lookup is structural — matches an If whose test compares the
+    Name `tool_name` against the string constant `"TaskCreate"`.
     """
+    branches: list[ast.If] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.If):
             continue
@@ -76,65 +83,206 @@ def _find_taskcreate_branch(tree: ast.AST) -> ast.If | None:
             continue
         if not (len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq)):
             continue
-        return node
-    return None
+        branches.append(node)
+    return branches
 
 
-def _collect_advisory_rule_names(branch: ast.AST) -> list[str]:
-    """Walk an AST subtree, collect the rule-name string literal from each
-    `advisories.append((<rule_name>, <message>))` call. Returns the list
-    of literal rule names found.
+def _find_advisory_wrap_helpers(tree: ast.AST) -> set[str]:
+    """Identify functions in the module whose body wraps
+    `advisories.append((<param_name>, ...))` — i.e., the rule name comes
+    from one of the function's own parameters. These are
+    "wrap helpers": calling them with a string literal as the first
+    argument is semantically equivalent to writing the literal directly
+    into an `advisories.append` tuple at the call site.
+
+    Returns the set of helper-function names. Phantom-green protection:
+    without this resolution step, a refactor introducing
+    `def _add(rule, msg): advisories.append((rule, msg))` and calling
+    `_add("teachback_addblocks_missing", ...)` from inside the
+    TaskCreate branch would silently pass the invariant — `ast.walk`
+    finds no direct `advisories.append` call inside the branch.
+
+    Only catches the one-hop direct-wrap pattern. Indirect chains
+    (helper-calls-helper-that-appends) are NOT resolved — this is
+    deliberately bounded to keep the AST analysis predictable.
+    """
+    helpers: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        param_names = {a.arg for a in node.args.args}
+        for body_node in ast.walk(node):
+            if not isinstance(body_node, ast.Call):
+                continue
+            func = body_node.func
+            if not (isinstance(func, ast.Attribute) and func.attr == "append"):
+                continue
+            receiver = func.value
+            if not (isinstance(receiver, ast.Name) and receiver.id == "advisories"):
+                continue
+            if not body_node.args:
+                continue
+            arg0 = body_node.args[0]
+            if not (isinstance(arg0, ast.Tuple) and arg0.elts):
+                continue
+            first = arg0.elts[0]
+            if isinstance(first, ast.Name) and first.id in param_names:
+                helpers.add(node.name)
+                break
+    return helpers
+
+
+def _collect_advisory_rule_names(branch: ast.AST, wrap_helpers: set[str]) -> list[str]:
+    """Walk an AST subtree, collect rule-name string literals from BOTH:
+    (1) direct `advisories.append((<rule_name>, <message>))` calls, and
+    (2) calls to a known wrap-helper (resolves the literal rule-name
+        passed at the call site).
+
+    `wrap_helpers` is the set of function names returned by
+    `_find_advisory_wrap_helpers`. Phantom-green protection: pass the
+    wrap-helper set so helper-wrapped calls inside the branch are
+    detected.
     """
     rule_names: list[str] = []
     for node in ast.walk(branch):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if not isinstance(func, ast.Attribute):
+        # Pattern (1): direct advisories.append((rule, msg)) call.
+        if isinstance(func, ast.Attribute) and func.attr == "append":
+            receiver = func.value
+            if isinstance(receiver, ast.Name) and receiver.id == "advisories":
+                if node.args:
+                    arg0 = node.args[0]
+                    if isinstance(arg0, ast.Tuple) and arg0.elts:
+                        first = arg0.elts[0]
+                        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                            rule_names.append(first.value)
             continue
-        if func.attr != "append":
-            continue
-        # advisories.append(...) — match the receiver name conservatively
-        receiver = func.value
-        if not (isinstance(receiver, ast.Name) and receiver.id == "advisories"):
+        # Pattern (2): wrap-helper call — resolve the literal first arg.
+        helper_name: str | None = None
+        if isinstance(func, ast.Name):
+            helper_name = func.id
+        elif isinstance(func, ast.Attribute):
+            helper_name = func.attr
+        if helper_name is None or helper_name not in wrap_helpers:
             continue
         if not node.args:
             continue
         arg0 = node.args[0]
-        # advisory tuples are 2-element (rule_name, message).
-        if not isinstance(arg0, ast.Tuple) or not arg0.elts:
-            continue
-        first = arg0.elts[0]
-        if isinstance(first, ast.Constant) and isinstance(first.value, str):
-            rule_names.append(first.value)
+        if isinstance(arg0, ast.Constant) and isinstance(arg0.value, str):
+            rule_names.append(arg0.value)
     return rule_names
 
 
 def test_no_multi_write_protocol_rule_in_taskcreate_branch():
-    """AST gate: the TaskCreate branch of evaluate_lifecycle must not
-    fire any rule that enforces a multi-write-protocol invariant. Such
-    rules belong at a write-time TaskUpdate (or completion-time) boundary
-    where the downstream writes have happened and the invariant can be
-    satisfied or falsified.
+    """AST gate: NO `if tool_name == "TaskCreate":` branch in the file
+    may fire a rule that enforces a multi-write-protocol invariant.
+    Such rules belong at a write-time TaskUpdate (or completion-time)
+    boundary where the downstream writes have happened and the
+    invariant can be satisfied or falsified.
+
+    Robust against two refactor-fragility hazards:
+    (1) multiple TaskCreate branches in the file — all are enumerated;
+    (2) helper-wrapped `advisories.append` calls — rule names passed
+        through a one-hop wrap helper are still resolved at call sites.
     """
     source = HOOK_FILE.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(HOOK_FILE))
-    branch = _find_taskcreate_branch(tree)
-    assert branch is not None, (
-        f"Could not locate `if tool_name == \"TaskCreate\":` branch in "
-        f"{HOOK_FILE}. The AST invariant cannot evaluate without this "
+    branches = _find_taskcreate_branches(tree)
+    assert branches, (
+        f"Could not locate any `if tool_name == \"TaskCreate\":` branch "
+        f"in {HOOK_FILE}. The AST invariant cannot evaluate without this "
         "structural landmark — has evaluate_lifecycle been restructured?"
     )
-    rule_names = _collect_advisory_rule_names(branch)
-    offending = [r for r in rule_names if r in MULTI_WRITE_PROTOCOL_RULES]
+    wrap_helpers = _find_advisory_wrap_helpers(tree)
+    offending: list[str] = []
+    for branch in branches:
+        for rule in _collect_advisory_rule_names(branch, wrap_helpers):
+            if rule in MULTI_WRITE_PROTOCOL_RULES and rule not in offending:
+                offending.append(rule)
     assert offending == [], (
-        f"Multi-write-protocol rule(s) found inside the TaskCreate branch "
+        f"Multi-write-protocol rule(s) found inside a TaskCreate branch "
         f"of {HOOK_FILE.name}: {offending}. These rules enforce invariants "
         f"that span multiple writes; firing them at TaskCreate is either "
         f"spurious (the downstream writes have not happened) or "
         f"structurally unsatisfiable (the work-task id has not yet been "
         f"assigned). Move the rule to a TaskUpdate (or completion-time) "
         f"boundary where the invariant can be honestly evaluated."
+    )
+
+
+def test_helper_wrapped_appends_are_resolved_through_one_hop():
+    """Phantom-green protection: synthetic source where the TaskCreate
+    branch invokes a wrap helper with the denylisted rule name as a
+    string-literal argument. The wrap helper's body forwards the
+    parameter to advisories.append. Without one-hop resolution, the
+    direct-append walker would find no advisories.append call inside
+    the branch and the invariant would silently pass. With resolution,
+    the offending rule is detected at the call site.
+    """
+    src = (
+        "def _add_advisory(rule, msg):\n"
+        "    advisories.append((rule, msg))\n"
+        "\n"
+        "def evaluate_lifecycle(input_data):\n"
+        "    advisories = []\n"
+        "    tool_name = input_data.get('tool_name')\n"
+        "    if tool_name == 'TaskCreate':\n"
+        "        _add_advisory('teachback_addblocks_missing', 'fake')\n"
+        "    return advisories\n"
+    )
+    tree = ast.parse(src)
+    wrap_helpers = _find_advisory_wrap_helpers(tree)
+    assert "_add_advisory" in wrap_helpers, (
+        f"Wrap helper detector failed to identify _add_advisory; "
+        f"detected helpers: {wrap_helpers}"
+    )
+    branches = _find_taskcreate_branches(tree)
+    assert len(branches) == 1
+    rule_names = _collect_advisory_rule_names(branches[0], wrap_helpers)
+    assert "teachback_addblocks_missing" in rule_names, (
+        f"One-hop wrap-helper resolution failed to surface the rule "
+        f"passed via the helper. Detected rules: {rule_names}"
+    )
+
+
+def test_multiple_taskcreate_branches_are_all_inspected():
+    """Phantom-green protection: synthetic source with TWO sibling
+    `if tool_name == "TaskCreate":` branches in different functions.
+    A denylisted rule moved into the second branch must be caught.
+    Without multi-branch enumeration, the original single-branch walker
+    would return only the first branch and the offending second-branch
+    rule would silently pass.
+    """
+    src = (
+        "def evaluate_lifecycle(input_data):\n"
+        "    advisories = []\n"
+        "    tool_name = input_data.get('tool_name')\n"
+        "    if tool_name == 'TaskCreate':\n"
+        "        advisories.append(('work_addblockedby_missing', 'ok'))\n"
+        "    return advisories\n"
+        "\n"
+        "def evaluate_lifecycle_sibling_dispatch(input_data):\n"
+        "    advisories = []\n"
+        "    tool_name = input_data.get('tool_name')\n"
+        "    if tool_name == 'TaskCreate':\n"
+        "        advisories.append(('teachback_addblocks_missing', 'fake'))\n"
+        "    return advisories\n"
+    )
+    tree = ast.parse(src)
+    branches = _find_taskcreate_branches(tree)
+    assert len(branches) == 2, (
+        f"Multi-branch enumerator returned {len(branches)} branches; "
+        f"expected 2 (one per evaluate_lifecycle*)."
+    )
+    wrap_helpers = _find_advisory_wrap_helpers(tree)
+    all_rules: list[str] = []
+    for branch in branches:
+        all_rules.extend(_collect_advisory_rule_names(branch, wrap_helpers))
+    assert "teachback_addblocks_missing" in all_rules, (
+        f"Multi-branch walker failed to surface the rule from the "
+        f"second branch. Detected rules across all branches: {all_rules}"
     )
 
 

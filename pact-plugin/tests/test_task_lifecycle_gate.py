@@ -213,6 +213,143 @@ def test_silent_when_subject_is_not_teachback(tmp_path, monkeypatch, pact_contex
     )
 
 
+def test_silent_when_owner_not_provided_on_teachback_subject(tmp_path, monkeypatch, pact_context):
+    """Clause-2 coverage: the rule requires `tool_input.get('owner')` as
+    one of the four AND clauses. A TaskUpdate that touches a teachback
+    subject WITHOUT setting owner (e.g., a status-change update or an
+    addBlocks-only update) must NOT trip the rule — the rule fires
+    specifically on the canonical Step-3 owner-wiring update, not on
+    arbitrary mutations to teachback-subject tasks.
+
+    Phantom-green protection: if a future refactor drops the owner check
+    (simplifying to `is_teachback AND NOT addBlocks AND NOT blocks_on_disk`),
+    this test catches the regression."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "A",
+        subject="preparer: TEACHBACK for foo",
+        status="pending",
+        blocks=[],
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "A",
+            "addBlocks": ["42"],
+            # owner deliberately omitted — exercises the clause-2 short-circuit
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(rule == "teachback_addblocks_missing" for rule, _ in advisories), (
+        f"expected silent on owner-less TaskUpdate, got: {advisories}"
+    )
+
+
+def test_silent_when_status_completed_on_teachback_subject(tmp_path, monkeypatch, pact_context):
+    """Defense-in-depth: the write-time TaskUpdate branch carrying the
+    teachback_addblocks_missing rule is gated by `status != 'completed'`.
+    A completion-time TaskUpdate (status=completed) must NOT trip the
+    wiring-boundary rule — completion-time rules (teachback_submit checks,
+    paired-send window, etc.) handle that branch in the sibling
+    `if tool_name == 'TaskUpdate' and tool_input.get('status') == 'completed':`
+    block. A regression that moves the new rule outside the status guard
+    would fire on every completion of a teachback-subject task."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "A",
+        subject="preparer: TEACHBACK for foo",
+        status="pending",
+        blocks=[],
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "A",
+            "owner": "pact-preparer",
+            "status": "completed",
+            # no addBlocks — but the status-completed guard suppresses
+        },
+        "tool_response": {
+            "task": {
+                "id": "A",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "pact-preparer",
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(rule == "teachback_addblocks_missing" for rule, _ in advisories), (
+        f"expected silent on status=completed TaskUpdate, got: {advisories}"
+    )
+
+
+def test_silent_when_team_name_empty(tmp_path, monkeypatch, pact_context):
+    """Defense-in-depth: empty team_name short-circuits the
+    `read_task_json(task_id, team_name) if team_name else {}` disk read
+    at the top of the write-time branch. With task_a = {}, subject = ""
+    → `_is_teachback_subject("")` is False → clause 1 fails → rule silent.
+    A regression dropping the `if team_name` guard would route through
+    read_task_json with an empty team and potentially misbehave depending
+    on the function's empty-team-name semantics."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="", session_id="test-session")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "A",
+            "owner": "pact-preparer",
+            # owner set, no addBlocks — would fire if subject resolved
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(rule == "teachback_addblocks_missing" for rule, _ in advisories), (
+        f"expected silent on empty team_name, got: {advisories}"
+    )
+
+
+def test_silent_when_gate_writeback_recursion_marker_present(tmp_path, monkeypatch, pact_context):
+    """Defense-in-depth: the recursion guard at evaluate_lifecycle's top
+    short-circuits when `tool_input.metadata.gate_writeback is True`. This
+    is the gate's own writeback re-entry path; the new wiring-boundary
+    rule must never fire on it (and no other rule fires either — the
+    guard returns [] immediately). A regression that moves the recursion
+    guard below the new rule would emit a spurious advisory on every
+    gate-writeback re-entry."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "A",
+        subject="preparer: TEACHBACK for foo",
+        status="pending",
+        blocks=[],
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "A",
+            "owner": "pact-preparer",
+            "metadata": {"gate_writeback": True},
+            # no addBlocks — would otherwise fire, but recursion guard preempts
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert advisories == [], (
+        f"expected empty advisory list (recursion guard short-circuits), "
+        f"got: {advisories}"
+    )
+
+
 # =============================================================================
 # work_addblockedby_missing — pact-* non-TEACHBACK Task without addBlockedBy=[<teachback_id>]
 # =============================================================================
