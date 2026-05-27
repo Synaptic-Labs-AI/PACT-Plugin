@@ -548,6 +548,91 @@ class TestTeachbackMicroSkillExtraction:
                 f"protocol, not just a pointer."
             )
 
+    def test_teachback_skill_canonical_schema_at_a_glance_block(self, teachback_skill):
+        """T3b: pin the `## Canonical schema at a glance` first-read anchor
+        section + its JSON block content. The block is the load-bearing
+        skim-target at the top of the skill — drift here silently degrades
+        the pre-write learning surface for the 4 wrong-shape failure modes.
+
+        Pins (anchored by line content, not row index):
+          - Section header `## Canonical schema at a glance` exists
+          - A fenced code block follows the section header before the next
+            `##` section
+          - All 5 canonical teachback_submit field names appear inside the
+            block (understanding / most_likely_wrong / least_confident_item /
+            first_action / variety_acknowledgment)
+          - `intentional_wait` appears AFTER the teachback_submit close brace
+            (sibling top-level metadata key, NOT nested), pinning the
+            cross-key invariant the runtime advisory R10
+            `intentional_wait_nested_in_teachback_submit` enforces
+        """
+        text = teachback_skill.read_text(encoding="utf-8")
+        lines = text.splitlines()
+
+        # Section header presence
+        header_idx = next(
+            (
+                i for i, line in enumerate(lines)
+                if line.strip() == "## Canonical schema at a glance"
+            ),
+            None,
+        )
+        assert header_idx is not None, (
+            "pact-teachback SKILL.md missing `## Canonical schema at a glance` "
+            "section header (first-read anchor for the canonical payload shape)."
+        )
+
+        # Slice the section body up to the next `## ` header
+        body_lines = []
+        for line in lines[header_idx + 1:]:
+            if line.startswith("## "):
+                break
+            body_lines.append(line)
+        body = "\n".join(body_lines)
+
+        # Fenced code block present
+        assert "```" in body, (
+            "Canonical schema section missing a fenced code block — the "
+            "first-read anchor must show the literal payload shape."
+        )
+
+        # All 5 canonical teachback_submit field names appear inside the block
+        for field in (
+            "understanding",
+            "most_likely_wrong",
+            "least_confident_item",
+            "first_action",
+            "variety_acknowledgment",
+        ):
+            assert field in body, (
+                f"Canonical schema block missing required teachback_submit "
+                f"field {field!r}. The 5-field shape is the load-bearing "
+                f"first-read anchor; drift triggers wrong-shape failure modes."
+            )
+
+        # intentional_wait sibling-vs-nested invariant: the JSON block must
+        # show intentional_wait AFTER teachback_submit's closing brace, not
+        # inside it. Approximate via index ordering of two marker substrings
+        # within the block body.
+        tb_close_idx = body.find('"teachback_submit"')
+        iw_idx = body.find('"intentional_wait"')
+        assert tb_close_idx != -1, (
+            "Canonical schema block missing teachback_submit key — block "
+            "must show the canonical payload structure."
+        )
+        assert iw_idx != -1, (
+            "Canonical schema block missing intentional_wait — the block "
+            "must pin the sibling-top-level placement that "
+            "is_self_complete_exempt requires."
+        )
+        assert iw_idx > tb_close_idx, (
+            "Canonical schema block must place intentional_wait AFTER "
+            "teachback_submit (sibling top-level key), not nested inside it. "
+            "The runtime advisory `intentional_wait_nested_in_teachback_submit` "
+            "fires on the nested placement; this block must teach the "
+            "correct sibling shape."
+        )
+
     def test_all_agents_have_teachback_in_frontmatter(self, teammate_agent_files):
         """T4: every agent must eager-load pact-teachback via frontmatter."""
         for f in teammate_agent_files:

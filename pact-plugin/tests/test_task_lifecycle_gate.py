@@ -1995,9 +1995,9 @@ def test_r5_silent_on_non_teachback_subject(
 def test_r3_r5_silent_when_status_completed(
     tmp_path, monkeypatch, pact_context,
 ):
-    """R3 + R5 are gated on status != 'completed' (two-surface asymmetry
-    per design doc §6.1: R1/R2 cover completion-time; R3/R5 cover write-
-    time only). When a teammate atypically bundles teachback_submit +
+    """R3 + R5 are gated on status != 'completed' (two-surface asymmetry:
+    R1/R2 cover completion-time; R3/R5 cover write-time only). When a
+    teammate atypically bundles teachback_submit +
     status=completed in one TaskUpdate, R3/R5 stay silent and R1/R2 (with
     schema validator) cover the same defect class."""
     pact_context(team_name="test-team", session_id="test-session")
@@ -2399,6 +2399,64 @@ def test_reasoning_reconstruction_in_handoff_silent_when_no_handoff(
         rule == "reasoning_reconstruction_in_handoff"
         for rule, _ in advisories
     )
+
+
+@pytest.mark.parametrize(
+    "rr_shape,shape_label",
+    [
+        (
+            {
+                "what-I-learned": "x",
+                "falsification-attempts": "y",
+                "most-likely-wrong-prediction": "z",
+            },
+            "wrong-key-names",
+        ),
+        (
+            {
+                "decision_attribution": "x",
+                "assumption_trace": "",
+                "contingency_clause": "x",
+            },
+            "empty-sub-key-value",
+        ),
+    ],
+)
+def test_reasoning_reconstruction_in_handoff_fires_regardless_of_inner_shape(
+    rr_shape, shape_label, pact_context,
+):
+    """R7 fires whenever reasoning_reconstruction appears in metadata.handoff,
+    INDEPENDENT of the inner sub-key shape. The cross-slot rule is a pure
+    slot-location detector; sub-key validity is R9's surface, not R7's.
+
+    Matches R9's parametrized shape-probe coverage (wrong-key-names +
+    empty-sub-key-value) so the two write-time advisory surfaces are
+    symmetric in shape-probe breadth — proving slot detection is
+    disjoint from sub-key validation across both surfaces."""
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {
+                "handoff": {
+                    "produced": "x",
+                    "decisions": "x",
+                    "reasoning_chain": "x",
+                    "uncertainty": "x",
+                    "integration": "x",
+                    "open_questions": "x",
+                    "reasoning_reconstruction": rr_shape,
+                },
+            },
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(
+        rule == "reasoning_reconstruction_in_handoff"
+        for rule, _ in advisories
+    ), f"expected R7 to fire for {shape_label}, got: {advisories}"
 
 
 # =============================================================================

@@ -6,7 +6,7 @@ disk-based traversal from Task A (teachback subject) through blocks[0] to
 Task B's metadata.variety.total. This is the helper that R3 consumes to
 decide whether reasoning_reconstruction is REQUIRED.
 
-Test surface architecture (per the design doc §4.2):
+Test surface architecture:
   - All 4 return values exercised: "required", "recommended", "skipped",
     "unresolvable".
   - All fail-open paths: blocks missing, blocks empty, Task B id
@@ -167,8 +167,8 @@ class TestRequiredBandResolution:
         variety_scorer.ORCHESTRATE_MAX. PLAN_MODE_MIN-implied threshold is
         ORCHESTRATE_MAX + 1 = 11. If variety_scorer's thresholds shift and
         this module's constant doesn't, this test fails and the drift is
-        surfaced. The design doc §6.5 codifies this as a grep-at-edit-
-        time discipline until the SSOT migration trajectory lands."""
+        surfaced. Grep-at-edit-time discipline applies until the SSOT
+        migration trajectory lands."""
         from shared import variety_scorer
         from shared.teachback_schema import (
             TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN,
@@ -179,7 +179,7 @@ class TestRequiredBandResolution:
             == variety_scorer.ORCHESTRATE_MAX + 1
         ), (
             "shared.teachback_schema constant drifted from variety_scorer "
-            "SSOT — see teachback_schema.py inline comment + design doc §6.5"
+            "SSOT — see teachback_schema.py inline comment"
         )
 
 
