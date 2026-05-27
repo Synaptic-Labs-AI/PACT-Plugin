@@ -22,8 +22,12 @@ hookSpecificOutput schema-rejection defense — missing hookEventName
 triggers silent platform-layer rejection).
 
 Rule coverage:
-  - teachback_addblocks_missing — Teachback Task created without
-    addBlocks=[<work_task_id>]
+  - teachback_addblocks_missing — Teachback Task owner-wiring
+    TaskUpdate landed without addBlocks=[<work_task_id>]. Fires at the
+    canonical Step-3 wiring boundary (lead sets owner on a teachback
+    Task) rather than at TaskCreate — the historical TaskCreate-time
+    check was structurally unsatisfiable because the work-task id did
+    not exist yet at TaskCreate(A).
   - work_addblockedby_missing — pact-* work Task created without
     addBlockedBy=[<teachback_id>]
   - completion_no_paired_send — Teachback Task completed without paired
@@ -552,14 +556,6 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
         if not isinstance(owner, str):
             owner = ""
 
-        if is_teachback and not tool_input.get("addBlocks"):
-            advisories.append((
-                "teachback_addblocks_missing",
-                "PACT task_lifecycle_gate: Teachback Task created without "
-                "addBlocks=[<work_task_id>]. The teachback gate must block "
-                "the work task (per pact-completion-authority).",
-            ))
-
         # Clause order is intentional: the cheap checks
         # (is_teachback dict-lookup, owner.startswith string-prefix,
         # tool_input.get dict-lookup) precede the disk-reading
@@ -771,13 +767,46 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                 "field). See pact-teachback skill Common mistakes row 2.",
             ))
 
+        # Shared task_a disk read — lifted to sibling of the cross-slot
+        # handoff check above so the wiring-boundary
+        # teachback_addblocks_missing rule and the teachback_submit
+        # write-time rules below all consume one disk read per
+        # non-completed TaskUpdate. Single-pay disk cost across all
+        # write-time rules that need task_a's subject + blocks.
+        task_id = tool_input.get("taskId", "") or ""
+        task_a = read_task_json(task_id, team_name) if team_name else {}
+        if not isinstance(task_a, dict):
+            task_a = {}
+        subject = task_a.get("subject") or ""
+
+        # Wiring-boundary teachback_addblocks_missing — fires when the
+        # canonical Step-3 wiring TaskUpdate (lead sets owner on a
+        # teachback Task) lands WITHOUT addBlocks=[<work_task_id>].
+        # Predicates: subject is teachback-shaped AND incoming owner is
+        # being set AND addBlocks is absent on the wiring update AND the
+        # task_a already-on-disk record does not have blocks wired (benign
+        # late-wiring guard: if an earlier TaskUpdate already wired blocks,
+        # a later owner-only update is not a violation). Re-times the
+        # historical TaskCreate-time check (which was structurally
+        # unsatisfiable because the work-task id did not exist yet at
+        # TaskCreate(A)) to the moment the lead can satisfy both clauses
+        # in one TaskUpdate.
+        if (
+            _is_teachback_subject(subject)
+            and tool_input.get("owner")
+            and not tool_input.get("addBlocks")
+            and not task_a.get("blocks")
+        ):
+            advisories.append((
+                "teachback_addblocks_missing",
+                f"PACT task_lifecycle_gate: Teachback Task {task_id} "
+                "owner-wiring TaskUpdate landed without "
+                "addBlocks=[<work_task_id>]. Canonical sequence pairs "
+                "owner + addBlocks in one update; split-write leaves "
+                "the teachback gate unwired.",
+            ))
+
         if isinstance(incoming_teachback, dict):
-            task_id = tool_input.get("taskId", "") or ""
-            # Shared task_a disk read — R3, R5, and the 3 new
-            # teachback-scoped rules consume this one read (R3 needs
-            # blocks for traversal, others only need subject).
-            task_a = read_task_json(task_id, team_name) if team_name else {}
-            subject = task_a.get("subject") or ""
             if _is_teachback_subject(subject):
                 # R5 (D10): variety_acknowledgment presence check.
                 # Presence-only at write-time; full schema validation is
