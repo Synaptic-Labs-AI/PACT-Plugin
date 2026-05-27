@@ -71,16 +71,53 @@ def _capture_main(payload: dict, capsys) -> tuple[int, dict | None]:
 
 
 # =============================================================================
-# teachback_addblocks_missing — TEACHBACK Task without addBlocks=[<work_task_id>]
+# teachback_addblocks_missing — TaskUpdate-wiring-time rule
+#
+# The rule fires at the canonical Step-3 wiring TaskUpdate (lead sets owner
+# on a teachback Task) when the update lands without paired
+# addBlocks=[<work_task_id>] AND the on-disk task_a record does not already
+# carry blocks (benign late-wiring guard). Re-times the historical
+# TaskCreate-time check, which was structurally unsatisfiable because the
+# work-task id did not exist yet at TaskCreate(A) time.
+#
+# Fixture discipline: the wiring-boundary check calls
+# read_task_json(task_id, team_name) at the top of the write-time branch
+# (fires on EVERY non-completed TaskUpdate, not only those carrying
+# teachback_submit metadata). Tests must seed ~/.claude/tasks/{team}/{id}.json
+# under tmp_path via monkeypatch.setattr(Path, "home", lambda: tmp_path) so
+# that the disk read resolves the teachback subject + blocks fields.
 # =============================================================================
 
 
-def test_silent_when_teachback_carries_addblocks(pact_context):
+def _seed_task_a(tmp_path: Path, team_name: str, task_id: str, **fields) -> None:
+    """Write a task .json under the test-scoped HOME so the lifted
+    `read_task_json(task_id, team_name)` call inside the write-time
+    TaskUpdate branch resolves to a real on-disk record.
+    """
+    tasks_dir = tmp_path / ".claude" / "tasks" / team_name
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"id": task_id, **fields}
+    (tasks_dir / f"{task_id}.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+
+def test_silent_when_owner_wiring_carries_addblocks(tmp_path, monkeypatch, pact_context):
+    """Canonical Step-3 wiring TaskUpdate pairs owner + addBlocks in one
+    update — no advisory at the wiring boundary."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "A",
+        subject="preparer: TEACHBACK for foo",
+        status="pending",
+    )
     payload = {
-        "tool_name": "TaskCreate",
+        "tool_name": "TaskUpdate",
         "tool_input": {
-            "subject": "preparer: TEACHBACK for foo",
+            "taskId": "A",
             "owner": "pact-preparer",
             "addBlocks": ["42"],
         },
@@ -88,7 +125,91 @@ def test_silent_when_teachback_carries_addblocks(pact_context):
     }
     advisories = tlg.evaluate_lifecycle(payload)
     assert not any(rule == "teachback_addblocks_missing" for rule, _ in advisories), (
-        f"expected silent (teachback_addblocks_missing satisfied), got: {advisories}"
+        f"expected silent (owner+addBlocks paired in wiring update), got: {advisories}"
+    )
+
+
+def test_fires_on_wiring_update_without_addblocks(tmp_path, monkeypatch, pact_context):
+    """Positive: the canonical owner-wiring TaskUpdate lands without paired
+    addBlocks AND task_a has no pre-existing blocks → advisory fires.
+    """
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "A",
+        subject="preparer: TEACHBACK for foo",
+        status="pending",
+        blocks=[],
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "A",
+            "owner": "pact-preparer",
+            # no addBlocks
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(rule == "teachback_addblocks_missing" for rule, _ in advisories), (
+        f"expected teachback_addblocks_missing on owner-only wiring, got: {advisories}"
+    )
+
+
+def test_silent_when_task_a_already_has_blocks(tmp_path, monkeypatch, pact_context):
+    """Benign late-wiring guard: an earlier TaskUpdate already wired
+    blocks; a later owner-only update is not a violation."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "A",
+        subject="preparer: TEACHBACK for foo",
+        status="pending",
+        blocks=["42"],
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "A",
+            "owner": "pact-preparer",
+            # no addBlocks — but task_a.blocks already populated
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(rule == "teachback_addblocks_missing" for rule, _ in advisories), (
+        f"expected silent (task_a.blocks already wired), got: {advisories}"
+    )
+
+
+def test_silent_when_subject_is_not_teachback(tmp_path, monkeypatch, pact_context):
+    """Subject gate: a work-task subject (non-teachback) carrying owner
+    without addBlocks does not trip the teachback-specific rule."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "B",
+        subject="preparer: implement feature X",
+        status="pending",
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "B",
+            "owner": "pact-preparer",
+            # no addBlocks — but subject is not a teachback subject
+        },
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(rule == "teachback_addblocks_missing" for rule, _ in advisories), (
+        f"expected silent on non-teachback subject, got: {advisories}"
     )
 
 
@@ -223,9 +344,9 @@ def test_teachback_addblocks_missing_still_fires_for_stray_secretary_teachback(
     tmp_path, monkeypatch, pact_context
 ):
     """Defensive: the teachback_addblocks_missing rule is independent of the
-    new exemption. A stray teachback-subject task for the secretary still
-    triggers the addBlocks advisory — exemption applies only to the
-    work_addblockedby_missing rule."""
+    secretary exemption. A stray teachback-subject task whose owner-wiring
+    TaskUpdate lands without paired addBlocks still triggers the advisory —
+    the agentType exemption applies only to work_addblockedby_missing."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
     team_dir = tmp_path / ".claude" / "teams" / "test-team"
@@ -239,10 +360,18 @@ def test_teachback_addblocks_missing_still_fires_for_stray_secretary_teachback(
         }),
         encoding="utf-8",
     )
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "A",
+        subject="secretary: TEACHBACK for some task",
+        status="pending",
+        blocks=[],
+    )
     payload = {
-        "tool_name": "TaskCreate",
+        "tool_name": "TaskUpdate",
         "tool_input": {
-            "subject": "secretary: TEACHBACK for some task",
+            "taskId": "A",
             "owner": "pact-secretary",
             # no addBlocks
         },
