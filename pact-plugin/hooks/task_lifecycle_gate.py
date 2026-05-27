@@ -28,6 +28,9 @@ Rule coverage:
     Task) rather than at TaskCreate — the historical TaskCreate-time
     check was structurally unsatisfiable because the work-task id did
     not exist yet at TaskCreate(A).
+    Fire condition (4-clause AND): subject is teachback-shaped AND
+    tool_input.owner is set AND tool_input.addBlocks is absent/empty
+    AND task_a.blocks is empty (benign late-wiring guard).
   - work_addblockedby_missing — pact-* work Task created without
     addBlockedBy=[<teachback_id>]
   - completion_no_paired_send — Teachback Task completed without paired
@@ -564,11 +567,27 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
         # 3rd clause and never hits disk. Failure path (missing
         # addBlockedBy) does hit disk via _iter_members, but this is
         # the rare misconfiguration path — amortized cost near zero.
+        #
+        # Cached short-circuit: `_teachback_exempt` is computed at most
+        # once per TaskCreate and reused by R4 below. Both rules share
+        # the same disk-touching predicate; the cache amortizes the
+        # `is_teachback_exempt(owner, team_name)` cost across rules.
+        # `None` sentinel means "not yet computed"; `False/True` is the
+        # cached result. The lazy fill preserves the cheap-first clause
+        # ordering (no eager disk read when cheap predicates fail).
+        _teachback_exempt: bool | None = None
+
+        def _exempt() -> bool:
+            nonlocal _teachback_exempt
+            if _teachback_exempt is None:
+                _teachback_exempt = is_teachback_exempt(owner, team_name)
+            return _teachback_exempt
+
         if (
             not is_teachback
             and owner.startswith("pact-")
             and not tool_input.get("addBlockedBy")
-            and not is_teachback_exempt(owner, team_name)
+            and not _exempt()
         ):
             advisories.append((
                 "work_addblockedby_missing",
@@ -584,11 +603,12 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
         # rationales); distinct message text per path, same rule name —
         # the lead-side correction is the same (re-stamp variety) in
         # either case. Clause order mirrors L575-580: cheap dict-lookups
-        # first, disk-touching exempt-check last.
+        # first, disk-touching exempt-check last (cached via `_exempt()`
+        # so the second invocation reuses the first call's result).
         if (
             not is_teachback
             and owner.startswith("pact-")
-            and not is_teachback_exempt(owner, team_name)
+            and not _exempt()
         ):
             incoming_variety = (
                 tool_input.get("metadata") or {}
@@ -806,6 +826,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                 "the teachback gate unwired.",
             ))
 
+        # task_id, subject, task_a are hoisted to L776-780 (sibling-of-cross-slot-handoff-check); this branch consumes the hoisted values.
         if isinstance(incoming_teachback, dict):
             if _is_teachback_subject(subject):
                 # R5 (D10): variety_acknowledgment presence check.
@@ -918,7 +939,8 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                         "missing OR Task B.metadata.variety absent. "
                         "Hook advisory skipped; lead should enforce "
                         "variety stamping via teachback_addblocks_missing "
-                        "+ variety_missing_on_dispatch_task upstream.",
+                        "wiring-time enforcement upstream + "
+                        "variety_missing_on_dispatch_task at TaskCreate.",
                     ))
 
     return advisories
