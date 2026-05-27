@@ -20,22 +20,23 @@ on the team — regardless of count_active_tasks's tally.
 PHANTOM-GREEN DISCIPLINE
 ========================
 
-This file (C4) lands BEFORE backend's C5. Per the test-engineer +
-backend-coder + lead synthesis at plan-mode, C4's V1/V6 assertions
-must match CURRENT (pre-fix) broken behavior — they MUST be GREEN at
-this commit. Backend's C5 then INVERTS those assertions in the same
-atomic commit as the Gate-6 source. This is the phantom-green coupling
-proof: the assertions are demonstrably tied to the source change, not
-independent assertions that pass for unrelated reasons.
+This file landed in two commits — the prior commit (C4) shipped V1/V6
+asserting CURRENT (pre-fix) broken behavior; this commit (C5) flipped
+those assertions and added the Gate 6 source in the SAME atomic
+commit. The coupling is the phantom-green proof: reverting Gate 6
+source ALONE (keeping the post-flip assertions) regresses V1/V6/V8 +
+the multi-phase noise-budget regression to RED while V2/V3/V4 stay
+GREEN. The asymmetric cardinality discriminates Gate 6's specific
+suppression mechanism from unrelated causes.
 
-  Variant   At C4 (pre-fix)        Backend C5 flip       After-fix
-  -------   --------------------   -------------------   ---------
-  V1        teardown FIRES (bug)   assert SUPPRESSED     suppressed
-  V6        teardown FIRES (bug)   assert SUPPRESSED     suppressed
-  V8        (added by C5)          ---                   suppressed
-  V2        teardown FIRES (H4)    UNCHANGED             fires (H4 latent)
-  V3        teardown FIRES (legit) UNCHANGED             fires
-  V4        teardown SUPPRESSED    UNCHANGED             suppressed
+  Variant   Pre-C5 (broken)       Post-C5 (after Gate 6)
+  -------   --------------------   ----------------------
+  V1        teardown FIRES (bug)   teardown SUPPRESSED
+  V6        teardown FIRES (bug)   teardown SUPPRESSED
+  V8        (added by C5)          teardown SUPPRESSED
+  V2        teardown FIRES (H4)    teardown FIRES (H4 latent — unchanged)
+  V3        teardown FIRES (legit) teardown FIRES (unchanged)
+  V4        teardown SUPPRESSED    teardown SUPPRESSED (unchanged)
 
 V2 (H4 unowned-B latent bug) is documented but NOT fixed by PR-B —
 defensive coverage retained in the C10 promoted harness conversion.
@@ -308,14 +309,17 @@ class TestV1CanonicalPhaseLullTeachbackHandoff:
     Backend's C5 will INVERT this assertion when adding Gate 6 source.
     """
 
-    def test_v1_teardown_currently_fires_during_phase_lull(self, tmp_path):
-        """V1 RED-state: teardown FIRES today during the phase-lull
-        window (umbrella in_progress + count_active_tasks==0). Backend's
-        C5 commit flips this to assert teardown SUPPRESSED.
+    def test_v1_teardown_suppressed_during_phase_lull(self, tmp_path):
+        """V1 GREEN post-fix: teardown is SUPPRESSED during the phase-
+        lull window (umbrella in_progress + count_active_tasks==0).
+        Gate 6 short-circuits before Gate 3 reads the (degenerate) 0
+        count.
 
-        PHANTOM-GREEN DISCIPLINE: this assertion is intentionally
-        coupled to the CURRENT bug; flipping it without the Gate 6
-        source change would make the test pass for the wrong reason.
+        PHANTOM-GREEN DISCIPLINE: this assertion is coupled to the
+        Gate 6 source change in the SAME atomic commit. Reverting the
+        Gate 6 source flips this back to RED, recovering the C4
+        baseline. The counter-test-by-revert cardinality is recorded
+        in the commit docstring.
         """
         home = tmp_path / "home"
         home.mkdir()
@@ -347,20 +351,19 @@ class TestV1CanonicalPhaseLullTeachbackHandoff:
         )
         assert rc == 0, f"hook must exit 0; stderr={err}"
 
-        # CURRENT BEHAVIOR: teardown fires (bug).
-        # Backend C5 inverts to: assert NOT _teardown_directive_in_stdout(out)
-        assert _teardown_directive_in_stdout(out), (
-            "V1 RED-state: teardown directive currently fires during phase-lull "
-            "window (umbrella in_progress + count==0). Backend C5 commits the "
-            "Gate 6 fix AND flips this assertion in the same commit."
+        # POST-FIX BEHAVIOR: Gate 6 suppresses teardown when umbrella
+        # in_progress (signature-based detection on subject prefix).
+        assert not _teardown_directive_in_stdout(out), (
+            "V1 GREEN post-fix: teardown directive must be SUPPRESSED "
+            "during phase-lull (umbrella in_progress + count==0). "
+            "Reverting the Gate 6 source flips this back to RED."
         )
 
-    def test_v1_teardown_request_currently_journaled_during_phase_lull(self, tmp_path):
-        """V1 RED-state journal-side pin: the teardown_request event
-        IS written to the session journal today (the directive emission
-        and the journal write are paired). Backend's C5 flips this to
-        assert the journal events list is empty.
-        """
+    def test_v1_teardown_request_not_journaled_during_phase_lull(self, tmp_path):
+        "V1 GREEN post-fix journal-side pin: no teardown_request event "
+        "is written to the session journal during phase-lull. The "
+        "directive emission and the journal write are paired; Gate 6 "
+        "short-circuits both."
         home = tmp_path / "home"
         home.mkdir()
         team = "team-phase-lull-v1-journal"
@@ -380,12 +383,12 @@ class TestV1CanonicalPhaseLullTeachbackHandoff:
         )
         events = _read_journal_events(home, pdir, sid, event_type="teardown_request")
 
-        # CURRENT BEHAVIOR: one teardown_request event journaled.
-        # Backend C5 inverts to: assert events == []
-        assert len(events) == 1, (
-            f"V1 RED-state: exactly one teardown_request event currently "
-            f"journaled during phase-lull window; got {len(events)} events. "
-            f"Backend C5 flips this to assert events == []."
+        # POST-FIX BEHAVIOR: zero teardown_request events journaled
+        # when Gate 6 suppresses the emission path.
+        assert events == [], (
+            f"V1 GREEN post-fix: zero teardown_request events expected "
+            f"during phase-lull window; got {len(events)} events. "
+            f"Reverting Gate 6 source flips this back to RED (1 event)."
         )
 
 
@@ -550,14 +553,16 @@ class TestV6PurePhaseLullUmbrellaOnly:
     Backend's C5 will INVERT this assertion when adding Gate 6 source.
     """
 
-    def test_v6_teardown_currently_fires_with_umbrella_only(self, tmp_path):
-        """V6 RED-state: teardown FIRES today with only an umbrella
-        in_progress + completed teammate task. Backend's C5 flips this
-        to assert teardown SUPPRESSED — the structural OPERATIONAL-LULL
-        suppression that PR-B introduces.
+    def test_v6_teardown_suppressed_with_umbrella_only(self, tmp_path):
+        """V6 GREEN post-fix: teardown is SUPPRESSED with only an
+        umbrella in_progress + completed teammate task. The structural
+        OPERATIONAL-LULL suppression Gate 6 provides — Tier-1
+        emission-site coverage of the canonical bug shape seen in
+        pact-450f3d63.
 
-        PHANTOM-GREEN DISCIPLINE: assertion is intentionally coupled
-        to the current bug shape.
+        PHANTOM-GREEN DISCIPLINE: assertion coupled to the Gate 6
+        source change in the same atomic commit. Reverting Gate 6
+        source flips this back to RED.
         """
         home = tmp_path / "home"
         home.mkdir()
@@ -578,10 +583,11 @@ class TestV6PurePhaseLullUmbrellaOnly:
             env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": "/tmp/phase-lull-test"},
         )
         assert rc == 0, f"hook must exit 0; stderr={err}"
-        assert _teardown_directive_in_stdout(out), (
-            "V6 RED-state: teardown directive currently fires during pure "
-            "phase-lull window (umbrella in_progress + count==0, no Task B). "
-            "Backend C5 flips this to assert teardown SUPPRESSED."
+        assert not _teardown_directive_in_stdout(out), (
+            "V6 GREEN post-fix: teardown directive must be SUPPRESSED "
+            "during pure phase-lull window (umbrella in_progress + "
+            "count==0, no Task B). Reverting Gate 6 source flips this "
+            "back to RED."
         )
 
 
@@ -637,6 +643,112 @@ class TestMultiPhaseNoiseBudgetScaffold:
         assert fixture["umbrella_task_id"]
         assert len(fixture["specialist_task_ids"]) == (
             n_phases * n_specialists_per_phase
+        )
+
+
+# =============================================================================
+# V8 — Subprocess-integration variant added in C5 alongside the Gate 6 source
+# change. Covers a phase-lull window where the umbrella is in_progress AND
+# multiple completed teammate tasks are present (the canonical "phase wound
+# down; next phase has not started" shape). Distinct from V1 (Task B mid-
+# wiring) and V6 (single completed teammate task) — V8 exercises the
+# "many done, none pending" multi-completion shape that the noise-budget
+# regression (C8) will later parametrize across N phases.
+# =============================================================================
+
+
+class TestV8MultiCompletionUnderUmbrella:
+    """V8 — Multiple completed teammate tasks under in_progress umbrella.
+
+    Added at C5. The fixture has the umbrella in_progress + several
+    completed teammate tasks from the prior phase + no pending B-side
+    work yet (the next phase's specialists have not yet been
+    dispatched). Gate 6 must suppress teardown — this is the multi-
+    completion phase-lull shape.
+    """
+
+    def test_v8_teardown_suppressed_with_umbrella_and_multiple_completed(
+        self, tmp_path,
+    ):
+        """V8 GREEN post-fix: teardown SUPPRESSED when the umbrella is
+        in_progress and multiple teammate tasks from the prior phase
+        are completed. Distinguishes the multi-completion shape from
+        V6's single-completion shape — same Gate 6 mechanism, broader
+        fixture coverage.
+        """
+        home = tmp_path / "home"
+        home.mkdir()
+        team = "team-phase-lull-v8"
+        _setup_lead_session(home, team)
+
+        # Lead-owned umbrella in_progress.
+        _write_task(home, team, make_umbrella_task(
+            "U8", subject_prefix="Feature: ", subject_suffix="v8 multi-completion",
+            status="in_progress",
+        ))
+        # Three teammate tasks already completed from the prior phase.
+        for idx, owner in enumerate(("preparer", "architect", "analyst")):
+            _write_task(home, team, make_specialist_task(
+                f"T8-{idx}", owner=owner,
+                subject=f"{owner}: v8 prior-phase work",
+                status="completed",
+            ))
+
+        # The hook fires on the LAST teammate task's completion — that's
+        # the moment count_active_tasks transitions to 0 in the legacy
+        # path. Gate 6 must short-circuit before that.
+        rc, out, err = _run_emitter_subprocess(
+            json.dumps(_lead_taskcompleted_payload(team, "T8-2")),
+            env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": "/tmp/phase-lull-test"},
+        )
+        assert rc == 0, f"hook must exit 0; stderr={err}"
+        assert not _teardown_directive_in_stdout(out), (
+            "V8 GREEN post-fix: teardown directive must be SUPPRESSED "
+            "when the umbrella is in_progress AND multiple completed "
+            "teammate tasks are present (multi-completion phase-lull "
+            "shape). Reverting Gate 6 source flips this back to RED."
+        )
+
+    def test_v8_non_canonical_umbrella_prefix_still_emits(self, tmp_path):
+        """V8 negative pin: an umbrella-shaped task whose subject does
+        NOT match UMBRELLA_SUBJECT_PREFIXES does not trip Gate 6.
+        Signature-based detection must reject arbitrary lead-owned
+        in_progress tasks — only the canonical prefixes count.
+        Distinguishes Gate 6 from a naive "any in_progress task with
+        no owner" predicate."""
+        home = tmp_path / "home"
+        home.mkdir()
+        team = "team-phase-lull-v8-neg"
+        _setup_lead_session(home, team)
+
+        # A lead-owned in_progress task whose subject does NOT start
+        # with any canonical umbrella prefix. This is structurally
+        # similar to an umbrella but signature-distinct.
+        non_canonical = make_umbrella_task(
+            "U8N", subject_prefix="Internal note: ",
+            subject_suffix="not an umbrella", status="in_progress",
+        )
+        # subject_prefix is applied verbatim; assert it does not match.
+        assert not any(
+            non_canonical["subject"].startswith(p)
+            for p in UMBRELLA_SUBJECT_PREFIXES
+        )
+        _write_task(home, team, non_canonical)
+        _write_task(home, team, make_specialist_task(
+            "T8N", owner="preparer", subject="preparer: v8-neg done",
+            status="completed",
+        ))
+
+        rc, out, err = _run_emitter_subprocess(
+            json.dumps(_lead_taskcompleted_payload(team, "T8N")),
+            env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": "/tmp/phase-lull-test"},
+        )
+        assert rc == 0, f"hook must exit 0; stderr={err}"
+        assert _teardown_directive_in_stdout(out), (
+            "V8 negative pin: Gate 6 must NOT suppress when the in_progress "
+            "task's subject is signature-distinct from "
+            "UMBRELLA_SUBJECT_PREFIXES. The teardown emits via the "
+            "existing legitimate-teardown path."
         )
 
 
