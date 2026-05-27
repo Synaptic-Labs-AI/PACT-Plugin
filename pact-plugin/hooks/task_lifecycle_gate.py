@@ -761,12 +761,14 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
             advisories.append((
                 "reasoning_reconstruction_in_handoff",
                 f"PACT task_lifecycle_gate: Task {task_id} "
-                "placed reasoning_reconstruction inside metadata.handoff. "
-                "It belongs at top-level on metadata.teachback_submit. "
-                "The handoff has reasoning_chain (sender's view); the "
-                "teachback has reasoning_reconstruction (receiver's "
-                "reconstruction). See pact-teachback skill Common "
-                "mistakes row 2.",
+                "placed reasoning_reconstruction inside metadata.handoff "
+                "(wrong slot). Correct destination depends on task type: "
+                "for a Teachback Task, place reasoning_reconstruction at "
+                "top-level on metadata.teachback_submit. For a work task "
+                "carrying a HANDOFF, the HANDOFF schema has "
+                "reasoning_chain (sender's view) — not "
+                "reasoning_reconstruction (the receiver-side teachback "
+                "field). See pact-teachback skill Common mistakes row 2.",
             ))
 
         if isinstance(incoming_teachback, dict):

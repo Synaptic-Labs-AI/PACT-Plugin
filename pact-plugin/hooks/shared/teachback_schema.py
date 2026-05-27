@@ -25,14 +25,17 @@ Public surface:
 - TEACHBACK_VARIETY_ACK_VALID_VALUES — enum tuple for
   variety_acknowledgment.rationale_articulates_this_dispatch.
 - TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN — variety band threshold
-  (>= 11 → REQUIRED). Sourced from variety_scorer.PLAN_MODE_MAX + 1
-  semantics; align via grep-at-edit-time until variety_scorer.py exports
-  an explicit PLAN_MODE_MIN.
+  (>= 11 → REQUIRED). Derived at module-load from
+  `variety_scorer.ORCHESTRATE_MAX + 1`; substitute
+  `from shared.variety_scorer import PLAN_MODE_MIN` when that constant
+  lands.
 - validate_reasoning_reconstruction(rr) — pure validator returning None
   on well-formed input or a reason-enum string on rejection.
 """
 
 from __future__ import annotations
+
+from shared.variety_scorer import ORCHESTRATE_MAX
 
 
 # Canonical 5 field names per D10. 4 string fields + variety_acknowledgment dict.
@@ -57,11 +60,12 @@ TEACHBACK_REQUIRED_SUBKEYS: tuple[str, ...] = (
 #   {rationale_articulates_this_dispatch: <enum>, concern: <str when != yes>}.
 TEACHBACK_VARIETY_ACK_VALID_VALUES: tuple[str, ...] = ("yes", "no", "concern")
 
-# REQUIRED-band threshold for reasoning_reconstruction. Per variety_scorer.py:
-# PLAN_MODE_MAX = 14, ORCHESTRATE_MAX = 10 → plan-mode-and-above starts at >= 11.
-# When variety_scorer.py exports an explicit PLAN_MODE_MIN, this should be
+# REQUIRED-band threshold for reasoning_reconstruction. Derived from
+# variety_scorer.ORCHESTRATE_MAX semantics: plan-mode-and-above starts at
+# ORCHESTRATE_MAX + 1 (i.e. >= 11 given ORCHESTRATE_MAX = 10). When
+# variety_scorer.py exports an explicit PLAN_MODE_MIN, this should be
 # replaced with `from shared.variety_scorer import PLAN_MODE_MIN`.
-TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN: int = 11
+TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN: int = ORCHESTRATE_MAX + 1
 
 
 def validate_reasoning_reconstruction(rr: object) -> str | None:
