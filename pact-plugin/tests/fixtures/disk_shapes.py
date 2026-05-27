@@ -1,31 +1,31 @@
 """
 Location: pact-plugin/tests/fixtures/disk_shapes.py
-Summary: SSOT for the umbrella-orchestration subject-prefix tuple AND
-         canonical on-disk task / team-config dict shapes used by both
-         production code and test fixtures. Centralizing these constants
-         prevents fixture-implementation drift on the load-bearing
-         OPERATIONAL-LULL detection contract.
-Used by: pact-plugin/hooks/shared/wake_lifecycle.py (imports
-         UMBRELLA_SUBJECT_PREFIXES into the
-         has_in_progress_umbrella_orchestration predicate),
-         pact-plugin/tests/test_shared_wake_lifecycle.py (unit tests on
-         that predicate import the tuple + shape helpers),
+Summary: Fixture surface for the OPERATIONAL-LULL regression test
+         suite. Re-exports the canonical UMBRELLA_SUBJECT_PREFIXES tuple
+         from shared/wake_lifecycle.py (the production home) AND
+         defines minimal on-disk task / team-config dict-shape helpers
+         used by fixtures.
+Used by: pact-plugin/tests/test_shared_wake_lifecycle.py (unit tests on
+         has_in_progress_umbrella_orchestration import the tuple +
+         shape helpers),
          pact-plugin/tests/test_teardown_request_emitter_phase_lull.py
          (Tier-1 phase-lull regression fixtures),
          pact-plugin/tests/test_wake_lifecycle_emitter_phase_lull.py
          (Tier-2 mirror coverage), and the promoted
          tests/regression/test_842_phase_lull_regression.py harness.
 
-Why an SSOT module: the UMBRELLA_SUBJECT_PREFIXES tuple is the load-
-bearing contract for OPERATIONAL-LULL-AT-PHASE-BOUNDARY detection. If
-the production helper's tuple ever drifts away from the fixture-side
-tuple, V6/V8 regression tests pass on synthesized inputs that the
-production code would reject (or vice versa). A single import surface
-makes that class of drift mechanically impossible. Per devops's
-empirical finding at the Phase A diagnostic, umbrella tasks have
-`owner: null` on disk (created by /PACT:orchestrate / /PACT:comPACT /
-/PACT:peer-review and phase-task TaskCreates), so the detection
-discriminator is signature-based (subject prefix), NOT owner-based.
+SSOT direction: UMBRELLA_SUBJECT_PREFIXES is DEFINED at
+shared/wake_lifecycle.py (production); this module RE-EXPORTS it. Hook
+subprocesses do not have tests/ on sys.path at runtime, so the
+production helper cannot import from this fixture module — the
+dependency points outward from production to tests, not inward. Tests
+get drift-resistance via Python import semantics: the re-exported
+tuple object is identity-equal to the production constant. Per
+devops's empirical finding at the Phase A diagnostic, umbrella tasks
+have `owner: null` on disk (created by /PACT:orchestrate /
+/PACT:comPACT / /PACT:peer-review and phase-task TaskCreates), so the
+detection discriminator is signature-based (subject prefix), NOT
+owner-based.
 
 Scope discipline: this module pins only what the production helper or
 its direct unit tests consume. Test-engineer's broader fixture surface
@@ -34,30 +34,13 @@ principle is "single source of truth for the load-bearing contract,"
 not "all-encompassing module."
 """
 
-# The canonical umbrella-task subject prefixes. Every task created by
-# /PACT:orchestrate, /PACT:comPACT, /PACT:peer-review, or the umbrella
-# phase TaskCreates carries one of these prefixes. Empirically verified
-# at Phase A diagnostic (2026-05-27) against on-disk ~/.claude/tasks/
-# {team}/*.json files; the prefixes are the disk-truth surface the
-# Gate-6 / Tier-2 Clause-4 suppression contract reads.
-#
-# Tuple (not list/set) so the contract is immutable at import time and
-# the constant participates in identity-stable membership checks. Order
-# is informational only — the predicate uses subject.startswith(p) for
-# any p; no precedence between prefixes.
-#
-# Adding a new prefix requires updating ONLY this constant — both the
-# production helper and every regression fixture re-derive at import
-# time.
-UMBRELLA_SUBJECT_PREFIXES = (
-    "Feature: ",
-    "Plan: ",
-    "Plan (revised): ",
-    "PREPARE: ",
-    "ARCHITECT: ",
-    "CODE: ",
-    "TEST: ",
-)
+# Re-export UMBRELLA_SUBJECT_PREFIXES from its production home so test
+# fixtures import a single symbol that is provably identical (by Python
+# import semantics) to the constant the production helper consults.
+# Adding a new prefix requires updating ONLY shared/wake_lifecycle.py —
+# both the production helper and every regression fixture re-derive at
+# import time.
+from shared.wake_lifecycle import UMBRELLA_SUBJECT_PREFIXES  # noqa: F401
 
 
 def make_umbrella_task(

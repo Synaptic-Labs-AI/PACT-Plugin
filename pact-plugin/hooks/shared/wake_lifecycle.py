@@ -29,6 +29,28 @@ Public surface:
     the 1->0 Teardown emit when a same-teammate continuation is staged
     for handoff. Pure function; never raises; fail-closed (returns
     False on every error path so Teardown emits unchanged).
+- has_in_progress_umbrella_orchestration(team_name) -> bool
+    Predicate. True iff the team has at least one in_progress task
+    whose subject starts with one of UMBRELLA_SUBJECT_PREFIXES.
+    Consumers (teardown_request_emitter Gate 6 + Tier-2 mirror at
+    wake_lifecycle_emitter._maybe_write_teammate_teardown_marker Clause 4)
+    use this to suppress teardown during
+    OPERATIONAL-LULL-AT-PHASE-BOUNDARY windows — the brief operational
+    lull between phase-N specialists wrapping up and phase-(N+1)
+    specialists arriving, during which the umbrella orchestration task
+    stays in_progress while the lifecycle-relevant count is legitimately
+    0. Signature-based (subject prefix) NOT owner-based: umbrella tasks
+    have `owner: null` on disk per orchestrate.md TaskCreate conventions.
+    Pure function; never raises; fail-CONSERVATIVE (returns False on
+    every error path, matching the fail-open module posture — failing
+    to suppress over-fires teardown rather than over-suppressing,
+    aligning with the wake mechanism's over-arm-is-recoverable axiom).
+- UMBRELLA_SUBJECT_PREFIXES: tuple[str, ...]
+    The canonical umbrella-orchestration subject-prefix tuple. Single
+    source of truth consumed by has_in_progress_umbrella_orchestration
+    AND re-exported through tests/fixtures/disk_shapes.py for the
+    OPERATIONAL-LULL regression fixture surface. Adding a new
+    umbrella-creating workflow requires updating ONLY this constant.
 - is_lead_context(stdin, team_name="") -> bool
     Predicate. True iff this hook fire originated in the lead context
     (not an in-process teammate frame). Single consolidated discriminator
@@ -115,6 +137,35 @@ _SIGNAL_TASK_TYPES = ("blocker", "algedonic")
 # by the positive allowlist (conservative: only count statuses we know
 # represent in-flight work).
 _ACTIVE_STATUSES = ("pending", "in_progress")
+
+# Canonical umbrella-orchestration subject-prefix tuple. Every task
+# created by /PACT:orchestrate, /PACT:comPACT, /PACT:peer-review, and the
+# umbrella phase TaskCreates carries one of these prefixes. Empirically
+# verified at Phase A diagnostic (2026-05-27) against on-disk
+# ~/.claude/tasks/{team}/*.json: umbrella tasks have `owner: null` (or no
+# owner field), so signature-based detection is the only available
+# discriminator. The constant lives here (production code) rather than
+# under tests/fixtures/ because hook subprocesses do not have tests/ on
+# sys.path at runtime; tests/fixtures/disk_shapes.py re-exports the
+# tuple so test fixtures can import a single symbol that is provably
+# identical to the production constant by Python import semantics.
+# Adding a new umbrella-creating workflow requires updating ONLY this
+# constant — both the production helper and every regression fixture
+# re-derive at import time.
+#
+# Tuple (not list/set) so the contract is immutable at import time and
+# participates in identity-stable membership checks. Order is
+# informational only — the predicate uses `subject.startswith(p)` for
+# any p; no precedence between prefixes.
+UMBRELLA_SUBJECT_PREFIXES = (
+    "Feature: ",
+    "Plan: ",
+    "Plan (revised): ",
+    "PREPARE: ",
+    "ARCHITECT: ",
+    "CODE: ",
+    "TEST: ",
+)
 
 
 @dataclass(frozen=True)
@@ -727,3 +778,62 @@ def is_lead_context(stdin: Any, team_name: str = "") -> bool:
     if not isinstance(stdin, dict):
         return False
     return "agent_id" not in stdin and "teammate_name" not in stdin
+
+
+def has_in_progress_umbrella_orchestration(team_name: str) -> bool:
+    """Return True iff the team has at least one in_progress task whose
+    subject starts with one of UMBRELLA_SUBJECT_PREFIXES.
+
+    Consumers are the two teardown emission sites — the Tier-1
+    teardown_request_emitter (Gate 6, before the count_active_tasks
+    1->0 gate) and the Tier-2 wake_lifecycle_emitter
+    _maybe_write_teammate_teardown_marker (Clause 4 mirror). Both
+    consult this single helper so the OPERATIONAL-LULL-AT-PHASE-BOUNDARY
+    suppression contract is enforced symmetrically.
+
+    Signature-based (subject prefix) NOT owner-based: umbrella tasks
+    created by /PACT:orchestrate / /PACT:comPACT / /PACT:peer-review and
+    the umbrella phase TaskCreates have `owner: null` on disk (or no
+    owner field). Empirically verified at the Phase A diagnostic
+    (2026-05-27). An owner-based predicate would silently miss every
+    umbrella and fail to suppress the operational-lull misfire.
+
+    Signal-task carve-out: tasks with `metadata.completion_type ==
+    "signal"` are excluded — they self-complete without driving the
+    lifecycle-relevant tally, so an in_progress signal-task is not a
+    phase-boundary indicator. (The signal-task carve-out is structural
+    in the count_active_tasks tally too; mirroring it here keeps the
+    Gate 6 short-circuit consistent with the Gate 3 count.)
+
+    Args:
+        team_name: Team name for scoped task lookup. Threaded through to
+            `iter_team_task_jsons` (which validates the name as a safe
+            path component). Empty or unsafe values yield no iteration
+            and the predicate returns False.
+
+    Returns:
+        True iff at least one umbrella-shaped in_progress task is
+        present. False otherwise (including every error path).
+
+    Pure function; never raises. fail-CONSERVATIVE: returns False on
+    every error path. Posture rationale: this helper is consulted by
+    teardown-emission gates that fail-open to "emit anyway" — a False
+    return means the gate does NOT suppress, so teardown emits, so the
+    wake-mechanism's over-arm-is-recoverable axiom is preserved. A True
+    return only suppresses when we can positively identify an umbrella;
+    silent over-suppression of legitimate teardowns is the failure mode
+    this posture avoids.
+    """
+    for task in iter_team_task_jsons(team_name):
+        if task.get("status") != "in_progress":
+            continue
+        subject = task.get("subject") or ""
+        if not isinstance(subject, str):
+            continue
+        if not any(subject.startswith(p) for p in UMBRELLA_SUBJECT_PREFIXES):
+            continue
+        metadata = task.get("metadata") or {}
+        if isinstance(metadata, dict) and metadata.get("completion_type") == "signal":
+            continue
+        return True
+    return False
