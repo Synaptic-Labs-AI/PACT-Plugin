@@ -22,8 +22,15 @@ hookSpecificOutput schema-rejection defense — missing hookEventName
 triggers silent platform-layer rejection).
 
 Rule coverage:
-  - teachback_addblocks_missing — Teachback Task created without
-    addBlocks=[<work_task_id>]
+  - teachback_addblocks_missing — Teachback Task owner-wiring
+    TaskUpdate landed without addBlocks=[<work_task_id>]. Fires at the
+    canonical Step-3 wiring boundary (lead sets owner on a teachback
+    Task) rather than at TaskCreate — the historical TaskCreate-time
+    check was structurally unsatisfiable because the work-task id did
+    not exist yet at TaskCreate(A).
+    Fire condition (4-clause AND): subject is teachback-shaped AND
+    tool_input.owner is set AND tool_input.addBlocks is absent/empty
+    AND task_a.blocks is empty (benign late-wiring guard).
   - work_addblockedby_missing — pact-* work Task created without
     addBlockedBy=[<teachback_id>]
   - completion_no_paired_send — Teachback Task completed without paired
@@ -552,14 +559,6 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
         if not isinstance(owner, str):
             owner = ""
 
-        if is_teachback and not tool_input.get("addBlocks"):
-            advisories.append((
-                "teachback_addblocks_missing",
-                "PACT task_lifecycle_gate: Teachback Task created without "
-                "addBlocks=[<work_task_id>]. The teachback gate must block "
-                "the work task (per pact-completion-authority).",
-            ))
-
         # Clause order is intentional: the cheap checks
         # (is_teachback dict-lookup, owner.startswith string-prefix,
         # tool_input.get dict-lookup) precede the disk-reading
@@ -568,11 +567,27 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
         # 3rd clause and never hits disk. Failure path (missing
         # addBlockedBy) does hit disk via _iter_members, but this is
         # the rare misconfiguration path — amortized cost near zero.
+        #
+        # Cached short-circuit: `_teachback_exempt` is computed at most
+        # once per TaskCreate and reused by R4 below. Both rules share
+        # the same disk-touching predicate; the cache amortizes the
+        # `is_teachback_exempt(owner, team_name)` cost across rules.
+        # `None` sentinel means "not yet computed"; `False/True` is the
+        # cached result. The lazy fill preserves the cheap-first clause
+        # ordering (no eager disk read when cheap predicates fail).
+        _teachback_exempt: bool | None = None
+
+        def _exempt() -> bool:
+            nonlocal _teachback_exempt
+            if _teachback_exempt is None:
+                _teachback_exempt = is_teachback_exempt(owner, team_name)
+            return _teachback_exempt
+
         if (
             not is_teachback
             and owner.startswith("pact-")
             and not tool_input.get("addBlockedBy")
-            and not is_teachback_exempt(owner, team_name)
+            and not _exempt()
         ):
             advisories.append((
                 "work_addblockedby_missing",
@@ -588,11 +603,12 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
         # rationales); distinct message text per path, same rule name —
         # the lead-side correction is the same (re-stamp variety) in
         # either case. Clause order mirrors L575-580: cheap dict-lookups
-        # first, disk-touching exempt-check last.
+        # first, disk-touching exempt-check last (cached via `_exempt()`
+        # so the second invocation reuses the first call's result).
         if (
             not is_teachback
             and owner.startswith("pact-")
-            and not is_teachback_exempt(owner, team_name)
+            and not _exempt()
         ):
             incoming_variety = (
                 tool_input.get("metadata") or {}
@@ -771,13 +787,47 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                 "field). See pact-teachback skill Common mistakes row 2.",
             ))
 
+        # Shared task_a disk read — lifted to sibling of the cross-slot
+        # handoff check above so the wiring-boundary
+        # teachback_addblocks_missing rule and the teachback_submit
+        # write-time rules below all consume one disk read per
+        # non-completed TaskUpdate. Single-pay disk cost across all
+        # write-time rules that need task_a's subject + blocks.
+        task_id = tool_input.get("taskId", "") or ""
+        task_a = read_task_json(task_id, team_name) if team_name else {}
+        if not isinstance(task_a, dict):
+            task_a = {}
+        subject = task_a.get("subject") or ""
+
+        # Wiring-boundary teachback_addblocks_missing — fires when the
+        # canonical Step-3 wiring TaskUpdate (lead sets owner on a
+        # teachback Task) lands WITHOUT addBlocks=[<work_task_id>].
+        # Predicates: subject is teachback-shaped AND incoming owner is
+        # being set AND addBlocks is absent on the wiring update AND the
+        # task_a already-on-disk record does not have blocks wired (benign
+        # late-wiring guard: if an earlier TaskUpdate already wired blocks,
+        # a later owner-only update is not a violation). Re-times the
+        # historical TaskCreate-time check (which was structurally
+        # unsatisfiable because the work-task id did not exist yet at
+        # TaskCreate(A)) to the moment the lead can satisfy both clauses
+        # in one TaskUpdate.
+        if (
+            _is_teachback_subject(subject)
+            and tool_input.get("owner")
+            and not tool_input.get("addBlocks")
+            and not task_a.get("blocks")
+        ):
+            advisories.append((
+                "teachback_addblocks_missing",
+                f"PACT task_lifecycle_gate: Teachback Task {task_id} "
+                "owner-wiring TaskUpdate landed without "
+                "addBlocks=[<work_task_id>]. Canonical sequence pairs "
+                "owner + addBlocks in one update; split-write leaves "
+                "the teachback gate unwired.",
+            ))
+
+        # task_id, subject, task_a are hoisted to L776-780 (sibling-of-cross-slot-handoff-check); this branch consumes the hoisted values.
         if isinstance(incoming_teachback, dict):
-            task_id = tool_input.get("taskId", "") or ""
-            # Shared task_a disk read — R3, R5, and the 3 new
-            # teachback-scoped rules consume this one read (R3 needs
-            # blocks for traversal, others only need subject).
-            task_a = read_task_json(task_id, team_name) if team_name else {}
-            subject = task_a.get("subject") or ""
             if _is_teachback_subject(subject):
                 # R5 (D10): variety_acknowledgment presence check.
                 # Presence-only at write-time; full schema validation is
@@ -889,7 +939,8 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                         "missing OR Task B.metadata.variety absent. "
                         "Hook advisory skipped; lead should enforce "
                         "variety stamping via teachback_addblocks_missing "
-                        "+ variety_missing_on_dispatch_task upstream.",
+                        "wiring-time enforcement upstream + "
+                        "variety_missing_on_dispatch_task at TaskCreate.",
                     ))
 
     return advisories

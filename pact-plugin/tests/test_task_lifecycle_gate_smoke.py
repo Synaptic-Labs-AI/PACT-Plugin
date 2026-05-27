@@ -5,7 +5,8 @@ PACT lifecycle rules (#662 Commit 3).
 NOT comprehensive coverage — that is TEST-phase scope. These cases lock
 the load-bearing decisions in place so a future regression surfaces fast:
 
-  S1. teachback_addblocks_missing advisory: TEACHBACK Task created without addBlocks
+  S1. teachback_addblocks_missing advisory: TEACHBACK Task owner-wiring TaskUpdate
+      lands without paired addBlocks and task_a has no pre-existing blocks
   S2. work_addblockedby_missing advisory: pact-* Task created without addBlockedBy
   S3. handoff_missing advisory: pact-* work-Task completed with empty metadata.handoff
   S4. self_completion advisory + writeback: teammate self-completes; assert
@@ -51,15 +52,27 @@ def _capture_main(payload: dict, capsys) -> tuple[int, dict | None]:
     return code, parsed
 
 
-# ─── S1: teachback_addblocks_missing — TEACHBACK Task created without addBlocks ─
+# ─── S1: teachback_addblocks_missing — owner-wiring TaskUpdate without addBlocks ─
 
 
-def test_teachback_create_without_addblocks(pact_context, capsys):
+def test_teachback_wiring_update_without_addblocks(tmp_path, monkeypatch, pact_context, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
-    payload = {
-        "tool_name": "TaskCreate",
-        "tool_input": {
+    tasks_dir = tmp_path / ".claude" / "tasks" / "test-team"
+    tasks_dir.mkdir(parents=True)
+    (tasks_dir / "A.json").write_text(
+        json.dumps({
+            "id": "A",
             "subject": "preparer: TEACHBACK for foo",
+            "status": "pending",
+            "blocks": [],
+        }),
+        encoding="utf-8",
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "A",
             "owner": "pact-preparer",
             # addBlocks deliberately omitted
         },
