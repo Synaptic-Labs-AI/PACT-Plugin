@@ -487,21 +487,52 @@ class TestV4Tier2GateOrderingPreservesCountSuppression:
         self, tmp_path,
     ):
         """Umbrella + Y in_progress + secretary self-complete:
-        count_active_tasks=1 (Y counts), Clause 4 blocks. Gate 6
-        ALSO blocks (umbrella in_progress) — doubly suppressed.
+        count_active_tasks=1 (Y counts because architect is a known
+        team member with non-exempt agentType), Clause 4 blocks. Gate
+        6 ALSO blocks (umbrella in_progress) — doubly suppressed.
         Either gate alone is sufficient; this verifies the ordering
         doesn't expose a hole.
+
+        Empirically calibrated: an earlier draft of this fixture used
+        _setup_secretary_teammate_session() which registered only
+        secretary + lead in team_config.members. With architect
+        unregistered, count_active_tasks excluded Y4 via the
+        unknown-owner filter — count became 0 and Gate 6 was the
+        SOLE suppressor. Tier-2-only-revert cardinality probe
+        surfaced the mis-characterization (V4-T2 went RED when it
+        should have stayed GREEN as a doubly-suppressed negative
+        control). Inline the team_config here to explicitly register
+        architect so the "doubly suppressed" claim holds empirically.
         """
         home = tmp_path / "home"
         home.mkdir()
         team = "team-tier2-v4"
-        _setup_secretary_teammate_session(home, team)
+        # Inline session-context registers architect as a known team
+        # member with non-exempt agentType, so Y4's owner is counted
+        # by count_active_tasks (Clause 4 suppression is real, not
+        # incidental to unknown-owner exclusion).
+        _write_session_context(
+            home, TEAMMATE_SID, PROJECT_DIR, team,
+            lead_session_id=LEAD_SID,
+            members=[
+                {
+                    "name": SECRETARY_NAME, "agentId": SECRETARY_AGENT_ID,
+                    "agentType": SECRETARY_AGENT_TYPE,
+                },
+                {
+                    "name": "architect", "agentId": "agent-architect",
+                    "agentType": "pact-architect",
+                },
+                {"name": "lead", "agentId": "agent-lead"},
+            ],
+            lead_agent_id="agent-lead",
+        )
 
         _write_task(home, team, make_umbrella_task(
             "U4", subject_prefix="ARCHITECT: ", subject_suffix="tier2 v4",
             status="in_progress",
         ))
-        # Peer teammate Y in_progress.
+        # Peer teammate Y in_progress (architect now known to team).
         _write_task(home, team, make_specialist_task(
             "Y4", owner="architect",
             subject="architect: tier2 v4 work",
