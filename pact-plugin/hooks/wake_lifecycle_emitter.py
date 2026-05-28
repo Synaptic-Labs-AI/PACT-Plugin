@@ -160,6 +160,7 @@ from shared.task_utils import read_task_json
 from shared.tool_response import extract_tool_response
 from shared.wake_lifecycle import (
     count_active_tasks,
+    has_in_progress_umbrella_orchestration,
     is_lead_context,
 )
 from shared.wake_lifecycle import _classify_owner
@@ -720,6 +721,20 @@ def _maybe_write_teammate_teardown_marker(
 
         # Clause 3: terminal-status transition.
         if not _is_terminal_status_update(input_data):
+            return
+
+        # Gate 6 (Tier-2 mirror — symmetric to teardown_request_emitter.py
+        # Gate 6; OPERATIONAL-LULL-AT-PHASE-BOUNDARY suppression; see also
+        # COUNT-BASED-LIFECYCLE-INVARIANT-MISFIRE parent class). Suppress
+        # the Teardown marker when an umbrella orchestration task is still
+        # in_progress on the team — the 1->0 active-task count is a
+        # phase-transition lull, NOT genuine session end. Layered as an
+        # orthogonal safety net on top of the 6-clause structure (no
+        # renumbering) so the cheap path-safety/tool-name/terminal-status
+        # clauses (1-3) short-circuit first; Gate 6 runs BEFORE the
+        # equally-priced count_active_tasks iteration (Clause 4) and
+        # the disk-reading is_self_complete_exempt witness (Clause 6).
+        if has_in_progress_umbrella_orchestration(team_name):
             return
 
         # Clause 4: 1->0 active-task transition.
