@@ -169,6 +169,62 @@ class TestHasInProgressUmbrellaOrchestration:
         (tasks_dir / "bogus.json").write_text("not valid json{", encoding="utf-8")
         assert wl.has_in_progress_umbrella_orchestration(team) is False
 
+    def test_iter_team_task_jsons_raise_does_not_propagate(
+        self, tmp_path, monkeypatch,
+    ):
+        """Cell 8: pins the contract that iter_team_task_jsons raises
+        do NOT propagate up through has_in_progress_umbrella_orchestration
+        — the helper returns False (fail-CONSERVATIVE) instead. Closes
+        F-test2 from PR #850 review.
+
+        Empirical finding (F-test2 fold, 2026-05-28): iter_team_task_jsons
+        does NOT swallow every exception class — RuntimeError propagates
+        empirically. Pre-hardening, the helper's "Pure function; never
+        raises" docstring claim was OVERSTATED and Gate 6 at both Tier-1
+        + Tier-2 emission sites would propagate uncaught exceptions to
+        the outer hook fail-open catches, masking the regression as
+        "Gate 6 silently never fires" rather than failing safely to
+        False. The hardening commit added a try/except Exception →
+        return False wrap around the for-loop body (see
+        wake_lifecycle.py "Fail-CONSERVATIVE wrap" comment at
+        has_in_progress_umbrella_orchestration); this test pins the
+        load-bearing property the wrap delivers.
+
+        Counter-test-by-revert (recorded at fold commit): revert the
+        try/except wrap → this test goes RED with the synthetic
+        RuntimeError propagating, proving the wrap is the actual
+        suppression mechanism (not iter_team_task_jsons swallowing).
+        Cardinality {1 RED in this test scope; existing 7 cells + 8
+        parametrized prefix-sweep cells stay GREEN}.
+
+        Mechanism: monkeypatch the bound module-global
+        wl.iter_team_task_jsons to a function that raises on first
+        call. Assert the helper returns False (not the raised
+        exception).
+
+        Coupling caveat: monkeypatch.setattr(wl, 'iter_team_task_jsons',
+        ...) relies on the `from shared.task_utils import
+        iter_team_task_jsons` import style at wake_lifecycle.py L113
+        binding iter_team_task_jsons as a module-level attribute of
+        wl. A future refactor switching to `from shared import
+        task_utils` + `task_utils.iter_team_task_jsons(...)` would
+        make this monkeypatch silently miss; the test would pass
+        vacuously (no iteration would actually call the patched name).
+        Mitigation: the existing 7 cells exercise the real
+        iter_team_task_jsons via on-disk fixtures, so a vacuous pass
+        here doesn't hide all coverage — but a future editor changing
+        the import style should audit this test."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        def _raising_iter(team_name):
+            raise RuntimeError(
+                "synthetic iter_team_task_jsons raise — F-test2 contract pin"
+            )
+            yield  # unreachable; makes this a generator for shape parity
+
+        monkeypatch.setattr(wl, "iter_team_task_jsons", _raising_iter)
+        assert wl.has_in_progress_umbrella_orchestration("team-raises") is False
+
 
 class TestUmbrellaPrefixesContract:
     """Pin the UMBRELLA_SUBJECT_PREFIXES re-export contract: the test-

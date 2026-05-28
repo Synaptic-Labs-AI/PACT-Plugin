@@ -865,16 +865,29 @@ def has_in_progress_umbrella_orchestration(team_name: str) -> bool:
     emitter._maybe_write_teammate_teardown_marker) is justified by
     the cost asymmetry, not by equal pricing.
     """
-    for task in iter_team_task_jsons(team_name):
-        if task.get("status") != "in_progress":
-            continue
-        subject = task.get("subject")
-        if not isinstance(subject, str):
-            continue
-        if not any(subject.startswith(p) for p in UMBRELLA_SUBJECT_PREFIXES):
-            continue
-        metadata = task.get("metadata") or {}
-        if isinstance(metadata, dict) and metadata.get("completion_type") == "signal":
-            continue
-        return True
-    return False
+    # Fail-CONSERVATIVE wrap: the "Pure function; never raises" docstring
+    # claim on this helper depends entirely on iter_team_task_jsons
+    # swallowing every exception class. F-test2 (PR #850 review) empirically
+    # surfaced that iter_team_task_jsons does NOT swallow RuntimeError (and
+    # likely not arbitrary other propagating exceptions either). Without
+    # this wrap, an uncaught exception in iter would propagate through
+    # has_in_progress_umbrella_orchestration to the outer fail-open catches
+    # at the hook boundaries — masking the regression as "Gate 6 silently
+    # never fires" rather than failing safely to False. The wrap makes the
+    # docstring contract empirically true rather than aspirational.
+    try:
+        for task in iter_team_task_jsons(team_name):
+            if task.get("status") != "in_progress":
+                continue
+            subject = task.get("subject")
+            if not isinstance(subject, str):
+                continue
+            if not any(subject.startswith(p) for p in UMBRELLA_SUBJECT_PREFIXES):
+                continue
+            metadata = task.get("metadata") or {}
+            if isinstance(metadata, dict) and metadata.get("completion_type") == "signal":
+                continue
+            return True
+        return False
+    except Exception:
+        return False
