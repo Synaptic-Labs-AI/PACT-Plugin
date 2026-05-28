@@ -78,8 +78,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 from fixtures.disk_shapes import (
     UMBRELLA_SUBJECT_PREFIXES,
     make_specialist_task,
@@ -592,68 +590,17 @@ class TestV6PurePhaseLullUmbrellaOnly:
 
 
 # =============================================================================
-# Parametrized scaffolding for the C8 multi-phase noise-budget regression.
-#
-# C4 lands the parametrized infrastructure (test ID matrix, fixture
-# helpers); C8 populates the assertion shape with the noise-budget
-# invariant. Backend's C5 may populate V8 (a phase-lull variant with
-# multiple completed teammate tasks under the umbrella) in this
-# parametrized class.
-#
-# The N=1..3 phase-count x N=1..3 specialist-per-phase matrix covers
-# the combinatorial space the bug manifested in (6 fires over 4 phase
-# transitions in pact-450f3d63 — N=4, M=multiple per phase). N=3 is
-# the smallest exhaustive sample of the asymmetric counts that
-# discriminate Gate-6-shaped suppression from Gate-3-shaped suppression.
-# =============================================================================
-
-
-class TestMultiPhaseNoiseBudgetScaffold:
-    """Parametrized infrastructure for C8 noise-budget regression.
-
-    At C4: scaffold only. The fixture-construction helper
-    (_build_multi_phase_fixture) is exercised via a smoke parameter
-    that verifies it does not crash on the matrix's corner cells. C8
-    adds the load-bearing noise-budget assertion (max teardown
-    emissions per N-phase orchestration MUST equal exactly 1 — the
-    final genuine 1->0 transition after the umbrella completes).
-    """
-
-    @pytest.mark.parametrize(
-        "n_phases,n_specialists_per_phase",
-        [(1, 1), (1, 2), (1, 3), (2, 1), (2, 2), (2, 3), (3, 1), (3, 2), (3, 3)],
-        ids=lambda v: f"n{v}",
-    )
-    def test_scaffold_matrix_fixture_constructs(
-        self, tmp_path, n_phases, n_specialists_per_phase,
-    ):
-        """C4 smoke check: the 9-cell N=1,2,3 x M=1,2,3 matrix
-        fixture-builder does not crash on any cell. C8 replaces this
-        assertion with the noise-budget invariant: across N
-        phase-transitions with M specialists each, the emitted
-        teardown count MUST equal exactly 1.
-        """
-        fixture = _build_multi_phase_fixture(
-            tmp_path, n_phases=n_phases,
-            n_specialists_per_phase=n_specialists_per_phase,
-        )
-        # Smoke: fixture builds a non-empty task set with the expected
-        # umbrella + specialist task layout. C8 replaces with noise-
-        # budget assertion.
-        assert fixture["umbrella_task_id"]
-        assert len(fixture["specialist_task_ids"]) == (
-            n_phases * n_specialists_per_phase
-        )
-
-
-# =============================================================================
 # V8 — Subprocess-integration variant added in C5 alongside the Gate 6 source
 # change. Covers a phase-lull window where the umbrella is in_progress AND
 # multiple completed teammate tasks are present (the canonical "phase wound
 # down; next phase has not started" shape). Distinct from V1 (Task B mid-
 # wiring) and V6 (single completed teammate task) — V8 exercises the
-# "many done, none pending" multi-completion shape that the noise-budget
-# regression (C8) will later parametrize across N phases.
+# "many done, none pending" multi-completion shape.
+#
+# The N=1..3 phase-count x M=1..3 specialist-per-phase aggregate regression
+# is covered by tests/test_phase_lull_noise_budget.py (separate file; same
+# `_build_multi_phase_fixture` helper, different invariant — aggregate
+# emission count under the umbrella MUST be zero).
 # =============================================================================
 
 
