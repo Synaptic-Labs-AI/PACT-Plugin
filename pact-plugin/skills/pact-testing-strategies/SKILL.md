@@ -526,7 +526,7 @@ Distinguishing the two matters because the mitigations differ: ASPIRATIONAL-HAND
 #### Canonical mitigation
 
 <!-- planning-artifact-exempt: pact-memory ID, content-addressable via secretary / PACT:pact-memory skill, not a commit SHA -->
-Cross-stream verification (pact-memory `f3f3d093`) MUST run on every cardinality, set-membership, or fidelity claim in a HANDOFF. The recount is performed by an agent operating in an explicitly different role-context from the HANDOFF author — one of:
+Cross-stream verification (pact-memory `f3f3d093`) MUST run on every cardinality, set-membership, fidelity, or structural-shape claim in a HANDOFF. The recount is performed by an agent operating in an explicitly different role-context from the HANDOFF author — one of:
 
 - **Test-author** running review-role checks on their own implementation HANDOFF (same specialist OK if the role-switch is explicit).
 - **Fix-builder** recounting the test-engineer's HANDOFF cardinality before integrating the fix.
@@ -551,7 +551,11 @@ An SSOT-fidelity test passed because of unknown-owner exclusion rather than umbr
 
 #### Canonical mitigation
 
-Default discipline: **register all task-owners** the test exercises in `team_config.members[]` so the count reflects the intended suppression mechanism. If the test is intentionally exercising the exclusion path, name it in the test docstring AND verify the assertion would hold without the exclusion (so the suppression mechanism stands on its own). The "would hold without the exclusion" check is the load-bearing verification — without it, the test is indistinguishable from a fixture-completeness defect.
+**Register all task-owners** — default discipline: list the task-owners the test exercises in `team_config.members[]` so the count reflects the intended suppression mechanism. If the test is intentionally exercising the exclusion path, name it in the test docstring AND verify the assertion would hold without the exclusion (so the suppression mechanism stands on its own). The "would hold without the exclusion" check is the load-bearing verification — without it, the test is indistinguishable from a fixture-completeness defect.
+
+#### Detection signature
+
+Tests asserting on `count_active_tasks` boundary conditions (`count == 0`, `count == 1`, `count == N`) where the fixture's `team_config.members[]` lists only a subset of the task-owners the test exercises are at elevated risk. The shape "count assertion + sparsely-constructed `members[]`" is the highest-yield surface for a fixture-completeness audit.
 
 ### Sibling-file convention for parametrized noise-budget regression
 
@@ -565,7 +569,11 @@ A PACT-internal regression added the sibling test file `pact-plugin/tests/test_p
 
 #### Canonical mitigation
 
-Default discipline: when adding a parametrized noise-budget regression test for a phase-specific test family, create a **sibling file** named `test_{phase-domain}_noise_budget.py` rather than appending to the primary file. Cross-reference the primary phase-specific file in the sibling's docstring so a future reader can find the family. When 3+ instances of HANDOFF-cardinality-matrix patterns cluster in a single review cycle, the cluster suggests a HANDOFF-shape risk-factor specific to phase-lull tests with N-cell parametrized cardinality matrices — pair these tests with cross-stream-verifier review (see Author-blindness above) at elevated priority.
+**Sibling-file split** — default discipline: when adding a parametrized noise-budget regression test for a phase-specific test family, create a sibling file named `test_{phase-domain}_noise_budget.py` rather than appending to the primary file. Cross-reference the primary phase-specific file in the sibling's docstring so a future reader can find the family. When 3+ instances of HANDOFF-cardinality-matrix patterns cluster in a single review cycle, the cluster suggests a HANDOFF-shape risk-factor specific to phase-lull tests with N-cell parametrized cardinality matrices — pair these tests with cross-stream-verifier review (see Author-blindness above) at elevated priority.
+
+#### Detection signature
+
+Phase-specific test files that already count specific event types AND gain a parametrized N×M matrix test for the same event-type are at elevated risk. The shape "tight fire-count assertion in the same file as a parametrized matrix" is the highest-yield surface for the sibling-file split.
 
 ---
 
