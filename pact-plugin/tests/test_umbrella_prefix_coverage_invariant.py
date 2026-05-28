@@ -130,6 +130,20 @@ UMBRELLA_PREFIX_COMMAND_MAPPING: dict[str, set[str]] = {
 # plan-mode.md) is queued as a separate follow-up issue. Removing an
 # entry from this allowlist requires the corresponding command file to
 # add a quoted-literal example of the prefix template.
+#
+# Retention review: entries in this allowlist should be reviewed each
+# release cycle OR when commands/*.md changes (whichever comes first)
+# to verify they still represent genuine documentation gaps versus
+# stale entries that have either been documented since (in which case
+# move the prefix into UMBRELLA_PREFIX_COMMAND_MAPPING) or removed
+# from UMBRELLA_SUBJECT_PREFIXES (in which case Assertion 4 will fail
+# loudly until the allowlist is pruned). The canonical path to remove
+# an entry by closing the documentation gap is to add the
+# corresponding `"<prefix>{template}"` example to the relevant
+# command file per the D-strict follow-up issue. Without an explicit
+# review cadence, allowlist entries decay into permanent exceptions
+# rather than time-limited carve-outs; reviewers should treat the
+# allowlist as a "documentation TODO" surface, not a stable contract.
 UMBRELLA_PREFIXES_WITHOUT_DOCUMENTED_CONSUMER: set[str] = {
     "Feature: ",
     "Plan (revised): ",
@@ -216,6 +230,35 @@ class TestUmbrellaPrefixCoverageInvariant:
             "the prefix to UMBRELLA_SUBJECT_PREFIXES at "
             "pact-plugin/hooks/shared/wake_lifecycle.py to close the "
             "lockstep gap."
+        )
+
+    def test_assertion_4_allowlist_subset_of_production_tuple(self):
+        """For each prefix in UMBRELLA_PREFIXES_WITHOUT_DOCUMENTED_CONSUMER,
+        the prefix MUST be in UMBRELLA_SUBJECT_PREFIXES. Catches: an
+        allowlist entry that's been removed from the production tuple —
+        the allowlist would silently retain a defunct entry (Assertion 2
+        only requires entries be 'in mapping OR in allowlist', so an
+        orphan allowlist entry with no production tuple presence and no
+        mapping consumer would pass A2 vacuously). This assertion
+        enforces the converse direction: every allowlist entry must
+        correspond to an actual production tuple entry, closing the
+        time-decay gap where stale allowlist entries linger after the
+        production tuple has been pruned.
+        """
+        production_tuple = set(UMBRELLA_SUBJECT_PREFIXES)
+        orphans = UMBRELLA_PREFIXES_WITHOUT_DOCUMENTED_CONSUMER - production_tuple
+        assert not orphans, (
+            "UMBRELLA_PREFIXES_WITHOUT_DOCUMENTED_CONSUMER contains "
+            "entries NOT in UMBRELLA_SUBJECT_PREFIXES. The allowlist "
+            "exists to declare 'this prefix is runtime-active but lacks "
+            "a documented commands/*.md consumer'; an entry that's not "
+            "in the production tuple is not runtime-active and should "
+            f"be removed from the allowlist. Orphan entries: {sorted(orphans)!r}. "
+            "Either restore the prefix to UMBRELLA_SUBJECT_PREFIXES at "
+            "pact-plugin/hooks/shared/wake_lifecycle.py (if the removal "
+            "was accidental) OR delete the orphan entries from "
+            "UMBRELLA_PREFIXES_WITHOUT_DOCUMENTED_CONSUMER (if the "
+            "umbrella shape is genuinely retired)."
         )
 
 
