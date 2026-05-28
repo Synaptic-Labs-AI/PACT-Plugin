@@ -175,14 +175,31 @@ _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 _MAX_PAYLOAD_BYTES = 1024 * 1024
 
 # Directive prose — verbatim text emitted via additionalContext on
-# transitions. Imperative voice; references the canonical command-pair
-# slugs `PACT:start-pending-scan` (Arm role) and `PACT:stop-pending-scan`
+# transitions. References the canonical command-pair slugs
+# `PACT:start-pending-scan` (Arm role) and `PACT:stop-pending-scan`
 # (Teardown role); idempotency / best-effort clauses prevent the lead
-# from adding their own conditional self-diagnosis (per the
-# unconditional-directive discipline: emit identical prose every fire —
-# the orchestrator is not authorized to second-guess directive
-# applicability). Idempotency is enforced in the skill body via
-# CronList exact-suffix-match; there is no hook-side STATE_FILE.
+# from adding their own conditional self-diagnosis.
+#
+# Voice asymmetry (Opt-3 additive defense layer, paired with Gate 6
+# at both teardown emission sites): the Arm directive uses a single
+# unconditional MUST under the unconditional-directive discipline —
+# over-arming is benign because the skill body is CronList-exact-
+# suffix idempotent. The Teardown directive uses a two-MUST sequence:
+# the first MUST binds verification (CronList + check for active
+# teammate task entries) as a prerequisite; the second MUST binds the
+# stop-pending-scan invocation conditional on verification outcome
+# via "if so". This pairing addresses OPERATIONAL-LULL-AT-PHASE-
+# BOUNDARY residual fires that escape Gate 6: when next-phase
+# specialists are arriving within 8–30s, the verify clause forces
+# the orchestrator to confirm absence of in-flight work before
+# tearing down the scan. The "non-negotiable lifecycle gate" label
+# stands as a standalone unconditional sentence — both MUST bindings
+# and the label survive the AntiSofteningGuard substring assertions
+# (institutional pins from #760 + #738). Preamble is factual signal
+# ("Active-task count observed at zero"), NOT a pre-concluded "no
+# work remaining" — the latter would contradict the verify-clause's
+# premise. Idempotency is enforced in the skill body via CronList
+# exact-suffix-match; there is no hook-side STATE_FILE.
 _ARM_DIRECTIVE = (
     'Active teammate work detected. '
     'You MUST invoke Skill("PACT:start-pending-scan") before your next '
@@ -192,12 +209,12 @@ _ARM_DIRECTIVE = (
 )
 
 _TEARDOWN_DIRECTIVE = (
-    'No active teammate work remaining. '
-    'You MUST invoke Skill("PACT:stop-pending-scan") before your next '
-    'tool call to delete the /PACT:scan-pending-tasks cron. '
-    'This is a non-negotiable lifecycle gate. '
-    'Best-effort — tolerates a cron that was already auto-deleted '
-    '(7-day expiry) or never registered.'
+    'Active-task count observed at zero. '
+    'You MUST verify no specialist work is in flight '
+    '(CronList + check for active teammate task entries) '
+    'and, if so, then you MUST invoke '
+    'Skill("PACT:stop-pending-scan") before your next tool call. '
+    'This is a non-negotiable lifecycle gate.'
 )
 
 # Tools accepted by _decide_directive. The hooks.json matcher prunes
