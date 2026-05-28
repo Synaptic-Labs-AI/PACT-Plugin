@@ -225,6 +225,48 @@ class TestHasInProgressUmbrellaOrchestration:
         monkeypatch.setattr(wl, "iter_team_task_jsons", _raising_iter)
         assert wl.has_in_progress_umbrella_orchestration("team-raises") is False
 
+    def test_iter_team_task_jsons_is_module_attribute_for_monkeypatch_pin(self):
+        """Cell 9: pins the monkeypatch-coupling shape that Cell 8 depends
+        on. If a future refactor changes the import style in
+        wake_lifecycle.py from `from shared.task_utils import
+        iter_team_task_jsons` (binds wl.iter_team_task_jsons as a module-
+        level attribute) to `from shared import task_utils` +
+        `task_utils.iter_team_task_jsons(...)` (binds task_utils as the
+        attribute, with iter accessed via task_utils-namespaced lookup),
+        this assertion catches the drift IMMEDIATELY — before Cell 8
+        silently goes vacuous (the monkeypatch would still succeed but
+        wouldn't intercept the actual call, so Cell 8 would pass without
+        exercising any raises-don't-propagate behavior).
+
+        Promotes Cell 8's monkeypatch coupling-caveat from docstring-only
+        warning to a structural pin. Closes Future #1 from Task #41
+        verify-only review.
+
+        Pure attribute-presence + callable-shape check; no fixture, no
+        monkeypatch, no I/O. Single import-level assertion catches the
+        full coupling-drift class. Identity check (`is`) against
+        shared.task_utils intentionally omitted: catches a different drift
+        class (shadowing / decorator wrap) at the cost of coupling test
+        to import internals more tightly than the coupling-caveat names.
+        hasattr+callable is sufficient for the documented drift; add
+        identity check as a separate follow-up only if the looser drift
+        class manifests."""
+        assert hasattr(wl, "iter_team_task_jsons"), (
+            "wl.iter_team_task_jsons missing as module-level attribute. "
+            "Import-style refactor drift detected — Cell 8's "
+            "monkeypatch.setattr(wl, 'iter_team_task_jsons', ...) would "
+            "silently miss, rendering Cell 8 vacuous. Either restore "
+            "the `from shared.task_utils import iter_team_task_jsons` "
+            "import OR update Cell 8 + this assertion to match the new "
+            "monkeypatch target shape."
+        )
+        assert callable(getattr(wl, "iter_team_task_jsons")), (
+            "wl.iter_team_task_jsons is present but not callable. "
+            "Cell 8's monkeypatch-and-call shape requires a callable "
+            "target; this assertion catches a refactor that bound the "
+            "name to a non-callable object."
+        )
+
 
 class TestUmbrellaPrefixesContract:
     """Pin the UMBRELLA_SUBJECT_PREFIXES re-export contract: the test-
