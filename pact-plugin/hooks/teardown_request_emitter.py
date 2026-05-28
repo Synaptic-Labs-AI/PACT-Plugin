@@ -89,9 +89,17 @@ Gate 6 — OPERATIONAL-LULL umbrella-orchestration suppression
   window between phase-N specialists wrapping up and phase-(N+1)
   specialists arriving. Without Gate 6, the 0 reading triggers a
   spurious teardown_request even though the umbrella signals live
-  orchestration. Numbered "6" rather than appending after Gate 5
-  because the gate ordinality reflects the ORDER OF EVALUATION (Gate
-  0 -> 1 -> 6 -> ...), not chronological introduction order.
+  orchestration.
+- Numbering rationale: Gate 6 is numbered for grep-anchor symmetry
+  with the Tier-2 mirror at wake_lifecycle_emitter.py
+  (_maybe_write_teammate_teardown_marker Clause 6 sibling); the
+  numbering does NOT reflect a monotonic order of evaluation. Actual
+  evaluation order in this hook's `main()` is 0 -> 1 -> 6 -> 3 -> 4
+  -> 2 (Gate 2's marker claim is evaluated LAST so only fires that
+  would otherwise emit consume a marker). Treat the "Gate N" labels
+  as stable identifiers for cross-file reference, not as a sequence
+  diagram. See `wake_lifecycle_emitter.py` for the Tier-2 mirror's
+  matching grep-anchor convention.
 
 Gate 3 — 1->0 active-task transition:
 - count_active_tasks(team_name) excludes signal-tasks (blocker /

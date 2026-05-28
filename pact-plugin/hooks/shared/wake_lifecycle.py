@@ -853,11 +853,22 @@ def has_in_progress_umbrella_orchestration(team_name: str) -> bool:
     return only suppresses when we can positively identify an umbrella;
     silent over-suppression of legitimate teardowns is the failure mode
     this posture avoids.
+
+    Cost class: CHEAPER than count_active_tasks. Short-circuits on the
+    first umbrella match (return True immediately) and performs no
+    team-config / agentType lookup — pure subject-prefix string
+    comparison against an 8-element tuple. count_active_tasks must
+    iterate every lifecycle-relevant task AND read team config once
+    per call (via `_classify_owner`). Cheap-first ordering at both
+    Gate 6 sites (Tier-1 Gate 6 BEFORE Gate 3 in teardown_request_
+    emitter.py; Tier-2 Gate 6 BEFORE Clause 4 in wake_lifecycle_
+    emitter._maybe_write_teammate_teardown_marker) is justified by
+    the cost asymmetry, not by equal pricing.
     """
     for task in iter_team_task_jsons(team_name):
         if task.get("status") != "in_progress":
             continue
-        subject = task.get("subject") or ""
+        subject = task.get("subject")
         if not isinstance(subject, str):
             continue
         if not any(subject.startswith(p) for p in UMBRELLA_SUBJECT_PREFIXES):

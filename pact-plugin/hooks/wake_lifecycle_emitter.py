@@ -185,7 +185,7 @@ _MAX_PAYLOAD_BYTES = 1024 * 1024
 # unconditional MUST under the unconditional-directive discipline —
 # over-arming is benign because the skill body is CronList-exact-
 # suffix idempotent. The Teardown directive uses a two-MUST sequence:
-# the first MUST binds verification (CronList + check for active
+# the first MUST binds verification (CronList + TaskList for active
 # teammate task entries) as a prerequisite; the second MUST binds the
 # stop-pending-scan invocation conditional on verification outcome
 # via "if so". This pairing addresses OPERATIONAL-LULL-AT-PHASE-
@@ -211,7 +211,7 @@ _ARM_DIRECTIVE = (
 _TEARDOWN_DIRECTIVE = (
     'Active-task count observed at zero. '
     'You MUST verify no specialist work is in flight '
-    '(CronList + check for active teammate task entries) '
+    '(CronList + TaskList for active teammate task entries) '
     'and, if so, then you MUST invoke '
     'Skill("PACT:stop-pending-scan") before your next tool call. '
     'This is a non-negotiable lifecycle gate.'
@@ -745,12 +745,20 @@ def _maybe_write_teammate_teardown_marker(
         # COUNT-BASED-LIFECYCLE-INVARIANT-MISFIRE parent class). Suppress
         # the Teardown marker when an umbrella orchestration task is still
         # in_progress on the team — the 1->0 active-task count is a
-        # phase-transition lull, NOT genuine session end. Layered as an
+        # phase-transition lull, NOT genuine session end.
+        # Numbering rationale: "Gate 6" is a grep-anchor symmetric with
+        # the Tier-1 site at teardown_request_emitter.py; it does NOT
+        # imply monotonic order of evaluation. Here it is layered as an
         # orthogonal safety net on top of the 6-clause structure (no
         # renumbering) so the cheap path-safety/tool-name/terminal-status
         # clauses (1-3) short-circuit first; Gate 6 runs BEFORE the
-        # equally-priced count_active_tasks iteration (Clause 4) and
-        # the disk-reading is_self_complete_exempt witness (Clause 6).
+        # count_active_tasks iteration (Clause 4) and the disk-reading
+        # is_self_complete_exempt witness (Clause 6). See the Tier-1
+        # comment in teardown_request_emitter.py for the matching
+        # grep-anchor convention. Cheap-first ordering before Clause 4
+        # is justified — has_in_progress_umbrella_orchestration is
+        # CHEAPER than count_active_tasks (short-circuits on first
+        # umbrella match; no team-config lookup), not equally-priced.
         if has_in_progress_umbrella_orchestration(team_name):
             return
 
