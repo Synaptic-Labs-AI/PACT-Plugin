@@ -497,6 +497,86 @@ Whole-commit revert is still correct for commits that ship source-only (or tests
 
 ---
 
+## Testing Craft Patterns
+
+Testing-craft patterns that surface during PACT review cycles and reach the codification threshold (≥2 instances, multiple specialists, or explicit reviewer flag) live here. Each rule names a specific failure mode in how tests, fixtures, or HANDOFFs are constructed — and the canonical mitigation that closes the gap. The patterns compose: a single PACT cycle can hit all three independently, and each cites the sister patterns it interacts with through their pact-memory IDs.
+
+### Author-blindness in HANDOFF arithmetic
+
+When a HANDOFF author asserts a cardinality, set-membership, or fidelity claim about their own work — commit-test counts, suppression-cardinality matrices, SSOT-fidelity tallies — the claim often contains an arithmetic or set-shape error that the author does NOT catch in self-review. **Author-bias** on one's own work suppresses recounting: the asserting act feels equivalent to the verifying act, so the recount never happens. The **numeric pre-verification illusion** is stronger on arithmetic claims than on prose claims because numbers feel pre-verified at the moment they are written down.
+<!-- planning-artifact-exempt: pact-memory ID, content-addressable via secretary / PACT:pact-memory skill, not a commit SHA -->
+Canonical body: pact-memory `d319e8e1`.
+
+#### Discriminator vs the ASPIRATIONAL-HANDOFF sister pattern
+
+<!-- planning-artifact-exempt: pact-memory ID, content-addressable via secretary / PACT:pact-memory skill, not a commit SHA -->
+AUTHOR-BLINDNESS and **ASPIRATIONAL-HANDOFF** (pact-memory `0bc2c78d`) are sister failure modes of HANDOFF-author bias but differ in the source-of-belief failure they expose:
+
+- **ASPIRATIONAL-HANDOFF**: the author claims X-as-verified when X was actually believed-from-the-dispatch-prompt — a source-of-belief failure. The author never empirically checked X.
+- **AUTHOR-BLINDNESS**: the author claims X-as-verified when the author DID empirically check X but mis-counted under author-bias — a counting-fidelity failure. The empirical work happened; the recount didn't.
+
+Distinguishing the two matters because the mitigations differ: ASPIRATIONAL-HANDOFF wants a "is this from the prompt or from your verification?" challenge; AUTHOR-BLINDNESS wants a literal cross-stream recount of the cardinality claim.
+
+#### Worked example — three instances
+
+- **Tier-2 SSOT-fidelity miscount**: a Tier-2 SSOT-fidelity check miscounted prefix-tuple cardinality in the author's own HANDOFF — the empirical scan happened, but the recount step that would have caught the off-by-one was skipped because the asserting act felt sufficient.
+- **Suppression-cardinality narrowing**: a fixture mis-characterization claimed double-suppression that empirical retest narrowed to single-suppression — the author had run the suppression check but the cardinality summary line in the HANDOFF was written from memory of the intended shape, not from the actual run.
+- **Cross-pass cluster miscount**: a review-HANDOFF re-counted a test-emission tally and surfaced two author-blind miscounts in the SAME specialist's prior implementation HANDOFF — confirming the bias is stream-role-contextual (one specialist switching from implementation-role to review-role catches their own prior miscount only when the role-switch is explicit).
+
+#### Canonical mitigation
+
+<!-- planning-artifact-exempt: pact-memory ID, content-addressable via secretary / PACT:pact-memory skill, not a commit SHA -->
+Cross-stream verification (pact-memory `f3f3d093`) MUST run on every cardinality, set-membership, fidelity, or structural-shape claim in a HANDOFF. The recount is performed by an agent operating in an explicitly different role-context from the HANDOFF author — one of:
+
+- **Test-author** running review-role checks on their own implementation HANDOFF (same specialist OK if the role-switch is explicit).
+- **Fix-builder** recounting the test-engineer's HANDOFF cardinality before integrating the fix.
+- **Review-test-engineer-who-found-but-did-not-fix** recounting the fix-builder's claim before sign-off.
+- **Fresh agent** with no prior context in the cycle, recounting from the dispatch artifact and the live tree.
+
+The loop closes when the recount is done literally — re-run the count, re-list the set, re-derive the fidelity tally from the source — not by re-asserting confidence in the HANDOFF's number. AUTHOR-BLINDNESS is the problem; cross-stream verification is the treatment.
+
+#### Detection signature
+
+HANDOFFs that assert cardinality matrices, set-membership tallies, or fidelity counts about the author's own work are at elevated risk. The shape "I verified N of M cases" — especially when N and M are small integers — is the highest-yield surface for a cross-stream recount.
+
+### count_active_tasks fixture-completeness audit
+
+Any test asserting on `count_active_tasks` boundary conditions (`count == 0` vs `count == 1` vs `count == N`) MUST either register all task-owners in the fixture's `team_config.members[]` so the count reflects the intended suppression mechanism, or explicitly assert on the unknown-owner-exclusion path with a docstring comment naming the exclusion as the load-bearing mechanism being tested.
+
+`count_active_tasks` filters by two conjoined conditions: `status == in_progress` AND `owner` is a registered teammate. Tasks with `owner=null` or `owner=<unregistered name>` are **silently excluded** from the count. An under-registered fixture passes a `count == 0` assertion for the wrong reason — the **wrong-reason green** is that the count reads 0 because no owners matched, not because the suppression-or-aggregation mechanism the test intended to exercise actually fired.
+
+#### Worked example — fixture mis-registration
+
+An SSOT-fidelity test passed because of unknown-owner exclusion rather than umbrella-suppression: the fixture's `team_config.members[]` under-registered the task-owners the test exercised, so the `count == 0` assertion held on the exclusion path while the umbrella-suppression mechanism the test was supposed to falsify remained un-exercised. A separate fixture under-registered task-owners in a way that masked which suppression mechanism was load-bearing in the assertion — the test stayed green through a change that should have produced a cardinality shift.
+
+#### Canonical mitigation
+
+**Register all task-owners** — default discipline: list the task-owners the test exercises in `team_config.members[]` so the count reflects the intended suppression mechanism. If the test is intentionally exercising the exclusion path, name it in the test docstring AND verify the assertion would hold without the exclusion (so the suppression mechanism stands on its own). The "would hold without the exclusion" check is the load-bearing verification — without it, the test is indistinguishable from a fixture-completeness defect.
+
+#### Detection signature
+
+Tests asserting on `count_active_tasks` boundary conditions (`count == 0`, `count == 1`, `count == N`) where the fixture's `team_config.members[]` lists only a subset of the task-owners the test exercises are at elevated risk. The shape "count assertion + sparsely-constructed `members[]`" is the highest-yield surface for a fixture-completeness audit.
+
+### Sibling-file convention for parametrized noise-budget regression
+
+Parametrized noise-budget regression tests — N×M matrices counting events across simulated scenarios — MUST live in a sibling test file named `test_{phase-domain}_noise_budget.py`, never packed into the primary phase-specific test files.
+
+Primary phase-specific test files count specific event types and require clean fire-counts to assert on Tier-N cardinality. Mixing them with parametrized N×M matrix tests reduces **signal-to-noise** on the cardinality assertions because the parametrized matrix's setup/teardown noise drowns out the primary file's tight fire-count assertions. **Fire-count cleanliness** is the property that lets a primary test file's `assert events.count == N` reliably localize a regression — once a parametrized matrix sits alongside, the same assertion has to defend against matrix-induced cross-contamination.
+
+#### Worked example — sibling-file split
+
+A PACT-internal regression added the sibling test file `pact-plugin/tests/test_phase_lull_noise_budget.py` alongside a phase-specific test family, splitting the N-cell parametrized cardinality matrix out of the primary file. The split preserved the primary file's fire-count assertions at their original tightness while letting the matrix expand independently for new scenarios.
+
+#### Canonical mitigation
+
+**Sibling-file split** — default discipline: when adding a parametrized noise-budget regression test for a phase-specific test family, create a sibling file named `test_{phase-domain}_noise_budget.py` rather than appending to the primary file. Cross-reference the primary phase-specific file in the sibling's docstring so a future reader can find the family. When 3+ instances of HANDOFF-cardinality-matrix patterns cluster in a single review cycle, the cluster suggests a HANDOFF-shape risk-factor specific to phase-lull tests with N-cell parametrized cardinality matrices — pair these tests with cross-stream-verifier review (see Author-blindness above) at elevated priority.
+
+#### Detection signature
+
+Phase-specific test files that already count specific event types AND gain a parametrized N×M matrix test for the same event-type are at elevated risk. The shape "tight fire-count assertion in the same file as a parametrized matrix" is the highest-yield surface for the sibling-file split.
+
+---
+
 ## Detailed References
 
 For comprehensive testing guidance:

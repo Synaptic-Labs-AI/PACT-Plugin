@@ -413,6 +413,25 @@ module.exports = { UserController };
 
 ---
 
+## Interpreting design-doc optionals
+
+When a design doc spec'd an OPTIONAL cross-link sentence, closing paragraph, or sister-section reference, the CODE author MUST evaluate the optional content's logical relationship to the preceding paragraph before deciding how to render it.
+
+- **Strengthening clause** — the optional content reinforces, qualifies, or extends the directive in the preceding paragraph (e.g., a cross-link that tells the reader where the next degree of detail lives). FOLD it inline into the preceding paragraph for tighter prose flow.
+- **Discursive observation** — the optional content introduces a new framing, raises a separate point, or pivots to an adjacent concern. KEEP it as a standalone paragraph.
+
+The judgment lives at write time: read the preceding paragraph and ask "does this optional content add to that paragraph's directive, or does it start a new one?" Strengthening = fold; discursive = keep.
+
+### Detection signature
+
+Design-doc phrasings like "CODE may include or drop", "optional closing cross-link", or "optional discursive paragraph" mark the entry condition. Apply the strengthening-vs-discursive judgment before composing the section; do not default to either form mechanically.
+
+### Worked example — fold-in cross-link
+
+In `pact-plugin/skills/pact-testing-strategies/SKILL.md`, the section "Sibling-file convention for parametrized noise-budget regression" closes its canonical-mitigation paragraph with an inline cross-reference to the sister "Author-blindness in HANDOFF arithmetic" section rather than a standalone closing paragraph. The cross-link functions as a strengthening clause on the elevated-priority directive that precedes it — telling the reader where the pair-with-cross-stream-verifier rule lives — so it folds into the same paragraph instead of opening a new one. The fold preserves the cross-reference content while keeping the canonical mitigation a single tight directive.
+
+---
+
 ## Code Quality Checklist
 
 Before completing CODE phase:
