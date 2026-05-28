@@ -269,11 +269,16 @@ class TestAuditAnchorRegressionGuards:
         assert "Idempotent" in emitter._ARM_DIRECTIVE
 
     def test_teardown_directive_constant_unchanged(self):
+        # Retired the "No active teammate work remaining" + "Best-effort"
+        # literal pins per minimal-directive principle (CLAUDE.md pin
+        # "Minimal directives are better directives", 2026-05-28). The
+        # decorative preamble pre-concluded the very question the
+        # verify-first defense answers; the tolerance-clause prose added
+        # tokens without changing LLM behavior. Skill-invocation
+        # byte-identity is the load-bearing contract and stays pinned.
         sys.path.insert(0, str(HOOK_DIR))
         import wake_lifecycle_emitter as emitter
-        assert "No active teammate work remaining" in emitter._TEARDOWN_DIRECTIVE
         assert 'Skill("PACT:stop-pending-scan")' in emitter._TEARDOWN_DIRECTIVE
-        assert "Best-effort" in emitter._TEARDOWN_DIRECTIVE
 
 
 # ---------- Parallel TaskUpdate-side test for parity ----------

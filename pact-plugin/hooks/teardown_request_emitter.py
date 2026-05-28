@@ -32,6 +32,14 @@ AND
 (1)  hook_event_name == "TaskCompleted" OR (fallback) disk-read task
      status == "completed" — primary transition signal + fallback
 AND
+(6)  NOT has_in_progress_umbrella_orchestration(team_name) —
+     OPERATIONAL-LULL-AT-PHASE-BOUNDARY suppression. Evaluated BEFORE
+     Gate 3 so the umbrella-orchestration short-circuit fires before
+     the count_active_tasks iteration, which is the structurally
+     load-bearing ordering — Gate 3's 0 reading IS the misfire signal
+     during the lull window. See Gate 6 audit-anchor comment for the
+     class taxonomy and parent-class see-also.
+AND
 (2)  the per-(team, task_id) sidecar O_EXCL marker does not yet exist
      — idempotency across Stop-sweep secondary firings + retries
 AND
@@ -70,6 +78,28 @@ Gate 2 — Sidecar O_EXCL marker idempotency:
   trading one rare write-failure event loss against repeated duplicate
   emission (see agent_handoff_emitter.py:313-321 for the empirical
   basis: up to 37x per task without the marker).
+
+Gate 6 — OPERATIONAL-LULL umbrella-orchestration suppression
+(introduced for #842):
+- has_in_progress_umbrella_orchestration(team_name) returns True iff
+  the team has at least one in_progress task with a canonical
+  umbrella-orchestration subject prefix (UMBRELLA_SUBJECT_PREFIXES at
+  shared/wake_lifecycle.py). Evaluated BEFORE Gate 3 because the
+  OPERATIONAL-LULL misfire IS a 0 reading at Gate 3 during the brief
+  window between phase-N specialists wrapping up and phase-(N+1)
+  specialists arriving. Without Gate 6, the 0 reading triggers a
+  spurious teardown_request even though the umbrella signals live
+  orchestration.
+- Numbering rationale: Gate 6 is numbered for grep-anchor symmetry
+  with the Tier-2 mirror at wake_lifecycle_emitter.py
+  (_maybe_write_teammate_teardown_marker Clause 6 sibling); the
+  numbering does NOT reflect a monotonic order of evaluation. Actual
+  evaluation order in this hook's `main()` is 0 -> 1 -> 6 -> 3 -> 4
+  -> 2 (Gate 2's marker claim is evaluated LAST so only fires that
+  would otherwise emit consume a marker). Treat the "Gate N" labels
+  as stable identifiers for cross-file reference, not as a sequence
+  diagram. See `wake_lifecycle_emitter.py` for the Tier-2 mirror's
+  matching grep-anchor convention.
 
 Gate 3 — 1->0 active-task transition:
 - count_active_tasks(team_name) excludes signal-tasks (blocker /
@@ -111,6 +141,7 @@ from shared.session_journal import append_event, make_event
 from shared.task_utils import read_task_json
 from shared.wake_lifecycle import (
     count_active_tasks,
+    has_in_progress_umbrella_orchestration,
     has_same_teammate_continuation,
     is_lead_context,
 )
@@ -341,6 +372,33 @@ def main() -> None:
             if task_data.get("status") not in ("completed", "deleted"):
                 print(_SUPPRESS_OUTPUT)
                 sys.exit(0)
+
+        # Gate 6 — OPERATIONAL-LULL-AT-PHASE-BOUNDARY suppression.
+        # Audit-anchor class taxonomy:
+        #   Child class: OPERATIONAL-LULL-AT-PHASE-BOUNDARY — the brief
+        #     window between phase-N specialists wrapping up and
+        #     phase-(N+1) specialists arriving (8-30s per Phase A
+        #     diagnostic on session pact-450f3d63). During this window
+        #     count_active_tasks legitimately reaches 0 (lead-owned
+        #     umbrella is excluded by the teammate-owner filter); Gate
+        #     3's 0 reading misfires a phantom 1->0 transition signal.
+        #   Parent class (see also): COUNT-BASED-LIFECYCLE-INVARIANT-
+        #     MISFIRE — hypothesized at N=2 instances (this + #843's
+        #     FIRST-OBSERVABLE-WRITE). The shared shape: hook reads an
+        #     aggregate count to derive a transition signal, but the
+        #     count is briefly degenerate at protocol boundaries.
+        # Mitigation pattern: gate the count-reading BEFORE the count
+        # itself with a structural-signature predicate that detects the
+        # protocol's still-live state. Here:
+        # has_in_progress_umbrella_orchestration reads the umbrella
+        # task's signature (subject prefix from UMBRELLA_SUBJECT_PREFIXES
+        # at shared/wake_lifecycle.py) — signature-based, NOT owner-
+        # based, because umbrella tasks have owner=null on disk.
+        # Evaluated BEFORE Gate 3 because the misfire IS Gate 3's 0
+        # reading during the lull window.
+        if has_in_progress_umbrella_orchestration(team_name):
+            print(_SUPPRESS_OUTPUT)
+            sys.exit(0)
 
         # Gate 3 — 1->0 active-task transition. count_active_tasks
         # excludes signal-tasks and self-complete-exempt agent owners

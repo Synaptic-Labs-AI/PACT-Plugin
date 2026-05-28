@@ -160,6 +160,7 @@ from shared.task_utils import read_task_json
 from shared.tool_response import extract_tool_response
 from shared.wake_lifecycle import (
     count_active_tasks,
+    has_in_progress_umbrella_orchestration,
     is_lead_context,
 )
 from shared.wake_lifecycle import _classify_owner
@@ -174,14 +175,31 @@ _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 _MAX_PAYLOAD_BYTES = 1024 * 1024
 
 # Directive prose — verbatim text emitted via additionalContext on
-# transitions. Imperative voice; references the canonical command-pair
-# slugs `PACT:start-pending-scan` (Arm role) and `PACT:stop-pending-scan`
+# transitions. References the canonical command-pair slugs
+# `PACT:start-pending-scan` (Arm role) and `PACT:stop-pending-scan`
 # (Teardown role); idempotency / best-effort clauses prevent the lead
-# from adding their own conditional self-diagnosis (per the
-# unconditional-directive discipline: emit identical prose every fire —
-# the orchestrator is not authorized to second-guess directive
-# applicability). Idempotency is enforced in the skill body via
-# CronList exact-suffix-match; there is no hook-side STATE_FILE.
+# from adding their own conditional self-diagnosis.
+#
+# Voice asymmetry (Opt-3 additive defense layer, paired with Gate 6
+# at both teardown emission sites): the Arm directive uses a single
+# unconditional MUST under the unconditional-directive discipline —
+# over-arming is benign because the skill body is CronList-exact-
+# suffix idempotent. The Teardown directive uses a two-MUST sequence:
+# the first MUST binds verification (CronList + TaskList for active
+# teammate task entries) as a prerequisite; the second MUST binds the
+# stop-pending-scan invocation conditional on verification outcome
+# via "if so". This pairing addresses OPERATIONAL-LULL-AT-PHASE-
+# BOUNDARY residual fires that escape Gate 6: when next-phase
+# specialists are arriving within 8–30s, the verify clause forces
+# the orchestrator to confirm absence of in-flight work before
+# tearing down the scan. The "non-negotiable lifecycle gate" label
+# stands as a standalone unconditional sentence — both MUST bindings
+# and the label survive the AntiSofteningGuard substring assertions
+# (institutional pins from #760 + #738). Preamble is factual signal
+# ("Active-task count observed at zero"), NOT a pre-concluded "no
+# work remaining" — the latter would contradict the verify-clause's
+# premise. Idempotency is enforced in the skill body via CronList
+# exact-suffix-match; there is no hook-side STATE_FILE.
 _ARM_DIRECTIVE = (
     'Active teammate work detected. '
     'You MUST invoke Skill("PACT:start-pending-scan") before your next '
@@ -191,12 +209,12 @@ _ARM_DIRECTIVE = (
 )
 
 _TEARDOWN_DIRECTIVE = (
-    'No active teammate work remaining. '
-    'You MUST invoke Skill("PACT:stop-pending-scan") before your next '
-    'tool call to delete the /PACT:scan-pending-tasks cron. '
-    'This is a non-negotiable lifecycle gate. '
-    'Best-effort — tolerates a cron that was already auto-deleted '
-    '(7-day expiry) or never registered.'
+    'Active-task count observed at zero. '
+    'You MUST verify no specialist work is in flight '
+    '(CronList + TaskList for active teammate task entries) '
+    'and, if so, then you MUST invoke '
+    'Skill("PACT:stop-pending-scan") before your next tool call. '
+    'This is a non-negotiable lifecycle gate.'
 )
 
 # Tools accepted by _decide_directive. The hooks.json matcher prunes
@@ -720,6 +738,28 @@ def _maybe_write_teammate_teardown_marker(
 
         # Clause 3: terminal-status transition.
         if not _is_terminal_status_update(input_data):
+            return
+
+        # Gate 6 (Tier-2 mirror — symmetric to teardown_request_emitter.py
+        # Gate 6; OPERATIONAL-LULL-AT-PHASE-BOUNDARY suppression; see also
+        # COUNT-BASED-LIFECYCLE-INVARIANT-MISFIRE parent class). Suppress
+        # the Teardown marker when an umbrella orchestration task is still
+        # in_progress on the team — the 1->0 active-task count is a
+        # phase-transition lull, NOT genuine session end.
+        # Numbering rationale: "Gate 6" is a grep-anchor symmetric with
+        # the Tier-1 site at teardown_request_emitter.py; it does NOT
+        # imply monotonic order of evaluation. Here it is layered as an
+        # orthogonal safety net on top of the 6-clause structure (no
+        # renumbering) so the cheap path-safety/tool-name/terminal-status
+        # clauses (1-3) short-circuit first; Gate 6 runs BEFORE the
+        # count_active_tasks iteration (Clause 4) and the disk-reading
+        # is_self_complete_exempt witness (Clause 6). See the Tier-1
+        # comment in teardown_request_emitter.py for the matching
+        # grep-anchor convention. Cheap-first ordering before Clause 4
+        # is justified — has_in_progress_umbrella_orchestration is
+        # CHEAPER than count_active_tasks (short-circuits on first
+        # umbrella match; no team-config lookup), not equally-priced.
+        if has_in_progress_umbrella_orchestration(team_name):
             return
 
         # Clause 4: 1->0 active-task transition.

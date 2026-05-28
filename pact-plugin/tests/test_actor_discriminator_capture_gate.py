@@ -768,17 +768,28 @@ class TestDirectiveByteIdentityOnPactSkillLiterals:
             f"got {emitter._TEARDOWN_DIRECTIVE!r}"
         )
 
-    def test_both_directives_reference_scan_pending_tasks_cron_slug(self):
-        """Both directives reference the cron's slug
-        `/PACT:scan-pending-tasks` (Arm: "if a /PACT:scan-pending-tasks
-        cron is already registered"; Teardown: "to delete the
-        /PACT:scan-pending-tasks cron"). The slug literal is the
-        CronList match key; drift here would break the idempotency
-        check in the skill body.
+    def test_arm_directive_references_scan_pending_tasks_cron_slug(self):
+        """The Arm directive references the cron's slug
+        `/PACT:scan-pending-tasks` ("if a /PACT:scan-pending-tasks
+        cron is already registered"). The slug literal is the
+        CronList match key for the Arm-side idempotency check;
+        drift here would break that check in the skill body.
+
+        Split from the prior two-directive assertion per the minimal-
+        directive principle (CLAUDE.md pin "Minimal directives are
+        better directives", 2026-05-28). The Teardown half of the
+        original assertion was retired alongside the C9 prose-
+        softening commit because the new Teardown directive omits
+        the cron-slug reference — the verify-first formulation
+        delegates the slug lookup to the
+        Skill("PACT:stop-pending-scan") body itself rather than
+        inlining it in the directive. The Arm directive STILL
+        carries the slug (idempotency check happens in the Arm
+        skill body, not the Teardown skill body) so this half of
+        the original byte-identity contract survives unchanged.
         """
         emitter = self._import_emitter()
         assert "/PACT:scan-pending-tasks" in emitter._ARM_DIRECTIVE
-        assert "/PACT:scan-pending-tasks" in emitter._TEARDOWN_DIRECTIVE
 
 
 # =============================================================================
