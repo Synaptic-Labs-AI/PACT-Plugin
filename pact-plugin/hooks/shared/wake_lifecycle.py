@@ -138,14 +138,27 @@ _SIGNAL_TASK_TYPES = ("blocker", "algedonic")
 # represent in-flight work).
 _ACTIVE_STATUSES = ("pending", "in_progress")
 
-# Canonical umbrella-orchestration subject-prefix tuple. Every task
-# created by /PACT:orchestrate, /PACT:comPACT, /PACT:peer-review, and the
-# umbrella phase TaskCreates carries one of these prefixes. Empirically
-# verified at Phase A diagnostic (2026-05-27) against on-disk
-# ~/.claude/tasks/{team}/*.json: umbrella tasks have `owner: null` (or no
-# owner field), so signature-based detection is the only available
-# discriminator. The constant lives here (production code) rather than
-# under tests/fixtures/ because hook subprocesses do not have tests/ on
+# Canonical umbrella-orchestration subject-prefix tuple. Covers every
+# workflow that creates a lead-owned umbrella task whose lifecycle
+# spans phase-boundary lulls during which count_active_tasks
+# legitimately reaches 0:
+#   /PACT:orchestrate         -> "Feature: " + phase prefixes
+#                                ("PREPARE: ", "ARCHITECT: ", "CODE: ",
+#                                 "TEST: ")
+#   /PACT:plan-mode           -> "Plan: " (+ "Plan (revised): " on
+#                                resubmission)
+#   /PACT:peer-review         -> "Review: "
+# Empirically verified against on-disk ~/.claude/tasks/{team}/*.json:
+# umbrella tasks have `owner: null` (or no owner field), so signature-
+# based detection (subject prefix) is the only available discriminator.
+# /PACT:comPACT is NOT in scope — it uses `{specialist-name}: ` prefix
+# at the outer task level (the user's TaskCreate IS the umbrella but
+# carries a user-provided subject with no fixed prefix); comPACT mode
+# doesn't have phase-transition lulls so Gate 6 coverage isn't needed
+# there.
+#
+# The constant lives here (production code) rather than under
+# tests/fixtures/ because hook subprocesses do not have tests/ on
 # sys.path at runtime; tests/fixtures/disk_shapes.py re-exports the
 # tuple so test fixtures can import a single symbol that is provably
 # identical to the production constant by Python import semantics.
@@ -165,6 +178,7 @@ UMBRELLA_SUBJECT_PREFIXES = (
     "ARCHITECT: ",
     "CODE: ",
     "TEST: ",
+    "Review: ",
 )
 
 
@@ -804,6 +818,22 @@ def has_in_progress_umbrella_orchestration(team_name: str) -> bool:
     phase-boundary indicator. (The signal-task carve-out is structural
     in the count_active_tasks tally too; mirroring it here keeps the
     Gate 6 short-circuit consistent with the Gate 3 count.)
+
+    Non-mirrored carve-outs (intentional asymmetry with
+    `count_active_tasks`'s `_lifecycle_relevant` filter):
+      - WAKE_EXCLUDED_AGENT_TYPES agentType filter: vacuous today (set
+        is empty); even if populated, would not change umbrella
+        detection since umbrellas have `owner: null` and no agentType
+        resolves.
+      - Teammate-owner filter: intentionally NOT applied here.
+        `_lifecycle_relevant` excludes unowned umbrella tasks at its
+        step 4 — that's the exact umbrellas Gate 6 needs to DETECT.
+        Mirroring symmetrically would re-introduce the bug Gate 6
+        exists to fix.
+    Gate 6 and Gate 3 answer different questions — "is orchestration
+    live?" vs "is there active teammate work?" — so the partial-
+    symmetry is by design. Do NOT add the teammate-owner filter to
+    "preserve symmetry"; it would silently break umbrella detection.
 
     Args:
         team_name: Team name for scoped task lookup. Threaded through to

@@ -52,11 +52,39 @@ class TestHasInProgressUmbrellaOrchestration:
 
     def test_umbrella_present_returns_true(self, tmp_path, monkeypatch):
         """Cell 1: an in_progress umbrella task with a canonical prefix
-        is present → True (suppress teardown)."""
+        is present → True (suppress teardown). Uses the make_umbrella_task
+        default ('Feature: '); per-prefix sweep below extends this to
+        the full SSOT tuple."""
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         team = "team-cell1"
         _write_task(tmp_path, team, make_umbrella_task("U1"))
         assert wl.has_in_progress_umbrella_orchestration(team) is True
+
+    @pytest.mark.parametrize("prefix", list(UMBRELLA_SUBJECT_PREFIXES))
+    def test_umbrella_present_returns_true_for_each_prefix(
+        self, tmp_path, monkeypatch, prefix,
+    ):
+        """Cell 1 parametrized sweep: every prefix in the SSOT tuple
+        produces True. Drift-resistant by construction — when a new
+        prefix is added to UMBRELLA_SUBJECT_PREFIXES, this test
+        automatically extends to cover it. No test-side update needed
+        beyond the SSOT addition.
+
+        Cardinality contract: len(UMBRELLA_SUBJECT_PREFIXES) parametrized
+        cells, all expected True. If the helper drifts to special-case
+        a prefix (e.g., hardcoded 'Feature: ' check sneaks in), the
+        mismatched prefix flips RED.
+        """
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        team = f"team-prefix-{prefix.strip(': ').lower().replace(' ', '-').replace('(', '').replace(')', '')}"
+        _write_task(
+            tmp_path, team,
+            make_umbrella_task("U1", subject_prefix=prefix),
+        )
+        assert wl.has_in_progress_umbrella_orchestration(team) is True, (
+            f"prefix {prefix!r} from UMBRELLA_SUBJECT_PREFIXES SSOT did "
+            f"not produce True; helper may special-case some prefixes."
+        )
 
     def test_umbrella_absent_returns_false(self, tmp_path, monkeypatch):
         """Cell 2: no tasks present at all → False (emit teardown).
@@ -156,9 +184,19 @@ class TestUmbrellaPrefixesContract:
         assert UMBRELLA_SUBJECT_PREFIXES is wl.UMBRELLA_SUBJECT_PREFIXES
 
     def test_tuple_contents_are_locked_per_plan(self):
-        """Pin the exact 7-element shape per plan L133-141. Adding /
-        removing a prefix is a contract change that requires updating
-        both the production constant AND this test in the same PR."""
+        """Pin the exact 8-element shape (plan L133-141 baseline 7 +
+        `Review: ` added per B1 peer-review-prefix-coverage remediation).
+        Adding / removing a prefix is a contract change that requires
+        updating both the production constant AND this test in the same
+        commit per phantom-green discipline.
+
+        The `Review: ` prefix corresponds to `/PACT:peer-review` umbrella
+        tasks; without it, peer-review orchestrations would drop into
+        the OPERATIONAL-LULL phase-lull bug class (Gate 6 would not
+        match `Review: feat-...` subjects). The peer-review phase-lull
+        regression fixture lives in test_teardown_request_emitter_phase_
+        lull.py::TestV9PeerReviewPhaseLullSuppression.
+        """
         assert wl.UMBRELLA_SUBJECT_PREFIXES == (
             "Feature: ",
             "Plan: ",
@@ -167,6 +205,7 @@ class TestUmbrellaPrefixesContract:
             "ARCHITECT: ",
             "CODE: ",
             "TEST: ",
+            "Review: ",
         )
 
 

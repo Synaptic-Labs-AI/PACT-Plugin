@@ -699,6 +699,106 @@ class TestV8MultiCompletionUnderUmbrella:
         )
 
 
+# =============================================================================
+# V9 — Peer-review phase-lull: `Review: ` umbrella prefix coverage. The
+# `/PACT:peer-review` orchestration creates an umbrella task with subject
+# `Review: <topic>`. Without `Review: ` in UMBRELLA_SUBJECT_PREFIXES, the
+# Gate-6 predicate misses the umbrella and teardown_request fires during
+# the peer-review phase-transition lull — exact OPERATIONAL-LULL class
+# bug recurring for a different prefix.
+#
+# Counter-test-by-revert: remove `'Review: '` from UMBRELLA_SUBJECT_PREFIXES
+# ONLY → V9 RED; V1+V6+V8 stay GREEN (they use other prefixes). Cardinality
+# {1 RED on the peer-review-specific test; 7-prefix sweep in
+# test_shared_wake_lifecycle.py also RED at the 'Review: ' parametrized
+# cell, total {2 RED}}. Confirms `Review: ` is the ONLY suppressor in this
+# fixture and the predicate honors the SSOT tuple.
+# =============================================================================
+
+
+class TestV9PeerReviewPhaseLullSuppression:
+    """V9 — peer-review phase-lull: umbrella with `Review: ` prefix.
+    Mirrors V6's structural shape (umbrella + completed teammate, no
+    Task B) but uses the peer-review prefix added per B1 remediation.
+
+    Why a dedicated class instead of extending V1/V6: the bug class
+    (OPERATIONAL-LULL) is general but the specific prefix-coverage gap
+    is peer-review-orchestration-specific. A grep for
+    'TestV9PeerReviewPhaseLull' from a future investigator surfaces the
+    exact provenance — peer-review was the bug-class instance that
+    surfaced the prefix-coverage discipline."""
+
+    def test_v9_teardown_suppressed_during_peer_review_phase_lull(self, tmp_path):
+        """V9 phase-lull: `Review: <topic>` umbrella in_progress +
+        completed teammate task (e.g., a reviewer's TEACHBACK or review
+        deliverable). Post-B1, Gate 6 short-circuits via the
+        `'Review: '` prefix; teardown directive absent; no
+        teardown_request event journaled."""
+        home = tmp_path / "home"
+        home.mkdir()
+        team = "team-phase-lull-v9"
+        sid, pdir = _setup_lead_session(home, team)
+
+        # Peer-review umbrella in_progress.
+        _write_task(home, team, make_umbrella_task(
+            "U9", subject_prefix="Review: ", subject_suffix="v9 peer-review",
+            status="in_progress",
+        ))
+        # Just-completed reviewer task (e.g., test-engineer review handoff).
+        _write_task(home, team, make_specialist_task(
+            "T9", owner="test-engineer",
+            subject="test-engineer: review v9 phase-lull",
+            status="completed",
+        ))
+
+        rc, out, err = _run_emitter_subprocess(
+            json.dumps(_lead_taskcompleted_payload(team, "T9")),
+            env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+        )
+        assert rc == 0, f"hook must exit 0; stderr={err}"
+        assert not _teardown_directive_in_stdout(out), (
+            "V9 phase-lull: teardown directive must be suppressed when "
+            "a `Review: ` umbrella is in_progress. If this fires, "
+            "either `'Review: '` was removed from UMBRELLA_SUBJECT_PREFIXES "
+            "(B1 regression) or the predicate dropped its prefix-match "
+            "for this entry specifically."
+        )
+
+    def test_v9_teardown_request_not_journaled_during_peer_review_phase_lull(
+        self, tmp_path,
+    ):
+        """V9 journal-side pin paired with the directive-emission pin.
+        Mirrors V1's journal-pin pattern — the journal write is the
+        falsifiable primitive consumed by the Tier-4 cron-staleness
+        fallback; a partial-suppression bug that skips the directive
+        but writes the journal event would trigger phantom Teardown
+        emissions later via cron replay."""
+        home = tmp_path / "home"
+        home.mkdir()
+        team = "team-phase-lull-v9-journal"
+        sid, pdir = _setup_lead_session(home, team)
+
+        _write_task(home, team, make_umbrella_task(
+            "U9", subject_prefix="Review: ", subject_suffix="v9 journal pin",
+            status="in_progress",
+        ))
+        _write_task(home, team, make_specialist_task(
+            "T9", owner="test-engineer",
+            subject="test-engineer: review v9 journal",
+            status="completed",
+        ))
+
+        _run_emitter_subprocess(
+            json.dumps(_lead_taskcompleted_payload(team, "T9")),
+            env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+        )
+        events = _read_journal_events(home, pdir, sid, event_type="teardown_request")
+        assert events == [], (
+            f"V9 phase-lull: no teardown_request event must be journaled "
+            f"under a `Review: ` umbrella in_progress; got {events!r}"
+        )
+
+
 def _build_multi_phase_fixture(
     tmp_path, *, n_phases: int, n_specialists_per_phase: int,
 ):
