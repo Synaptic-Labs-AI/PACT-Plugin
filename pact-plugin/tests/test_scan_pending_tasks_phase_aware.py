@@ -404,3 +404,34 @@ class TestTeardownDirectiveOpt3RuntimeProperties:
             f"routes it into lifecycle-gate handling rather than "
             f"advisory deferral. got: {directive!r}"
         )
+
+    def test_opt3_directive_carries_verify_first_ordering(self):
+        """Structural property test: the 'verify' clause precedes the
+        'invoke' clause in the directive text. This is the load-bearing
+        verify-first ordering property — a future refactor that swaps
+        clause order to 'You MUST invoke Skill(...) IF you have first
+        verified...' would pass all 3 substring-presence probes above
+        (MUST + invoke + Skill + verify + non-negotiable lifecycle gate
+        all still present) but DESTROY the verify-first defense
+        semantics. The orchestrator's literal-compliance reflex on
+        'you MUST invoke' would fire BEFORE the verify-clause was
+        processed, restoring the unconditional-invoke shape that
+        Opt-3 explicitly replaced.
+
+        Pin: index('verify') < index('invoke') in the case-insensitive
+        directive text. Both keywords are guaranteed present by sibling
+        tests above; this pin adds the ordering constraint that no
+        substring-presence probe alone can express.
+
+        Test-engineer review finding M5 / dispatch B8."""
+        directive_lower = self._directive().lower()
+        verify_pos = directive_lower.index("verify")
+        invoke_pos = directive_lower.index("invoke")
+        assert verify_pos < invoke_pos, (
+            f"Opt-3 directive verify-first ordering violated: "
+            f"'verify' at position {verify_pos} but 'invoke' at "
+            f"position {invoke_pos}. The verify clause must precede "
+            f"the invoke clause; a refactor that swapped them would "
+            f"restore the unconditional-invoke shape Opt-3 replaced. "
+            f"got: {self._directive()!r}"
+        )

@@ -444,7 +444,17 @@ class TestRegressionV7Pact450f3d63JournalReplay:
         canonical reason token for Tier-1 fires). This pins the
         empirical signature for the OPERATIONAL-LULL bug class — any
         future Tier-1 event with a different reason indicates a new
-        bug surface or a reason-token rename to track."""
+        bug surface or a reason-token rename to track.
+
+        Equality assertion is intentional (NOT a subset check): if a
+        future Tier-1 reason-token is added to the emitter (e.g.,
+        'lead_terminal_taskdelete', 'lead_session_end'), this test
+        RED-flags the change so the bug-class taxonomy is reviewed and
+        either (a) the new token is documented as a sibling reason and
+        added to this assertion, or (b) the new token surface is
+        investigated as a new bug class. RED-on-extension is the
+        taxonomy-drift signal — relax to subset-check ONLY after
+        explicit taxonomy review."""
         with PACT_450F3D63_JOURNAL.open(encoding="utf-8") as f:
             reasons = set()
             for line in f:

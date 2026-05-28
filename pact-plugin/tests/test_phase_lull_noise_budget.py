@@ -154,7 +154,20 @@ class TestMultiPhaseNoiseBudgetUnderUmbrella:
 
     @pytest.mark.parametrize(
         "n_phases,n_specialists_per_phase",
-        [(1, 1), (1, 2), (1, 3), (2, 1), (2, 2), (2, 3), (3, 1), (3, 2), (3, 3)],
+        [
+            # 3x3 baseline (diagnostic-minimum coverage).
+            (1, 1), (1, 2), (1, 3),
+            (2, 1), (2, 2), (2, 3),
+            (3, 1), (3, 2), (3, 3),
+            # N=4 operational-norm extension (peer-review test-engineer
+            # review-finding M3 / dispatch B6): PR-B's own session was
+            # N>=4 teammate completions in flight by peer-review time
+            # (backend + devops + test + auditor all in flight). The
+            # 3x3 baseline is calibrated to the diagnostic; N=4 covers
+            # the empirical-norm regime. Compute cost ~0.4s additional
+            # for 4 cells x 2 halves (directive + journal) = 8 tests.
+            (4, 1), (4, 2), (4, 3), (4, 4),
+        ],
         ids=lambda v: f"n{v}",
     )
     def test_noise_budget_zero_teardown_directives_under_umbrella(
@@ -188,7 +201,20 @@ class TestMultiPhaseNoiseBudgetUnderUmbrella:
 
     @pytest.mark.parametrize(
         "n_phases,n_specialists_per_phase",
-        [(1, 1), (1, 2), (1, 3), (2, 1), (2, 2), (2, 3), (3, 1), (3, 2), (3, 3)],
+        [
+            # 3x3 baseline (diagnostic-minimum coverage).
+            (1, 1), (1, 2), (1, 3),
+            (2, 1), (2, 2), (2, 3),
+            (3, 1), (3, 2), (3, 3),
+            # N=4 operational-norm extension (peer-review test-engineer
+            # review-finding M3 / dispatch B6): PR-B's own session was
+            # N>=4 teammate completions in flight by peer-review time
+            # (backend + devops + test + auditor all in flight). The
+            # 3x3 baseline is calibrated to the diagnostic; N=4 covers
+            # the empirical-norm regime. Compute cost ~0.4s additional
+            # for 4 cells x 2 halves (directive + journal) = 8 tests.
+            (4, 1), (4, 2), (4, 3), (4, 4),
+        ],
         ids=lambda v: f"n{v}",
     )
     def test_noise_budget_zero_teardown_journal_events_under_umbrella(
@@ -237,7 +263,10 @@ class TestNoiseBudgetTerminalTeardownEmits:
 
     @pytest.mark.parametrize(
         "n_phases,n_specialists_per_phase",
-        [(1, 1), (2, 2), (3, 3)],  # diagonal sample of matrix
+        # Diagonal sample of matrix — bounded runtime via diagonal-only
+        # rather than full N×M. (4,4) extension paired with B6 / M3
+        # operational-norm extension above.
+        [(1, 1), (2, 2), (3, 3), (4, 4)],
         ids=lambda v: f"n{v}",
     )
     def test_umbrella_completion_emits_single_legitimate_teardown(
