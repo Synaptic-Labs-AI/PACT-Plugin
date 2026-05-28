@@ -792,10 +792,16 @@ class TestRetiredPostToolUseTeardownDoesNotFire:
             f"pre_c5={pre_c5_total}, post_c5={post_c5_total}"
         )
 
-        # Pin the actual SSOT directive prose so a future renamer
-        # of stop-pending-scan trips this regression guard.
+        # Pin the SSOT skill-invocation literal so a future renamer
+        # of stop-pending-scan trips this regression guard. The
+        # decorative preamble pin ("No active teammate work remaining")
+        # was retired alongside the C9 prose-softening commit per the
+        # minimal-directive principle (CLAUDE.md pin "Minimal directives
+        # are better directives", 2026-05-28). The C5 cardinality
+        # assertion ({2 -> 1}) above is the load-bearing half of this
+        # test; the prose pin is a tagalong that the minimal-directive
+        # sweep retired.
         assert "PACT:stop-pending-scan" in pre_c5_simulated_directive
-        assert "No active teammate work remaining" in pre_c5_simulated_directive
 
 
 # =============================================================================
@@ -825,48 +831,18 @@ class TestTeardownDirectiveAuditAnchor:
         import wake_lifecycle_emitter as emitter
         assert 'Skill("PACT:stop-pending-scan")' in emitter._TEARDOWN_DIRECTIVE
 
-    def test_teardown_directive_describes_no_active_work_remaining(self):
-        """Pin the categorical-token prose ("No active teammate work
-        remaining") that the lead's parser keys off. Drift here would
-        produce ambiguous downstream UX.
-        """
-        sys.path.insert(0, str(HOOK_DIR))
-        import wake_lifecycle_emitter as emitter
-        assert "No active teammate work remaining" in emitter._TEARDOWN_DIRECTIVE
-
-    def test_teardown_directive_describes_cron_deletion(self):
-        """The directive prose describes WHAT will happen on
-        invocation (deleting the cron). Future readers must be able to
-        see the action without consulting the skill body.
-        """
-        sys.path.insert(0, str(HOOK_DIR))
-        import wake_lifecycle_emitter as emitter
-        assert "delete" in emitter._TEARDOWN_DIRECTIVE.lower()
-        assert "/PACT:scan-pending-tasks" in emitter._TEARDOWN_DIRECTIVE
-
-    def test_teardown_directive_includes_best_effort_clause(self):
-        """Pin the canonical best-effort idempotency clause + the
-        tolerance rationale for missing-cron-entry scenarios.
-
-        The directive must signal that re-firing the Teardown is safe
-        (best-effort) and that the underlying CronDelete tolerates a
-        missing entry (auto-deletion via 7-day expiry, or never-armed
-        first-fire). Without this prose, an LLM reading the directive
-        in an ambiguous context might defer the stop-pending-scan
-        invocation under uncertainty about safety.
-        """
-        sys.path.insert(0, str(HOOK_DIR))
-        import wake_lifecycle_emitter as emitter
-        directive_lower = emitter._TEARDOWN_DIRECTIVE.lower()
-        assert "best-effort" in directive_lower, (
-            f"Teardown directive must signal best-effort idempotency; "
-            f"got {emitter._TEARDOWN_DIRECTIVE!r}"
-        )
-        assert "tolerat" in directive_lower, (
-            f"Teardown directive must signal cron-tolerance "
-            f"(already-deleted, never-registered); got "
-            f"{emitter._TEARDOWN_DIRECTIVE!r}"
-        )
+    # Retired: tests that pinned decorative SSOT prose ("No active teammate
+    # work remaining" preamble, "delete" + cron-slug substring, "best-effort"
+    # + "tolerat" idempotency clause). The minimal-directive principle in
+    # CLAUDE.md ("Minimal directives are better directives", 2026-05-28)
+    # supersedes these pins: prose that PRE-CONCLUDED the verify-first
+    # answer ("No active teammate work remaining") undermines the
+    # verify-first defense the new directive enacts; decorative tolerance
+    # prose adds tokens without changing LLM behavior. Skill-invocation
+    # byte-identity (PACT:stop-pending-scan) is the load-bearing contract
+    # and is pinned independently below via the
+    # test_teardown_directive_invokes_stop_pending_scan test that survived
+    # the retirement sweep.
 
 
 # =============================================================================
