@@ -40,7 +40,7 @@ def _iso_ts(epoch_seconds: int) -> str:
     ).strftime(ISO_FORMAT_LITERAL)
 
 
-def _run_drain(stdin_payload, env_extra=None):
+def _run_drain(stdin_payload, env_extra=None, autoarm_enabled=True):
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
     if env_extra:
         env.update(env_extra)
@@ -48,8 +48,24 @@ def _run_drain(stdin_payload, env_extra=None):
         stdin_payload if isinstance(stdin_payload, bytes)
         else stdin_payload.encode("utf-8")
     )
+    # Production default is CRON_AUTOARM_ENABLED=False (auto-arm disabled).
+    # These tests exercise the arm MACHINERY, which is still present and
+    # reachable via the manual /PACT:start-pending-scan path, so the runner
+    # re-enables the gate inside the subprocess by importing the hook,
+    # setting the CONSUMER-module binding, and calling main(). The
+    # name-import snapshot means patching shared.wake_lifecycle would not
+    # reach the already-bound `wake_inbox_drain.CRON_AUTOARM_ENABLED` name.
+    # Pass autoarm_enabled=False to exercise the production-default
+    # suppression behavior.
+    runner_src = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(HOOK_DIR)!r})\n"
+        "import wake_inbox_drain\n"
+        f"wake_inbox_drain.CRON_AUTOARM_ENABLED = {autoarm_enabled!r}\n"
+        "wake_inbox_drain.main()\n"
+    )
     proc = subprocess.run(
-        [sys.executable, str(DRAIN)],
+        [sys.executable, "-c", runner_src],
         input=payload_bytes,
         capture_output=True,
         env=env,
@@ -548,6 +564,9 @@ def test_outer_guard_catches_unexpected_exception(tmp_path):
         "def _raise(*_a, **_k):\n"
         "    raise ImportError('simulated lazy-import failure')\n"
         "wake_inbox_drain.read_last_event = _raise\n"
+        # Re-enable the gate: this test exercises the arm machinery's
+        # fail-conservative path (production default is disabled).
+        "wake_inbox_drain.CRON_AUTOARM_ENABLED = True\n"
         "wake_inbox_drain.main()\n",
         encoding="utf-8",
     )
@@ -1440,6 +1459,9 @@ def test_outer_guard_catches_arbitrary_exception(tmp_path, exception_class):
         "def _raise(*_a, **_k):\n"
         "    raise _exc_class('simulated widened-except contract probe')\n"
         "wake_inbox_drain.read_last_event = _raise\n"
+        # Re-enable the gate: this test exercises the arm machinery's
+        # fail-conservative path (production default is disabled).
+        "wake_inbox_drain.CRON_AUTOARM_ENABLED = True\n"
         "wake_inbox_drain.main()\n",
         encoding="utf-8",
     )

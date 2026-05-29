@@ -155,7 +155,11 @@ try:
     from shared.pact_context import get_team_name
     from shared.session_journal import append_event, make_event, read_last_event
     from shared.session_state import is_safe_path_component
-    from shared.wake_lifecycle import count_active_tasks, is_lead_context
+    from shared.wake_lifecycle import (
+        count_active_tasks,
+        is_lead_context,
+        CRON_AUTOARM_ENABLED,
+    )
     # Reuse the canonical _ARM_DIRECTIVE / _TEARDOWN_DIRECTIVE literals
     # from the emitter so the directive prose has a single source of
     # truth. The audit-anchor literal-prose pins on the emitter side
@@ -372,6 +376,9 @@ def _emit_arm() -> None:
     """Print the _ARM_DIRECTIVE additionalContext payload with the
     required hookEventName field. Caller is responsible for sys.exit(0).
     """
+    if not CRON_AUTOARM_ENABLED:
+        print(_SUPPRESS_OUTPUT)
+        return
     output = {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",

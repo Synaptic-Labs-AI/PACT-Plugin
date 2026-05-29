@@ -51,6 +51,15 @@ Public surface:
     AND re-exported through tests/fixtures/disk_shapes.py for the
     OPERATIONAL-LULL regression fixture surface. Adding a new
     umbrella-creating workflow requires updating ONLY this constant.
+- CRON_AUTOARM_ENABLED: bool
+    Master switch for the cron auto-arm directive. When False (the
+    default), the three auto-arm producers (wake_lifecycle_emitter.py,
+    session_init.py, wake_inbox_drain.py) each suppress their arm emit at
+    its source; the manual /PACT:start-pending-scan path and all teardown
+    machinery are unaffected. Flipping to True re-enables every auto-arm
+    path in one line. Homed in this module so the sentinel outlives the
+    eventual deletion of the two emitter hooks (this module is retained
+    while they are removed).
 - is_lead_context(stdin, team_name="") -> bool
     Predicate. True iff this hook fire originated in the lead context
     (not an in-process teammate frame). Single consolidated discriminator
@@ -180,6 +189,21 @@ UMBRELLA_SUBJECT_PREFIXES = (
     "TEST: ",
     "Review: ",
 )
+
+# Cron auto-arm master switch (single source of truth). When False, every
+# hook-emitted auto-arm directive — the hint that tells the lead to invoke
+# Skill("PACT:start-pending-scan") — is suppressed at its emit site. The
+# three auto-arm producers (wake_lifecycle_emitter._arm_or_none +
+# _maybe_write_teammate_arm_marker, session_init's resume/startup arm block,
+# wake_inbox_drain._emit_arm) each guard on this token. The manual
+# /PACT:start-pending-scan command, all teardown machinery, and every
+# non-arm hook behavior are deliberately left intact — this disables ONLY
+# the automatic arming. Reversal is a one-line flip to True. Homed in this
+# (retained) shared module rather than an emitter so the surviving
+# session_init guard keeps a valid reference after the emitter hooks are
+# removed. A bare bool is side-effect-free and respects this module's
+# pure/never-raises contract.
+CRON_AUTOARM_ENABLED = False
 
 
 @dataclass(frozen=True)

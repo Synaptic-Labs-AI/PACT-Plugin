@@ -30,14 +30,28 @@ EMITTER = HOOK_DIR / "wake_lifecycle_emitter.py"
 HOOKS_JSON = HOOK_DIR / "hooks.json"
 
 
-def _run_emitter(stdin_payload: str | bytes, env_extra: dict | None = None) -> tuple[int, str, str]:
+def _run_emitter(stdin_payload: str | bytes, env_extra: dict | None = None, autoarm_enabled: bool = True) -> tuple[int, str, str]:
     # Start from a clean env so the harness's CLAUDE_PROJECT_DIR doesn't
     # leak into the synthesized context resolution.
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
     if env_extra:
         env.update(env_extra)
+    # Production default is CRON_AUTOARM_ENABLED=False (auto-arm disabled).
+    # These tests exercise the arm MACHINERY (still reachable via the manual
+    # /PACT:start-pending-scan path), so re-enable the gate in the subprocess
+    # by importing the hook, setting the CONSUMER-module binding, and calling
+    # main(). Patching shared.wake_lifecycle would NOT reach the already-bound
+    # wake_lifecycle_emitter.CRON_AUTOARM_ENABLED name (name-import snapshot).
+    # Pass autoarm_enabled=False to exercise production-default suppression.
+    runner_src = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(HOOK_DIR)!r})\n"
+        "import wake_lifecycle_emitter\n"
+        f"wake_lifecycle_emitter.CRON_AUTOARM_ENABLED = {autoarm_enabled!r}\n"
+        "wake_lifecycle_emitter.main()\n"
+    )
     proc = subprocess.run(
-        [sys.executable, str(EMITTER)],
+        [sys.executable, "-c", runner_src],
         input=stdin_payload if isinstance(stdin_payload, bytes) else stdin_payload.encode("utf-8"),
         capture_output=True,
         env=env,
@@ -682,7 +696,10 @@ def test_count_active_tasks_called_on_taskcreate():
     import wake_lifecycle_emitter as emitter
 
     from unittest.mock import patch
-    with patch.object(emitter, "is_lead_context", return_value=True), \
+    # G1 (_arm_or_none) early-returns before count_active_tasks under the
+    # production default; re-enable the gate to exercise the count-call path.
+    with patch.object(emitter, "CRON_AUTOARM_ENABLED", True), \
+         patch.object(emitter, "is_lead_context", return_value=True), \
          patch.object(emitter, "_extract_task_id", return_value="1"), \
          patch.object(emitter, "count_active_tasks", return_value=1) as mock_count:
         emitter._decide_directive({

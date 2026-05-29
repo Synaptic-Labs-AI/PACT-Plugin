@@ -79,7 +79,7 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "wake_lifecycle"
 # ─── Helpers (mirror existing wake_lifecycle test pattern) ──────────────
 
 
-def _run_hook(hook_path, stdin_payload, env_extra=None, timeout=10):
+def _run_hook(hook_path, stdin_payload, env_extra=None, timeout=10, autoarm_enabled=True):
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
     if env_extra:
         env.update(env_extra)
@@ -87,8 +87,23 @@ def _run_hook(hook_path, stdin_payload, env_extra=None, timeout=10):
         stdin_payload if isinstance(stdin_payload, bytes)
         else stdin_payload.encode("utf-8")
     )
+    # Production default is CRON_AUTOARM_ENABLED=False (auto-arm disabled).
+    # These tests exercise the arm MACHINERY (still reachable via the manual
+    # /PACT:start-pending-scan path), so re-enable the gate in the subprocess
+    # by importing the hook module, setting the CONSUMER-module binding, and
+    # calling main(). Patching shared.wake_lifecycle would NOT reach the
+    # already-bound consumer-module name (name-import snapshot). Pass
+    # autoarm_enabled=False to exercise production-default suppression.
+    module_name = Path(hook_path).stem
+    runner_src = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(HOOK_DIR)!r})\n"
+        f"import {module_name} as _hook\n"
+        f"_hook.CRON_AUTOARM_ENABLED = {autoarm_enabled!r}\n"
+        "_hook.main()\n"
+    )
     proc = subprocess.run(
-        [sys.executable, str(hook_path)],
+        [sys.executable, "-c", runner_src],
         input=payload_bytes,
         capture_output=True,
         env=env,

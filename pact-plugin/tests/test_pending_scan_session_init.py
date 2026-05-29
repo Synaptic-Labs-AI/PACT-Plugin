@@ -72,8 +72,12 @@ def test_directive_emitted_only_when_count_positive(src):
     `active_count > 0` predicate participating in the if-test."""
     assert "active_count > 0" in src
     # And the gate must use an `if` statement (not a ternary/while/etc.).
+    # Per this test's own contract, the gate expression may carry additional
+    # conjuncts; one such conjunct (the auto-arm sentinel
+    # `CRON_AUTOARM_ENABLED and ...`) precedes `active_count > 0`, so allow
+    # any same-line prefix between `if` and the load-bearing predicate.
     import re as _re
-    assert _re.search(r"\bif\s+active_count\s*>\s*0", src) is not None
+    assert _re.search(r"\bif\b[^\n]*\bactive_count\s*>\s*0", src) is not None
 
 
 def test_directive_appended_to_context_parts(src):
@@ -133,6 +137,7 @@ def _run_session_init(
     agent_type: str | None = None,
     agent_id: str | None = None,
     teammate_name: str | None = None,
+    autoarm_enabled: bool = True,
 ) -> dict:
     """Run session_init.py with synthesized SessionStart stdin.
 
@@ -154,8 +159,23 @@ def _run_session_init(
     payload = json.dumps(payload_dict)
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
     env.update({"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir})
+    # Production default is CRON_AUTOARM_ENABLED=False (auto-arm disabled).
+    # G3 gates the session-start arm directive on it; these tests exercise
+    # the arm MACHINERY (still reachable via the manual
+    # /PACT:start-pending-scan path), so re-enable the gate in the subprocess
+    # by importing the hook, setting the CONSUMER-module binding, and calling
+    # main(). Patching shared.wake_lifecycle would NOT reach the already-bound
+    # session_init.CRON_AUTOARM_ENABLED name (name-import snapshot). Pass
+    # autoarm_enabled=False to exercise production-default suppression.
+    runner_src = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(SESSION_INIT_HOOK.parent)!r})\n"
+        "import session_init\n"
+        f"session_init.CRON_AUTOARM_ENABLED = {autoarm_enabled!r}\n"
+        "session_init.main()\n"
+    )
     proc = subprocess.run(
-        [sys.executable, str(SESSION_INIT_HOOK)],
+        [sys.executable, "-c", runner_src],
         input=payload.encode("utf-8"),
         capture_output=True,
         env=env,

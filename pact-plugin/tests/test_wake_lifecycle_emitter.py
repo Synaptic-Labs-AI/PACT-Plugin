@@ -44,7 +44,7 @@ EMITTER = HOOK_DIR / "wake_lifecycle_emitter.py"
 # =============================================================================
 
 
-def _run_emitter(stdin_payload, env_extra=None):
+def _run_emitter(stdin_payload, env_extra=None, autoarm_enabled=True):
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
     if env_extra:
         env.update(env_extra)
@@ -52,8 +52,22 @@ def _run_emitter(stdin_payload, env_extra=None):
         stdin_payload if isinstance(stdin_payload, bytes)
         else stdin_payload.encode("utf-8")
     )
+    # Production default is CRON_AUTOARM_ENABLED=False (auto-arm disabled).
+    # These tests exercise the arm MACHINERY (still reachable via the manual
+    # /PACT:start-pending-scan path), so re-enable the gate in the subprocess
+    # by importing the hook, setting the CONSUMER-module binding, and calling
+    # main(). Patching shared.wake_lifecycle would NOT reach the already-bound
+    # wake_lifecycle_emitter.CRON_AUTOARM_ENABLED name (name-import snapshot).
+    # Pass autoarm_enabled=False to exercise production-default suppression.
+    runner_src = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(HOOK_DIR)!r})\n"
+        "import wake_lifecycle_emitter\n"
+        f"wake_lifecycle_emitter.CRON_AUTOARM_ENABLED = {autoarm_enabled!r}\n"
+        "wake_lifecycle_emitter.main()\n"
+    )
     proc = subprocess.run(
-        [sys.executable, str(EMITTER)],
+        [sys.executable, "-c", runner_src],
         input=payload_bytes,
         capture_output=True,
         env=env,
