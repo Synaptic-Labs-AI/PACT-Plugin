@@ -335,7 +335,7 @@ Twenty-two protocols cover agent communication, phase transitions, scope detecti
 
 PACT maintains a per-session append-only JSONL journal at `~/.claude/pact-sessions/{slug}/{session_id}/session-journal.jsonl`. Implementation in [`pact-plugin/hooks/shared/session_journal.py`](pact-plugin/hooks/shared/session_journal.py).
 
-- **Schema-versioned events** with per-type required-field validation. Event types include `session_start`, `session_end`, `session_paused`, `session_consolidated`, `variety_assessed`, `phase_transition`, `checkpoint`, `agent_dispatch`, `agent_handoff`, `commit`, `s2_state_seeded`, `review_dispatch`, `review_finding`, `remediation`, `pr_ready`, `teardown_request`, `scan_armed` (see [`pact-plugin/hooks/shared/session_journal.py`](pact-plugin/hooks/shared/session_journal.py) for the complete registry of 20 types)
+- **Schema-versioned events** with per-type required-field validation. Event types include `session_start`, `session_end`, `session_paused`, `session_consolidated`, `variety_assessed`, `phase_transition`, `checkpoint`, `agent_dispatch`, `agent_handoff`, `commit`, `s2_state_seeded`, `review_dispatch`, `review_finding`, `remediation`, `pr_ready` (see [`pact-plugin/hooks/shared/session_journal.py`](pact-plugin/hooks/shared/session_journal.py) for the complete registry of 16 types)
 - **Append-only with `fcntl.flock(LOCK_EX)`** advisory locking around short-write loops to handle concurrent hooks + orchestrator CLI calls safely
 - **Tail-window reverse scan** (32 KB) for fast `read-last` operations; falls back to full-file slurp when needed
 - **Best-effort durability** — no `fsync` per write (hot path), but cross-process visibility is immediate after lock release
