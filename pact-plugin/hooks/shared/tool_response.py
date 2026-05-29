@@ -4,7 +4,7 @@ Summary: SSOT helper for extracting the platform's tool-response payload from
          hook stdin, with a defensive fallback for the legacy `tool_output`
          envelope name and a security warning when both fields are present.
 Used by: hooks that consume PostToolUse / SubagentStop / TaskCompleted stdin
-         (task_lifecycle_gate.py, wake_lifecycle_emitter.py, merge_guard_post.py).
+         (task_lifecycle_gate.py, merge_guard_post.py).
 
 The platform's canonical field is `tool_response`. Pre-rename payloads (and
 captured-from-production test fixtures from that era) carry `tool_output`.

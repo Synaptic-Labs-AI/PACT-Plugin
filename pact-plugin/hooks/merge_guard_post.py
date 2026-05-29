@@ -443,11 +443,11 @@ def main():
         # that op_type, the 3-block predicate degrades to 2 blocks
         # (fail-closed-on-no-signal per architect §5 rationale).
         #
-        # 3-block named-with-early-return REJECT pattern (architect §3.2,
-        # modeled on wake_lifecycle_emitter.py:255-291). NOT a first-match-
-        # wins dispatch precedence — each block independently short-
-        # circuits to no-op on its own reject condition. Structurally
-        # equivalent to a flat AND chain but inspectable per-block.
+        # 3-block named-with-early-return REJECT pattern (architect §3.2).
+        # NOT a first-match-wins dispatch precedence — each block
+        # independently short-circuits to no-op on its own reject
+        # condition. Structurally equivalent to a flat AND chain but
+        # inspectable per-block.
         #
         # Observer-style per architect §13.4: token retirement is
         # observation, NOT a permission decision. The Bash branch always
