@@ -606,7 +606,7 @@ When installed as a plugin, PACT lives in your plugin cache:
 │   └── cache/
 │       └── pact-plugin/
 │           └── PACT/
-│               └── 4.3.8/      # Plugin version
+│               └── 4.4.0/      # Plugin version
 │                   ├── agents/
 │                   ├── commands/
 │                   ├── skills/
