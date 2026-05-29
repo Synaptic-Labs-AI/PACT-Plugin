@@ -112,19 +112,22 @@ def _reset_pact_context_state():
     upstream test made ~19 merge_guard tests fail under the full suite while
     passing standalone.
 
-    This fixture force-resets both globals to their import-time clean state
-    (``None``) before AND after every test. It uses a DIRECT assignment, not a
-    ``monkeypatch`` revert, so it is immune to dirty-baseline chains (where a
-    polluting test's own ``monkeypatch.setattr(..., None)`` records an
-    already-polluted value and "reverts" to it). This autouse reset is the
-    single source of truth for cross-test isolation; the opt-in
-    ``pact_context`` fixture above layers on top of it to CONFIGURE a context
-    for tests that need a populated session.
+    This fixture force-resets that state to its import-time clean default
+    before AND after every test by calling the module's own public
+    ``reset_for_tests()`` hook (an unconditional reset, NOT a ``monkeypatch``
+    revert, so it is immune to dirty-baseline chains where a polluting test's
+    own ``monkeypatch.setattr(..., None)`` records an already-polluted value
+    and "reverts" to it). Delegating to ``pact_context.reset_for_tests()``
+    (rather than direct-assigning the private ``_cache`` / ``_context_path``
+    globals here) keeps the reset co-located with the module that owns the
+    state: a future rename of those internals updates the reset hook in the
+    same module, instead of silently turning this fixture into a no-op. This
+    autouse reset is the single source of truth for cross-test isolation; the
+    opt-in ``pact_context`` fixture above layers on top of it to CONFIGURE a
+    context for tests that need a populated session.
     """
     import shared.pact_context as ctx_module
 
-    ctx_module._cache = None
-    ctx_module._context_path = None
+    ctx_module.reset_for_tests()
     yield
-    ctx_module._cache = None
-    ctx_module._context_path = None
+    ctx_module.reset_for_tests()
