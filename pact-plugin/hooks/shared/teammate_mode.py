@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -57,26 +58,54 @@ def _read_teammate_mode(path: Path) -> Optional[str]:
         return None
 
 
+def _managed_settings_path() -> Path:
+    """Return the OS-specific enterprise managed-settings.json path.
+
+    Enterprise managed settings outrank every other source in Claude Code's
+    runtime getter (g1), so this is the highest-precedence entry in
+    _settings_source_paths(). The returned value is an absolute OS-specific
+    literal: it makes NO Path.home()/expanduser call and performs NO I/O here
+    (the file is read fail-open by _read_teammate_mode like any other source).
+    On a machine without a managed deployment the path simply does not exist
+    (exists()=False → skipped), so adding it is a no-op off managed fleets.
+
+    WSL's /mnt/c/... rewrite of the Windows path is deferred — not handled here.
+    Paths verified live against Claude Code 2.1.156.
+    """
+    if sys.platform == "darwin":
+        return Path("/Library/Application Support/ClaudeCode/managed-settings.json")
+    if sys.platform == "win32":
+        return Path(r"C:\Program Files\ClaudeCode\managed-settings.json")
+    return Path("/etc/claude-code/managed-settings.json")  # linux / default
+
+
 def _settings_source_paths() -> list[Path]:
     """Settings sources in runtime precedence order (highest first).
 
     Mirrors the FILE-READABLE portion of Claude Code's settings precedence:
-      1. project  .claude/settings.local.json   (local — highest)
-      2. project  .claude/settings.json         (project)
-      3. user     ~/.claude/settings.json        (user)
-    The enterprise managed-settings layer (which sits ABOVE these in the
-    runtime) is intentionally NOT read here (absent on dev machines; reading
-    it adds an OS-specific path matrix). This omission is an ACCEPTED
-    never-false-suppress breach: a managed `teammateMode` of "in-process" /
-    "auto" OVER a lower-layer "tmux" resolves non-tmux at runtime (managed
-    wins in g1), while this helper reads the lower "tmux" and SUPPRESSES — a
-    false-suppress (the #864-reinstating direction). Accepted for Phase 1
-    (narrow: a managed fleet forcing non-tmux beneath a lower-layer tmux); the
-    in-memory CLI `--teammate-mode` override is the OTHER accepted
-    false-suppress edge (see module docstring). Prepending the managed path
-    later is a one-line change that closes it (FUTURE, #868).
+      1. enterprise managed-settings (OS-specific; highest — managed wins in g1)
+      2. project  .claude/settings.local.json   (local)
+      3. project  .claude/settings.json         (project)
+      4. user     ~/.claude/settings.json        (user)
+    Reading the enterprise managed-settings layer at the TOP of the precedence
+    (it outranks all others in g1) CLOSES the former false-suppress edge: a
+    managed `teammateMode` of "in-process" / "auto" OVER a lower-layer "tmux"
+    now resolves correctly (managed read first → non-tmux → EMIT) instead of
+    this helper reading the lower "tmux" and wrongly SUPPRESSING. The managed
+    file is absent on dev machines (exists()=False → skipped), so this adds
+    zero behavior change off managed fleets.
+
+    The ONE remaining accepted never-false-suppress breach is the in-memory
+    `--teammate-mode` CLI override: it lives only in the parent process's
+    memory and is invisible to a hook subprocess (see module docstring), so a
+    live `--teammate-mode in-process` over a "tmux" config can still be missed.
+    That edge is irreducible from a hook; the managed-settings layer is now
+    handled (highest precedence).
 
     Path-resolution conventions (test-seam compatible):
+      - the managed path is an absolute OS-specific literal (see
+        _managed_settings_path); it makes no Path.home()/expanduser call, so it
+        does not perturb the home-monkeypatch test seam.
       - project paths derive from CLAUDE_PROJECT_DIR (already consumed by
         session_init.py); defaults to "." when unset.
       - user path uses Path.home() (NOT os.path.expanduser) so tests that
@@ -85,6 +114,7 @@ def _settings_source_paths() -> list[Path]:
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", ".")
     project_claude = Path(project_dir) / ".claude"
     return [
+        _managed_settings_path(),
         project_claude / "settings.local.json",
         project_claude / "settings.json",
         Path.home() / ".claude" / "settings.json",
@@ -94,7 +124,7 @@ def _settings_source_paths() -> list[Path]:
 def resolve_effective_teammate_mode() -> str:
     """Return the effective teammateMode the runtime would resolve from disk.
 
-    Scans settings sources (local → project → user), then the ~/.claude.json
+    Scans settings sources (managed → local → project → user), then the ~/.claude.json
     legacy global-config fallback, then defaults to "auto". Restricted to the
     file-readable precedence: a live `--teammate-mode` CLI override cannot be
     recovered from a hook and is NOT reflected here.

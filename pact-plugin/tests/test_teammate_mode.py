@@ -13,10 +13,13 @@ reinstates the in-process idle-stall the notice exists to warn about; a false
 emit is one harmless extra startup line. Every fail-open / fail-safe decision
 resolves toward EMIT.
 
-(Accepted breaches, NOT tested here because they are unreadable from a hook
-subprocess: the in-memory `--teammate-mode` CLI override and the enterprise
-managed-settings layer. Both are documented Phase-1 blind spots that only ever
-err toward over-emitting -- the safe direction.)
+(Accepted breach, NOT tested here because it is unreadable from a hook
+subprocess: the in-memory `--teammate-mode` CLI override. It only ever errs
+toward over-emitting -- the safe direction. The enterprise managed-settings
+layer USED to be an untested blind spot too, but F1 now reads it at the TOP of
+the precedence (see TestManagedSettingsPath / TestManagedPrecedence below), so
+it is no longer a blind spot: a managed "in-process"/"auto" over a lower-layer
+"tmux" now resolves correctly instead of false-suppressing.)
 
 Coverage:
 
@@ -39,6 +42,16 @@ Precedence layering (defense-in-depth beyond the architect's 10):
 - project settings.local.json beats project settings.json
 - empty-string teammateMode is skipped like any unrecognized value
 
+Enterprise managed-settings precedence (F1):
+- _managed_settings_path() returns the correct OS-specific absolute literal
+- managed-settings is the HIGHEST precedence source (paths[0])
+- ** breach-closure regression: managed "in-process" OVER user "tmux"
+  resolves "in-process" / EMIT (the false-suppress F1 closes)
+- symmetric: managed "tmux" OVER user "in-process" resolves "tmux" / SUPPRESS
+  (managed truly drives resolution both ways; closes the OQ1 over-emit)
+- managed-absent falls through to lower layers (dev-machine common case)
+- malformed managed file fails open (skip -> fall through -> never raises)
+
 VALID_TEAMMATE_MODES contract:
 - exact membership + frozenset immutability
 
@@ -58,6 +71,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 import shared.teammate_mode as teammate_mode
 from shared.teammate_mode import (
     VALID_TEAMMATE_MODES,
+    _managed_settings_path,
     _read_teammate_mode,
     _settings_source_paths,
     resolve_effective_teammate_mode,
@@ -79,10 +93,13 @@ class _ModeEnv:
     """
 
     def __init__(self, tmp_path, monkeypatch):
+        self.root = tmp_path
         self.home = tmp_path / "home"
         self.project = tmp_path / "project"
+        self.managed = tmp_path / "managed-settings.json"
         self.home.mkdir()
         self.project.mkdir()
+        self._monkeypatch = monkeypatch
         monkeypatch.setattr(Path, "home", lambda: self.home)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(self.project))
 
@@ -106,6 +123,30 @@ class _ModeEnv:
 
     def write_legacy(self, content):
         return self._write(self.home / ".claude.json", content)
+
+    # Enterprise managed-settings (F1) -- highest precedence. Isolation seam:
+    # monkeypatch teammate_mode._managed_settings_path so the test owns the
+    # highest source WITHOUT touching a real OS managed-settings path.
+    def write_managed(self, content):
+        """Write a managed-settings.json under tmp and point the helper at it."""
+        self._write(self.managed, content)
+        self._monkeypatch.setattr(
+            teammate_mode, "_managed_settings_path", lambda: self.managed
+        )
+        return self.managed
+
+    def point_managed_at_absent(self):
+        """Point _managed_settings_path at an absent tmp file (managed-absent case).
+
+        Deterministic stand-in for the dev-machine common case where the real
+        OS managed path does not exist -- avoids depending on the host actually
+        lacking /Library/Application Support/ClaudeCode/managed-settings.json.
+        """
+        absent = self.root / "absent-managed-settings.json"
+        self._monkeypatch.setattr(
+            teammate_mode, "_managed_settings_path", lambda: absent
+        )
+        return absent
 
 
 @pytest.fixture
@@ -371,24 +412,149 @@ class TestResolveFailOpen:
 # ---------------------------------------------------------------------------
 
 class TestSettingsSourcePaths:
-    """Pin the file-readable precedence order and the CLAUDE_PROJECT_DIR seam."""
+    """Pin the file-readable precedence order and the CLAUDE_PROJECT_DIR seam.
+
+    F1: the enterprise managed-settings path is prepended as the HIGHEST
+    precedence source (paths[0]); the file-readable list is now 4 entries:
+    managed -> project-local -> project -> user.
+    """
 
     def test_paths_in_precedence_order(self, mode_env):
+        """4 paths, managed highest. Asserts against _managed_settings_path()
+        itself (same-function compare) so it is platform-agnostic -- no
+        hardcoded OS literal in the order assertion.
+        """
         paths = _settings_source_paths()
         assert paths == [
+            _managed_settings_path(),
             mode_env.project / ".claude" / "settings.local.json",
             mode_env.project / ".claude" / "settings.json",
             mode_env.home / ".claude" / "settings.json",
         ]
 
     def test_project_dir_defaults_to_cwd_when_unset(self, monkeypatch, tmp_path):
-        """Unset CLAUDE_PROJECT_DIR -> project paths derive from '.' (never raises)."""
+        """Unset CLAUDE_PROJECT_DIR -> project paths derive from '.' (never raises).
+
+        Managed stays at paths[0] (F1, highest); the cwd-default project-local
+        is now paths[1], project paths[2], user paths[3] (index +1 vs pre-F1).
+        """
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         paths = _settings_source_paths()
-        assert paths[0] == Path(".") / ".claude" / "settings.local.json"
-        assert paths[1] == Path(".") / ".claude" / "settings.json"
-        assert paths[2] == tmp_path / ".claude" / "settings.json"
+        assert paths[0] == _managed_settings_path()
+        assert paths[1] == Path(".") / ".claude" / "settings.local.json"
+        assert paths[2] == Path(".") / ".claude" / "settings.json"
+        assert paths[3] == tmp_path / ".claude" / "settings.json"
+
+
+# ---------------------------------------------------------------------------
+# Enterprise managed-settings (F1): OS-specific path + highest-precedence reads
+# ---------------------------------------------------------------------------
+
+class TestManagedSettingsPath:
+    """_managed_settings_path() returns the correct OS-specific absolute literal.
+
+    Pure path construction -- no I/O, no Path.home()/expanduser -- so it does
+    not perturb the home-monkeypatch seam. The literals are verified live
+    against Claude Code 2.1.156 (architect OQ1 / F1).
+    """
+
+    @pytest.mark.parametrize(
+        "platform,expected",
+        [
+            ("darwin", Path("/Library/Application Support/ClaudeCode/managed-settings.json")),
+            ("win32", Path(r"C:\Program Files\ClaudeCode\managed-settings.json")),
+            ("linux", Path("/etc/claude-code/managed-settings.json")),
+        ],
+    )
+    def test_managed_path_per_os(self, monkeypatch, platform, expected):
+        """Each platform maps to its documented absolute managed-settings path."""
+        monkeypatch.setattr(sys, "platform", platform)
+        assert _managed_settings_path() == expected
+
+    def test_unknown_platform_defaults_to_linux_path(self, monkeypatch):
+        """An unrecognized sys.platform falls to the linux/default literal."""
+        monkeypatch.setattr(sys, "platform", "freebsd13")
+        assert _managed_settings_path() == Path("/etc/claude-code/managed-settings.json")
+
+
+class TestManagedPrecedence:
+    """Managed-settings is the highest-precedence file source (F1).
+
+    Isolation: mode_env.write_managed()/point_managed_at_absent() monkeypatch
+    teammate_mode._managed_settings_path to a tmp file the test owns, so these
+    NEVER read or write a real OS managed-settings path.
+    """
+
+    def test_managed_in_process_over_user_tmux_breach_closed(self, mode_env):
+        """** MANAGED-SETTINGS BREACH-CLOSURE REGRESSION (F1). **
+
+        managed-settings 'in-process' layered OVER a user 'tmux' MUST resolve
+        'in-process' / EMIT. This is the exact false-suppress F1 closes: before
+        F1 the helper never read managed-settings, so a managed fleet pinning
+        'in-process' over a user 'tmux' was wrongly SUPPRESSED (the
+        #864-reinstating direction). Managed now sits at precedence [0], read
+        first -> 'in-process' -> EMIT.
+
+        If this ever inverts (resolve 'tmux' / suppress), the managed layer has
+        stopped being read at the top of the precedence and the breach is open
+        again.
+        """
+        mode_env.write_managed({"teammateMode": "in-process"})
+        mode_env.write_user({"teammateMode": "tmux"})
+        assert resolve_effective_teammate_mode() == "in-process"
+        assert should_emit_inprocess_notice() is True
+
+    def test_managed_tmux_over_user_in_process_suppresses(self, mode_env):
+        """Symmetric direction: managed 'tmux' OVER user 'in-process' -> tmux / SUPPRESS.
+
+        Proves managed genuinely DRIVES resolution both ways (not just that an
+        absent managed file falls through). Also closes architect OQ1: a
+        managed-tmux fleet that previously OVER-emitted the notice now correctly
+        suppresses -- because the fleet really is in tmux, this is a true
+        suppress, not a false one.
+        """
+        mode_env.write_managed({"teammateMode": "tmux"})
+        mode_env.write_user({"teammateMode": "in-process"})
+        assert resolve_effective_teammate_mode() == "tmux"
+        assert should_emit_inprocess_notice() is False
+
+    def test_managed_absent_falls_through_to_lower_layers(self, mode_env):
+        """managed path absent -> read lower layers normally (dev-machine case).
+
+        Zero behavior change off managed fleets: the user 'tmux' wins exactly as
+        it did pre-F1. Uses a controlled absent tmp path (not the real OS path)
+        for determinism.
+        """
+        mode_env.point_managed_at_absent()
+        mode_env.write_user({"teammateMode": "tmux"})
+        assert resolve_effective_teammate_mode() == "tmux"
+        assert should_emit_inprocess_notice() is False
+
+    def test_managed_malformed_fails_open_to_lower_layers(self, mode_env):
+        """Malformed managed file -> skipped (fail-open) -> fall through; never raises.
+
+        A corrupt highest-precedence source must NOT crash the hot path nor
+        wrongly suppress: it is skipped like any unreadable source and
+        resolution continues to the lower layers (here user 'in-process' -> EMIT).
+        """
+        mode_env.write_managed("{ this is not valid json ")
+        mode_env.write_user({"teammateMode": "in-process"})
+        assert resolve_effective_teammate_mode() == "in-process"
+        assert should_emit_inprocess_notice() is True
+
+    def test_managed_unreadable_dir_fails_open(self, mode_env, monkeypatch):
+        """Managed path is a directory (read raises) -> fail-open skip -> fall through.
+
+        Defense-in-depth alongside the malformed case: a non-OSError-free read
+        failure on the highest source still degrades safely to the lower layers.
+        """
+        managed_dir = mode_env.root / "managed-as-dir.json"
+        managed_dir.mkdir()
+        monkeypatch.setattr(teammate_mode, "_managed_settings_path", lambda: managed_dir)
+        mode_env.write_user({"teammateMode": "tmux"})
+        assert resolve_effective_teammate_mode() == "tmux"
+        assert should_emit_inprocess_notice() is False
 
 
 # ---------------------------------------------------------------------------
