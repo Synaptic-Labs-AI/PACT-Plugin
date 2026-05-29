@@ -13,6 +13,11 @@ reinstates the in-process idle-stall the notice exists to warn about; a false
 emit is one harmless extra startup line. Every fail-open / fail-safe decision
 resolves toward EMIT.
 
+(Accepted breaches, NOT tested here because they are unreadable from a hook
+subprocess: the in-memory `--teammate-mode` CLI override and the enterprise
+managed-settings layer. Both are documented Phase-1 blind spots that only ever
+err toward over-emitting -- the safe direction.)
+
 Coverage:
 
 resolve_effective_teammate_mode() + should_emit_inprocess_notice() -- §9.1 matrix:
@@ -384,3 +389,110 @@ class TestSettingsSourcePaths:
         assert paths[0] == Path(".") / ".claude" / "settings.local.json"
         assert paths[1] == Path(".") / ".claude" / "settings.json"
         assert paths[2] == tmp_path / ".claude" / "settings.json"
+
+
+# ---------------------------------------------------------------------------
+# Anti-normalization regression guard (documentation-in-code)
+# ---------------------------------------------------------------------------
+
+class TestAntiNormalizationVariants:
+    """Pin case-variant and whitespace-padded values to EMIT -- on purpose.
+
+    The helper does an EXACT check: a value is recognized only if it is
+    byte-identical to a member of VALID_TEAMMATE_MODES, and should_emit
+    suppresses only on resolved == "tmux". So every case-variant ("Tmux",
+    "TMUX") and whitespace-padded (" tmux", "tmux ") value is NOT recognized
+    -> the source is skipped -> resolution falls through to "auto" -> the
+    notice EMITS. That EMIT is the fail-open-SAFE direction: a tmux user who
+    typed "Tmux" gets one harmless extra startup line.
+
+    These tests exist to FAIL LOUDLY if a future "be lenient" refactor adds
+    case/whitespace normalization (e.g. `value.strip().lower() in
+    VALID_TEAMMATE_MODES`) to _read_teammate_mode. Such a refactor would
+    silently flip these variants to the SUPPRESS direction -- a FALSE-SUPPRESS,
+    the exact #864-reinstating outcome the core invariant forbids -- while
+    passing every other test in this file. The test IS the guard: do NOT
+    "fix" these to suppress.
+    """
+
+    @pytest.mark.parametrize("variant", ["Tmux", "TMUX", "tMux"])
+    def test_case_variant_emits(self, mode_env, variant):
+        """A case-variant of 'tmux' is not byte-equal -> skipped -> auto -> EMIT.
+
+        Failure here (resolve 'tmux' / suppress) means someone added
+        case-normalization that introduced a false-suppress. See class docstring.
+        """
+        mode_env.write_user({"teammateMode": variant})
+        assert resolve_effective_teammate_mode() == "auto"
+        assert should_emit_inprocess_notice() is True
+
+    @pytest.mark.parametrize("variant", [" tmux", "tmux ", " tmux ", "\ttmux", "tmux\n"])
+    def test_whitespace_padded_emits(self, mode_env, variant):
+        """A whitespace-padded 'tmux' is not byte-equal -> skipped -> auto -> EMIT.
+
+        Failure here (resolve 'tmux' / suppress) means someone added
+        whitespace-stripping that introduced a false-suppress. See class docstring.
+        """
+        mode_env.write_user({"teammateMode": variant})
+        assert resolve_effective_teammate_mode() == "auto"
+        assert should_emit_inprocess_notice() is True
+
+
+# ---------------------------------------------------------------------------
+# Broad-except CONTRACT: the breadth of the per-file handler is load-bearing
+# ---------------------------------------------------------------------------
+
+class TestPerFileBroadExceptContract:
+    """Pin the BREADTH of _read_teammate_mode's `except Exception` -- not just
+    that it catches *something*.
+
+    The per-file reader wraps its body in a broad `except Exception` so ANY
+    read/parse failure degrades to None (fail-open). The existing fail-open
+    tests only exercise exceptions a NARROW tuple would STILL catch:
+    IsADirectoryError / PermissionError (OSError) and malformed JSON
+    (json.JSONDecodeError). None of them would fail if someone "tightened" the
+    handler to `except (OSError, json.JSONDecodeError)`.
+
+    This closes that gap with an input whose exception is OUTSIDE that narrow
+    tuple: a file whose bytes are not valid UTF-8. read_text(encoding="utf-8")
+    then raises UnicodeDecodeError -- a subclass of ValueError, and NOT a
+    subclass of OSError or json.JSONDecodeError (verified on CPython 3.14).
+    Only the broad `except Exception` catches it; a narrowed handler would let
+    it propagate and FAIL test_invalid_utf8_returns_none_via_broad_except --
+    which is exactly the regression signal we want.
+
+    NOTE: an embedded-NUL path is deliberately NOT used here. On CPython 3.12+
+    Path.exists() returns False for a NUL path (it does not raise), so
+    _read_teammate_mode short-circuits at its `if not path.exists()` guard
+    WITHOUT entering the try/except body -- a NUL test would be phantom-green
+    (it passes whether or not the except is narrowed). Invalid UTF-8 is the
+    live discriminator on this interpreter.
+    """
+
+    def test_invalid_utf8_returns_none_via_broad_except(self, tmp_path):
+        """Invalid-UTF-8 bytes -> UnicodeDecodeError (ValueError, not OSError /
+        JSONDecodeError) -> only the broad except returns None. THE discriminator.
+        """
+        p = tmp_path / "settings.json"
+        # Lone 0xFF/0xFE bytes inside an otherwise-JSON document: read_text
+        # with strict utf-8 raises UnicodeDecodeError before json.loads runs.
+        p.write_bytes(b'{"teammateMode": "\xff\xfetmux"}')
+        assert _read_teammate_mode(p) is None
+
+    def test_resolve_never_raises_on_invalid_utf8_source(self, mode_env):
+        """End-to-end public never-raises contract under a non-OSError parse
+        failure: an invalid-UTF-8 user settings.json -> resolve degrades to
+        'auto' / EMIT, never propagating onto the SessionStart hot path.
+
+        Defense-in-depth: resolve's OWN outer `except Exception` also backstops
+        a propagating UnicodeDecodeError, so this end-to-end assertion would
+        survive a per-file narrowing on its own. The per-file discriminator
+        above is the test that actually fails on a narrowed per-file handler;
+        this one pins the public contract that the hot path never sees a raise.
+        """
+        (mode_env.home / ".claude").mkdir(parents=True, exist_ok=True)
+        (mode_env.home / ".claude" / "settings.json").write_bytes(
+            b'{"teammateMode": "\xff\xfetmux"}'
+        )
+        assert resolve_effective_teammate_mode() == "auto"
+        assert should_emit_inprocess_notice() is True
