@@ -19,6 +19,7 @@ assert the post-empty behavior (secretary counts).
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -167,22 +168,42 @@ def test_lifecycle_relevant_preserves_fail_conservative_audit_anchor():
     # reproduce the full distinctive span — while tolerating bare-token
     # reuse anywhere else.
     #
-    # Each span lives entirely on one source line so it survives the
-    # per-line "\n".join(window_lines) reconstruction (a phrase wrapping
-    # two comment lines would be split by the intervening "\n# " and
-    # never match).
+    # Reflow-robust matching: the source text is NORMALIZED before
+    # substring-matching so a benign comment reflow (an auto-formatter
+    # re-wrapping the rationale across different line breaks) does NOT
+    # trip the anchor. `_normalize` strips per-line leading comment
+    # markers ('#' + an optional single space) and collapses every run
+    # of whitespace — including the newlines from the per-line
+    # "\n".join(window_lines) reconstruction — into a single space. A
+    # phrase that wraps two comment lines therefore still matches. This
+    # is NOT a vacuous/whitespace-only match: the phrase tokens and
+    # their left-to-right order are still required; only inter-token
+    # whitespace is normalized. The SAME normalization is applied to the
+    # matched text AND to the phrases on both checks below.
+    def _normalize(text):
+        no_markers = re.sub(r"(?m)^[ \t]*#[ \t]?", "", text)
+        return re.sub(r"\s+", " ", no_markers).strip()
+
     distinctive_phrases = (
         "Fail-CONSERVATIVE: the team config is unreadable",
         "inverts the priority: under-arm",
         "unrecoverable; over-arm (extra empty scans) is recoverable",
     )
+    normalized_phrases = [_normalize(p) for p in distinctive_phrases]
 
     # Positive (presence): each distinctive phrase MUST live inside the
-    # executable elif body's window. A body-only revert that deletes the
-    # elif rationale empties window_lines, flipping these assertions to
-    # FAIL — the intended counter-signal under body-only revert.
-    for phrase in distinctive_phrases:
-        assert phrase in window_text, (
+    # executable elif body's window. The match is normalized but stays
+    # POSITION-ANCHORED — only the collected window_text (the elif body)
+    # is normalized, NEVER the file at large. That position-anchoring is
+    # load-bearing: a body-only revert that deletes the elif rationale
+    # empties window_lines, so the normalized window no longer contains
+    # the phrases and these assertions flip to FAIL — the intended
+    # counter-signal under body-only revert. Normalizing src-wide here
+    # (or broadening the window) would let a phrase match across the
+    # elif boundary and silently gut that counter-signal.
+    normalized_window = _normalize(window_text)
+    for phrase, norm_phrase in zip(distinctive_phrases, normalized_phrases):
+        assert norm_phrase in normalized_window, (
             f"Distinctive audit-anchor phrase {phrase!r} must live inside "
             f"the step-4 `elif team_name:` body (executable line "
             f"{anchor_idx + 1}). Window starts at line {anchor_idx + 2}; "
@@ -193,16 +214,19 @@ def test_lifecycle_relevant_preserves_fail_conservative_audit_anchor():
     # src OUTSIDE the window. A docstring/comment orphan of the real
     # rationale elsewhere would create a phantom-green path where a
     # future contributor deletes the elif body's rationale yet the
-    # positive assertion above still passes vacuously. Pinning the
-    # DISTINCTIVE span (not the bare token) keeps that protection while
-    # tolerating legitimate bare-token reuse elsewhere in the module.
+    # positive assertion above still passes vacuously. The outside-window
+    # source is normalized the SAME way, so even a REFLOWED orphan pasted
+    # anywhere outside the window is caught. Pinning the DISTINCTIVE span
+    # (not the bare token) keeps that protection while tolerating
+    # legitimate bare-token reuse elsewhere in the module.
     src_outside_window = "\n".join(
         ln
         for i, ln in enumerate(src_lines)
         if not (anchor_idx + 1 <= i <= anchor_idx + len(window_lines))
     )
-    for phrase in distinctive_phrases:
-        assert phrase not in src_outside_window, (
+    normalized_outside = _normalize(src_outside_window)
+    for phrase, norm_phrase in zip(distinctive_phrases, normalized_phrases):
+        assert norm_phrase not in normalized_outside, (
             f"Distinctive phrase {phrase!r} must appear ONLY inside the "
             f"step-4 `elif team_name:` body's comment block (lines "
             f"{anchor_idx + 2}..{anchor_idx + 1 + len(window_lines)}). "
