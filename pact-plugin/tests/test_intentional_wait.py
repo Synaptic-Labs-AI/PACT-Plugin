@@ -387,8 +387,7 @@ class TestSelfCompleteExemptAgentTypesConstant:
 
 class TestIsExemptAgentType:
     """Direct unit tests on _is_exempt_agent_type — the shared helper that
-    backs both is_self_complete_exempt (surface 1) and
-    wake_lifecycle._lifecycle_relevant (carve-out 2).
+    backs is_self_complete_exempt.
     """
 
     def test_owner_with_pact_secretary_agenttype_is_exempt(self, teams_dir):
@@ -627,39 +626,26 @@ class TestIsSelfCompleteExemptMalformedTaskShapes:
         assert is_self_complete_exempt(task, "test-team", teams_dir) is True
 
     def test_self_completion_with_corrupted_metadata_for_secretary(self, teams_dir):
-        """Pin the asymmetric carve-out hoist behavior between
-        is_self_complete_exempt and _lifecycle_relevant.
+        """Pin is_self_complete_exempt's metadata-shape-gate behavior for a
+        secretary task with corrupted (non-dict-truthy) metadata.
 
-        The two predicates handle "secretary task with corrupted (non-dict
-        truthy) metadata" differently because they hoist the agentType
-        carve-out at different points relative to the metadata-shape gate:
-
-        - `_lifecycle_relevant` (wake_lifecycle.py): hoists agentType
-          check ABOVE the metadata-shape gate. A secretary task with
-          `metadata="garbage"` returns False (carve-out applied → not
-          counted toward wake-arming). Correct behavior.
-
-        - `is_self_complete_exempt` (intentional_wait.py): metadata-shape
-          gate fires FIRST. Same input returns False (NOT exempt → the
-          self_completion advisory will fire). False-positive: the
-          advisory is noisy for a secretary task.
+        `is_self_complete_exempt` (intentional_wait.py) runs the
+        metadata-shape gate FIRST: a secretary task with `metadata="garbage"`
+        returns False (NOT exempt → the self_completion advisory will fire).
+        This is a false-positive (the advisory is noisy for a secretary
+        task), but it leans CONSERVATIVE — noisy, not unsafe — and the
+        advisory is non-blocking.
 
         Operationally: a secretary task with corrupted metadata is rare
-        (metadata is harness-written; corruption requires explicit
-        teammate action or disk corruption). The asymmetry leans
-        CONSERVATIVE in is_self_complete_exempt (false-positive advisory
-        is noisy, not unsafe) and the advisory is non-blocking.
+        (metadata is harness-written; corruption requires explicit teammate
+        action or disk corruption).
 
-        This test PINS the current asymmetric behavior so a future
-        predicate refactor (e.g., aligning the hoist to mirror
-        _lifecycle_relevant) cannot silently change it without updating
-        this test alongside the refactor. If the hoist is later aligned,
-        update this test's expected result from False to True and add a
-        cross-reference to the alignment commit.
-
-        Code-side hoist alignment is a separate consideration outside
-        #682's scope and tracked via SendMessage to review-backend-coder
-        rather than implemented here.
+        This test PINS the current behavior so a future predicate refactor
+        (e.g., hoisting the agentType carve-out ABOVE the metadata-shape
+        gate) cannot silently change it without updating this test alongside
+        the refactor. If the hoist is later changed, update this test's
+        expected result from False to True and add a cross-reference to the
+        alignment commit.
         """
         from shared.intentional_wait import is_self_complete_exempt
 
@@ -675,24 +661,11 @@ class TestIsSelfCompleteExemptMalformedTaskShapes:
             "Pinned current behavior: is_self_complete_exempt returns False "
             "(NOT exempt) for a secretary task with non-dict-truthy "
             "metadata, because the metadata-shape gate fires before the "
-            "agentType lookup. If a future refactor aligns the hoist to "
-            "mirror _lifecycle_relevant (agentType check ABOVE metadata "
-            "gate), update this test's expected result and add a "
-            "cross-reference to the alignment commit."
+            "agentType lookup. If a future refactor hoists the agentType "
+            "carve-out ABOVE the metadata-shape gate, update this test's "
+            "expected result and add a cross-reference to the alignment "
+            "commit."
         )
-        # Confirm the asymmetry is real by comparing with the sibling
-        # predicate _lifecycle_relevant on identical input.
-        import shared.wake_lifecycle as wl
-        # _lifecycle_relevant requires Path.home()-rooted teams_dir to
-        # find the team config. Use a minimal monkeypatch-free approach
-        # by construct the full path lookup. Skip: the asymmetry pin
-        # via is_self_complete_exempt alone is sufficient regression
-        # coverage; cross-predicate equivalence is a separate concern
-        # belonging to wake_lifecycle's own test suite. The wake-side
-        # behavior is already pinned by
-        # test_lifecycle_relevant_exempt_agenttype_with_corrupted_metadata
-        # in test_inbox_wake_lifecycle_helper.py.
-        _ = wl  # keep import to make divergence-target explicit in test source
 
     def test_owner_none_returns_false(self):
         from shared.intentional_wait import is_self_complete_exempt
@@ -802,8 +775,8 @@ class TestSelfCompleteExemptAgentTypesImmutability:
 
 
 class TestTeachbackExemptAgentTypesConstant:
-    """Third agentType-keyed carve-out frozenset, parallel structure to
-    SELF_COMPLETE_EXEMPT_AGENT_TYPES and WAKE_EXCLUDED_AGENT_TYPES. Membership:
+    """Second agentType-keyed carve-out frozenset, parallel structure to
+    SELF_COMPLETE_EXEMPT_AGENT_TYPES. Membership:
     {pact-secretary}. Surface: teachback-gated dispatch (Task A skipped).
     """
 
@@ -864,33 +837,29 @@ class TestTeachbackExemptAgentTypesImmutability:
             TEACHBACK_EXEMPT_AGENT_TYPES.clear()
 
 
-class TestThreeFrozensetsAreSeparateObjects:
-    """Phantom-green guard: the module docstring forbids aliasing the three
+class TestTwoFrozensetsAreSeparateObjects:
+    """Phantom-green guard: the module docstring forbids aliasing the two
     agentType-keyed carve-out frozensets (`SELF_COMPLETE_EXEMPT_AGENT_TYPES`,
-    `WAKE_EXCLUDED_AGENT_TYPES`, `TEACHBACK_EXEMPT_AGENT_TYPES`) because
-    each governs an independent operational surface (self-completion,
-    wake-counting, dispatch). Same-contents aliasing — e.g.
-    `TEACHBACK_EXEMPT_AGENT_TYPES = SELF_COMPLETE_EXEMPT_AGENT_TYPES` — is a
-    silent-recouple defect: membership and immutability tests stay GREEN
-    because the alias preserves contents; the docstring prohibition has no
-    CI teeth. This test pins the three as separate objects via `is not`
+    `TEACHBACK_EXEMPT_AGENT_TYPES`) because each governs an independent
+    operational surface (self-completion, dispatch). Same-contents aliasing
+    — e.g. `TEACHBACK_EXEMPT_AGENT_TYPES = SELF_COMPLETE_EXEMPT_AGENT_TYPES`
+    — is a silent-recouple defect: membership and immutability tests stay
+    GREEN because the alias preserves contents; the docstring prohibition
+    has no CI teeth. This test pins the two as separate objects via `is not`
     identity checks so a future aliasing refactor fails loudly.
 
-    When divergence lands (one frozenset gains a member the others don't),
+    When divergence lands (one frozenset gains a member the other doesn't),
     contents-based tests will catch it. But during the equal-contents
     window — which is the current state — only identity checks discriminate.
     """
 
-    def test_three_frozensets_are_separate_objects(self):
+    def test_two_frozensets_are_separate_objects(self):
         from shared.intentional_wait import (
             SELF_COMPLETE_EXEMPT_AGENT_TYPES,
             TEACHBACK_EXEMPT_AGENT_TYPES,
-            WAKE_EXCLUDED_AGENT_TYPES,
         )
 
         assert TEACHBACK_EXEMPT_AGENT_TYPES is not SELF_COMPLETE_EXEMPT_AGENT_TYPES
-        assert TEACHBACK_EXEMPT_AGENT_TYPES is not WAKE_EXCLUDED_AGENT_TYPES
-        assert SELF_COMPLETE_EXEMPT_AGENT_TYPES is not WAKE_EXCLUDED_AGENT_TYPES
 
 
 class TestIsTeachbackExempt:
@@ -1203,77 +1172,6 @@ class TestIsExemptAgentTypeMixedTeamConfig:
             "rather than 'first-match-wins' — a privilege-drift defect."
         )
 
-    def test_count_active_tasks_isolates_per_member(self, teams_dir, tmp_path, monkeypatch):
-        # POST-EMPTY-CARVE-OUT: in a multi-member team with one secretary
-        # and one non-secretary teammate, two simultaneous in_progress
-        # tasks (one each) must now produce count=2 because
-        # WAKE_EXCLUDED_AGENT_TYPES is empty (secretary tasks count).
-        # Pre-empty this test asserted count=1 (secretary excluded);
-        # post-empty both members' tasks count toward the active tally.
-        import shared.wake_lifecycle as wl
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        team = "multi-task-team"
-        team_dir = tmp_path / ".claude" / "teams" / team
-        team_dir.mkdir(parents=True)
-        (team_dir / "config.json").write_text(
-            json.dumps({"team_name": team, "members": [
-                {"name": "session-secretary", "agentType": "pact-secretary"},
-                {"name": "backend-coder-1", "agentType": "pact-backend-coder"},
-            ]}),
-            encoding="utf-8",
-        )
-        tasks_dir = tmp_path / ".claude" / "tasks" / team
-        tasks_dir.mkdir(parents=True)
-        (tasks_dir / "1.json").write_text(json.dumps(
-            {"id": "1", "status": "in_progress", "owner": "session-secretary"}
-        ))
-        (tasks_dir / "2.json").write_text(json.dumps(
-            {"id": "2", "status": "in_progress", "owner": "backend-coder-1"}
-        ))
-        # Both tasks count post-empty (secretary no longer wake-excluded).
-        assert wl.count_active_tasks(team) == 2
-
-
-class TestMultipleSecretaryTasksAllCountPostEmptyCarveOut:
-    """POST-EMPTY-CARVE-OUT: cross-task interaction. A team running
-    multiple parallel memory-save tasks owned by the same secretary
-    teammate (e.g., pre-CODE harvest + post-CODE harvest in the same
-    wave) all COUNT toward the wake-mechanism active tally because
-    WAKE_EXCLUDED_AGENT_TYPES is empty.
-
-    Pre-empty: this class asserted secretary tasks were all exempt
-    (count == 0 regardless of how many secretary tasks). Post-empty:
-    each secretary task counts; the count gate handles the Bug A
-    secretary-window scenario at the count layer rather than the
-    per-owner carve-out layer.
-
-    Pins that the predicate is stateless across task iteration —
-    the post-empty count == N for N parallel secretary tasks."""
-
-    def test_multiple_secretary_tasks_all_count_post_empty(self, tmp_path, monkeypatch):
-        import shared.wake_lifecycle as wl
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        team = "multi-sec-team"
-        team_dir = tmp_path / ".claude" / "teams" / team
-        team_dir.mkdir(parents=True)
-        (team_dir / "config.json").write_text(
-            json.dumps({"team_name": team, "members": [
-                {"name": "session-secretary", "agentType": "pact-secretary"},
-            ]}),
-            encoding="utf-8",
-        )
-        tasks_dir = tmp_path / ".claude" / "tasks" / team
-        tasks_dir.mkdir(parents=True)
-        # Three concurrent secretary memory-save tasks.
-        for tid in ("harvest-1", "harvest-2", "harvest-3"):
-            (tasks_dir / f"{tid}.json").write_text(json.dumps(
-                {"id": tid, "status": "in_progress", "owner": "session-secretary"}
-            ))
-        # All three count post-empty (predicate is stateless across iteration).
-        assert wl.count_active_tasks(team) == 3
-
 
 class TestDocSurfaceStalenessSweep:
     """Doc-staleness regression pin (lead-approved per #682 TEST phase).
@@ -1304,11 +1202,6 @@ class TestDocSurfaceStalenessSweep:
     - `test_deprecation_blockquote_skipped` — `> Deprecated:` line does NOT.
     - `test_old_name_html_comment_skipped` — `<!-- old name: ... -->` does NOT.
     - `test_fenced_code_block_skipped` — content inside ```...``` does NOT.
-
-    The single permitted reference outside doc surfaces is the
-    negative-assertion in test_inbox_wake_lifecycle_helper.py:48
-    (`assert "SELF_COMPLETE_EXEMPT_AGENTS" not in src`), which is itself
-    a guard against the old name reappearing in wake_lifecycle.py.
 
     If a future refactor genuinely needs to rename
     SELF_COMPLETE_EXEMPT_AGENT_TYPES, update this test alongside the
