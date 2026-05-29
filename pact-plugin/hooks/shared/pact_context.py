@@ -53,6 +53,34 @@ _EMPTY_CONTEXT = {
 }
 
 
+def reset_for_tests() -> None:
+    """Reset this module's mutable session-context state to its import-time
+    default. Public test-isolation hook.
+
+    ``pact_context`` memoizes the resolved session context in two
+    module-level globals — ``_cache`` (the parsed context dict) and
+    ``_context_path`` (the resolved context-file path). Both are populated
+    lazily on first read and persist for the life of the process. That is
+    correct in production (one session per process) but leaks across tests,
+    which reuse a single process: a test that populates the cache with a
+    session bleeds it into every later test. The pytest autouse fixture in
+    ``tests/conftest.py`` calls this before AND after every test to guarantee
+    cross-test isolation.
+
+    Co-located with the state it resets ON PURPOSE: a future rename of
+    ``_cache`` / ``_context_path`` must update THIS function in the same
+    module, instead of silently turning an external direct-assignment reset
+    into a no-op. Pure, no args, idempotent. Resets ONLY the mutable
+    cache/path globals — ``_EMPTY_CONTEXT`` and the ``TOKEN_*`` / config
+    constants are immutable defaults and are not touched. ADDITIVE: production
+    caching behavior and all existing callers are unchanged; this is invoked
+    only by tests.
+    """
+    global _cache, _context_path
+    _cache = None
+    _context_path = None
+
+
 def _build_session_path(slug: str, session_id: str) -> Path:
     """Build the session-scoped directory path.
 
