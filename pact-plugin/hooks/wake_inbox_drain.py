@@ -375,6 +375,8 @@ def _drain_markers(inbox_dir: Path) -> dict[str, Any]:
 def _emit_arm() -> None:
     """Print the _ARM_DIRECTIVE additionalContext payload with the
     required hookEventName field. Caller is responsible for sys.exit(0).
+    When CRON_AUTOARM_ENABLED is False (the auto-arm master switch),
+    prints _SUPPRESS_OUTPUT and returns without emitting the directive.
     """
     if not CRON_AUTOARM_ENABLED:
         print(_SUPPRESS_OUTPUT)

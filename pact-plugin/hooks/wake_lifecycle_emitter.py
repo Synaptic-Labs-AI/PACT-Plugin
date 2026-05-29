@@ -397,7 +397,9 @@ def _arm_or_none(team_name: str) -> str | None:
     """
     Return _ARM_DIRECTIVE iff the conditions for emitting Arm are met:
     at least one lifecycle-relevant active teammate task. Otherwise
-    return None.
+    return None. Precondition: returns None unconditionally when
+    CRON_AUTOARM_ENABLED is False (the auto-arm master switch); the
+    active-task check is reached only when auto-arm is enabled.
 
     Shared between the TaskCreate Arm branch and the pending->in_progress
     re-Arm branch in `_decide_directive` — both branches share identical
