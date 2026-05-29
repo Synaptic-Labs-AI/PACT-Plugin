@@ -962,3 +962,166 @@ class TestDirectiveAntiSofteningGuard:
             f"task completed` (#738: provably-false on re-fire); got "
             f"{emitter._TEARDOWN_DIRECTIVE!r}"
         )
+
+
+# ===========================================================================
+# Cron auto-arm DISABLE contract (Phase 2) — G1 (_arm_or_none) + G2
+# (_maybe_write_teammate_arm_marker), production-default suppression.
+#
+# Under the PRODUCTION default CRON_AUTOARM_ENABLED=False, NO arm directive
+# (G1) and NO teammate arm marker (G2) is produced even with active teammate
+# work present. Each suppression test is PAIRED with a True-recovery on the
+# SAME fixture: the True case firing proves count_active_tasks > 0 for that
+# fixture, so the False suppression cannot be a count==0 phantom-green — it is
+# gate-driven. The pairing is a contract-level counter-test-by-revert with the
+# sentinel flip standing in for the revert; the gate is proven the SOLE
+# suppressor. (A source-level guard-removal counter-test was run out-of-band;
+# see the TEST-phase HANDOFF.)
+# ===========================================================================
+
+
+def _g1_taskcreate_payload(sid, pdir, task_id="task-1"):
+    return {
+        "tool_name": "TaskCreate",
+        "session_id": sid,
+        "cwd": pdir,
+        "tool_input": {"taskId": task_id},
+        "tool_response": {"task": {"id": task_id}},
+    }
+
+
+def _g1_rearm_payload(sid, pdir, task_id="B", owner="backend-coder"):
+    return {
+        "tool_name": "TaskUpdate",
+        "session_id": sid,
+        "cwd": pdir,
+        "tool_input": {"taskId": task_id, "status": "in_progress"},
+        "tool_response": {"id": task_id, "status": "in_progress", "owner": owner},
+    }
+
+
+def test_autoarm_disabled_taskcreate_suppresses_arm(tmp_path):
+    """G1 (TaskCreate branch): one active task on disk, production default
+    CRON_AUTOARM_ENABLED=False -> _arm_or_none returns None -> suppressOutput.
+    Paired recovery: test_autoarm_recovery_taskcreate_emits_arm."""
+    home = tmp_path / "home"; home.mkdir()
+    sid = "session-1"; pdir = "/tmp/proj"; team = "team-a"
+    _write_session_context(home, sid, pdir, team)
+    _write_task(home, team, "task-1", status="in_progress", owner="backend-coder")
+    rc, out, err = _run_emitter(
+        json.dumps(_g1_taskcreate_payload(sid, pdir)),
+        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+        autoarm_enabled=False,
+    )
+    assert rc == 0, f"stderr={err}"
+    assert json.loads(out) == {"suppressOutput": True}
+
+
+def test_autoarm_recovery_taskcreate_emits_arm(tmp_path):
+    """G1 recovery: SAME fixture, gate flipped True -> arm fires again.
+    Proves count_active_tasks > 0 for this fixture, so the False
+    suppression above is gate-driven, not a count==0 phantom-green."""
+    home = tmp_path / "home"; home.mkdir()
+    sid = "session-1"; pdir = "/tmp/proj"; team = "team-a"
+    _write_session_context(home, sid, pdir, team)
+    _write_task(home, team, "task-1", status="in_progress", owner="backend-coder")
+    rc, out, err = _run_emitter(
+        json.dumps(_g1_taskcreate_payload(sid, pdir)),
+        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+        autoarm_enabled=True,
+    )
+    assert rc == 0, f"stderr={err}"
+    hso = json.loads(out)["hookSpecificOutput"]
+    assert 'Skill("PACT:start-pending-scan")' in hso["additionalContext"]
+
+
+def test_autoarm_disabled_rearm_suppresses_arm(tmp_path):
+    """G1 (TaskUpdate pending->in_progress re-arm branch — the SECOND
+    _arm_or_none funnel): active task on disk, CRON_AUTOARM_ENABLED=False ->
+    suppressOutput. Paired recovery: test_autoarm_recovery_rearm_emits_arm."""
+    home = tmp_path / "home"; home.mkdir()
+    sid = "s"; pdir = "/tmp/p"; team = "team-rearm"
+    _write_session_context(home, sid, pdir, team)
+    _write_task(home, team, "B", status="in_progress", owner="backend-coder")
+    rc, out, err = _run_emitter(
+        json.dumps(_g1_rearm_payload(sid, pdir)),
+        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+        autoarm_enabled=False,
+    )
+    assert rc == 0, f"stderr={err}"
+    assert json.loads(out) == {"suppressOutput": True}
+
+
+def test_autoarm_recovery_rearm_emits_arm(tmp_path):
+    """G1 re-arm recovery: SAME fixture, gate True -> arm fires again."""
+    home = tmp_path / "home"; home.mkdir()
+    sid = "s"; pdir = "/tmp/p"; team = "team-rearm"
+    _write_session_context(home, sid, pdir, team)
+    _write_task(home, team, "B", status="in_progress", owner="backend-coder")
+    rc, out, err = _run_emitter(
+        json.dumps(_g1_rearm_payload(sid, pdir)),
+        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+        autoarm_enabled=True,
+    )
+    assert rc == 0, f"stderr={err}"
+    hso = json.loads(out)["hookSpecificOutput"]
+    assert 'Skill("PACT:start-pending-scan")' in hso["additionalContext"]
+
+
+def _g2_teammate_fixture(home, team, teammate_sid, pdir, owner):
+    _write_session_context(
+        home, teammate_sid, pdir, team,
+        lead_session_id="lead-sid",
+        members=[
+            {"name": owner, "agentId": "agent-bc"},
+            {"name": "lead", "agentId": "agent-lead"},
+        ],
+        lead_agent_id="agent-lead",
+    )
+    _write_task(home, team, "G2a", status="in_progress", owner=owner)
+    return {
+        "tool_name": "TaskUpdate",
+        "session_id": teammate_sid, "agent_id": "agent-bc", "cwd": pdir,
+        "tool_input": {"taskId": "G2a", "status": "in_progress", "owner": owner},
+        "tool_response": {"id": "G2a", "status": "in_progress", "owner": owner},
+    }
+
+
+def test_autoarm_disabled_teammate_arm_marker_not_written(tmp_path):
+    """G2 (_maybe_write_teammate_arm_marker): an in-process teammate-frame
+    self-claim that WOULD write an arm marker writes NOTHING under
+    CRON_AUTOARM_ENABLED=False (producer early-returns before any I/O).
+    Paired recovery: test_autoarm_recovery_teammate_arm_marker_written."""
+    home = tmp_path / "home"; home.mkdir()
+    team = "team-g2"; pdir = "/tmp/p"; owner = "backend-coder"
+    payload = _g2_teammate_fixture(home, team, "teammate-sid", pdir, owner)
+    rc, out, err = _run_emitter(
+        json.dumps(payload),
+        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+        autoarm_enabled=False,
+    )
+    assert rc == 0, f"stderr={err}"
+    assert _read_inbox_markers(home, team) == [], (
+        "no teammate arm marker may be written under autoarm-disabled"
+    )
+
+
+def test_autoarm_recovery_teammate_arm_marker_written(tmp_path):
+    """G2 recovery: SAME fixture, gate True -> exactly one arm marker is
+    written. Proves the producer's clause ladder reaches the write under
+    this fixture, so the False no-write above is gate-driven."""
+    home = tmp_path / "home"; home.mkdir()
+    team = "team-g2"; pdir = "/tmp/p"; owner = "backend-coder"
+    payload = _g2_teammate_fixture(home, team, "teammate-sid", pdir, owner)
+    rc, out, err = _run_emitter(
+        json.dumps(payload),
+        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+        autoarm_enabled=True,
+    )
+    assert rc == 0, f"stderr={err}"
+    markers = _read_inbox_markers(home, team)
+    arm_markers = [m for m in markers if m.get("type") == "arm"]
+    assert len(arm_markers) == 1, (
+        f"exactly one teammate arm marker expected under autoarm-enabled; "
+        f"got {markers!r}"
+    )

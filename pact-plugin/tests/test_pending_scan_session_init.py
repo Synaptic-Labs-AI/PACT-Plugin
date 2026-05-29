@@ -338,3 +338,79 @@ def test_session_init_does_not_emit_arm_directive_from_in_process_teammate_frame
         "session_init emitted start-pending-scan slug from in-process "
         "teammate frame."
     )
+
+
+# ===========================================================================
+# Cron auto-arm DISABLE contract (Phase 2) — G3 (session_init resume/startup
+# arm block) + the step-0b in-process teammateMode notice regression guard.
+#
+# G3 extended the SAME main() arm `if` that sits just below the step-0b notice
+# append. Under the PRODUCTION default CRON_AUTOARM_ENABLED=False the arm
+# directive is suppressed; the True-recovery anchor is the existing
+# test_session_init_emits_arm_directive_when_active_tasks_present. The step-0b
+# tests pin that the G3 edit caused NO collateral damage: the notice still
+# fires when arm is suppressed (regression), and both surface together when
+# arm is enabled (coexistence — the gate toggles ARM only).
+#
+# _INPROCESS_NOTICE_FRAGMENT is a distinctive substring of the step-0b notice,
+# taken verbatim from the hook's emitted systemMessage and confirmed
+# empirically to fire under BOTH gate states in the subprocess harness.
+# ===========================================================================
+
+_INPROCESS_NOTICE_FRAGMENT = "unattended runs may stall in in-process teammate mode"
+
+
+def test_session_init_suppresses_arm_when_autoarm_disabled(tmp_path):
+    """G3: with >=1 active task on disk and a lead-context SessionStart, the
+    arm directive is SUPPRESSED under CRON_AUTOARM_ENABLED=False. Recovery
+    anchor: test_session_init_emits_arm_directive_when_active_tasks_present
+    (which runs the same shape at the default autoarm_enabled=True)."""
+    home = tmp_path / "home"; home.mkdir()
+    sid = "abcdef01-autoarm-off"
+    pdir = "/tmp/pi-autoarm-g3"
+    team = "pact-abcdef01"
+    _stage_pact_session(home, team, sid, pdir)
+    _stage_active_task(home, team)
+    result = _run_session_init(home, sid, pdir, source="resume", autoarm_enabled=False)
+    ctx = result.get("hookSpecificOutput", {}).get("additionalContext", "")
+    assert _ARM_DIRECTIVE_PHRASE not in ctx, (
+        f"G3 must suppress the session-start arm directive under "
+        f"autoarm-disabled; got additionalContext={ctx!r}"
+    )
+
+
+def test_step0b_notice_still_fires_when_autoarm_disabled(tmp_path):
+    """Regression guard: the step-0b in-process teammateMode notice MUST
+    still fire under CRON_AUTOARM_ENABLED=False, while the adjacent G3 arm
+    directive is suppressed. Pins that the G3 edit to the shared main() arm
+    block did not collaterally break the Phase-1 step-0b notice."""
+    home = tmp_path / "home"; home.mkdir()
+    sid = "abcdef01-step0b-off"
+    pdir = "/tmp/pi-step0b-off"
+    team = "pact-abcdef01"
+    _stage_pact_session(home, team, sid, pdir)
+    _stage_active_task(home, team)
+    result = _run_session_init(home, sid, pdir, source="startup", autoarm_enabled=False)
+    assert _INPROCESS_NOTICE_FRAGMENT in result.get("systemMessage", ""), (
+        "step-0b in-process notice must still fire under autoarm-disabled"
+    )
+    ctx = result.get("hookSpecificOutput", {}).get("additionalContext", "")
+    assert _ARM_DIRECTIVE_PHRASE not in ctx, (
+        "G3 arm directive must be suppressed under autoarm-disabled"
+    )
+
+
+def test_step0b_notice_and_arm_coexist_when_autoarm_enabled(tmp_path):
+    """Coexistence/recovery: with the gate True, BOTH the step-0b notice and
+    the G3 arm directive fire — confirming the gate toggles the ARM path
+    ONLY; the step-0b notice is independent."""
+    home = tmp_path / "home"; home.mkdir()
+    sid = "abcdef01-step0b-on"
+    pdir = "/tmp/pi-step0b-on"
+    team = "pact-abcdef01"
+    _stage_pact_session(home, team, sid, pdir)
+    _stage_active_task(home, team)
+    result = _run_session_init(home, sid, pdir, source="startup", autoarm_enabled=True)
+    assert _INPROCESS_NOTICE_FRAGMENT in result.get("systemMessage", "")
+    ctx = result.get("hookSpecificOutput", {}).get("additionalContext", "")
+    assert _ARM_DIRECTIVE_PHRASE in ctx

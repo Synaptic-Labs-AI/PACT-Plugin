@@ -2220,3 +2220,228 @@ class TestMalformedTeardownMarkerDemotedToArm:
                     f"{child!r}; drain-side guard failed"
                 )
 
+
+
+# ===========================================================================
+# Cron auto-arm DISABLE contract (Phase 2) — G4 (_emit_arm), all 3 drain
+# call sites, plus the no-over-suppression guard on the ungated teardown path.
+#
+# Under the PRODUCTION default CRON_AUTOARM_ENABLED=False, every arm emit
+# through _emit_arm suppresses; each suppression is PAIRED with a True-recovery
+# on the SAME fixture (recovery firing proves count/marker drives an arm under
+# this fixture, so the False suppression is gate-driven, not phantom-green).
+# The teardown path (_emit_teardown) is a SEPARATE, ungated function and MUST
+# still fire under autoarm-disabled — the final test pins that G4 suppresses
+# ARM only and does not over-suppress TEARDOWN.
+# ===========================================================================
+
+
+def _g4_user_prompt(sid, pdir):
+    return {
+        "session_id": sid, "cwd": pdir,
+        "hook_event_name": "UserPromptSubmit", "prompt": "go",
+    }
+
+
+def _g4_member_fixture(home, lead_sid, pdir, team, owner="backend-coder"):
+    _write_session_context(
+        home, lead_sid, pdir, team,
+        members=[
+            {"name": owner, "agentId": "agent-bc"},
+            {"name": "lead", "agentId": "agent-lead"},
+        ],
+        lead_agent_id="agent-lead",
+    )
+
+
+def test_autoarm_disabled_count_fallback_suppresses(tmp_path):
+    """G4 site 3 — the marker-INDEPENDENT B-1 count fallback (the path that
+    re-fires on every lead prompt with active work). Empty inbox + count>=1,
+    CRON_AUTOARM_ENABLED=False -> _emit_arm suppresses. Paired recovery:
+    test_autoarm_recovery_count_fallback_emits."""
+    home = tmp_path / "home"; home.mkdir()
+    lead_sid = "lead-sid"; pdir = "/tmp/p"; team = "team-g4-fallback"
+    _g4_member_fixture(home, lead_sid, pdir, team)
+    _write_task(home, team, "Q", status="in_progress", owner="backend-coder")
+    rc, out, err = _run_drain(
+        json.dumps(_g4_user_prompt(lead_sid, pdir)),
+        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+        autoarm_enabled=False,
+    )
+    assert rc == 0, f"stderr={err}"
+    assert json.loads(out).get("suppressOutput") is True
+    assert "PACT:start-pending-scan" not in out
+
+
+def test_autoarm_recovery_count_fallback_emits(tmp_path):
+    """G4 site 3 recovery: SAME fixture, gate True -> count fallback emits
+    Arm. Proves count>=1 here, so the False suppression is gate-driven."""
+    home = tmp_path / "home"; home.mkdir()
+    lead_sid = "lead-sid"; pdir = "/tmp/p"; team = "team-g4-fallback"
+    _g4_member_fixture(home, lead_sid, pdir, team)
+    _write_task(home, team, "Q", status="in_progress", owner="backend-coder")
+    rc, out, err = _run_drain(
+        json.dumps(_g4_user_prompt(lead_sid, pdir)),
+        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+        autoarm_enabled=True,
+    )
+    assert rc == 0, f"stderr={err}"
+    hso = json.loads(out)["hookSpecificOutput"]
+    assert "PACT:start-pending-scan" in hso["additionalContext"]
+
+
+def test_autoarm_disabled_drained_arm_marker_suppresses(tmp_path):
+    """G4 site 2 — arm-only drain. An arm marker drains (and is consumed)
+    but _emit_arm suppresses under CRON_AUTOARM_ENABLED=False. Paired
+    recovery: test_autoarm_recovery_drained_arm_marker_emits."""
+    home = tmp_path / "home"; home.mkdir()
+    lead_sid = "lead-sid"; pdir = "/tmp/p"; team = "team-g4-arm-drain"
+    _write_session_context(home, lead_sid, pdir, team)
+    _write_marker(
+        home, team, "20260516T160200Z-x-T3.json",
+        {
+            "schema_version": 1, "type": "arm",
+            "trigger": "teammate_self_claim_in_progress",
+            "tool_name": "TaskUpdate", "task_id": "T3", "owner": "backend-coder",
+        },
+    )
+    rc, out, err = _run_drain(
+        json.dumps(_g4_user_prompt(lead_sid, pdir)),
+        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+        autoarm_enabled=False,
+    )
+    assert rc == 0, f"stderr={err}"
+    assert json.loads(out).get("suppressOutput") is True
+    assert "PACT:start-pending-scan" not in out
+
+
+def test_autoarm_recovery_drained_arm_marker_emits(tmp_path):
+    """G4 site 2 recovery: SAME fixture, gate True -> drained arm marker
+    emits Arm."""
+    home = tmp_path / "home"; home.mkdir()
+    lead_sid = "lead-sid"; pdir = "/tmp/p"; team = "team-g4-arm-drain"
+    _write_session_context(home, lead_sid, pdir, team)
+    _write_marker(
+        home, team, "20260516T160200Z-x-T3.json",
+        {
+            "schema_version": 1, "type": "arm",
+            "trigger": "teammate_self_claim_in_progress",
+            "tool_name": "TaskUpdate", "task_id": "T3", "owner": "backend-coder",
+        },
+    )
+    rc, out, err = _run_drain(
+        json.dumps(_g4_user_prompt(lead_sid, pdir)),
+        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+        autoarm_enabled=True,
+    )
+    assert rc == 0, f"stderr={err}"
+    hso = json.loads(out)["hookSpecificOutput"]
+    assert "PACT:start-pending-scan" in hso["additionalContext"]
+
+
+def test_autoarm_disabled_arm_teardown_disambiguation_suppresses(tmp_path):
+    """G4 site 1 — arm+teardown same-prompt disambiguation. With count>0 the
+    drain normally DEMOTES the mixed drain to an arm emit; under
+    CRON_AUTOARM_ENABLED=False the demoted arm emit suppresses (and the stale
+    teardown still must NOT win). Paired recovery:
+    test_autoarm_recovery_arm_teardown_disambiguation_emits."""
+    home = tmp_path / "home"; home.mkdir()
+    lead_sid = "lead-sid"; pdir = "/tmp/p"; team = "team-g4-disambig"
+    _g4_member_fixture(home, lead_sid, pdir, team)
+    _write_task(home, team, "A_active", status="in_progress", owner="backend-coder")
+    _write_marker(
+        home, team, "20260516T160600Z-x-Z_stale.json",
+        {
+            "schema_version": 1, "type": "teardown", "task_id": "Z_stale",
+            "team_name": team, "owner": "secretary",
+            "timestamp_ms": 1715792300000,
+            "trigger": "self_complete_exempt_or_stop_sweep",
+        },
+    )
+    _write_marker(
+        home, team, "20260516T160700Z-x-A_active.json",
+        {
+            "schema_version": 1, "type": "arm",
+            "trigger": "teammate_self_claim_in_progress",
+            "tool_name": "TaskUpdate", "task_id": "A_active",
+            "owner": "backend-coder",
+        },
+    )
+    rc, out, err = _run_drain(
+        json.dumps(_g4_user_prompt(lead_sid, pdir)),
+        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+        autoarm_enabled=False,
+    )
+    assert rc == 0, f"stderr={err}"
+    assert json.loads(out).get("suppressOutput") is True
+    assert "PACT:start-pending-scan" not in out
+    # The stale teardown must NOT win either — the demoted-arm branch was
+    # taken (count>0) and that branch is what G4 suppresses.
+    assert "PACT:stop-pending-scan" not in out
+
+
+def test_autoarm_recovery_arm_teardown_disambiguation_emits(tmp_path):
+    """G4 site 1 recovery: SAME fixture, gate True -> the demoted-arm branch
+    emits Arm (cron stays armed; stale teardown yields)."""
+    home = tmp_path / "home"; home.mkdir()
+    lead_sid = "lead-sid"; pdir = "/tmp/p"; team = "team-g4-disambig"
+    _g4_member_fixture(home, lead_sid, pdir, team)
+    _write_task(home, team, "A_active", status="in_progress", owner="backend-coder")
+    _write_marker(
+        home, team, "20260516T160600Z-x-Z_stale.json",
+        {
+            "schema_version": 1, "type": "teardown", "task_id": "Z_stale",
+            "team_name": team, "owner": "secretary",
+            "timestamp_ms": 1715792300000,
+            "trigger": "self_complete_exempt_or_stop_sweep",
+        },
+    )
+    _write_marker(
+        home, team, "20260516T160700Z-x-A_active.json",
+        {
+            "schema_version": 1, "type": "arm",
+            "trigger": "teammate_self_claim_in_progress",
+            "tool_name": "TaskUpdate", "task_id": "A_active",
+            "owner": "backend-coder",
+        },
+    )
+    rc, out, err = _run_drain(
+        json.dumps(_g4_user_prompt(lead_sid, pdir)),
+        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+        autoarm_enabled=True,
+    )
+    assert rc == 0, f"stderr={err}"
+    ac = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "PACT:start-pending-scan" in ac
+    assert "PACT:stop-pending-scan" not in ac
+
+
+def test_autoarm_disabled_teardown_marker_still_emits(tmp_path):
+    """NO OVER-SUPPRESSION: G4 gates _emit_arm ONLY. A drained teardown
+    marker MUST still emit the Teardown directive under
+    CRON_AUTOARM_ENABLED=False (teardown is a separate, ungated path).
+    Pins the surgical placement of G4 — disabling auto-ARM must not
+    collaterally disable auto-TEARDOWN."""
+    home = tmp_path / "home"; home.mkdir()
+    lead_sid = "lead-sid"; pdir = "/tmp/p"; team = "team-g4-teardown-survives"
+    _write_session_context(home, lead_sid, pdir, team)
+    _write_marker(
+        home, team, "20260516T160300Z-x-T4.json",
+        {
+            "schema_version": 1, "type": "teardown", "task_id": "T4",
+            "team_name": team, "owner": "secretary",
+            "timestamp_ms": 1715792180000,
+            "trigger": "self_complete_exempt_or_stop_sweep",
+        },
+    )
+    rc, out, err = _run_drain(
+        json.dumps(_g4_user_prompt(lead_sid, pdir)),
+        env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir},
+        autoarm_enabled=False,
+    )
+    assert rc == 0, f"stderr={err}"
+    hso = json.loads(out)["hookSpecificOutput"]
+    assert "PACT:stop-pending-scan" in hso["additionalContext"], (
+        "teardown must still fire under autoarm-disabled (no over-suppression)"
+    )
+    assert "PACT:start-pending-scan" not in hso["additionalContext"]
