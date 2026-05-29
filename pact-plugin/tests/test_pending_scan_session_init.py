@@ -138,6 +138,7 @@ def _run_session_init(
     agent_id: str | None = None,
     teammate_name: str | None = None,
     autoarm_enabled: bool = True,
+    managed_teammate_mode: str | None = None,
 ) -> dict:
     """Run session_init.py with synthesized SessionStart stdin.
 
@@ -148,6 +149,13 @@ def _run_session_init(
     auxiliary platform-frame schema bits (it does not influence the
     actor-discriminator under the compound check). Lead-frame fires
     omit all three (default None).
+
+    `managed_teammate_mode` controls the (otherwise OS-absolute, #867)
+    enterprise managed-settings source that the step-0b in-process notice
+    consults at top precedence: None neutralizes it to an ABSENT path under
+    the isolated HOME (source[0] inert; behavior-neutral where the real file
+    is absent); a value (e.g. "tmux") writes a managed-settings.json carrying
+    that teammateMode so a test can exercise the managed-precedence direction.
     """
     payload_dict: dict = {"session_id": sid, "cwd": pdir, "source": source}
     if agent_type is not None:
@@ -159,6 +167,25 @@ def _run_session_init(
     payload = json.dumps(payload_dict)
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
     env.update({"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir})
+    # Hermeticity (#867): the effective-teammateMode resolver consulted by the
+    # step-0b in-process notice reads an OS-ABSOLUTE enterprise managed-settings
+    # path as its HIGHEST-precedence source (shared.teammate_mode.
+    # _managed_settings_path() -> /Library/.../managed-settings.json etc.).
+    # HOME/CLAUDE_PROJECT_DIR env isolation does NOT cover it, so without
+    # neutralization the notice's firing would be contingent on the real
+    # machine's managed settings (green-by-luck on a dev box; false-RED on a
+    # managed fleet that sets teammateMode=tmux). monkeypatch cannot cross the
+    # subprocess boundary, so rebind _managed_settings_path INSIDE runner_src to
+    # a path UNDER the isolated HOME. Default (managed_teammate_mode=None) points
+    # at an ABSENT path -> source[0] inert. A value writes a managed-settings.json
+    # carrying that teammateMode so a test can exercise managed precedence.
+    managed_dir = Path(home) / ".claude" / "_managed_test"
+    managed_path = managed_dir / "managed-settings.json"
+    if managed_teammate_mode is not None:
+        managed_dir.mkdir(parents=True, exist_ok=True)
+        managed_path.write_text(
+            json.dumps({"teammateMode": managed_teammate_mode}), encoding="utf-8",
+        )
     # Production default is CRON_AUTOARM_ENABLED=False (auto-arm disabled).
     # G3 gates the session-start arm directive on it; these tests exercise
     # the arm MACHINERY (still reachable via the manual
@@ -167,11 +194,19 @@ def _run_session_init(
     # main(). Patching shared.wake_lifecycle would NOT reach the already-bound
     # session_init.CRON_AUTOARM_ENABLED name (name-import snapshot). Pass
     # autoarm_enabled=False to exercise production-default suppression.
+    #
+    # The _managed_settings_path rebind lands BEFORE main(): session_init imports
+    # should_emit_inprocess_notice lazily inside main()'s step-0b block, and that
+    # function reaches _managed_settings_path() by module-bare-name at call time,
+    # so the rebind on the shared.teammate_mode module is honored.
     runner_src = (
         "import sys\n"
         f"sys.path.insert(0, {str(SESSION_INIT_HOOK.parent)!r})\n"
         "import session_init\n"
         f"session_init.CRON_AUTOARM_ENABLED = {autoarm_enabled!r}\n"
+        "import shared.teammate_mode as _tm\n"
+        "import pathlib as _pl\n"
+        f"_tm._managed_settings_path = lambda: _pl.Path({str(managed_path)!r})\n"
         "session_init.main()\n"
     )
     proc = subprocess.run(
@@ -414,3 +449,29 @@ def test_step0b_notice_and_arm_coexist_when_autoarm_enabled(tmp_path):
     assert _INPROCESS_NOTICE_FRAGMENT in result.get("systemMessage", "")
     ctx = result.get("hookSpecificOutput", {}).get("additionalContext", "")
     assert _ARM_DIRECTIVE_PHRASE in ctx
+
+
+def test_step0b_notice_suppressed_when_managed_teammate_mode_tmux(tmp_path):
+    """Managed-precedence pin (suppression direction): the enterprise
+    managed-settings source — source[0], the HIGHEST-precedence layer — setting
+    teammateMode="tmux" SUPPRESSES the step-0b in-process notice, even though no
+    lower source defines the key. The rest of the step-0b suite only asserts the
+    notice FIRES (the absence/auto direction); this pins the opposite direction
+    AND that _managed_settings_path is actually read at top precedence.
+
+    Hermetic by construction: the managed source is fixture-controlled under the
+    isolated HOME via the runner_src override (#867) — the assertion depends ONLY
+    on the injected teammateMode, never on the host's real managed-settings."""
+    home = tmp_path / "home"; home.mkdir()
+    sid = "abcdef01-managed-tmux"
+    pdir = "/tmp/pi-managed-tmux"
+    team = "pact-abcdef01"
+    _stage_pact_session(home, team, sid, pdir)
+    _stage_active_task(home, team)
+    result = _run_session_init(
+        home, sid, pdir, source="startup", managed_teammate_mode="tmux",
+    )
+    assert _INPROCESS_NOTICE_FRAGMENT not in result.get("systemMessage", ""), (
+        "managed teammateMode=tmux (top-precedence source) must suppress the "
+        "step-0b in-process notice"
+    )
