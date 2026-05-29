@@ -450,11 +450,12 @@ class TestSessionStartCardinality:
 
 
 class TestSpawnToolMatchersPost662:
-    """#662: matcher='Agent' on team_guard + auditor_reminder; matcher
-    'TaskCreate|TaskUpdate' on wake_lifecycle_emitter PRESERVED. The earlier
-    matcher='Task' was wrong — the canonical Claude Code platform tool
-    name for sub-agent spawning is `Agent`. Cat-2 task-management tools
-    (TaskCreate/TaskUpdate/TaskList/...) are unrelated and MUST stay.
+    """#662: matcher='Agent' on team_guard + auditor_reminder; the
+    'TaskCreate|TaskUpdate' Cat-2 matcher (now on task_lifecycle_gate) is
+    PRESERVED. The earlier matcher='Task' was wrong — the canonical Claude
+    Code platform tool name for sub-agent spawning is `Agent`. Cat-2
+    task-management tools (TaskCreate/TaskUpdate/TaskList/...) are unrelated
+    and MUST stay.
     """
 
     def _all_matcher_pairs(self, hooks_config):
@@ -495,26 +496,6 @@ class TestSpawnToolMatchersPost662:
                 )
                 return
         pytest.fail("auditor_reminder.py entry not found in hooks.json")
-
-    def test_wake_lifecycle_emitter_matcher_unchanged(self, hooks_config):
-        """Cat-2 preservation regression-prevention (#662): the
-        wake_lifecycle_emitter matcher 'TaskCreate|TaskUpdate' MUST NOT be
-        renamed. These are PACT plugin task-system tools, distinct from
-        the spawn-tool `Agent`. Renaming them would break lifecycle hooks.
-        """
-        for event_type, matcher, commands in self._all_matcher_pairs(
-            hooks_config
-        ):
-            if any("wake_lifecycle_emitter.py" in c for c in commands):
-                assert matcher == "TaskCreate|TaskUpdate", (
-                    f"wake_lifecycle_emitter.py matcher MUST remain "
-                    f"'TaskCreate|TaskUpdate' (Cat-2 preservation, #662); "
-                    f"got {matcher!r} on {event_type}"
-                )
-                return
-        pytest.fail(
-            "wake_lifecycle_emitter.py entry not found in hooks.json"
-        )
 
     def test_no_matcher_is_bare_task_string(self, hooks_config):
         """Regression-prevention: NO matcher should be the bare 'Task'

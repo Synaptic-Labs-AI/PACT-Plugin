@@ -81,7 +81,6 @@ from shared.pact_context import get_session_dir, write_context
 from shared.session_journal import append_event, make_event
 from shared.failure_log import append_failure
 from shared.plugin_manifest import format_plugin_banner
-from shared.wake_lifecycle import count_active_tasks, is_lead_context, CRON_AUTOARM_ENABLED
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import setup_plugin_symlinks
@@ -808,54 +807,6 @@ def main():
 
         # 5. Remind orchestrator to create session-unique PACT team (or reuse on resume)
         team_name = generate_team_name(input_data)
-
-        # 5_pre. Scan-arm directive (resume-with-active-tasks gap closure).
-        # PostToolUse on Task-mutating tools handles 0->1 transitions
-        # within a session, but a session resuming with tasks already in
-        # flight has no such transition to observe. Hook-side
-        # count_active_tasks check + unconditional Arm emit when the
-        # team has any active teammate work on disk. The hook does the
-        # diagnosis; the directive itself is unconditional per the
-        # hook-emitted-directives discipline (unconditional >
-        # conditional). Tier-0 additionalContext via context_parts
-        # append; resume / startup / clear / compact all reach this
-        # branch identically — Arm is idempotent in the skill (CronList
-        # exact-suffix-match in start-pending-scan.md), so redundant
-        # emission no-ops cheaply.
-        #
-        # count_active_tasks honors the pure-never-raises contract
-        # (shared.wake_lifecycle module-wide pin); call it directly,
-        # no try/except wrapper required.
-        active_count = count_active_tasks(team_name)
-        if CRON_AUTOARM_ENABLED and active_count > 0 and is_lead_context(input_data, team_name):
-            # Audit anchor (editing-LLM warning): the directive prose
-            # below is UNCONDITIONAL by design. Do not introduce
-            # LLM-self-diagnosis here ("only emit if X"). Diagnostic
-            # logic belongs in the hook (Python side, this function);
-            # the directive (LLM side) carries no conditional wording.
-            # Tier-0 additionalContext is architecturally binding;
-            # conditional wording silently regresses to the
-            # LLM-self-diagnosis failure mode.
-            #
-            # Lead-Context Guard (Layer 0 of the defense-in-depth model
-            # for scan-firing-only-in-lead-context): the
-            # `is_lead_context` predicate (compound `'agent_id' not in
-            # stdin and 'teammate_name' not in stdin`) filters directive
-            # emission to lead-context only. Empirically the in-process subagent
-            # model produces no teammate-fire path for SessionStart, so
-            # every fire reaching this branch is lead-context under
-            # current platform behavior; the broader per-event schema
-            # audit on hypothetical future SessionStart-subagent-frame
-            # additions is tracked separately (see helper docstring in
-            # shared/wake_lifecycle.py). Correct-by-construction at
-            # the emission source; the skill body's Lead-Session Guard
-            # (Layer 1) is backstop for user-typed manual invocation.
-            context_parts.append(
-                'Active teammate tasks detected on session start. '
-                'Invoke Skill("PACT:start-pending-scan") before any further '
-                'teammate dispatch. Idempotent — no-op if a '
-                '/PACT:scan-pending-tasks cron is already registered.'
-            )
 
         # 5a. Write session context file FIRST so get_session_dir() works for
         # subsequent journal writes. write_context() populates the _cache

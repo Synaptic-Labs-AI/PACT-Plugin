@@ -16,14 +16,6 @@
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/bootstrap_prompt_gate.py\""
           }
         ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/wake_inbox_drain.py\""
-          }
-        ]
       }
     ],
     "SessionStart": [
@@ -149,14 +141,6 @@
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/agent_handoff_emitter.py\""
           }
         ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/teardown_request_emitter.py\""
-          }
-        ]
       }
     ],
     "TeammateIdle": [
@@ -210,10 +194,6 @@
       {
         "matcher": "TaskCreate|TaskUpdate",
         "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/wake_lifecycle_emitter.py\""
-          },
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/task_lifecycle_gate.py\""
