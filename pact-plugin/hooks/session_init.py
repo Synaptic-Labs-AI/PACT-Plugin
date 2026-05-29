@@ -81,7 +81,7 @@ from shared.pact_context import get_session_dir, write_context
 from shared.session_journal import append_event, make_event
 from shared.failure_log import append_failure
 from shared.plugin_manifest import format_plugin_banner
-from shared.wake_lifecycle import count_active_tasks, is_lead_context
+from shared.wake_lifecycle import count_active_tasks, is_lead_context, CRON_AUTOARM_ENABLED
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import setup_plugin_symlinks
@@ -827,7 +827,7 @@ def main():
         # (shared.wake_lifecycle module-wide pin); call it directly,
         # no try/except wrapper required.
         active_count = count_active_tasks(team_name)
-        if active_count > 0 and is_lead_context(input_data, team_name):
+        if CRON_AUTOARM_ENABLED and active_count > 0 and is_lead_context(input_data, team_name):
             # Audit anchor (editing-LLM warning): the directive prose
             # below is UNCONDITIONAL by design. Do not introduce
             # LLM-self-diagnosis here ("only emit if X"). Diagnostic

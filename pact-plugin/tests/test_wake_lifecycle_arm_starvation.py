@@ -32,7 +32,7 @@ EMITTER = HOOK_DIR / "wake_lifecycle_emitter.py"
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "wake_lifecycle"
 
 
-def _run_emitter(stdin_payload, env_extra=None):
+def _run_emitter(stdin_payload, env_extra=None, autoarm_enabled=True):
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
     if env_extra:
         env.update(env_extra)
@@ -40,8 +40,22 @@ def _run_emitter(stdin_payload, env_extra=None):
         stdin_payload if isinstance(stdin_payload, bytes)
         else stdin_payload.encode("utf-8")
     )
+    # Production default is CRON_AUTOARM_ENABLED=False (auto-arm disabled).
+    # These tests exercise the arm MACHINERY (still reachable via the manual
+    # /PACT:start-pending-scan path), so re-enable the gate in the subprocess
+    # by importing the hook, setting the CONSUMER-module binding, and calling
+    # main(). Patching shared.wake_lifecycle would NOT reach the already-bound
+    # wake_lifecycle_emitter.CRON_AUTOARM_ENABLED name (name-import snapshot).
+    # Pass autoarm_enabled=False to exercise production-default suppression.
+    runner_src = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(HOOK_DIR)!r})\n"
+        "import wake_lifecycle_emitter\n"
+        f"wake_lifecycle_emitter.CRON_AUTOARM_ENABLED = {autoarm_enabled!r}\n"
+        "wake_lifecycle_emitter.main()\n"
+    )
     proc = subprocess.run(
-        [sys.executable, str(EMITTER)],
+        [sys.executable, "-c", runner_src],
         input=payload_bytes,
         capture_output=True,
         env=env,
@@ -470,7 +484,11 @@ def test_marker_o_excl_collision_silent(tmp_path):
             return fixed
 
     original_dt = emitter.datetime
+    original_autoarm = emitter.CRON_AUTOARM_ENABLED
     emitter.datetime = _FixedDateTime
+    # Re-enable the gate: G2 (_maybe_write_teammate_arm_marker) early-returns
+    # under the production default; this test exercises the marker machinery.
+    emitter.CRON_AUTOARM_ENABLED = True
     try:
         os.environ["HOME"] = str(home)
         payload = {
@@ -502,6 +520,7 @@ def test_marker_o_excl_collision_silent(tmp_path):
         )
     finally:
         emitter.datetime = original_dt
+        emitter.CRON_AUTOARM_ENABLED = original_autoarm
 
 
 # ─── Audit-anchor regression guards ────────────────────────────────────

@@ -694,3 +694,26 @@ def test_references_section_links_to_companion_commands(cmd_text):
     assert "stop-pending-scan.md" in refs_section
     # Relative-path discipline.
     assert "@~/" not in refs_section
+
+
+# ===========================================================================
+# Cron auto-arm DISABLE contract (Phase 2) — manual arm-path independence.
+#
+# Disabling AUTO-arm (the hooks) must leave the user-invocable MANUAL arm path
+# (/PACT:start-pending-scan) fully functional. The manual command does NOT
+# route through the CRON_AUTOARM_ENABLED gate (the sentinel is consulted only
+# by the auto-arm hooks) and still carries its CronCreate arm machinery.
+# ===========================================================================
+
+
+def test_manual_arm_path_independent_of_autoarm_sentinel(cmd_text):
+    """The /PACT:start-pending-scan command bypasses the CRON_AUTOARM_ENABLED
+    gate entirely: the command file does not reference the sentinel, and it
+    still contains its CronCreate arm machinery. Proves Phase-2's disable of
+    AUTO-arm leaves the MANUAL arm path intact."""
+    assert "CRON_AUTOARM_ENABLED" not in cmd_text, (
+        "manual arm command must not route through the auto-arm gate"
+    )
+    assert "CronCreate" in cmd_text, (
+        "manual arm machinery (CronCreate) must remain intact"
+    )

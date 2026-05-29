@@ -159,6 +159,7 @@ from shared.session_state import is_safe_path_component
 from shared.task_utils import read_task_json
 from shared.tool_response import extract_tool_response
 from shared.wake_lifecycle import (
+    CRON_AUTOARM_ENABLED,
     count_active_tasks,
     has_in_progress_umbrella_orchestration,
     is_lead_context,
@@ -396,7 +397,9 @@ def _arm_or_none(team_name: str) -> str | None:
     """
     Return _ARM_DIRECTIVE iff the conditions for emitting Arm are met:
     at least one lifecycle-relevant active teammate task. Otherwise
-    return None.
+    return None. Precondition: returns None unconditionally when
+    CRON_AUTOARM_ENABLED is False (the auto-arm master switch); the
+    active-task check is reached only when auto-arm is enabled.
 
     Shared between the TaskCreate Arm branch and the pending->in_progress
     re-Arm branch in `_decide_directive` — both branches share identical
@@ -404,6 +407,8 @@ def _arm_or_none(team_name: str) -> str | None:
     filters carve-outs (signal-tasks, wake-excluded agentTypes), so
     `>= 1` is the lifecycle-relevant positive count.
     """
+    if not CRON_AUTOARM_ENABLED:
+        return None
     if count_active_tasks(team_name) < 1:
         return None
     return _ARM_DIRECTIVE
@@ -505,6 +510,8 @@ def _maybe_write_teammate_arm_marker(
     OSError + Exception class). Returns None unconditionally — caller
     must NOT branch on a return value.
     """
+    if not CRON_AUTOARM_ENABLED:
+        return
     try:
         # Clause 1: team_name path-safety.
         if not isinstance(team_name, str) or not team_name:
