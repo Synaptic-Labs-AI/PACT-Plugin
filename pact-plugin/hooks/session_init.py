@@ -6,6 +6,7 @@ Used by: Claude Code settings.json SessionStart hook
 
 Performs PACT environment initialization:
 0. Checks if ~/.claude/teams is in additionalDirectories (emits setup tip if not configured)
+0b. Emits a one-time in-process teammateMode notice recommending tmux for unattended runs (startup/resume only)
 1. Creates plugin symlinks for @reference resolution
 3. Ensures project CLAUDE.md exists with memory sections
 3b. One-time migration: wraps existing project CLAUDE.md in PACT_MANAGED boundary (#404)
@@ -100,6 +101,19 @@ from shared.session_resume import (
     restore_last_session,
     check_resumption_context,
     check_paused_state,
+)
+
+
+# #864 Phase 1: one-time startup notice recommending tmux for unattended runs
+# when the effective teammateMode is not positively "tmux". Emitted via
+# system_messages (user-facing) by main() step 0b. Lives HERE (presentation
+# layer) rather than in shared/teammate_mode.py (resolution layer) per SRP.
+# Pure literal (no interpolation) so tests can pin the exact substring.
+_INPROCESS_MODE_NOTICE = (
+    "PACT: unattended runs may stall in in-process teammate mode "
+    "(the lead can sit idle awaiting a wake that needs a manual nudge). "
+    "For hands-off runs, relaunch with `--teammate-mode tmux` for reliable "
+    "native delivery, or keep a heartbeat — see reference/unattended-runs.md."
 )
 
 
@@ -572,6 +586,7 @@ def main():
 
     Performs PACT environment initialization:
     0. Checks if ~/.claude/teams is in additionalDirectories (emits setup tip if not configured)
+    0b. Emits a one-time in-process teammateMode notice recommending tmux for unattended runs (startup/resume only)
     1. Creates plugin symlinks for @reference resolution
     3. Ensures project CLAUDE.md exists with memory sections
     3b. One-time migration: wraps existing project CLAUDE.md in PACT_MANAGED boundary (#404)
@@ -670,6 +685,33 @@ def main():
             dirs_tip = check_additional_directories()
             if dirs_tip:
                 system_messages.append(dirs_tip)
+
+        # 0b. One-time in-process teammateMode notice (#864 Phase 1, ADDITIVE).
+        # Warn that unattended runs may stall in in-process mode and recommend
+        # `--teammate-mode tmux`. User-facing recommendation (the model cannot
+        # relaunch itself) → system_messages channel, mirroring the step-0
+        # additionalDirectories tip.
+        #
+        # WHEN: emit only on session-LAUNCH events (startup + resume). A
+        # resumed session is the walk-away/unattended case worth re-warning,
+        # and each launch fires SessionStart exactly once for that source — so
+        # NO marker file is needed to stay once-per-launch. `compact` and
+        # `clear` are mid-launch context-reset events that CAN re-fire within a
+        # single launch; they are SUPPRESSED so the notice is never repeated.
+        # An unrecognized source (normalized to "unknown") is also suppressed.
+        #
+        # Fail-safe: should_emit_inprocess_notice() is total (never raises) and
+        # returns True on any read/parse uncertainty. The belt-and-suspenders
+        # try/except ALSO emits on any unexpected escape (e.g. an import
+        # failure) — "emit on uncertainty" is the protected direction — and it
+        # MUST NOT raise out of the SessionStart hot path.
+        if source in ("startup", "resume"):
+            try:
+                from shared.teammate_mode import should_emit_inprocess_notice
+                if should_emit_inprocess_notice():
+                    system_messages.append(_INPROCESS_MODE_NOTICE)
+            except Exception:  # noqa: BLE001 — fail-safe → emit; never block init
+                system_messages.append(_INPROCESS_MODE_NOTICE)
 
         # 1. Set up plugin symlinks (enables @~/.claude/protocols/pact-plugin/ references)
         # Context resets (compact/clear): symlinks are already set up from original session
