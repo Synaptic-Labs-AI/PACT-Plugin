@@ -571,11 +571,12 @@ def _lifecycle_relevant(task: Any, team_name: str = "") -> bool:
         # the next state change. The wake-mechanism's purpose — never
         # strand a teammate whose SendMessage needs to wake the lead —
         # is load-bearing here, so we fail toward counting on every
-        # config-read failure. The audit-anchor invariant test pins
-        # these phrases (Fail-CONSERVATIVE, under-arm, unrecoverable)
-        # inside this `elif` body so a future agent-reader deleting
-        # step 4 also deletes the rationale rather than leaving an
-        # orphan comment.
+        # config-read failure. The audit-anchor invariant test pins the
+        # DISTINCTIVE FULL PHRASES of this rationale (not the bare tokens
+        # Fail-CONSERVATIVE / under-arm / unrecoverable, which legitimately
+        # recur elsewhere in the module) inside this `elif` body, so a
+        # future agent-reader deleting step 4 also deletes the rationale
+        # rather than leaving an orphan comment.
         #
         # One-shot observability warn per team per process so a
         # permanently-unreadable config doesn't silently keep the wake

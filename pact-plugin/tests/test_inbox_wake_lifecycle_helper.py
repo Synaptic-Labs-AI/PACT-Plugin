@@ -19,6 +19,7 @@ assert the post-empty behavior (secretary counts).
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -93,14 +94,19 @@ def test_lifecycle_relevant_preserves_fail_conservative_audit_anchor():
     """The fail-CONSERVATIVE asymmetry between this call site (count on
     config-read failure) and the sibling predicates in
     intentional_wait.py (return False on config-read failure) is
-    load-bearing for the wake mechanism. Pin the audit-anchor phrases
-    INSIDE the step-4 ``elif team_name:`` block specifically — a free
-    file-wide substring check would pass vacuously if a future
-    contributor introduced the phrases anywhere else in the module
-    (e.g. a helper docstring, an unrelated comment). The tightened
-    anchor requires both halves of the rationale to live in the
-    executable elif-body's comment block, so a body-only revert that
-    deletes the elif block deletes the anchor with it.
+    load-bearing for the wake mechanism. Pin the DISTINCTIVE FULL
+    PHRASES of the rationale INSIDE the step-4 ``elif team_name:`` block
+    specifically — a free file-wide substring check would pass vacuously
+    if a future contributor introduced the phrases anywhere else in the
+    module (e.g. a helper docstring, an unrelated comment). The anchor
+    pins distinctive spans rather than bare tokens
+    ('Fail-CONSERVATIVE', 'under-arm', 'unrecoverable') so that
+    legitimate reuse of a bare token elsewhere in the module does not
+    re-trip a uniqueness assertion, while an orphan of the real
+    rationale would still have to reproduce the full distinctive span.
+    A body-only revert that deletes the elif block empties the window
+    and flips the positive assertions to FAIL — the anchor dies with
+    the rationale it guards.
     """
     src_path = (
         Path(__file__).resolve().parent.parent
@@ -148,48 +154,85 @@ def test_lifecycle_relevant_preserves_fail_conservative_audit_anchor():
             break
     window_text = "\n".join(window_lines)
 
-    # The three audit-anchor phrases MUST live inside the executable
-    # elif body's window. A future revert that deletes the elif body
-    # makes window_lines empty (or near-empty), flipping these
-    # assertions to FAIL — the intended counter-signal under body-only
-    # revert.
-    assert "Fail-CONSERVATIVE" in window_text, (
-        f"`Fail-CONSERVATIVE` audit anchor must live inside the step-4 "
-        f"`elif team_name:` body (executable line {anchor_idx + 1}). "
-        f"Window starts at line {anchor_idx + 2}; collected window:\n"
-        f"{window_text!r}"
-    )
-    assert "under-arm" in window_text, (
-        f"`under-arm` rationale must live inside the step-4 `elif "
-        f"team_name:` body (executable line {anchor_idx + 1}). Window:\n"
-        f"{window_text!r}"
-    )
-    assert "unrecoverable" in window_text, (
-        f"`unrecoverable` rationale must live inside the step-4 `elif "
-        f"team_name:` body (executable line {anchor_idx + 1}). Window:\n"
-        f"{window_text!r}"
-    )
+    # Pin the DISTINCTIVE FULL PHRASE that identifies each half of the
+    # step-4 rationale, NOT the bare token. The bare tokens
+    # ('Fail-CONSERVATIVE', 'under-arm', 'unrecoverable') are natural
+    # language that legitimately recurs elsewhere in the module — e.g.
+    # the umbrella helper carries a 'Fail-CONSERVATIVE wrap:' comment
+    # describing its own defensive try/except, which is unrelated to the
+    # step-4 fail-CONSERVATIVE rationale. Pinning the bare token as
+    # unique-to-this-window is brittle: any legitimate reuse re-trips the
+    # uniqueness assertion (the failure this test itself once produced).
+    # Pinning the distinctive span preserves the anti-phantom-green
+    # protection — an orphan of the real rationale would still have to
+    # reproduce the full distinctive span — while tolerating bare-token
+    # reuse anywhere else.
+    #
+    # Reflow-robust matching: the source text is NORMALIZED before
+    # substring-matching so a benign comment reflow (an auto-formatter
+    # re-wrapping the rationale across different line breaks) does NOT
+    # trip the anchor. `_normalize` strips per-line leading comment
+    # markers ('#' + an optional single space) and collapses every run
+    # of whitespace — including the newlines from the per-line
+    # "\n".join(window_lines) reconstruction — into a single space. A
+    # phrase that wraps two comment lines therefore still matches. This
+    # is NOT a vacuous/whitespace-only match: the phrase tokens and
+    # their left-to-right order are still required; only inter-token
+    # whitespace is normalized. The SAME normalization is applied to the
+    # matched text AND to the phrases on both checks below.
+    def _normalize(text):
+        no_markers = re.sub(r"(?m)^[ \t]*#[ \t]?", "", text)
+        return re.sub(r"\s+", " ", no_markers).strip()
 
-    # Pin additionally that no OTHER executable site in the module
-    # contains these phrases. Docstring/comment occurrences elsewhere
-    # would create a phantom-green path where a future contributor
-    # could delete the elif body's comment block, leave the phrases in
-    # an unrelated docstring, and the assertions above would still
-    # pass. Forbid the phrases anywhere in src EXCEPT inside the
-    # window we just validated.
+    distinctive_phrases = (
+        "Fail-CONSERVATIVE: the team config is unreadable",
+        "inverts the priority: under-arm",
+        "unrecoverable; over-arm (extra empty scans) is recoverable",
+    )
+    normalized_phrases = [_normalize(p) for p in distinctive_phrases]
+
+    # Positive (presence): each distinctive phrase MUST live inside the
+    # executable elif body's window. The match is normalized but stays
+    # POSITION-ANCHORED — only the collected window_text (the elif body)
+    # is normalized, NEVER the file at large. That position-anchoring is
+    # load-bearing: a body-only revert that deletes the elif rationale
+    # empties window_lines, so the normalized window no longer contains
+    # the phrases and these assertions flip to FAIL — the intended
+    # counter-signal under body-only revert. Normalizing src-wide here
+    # (or broadening the window) would let a phrase match across the
+    # elif boundary and silently gut that counter-signal.
+    normalized_window = _normalize(window_text)
+    for phrase, norm_phrase in zip(distinctive_phrases, normalized_phrases):
+        assert norm_phrase in normalized_window, (
+            f"Distinctive audit-anchor phrase {phrase!r} must live inside "
+            f"the step-4 `elif team_name:` body (executable line "
+            f"{anchor_idx + 1}). Window starts at line {anchor_idx + 2}; "
+            f"collected window:\n{window_text!r}"
+        )
+
+    # Negative (anti-orphan): forbid each distinctive phrase anywhere in
+    # src OUTSIDE the window. A docstring/comment orphan of the real
+    # rationale elsewhere would create a phantom-green path where a
+    # future contributor deletes the elif body's rationale yet the
+    # positive assertion above still passes vacuously. The outside-window
+    # source is normalized the SAME way, so even a REFLOWED orphan pasted
+    # anywhere outside the window is caught. Pinning the DISTINCTIVE span
+    # (not the bare token) keeps that protection while tolerating
+    # legitimate bare-token reuse elsewhere in the module.
     src_outside_window = "\n".join(
         ln
         for i, ln in enumerate(src_lines)
         if not (anchor_idx + 1 <= i <= anchor_idx + len(window_lines))
     )
-    for phrase in ("Fail-CONSERVATIVE", "under-arm", "unrecoverable"):
-        assert phrase not in src_outside_window, (
-            f"Phrase {phrase!r} must appear ONLY inside the step-4 "
-            f"`elif team_name:` body's comment block (lines "
+    normalized_outside = _normalize(src_outside_window)
+    for phrase, norm_phrase in zip(distinctive_phrases, normalized_phrases):
+        assert norm_phrase not in normalized_outside, (
+            f"Distinctive phrase {phrase!r} must appear ONLY inside the "
+            f"step-4 `elif team_name:` body's comment block (lines "
             f"{anchor_idx + 2}..{anchor_idx + 1 + len(window_lines)}). "
-            f"Found outside the window — a future contributor could "
-            f"delete the elif body's rationale and this anchor would "
-            f"still pass vacuously."
+            f"Found outside the window — a future contributor could delete "
+            f"the elif body's rationale and this anchor would still pass "
+            f"vacuously."
         )
 
 
