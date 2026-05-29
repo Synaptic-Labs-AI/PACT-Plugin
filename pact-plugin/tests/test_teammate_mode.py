@@ -102,6 +102,22 @@ class _ModeEnv:
         self._monkeypatch = monkeypatch
         monkeypatch.setattr(Path, "home", lambda: self.home)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(self.project))
+        # Default-neutralize the enterprise managed-settings source so a test
+        # that does NOT opt into write_managed() does not read the REAL OS
+        # managed path as the highest-precedence source[0]. Without this, every
+        # resolve/should_emit test silently reads
+        # /Library/Application Support/ClaudeCode/managed-settings.json (or the
+        # OS equivalent): green on a dev machine only because that file is
+        # absent, but non-deterministic on a managed fleet -- exactly the
+        # environment the managed-settings precedence targets. Mirrors the
+        # Path.home() / CLAUDE_PROJECT_DIR isolation above. Tests that WANT a
+        # managed file still opt in explicitly via write_managed(); the
+        # managed-absent case opts in via point_managed_at_absent().
+        self._default_absent_managed = tmp_path / "default-absent-managed-settings.json"
+        monkeypatch.setattr(
+            teammate_mode, "_managed_settings_path",
+            lambda: self._default_absent_managed,
+        )
 
     @staticmethod
     def _write(path: Path, content):
@@ -420,13 +436,21 @@ class TestSettingsSourcePaths:
     """
 
     def test_paths_in_precedence_order(self, mode_env):
-        """4 paths, managed highest. Asserts against _managed_settings_path()
-        itself (same-function compare) so it is platform-agnostic -- no
-        hardcoded OS literal in the order assertion.
+        """4 paths, managed highest. Asserts against the SAME managed-path
+        getter the resolver uses (same-function compare) so it is
+        platform-agnostic -- no hardcoded OS literal in the order assertion.
+
+        Reads teammate_mode._managed_settings_path (the MODULE attribute) rather
+        than the from-imported name: the mode_env fixture default-neutralizes
+        the module attribute (see _ModeEnv.__init__), and _settings_source_paths
+        resolves the getter through the module namespace at call time. Comparing
+        against the module attribute keeps both sides referring to the same
+        (neutralized) getter; the bare from-imported name would still point at
+        the original real-OS getter and spuriously mismatch.
         """
         paths = _settings_source_paths()
         assert paths == [
-            _managed_settings_path(),
+            teammate_mode._managed_settings_path(),
             mode_env.project / ".claude" / "settings.local.json",
             mode_env.project / ".claude" / "settings.json",
             mode_env.home / ".claude" / "settings.json",
@@ -503,6 +527,26 @@ class TestManagedPrecedence:
         mode_env.write_managed({"teammateMode": "in-process"})
         mode_env.write_user({"teammateMode": "tmux"})
         assert resolve_effective_teammate_mode() == "in-process"
+        assert should_emit_inprocess_notice() is True
+
+    def test_managed_auto_over_user_tmux_breach_closed(self, mode_env):
+        """** MANAGED 'auto' BREACH-CLOSURE (auto-flavor of the in-process case). **
+
+        managed-settings 'auto' layered OVER a user 'tmux' MUST resolve 'auto' /
+        EMIT. 'auto' is a non-tmux value, so the same false-suppress F1 closes
+        applies: before F1 the helper never read managed-settings, so a managed
+        fleet pinning 'auto' over a user 'tmux' was wrongly SUPPRESSED. Managed
+        sits at precedence [0], read first -> 'auto' -> EMIT (fail-safe: 'auto'
+        may resolve to in-process at runtime).
+
+        Symmetric companion to test_managed_in_process_over_user_tmux_breach_closed:
+        both pin that ANY non-tmux managed value over a lower 'tmux' EMITS. If
+        this inverts (resolve 'tmux' / suppress), the managed layer has stopped
+        being read at the top of the precedence and the breach is open again.
+        """
+        mode_env.write_managed({"teammateMode": "auto"})
+        mode_env.write_user({"teammateMode": "tmux"})
+        assert resolve_effective_teammate_mode() == "auto"
         assert should_emit_inprocess_notice() is True
 
     def test_managed_tmux_over_user_in_process_suppresses(self, mode_env):
