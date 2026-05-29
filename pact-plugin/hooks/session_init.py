@@ -705,6 +705,11 @@ def main():
         # try/except ALSO emits on any unexpected escape (e.g. an import
         # failure) — "emit on uncertainty" is the protected direction — and it
         # MUST NOT raise out of the SessionStart hot path.
+        #
+        # ALLOWLIST MAINTENANCE: a future Claude Code launch-like source not in
+        # this tuple normalizes to "unknown" (see source-normalization above)
+        # and is SUPPRESSED — update this allowlist if such a launch source is
+        # added upstream.
         if source in ("startup", "resume"):
             try:
                 from shared.teammate_mode import should_emit_inprocess_notice

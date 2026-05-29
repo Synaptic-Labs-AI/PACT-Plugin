@@ -65,9 +65,16 @@ def _settings_source_paths() -> list[Path]:
       2. project  .claude/settings.json         (project)
       3. user     ~/.claude/settings.json        (user)
     The enterprise managed-settings layer (which sits ABOVE these in the
-    runtime) is intentionally NOT read here: it is absent on dev machines,
-    and omitting it only ever errs toward over-emitting the notice (the safe
-    direction). Adding that path later is a one-line prepend to this list.
+    runtime) is intentionally NOT read here (absent on dev machines; reading
+    it adds an OS-specific path matrix). This omission is an ACCEPTED
+    never-false-suppress breach: a managed `teammateMode` of "in-process" /
+    "auto" OVER a lower-layer "tmux" resolves non-tmux at runtime (managed
+    wins in g1), while this helper reads the lower "tmux" and SUPPRESSES — a
+    false-suppress (the #864-reinstating direction). Accepted for Phase 1
+    (narrow: a managed fleet forcing non-tmux beneath a lower-layer tmux); the
+    in-memory CLI `--teammate-mode` override is the OTHER accepted
+    false-suppress edge (see module docstring). Prepending the managed path
+    later is a one-line change that closes it (FUTURE, #868).
 
     Path-resolution conventions (test-seam compatible):
       - project paths derive from CLAUDE_PROJECT_DIR (already consumed by
@@ -96,6 +103,12 @@ def resolve_effective_teammate_mode() -> str:
     a source explicitly sets "auto" AND when nothing defines the key / every
     source is unreadable (indistinguishable downstream; both fail SAFE to
     emit). Total — never raises.
+
+    Reuse note: this "auto" conflation erases explicit-"auto" vs nothing-
+    defined/unreadable — correct for the Phase-1 emit-policy (both → emit), but
+    a future consumer (e.g. the Phase-2 cron-auto-arm gate) needing to
+    distinguish them must add a separate signal; it MUST NOT assume "auto"
+    means an explicit user choice.
     """
     try:
         for path in _settings_source_paths():
