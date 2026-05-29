@@ -808,6 +808,11 @@ class TestInprocessModeNoticeIntegration:
     _DOC_REF = "reference/unattended-runs.md"
     _CLI_HINT = "--teammate-mode tmux"
 
+    # Sentinel: pass as `source` to OMIT the source key from stdin entirely
+    # (distinct from passing None, which sets {"source": null} -> normalizes to
+    # "unknown"). Drives main()'s missing-source default-to-"startup" path.
+    _OMIT_SOURCE = object()
+
     def _run_main_capture_systemmessage(
         self, monkeypatch, tmp_path, source, mode
     ):
@@ -824,6 +829,17 @@ class TestInprocessModeNoticeIntegration:
         project_dir.mkdir()
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        # Determinism: neutralize the enterprise managed-settings source so the
+        # effective teammateMode resolves ONLY from the isolated tmp settings
+        # written below -- never the real OS managed path, which sits at
+        # precedence[0] and would otherwise confound mode resolution on a
+        # managed fleet. Sibling of the _ModeEnv fixture isolation in
+        # test_teammate_mode.py (same managed-path determinism class).
+        import shared.teammate_mode as teammate_mode
+        monkeypatch.setattr(
+            teammate_mode, "_managed_settings_path",
+            lambda: tmp_path / "absent-managed-settings.json",
+        )
 
         # User settings.json: populate additionalDirectories (suppress the
         # step-0 dirs-tip) and optionally pin teammateMode.
@@ -844,10 +860,12 @@ class TestInprocessModeNoticeIntegration:
         team_dir.mkdir(parents=True)
         (team_dir / "config.json").write_text('{"members": []}')
 
-        stdin_data = json.dumps({
-            "session_id": "aabb1122-0000-0000-0000-000000000000",
-            "source": source,
-        })
+        # Omit the source key entirely when _OMIT_SOURCE is passed (drives
+        # main()'s `.get("source","startup")` default); otherwise pin it.
+        payload = {"session_id": "aabb1122-0000-0000-0000-000000000000"}
+        if source is not self._OMIT_SOURCE:
+            payload["source"] = source
+        stdin_data = json.dumps(payload)
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -927,6 +945,44 @@ class TestInprocessModeNoticeIntegration:
         )
         # Notice emitted via the except path despite mode=tmux (would suppress).
         assert self._DOC_REF in system_msg
+        assert self._CLI_HINT in system_msg
+
+    def test_unrecognized_source_suppresses_notice(self, monkeypatch, tmp_path):
+        """Source-gate edge: an UNRECOGNIZED source ("banana") normalizes to
+        "unknown" (session_init source validation, not in _VALID_SOURCES) and is
+        NOT in the {startup,resume} notice allowlist -> the notice is SUPPRESSED.
+
+        The effective mode is forced 'in-process' (non-tmux) -- which WOULD emit
+        on a launch source -- so the suppression here is attributable to the
+        SOURCE gate alone. A regression that dropped or widened the source check
+        would EMIT and fail this test. (mode is deterministic: the helper
+        isolates all settings sources incl. the managed path, so this never
+        depends on the real machine's teammateMode.)
+        """
+        system_msg = self._run_main_capture_systemmessage(
+            monkeypatch, tmp_path, source="banana", mode="in-process"
+        )
+        assert self._DOC_REF not in system_msg, (
+            "an unrecognized source must SUPPRESS the in-process notice "
+            "(normalizes to 'unknown'; not in the startup/resume allowlist)"
+        )
+
+    def test_missing_source_defaults_to_startup_and_emits(self, monkeypatch, tmp_path):
+        """Source-gate edge: a stdin payload with NO source key defaults to
+        "startup" (main()'s `.get("source","startup")`) -> a launch source ->
+        the notice EMITS (mode 'in-process' is non-tmux). Pins the SAFE default:
+        a missing source must NOT silently suppress the notice on a real launch.
+
+        _OMIT_SOURCE omits the key entirely; passing None would instead set
+        {"source": null} -> None -> normalizes to "unknown" -> SUPPRESS, a
+        different path that is NOT what 'missing source' means here.
+        """
+        system_msg = self._run_main_capture_systemmessage(
+            monkeypatch, tmp_path, source=self._OMIT_SOURCE, mode="in-process"
+        )
+        assert self._DOC_REF in system_msg, (
+            "a missing source must default to 'startup' and EMIT the notice"
+        )
         assert self._CLI_HINT in system_msg
 
 
