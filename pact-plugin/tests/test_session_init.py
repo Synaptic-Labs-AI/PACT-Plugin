@@ -790,6 +790,202 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         assert "PACT tip" not in system_msg
 
 
+class TestInprocessModeNoticeIntegration:
+    """#864 Phase 1 §9.2: the in-process teammateMode notice wired into main().
+
+    Drives session_init.main() end-to-end and asserts the notice appears in the
+    emitted systemMessage for launch events (startup/resume) when the effective
+    mode is not positively tmux, and is ABSENT for mid-launch context resets
+    (compact/clear) and when the mode is tmux.
+
+    The notice is detected by its stable doc-reference substring
+    'reference/unattended-runs.md' (the notice<->doc link contract). The
+    fixtures populate additionalDirectories so the step-0 dirs-tip is
+    suppressed, isolating systemMessage to the notice under test.
+    """
+
+    # Stable substrings the notice MUST contain (drift guards per §9.2).
+    _DOC_REF = "reference/unattended-runs.md"
+    _CLI_HINT = "--teammate-mode tmux"
+
+    # Sentinel: pass as `source` to OMIT the source key from stdin entirely
+    # (distinct from passing None, which sets {"source": null} -> normalizes to
+    # "unknown"). Drives main()'s missing-source default-to-"startup" path.
+    _OMIT_SOURCE = object()
+
+    def _run_main_capture_systemmessage(
+        self, monkeypatch, tmp_path, source, mode
+    ):
+        """Run main() with given source + effective teammateMode (mode=None ->
+        no teammateMode key -> resolves 'auto'). Returns the systemMessage str.
+
+        Filesystem-isolated: Path.home -> tmp_path, CLAUDE_PROJECT_DIR -> an
+        empty temp project dir (so project settings sources do not exist and the
+        mode resolves from the user settings.json we write here).
+        """
+        from session_init import main
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        # Determinism: neutralize the enterprise managed-settings source so the
+        # effective teammateMode resolves ONLY from the isolated tmp settings
+        # written below -- never the real OS managed path, which sits at
+        # precedence[0] and would otherwise confound mode resolution on a
+        # managed fleet. Sibling of the _ModeEnv fixture isolation in
+        # test_teammate_mode.py (same managed-path determinism class).
+        import shared.teammate_mode as teammate_mode
+        monkeypatch.setattr(
+            teammate_mode, "_managed_settings_path",
+            lambda: tmp_path / "absent-managed-settings.json",
+        )
+
+        # User settings.json: populate additionalDirectories (suppress the
+        # step-0 dirs-tip) and optionally pin teammateMode.
+        teams_abs = str(tmp_path / ".claude" / "teams")
+        sessions_abs = str(tmp_path / ".claude" / "pact-sessions")
+        settings = {"permissions": {"additionalDirectories": [teams_abs, sessions_abs]}}
+        if mode is not None:
+            settings["teammateMode"] = mode
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir(parents=True)
+        (settings_dir / "settings.json").write_text(
+            json.dumps(settings), encoding="utf-8"
+        )
+
+        # Team config so resume/compact/clear stay on the normal (non-anomalous)
+        # path; mirrors the existing context-reset integration tests.
+        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text('{"members": []}')
+
+        # Omit the source key entirely when _OMIT_SOURCE is passed (drives
+        # main()'s `.get("source","startup")` default); otherwise pin it.
+        payload = {"session_id": "aabb1122-0000-0000-0000-000000000000"}
+        if source is not self._OMIT_SOURCE:
+            payload["source"] = source
+        stdin_data = json.dumps(payload)
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        output = json.loads(mock_stdout.getvalue())
+        return output.get("systemMessage", "")
+
+    @pytest.mark.parametrize(
+        "source,mode,present",
+        [
+            ("startup", "in-process", True),
+            ("startup", "tmux", False),
+            ("resume", "in-process", True),     # D1: resume re-warns (walk-away case)
+            ("compact", "in-process", False),   # mid-launch reset -> suppressed
+            ("clear", "in-process", False),     # mid-launch reset -> suppressed
+            ("startup", None, True),            # no teammateMode -> auto -> emit (fail-safe)
+        ],
+    )
+    def test_notice_emit_matrix(self, monkeypatch, tmp_path, source, mode, present):
+        """§9.2 matrix: notice present iff launch-event AND mode not tmux."""
+        system_msg = self._run_main_capture_systemmessage(
+            monkeypatch, tmp_path, source=source, mode=mode
+        )
+        if present:
+            assert self._DOC_REF in system_msg, (
+                f"expected notice for source={source!r} mode={mode!r}"
+            )
+            # Drift guards: the notice pins both literal substrings (§9.2).
+            assert self._CLI_HINT in system_msg
+        else:
+            assert self._DOC_REF not in system_msg, (
+                f"expected NO notice for source={source!r} mode={mode!r}"
+            )
+
+    def test_notice_text_pins_literal_substrings(self, monkeypatch, tmp_path):
+        """The emitted notice contains BOTH the CLI hint and the doc link.
+
+        Standalone drift guard so a future edit to _INPROCESS_MODE_NOTICE that
+        drops either load-bearing substring fails loudly here.
+        """
+        system_msg = self._run_main_capture_systemmessage(
+            monkeypatch, tmp_path, source="startup", mode="in-process"
+        )
+        assert self._CLI_HINT in system_msg
+        assert self._DOC_REF in system_msg
+
+    def test_belt_and_suspenders_emits_when_helper_raises(self, monkeypatch, tmp_path):
+        """§9.3 fail-open: if should_emit_inprocess_notice() raises, the step-0b
+        except path STILL emits the notice and main() STILL exits 0.
+
+        The mode is pinned to 'tmux' so the happy path would SUPPRESS -- the
+        notice can therefore only appear via the belt-and-suspenders except,
+        proving that path emits (the protected #864 direction) rather than
+        crashing the SessionStart hot path.
+        """
+        import shared.teammate_mode as teammate_mode
+
+        def boom():
+            raise RuntimeError("helper exploded on the hot path")
+
+        # session_init imports the helper lazily at call time, so patching the
+        # module attribute is resolved by the in-block `from ... import ...`.
+        monkeypatch.setattr(teammate_mode, "should_emit_inprocess_notice", boom)
+
+        system_msg = self._run_main_capture_systemmessage(
+            monkeypatch, tmp_path, source="startup", mode="tmux"
+        )
+        # Notice emitted via the except path despite mode=tmux (would suppress).
+        assert self._DOC_REF in system_msg
+        assert self._CLI_HINT in system_msg
+
+    def test_unrecognized_source_suppresses_notice(self, monkeypatch, tmp_path):
+        """Source-gate edge: an UNRECOGNIZED source ("banana") normalizes to
+        "unknown" (session_init source validation, not in _VALID_SOURCES) and is
+        NOT in the {startup,resume} notice allowlist -> the notice is SUPPRESSED.
+
+        The effective mode is forced 'in-process' (non-tmux) -- which WOULD emit
+        on a launch source -- so the suppression here is attributable to the
+        SOURCE gate alone. A regression that dropped or widened the source check
+        would EMIT and fail this test. (mode is deterministic: the helper
+        isolates all settings sources incl. the managed path, so this never
+        depends on the real machine's teammateMode.)
+        """
+        system_msg = self._run_main_capture_systemmessage(
+            monkeypatch, tmp_path, source="banana", mode="in-process"
+        )
+        assert self._DOC_REF not in system_msg, (
+            "an unrecognized source must SUPPRESS the in-process notice "
+            "(normalizes to 'unknown'; not in the startup/resume allowlist)"
+        )
+
+    def test_missing_source_defaults_to_startup_and_emits(self, monkeypatch, tmp_path):
+        """Source-gate edge: a stdin payload with NO source key defaults to
+        "startup" (main()'s `.get("source","startup")`) -> a launch source ->
+        the notice EMITS (mode 'in-process' is non-tmux). Pins the SAFE default:
+        a missing source must NOT silently suppress the notice on a real launch.
+
+        _OMIT_SOURCE omits the key entirely; passing None would instead set
+        {"source": null} -> None -> normalizes to "unknown" -> SUPPRESS, a
+        different path that is NOT what 'missing source' means here.
+        """
+        system_msg = self._run_main_capture_systemmessage(
+            monkeypatch, tmp_path, source=self._OMIT_SOURCE, mode="in-process"
+        )
+        assert self._DOC_REF in system_msg, (
+            "a missing source must default to 'startup' and EMIT the notice"
+        )
+        assert self._CLI_HINT in system_msg
+
+
 class TestIsUnknownOrMissingSession:
     """Direct unit tests for _is_unknown_or_missing_session() predicate.
 
