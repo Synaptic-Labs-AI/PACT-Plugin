@@ -23,11 +23,12 @@ Four layers, each catching a different failure-mode class:
         today but fire on unexpected stdin shapes tomorrow.
 
     Layer 3 — hooks.json invariants
-        Asserts Stop event key absent entirely, 8 removed hooks
-        (handoff_gate, teammate_completion_gate, stop_audit.sh,
-        memory_adhoc_reminder, phase_completion, wake_inbox_drain,
-        teardown_request_emitter, wake_lifecycle_emitter) appear in NO command
-        string anywhere in hooks.json, TaskCompleted binds to
+        Asserts Stop event key absent entirely, every removed hook in
+        _REMOVED_HOOK_BASENAMES (handoff_gate, teammate_completion_gate,
+        stop_audit.sh, memory_adhoc_reminder, phase_completion,
+        wake_inbox_drain, teardown_request_emitter, wake_lifecycle_emitter)
+        appears in NO command string anywhere in hooks.json, TaskCompleted
+        binds to
         agent_handoff_emitter.py, TeammateIdle binds only to
         teammate_idle.py. Catches "hooks.json config regressed even
         though the source files exist."
@@ -396,12 +397,13 @@ class TestLayer2_RuntimeEmissionBounds:
 
 
 # ---------------------------------------------------------------------------
-# Layer 3 — hooks.json config invariants (8 removed hooks + Stop absence)
+# Layer 3 — hooks.json config invariants (_REMOVED_HOOK_BASENAMES + Stop absence)
 # ---------------------------------------------------------------------------
 
 class TestLayer3_HooksJsonInvariants:
-    """Config-level assertions — the 8 removed hooks MUST be absent from
-    every command string, Stop event key MUST be absent, TaskCompleted
+    """Config-level assertions — every hook in _REMOVED_HOOK_BASENAMES MUST
+    be absent from every command string, Stop event key MUST be absent,
+    TaskCompleted
     MUST bind to agent_handoff_emitter.py, TeammateIdle MUST bind only
     to teammate_idle.py."""
 
