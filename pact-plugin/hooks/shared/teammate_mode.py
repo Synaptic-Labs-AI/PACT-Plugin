@@ -6,8 +6,8 @@ Summary: Resolve the effective Claude Code `teammateMode` setting from on-disk
          precedence. Fail-open by construction — every public function is total
          (never raises), because the sole consumer runs on the SessionStart hot
          path where an uncaught exception would break bootstrap.
-Used by: session_init.py (in-process startup notice). Designed for reuse by a
-         future cron-auto-arm gate via resolve_effective_teammate_mode().
+Used by: session_init.py (in-process startup notice). Designed for reuse by
+         future consumers via resolve_effective_teammate_mode().
 
 Background (verified live, Claude Code 2.1.156):
   `teammateMode` is a first-class Claude Code SETTING (one of {"auto","tmux",
@@ -135,10 +135,9 @@ def resolve_effective_teammate_mode() -> str:
     emit). Total — never raises.
 
     Reuse note: this "auto" conflation erases explicit-"auto" vs nothing-
-    defined/unreadable — correct for the Phase-1 emit-policy (both → emit), but
-    a future consumer (e.g. the Phase-2 cron-auto-arm gate) needing to
-    distinguish them must add a separate signal; it MUST NOT assume "auto"
-    means an explicit user choice.
+    defined/unreadable — correct for the current emit-policy (both → emit), but
+    any future consumer needing to distinguish them must add a separate
+    signal; it MUST NOT assume "auto" means an explicit user choice.
     """
     try:
         for path in _settings_source_paths():

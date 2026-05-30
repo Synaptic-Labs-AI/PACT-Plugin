@@ -744,14 +744,12 @@ def main():
         # layer around the internal fail-closed guard.
         current_team_name = get_team_name()
 
-        # No wake-registry cleanup needed under the cron-based pending-scan
-        # mechanism. The platform's session-scoped cron store
-        # (CronCreate durable=false) is in-memory only and dies when the
-        # session exits (SIGKILL drops the in-memory store; CronList is
-        # session-scoped). No STATE_FILE sidecar exists on disk to reap.
-        # An editing LLM tempted to re-introduce a "just in case" registry-
-        # cleanup helper is re-coupling SessionEnd to scan-mechanism state
-        # — the platform invariants make this unnecessary.
+        # No registry cleanup is needed in this hook: SessionEnd reaps
+        # ~/.claude/teams/ and ~/.claude/tasks/ only, and no on-disk
+        # registry sidecar (STATE_FILE) ever exists for it to reap. An
+        # editing LLM tempted to add a "just in case" registry-cleanup
+        # helper here would be coupling SessionEnd to disk state that does
+        # not exist — leave this branch reaping teams/ and tasks/ only.
 
         teams_r, teams_s = 0, 0
         tasks_r, tasks_s = 0, 0
