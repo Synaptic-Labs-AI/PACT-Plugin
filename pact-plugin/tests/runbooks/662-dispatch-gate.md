@@ -287,8 +287,7 @@ remediated in-place:
    - `pact-plugin/hooks/shared/dispatch_helpers.py` (delete file)
    - `pact-plugin/hooks/hooks.json` (revert PreToolUse `matcher='Agent'`
      hooks list to `[team_guard.py]` only; revert PostToolUse
-     `matcher='TaskCreate|TaskUpdate'` to `[wake_lifecycle_emitter.py]`
-     only)
+     `matcher='TaskCreate|TaskUpdate'` to its pre-#662 membership)
    - `pact-plugin/hooks/bootstrap_gate.py` (revert marker-fingerprint + module-load fail-closed hardening
      from Commit 1)
 3. Re-run this runbook against the patched version to confirm the

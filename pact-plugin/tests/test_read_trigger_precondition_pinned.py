@@ -30,12 +30,10 @@ load fidelity for an LLM reading only the section that lost the marker.
 A future intentional count change requires updating EXPECTED_COUNTS in
 lockstep — the brittleness IS the point.
 
-Counter-test-by-revert (manual / runbook-documented): cp-bak each of the 5 doc
+Counter-test-by-revert (manual): cp-bak each of the 5 doc
 files, `git checkout HEAD~1 -- <paths>`, run this test module — expect
 cardinality {5+ fail} (one presence-pin per surface + drift-detection +
-count-pin per surface). Restore the .bak files. See
-pact-plugin/tests/runbooks/wake-lifecycle-teachback-rearm.md for the full
-procedure.
+count-pin per surface). Restore the .bak files.
 """
 
 from pathlib import Path

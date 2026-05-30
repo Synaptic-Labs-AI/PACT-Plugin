@@ -50,11 +50,10 @@
 set -euo pipefail
 
 # ─── Dynamic plugin-root resolution ─────────────────────────────────────
-# Same resolution method as install_logging_shim.sh (sibling). Inline
-# duplication of the ~15-line block is preferred over a sourced helper to
-# avoid source-path-fragility (the helper file path would depend on the
-# installer's invocation CWD). Both scripts are run via absolute path from
-# the orchestrator, so the duplication cost is bounded.
+# Inline duplication of the ~15-line block is preferred over a sourced
+# helper to avoid source-path-fragility (the helper file path would depend
+# on the installer's invocation CWD). This installer is run via absolute
+# path from the orchestrator, so the duplication cost is bounded.
 #
 # Note on the glob pattern: the canonical on-disk dir name is `pact-plugin/PACT/`
 # (uppercase PACT) per project convention. APFS on macOS is case-insensitive
