@@ -31,9 +31,8 @@ sitting inside a TaskCreate branch.
 
 The invariant is intentionally narrow: it does NOT enumerate hook files
 generally. It scopes to `task_lifecycle_gate.py` because that's where the
-FIRST-OBSERVABLE-WRITE instance lived. Generalization to other hooks (e.g.,
-`wake_lifecycle_emitter.py`) is deliberately deferred to a future
-architectural-class consolidation pass.
+FIRST-OBSERVABLE-WRITE instance lived. Generalization to other hooks is
+deliberately deferred to a future architectural-class consolidation pass.
 """
 
 import ast

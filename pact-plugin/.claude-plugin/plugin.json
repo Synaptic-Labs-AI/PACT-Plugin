@@ -1,6 +1,6 @@
 {
   "name": "PACT",
-  "version": "4.3.8",
+  "version": "4.4.0",
   "description": "Orchestration harness that turns Claude Code into a coordinated team of specialist AI agents",
   "author": {
     "name": "Synaptic-Labs-AI",
@@ -36,9 +36,6 @@
     "./commands/pause.md",
     "./commands/pin-memory.md",
     "./commands/telegram-setup.md",
-    "./commands/start-pending-scan.md",
-    "./commands/scan-pending-tasks.md",
-    "./commands/stop-pending-scan.md",
     "./commands/prune-memory.md"
   ],
   "agents": [

@@ -40,14 +40,13 @@
 #   3. Inspect /tmp/pact-hook-stdin-captures/sessionstart/session_init/
 #      for captures.
 #   4. Audit the captured payload for the actual discriminator field —
-#      the consolidated `is_lead_context` helper checks compound
+#      lead-vs-teammate context is distinguished by compound
 #      field-presence on `agent_id` AND `teammate_name`; this campaign
 #      empirically verifies whether the SessionStart event class
 #      stamps either field on teammate-frame fires (and whether
 #      SessionStart even has a teammate-fire path).
-#   5. Promote captures to fixtures under
-#      pact-plugin/tests/fixtures/wake_lifecycle/ with hand-added _meta
-#      block (capture_method="logging-shim").
+#   5. Promote captures to fixtures under pact-plugin/tests/fixtures/
+#      with a hand-added _meta block (capture_method="logging-shim").
 #   6. Uninstall by restoring the .preshim.bak.
 #   7. Before sharing any captures externally:
 #      rm -rf /tmp/pact-hook-stdin-captures/

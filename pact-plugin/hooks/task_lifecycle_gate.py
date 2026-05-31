@@ -7,7 +7,7 @@ Summary: PostToolUse hook (matcher='TaskCreate|TaskUpdate') enforcing PACT
          self-completion violations.
 Used by: hooks.json PostToolUse matcher='TaskCreate|TaskUpdate' (per the
          unified Task-mutating-tool matcher convention shared with
-         wake_lifecycle_emitter and agent_handoff_emitter).
+         agent_handoff_emitter).
 
 Self-completion writeback recursion mitigation: the metadata writeback marks
 metadata.gate_writeback=true. The gate's first check skips on this marker

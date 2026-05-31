@@ -90,9 +90,7 @@ _TAIL_WINDOW_BYTES = 32 * 1024
 #
 # Trust boundary: write path validates events against this dict; read path
 # trusts disk content. Loosening this dict without auditing all readers
-# will silently break extractors assuming validated shape (e.g., Step 0
-# bash in commands/scan-pending-tasks.md assumes scan_armed.ts is the
-# auto-stamped ISO-8601 string from make_event, parsed via strptime).
+# will silently break extractors assuming validated shape.
 _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # hooks/session_init.py writes session_start with team, session_id,
     # project_dir, worktree on the valid-stdin path only (under R3, the event
@@ -173,46 +171,6 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # activates the _OPTIONAL_FIELDS_BY_TYPE enforcement below (same pattern
     # as session_end and cleanup_summary).
     "session_consolidated": {},
-    # hooks/shared/wake_lifecycle.py::_warn_empty_team_config_once writes
-    # wake_tally_warn ONE-shot per team per process when the step-4
-    # owner-check fall-through fires (config unreadable, members[] empty).
-    # team_name is load-bearing — without it the warn has no actionable
-    # signal. reason is a categorical token for future log-filter
-    # dispatch ("empty_team_config_fail_conservative" today; future
-    # variants may add "malformed_team_config_json" or similar). detail
-    # is documentation-grade prose for human readers (stderr fallback)
-    # and is registered as optional in _OPTIONAL_FIELDS_BY_TYPE below.
-    "wake_tally_warn": {"team_name": str, "reason": str},
-    # commands/start-pending-scan.md Step 5 writes scan_armed after the
-    # CronCreate that arms the pending-scan cron. commands/scan-pending-tasks.md
-    # Step 0 reads the latest scan_armed event's auto-stamped `ts` (parsed
-    # via strptime → epoch) and skips the scan body when elapsed-since-arm
-    # < WARMUP_GRACE_SECONDS. The grace window is coupled in lockstep to
-    # the cron interval (300s grace + */5 cron) — first-fire-coverage
-    # invariant; see start-pending-scan.md §CronCreate Block audit. No
-    # type-specific required fields — `ts` is supplied by the make_event
-    # auto-stamp path (matches session_end / cleanup_summary precedent).
-    "scan_armed": {},
-    # commands/stop-pending-scan.md writes scan_disarmed after the
-    # CronDelete that tears down the pending-scan cron. Paired writer
-    # to scan_armed; together they form the event-model lifecycle
-    # consumed by hooks/wake_inbox_drain.py — the drain hook's
-    # producer-side idempotency suppresses the redundant Arm directive
-    # only when scan_armed.ts is strictly more recent than
-    # scan_disarmed.ts (re-arm dominance under post-Teardown re-arm).
-    # No type-specific required fields — `ts` is supplied by the
-    # make_event auto-stamp path.
-    "scan_disarmed": {},
-    # hooks/teardown_request_emitter.py writes teardown_request after
-    # the lead-driven TaskUpdate(status="completed") drives the team's
-    # lifecycle-relevant active-task count to 0 (Tier-1 fast path), AND
-    # hooks/wake_inbox_drain.py writes teardown_request after draining
-    # a type="teardown" wake_inbox marker (Tier-2 carve-out fallback).
-    # The event is the falsifiable trace; the additionalContext
-    # directive is the wake-hint. Required fields are the minimum
-    # identity carrier: task_id pins the specific completion;
-    # team_name pins the cron binding the directive will tear down.
-    "teardown_request": {"task_id": str, "team_name": str},
 }
 
 
@@ -277,23 +235,6 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
         "task_count": int,
         "memories_saved": int,
     },
-    # hooks/shared/wake_lifecycle.py::_warn_empty_team_config_once writes
-    # wake_tally_warn with an optional `detail` free-form prose string.
-    # The required-fields registration in _REQUIRED_FIELDS_BY_TYPE above
-    # ("wake_tally_warn": {team_name: str, reason: str}) is what
-    # ACTIVATES this optional check — _validate_event_schema short-
-    # circuits on unknown event types and would otherwise skip the
-    # optional loop. Symmetric with the session_end + cleanup_summary
-    # registration patterns.
-    "wake_tally_warn": {"detail": str},
-    # hooks/teardown_request_emitter.py (Tier-1) and
-    # hooks/wake_inbox_drain.py (Tier-2) write teardown_request with
-    # optional `tier` ("1" | "2") attributing the emission path, and
-    # optional `reason` categorizing the trigger
-    # ("lead_terminal_taskupdate" | "wake_inbox_drained" |
-    # "self_complete_exempt" — extend with new categorical tokens as
-    # paths are added). Audit-only fields; no behavioral consumer.
-    "teardown_request": {"tier": str, "reason": str},
 }
 
 

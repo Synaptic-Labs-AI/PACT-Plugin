@@ -7,16 +7,12 @@
 # Inspect captures for sensitive data + clean /tmp before sharing any
 # captures externally. See #814 for safety-hardening tracking.
 #
-# Install a logging-shim wrapper around BOTH TaskCompleted hooks
-# (agent_handoff_emitter.py + teardown_request_emitter.py) to capture raw
-# TaskCompleted stdin from the next session's hook fires. Wrapping both
-# hooks lets a single fire produce two captures (sibling-emission cross-
-# check); if one hook short-circuits at its own gate, the other still
-# captures — robust to mid-pipeline early-exits.
+# Install a logging-shim wrapper around the agent_handoff_emitter.py
+# TaskCompleted hook to capture raw TaskCompleted stdin from the next
+# session's hook fires.
 #
 # Capture target (per-hook subdir disambiguation):
 #   /tmp/pact-hook-stdin-captures/taskcompleted/agent_handoff_emitter/{ISO_timestamp}Z-pid{N}.json
-#   /tmp/pact-hook-stdin-captures/taskcompleted/teardown_request_emitter/{ISO_timestamp}Z-pid{N}.json
 #
 # The shim is a side-effect tee: reads stdin into a buffer, atomically
 # writes the buffer to disk (`.tmp` sibling + os.rename for POSIX-atomic
@@ -40,26 +36,24 @@
 #   1. Run this installer.
 #   2. Start a fresh session.
 #   3. Trigger a teammate TaskCompleted event (e.g., dispatch a teammate
-#      task, wait for completion). Each TaskCompleted fire produces two
-#      captures — one per wrapped hook.
+#      task, wait for completion). Each TaskCompleted fire produces one
+#      capture from the wrapped hook.
 #   4. Inspect /tmp/pact-hook-stdin-captures/taskcompleted/ for captures.
 #   5. Confirm agent_id presence on teammate-frame fires; absence on
 #      lead-frame fires.
-#   6. Promote captures to fixtures under pact-plugin/tests/fixtures/wake_lifecycle/
-#      (taskcompleted_lead_context_shape.json + taskcompleted_teammate_context_shape.json)
-#      with hand-added _meta block (capture_method="logging-shim").
-#   7. Uninstall by restoring each .preshim.bak.
+#   6. Promote captures to fixtures with a hand-added _meta block
+#      (capture_method="logging-shim").
+#   7. Uninstall by restoring the .preshim.bak.
 #   8. Before sharing any captures externally:
 #      rm -rf /tmp/pact-hook-stdin-captures/
 
 set -euo pipefail
 
 # ─── Dynamic plugin-root resolution ─────────────────────────────────────
-# Same resolution method as install_logging_shim.sh (sibling). Inline
-# duplication of the ~15-line block is preferred over a sourced helper to
-# avoid source-path-fragility (the helper file path would depend on the
-# installer's invocation CWD). Both scripts are run via absolute path from
-# the orchestrator, so the duplication cost is bounded.
+# Inline duplication of the ~15-line block is preferred over a sourced
+# helper to avoid source-path-fragility (the helper file path would depend
+# on the installer's invocation CWD). This installer is run via absolute
+# path from the orchestrator, so the duplication cost is bounded.
 #
 # Note on the glob pattern: the canonical on-disk dir name is `pact-plugin/PACT/`
 # (uppercase PACT) per project convention. APFS on macOS is case-insensitive
@@ -84,13 +78,12 @@ fi
 echo "Resolved plugin root: $PACT_ROOT"
 
 # ─── Hooks to wrap ──────────────────────────────────────────────────────
-# Both TaskCompleted hooks per hooks.json registration. The shim install
-# loops over both; each hook gets its own .preshim.bak and per-hook capture
-# subdir.
+# The agent_handoff_emitter TaskCompleted hook per hooks.json registration.
+# The shim install loops over the hook list; each hook gets its own
+# .preshim.bak and per-hook capture subdir.
 
 HOOKS=(
   "$PACT_ROOT/hooks/agent_handoff_emitter.py"
-  "$PACT_ROOT/hooks/teardown_request_emitter.py"
 )
 CAPTURE_BASE="/tmp/pact-hook-stdin-captures/taskcompleted"
 
@@ -229,8 +222,7 @@ if [[ "$NEWLY_INSTALLED_COUNT" -eq 0 ]]; then
 fi
 
 # ─── Post-install verification ──────────────────────────────────────────
-# Three assertions per newly-installed hook (so up to 6 total across both
-# hooks when both are newly installed):
+# Three assertions per newly-installed hook:
 #   1. Marker count == 1 in the hook file.
 #   2. Capture-dir literal count >= 1 in the hook file.
 #   3. Per-hook capture subdir exists on disk.

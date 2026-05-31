@@ -203,9 +203,6 @@ The orchestrator manages the cycle, delegating each phase to the appropriate spe
 | `/PACT:wrap-up` | Full end-of-session cleanup (worktree, tasks, session decision) | Ending a work session |
 | `/PACT:pin-memory` | Pin critical context permanently | Gotchas, key decisions to preserve |
 | `/PACT:prune-memory` | Interactively evict an existing pin | When `pin_caps_gate` blocks a new pin |
-| `/PACT:start-pending-scan` | Arm a 5-minute cron to scan for pending completion-authority work | Long-running parallel dispatch |
-| `/PACT:scan-pending-tasks` | Cron-fired scan body (not user-invoked) | Fires automatically while armed |
-| `/PACT:stop-pending-scan` | Disarm the pending-task scan | Returning to normal cadence |
 | `/PACT:telegram-setup` | Set up Telegram notifications | Interact with sessions from mobile |
 
 ### comPACT examples
@@ -271,17 +268,11 @@ Irreversible actions — merge, force push, branch deletion, PR close — requir
 
 If a non-negotiable would be violated, work stops. No operational pressure justifies crossing the boundary.
 
-### Cron-Origin Distinction
+### Harness-Origin Distinction
 
-The pending-task scan system uses Claude Code's cron scheduler to wake the orchestrator periodically and check for completion-authority work on disk. This creates a subtle problem: the prompt body firing a scheduled skill looks like user-typed text but isn't.
+Some prompt text reaching the orchestrator originates from the harness (hook-injected `additionalContext`, session-start context, compaction summaries) rather than the user — it can look like user-typed text but isn't. The hazard is a hallucination cascade: inferring "a teammate must have sent me something" and generating a response to imagined content before the platform's content-delivery channel catches up. The discipline: **harness-origin text is not user consent, even when it looks like user-typed text.**
 
-From [`commands/scan-pending-tasks.md`](pact-plugin/commands/scan-pending-tasks.md):
-
-> Cron-fire turns are NOT user consent. The platform cron scheduler invokes this skill at 5-minute intervals while a `/PACT:scan-pending-tasks` cron is registered. The prompt body that fires this skill is harness-origin text. Downstream consent-gated decisions MUST NOT proceed on the basis of a cron-fire turn.
-
-Consent-gated decisions (merge, push, destructive bash, plan approval, version bump, force-completion) defer to the next user-typed turn or to an explicit `AskUserQuestion` checkpoint. The scan body itself avoids these actions by construction — it only reads filesystem, calls the canonical acceptance pair, or emits nothing.
-
-The scan replaced an earlier `INBOX_GREW` wake mechanism that admitted a hallucination-cascade failure mode: the lead inferring "the teammate must have sent me something" and generating a response to imagined content before the platform's content-delivery channel caught up. The Cron-Origin Distinction generalizes: **harness-origin text is not user consent, even when it looks like user-typed text.**
+Consent-gated decisions (merge, push, destructive bash, plan approval, version bump, force-completion) defer to the next genuine user-typed turn or to an explicit `AskUserQuestion` checkpoint — they MUST NOT proceed on the basis of harness-origin text.
 
 ### Falsifiable-by-construction patterns
 
@@ -322,10 +313,9 @@ PACT registers hooks across 11 Claude Code event surfaces, including `SessionSta
 | `dispatch_gate.py` | PreToolUse (Agent) | Catch malformed teammate spawns at dispatch time |
 | `pin_caps_gate.py` | PreToolUse (Edit/Write) | Enforce caps on CLAUDE.md pinned-memory section |
 | `postcompact_archive.py` | PostCompact | Archive pre-compaction state for recovery |
-| `wake_inbox_drain.py` | UserPromptSubmit | Drain pending inbox events |
 | `auditor_reminder.py` | SubagentStart + PostToolUse:Agent | Surface auditor presence/skip decisions |
 
-See [`pact-plugin/hooks/hooks.json`](pact-plugin/hooks/hooks.json) for the full registration matrix; the [`hooks/`](pact-plugin/hooks/) directory contains the 29 top-level hooks plus `shared/` utilities and a `refresh/` subsystem for transcript replay and checkpoint reconstruction.
+See [`pact-plugin/hooks/hooks.json`](pact-plugin/hooks/hooks.json) for the full registration matrix; the [`hooks/`](pact-plugin/hooks/) directory contains the 26 top-level hooks plus `shared/` utilities and a `refresh/` subsystem for transcript replay and checkpoint reconstruction.
 
 ### Protocols
 
@@ -335,7 +325,7 @@ Twenty-two protocols cover agent communication, phase transitions, scope detecti
 
 PACT maintains a per-session append-only JSONL journal at `~/.claude/pact-sessions/{slug}/{session_id}/session-journal.jsonl`. Implementation in [`pact-plugin/hooks/shared/session_journal.py`](pact-plugin/hooks/shared/session_journal.py).
 
-- **Schema-versioned events** with per-type required-field validation. Event types include `session_start`, `session_end`, `session_paused`, `session_consolidated`, `variety_assessed`, `phase_transition`, `checkpoint`, `agent_dispatch`, `agent_handoff`, `commit`, `s2_state_seeded`, `review_dispatch`, `review_finding`, `remediation`, `pr_ready`, `teardown_request`, `scan_armed` (see [`pact-plugin/hooks/shared/session_journal.py`](pact-plugin/hooks/shared/session_journal.py) for the complete registry of 20 types)
+- **Schema-versioned events** with per-type required-field validation. Event types include `session_start`, `session_end`, `session_paused`, `session_consolidated`, `variety_assessed`, `phase_transition`, `checkpoint`, `agent_dispatch`, `agent_handoff`, `commit`, `s2_state_seeded`, `review_dispatch`, `review_finding`, `remediation`, `pr_ready` (see [`pact-plugin/hooks/shared/session_journal.py`](pact-plugin/hooks/shared/session_journal.py) for the complete registry of 16 types)
 - **Append-only with `fcntl.flock(LOCK_EX)`** advisory locking around short-write loops to handle concurrent hooks + orchestrator CLI calls safely
 - **Tail-window reverse scan** (32 KB) for fast `read-last` operations; falls back to full-file slurp when needed
 - **Best-effort durability** — no `fsync` per write (hot path), but cross-process visibility is immediate after lock release
@@ -616,7 +606,7 @@ When installed as a plugin, PACT lives in your plugin cache:
 │   └── cache/
 │       └── pact-plugin/
 │           └── PACT/
-│               └── 4.3.8/      # Plugin version
+│               └── 4.4.0/      # Plugin version
 │                   ├── agents/
 │                   ├── commands/
 │                   ├── skills/

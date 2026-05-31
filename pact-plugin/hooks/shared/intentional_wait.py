@@ -26,18 +26,11 @@ Public surface:
   (member.agentType), NOT owner name — secretaries spawned under any
   name (e.g. session-secretary) reach the carve-out as long as their
   agentType is in this set.
-- WAKE_EXCLUDED_AGENT_TYPES — agentType tokens whose owners' active work
-  does NOT count toward the wake-mechanism's active-task tally.
-  Companion predicate: _is_wake_excluded_agent_type. Currently EMPTY by
-  design — secretary's standing-listener role produces messages the
-  lead must receive promptly via wake. Semantically distinct from
-  SELF_COMPLETE_EXEMPT_AGENT_TYPES (different consumers ask different
-  questions); see constant docstring for the divergence rationale.
 - TEACHBACK_EXEMPT_AGENT_TYPES — agentType tokens whose owners are
   exempt from the teachback-gated dispatch pattern (no Task A
   teachback gate; single-task dispatch). Consumed by
   task_lifecycle_gate.work_addblockedby_missing via is_teachback_exempt.
-  Same team-config agentType lookup as the prior two constants.
+  Same team-config agentType lookup as the prior constant.
 - canonical_since() — ISO-8601 UTC timestamp helper for the `since` field.
 - validate_wait(wait_metadata) — True iff the flag is well-formed.
 - wait_stale(wait_metadata) — True iff the flag has aged past threshold.
@@ -101,41 +94,9 @@ SELF_COMPLETE_EXEMPT_AGENT_TYPES: frozenset = frozenset({
 })
 
 
-# AgentType tokens whose owners do NOT count toward the wake-mechanism's
-# active-task tally. Semantically distinct from
-# SELF_COMPLETE_EXEMPT_AGENT_TYPES: the self-completion exemption answers
-# "may this owner self-complete without lead inspection?" while the
-# wake-mechanism exclusion answers "should this owner's active work fire
-# the lead's inbox-watch Monitor?" Two consumers, two questions.
-#
-# CURRENTLY EMPTY by design. Earlier iterations of this constant included
-# `pact-secretary` (inherited from the pre-decoupling single-frozenset
-# design). That carve-out was wrong: the secretary's standing-listener
-# role still produces messages the lead must receive promptly via wake
-# (query replies, calibration responses, harvest summaries). Excluding
-# secretary from the wake count produced the secretary-window failure
-# mode where the Monitor tore down before the lead could read the
-# secretary's reply. Emptying the set restores wake coverage for ALL
-# agentTypes, including secretary.
-#
-# Future divergence is supported: a hypothetical wake-only-noisy
-# agentType (one that emits frequent low-signal traffic and should not
-# wake the Monitor on every task) could be added here without affecting
-# self-completion semantics. The two-constant shape is the architectural
-# anchor for that future divergence.
-#
-# DO NOT recouple by aliasing one constant to the other. Re-linking the
-# policies via a shared import would silently re-introduce the secretary-
-# window failure the next time SELF_COMPLETE_EXEMPT_AGENT_TYPES gains a
-# member.
-WAKE_EXCLUDED_AGENT_TYPES: frozenset = frozenset()
-
-
 # AgentType tokens whose owners are exempt from the teachback-gated
-# dispatch pattern. Semantically distinct from the two prior surfaces:
+# dispatch pattern. Semantically distinct from the prior surface:
 # - SELF_COMPLETE_EXEMPT_AGENT_TYPES answers "may this owner self-complete?"
-# - WAKE_EXCLUDED_AGENT_TYPES answers "should this owner's tasks count toward
-#   the lead's inbox-watch Monitor lifecycle?"
 # - TEACHBACK_EXEMPT_AGENT_TYPES answers "should the team-lead dispatch this
 #   owner via the Task A (teachback) + Task B (work) pair, or skip Task A?"
 #
@@ -152,9 +113,9 @@ WAKE_EXCLUDED_AGENT_TYPES: frozenset = frozenset()
 # team-config records its agentType as `pact-secretary`.
 #
 # Future divergence is supported: a hypothetical rote-only agentType
-# joins the set with a one-line change. Three frozensets, three
-# operational surfaces, fully decoupled — DO NOT recouple by aliasing to
-# either of the prior two constants.
+# joins the set with a one-line change. Two frozensets, two operational
+# surfaces, fully decoupled — DO NOT recouple by aliasing to the prior
+# constant.
 TEACHBACK_EXEMPT_AGENT_TYPES: frozenset = frozenset({
     "pact-secretary",
 })
@@ -183,8 +144,8 @@ def _is_exempt_agent_type(
     upstream becomes fail-closed for this predicate because we require
     a positive match.
 
-    NOT a hook predicate — pure helper for shared.intentional_wait.
-    is_self_complete_exempt and shared.wake_lifecycle._lifecycle_relevant.
+    NOT a hook predicate — pure helper for
+    shared.intentional_wait.is_self_complete_exempt.
     Mirrors the auditor_reminder._team_has_auditor precedent in
     parameter shape (owner-or-role + team_name + teams_dir override) and
     in upstream-config-read delegation, BUT inverts the error semantics:
@@ -213,46 +174,6 @@ def _is_exempt_agent_type(
     return False
 
 
-def _is_wake_excluded_agent_type(
-    owner: str,
-    team_name: str,
-    teams_dir: str | None = None,
-) -> bool:
-    """Return True iff the team-config member matching `owner` has an
-    agentType in WAKE_EXCLUDED_AGENT_TYPES.
-
-    Parallel to `_is_exempt_agent_type` but keyed on a different
-    constant so the wake-mechanism's count-exclusion policy can diverge
-    from the self-completion exemption policy without coupling. See the
-    WAKE_EXCLUDED_AGENT_TYPES constant docstring for the semantic
-    distinction.
-
-    Same fail-closed semantics as `_is_exempt_agent_type`: returns False
-    on every error path. Same upstream-config-read delegation to
-    `_iter_members`. Consumed by `shared.wake_lifecycle._lifecycle_relevant`.
-
-    NOT a hook predicate — pure helper.
-
-    Args:
-        owner: Task owner name (matched against member.name).
-        team_name: Team name for config path. Empty string returns False.
-        teams_dir: Override teams directory (for testing). When omitted,
-                   _iter_members uses ``~/.claude/teams/``.
-    """
-    if not isinstance(owner, str) or not owner:
-        return False
-    if not isinstance(team_name, str) or not team_name:
-        return False
-    for member in pact_context._iter_members(team_name, teams_dir):
-        if member.get("name") == owner:
-            agent_type = member.get("agentType")
-            return (
-                isinstance(agent_type, str)
-                and agent_type in WAKE_EXCLUDED_AGENT_TYPES
-            )
-    return False
-
-
 def _is_teachback_exempt_agent_type(
     owner: str,
     team_name: str,
@@ -261,11 +182,11 @@ def _is_teachback_exempt_agent_type(
     """Return True iff the team-config member matching `owner` has an
     agentType in TEACHBACK_EXEMPT_AGENT_TYPES.
 
-    Parallel to `_is_exempt_agent_type` and `_is_wake_excluded_agent_type`
-    but keyed on a different constant so the dispatch-exemption policy
-    can diverge from the self-completion and wake-counting policies
-    without coupling. See the TEACHBACK_EXEMPT_AGENT_TYPES constant
-    docstring for the semantic distinction.
+    Parallel to `_is_exempt_agent_type` but keyed on a different
+    constant so the dispatch-exemption policy can diverge from the
+    self-completion policy without coupling. See the
+    TEACHBACK_EXEMPT_AGENT_TYPES constant docstring for the semantic
+    distinction.
 
     Same fail-closed semantics as the sibling predicates: returns False
     on every error path. Conservative posture — a non-exempt owner

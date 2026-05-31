@@ -1,6 +1,6 @@
 # PACT — Orchestration Harness for Claude Code
 
-> **Version**: 4.3.8
+> **Version**: 4.4.0
 
 Turn a single Claude Code session into a managed team of specialist AI agents that prepare, design, build, and test your code systematically.
 
@@ -48,12 +48,12 @@ Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/Syna
 ## What You Get
 
 - **12 Specialist Agents** — Preparer, Architect, Backend/Frontend/Database/DevOps Coders, n8n, Test/Security/QA Engineers, Auditor (concurrent observation during CODE), Secretary
-- **15 Commands** — From full orchestration (`/PACT:orchestrate`) to quick single-specialist fixes (`/PACT:comPACT`), plus pause/resume (`/PACT:pause`), pin-memory management (`/PACT:pin-memory`, `/PACT:prune-memory`), and the pending-task scan family for long-running parallel dispatch
+- **12 Commands** — From full orchestration (`/PACT:orchestrate`) to quick single-specialist fixes (`/PACT:comPACT`), plus pause/resume (`/PACT:pause`) and pin-memory management (`/PACT:pin-memory`, `/PACT:prune-memory`)
 - **20 Skills** — On-demand domain knowledge for architecture, coding, testing, security, n8n, plus operational skills (agent teams, teachback, handoff harvest, memory, worktree)
 - **Persistent Memory** — SQLite + vector embeddings for cross-session learning; additive list merge so lessons grow monotonically
 - **Durable Workflow State** — Append-only session journal (`~/.claude/pact-sessions/`) survives compaction, task GC, and crashes
 - **Adaptive Complexity** — Light process for simple tasks, full ceremony for complex ones; calibration data feeds back into variety scoring (Bateson's Learning II)
-- **Safety Discipline** — Cron-Origin Distinction (harness-origin text ≠ user consent), two-call atomic acceptance pair, structural verification against `git diff` ground truth
+- **Safety Discipline** — Harness-Origin Distinction (harness-origin text ≠ user consent), two-call atomic acceptance pair, structural verification against `git diff` ground truth
 
 ## Quick Start
 
@@ -95,7 +95,6 @@ For installation options, detailed features, examples, and technical reference:
 - [State Recovery](protocols/pact-state-recovery.md) — Resume + recovery semantics across sessions
 - [S5 Policy](protocols/pact-s5-policy.md) — Non-negotiable rules layer (security, quality, ethics, integrity)
 - [S4 Tension](protocols/pact-s4-tension.md) — Strategic-vs-operational tension management
-- [Cron-Origin Distinction](commands/scan-pending-tasks.md) — Harness-origin text classification (cron-fire turns ≠ user consent)
 - [VSM Glossary](reference/vsm-glossary.md) — Viable System Model terminology in PACT context
 
 ## License

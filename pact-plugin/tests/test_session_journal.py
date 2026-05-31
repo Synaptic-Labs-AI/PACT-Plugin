@@ -812,8 +812,8 @@ class TestReadLastEventTailStreamed:
 
     Fixtures use `append_event(make_event("checkpoint", phase=..., data=...))`
     for normal padding (passes the writer's schema validator: checkpoint
-    requires `phase: str`). The single target event is `scan_armed` with
-    a fixed `armed_at` integer for unambiguous identification.
+    requires `phase: str`). The single target event is `session_consolidated` with
+    a fixed `task_count` integer for unambiguous identification.
 
     Tests (c) and (d) bypass `append_event` and write directly to the
     journal file path because they require byte-precise placement or an
@@ -853,8 +853,8 @@ class TestReadLastEventTailStreamed:
         """Test (a) — Tail-hit large-journal happy path.
 
         Fixture: pad journal beyond _TAIL_WINDOW_BYTES, then append the
-        target `scan_armed` event LAST so it lands in the tail window.
-        Assert the tail-scan returns the target event's armed_at.
+        target `session_consolidated` event LAST so it lands in the tail window.
+        Assert the tail-scan returns the target event's task_count.
 
         Falsifiability: counter-test-by-revert is performed against
         `_read_last_event_at` itself — replacing the `return match` after
@@ -881,7 +881,7 @@ class TestReadLastEventTailStreamed:
         # so it is the LAST event on disk — guaranteed to fall within the
         # last _TAIL_WINDOW_BYTES bytes.
         self._pad_journal_to_size(_TAIL_WINDOW_BYTES + 4096)
-        append_event(make_event("scan_armed", armed_at=20260516))
+        append_event(make_event("session_consolidated", task_count=20260516))
 
         journal_path = Path(get_journal_path())
         assert journal_path.stat().st_size > _TAIL_WINDOW_BYTES, (
@@ -889,16 +889,16 @@ class TestReadLastEventTailStreamed:
             "exercise the tail-streamed branch."
         )
 
-        result = _read_last_event_at(journal_path, "scan_armed")
+        result = _read_last_event_at(journal_path, "session_consolidated")
         assert result is not None
-        assert result["armed_at"] == 20260516
+        assert result["task_count"] == 20260516
 
     def test_tail_miss_fallback_recovers_target(
         self, journal_home, session_dir,
     ):
         """Test (b) — Tail-miss-fallback path.
 
-        Fixture: append the target `scan_armed` event FIRST, then pad
+        Fixture: append the target `session_consolidated` event FIRST, then pad
         with > _TAIL_WINDOW_BYTES bytes of checkpoint filler so the
         target ends up older than the tail window. The tail-scan
         misses; the full-slurp fallback must recover the target.
@@ -916,7 +916,7 @@ class TestReadLastEventTailStreamed:
 
         # Target FIRST, then pad past the tail window so target falls
         # OUTSIDE the last _TAIL_WINDOW_BYTES window.
-        append_event(make_event("scan_armed", armed_at=20260517))
+        append_event(make_event("session_consolidated", task_count=20260517))
         # Pad enough that target is comfortably older than the tail.
         self._pad_journal_to_size(_TAIL_WINDOW_BYTES * 2 + 4096)
 
@@ -925,20 +925,20 @@ class TestReadLastEventTailStreamed:
             "Fixture invariant: journal must exceed tail window."
         )
 
-        result = _read_last_event_at(journal_path, "scan_armed")
+        result = _read_last_event_at(journal_path, "session_consolidated")
         assert result is not None, (
             "Tail-miss fallback must recover the target event. A None "
             "return indicates the fallback path was skipped (return "
             "after tail-miss instead of falling through to full-slurp)."
         )
-        assert result["armed_at"] == 20260517
+        assert result["task_count"] == 20260517
 
     def test_byte_boundary_alignment_recovers_target(
         self, journal_home, session_dir, monkeypatch,
     ):
         """Test (c) — Byte-boundary alignment empirical pin.
 
-        Construct a journal where the target `scan_armed` event line
+        Construct a journal where the target `session_consolidated` event line
         starts at exactly `file_size - _TAIL_WINDOW_BYTES`. The tail
         seek lands at the start of a complete line (no preceding
         partial), but the `tail_lines[1:]` discard always drops the
@@ -971,7 +971,7 @@ class TestReadLastEventTailStreamed:
         # Build a journal where the target event line starts at exactly
         # `file_size - _TAIL_WINDOW_BYTES`. Strategy:
         #   1. Prefix = N filler lines, padded so prefix bytes >> 0.
-        #   2. Target line = scan_armed event (one complete JSONL line).
+        #   2. Target line = session_consolidated event (one complete JSONL line).
         #   3. Suffix = filler lines totalling exactly
         #      `_TAIL_WINDOW_BYTES - len(target_line)` bytes.
         #   Then file_size = len(prefix) + len(target) + len(suffix);
@@ -981,9 +981,9 @@ class TestReadLastEventTailStreamed:
         #   first byte of the target line.
         target_line = (
             json.dumps({
-                "v": 1, "type": "scan_armed",
+                "v": 1, "type": "session_consolidated",
                 "ts": "2026-05-16T00:00:00Z",
-                "armed_at": 20260518,
+                "task_count": 20260518,
             }) + "\n"
         ).encode("utf-8")
 
@@ -1030,7 +1030,7 @@ class TestReadLastEventTailStreamed:
 
         monkeypatch.setattr(sj, "_scan_lines_for_event", counting_scan)
 
-        result = _read_last_event_at(journal_path, "scan_armed")
+        result = _read_last_event_at(journal_path, "session_consolidated")
 
         assert result is not None, (
             "Byte-boundary alignment must yield the target via either "
@@ -1040,7 +1040,7 @@ class TestReadLastEventTailStreamed:
             f"{file_size}, target_line_starts_at={len(prefix)}, "
             f"seek_pos_lands_at={expected_seek_pos}."
         )
-        assert result["armed_at"] == 20260518
+        assert result["task_count"] == 20260518
         # Observed-behavior pin: tail-scan discards the leading partial-
         # line (which IS our target at this exact boundary), so the
         # fallback fires. _scan_lines_for_event is invoked twice.
@@ -1086,7 +1086,7 @@ class TestReadLastEventTailStreamed:
         assert journal_path.exists()
         assert journal_path.stat().st_size == 0
 
-        result = _read_last_event_at(journal_path, "scan_armed")
+        result = _read_last_event_at(journal_path, "session_consolidated")
         assert result is None, (
             f"Empty journal must return None without error; got {result!r}"
         )
@@ -3242,44 +3242,6 @@ class TestValidateEventSchemaPerType:
         "session_end": {},  # No required fields; baseline-only.
         "cleanup_summary": {},  # No required fields; optional-only (#412 Fix B).
         "session_consolidated": {},  # No required fields; optional-only (#453 Fix B).
-        # `wake_tally_warn` is emitted by
-        # `shared.wake_lifecycle._warn_empty_team_config_once` when the
-        # step-4 owner-classification falls through fail-CONSERVATIVE
-        # (empty members list). `team_name` identifies which team's
-        # config is unreadable; `reason` is a categorical token so a
-        # future log-filter can dispatch on the failure mode. The free-
-        # form `detail` field that the production call site also passes
-        # is documentation-grade prose and is intentionally NOT required.
-        "wake_tally_warn": {
-            "team_name": "team-warn-sample",
-            "reason": "empty_team_config_fail_conservative",
-        },
-        # `scan_armed` is emitted by commands/start-pending-scan.md Step 5
-        # after CronCreate arms the pending-scan cron. No type-specific
-        # required fields — the arm time is carried by the auto-stamped
-        # `ts` ISO-8601 string (set by make_event), parsed via strptime at
-        # commands/scan-pending-tasks.md Step 0 to bound the warmup-grace
-        # skip window.
-        "scan_armed": {},
-        # `scan_disarmed` is emitted by commands/stop-pending-scan.md after
-        # CronDelete tears down the pending-scan cron. No type-specific
-        # required fields — the teardown time is carried by the auto-
-        # stamped `ts` (parsed via strptime). Paired writer to scan_armed;
-        # together they drive the event-model lifecycle consumed by
-        # hooks/wake_inbox_drain.py's producer-side idempotency check
-        # (suppress only when scan_armed.ts is strictly more recent than
-        # scan_disarmed.ts).
-        "scan_disarmed": {},
-        # `teardown_request` is the falsifiable trace for the 1->0 active-
-        # task transition that retires the pending-scan cron. Written by
-        # hooks/teardown_request_emitter.py (Tier-1, lead-session
-        # TaskCompleted handler) and by hooks/wake_inbox_drain.py (Tier-2,
-        # carve-out fallback that drains a type="teardown" wake_inbox
-        # marker). The additionalContext directive is the wake-hint; the
-        # event is the source of truth that Tier-4 cron staleness fallback
-        # can replay from. task_id pins the specific completion; team_name
-        # pins the cron binding the directive will tear down.
-        "teardown_request": {"task_id": "T1", "team_name": "team-x"},
     }
 
     def test_samples_mirror_required_fields_dict(self):
@@ -3515,9 +3477,6 @@ class TestValidateEventSchemaPerType:
         ("remediation", "items", {"k": "v"}, "list", "dict"),
         # bool field fed an int (bool fields currently only consolidation_completed)
         ("session_paused", "consolidation_completed", 1, "bool", "int"),
-        # teardown_request required str fields fed an int
-        ("teardown_request", "task_id", 42, "str", "int"),
-        ("teardown_request", "team_name", 42, "str", "int"),
     ]
 
     @pytest.mark.parametrize(
@@ -3685,86 +3644,6 @@ class TestValidateEventSchemaPerType:
             "non-empty string"
         ) in result.stderr
         assert not journal_file.exists() or journal_file.read_text() == ""
-
-    def test_legacy_scan_armed_with_armed_at_extra_field_validates_bc_safe(self):
-        """BC-safety migration contract for #821 ts-unification (DELETE
-        path per architect Q1 binding).
-
-        #821 deleted `armed_at` from _REQUIRED_FIELDS_BY_TYPE["scan_armed"]
-        (the schema entry is now `{}`) and the writer at
-        commands/start-pending-scan.md Step 5 no longer emits the
-        `armed_at` field. The DELETE-vs-DEPRECATE binding decision rests
-        on the lenient-validator contract: an OLD journal event from
-        before #821 carrying BOTH the auto-stamped `ts` ISO string AND
-        the now-deprecated `armed_at: int` extra field MUST still pass
-        `_validate_event_schema` so post-#821 readers can continue
-        consuming legacy journals without rewrite.
-
-        Symmetric pin for `scan_disarmed.disarmed_at`.
-
-        Counter-test-by-revert: if a future refactor changes
-        `_validate_event_schema` from open-schema (extras pass silently)
-        to closed-schema (extras rejected), this test FAILS — and the
-        failure message names the BC-safety contract that broke.
-
-        This test SUPPLEMENTS the side-effect coverage at
-        TestReadLastEventTailStreamed lines ~884/919 (which write
-        `make_event("scan_armed", armed_at=N)` as a unique-identifier
-        marker for tail-window position-recovery tests) by EXPLICITLY
-        pinning the migration contract rather than relying on it as an
-        unintended-consequence pass.
-
-        References:
-          - architect #821 §3.1 Q1 (schema entry `{}` not REMOVE,
-            relies on lenient validator for BC).
-          - PREPARE #821 §4 (lenient-validator empirical probe) + §7
-            (live-journal byte-identity evidence).
-          - The producer-side idempotency check at
-            hooks/wake_inbox_drain.py:~696-734 reads only `ts`, not
-            `armed_at` — a legacy event's extra `armed_at` is
-            ignored.
-        """
-        from shared.session_journal import _validate_event_schema
-
-        legacy_scan_armed_event = {
-            "v": 1,
-            "type": "scan_armed",
-            "ts": "2026-05-18T23:37:44Z",
-            "armed_at": 1779147464,  # pre-#821 integer-epoch field
-        }
-        ok, reason = _validate_event_schema(legacy_scan_armed_event)
-        assert ok is True, (
-            f"Legacy scan_armed event with `armed_at` extra field MUST "
-            f"validate (BC-safety migration contract per architect "
-            f"#821 §3.1 Q1). Got ok={ok}, reason={reason!r}. A False "
-            f"result here indicates _validate_event_schema has shifted "
-            f"from open-schema (extras pass silently) to closed-schema "
-            f"(extras rejected) — the #821 DELETE-vs-DEPRECATE binding "
-            f"decision rests on lenient-validator behavior; this "
-            f"regression would break readers consuming legacy journals."
-        )
-        assert reason == "ok", (
-            f"BC-safety: lenient validator must return 'ok' for "
-            f"legacy event with `armed_at` extra; got {reason!r}."
-        )
-
-        legacy_scan_disarmed_event = {
-            "v": 1,
-            "type": "scan_disarmed",
-            "ts": "2026-05-19T07:34:35Z",
-            "disarmed_at": 1779176075,  # pre-#821 integer-epoch field
-        }
-        ok, reason = _validate_event_schema(legacy_scan_disarmed_event)
-        assert ok is True, (
-            f"Legacy scan_disarmed event with `disarmed_at` extra "
-            f"field MUST validate (BC-safety migration contract per "
-            f"architect #821 §3.1 Q1, symmetric to scan_armed). Got "
-            f"ok={ok}, reason={reason!r}."
-        )
-        assert reason == "ok", (
-            f"BC-safety: lenient validator must return 'ok' for "
-            f"legacy event with `disarmed_at` extra; got {reason!r}."
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -4324,269 +4203,3 @@ class TestValidateOptionalFieldTypes:
         ok, reason = _validate_event_schema(event)
         assert ok is True, f"full payload should pass; got {reason!r}"
         assert reason == "ok"
-
-
-# =============================================================================
-# teardown_request journal event schema tests (covers C1 of #763)
-# =============================================================================
-#
-# The `teardown_request` event is the falsifiable trace for the 1->0 active-
-# task transition that retires the pending-scan cron. Written by two
-# producers: hooks/teardown_request_emitter.py (Tier-1) and hooks/wake_inbox_
-# drain.py (Tier-2). These tests pin the schema contract at the journal
-# boundary so a regression in either producer (e.g. dropping team_name or
-# passing the wrong type) is rejected before it lands on disk.
-
-
-class TestTeardownRequestSchemaRoundTrip:
-    """Required + optional fields validate and round-trip through
-    append + read.
-
-    The schema is pinned at C1 in shared/session_journal.py:
-      _REQUIRED_FIELDS_BY_TYPE["teardown_request"] = {
-          "task_id": str, "team_name": str,
-      }
-      _OPTIONAL_FIELDS_BY_TYPE["teardown_request"] = {
-          "tier": str,    # "1" (TaskCompleted-driven) | "2" (wake_inbox-drained)
-          "reason": str,  # e.g. "lead_terminal_taskupdate" | "wake_inbox_drained"
-      }
-    """
-
-    def test_make_event_with_required_fields_validates(self):
-        """Minimum required-only payload passes per-type validation."""
-        from shared.session_journal import _validate_event_schema, make_event
-
-        event = make_event(
-            "teardown_request",
-            task_id="task-42",
-            team_name="pact-test",
-        )
-        ok, reason = _validate_event_schema(event)
-        assert ok is True, f"required-only payload should pass; got {reason!r}"
-        assert reason == "ok"
-
-    def test_make_event_with_optional_fields_validates(self):
-        """Full payload including tier + reason optional fields validates."""
-        from shared.session_journal import _validate_event_schema, make_event
-
-        event = make_event(
-            "teardown_request",
-            task_id="task-42",
-            team_name="pact-test",
-            tier="1",
-            reason="lead_terminal_taskupdate",
-        )
-        ok, reason = _validate_event_schema(event)
-        assert ok is True, f"full payload should pass; got {reason!r}"
-        assert reason == "ok"
-
-    def test_append_then_read_last_returns_same_event(
-        self, journal_home, session_dir, journal_file,
-    ):
-        """End-to-end: write a teardown_request via append_event and read
-        it back via read_events. The on-disk shape preserves both required
-        and optional fields.
-        """
-        from shared.session_journal import append_event, make_event, read_events
-
-        event = make_event(
-            "teardown_request",
-            task_id="task-99",
-            team_name="pact-test",
-            tier="2",
-            reason="wake_inbox_drained",
-        )
-        assert append_event(event) is True
-        events = read_events("teardown_request")
-        assert len(events) == 1
-        roundtripped = events[0]
-        assert roundtripped["task_id"] == "task-99"
-        assert roundtripped["team_name"] == "pact-test"
-        assert roundtripped["tier"] == "2"
-        assert roundtripped["reason"] == "wake_inbox_drained"
-
-    def test_tier_1_and_tier_2_both_validate(self):
-        """Both Tier-1 ('1') and Tier-2 ('2') values for the optional
-        tier field validate. Pins the production-callsite invariant that
-        producers emit one of these two literals.
-        """
-        from shared.session_journal import _validate_event_schema, make_event
-
-        for tier_value in ("1", "2"):
-            event = make_event(
-                "teardown_request",
-                task_id="t1",
-                team_name="team-x",
-                tier=tier_value,
-            )
-            ok, reason = _validate_event_schema(event)
-            assert ok is True, (
-                f"tier={tier_value!r} should pass; got {reason!r}"
-            )
-
-    def test_schema_registered_in_required_fields(self):
-        """teardown_request is registered in _REQUIRED_FIELDS_BY_TYPE with
-        task_id and team_name as str. Pins the dict entry so a future
-        refactor that drops the entry trips this test (without it, the
-        validator's unknown-type short-circuit would silently accept
-        malformed payloads).
-        """
-        from shared.session_journal import _REQUIRED_FIELDS_BY_TYPE
-
-        assert _REQUIRED_FIELDS_BY_TYPE.get("teardown_request") == {
-            "task_id": str,
-            "team_name": str,
-        }
-
-    def test_optional_fields_registered(self):
-        """teardown_request optional fields registered in _OPTIONAL_FIELDS_
-        BY_TYPE. Without this entry, the optional-field loop would
-        silently accept wrong-typed tier/reason values.
-        """
-        from shared.session_journal import _OPTIONAL_FIELDS_BY_TYPE
-
-        assert _OPTIONAL_FIELDS_BY_TYPE.get("teardown_request") == {
-            "tier": str,
-            "reason": str,
-        }
-
-
-class TestTeardownRequestSchemaRejectsMalformed:
-    """Validation rejects missing-required, wrong-type, and None-required
-    payloads. Each path exercises a distinct validator branch.
-    """
-
-    def test_missing_task_id_rejected(self):
-        """Missing required task_id is rejected with the canonical reason
-        string format. A producer that forgets to pass task_id (the
-        identity carrier) must not land on disk.
-        """
-        from shared.session_journal import _validate_event_schema, make_event
-
-        event = make_event("teardown_request", team_name="team-x")
-        ok, reason = _validate_event_schema(event)
-        assert ok is False
-        assert reason == (
-            "missing required field 'task_id' for type 'teardown_request'"
-        )
-
-    def test_missing_team_name_rejected(self):
-        """Missing required team_name is rejected. team_name pins the
-        cron binding the directive will tear down — a payload without it
-        has no actionable target.
-        """
-        from shared.session_journal import _validate_event_schema, make_event
-
-        event = make_event("teardown_request", task_id="t1")
-        ok, reason = _validate_event_schema(event)
-        assert ok is False
-        assert reason == (
-            "missing required field 'team_name' for type 'teardown_request'"
-        )
-
-    def test_none_task_id_rejected(self):
-        """Explicit task_id=None is rejected (validator treats None as
-        absent for required fields).
-        """
-        from shared.session_journal import _validate_event_schema, make_event
-
-        event = make_event(
-            "teardown_request", task_id=None, team_name="team-x",
-        )
-        ok, reason = _validate_event_schema(event)
-        assert ok is False
-        assert reason == (
-            "missing required field 'task_id' for type 'teardown_request'"
-        )
-
-    def test_none_team_name_rejected(self):
-        """Explicit team_name=None is rejected — symmetric with None
-        task_id; covers the validator's
-        `field not in event or event[field] is None` branch.
-        """
-        from shared.session_journal import _validate_event_schema, make_event
-
-        event = make_event(
-            "teardown_request", task_id="t1", team_name=None,
-        )
-        ok, reason = _validate_event_schema(event)
-        assert ok is False
-        assert reason == (
-            "missing required field 'team_name' for type 'teardown_request'"
-        )
-
-    def test_wrong_type_for_required_task_id_rejected(self):
-        """task_id=int is rejected with both expected and actual types
-        in the reason string.
-        """
-        from shared.session_journal import _validate_event_schema, make_event
-
-        event = make_event(
-            "teardown_request", task_id=42, team_name="team-x",
-        )
-        ok, reason = _validate_event_schema(event)
-        assert ok is False
-        assert reason == (
-            "field 'task_id' for type 'teardown_request' must be str, "
-            "got int"
-        )
-
-    def test_wrong_type_for_required_team_name_rejected(self):
-        """team_name=int is rejected with the canonical reason format."""
-        from shared.session_journal import _validate_event_schema, make_event
-
-        event = make_event(
-            "teardown_request", task_id="t1", team_name=42,
-        )
-        ok, reason = _validate_event_schema(event)
-        assert ok is False
-        assert reason == (
-            "field 'team_name' for type 'teardown_request' must be str, "
-            "got int"
-        )
-
-    def test_wrong_type_for_optional_tier_rejected(self):
-        """tier=int is rejected by the optional-field type check. Pins
-        the contract that tier is a str discriminator ('1' / '2'), NOT
-        an int (which would invite unsafe arithmetic on consumer side).
-        """
-        from shared.session_journal import _validate_event_schema, make_event
-
-        event = make_event(
-            "teardown_request",
-            task_id="t1", team_name="team-x", tier=1,
-        )
-        ok, reason = _validate_event_schema(event)
-        assert ok is False
-        assert reason == (
-            "optional field 'tier' for type 'teardown_request' must be "
-            "str, got int"
-        )
-
-    def test_wrong_type_for_optional_reason_rejected(self):
-        """reason=int is rejected. reason carries the categorical token
-        identifying the producer path ('lead_terminal_taskupdate',
-        'wake_inbox_drained', etc.); a non-str value poisons audit
-        consumers that switch on the token.
-        """
-        from shared.session_journal import _validate_event_schema, make_event
-
-        event = make_event(
-            "teardown_request",
-            task_id="t1", team_name="team-x", reason=42,
-        )
-        ok, reason_msg = _validate_event_schema(event)
-        assert ok is False
-        assert reason_msg == (
-            "optional field 'reason' for type 'teardown_request' must be "
-            "str, got int"
-        )
-
-    def test_append_event_rejects_missing_required(self, journal_home):
-        """End-to-end: append_event returns False for a malformed
-        teardown_request payload; nothing lands on disk.
-        """
-        from shared.session_journal import append_event, make_event
-
-        bad_event = make_event("teardown_request", task_id="t1")  # missing team_name
-        assert append_event(bad_event) is False
