@@ -31,6 +31,7 @@ comprehensiveness add: teammate + plain rows for every write, plus the split.
 
 import io
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -300,14 +301,36 @@ class TestWriteContextSplit:
 # UNKNOWN-ROLE STARTUP WARNING — fires for unknown role ONLY.
 # ===========================================================================
 
-class TestUnknownRoleStartupWarning:
-    """The unknown-role notice fires for a plain (agent_type-absent) frame on
-    startup/resume, and NOT for lead or teammate frames."""
+# The live plugin root (this file is tests/…, parent.parent is pact-plugin/,
+# which carries the real agents/pact-*.md registry). #1 resolves the recognized-
+# specialist set from CLAUDE_PLUGIN_ROOT at the 0c site, so the notice tests
+# point that env at the live root — exercising the REAL specialist registry
+# (the SSOT), not a hand-seeded fixture.
+_REAL_PLUGIN_ROOT = str(Path(__file__).resolve().parent.parent)
 
-    def _run_capture_systemmessage(self, stdin_data, monkeypatch, tmp_path):
+
+class TestUnknownRoleStartupWarning:
+    """#1 (#878): the unknown-role notice fires when a frame has NO recognized
+    role — agent_type ABSENT, OR present-but-unrecognized (typo'd) — and NOT for
+    a lead frame or a RECOGNIZED specialist. Recognized = the live
+    agents/pact-*.md registry, resolved at 0c from CLAUDE_PLUGIN_ROOT (env), with
+    a PACT:-strip for spelling-symmetry and is_lead checked FIRST.
+    """
+
+    def _run_capture_systemmessage(
+        self, stdin_data, monkeypatch, tmp_path, plugin_root=_REAL_PLUGIN_ROOT,
+    ):
         from session_init import main
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", _PROJECT_DIR)
+        # #1: the specialist-registry resolution at 0c reads CLAUDE_PLUGIN_ROOT
+        # from env. Default to the live plugin root so a recognized specialist
+        # type actually resolves; pass "" to exercise the unresolvable-registry
+        # fail-OPEN residual.
+        if plugin_root:
+            monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", plugin_root)
+        else:
+            monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
@@ -330,21 +353,77 @@ class TestUnknownRoleStartupWarning:
         import session_init
         return session_init._UNKNOWN_ROLE_NOTICE
 
-    def test_plain_frame_startup_fires_warning(self, monkeypatch, tmp_path):
+    # ---- FIRES: no recognized role ----
+
+    def test_absent_agent_type_fires(self, monkeypatch, tmp_path):
+        """(d) plain frame — agent_type ABSENT → notice fires."""
         stdin = json.dumps({"session_id": _SESSION_ID, "source": "startup",
                             **plain_frame()})
         blob = self._run_capture_systemmessage(stdin, monkeypatch, tmp_path)
         assert self._notice_text() in blob, (
-            "unknown-role (plain) frame on startup must emit the notice"
+            "absent agent_type on startup must emit the unknown-role notice"
         )
 
+    def test_present_but_unrecognized_agent_type_fires(self, monkeypatch, tmp_path):
+        """(c) a present-but-unrecognized / typo'd agent_type (not in the live
+        registry) → notice fires. This is the #1 broadening over the prior
+        absent-only check."""
+        stdin = json.dumps({"session_id": _SESSION_ID, "source": "startup",
+                            "agent_type": "pact-architct"})  # typo: not in registry
+        blob = self._run_capture_systemmessage(stdin, monkeypatch, tmp_path)
+        assert self._notice_text() in blob, (
+            "a present-but-unrecognized agent_type must emit the notice "
+            "(the typo'd-orchestrator case #1 exists to catch)"
+        )
+
+    def test_unresolvable_registry_present_unrecognized_fires(self, monkeypatch, tmp_path):
+        """(e) fail-OPEN residual: env CLAUDE_PLUGIN_ROOT empty → registry
+        unresolvable → a present-but-(unverifiable) agent_type fires. An install
+        with no resolvable plugin_root is broken; a spurious advisory is harmless."""
+        stdin = json.dumps({"session_id": _SESSION_ID, "source": "startup",
+                            "agent_type": "pact-backend-coder"})
+        blob = self._run_capture_systemmessage(
+            stdin, monkeypatch, tmp_path, plugin_root="",
+        )
+        assert self._notice_text() in blob, (
+            "unresolvable registry (empty env plugin_root) must FAIL-OPEN — "
+            "the notice fires rather than being suppressed"
+        )
+
+    # ---- DOES NOT FIRE: recognized role ----
+
     @pytest.mark.parametrize("frame_builder", [
-        lead_frame_qualified, lead_frame_unqualified, teammate_frame,
-    ], ids=["lead-qualified", "lead-unqualified", "teammate"])
-    def test_known_role_does_not_fire_warning(self, frame_builder, monkeypatch, tmp_path):
+        lead_frame_qualified, lead_frame_unqualified,
+    ], ids=["lead-qualified", "lead-unqualified"])
+    def test_lead_does_not_fire(self, frame_builder, monkeypatch, tmp_path):
         stdin = json.dumps({"session_id": _SESSION_ID, "source": "startup",
                             **frame_builder()})
         blob = self._run_capture_systemmessage(stdin, monkeypatch, tmp_path)
         assert self._notice_text() not in blob, (
-            "a recognized (lead/teammate) role must NOT emit the unknown-role notice"
+            "a lead frame must NOT emit the unknown-role notice"
+        )
+
+    def test_recognized_teammate_does_not_fire(self, monkeypatch, tmp_path):
+        """(a) THE REGRESSION PIN: a recognized specialist teammate at 0c (with
+        env plugin_root set) must NOT fire. The timing-blocker fix exists so the
+        registry resolves at 0c — without it, the empty pre-cache registry would
+        false-fire for every teammate."""
+        stdin = json.dumps({"session_id": _SESSION_ID, "source": "startup",
+                            **teammate_frame()})  # agent_type=pact-backend-coder
+        blob = self._run_capture_systemmessage(stdin, monkeypatch, tmp_path)
+        assert self._notice_text() not in blob, (
+            "a RECOGNIZED specialist teammate must NOT fire the unknown-role "
+            "notice — this is the false-fire regression the #1 timing fix prevents"
+        )
+
+    def test_qualified_specialist_does_not_fire(self, monkeypatch, tmp_path):
+        """(b) the PACT:-strip pin: a qualified specialist spelling
+        (PACT:pact-backend-coder) is recognized just like is_lead accepts both
+        lead spellings → NO notice."""
+        stdin = json.dumps({"session_id": _SESSION_ID, "source": "startup",
+                            "agent_type": "PACT:pact-backend-coder"})
+        blob = self._run_capture_systemmessage(stdin, monkeypatch, tmp_path)
+        assert self._notice_text() not in blob, (
+            "a qualified specialist spelling must be recognized (PACT:-strip) "
+            "and NOT fire the unknown-role notice"
         )

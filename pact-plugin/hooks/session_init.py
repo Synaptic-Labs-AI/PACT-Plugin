@@ -84,6 +84,7 @@ from shared.pact_context import (
     is_lead,
     persist_context,
 )
+from shared.dispatch_helpers import is_registered_pact_specialist
 from shared.session_journal import append_event, make_event
 from shared.failure_log import append_failure
 from shared.plugin_manifest import format_plugin_banner
@@ -137,6 +138,55 @@ _UNKNOWN_ROLE_NOTICE = (
     "meant to drive PACT as the orchestrator, relaunch with "
     "`--agent PACT:pact-orchestrator`."
 )
+
+
+def _should_warn_unknown_role(input_data: dict) -> bool:
+    """Decide whether the #878 unknown-role startup notice should fire.
+
+    Fires when the frame has NO recognized PACT role:
+      classify_session_role == "unknown"  (agent_type absent)
+        OR
+      agent_type is present AND NOT is_lead AND NOT a recognized specialist.
+
+    The "present-but-unrecognized" arm catches a mis-launched / typo'd
+    agent_type (e.g. ``--agent pact-architct``) that the absent-only check
+    misses. Recognized = the live ``agents/pact-*.md`` registry (SSOT), tested
+    via ``is_registered_pact_specialist``.
+
+    ORDERING IS LOAD-BEARING — do NOT reorder (security-engineer ruling):
+    ``is_lead`` is checked BEFORE the registry. ``pact-orchestrator.md`` IS in
+    the glob set, so the registry would recognize the unqualified lead spelling
+    as a "specialist" — but is_lead short-circuits first, so a genuine lead is
+    never mis-bucketed and a registered-lead-spelling edge can't suppress the
+    notice for a frame that should get it.
+
+    plugin_root is read from the ENV (``CLAUDE_PLUGIN_ROOT``), NOT the cache:
+    this notice fires BEFORE build_context_cache populates the pact_context
+    cache, so a cache-backed registry lookup would see an empty plugin_root →
+    empty registry → every teammate would false-fire the notice. The env is the
+    authoritative pre-cache source (it is the same value the cache later copies).
+
+    SPELLING-SYMMETRY: strip a leading ``PACT:`` before the membership test, so
+    a qualified specialist spelling (``PACT:pact-backend-coder``) is recognized
+    just as is_lead accepts both qualified and unqualified lead spellings.
+
+    FAIL-OPEN residual: when even the env plugin_root is empty/unresolvable, the
+    registry is empty and a present-but-non-lead frame fires the notice. That is
+    correct — an install with no resolvable plugin_root is broken, and a
+    spurious advisory notice is harmless (the notice never DENIES).
+    """
+    if classify_session_role(input_data) == "unknown":
+        return True
+    if is_lead(input_data):
+        return False
+    agent_type = input_data.get("agent_type")
+    if not isinstance(agent_type, str):
+        # Present-but-non-string (unhashable/odd) agent_type: not lead, not a
+        # resolvable specialist spelling → treat as unrecognized → fire.
+        return True
+    stripped = agent_type.removeprefix("PACT:")
+    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+    return not is_registered_pact_specialist(stripped, plugin_root=plugin_root)
 
 
 def check_pinned_staleness():
@@ -741,15 +791,18 @@ def main():
                 system_messages.append(_INPROCESS_MODE_NOTICE)
 
         # 0c. Unknown-role startup warning (#878). The lead-only writes in
-        # steps 5a/5b/8 are gated behind is_lead below; an "unknown" role
-        # (no `--agent` flag) silently performs none of them. Surface that so a
+        # steps 5a/5b/8 are gated behind is_lead below; a frame with NO
+        # recognized role (no `--agent` flag, OR a present-but-unrecognized /
+        # typo'd agent_type) silently performs none of them. Surface that so a
         # mis-launched orchestrator is observable. Conditional emission mirroring
         # the 0b notice shape (NOT a new numbered init step — keeps clear of the
         # module/main() docstring-parity convention). Launch events only
         # (startup/resume): a mid-launch compact/clear context-reset must not
-        # re-fire it. classify_session_role is total (never raises); no
-        # try/except needed at the call site.
-        if source in ("startup", "resume") and classify_session_role(input_data) == "unknown":
+        # re-fire it. The unknown-role decision (incl. the is_lead-first ordering,
+        # the live specialist-registry check against env plugin_root, and the
+        # PACT:-strip) lives in _should_warn_unknown_role — total (never raises),
+        # so no try/except is needed at the call site.
+        if source in ("startup", "resume") and _should_warn_unknown_role(input_data):
             system_messages.append(_UNKNOWN_ROLE_NOTICE)
 
         # 1. Set up plugin symlinks (enables @~/.claude/protocols/pact-plugin/ references)

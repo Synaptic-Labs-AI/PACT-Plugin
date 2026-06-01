@@ -1027,3 +1027,77 @@ def test_mixed_case_team_name_normalizes_consistently(tmp_path, monkeypatch, cap
         f"Mixed-case team_name should normalize and ALLOW (canonical "
         f"lowercase form passes all rules); got code={code} out={out}"
     )
+
+
+# ===========================================================================
+# #878 #1: is_registered_pact_specialist additive plugin_root param
+# (Option X seam: cached registry untouched; uncached _glob_specialists shared)
+# ===========================================================================
+
+class TestIsRegisteredSpecialistPluginRootParam:
+    """The additive ``plugin_root`` param is backward-compatible: existing
+    callers passing NOTHING resolve via the cached registry exactly as before;
+    the new explicit-root path (the session_init startup notice) globs directly.
+    """
+
+    def test_existing_caller_no_plugin_root_arg_resolves_via_cache(
+        self, monkeypatch, tmp_path
+    ):
+        """(f) BACKWARD-COMPAT PIN: a caller passing NO plugin_root (the existing
+        self-completion-gate / dispatch path) still resolves via the cached
+        _specialist_registry() reading the pact_context cache — identical to
+        before the param existed."""
+        import shared.dispatch_helpers as dh
+
+        plugin_root = tmp_path / "plugin"
+        _seed_plugin(plugin_root, agents=("pact-architect", "pact-backend-coder"))
+        _setup_session(monkeypatch, tmp_path, plugin_root)  # wires cache + cache_clear
+
+        # No plugin_root arg → cached cache-read path.
+        assert dh.is_registered_pact_specialist("pact-architect") is True
+        assert dh.is_registered_pact_specialist("pact-backend-coder") is True
+        assert dh.is_registered_pact_specialist("pact-not-a-real-agent") is False
+        # Empty/non-str guard unchanged.
+        assert dh.is_registered_pact_specialist("") is False
+        assert dh.is_registered_pact_specialist(None) is False  # type: ignore[arg-type]
+
+    def test_explicit_plugin_root_globs_directly_uncached(self, monkeypatch, tmp_path):
+        """The explicit-root path resolves against the PASSED plugin_root via the
+        uncached _glob_specialists — independent of the pact_context cache (which
+        is empty at the 0c notice site)."""
+        import shared.dispatch_helpers as dh
+        import shared.pact_context as ctx_module
+
+        plugin_root = tmp_path / "plugin"
+        _seed_plugin(plugin_root, agents=("pact-architect",))
+        # Deliberately leave the pact_context cache EMPTY (the 0c condition):
+        monkeypatch.setattr(ctx_module, "_context_path", None)
+        monkeypatch.setattr(ctx_module, "_cache", None)
+        dh._specialist_registry.cache_clear()
+
+        # No-arg path sees the empty cache → empty registry → not registered.
+        assert dh.is_registered_pact_specialist("pact-architect") is False, (
+            "with an empty cache the cached path must NOT resolve — this is the "
+            "exact 0c timing trap the explicit-root param fixes"
+        )
+        # Explicit plugin_root path globs the real dir → registered.
+        assert dh.is_registered_pact_specialist(
+            "pact-architect", plugin_root=str(plugin_root)
+        ) is True
+        assert dh.is_registered_pact_specialist(
+            "pact-not-real", plugin_root=str(plugin_root)
+        ) is False
+
+    def test_explicit_empty_plugin_root_falls_back_to_cache(self, monkeypatch, tmp_path):
+        """An explicitly-passed EMPTY plugin_root ("") is treated as 'not
+        provided' → cache fallback (so the param default and an explicit ""
+        behave identically)."""
+        import shared.dispatch_helpers as dh
+
+        plugin_root = tmp_path / "plugin"
+        _seed_plugin(plugin_root, agents=("pact-architect",))
+        _setup_session(monkeypatch, tmp_path, plugin_root)
+
+        assert dh.is_registered_pact_specialist(
+            "pact-architect", plugin_root=""
+        ) is True  # "" → cache fallback, which resolves to the seeded root
