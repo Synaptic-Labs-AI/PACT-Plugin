@@ -552,13 +552,15 @@ def _is_unknown_or_missing_session(raw_id: object) -> bool:
     """Return True if the session_id is missing, blank, a sentinel, or contains control chars.
 
     Single canonical predicate for the malformed-stdin gate. Both the
-    persistence call sites at the top of main() (write_context + append_event)
-    and the CLAUDE.md write at step 5b consult this helper so the two gates
-    can never drift. Drift previously allowed three corruption classes:
+    persistence call sites at the top of main() (build_context_cache +
+    persist_context + append_event) and the CLAUDE.md write at step 5b consult
+    this helper so the two gates can never drift. Drift previously allowed
+    three corruption classes:
 
     * Whitespace-only ids (e.g. `"   "`) were truthy and bypassed
-      `not raw_id`, leaking through to write_context as a literal directory
-      name.
+      `not raw_id`, leaking through to the context-persist path
+      (build_context_cache resolves it, persist_context mkdir's it) as a
+      literal directory name.
     * An attacker-supplied `"unknown-foo"` value passed `not raw_id` because
       the string is non-empty, then later passed `startswith("unknown")`
       and was written into CLAUDE.md anyway via a different code path.
@@ -737,7 +739,7 @@ def main():
         # Clear bootstrap-complete marker on user-initiated clear only (#414).
         #
         # Cannot use get_session_dir() here because the context module
-        # hasn't been initialized yet (write_context() runs at step 5a
+        # hasn't been initialized yet (build_context_cache() runs at step 5a
         # below). Uses build_session_path() directly — it has its own
         # path traversal guard (Path.parents containment check).
         #
@@ -896,9 +898,10 @@ def main():
         # 5. Remind orchestrator to create session-unique PACT team (or reuse on resume)
         team_name = generate_team_name(input_data)
 
-        # 5a. Write session context file FIRST so get_session_dir() works for
-        # subsequent journal writes. write_context() populates the _cache
-        # immediately, enabling append_event() to derive the journal path.
+        # 5a. Build the session context FIRST so get_session_dir() works for
+        # subsequent journal writes. build_context_cache() populates the _cache
+        # immediately (for every frame), enabling append_event() to derive the
+        # journal path; persist_context() then writes the file (lead frames only).
         # Defensive substitution: the RA1+RG2 schema validator (commit 2d6448c)
         # rejects empty strings for str-typed required fields, so an empty
         # session_id would cause append_event() to silently drop the
@@ -915,8 +918,9 @@ def main():
         # `~/.claude/pact-sessions/{slug}/unknown-a3f9b2c4/`. session_end's
         # cleanup_old_sessions filters by strict _UUID_PATTERN, which
         # "unknown-*" never matches — so these directories accumulate
-        # indefinitely. Gate BOTH persistence call sites (write_context and
-        # append_event) on session_id_was_missing to prevent the leak. The
+        # indefinitely. Gate BOTH persistence call sites (the
+        # build_context_cache/persist_context pair and append_event) on
+        # session_id_was_missing to prevent the leak. The
         # existing CLAUDE.md guard at step 5b handles its own persistence.
         # The session_start journal anchor event is intentionally dropped on
         # the malformed-stdin path: without a valid session_id, we cannot
@@ -1041,8 +1045,8 @@ def main():
                 # Fail-open: context file is best-effort; hooks fall back to empty strings
                 print(f"session_init: could not write context file: {e}", file=sys.stderr)
 
-            # Write session_start event to journal (after write_context so path is
-            # available). Lead-only (#877): the journal session_start anchor is a
+            # Write session_start event to journal (after build_context_cache so
+            # path is available). Lead-only (#877): the journal session_start anchor is a
             # lead-only write — a teammate/plain frame would append a phantom
             # anchor to (or create) a session journal it does not own.
             # `source` is the already-normalized value from the `_VALID_SOURCES`
@@ -1070,7 +1074,7 @@ def main():
             team_exists = False
 
         # Resolve session_dir early so substitution instructions can include it.
-        # get_session_dir() works here because write_context() populated _cache above.
+        # get_session_dir() works here because build_context_cache() populated _cache above.
         # Suppress session_dir for the unknown-* sentinel so the literal
         # `.../unknown-xxxx/` path never leaks into the substitution instructions
         # block — otherwise the orchestrator would obediently mkdir that path
