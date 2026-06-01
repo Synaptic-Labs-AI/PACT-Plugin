@@ -203,11 +203,16 @@ class TestPostcompactOuterExceptionHandler:
     (the only external call remaining in main()'s happy path).
     """
 
+    # #881: the compact-summary write is now gated behind is_lead, so these
+    # outer-exception-handler tests must present a LEAD frame (agent_type) for
+    # the patched write_compact_summary side-effect to actually fire.
     def test_exits_zero_on_unexpected_error(self):
         """main() must exit 0 even when write_compact_summary raises."""
         from postcompact_archive import main
 
-        stdin_data = json.dumps({"compact_summary": "test"})
+        stdin_data = json.dumps(
+            {"compact_summary": "test", "agent_type": "pact-orchestrator"}
+        )
         with patch("sys.stdin", StringIO(stdin_data)), \
              patch("postcompact_archive.write_compact_summary",
                    side_effect=RuntimeError("test error")):
@@ -219,7 +224,9 @@ class TestPostcompactOuterExceptionHandler:
         """Error details must appear on stderr for logging."""
         from postcompact_archive import main
 
-        stdin_data = json.dumps({"compact_summary": "test"})
+        stdin_data = json.dumps(
+            {"compact_summary": "test", "agent_type": "pact-orchestrator"}
+        )
         with patch("sys.stdin", StringIO(stdin_data)), \
              patch("postcompact_archive.write_compact_summary",
                    side_effect=RuntimeError("test error")):
@@ -234,7 +241,9 @@ class TestPostcompactOuterExceptionHandler:
         """Stdout must contain structured JSON from hook_error_json."""
         from postcompact_archive import main
 
-        stdin_data = json.dumps({"compact_summary": "test"})
+        stdin_data = json.dumps(
+            {"compact_summary": "test", "agent_type": "pact-orchestrator"}
+        )
         with patch("sys.stdin", StringIO(stdin_data)), \
              patch("postcompact_archive.write_compact_summary",
                    side_effect=RuntimeError("test error")):
@@ -247,3 +256,58 @@ class TestPostcompactOuterExceptionHandler:
         assert "PACT hook warning" in output["systemMessage"]
         assert "postcompact_archive" in output["systemMessage"]
         assert "test error" in output["systemMessage"]
+
+
+# ---------------------------------------------------------------------------
+# #881: lead-only gate on the global-singleton compact-summary write
+# ---------------------------------------------------------------------------
+
+
+class TestPostcompactLeadGate:
+    """The compact-summary write is gated behind is_lead (#881).
+
+    COMPACT_SUMMARY_PATH is a GLOBAL SINGLETON the lead reads on resume, and
+    the write is O_TRUNC. A teammate/plain frame's PostCompact must NOT clobber
+    it. These are smoke tests (call / no-call of write_compact_summary by
+    role); comprehensive per-role suppression coverage is the TEST phase.
+    """
+
+    def _run_main_with(self, frame):
+        from postcompact_archive import main
+
+        stdin_data = json.dumps(frame)
+        with patch("sys.stdin", StringIO(stdin_data)), \
+             patch("postcompact_archive.write_compact_summary") as mock_write:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+            return mock_write
+
+    def test_lead_qualified_writes(self):
+        from fixtures.role_frames import postcompact_frame
+        mock_write = self._run_main_with(
+            postcompact_frame("PACT:pact-orchestrator", compact_summary="x")
+        )
+        mock_write.assert_called_once_with("x")
+
+    def test_lead_unqualified_writes(self):
+        from fixtures.role_frames import postcompact_frame
+        mock_write = self._run_main_with(
+            postcompact_frame("pact-orchestrator", compact_summary="x")
+        )
+        mock_write.assert_called_once_with("x")
+
+    def test_teammate_suppressed(self):
+        from fixtures.role_frames import postcompact_frame
+        mock_write = self._run_main_with(
+            postcompact_frame("pact-backend-coder", compact_summary="x")
+        )
+        mock_write.assert_not_called()
+
+    def test_plain_frame_suppressed(self):
+        """No agent_type (no --agent) → not lead → write suppressed."""
+        from fixtures.role_frames import postcompact_frame
+        mock_write = self._run_main_with(
+            postcompact_frame(None, compact_summary="x")
+        )
+        mock_write.assert_not_called()

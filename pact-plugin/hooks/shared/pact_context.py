@@ -506,6 +506,7 @@ def write_context(
     session_id: str,
     project_dir: str,
     plugin_root: str = "",
+    write_disk: bool = True,
 ) -> None:
     """
     Write the session context file. Called ONLY by session_init.py.
@@ -521,11 +522,27 @@ def write_context(
     Also sets _context_path so subsequent reads in the same process use the
     correct path (relevant for session_init.py which may read context after writing).
 
+    DISK-WRITE / CACHE SPLIT (#877 — the one non-mechanical lead-gate site):
+    this function COUPLES two responsibilities — (1) the on-disk session-context
+    file and (2) the in-process ``_cache`` / ``_context_path`` population that
+    ``get_session_dir()`` and ``append_event()``'s implicit path-resolution read.
+    The on-disk file is the lead-only artifact a teammate frame must NOT clobber
+    (#877); but ``session_init`` does NOT call ``pact_context.init()`` — it relies
+    on this function to populate the cache, so blanket-gating the whole call
+    would also starve same-process readers of the cache. ``write_disk``
+    decouples the two: gate ONLY the disk side-effect on ``is_lead`` while
+    populating the cache UNCONDITIONALLY. Non-lead frames thus get identical
+    in-memory cache behavior (no behavior change for ``get_session_dir()``) but
+    perform NO disk write. ``write_disk=True`` preserves the historical
+    lead-path behavior byte-for-byte.
+
     Args:
         team_name: The generated team name (e.g., "pact-0001639f")
         session_id: Session ID from stdin JSON or env var
         project_dir: CLAUDE_PROJECT_DIR value
         plugin_root: CLAUDE_PLUGIN_ROOT value (path to installed plugin directory)
+        write_disk: When False, populate the in-process cache/path but skip the
+            on-disk write (non-lead frames — #877). Defaults to True (lead path).
     """
     global _context_path, _cache
 
@@ -553,6 +570,16 @@ def write_context(
             "pact_context: skipping write — session_id or project_dir unavailable",
             file=sys.stderr,
         )
+        return
+
+    # Non-lead frame (#877): populate the in-process cache/path so same-process
+    # readers (get_session_dir, append_event path-resolution) behave exactly as
+    # on the lead path, but do NOT touch disk — the on-disk session-context file
+    # is a lead-only artifact and a teammate write would create a phantom
+    # session dir. No mkdir, no temp file, no rename.
+    if not write_disk:
+        _context_path = target
+        _cache = context
         return
 
     context_dir = target.parent

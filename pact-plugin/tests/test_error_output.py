@@ -650,8 +650,11 @@ class TestPostcompactArchiveErrorOutput:
     def test_exception_outputs_json_with_system_message(self, capsys):
         from postcompact_archive import main
 
+        # #881: the compact-summary write is gated behind is_lead, so a LEAD
+        # frame (agent_type) is required for the patched side-effect to fire.
         input_data = json.dumps({
             "compact_summary": "test summary",
+            "agent_type": "pact-orchestrator",
         })
 
         with patch("sys.stdin", io.StringIO(input_data)), \
@@ -668,8 +671,10 @@ class TestPostcompactArchiveErrorOutput:
         """stderr should contain the hook name and the specific error message."""
         from postcompact_archive import main
 
+        # #881: lead frame so the gated write (and its side-effect) executes.
         input_data = json.dumps({
             "compact_summary": "test summary",
+            "agent_type": "pact-orchestrator",
         })
 
         with patch("sys.stdin", io.StringIO(input_data)), \

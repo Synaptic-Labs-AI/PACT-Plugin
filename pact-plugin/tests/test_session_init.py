@@ -53,6 +53,25 @@ import pytest
 # Add hooks directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
+
+# #877: session_init's Class-A writes (write_context disk-write, session_start
+# journal anchor, CLAUDE.md Current Session block, paused-state surface) are now
+# gated behind is_lead, which keys on the harness-set agent_type. These tests
+# exercise the LEAD path, so their stdin payloads must carry a lead agent_type.
+# _with_lead_role injects it without disturbing any payload that already sets
+# agent_type (e.g. a teammate/plain-frame suppression test sets it explicitly).
+_LEAD_AGENT_TYPE = "pact-orchestrator"
+
+
+def _with_lead_role(payload: dict) -> dict:
+    """Return a copy of ``payload`` with a lead ``agent_type`` unless one is
+    already present. Lets the lead-path tests opt in to is_lead==True with a
+    single shared edit instead of stamping every inline stdin literal."""
+    if "agent_type" in payload:
+        return payload
+    return {**payload, "agent_type": _LEAD_AGENT_TYPE}
+
+
 class TestGenerateTeamName:
     """Tests for generate_team_name() -- session-unique team name generation."""
 
@@ -186,8 +205,11 @@ class TestMainPausedStateIntegration:
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
 
-        # Provide valid JSON on stdin with a session_id
-        stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
+        # Provide valid JSON on stdin with a session_id (#877: lead frame so the
+        # is_lead-gated check_paused_state actually runs).
+        stdin_data = json.dumps(_with_lead_role(
+            {"session_id": "aabb1122-0000-0000-0000-000000000000"}
+        ))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -307,8 +329,9 @@ class TestMainPrevSessionDirOrdering:
         )
 
         # --- Arrange: current session id (different from the prior one) ---
+        # #877: lead frame so the is_lead-gated check_paused_state runs.
         current_session_id = "aabb1122-0000-0000-0000-000000000000"
-        stdin_data = json.dumps({"session_id": current_session_id})
+        stdin_data = json.dumps(_with_lead_role({"session_id": current_session_id}))
 
         # Spies so we can assert exactly which prev_session_dir the downstream
         # calls received. We wrap rather than replace so the real implementations
@@ -1089,9 +1112,10 @@ class TestWriteContextIntegration:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        stdin_data = json.dumps({
+        # #877: lead frame → write_disk=True (the on-disk write happens).
+        stdin_data = json.dumps(_with_lead_role({
             "session_id": "aabb1122-0000-0000-0000-000000000000",
-        })
+        }))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -1107,11 +1131,13 @@ class TestWriteContextIntegration:
                 main()
 
         assert exc_info.value.code == 0
+        # #877: the disk-write split adds write_disk=is_lead (True on the lead path).
         mock_write_ctx.assert_called_once_with(
             "pact-aabb1122",
             "aabb1122-0000-0000-0000-000000000000",
             "/Users/example/Sites/test-project",
             "",  # plugin_root: CLAUDE_PLUGIN_ROOT not set in this test
+            write_disk=True,
         )
 
     def test_missing_session_id_falls_back_to_unknown_and_warns(self, monkeypatch, tmp_path, capsys):
@@ -1351,7 +1377,8 @@ class TestWriteContextIntegration:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         real_session_id = "aabb1122-0000-0000-0000-000000000000"
-        stdin_data = json.dumps({"session_id": real_session_id})
+        # #877: lead frame so the is_lead-gated update_session_info runs.
+        stdin_data = json.dumps(_with_lead_role({"session_id": real_session_id}))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -2457,9 +2484,9 @@ class TestPluginRootEnvWiring:
         monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", plugin_root_value)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        stdin_data = json.dumps({
+        stdin_data = json.dumps(_with_lead_role({
             "session_id": "aabb1122-0000-0000-0000-000000000000",
-        })
+        }))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -2475,12 +2502,13 @@ class TestPluginRootEnvWiring:
                 main()
 
         assert exc_info.value.code == 0
-        # 4th positional arg of write_context is plugin_root
+        # 4th positional arg of write_context is plugin_root; #877 adds write_disk.
         mock_write_ctx.assert_called_once_with(
             "pact-aabb1122",
             "aabb1122-0000-0000-0000-000000000000",
             str(tmp_path / "proj"),
             plugin_root_value,
+            write_disk=True,
         )
 
     def test_plugin_root_env_flows_to_update_session_info(
@@ -2504,9 +2532,10 @@ class TestPluginRootEnvWiring:
         monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", plugin_root_value)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        stdin_data = json.dumps({
+        # #877: lead frame so the is_lead-gated update_session_info runs.
+        stdin_data = json.dumps(_with_lead_role({
             "session_id": "aabb1122-0000-0000-0000-000000000000",
-        })
+        }))
 
         # Intentionally NOT mocking update_session_info — we want it to run
         # for real against the tmp_path project dir. Everything else that
@@ -2564,7 +2593,8 @@ class TestPluginRootEnvWiring:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         session_id = "ccdd3344-0000-0000-0000-000000000000"
-        stdin_data = json.dumps({"session_id": session_id})
+        # #877: lead frame so write_disk=True and the JSON lands on disk.
+        stdin_data = json.dumps(_with_lead_role({"session_id": session_id}))
 
         # pact_context._cache / _context_path reset handled by the class's
         # autouse _reset_pact_context_cache fixture (T2) — no inline reset
@@ -2754,7 +2784,7 @@ class TestSessionStartSourceField:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        stdin_data = json.dumps(stdin_payload)
+        stdin_data = json.dumps(_with_lead_role(stdin_payload))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -4111,9 +4141,11 @@ class TestMainExceptionSafetyNet:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        stdin_data = json.dumps({
+        # #877: lead frame so the is_lead-gated update_session_info runs and the
+        # injected late failure actually fires.
+        stdin_data = json.dumps(_with_lead_role({
             "session_id": "aabb1122-0000-0000-0000-000000000000",
-        })
+        }))
 
         def raise_late(*args, **kwargs):
             raise RuntimeError("simulated late failure after team name captured")

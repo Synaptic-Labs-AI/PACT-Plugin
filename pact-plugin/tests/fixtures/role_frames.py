@@ -52,3 +52,14 @@ def teammate_frame(agent_type="pact-backend-coder", **extra):
 def plain_frame(**extra):
     """A non-PACT / no-``--agent`` primary frame (agent_type absent)."""
     return _frame(None, **extra)
+
+
+def postcompact_frame(agent_type, compact_summary="post-compaction summary text"):
+    """A synthesized PostCompact hook-stdin frame for the #881 gate tests.
+
+    PostCompact frames carry ``compact_summary``; ``agent_type`` carries the
+    role discriminator the is_lead gate keys on. Pass ``agent_type=None`` for a
+    plain frame (the field is omitted).
+    """
+    return _frame(agent_type, hook_event_name="PostCompact",
+                  compact_summary=compact_summary)

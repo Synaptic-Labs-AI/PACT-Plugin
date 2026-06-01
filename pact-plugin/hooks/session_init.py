@@ -77,7 +77,12 @@ from pin_caps import (  # noqa: F401
 
 from shared import BOOTSTRAP_MARKER_NAME, SESSION_ID_CONTROL_CHARS_RE, build_session_path
 from shared.constants import COMPACT_SUMMARY_PATH
-from shared.pact_context import get_session_dir, write_context
+from shared.pact_context import (
+    classify_session_role,
+    get_session_dir,
+    is_lead,
+    write_context,
+)
 from shared.session_journal import append_event, make_event
 from shared.failure_log import append_failure
 from shared.plugin_manifest import format_plugin_banner
@@ -113,6 +118,23 @@ _INPROCESS_MODE_NOTICE = (
     "(the lead can sit idle awaiting a wake that needs a manual nudge). "
     "For hands-off runs, relaunch with `--teammate-mode tmux` for reliable "
     "native delivery, or keep a heartbeat — see reference/unattended-runs.md."
+)
+
+# Unknown-role startup warning (#878). The lead-only writes below are gated
+# behind is_lead, which keys on the harness-set agent_type field. A session
+# launched WITHOUT `--agent` (or with a non-PACT agent_type) carries no
+# recognizable role — classify_session_role() returns "unknown" — so its
+# session_init silently performs none of the lead-only writes. That is the
+# intended fail-toward-teammate direction, but it is invisible to an operator
+# who MEANT to launch the orchestrator and forgot the flag. This notice makes
+# that case observable. Emitted via system_messages (user-facing) only for the
+# "unknown" role; lead and teammate frames never see it. Pure literal so tests
+# can pin the exact substring.
+_UNKNOWN_ROLE_NOTICE = (
+    "PACT: this session has no recognized agent role (no `--agent` flag, or an "
+    "unrecognized agent_type), so lead-only session setup was skipped. If you "
+    "meant to drive PACT as the orchestrator, relaunch with "
+    "`--agent PACT:pact-orchestrator`."
 )
 
 
@@ -717,6 +739,18 @@ def main():
             except Exception:  # noqa: BLE001 — fail-safe → emit; never block init
                 system_messages.append(_INPROCESS_MODE_NOTICE)
 
+        # 0c. Unknown-role startup warning (#878). The lead-only writes in
+        # steps 5a/5b/8 are gated behind is_lead below; an "unknown" role
+        # (no `--agent` flag) silently performs none of them. Surface that so a
+        # mis-launched orchestrator is observable. Conditional emission mirroring
+        # the 0b notice shape (NOT a new numbered init step — keeps clear of the
+        # module/main() docstring-parity convention). Launch events only
+        # (startup/resume): a mid-launch compact/clear context-reset must not
+        # re-fire it. classify_session_role is total (never raises); no
+        # try/except needed at the call site.
+        if source in ("startup", "resume") and classify_session_role(input_data) == "unknown":
+            system_messages.append(_UNKNOWN_ROLE_NOTICE)
+
         # 1. Set up plugin symlinks (enables @~/.claude/protocols/pact-plugin/ references)
         # Context resets (compact/clear): symlinks are already set up from original session
         if not is_context_reset:
@@ -928,29 +962,47 @@ def main():
                 file=sys.stderr,
             )
         plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+        # Lead-role gate (#877). is_lead is total (never raises) and reads only
+        # the harness-set agent_type. Computed once and reused for both Class-A
+        # writes below so the disk-write split and the journal-anchor gate share
+        # one verdict.
+        frame_is_lead = is_lead(input_data)
         if not session_id_was_missing:
             try:
-                write_context(team_name, session_id, project_dir, plugin_root)
+                # SPLIT (#877): always populate the in-process cache/path so
+                # get_session_dir() and append_event's path-resolution behave
+                # identically for every frame; gate ONLY the disk write on
+                # is_lead so a teammate/plain frame never clobbers the lead's
+                # on-disk session-context file (or creates a phantom session
+                # dir). See write_context's DISK-WRITE / CACHE SPLIT docstring.
+                write_context(
+                    team_name, session_id, project_dir, plugin_root,
+                    write_disk=frame_is_lead,
+                )
             except Exception as e:
                 # Fail-open: context file is best-effort; hooks fall back to empty strings
                 print(f"session_init: could not write context file: {e}", file=sys.stderr)
 
-            # Write session_start event to journal (after write_context so path is available).
+            # Write session_start event to journal (after write_context so path is
+            # available). Lead-only (#877): the journal session_start anchor is a
+            # lead-only write — a teammate/plain frame would append a phantom
+            # anchor to (or create) a session journal it does not own.
             # `source` is the already-normalized value from the `_VALID_SOURCES`
             # check above — one of {startup, resume, compact, clear, unknown}.
             # Persisting it here gives downstream triage direct attribution for
             # marker-wipe and other source-conditioned behavior, instead of
             # forcing triangulation from timing clusters (#414 R2).
-            append_event(
-                make_event(
-                    "session_start",
-                    team=team_name,
-                    session_id=session_id,
-                    project_dir=project_dir,
-                    worktree="",  # Not yet created at this point
-                    source=source,
-                ),
-            )
+            if frame_is_lead:
+                append_event(
+                    make_event(
+                        "session_start",
+                        team=team_name,
+                        session_id=session_id,
+                        project_dir=project_dir,
+                        worktree="",  # Not yet created at this point
+                        source=source,
+                    ),
+                )
 
         try:
             team_config = Path.home() / ".claude" / "teams" / team_name / "config.json"
@@ -1136,7 +1188,11 @@ def main():
         # _extract_prev_session_dir, and session_end.py:cleanup_old_sessions
         # filters by _UUID_PATTERN (which "unknown-*" never matches), so the
         # directory would accumulate indefinitely.
-        if not _is_unknown_or_missing_session(session_id):
+        # Lead-only (#877): the CLAUDE.md "## Current Session" block is the true
+        # CROSS-PROCESS CLOBBER — a teammate/plain frame writing it overwrites
+        # the lead's session block in the shared project file. Gate on is_lead
+        # in addition to the existing sentinel guard.
+        if frame_is_lead and not _is_unknown_or_missing_session(session_id):
             session_msg = update_session_info(session_id, team_name, session_dir, plugin_root)
             if session_msg:
                 if "failed" in session_msg.lower() or "skipped" in session_msg.lower():
@@ -1163,10 +1219,16 @@ def main():
         if session_snapshot:
             context_parts.append(session_snapshot)
 
-        # 8. Check for paused work from previous session's /PACT:pause
-        paused_msg = check_paused_state(prev_session_dir=prev_session_dir)
-        if paused_msg:
-            context_parts.append(paused_msg)
+        # 8. Check for paused work from previous session's /PACT:pause.
+        # Lead-only (#877): mechanically this is a READ (it surfaces a
+        # resume/paused-work prompt, not a write), but surfacing the lead's
+        # paused-work is a lead-only operation — a teammate/plain frame must not
+        # receive the lead's resume prompt. Gate the check itself so a non-lead
+        # frame does no journal read either.
+        if frame_is_lead:
+            paused_msg = check_paused_state(prev_session_dir=prev_session_dir)
+            if paused_msg:
+                context_parts.append(paused_msg)
 
         # Build output
         output = {}
