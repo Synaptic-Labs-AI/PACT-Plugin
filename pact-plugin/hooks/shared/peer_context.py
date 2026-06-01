@@ -250,6 +250,14 @@ def _own_pane_id() -> tuple[str, bool] | None:
     Reads BOTH backend families so the resolver works under either; returns None
     when no pane id is reachable (e.g. an in-process frame).
     """
+    # PRECEDENCE ASSUMPTION (#885): checks the iTerm2/Terminal UUID family
+    # BEFORE TMUX_PANE and returns the first hit. This assumes the harness
+    # stores the same pane-id family it prefers — confirmed UUID under this
+    # harness's tmux mode (separate iTerm2 sessions; members[].tmuxPaneId are
+    # UUIDs, TMUX_PANE unset). The coexistence case (TMUX_PANE also set AND the
+    # config stored a "%N") is the literal-tmux gap -> #885 (interim: an ordered
+    # UUID->%N fallback; #885 self-registration is the real cure). Re-verify
+    # this assumption if the harness's pane-id storage ever changes.
     for var in ("ITERM_SESSION_ID", "TERM_SESSION_ID"):
         match = _PANE_UUID_RE.search(os.environ.get(var, ""))
         if match:

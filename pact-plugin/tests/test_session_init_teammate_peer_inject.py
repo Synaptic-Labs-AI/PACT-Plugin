@@ -308,11 +308,15 @@ class TestStructuralInvariant:
         assert isinstance(kw["include_role_marker"], ast.Constant)
         assert kw["include_role_marker"].value is False
 
-    def test_builder_call_is_gated_by_classify_session_role_teammate(self):
+    def test_builder_call_is_gated_by_frame_role_teammate(self):
         tree = self._tree()
         call = self._get_peer_context_calls(tree)[0]
         # Find the enclosing `if` whose body contains the call, and assert its
-        # test is `classify_session_role(...) == "teammate"`.
+        # test is `frame_role == "teammate"`. (m3 dedup: the gate REUSES the
+        # single captured classify_session_role verdict instead of recomputing
+        # it — see test_frame_role_is_the_single_classify_session_role_capture
+        # for the SSOT-capture invariant that keeps frame_role == the classify
+        # verdict.)
         gating_ifs = []
         for node in ast.walk(tree):
             if isinstance(node, ast.If):
@@ -322,20 +326,43 @@ class TestStructuralInvariant:
                     gating_ifs.append(node)
         # innermost gating-if is the teammate gate
         assert gating_ifs, "get_peer_context call is not inside any if-branch"
-        # at least one gating if must test classify_session_role == "teammate"
-        def tests_classify_teammate(test):
+        # at least one gating if must test frame_role == "teammate"
+        def tests_frame_role_teammate(test):
             return (
                 isinstance(test, ast.Compare)
-                and isinstance(test.left, ast.Call)
-                and isinstance(test.left.func, ast.Name)
-                and test.left.func.id == "classify_session_role"
+                and isinstance(test.left, ast.Name)
+                and test.left.id == "frame_role"
                 and len(test.comparators) == 1
                 and isinstance(test.comparators[0], ast.Constant)
                 and test.comparators[0].value == "teammate"
             )
-        assert any(tests_classify_teammate(n.test) for n in gating_ifs), (
+        assert any(tests_frame_role_teammate(n.test) for n in gating_ifs), (
             "the get_peer_context injection must be gated on "
-            'classify_session_role(input_data) == "teammate" (the SSOT)'
+            'frame_role == "teammate" (m3 dedup of the recomputed gate)'
+        )
+
+    def test_frame_role_is_the_single_classify_session_role_capture(self):
+        """m3 SSOT: frame_role is assigned EXACTLY ONCE from
+        classify_session_role(input_data) — the single role decision shared by
+        the teammate peer-context gate, the lead-only advisory gates (m2), and
+        the role-aware exception safety-net (#888). Locks the dedup so a future
+        edit cannot reintroduce a recomputed classify_session_role gate."""
+        tree = self._tree()
+        frame_role_captures = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Assign)
+            and any(
+                isinstance(t, ast.Name) and t.id == "frame_role"
+                for t in n.targets
+            )
+            and isinstance(n.value, ast.Call)
+            and isinstance(n.value.func, ast.Name)
+            and n.value.func.id == "classify_session_role"
+        ]
+        assert len(frame_role_captures) == 1, (
+            "frame_role must be captured EXACTLY ONCE from "
+            "classify_session_role(input_data); found "
+            f"{len(frame_role_captures)} capture(s)"
         )
 
 

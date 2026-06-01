@@ -4084,6 +4084,91 @@ class TestBuildSafetyNetContext:
         assert "YOUR PACT ROLE: orchestrator." not in additional
         assert 'Skill("PACT:bootstrap")' not in additional
 
+
+class TestM2TeammateAdvisoryGating:
+    """#806 cycle-3 m2: a separate-process teammate's SessionStart
+    additionalContext must NOT carry lead-only pin advisories — step 4
+    stale-pin info, step 4a pin-slot status, step 4b '/PACT:pin-memory'
+    directive — while a LEAD frame still receives all three. Pins live in the
+    project CLAUDE.md, a lead/orchestrator memory surface a teammate has no
+    authority over; #877 gated lead WRITES on is_lead but left these advisory
+    SURFACINGS ungated. This locks the role-coherence fold so it ships without
+    re-running the blind wave.
+
+    The gate keys on the single frame_role captured early (just after the
+    stdin/source parse) — which is also why m2 required relocating that capture
+    ABOVE steps 4/4a/4b (they run before the old L1072 capture point)."""
+
+    _STALE_SENTINEL = "SENTINEL_STALE_PINS_STEP4"
+    _SLOT_SENTINEL = "SENTINEL_PIN_SLOT_4A"
+    # 4b's real text carries the lead-only "/PACT:pin-memory" directive.
+    _PINMEM_SENTINEL = "SENTINEL_4B You MUST run /PACT:pin-memory to archive"
+
+    def _run_main_additional_context(self, monkeypatch, tmp_path, agent_type):
+        """Drive session_init.main() for a frame with the given agent_type and
+        return the emitted hookSpecificOutput.additionalContext (or '').
+
+        The three pin helpers are mocked to truthy sentinels so the assertion
+        is purely about the m2 GATE (frame_role), independent of whether a real
+        CLAUDE.md exists under tmp_path."""
+        import shared.pact_context as pact_context
+        from session_init import main
+
+        monkeypatch.setattr(pact_context, "_context_path", None)
+        monkeypatch.setattr(pact_context, "_cache", None)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+            "source": "startup",
+            "agent_type": agent_type,
+        })
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=self._STALE_SENTINEL), \
+             patch("session_init.check_pin_slot_status", return_value=self._SLOT_SENTINEL), \
+             patch("session_init.check_pin_stale_block_directive", return_value=self._PINMEM_SENTINEL), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.persist_context", return_value=None), \
+             patch("session_init.append_event", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        raw = mock_stdout.getvalue().strip().splitlines()
+        output = json.loads(raw[-1]) if raw else {}
+        return output.get("hookSpecificOutput", {}).get("additionalContext", "")
+
+    def test_lead_frame_receives_all_pin_advisories(self, monkeypatch, tmp_path):
+        """A lead frame's additionalContext carries step 4 / 4a / 4b advisories."""
+        additional = self._run_main_additional_context(
+            monkeypatch, tmp_path, _LEAD_AGENT_TYPE
+        )
+        assert self._STALE_SENTINEL in additional
+        assert self._SLOT_SENTINEL in additional
+        assert "/PACT:pin-memory" in additional
+
+    def test_teammate_frame_suppresses_all_pin_advisories(self, monkeypatch, tmp_path):
+        """A teammate frame's additionalContext carries NONE of the lead pin
+        advisories — the m2 lock."""
+        additional = self._run_main_additional_context(
+            monkeypatch, tmp_path, "pact-devops-engineer"
+        )
+        assert self._STALE_SENTINEL not in additional
+        assert self._SLOT_SENTINEL not in additional
+        assert "/PACT:pin-memory" not in additional
+        # Suppression is TARGETED, not total: the teammate frame still produces
+        # additionalContext (e.g. the universal step-4c plugin banner), so the
+        # absence above is real gating, not an empty/failed output.
+        assert additional
+
     def test_with_team_mentions_partial_failure(self):
         """The team-present branch should note that session_init partially failed."""
         from session_init import _build_safety_net_context

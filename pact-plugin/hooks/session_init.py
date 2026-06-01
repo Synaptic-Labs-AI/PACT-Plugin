@@ -719,12 +719,12 @@ def main():
     # net falls through to the "NOT GENERATED" branch.
     team_name = None
     # #888: role captured pre-assembly so the except-block safety net can pick
-    # a role-appropriate "YOUR PACT ROLE:" marker. Stays None until the capture
-    # at the is_lead/classify seam below; a frame that fails BEFORE that capture
-    # keeps None, which selects the orchestrator marker — identical to the
-    # pre-#888 behavior. That early-failure window is a KNOWN no-regression
-    # default (a teammate failing before the seam is mis-marked orchestrator),
-    # not a misroute introduced by this change.
+    # a role-appropriate "YOUR PACT ROLE:" marker. Stays None until the early
+    # capture just after the stdin/source parse below; a frame that fails BEFORE
+    # that capture keeps None, which selects the orchestrator marker — identical
+    # to the pre-#888 behavior. That early-failure window is a KNOWN
+    # no-regression default (a teammate failing before the capture is mis-marked
+    # orchestrator), not a misroute introduced by this change.
     frame_role = None
     # Track whether stdin JSON parsing failed, so the R3 malformed-stdin
     # gate below can distinguish "stdin was malformed JSON" from "stdin
@@ -766,6 +766,21 @@ def main():
         # on compact re-engages the bootstrap gate mid-task, blocking
         # Edit/Write/Agent when the orchestrator needs them most (#414).
         is_marker_reset = source == "clear"
+
+        # Frame role, captured EARLY — right after the stdin/source parse, where
+        # input_data is a PROVEN dict (it survived the .get() calls above; a
+        # non-dict would have raised at raw_source and bubbled to the outer
+        # safety net). classify_session_role does input_data.get(...) so it is
+        # total only on a dict — capturing here, NEVER in the except, preserves
+        # the safety net's never-raise contract. One capture serves three sites:
+        #   - the lead-only advisory gates below (steps 4/4a/4b): a teammate
+        #     frame must not receive lead pin advisories (m2);
+        #   - the teammate peer-context branch (the `== "teammate"` gate, m3);
+        #   - the role-aware exception safety net (_build_safety_net_context).
+        # If the exception fires before this point, frame_role stays None and
+        # the safety net emits the orchestrator marker — identical to prior
+        # behavior, a KNOWN no-regression default, not a misroute.
+        frame_role = classify_session_role(input_data)
 
         # Clean up stale compact-summary from previous sessions.
         # Only "compact" source needs it (just written by postcompact_archive).
@@ -904,26 +919,35 @@ def main():
         except Exception:
             pass  # Fail-open: never block session init for disk hygiene.
 
-        # 4. Check for stale pinned context
+        # 4. Check for stale pinned context. The informational surfacing is a
+        # lead-oriented pin advisory (m2): suppress it for a teammate frame
+        # (which has no pin-management authority — pins live in CLAUDE.md, a
+        # lead/orchestrator memory surface), but keep the failed/skipped
+        # DIAGNOSTICS on system_messages for every frame. The check CALL and its
+        # marker side-effect are unchanged — m2 gates advisory SURFACINGS, not
+        # writes (#877 owns write-gating).
         staleness_msg = check_pinned_staleness()
         if staleness_msg:
             if "failed" in staleness_msg.lower() or "skipped" in staleness_msg.lower():
                 system_messages.append(staleness_msg)
-            else:
+            elif frame_role != "teammate":
                 context_parts.append(staleness_msg)
 
         # 4a. Surface pin slot count (#492). Tier-0 additionalContext —
         # architecturally binding, survives compaction. Fail-open: None
-        # when CLAUDE.md cannot be resolved or parsed.
+        # when CLAUDE.md cannot be resolved or parsed. m2: lead-only pin
+        # telemetry — not surfaced to a teammate frame.
         slot_status_msg = check_pin_slot_status()
-        if slot_status_msg:
+        if slot_status_msg and frame_role != "teammate":
             context_parts.append(slot_status_msg)
 
         # 4b. Emit unconditional stale-block directive when stale pin
         # count meets threshold (#492). Never exit-2 — breaks /clear and
-        # /resume per plan key-decisions row 6.
+        # /resume per plan key-decisions row 6. m2: the "/PACT:pin-memory"
+        # directive is a lead/orchestrator memory action — not surfaced to a
+        # teammate frame (the helper's marker side-effect is unchanged).
         stale_block_msg = check_pin_stale_block_directive()
-        if stale_block_msg:
+        if stale_block_msg and frame_role != "teammate":
             context_parts.append(stale_block_msg)
 
         # 4c. Surface plugin manifest diagnostic (#500). Tier-0 additionalContext —
@@ -1064,12 +1088,6 @@ def main():
         # writes below so the disk-write split and the journal-anchor gate share
         # one verdict.
         frame_is_lead = is_lead(input_data)
-        # #888: capture the 3-way role here (input_data is a proven dict — it
-        # survived the earlier .get() calls) so the except-block safety net can
-        # pick a role-appropriate marker. NEVER classify in the except:
-        # classify_session_role does input_data.get(...) and is total only on a
-        # dict, so capturing here preserves the safety net's never-raise contract.
-        frame_role = classify_session_role(input_data)
         if not session_id_was_missing:
             try:
                 # SEAM (#877): compose the two halves directly. ALWAYS build +
@@ -1204,7 +1222,7 @@ def main():
         # self-identifying as orchestrator); the role marker is omitted because
         # the spawn prompt already owns the role and session_init lacks agent_name
         # under tmux. This is a CONDITIONAL EMISSION, not a new numbered step.
-        if classify_session_role(input_data) == "teammate":
+        if frame_role == "teammate":  # m3: reuse the role captured at the early seam (was a recompute)
             # O1 fix + Finding-1. team_name above is generate_team_name(input_data)
             # = pact-{this teammate's OWN session hash}, NOT the lead's team — so
             # resolve the lead's team + this teammate's own member name by pane-id
