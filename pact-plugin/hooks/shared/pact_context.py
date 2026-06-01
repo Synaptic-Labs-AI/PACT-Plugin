@@ -364,15 +364,18 @@ def is_lead(input_data: dict) -> bool:
     ``agent_id``, environment variables, or team config — purity is a
     tested assertion (a future author must not smuggle other signals in).
 
-    TOTAL: never raises on a dict input. The membership test is guarded by
-    an ``isinstance(..., str)`` check because ``x in frozenset`` raises
-    ``TypeError`` for an unhashable ``x`` (a malformed ``agent_type`` that is
-    a list/dict) — and a non-string ``agent_type`` is definitionally not a
-    lead spelling anyway, so it short-circuits to False. ``dict.get`` on a
-    non-dict input would still raise, so callers that may pass a non-dict
-    must guard upstream; in practice every hook parses stdin into a dict
-    before calling. Totality preserves each gate's existing exception-fail-
-    CLOSED path — a raising predicate would change that fail semantics.
+    TOTAL (given a dict): never raises when ``input_data`` is a dict. The
+    membership test is guarded by an ``isinstance(..., str)`` check because
+    ``x in frozenset`` raises ``TypeError`` for an unhashable ``x`` (a malformed
+    ``agent_type`` that is a list/dict) — and a non-string ``agent_type`` is
+    definitionally not a lead spelling anyway, so it short-circuits to False.
+    ``dict.get`` on a non-dict input would still raise, so callers that may pass
+    a non-dict must guard upstream; in practice every hook parses stdin into a
+    dict before calling. Totality preserves each gate's existing exception-fail-
+    CLOSED path — a raising predicate would change that fail semantics. (We
+    deliberately do NOT add an ``isinstance(input_data, dict)`` guard: it would
+    change the gates' fail-CLOSED contract, which relies on a non-dict stdin
+    raising through to each gate's own try/except.)
 
     COORDINATION CONTROL, NOT A SECURITY BOUNDARY. This predicate decides
     *coordination* (which frame performs lead-only writes / drives the
@@ -418,12 +421,13 @@ def classify_session_role(input_data: dict) -> str:
     Returns:
         One of ``"lead"``, ``"teammate"``, ``"unknown"``.
     """
-    agent_type = input_data.get("agent_type")
-    # Mirror is_lead's isinstance guard so the membership test stays TOTAL
-    # for an unhashable (list/dict) agent_type.
-    if isinstance(agent_type, str) and agent_type in LEAD_AGENT_TYPES:
+    # Delegate the lead test to is_lead so there is a SINGLE expression of
+    # "what lead means" (DRY) — a future change to the lead predicate (e.g.
+    # normalization) then lands in one place. is_lead carries the isinstance
+    # guard that keeps the membership test TOTAL for an unhashable agent_type.
+    if is_lead(input_data):
         return "lead"
-    if agent_type:
+    if input_data.get("agent_type"):
         return "teammate"
     return "unknown"
 

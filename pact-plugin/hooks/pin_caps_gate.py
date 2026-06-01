@@ -233,7 +233,10 @@ def _check_tool_allowed(input_data: dict) -> Optional[str]:
     # (resolve_agent_name returned non-empty for both lead spellings, so the
     # lead took this bypass branch and the DENY gate was silently DEAD for it).
     # is_lead keys on the harness-set agent_type directly; it is total (never
-    # raises), preserving the caller's exception-fail-CLOSED path.
+    # raises), preserving the caller's existing exception posture — which for
+    # this gate is fail-OPEN (the SACROSANCT default at main()'s except), with
+    # the narrow asymmetric Write-baseline-over-cap fail-CLOSED exception
+    # (Sec N7). A raising predicate would have perturbed that posture.
     if not pact_context.is_lead(input_data):
         return None
 
