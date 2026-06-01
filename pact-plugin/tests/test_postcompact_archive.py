@@ -203,11 +203,16 @@ class TestPostcompactOuterExceptionHandler:
     (the only external call remaining in main()'s happy path).
     """
 
+    # #881: the compact-summary write is now gated behind is_lead, so these
+    # outer-exception-handler tests must present a LEAD frame (agent_type) for
+    # the patched write_compact_summary side-effect to actually fire.
     def test_exits_zero_on_unexpected_error(self):
         """main() must exit 0 even when write_compact_summary raises."""
         from postcompact_archive import main
 
-        stdin_data = json.dumps({"compact_summary": "test"})
+        stdin_data = json.dumps(
+            {"compact_summary": "test", "agent_type": "pact-orchestrator"}
+        )
         with patch("sys.stdin", StringIO(stdin_data)), \
              patch("postcompact_archive.write_compact_summary",
                    side_effect=RuntimeError("test error")):
@@ -219,7 +224,9 @@ class TestPostcompactOuterExceptionHandler:
         """Error details must appear on stderr for logging."""
         from postcompact_archive import main
 
-        stdin_data = json.dumps({"compact_summary": "test"})
+        stdin_data = json.dumps(
+            {"compact_summary": "test", "agent_type": "pact-orchestrator"}
+        )
         with patch("sys.stdin", StringIO(stdin_data)), \
              patch("postcompact_archive.write_compact_summary",
                    side_effect=RuntimeError("test error")):
@@ -234,7 +241,9 @@ class TestPostcompactOuterExceptionHandler:
         """Stdout must contain structured JSON from hook_error_json."""
         from postcompact_archive import main
 
-        stdin_data = json.dumps({"compact_summary": "test"})
+        stdin_data = json.dumps(
+            {"compact_summary": "test", "agent_type": "pact-orchestrator"}
+        )
         with patch("sys.stdin", StringIO(stdin_data)), \
              patch("postcompact_archive.write_compact_summary",
                    side_effect=RuntimeError("test error")):
@@ -247,3 +256,130 @@ class TestPostcompactOuterExceptionHandler:
         assert "PACT hook warning" in output["systemMessage"]
         assert "postcompact_archive" in output["systemMessage"]
         assert "test error" in output["systemMessage"]
+
+
+# ---------------------------------------------------------------------------
+# #881: lead-only gate on the global-singleton compact-summary write
+# ---------------------------------------------------------------------------
+
+
+class TestPostcompactLeadGate:
+    """The compact-summary write is gated behind is_lead (#881).
+
+    COMPACT_SUMMARY_PATH is a GLOBAL SINGLETON the lead reads on resume, and
+    the write is O_TRUNC. A teammate/plain frame's PostCompact must NOT clobber
+    it. These are smoke tests (call / no-call of write_compact_summary by
+    role); comprehensive per-role suppression coverage is the TEST phase.
+    """
+
+    def _run_main_with(self, frame):
+        from postcompact_archive import main
+
+        stdin_data = json.dumps(frame)
+        with patch("sys.stdin", StringIO(stdin_data)), \
+             patch("postcompact_archive.write_compact_summary") as mock_write:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+            return mock_write
+
+    def test_lead_qualified_writes(self):
+        from fixtures.role_frames import postcompact_frame
+        mock_write = self._run_main_with(
+            postcompact_frame("PACT:pact-orchestrator", compact_summary="x")
+        )
+        mock_write.assert_called_once_with("x")
+
+    def test_lead_unqualified_writes(self):
+        from fixtures.role_frames import postcompact_frame
+        mock_write = self._run_main_with(
+            postcompact_frame("pact-orchestrator", compact_summary="x")
+        )
+        mock_write.assert_called_once_with("x")
+
+    def test_teammate_suppressed(self):
+        from fixtures.role_frames import postcompact_frame
+        mock_write = self._run_main_with(
+            postcompact_frame("pact-backend-coder", compact_summary="x")
+        )
+        mock_write.assert_not_called()
+
+    def test_plain_frame_suppressed(self):
+        """No agent_type (no --agent) → not lead → write suppressed."""
+        from fixtures.role_frames import postcompact_frame
+        mock_write = self._run_main_with(
+            postcompact_frame(None, compact_summary="x")
+        )
+        mock_write.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# #4 (#883 fold-in): real-disk defense-in-depth for the #881 lead-gate.
+# ---------------------------------------------------------------------------
+
+
+class TestPostcompactLeadGateRealDisk:
+    """Defense-in-depth complement to TestPostcompactLeadGate (which mocks
+    write_compact_summary and asserts call/no-call). Here the REAL function runs
+    against a REAL file on disk: a teammate/plain frame through main() must NOT
+    truncate the global-singleton compact-summary file (#881's O_TRUNC clobber).
+
+    COMPACT_SUMMARY_PATH is computed at IMPORT in shared.constants
+    (Path.home()/...), so a post-import Path.home monkeypatch does NOT redirect
+    it; we monkeypatch the name postcompact_archive binds (it does
+    `from shared.constants import COMPACT_SUMMARY_PATH`) to a tmp file. main()
+    calls write_compact_summary(summary) with no base-dir → _get_summary_path()
+    returns this redirected path.
+    """
+
+    _SENTINEL = "PRIOR LEAD SUMMARY — must survive a teammate PostCompact"
+
+    def _run_main_realdisk(self, frame, monkeypatch, tmp_path):
+        from postcompact_archive import main
+
+        summary_path = tmp_path / "compact-summary.txt"
+        summary_path.write_text(self._SENTINEL, encoding="utf-8")
+        # Redirect the global-singleton path (import-frozen constant) to tmp.
+        monkeypatch.setattr(
+            "postcompact_archive.COMPACT_SUMMARY_PATH", summary_path
+        )
+
+        with patch("sys.stdin", StringIO(json.dumps(frame))):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+        return summary_path
+
+    def test_teammate_frame_does_not_truncate_real_file(self, monkeypatch, tmp_path):
+        """A teammate PostCompact must leave the lead's on-disk compact-summary
+        UNTOUCHED — the #881 is_lead gate suppresses the real O_TRUNC write."""
+        from fixtures.role_frames import postcompact_frame
+        summary_path = self._run_main_realdisk(
+            postcompact_frame("pact-backend-coder", compact_summary="TEAMMATE CLOBBER"),
+            monkeypatch, tmp_path,
+        )
+        assert summary_path.read_text(encoding="utf-8") == self._SENTINEL, (
+            "a teammate PostCompact truncated the global compact-summary file — "
+            "the #881 lead-gate failed to suppress the real O_TRUNC write"
+        )
+
+    def test_plain_frame_does_not_truncate_real_file(self, monkeypatch, tmp_path):
+        """A plain (no-agent_type) PostCompact must also leave the file intact."""
+        from fixtures.role_frames import postcompact_frame
+        summary_path = self._run_main_realdisk(
+            postcompact_frame(None, compact_summary="PLAIN CLOBBER"),
+            monkeypatch, tmp_path,
+        )
+        assert summary_path.read_text(encoding="utf-8") == self._SENTINEL
+
+    def test_lead_frame_does_overwrite_real_file(self, monkeypatch, tmp_path):
+        """Positive symmetry: a LEAD PostCompact DOES write the file (the gate
+        suppresses only NON-lead frames; the lead's archival must still work)."""
+        from fixtures.role_frames import postcompact_frame
+        summary_path = self._run_main_realdisk(
+            postcompact_frame("PACT:pact-orchestrator", compact_summary="NEW LEAD SUMMARY"),
+            monkeypatch, tmp_path,
+        )
+        assert summary_path.read_text(encoding="utf-8") == "NEW LEAD SUMMARY", (
+            "a lead PostCompact must still archive the compact summary"
+        )

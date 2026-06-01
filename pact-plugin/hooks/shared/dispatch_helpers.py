@@ -76,19 +76,21 @@ SOLO_EXEMPT = frozenset({"general-purpose", "Explore", "Plan"})
 
 # ─── specialist registry ───────────────────────────────────────────────────
 
-@functools.lru_cache(maxsize=1)
-def _specialist_registry() -> frozenset[str]:
-    """Glob agents/pact-*.md once per hook subprocess.
+def _glob_specialists(plugin_root: str) -> frozenset[str]:
+    """Glob the specialist stems at ``{plugin_root}/agents/pact-*.md``.
 
-    Hook subprocesses are short-lived (per-tool-call); the cache is rebuilt
-    on every dispatch evaluation. Empty plugin_root or missing agents/
-    directory → empty registry → every pact-* dispatch is DENIED
-    (registry fail-closed). pact-orchestrator.md IS in the glob set;
-    the "orchestrator is the persona, not a dispatchable specialist"
-    semantic is enforced at a different layer (system-prompt --agent
-    flag at session start), not at the registry.
+    Uncached, pure-of-cache: the caller supplies plugin_root explicitly. Empty
+    plugin_root or missing agents/ directory → empty frozenset (registry
+    fail-closed); OSError → empty frozenset. ``pact-orchestrator.md`` IS in the
+    glob set; the "orchestrator is the persona, not a dispatchable specialist"
+    semantic is enforced at a different layer (system-prompt --agent flag at
+    session start), not at the registry.
+
+    Extracted from ``_specialist_registry`` (#878) so the cached registry and
+    an explicit-root caller (the session_init startup notice, which runs BEFORE
+    the pact_context cache is populated and so must pass an env-resolved root)
+    share ONE glob implementation without parameterizing the lru_cache.
     """
-    plugin_root = pact_context.get_plugin_root()
     if not plugin_root:
         return frozenset()
     agents_dir = Path(plugin_root) / "agents"
@@ -98,11 +100,42 @@ def _specialist_registry() -> frozenset[str]:
         return frozenset()
 
 
-def is_registered_pact_specialist(subagent_type: str) -> bool:
-    """True iff subagent_type matches a file at ``agents/pact-*.md``."""
+@functools.lru_cache(maxsize=1)
+def _specialist_registry() -> frozenset[str]:
+    """Glob agents/pact-*.md once per hook subprocess (cached, arg-less).
+
+    Hook subprocesses are short-lived (per-tool-call); the cache is rebuilt
+    on every dispatch evaluation. Resolves plugin_root from the pact_context
+    cache and delegates the glob to ``_glob_specialists``. Deliberately
+    ARG-LESS so the lru_cache holds exactly one entry per subprocess (the hot
+    dispatch path); the explicit-root path the startup notice needs pre-cache
+    goes through ``_glob_specialists`` directly, never through this cache.
+    Empty plugin_root / missing agents/ → empty registry (fail-closed).
+    """
+    return _glob_specialists(pact_context.get_plugin_root())
+
+
+def is_registered_pact_specialist(
+    subagent_type: str, plugin_root: str = ""
+) -> bool:
+    """True iff subagent_type matches a file at ``agents/pact-*.md``.
+
+    ``plugin_root`` (#878, additive + backward-compatible): when a non-empty
+    plugin_root is passed, resolve the registry against it directly via
+    ``_glob_specialists`` (the uncached path) — required by the session_init
+    startup notice, which runs BEFORE the pact_context cache is populated, so
+    the cached ``_specialist_registry()`` would see an empty plugin_root and
+    wrongly report every type as unregistered there. When omitted/empty (every
+    existing caller, e.g. the dispatch self-completion gate), fall back to the
+    cached ``_specialist_registry()`` — identical behavior to before this param
+    existed.
+    """
     if not isinstance(subagent_type, str) or not subagent_type:
         return False
-    return subagent_type in _specialist_registry()
+    registry = (
+        _glob_specialists(plugin_root) if plugin_root else _specialist_registry()
+    )
+    return subagent_type in registry
 
 
 # ─── task-assigned check ───────────────────────────────────────────────────

@@ -131,3 +131,32 @@ def _reset_pact_context_state():
     ctx_module.reset_for_tests()
     yield
     ctx_module.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _reset_specialist_registry_cache():
+    """Unconditional cross-test isolation for ``dispatch_helpers``'s
+    ``_specialist_registry`` ``@lru_cache``. Runs for EVERY test (autouse).
+
+    F1 (#883 fold-in). ``_specialist_registry`` memoizes the globbed
+    ``agents/pact-*.md`` registry (keyed on the pact_context-resolved
+    ``plugin_root``) for the life of the process. Like ``pact_context``'s
+    ``_cache`` / ``_context_path`` (reset by the sibling fixture above), an
+    uncleared lru_cache leaks a stale — or empty — registry across tests: the
+    same #845-class order-dependent pollution vector, now more exposed since the
+    suite exercises the registry more (the is_lead startup-notice path + the
+    dispatch tests). Cleared before AND after every test (symmetric), mirroring
+    the pact_context reset.
+
+    DELIBERATELY A SEPARATE FIXTURE (SRP): the sibling
+    ``_reset_pact_context_state`` is the documented single-source-of-truth for
+    ``pact_context``'s module-globals; folding a second module's cache-clear into
+    it would muddy that scope. Each autouse reset owns exactly one module's
+    state. (``cache_clear`` is the lru_cache-provided reset; a future removal of
+    the ``@lru_cache`` decorator on ``_specialist_registry`` must update this.)
+    """
+    import shared.dispatch_helpers as dispatch_helpers
+
+    dispatch_helpers._specialist_registry.cache_clear()
+    yield
+    dispatch_helpers._specialist_registry.cache_clear()

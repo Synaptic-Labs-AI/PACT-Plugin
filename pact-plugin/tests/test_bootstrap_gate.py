@@ -106,14 +106,24 @@ _CANONICAL_DENY_REASON_LITERAL = (
 # =============================================================================
 
 
-def _make_input(tool_name="Edit", session_id=_SESSION_ID):
-    """Build a minimal PreToolUse hook input dict."""
-    return {
+def _make_input(tool_name="Edit", session_id=_SESSION_ID,
+                agent_type="pact-orchestrator"):
+    """Build a minimal PreToolUse hook input dict.
+
+    #878: the gate now keys lead-detection on the harness-set agent_type via
+    is_lead. The default is a LEAD frame (the unmarked case these DENY tests
+    historically assumed via empty resolve_agent_name). Teammate/non-lead tests
+    pass agent_type=<teammate> or agent_type=None to exercise the bypass branch.
+    """
+    data = {
         "hook_event_name": "PreToolUse",
         "session_id": session_id,
         "tool_name": tool_name,
         "tool_input": {},
     }
+    if agent_type is not None:
+        data["agent_type"] = agent_type
+    return data
 
 
 def _run_main(input_data, capsys):
@@ -288,38 +298,32 @@ class TestCheckToolAllowed:
         assert result is None
 
     def test_teammate_allows_all(self, monkeypatch, tmp_path):
-        """Teammate → None even for blocked tools."""
+        """Teammate (non-lead agent_type) → None even for blocked tools.
+
+        #878: lead-detection migrated to is_lead, which reads agent_type. A
+        specialist agent_type is not a lead spelling, so the gate bypasses.
+        """
         from bootstrap_gate import _check_tool_allowed
 
         _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
 
-        input_data = _make_input("Edit")
-        input_data["agent_name"] = "backend-coder"
+        input_data = _make_input("Edit", agent_type="pact-backend-coder")
 
         result = _check_tool_allowed(input_data)
         assert result is None
 
-    def test_teammate_via_agent_id(self, monkeypatch, tmp_path):
-        """Teammate via agent_id format → None."""
+    def test_teammate_via_qualified_agent_type(self, monkeypatch, tmp_path):
+        """Teammate carrying a qualified non-lead agent_type → None.
+
+        #878: the gate no longer resolves agent_id/agent_name — it reads
+        agent_type directly. A `PACT:`-qualified specialist type is not a lead
+        spelling, so the gate bypasses.
+        """
         from bootstrap_gate import _check_tool_allowed
-        import shared.pact_context as ctx_module
 
-        session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
 
-        # Override context to have a team_name
-        plugin_root = tmp_path / "plugin"
-        context_file = session_dir / "pact-session-context.json"
-        context_file.write_text(json.dumps({
-            "team_name": "pact-test1234",
-            "session_id": _SESSION_ID,
-            "project_dir": _PROJECT_DIR,
-            "plugin_root": str(plugin_root),
-            "started_at": "2026-01-01T00:00:00Z",
-        }), encoding="utf-8")
-        ctx_module._cache = None
-
-        input_data = _make_input("Write")
-        input_data["agent_id"] = "backend-coder@pact-test1234"
+        input_data = _make_input("Write", agent_type="PACT:pact-backend-coder")
 
         result = _check_tool_allowed(input_data)
         assert result is None
@@ -409,11 +413,10 @@ class TestMainEntryPoint:
         assert output == _SUPPRESS_EXPECTED
 
     def test_teammate_exits_0(self, monkeypatch, tmp_path, capsys):
-        """Teammate → exit 0."""
+        """Teammate (non-lead agent_type) → exit 0 (bypass, no DENY)."""
         _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
 
-        input_data = _make_input("Edit")
-        input_data["agent_name"] = "backend-coder"
+        input_data = _make_input("Edit", agent_type="pact-backend-coder")
 
         exit_code, output = _run_main(input_data, capsys)
         assert exit_code == 0
@@ -655,11 +658,16 @@ def _setup_pact_session_with_team(monkeypatch, tmp_path, team_name="t1",
     return session_dir
 
 
-def _canonical_secretary_input(team_name="t1", overrides=None):
+def _canonical_secretary_input(team_name="t1", overrides=None,
+                               agent_type="pact-orchestrator"):
     """Build the canonical Agent(secretary) PreToolUse input.
 
     overrides: dict merged into tool_input to forge mismatched bindings
     in negative tests.
+
+    #878: the gate keys lead-detection on is_lead (the harness-set agent_type).
+    The secretary-spawn carve-out only applies on the LEAD path (the lead's
+    pre-bootstrap secretary dispatch), so the default is a lead agent_type.
     """
     tool_input = {
         "subagent_type": "pact-secretary",
@@ -668,12 +676,15 @@ def _canonical_secretary_input(team_name="t1", overrides=None):
     }
     if overrides:
         tool_input.update(overrides)
-    return {
+    data = {
         "hook_event_name": "PreToolUse",
         "session_id": _SESSION_ID,
         "tool_name": "Agent",
         "tool_input": tool_input,
     }
+    if agent_type is not None:
+        data["agent_type"] = agent_type
+    return data
 
 
 class TestCanonicalSecretarySpawnCarveOut:
@@ -1472,6 +1483,7 @@ class TestCanonicalSecretarySpawnAdversarial:
             "hook_event_name": "PreToolUse",
             "session_id": _SESSION_ID,
             "tool_name": "Agent",
+            "agent_type": "pact-orchestrator",  # #878: lead frame reaches the gate body
             "tool_input": tool_input_value,
         }
         result = _check_tool_allowed(input_data)
@@ -1510,6 +1522,7 @@ class TestCanonicalSecretarySpawnAdversarial:
             "hook_event_name": "PreToolUse",
             "session_id": _SESSION_ID,
             "tool_name": "Agent",
+            "agent_type": "pact-orchestrator",  # #878: lead frame reaches the gate body
             "tool_input": canonical,
         }
         result = _check_tool_allowed(input_data)
@@ -1565,6 +1578,7 @@ class TestCanonicalSecretarySpawnAdversarial:
         input_data = {
             "hook_event_name": "PreToolUse",
             "session_id": _SESSION_ID,
+            "agent_type": "pact-orchestrator",  # #878: lead frame reaches the gate body
             "tool_input": {
                 "subagent_type": "pact-secretary",
                 "name": "secretary",
@@ -2051,6 +2065,7 @@ class TestCanonicalSecretarySpawnAdversarial:
                 "hook_event_name": "PreToolUse",
                 "session_id": _SESSION_ID,
                 "tool_name": "Agent",
+                "agent_type": "pact-orchestrator",  # #878: lead frame reaches the gate body
                 "tool_input": {"name": "secretary", "team_name": "t1"},
             }
         else:

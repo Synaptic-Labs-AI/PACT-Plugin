@@ -2591,9 +2591,12 @@ class TestSessionInitJournalWrite:
         (journal_home / "project").mkdir()
         (journal_home / "project" / "CLAUDE.md").write_text("# Project\n## Retrieved Context\n")
 
+        # #877: the session_start journal anchor is a lead-only write (gated
+        # behind is_lead), so a lead agent_type is required for it to be written.
         input_data = {
             "session_id": "abc12345-test",
             "source": stdin_source,
+            "agent_type": "pact-orchestrator",
         }
 
         with patch("sys.stdin", io.StringIO(json.dumps(input_data))), \
@@ -2601,7 +2604,7 @@ class TestSessionInitJournalWrite:
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.get_task_list", return_value=[]), \
-             patch("session_init.write_context"), \
+             patch("session_init.persist_context"), \
              patch("session_init.check_resumption_context", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
              patch("session_init.check_paused_state", return_value=None):

@@ -8,9 +8,9 @@ Used by: hooks.json UserPromptSubmit hook (no matcher — fires on every prompt)
 Layer 2 of the four-layer bootstrap gate enforcement (#401). On each user
 message, checks for the session-scoped bootstrap-complete marker file:
   - Marker exists → suppressOutput (zero tokens, sub-ms)
-  - No marker + PACT team-lead session → inject additionalContext instructing bootstrap
+  - No marker + PACT team-lead session (is_lead) → inject additionalContext instructing bootstrap
   - Non-PACT session (no context file) → no-op passthrough
-  - Teammate (resolve_agent_name non-empty) → no-op passthrough
+  - Teammate / non-lead frame (not is_lead) → no-op passthrough
 
 SACROSANCT (post-#662 module-load fail-closed retrofit): module-load
 failures emit an advisory `additionalContext` block at exit 0 —
@@ -113,9 +113,13 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
         # Bootstrap already done → suppress (zero tokens)
         return None
 
-    # Teammate detection: teammates don't need the team-lead's bootstrap gate
-    agent_name = pact_context.resolve_agent_name(input_data)
-    if agent_name:
+    # Lead-role gate (#878): only the team-lead drives the bootstrap ritual.
+    # Migrated from the negative `resolve_agent_name(...) != ""` heuristic to
+    # the positive is_lead predicate — the old heuristic returned non-empty for
+    # BOTH lead spellings (Step-4 prefix-strip), so under tmux the lead itself
+    # took this teammate-bypass branch. is_lead keys on the harness-set
+    # agent_type directly.
+    if not pact_context.is_lead(input_data):
         return None
 
     # Lead session, no marker → inject bootstrap instruction with session dir

@@ -67,7 +67,13 @@ def caps_gate_env(tmp_path, monkeypatch, pact_context):
 
 
 def _call_gate(input_data):
+    # #878: the gate now keys lead-detection on is_lead (the harness-set
+    # agent_type), not the old empty-resolve_agent_name heuristic. Default to a
+    # LEAD frame (the unmarked case these DENY tests assume) unless the caller
+    # supplies an explicit agent_type (teammate/plain bypass tests).
     from pin_caps_gate import _check_tool_allowed
+    if "agent_type" not in input_data:
+        input_data = {**input_data, "agent_type": "pact-orchestrator"}
     return _check_tool_allowed(input_data)
 
 
@@ -282,24 +288,25 @@ class TestPinCapsGate_Smoke:
         assert result is None
 
     def test_teammate_bypass(self, caps_gate_env):
-        """Teammate sessions (agent_name non-empty) bypass the gate."""
+        """Teammate sessions (non-lead agent_type) bypass the gate.
+
+        #878: lead-detection migrated to is_lead, which reads agent_type
+        directly (no longer resolve_agent_name). A specialist agent_type is not
+        a lead spelling, so the gate bypasses.
+        """
         env = caps_gate_env(pin_count=3)
-        # Patch resolve_agent_name to return a non-empty name.
-        import shared.pact_context as ctx_module
-        with patch.object(
-            ctx_module, "resolve_agent_name", return_value="backend-coder-x"
-        ):
-            entries = [
-                make_pin_entry(title=f"Pin{i}", body_chars=4) for i in range(13)
-            ]
-            new_content = make_claude_md_with_pins(entries)
-            result = _call_gate({
-                "tool_name": "Write",
-                "tool_input": {
-                    "file_path": str(env["claude_md"]),
-                    "content": new_content,
-                },
-            })
+        entries = [
+            make_pin_entry(title=f"Pin{i}", body_chars=4) for i in range(13)
+        ]
+        new_content = make_claude_md_with_pins(entries)
+        result = _call_gate({
+            "tool_name": "Write",
+            "agent_type": "pact-backend-coder",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "content": new_content,
+            },
+        })
         assert result is None
 
     def test_edit_legitimate_new_pin_with_date_comment_allows(

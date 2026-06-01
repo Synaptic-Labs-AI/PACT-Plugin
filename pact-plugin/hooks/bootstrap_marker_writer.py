@@ -216,8 +216,12 @@ def _try_write_marker(input_data: dict) -> None:
     if is_marker_set(session_dir):
         return
 
-    # Teammate sessions don't drive bootstrap (their lead does). Skip.
-    if pact_context.resolve_agent_name(input_data):
+    # Lead-role gate (#878): only the team-lead drives bootstrap (writes the
+    # marker). Migrated from the negative `resolve_agent_name(...) != ""`
+    # heuristic — which returned non-empty for BOTH lead spellings, so the lead
+    # itself took this bypass branch under tmux — to the positive is_lead
+    # predicate keyed on the harness-set agent_type.
+    if not pact_context.is_lead(input_data):
         return
 
     # Pre-condition: team config + secretary member exist on disk.

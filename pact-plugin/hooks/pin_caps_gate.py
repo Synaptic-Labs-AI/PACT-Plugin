@@ -225,10 +225,19 @@ def _check_tool_allowed(input_data: dict) -> Optional[str]:
 
     pact_context.init(input_data)
 
-    # Teammate bypass — mirror pin_staleness_gate. Teammates do not edit
-    # the project CLAUDE.md; only the team-lead (empty agent_name) is gated.
-    agent_name = pact_context.resolve_agent_name(input_data)
-    if agent_name:
+    # Lead-role gate (#878, DENY-gate enforcement RESTORATION) — mirror
+    # pin_staleness_gate. Teammates do not edit the project CLAUDE.md; only the
+    # team-lead is gated. The team-lead carries a POSITIVE lead agent_type
+    # (`PACT:pact-orchestrator` / `pact-orchestrator`) — NOT an empty
+    # agent_name; the prior "empty agent_name" assumption was the bug
+    # (resolve_agent_name returned non-empty for both lead spellings, so the
+    # lead took this bypass branch and the DENY gate was silently DEAD for it).
+    # is_lead keys on the harness-set agent_type directly; it is total (never
+    # raises), preserving the caller's existing exception posture — which for
+    # this gate is fail-OPEN (the SACROSANCT default at main()'s except), with
+    # the narrow asymmetric Write-baseline-over-cap fail-CLOSED exception
+    # (Sec N7). A raising predicate would have perturbed that posture.
+    if not pact_context.is_lead(input_data):
         return None
 
     tool_input = input_data.get("tool_input", {})

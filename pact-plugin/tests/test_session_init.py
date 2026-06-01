@@ -53,6 +53,25 @@ import pytest
 # Add hooks directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
+
+# #877: session_init's Class-A writes (write_context disk-write, session_start
+# journal anchor, CLAUDE.md Current Session block, paused-state surface) are now
+# gated behind is_lead, which keys on the harness-set agent_type. These tests
+# exercise the LEAD path, so their stdin payloads must carry a lead agent_type.
+# _with_lead_role injects it without disturbing any payload that already sets
+# agent_type (e.g. a teammate/plain-frame suppression test sets it explicitly).
+_LEAD_AGENT_TYPE = "pact-orchestrator"
+
+
+def _with_lead_role(payload: dict) -> dict:
+    """Return a copy of ``payload`` with a lead ``agent_type`` unless one is
+    already present. Lets the lead-path tests opt in to is_lead==True with a
+    single shared edit instead of stamping every inline stdin literal."""
+    if "agent_type" in payload:
+        return payload
+    return {**payload, "agent_type": _LEAD_AGENT_TYPE}
+
+
 class TestGenerateTeamName:
     """Tests for generate_team_name() -- session-unique team name generation."""
 
@@ -186,8 +205,11 @@ class TestMainPausedStateIntegration:
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
 
-        # Provide valid JSON on stdin with a session_id
-        stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
+        # Provide valid JSON on stdin with a session_id (#877: lead frame so the
+        # is_lead-gated check_paused_state actually runs).
+        stdin_data = json.dumps(_with_lead_role(
+            {"session_id": "aabb1122-0000-0000-0000-000000000000"}
+        ))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -307,8 +329,9 @@ class TestMainPrevSessionDirOrdering:
         )
 
         # --- Arrange: current session id (different from the prior one) ---
+        # #877: lead frame so the is_lead-gated check_paused_state runs.
         current_session_id = "aabb1122-0000-0000-0000-000000000000"
-        stdin_data = json.dumps({"session_id": current_session_id})
+        stdin_data = json.dumps(_with_lead_role({"session_id": current_session_id}))
 
         # Spies so we can assert exactly which prev_session_dir the downstream
         # calls received. We wrap rather than replace so the real implementations
@@ -1089,9 +1112,11 @@ class TestWriteContextIntegration:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        stdin_data = json.dumps({
+        # #878 SHAPE-2 seam: lead frame → session_init builds the cache then
+        # persists. build_context_cache carries the 4 positional args (no flag).
+        stdin_data = json.dumps(_with_lead_role({
             "session_id": "aabb1122-0000-0000-0000-000000000000",
-        })
+        }))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -1100,14 +1125,19 @@ class TestWriteContextIntegration:
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
              patch("session_init.check_paused_state", return_value=None), \
-             patch("session_init.write_context") as mock_write_ctx, \
+             patch("session_init.build_context_cache",
+                   return_value=(Path("/tmp/ctx.json"), {})) as mock_build_ctx, \
+             patch("session_init.persist_context", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
-        mock_write_ctx.assert_called_once_with(
+        # #878 SHAPE-2: build_context_cache takes the 4 positional args; the
+        # lead/teammate disk gate moved OUT of this call (it's now persist_context,
+        # invoked only when frame_is_lead) — so no write_disk kwarg here.
+        mock_build_ctx.assert_called_once_with(
             "pact-aabb1122",
             "aabb1122-0000-0000-0000-000000000000",
             "/Users/example/Sites/test-project",
@@ -1143,17 +1173,21 @@ class TestWriteContextIntegration:
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
              patch("session_init.check_paused_state", return_value=None), \
-             patch("session_init.write_context") as mock_write_ctx, \
+             patch("session_init.build_context_cache") as mock_build_ctx, \
+             patch("session_init.persist_context") as mock_persist, \
              patch("session_init.append_event") as mock_append, \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO):
             with pytest.raises(SystemExit):
                 main()
 
-        # R3: write_context and append_event must NOT be called on the
-        # malformed-stdin path — they would create an unreapable
-        # `pact-sessions/.../unknown-xxxx/` directory.
-        mock_write_ctx.assert_not_called()
+        # R3: the context build/persist and append_event must NOT be called on
+        # the malformed-stdin path — they would create an unreapable
+        # `pact-sessions/.../unknown-xxxx/` directory. The whole
+        # `if not session_id_was_missing` block is skipped, so neither half of
+        # the build_context_cache/persist_context seam runs.
+        mock_build_ctx.assert_not_called()
+        mock_persist.assert_not_called()
         session_start_calls = [
             call for call in mock_append.call_args_list
             if call.args and call.args[0].get("type") == "session_start"
@@ -1206,7 +1240,7 @@ class TestWriteContextIntegration:
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
              patch("session_init.check_paused_state", return_value=None), \
-             patch("session_init.write_context", return_value=None), \
+             patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event") as mock_append, \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO), \
@@ -1323,7 +1357,7 @@ class TestWriteContextIntegration:
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
              patch("session_init.check_paused_state", return_value=None), \
-             patch("session_init.write_context", return_value=None), \
+             patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=True), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO), \
@@ -1351,7 +1385,8 @@ class TestWriteContextIntegration:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         real_session_id = "aabb1122-0000-0000-0000-000000000000"
-        stdin_data = json.dumps({"session_id": real_session_id})
+        # #877: lead frame so the is_lead-gated update_session_info runs.
+        stdin_data = json.dumps(_with_lead_role({"session_id": real_session_id}))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -1360,7 +1395,7 @@ class TestWriteContextIntegration:
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
              patch("session_init.check_paused_state", return_value=None), \
-             patch("session_init.write_context", return_value=None), \
+             patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=True), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO), \
@@ -1420,7 +1455,7 @@ class TestFailureLogIntegration:
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
              patch("session_init.check_paused_state", return_value=None), \
-             patch("session_init.write_context", return_value=None), \
+             patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=None), \
              patch("session_init.append_failure") as mock_append_failure, \
              patch("sys.stdin", io.StringIO(stdin_data)), \
@@ -1467,7 +1502,7 @@ class TestFailureLogIntegration:
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
              patch("session_init.check_paused_state", return_value=None), \
-             patch("session_init.write_context", return_value=None), \
+             patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=None), \
              patch("session_init.append_failure") as mock_append_failure, \
              patch("sys.stdin", io.StringIO(stdin_data)), \
@@ -1505,7 +1540,7 @@ class TestFailureLogIntegration:
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
              patch("session_init.check_paused_state", return_value=None), \
-             patch("session_init.write_context", return_value=None), \
+             patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=None), \
              patch("session_init.append_failure") as mock_append_failure, \
              patch("sys.stdin", io.StringIO(stdin_data)), \
@@ -1544,7 +1579,7 @@ class TestFailureLogIntegration:
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
              patch("session_init.check_paused_state", return_value=None), \
-             patch("session_init.write_context", return_value=None), \
+             patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=None), \
              patch("session_init.append_failure") as mock_append_failure, \
              patch("sys.stdin", io.StringIO(stdin_data)), \
@@ -1583,7 +1618,7 @@ class TestFailureLogIntegration:
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
              patch("session_init.check_paused_state", return_value=None), \
-             patch("session_init.write_context", return_value=None), \
+             patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=None), \
              patch("session_init.append_failure") as mock_append_failure, \
              patch("sys.stdin", io.StringIO(stdin_data)), \
@@ -1627,7 +1662,7 @@ class TestFailureLogIntegration:
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
              patch("session_init.check_paused_state", return_value=None), \
-             patch("session_init.write_context", return_value=None), \
+             patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=None), \
              patch("session_init.append_failure", side_effect=raising_append_failure), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
@@ -1702,7 +1737,8 @@ class TestFailureLogIntegration:
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
              patch("session_init.check_paused_state", return_value=None), \
-             patch("session_init.write_context") as mock_write_context, \
+             patch("session_init.build_context_cache") as mock_build_context, \
+             patch("session_init.persist_context") as mock_persist_context, \
              patch("session_init.append_event", return_value=None), \
              patch("session_init.append_failure") as mock_append_failure, \
              patch("sys.stdin", io.StringIO(stdin_data)), \
@@ -1731,10 +1767,12 @@ class TestFailureLogIntegration:
         # write entirely. If this assertion fails the tainted id could be
         # interpolated into the Resume line verbatim.
         mock_update_session_info.assert_not_called()
-        # write_context is also gated by session_id_was_missing — the
-        # pact-session-context.json write must not happen either, since
-        # the tainted id would otherwise land on disk as a dir segment.
-        mock_write_context.assert_not_called()
+        # The context build/persist seam is also gated by session_id_was_missing
+        # — the pact-session-context.json write must not happen either, since the
+        # tainted id would otherwise land on disk as a dir segment. Neither half
+        # of build_context_cache/persist_context runs.
+        mock_build_context.assert_not_called()
+        mock_persist_context.assert_not_called()
 
     def test_other_classification_catchall_via_mock(
         self, monkeypatch, tmp_path
@@ -1765,7 +1803,7 @@ class TestFailureLogIntegration:
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
              patch("session_init.check_paused_state", return_value=None), \
-             patch("session_init.write_context", return_value=None), \
+             patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=None), \
              patch("session_init.append_failure") as mock_append_failure, \
              patch("session_init._is_unknown_or_missing_session", return_value=True), \
@@ -2457,9 +2495,9 @@ class TestPluginRootEnvWiring:
         monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", plugin_root_value)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        stdin_data = json.dumps({
+        stdin_data = json.dumps(_with_lead_role({
             "session_id": "aabb1122-0000-0000-0000-000000000000",
-        })
+        }))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -2467,16 +2505,18 @@ class TestPluginRootEnvWiring:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
-             patch("session_init.write_context") as mock_write_ctx, \
+             patch("session_init.build_context_cache",
+                   return_value=(Path("/tmp/ctx.json"), {})) as mock_build_ctx, \
+             patch("session_init.persist_context", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
-        # 4th positional arg of write_context is plugin_root
-        mock_write_ctx.assert_called_once_with(
+        # 4th positional arg is plugin_root; #878 SHAPE-2 moved the disk gate out
+        # of this call into persist_context, so no write_disk kwarg here.
+        mock_build_ctx.assert_called_once_with(
             "pact-aabb1122",
             "aabb1122-0000-0000-0000-000000000000",
             str(tmp_path / "proj"),
@@ -2504,9 +2544,10 @@ class TestPluginRootEnvWiring:
         monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", plugin_root_value)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        stdin_data = json.dumps({
+        # #877: lead frame so the is_lead-gated update_session_info runs.
+        stdin_data = json.dumps(_with_lead_role({
             "session_id": "aabb1122-0000-0000-0000-000000000000",
-        })
+        }))
 
         # Intentionally NOT mocking update_session_info — we want it to run
         # for real against the tmp_path project dir. Everything else that
@@ -2564,7 +2605,9 @@ class TestPluginRootEnvWiring:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         session_id = "ccdd3344-0000-0000-0000-000000000000"
-        stdin_data = json.dumps({"session_id": session_id})
+        # #878 SHAPE-2: lead frame so session_init persists (build + persist) and
+        # the JSON lands on disk.
+        stdin_data = json.dumps(_with_lead_role({"session_id": session_id}))
 
         # pact_context._cache / _context_path reset handled by the class's
         # autouse _reset_pact_context_cache fixture (T2) — no inline reset
@@ -2754,7 +2797,7 @@ class TestSessionStartSourceField:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        stdin_data = json.dumps(stdin_payload)
+        stdin_data = json.dumps(_with_lead_role(stdin_payload))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -2763,7 +2806,7 @@ class TestSessionStartSourceField:
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
              patch("session_init.check_paused_state", return_value=None), \
-             patch("session_init.write_context", return_value=None), \
+             patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event") as mock_append, \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO):
@@ -4111,9 +4154,11 @@ class TestMainExceptionSafetyNet:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        stdin_data = json.dumps({
+        # #877: lead frame so the is_lead-gated update_session_info runs and the
+        # injected late failure actually fires.
+        stdin_data = json.dumps(_with_lead_role({
             "session_id": "aabb1122-0000-0000-0000-000000000000",
-        })
+        }))
 
         def raise_late(*args, **kwargs):
             raise RuntimeError("simulated late failure after team name captured")

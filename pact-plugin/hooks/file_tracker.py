@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 import shared.pact_context as pact_context
-from shared.pact_context import get_team_name, resolve_agent_name
+from shared.pact_context import get_session_id, get_team_name, resolve_agent_name
 
 try:
     import fcntl
@@ -46,8 +46,20 @@ def track_edit(
     agent_name: str,
     tool_name: str,
     tracking_path: str,
+    session_id: str = "",
 ) -> None:
-    """Append a file edit record to the tracking file."""
+    """Append a file edit record to the tracking file.
+
+    NEW-1 (#878): the editor is identified by the COMPOSITE key
+    ``(agent_name, session_id)``, not by ``agent_name`` alone. Under tmux,
+    same-``agent_type`` siblings (e.g. two ``backend-coder`` instances)
+    collapse to the same ``resolve_agent_name`` value, so an agent-name-only
+    key cannot tell them apart and conflict detection false-negatives. The
+    ``session_id`` (already in stdin via ``pact_context.init``) supplies the
+    per-instance uniqueness in BOTH modes. ``agent_name`` is retained as the
+    human-readable LABEL (the friendly-name recovery for the label under tmux
+    is a deferred follow-up; detection-uniqueness is what this fix restores).
+    """
     file_path = _normalize_path(file_path)
     tracking_file = Path(tracking_path)
     tracking_file.parent.mkdir(parents=True, exist_ok=True)
@@ -55,6 +67,7 @@ def track_edit(
     new_entry = {
         "file": file_path,
         "agent": agent_name,
+        "session_id": session_id,
         "tool": tool_name,
         "ts": int(time.time()),
     }
@@ -91,8 +104,23 @@ def check_conflict(
     file_path: str,
     agent_name: str,
     tracking_path: str,
+    session_id: str = "",
 ) -> str | None:
-    """Check if another agent has edited this file."""
+    """Check if another EDITOR INSTANCE has edited this file.
+
+    NEW-1 (#878): an editor is the COMPOSITE ``(agent_name, session_id)`` — so
+    a different *instance* of the same ``agent_type`` (same ``agent_name``,
+    different ``session_id``) is correctly counted as a separate editor and a
+    real cross-instance conflict is DETECTED under tmux (the prior
+    agent-name-only key false-negatived here). The SAME instance editing twice
+    (same composite) is NOT a conflict.
+
+    The conflict message lists the human-readable ``agent`` LABEL of each other
+    editor. When two other editors share an ``agent`` label but differ by
+    ``session_id`` (same-type siblings under tmux), the label is disambiguated
+    with a short session_id suffix so the message names two distinct editors
+    rather than a confusing repeated name.
+    """
     file_path = _normalize_path(file_path)
     if not agent_name:
         return None
@@ -106,19 +134,39 @@ def check_conflict(
     except (json.JSONDecodeError, IOError):
         return None
 
-    other_agents = set()
+    self_key = (agent_name, session_id)
+    # Collect the distinct OTHER editor instances (composite key) and, per
+    # agent label, the set of session_ids seen — so the label can be
+    # disambiguated only when a name is genuinely shared across instances.
+    other_keys: set[tuple[str, str]] = set()
+    sessions_by_agent: dict[str, set[str]] = {}
     for entry in entries:
-        if entry.get("file") == file_path and entry.get("agent") != agent_name:
-            other_agents.add(entry["agent"])
+        if entry.get("file") != file_path:
+            continue
+        entry_agent = entry.get("agent", "")
+        entry_session = entry.get("session_id", "")
+        if (entry_agent, entry_session) == self_key:
+            continue
+        other_keys.add((entry_agent, entry_session))
+        sessions_by_agent.setdefault(entry_agent, set()).add(entry_session)
 
-    if other_agents:
-        others = ", ".join(sorted(other_agents))
-        return (
-            f"File conflict: {file_path} was also edited by {others}. "
-            f"Consider coordinating via SendMessage to avoid merge conflicts."
-        )
+    if not other_keys:
+        return None
 
-    return None
+    labels = []
+    for entry_agent, entry_session in other_keys:
+        # Disambiguate with a short session_id suffix only when this agent
+        # name is shared by more than one instance (otherwise the bare name
+        # is unambiguous and cleaner).
+        if entry_session and len(sessions_by_agent.get(entry_agent, set())) > 1:
+            labels.append(f"{entry_agent} (session {entry_session[:8]})")
+        else:
+            labels.append(entry_agent)
+    others = ", ".join(sorted(labels))
+    return (
+        f"File conflict: {file_path} was also edited by {others}. "
+        f"Consider coordinating via SendMessage to avoid merge conflicts."
+    )
 
 
 def get_environment_delta(
@@ -175,16 +223,25 @@ def main():
 
     agent_name = resolve_agent_name(input_data)
     tool_name = input_data.get("tool_name", "")
+    # NEW-1 (#878): session_id is the per-instance uniqueness component of the
+    # composite editor key. Available via pact_context after init() above.
+    # resolve_agent_name is KEPT for the human-readable label.
+    session_id = get_session_id()
 
     tracking_path = str(
         Path.home() / ".claude" / "teams" / team_name / "file-edits.json"
     )
 
-    # Check for conflict BEFORE recording this edit
-    conflict = check_conflict(file_path, agent_name, tracking_path)
+    # Check for conflict BEFORE recording this edit. Pass the same
+    # (agent_name, session_id) composite so this instance's own prior edits are
+    # excluded but a different instance's are detected.
+    conflict = check_conflict(file_path, agent_name, tracking_path, session_id)
 
     # Record this edit
-    track_edit(file_path, agent_name or "orchestrator", tool_name, tracking_path)
+    track_edit(
+        file_path, agent_name or "orchestrator", tool_name, tracking_path,
+        session_id,
+    )
 
     # Warn if conflict
     if conflict:

@@ -82,14 +82,24 @@ _PLUGIN_VERSION = "9.9.9"
 # =============================================================================
 
 
-def _make_input(session_id=_SESSION_ID, source="startup"):
-    """Build a minimal UserPromptSubmit hook input dict."""
-    return {
+def _make_input(session_id=_SESSION_ID, source="startup",
+                agent_type="pact-orchestrator"):
+    """Build a minimal UserPromptSubmit hook input dict.
+
+    #878: the writer now keys lead-detection on the harness-set agent_type via
+    is_lead. The default is a LEAD frame (the unmarked case these tests
+    historically assumed). Teammate/non-lead tests pass agent_type=<teammate>
+    or agent_type=None to exercise the bypass branch.
+    """
+    data = {
         "hook_event_name": "UserPromptSubmit",
         "session_id": session_id,
         "prompt": "Hello world",
         "source": source,
     }
+    if agent_type is not None:
+        data["agent_type"] = agent_type
+    return data
 
 
 def _setup_session(monkeypatch, tmp_path, *, with_team_config=False,
@@ -359,17 +369,20 @@ class TestVerifyAndRefuse:
         assert marker.read_bytes() == before
 
     def test_teammate_session_skips_writer(self, monkeypatch, tmp_path, capsys):
-        """Teammate session (resolve_agent_name returns non-empty) → no
-        marker write. Teammates don't drive bootstrap."""
+        """Teammate session (non-lead agent_type) → no marker write.
+        Teammates don't drive bootstrap.
+
+        #878: lead-detection migrated to is_lead, which reads agent_type. A
+        specialist agent_type is not a lead spelling, so the writer bypasses.
+        """
         members = [
             {"id": "agent-uuid-xyz", "name": "secretary"},
             {"id": "agent-uuid-tm", "name": "backend-coder"},
         ]
         session_dir, _ = _setup_session(monkeypatch, tmp_path,
                                         with_team_config=True, members=members)
-        # Teammate input shape: agent_id matching a member entry.
-        input_data = _make_input()
-        input_data["agent_id"] = "agent-uuid-tm"
+        # Teammate input shape: a non-lead agent_type.
+        input_data = _make_input(agent_type="pact-backend-coder")
         code, out = _run_main(input_data, capsys)
         assert code == 0
         assert out == _SUPPRESS_EXPECTED
@@ -1085,11 +1098,13 @@ class TestSubprocessIntegration:
         )
         assert hook_path.exists(), f"writer hook missing at {hook_path}"
 
+        # #878: lead frame (agent_type) so the is_lead-gated writer runs.
         stdin_payload = json.dumps({
             "hook_event_name": "UserPromptSubmit",
             "session_id": session_id,
             "prompt": "first real prompt",
             "source": "startup",
+            "agent_type": "pact-orchestrator",
         })
 
         env = os.environ.copy()

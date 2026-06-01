@@ -27,6 +27,7 @@ from pathlib import Path
 
 from shared.constants import COMPACT_SUMMARY_PATH
 from shared.error_output import hook_error_json
+from shared.pact_context import is_lead
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +85,15 @@ def main():
         # Per #444 Tertiary: no systemMessage emission. The previously-emitted
         # "Post-compaction: critical context preserved" message was reassurance
         # that could suppress orchestrator self-check (see issue #444 root cause).
-        if compact_summary:
+        #
+        # Lead-only (#881): COMPACT_SUMMARY_PATH is a GLOBAL SINGLETON the lead
+        # reads on resume; the write is O_TRUNC, so a teammate/plain frame's
+        # PostCompact would CLOBBER the lead's summary (the 2nd acute clobber
+        # after #877). Gate the write behind is_lead. is_lead is total and only
+        # reaches stdin_data here when compact_summary is truthy, which the
+        # isinstance(dict) guard above already established — so stdin_data is a
+        # dict and the .get inside is_lead cannot raise.
+        if compact_summary and is_lead(stdin_data):
             write_compact_summary(compact_summary)
 
         # Suppress output to avoid false "hook error" UI display on clean exits.

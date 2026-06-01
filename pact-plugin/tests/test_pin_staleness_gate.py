@@ -76,8 +76,16 @@ def gate_env(tmp_path, monkeypatch, pact_context):
 
 
 def _call_gate(input_data):
-    """Invoke _check_tool_allowed directly with a synthesized input_data."""
+    """Invoke _check_tool_allowed directly with a synthesized input_data.
+
+    #878: the gate now keys lead-detection on is_lead (the harness-set
+    agent_type), not the old empty-resolve_agent_name heuristic. Default to a
+    LEAD frame (the unmarked case these DENY tests assume) unless the caller
+    supplies an explicit agent_type (teammate/plain bypass tests).
+    """
     from pin_staleness_gate import _check_tool_allowed
+    if "agent_type" not in input_data:
+        input_data = {**input_data, "agent_type": "pact-orchestrator"}
     return _check_tool_allowed(input_data)
 
 
@@ -252,14 +260,12 @@ class TestPinStalenessGate_TeammateBypass:
     """Teammates bypass the gate (worktree scope — no CLAUDE.md in worktrees)."""
 
     def test_teammate_edit_on_claude_md_allowed(self, gate_env, monkeypatch):
+        """#878: a non-lead agent_type bypasses the gate. The gate keys on
+        is_lead (agent_type), not resolve_agent_name."""
         env = gate_env(marker_present=True)
-        import shared.pact_context as ctx_module
-        monkeypatch.setattr(
-            ctx_module, "resolve_agent_name",
-            lambda _input_data: "backend-coder",
-        )
         result = _call_gate({
             "tool_name": "Edit",
+            "agent_type": "pact-backend-coder",
             "tool_input": {
                 "file_path": str(env["claude_md"]),
                 "old_string": "## Pinned Context",
@@ -359,8 +365,10 @@ class TestPinStalenessGate_MainDenyPath:
             f"{new_pin}## Working Memory\n",
         )
         assert replacement != current
+        # #878: lead frame (agent_type) so the is_lead-gated DENY path fires.
         monkeypatch.setattr(sys, "stdin", StringIO(json.dumps({
             "tool_name": "Write",
+            "agent_type": "pact-orchestrator",
             "tool_input": {
                 "file_path": str(env["claude_md"]),
                 "content": replacement,

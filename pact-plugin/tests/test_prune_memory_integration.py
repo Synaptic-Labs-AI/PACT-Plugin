@@ -76,9 +76,12 @@ def curator_env(tmp_path, monkeypatch, pact_context):
         )
 
     def _call_gate(tool_name, tool_input):
+        # #878: the gate keys lead-detection on is_lead (top-level agent_type).
+        # These integration assertions exercise the lead CLAUDE.md-edit path.
         from pin_caps_gate import _check_tool_allowed
         return _check_tool_allowed({
             "tool_name": tool_name,
+            "agent_type": "pact-orchestrator",
             "tool_input": tool_input,
         })
 
