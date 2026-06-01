@@ -279,3 +279,99 @@ class TestMainEntryPoint:
         # Issue #658: hookEventName is required by the harness schema; missing
         # it causes the harness to silently fail open (additionalContext dropped).
         assert output["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+
+
+class TestFileTrackerCompositeKey:
+    """NEW-1 (#878): the editor key is the composite (agent_name, session_id),
+    so same-agent_type instances are distinguished under tmux.
+
+    Smoke tests for the functional fix; comprehensive matrix is the TEST phase.
+    """
+
+    def test_same_agent_type_distinct_sessions_conflict_detected(self, tmp_path):
+        """Two backend-coder instances (same agent_name, DIFFERENT session_id)
+        editing one file → conflict DETECTED. The prior agent-name-only key
+        false-negatived this under tmux. Only ONE other instance exists here,
+        so the label is the bare name (no session suffix — disambiguation only
+        kicks in when a name is shared across multiple OTHER editors)."""
+        from file_tracker import track_edit, check_conflict
+
+        tracking_file = str(tmp_path / "file-edits.json")
+        abs_path = str(tmp_path / "src" / "auth.ts")
+
+        # Instance A edits.
+        track_edit(abs_path, "backend-coder", "Edit", tracking_file, session_id="sess-aaaa")
+        # Instance B (same agent_name, different session) checks before editing.
+        conflict = check_conflict(abs_path, "backend-coder", tracking_file, session_id="sess-bbbb")
+        assert conflict is not None
+        assert "auth.ts" in conflict
+        assert "backend-coder" in conflict
+
+    def test_two_same_name_other_instances_label_disambiguated(self, tmp_path):
+        """When TWO other editors share an agent_name (different sessions), the
+        labels are disambiguated with a session suffix so the message names two
+        distinct editors rather than a confusing repeated bare name."""
+        from file_tracker import track_edit, check_conflict
+
+        tracking_file = str(tmp_path / "file-edits.json")
+        abs_path = str(tmp_path / "src" / "auth.ts")
+
+        track_edit(abs_path, "backend-coder", "Edit", tracking_file, session_id="sess-aaaa")
+        track_edit(abs_path, "backend-coder", "Edit", tracking_file, session_id="sess-bbbb")
+        # A third instance checks.
+        conflict = check_conflict(abs_path, "backend-coder", tracking_file, session_id="sess-cccc")
+        assert conflict is not None
+        assert "session sess-aaa" in conflict
+        assert "session sess-bbb" in conflict
+
+    def test_same_instance_twice_no_false_positive(self, tmp_path):
+        """The SAME instance (same agent_name AND session_id) editing twice is
+        NOT a conflict."""
+        from file_tracker import track_edit, check_conflict
+
+        tracking_file = str(tmp_path / "file-edits.json")
+        abs_path = str(tmp_path / "src" / "auth.ts")
+
+        track_edit(abs_path, "backend-coder", "Edit", tracking_file, session_id="sess-aaaa")
+        conflict = check_conflict(abs_path, "backend-coder", tracking_file, session_id="sess-aaaa")
+        assert conflict is None
+
+    def test_in_process_distinct_agent_names_shared_session_detected(self, tmp_path):
+        """In-process model (one process → one shared session_id, distinct
+        agent_names) → conflict still DETECTED via the agent_name half of the
+        composite."""
+        from file_tracker import track_edit, check_conflict
+
+        tracking_file = str(tmp_path / "file-edits.json")
+        abs_path = str(tmp_path / "src" / "auth.ts")
+
+        track_edit(abs_path, "backend-coder", "Edit", tracking_file, session_id="sess-shared")
+        conflict = check_conflict(abs_path, "frontend-coder", tracking_file, session_id="sess-shared")
+        assert conflict is not None
+        assert "backend-coder" in conflict
+
+    def test_track_edit_records_session_id(self, tmp_path):
+        """The composite-key session_id component is persisted in the entry."""
+        from file_tracker import track_edit
+
+        tracking_file = tmp_path / "file-edits.json"
+        abs_path = str(tmp_path / "src" / "auth.ts")
+        track_edit(abs_path, "backend-coder", "Edit", str(tracking_file), session_id="sess-xyz")
+
+        entries = json.loads(tracking_file.read_text())
+        assert entries[0]["session_id"] == "sess-xyz"
+        assert entries[0]["agent"] == "backend-coder"  # label retained
+
+    def test_single_other_editor_label_not_disambiguated(self, tmp_path):
+        """When only ONE other editor instance exists for a name, the label is
+        the bare agent_name (no noisy session suffix)."""
+        from file_tracker import track_edit, check_conflict
+
+        tracking_file = str(tmp_path / "file-edits.json")
+        abs_path = str(tmp_path / "src" / "auth.ts")
+
+        track_edit(abs_path, "frontend-coder", "Edit", tracking_file, session_id="sess-aaaa")
+        conflict = check_conflict(abs_path, "backend-coder", tracking_file, session_id="sess-bbbb")
+        assert conflict is not None
+        assert "frontend-coder" in conflict
+        assert "session" not in conflict  # unambiguous single editor → no suffix
