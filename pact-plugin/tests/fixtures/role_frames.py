@@ -1,13 +1,31 @@
 """Synthesized hook-stdin role frames for the lead/teammate discriminator.
 
-These are SYNTHESIZED-from-matrix frames, NOT verbatim captured stdin: the
-raw platform frames were not persisted in this session. The shape matches the
-documented v4.4.0 / CC 2.1.158 capture matrix (teammate hook stdin carries
-``agent_type`` on every event; ``agent_id`` / ``agent_name`` are ABSENT under
-tmux; ``teammate_name`` appears only on TeammateIdle). Every frame carries a
-``_meta.capture_method`` stamp so no reader mistakes them for recovered
-captures. If byte-exact frames are ever needed, re-capture freshly per the
-capture spec in docs/plans/hook-lead-discriminator-fix-plan.md.
+PROVENANCE — these are SYNTHESIZED-from-matrix frames, NOT verbatim captured
+stdin: the raw platform frames were not persisted in this session. The shape
+matches the documented v4.4.0 / CC 2.1.158 capture matrix (teammate hook stdin
+carries ``agent_type`` on every event; ``agent_id`` / ``agent_name`` are ABSENT
+under tmux; ``teammate_name`` appears only on TeammateIdle). Every frame carries
+a ``_meta.capture_method`` stamp so no reader ever mistakes them for recovered
+captures.
+
+RE-CAPTURE PROCEDURE (and why it is GATED on adopting tmux):
+  The actual real-frame re-capture CANNOT be done from the current in-process
+  teammateMode — in-process teammates do not fire their own separate hook
+  lifecycle with the tmux frame shape, so there is no genuine teammate stdin to
+  capture here. Re-capture therefore stays GATED on actually adopting tmux
+  teammateMode for an unattended run. When that happens, the procedure is:
+    1. On a scratch branch, add a passive additive hook (PostToolUse /
+       SubagentStart / PreToolUse-TaskUpdate) that appends raw ``sys.stdin`` to
+       a session-id-filtered capture file — over those 3 events, to settle the
+       per-event ``agent_name`` / ``agent_id`` presence under tmux.
+    2. Run a real tmux PACT session (lead + ≥1 specialist teammate) so each
+       process fires its own hook lifecycle and real frames land in the file.
+    3. Replace these synthesized builders with the captured frames, updating
+       ``_meta.capture_method`` to record the capture date + CC build.
+  Until tmux is adopted, the synthesized shape (matched to the documented
+  matrix) is the correct and only available source — re-capture is a follow-up,
+  not a gap in this PR. See the capture spec in
+  docs/plans/hook-lead-discriminator-fix-plan.md.
 
 Consumed by test_is_lead.py (predicate truth-table) and the per-hook
 suppression tests (session_init / postcompact_archive gate behavior).

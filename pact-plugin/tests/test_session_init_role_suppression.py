@@ -133,6 +133,32 @@ class TestLeadRowsAllWritesRun:
         # paused-state surface checked.
         mocks["check_paused_state"].assert_called_once()
 
+    def test_lead_with_missing_session_id_suppresses_all_writes(
+        self, monkeypatch, tmp_path
+    ):
+        """#9: a LEAD frame with NO session_id suppresses ALL Class-A writes —
+        including update_session_info. The is_lead gate is necessary but not
+        sufficient: the `session_id_was_missing` guard (R3) independently skips
+        every persistence call so a malformed-stdin lead can't leak an
+        unreapable `pact-sessions/.../unknown-xxxx/` dir or interpolate a junk
+        session_id into the CLAUDE.md Current Session block. This pins that the
+        two gates compose (lead AND valid-session_id), not lead alone."""
+        # Lead frame (qualified) but OMIT session_id → session_id_was_missing.
+        stdin = json.dumps({**lead_frame_qualified()})  # no session_id key
+        mocks = _run_main_with(stdin, monkeypatch, tmp_path)
+
+        # The whole `if not session_id_was_missing` block is skipped: neither
+        # half of the build/persist seam, nor the journal anchor, runs.
+        mocks["build_context_cache"].assert_not_called()
+        mocks["persist_context"].assert_not_called()
+        assert _session_start_calls(mocks["append_event"]) == [], (
+            "missing-session_id lead must NOT append the session_start anchor"
+        )
+        # update_session_info is gated by `frame_is_lead AND not
+        # _is_unknown_or_missing_session` — the missing-session_id arm suppresses
+        # it even though the frame IS the lead.
+        mocks["update_session_info"].assert_not_called()
+
 
 # ===========================================================================
 # TEAMMATE + PLAIN rows — every write is SUPPRESSED.

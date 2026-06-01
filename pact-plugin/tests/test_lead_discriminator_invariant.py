@@ -230,6 +230,14 @@ def _find_env_var_role_reads(
     name contains a role token (AGENT / TEAMMATE / LEAD / ORCHESTRAT / ROLE),
     EXCLUDING the benign infra vars (CLAUDE_PROJECT_DIR, CLAUDE_PLUGIN_ROOT,
     CLAUDE_ENV_FILE — paths, not roles).
+
+    Catches BOTH the attribute form (``import os`` → ``os.environ`` /
+    ``os.getenv``, where the receiver is an ``ast.Attribute``) AND the aliased
+    form (``from os import environ`` → ``environ.get(...)`` / ``environ[...]``;
+    ``from os import getenv`` → ``getenv(...)``, where the receiver/callee is a
+    bare ``ast.Name``). Both spell the same env read; a drift author reaching
+    for an env role signal must not be able to dodge the denylist by importing
+    the name directly.
     """
     role_tokens = ("AGENT", "TEAMMATE", "LEAD", "ORCHESTRAT", "ROLE")
     benign = ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT", "CLAUDE_ENV_FILE")
@@ -241,38 +249,48 @@ def _find_env_var_role_reads(
             return False
         return any(tok in up for tok in role_tokens)
 
-    def _receiver_is_environ(attr_node: ast.Attribute) -> bool:
-        """True iff ``attr_node`` is ``<...>.environ.<attr>`` — so we only
-        match an os.environ ``.get`` and never ``input_data.get(...)`` /
-        ``tool_input.get(...)`` (those carry stdin role FIELDS, not env vars,
-        and are handled by the dedicated agent_id / is_lead detectors)."""
-        recv = attr_node.value
-        return isinstance(recv, ast.Attribute) and recv.attr == "environ"
+    def _is_environ_ref(node: ast.AST) -> bool:
+        """True iff ``node`` refers to ``os.environ`` in EITHER form:
+        - attribute: ``os.environ`` → ``ast.Attribute(attr="environ")``
+        - aliased:   ``from os import environ`` → ``ast.Name(id="environ")``
+        Matching only these never matches ``input_data.get(...)`` /
+        ``tool_input.get(...)`` (stdin role FIELDS, handled by the dedicated
+        agent_id / is_lead detectors)."""
+        return (
+            (isinstance(node, ast.Attribute) and node.attr == "environ")
+            or (isinstance(node, ast.Name) and node.id == "environ")
+        )
+
+    def _is_getenv_callee(func: ast.AST) -> bool:
+        """True iff ``func`` is a ``getenv`` callee in EITHER form:
+        - attribute: ``os.getenv`` → ``ast.Attribute(attr="getenv")``
+        - aliased:   ``from os import getenv`` → ``ast.Name(id="getenv")``."""
+        return (
+            (isinstance(func, ast.Attribute) and func.attr == "getenv")
+            or (isinstance(func, ast.Name) and func.id == "getenv")
+        )
 
     for node in ast.walk(tree):
-        # os.environ.get("KEY") / os.getenv("KEY")
-        if isinstance(node, ast.Call):
+        # os.environ.get("KEY") / environ.get("KEY") / os.getenv("KEY") / getenv("KEY")
+        if isinstance(node, ast.Call) and node.args:
             func = node.func
-            if not (isinstance(func, ast.Attribute) and node.args):
-                continue
-            # `.get` must be on an os.environ receiver; `getenv` is always env.
-            is_env_get = (
-                (func.attr == "get" and _receiver_is_environ(func))
-                or func.attr == "getenv"
+            # `.get` must be on an os.environ receiver (attr OR aliased Name);
+            # `getenv` (attr OR aliased bare Name) is always an env read.
+            is_environ_get = (
+                isinstance(func, ast.Attribute)
+                and func.attr == "get"
+                and _is_environ_ref(func.value)
             )
+            is_env_get = is_environ_get or _is_getenv_callee(func)
             if is_env_get:
                 arg0 = node.args[0]
                 if isinstance(arg0, ast.Constant) and isinstance(arg0.value, str):
                     if _key_is_role(arg0.value):
                         offending.append((_enclosing_function(tree, node), node.lineno))
-        # os.environ["KEY"]
+        # os.environ["KEY"] / environ["KEY"]
         if isinstance(node, ast.Subscript):
-            value = node.value
-            is_environ = (
-                isinstance(value, ast.Attribute) and value.attr == "environ"
-            )
             sl = node.slice
-            if is_environ and isinstance(sl, ast.Constant) and isinstance(sl.value, str):
+            if _is_environ_ref(node.value) and isinstance(sl, ast.Constant) and isinstance(sl.value, str):
                 if _key_is_role(sl.value):
                     offending.append((_enclosing_function(tree, node), node.lineno))
     return offending
@@ -517,6 +535,77 @@ class TestNegativeLegDetectorsFire:
         assert hits == [], (
             f"Stdin-field .get() calls were misflagged as env-var reads: "
             f"{hits}. The detector must require an os.environ receiver."
+        )
+
+    # ---- #5: aliased `from os import ...` forms must ALSO be detected ----
+    # The first pass matched only the ATTRIBUTE form (os.environ / os.getenv,
+    # receiver = ast.Attribute). A drift author could dodge the denylist by
+    # importing the name directly (`from os import environ` / `from os import
+    # getenv`), where the receiver/callee is a bare ast.Name. These phantom-green
+    # proofs pin that the aliased forms are now caught.
+
+    def test_env_var_detector_fires_on_aliased_environ_get(self):
+        """`from os import environ` → `environ.get('CLAUDE_AGENT_TYPE')` (Name
+        receiver, not os.environ Attribute) MUST be detected."""
+        src = (
+            "from os import environ\n"
+            "def gate(input_data):\n"
+            "    if environ.get('CLAUDE_AGENT_TYPE') == 'lead':\n"
+            "        return None\n"
+        )
+        tree = ast.parse(src)
+        hits = _find_env_var_role_reads(tree, "some_new_gate.py")
+        assert hits, (
+            "aliased environ.get role read was NOT detected — a drift author "
+            "could dodge the denylist via `from os import environ`."
+        )
+
+    def test_env_var_detector_fires_on_aliased_getenv(self):
+        """`from os import getenv` → `getenv('CLAUDE_LEAD')` (bare Name callee,
+        not os.getenv Attribute) MUST be detected."""
+        src = (
+            "from os import getenv\n"
+            "def gate(input_data):\n"
+            "    return getenv('CLAUDE_LEAD')\n"
+        )
+        tree = ast.parse(src)
+        hits = _find_env_var_role_reads(tree, "some_new_gate.py")
+        assert hits, (
+            "aliased getenv role read was NOT detected — a drift author could "
+            "dodge the denylist via `from os import getenv`."
+        )
+
+    def test_env_var_detector_fires_on_aliased_environ_subscript(self):
+        """`from os import environ` → `environ['CLAUDE_ORCHESTRATOR']` (Name
+        subscript value, not os.environ Attribute) MUST be detected."""
+        src = (
+            "from os import environ\n"
+            "def gate(input_data):\n"
+            "    return environ['CLAUDE_ORCHESTRATOR']\n"
+        )
+        tree = ast.parse(src)
+        hits = _find_env_var_role_reads(tree, "some_new_gate.py")
+        assert hits, (
+            "aliased environ[...] role read was NOT detected — a drift author "
+            "could dodge the denylist via `from os import environ` subscript."
+        )
+
+    def test_env_var_detector_aliased_form_still_ignores_benign(self):
+        """The receiver-form fix must NOT relax the benign-infra allowlist:
+        aliased reads of CLAUDE_PLUGIN_ROOT / CLAUDE_PROJECT_DIR still pass."""
+        src = (
+            "from os import environ, getenv\n"
+            "def main():\n"
+            "    pr = environ.get('CLAUDE_PLUGIN_ROOT', '')\n"
+            "    pd = getenv('CLAUDE_PROJECT_DIR')\n"
+            "    ef = environ['CLAUDE_ENV_FILE']\n"
+            "    return pr, pd, ef\n"
+        )
+        tree = ast.parse(src)
+        hits = _find_env_var_role_reads(tree, "session_init.py")
+        assert hits == [], (
+            f"Aliased benign infra env reads were misflagged: {hits}. The "
+            f"aliased-form fix must keep the benign allowlist intact."
         )
 
 
