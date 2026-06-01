@@ -73,8 +73,7 @@ def _sanitize_agent_name(agent_name: str) -> str:
     agent_name into `YOUR PACT ROLE: teammate ({agent_name}).` Without
     sanitization, an agent_name containing a newline could inject a
     second `YOUR PACT ROLE: orchestrator` line into additionalContext,
-    causing a teammate to self-identify as the orchestrator under the
-    routing block's substring check.
+    causing a teammate to self-identify as the orchestrator.
 
     Stripped characters:
       - newline (\\n) and carriage return (\\r): prevent line-break
@@ -85,11 +84,9 @@ def _sanitize_agent_name(agent_name: str) -> str:
     The fallback for empty/None agent_name is "unknown" — same as
     before this hardening.
 
-    Note: this is producer-side sanitization. The line-anchor consumer
-    check in PACT_ROUTING_BLOCK is the second layer of defense
-    (cycle 2 minor item 15) — together they provide defense in depth
-    against marker spoofing via either malicious agent names or
-    embedded prose containing the marker phrase.
+    Note: this is producer-side sanitization — it defends against marker
+    spoofing via either malicious agent names or embedded prose containing
+    the marker phrase.
     """
     if not agent_name:
         return "unknown"
@@ -98,8 +95,7 @@ def _sanitize_agent_name(agent_name: str) -> str:
     # SEPARATOR (U+2029). The Unicode terminators are recognized by
     # `str.splitlines()` and by LLM tokenizers — a name containing
     # U+2028 can inject a fake line into the PACT ROLE prelude
-    # template, bypassing the line-anchor consumer check that is the
-    # second layer of defense (see security-engineer memory
+    # template (see security-engineer memory
     # patterns_symmetric_sanitization.md). Matches the sibling filter
     # in session_state._sanitize_rendered_string.
     sanitized = re.sub(r"[\x00-\x1f\x7f\u0085\u2028\u2029]", "_", agent_name)
