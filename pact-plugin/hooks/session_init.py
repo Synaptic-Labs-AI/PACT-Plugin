@@ -88,6 +88,7 @@ from shared.dispatch_helpers import is_registered_pact_specialist
 from shared.session_journal import append_event, make_event
 from shared.failure_log import append_failure
 from shared.plugin_manifest import format_plugin_banner
+from shared.peer_context import get_peer_context
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import setup_plugin_symlinks
@@ -1145,90 +1146,114 @@ def main():
         #      the bootstrap directive.
         tasks = get_task_list()
 
-        if source == "compact" and team_exists:
-            # Post-compaction: bootstrap directive (in _team_reuse) subsumes
-            # "recover state" guidance; keep concrete task-resumption bullets
-            # for the orchestrator's next actions after bootstrap.
-            context_parts.insert(0, (
-                f'{_team_reuse} '
-                f'After bootstrap, recover session state: '
-                f'(1) Read {COMPACT_SUMMARY_PATH} for prior context, '
-                f'(2) Run TaskList to find in-progress work, '
-                f'(3) TaskGet on in-progress tasks for details. '
-                f"Re-engage secretary: SendMessage(to='secretary', "
-                f"message='Post-compaction: deliver session briefing with current state.')."
-            ))
-            # Secondary-layer (#444): append POST-COMPACTION CHECKPOINT block
-            # when tasks in_progress. Consumes the hoisted `tasks` variable
-            # (single source of truth).
-            if tasks:
-                _in_progress = [
-                    t for t in tasks
-                    if t.get("status") == "in_progress"
-                ]
-                if _in_progress:
-                    _checkpoint_block = build_post_compaction_checkpoint(
-                        feature=find_feature_task(tasks),
-                        phase=find_current_phase(tasks),
-                        agents=find_active_agents(tasks),
-                        blockers=find_blockers(tasks),
-                    )
-                    context_parts.append(_checkpoint_block)
-        elif source == "clear" and team_exists:
-            # Context cleared via /clear: no compact-summary, but team and tasks survive
-            context_parts.insert(0, (
-                f'{_team_reuse} '
-                f'CONTEXT CLEARED: Your context was cleared via /clear. '
-                f'State recovery: '
-                f'(1) TaskList for current tasks, '
-                f'(2) TaskGet on in-progress tasks. '
-                f"Re-engage secretary: SendMessage(to='secretary', "
-                f"message='Context cleared: deliver fresh briefing with current project state.')."
-            ))
-        elif source == "resume" and team_exists:
-            # Normal resume: model retains context, team exists
-            context_parts.insert(0, (
-                f'{_team_reuse} '
-                f'Check session journal for paused state from /PACT:pause.'
-            ))
-        elif source == "startup" and not team_exists:
-            # Fresh session: full initialization
-            context_parts.insert(0, _team_create)
-        elif team_exists:
-            # Anomalous: unexpected source but team exists (e.g., startup + team exists)
-            # Reuse team, note the anomaly
-            context_parts.insert(0, (
-                f'{_team_reuse} '
-                f'Note: Unexpected session source "{source}" with existing team — '
-                f'reusing team. Run TaskList to check current state.'
-            ))
+        # Family E relocation (#806): a separate-process (e.g. tmux/iterm2)
+        # teammate fires its OWN SessionStart — unlike an in-process teammate,
+        # which fires SubagentStart (covered by peer_inject). The two surfaces
+        # are mode-exclusive (one teammate fires exactly one), so injecting the
+        # peer-context body here causes no double-injection. classify_session_role
+        # is the fail-safe gate: only a genuine "teammate" frame takes this branch;
+        # "lead" AND "unknown"/empty agent_type both fall to the else-branch, which
+        # keeps the existing orchestrator-directive ladder UNCHANGED. Emitting the
+        # marker-free body (include_role_marker=False) ALSO suppresses the
+        # "YOUR PACT ROLE: orchestrator" block for teammate frames — that
+        # unconditional orchestrator block was the mis-roling bug (a teammate
+        # self-identifying as orchestrator); the role marker is omitted because
+        # the spawn prompt already owns the role and session_init lacks agent_name
+        # under tmux. This is a CONDITIONAL EMISSION, not a new numbered step.
+        if classify_session_role(input_data) == "teammate":
+            _peer_body = get_peer_context(
+                agent_type=input_data.get("agent_type", ""),
+                team_name=team_name,
+                agent_name=input_data.get("agent_name", ""),
+                include_role_marker=False,
+            )
+            if _peer_body:
+                context_parts.insert(0, _peer_body)
         else:
-            # Differentiate the no-team branch by whether `source` is a
-            # recognized lifecycle value:
-            #   - known source + no team → informational note (recovery
-            #     hint stays; no WARNING tone). Legitimate first-session-
-            #     after-stale-CLAUDE.md class.
-            #   - unknown source + no team → emit WARNING in
-            #     additionalContext AND stderr for observability (debug
-            #     logs surface the malformed-stdin signal).
-            _KNOWN_SOURCES = {"startup", "resume", "compact", "clear"}
-            if source in _KNOWN_SOURCES:
+            if source == "compact" and team_exists:
+                # Post-compaction: bootstrap directive (in _team_reuse) subsumes
+                # "recover state" guidance; keep concrete task-resumption bullets
+                # for the orchestrator's next actions after bootstrap.
                 context_parts.insert(0, (
-                    f'{_team_create} '
-                    f'Session source "{source}" without team — '
-                    f'creating fresh team. Run TaskList to check current state.'
+                    f'{_team_reuse} '
+                    f'After bootstrap, recover session state: '
+                    f'(1) Read {COMPACT_SUMMARY_PATH} for prior context, '
+                    f'(2) Run TaskList to find in-progress work, '
+                    f'(3) TaskGet on in-progress tasks for details. '
+                    f"Re-engage secretary: SendMessage(to='secretary', "
+                    f"message='Post-compaction: deliver session briefing with current state.')."
+                ))
+                # Secondary-layer (#444): append POST-COMPACTION CHECKPOINT block
+                # when tasks in_progress. Consumes the hoisted `tasks` variable
+                # (single source of truth).
+                if tasks:
+                    _in_progress = [
+                        t for t in tasks
+                        if t.get("status") == "in_progress"
+                    ]
+                    if _in_progress:
+                        _checkpoint_block = build_post_compaction_checkpoint(
+                            feature=find_feature_task(tasks),
+                            phase=find_current_phase(tasks),
+                            agents=find_active_agents(tasks),
+                            blockers=find_blockers(tasks),
+                        )
+                        context_parts.append(_checkpoint_block)
+            elif source == "clear" and team_exists:
+                # Context cleared via /clear: no compact-summary, but team and tasks survive
+                context_parts.insert(0, (
+                    f'{_team_reuse} '
+                    f'CONTEXT CLEARED: Your context was cleared via /clear. '
+                    f'State recovery: '
+                    f'(1) TaskList for current tasks, '
+                    f'(2) TaskGet on in-progress tasks. '
+                    f"Re-engage secretary: SendMessage(to='secretary', "
+                    f"message='Context cleared: deliver fresh briefing with current project state.')."
+                ))
+            elif source == "resume" and team_exists:
+                # Normal resume: model retains context, team exists
+                context_parts.insert(0, (
+                    f'{_team_reuse} '
+                    f'Check session journal for paused state from /PACT:pause.'
+                ))
+            elif source == "startup" and not team_exists:
+                # Fresh session: full initialization
+                context_parts.insert(0, _team_create)
+            elif team_exists:
+                # Anomalous: unexpected source but team exists (e.g., startup + team exists)
+                # Reuse team, note the anomaly
+                context_parts.insert(0, (
+                    f'{_team_reuse} '
+                    f'Note: Unexpected session source "{source}" with existing team — '
+                    f'reusing team. Run TaskList to check current state.'
                 ))
             else:
-                print(
-                    f"session_init: unknown source value: {source!r}",
-                    file=sys.stderr,
-                )
-                context_parts.insert(0, (
-                    f'{_team_create} '
-                    f'WARNING: Unrecognized session source "{source}" — '
-                    f'previous session state may be lost. '
-                    f'Check TaskList for recovery context.'
-                ))
+                # Differentiate the no-team branch by whether `source` is a
+                # recognized lifecycle value:
+                #   - known source + no team → informational note (recovery
+                #     hint stays; no WARNING tone). Legitimate first-session-
+                #     after-stale-CLAUDE.md class.
+                #   - unknown source + no team → emit WARNING in
+                #     additionalContext AND stderr for observability (debug
+                #     logs surface the malformed-stdin signal).
+                _KNOWN_SOURCES = {"startup", "resume", "compact", "clear"}
+                if source in _KNOWN_SOURCES:
+                    context_parts.insert(0, (
+                        f'{_team_create} '
+                        f'Session source "{source}" without team — '
+                        f'creating fresh team. Run TaskList to check current state.'
+                    ))
+                else:
+                    print(
+                        f"session_init: unknown source value: {source!r}",
+                        file=sys.stderr,
+                    )
+                    context_parts.insert(0, (
+                        f'{_team_create} '
+                        f'WARNING: Unrecognized session source "{source}" — '
+                        f'previous session state may be lost. '
+                        f'Check TaskList for recovery context.'
+                    ))
 
         # 5a. Capture the PREVIOUS session's dir from project CLAUDE.md
         # before step 5b overwrites the Current Session block with THIS
