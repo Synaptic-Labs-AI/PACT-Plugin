@@ -371,11 +371,12 @@ def is_lead(input_data: dict) -> bool:
     definitionally not a lead spelling anyway, so it short-circuits to False.
     ``dict.get`` on a non-dict input would still raise, so callers that may pass
     a non-dict must guard upstream; in practice every hook parses stdin into a
-    dict before calling. Totality preserves each gate's existing exception-fail-
-    CLOSED path — a raising predicate would change that fail semantics. (We
-    deliberately do NOT add an ``isinstance(input_data, dict)`` guard: it would
-    change the gates' fail-CLOSED contract, which relies on a non-dict stdin
-    raising through to each gate's own try/except.)
+    dict before calling. Totality preserves each gate's existing exception
+    posture (``bootstrap_gate`` fail-CLOSED; the pin gates fail-OPEN) — a raising
+    predicate would change that per-gate fail semantics. (We deliberately do NOT
+    add an ``isinstance(input_data, dict)`` guard: it would change those per-gate
+    postures, which rely on a non-dict stdin raising through to each gate's own
+    try/except.)
 
     COORDINATION CONTROL, NOT A SECURITY BOUNDARY. This predicate decides
     *coordination* (which frame performs lead-only writes / drives the
