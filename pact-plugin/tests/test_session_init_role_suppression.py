@@ -73,7 +73,9 @@ def _run_main_with(stdin_data: str, monkeypatch, tmp_path):
          patch("session_init.check_pinned_staleness", return_value=None), \
          patch("session_init.get_task_list", return_value=None), \
          patch("session_init.restore_last_session", return_value=None), \
-         patch("session_init.write_context") as mock_write_ctx, \
+         patch("session_init.build_context_cache",
+               return_value=(Path("/tmp/ctx.json"), {})) as mock_build_ctx, \
+         patch("session_init.persist_context", return_value=None) as mock_persist, \
          patch("session_init.append_event") as mock_append, \
          patch("session_init.update_session_info", return_value=None) as mock_update, \
          patch("session_init.check_paused_state", return_value=None) as mock_paused, \
@@ -84,7 +86,11 @@ def _run_main_with(stdin_data: str, monkeypatch, tmp_path):
 
     assert exc_info.value.code == 0
     return {
-        "write_context": mock_write_ctx,
+        # #878 SHAPE-2: the disk/cache seam is two functions. build_context_cache
+        # runs for EVERY frame (cache always populated); persist_context (the disk
+        # side-effect) runs ONLY for a lead frame.
+        "build_context_cache": mock_build_ctx,
+        "persist_context": mock_persist,
         "append_event": mock_append,
         "update_session_info": mock_update,
         "check_paused_state": mock_paused,
@@ -114,11 +120,10 @@ class TestLeadRowsAllWritesRun:
     def test_lead_runs_all_four_writes(self, frame_builder, monkeypatch, tmp_path):
         mocks = _run_main_with(_stdin_for(frame_builder()), monkeypatch, tmp_path)
 
-        # write_context invoked with write_disk=True (the disk write happens).
-        mocks["write_context"].assert_called_once()
-        assert mocks["write_context"].call_args.kwargs.get("write_disk") is True, (
-            "lead frame must call write_context with write_disk=True"
-        )
+        # #878 SHAPE-2: cache is built for every frame; the lead ALSO persists to
+        # disk (persist_context fires).
+        mocks["build_context_cache"].assert_called_once()
+        mocks["persist_context"].assert_called_once()
         # session_start journal anchor appended.
         assert _session_start_calls(mocks["append_event"]), (
             "lead frame must append the session_start journal anchor"
@@ -136,8 +141,8 @@ class TestLeadRowsAllWritesRun:
 class TestNonLeadRowsAllWritesSuppressed:
     """For a teammate or plain frame, all 4 Class-A writes are suppressed.
 
-    write_context is still CALLED (the cache must be populated — see
-    TestWriteContextSplit) but with write_disk=False so no disk write occurs;
+    build_context_cache is still CALLED (the cache must be populated — see
+    TestWriteContextSplit) but persist_context (the disk write) is NOT called;
     the other 3 writes are not called at all.
     """
 
@@ -150,13 +155,11 @@ class TestNonLeadRowsAllWritesSuppressed:
     ):
         mocks = _run_main_with(_stdin_for(frame_builder()), monkeypatch, tmp_path)
 
-        # write_context IS called (cache population is unconditional) but the
-        # disk write is gated OFF (write_disk=False).
-        mocks["write_context"].assert_called_once()
-        assert mocks["write_context"].call_args.kwargs.get("write_disk") is False, (
-            f"{role} frame must call write_context with write_disk=False "
-            f"(disk write suppressed, cache still populated)"
-        )
+        # #878 SHAPE-2: build_context_cache IS called (cache population is
+        # unconditional) but persist_context (the disk write) is NOT — the disk
+        # side-effect is gated on is_lead.
+        mocks["build_context_cache"].assert_called_once()
+        mocks["persist_context"].assert_not_called()
         # The other 3 lead-only writes are NOT called at all.
         assert _session_start_calls(mocks["append_event"]) == [], (
             f"{role} frame must NOT append the session_start journal anchor"
@@ -172,7 +175,9 @@ class TestNonLeadRowsAllWritesSuppressed:
             mocks = _run_main_with(
                 _stdin_for(teammate_frame(agent_type=at)), monkeypatch, tmp_path
             )
-            assert mocks["write_context"].call_args.kwargs.get("write_disk") is False
+            # #878 SHAPE-2: cache built, but the disk persist is suppressed.
+            mocks["build_context_cache"].assert_called_once()
+            mocks["persist_context"].assert_not_called()
             mocks["update_session_info"].assert_not_called()
 
 
@@ -181,82 +186,87 @@ class TestNonLeadRowsAllWritesSuppressed:
 # ===========================================================================
 
 class TestWriteContextSplit:
-    """write_context populates _cache/_context_path UNCONDITIONALLY but gates
-    the on-disk write on write_disk. Exercises the REAL write_context (not a
-    mock) — this is the #877 split's correctness property. The autouse
-    _reset_pact_context_state fixture (conftest.py) gives each test a clean
-    cache.
+    """#878 SHAPE-2 seam: build_context_cache populates _cache/_context_path
+    UNCONDITIONALLY (NO disk I/O); persist_context is the separate is_lead-gated
+    disk write. The #877 split's correctness property. Exercises the REAL
+    functions (not mocks). The autouse _reset_pact_context_state fixture
+    (conftest.py) gives each test a clean cache.
     """
 
     def test_non_lead_populates_cache_but_writes_no_disk_file(self, monkeypatch, tmp_path):
-        """write_disk=False: _cache + _context_path are set (get_session_dir
-        works) and NO on-disk pact-session-context.json is created."""
+        """Non-lead = build_context_cache ONLY (no persist): _cache +
+        _context_path are set (get_session_dir works) and NO on-disk
+        pact-session-context.json is created."""
         import shared.pact_context as ctx
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         # Pre-state: autouse reset leaves both None.
         assert ctx._cache is None and ctx._context_path is None
 
-        ctx.write_context(
-            "pact-aabb1122", _SESSION_ID, str(tmp_path / "proj"),
-            "", write_disk=False,
+        result = ctx.build_context_cache(
+            "pact-aabb1122", _SESSION_ID, str(tmp_path / "proj"), "",
         )
+        # (no persist_context call — this is the non-lead path)
 
-        # Cache + path populated unconditionally.
+        assert result is not None
+        # Cache + path populated unconditionally by the builder.
         assert ctx._cache is not None, "non-lead frame must still populate _cache"
         assert ctx._cache["session_id"] == _SESSION_ID
         assert ctx._context_path is not None, "non-lead frame must set _context_path"
         # get_session_dir() (the downstream consumer) resolves off the cache.
         assert ctx.get_session_dir(), "get_session_dir must work for a non-lead frame"
-        # But NO disk file was written.
+        # But NO disk file was written (persist_context was never called).
         assert not ctx._context_path.exists(), (
-            "write_disk=False must NOT create the on-disk session-context file "
+            "skipping persist must NOT create the on-disk session-context file "
             "(the lead-only artifact a teammate frame must not clobber)"
         )
 
     def test_lead_populates_cache_and_writes_disk_file(self, monkeypatch, tmp_path):
-        """write_disk=True (lead): _cache populated AND the on-disk file
-        exists with the expected content — byte-for-byte historical behavior."""
+        """Lead = build_context_cache THEN persist_context: _cache populated AND
+        the on-disk file exists with the expected content — byte-for-byte
+        historical behavior."""
         import shared.pact_context as ctx
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         assert ctx._cache is None and ctx._context_path is None
 
-        ctx.write_context(
-            "pact-aabb1122", _SESSION_ID, str(tmp_path / "proj"),
-            "", write_disk=True,
+        result = ctx.build_context_cache(
+            "pact-aabb1122", _SESSION_ID, str(tmp_path / "proj"), "",
         )
+        assert result is not None
+        ctx.persist_context(*result)
 
         assert ctx._cache is not None
         assert ctx._context_path is not None
         assert ctx._context_path.exists(), (
-            "write_disk=True (lead) must create the on-disk session-context file"
+            "lead path (build + persist) must create the on-disk session-context file"
         )
         written = json.loads(ctx._context_path.read_text(encoding="utf-8"))
         assert written["session_id"] == _SESSION_ID
         assert written["team_name"] == "pact-aabb1122"
 
     def test_cache_identical_between_disk_and_no_disk(self, monkeypatch, tmp_path):
-        """The in-memory cache content is IDENTICAL whether or not the disk
-        write happens — the split changes only the disk side-effect, never the
-        cache the downstream consumers read. (started_at differs by clock, so
-        compare the stable fields.)"""
+        """The in-memory cache content is IDENTICAL whether or not persist runs
+        — the seam changes only the disk side-effect, never the cache the
+        downstream consumers read. (started_at differs by clock, so compare the
+        stable fields.)"""
         import shared.pact_context as ctx
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        ctx.write_context("pact-x", _SESSION_ID, "/p", "plug", write_disk=False)
+        ctx.build_context_cache("pact-x", _SESSION_ID, "/p", "plug")  # no persist
         no_disk = {k: ctx._cache[k] for k in
                    ("team_name", "session_id", "project_dir", "plugin_root")}
 
         ctx.reset_for_tests()
-        ctx.write_context("pact-x", _SESSION_ID, "/p", "plug", write_disk=True)
+        result = ctx.build_context_cache("pact-x", _SESSION_ID, "/p", "plug")
+        ctx.persist_context(*result)
         with_disk = {k: ctx._cache[k] for k in
                      ("team_name", "session_id", "project_dir", "plugin_root")}
 
         assert no_disk == with_disk, (
-            "the in-memory cache must be identical regardless of write_disk — "
-            "the split gates ONLY the disk side-effect"
+            "the in-memory cache must be identical regardless of whether persist "
+            "runs — the seam gates ONLY the disk side-effect"
         )
 
 
@@ -279,7 +289,7 @@ class TestUnknownRoleStartupWarning:
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.write_context", return_value=None), \
+             patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.check_paused_state", return_value=None), \

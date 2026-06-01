@@ -2604,7 +2604,7 @@ class TestSessionInitJournalWrite:
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.get_task_list", return_value=[]), \
-             patch("session_init.write_context"), \
+             patch("session_init.persist_context"), \
              patch("session_init.check_resumption_context", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
              patch("session_init.check_paused_state", return_value=None):

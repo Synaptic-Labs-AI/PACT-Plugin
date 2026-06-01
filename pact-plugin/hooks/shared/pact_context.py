@@ -501,48 +501,43 @@ def _lookup_agent_in_team_config(
     return ""
 
 
-def write_context(
+def build_context_cache(
     team_name: str,
     session_id: str,
     project_dir: str,
     plugin_root: str = "",
-    write_disk: bool = True,
-) -> None:
-    """
-    Write the session context file. Called ONLY by session_init.py.
+) -> tuple[Path, dict] | None:
+    """Build the session context dict + path and populate the in-process cache.
 
-    Computes the session-scoped path from session_id and project_dir:
-        ~/.claude/pact-sessions/{project-slug}/{session-id}/pact-session-context.json
-    Requires session_id and project_dir — returns without writing if either
-    is missing (the fail-open read behavior handles the no-file case).
+    PURE of disk I/O: this is the cache-half of the session-context write. It
+    builds the ``context`` dict, resolves the session-scoped ``target`` path,
+    and populates the module-level ``_cache`` / ``_context_path`` so same-process
+    readers (``get_session_dir()`` and ``append_event()``'s implicit
+    path-resolution) work immediately — but it NEVER touches disk.
 
-    Uses atomic write (write to temp file, then os.rename) for crash safety.
-    File permissions: 0o600 (user-only read/write).
+    Returns ``(target, context)`` so a caller can pass them straight to
+    ``persist_context()``; returns ``None`` when the session-scoped path cannot
+    be computed (missing ``session_id`` / ``project_dir``), preserving the
+    historical skip-write behavior (readers fall back to ``_EMPTY_CONTEXT``).
 
-    Also sets _context_path so subsequent reads in the same process use the
-    correct path (relevant for session_init.py which may read context after writing).
-
-    DISK-WRITE / CACHE SPLIT (#877 — the one non-mechanical lead-gate site):
-    this function COUPLES two responsibilities — (1) the on-disk session-context
-    file and (2) the in-process ``_cache`` / ``_context_path`` population that
-    ``get_session_dir()`` and ``append_event()``'s implicit path-resolution read.
-    The on-disk file is the lead-only artifact a teammate frame must NOT clobber
-    (#877); but ``session_init`` does NOT call ``pact_context.init()`` — it relies
-    on this function to populate the cache, so blanket-gating the whole call
-    would also starve same-process readers of the cache. ``write_disk``
-    decouples the two: gate ONLY the disk side-effect on ``is_lead`` while
-    populating the cache UNCONDITIONALLY. Non-lead frames thus get identical
-    in-memory cache behavior (no behavior change for ``get_session_dir()``) but
-    perform NO disk write. ``write_disk=True`` preserves the historical
-    lead-path behavior byte-for-byte.
+    CACHE OWNERSHIP (#877, the disk/cache seam): this function is the SOLE owner
+    of ``_cache`` / ``_context_path``. The cache is the PROCESS'S OWN working
+    context — populated UNCONDITIONALLY for every frame (lead, teammate, plain),
+    independent of whether the disk file is ever persisted. Disk persistence is
+    a separate, ``is_lead``-gated best-effort side-effect (``persist_context``)
+    for OTHER processes to read; a non-lead frame builds+caches and never
+    persists, and a lead frame whose ``persist_context`` later raises STILL has
+    its correct in-memory context (it is NOT unset on persist failure). This
+    uniform rule replaced the old ``write_disk`` flag — see ``persist_context``.
 
     Args:
         team_name: The generated team name (e.g., "pact-0001639f")
         session_id: Session ID from stdin JSON or env var
         project_dir: CLAUDE_PROJECT_DIR value
         plugin_root: CLAUDE_PLUGIN_ROOT value (path to installed plugin directory)
-        write_disk: When False, populate the in-process cache/path but skip the
-            on-disk write (non-lead frames — #877). Defaults to True (lead path).
+
+    Returns:
+        ``(target, context)`` on success, or ``None`` if the path is uncomputable.
     """
     global _context_path, _cache
 
@@ -564,24 +559,39 @@ def write_context(
             _build_session_path(slug, session_id) / "pact-session-context.json"
         )
     else:
-        # Cannot compute session-scoped path — skip writing.
+        # Cannot compute session-scoped path — skip.
         # Readers fall back to empty context via _EMPTY_CONTEXT.
         print(
             "pact_context: skipping write — session_id or project_dir unavailable",
             file=sys.stderr,
         )
-        return
+        return None
 
-    # Non-lead frame (#877): populate the in-process cache/path so same-process
-    # readers (get_session_dir, append_event path-resolution) behave exactly as
-    # on the lead path, but do NOT touch disk — the on-disk session-context file
-    # is a lead-only artifact and a teammate write would create a phantom
-    # session dir. No mkdir, no temp file, no rename.
-    if not write_disk:
-        _context_path = target
-        _cache = context
-        return
+    # Populate the in-process cache UNCONDITIONALLY (Option A). The cache is the
+    # process's own working truth; disk persistence is an independent side-effect.
+    _context_path = target
+    _cache = context
+    return target, context
 
+
+def persist_context(target: Path, context: dict) -> None:
+    """Atomically write the session context to disk. The impure half of the seam.
+
+    Writes ``context`` to ``target`` via a temp file + ``os.rename`` (crash-safe
+    atomic write), 0o600 permissions. Called ONLY for a lead frame (the on-disk
+    session-context file is a lead-only artifact a teammate/plain frame must NOT
+    clobber — #877). Fail-open: any error is logged and swallowed.
+
+    DOES NOT touch ``_cache`` / ``_context_path`` — ``build_context_cache`` is the
+    sole owner of cache state (Option A). A persist failure therefore leaves the
+    process's in-memory context intact (correct values), rather than unsetting it
+    and degrading the lead to empty strings. ``target`` / ``context`` are exactly
+    the pair returned by ``build_context_cache``.
+
+    Args:
+        target: The resolved session-context file path (from build_context_cache).
+        context: The context dict to serialize (from build_context_cache).
+    """
     context_dir = target.parent
     try:
         context_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -604,16 +614,48 @@ def write_context(
             except OSError:
                 pass
             raise
-
-        # Only after successful rename: update module state so reads in the
-        # same process find the file. Populate _cache so get_session_dir()
-        # works right after write_context() within the same process (e.g.,
-        # session_init.py). On rename failure, the cache stays unset and the
-        # in-memory state matches the on-disk state (no file).
-        _context_path = target
-        _cache = context
     except Exception as e:
         print(
             f"pact_context: could not write context file: {e}",
             file=sys.stderr,
         )
+
+
+def write_context(
+    team_name: str,
+    session_id: str,
+    project_dir: str,
+    plugin_root: str = "",
+) -> None:
+    """
+    Write the session context file (full op: build + cache + persist to disk).
+
+    Computes the session-scoped path from session_id and project_dir:
+        ~/.claude/pact-sessions/{project-slug}/{session-id}/pact-session-context.json
+    Requires session_id and project_dir — returns without writing if either
+    is missing (the fail-open read behavior handles the no-file case).
+
+    Uses atomic write (write to temp file, then os.rename) for crash safety.
+    File permissions: 0o600 (user-only read/write).
+
+    Also populates ``_cache`` / ``_context_path`` so subsequent reads in the same
+    process use the correct path (relevant for callers that read context after
+    writing).
+
+    SEAM (#877): this is the thin composition of the two halves —
+    ``build_context_cache`` (pure: build dict + path + populate cache) followed by
+    ``persist_context`` (impure: disk write). ``session_init`` does NOT call this
+    full op; it composes the two halves directly so it can populate the cache for
+    EVERY frame while gating the disk persist on ``is_lead`` (a teammate/plain
+    frame must not clobber the lead's on-disk file). Every OTHER caller wants the
+    full build+cache+persist and keeps this unchanged public contract.
+
+    Args:
+        team_name: The generated team name (e.g., "pact-0001639f")
+        session_id: Session ID from stdin JSON or env var
+        project_dir: CLAUDE_PROJECT_DIR value
+        plugin_root: CLAUDE_PLUGIN_ROOT value (path to installed plugin directory)
+    """
+    result = build_context_cache(team_name, session_id, project_dir, plugin_root)
+    if result is not None:
+        persist_context(*result)

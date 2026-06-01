@@ -78,10 +78,11 @@ from pin_caps import (  # noqa: F401
 from shared import BOOTSTRAP_MARKER_NAME, SESSION_ID_CONTROL_CHARS_RE, build_session_path
 from shared.constants import COMPACT_SUMMARY_PATH
 from shared.pact_context import (
+    build_context_cache,
     classify_session_role,
     get_session_dir,
     is_lead,
-    write_context,
+    persist_context,
 )
 from shared.session_journal import append_event, make_event
 from shared.failure_log import append_failure
@@ -969,16 +970,20 @@ def main():
         frame_is_lead = is_lead(input_data)
         if not session_id_was_missing:
             try:
-                # SPLIT (#877): always populate the in-process cache/path so
+                # SEAM (#877): compose the two halves directly. ALWAYS build +
+                # cache (every frame gets the in-process context so
                 # get_session_dir() and append_event's path-resolution behave
-                # identically for every frame; gate ONLY the disk write on
-                # is_lead so a teammate/plain frame never clobbers the lead's
-                # on-disk session-context file (or creates a phantom session
-                # dir). See write_context's DISK-WRITE / CACHE SPLIT docstring.
-                write_context(
+                # identically), then persist to disk ONLY for a lead frame so a
+                # teammate/plain frame never clobbers the lead's on-disk
+                # session-context file (or creates a phantom session dir).
+                # build_context_cache is the sole owner of _cache; persist_context
+                # is the is_lead-gated best-effort disk side-effect. See the
+                # build_context_cache / persist_context docstrings.
+                _ctx_result = build_context_cache(
                     team_name, session_id, project_dir, plugin_root,
-                    write_disk=frame_is_lead,
                 )
+                if frame_is_lead and _ctx_result is not None:
+                    persist_context(*_ctx_result)
             except Exception as e:
                 # Fail-open: context file is best-effort; hooks fall back to empty strings
                 print(f"session_init: could not write context file: {e}", file=sys.stderr)

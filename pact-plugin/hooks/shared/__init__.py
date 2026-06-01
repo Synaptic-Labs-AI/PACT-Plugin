@@ -113,6 +113,8 @@ from .pact_context import (
     is_lead,
     classify_session_role,
     LEAD_AGENT_TYPES,
+    build_context_cache,
+    persist_context,
     write_context,
 )
 
@@ -175,5 +177,7 @@ __all__ = [
     "is_lead",
     "classify_session_role",
     "LEAD_AGENT_TYPES",
+    "build_context_cache",
+    "persist_context",
     "write_context",
 ]
