@@ -6,7 +6,7 @@ Tests cover:
 1. Marker exists → suppressOutput (fast path, zero tokens)
 2. No marker + PACT team-lead session → inject additionalContext with bootstrap instruction
 3. Non-PACT session (no session dir) → suppressOutput (no-op passthrough)
-4. Teammate (agent_name non-empty) → suppressOutput (no-op passthrough)
+4. Teammate / non-lead frame (non-lead agent_type) → suppressOutput (no-op passthrough)
 5. Malformed stdin JSON → fail-open (suppressOutput, exit 0)
 6. Exception in _check_bootstrap_needed → fail-open (suppressOutput, exit 0)
 7. main() entry point: exit codes, output format, JSON structure
@@ -43,14 +43,24 @@ _SLUG = "project"
 # =============================================================================
 
 
-def _make_input(session_id=_SESSION_ID, source="startup"):
-    """Build a minimal UserPromptSubmit hook input dict."""
-    return {
+def _make_input(session_id=_SESSION_ID, source="startup",
+                agent_type="pact-orchestrator"):
+    """Build a minimal UserPromptSubmit hook input dict.
+
+    #878: the gate now keys lead-detection on the harness-set agent_type via
+    is_lead. The default is a LEAD frame (the unmarked case these tests
+    historically assumed). Teammate/non-lead tests pass agent_type=<teammate>
+    or agent_type=None to exercise the bypass branch.
+    """
+    data = {
         "hook_event_name": "UserPromptSubmit",
         "session_id": session_id,
         "prompt": "Hello world",
         "source": source,
     }
+    if agent_type is not None:
+        data["agent_type"] = agent_type
+    return data
 
 
 def _run_main(input_data, capsys):
@@ -157,37 +167,32 @@ class TestCheckBootstrapNeeded:
         assert result is None
 
     def test_returns_none_for_teammate(self, monkeypatch, tmp_path):
-        """Teammate (agent_name resolved) → None (passthrough)."""
+        """Teammate (non-lead agent_type) → None (passthrough).
+
+        #878: lead-detection migrated to is_lead, which keys on agent_type. A
+        specialist agent_type is not a lead spelling, so the gate bypasses.
+        """
         from bootstrap_prompt_gate import _check_bootstrap_needed
 
         _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
 
-        input_data = _make_input()
-        input_data["agent_name"] = "backend-coder"
+        input_data = _make_input(agent_type="pact-backend-coder")
 
         result = _check_bootstrap_needed(input_data)
         assert result is None
 
-    def test_teammate_with_agent_id_format(self, monkeypatch, tmp_path):
-        """Teammate identified via agent_id 'name@team' format → None."""
+    def test_teammate_with_qualified_agent_type(self, monkeypatch, tmp_path):
+        """Teammate carrying a qualified non-lead agent_type → None.
+
+        #878: the gate no longer resolves agent_id/agent_name — it reads
+        agent_type directly. A `PACT:`-qualified specialist type is still not a
+        lead spelling, so the gate bypasses.
+        """
         from bootstrap_prompt_gate import _check_bootstrap_needed
-        import shared.pact_context as ctx_module
 
-        session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
 
-        # Override context to have a team_name (needed for agent_id resolution)
-        context_file = session_dir / "pact-session-context.json"
-        context_file.write_text(json.dumps({
-            "team_name": "pact-test1234",
-            "session_id": _SESSION_ID,
-            "project_dir": _PROJECT_DIR,
-            "plugin_root": "",
-            "started_at": "2026-01-01T00:00:00Z",
-        }), encoding="utf-8")
-        ctx_module._cache = None
-
-        input_data = _make_input()
-        input_data["agent_id"] = "backend-coder@pact-test1234"
+        input_data = _make_input(agent_type="PACT:pact-backend-coder")
 
         result = _check_bootstrap_needed(input_data)
         assert result is None
@@ -257,11 +262,10 @@ class TestMainEntryPoint:
         assert output == _SUPPRESS_EXPECTED
 
     def test_suppress_for_teammate(self, monkeypatch, tmp_path, capsys):
-        """Teammate → suppressOutput."""
+        """Teammate (non-lead agent_type) → suppressOutput."""
         _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
 
-        input_data = _make_input()
-        input_data["agent_name"] = "backend-coder"
+        input_data = _make_input(agent_type="pact-backend-coder")
 
         _, output = _run_main(input_data, capsys)
         assert output == _SUPPRESS_EXPECTED
