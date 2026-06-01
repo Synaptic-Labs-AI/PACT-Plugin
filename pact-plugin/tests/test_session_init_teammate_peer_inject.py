@@ -54,7 +54,8 @@ def _stdin_for(frame: dict, source: str = "resume") -> str:
     return json.dumps({"session_id": _SESSION_ID, "source": source, **frame})
 
 
-def _run_main_capture(stdin_data, monkeypatch, tmp_path, *, peer_return=_PEER_SENTINEL):
+def _run_main_capture(stdin_data, monkeypatch, tmp_path, *, peer_return=_PEER_SENTINEL,
+                      resolver_return=None, peer_raises=False):
     """Run session_init.main() with the heavy collaborators patched out and
     get_peer_context stubbed to ``peer_return``; return
     (additionalContext_str, get_peer_context_mock).
@@ -62,6 +63,12 @@ def _run_main_capture(stdin_data, monkeypatch, tmp_path, *, peer_return=_PEER_SE
     Stubbing get_peer_context isolates the teammate/else FORK DECISION (what
     commit 2 added) from the builder internals (covered separately below +
     by the ported test_peer_inject corpus).
+
+    resolve_lead_team_by_pane is ALSO stubbed (default ``None`` → the teammate
+    branch takes the generate_team_name fallback, deterministically, independent
+    of the ambient ITERM_SESSION_ID/TMUX_PANE of the test runner). Pass
+    ``resolver_return=(team, name)`` to drive the resolver path. ``peer_raises``
+    makes get_peer_context raise — to prove the Finding-1 fail-open wrapper.
     """
     from session_init import main
 
@@ -79,7 +86,10 @@ def _run_main_capture(stdin_data, monkeypatch, tmp_path, *, peer_return=_PEER_SE
          patch("session_init.append_event"), \
          patch("session_init.update_session_info", return_value=None), \
          patch("session_init.check_paused_state", return_value=None), \
-         patch("session_init.get_peer_context", return_value=peer_return) as mock_gpc, \
+         patch("session_init.resolve_lead_team_by_pane", return_value=resolver_return), \
+         patch("session_init.get_peer_context",
+               side_effect=(RuntimeError("peer-build boom") if peer_raises else None),
+               return_value=peer_return) as mock_gpc, \
          patch("sys.stdin", io.StringIO(stdin_data)), \
          patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
         with pytest.raises(SystemExit) as exc_info:
@@ -327,3 +337,156 @@ class TestStructuralInvariant:
             "the get_peer_context injection must be gated on "
             'classify_session_role(input_data) == "teammate" (the SSOT)'
         )
+
+
+# ===========================================================================
+# O1 remediation — resolve_lead_team_by_pane resolver (security-sensitive core)
+# ===========================================================================
+
+class TestResolveLeadTeamByPane:
+    """Unit tests for the pane-id LEAD-team resolver. The multi-match->None case
+    is the security-critical one (a wrong team would leak the wrong peer list)."""
+
+    _UUID = "F26F1088-AA28-4D03-AE9B-0D12EE62034E"
+
+    def _clear_pane_env(self, monkeypatch):
+        for var in ("ITERM_SESSION_ID", "TERM_SESSION_ID", "TMUX_PANE"):
+            monkeypatch.delenv(var, raising=False)
+
+    def _write_team(self, base, team, members):
+        d = base / "teams" / team
+        d.mkdir(parents=True)
+        (d / "config.json").write_text(
+            json.dumps({"members": members}), encoding="utf-8"
+        )
+        return str(base / "teams")
+
+    def test_unique_match_returns_team_and_member_name(self, tmp_path, monkeypatch):
+        from shared.peer_context import resolve_lead_team_by_pane
+        self._clear_pane_env(monkeypatch)
+        monkeypatch.setenv("ITERM_SESSION_ID", f"w0t0p0:{self._UUID}")
+        teams = self._write_team(tmp_path, "pact-leadteam", [
+            {"name": "team-lead", "agentType": "team-lead", "tmuxPaneId": ""},
+            {"name": "devops", "agentType": "pact-devops-engineer", "tmuxPaneId": self._UUID},
+            {"name": "architect", "agentType": "pact-architect", "tmuxPaneId": "OTHER-GUID"},
+        ])
+        assert resolve_lead_team_by_pane(teams_dir=teams) == ("pact-leadteam", "devops")
+
+    def test_no_pane_env_returns_none(self, tmp_path, monkeypatch):
+        from shared.peer_context import resolve_lead_team_by_pane
+        self._clear_pane_env(monkeypatch)
+        teams = self._write_team(tmp_path, "pact-x", [
+            {"name": "devops", "agentType": "pact-devops-engineer", "tmuxPaneId": self._UUID},
+        ])
+        assert resolve_lead_team_by_pane(teams_dir=teams) is None
+
+    def test_no_match_returns_none(self, tmp_path, monkeypatch):
+        from shared.peer_context import resolve_lead_team_by_pane
+        self._clear_pane_env(monkeypatch)
+        monkeypatch.setenv("ITERM_SESSION_ID", f"w0t0p0:{self._UUID}")
+        teams = self._write_team(tmp_path, "pact-x", [
+            {"name": "devops", "agentType": "pact-devops-engineer", "tmuxPaneId": "DIFFERENT-GUID"},
+        ])
+        assert resolve_lead_team_by_pane(teams_dir=teams) is None
+
+    def test_multiple_match_returns_none_failsafe(self, tmp_path, monkeypatch):
+        """SECURITY-CRITICAL: same pane id in two configs → ambiguous → None
+        (never guess a team — a wrong team leaks the wrong peer list)."""
+        from shared.peer_context import resolve_lead_team_by_pane
+        self._clear_pane_env(monkeypatch)
+        monkeypatch.setenv("ITERM_SESSION_ID", f"w0t0p0:{self._UUID}")
+        base = tmp_path / "teams"
+        for team in ("pact-aaa", "pact-bbb"):
+            d = base / team
+            d.mkdir(parents=True)
+            (d / "config.json").write_text(json.dumps({"members": [
+                {"name": "devops", "agentType": "pact-devops-engineer", "tmuxPaneId": self._UUID},
+            ]}), encoding="utf-8")
+        assert resolve_lead_team_by_pane(teams_dir=str(base)) is None
+
+    def test_malformed_config_skipped_no_raise(self, tmp_path, monkeypatch):
+        from shared.peer_context import resolve_lead_team_by_pane
+        self._clear_pane_env(monkeypatch)
+        monkeypatch.setenv("ITERM_SESSION_ID", f"w0t0p0:{self._UUID}")
+        base = tmp_path / "teams"
+        (base / "pact-bad").mkdir(parents=True)
+        (base / "pact-bad" / "config.json").write_text("{not json", encoding="utf-8")
+        (base / "pact-list").mkdir(parents=True)
+        (base / "pact-list" / "config.json").write_text("[]", encoding="utf-8")
+        (base / "pact-good").mkdir(parents=True)
+        (base / "pact-good" / "config.json").write_text(json.dumps({"members": [
+            {"name": "devops", "agentType": "pact-devops-engineer", "tmuxPaneId": self._UUID},
+        ]}), encoding="utf-8")
+        # bad/list configs skipped (no raise), the valid match still returned
+        assert resolve_lead_team_by_pane(teams_dir=str(base)) == ("pact-good", "devops")
+
+    def test_empty_paneid_member_never_matches(self, tmp_path, monkeypatch):
+        """A member with empty tmuxPaneId (the lead) is skipped → never matched."""
+        from shared.peer_context import resolve_lead_team_by_pane
+        self._clear_pane_env(monkeypatch)
+        monkeypatch.setenv("ITERM_SESSION_ID", f"w0t0p0:{self._UUID}")
+        teams = self._write_team(tmp_path, "pact-x", [
+            {"name": "team-lead", "agentType": "team-lead", "tmuxPaneId": ""},
+        ])
+        assert resolve_lead_team_by_pane(teams_dir=teams) is None
+
+    def test_tmux_pane_exact_match_no_substring_collision(self, tmp_path, monkeypatch):
+        """tmux pane ids match EXACTLY: '%3' must NOT substring-collide with '%30'."""
+        from shared.peer_context import resolve_lead_team_by_pane
+        self._clear_pane_env(monkeypatch)
+        monkeypatch.setenv("TMUX_PANE", "%3")
+        collide = self._write_team(tmp_path, "pact-collide", [
+            {"name": "devops", "agentType": "pact-devops-engineer", "tmuxPaneId": "%30"},
+        ])
+        assert resolve_lead_team_by_pane(teams_dir=collide) is None
+        exact = self._write_team(tmp_path / "x2", "pact-exact", [
+            {"name": "devops", "agentType": "pact-devops-engineer", "tmuxPaneId": "%3"},
+        ])
+        assert resolve_lead_team_by_pane(teams_dir=exact) == ("pact-exact", "devops")
+
+    def test_missing_teams_dir_returns_none(self, tmp_path, monkeypatch):
+        from shared.peer_context import resolve_lead_team_by_pane
+        self._clear_pane_env(monkeypatch)
+        monkeypatch.setenv("ITERM_SESSION_ID", f"w0t0p0:{self._UUID}")
+        assert resolve_lead_team_by_pane(teams_dir=str(tmp_path / "nope")) is None
+
+
+class TestTeammateBranchUsesResolver:
+    """The teammate-branch uses the resolver's (team, exact-name) when resolved,
+    and falls back to generate_team_name + stdin agent_name when it returns None."""
+
+    def test_resolved_team_and_name_passed_to_builder(self, monkeypatch, tmp_path):
+        _, mock_gpc = _run_main_capture(
+            _stdin_for(teammate_frame("pact-backend-coder")), monkeypatch, tmp_path,
+            resolver_return=("pact-leadteam", "backend-coder-7"),
+        )
+        assert mock_gpc.called
+        kw = mock_gpc.call_args.kwargs
+        assert kw.get("team_name") == "pact-leadteam"
+        assert kw.get("agent_name") == "backend-coder-7"  # exact-name self-exclusion
+        assert kw.get("include_role_marker") is False
+
+    def test_unresolved_falls_back_to_generate_team_name(self, monkeypatch, tmp_path):
+        _, mock_gpc = _run_main_capture(
+            _stdin_for(teammate_frame("pact-backend-coder")), monkeypatch, tmp_path,
+            resolver_return=None,
+        )
+        assert mock_gpc.called
+        kw = mock_gpc.call_args.kwargs
+        assert kw.get("team_name") == "pact-" + _SESSION_ID[:8]  # generate_team_name fallback
+        assert kw.get("include_role_marker") is False
+
+
+class TestFindingOneFailOpen:
+    """Finding-1: a raise in the teammate-branch build path → NO injection, NO
+    raise, NO orchestrator-block fallthrough (never the safety-net mis-roling)."""
+
+    def test_peer_build_raise_yields_no_injection_no_orchestrator(self, monkeypatch, tmp_path):
+        additional, _ = _run_main_capture(
+            _stdin_for(teammate_frame("pact-backend-coder")), monkeypatch, tmp_path,
+            resolver_return=("pact-leadteam", "devops"), peer_raises=True,
+        )
+        # exit 0 asserted inside the helper → the exception was swallowed;
+        # neither a peer body nor the orchestrator block was injected.
+        assert _PEER_SENTINEL not in additional
+        assert _ORCH_MARKER not in additional
