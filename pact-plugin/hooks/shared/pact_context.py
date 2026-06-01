@@ -339,6 +339,95 @@ def resolve_agent_name(
     return ""
 
 
+# Lead agent_type spellings — the single source of truth for is_lead /
+# classify_session_role. Both forms the harness can stamp when the
+# orchestrator is launched: the qualified `--agent PACT:pact-orchestrator`
+# and the unqualified `--agent pact-orchestrator`. Case-SENSITIVE exact
+# match (a mixed-case spelling is NOT a lead). Deliberately a 2-element
+# literal, NOT derived from _specialist_registry(): pact-orchestrator.md
+# lives in agents/, so a registry-derived set would both conflate the
+# orchestrator with a specialist AND miss the qualified `PACT:` spelling.
+LEAD_AGENT_TYPES = frozenset({"PACT:pact-orchestrator", "pact-orchestrator"})
+
+
+def is_lead(input_data: dict) -> bool:
+    """Return True iff this hook frame belongs to the PACT team-lead.
+
+    Reads the TOP-LEVEL ``agent_type`` field DIRECTLY (not via
+    ``resolve_agent_name``) and tests membership in ``LEAD_AGENT_TYPES``.
+    Reading ``agent_type`` directly drops ``resolve_agent_name``'s Step-4
+    prefix-strip ambiguity and the ``agent_id`` resolution surface entirely
+    out of the role decision: the lead/teammate question reduces to one
+    dict lookup on one harness-set field.
+
+    PURE: reads ONLY ``agent_type``. Never reads ``tool_input``,
+    ``agent_id``, environment variables, or team config — purity is a
+    tested assertion (a future author must not smuggle other signals in).
+
+    TOTAL: never raises on a dict input. The membership test is guarded by
+    an ``isinstance(..., str)`` check because ``x in frozenset`` raises
+    ``TypeError`` for an unhashable ``x`` (a malformed ``agent_type`` that is
+    a list/dict) — and a non-string ``agent_type`` is definitionally not a
+    lead spelling anyway, so it short-circuits to False. ``dict.get`` on a
+    non-dict input would still raise, so callers that may pass a non-dict
+    must guard upstream; in practice every hook parses stdin into a dict
+    before calling. Totality preserves each gate's existing exception-fail-
+    CLOSED path — a raising predicate would change that fail semantics.
+
+    COORDINATION CONTROL, NOT A SECURITY BOUNDARY. This predicate decides
+    *coordination* (which frame performs lead-only writes / drives the
+    bootstrap gate), not *authorization*. Lead, teammate, and plain frames
+    all run as the same OS user, so there is no privilege boundary to
+    breach here. ``agent_type`` is harness-spawn-set from process context
+    and is NOT reflectable from untrusted request content (prompt text,
+    file-under-review, tool arguments cannot forge it) — but a future
+    author must NOT hang an access-control decision on this function.
+
+    Args:
+        input_data: Parsed stdin JSON from the hook.
+
+    Returns:
+        True iff ``input_data["agent_type"]`` is one of LEAD_AGENT_TYPES.
+    """
+    agent_type = input_data.get("agent_type")
+    # isinstance guard keeps the predicate TOTAL: `x in frozenset` raises
+    # TypeError for an unhashable x (list/dict). A non-string agent_type is
+    # not a lead spelling, so short-circuit to False.
+    return isinstance(agent_type, str) and agent_type in LEAD_AGENT_TYPES
+
+
+def classify_session_role(input_data: dict) -> str:
+    """Classify the hook frame's session role as a 3-way value.
+
+    A bare ``is_lead`` boolean cannot separate "teammate" from "neither"
+    (a non-PACT / no-``--agent`` primary frame). The startup warning in
+    session_init needs that distinction — it fires ONLY for the "unknown"
+    role — so this companion classifier reads the same ``agent_type`` field
+    and the same ``LEAD_AGENT_TYPES`` SSOT as ``is_lead``.
+
+        lead     := agent_type in LEAD_AGENT_TYPES
+        teammate := agent_type present (truthy) and not in LEAD_AGENT_TYPES
+        unknown  := agent_type absent (None / missing / empty)
+
+    PURE / TOTAL on the same contract as ``is_lead``. Same coordination-not-
+    security caveat applies.
+
+    Args:
+        input_data: Parsed stdin JSON from the hook.
+
+    Returns:
+        One of ``"lead"``, ``"teammate"``, ``"unknown"``.
+    """
+    agent_type = input_data.get("agent_type")
+    # Mirror is_lead's isinstance guard so the membership test stays TOTAL
+    # for an unhashable (list/dict) agent_type.
+    if isinstance(agent_type, str) and agent_type in LEAD_AGENT_TYPES:
+        return "lead"
+    if agent_type:
+        return "teammate"
+    return "unknown"
+
+
 def _iter_members(
     team_name: str,
     teams_dir: str | None = None,

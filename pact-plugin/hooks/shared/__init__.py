@@ -110,6 +110,9 @@ from .pact_context import (
     get_session_id,
     get_project_dir,
     resolve_agent_name,
+    is_lead,
+    classify_session_role,
+    LEAD_AGENT_TYPES,
     write_context,
 )
 
@@ -169,5 +172,8 @@ __all__ = [
     "get_session_id",
     "get_project_dir",
     "resolve_agent_name",
+    "is_lead",
+    "classify_session_role",
+    "LEAD_AGENT_TYPES",
     "write_context",
 ]
