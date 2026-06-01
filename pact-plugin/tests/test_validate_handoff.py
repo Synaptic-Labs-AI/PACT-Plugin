@@ -140,7 +140,7 @@ class TestMainLastAssistantMessage:
         from validate_handoff import main
 
         input_data = json.dumps({
-            "agent_id": "pact-backend-coder",
+            "agent_type": "pact-backend-coder",
             "last_assistant_message": GOOD_HANDOFF,
             "transcript": MISSING_HANDOFF,  # Would fail if used
         })
@@ -160,7 +160,7 @@ class TestMainLastAssistantMessage:
         from validate_handoff import main
 
         input_data = json.dumps({
-            "agent_id": "pact-backend-coder",
+            "agent_type": "pact-backend-coder",
             "transcript": GOOD_HANDOFF,
         })
 
@@ -178,7 +178,7 @@ class TestMainLastAssistantMessage:
         from validate_handoff import main
 
         input_data = json.dumps({
-            "agent_id": "pact-backend-coder",
+            "agent_type": "pact-backend-coder",
             "last_assistant_message": "",
             "transcript": GOOD_HANDOFF,
         })
@@ -196,7 +196,7 @@ class TestMainLastAssistantMessage:
         from validate_handoff import main
 
         input_data = json.dumps({
-            "agent_id": "pact-backend-coder",
+            "agent_type": "pact-backend-coder",
             "last_assistant_message": "x" * 100 + " " + MISSING_HANDOFF,
         })
 
@@ -223,7 +223,7 @@ class TestMainEntryPoint:
         from validate_handoff import main
 
         input_data = json.dumps({
-            "agent_id": "custom-agent",
+            "agent_type": "custom-agent",
             "transcript": MISSING_HANDOFF,
         })
 
@@ -248,7 +248,7 @@ class TestMainEntryPoint:
         from validate_handoff import main
 
         input_data = json.dumps({
-            "agent_id": "pact-backend-coder",
+            "agent_type": "pact-backend-coder",
             "last_assistant_message": "short",
         })
 
@@ -290,7 +290,7 @@ class TestLastAssistantMessagePreference:
         from validate_handoff import main
 
         input_data = json.dumps({
-            "agent_id": "pact-backend-coder",
+            "agent_type": "pact-backend-coder",
             "last_assistant_message": GOOD_HANDOFF,
             "transcript": "x" * 200,  # Long enough to trigger validation, but no handoff
         })
@@ -308,7 +308,7 @@ class TestLastAssistantMessagePreference:
         from validate_handoff import main
 
         input_data = json.dumps({
-            "agent_id": "pact-backend-coder",
+            "agent_type": "pact-backend-coder",
             "last_assistant_message": None,
             "transcript": GOOD_HANDOFF,
         })
@@ -326,7 +326,7 @@ class TestLastAssistantMessagePreference:
         from validate_handoff import main
 
         input_data = json.dumps({
-            "agent_id": "pact-backend-coder",
+            "agent_type": "pact-backend-coder",
         })
 
         with patch("sys.stdin", io.StringIO(input_data)):
@@ -668,7 +668,7 @@ class TestMainLosslessWarnings:
         # Pad to exceed 100 char minimum + has HANDOFF section but missing Produced
         transcript = HANDOFF_MISSING_PRODUCED + " " * max(0, 100 - len(HANDOFF_MISSING_PRODUCED))
         input_data = json.dumps({
-            "agent_id": "pact-backend-coder",
+            "agent_type": "pact-backend-coder",
             "last_assistant_message": transcript,
         })
 
@@ -688,7 +688,7 @@ class TestMainLosslessWarnings:
 
         transcript = HANDOFF_MISSING_BOTH_LOSSLESS + " " * max(0, 100 - len(HANDOFF_MISSING_BOTH_LOSSLESS))
         input_data = json.dumps({
-            "agent_id": "pact-backend-coder",
+            "agent_type": "pact-backend-coder",
             "last_assistant_message": transcript,
         })
 
@@ -708,7 +708,7 @@ class TestMainLosslessWarnings:
         from validate_handoff import main
 
         input_data = json.dumps({
-            "agent_id": "pact-backend-coder",
+            "agent_type": "pact-backend-coder",
             "last_assistant_message": HANDOFF_BOTH_LOSSLESS,
         })
 
@@ -725,7 +725,7 @@ class TestMainLosslessWarnings:
         from validate_handoff import main
 
         input_data = json.dumps({
-            "agent_id": "pact-auditor",
+            "agent_type": "pact-auditor",
             "last_assistant_message": SIGNAL_COMPLETION_TRANSCRIPT,
         })
 
@@ -736,3 +736,86 @@ class TestMainLosslessWarnings:
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
         assert json.loads(captured.out.strip()) == {"suppressOutput": True}
+
+
+# =============================================================================
+# #812 role-class gate: keyed on agent_type (was agent_id, dormant at v4.4.0)
+# =============================================================================
+
+class TestRoleClassGateOnAgentType:
+    """The role-class gate ("is this a PACT agent?") reads ``agent_type``, not
+    ``agent_id`` (#812). agent_id is absent under the separate-process teammate
+    model, so the prior agent_id-keyed check was DORMANT for all teammates;
+    keying on agent_type re-enables teammate HANDOFF validation. Fail-safe:
+    advisory systemMessage, never DENY.
+    """
+
+    def test_teammate_agent_type_fires_handoff_warning(self, capsys):
+        """A teammate's agent_type (e.g. "pact-preparer") matches the pact-
+        prefix → the gate fires → a missing-HANDOFF transcript warns. This is
+        the validation that was dormant before the #812 swap."""
+        from validate_handoff import main
+
+        input_data = json.dumps({
+            "agent_type": "pact-preparer",
+            "last_assistant_message": "x" * 100 + " " + MISSING_HANDOFF,
+        })
+
+        with patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out.strip())
+        assert "systemMessage" in output, (
+            "teammate agent_type 'pact-preparer' must engage the role-class gate "
+            "(re-enabled #812 validation) and warn on a missing HANDOFF"
+        )
+        # The warning labels the agent by its agent_type (no longer the absent agent_id).
+        assert "pact-preparer" in output["systemMessage"]
+
+    def test_agent_id_only_no_agent_type_is_dormant(self, capsys):
+        """DOCUMENTS THE v4.4.0 STATE THE SWAP FIXES: a frame carrying ONLY
+        agent_id (no agent_type) does NOT engage the gate — the role-class check
+        reads agent_type, which is absent → suppressOutput. Pins that agent_id
+        is no longer consulted (so the check is no longer dormant-via-agent_id-
+        absence in the normal teammate case, which DOES carry agent_type)."""
+        from validate_handoff import main
+
+        input_data = json.dumps({
+            "agent_id": "pact-backend-coder",  # present, but NOT the gate field
+            "last_assistant_message": "x" * 100 + " " + MISSING_HANDOFF,
+        })
+
+        with patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}, (
+            "agent_id is no longer the gate field — an agent_id-only frame "
+            "(no agent_type) must suppress, proving the gate reads agent_type"
+        )
+
+    def test_non_pact_agent_type_suppresses(self, capsys):
+        """A non-PACT agent_type ("custom-agent") does not match the pact-
+        prefix → suppress (no false-positive HANDOFF warning for non-PACT
+        agents)."""
+        from validate_handoff import main
+
+        input_data = json.dumps({
+            "agent_type": "custom-agent",
+            "last_assistant_message": "x" * 100 + " " + MISSING_HANDOFF,
+        })
+
+        with patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}, (
+            "a non-PACT agent_type must not engage the role-class gate"
+        )

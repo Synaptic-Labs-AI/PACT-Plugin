@@ -14,7 +14,7 @@ status under Agent Teams, and the team-lead may process output after this hook
 fires), so Task state cannot be reliably checked here.
 
 Input: JSON from stdin with `last_assistant_message` (preferred, SDK v2.1.47+),
-       `transcript` (fallback), and `agent_id`
+       `transcript` (fallback), and `agent_type` (the role-class gate field, #812)
 Output: JSON with `systemMessage` if handoff format is incomplete
 """
 
@@ -180,21 +180,25 @@ def validate_handoff(transcript: str) -> tuple:
     return is_valid, missing, []
 
 
-def is_pact_agent(agent_id: str) -> bool:
+def is_pact_agent(agent_identifier: str) -> bool:
     """
-    Check if the agent is a PACT framework agent.
+    Check if the agent is a PACT framework agent (role-class gate).
 
     Args:
-        agent_id: The identifier of the agent
+        agent_identifier: The agent's role identifier — under #812 this is the
+            harness-set ``agent_type`` (e.g. ``"pact-preparer"``). The ``pact-``
+            prefix family below matches ``agent_type`` values directly, so the
+            same prefix-check answers the role-class question against the field
+            that is actually present at SubagentStop.
 
     Returns:
         True if this is a PACT agent that should be validated
     """
-    if not agent_id:
+    if not agent_identifier:
         return False
 
     pact_prefixes = ["pact-", "PACT-", "pact_", "PACT_"]
-    return any(agent_id.startswith(prefix) for prefix in pact_prefixes)
+    return any(agent_identifier.startswith(prefix) for prefix in pact_prefixes)
 
 
 def main():
@@ -216,10 +220,18 @@ def main():
 
         # Prefer last_assistant_message (SDK v2.1.47+), fall back to transcript
         transcript = input_data.get("last_assistant_message", "") or input_data.get("transcript", "")
-        agent_id = input_data.get("agent_id", "")
+        # #812 role-class gate: key on the harness-set ``agent_type``, NOT
+        # ``agent_id``. agent_id is ABSENT under the separate-process teammate
+        # model (v4.4.0), so the prior agent_id-keyed check was DORMANT for all
+        # teammates — this hook fires on SubagentStop (teammate-only) and the
+        # teammate's agent_type (e.g. "pact-preparer") matches the pact- prefix.
+        # The lead's "PACT:"-prefixed agent_type never reaches this hook
+        # (SubagentStop is teammate-only). Fail-safe: advisory systemMessage, no
+        # DENY — re-enabling it can only ADD a missing-HANDOFF warning.
+        agent_type = input_data.get("agent_type", "")
 
         # Only validate PACT agents
-        if not is_pact_agent(agent_id):
+        if not is_pact_agent(agent_type):
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
@@ -231,14 +243,14 @@ def main():
 
             if not is_valid and missing:
                 warnings.append(
-                    f"PACT Handoff Warning: Agent '{agent_id}' completed without "
+                    f"PACT Handoff Warning: Agent '{agent_type}' completed without "
                     f"proper handoff. Missing: {', '.join(missing)}. "
                     "Consider including: what was produced, key decisions, and next steps."
                 )
 
             if lossless_missing:
                 warnings.append(
-                    f"PACT Lossless Field Warning: Agent '{agent_id}' HANDOFF "
+                    f"PACT Lossless Field Warning: Agent '{agent_type}' HANDOFF "
                     f"section is missing: {', '.join(lossless_missing)}. "
                     "These fields preserve information that would otherwise be lost."
                 )
