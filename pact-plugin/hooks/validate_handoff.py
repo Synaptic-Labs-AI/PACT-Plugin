@@ -13,6 +13,20 @@ Task state may still be in flux at SubagentStop time (agents self-manage
 status under Agent Teams, and the team-lead may process output after this hook
 fires), so Task state cannot be reliably checked here.
 
+CANONICAL STRUCTURED VALIDATOR (do NOT relocate this hook): this hook
+validates the PROSE form of a HANDOFF in the agent transcript and is a
+legacy, IN-PROCESS-only convenience. The authoritative validation of the
+STRUCTURED 6-field handoff (`metadata.handoff`) is `_validate_handoff_schema`
+in task_lifecycle_gate.py, which emits the `handoff_missing` /
+`handoff_schema_invalid` advisories on TaskUpdate->completed and therefore
+fires lead-side in BOTH teammate modes (in-process AND separate-process).
+This SubagentStop prose check does NOT fire for a separate-process (e.g.
+tmux/iTerm2) teammate — such a teammate fires its OWN Stop/SessionEnd, never
+a SubagentStop in the lead's process — so the prose nudge is simply absent
+there. That absence is intentional and acceptable: the structured validator
+above already covers both modes. Do NOT "restore" this prose check onto a
+teammate end-of-life surface believing validation was lost — it was not.
+
 Input: JSON from stdin with `last_assistant_message` (preferred, SDK v2.1.47+),
        `transcript` (fallback), and `agent_type` (the role-class gate field, #812)
 Output: JSON with `systemMessage` if handoff format is incomplete
