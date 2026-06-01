@@ -589,31 +589,61 @@ def _is_unknown_or_missing_session(raw_id: object) -> bool:
     return stripped.startswith("unknown-")
 
 
-def _build_safety_net_context(team_name: str | None) -> str:
+def _build_safety_net_context(
+    team_name: str | None, frame_role: str | None = None
+) -> str:
     """
     Build a minimal governance-delivery additionalContext string for the
     exception safety net in main().
 
-    The returned string MUST start with "YOUR PACT ROLE: orchestrator." at byte 0
-    (line-anchored), and must include the `Skill("PACT:bootstrap")` invocation
-    so the team-lead
-    still loads its operating instructions, governance policy, and workflow
-    protocols even when main() failed before building the normal
-    team-reuse/team-create string.
+    The returned string MUST start with the role-appropriate
+    "YOUR PACT ROLE: <role>." marker at byte 0 (line-anchored). For a lead /
+    unknown / unclassified frame (the default) the marker is
+    "YOUR PACT ROLE: orchestrator." and the string includes the
+    `Skill("PACT:bootstrap")` invocation so the team-lead still loads its
+    operating instructions, governance policy, and workflow protocols even
+    when main() failed before building the normal team-reuse/team-create
+    string. For a teammate frame (frame_role == "teammate") the marker is
+    "YOUR PACT ROLE: teammate." and the body is a minimal TaskList directive —
+    a teammate MUST NOT be handed the orchestrator-only bootstrap directive.
 
-    This helper is deliberately zero-risk: only string literals and a single
+    frame_role is captured in main() BEFORE the risky assembly (alongside
+    team_name). If the exception fired before that capture, frame_role is None
+    and the orchestrator marker is emitted — identical to the pre-role-aware
+    behavior, so an early-window failure is a known no-regression default
+    rather than a misroute.
+
+    This helper is deliberately zero-risk: only string literals, a single
     f-string interpolation of team_name (which is either None or a validated
-    team name from generate_team_name). No file I/O, no subprocess, no
-    imports that might fail.
+    team name from generate_team_name), and a pure equality branch on
+    frame_role. No file I/O, no subprocess, no classify call, no imports that
+    might fail — and it never raises.
 
     Args:
         team_name: Team name captured before the exception, or None if the
                    exception fired before generate_team_name() ran.
+        frame_role: Session role ("lead" / "teammate" / "unknown") captured
+                    before the exception, or None if the exception fired before
+                    the capture. Only "teammate" selects the teammate marker;
+                    every other value (including None) selects the orchestrator
+                    marker — the safe default.
 
     Returns:
         Minimal additionalContext string suitable for the except-block
-        safety net. Leads with "YOUR PACT ROLE: orchestrator." at byte 0.
+        safety net. Leads with the role-appropriate "YOUR PACT ROLE: <role>."
+        marker at byte 0.
     """
+    if frame_role == "teammate":
+        # Teammate fail-open: byte-0 teammate marker + a minimal directive to
+        # find assigned work. Deliberately NO Skill("PACT:bootstrap") (that is
+        # the lead-only governance entrypoint) and NO team_name echo (in a
+        # teammate frame team_name is the frame's OWN session-derived name, not
+        # the lead's team — echoing it would mislead).
+        return (
+            'YOUR PACT ROLE: teammate.\n\n'
+            'session_init partially failed — check systemMessage for details. '
+            'Check TaskList for tasks assigned to you.'
+        )
     prelude = (
         'YOUR PACT ROLE: orchestrator.\n\n'
         'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input. '
@@ -688,6 +718,14 @@ def main():
     # the exception fires before step 5, team_name stays None and the safety
     # net falls through to the "NOT GENERATED" branch.
     team_name = None
+    # #888: role captured pre-assembly so the except-block safety net can pick
+    # a role-appropriate "YOUR PACT ROLE:" marker. Stays None until the capture
+    # at the is_lead/classify seam below; a frame that fails BEFORE that capture
+    # keeps None, which selects the orchestrator marker — identical to the
+    # pre-#888 behavior. That early-failure window is a KNOWN no-regression
+    # default (a teammate failing before the seam is mis-marked orchestrator),
+    # not a misroute introduced by this change.
+    frame_role = None
     # Track whether stdin JSON parsing failed, so the R3 malformed-stdin
     # gate below can distinguish "stdin was malformed JSON" from "stdin
     # parsed but session_id was missing/blank". Both paths fall through
@@ -1026,6 +1064,12 @@ def main():
         # writes below so the disk-write split and the journal-anchor gate share
         # one verdict.
         frame_is_lead = is_lead(input_data)
+        # #888: capture the 3-way role here (input_data is a proven dict — it
+        # survived the earlier .get() calls) so the except-block safety net can
+        # pick a role-appropriate marker. NEVER classify in the except:
+        # classify_session_role does input_data.get(...) and is total only on a
+        # dict, so capturing here preserves the safety net's never-raise contract.
+        frame_role = classify_session_role(input_data)
         if not session_id_was_missing:
             try:
                 # SEAM (#877): compose the two halves directly. ALWAYS build +
@@ -1369,7 +1413,7 @@ def main():
         # additionalContext, alongside the error in systemMessage. Claude
         # Code's hook-output schema supports both fields in the same JSON.
         print(f"Hook warning (session_init): {str(e)[:200]}", file=sys.stderr)
-        safety_net_context = _build_safety_net_context(team_name)
+        safety_net_context = _build_safety_net_context(team_name, frame_role)
         # hookEventName is required by the harness; missing it silently fails open
         output = {
             "hookSpecificOutput": {
