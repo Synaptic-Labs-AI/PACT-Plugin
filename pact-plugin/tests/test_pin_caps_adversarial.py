@@ -107,8 +107,10 @@ class TestPinCapsAdversarial_PathResolution:
         import staleness
         monkeypatch.setattr(staleness, "get_project_claude_md_path", lambda: claude_md)
         # ADD-shape Write: new content has 1 pin comment; current file has 0.
+        # #878: lead frame (agent_type) so the is_lead-gated DENY path fires.
         result = _check_tool_allowed({
             "tool_name": "Write",
+            "agent_type": "pact-orchestrator",
             "tool_input": {
                 "file_path": str(symlink),
                 "content": "# Project\n<!-- pinned: 2026-04-20 -->\n### New\nbody\n",

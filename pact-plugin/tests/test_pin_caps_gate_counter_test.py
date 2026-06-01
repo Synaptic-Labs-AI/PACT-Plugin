@@ -64,7 +64,13 @@ def gate_env(tmp_path, monkeypatch, pact_context):
 
 
 def _call_gate(input_data):
+    # #878: the gate now keys lead-detection on is_lead (the harness-set
+    # agent_type), not the old empty-resolve_agent_name heuristic. Default to a
+    # LEAD frame (the unmarked case these DENY tests assume) unless the caller
+    # supplies an explicit agent_type.
     from pin_caps_gate import _check_tool_allowed
+    if "agent_type" not in input_data:
+        input_data = {**input_data, "agent_type": "pact-orchestrator"}
     return _check_tool_allowed(input_data)
 
 

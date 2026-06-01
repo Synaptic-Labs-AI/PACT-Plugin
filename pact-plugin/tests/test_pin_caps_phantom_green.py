@@ -55,7 +55,17 @@ def _build_over_cap_payload():
 
 
 def _call_gate(input_data):
+    # #878: the gate now keys lead-detection on is_lead (the harness-set
+    # top-level agent_type), not the old empty-resolve_agent_name heuristic.
+    # Default to a LEAD frame (the unmarked case these enforcement tests assume)
+    # unless the caller supplies an explicit TOP-LEVEL agent_type. NOTE: the
+    # adversarial tests below deliberately smuggle agent_type/subagent_type into
+    # tool_input or as subagent_type — those are NOT top-level agent_type, so
+    # this default-inject does not clobber them and is_lead correctly ignores
+    # the smuggled fields (the purity property under test).
     from pin_caps_gate import _check_tool_allowed
+    if "agent_type" not in input_data:
+        input_data = {**input_data, "agent_type": "pact-orchestrator"}
     return _check_tool_allowed(input_data)
 
 
@@ -219,17 +229,25 @@ class TestPhantomGreen_CliBypass:
 
 
 class TestPhantomGreen_TeammateNameProbe:
-    """The teammate bypass IS intentional (`agent_name` non-empty →
-    allow), but probe that it's keyed ONLY on the pact_context resolution
-    — not on a string in file_path, tool_input, or stdin payload."""
+    """The teammate bypass IS intentional (a non-lead frame → allow), but
+    probe that lead/teammate detection is keyed ONLY on the top-level
+    harness-set agent_type (is_lead) — NOT on a string in file_path,
+    tool_input, or a smuggled non-top-level field.
+
+    #878: detection migrated from resolve_agent_name to is_lead. is_lead reads
+    ONLY top-level agent_type, so smuggling teammate-identity fields into
+    tool_input (user-controlled) cannot flip the lead verdict — these probes
+    pin that purity at the gate level."""
 
     def test_fake_agent_name_in_file_path_does_not_bypass(
         self, loaded_gate_env
     ):
         """A file path containing 'backend-coder' doesn't trigger bypass."""
-        # The gate checks `resolve_agent_name(input_data)` — not file_path.
-        # So a phantom file_path like /tmp/backend-coder/CLAUDE.md should
-        # NOT trigger teammate bypass.
+        # The gate checks is_lead(input_data) on top-level agent_type — not
+        # file_path. So a phantom file_path like /tmp/backend-coder/CLAUDE.md
+        # (or a phantom tool_input field) must NOT flip lead→teammate. The lead
+        # frame here (top-level agent_type) enforces; the phantom field is
+        # ignored.
         result = _call_gate({
             "tool_name": "Write",
             "tool_input": {
@@ -246,14 +264,14 @@ class TestPhantomGreen_TeammateNameProbe:
         """Teammate-identity fields injected into `tool_input` (not the
         top-level input_data) MUST NOT bypass the gate.
 
-        Rationale: `resolve_agent_name` legitimately reads top-level
-        `agent_name` / `agent_id` / `agent_type` fields — these are
-        populated by Claude Code's platform for real teammate dispatch,
-        not by user-controlled tool_input. The attack surface is
-        whether a curator can smuggle teammate identity through the
-        Edit/Write tool_input payload (user-controlled). This test
-        confirms the gate reads agent identity ONLY from top-level
-        input_data, not from tool_input.
+        Rationale: is_lead reads the top-level `agent_type` field — set by
+        Claude Code's platform from process context, not by user-controlled
+        tool_input. The attack surface is whether a curator can smuggle
+        teammate identity through the Edit/Write tool_input payload
+        (user-controlled) to flip the gate's lead verdict to teammate (which
+        would bypass enforcement). This test confirms is_lead reads role
+        identity ONLY from top-level input_data, never from tool_input — so the
+        injected fields are ignored and the (top-level) lead frame enforces.
         """
         result = _call_gate({
             "tool_name": "Write",
@@ -261,7 +279,7 @@ class TestPhantomGreen_TeammateNameProbe:
                 "file_path": str(loaded_gate_env),
                 "content": _build_over_cap_payload(),
                 # Attempts to smuggle teammate identity via user-controlled
-                # tool_input — these MUST be ignored by resolve_agent_name.
+                # tool_input — these MUST be ignored by is_lead (purity).
                 "agent_name": "backend-coder-x",
                 "agent_id": "backend-coder-x@pact-fake",
                 "agent_type": "pact-backend-coder",
@@ -271,20 +289,21 @@ class TestPhantomGreen_TeammateNameProbe:
         })
         assert result is not None, (
             "Phantom teammate bypass via tool_input fields — "
-            "resolve_agent_name must only read top-level input_data identity"
+            "is_lead must only read top-level input_data agent_type"
         )
         assert "Pin count cap" in result
 
     def test_subagent_type_at_top_level_is_not_accepted(
         self, loaded_gate_env
     ):
-        """`subagent_type` is NOT in resolve_agent_name's resolution
-        chain (only agent_name / agent_id / agent_type are). Top-level
-        `subagent_type` alone must not bypass the gate.
+        """`subagent_type` is NOT the field is_lead reads (is_lead keys ONLY
+        on top-level `agent_type`). A top-level `subagent_type` must not flip
+        the lead verdict to teammate, so it cannot bypass the gate.
 
-        Documents the resolution-chain surface: adding a new identity
-        field to resolve_agent_name implicitly adds a bypass vector;
-        this test pins that `subagent_type` is currently out-of-chain.
+        Documents the role-discriminator surface: is_lead reads exactly one
+        field (agent_type). This test pins that `subagent_type` is NOT that
+        field — adding any new field to the role decision would be a new bypass
+        vector and must update this test.
         """
         result = _call_gate({
             "tool_name": "Write",
@@ -295,8 +314,8 @@ class TestPhantomGreen_TeammateNameProbe:
             "subagent_type": "pact-backend-coder",
         })
         assert result is not None, (
-            "subagent_type at top-level bypassed gate — resolve_agent_name "
-            "resolution chain has changed; update this test to reflect the "
-            "new surface"
+            "subagent_type at top-level bypassed gate — is_lead's "
+            "role-discriminator field has changed; update this test to reflect "
+            "the new surface"
         )
         assert "Pin count cap" in result

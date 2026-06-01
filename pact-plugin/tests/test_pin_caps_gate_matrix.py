@@ -115,7 +115,13 @@ def gate_env(tmp_path, monkeypatch, pact_context):
 
 
 def _call_gate(input_data):
+    # #878: the gate now keys lead-detection on is_lead (the harness-set
+    # agent_type), not the old empty-resolve_agent_name heuristic. Default to a
+    # LEAD frame (the unmarked case these DENY tests assume) unless the caller
+    # supplies an explicit agent_type (teammate/plain bypass tests).
     from pin_caps_gate import _check_tool_allowed
+    if "agent_type" not in input_data:
+        input_data = {**input_data, "agent_type": "pact-orchestrator"}
     return _check_tool_allowed(input_data)
 
 
@@ -534,21 +540,21 @@ class TestPinCapsGate_Matrix_Edit:
 
     @pytest.mark.parametrize("baseline", ["fresh", "missing", "corrupt"])
     def test_edit_teammate_bypass(self, gate_env, baseline):
-        """Teammate session bypasses the gate regardless of baseline state."""
+        """Teammate session bypasses the gate regardless of baseline state.
+
+        #878: a non-lead agent_type bypasses (the gate keys on is_lead, not
+        resolve_agent_name)."""
         env = gate_env(pin_count=3, baseline=baseline)
-        import shared.pact_context as ctx_module
-        with patch.object(
-            ctx_module, "resolve_agent_name", return_value="backend-coder-x"
-        ):
-            result = _call_gate({
-                "tool_name": "Edit",
-                "tool_input": {
-                    "file_path": str(env["claude_md"]),
-                    "old_string": "anything",
-                    "new_string": _build_claude_md(99),  # Wildly over-cap
-                    "replace_all": False,
-                },
-            })
+        result = _call_gate({
+            "tool_name": "Edit",
+            "agent_type": "pact-backend-coder",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "old_string": "anything",
+                "new_string": _build_claude_md(99),  # Wildly over-cap
+                "replace_all": False,
+            },
+        })
         assert result is None, (
             f"teammate should bypass regardless of baseline={baseline}, got {result!r}"
         )
@@ -764,18 +770,16 @@ class TestPinCapsGate_Matrix_Write:
 
     @pytest.mark.parametrize("baseline", ["fresh", "missing", "corrupt"])
     def test_write_teammate_bypass(self, gate_env, baseline):
+        """#878: a non-lead agent_type bypasses (gate keys on is_lead)."""
         env = gate_env(pin_count=3, baseline=baseline)
-        import shared.pact_context as ctx_module
-        with patch.object(
-            ctx_module, "resolve_agent_name", return_value="backend-coder-x"
-        ):
-            result = _call_gate({
-                "tool_name": "Write",
-                "tool_input": {
-                    "file_path": str(env["claude_md"]),
-                    "content": _build_claude_md(99),
-                },
-            })
+        result = _call_gate({
+            "tool_name": "Write",
+            "agent_type": "pact-backend-coder",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "content": _build_claude_md(99),
+            },
+        })
         assert result is None
 
 
@@ -878,8 +882,10 @@ class TestPinCapsGate_Matrix_Main:
     ):
         env = gate_env(pin_count=3)
         new_content = _build_claude_md(13)
+        # #878: lead frame (agent_type) so the is_lead-gated DENY path fires.
         stdin_payload = json.dumps({
             "tool_name": "Write",
+            "agent_type": "pact-orchestrator",
             "tool_input": {
                 "file_path": str(env["claude_md"]),
                 "content": new_content,

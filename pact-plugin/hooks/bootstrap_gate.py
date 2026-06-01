@@ -357,9 +357,15 @@ def _check_tool_allowed(input_data: dict) -> str | None:
     if is_marker_set(Path(session_dir)):
         return None
 
-    # Teammate detection
-    agent_name = pact_context.resolve_agent_name(input_data)
-    if agent_name:
+    # Lead-role gate (#878, DENY-gate enforcement RESTORATION): only the
+    # team-lead's pre-bootstrap tool calls are gated. Migrated from the
+    # negative `resolve_agent_name(...) != ""` heuristic — which returned
+    # non-empty for BOTH lead spellings (Step-4 prefix-strip), so at v4.4.0 the
+    # lead itself took this teammate-bypass branch and the DENY gate was
+    # silently DEAD for the lead. is_lead keys on the harness-set agent_type
+    # directly, re-enabling lead-side enforcement. is_lead is total (never
+    # raises), so the caller's exception-fail-CLOSED path is preserved.
+    if not pact_context.is_lead(input_data):
         return None
 
     # Lead session, no marker — check tool classification

@@ -164,10 +164,14 @@ def _check_tool_allowed(input_data: dict) -> str | None:
 
     pact_context.init(input_data)
 
-    # Teammate bypass — teammates don't edit project CLAUDE.md
-    # (worktree scope rule), so this gate is team-lead-only.
-    agent_name = pact_context.resolve_agent_name(input_data)
-    if agent_name:
+    # Lead-role gate (#878, DENY-gate enforcement RESTORATION) — teammates
+    # don't edit project CLAUDE.md (worktree scope rule), so this gate is
+    # team-lead-only. Migrated from the negative `resolve_agent_name(...) != ""`
+    # heuristic — which returned non-empty for BOTH lead spellings, so the lead
+    # itself took this bypass branch and the DENY gate was silently DEAD for
+    # the lead. is_lead keys on the harness-set agent_type directly; it is total
+    # (never raises), preserving the caller's exception-fail-CLOSED path.
+    if not pact_context.is_lead(input_data):
         return None
 
     session_dir = pact_context.get_session_dir()
