@@ -357,19 +357,82 @@ class TestRealTmuxRegisterPreMergeGatePlan:
          so a teammate's name@team is resolvable by the time a later hook calls
          resolve_agent_name / the session_init teammate-branch.
 
-    This is a documented PLACEHOLDER for the test-engineer to execute under a
-    live tmux flip; it is skipped here because it requires a real multi-process
-    teammate spawn that the in-process unit suite cannot stand up.
+    This is a documented PLACEHOLDER executed under a live tmux flip; it is skipped
+    here because it requires a real multi-process teammate spawn the in-process
+    unit suite cannot stand up. The TURNKEY RUNBOOK below makes it mechanical for
+    whoever flips tmux — no design re-derivation needed.
+
+    ------------------------------------------------------------------------
+    TURNKEY PRE-MERGE RUNBOOK (execute under a real tmux teammateMode flip)
+    ------------------------------------------------------------------------
+    PRECONDITIONS
+      * Operator teammateMode = tmux (N separate processes, N:1 session:team) —
+        NOT in-process. Confirm a teammate runs as its OWN OS process / OWN
+        session_id (session_id != leadSessionId).
+      * The plugin symlink invariant holds (SessionStart's setup_plugin_symlinks),
+        so the agent-def direct-path
+        `python3 <plugin_root>/hooks/shared/session_registry.py register --name ...`
+        resolves. If absent, register degrades fail-safe (no block) — see prop 1.
+
+    SETUP / OBSERVATION POINTS
+      R = ~/.claude/pact-sessions/.teammate-registry.jsonl  (the global registry)
+      Before the flip, snapshot R's lines (or its absence) so new lines are
+      attributable to this run.
+
+    STEP 1 — spawn a real separate-process (tmux) teammate of a known team.
+      Capture the teammate's own session_id (its $CLAUDE_CODE_SESSION_ID) and the
+      lead's team name; the expected registry value is "<teammate-name>@<lead-team>".
+
+    STEP 2 — REGISTER-FIRST ORDERING + RUNTIME PROPERTY 1 (no turn-1 gate DENY).
+      The agent-def first-action imperative MUST fire the register Bash on turn 1,
+      BEFORE any teachback_submit exists.
+        PASS: the register Bash is NOT denied by a PreToolUse gate (e.g. a
+              no-Bash-before-teachback gate). The register step is scoped-exempt
+              (verified structurally by the skills_structure suite); confirm it
+              holds at RUNTIME here.
+        IF DENIED: the register needs a carve-out — file a FOLLOW-UP, do NOT block
+              the merge. register is fail-safe-skip, so a denied register degrades
+              to current behavior (labeling stays degraded, nothing breaks).
+
+    STEP 3 — name@team CORRECTNESS + env session_id SOURCE.
+      After the register fires, inspect R:
+        PASS: R gained exactly one line {"session_id": <the teammate's OWN
+              $CLAUDE_CODE_SESSION_ID>, "value": "<teammate-name>@<lead-team>"}.
+        CHECK the session_id came from the teammate's ENV ($CLAUDE_CODE_SESSION_ID),
+              not the lead's — it must equal the teammate's OWN session_id (tmux
+              topology: != leadSessionId).
+        CHECK the @team half is the LEAD's team (the datum a teammate cannot
+              otherwise compute), not generate_team_name(own session) (which would
+              be pact-<own hash>).
+        CHECK the line parses as JSON, is <=512B, and the file mode is 0o600.
+
+    STEP 4 — RUNTIME PROPERTY 2 (registration LANDS BEFORE consuming hooks).
+      A later hook (resolve_agent_name Step 3.5 / the session_init teammate-branch)
+      must be able to self-look-up the teammate's OWN session_id and recover the
+      friendly name@team.
+        PASS: the consuming hook recovers "<teammate-name>@<lead-team>" via
+              own-session_id self-lookup — i.e. the register landed BEFORE the
+              consumer needed it (agent-def first-action ordering holds).
+        OBSERVE: the teammate's SessionStart additionalContext carries the
+              marker-free peer body (the resolved team's peer list), and the
+              teammate is NOT mis-roled as orchestrator.
+
+    OVERALL GATE
+      Merge-blocking: STEP 3 + STEP 4 must PASS (real register lands with correct
+      name@team + a real consumer recovers it). STEP 2 is informational — a turn-1
+      DENY is a follow-up, not a blocker (fail-safe-skip). If NO deterministic
+      register form lands at all (symlink absent AND no fallback), that is a design
+      break -> STOP + imPACT (considered unlikely: agent-def imperative fires 2/2,
+      symlink verified present, module self-contained; only the assembled bash
+      string was untested against the real helper).
     """
 
-    @pytest.mark.skip(reason="real-tmux production-register pre-merge gate — requires a live tmux teammate spawn (test-engineer executes)")
+    @pytest.mark.skip(reason="real-tmux production-register pre-merge gate — requires a live tmux teammate spawn (executed under a live tmux flip, not in the in-process suite)")
     def test_real_tmux_register_flow_end_to_end(self):
-        # Executed manually / by the test-engineer under a real tmux flip:
-        #   1. spawn a real separate-process teammate;
-        #   2. assert it runs the agent-def register imperative turn-1 (no gate
-        #      DENY before teachback_submit exists — runtime property 1);
-        #   3. assert .teammate-registry.jsonl gains {its session_id -> name@team}
-        #      BEFORE a consuming hook calls resolve (runtime property 2);
-        #   4. assert a later resolve_agent_name / session_init teammate-branch
-        #      recovers the friendly name@team via own-session_id self-lookup.
-        raise NotImplementedError("the real-tmux production-register smoke is executed under a live tmux flip")
+        # See the class docstring's TURNKEY PRE-MERGE RUNBOOK for the mechanical
+        # steps + explicit PASS/FAIL criteria. Executed under a real tmux flip;
+        # the in-process unit suite cannot stand up a real multi-process teammate.
+        raise NotImplementedError(
+            "execute the TURNKEY PRE-MERGE RUNBOOK (class docstring) under a live "
+            "tmux teammateMode flip"
+        )
