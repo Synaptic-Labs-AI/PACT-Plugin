@@ -81,6 +81,7 @@ from shared.pact_context import (
     build_context_cache,
     classify_session_role,
     get_session_dir,
+    get_session_id,
     is_lead,
     persist_context,
 )
@@ -88,7 +89,8 @@ from shared.dispatch_helpers import is_registered_pact_specialist
 from shared.session_journal import append_event, make_event
 from shared.failure_log import append_failure
 from shared.plugin_manifest import format_plugin_banner
-from shared.peer_context import get_peer_context, resolve_lead_team_by_pane
+from shared.peer_context import get_peer_context
+from shared.session_registry import resolve as _registry_resolve
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import setup_plugin_symlinks
@@ -1225,13 +1227,15 @@ def main():
         if frame_role == "teammate":  # m3: reuse the role captured at the early seam (was a recompute)
             # O1 fix + Finding-1. team_name above is generate_team_name(input_data)
             # = pact-{this teammate's OWN session hash}, NOT the lead's team — so
-            # resolve the lead's team + this teammate's own member name by pane-id
-            # match (resolve_lead_team_by_pane reads our pane id from env and
-            # matches members[].tmuxPaneId in the team configs the harness writes).
-            # On a miss (ambiguous / no pane id / in-process), fall back to the
-            # session-derived team_name + stdin agent_name — no worse than pre-fix.
-            # The matched member name gives EXACT-name self-exclusion (full peer
-            # list, not the agentType-narrowed one).
+            # resolve the lead's team + this teammate's own member name from the
+            # self-registration registry: the teammate wrote {own session_id →
+            # name@team} at its first action, so a self-lookup by our OWN
+            # session_id recovers both the @team (the lead's team — the datum a
+            # teammate cannot otherwise compute) AND the name (for EXACT-name
+            # self-exclusion: the full peer list, not the agentType-narrowed one).
+            # On a miss (no registration / in-process / any error), fall back to
+            # the session-derived team_name + stdin agent_name — no worse than
+            # pre-fix; _registry_resolve never raises.
             # Finding-1 (security): the resolver + get_peer_context now read a LIVE
             # config that could be malformed — wrap the whole resolve→build→insert
             # in a fail-open guard so it degrades to NO injection and NEVER lets an
@@ -1239,9 +1243,9 @@ def main():
             # (which would mis-role the teammate as orchestrator). Mirrors
             # peer_inject's fail-open-to-no-injection contract.
             try:
-                _resolved = resolve_lead_team_by_pane()
-                if _resolved:
-                    _tn, _own = _resolved
+                _resolved = _registry_resolve(get_session_id())
+                if _resolved and "@" in _resolved:
+                    _own, _, _tn = _resolved.partition("@")
                 else:
                     _tn, _own = team_name, input_data.get("agent_name", "")
                 _peer_body = get_peer_context(

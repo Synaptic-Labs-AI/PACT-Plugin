@@ -60,14 +60,15 @@ def _run_main_capture(stdin_data, monkeypatch, tmp_path, *, peer_return=_PEER_SE
     get_peer_context stubbed to ``peer_return``; return
     (additionalContext_str, get_peer_context_mock).
 
-    Stubbing get_peer_context isolates the teammate/else FORK DECISION (what
-    commit 2 added) from the builder internals (covered separately below +
-    by the ported test_peer_inject corpus).
+    Stubbing get_peer_context isolates the teammate/else FORK DECISION from the
+    builder internals (covered separately below + by the ported test_peer_inject
+    corpus).
 
-    resolve_lead_team_by_pane is ALSO stubbed (default ``None`` → the teammate
-    branch takes the generate_team_name fallback, deterministically, independent
-    of the ambient ITERM_SESSION_ID/TMUX_PANE of the test runner). Pass
-    ``resolver_return=(team, name)`` to drive the resolver path. ``peer_raises``
+    The self-registration registry resolver (``_registry_resolve``) is ALSO
+    stubbed (default ``None`` → the teammate branch takes the generate_team_name
+    fallback, deterministically, independent of any on-disk registry). Pass
+    ``resolver_return="<name>@<team>"`` to drive the resolved path — the branch
+    partitions that string on "@" into (own_name, lead_team). ``peer_raises``
     makes get_peer_context raise — to prove the Finding-1 fail-open wrapper.
     """
     from session_init import main
@@ -86,7 +87,7 @@ def _run_main_capture(stdin_data, monkeypatch, tmp_path, *, peer_return=_PEER_SE
          patch("session_init.append_event"), \
          patch("session_init.update_session_info", return_value=None), \
          patch("session_init.check_paused_state", return_value=None), \
-         patch("session_init.resolve_lead_team_by_pane", return_value=resolver_return), \
+         patch("session_init._registry_resolve", return_value=resolver_return), \
          patch("session_init.get_peer_context",
                side_effect=(RuntimeError("peer-build boom") if peer_raises else None),
                return_value=peer_return) as mock_gpc, \
@@ -479,18 +480,23 @@ class TestResolveLeadTeamByPane:
 
 
 class TestTeammateBranchUsesResolver:
-    """The teammate-branch uses the resolver's (team, exact-name) when resolved,
-    and falls back to generate_team_name + stdin agent_name when it returns None."""
+    """The teammate-branch self-looks-up the registry by its OWN session_id; on a
+    resolved ``name@team`` it partitions into (own_name, lead_team) and passes
+    both to the builder, and falls back to generate_team_name + stdin agent_name
+    when the registry returns None."""
 
     def test_resolved_team_and_name_passed_to_builder(self, monkeypatch, tmp_path):
+        # The registry value is "<own-name>@<lead-team>": the @team carries the
+        # LEAD's team (the datum a teammate cannot compute), the name half gives
+        # EXACT-name self-exclusion.
         _, mock_gpc = _run_main_capture(
             _stdin_for(teammate_frame("pact-backend-coder")), monkeypatch, tmp_path,
-            resolver_return=("pact-leadteam", "backend-coder-7"),
+            resolver_return="backend-coder-7@pact-leadteam",
         )
         assert mock_gpc.called
         kw = mock_gpc.call_args.kwargs
-        assert kw.get("team_name") == "pact-leadteam"
-        assert kw.get("agent_name") == "backend-coder-7"  # exact-name self-exclusion
+        assert kw.get("team_name") == "pact-leadteam"  # @team half → lead's team
+        assert kw.get("agent_name") == "backend-coder-7"  # name half → self-exclusion
         assert kw.get("include_role_marker") is False
 
     def test_unresolved_falls_back_to_generate_team_name(self, monkeypatch, tmp_path):
@@ -503,6 +509,18 @@ class TestTeammateBranchUsesResolver:
         assert kw.get("team_name") == "pact-" + _SESSION_ID[:8]  # generate_team_name fallback
         assert kw.get("include_role_marker") is False
 
+    def test_value_without_at_falls_back(self, monkeypatch, tmp_path):
+        """A registry value missing the "@" separator (malformed) → the branch
+        treats it as unresolved and takes the generate_team_name fallback."""
+        _, mock_gpc = _run_main_capture(
+            _stdin_for(teammate_frame("pact-backend-coder")), monkeypatch, tmp_path,
+            resolver_return="no-at-separator",
+        )
+        assert mock_gpc.called
+        kw = mock_gpc.call_args.kwargs
+        assert kw.get("team_name") == "pact-" + _SESSION_ID[:8]
+        assert kw.get("include_role_marker") is False
+
 
 class TestFindingOneFailOpen:
     """Finding-1: a raise in the teammate-branch build path → NO injection, NO
@@ -511,7 +529,7 @@ class TestFindingOneFailOpen:
     def test_peer_build_raise_yields_no_injection_no_orchestrator(self, monkeypatch, tmp_path):
         additional, _ = _run_main_capture(
             _stdin_for(teammate_frame("pact-backend-coder")), monkeypatch, tmp_path,
-            resolver_return=("pact-leadteam", "devops"), peer_raises=True,
+            resolver_return="devops@pact-leadteam", peer_raises=True,
         )
         # exit 0 asserted inside the helper → the exception was swallowed;
         # neither a peer body nor the orchestrator block was injected.

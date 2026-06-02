@@ -19,6 +19,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .session_state import SESSION_ID_CONTROL_CHARS_RE
+# One-directional import: session_registry is a self-contained leaf (imports
+# nothing from shared.*), so this introduces NO circular import. Used by
+# resolve_agent_name Step 3.5 to recover a tmux teammate's friendly name.
+from .session_registry import resolve as _registry_resolve
 
 # Slug sanitizer: collapse any character outside the safe-path-component
 # allowlist into "_". The slug derives from CLAUDE_PROJECT_DIR's basename
@@ -296,6 +300,9 @@ def resolve_agent_name(
     2. input_data["agent_id"] string split — if contains "@", split and
        return the name part (format: "name@team_name")
     3. input_data["agent_id"] → lookup in team config members array
+    3.5. input_data["session_id"] → self-registration registry self-lookup,
+       split "@" and return the name part (recovers a tmux teammate's name
+       that is absent from hook stdin; fail-safe, falls through on miss)
     4. input_data["agent_type"] → strip "pact-" prefix as fallback name
     5. "" — unknown agent (main process, non-PACT context)
 
@@ -326,6 +333,20 @@ def resolve_agent_name(
             )
             if name:
                 return name
+
+    # Step 3.5: own session_id → self-registration registry. Recovers a tmux
+    # teammate's friendly name@team, which is ABSENT from tmux hook stdin (no
+    # agent_name / agent_id), by self-looking-up its OWN session_id. Gated
+    # behind Steps 1-3 (all early returns / the in-process common case never
+    # reaches here), so this file read fires ONLY for the tmux-degraded frame
+    # that needs it. resolve() is fail-safe (None on any miss/error, never
+    # raises); on None we fall through to Step 4 (current behavior). The value
+    # is name@team — return the name half, matching Step 2's split("@")[0] shape.
+    session_id = input_data.get("session_id")
+    if session_id:
+        resolved = _registry_resolve(str(session_id))
+        if resolved and "@" in resolved:
+            return resolved.split("@")[0]
 
     # Step 4: agent_type → strip "pact-" prefix
     agent_type = input_data.get("agent_type")
