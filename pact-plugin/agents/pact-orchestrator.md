@@ -375,7 +375,7 @@ For non-exempt teammates (everyone except `pact-secretary`):
 2. `TaskCreate(subject="{name}: {primary work subject}", description="<full mission: CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES per §13 Recommended Agent Prompting Structure>")` — create Task B (primary work).
 3. `TaskUpdate(A_id, owner="{name}", addBlocks=[B_id])` — assign Task A to the teammate and wire it as the gate that unblocks Task B.
 4. `TaskUpdate(B_id, owner="{name}", addBlockedBy=[A_id])` — assign Task B to the same teammate and explicitly mirror the block edge. Do NOT pre-set `status="in_progress"` on either task — the teammate self-claims on arrival.
-5. `Agent(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", prompt="YOUR PACT ROLE: teammate ({name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you.")` — spawn the teammate. Keep the prompt ≤ 800 chars and include the literal `TaskList` reference (or one of: `task list`, `tasks assigned`, `check your tasks`); the teammate reads the mission via `TaskGet(B_id)`, not from the prompt.
+5. `Agent(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", prompt="YOUR PACT ROLE: teammate ({name}).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. Then check `TaskList` for tasks assigned to you.")` — spawn the teammate. Keep the prompt ≤ 800 chars and include the literal `TaskList` reference (or one of: `task list`, `tasks assigned`, `check your tasks`); the teammate reads the mission via `TaskGet(B_id)`, not from the prompt.
 
 #### First-spawn verification (HARD-RULE)
 

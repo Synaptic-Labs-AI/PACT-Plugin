@@ -254,6 +254,93 @@ class TestNoFirstActionFossilInConsumerCommands:
         )
 
 
+# The teammate self-registration first-action directive, in its delivered
+# (unescaped) form. In the source `prompt="..."` literals it is written with
+# escaped quotes (`Invoke Skill(\"PACT:pact-team-registration\")`), consistent
+# with the escaped `\n\n` in the same literal; the orchestrator unescapes both
+# when it constructs the real Agent() call. The presence check below normalizes
+# the escaping so it is robust to either representation.
+REGISTER_DIRECTIVE = 'Invoke Skill("PACT:pact-team-registration")'
+
+
+def _normalize_prompt_escaping(text: str) -> str:
+    """Collapse source-literal escaped quotes (\\") to plain quotes so a
+    presence check matches whether the directive is written escaped (current
+    convention, valid inside a `prompt="..."` literal) or unescaped."""
+    return text.replace('\\"', '"')
+
+
+# Every surface that emits a teammate spawn prompt. The register directive must
+# be present in ALL of them (present-in-ALL, not present-in-at-least-one): a
+# single surface that drops it silently spawns teammates that never register.
+# bootstrap.md (the secretary spawn) is NOT a CONSUMER_COMMAND but IS a
+# teammate-spawning surface; the persona canonical template
+# (agents/pact-orchestrator.md) is the authoritative source form.
+SPAWN_PROMPT_SURFACES = [
+    ("orchestrate", COMMANDS_DIR / "orchestrate.md"),
+    ("peer-review", COMMANDS_DIR / "peer-review.md"),
+    ("comPACT", COMMANDS_DIR / "comPACT.md"),
+    ("rePACT", COMMANDS_DIR / "rePACT.md"),
+    ("plan-mode", COMMANDS_DIR / "plan-mode.md"),
+    ("bootstrap", COMMANDS_DIR / "bootstrap.md"),
+    ("pact-orchestrator", COMMANDS_DIR.parent / "agents" / "pact-orchestrator.md"),
+]
+
+
+class TestRegisterDirectivePresentInAllSpawnSurfaces:
+    """Present-in-ALL drop-guard for the teammate self-registration first-action.
+
+    Every surface that emits a teammate spawn prompt MUST carry the register
+    directive so a spawned teammate records its name@team before any other
+    action. Unlike the present-in-at-least-one Class B component check, this is
+    present-in-ALL: a single surface that drops the directive silently produces
+    teammates that never register — the exact LEG-4 register-delivery failure
+    class — so each surface is pinned independently (diagnostic axis = WHICH
+    surface dropped it).
+    """
+
+    @pytest.mark.parametrize(
+        "label,path",
+        SPAWN_PROMPT_SURFACES,
+        ids=[label for label, _ in SPAWN_PROMPT_SURFACES],
+    )
+    def test_surface_carries_register_directive(self, label, path):
+        assert path.is_file(), f"Spawn-prompt surface missing: {label} ({path})"
+        text = _normalize_prompt_escaping(path.read_text(encoding="utf-8"))
+        assert REGISTER_DIRECTIVE in text, (
+            f"{label} is a teammate-spawning surface but its spawn prompt is "
+            f"missing the register first-action directive {REGISTER_DIRECTIVE!r}. "
+            f"A spawned teammate would never record its name@team — the LEG-4 "
+            f"register-delivery failure class. Every spawn surface must carry "
+            f"the directive (present-in-ALL)."
+        )
+
+
+class TestTeamRegistrationSkillLiveness:
+    """Anti-fossil liveness guard: the register directive points at a LIVE skill.
+
+    The register first-action directs every spawned teammate to invoke the
+    pact-team-registration skill. If that skill directory is ever renamed or
+    removed, the directive dead-ends — the exact failure that killed the
+    deleted teammate-bootstrap skill (guarded by
+    TestNoFirstActionFossilInConsumerCommands). This makes the new directive
+    fossil-proof: a future skill rename that breaks it fails CI.
+    """
+
+    SKILL_PATH = (
+        COMMANDS_DIR.parent / "skills" / "pact-team-registration" / "SKILL.md"
+    )
+
+    def test_team_registration_skill_exists(self):
+        assert self.SKILL_PATH.is_file(), (
+            "skills/pact-team-registration/SKILL.md does not exist, but the "
+            "canonical spawn prompt directs every teammate to invoke "
+            "PACT:pact-team-registration as its first action. The directive "
+            "would dead-end — the failure that killed teammate-bootstrap. "
+            "Restore the skill or update the directive."
+        )
+
+
 class TestImperativeSoftPhrasingConvention:
     """v4.0.0 lazy-load cross-reference convention guard.
 
