@@ -76,9 +76,17 @@ echo "LIVE cache = $LIVE"
 # Back up the pristine cache (MANDATORY — the revert restores from this).
 cp -a "$LIVE" "$LIVE.pristine-bak"
 
-# Overlay the branch's plugin tree onto the live cache.
+# Overlay the branch's plugin tree onto the live cache — EXCLUDING the
+# version-tracking files. The cache version MUST keep matching the HMAC-signed
+# bootstrap marker: the marker signs `plugin_version`, so a cache whose
+# .claude-plugin/plugin.json version differs from the signed marker's makes
+# `bootstrap_gate` fail-CLOSED and BLOCKS Agent dispatch. Overlay only the
+# FUNCTIONAL files (skill, session_registry.py, agent-defs, commands); the
+# cache keeps its pristine version. (Whole-tree rsync carried the branch's
+# version bump into the older cache and blocked dispatch until plugin.json was
+# restored — exclude the version files to avoid it.)
 WT=~/Sites/collab/PACT-prompt/.worktrees/feat/self-registration-885/pact-plugin
-rsync -a "$WT"/ "$LIVE"/
+rsync -a --exclude='/.claude-plugin/plugin.json' --exclude='/README.md' "$WT"/ "$LIVE"/
 
 # Confirm the new files landed in the live cache.
 ls "$LIVE/skills/pact-team-registration/SKILL.md" \
