@@ -42,6 +42,7 @@ from shared.session_journal import (
 )
 
 from shared.session_state import is_safe_path_component
+from shared.session_registry import REGISTRY_PATH as _REGISTRY_PATH
 from shared.task_utils import get_task_list
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
@@ -644,6 +645,84 @@ def _assemble_tasks_skip_set(
     return skip_names
 
 
+def _prune_registry_dead_teams(
+    registry_path: Path | None = None,
+    teams_dir: Path | None = None,
+) -> int:
+    """Prune self-registration registry lines whose ``@team`` is no longer a
+    live team directory under ``~/.claude/teams/``.
+
+    The registry (``~/.claude/pact-sessions/.teammate-registry.jsonl``) grows one
+    line per teammate per session. Last-wins-on-read makes stale lines harmless
+    to correctness, but they accumulate, so SessionEnd drops the lines whose team
+    has already been reaped — keeping the file bounded. A line is KEPT when its
+    value's ``@team`` still has a directory under teams_dir; everything else
+    (lines for reaped teams, malformed lines, lines with no ``@``) is dropped.
+
+    Best-effort: never raises. A missing registry / unreadable file / write race
+    is swallowed (the hook-fail-open invariant; a stale line is harmless). The
+    rewrite preserves 0o600 and uses O_NOFOLLOW so a planted symlink at the path
+    cannot redirect the write.
+
+    Args:
+        registry_path: the registry file. Defaults to the shared REGISTRY_PATH.
+        teams_dir: the live-teams root. Defaults to ~/.claude/teams.
+
+    Returns:
+        Number of lines pruned (0 if the file is absent or nothing was stale).
+    """
+    if registry_path is None:
+        registry_path = _REGISTRY_PATH
+    if teams_dir is None:
+        teams_dir = Path.home() / ".claude" / "teams"
+
+    try:
+        if not registry_path.exists() or registry_path.is_symlink():
+            return 0
+        raw = registry_path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+
+    kept_lines: list[str] = []
+    pruned = 0
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        team = None
+        try:
+            obj = json.loads(stripped)
+            value = obj.get("value") if isinstance(obj, dict) else None
+            if isinstance(value, str) and "@" in value:
+                team = value.partition("@")[2]
+        except ValueError:
+            team = None  # malformed line → drop
+        if team and (teams_dir / team).is_dir():
+            kept_lines.append(stripped)
+        else:
+            pruned += 1
+
+    if pruned == 0:
+        return 0  # nothing stale → leave the file untouched (no needless rewrite)
+
+    try:
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | nofollow
+        fd = os.open(str(registry_path), flags, 0o600)
+        try:
+            # O_CREAT's mode arg is a no-op when the file already exists, so set
+            # 0o600 explicitly to preserve the register-side permission on rewrite.
+            os.fchmod(fd, 0o600)
+            payload = ("\n".join(kept_lines) + "\n") if kept_lines else ""
+            os.write(fd, payload.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except OSError:
+        return 0  # write race / symlink (ELOOP) → leave as-is, never raise
+
+    return pruned
+
+
 def _cleanup_old_checkpoints(
     checkpoint_dir: Path | None = None,
     max_age_days: int = _CHECKPOINT_MAX_AGE_DAYS,
@@ -744,12 +823,15 @@ def main():
         # layer around the internal fail-closed guard.
         current_team_name = get_team_name()
 
-        # No registry cleanup is needed in this hook: SessionEnd reaps
-        # ~/.claude/teams/ and ~/.claude/tasks/ only, and no on-disk
-        # registry sidecar (STATE_FILE) ever exists for it to reap. An
-        # editing LLM tempted to add a "just in case" registry-cleanup
-        # helper here would be coupling SessionEnd to disk state that does
-        # not exist — leave this branch reaping teams/ and tasks/ only.
+        # Registry cleanup: SessionEnd also prunes the self-registration
+        # registry (~/.claude/pact-sessions/.teammate-registry.jsonl), dropping
+        # lines whose @team no longer has a live directory under ~/.claude/teams/.
+        # The registry grows one line per teammate per session; last-wins-on-read
+        # keeps stale lines harmless to correctness, but they accumulate, so the
+        # prune (after the teams reaper, so reaped teams are already gone) keeps
+        # the file bounded. Best-effort + fail-safe: a missing file / write race
+        # is swallowed and never blocks session termination. (Run AFTER
+        # cleanup_old_teams so a team reaped this run is also pruned here.)
 
         teams_r, teams_s = 0, 0
         tasks_r, tasks_s = 0, 0
@@ -760,6 +842,8 @@ def main():
                 current_team_name=current_team_name,
             )
             teams_reaper_ran = True
+
+        _prune_registry_dead_teams()
 
         # Assemble skip-set via the module-level helper — see
         # `_assemble_tasks_skip_set` for the full rationale on the three
