@@ -25,6 +25,7 @@ EXPECTED_SKILLS = {
     "pact-memory",
     "pact-prepare-research",
     "pact-security-patterns",
+    "pact-team-registration",
     "pact-testing-strategies",
     "request-more-context",
     "worktree-cleanup",
