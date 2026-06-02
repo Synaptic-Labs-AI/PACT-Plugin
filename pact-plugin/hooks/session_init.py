@@ -88,6 +88,7 @@ from shared.dispatch_helpers import is_registered_pact_specialist
 from shared.session_journal import append_event, make_event
 from shared.failure_log import append_failure
 from shared.plugin_manifest import format_plugin_banner
+from shared.peer_context import get_peer_context, resolve_lead_team_by_pane
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import setup_plugin_symlinks
@@ -588,31 +589,61 @@ def _is_unknown_or_missing_session(raw_id: object) -> bool:
     return stripped.startswith("unknown-")
 
 
-def _build_safety_net_context(team_name: str | None) -> str:
+def _build_safety_net_context(
+    team_name: str | None, frame_role: str | None = None
+) -> str:
     """
     Build a minimal governance-delivery additionalContext string for the
     exception safety net in main().
 
-    The returned string MUST start with "YOUR PACT ROLE: orchestrator." at byte 0
-    (line-anchored) so the routing-block consumer check recognizes it, and
-    must include the `Skill("PACT:bootstrap")` invocation so the team-lead
-    still loads its operating instructions, governance policy, and workflow
-    protocols even when main() failed before building the normal
-    team-reuse/team-create string.
+    The returned string MUST start with the role-appropriate
+    "YOUR PACT ROLE: <role>." marker at byte 0 (line-anchored). For a lead /
+    unknown / unclassified frame (the default) the marker is
+    "YOUR PACT ROLE: orchestrator." and the string includes the
+    `Skill("PACT:bootstrap")` invocation so the team-lead still loads its
+    operating instructions, governance policy, and workflow protocols even
+    when main() failed before building the normal team-reuse/team-create
+    string. For a teammate frame (frame_role == "teammate") the marker is
+    "YOUR PACT ROLE: teammate." and the body is a minimal TaskList directive —
+    a teammate MUST NOT be handed the orchestrator-only bootstrap directive.
 
-    This helper is deliberately zero-risk: only string literals and a single
+    frame_role is captured in main() BEFORE the risky assembly (alongside
+    team_name). If the exception fired before that capture, frame_role is None
+    and the orchestrator marker is emitted — identical to the pre-role-aware
+    behavior, so an early-window failure is a known no-regression default
+    rather than a misroute.
+
+    This helper is deliberately zero-risk: only string literals, a single
     f-string interpolation of team_name (which is either None or a validated
-    team name from generate_team_name). No file I/O, no subprocess, no
-    imports that might fail.
+    team name from generate_team_name), and a pure equality branch on
+    frame_role. No file I/O, no subprocess, no classify call, no imports that
+    might fail — and it never raises.
 
     Args:
         team_name: Team name captured before the exception, or None if the
                    exception fired before generate_team_name() ran.
+        frame_role: Session role ("lead" / "teammate" / "unknown") captured
+                    before the exception, or None if the exception fired before
+                    the capture. Only "teammate" selects the teammate marker;
+                    every other value (including None) selects the orchestrator
+                    marker — the safe default.
 
     Returns:
         Minimal additionalContext string suitable for the except-block
-        safety net. Leads with "YOUR PACT ROLE: orchestrator." at byte 0.
+        safety net. Leads with the role-appropriate "YOUR PACT ROLE: <role>."
+        marker at byte 0.
     """
+    if frame_role == "teammate":
+        # Teammate fail-open: byte-0 teammate marker + a minimal directive to
+        # find assigned work. Deliberately NO Skill("PACT:bootstrap") (that is
+        # the lead-only governance entrypoint) and NO team_name echo (in a
+        # teammate frame team_name is the frame's OWN session-derived name, not
+        # the lead's team — echoing it would mislead).
+        return (
+            'YOUR PACT ROLE: teammate.\n\n'
+            'session_init partially failed — check systemMessage for details. '
+            'Check TaskList for tasks assigned to you.'
+        )
     prelude = (
         'YOUR PACT ROLE: orchestrator.\n\n'
         'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input. '
@@ -687,6 +718,14 @@ def main():
     # the exception fires before step 5, team_name stays None and the safety
     # net falls through to the "NOT GENERATED" branch.
     team_name = None
+    # #888: role captured pre-assembly so the except-block safety net can pick
+    # a role-appropriate "YOUR PACT ROLE:" marker. Stays None until the early
+    # capture just after the stdin/source parse below; a frame that fails BEFORE
+    # that capture keeps None, which selects the orchestrator marker — identical
+    # to the pre-#888 behavior. That early-failure window is a KNOWN
+    # no-regression default (a teammate failing before the capture is mis-marked
+    # orchestrator), not a misroute introduced by this change.
+    frame_role = None
     # Track whether stdin JSON parsing failed, so the R3 malformed-stdin
     # gate below can distinguish "stdin was malformed JSON" from "stdin
     # parsed but session_id was missing/blank". Both paths fall through
@@ -727,6 +766,21 @@ def main():
         # on compact re-engages the bootstrap gate mid-task, blocking
         # Edit/Write/Agent when the orchestrator needs them most (#414).
         is_marker_reset = source == "clear"
+
+        # Frame role, captured EARLY — right after the stdin/source parse, where
+        # input_data is a PROVEN dict (it survived the .get() calls above; a
+        # non-dict would have raised at raw_source and bubbled to the outer
+        # safety net). classify_session_role does input_data.get(...) so it is
+        # total only on a dict — capturing here, NEVER in the except, preserves
+        # the safety net's never-raise contract. One capture serves three sites:
+        #   - the lead-only advisory gates below (steps 4/4a/4b): a teammate
+        #     frame must not receive lead pin advisories (m2);
+        #   - the teammate peer-context branch (the `== "teammate"` gate, m3);
+        #   - the role-aware exception safety net (_build_safety_net_context).
+        # If the exception fires before this point, frame_role stays None and
+        # the safety net emits the orchestrator marker — identical to prior
+        # behavior, a KNOWN no-regression default, not a misroute.
+        frame_role = classify_session_role(input_data)
 
         # Clean up stale compact-summary from previous sessions.
         # Only "compact" source needs it (just written by postcompact_archive).
@@ -865,26 +919,35 @@ def main():
         except Exception:
             pass  # Fail-open: never block session init for disk hygiene.
 
-        # 4. Check for stale pinned context
+        # 4. Check for stale pinned context. The informational surfacing is a
+        # lead-oriented pin advisory (m2): suppress it for a teammate frame
+        # (which has no pin-management authority — pins live in CLAUDE.md, a
+        # lead/orchestrator memory surface), but keep the failed/skipped
+        # DIAGNOSTICS on system_messages for every frame. The check CALL and its
+        # marker side-effect are unchanged — m2 gates advisory SURFACINGS, not
+        # writes (#877 owns write-gating).
         staleness_msg = check_pinned_staleness()
         if staleness_msg:
             if "failed" in staleness_msg.lower() or "skipped" in staleness_msg.lower():
                 system_messages.append(staleness_msg)
-            else:
+            elif frame_role != "teammate":
                 context_parts.append(staleness_msg)
 
         # 4a. Surface pin slot count (#492). Tier-0 additionalContext —
         # architecturally binding, survives compaction. Fail-open: None
-        # when CLAUDE.md cannot be resolved or parsed.
+        # when CLAUDE.md cannot be resolved or parsed. m2: lead-only pin
+        # telemetry — not surfaced to a teammate frame.
         slot_status_msg = check_pin_slot_status()
-        if slot_status_msg:
+        if slot_status_msg and frame_role != "teammate":
             context_parts.append(slot_status_msg)
 
         # 4b. Emit unconditional stale-block directive when stale pin
         # count meets threshold (#492). Never exit-2 — breaks /clear and
-        # /resume per plan key-decisions row 6.
+        # /resume per plan key-decisions row 6. m2: the "/PACT:pin-memory"
+        # directive is a lead/orchestrator memory action — not surfaced to a
+        # teammate frame (the helper's marker side-effect is unchanged).
         stale_block_msg = check_pin_stale_block_directive()
-        if stale_block_msg:
+        if stale_block_msg and frame_role != "teammate":
             context_parts.append(stale_block_msg)
 
         # 4c. Surface plugin manifest diagnostic (#500). Tier-0 additionalContext —
@@ -1145,90 +1208,137 @@ def main():
         #      the bootstrap directive.
         tasks = get_task_list()
 
-        if source == "compact" and team_exists:
-            # Post-compaction: bootstrap directive (in _team_reuse) subsumes
-            # "recover state" guidance; keep concrete task-resumption bullets
-            # for the orchestrator's next actions after bootstrap.
-            context_parts.insert(0, (
-                f'{_team_reuse} '
-                f'After bootstrap, recover session state: '
-                f'(1) Read {COMPACT_SUMMARY_PATH} for prior context, '
-                f'(2) Run TaskList to find in-progress work, '
-                f'(3) TaskGet on in-progress tasks for details. '
-                f"Re-engage secretary: SendMessage(to='secretary', "
-                f"message='Post-compaction: deliver session briefing with current state.')."
-            ))
-            # Secondary-layer (#444): append POST-COMPACTION CHECKPOINT block
-            # when tasks in_progress. Consumes the hoisted `tasks` variable
-            # (single source of truth).
-            if tasks:
-                _in_progress = [
-                    t for t in tasks
-                    if t.get("status") == "in_progress"
-                ]
-                if _in_progress:
-                    _checkpoint_block = build_post_compaction_checkpoint(
-                        feature=find_feature_task(tasks),
-                        phase=find_current_phase(tasks),
-                        agents=find_active_agents(tasks),
-                        blockers=find_blockers(tasks),
-                    )
-                    context_parts.append(_checkpoint_block)
-        elif source == "clear" and team_exists:
-            # Context cleared via /clear: no compact-summary, but team and tasks survive
-            context_parts.insert(0, (
-                f'{_team_reuse} '
-                f'CONTEXT CLEARED: Your context was cleared via /clear. '
-                f'State recovery: '
-                f'(1) TaskList for current tasks, '
-                f'(2) TaskGet on in-progress tasks. '
-                f"Re-engage secretary: SendMessage(to='secretary', "
-                f"message='Context cleared: deliver fresh briefing with current project state.')."
-            ))
-        elif source == "resume" and team_exists:
-            # Normal resume: model retains context, team exists
-            context_parts.insert(0, (
-                f'{_team_reuse} '
-                f'Check session journal for paused state from /PACT:pause.'
-            ))
-        elif source == "startup" and not team_exists:
-            # Fresh session: full initialization
-            context_parts.insert(0, _team_create)
-        elif team_exists:
-            # Anomalous: unexpected source but team exists (e.g., startup + team exists)
-            # Reuse team, note the anomaly
-            context_parts.insert(0, (
-                f'{_team_reuse} '
-                f'Note: Unexpected session source "{source}" with existing team — '
-                f'reusing team. Run TaskList to check current state.'
-            ))
+        # Family E relocation (#806): a separate-process (e.g. tmux/iterm2)
+        # teammate fires its OWN SessionStart — unlike an in-process teammate,
+        # which fires SubagentStart (covered by peer_inject). The two surfaces
+        # are mode-exclusive (one teammate fires exactly one), so injecting the
+        # peer-context body here causes no double-injection. classify_session_role
+        # is the fail-safe gate: only a genuine "teammate" frame takes this branch;
+        # "lead" AND "unknown"/empty agent_type both fall to the else-branch, which
+        # keeps the existing orchestrator-directive ladder UNCHANGED. Emitting the
+        # marker-free body (include_role_marker=False) ALSO suppresses the
+        # "YOUR PACT ROLE: orchestrator" block for teammate frames — that
+        # unconditional orchestrator block was the mis-roling bug (a teammate
+        # self-identifying as orchestrator); the role marker is omitted because
+        # the spawn prompt already owns the role and session_init lacks agent_name
+        # under tmux. This is a CONDITIONAL EMISSION, not a new numbered step.
+        if frame_role == "teammate":  # m3: reuse the role captured at the early seam (was a recompute)
+            # O1 fix + Finding-1. team_name above is generate_team_name(input_data)
+            # = pact-{this teammate's OWN session hash}, NOT the lead's team — so
+            # resolve the lead's team + this teammate's own member name by pane-id
+            # match (resolve_lead_team_by_pane reads our pane id from env and
+            # matches members[].tmuxPaneId in the team configs the harness writes).
+            # On a miss (ambiguous / no pane id / in-process), fall back to the
+            # session-derived team_name + stdin agent_name — no worse than pre-fix.
+            # The matched member name gives EXACT-name self-exclusion (full peer
+            # list, not the agentType-narrowed one).
+            # Finding-1 (security): the resolver + get_peer_context now read a LIVE
+            # config that could be malformed — wrap the whole resolve→build→insert
+            # in a fail-open guard so it degrades to NO injection and NEVER lets an
+            # exception reach main()'s outer except → _build_safety_net_context
+            # (which would mis-role the teammate as orchestrator). Mirrors
+            # peer_inject's fail-open-to-no-injection contract.
+            try:
+                _resolved = resolve_lead_team_by_pane()
+                if _resolved:
+                    _tn, _own = _resolved
+                else:
+                    _tn, _own = team_name, input_data.get("agent_name", "")
+                _peer_body = get_peer_context(
+                    agent_type=input_data.get("agent_type", ""),
+                    team_name=_tn,
+                    agent_name=_own,
+                    include_role_marker=False,
+                )
+                if _peer_body:
+                    context_parts.insert(0, _peer_body)
+            except Exception:
+                pass  # fail-open: no injection; never the orchestrator safety-net
         else:
-            # Differentiate the no-team branch by whether `source` is a
-            # recognized lifecycle value:
-            #   - known source + no team → informational note (recovery
-            #     hint stays; no WARNING tone). Legitimate first-session-
-            #     after-stale-CLAUDE.md class.
-            #   - unknown source + no team → emit WARNING in
-            #     additionalContext AND stderr for observability (debug
-            #     logs surface the malformed-stdin signal).
-            _KNOWN_SOURCES = {"startup", "resume", "compact", "clear"}
-            if source in _KNOWN_SOURCES:
+            if source == "compact" and team_exists:
+                # Post-compaction: bootstrap directive (in _team_reuse) subsumes
+                # "recover state" guidance; keep concrete task-resumption bullets
+                # for the orchestrator's next actions after bootstrap.
                 context_parts.insert(0, (
-                    f'{_team_create} '
-                    f'Session source "{source}" without team — '
-                    f'creating fresh team. Run TaskList to check current state.'
+                    f'{_team_reuse} '
+                    f'After bootstrap, recover session state: '
+                    f'(1) Read {COMPACT_SUMMARY_PATH} for prior context, '
+                    f'(2) Run TaskList to find in-progress work, '
+                    f'(3) TaskGet on in-progress tasks for details. '
+                    f"Re-engage secretary: SendMessage(to='secretary', "
+                    f"message='Post-compaction: deliver session briefing with current state.')."
+                ))
+                # Secondary-layer (#444): append POST-COMPACTION CHECKPOINT block
+                # when tasks in_progress. Consumes the hoisted `tasks` variable
+                # (single source of truth).
+                if tasks:
+                    _in_progress = [
+                        t for t in tasks
+                        if t.get("status") == "in_progress"
+                    ]
+                    if _in_progress:
+                        _checkpoint_block = build_post_compaction_checkpoint(
+                            feature=find_feature_task(tasks),
+                            phase=find_current_phase(tasks),
+                            agents=find_active_agents(tasks),
+                            blockers=find_blockers(tasks),
+                        )
+                        context_parts.append(_checkpoint_block)
+            elif source == "clear" and team_exists:
+                # Context cleared via /clear: no compact-summary, but team and tasks survive
+                context_parts.insert(0, (
+                    f'{_team_reuse} '
+                    f'CONTEXT CLEARED: Your context was cleared via /clear. '
+                    f'State recovery: '
+                    f'(1) TaskList for current tasks, '
+                    f'(2) TaskGet on in-progress tasks. '
+                    f"Re-engage secretary: SendMessage(to='secretary', "
+                    f"message='Context cleared: deliver fresh briefing with current project state.')."
+                ))
+            elif source == "resume" and team_exists:
+                # Normal resume: model retains context, team exists
+                context_parts.insert(0, (
+                    f'{_team_reuse} '
+                    f'Check session journal for paused state from /PACT:pause.'
+                ))
+            elif source == "startup" and not team_exists:
+                # Fresh session: full initialization
+                context_parts.insert(0, _team_create)
+            elif team_exists:
+                # Anomalous: unexpected source but team exists (e.g., startup + team exists)
+                # Reuse team, note the anomaly
+                context_parts.insert(0, (
+                    f'{_team_reuse} '
+                    f'Note: Unexpected session source "{source}" with existing team — '
+                    f'reusing team. Run TaskList to check current state.'
                 ))
             else:
-                print(
-                    f"session_init: unknown source value: {source!r}",
-                    file=sys.stderr,
-                )
-                context_parts.insert(0, (
-                    f'{_team_create} '
-                    f'WARNING: Unrecognized session source "{source}" — '
-                    f'previous session state may be lost. '
-                    f'Check TaskList for recovery context.'
-                ))
+                # Differentiate the no-team branch by whether `source` is a
+                # recognized lifecycle value:
+                #   - known source + no team → informational note (recovery
+                #     hint stays; no WARNING tone). Legitimate first-session-
+                #     after-stale-CLAUDE.md class.
+                #   - unknown source + no team → emit WARNING in
+                #     additionalContext AND stderr for observability (debug
+                #     logs surface the malformed-stdin signal).
+                _KNOWN_SOURCES = {"startup", "resume", "compact", "clear"}
+                if source in _KNOWN_SOURCES:
+                    context_parts.insert(0, (
+                        f'{_team_create} '
+                        f'Session source "{source}" without team — '
+                        f'creating fresh team. Run TaskList to check current state.'
+                    ))
+                else:
+                    print(
+                        f"session_init: unknown source value: {source!r}",
+                        file=sys.stderr,
+                    )
+                    context_parts.insert(0, (
+                        f'{_team_create} '
+                        f'WARNING: Unrecognized session source "{source}" — '
+                        f'previous session state may be lost. '
+                        f'Check TaskList for recovery context.'
+                    ))
 
         # 5a. Capture the PREVIOUS session's dir from project CLAUDE.md
         # before step 5b overwrites the Current Session block with THIS
@@ -1321,7 +1431,7 @@ def main():
         # additionalContext, alongside the error in systemMessage. Claude
         # Code's hook-output schema supports both fields in the same JSON.
         print(f"Hook warning (session_init): {str(e)[:200]}", file=sys.stderr)
-        safety_net_context = _build_safety_net_context(team_name)
+        safety_net_context = _build_safety_net_context(team_name, frame_role)
         # hookEventName is required by the harness; missing it silently fails open
         output = {
             "hookSpecificOutput": {

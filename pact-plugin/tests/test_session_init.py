@@ -3905,15 +3905,21 @@ class TestBuildSafetyNetContext:
     """Unit tests for _build_safety_net_context() helper."""
 
     def test_none_team_starts_with_pact_role_marker(self):
-        """With team_name=None the string must start with 'YOUR PACT ROLE: orchestrator.' at byte 0."""
+        """The lead/unknown/None roles (the safe default) lead with the
+        orchestrator marker at byte 0 (#888 role-aware contract).
+
+        frame_role is omitted (defaults to None) or set to a non-teammate
+        value; all three select the orchestrator marker — the pre-#888
+        behavior — so an early-window failure (frame_role still None) never
+        downgrades the lead's governance delivery."""
         from session_init import _build_safety_net_context
 
-        result = _build_safety_net_context(None)
-
-        assert result.startswith("YOUR PACT ROLE: orchestrator."), (
-            "Safety net must lead with 'YOUR PACT ROLE: orchestrator.' (line-anchored "
-            "for routing block consumer check)."
-        )
+        for frame_role in (None, "lead", "unknown"):
+            result = _build_safety_net_context(None, frame_role)
+            assert result.startswith("YOUR PACT ROLE: orchestrator."), (
+                f"frame_role={frame_role!r} must lead with 'YOUR PACT ROLE: "
+                "orchestrator.' (line-anchored for routing block consumer check)."
+            )
 
     def test_none_team_contains_skill_first_action(self):
         """With team_name=None the string must contain the #444 4-sentence directive.
@@ -3965,6 +3971,203 @@ class TestBuildSafetyNetContext:
         assert 'Do this before anything else.' in result
         assert 'Do not evaluate whether it is needed.' in result
         assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in result
+
+    # ---- #888: role-aware teammate branch ----------------------------------
+    # A teammate frame that hits the safety net must be marked as a teammate,
+    # NOT as the orchestrator, and must NOT be handed the lead-only bootstrap
+    # directive. (Before #888 every frame got the orchestrator marker + the
+    # bootstrap directive, mis-roling a teammate.)
+
+    def test_teammate_role_starts_with_teammate_marker(self):
+        """frame_role='teammate' must lead with 'YOUR PACT ROLE: teammate.' at byte 0."""
+        from session_init import _build_safety_net_context
+
+        result = _build_safety_net_context(None, "teammate")
+
+        assert result.startswith("YOUR PACT ROLE: teammate."), (
+            "Teammate safety net must lead with 'YOUR PACT ROLE: teammate.' "
+            "(line-anchored), not the orchestrator marker."
+        )
+
+    def test_teammate_role_omits_orchestrator_bootstrap_directive(self):
+        """The teammate branch MUST NOT carry the orchestrator-only bootstrap
+        directive, and MUST point the teammate at its task list instead."""
+        from session_init import _build_safety_net_context
+
+        result = _build_safety_net_context(None, "teammate")
+
+        # No orchestrator marker and no lead-only bootstrap invocation.
+        assert "YOUR PACT ROLE: orchestrator." not in result
+        assert 'Skill("PACT:bootstrap")' not in result
+        # The minimal teammate fail-open directive.
+        assert "TaskList" in result
+
+    def test_teammate_role_ignores_team_name(self):
+        """A teammate frame must get the teammate marker (and no bootstrap /
+        no team-name echo) regardless of any team_name passed — in a teammate
+        frame team_name is the frame's OWN session-derived name, not the lead's
+        team, so it must not be surfaced."""
+        from session_init import _build_safety_net_context
+
+        result = _build_safety_net_context("pact-ownname", "teammate")
+
+        assert result.startswith("YOUR PACT ROLE: teammate.")
+        assert 'Skill("PACT:bootstrap")' not in result
+        assert "pact-ownname" not in result
+
+    def test_teammate_role_returns_str_never_raises(self):
+        """The role branch is a pure string selection — it returns a non-empty
+        str and never raises (the safety net's last-resort never-raise contract)."""
+        from session_init import _build_safety_net_context
+
+        result = _build_safety_net_context(None, "teammate")
+
+        assert isinstance(result, str)
+        assert result
+
+    def test_teammate_frame_safety_net_emits_teammate_marker(
+        self, monkeypatch, tmp_path
+    ):
+        """#888 WIRING: a teammate frame whose main() raises AFTER the role
+        capture must hit the outer except and emit the TEAMMATE marker —
+        proving frame_role is captured (pre-declared None, set at the
+        is_lead/classify seam) and threaded into _build_safety_net_context,
+        not merely unit-tested in isolation.
+
+        Injection point: get_task_list() is called unconditionally after the
+        capture and before the fail-open teammate peer-inject branch (which
+        swallows its own exceptions), so forcing it to raise drives main()
+        straight to the safety net with frame_role already == 'teammate'.
+        side_effect (not return_value) replaces the real function wholesale so
+        its internal try/except cannot absorb the raise."""
+        import shared.pact_context as pact_context
+        from session_init import main
+
+        # Isolate the module-level context cache: this is the only test in this
+        # class that drives main() and thus populates _cache.
+        monkeypatch.setattr(pact_context, "_context_path", None)
+        monkeypatch.setattr(pact_context, "_cache", None)
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        # Truthy agent_type not in LEAD_AGENT_TYPES → classify_session_role == "teammate".
+        stdin_data = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+            "source": "startup",
+            "agent_type": "pact-devops-engineer",
+        })
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.persist_context", return_value=None), \
+             patch("session_init.append_event", return_value=None), \
+             patch("session_init.get_task_list",
+                   side_effect=RuntimeError("forced post-capture failure")), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        # Fail-open: even on the forced failure, session start exits 0.
+        assert exc_info.value.code == 0
+
+        output = json.loads(mock_stdout.getvalue().strip().splitlines()[-1])
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        # Capture-and-thread proven: byte-0 teammate marker on the failure path.
+        assert additional.startswith("YOUR PACT ROLE: teammate."), additional
+        # NOT mis-roled as orchestrator, and NOT handed the lead-only directive.
+        assert "YOUR PACT ROLE: orchestrator." not in additional
+        assert 'Skill("PACT:bootstrap")' not in additional
+
+
+class TestM2TeammateAdvisoryGating:
+    """#806 cycle-3 m2: a separate-process teammate's SessionStart
+    additionalContext must NOT carry lead-only pin advisories — step 4
+    stale-pin info, step 4a pin-slot status, step 4b '/PACT:pin-memory'
+    directive — while a LEAD frame still receives all three. Pins live in the
+    project CLAUDE.md, a lead/orchestrator memory surface a teammate has no
+    authority over; #877 gated lead WRITES on is_lead but left these advisory
+    SURFACINGS ungated. This locks the role-coherence fold so it ships without
+    re-running the blind wave.
+
+    The gate keys on the single frame_role captured early (just after the
+    stdin/source parse) — which is also why m2 required relocating that capture
+    ABOVE steps 4/4a/4b (they run before the old L1072 capture point)."""
+
+    _STALE_SENTINEL = "SENTINEL_STALE_PINS_STEP4"
+    _SLOT_SENTINEL = "SENTINEL_PIN_SLOT_4A"
+    # 4b's real text carries the lead-only "/PACT:pin-memory" directive.
+    _PINMEM_SENTINEL = "SENTINEL_4B You MUST run /PACT:pin-memory to archive"
+
+    def _run_main_additional_context(self, monkeypatch, tmp_path, agent_type):
+        """Drive session_init.main() for a frame with the given agent_type and
+        return the emitted hookSpecificOutput.additionalContext (or '').
+
+        The three pin helpers are mocked to truthy sentinels so the assertion
+        is purely about the m2 GATE (frame_role), independent of whether a real
+        CLAUDE.md exists under tmp_path."""
+        import shared.pact_context as pact_context
+        from session_init import main
+
+        monkeypatch.setattr(pact_context, "_context_path", None)
+        monkeypatch.setattr(pact_context, "_cache", None)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+            "source": "startup",
+            "agent_type": agent_type,
+        })
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=self._STALE_SENTINEL), \
+             patch("session_init.check_pin_slot_status", return_value=self._SLOT_SENTINEL), \
+             patch("session_init.check_pin_stale_block_directive", return_value=self._PINMEM_SENTINEL), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.persist_context", return_value=None), \
+             patch("session_init.append_event", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        raw = mock_stdout.getvalue().strip().splitlines()
+        output = json.loads(raw[-1]) if raw else {}
+        return output.get("hookSpecificOutput", {}).get("additionalContext", "")
+
+    def test_lead_frame_receives_all_pin_advisories(self, monkeypatch, tmp_path):
+        """A lead frame's additionalContext carries step 4 / 4a / 4b advisories."""
+        additional = self._run_main_additional_context(
+            monkeypatch, tmp_path, _LEAD_AGENT_TYPE
+        )
+        assert self._STALE_SENTINEL in additional
+        assert self._SLOT_SENTINEL in additional
+        assert "/PACT:pin-memory" in additional
+
+    def test_teammate_frame_suppresses_all_pin_advisories(self, monkeypatch, tmp_path):
+        """A teammate frame's additionalContext carries NONE of the lead pin
+        advisories — the m2 lock."""
+        additional = self._run_main_additional_context(
+            monkeypatch, tmp_path, "pact-devops-engineer"
+        )
+        assert self._STALE_SENTINEL not in additional
+        assert self._SLOT_SENTINEL not in additional
+        assert "/PACT:pin-memory" not in additional
+        # Suppression is TARGETED, not total: the teammate frame still produces
+        # additionalContext (e.g. the universal step-4c plugin banner), so the
+        # absence above is real gating, not an empty/failed output.
+        assert additional
 
     def test_with_team_mentions_partial_failure(self):
         """The team-present branch should note that session_init partially failed."""
@@ -4201,6 +4404,116 @@ class TestMainExceptionSafetyNet:
         assert "simulated late failure after team name captured" in sys_msg
         assert "PACT hook warning (session_init)" in sys_msg
 
+
+
+class TestNonDictStdinNeverRaiseDominance:
+    """#806 cycle-3 (security #52 NOTE): lock the never-raise DOMINANCE invariant
+    of session_init.main().
+
+    main() pre-declares frame_role=None, then makes its FIRST input_data access at
+    L756: ``raw_source = input_data.get("source", "startup")``. Of json's return
+    types (dict / list / str / int / float / bool / None) only dict has ``.get``,
+    so a VALID-but-NON-DICT stdin (a JSON list / string / int / null) raises
+    AttributeError THERE — before the relocated ``frame_role =
+    classify_session_role(input_data)`` capture at L783. The AttributeError
+    bubbles to main()'s outer safety-net except, which emits the orchestrator
+    marker with frame_role still None. So on the non-dict path
+    classify_session_role is NEVER reached: L756 DOMINATES L783.
+
+    Why this matters: classify_session_role itself does ``input_data.get(...)`` —
+    it is total only on a dict. The cycle-3 relocation of the capture to the early
+    seam is never-raise-safe ONLY because L756 dominates it. This test LOCKS that
+    ordering so a future reorder that moved the capture above the L756 guard
+    (reintroducing a non-dict path into the role layer) is caught in CI.
+
+    NON-VACUITY: an ``assert_not_called`` is only meaningful if the spy is on the
+    binding the code actually invokes. session_init imports the symbol into its
+    own namespace (``from shared.pact_context import classify_session_role``), so
+    the L783 call resolves through ``session_init.classify_session_role`` — which
+    is the patch target. ``test_positive_control_dict_stdin_reaches_classify``
+    drives a DICT stdin through the SAME spy and asserts it IS called: if that
+    fails, the spy is on the wrong binding and the not-called assertions are
+    vacuous. (A counter-test-by-revert that hoists the capture above L756 was run
+    during the TEST phase: the parametrized non-dict cases below flip to FAIL,
+    confirming directional teeth — see the task HANDOFF.)
+    """
+
+    def _run_main(self, stdin_str, monkeypatch, tmp_path):
+        """Drive session_init.main() with raw ``stdin_str`` and a wraps=real spy
+        on classify_session_role; return (additionalContext, spy).
+
+        The heavy collaborators are patched so a DICT-stdin run (the positive
+        control) reaches exit 0 hermetically; on a NON-DICT run they are never
+        reached (L756 raises first), so those patches are harmless no-ops there.
+        """
+        import shared.pact_context as pact_context
+        from shared.pact_context import classify_session_role as real_classify
+        from session_init import main
+
+        monkeypatch.setattr(pact_context, "_context_path", None)
+        monkeypatch.setattr(pact_context, "_cache", None)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        with patch("session_init.classify_session_role", wraps=real_classify) as spy, \
+             patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.check_pin_slot_status", return_value=None), \
+             patch("session_init.check_pin_stale_block_directive", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.persist_context", return_value=None), \
+             patch("session_init.append_event", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_str)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0, (
+            f"session_init.main() must fail-open to exit 0; got {exc_info.value.code}"
+        )
+        raw = mock_stdout.getvalue().strip().splitlines()
+        output = json.loads(raw[-1]) if raw else {}
+        additional = output.get("hookSpecificOutput", {}).get("additionalContext", "")
+        return additional, spy
+
+    @pytest.mark.parametrize(
+        "label,stdin_str",
+        [
+            ("json_list", "[1, 2, 3]"),
+            ("json_string", '"a-bare-string"'),
+            ("json_int", "42"),
+            ("json_null", "null"),
+        ],
+    )
+    def test_non_dict_stdin_orchestrator_safety_net_classify_not_reached(
+        self, label, stdin_str, monkeypatch, tmp_path
+    ):
+        """A valid NON-DICT stdin must: (a) never raise (exit 0, asserted in the
+        helper), (b) emit the byte-0 orchestrator safety-net marker (frame_role
+        stayed None), (c) NEVER reach classify_session_role (L756 dominates L783)."""
+        additional, spy = self._run_main(stdin_str, monkeypatch, tmp_path)
+        assert additional.startswith("YOUR PACT ROLE: orchestrator."), (
+            f"non-dict stdin ({label}) must hit the orchestrator safety net; "
+            f"got: {additional[:80]!r}"
+        )
+        spy.assert_not_called()
+
+    def test_positive_control_dict_stdin_reaches_classify(self, monkeypatch, tmp_path):
+        """NON-VACUITY GUARD (hard requirement): a DICT stdin runs through the
+        SAME spy and MUST call classify_session_role — proving the spy is on the
+        binding the code actually invokes (session_init.classify_session_role,
+        the L783 capture), so the assert_not_called above is meaningful. If this
+        fails, the spy target is wrong and the whole lock is vacuous."""
+        dict_stdin = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+            "source": "startup",
+        })
+        _additional, spy = self._run_main(dict_stdin, monkeypatch, tmp_path)
+        spy.assert_called()
 
 
 # =============================================================================
