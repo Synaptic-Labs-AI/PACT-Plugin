@@ -4406,6 +4406,116 @@ class TestMainExceptionSafetyNet:
 
 
 
+class TestNonDictStdinNeverRaiseDominance:
+    """#806 cycle-3 (security #52 NOTE): lock the never-raise DOMINANCE invariant
+    of session_init.main().
+
+    main() pre-declares frame_role=None, then makes its FIRST input_data access at
+    L756: ``raw_source = input_data.get("source", "startup")``. Of json's return
+    types (dict / list / str / int / float / bool / None) only dict has ``.get``,
+    so a VALID-but-NON-DICT stdin (a JSON list / string / int / null) raises
+    AttributeError THERE — before the relocated ``frame_role =
+    classify_session_role(input_data)`` capture at L783. The AttributeError
+    bubbles to main()'s outer safety-net except, which emits the orchestrator
+    marker with frame_role still None. So on the non-dict path
+    classify_session_role is NEVER reached: L756 DOMINATES L783.
+
+    Why this matters: classify_session_role itself does ``input_data.get(...)`` —
+    it is total only on a dict. The cycle-3 relocation of the capture to the early
+    seam is never-raise-safe ONLY because L756 dominates it. This test LOCKS that
+    ordering so a future reorder that moved the capture above the L756 guard
+    (reintroducing a non-dict path into the role layer) is caught in CI.
+
+    NON-VACUITY: an ``assert_not_called`` is only meaningful if the spy is on the
+    binding the code actually invokes. session_init imports the symbol into its
+    own namespace (``from shared.pact_context import classify_session_role``), so
+    the L783 call resolves through ``session_init.classify_session_role`` — which
+    is the patch target. ``test_positive_control_dict_stdin_reaches_classify``
+    drives a DICT stdin through the SAME spy and asserts it IS called: if that
+    fails, the spy is on the wrong binding and the not-called assertions are
+    vacuous. (A counter-test-by-revert that hoists the capture above L756 was run
+    during the TEST phase: the parametrized non-dict cases below flip to FAIL,
+    confirming directional teeth — see the task HANDOFF.)
+    """
+
+    def _run_main(self, stdin_str, monkeypatch, tmp_path):
+        """Drive session_init.main() with raw ``stdin_str`` and a wraps=real spy
+        on classify_session_role; return (additionalContext, spy).
+
+        The heavy collaborators are patched so a DICT-stdin run (the positive
+        control) reaches exit 0 hermetically; on a NON-DICT run they are never
+        reached (L756 raises first), so those patches are harmless no-ops there.
+        """
+        import shared.pact_context as pact_context
+        from shared.pact_context import classify_session_role as real_classify
+        from session_init import main
+
+        monkeypatch.setattr(pact_context, "_context_path", None)
+        monkeypatch.setattr(pact_context, "_cache", None)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        with patch("session_init.classify_session_role", wraps=real_classify) as spy, \
+             patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.check_pin_slot_status", return_value=None), \
+             patch("session_init.check_pin_stale_block_directive", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.persist_context", return_value=None), \
+             patch("session_init.append_event", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_str)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0, (
+            f"session_init.main() must fail-open to exit 0; got {exc_info.value.code}"
+        )
+        raw = mock_stdout.getvalue().strip().splitlines()
+        output = json.loads(raw[-1]) if raw else {}
+        additional = output.get("hookSpecificOutput", {}).get("additionalContext", "")
+        return additional, spy
+
+    @pytest.mark.parametrize(
+        "label,stdin_str",
+        [
+            ("json_list", "[1, 2, 3]"),
+            ("json_string", '"a-bare-string"'),
+            ("json_int", "42"),
+            ("json_null", "null"),
+        ],
+    )
+    def test_non_dict_stdin_orchestrator_safety_net_classify_not_reached(
+        self, label, stdin_str, monkeypatch, tmp_path
+    ):
+        """A valid NON-DICT stdin must: (a) never raise (exit 0, asserted in the
+        helper), (b) emit the byte-0 orchestrator safety-net marker (frame_role
+        stayed None), (c) NEVER reach classify_session_role (L756 dominates L783)."""
+        additional, spy = self._run_main(stdin_str, monkeypatch, tmp_path)
+        assert additional.startswith("YOUR PACT ROLE: orchestrator."), (
+            f"non-dict stdin ({label}) must hit the orchestrator safety net; "
+            f"got: {additional[:80]!r}"
+        )
+        spy.assert_not_called()
+
+    def test_positive_control_dict_stdin_reaches_classify(self, monkeypatch, tmp_path):
+        """NON-VACUITY GUARD (hard requirement): a DICT stdin runs through the
+        SAME spy and MUST call classify_session_role — proving the spy is on the
+        binding the code actually invokes (session_init.classify_session_role,
+        the L783 capture), so the assert_not_called above is meaningful. If this
+        fails, the spy target is wrong and the whole lock is vacuous."""
+        dict_stdin = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+            "source": "startup",
+        })
+        _additional, spy = self._run_main(dict_stdin, monkeypatch, tmp_path)
+        spy.assert_called()
+
+
 # =============================================================================
 # Issue #414 R2: session_start event includes `source` field
 # =============================================================================
