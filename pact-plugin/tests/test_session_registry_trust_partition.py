@@ -49,6 +49,33 @@ _AUTHORITY_FILES = (
 _REGISTRY_MODULE_TOKENS = ("session_registry",)
 _REGISTRY_SYMBOL_TOKENS = ("_registry_resolve", "resolve")  # the resolver alias / symbol
 
+# Forbidden callee names in the authority files. An authority surface must call
+# NEITHER the registry resolver DIRECTLY (_registry_resolve) NOR a labeling
+# resolver that reaches it TRANSITIVELY. resolve_agent_name (pact_context)
+# consumes the self-asserted registry value at its Step 3.5, so an authority file
+# doing `import pact_context; pact_context.resolve_agent_name(...)` would launder
+# the forgeable value into an authority decision WITHOUT importing
+# session_registry — invisible to the no-import test above. Forbidding the call
+# name closes that transitive-reintroduction path structurally.
+_FORBIDDEN_AUTHORITY_CALLS = ("_registry_resolve", "resolve_agent_name")
+
+# The ONLY hook files permitted to import the self-registration registry. Pairs
+# the POSITIVE 2-file authority no-import test with a NEGATIVE all-files scan: a
+# NEW importer ANYWHERE under hooks/ — an authority file, a gate, a new helper —
+# trips the backstop, even one the _AUTHORITY_FILES tuple does not enumerate.
+# The three sanctioned consumers are all LABELING / lifecycle uses (the registry
+# value never reaches an authority decision through any of them):
+#   * shared/pact_context.py — resolve_agent_name Step 3.5 (human-readable label)
+#   * session_init.py        — teammate-branch lead-team resolution (peer display)
+#   * session_end.py         — prune (imports REGISTRY_PATH only, no resolver)
+# Paths are POSIX-relative to HOOKS_DIR. session_registry.py itself is NOT here:
+# the module does not import itself, so the detector does not flag it.
+_ALLOWED_REGISTRY_IMPORTERS = frozenset({
+    "shared/pact_context.py",
+    "session_init.py",
+    "session_end.py",
+})
+
 
 def _parse(path: Path) -> ast.AST:
     return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -85,6 +112,27 @@ def _registry_imports(tree: ast.AST) -> list[str]:
     return found
 
 
+def _forbidden_resolver_calls(tree: ast.AST) -> list[tuple[str, int]]:
+    """Return (name, lineno) for every Call whose callee name is in
+    ``_FORBIDDEN_AUTHORITY_CALLS`` — matching BOTH a bare name
+    ``resolve_agent_name(...)`` (ast.Name) and an attribute
+    ``pact_context.resolve_agent_name(...)`` (ast.Attribute, the realistic
+    transitive-reintroduction shape). Mirrors ``_registry_imports`` so the
+    call-detector gets the same phantom-green fire-check treatment."""
+    found: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = (
+                fn.id if isinstance(fn, ast.Name)
+                else fn.attr if isinstance(fn, ast.Attribute)
+                else None
+            )
+            if name in _FORBIDDEN_AUTHORITY_CALLS:
+                found.append((name, node.lineno))
+    return found
+
+
 # ===========================================================================
 # TRUST PARTITION — AST no-import (load-bearing security boundary)
 # ===========================================================================
@@ -108,25 +156,23 @@ class TestTrustPartitionNoRegistryImport:
 
     @pytest.mark.parametrize("rel_file", _AUTHORITY_FILES)
     def test_authority_file_does_not_call_registry_resolver(self, rel_file):
-        """Belt-and-suspenders beyond the import check: no call to a name that
-        looks like the registry resolver (in case of a future star-import or a
-        re-export). The authority files resolve actors via agent_id only."""
+        """Belt-and-suspenders beyond the no-import check: an authority file must
+        call NEITHER the registry resolver directly (``_registry_resolve``) NOR a
+        labeling resolver that reaches it TRANSITIVELY (``resolve_agent_name``,
+        which consumes the registry at pact_context Step 3.5). The no-import test
+        above cannot see the transitive path — an authority file that does
+        ``import pact_context; pact_context.resolve_agent_name(...)`` reintroduces
+        the self-asserted/forgeable value into an authority decision WITHOUT
+        importing session_registry. Authority surfaces resolve actors via the
+        harness-managed agent_id only."""
         path = HOOKS_DIR / rel_file
-        tree = _parse(path)
-        bad_calls = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                fn = node.func
-                name = (
-                    fn.id if isinstance(fn, ast.Name)
-                    else fn.attr if isinstance(fn, ast.Attribute)
-                    else None
-                )
-                if name == "_registry_resolve":
-                    bad_calls.append((name, node.lineno))
+        bad_calls = _forbidden_resolver_calls(_parse(path))
         assert bad_calls == [], (
-            f"{rel_file} calls the registry resolver: {bad_calls}. Authority "
-            f"surfaces must not consume the self-asserted registry value."
+            f"{rel_file} calls a forbidden resolver: {bad_calls}. Authority "
+            f"surfaces must NOT consume the self-asserted registry value — neither "
+            f"directly (_registry_resolve) nor transitively via resolve_agent_name "
+            f"(pact_context Step 3.5). Resolve actors via the harness-managed "
+            f"agent_id only."
         )
 
     @pytest.mark.parametrize("src", [
@@ -149,6 +195,65 @@ class TestTrustPartitionNoRegistryImport:
         """Counter-case: an unrelated import is NOT flagged (the detector isn't
         trivially matching everything)."""
         assert _registry_imports(ast.parse("from shared.peer_context import get_peer_context\n")) == []
+
+    @pytest.mark.parametrize("src", [
+        "resolve_agent_name(input_data)\n",                # bare-name transitive call
+        "pact_context.resolve_agent_name(input_data)\n",   # attribute transitive call
+        "_registry_resolve(session_id)\n",                 # direct resolver call
+    ])
+    def test_call_detector_fires_on_synthetic_resolver_call(self, src):
+        """Phantom-green guard for the CALL detector: it FIRES on every forbidden
+        resolver-call shape — the bare AND attribute forms of resolve_agent_name
+        (the transitive-reintroduction shape an authority file would reach for) and
+        the direct _registry_resolve — so the negative leg is non-vacuous and a
+        future narrowing that drops a name fails here. Mirrors
+        test_detector_fires_on_synthetic_import."""
+        assert _forbidden_resolver_calls(ast.parse(src)), (
+            f"the forbidden-resolver-call detector did NOT fire on {src!r} — the "
+            f"transitive trust-partition check would miss this call shape."
+        )
+
+    def test_call_detector_ignores_unrelated_call(self):
+        """Counter-case: an unrelated call (is_lead — the agent_type-direct role
+        predicate authority files SHOULD use) is NOT flagged."""
+        assert _forbidden_resolver_calls(ast.parse("is_lead(input_data)\n")) == []
+
+
+# ===========================================================================
+# IMPORTER ALLOWLIST — negative all-files backstop (pairs the positive no-import)
+# ===========================================================================
+
+class TestRegistryImporterAllowlist:
+    """Exactly the three sanctioned LABELING/lifecycle consumers may import the
+    registry. The no-import test above pins the TWO authority files specifically;
+    this backstop scans EVERY hook file so a NEW importer anywhere — including one
+    the _AUTHORITY_FILES tuple does not list — trips immediately."""
+
+    def test_only_known_consumers_import_registry(self):
+        actual: set[str] = set()
+        for path in sorted(HOOKS_DIR.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            if _registry_imports(_parse(path)):
+                actual.add(path.relative_to(HOOKS_DIR).as_posix())
+        # Non-vacuity guard: a broken scan (detector silently returns [] for all
+        # files) would make `actual` empty — fail LOUDLY with a clear message
+        # rather than via a confusing set-diff.
+        assert actual, (
+            "the registry-import scan found NO importers at all — the detector or "
+            "the HOOKS_DIR glob likely broke; this backstop would be vacuous."
+        )
+        assert actual == set(_ALLOWED_REGISTRY_IMPORTERS), (
+            f"the set of hook files importing session_registry drifted from the "
+            f"sanctioned allowlist.\n"
+            f"  expected: {sorted(_ALLOWED_REGISTRY_IMPORTERS)}\n"
+            f"  actual:   {sorted(actual)}\n"
+            f"A NEW importer MUST be reviewed: the registry value is "
+            f"self-asserted / forgeable and LABELING-ONLY. If the new consumer is "
+            f"a labeling/lifecycle use, add it to _ALLOWED_REGISTRY_IMPORTERS; if "
+            f"it is an AUTHORITY surface, it must NOT import the registry at all "
+            f"(see the no-import / no-call tests above)."
+        )
 
 
 # ===========================================================================
