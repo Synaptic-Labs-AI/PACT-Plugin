@@ -240,6 +240,23 @@ class TestNoSkillInvocationOnFirstAction:
                 f"Skills found: {skill_names!r}"
             )
 
+    def test_frontmatter_includes_team_registration(self, all_agents):
+        """Invocability insurance: every teammate-spawnable agent-def must list
+        pact-team-registration in its skills: frontmatter so the spawn-prompt
+        Invoke Skill("PACT:pact-team-registration") first-action directive is
+        guaranteed discoverable/invocable — we do not assume a non-frontmatter
+        skill is invocable. Frontmatter preloads NAME+DESCRIPTION only (the body
+        still loads on the explicit invoke), so this does not re-trigger the
+        per-spawn skill-overhead concern. Scoped to the teammates;
+        pact-orchestrator (the lead, not spawned as a teammate) is excluded by
+        the teammate_agent_files fixture."""
+        for name, (_fm, _text, skill_names) in all_agents.items():
+            assert "pact-team-registration" in skill_names, (
+                f"{name}: missing pact-team-registration in skills: frontmatter. "
+                f"The register first-action directive in the spawn prompt would "
+                f"not be guaranteed invocable. Skills found: {skill_names!r}"
+            )
+
 
 class TestExtractSkillNamesParser:
     """Edge case tests for _extract_skill_names() parser.
@@ -766,18 +783,21 @@ class TestAgentDomainSkillVariations:
         "pact-preparer": {
             "pact-agent-teams",
             "pact-teachback",
+            "pact-team-registration",
             "request-more-context",
             "pact-prepare-research",
         },
         "pact-architect": {
             "pact-agent-teams",
             "pact-teachback",
+            "pact-team-registration",
             "request-more-context",
             "pact-architecture-patterns",
         },
         "pact-backend-coder": {
             "pact-agent-teams",
             "pact-teachback",
+            "pact-team-registration",
             "request-more-context",
             "pact-coding-standards",
             "pact-security-patterns",
@@ -785,6 +805,7 @@ class TestAgentDomainSkillVariations:
         "pact-frontend-coder": {
             "pact-agent-teams",
             "pact-teachback",
+            "pact-team-registration",
             "request-more-context",
             "pact-coding-standards",
             "pact-security-patterns",
@@ -792,36 +813,42 @@ class TestAgentDomainSkillVariations:
         "pact-database-engineer": {
             "pact-agent-teams",
             "pact-teachback",
+            "pact-team-registration",
             "request-more-context",
             "pact-coding-standards",
         },
         "pact-devops-engineer": {
             "pact-agent-teams",
             "pact-teachback",
+            "pact-team-registration",
             "request-more-context",
             "pact-coding-standards",
         },
         "pact-test-engineer": {
             "pact-agent-teams",
             "pact-teachback",
+            "pact-team-registration",
             "request-more-context",
             "pact-testing-strategies",
         },
         "pact-qa-engineer": {
             "pact-agent-teams",
             "pact-teachback",
+            "pact-team-registration",
             "request-more-context",
             "pact-testing-strategies",
         },
         "pact-security-engineer": {
             "pact-agent-teams",
             "pact-teachback",
+            "pact-team-registration",
             "request-more-context",
             "pact-security-patterns",
         },
         "pact-n8n": {
             "pact-agent-teams",
             "pact-teachback",
+            "pact-team-registration",
             "request-more-context",
             "n8n-workflow-patterns",
             "n8n-validation-expert",
@@ -834,12 +861,14 @@ class TestAgentDomainSkillVariations:
         "pact-auditor": {
             "pact-agent-teams",
             "pact-teachback",
+            "pact-team-registration",
             "request-more-context",
             "pact-architecture-patterns",
         },
         "pact-secretary": {
             "pact-agent-teams",
             "pact-teachback",
+            "pact-team-registration",
             "pact-memory",
             "pact-handoff-harvest",
         },

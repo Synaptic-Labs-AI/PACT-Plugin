@@ -10,6 +10,7 @@ memory: user
 skills:
   - pact-agent-teams
   - pact-teachback
+  - pact-team-registration
   - pact-architecture-patterns
   - request-more-context
 ---

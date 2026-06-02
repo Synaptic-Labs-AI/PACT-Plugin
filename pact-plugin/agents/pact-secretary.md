@@ -33,6 +33,7 @@ memory: user
 skills:
   - pact-agent-teams
   - pact-teachback
+  - pact-team-registration
   - pact-memory
   - pact-handoff-harvest
 ---
