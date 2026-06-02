@@ -93,7 +93,13 @@ acceptance pair.
    2. `TaskCreate(subject="Session briefing + ...", description=...)` — Task B (mission lives here)
    3. `TaskUpdate(taskId=A, owner="secretary", addBlocks=[B])`
    4. `TaskUpdate(taskId=B, owner="secretary", addBlockedBy=[A])`
-   5. `Agent(name="secretary", team_name=<team>, subagent_type="pact-secretary", prompt="YOUR PACT ROLE: teammate (secretary).\n\nYou are joining team <team>. Check `TaskList` for tasks assigned to you.")`
+   5. `Agent(name="secretary", team_name=<team>, subagent_type="pact-secretary", prompt="YOUR PACT ROLE: teammate (secretary).\n\nYou are joining team <team>. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. Then check `TaskList` for tasks assigned to you.")`
+
+   > The secretary spawn prompt now carries the register first-action directive
+   > (the secretary self-supplies `secretary@<team>` and registers before its
+   > briefing). This runbook still validates only the dispatch SHAPE; the
+   > register-fires assertion lives in
+   > [885-team-registration-smoke.md](885-team-registration-smoke.md).
 3. Inspect the session journal for any `dispatch_decision` event:
    ```
    tail -50 ~/.claude/pact-sessions/<project>/<sid>/session-journal.jsonl \
