@@ -161,7 +161,15 @@ def already_emitted(team_name: str, task_id: str, occupant: str) -> bool:
     file was placed here." Acceptable trade-off versus read-the-file-to-verify
     (which races and complicates the atomic test-and-set).
     """
-    team_name = sanitize_path_component(team_name)
+    # Centralized normalization (SSOT): case-fold + sanitize team_name HERE so
+    # every caller derives a BYTE-IDENTICAL marker dir regardless of what it
+    # passed in — b1 (agent_handoff_emitter) pre-lowercases for its
+    # read_task_json path, b2 (task_lifecycle_gate) does not; folding .lower()
+    # in here makes the two structurally identical and closes the dormant
+    # case-drift (the #887 divergence shape one level up). Idempotent w.r.t.
+    # b1's external .lower(). The normalized value flows into BOTH _marker_dir()
+    # and the TOCTOU team_base below, keeping the containment check consistent.
+    team_name = sanitize_path_component(team_name.lower())
     task_id = sanitize_path_component(task_id)
     occupant = sanitize_path_component(occupant)
 
