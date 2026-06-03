@@ -339,6 +339,118 @@ class TestSanitizerParity:
 
 
 # ===========================================================================
+# TEAM-SEGMENT VALIDATOR PARITY — dual-copy _is_safe_team_segment (behavioral)
+# ===========================================================================
+
+# Behavioral-parity battery for the dual-copy _is_safe_team_segment. The validator
+# was introduced THIS PR in TWO inlined copies — session_end.py (prune) and
+# session_registry.py (_name_is_team_member) — because the registry leaf cannot
+# import from session_end (session_end imports FROM it), so the copy is duplicated
+# on purpose. Nothing else guards the two from silently diverging. Each
+# (input, expected) row documents intent AND feeds the cross-copy agreement check.
+#   REJECT: empty / NUL / C0-low / C0-high / DEL / fwd-slash / back-slash / dot / dotdot
+#   ACCEPT: a legit pact-<hex> team, "red-team", AND "pact-sessions-evil" — a VALID
+#           single path segment (both copies MUST accept it). The sibling-prefix
+#           rejection of "pact-sessions-evil" belongs to the PATH check
+#           (_is_under_pact_sessions, F4), NOT this SEGMENT check; conflating the
+#           two would wrongly reject a legitimately-named team.
+_TEAM_SEGMENT_PARITY_BATTERY = (
+    ("", False),
+    ("\x00", False),
+    ("\x01", False),
+    ("\x1f", False),
+    ("\x7f", False),
+    ("a/b", False),
+    ("a\\b", False),
+    (".", False),
+    ("..", False),
+    ("pact-deadbeef", True),
+    ("pact-sessions-evil", True),
+    ("pact-6f81f147", True),
+    ("red-team", True),
+)
+
+
+def _segment_parity_divergences(fn_a, fn_b, battery):
+    """Return [(input, a_result, b_result), ...] for inputs where the two
+    validators DISAGREE. Empty list == perfect behavioral parity. Pure: calls only
+    the two passed predicates over the battery, no I/O."""
+    out = []
+    for item, _expected in battery:
+        a, b = fn_a(item), fn_b(item)
+        if a != b:
+            out.append((item, a, b))
+    return out
+
+
+class TestTeamSegmentValidatorParity:
+    """The dual-copy _is_safe_team_segment (session_end + session_registry, inlined
+    to keep the registry's zero-shared-import leaf property) MUST behave
+    identically. BEHAVIORAL parity (not source-byte) is the right level — these are
+    explicit ord()/membership-check validators, not a shared regex literal like the
+    sanitizer above."""
+
+    def test_dual_copy_behaves_identically(self):
+        """Cross-copy agreement: the two inlined validators return the SAME bool for
+        every battery input. A divergence means a @team segment rejected by one
+        FS-path builder (prune vs membership) is accepted by the other."""
+        from session_end import _is_safe_team_segment as end_seg
+        from shared.session_registry import _is_safe_team_segment as reg_seg
+        diverged = _segment_parity_divergences(
+            end_seg, reg_seg, _TEAM_SEGMENT_PARITY_BATTERY
+        )
+        assert diverged == [], (
+            f"the two _is_safe_team_segment copies DIVERGED on {diverged} "
+            f"(input, session_end, session_registry). They MUST stay behaviorally "
+            f"identical — re-sync the reject branches (the registry copy is inlined "
+            f"on purpose; it cannot import session_end's)."
+        )
+
+    def test_both_copies_match_documented_intent(self):
+        """Guard against 'identical can mean identically WRONG': both copies must
+        match the battery's documented expected bool for every input, not merely
+        agree with each other."""
+        from session_end import _is_safe_team_segment as end_seg
+        from shared.session_registry import _is_safe_team_segment as reg_seg
+        for item, expected in _TEAM_SEGMENT_PARITY_BATTERY:
+            assert end_seg(item) == expected, (
+                f"session_end._is_safe_team_segment({item!r}) = {end_seg(item)}, "
+                f"expected {expected}"
+            )
+            assert reg_seg(item) == expected, (
+                f"session_registry._is_safe_team_segment({item!r}) = "
+                f"{reg_seg(item)}, expected {expected}"
+            )
+
+    def test_parity_comparator_is_non_vacuous(self):
+        """Non-vacuity (synthetic divergence): the comparator FLAGS two validators
+        that differ on exactly one input — a PERMANENT in-file proof that the
+        agreement check above would CATCH real drift rather than silently pass.
+        ``_safe`` rejects DEL (0x7f); ``_drops_del`` accepts it; they must diverge
+        on the "\\x7f" row and ONLY there (cardinality 1)."""
+        def _safe(t):
+            return (bool(t)
+                    and all(ord(c) >= 0x20 and ord(c) != 0x7f for c in t)
+                    and "/" not in t and "\\" not in t and t not in (".", ".."))
+
+        def _drops_del(t):  # identical EXCEPT it no longer rejects DEL (0x7f)
+            return (bool(t)
+                    and all(ord(c) >= 0x20 for c in t)
+                    and "/" not in t and "\\" not in t and t not in (".", ".."))
+
+        diverged = _segment_parity_divergences(
+            _safe, _drops_del, _TEAM_SEGMENT_PARITY_BATTERY
+        )
+        assert diverged, (
+            "the parity comparator did NOT catch a synthetic DEL-divergence — it "
+            "would miss a real drift between the two copies."
+        )
+        assert [i for i, _a, _b in diverged] == ["\x7f"], (
+            f"expected the divergence at exactly the DEL input; got {diverged}"
+        )
+
+
+# ===========================================================================
 # PATH-NOT-TEAM-SCOPED — global fixed team-agnostic path
 # ===========================================================================
 
