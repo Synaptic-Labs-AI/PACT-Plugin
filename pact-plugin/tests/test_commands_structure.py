@@ -271,8 +271,8 @@ def _normalize_prompt_escaping(text: str) -> str:
 
 
 # Every surface that emits a teammate spawn prompt. The register directive must
-# be present in ALL of them (present-in-ALL, not present-in-at-least-one): a
-# single surface that drops it silently spawns teammates that never register.
+# be present in EVERY teammate-spawn prompt literal across ALL of them: a single
+# literal that drops it silently spawns a teammate that never registers.
 # bootstrap.md (the secretary spawn) is NOT a CONSUMER_COMMAND but IS a
 # teammate-spawning surface; the persona canonical template
 # (agents/pact-orchestrator.md) is the authoritative source form.
@@ -286,17 +286,60 @@ SPAWN_PROMPT_SURFACES = [
     ("pact-orchestrator", COMMANDS_DIR.parent / "agents" / "pact-orchestrator.md"),
 ]
 
+# Expected count of teammate-spawn prompt literals per surface. Pinned so a
+# FUTURE literal added to a multi-literal file forces a conscious test update
+# (and thereby a conscious "does it carry the directive?" check) instead of
+# slipping in unguarded. orchestrate.md has the most (one per dispatched phase).
+EXPECTED_SPAWN_LITERAL_COUNTS = {
+    "orchestrate": 6,
+    "peer-review": 1,
+    "comPACT": 2,
+    "rePACT": 1,
+    "plan-mode": 1,
+    "bootstrap": 1,
+    "pact-orchestrator": 1,
+}
 
-class TestRegisterDirectivePresentInAllSpawnSurfaces:
-    """Present-in-ALL drop-guard for the teammate self-registration first-action.
+# Matches a double-quoted prompt="..." value, honoring escaped \" inside the
+# literal (the spawn prompts embed Invoke Skill(\"...\")). The capture is the
+# raw literal value with its source escaping intact.
+_PROMPT_LITERAL_RE = re.compile(r'prompt="((?:[^"\\]|\\.)*)"')
 
-    Every surface that emits a teammate spawn prompt MUST carry the register
-    directive so a spawned teammate records its name@team before any other
-    action. Unlike the present-in-at-least-one Class B component check, this is
-    present-in-ALL: a single surface that drops the directive silently produces
-    teammates that never register — the exact LEG-4 register-delivery failure
-    class — so each surface is pinned independently (diagnostic axis = WHICH
-    surface dropped it).
+# A teammate-spawn prompt literal always opens with the role prelude. This
+# prefix is what distinguishes a spawn literal from a non-spawn prompt such as
+# Agent(resume=..., prompt="Blocker resolved: ...") — a resumed agent already
+# registered on its INITIAL spawn, so its resume prompt must NOT carry (or be
+# required to carry) the register directive.
+_SPAWN_LITERAL_PREFIX = "YOUR PACT ROLE: teammate ("
+
+
+def _spawn_prompt_literals(text: str) -> list[str]:
+    """Return every teammate-spawn prompt literal value (raw, escaping intact)
+    in ``text`` — the ``prompt="YOUR PACT ROLE: teammate (..."`` sites. Excludes
+    non-spawn prompts (e.g. the Agent(resume=...) 'Blocker resolved' prompt),
+    which carry no role prelude and must NOT be held to the directive rule."""
+    return [
+        value
+        for value in _PROMPT_LITERAL_RE.findall(text)
+        if value.startswith(_SPAWN_LITERAL_PREFIX)
+    ]
+
+
+class TestRegisterDirectivePresentInEverySpawnLiteral:
+    """Present-in-EVERY-LITERAL drop-guard for the self-registration first-action
+    (literal-granular — supersedes the prior file-granular substring check).
+
+    Every teammate-spawn prompt literal MUST carry the register directive, not
+    merely SOMEWHERE in each file. A whole-file substring check is blind to a
+    single literal dropping the directive inside a MULTI-literal file
+    (orchestrate.md has 6 spawn literals, comPACT.md has 2): the directive still
+    appears in the file's other literals, so the drop passes undetected — the
+    exact LEG-4 register-delivery failure class (a teammate spawned via the
+    stripped literal never registers). This guard iterates PER literal.
+
+    Non-vacuity (counter-test-by-revert, documented): dropping the directive from
+    ONE of orchestrate.md's 6 literals turns the [orchestrate] row RED here,
+    where the prior file-granular test stayed GREEN.
     """
 
     @pytest.mark.parametrize(
@@ -304,15 +347,54 @@ class TestRegisterDirectivePresentInAllSpawnSurfaces:
         SPAWN_PROMPT_SURFACES,
         ids=[label for label, _ in SPAWN_PROMPT_SURFACES],
     )
-    def test_surface_carries_register_directive(self, label, path):
+    def test_every_spawn_literal_carries_register_directive(self, label, path):
         assert path.is_file(), f"Spawn-prompt surface missing: {label} ({path})"
-        text = _normalize_prompt_escaping(path.read_text(encoding="utf-8"))
-        assert REGISTER_DIRECTIVE in text, (
-            f"{label} is a teammate-spawning surface but its spawn prompt is "
-            f"missing the register first-action directive {REGISTER_DIRECTIVE!r}. "
-            f"A spawned teammate would never record its name@team — the LEG-4 "
-            f"register-delivery failure class. Every spawn surface must carry "
-            f"the directive (present-in-ALL)."
+        raw = path.read_text(encoding="utf-8")
+        literals = _spawn_prompt_literals(raw)
+
+        expected = EXPECTED_SPAWN_LITERAL_COUNTS[label]
+        assert len(literals) == expected, (
+            f"{label}: found {len(literals)} teammate-spawn prompt literal(s), "
+            f"expected {expected}. If you ADDED a teammate-spawn literal, update "
+            f"EXPECTED_SPAWN_LITERAL_COUNTS AND ensure the new literal carries "
+            f"{REGISTER_DIRECTIVE!r}; if you REMOVED one, update the count. The "
+            f"count guard makes a new spawn literal a conscious directive "
+            f"decision (the file-granular check could not see a per-literal drop)."
+        )
+
+        for index, value in enumerate(literals, start=1):
+            normalized = _normalize_prompt_escaping(value)
+            assert REGISTER_DIRECTIVE in normalized, (
+                f"{label}: teammate-spawn prompt literal #{index} is missing the "
+                f"register first-action directive {REGISTER_DIRECTIVE!r}. A "
+                f"teammate spawned via THIS literal would never record its "
+                f"name@team — the LEG-4 register-delivery failure class. A "
+                f"whole-file substring check would miss this when the file has "
+                f"other literals that carry it; EVERY literal must carry it. "
+                f"Offending literal (truncated): {value[:90]!r}"
+            )
+
+    def test_resume_prompt_excluded_from_directive_requirement(self):
+        """Regression: a non-spawn prompt — Agent(resume=..., prompt="Blocker
+        resolved: ...") — is NOT a teammate-spawn literal (no role prelude) and
+        is correctly EXCLUDED from the directive requirement. Pins the exclusion
+        so a future extractor change can't start demanding the directive in a
+        resume prompt (wrong: a resumed agent already registered on its initial
+        spawn). orchestrate.md is the surface that carries the resume example."""
+        orch = (COMMANDS_DIR / "orchestrate.md").read_text(encoding="utf-8")
+        all_prompts = _PROMPT_LITERAL_RE.findall(orch)
+        resume_prompts = [v for v in all_prompts if v.startswith("Blocker resolved")]
+        assert resume_prompts, (
+            "expected at least one Agent(resume=...) 'Blocker resolved' prompt in "
+            "orchestrate.md — the resume-recovery example. If it was removed, drop "
+            "this test; if the extractor regex changed shape, fix it. Without this "
+            "fixture the exclusion below would be vacuously true."
+        )
+        # The resume prompt must NOT be classified as a spawn literal.
+        spawn = _spawn_prompt_literals(orch)
+        assert all(not v.startswith("Blocker resolved") for v in spawn), (
+            "a resume prompt leaked into the teammate-spawn literal set — it "
+            "would then be wrongly required to carry the register directive."
         )
 
 
