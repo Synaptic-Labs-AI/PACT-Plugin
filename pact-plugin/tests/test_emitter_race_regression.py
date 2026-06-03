@@ -120,6 +120,8 @@ class TestRaceShapeRegression:
                     handoff content lands in journal.
         """
         monkeypatch.setenv("HOME", str(tmp_path))
+        from shared.agent_handoff_marker import occupant_hash
+
         calls: list[dict] = []
         payload = {
             "hook_event_name": "TaskCompleted",
@@ -148,9 +150,11 @@ class TestRaceShapeRegression:
             "(review-architect, PR #563) would resurface — empty-content "
             "marker would suppress the later genuine completion."
         )
+        # #887: marker is occupant-keyed — {task_id}-{occupant_hash}.
+        occ = occupant_hash("probe-agent", "two-fire revert sequence probe")
         marker = (
             tmp_path / ".claude" / "teams" / "pact-test"
-            / ".agent_handoff_emitted" / "two-fire-revert"
+            / ".agent_handoff_emitted" / f"two-fire-revert-{occ}"
         )
         assert not marker.exists(), (
             "Fire 1: marker MUST NOT be created when handoff is absent. "

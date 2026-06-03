@@ -7,7 +7,7 @@ from fixtures.emitter import VALID_HANDOFF, _run_main
 
 
 class TestPathSanitization:
-    """Direct coverage for `_sanitize_path_component` helper + integration
+    """Direct coverage for `sanitize_path_component` helper + integration
     coverage for degenerate post-sanitize values.
 
     The helper uses `re.sub(r"[/\\\\]|\\.\\.", "", v)` which strips `/`,
@@ -23,7 +23,7 @@ class TestPathSanitization:
     """
 
     class TestSanitizeHelper:
-        """Direct unit tests against _sanitize_path_component. Independent
+        """Direct unit tests against sanitize_path_component. Independent
         of task #24 guard — these exercise the regex behavior alone."""
 
         @pytest.mark.parametrize(
@@ -31,19 +31,19 @@ class TestPathSanitization:
             ["42", "12345", "feature-task-5", "task_5", "abc-def"],
         )
         def test_sanitize_preserves_legitimate_task_ids(self, legitimate):
-            from agent_handoff_emitter import _sanitize_path_component
-            assert _sanitize_path_component(legitimate) == legitimate, (
+            from shared.agent_handoff_marker import sanitize_path_component
+            assert sanitize_path_component(legitimate) == legitimate, (
                 f"legitimate task_id {legitimate!r} was altered by sanitizer; "
                 f"the regex must only strip `/`, `\\\\`, and `..` substrings."
             )
 
         def test_sanitize_strips_forward_slash(self):
-            from agent_handoff_emitter import _sanitize_path_component
-            assert _sanitize_path_component("foo/bar") == "foobar"
+            from shared.agent_handoff_marker import sanitize_path_component
+            assert sanitize_path_component("foo/bar") == "foobar"
 
         def test_sanitize_strips_backslash(self):
-            from agent_handoff_emitter import _sanitize_path_component
-            assert _sanitize_path_component("foo\\bar") == "foobar"
+            from shared.agent_handoff_marker import sanitize_path_component
+            assert sanitize_path_component("foo\\bar") == "foobar"
 
         @pytest.mark.parametrize(
             "input_value,expected",
@@ -57,8 +57,8 @@ class TestPathSanitization:
             ],
         )
         def test_sanitize_strips_dotdot_sequences(self, input_value, expected):
-            from agent_handoff_emitter import _sanitize_path_component
-            assert _sanitize_path_component(input_value) == expected, (
+            from shared.agent_handoff_marker import sanitize_path_component
+            assert sanitize_path_component(input_value) == expected, (
                 f"sanitize({input_value!r}) expected {expected!r}; "
                 f"regex may have drifted."
             )
@@ -77,8 +77,8 @@ class TestPathSanitization:
             """Compound attack inputs — the output must contain no `/`,
             no `\\`, and no `..` substring. Exact value is less
             important than the absence of traversal primitives."""
-            from agent_handoff_emitter import _sanitize_path_component
-            out = _sanitize_path_component(traversal_attempt)
+            from shared.agent_handoff_marker import sanitize_path_component
+            out = sanitize_path_component(traversal_attempt)
             assert "/" not in out, f"forward slash survived in {out!r}"
             assert "\\" not in out, f"backslash survived in {out!r}"
             assert ".." not in out, f"parent-dir sequence survived in {out!r}"
@@ -88,23 +88,23 @@ class TestPathSanitization:
             matches `..`). Caller guards against this degenerate shape
             separately (#24 guard). This test pins the current contract
             so a future regex tightening is a deliberate decision."""
-            from agent_handoff_emitter import _sanitize_path_component
-            assert _sanitize_path_component(".") == "."
+            from shared.agent_handoff_marker import sanitize_path_component
+            assert sanitize_path_component(".") == "."
 
         def test_sanitize_preserves_whitespace(self):
             """Whitespace is not a path-traversal primitive — regex doesn't
             strip it. Whitespace-only values create filesystem-valid
             (if unusual) filenames, so the guard does NOT need to treat
             them as degenerate."""
-            from agent_handoff_emitter import _sanitize_path_component
-            assert _sanitize_path_component(" ") == " "
-            assert _sanitize_path_component("  ") == "  "
+            from shared.agent_handoff_marker import sanitize_path_component
+            assert sanitize_path_component(" ") == " "
+            assert sanitize_path_component("  ") == "  "
 
         def test_sanitize_empty_string_unchanged(self):
             """Empty input returns empty — pinned for guard-paired tests
             that rely on the empty sentinel reaching _already_emitted."""
-            from agent_handoff_emitter import _sanitize_path_component
-            assert _sanitize_path_component("") == ""
+            from shared.agent_handoff_marker import sanitize_path_component
+            assert sanitize_path_component("") == ""
 
         @pytest.mark.parametrize(
             "control_input",
@@ -127,8 +127,8 @@ class TestPathSanitization:
             would survive into filesystem path joins, enabling
             log-injection (CR/LF) and path-truncation (NUL on some
             filesystems) attacks."""
-            from agent_handoff_emitter import _sanitize_path_component
-            out = _sanitize_path_component(control_input)
+            from shared.agent_handoff_marker import sanitize_path_component
+            out = sanitize_path_component(control_input)
             for ch in out:
                 assert ord(ch) >= 0x20 or ch == "\x7f", (
                     f"control char {ord(ch):#x} survived in {out!r}"
@@ -157,8 +157,8 @@ class TestPathSanitization:
             `..`). Either branch preserves the fail-open data-integrity
             contract; neither branch can leak path-traversal primitives
             to the marker write."""
-            from agent_handoff_emitter import _sanitize_path_component
-            sanitized = _sanitize_path_component(raw_input)
+            from shared.agent_handoff_marker import sanitize_path_component
+            sanitized = sanitize_path_component(raw_input)
 
             if sanitized in ("", ".", ".."):
                 # Caught by the degenerate guard in _already_emitted —
@@ -521,6 +521,8 @@ class TestPathSanitization:
             self, attack_task_id, expected_sanitized, tmp_path, monkeypatch
         ):
             monkeypatch.setenv("HOME", str(tmp_path))
+            from shared.agent_handoff_marker import occupant_hash
+
             calls: list[dict] = []
             _run_main(
                 stdin_payload={
@@ -537,12 +539,15 @@ class TestPathSanitization:
                 append_calls=calls,
             )
             assert len(calls) == 1
-            # Marker file (if created) lives at the sanitized basename
-            # INSIDE the team's .agent_handoff_emitted dir — never at
-            # an escape path.
+            # Marker file (if created) lives at the sanitized basename —
+            # now occupant-keyed ({sanitized}-{occupant_hash}, #887) —
+            # INSIDE the team's .agent_handoff_emitted dir, never at an
+            # escape path. occupant = hash(owner + subject), fixed across
+            # the parametrized cases.
+            occ = occupant_hash("probe-agent", "path-traversal probe")
             expected_marker = (
                 tmp_path / ".claude" / "teams" / "pact-test"
-                / ".agent_handoff_emitted" / expected_sanitized
+                / ".agent_handoff_emitted" / f"{expected_sanitized}-{occ}"
             )
             assert expected_marker.exists(), (
                 f"path-traversal attempt {attack_task_id!r} sanitized to "
