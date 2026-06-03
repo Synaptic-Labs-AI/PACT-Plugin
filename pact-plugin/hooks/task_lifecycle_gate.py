@@ -116,6 +116,11 @@ try:
     from pathlib import Path
 
     import shared.pact_context as pact_context
+    from shared.agent_handoff_marker import (
+        already_emitted,
+        is_signal_task,
+        occupant_hash,
+    )
     from shared.dispatch_helpers import trustworthy_actor_name
     from shared.intentional_wait import is_self_complete_exempt, is_teachback_exempt
     from shared.session_journal import append_event, make_event
@@ -346,6 +351,69 @@ def _writeback_dispute(task_id: str) -> bool:
         except OSError:
             pass
         return False
+
+
+def _emit_lead_side_agent_handoff(
+    team_name: str,
+    task_id: str,
+    owner: str,
+    subject: str,
+    task_metadata: dict,
+) -> None:
+    """Fix A (#869): emit a single agent_handoff event at the lead's
+    acceptance-commit — the lead's TaskUpdate(status="completed") on a work
+    task carrying a populated metadata.handoff.
+
+    WHY HERE (the b2 emit point): agent_handoff is TaskCompleted-keyed; a
+    stage-ready task completes mid-turn, so it is already "completed" at the
+    lead's Stop-sweep and swept over → the TaskCompleted-keyed
+    agent_handoff_emitter (b1) never fires for it. The lead's process has a
+    populated context, so append_event writes the canonical journal via
+    get_session_dir() with no resolver.
+
+    EMIT-ELIGIBILITY MIRRORS agent_handoff_emitter (b1) — that hook is the
+    CANONICAL source for the emit-shape (owner non-empty, not a teachback
+    task, not a signal task, handoff present). The divergence-critical atoms
+    (is_signal_task, occupant_hash, already_emitted) are SHARED via
+    shared.agent_handoff_marker so the two paths cannot drift on signal-task
+    exclusion or the dedup key (#887 class). The b2-specific topology gate
+    (is_lead) is applied by the caller. Deliberately NOT gated on the gate's
+    is_work_task `pact-` prefix, which no-ops for bare owner names — an
+    orthogonal pre-existing matter, out of scope here.
+
+    Shares the occupant-keyed marker with b1: if a mid-turn TaskUpdate ALSO
+    dispatches TaskCompleted (R2 — open until the real-tmux smoke), b1 and b2
+    test-and-set the SAME marker and dedup to exactly one event.
+
+    Best-effort: fail-open on any error (matches append_event's policy and
+    this hook's livelock-safe exit-0 posture; never raises to the caller).
+    """
+    try:
+        # Emit-eligibility (mirrors b1). owner-empty / teachback / signal-task
+        # / handoff-absent all suppress, same as the emitter's bypass gates.
+        if not owner or _is_teachback_subject(subject):
+            return
+        if is_signal_task(task_metadata):
+            return
+        handoff = task_metadata.get("handoff")
+        if not handoff:
+            return
+        occupant = occupant_hash(owner, subject)
+        if already_emitted(team_name, task_id, occupant):
+            return
+        append_event(
+            make_event(
+                "agent_handoff",
+                agent=owner,
+                task_id=task_id,
+                task_subject=subject,
+                handoff=handoff,
+            )
+        )
+    except Exception:
+        # Fail-open: a journal-emit failure must never break the gate's
+        # advisory evaluation or its exit-0 contract.
+        pass
 
 
 # ─── core evaluation ─────────────────────────────────────────────────────────
@@ -679,6 +747,20 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                         f"PACT task_lifecycle_gate: Task {task_id} "
                         f"metadata.handoff schema is invalid — {schema_problem}.",
                     ))
+
+        # Fix A (#869): lead-side agent_handoff emission at acceptance-commit.
+        # Independent of the is_work_task `pact-` discriminator above (which
+        # no-ops for bare owner names) — _emit_lead_side_agent_handoff applies
+        # the b1-mirrored emit-eligibility (owner / not-teachback / not-signal
+        # / handoff-present) + the shared occupant-keyed dedup. Gated on
+        # is_lead so the emit only runs in the lead's process, where
+        # get_session_dir() resolves the canonical journal; a teammate
+        # self-completion (carve-out / disputed) has no populated context and
+        # is correctly skipped (it would no-op AND must not be double-counted).
+        if pact_context.is_lead(input_data):
+            _emit_lead_side_agent_handoff(
+                team_name, task_id, owner, subject, metadata
+            )
 
         # Teachback-subject completion-time checks: teachback_submit presence
         # + schema, then paired wake-SendMessage. R1/R2 are disjoint by the

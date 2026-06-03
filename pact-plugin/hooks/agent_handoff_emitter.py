@@ -6,7 +6,10 @@ Used by: hooks.json TaskCompleted registration.
 
 Responsibilities:
 - On TaskCompleted, write a single agent_handoff event to the session
-  journal, keyed by (team_name, task_id) for idempotent emission.
+  journal, keyed by (team_name, task_id, occupant) for idempotent
+  emission, where occupant = hash(agent + subject) (see
+  shared/agent_handoff_marker.py — the SSOT shared with the #869 lead-side
+  emit in task_lifecycle_gate.py).
 - Bypass non-agent completions (no owner + no platform teammate_name) and
   signal-type tasks (metadata.type in ("blocker", "algedonic")).
 
@@ -22,7 +25,7 @@ Emission invariant: write exactly once iff
 AND
 (2)  task_metadata.get("handoff") is truthy
 AND
-(3)  the per-(team, task_id) sidecar marker does not yet exist.
+(3)  the per-(team, task_id, occupant) sidecar marker does not yet exist.
 
 The transition signal is `hook_event_name`. The disk-status read is a
 fallback only — used when stdin lacks `hook_event_name`. The disk-state
@@ -37,162 +40,43 @@ creation; only the fire with `metadata.handoff` populated claims the
 marker and writes the journal entry.
 
 Idempotency: sidecar O_EXCL marker at
-~/.claude/teams/{team}/.agent_handoff_emitted/{task_id}. The platform's
-Stop flow dispatches TaskCompleted on every matching owner; the marker
-deduplicates these so the journal records exactly one entry per
-(team, task_id).
+~/.claude/teams/{team}/.agent_handoff_emitted/{task_id}-{occupant_hash}.
+The platform's Stop flow dispatches TaskCompleted on every matching owner;
+the marker deduplicates these so the journal records exactly one entry per
+(team, task_id, occupant). Occupant-identity keying (vs. the prior bare
+{task_id}) fixes the #887 stale-marker collision on team-name reuse while
+preserving the standing-task fire-once-across-lifespan dedup. The marker
+machinery lives in shared/agent_handoff_marker.py (SSOT shared with
+task_lifecycle_gate.py's #869 lead-side emit).
 
 # livelock-safe: pure journal-writer; zero emission sinks. Writes at most
-# one agent_handoff event per (team, task_id) via an O_EXCL sidecar marker
-# gated on (a) hook_event_name OR disk-status, (b) handoff-presence in
-# task_metadata, and exits 0 suppressOutput on every code path. Does NOT
-# consume intentional_wait, does NOT emit systemMessage or stderr prompts,
-# and does NOT block completion.
+# one agent_handoff event per (team, task_id, occupant) via an O_EXCL
+# sidecar marker gated on (a) hook_event_name OR disk-status, (b)
+# handoff-presence in task_metadata, and exits 0 suppressOutput on every
+# code path. Does NOT consume intentional_wait, does NOT emit systemMessage
+# or stderr prompts, and does NOT block completion.
 
 Input: JSON from stdin with task_id, task_subject, task_description,
        teammate_name, team_name (TaskCompleted schema).
 Output: {"suppressOutput": true} on every path; exit 0.
 """
 
-import errno
 import json
-import os
-import re
 import sys
-from pathlib import Path
 
 import shared.pact_context as pact_context
+from shared.agent_handoff_marker import (
+    already_emitted,
+    is_signal_task,
+    occupant_hash,
+    sanitize_path_component,
+)
 from shared.pact_context import get_team_name
 from shared.session_journal import append_event, make_event
 from shared.task_utils import read_task_json
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths.
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
-
-# Signal-task types — inline literal, matches the
-# `task_type in ("blocker", "algedonic")` check inside task_utils.find_blockers
-# and the session_resume convention. Do NOT import is_signal_task: no
-# such helper exists.
-# Forward-anchor: extract to a shared `is_signal_task` predicate when a
-# 2nd consumer of this tuple appears.
-_SIGNAL_TASK_TYPES = ("blocker", "algedonic")
-
-
-def _sanitize_path_component(value: str) -> str:
-    """
-    Strip path-traversal fragments from a value destined for filesystem joins.
-
-    Mirrors the regex used inside task_utils.read_task_json so the gate
-    site (status read) and the write site (O_EXCL marker create) apply
-    symmetric sanitization. Without this, an attacker-crafted task_id or
-    team_name that happens to sanitize (in read_task_json) into a matching
-    existing completed-task file could still carry raw "../" fragments into
-    the marker-path join and cause zero-byte file creation outside the team's
-    marker directory.
-
-    Strips path-traversal primitives (`/`, `\\`, `..`) and C0 control
-    characters (NUL, CR/LF, and 0x00-0x1f range) at the producer
-    boundary. Control-char stripping defends against log-injection and
-    embedded-newline attacks on values that flow into filesystem paths.
-    """
-    return re.sub(r"[/\\\x00-\x1f]|\.\.", "", value)
-
-
-def _marker_dir(team_name: str) -> Path:
-    """
-    Return the per-team marker directory path.
-
-    Lives under ~/.claude/teams/{team}/.agent_handoff_emitted/ — a sibling
-    to the team's inboxes/ and config.json. session_end.py's team reaper
-    removes the whole team directory (shutil.rmtree), so the marker dir is
-    cleaned up automatically when the team ages out.
-
-    Kept task-scoped (not session-scoped) so fire-once semantics survive
-    pause/resume: a secretary standing task that spans sessions must emit
-    its agent_handoff event exactly once across the whole team lifespan.
-    """
-    return Path.home() / ".claude" / "teams" / team_name / ".agent_handoff_emitted"
-
-
-def _already_emitted(team_name: str, task_id: str) -> bool:
-    """
-    Test-and-set the per-(team, task_id) marker.
-
-    Returns True iff a prior fire for the same (team, task_id) already
-    created the marker (caller should suppress the journal write).
-    Returns False on fresh fires — the marker is created as a side-effect
-    of this call, making the test-and-set atomic at the kernel level.
-
-    Fail-open: on any OSError other than EEXIST (permission denied,
-    ENOSPC, filesystem race), returns False so the caller emits the
-    event anyway. Data-integrity (preserving the HANDOFF in the journal)
-    outweighs duplication-prevention when the marker subsystem itself
-    breaks; worst case the caller falls back to per-fire emission for
-    this one task (up to 37× per task, empirically measured).
-
-    Graceful-degrade caveat: a pre-existing non-symlink file at the
-    marker path (e.g., from a manually-created file or stale state
-    surviving an unclean cleanup) also returns True via EEXIST and
-    suppresses emission permanently for that (team, task_id) — the
-    O_EXCL test cannot distinguish "prior fire owns it" from "external
-    file was placed here." Acceptable trade-off versus the alternative
-    (read-the-file-to-verify, which races and complicates the atomic
-    test-and-set).
-    """
-    # Degenerate post-sanitization values collapse the marker path onto an
-    # existing directory:
-    #   `Path(marker_dir) / "."`  → marker_dir itself
-    #   `Path(marker_dir) / ".."` → marker_dir's parent
-    # In either case `os.open(..., O_CREAT | O_EXCL)` on that existing
-    # directory returns EEXIST, which the catch below interprets as "prior
-    # fire owns the marker" and PERMANENTLY SUPPRESSES every future emit for
-    # the degenerate key. The regex in _sanitize_path_component strips `/`,
-    # `\`, and `..` substrings but leaves single `.` segments untouched — so
-    # inputs like `"."`, `"..."`, `"/./"` and the two-segment form `"/./."`
-    # (which sanitizes to `".."`) all reach this site as `.` or `..`. Guard
-    # both task_id and team_name: emit the event, accept the rare-degenerate
-    # duplication risk over silent event loss.
-    if (
-        not team_name
-        or team_name in (".", "..")
-        or not task_id
-        or task_id in (".", "..")
-    ):
-        # No valid marker key → cannot dedupe. Emit rather than suppress.
-        return False
-
-    marker_dir = _marker_dir(team_name)
-    # Symlink-containment pre-check: if marker_dir already exists as a
-    # symlink, refuse to use it (a pre-planted symlink could redirect
-    # marker creation outside the team directory). Fail-open emit rather
-    # than risk writing to an attacker-controlled location.
-    if marker_dir.is_symlink():
-        return False
-    try:
-        marker_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    except OSError:
-        # Directory creation failed; fall back to fail-open (emit).
-        return False
-
-    marker_path = marker_dir / task_id
-    # O_NOFOLLOW defends against a pre-planted symlink at the marker path —
-    # mirrors the Sec-M1 pattern in session_init's symlink-defense path. POSIX O_CREAT|O_EXCL
-    # already refuses to follow a trailing symlink; O_NOFOLLOW is defense-in-depth
-    # against any future flag-combination divergence and against intermediate-symlink
-    # variants. getattr graceful-degrades on platforms that lack the flag.
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(
-            str(marker_path),
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
-            0o600,
-        )
-        os.close(fd)
-        return False  # we created it; proceed with emit
-    except OSError as e:
-        if e.errno == errno.EEXIST:
-            return True  # prior fire owns the marker; suppress
-        return False  # any other error (incl. ELOOP) → fail-open, emit anyway
 
 
 def main() -> None:
@@ -245,12 +129,12 @@ def main() -> None:
 
         # Sanitize path-joining components symmetrically with
         # task_utils.read_task_json. task_id and team_name both flow into
-        # filesystem paths (read_task_json for the status read, _marker_dir /
-        # marker_path for the O_EXCL dedup marker). A helper applied at a
-        # single producer-side site ensures the two sink paths can never
-        # diverge.
-        task_id = _sanitize_path_component(str(task_id))
-        team_name = _sanitize_path_component(
+        # filesystem paths (read_task_json for the status read; the marker
+        # join inside shared.agent_handoff_marker.already_emitted for the
+        # O_EXCL dedup marker). A helper applied at a single producer-side
+        # site ensures the sink paths can never diverge.
+        task_id = sanitize_path_component(str(task_id))
+        team_name = sanitize_path_component(
             str(input_data.get("team_name") or get_team_name()).lower()
         )
 
@@ -296,8 +180,9 @@ def main() -> None:
 
         # Signal-task bypass: blocker/algedonic tasks MUST NOT emit a phantom
         # agent_handoff event (would pollute read_events("agent_handoff") +
-        # mis-route secretary harvest).
-        if task_metadata.get("type") in _SIGNAL_TASK_TYPES:
+        # mis-route secretary harvest). Shared predicate (SSOT) — the #869
+        # lead-side emit in task_lifecycle_gate.py applies the same exclusion.
+        if is_signal_task(task_metadata):
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
@@ -311,12 +196,16 @@ def main() -> None:
             sys.exit(0)
 
         # Idempotency guard — suppress duplicate fires for the same
-        # (team, task_id). The marker is created ONLY when handoff-presence
-        # is verified above; the optimistic ordering (marker created before
-        # append_event completes) trades one rare write-failure event loss
-        # against repeated duplicate emission (see `_already_emitted` for
-        # empirical basis).
-        if _already_emitted(team_name, task_id):
+        # (team, task_id, occupant). The marker is created ONLY when
+        # handoff-presence is verified above; the optimistic ordering (marker
+        # created before append_event completes) trades one rare write-failure
+        # event loss against repeated duplicate emission (see
+        # shared.agent_handoff_marker.already_emitted for empirical basis).
+        #
+        # Fix B (#887): occupant-identity marker key. A re-scoped subject →
+        # one extra emit (biases to HANDOFF preservation, never loss).
+        occupant = occupant_hash(teammate_name, task_subject)
+        if already_emitted(team_name, task_id, occupant):
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
