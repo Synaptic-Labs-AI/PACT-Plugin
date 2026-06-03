@@ -233,14 +233,46 @@ def resolve(session_id: str) -> str | None:
         return None  # fail-safe: any unexpected error → miss, never raise
 
 
+def _is_safe_team_segment(team: str) -> bool:
+    """Return True iff ``team`` is a single safe path component — usable to build
+    a ``teams/<team>/config.json`` path without raising or escaping the teams root.
+
+    The ``@team`` half of a registry value is SELF-ASSERTED and unsanitized, so a
+    garbled/adversarial value could carry a NUL byte (``open``/``read_text``
+    rejects it with ``ValueError: embedded null byte`` on every Python version), a
+    path separator, or a ``..`` traversal that resolves into a real teams dir and
+    is wrongly validated. Reject BEFORE building the path (not merely catching
+    after): empty, any C0 control char / DEL / NUL, ``/`` or ``\\``, and the
+    traversal segments ``.`` / ``..``. Never raises.
+
+    Logic-parity with ``session_end._is_safe_team_segment`` — inlined here (not
+    imported) to keep this module a self-contained leaf (see module docstring).
+    """
+    if not team:
+        return False
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in team):
+        return False
+    if "/" in team or "\\" in team:
+        return False
+    if team in (".", ".."):
+        return False
+    return True
+
+
 def _name_is_team_member(name: str, team: str) -> bool:
     """Return True iff sanitized ``name`` is a member of ``team``'s config.
 
     Loads ~/.claude/teams/<team>/config.json and compares the sanitized
     candidate against the sanitized members[].name set. This is the integrity
     check that blunts the last-wins forge/overwrite vector for the labeling use.
-    Never raises — returns False on missing config / non-JSON / any error.
+    Never raises — returns False on missing config / non-JSON / an unsafe @team
+    path segment / any error.
     """
+    # Containment parity with the session_end prune: reject a traversal / NUL /
+    # control @team as a single safe path segment BEFORE building the FS path,
+    # not merely catching the error after the path is read.
+    if not _is_safe_team_segment(team):
+        return False
     try:
         config_path = Path.home() / ".claude" / "teams" / team / "config.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))

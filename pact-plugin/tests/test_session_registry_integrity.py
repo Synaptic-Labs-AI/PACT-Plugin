@@ -213,6 +213,32 @@ class TestMalformedTeamConfig:
         # Missing config dir entirely -> False, never raises.
         assert session_registry._name_is_team_member("alice", "pact-absent") is False
 
+    def test_unsafe_team_segment_rejected_before_path_build(self, registry_env):
+        """Containment parity with the session_end prune: an @team that is not a
+        single safe path segment is rejected BEFORE the teams/<team>/config.json
+        path is built, not merely caught after.
+
+        NON-VACUITY: './pact-real' resolves to the real pact-real config whose
+        members include 'alice', so PRE-fix _name_is_team_member returned True —
+        the containment hole where a traversal resolving into a live team wrongly
+        validates a forged name@team. POST-fix the segment guard rejects the '/'
+        and returns False. The legit 'pact-real' control still returns True (the
+        guard does not break real single-segment teams). The NUL case
+        (open/read_text raises ValueError on every Python version) returns False
+        without raising; built via chr(0) so the test file holds no literal null
+        byte.
+        """
+        registry_env.write_team("pact-real", ["alice"])
+        m = session_registry._name_is_team_member
+        # Control: legit single-segment team with a real member → True.
+        assert m("alice", "pact-real") is True
+        # Lever: a traversal resolving into the real team dir was wrongly KEPT
+        # pre-fix; the segment guard now rejects it before any path is built.
+        assert m("alice", "./pact-real") is False
+        # NUL / traversal-segment @team → rejected, never raises.
+        assert m("alice", "pact-" + chr(0) + "real") is False
+        assert m("alice", "..") is False
+
 
 # ===========================================================================
 # CORRUPT READ-PATH VALUES — non-@, non-str, non-dict lines on resolve
