@@ -79,6 +79,35 @@ def test_drops_malformed_and_no_at_lines(prune_env):
     assert prune_env.remaining() == [prune_env.line("s1", "alice@pact-live")]
 
 
+def test_unsafe_at_team_is_dropped_not_kept_and_never_raises(prune_env):
+    """L1/M1 regression: an @team that is not a single safe path segment must be
+    DROPPED — never KEPT via a traversal that happens to resolve to a real dir,
+    and never raise.
+
+    NON-VACUITY (lever works on the test runtime, Python 3.12+, where
+    ``Path.is_dir()`` returns False on a NUL instead of raising): the ``.`` and
+    ``pact-live/..`` cases both resolve to ``teams_dir`` itself, so PRE-fix
+    ``(teams_dir / team).is_dir()`` was True and the bogus lines were KEPT
+    (the L1 containment hole); POST-fix the segment validator rejects them, so
+    they drop. Reverting the validation flips those lines back to KEPT → this
+    assertion FAILS. The NUL case additionally guards the Python <=3.11 path
+    where ``is_dir()`` propagated ``ValueError`` out of the prune (there the
+    revert turns this into an ERROR). NUL is built with ``chr(0)`` so the test
+    file holds no literal null byte.
+    """
+    prune_env.live_team("pact-live")
+    nul_team = "pact-" + chr(0) + "evil"
+    prune_env.write_registry([
+        prune_env.line("s1", "alice@pact-live"),       # valid single segment → kept
+        prune_env.line("s2", "bob@."),                 # '.' resolves to teams_dir → pre-fix KEPT; drop
+        prune_env.line("s3", "eve@pact-live/.."),      # traversal → teams_dir → pre-fix KEPT; drop
+        prune_env.line("s4", "mallory@" + nul_team),   # NUL → drop (guards <=3.11 raise)
+    ])
+    pruned = prune_env.prune()  # must NOT raise on any supported Python
+    assert pruned == 3
+    assert prune_env.remaining() == [prune_env.line("s1", "alice@pact-live")]
+
+
 def test_idempotent_no_rewrite_when_nothing_stale(prune_env):
     prune_env.live_team("pact-live")
     prune_env.write_registry([prune_env.line("s1", "alice@pact-live")])

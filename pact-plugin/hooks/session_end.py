@@ -645,6 +645,31 @@ def _assemble_tasks_skip_set(
     return skip_names
 
 
+def _is_safe_team_segment(team: str) -> bool:
+    """Return True iff ``team`` is a single safe path component — usable to build
+    a ``teams/<team>`` path without raising or escaping the teams root.
+
+    The ``@team`` half of a registry value is SELF-ASSERTED and unsanitized (only
+    the name half is sanitized at write, since team is config-validated on read),
+    so a garbled/adversarial value could carry a NUL byte (an ``os.stat``/``open``
+    syscall rejects it with ``ValueError: embedded null byte``; ``Path.is_dir()``
+    only swallows it since Python 3.12), a path separator, or a ``..`` traversal
+    that resolves to a real directory and is wrongly KEPT on every Python version.
+    Legitimate team names are single lowercase-hex components (``pact-<hex>``, per
+    ``generate_team_name``), so reject: empty, any C0 control char / DEL / NUL,
+    ``/`` or ``\\``, and the traversal segments ``.`` / ``..``. Never raises.
+    """
+    if not team:
+        return False
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in team):
+        return False
+    if "/" in team or "\\" in team:
+        return False
+    if team in (".", ".."):
+        return False
+    return True
+
+
 def _prune_registry_dead_teams(
     registry_path: Path | None = None,
     teams_dir: Path | None = None,
@@ -657,10 +682,14 @@ def _prune_registry_dead_teams(
     to correctness, but they accumulate, so SessionEnd drops the lines whose team
     has already been reaped — keeping the file bounded. A line is KEPT when its
     value's ``@team`` still has a directory under teams_dir; everything else
-    (lines for reaped teams, malformed lines, lines with no ``@``) is dropped.
+    (lines for reaped teams, malformed lines, lines with no ``@``, lines whose
+    ``@team`` is not a safe single path segment) is dropped.
 
-    Best-effort: never raises. A missing registry / unreadable file / write race
-    is swallowed (the hook-fail-open invariant; a stale line is harmless). The
+    Best-effort: never raises. The self-asserted ``@team`` is validated as a safe
+    single path segment (``_is_safe_team_segment``) BEFORE any ``teams/<team>``
+    path build, so a garbled/adversarial value cannot raise (e.g. a NUL byte) or
+    escape the teams root. A missing registry / unreadable file / write race is
+    swallowed (the hook-fail-open invariant; a stale line is harmless). The
     rewrite preserves 0o600 and uses O_NOFOLLOW so a planted symlink at the path
     cannot redirect the write.
 
@@ -689,15 +718,23 @@ def _prune_registry_dead_teams(
         stripped = line.strip()
         if not stripped:
             continue
-        team = None
+        keep = False
         try:
             obj = json.loads(stripped)
             value = obj.get("value") if isinstance(obj, dict) else None
             if isinstance(value, str) and "@" in value:
                 team = value.partition("@")[2]
-        except ValueError:
-            team = None  # malformed line → drop
-        if team and (teams_dir / team).is_dir():
+                # Validate the self-asserted @team is a single safe path segment
+                # BEFORE building an FS path: a garbled/adversarial @team (NUL,
+                # control char, slash, '..') must never raise out of the prune
+                # (honor the never-raises contract) nor build an uncontained
+                # teams/<team> path. The is_dir() lives INSIDE this try so even an
+                # unexpected path error drops the line instead of raising.
+                if _is_safe_team_segment(team) and (teams_dir / team).is_dir():
+                    keep = True
+        except (ValueError, OSError):
+            keep = False  # malformed line / path error → drop, never raise
+        if keep:
             kept_lines.append(stripped)
         else:
             pruned += 1
