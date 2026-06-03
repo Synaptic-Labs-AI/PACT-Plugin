@@ -240,3 +240,28 @@ def test_path_containment_rejects_outside_tree(registry_env, tmp_path):
     assert session_registry._is_under_pact_sessions(outside) is False
     inside = registry_env.home / ".claude" / "pact-sessions" / "x.jsonl"
     assert session_registry._is_under_pact_sessions(inside) is True
+
+
+def test_path_containment_rejects_sibling_prefix_of_root(registry_env):
+    """F4: a SIBLING of the sessions root whose name is a string-PREFIX of it
+    (``pact-sessions-evil`` vs ``pact-sessions``) must NOT count as 'under' the
+    root. The check uses Path.parents containment, NOT a string prefix — a naive
+    ``str(candidate).startswith(str(root))`` would WRONGLY accept the sibling and
+    let register()/resolve() operate on an attacker-planted sibling tree
+    (``~/.claude/pact-sessions-evil/...``). test_path_containment_rejects_outside_tree
+    only covers a generic outside path, not this prefix-collision sibling — this
+    row pins the parents-vs-prefix distinction.
+
+    Non-vacuity (counter-test, isolated worktree): replacing _is_under_pact_sessions
+    with a str-prefix containment makes THIS test FAIL (the sibling is wrongly
+    accepted) while test_path_containment_rejects_outside_tree still passes.
+    """
+    claude = registry_env.home / ".claude"
+    # sibling dir whose name is a string-prefix of the real root
+    sibling = claude / "pact-sessions-evil" / "x.jsonl"
+    assert session_registry._is_under_pact_sessions(sibling) is False
+    # control: the real root itself and a child under it ARE contained
+    root = claude / "pact-sessions"
+    child = root / "sub" / "x.jsonl"
+    assert session_registry._is_under_pact_sessions(root) is True
+    assert session_registry._is_under_pact_sessions(child) is True
