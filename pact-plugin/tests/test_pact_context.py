@@ -944,6 +944,103 @@ class TestResolveAgentNameEdgeCases:
         assert result == ""
 
 
+class TestResolveAgentNameStep35RegistryPrecedence:
+    """Step 3.5 regression coverage: resolve_agent_name recovers a tmux
+    teammate's friendly name from the self-registration registry by self-looking
+    up its OWN session_id, slotted AFTER Steps 1-3 (real agent_name/agent_id) and
+    BEFORE Step 4 (the agent_type "pact-" strip fallback).
+
+    resolve_agent_name is high-fanout (file_tracker / merge_guard / etc. all
+    label via it), so a regression here = SILENT tmux-labeling degradation across
+    every consuming hook — the exact failure class #885 exists to fix. Before
+    these tests the wiring had ZERO direct coverage: the only registry consumer
+    exercised was session_init's OWN _registry_resolve call (a different code
+    path), so neutering Step 3.5 in pact_context left the whole suite green.
+
+    Each test monkeypatches pact_context._registry_resolve (the module-level
+    alias the function calls) — no on-disk registry needed.
+
+    Non-vacuity (counter-test-by-revert, documented): neutering Step 3.5
+    (e.g. `if False and session_id:`) turns test_resolves_tmux_frame_* and
+    test_precedence_over_step4_* RED (they depend on the registry name being
+    returned); the Steps-1-3-win and fall-through rows stay green by design.
+    """
+
+    def test_step35_not_reached_when_real_agent_id_present(self, monkeypatch):
+        """Steps 1-3 win: a real agent_id ("@" form) returns before Step 3.5, so
+        the registry is NEVER consulted (a self-asserted registry value must not
+        override a harness-supplied agent_id)."""
+        import shared.pact_context as pact_context
+        from shared.pact_context import resolve_agent_name
+
+        calls = []
+        monkeypatch.setattr(
+            pact_context, "_registry_resolve",
+            lambda sid: calls.append(sid) or "wrongname@pact-forged",
+        )
+        result = resolve_agent_name(
+            {"agent_id": "alice@pact-team", "session_id": "sess-x"}
+        )
+        assert result == "alice"  # Step 2 wins
+        assert calls == [], "registry was consulted despite a real agent_id (Steps 1-3 must short-circuit)"
+
+    def test_step35_resolves_tmux_frame_session_id_only(self, monkeypatch):
+        """The tmux-degraded frame (only session_id — no agent_name/agent_id/
+        agent_type) resolves via the registry: returns the NAME half of
+        name@team."""
+        import shared.pact_context as pact_context
+        from shared.pact_context import resolve_agent_name
+
+        monkeypatch.setattr(
+            pact_context, "_registry_resolve",
+            lambda sid: "regname@pact-leadteam" if sid == "sess-x" else None,
+        )
+        result = resolve_agent_name({"session_id": "sess-x"})
+        assert result == "regname"
+
+    def test_step35_precedence_over_step4_agent_type(self, monkeypatch):
+        """Step 3.5 takes precedence over Step 4: with BOTH a resolvable
+        session_id AND an agent_type present, the registry name wins over the
+        agent_type "pact-" strip fallback."""
+        import shared.pact_context as pact_context
+        from shared.pact_context import resolve_agent_name
+
+        monkeypatch.setattr(
+            pact_context, "_registry_resolve", lambda sid: "regname@pact-leadteam"
+        )
+        result = resolve_agent_name(
+            {"session_id": "sess-x", "agent_type": "pact-backend-coder"}
+        )
+        assert result == "regname"  # NOT "backend-coder"
+
+    def test_step35_miss_falls_through_to_step4_agent_type(self, monkeypatch):
+        """On a registry MISS (resolve → None), Step 3.5 falls through to Step 4,
+        which strips the "pact-" prefix from agent_type (current behavior)."""
+        import shared.pact_context as pact_context
+        from shared.pact_context import resolve_agent_name
+
+        monkeypatch.setattr(pact_context, "_registry_resolve", lambda sid: None)
+        result = resolve_agent_name(
+            {"session_id": "sess-x", "agent_type": "pact-backend-coder"}
+        )
+        assert result == "backend-coder"
+
+    def test_step35_corrupt_value_without_at_falls_through(self, monkeypatch):
+        """Fail-safe: a registry value missing the "@" separator is treated as a
+        miss (the `and "@" in resolved` guard), falling through to Step 4 rather
+        than returning a bare malformed name."""
+        import shared.pact_context as pact_context
+        from shared.pact_context import resolve_agent_name
+
+        monkeypatch.setattr(
+            pact_context, "_registry_resolve", lambda sid: "no-at-value"
+        )
+        result = resolve_agent_name(
+            {"session_id": "sess-x", "agent_type": "pact-architect"}
+        )
+        assert result == "architect"
+
+
 class TestWriteContextEdgeCases:
     """Additional edge case tests for write_context()."""
 
