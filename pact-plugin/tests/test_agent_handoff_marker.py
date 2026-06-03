@@ -349,6 +349,102 @@ class TestTocTouContainmentRecheck:
 
 
 # =============================================================================
+# dir_fd intermediate-dir TOCTOU race (remediation cycle 2)
+# =============================================================================
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd,
+    reason="platform lacks openat/dir_fd support",
+)
+class TestDirFdIntermediateDirRace:
+    """The marker create opens marker_dir as a dir_fd (O_DIRECTORY|O_NOFOLLOW)
+    and creates the marker RELATIVE to that fd. This closes the residual
+    INTERMEDIATE-DIR TOCTOU window: between the realpath/commonpath containment
+    re-check and the create, marker_dir itself could be swapped to a symlink,
+    and a full-path os.open would then write THROUGH the symlinked DIRECTORY
+    (O_NOFOLLOW on the marker FILE guards only the final component).
+
+    DISTINCT from TestTocTouContainmentRecheck: that family covers PRE-PLANTED
+    symlinks (caught by the is_symlink() pre-check OR the realpath/commonpath
+    re-check). The dir_fd fix is load-bearing ONLY for the RACE — marker_dir is
+    a REAL contained dir at pre-check AND containment-check time, THEN swapped to
+    an escaping symlink BEFORE the dir_fd open. So this test injects the swap in
+    exactly that window (as a side effect of the containment check's realpath
+    call), which a pre-planted symlink cannot exercise.
+
+    NON-VACUITY: reverting the create to the plain full-path
+    `os.open(str(marker_path), ...)` (pre-cycle-2 shape) makes the symlinked
+    marker_dir get followed and the marker written THROUGH to the escape target
+    — the no-write-through assertion then fails. Verified by isolated-worktree
+    revert.
+    """
+
+    def test_marker_dir_swapped_to_symlink_after_containment_is_contained(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        team, task_id, occ = "pact-test", "race", "occ"
+
+        team_base = tmp_path / ".claude" / "teams" / team
+        team_base.mkdir(parents=True)
+        escape_target = tmp_path / "escape_target"
+        escape_target.mkdir()
+        marker_dir = team_base / ".agent_handoff_emitted"
+
+        # Inject the TOCTOU swap as a side effect of the containment check's
+        # realpath(marker_dir) call: marker_dir is a REAL empty dir when
+        # resolved (so commonpath passes with the real contained path), then
+        # is swapped to an escaping symlink BEFORE the dir_fd open runs.
+        orig_realpath = os.path.realpath
+        state = {"swapped": False}
+
+        def _realpath_then_swap(path, *args, **kwargs):
+            resolved = orig_realpath(path, *args, **kwargs)
+            if not state["swapped"] and str(path).endswith(".agent_handoff_emitted"):
+                # marker_dir was just mkdir'd (real, empty) — swap it now.
+                Path(marker_dir).rmdir()
+                Path(marker_dir).symlink_to(escape_target, target_is_directory=True)
+                state["swapped"] = True
+            return resolved
+
+        monkeypatch.setattr(os.path, "realpath", _realpath_then_swap)
+
+        result = already_emitted(team, task_id, occ)
+
+        assert state["swapped"] is True, (
+            "vacuity guard: the race-swap must have fired (else the test "
+            "passes trivially via normal creation)"
+        )
+        assert marker_dir.is_symlink(), "marker_dir must be the escaping symlink at open time"
+        assert result is False, (
+            "a marker_dir swapped to a symlink in the race window must "
+            "fail-open EMIT (return False) — the dir_fd O_DIRECTORY|O_NOFOLLOW "
+            "open fails on the symlink"
+        )
+        assert not (escape_target / f"{task_id}-{occ}").exists(), (
+            "NO write-through: the marker must NOT be created at the escape "
+            "target. If this file exists, the dir_fd pinning was removed and a "
+            "full-path open followed the symlinked directory."
+        )
+
+    def test_real_contained_marker_dir_still_creates_positive_control(
+        self, tmp_path, monkeypatch
+    ):
+        """POSITIVE CONTROL: with NO swap, an ordinary contained marker_dir
+        creates the marker via the dir_fd path (first call → False + marker;
+        second → EEXIST → True). Proves the dir_fd open succeeds on the normal
+        path and the race assertion above isn't 'dir_fd always fails'."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        team, task_id, occ = "pact-test", "ok", "occ"
+        assert already_emitted(team, task_id, occ) is False
+        assert already_emitted(team, task_id, occ) is True
+        marker = (
+            tmp_path / ".claude" / "teams" / team / ".agent_handoff_emitted"
+            / f"{task_id}-{occ}"
+        )
+        assert marker.exists()
+
+
+# =============================================================================
 # Degenerate-value guard (smoke — full matrix in test_emitter_path_sanitization)
 # =============================================================================
 class TestDegenerateGuardSmoke:
