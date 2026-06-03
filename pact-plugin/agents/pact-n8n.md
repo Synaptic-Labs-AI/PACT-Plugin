@@ -9,6 +9,7 @@ memory: user
 skills:
   - pact-agent-teams
   - pact-teachback
+  - pact-team-registration
   - request-more-context
   - n8n-workflow-patterns
   - n8n-validation-expert

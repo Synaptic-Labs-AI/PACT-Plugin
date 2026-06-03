@@ -51,7 +51,7 @@ Agent(
   name="{teammate-name}",
   team_name="{team_name}",
   subagent_type="pact-{teammate-type}",
-  prompt="YOUR PACT ROLE: teammate ({teammate-name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+  prompt="YOUR PACT ROLE: teammate ({teammate-name}).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. Then check `TaskList` for tasks assigned to you."
 )
 ```
 
@@ -484,7 +484,7 @@ Agent(
   name="preparer",
   team_name="{team_name}",
   subagent_type="pact-preparer",
-  prompt="YOUR PACT ROLE: teammate (preparer).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+  prompt="YOUR PACT ROLE: teammate (preparer).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. Then check `TaskList` for tasks assigned to you."
 )
 ```
 
@@ -579,7 +579,7 @@ Agent(
   name="architect",
   team_name="{team_name}",
   subagent_type="pact-architect",
-  prompt="YOUR PACT ROLE: teammate (architect).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+  prompt="YOUR PACT ROLE: teammate (architect).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. Then check `TaskList` for tasks assigned to you."
 )
 ```
 
@@ -705,7 +705,7 @@ Agent(
   name="{coder-name}",
   team_name="{team_name}",
   subagent_type="pact-{coder-type}",
-  prompt="YOUR PACT ROLE: teammate ({coder-name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+  prompt="YOUR PACT ROLE: teammate ({coder-name}).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. Then check `TaskList` for tasks assigned to you."
 )
 ```
 
@@ -733,7 +733,7 @@ Agent(
   name="auditor",
   team_name="{team_name}",
   subagent_type="pact-auditor",
-  prompt="YOUR PACT ROLE: teammate (auditor).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+  prompt="YOUR PACT ROLE: teammate (auditor).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. Then check `TaskList` for tasks assigned to you."
 )
 ```
 
@@ -837,7 +837,7 @@ Agent(
   name="test-engineer",
   team_name="{team_name}",
   subagent_type="pact-test-engineer",
-  prompt="YOUR PACT ROLE: teammate (test-engineer).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+  prompt="YOUR PACT ROLE: teammate (test-engineer).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. Then check `TaskList` for tasks assigned to you."
 )
 ```
 

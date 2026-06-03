@@ -210,14 +210,14 @@ The `Agent()` `prompt` does NOT change shape — the Teachback-Gated Dispatch is
      ```
 3. `TaskUpdate(A_id, owner="{reviewer-name}", addBlocks=[B_id])`
 4. `TaskUpdate(B_id, owner="{reviewer-name}", addBlockedBy=[A_id])`
-5. Spawn the reviewer with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({reviewer-name})` marker on its own line so routing detects the teammate spawn (team protocol + teachback content arrive via spawn-time skills frontmatter, not a per-prompt directive):
+5. Spawn the reviewer with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({reviewer-name})` marker on its own line so routing detects the teammate spawn (team protocol + teachback content arrive via spawn-time skills frontmatter; the registration first-action is the sole per-prompt directive — it must explicitly invoke its skill because skill bodies are not preloaded):
 
 ```
 Agent(
   name="{reviewer-name}",
   team_name="{team_name}",
   subagent_type="pact-{reviewer-type}",
-  prompt="YOUR PACT ROLE: teammate ({reviewer-name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+  prompt="YOUR PACT ROLE: teammate ({reviewer-name}).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. Then check `TaskList` for tasks assigned to you."
 )
 ```
 

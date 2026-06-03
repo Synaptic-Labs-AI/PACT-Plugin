@@ -248,14 +248,14 @@ For each specialist needed, follow the steps for [Teachback-Gated Dispatch](#tea
    - Task B's `description` carries the implementation mission: "[full CONTEXT/MISSION/INSTRUCTIONS/GUIDELINES]"
 3. `TaskUpdate(A_id, owner="{scope-prefixed-name}", addBlocks=[B_id])`
 4. `TaskUpdate(B_id, owner="{scope-prefixed-name}", addBlockedBy=[A_id])`
-5. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({scope-prefixed-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter):
+5. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({scope-prefixed-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter; the dispatch prompt additionally carries the registration first-action directive):
 
 ```
 Agent(
   name="{scope-prefixed-name}",
   team_name="{team_name}",
   subagent_type="pact-{specialist-type}",
-  prompt="YOUR PACT ROLE: teammate ({scope-prefixed-name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+  prompt="YOUR PACT ROLE: teammate ({scope-prefixed-name}).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. Then check `TaskList` for tasks assigned to you."
 )
 ```
 

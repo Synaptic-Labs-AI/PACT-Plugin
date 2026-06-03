@@ -32,6 +32,15 @@ Sections-passed denominator is 8 per runbook §5 (§1, §1.1, §2, §2.1, §3, �
 
 Sections-passed denominator is 4 per runbook §5 (§1, §2, §3, §4). The inline-mission mode column records whether the production default (`warn`) was in effect during the run or whether the operator overrode to `deny` / `shadow`. If a section fails, file a follow-up issue per the severity tiers in runbook §5 and link it in the Notes column.
 
+## 885-team-registration-smoke.md
+
+| Run date (UTC) | Operator | Plugin version | Sections passed | inline-mission mode | Notes / per-section observations |
+| -------------- | -------- | -------------- | --------------- | ------------------- | -------------------------------- |
+| 2026-06-02 | michael-wojcik | 4.4.2 (overlay of 4.4.3 branch) | 3/3 | n/a | PASS. Standard teammate (smoke-probe): invoked `pact-team-registration` first → ran the register command → registry line `{own session_id → smoke-probe@pact-6f81f147}`; `resolve()` recovered it (members-validated). Secretary (smoke-secretary): registered `{own session_id → smoke-secretary@pact-6f81f147}`; `resolve()` recovered it. Integrity: `resolve(bogus)` → None. Overlay reverted (cache pristine 4.4.2, registry reset). **OVERLAY LESSON**: a whole-tree rsync carried the branch's 4.4.3 version bump into the 4.4.2 cache → the HMAC-signed bootstrap marker (signs `plugin_version`) mismatched → `bootstrap_gate` fail-closed → dispatch blocked until `.claude-plugin/plugin.json` was restored to 4.4.2. The §Step 1 recipe now EXCLUDES the version files so the cache version stays matched to the signed marker. |
+| _pending — re-run PRE-merge in fresh tmux session (overlay)_ | | | /3 | n/a | Standard-teammate first-action = `Invoke Skill("PACT:pact-team-registration")` (§Step 2) PASS/FAIL · Secretary registers `secretary@<team>` before briefing (§Step 3) PASS/FAIL · Registry non-empty with valid `session_id`→`name@team` per teammate (§Step 4) PASS/FAIL · Overlay reverted (§Step 5) DONE/PENDING. |
+
+Sections-passed denominator is 3 per runbook (standard-teammate first-action; secretary register-before-briefing; registry-non-empty assertion). The inline-mission mode column does not apply (`n/a`). Unlike the post-merge runbooks above, this is a **PRE-merge overlay smoke** — the empirical gate the LEG-4 NO-GO requires before this PR merges. If any section is RED, apply an architecture-doc §8.6 contingency and do **not** merge. The overlay revert (§Step 5) is mandatory regardless of outcome.
+
 ## v4.0.0-launch-and-isolation.md
 
 | Run date (UTC) | Operator | Plugin version | Sections passed | Notes / fallback-ladder signals |
