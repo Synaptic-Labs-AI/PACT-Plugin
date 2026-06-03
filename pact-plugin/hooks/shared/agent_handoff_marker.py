@@ -226,18 +226,32 @@ def already_emitted(team_name: str, task_id: str, occupant: str) -> bool:
     except (OSError, ValueError):
         return False
 
-    marker_path = marker_dir / f"{task_id}-{occupant}"
-    # O_NOFOLLOW defends against a pre-planted symlink at the marker path.
-    # POSIX O_CREAT|O_EXCL already refuses to follow a trailing symlink;
-    # O_NOFOLLOW is defense-in-depth against any future flag-combination
-    # divergence and against intermediate-symlink variants. getattr
-    # graceful-degrades on platforms that lack the flag.
     nofollow = getattr(os, "O_NOFOLLOW", 0)
+    # Intermediate-dir TOCTOU close-out. O_NOFOLLOW on the marker FILE guards
+    # only the FINAL path component — between the containment re-check above
+    # and the create, marker_dir itself could be swapped to a symlink, and a
+    # full-path os.open would then write THROUGH the symlinked DIRECTORY.
+    # Defense: pin marker_dir as a dir_fd opened with O_DIRECTORY|O_NOFOLLOW
+    # (a symlinked marker_dir makes THIS open fail → fail-open), then create
+    # the marker RELATIVE to that pinned fd so the directory identity is held
+    # by the descriptor, not re-resolved by path. The file open keeps
+    # O_CREAT|O_EXCL|O_NOFOLLOW for the final-component guard + atomic
+    # test-and-set. getattr fallbacks to 0 graceful-degrade where the dir
+    # flags are absent (the relative-to-dir_fd create still pins the dir);
+    # assumes POSIX openat (os.open dir_fd=), consistent with the existing
+    # O_NOFOLLOW reliance.
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow
+    try:
+        dir_fd = os.open(str(marker_dir), dir_flags)
+    except OSError:
+        # Symlinked / vanished marker_dir → fail-open emit, no marker write.
+        return False
     try:
         fd = os.open(
-            str(marker_path),
+            f"{task_id}-{occupant}",
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
             0o600,
+            dir_fd=dir_fd,
         )
         os.close(fd)
         return False  # we created it; proceed with emit
@@ -245,3 +259,5 @@ def already_emitted(team_name: str, task_id: str, occupant: str) -> bool:
         if e.errno == errno.EEXIST:
             return True  # prior fire owns the marker; suppress
         return False  # any other error (incl. ELOOP) → fail-open, emit anyway
+    finally:
+        os.close(dir_fd)
