@@ -1,5 +1,5 @@
 """
-pact-plugin/skills/pact-agent-teams/test_skill_loading.py
+pact-plugin/skills/pact-agent-teams/test_skill_loading_agent_teams.py
 
 Tests for verifying the pact-agent-teams skill file structure and content.
 Ensures SKILL.md exists, has valid YAML frontmatter, and includes key sections

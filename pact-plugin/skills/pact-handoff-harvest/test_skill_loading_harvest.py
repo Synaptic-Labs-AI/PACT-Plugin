@@ -1,5 +1,5 @@
 """
-pact-plugin/skills/pact-handoff-harvest/test_skill_loading.py
+pact-plugin/skills/pact-handoff-harvest/test_skill_loading_harvest.py
 
 Tests for verifying the pact-handoff-harvest skill file structure and content.
 Ensures SKILL.md exists, has valid YAML frontmatter, includes all three workflow
