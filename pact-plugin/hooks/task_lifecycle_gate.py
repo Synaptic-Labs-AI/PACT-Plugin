@@ -651,7 +651,8 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
         # HANDOFF presence at acceptance-commit (its own handoff-present
         # eligibility), so re-activating would duplicate coverage, not fill a
         # gap. _validate_handoff_schema is retained for its co-location pattern
-        # and as the named structured-validator reference in validate_handoff.py.
+        # and as the structural sibling of _validate_teachback_submit_schema
+        # (which mirrors it).
 
         # Fix A (#869): lead-side agent_handoff emission at acceptance-commit.
         # Self-contained, with no owner-name prefix gate (none is needed — bare

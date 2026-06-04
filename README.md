@@ -314,7 +314,7 @@ PACT registers hooks across 11 Claude Code event surfaces, including `SessionSta
 | `pin_caps_gate.py` | PreToolUse (Edit/Write) | Enforce caps on CLAUDE.md pinned-memory section |
 | `postcompact_archive.py` | PostCompact | Archive pre-compaction state for recovery |
 
-See [`pact-plugin/hooks/hooks.json`](pact-plugin/hooks/hooks.json) for the full registration matrix; the [`hooks/`](pact-plugin/hooks/) directory contains the 24 top-level hooks plus `shared/` utilities and a `refresh/` subsystem for transcript replay and checkpoint reconstruction.
+See [`pact-plugin/hooks/hooks.json`](pact-plugin/hooks/hooks.json) for the full registration matrix, which registers 22 distinct hook scripts; the [`hooks/`](pact-plugin/hooks/) directory holds those plus 2 co-located helper modules (`pin_caps.py`, `staleness.py`) — 24 top-level `.py` files in all — alongside `shared/` utilities and a `refresh/` subsystem for transcript replay and checkpoint reconstruction.
 
 ### Protocols
 
