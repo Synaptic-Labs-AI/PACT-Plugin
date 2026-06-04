@@ -37,7 +37,7 @@ If none of these sources have completed agent tasks, report "No pending HANDOFFs
 
 ### Step 2: Dedup Check (Processed Tasks)
 
-Read your processed task list from agent memory (`~/.claude/agent-memory/pact-secretary/session_processed_tasks.md`). Skip any task IDs already processed — only review the delta. This enables incremental passes (e.g., after remediation).
+Read your processed task list from your team's section in agent memory (`~/.claude/agent-memory/pact-secretary/session_processed_tasks.md`). The file is namespaced by team — read **only** your own `## team={your team_id}` section (file-format contract: see Step 8). Skip any task IDs already processed — only review the delta. This enables incremental passes (e.g., after remediation).
 
 ### Step 3: Read All HANDOFFs
 
@@ -112,19 +112,37 @@ Save using the CLI with proper structure:
 
 ### Step 8: Update Processed Task Tracking
 
-Save the list of all processed task IDs to agent memory (overwrite, not append — this sets the baseline for subsequent incremental passes):
+**Save the processed task IDs to your team's section in agent memory.** Locate (or create) the `## team={your team_id}` section in `~/.claude/agent-memory/pact-secretary/session_processed_tasks.md` and overwrite **that section's** task-ID list to set the baseline for subsequent incremental passes. Overwrite only your own team's section — never modify, overwrite, or remove another team's `## team=` section. Multiple secretary instances (one per concurrent team) share this single file; each owns exactly its own section.
+
+This file is **namespaced by team** so that concurrent secretary instances (one per active team, all sharing this single user-scope file) never clobber each other's processed-task baselines. The file-format contract:
 
 File: `~/.claude/agent-memory/pact-secretary/session_processed_tasks.md`
 ```markdown
 ---
 name: session_processed_tasks
-description: Task IDs processed in current session for dedup on incremental passes
+description: Task IDs processed per team for dedup on incremental passes. NAMESPACED by team to avoid cross-secretary collision (single-file user-scope).
 type: reference
 ---
 
-Processed task IDs: 6, 7, 12, 15
-Last processed: {timestamp}
+# Per-team processed-tasks log (NAMESPACED — multiple concurrent secretary instances write here)
+
+## team={team_id} ({project}, session {session_id})
+
+{optional one-line session note}
+
+Processed task IDs (this team): {comma-separated IDs}
+Last processed (this team): {timestamp}
+
+## team={other_team_id} ({project}, session {session_id})
+
+...
 ```
+
+**Section semantics:**
+- The section key is your own `{team_id}` (your spawn `pact-XXXXXXXX`). The parenthetical `({project}, session {session_id})` is human-readable context.
+- Read/write **only your own** `## team={team_id}` section. You MUST NOT read, edit, or remove any other team's section.
+- Within your own section: **overwrite** to set the clean baseline on this Standard Harvest pass; **append** task IDs on incremental passes (the intra-team overwrite-then-append semantics are preserved exactly — they just operate on your team's section instead of the whole file).
+- If your `## team={team_id}` section does not yet exist, create it (append a new section at the end of the file); never recreate the file from scratch.
 
 ### Step 9: Report Summary
 
@@ -161,12 +179,12 @@ After processing HANDOFFs, gather calibration metrics for the orchestrator's var
 
 Triggered after remediation completes — processes only the delta since the last harvest pass. Fires only when remediation occurred and produced new completed tasks.
 
-1. **Check processed task tracking**: Read `~/.claude/agent-memory/pact-secretary/session_processed_tasks.md` for already-processed task IDs
+1. **Check processed task tracking**: Read **only your own** `## team={your team_id}` section of `~/.claude/agent-memory/pact-secretary/session_processed_tasks.md` for already-processed task IDs
 2. **Discover new completions**: Check session journal `agent_handoff` events (primary) and `TaskList` (supplementary) for completed tasks not in the processed set — these are new completions from remediation.
 3. **If no new completions**: Report "No new HANDOFFs since last harvest" and complete
 4. **Read new HANDOFFs** using the Standard Harvest Step 3 two-tier fallback: prefer journal inline content, fall back to `TaskGet`
 5. **Extract and save** using Steps 4-7 from Standard Harvest (extract knowledge, organizational state, dedup protocol, save)
-6. **Update processed task tracking** — append new task IDs to the processed set (do NOT overwrite — preserves the full session history)
+6. **Update processed task tracking** — **append** the new task IDs to **your team's** `## team={your team_id}` section (do NOT overwrite — preserves the full session history for your team)
 7. **Do NOT delete the session journal** — it may still be accumulating entries from ongoing work
 8. **Update existing memories** if remediation superseded prior decisions (use `update` CLI command, not `save`). Remember: default `update` is additive merge — pass `--replace` only when the prior list items need to be discarded, not amended.
 9. **Report delta summary** to team-lead — only report what changed in this incremental pass
@@ -189,6 +207,7 @@ Review all memories saved during this session by listing recent pact-memory entr
 
 - Merge overlapping memories (same topic, same entities, compatible conclusions)
 - Prune superseded memories (update or delete entries replaced by newer information)
+- **Prune stale `## team=` sections** in `~/.claude/agent-memory/pact-secretary/session_processed_tasks.md`: drop any `## team=` section older than ~30 days (judge by the section's `Last processed` timestamp) or whose team is known-complete (the session has wrapped/paused and will not resume). This is safe — the session journal's `agent_handoff` events are the authoritative dedup source, so a pruned-then-resurrected team re-derives its processed set from its own journal. Prune only stale/complete sections; never touch an active team's section. (Pruning happens only in this deep-clean Consolidation pass — the Standard/Incremental hot paths leave the file untouched apart from your own section.)
 
 ### Step 4: Sync Working Memory
 
