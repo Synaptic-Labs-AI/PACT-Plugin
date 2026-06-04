@@ -9,9 +9,6 @@ Rule coverage:
     addBlocks=[<work_task_id>] → advisory
   - work_addblockedby_missing — TaskCreate pact-* non-TEACHBACK
     without addBlockedBy → advisory
-  - completion_no_paired_send — TaskUpdate(completed) teachback
-    Task without paired SendMessage → advisory
-        Boundary tested at 119s (silent) and 121s (advisory).
   - handoff_missing — TaskUpdate(completed) pact-* work Task
     without metadata.handoff → advisory
   - self_completion — Teammate self-completes Task → advisory +
@@ -549,7 +546,10 @@ def test_advisory_when_pact_owner_not_in_members_fails_closed(tmp_path, monkeypa
 
 
 # =============================================================================
-# completion_no_paired_send — teachback completion without paired SendMessage (120s window)
+# Shared inbox-seeding fixture — used by the teachback/variety tests below to
+# seed a team-lead inbox message in isolation. (The gate no longer reads the
+# inbox; the seed is now an inert convenience for tests that want a realistic
+# team-inbox on disk.)
 # =============================================================================
 
 
@@ -587,14 +587,48 @@ def _setup_team_inbox(
     )
 
 
-def test_silent_when_paired_sendmessage_within_window(
-    tmp_path, monkeypatch, pact_context
+# =============================================================================
+# Retired paired-send detector (#897) — regression guard
+#
+# The per-completion paired-wake detector was removed: it read
+# inboxes/{owner}.json to confirm a paired wake-SendMessage before a teachback
+# completion, but that store is platform-written ASYNC on delivery (after the
+# synchronous PostToolUse(TaskUpdate-completed) read), and SendMessage is
+# unhookable, so the advisory was ~100%-false-positive by construction.
+#
+# The issue's originally-proposed non-vacuity test ("a teachback completion
+# WITH a real paired wake must NOT emit the advisory") is UN-BUILDABLE: you
+# cannot deterministically construct a teachback completion where a real paired
+# wake is visible to the racing synchronous read — that race IS the bug. The
+# buildable inverse is asserted here instead: the advisory NEVER fires, under
+# ANY inbox state. Before the retire, the in-window state was silent while the
+# empty/out-of-window states FIRED; now all four are uniformly silent, which
+# proves the advisory is GONE, not merely silent on a happy path.
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    "paired_offset_seconds",
+    [
+        30,    # paired wake well within the old 120s window (was silent)
+        121,   # paired wake outside the old 120s window (FIRED before retire)
+        None,  # empty inbox, no paired wake at all (FIRED before retire)
+    ],
+    ids=["paired_in_window", "paired_out_of_window", "inbox_empty"],
+)
+def test_no_paired_send_advisory_with_inbox_on_disk(
+    paired_offset_seconds, tmp_path, monkeypatch, pact_context,
 ):
-    """Paired SendMessage 30s ago (well within 120s) → no completion_no_paired_send advisory."""
+    """A teachback-subject TaskUpdate(status=completed) NEVER emits the
+    retired `completion_no_paired_send` advisory, regardless of the on-disk
+    team-inbox state. Covers the three states the deleted tests pinned —
+    paired-in-window (was silent), paired-out-of-window and empty-inbox (both
+    FIRED before retire). The seed exercises a realistic inbox; the gate no
+    longer reads it, so all three states are uniformly silent post-retire."""
     pact_context(team_name="test-team", session_id="test-session")
     _setup_team_inbox(
         tmp_path, monkeypatch, owner="preparer", team_name="test-team",
-        paired_offset_seconds=30,
+        paired_offset_seconds=paired_offset_seconds,
     )
     payload = {
         "tool_name": "TaskUpdate",
@@ -609,18 +643,21 @@ def test_silent_when_paired_sendmessage_within_window(
         },
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert not any(rule == "completion_no_paired_send" for rule, _ in advisories), (
-        f"expected silent within 120s window, got: {advisories}"
-    )
+    assert not any(
+        rule == "completion_no_paired_send" for rule, _ in advisories
+    ), f"retired advisory must never fire, got: {advisories}"
 
 
-def test_silent_at_119s_boundary(tmp_path, monkeypatch, pact_context):
-    """119s ago is still within the 120s window → silent."""
+def test_no_paired_send_advisory_when_no_inbox_file(pact_context):
+    """The fourth (production-faithful) inbox state: no inbox file on disk at
+    all. This is the real shape the retired advisory could never observe — the
+    teachback completion branch consumes `tool_response.task` directly and the
+    gate performs NO inbox/Path.home read post-retire, so this test seeds
+    nothing (no `_setup_team_inbox`, no home monkeypatch). The advisory must
+    still never fire. Building this without monkeypatching home is deliberate:
+    faking an empty home would be wrong-reason-green theater for a branch that
+    never touches home."""
     pact_context(team_name="test-team", session_id="test-session")
-    _setup_team_inbox(
-        tmp_path, monkeypatch, owner="preparer", team_name="test-team",
-        paired_offset_seconds=119,
-    )
     payload = {
         "tool_name": "TaskUpdate",
         "tool_input": {"taskId": "1", "status": "completed"},
@@ -634,16 +671,33 @@ def test_silent_at_119s_boundary(tmp_path, monkeypatch, pact_context):
         },
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert not any(rule == "completion_no_paired_send" for rule, _ in advisories)
+    assert not any(
+        rule == "completion_no_paired_send" for rule, _ in advisories
+    ), f"retired advisory must never fire, got: {advisories}"
 
 
-def test_advisory_at_121s_boundary(tmp_path, monkeypatch, pact_context):
-    """121s ago is outside the 120s window → completion_no_paired_send fires."""
-    pact_context(team_name="test-team", session_id="test-session")
-    _setup_team_inbox(
-        tmp_path, monkeypatch, owner="preparer", team_name="test-team",
-        paired_offset_seconds=121,
+def test_paired_send_detector_symbols_stay_retired():
+    """Anti-fossil liveness pin: the retired detector's symbols must NOT be
+    re-introduced into the gate module. Goes RED loudly if someone "restores"
+    the dead check (which cannot work — see the provenance NOTE at the removal
+    site). Guards both the helper and its orphaned window constant."""
+    assert not hasattr(tlg, "_has_paired_sendmessage"), (
+        "_has_paired_sendmessage was retired in #897 (read-before-async-write "
+        "race; ~100%-false-positive) — do not re-introduce it"
     )
+    assert not hasattr(tlg, "PAIRED_SENDMESSAGE_WINDOW_S"), (
+        "PAIRED_SENDMESSAGE_WINDOW_S was orphaned by the retire — its only "
+        "consumers were the removed detector and its advisory message"
+    )
+
+
+def test_paired_send_advisory_absent_from_teachback_completion_output(pact_context):
+    """Structural anti-fossil pin at the emission surface: a teachback
+    completion that previously hit the empty-inbox FIRE path emits zero
+    advisories whose rule-name is `completion_no_paired_send`. Complements the
+    symbol-absence pin — even a re-introduction under a different helper name
+    would be caught here as long as it reused the canonical rule-name."""
+    pact_context(team_name="test-team", session_id="test-session")
     payload = {
         "tool_name": "TaskUpdate",
         "tool_input": {"taskId": "1", "status": "completed"},
@@ -657,19 +711,23 @@ def test_advisory_at_121s_boundary(tmp_path, monkeypatch, pact_context):
         },
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert any(rule == "completion_no_paired_send" for rule, _ in advisories), (
-        f"expected completion_no_paired_send outside window, got: {advisories}"
+    rule_names = [rule for rule, _ in advisories]
+    assert "completion_no_paired_send" not in rule_names, (
+        f"retired rule-name must not appear in gate output, got: {rule_names}"
     )
 
 
-def test_advisory_when_inbox_empty(tmp_path, monkeypatch, pact_context):
-    """No paired SendMessage at all → completion_no_paired_send fires."""
+def test_retire_leaves_sibling_teachback_completion_advisories_intact(pact_context):
+    """Regression-safety: removing the paired-send sub-check did not
+    collaterally disable the sibling advisories that share the same
+    `if is_teachback and owner:` completion branch. A teachback completion
+    with empty metadata must still fire `teachback_submit_missing` (R1); a
+    pact-* work-task completion with empty metadata.handoff must still fire
+    `handoff_missing`. Focused confirmation only — the dedicated R1/handoff
+    test sections cover these in depth; this asserts the retire was surgical."""
     pact_context(team_name="test-team", session_id="test-session")
-    _setup_team_inbox(
-        tmp_path, monkeypatch, owner="preparer", team_name="test-team",
-        paired_offset_seconds=None,
-    )
-    payload = {
+
+    teachback_payload = {
         "tool_name": "TaskUpdate",
         "tool_input": {"taskId": "1", "status": "completed"},
         "tool_response": {
@@ -681,8 +739,142 @@ def test_advisory_when_inbox_empty(tmp_path, monkeypatch, pact_context):
             }
         },
     }
-    advisories = tlg.evaluate_lifecycle(payload)
-    assert any(rule == "completion_no_paired_send" for rule, _ in advisories)
+    teachback_advisories = tlg.evaluate_lifecycle(teachback_payload)
+    assert any(
+        rule == "teachback_submit_missing" for rule, _ in teachback_advisories
+    ), (
+        "sibling R1 advisory must still fire after retire, got: "
+        f"{teachback_advisories}"
+    )
+
+    work_payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "2", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "2",
+                "subject": "implement foo",
+                "owner": "pact-backend-coder",
+                "metadata": {},
+            }
+        },
+    }
+    work_advisories = tlg.evaluate_lifecycle(work_payload)
+    assert any(
+        rule == "handoff_missing" for rule, _ in work_advisories
+    ), f"sibling handoff_missing advisory must still fire, got: {work_advisories}"
+
+
+# Allowlist SSOT: the complete set of advisory rule-names a teachback-subject
+# TaskUpdate(status=completed) may LEGITIMATELY emit. Derived from the gate's
+# `if is_teachback and owner:` completion branch + the adjacent self-completion
+# check:
+#   - teachback_submit_missing            (teachback_submit absent/empty)
+#   - teachback_submit_schema_invalid     (present but malformed)
+#   - self_completion                     (actor == owner, not carve-out exempt)
+# handoff_missing / handoff_schema_invalid are gated on is_work_task
+# (= not is_teachback) and are unreachable here; the write-time rules
+# (reasoning_reconstruction_in_handoff, teachback_addblocks_missing, the
+# variety_acknowledgment / reasoning_reconstruction / intentional_wait
+# write-time advisories) are gated on status != "completed"; agent_handoff is
+# a journal side-effect (append_event), not a returned advisory, and is
+# skipped for teachback subjects. A future maintainer who adds a NEW legitimate
+# teachback-completion advisory MUST add its rule-name here — that deliberate
+# update is the intended human gate, and is exactly what makes the pin below a
+# name-agnostic guard rather than a brittle one.
+_TEACHBACK_COMPLETION_ALLOWED_RULES = frozenset({
+    "teachback_submit_missing",
+    "teachback_submit_schema_invalid",
+    "self_completion",
+})
+
+
+def _teachback_completion_metadata_for(shape: str) -> dict:
+    """Build a teachback-completion `metadata` dict for the named shape. Called
+    inside the test body (runtime), NOT at collection time, so the late-defined
+    `_well_formed_teachback_submit` helper is resolvable. Shapes mirror what the
+    gate's `if is_teachback and owner:` branch distinguishes: empty → R1,
+    well_formed → nothing, missing_<field> → R2."""
+    if shape == "empty":
+        return {}
+    if shape == "well_formed":
+        return {"teachback_submit": _well_formed_teachback_submit()}
+    assert shape.startswith("missing_"), shape
+    field = shape[len("missing_"):]
+    tb = _well_formed_teachback_submit()
+    tb.pop(field)
+    return {"teachback_submit": tb}
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "empty",
+        "well_formed",
+        "missing_understanding",
+        "missing_most_likely_wrong",
+        "missing_least_confident_item",
+        "missing_first_action",
+        "missing_variety_acknowledgment",
+    ],
+)
+def test_teachback_completion_emits_only_allowlisted_rule_names(shape, pact_context):
+    """Name-agnostic anti-fossil pin: a teachback-subject completion emits ONLY
+    rule-names from the known-good allowlist. This closes the one re-intro
+    vector the symbol-absence + emission-surface pins miss — a paired-wake
+    detector re-introduced under BOTH a renamed helper AND a renamed rule-name
+    (so neither name-keyed pin fires) would still ADD an unexpected rule-name to
+    a teachback completion's output, and this catches it regardless of the name
+    chosen.
+
+    Parametrized over every teachback-completion metadata shape the gate
+    distinguishes (empty → R1, well_formed → nothing, each malformed variant →
+    R2) so the allowlist's COMPLETENESS is validated against the full surface:
+    if any legitimate shape emitted a rule-name outside the allowlist, this
+    fails and surfaces it (which would mean the allowlist needs widening, not
+    that a re-intro occurred)."""
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "1",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "preparer",
+                "metadata": _teachback_completion_metadata_for(shape),
+            }
+        },
+    }
+    rule_names = {rule for rule, _ in tlg.evaluate_lifecycle(payload)}
+    unexpected = rule_names - _TEACHBACK_COMPLETION_ALLOWED_RULES
+    assert not unexpected, (
+        "teachback completion emitted rule-name(s) outside the allowlist: "
+        f"{unexpected} — a re-introduced detector under any name would surface "
+        f"here. Full output: {rule_names}"
+    )
+
+
+def test_allowlist_pin_catches_a_foreign_rule_name():
+    """Non-vacuity proof for the allowlist pin, read-only (no hook revert — the
+    shared worktree forbids it). Simulates a re-introduced detector by injecting
+    a synthetic foreign rule-name into a teachback completion's output, then
+    applies the SAME allowlist predicate the pin above uses, and asserts it
+    flags the foreign name. This proves the pin would catch a renamed re-intro
+    on its face: if the allowlist were vacuous (e.g. it accidentally contained
+    every name, or the subtraction logic were inverted) this would not fire."""
+    # A re-introduced paired-wake detector would append an advisory tuple under
+    # some new rule-name — model that with a representative synthetic name that
+    # is NOT in the allowlist.
+    simulated_reintroduced_output = {
+        "teachback_submit_missing",          # a legitimate advisory that did fire
+        "wake_not_paired_v2",                # the foreign, re-introduced detector
+    }
+    unexpected = simulated_reintroduced_output - _TEACHBACK_COMPLETION_ALLOWED_RULES
+    assert unexpected == {"wake_not_paired_v2"}, (
+        "allowlist predicate must flag a foreign re-introduced rule-name "
+        f"regardless of its name; got unexpected={unexpected}"
+    )
 
 
 # =============================================================================
@@ -1261,8 +1453,8 @@ def test_advisory_when_teachback_completed_without_teachback_submit(
 ):
     """Teachback subject task completed with empty metadata.teachback_submit
     → R1 fires. Disjoint from R2 (no schema check on missing payload).
-    Paired-send setup mirrors the existing completion_no_paired_send tests
-    so we isolate R1 from completion_no_paired_send."""
+    Seeds a recent team-lead inbox message so the test exercises R1 against a
+    realistic on-disk team inbox (the gate does not read it; the seed is inert)."""
     pact_context(team_name="test-team", session_id="test-session")
     _setup_team_inbox(
         tmp_path, monkeypatch, owner="preparer", team_name="test-team",

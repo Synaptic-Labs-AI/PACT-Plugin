@@ -232,9 +232,10 @@ that Task B becomes claimable.
 **Failure signals**:
 
 - Task A `status == "completed"` but no paired `SendMessage` to
-  secretary: `task_lifecycle_gate.py` advisory
-  `completion_no_paired_send` should have fired in the journal. The
-  secretary will idle indefinitely on `awaiting_lead_completion`.
+  secretary: the secretary will idle indefinitely on
+  `awaiting_lead_completion` (a missed wake has no automated alarm — the
+  per-completion paired-wake detector was retired in #897 as unfixable;
+  the net is orchestrator attention + the send-before-complete mandate).
 - Task A still `pending` / `in_progress` after the orchestrator's
   acceptance turn: persona drift on the Completion Authority two-call
   pair OR the orchestrator missed the teachback signal.

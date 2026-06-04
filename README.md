@@ -278,7 +278,7 @@ Consent-gated decisions (merge, push, destructive bash, plan approval, version b
 
 Several PACT protocols are designed so that the system literally cannot fabricate the conditions for an action — only verify them on disk.
 
-**Two-call atomic acceptance pair** — From [`protocols/pact-completion-authority.md`](pact-plugin/protocols/pact-completion-authority.md): when accepting teammate work, the orchestrator MUST send a wake-signal `SendMessage` FIRST, then write `TaskUpdate(status="completed")`. The ordering is load-bearing — the wake must be on disk before the status flip fires, so the lifecycle gate's PostToolUse scan finds the paired wake. Reversed ordering produces false-positive `completion_no_paired_send` warnings even when the pair is structurally correct.
+**Two-call atomic acceptance pair** — From [`protocols/pact-completion-authority.md`](pact-plugin/protocols/pact-completion-authority.md): when accepting teammate work, the orchestrator MUST send a wake-signal `SendMessage` FIRST, then write `TaskUpdate(status="completed")`. The wake is load-bearing — `blockedBy` is pull-only, so an idle teammate cannot self-observe the status flip; the wake-signal is their content-arrival trigger, and the send is confirmed by a success receipt the orchestrator cannot forge.
 
 **First-spawn HARD-STOP verification** — From the orchestrator persona (§11 Agent Teams Dispatch): after the first specialist spawn in a session, the teammate's first message MUST demonstrate access to `TaskList`, `TaskUpdate`, and `SendMessage`. If any tool is reported missing, this is **not degraded mode** and **not something to work around** — the dispatch was malformed (typically `Task(...)` was used instead of `Agent(...)`, or `name=` / `team_name=` was omitted). The orchestrator stops the teammate, corrects the dispatch shape, and re-spawns. The teammate cannot self-recover from a malformed spawn.
 
@@ -606,7 +606,7 @@ When installed as a plugin, PACT lives in your plugin cache:
 │   └── cache/
 │       └── pact-plugin/
 │           └── PACT/
-│               └── 4.4.4/      # Plugin version
+│               └── 4.4.5/      # Plugin version
 │                   ├── agents/
 │                   ├── commands/
 │                   ├── skills/
