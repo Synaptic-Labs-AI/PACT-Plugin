@@ -13,10 +13,14 @@ Used by:
 - Test files: test_working_memory.py tests all functions in this module
 """
 
+import fcntl
 import logging
 import os
 import re
 import subprocess
+import sys
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -73,6 +77,71 @@ _PACT_BOUNDARY_ALT = "PACT_MEMORY_|PACT_MANAGED_|PACT_ROUTING_"
 # in hooks/shared/claude_md_manager.py (cannot import — separate package).
 _MANAGED_START_MARKER = "<!-- PACT_MANAGED_START: Managed by pact-plugin - do not edit this block -->"
 _MANAGED_END_MARKER = "<!-- PACT_MANAGED_END -->"
+
+# file_lock: vendored twin of hooks/shared/claude_md_manager.file_lock —
+# skills/pact-memory/scripts/ cannot import from hooks/shared/ (separate
+# package boundary). Cross-process correctness is preserved because
+# fcntl.flock serializes on the sidecar inode, not the Python object: a hook
+# process and this skill process locking the SAME .{name}.lock sidecar
+# contend on the same kernel lock. The drift-detection test
+# (TestFileLockTwinCopyDrift in tests/test_staleness.py) guards byte-alignment
+# of the function body with the canonical copy; if you change either, update
+# both in the SAME commit. The two constants below are part of the twin and
+# must match the canonical values.
+_LOCK_TIMEOUT_SECONDS = 5.0
+_LOCK_POLL_INTERVAL = 0.1
+
+
+@contextmanager
+def file_lock(target_file: Path):
+    """Acquire an exclusive sidecar file lock for a target CLAUDE.md path.
+
+    Twin of hooks/shared/claude_md_manager.file_lock — kept local because
+    skills/pact-memory/scripts/ cannot import from hooks/shared/. Body MUST
+    stay byte-identical to the canonical copy (drift test enforces this).
+    """
+    lock_path = target_file.parent / f".{target_file.name}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # 0o600: the lock file is adjacent to user-private CLAUDE.md content;
+    # match the same permissions to avoid leaving a world-readable sidecar.
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+    try:
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    # S8 (security-engineer-review): emit a stderr
+                    # warning before raising. Callers fail-open on
+                    # TimeoutError (skip the cleanup pass), so without
+                    # this warning a stuck holder would silently defer
+                    # kernel-block / managed-block cleanup forever.
+                    # Stderr from hooks does not surface in the user
+                    # transcript, but it does land in Claude Code's
+                    # debug logs — repeated warnings make the
+                    # contention-vs-bug class observable.
+                    print(
+                        f"PACT file_lock timeout: failed to acquire "
+                        f"lock on {lock_path} within "
+                        f"{_LOCK_TIMEOUT_SECONDS}s; falling open",
+                        file=sys.stderr,
+                    )
+                    raise TimeoutError(
+                        f"Failed to acquire lock on {lock_path} within "
+                        f"{_LOCK_TIMEOUT_SECONDS}s"
+                    )
+                time.sleep(_LOCK_POLL_INTERVAL)
+        yield
+    finally:
+        # Release before close. flock is released automatically on fd close
+        # by the kernel, but an explicit LOCK_UN ensures immediate release
+        # even if close is delayed (e.g., by subsequent finalizer work).
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
 
 
 def extract_managed_region(content: str) -> Optional[Tuple[str, int]]:
@@ -529,50 +598,61 @@ def sync_to_claude_md(
         return False
 
     try:
-        # Read current content
-        content = claude_md_path.read_text(encoding="utf-8")
+        # Serialize the FULL read-modify-write window: read-under-lock is what
+        # prevents the lost update (a write-only lock would let a 2nd writer
+        # read stale content and clobber this entry the instant we release).
+        # Lock identity is the sidecar of the resolved CLAUDE.md path, so this
+        # serializes against session_init/session_resume because all writers
+        # resolve to the same .claude/CLAUDE.md (CLAUDE_PROJECT_DIR is set every
+        # session → all hit the env-var branch first). If CLAUDE_PROJECT_DIR is
+        # ever unset AND the git-root/cwd fallbacks diverge between processes,
+        # the sidecars would differ and the lock would not serialize — accepted
+        # as out-of-contract (no safe fallback action exists if paths diverge).
+        with file_lock(claude_md_path):
+            # Read current content
+            content = claude_md_path.read_text(encoding="utf-8")
 
-        # Parse existing working memory section
-        before_section, section_header, after_section, existing_entries = \
-            _parse_working_memory_section(content)
+            # Parse existing working memory section
+            before_section, section_header, after_section, existing_entries = \
+                _parse_working_memory_section(content)
 
-        # Format new memory entry
-        new_entry = _format_memory_entry(memory, files, memory_id)
+            # Format new memory entry
+            new_entry = _format_memory_entry(memory, files, memory_id)
 
-        # Build new entries list: new entry first, then existing (up to max - 1)
-        all_entries = [new_entry] + existing_entries
-        trimmed_entries = all_entries[:MAX_WORKING_MEMORIES]
+            # Build new entries list: new entry first, then existing (up to max - 1)
+            all_entries = [new_entry] + existing_entries
+            trimmed_entries = all_entries[:MAX_WORKING_MEMORIES]
 
-        # Apply token budget: compress older entries if over budget
-        trimmed_entries = _apply_token_budget(
-            trimmed_entries, WORKING_MEMORY_TOKEN_BUDGET
-        )
+            # Apply token budget: compress older entries if over budget
+            trimmed_entries = _apply_token_budget(
+                trimmed_entries, WORKING_MEMORY_TOKEN_BUDGET
+            )
 
-        # Build new section content
-        section_lines = [
-            WORKING_MEMORY_HEADER,
-            WORKING_MEMORY_COMMENT,
-            ""  # Blank line after comment
-        ]
-        for entry in trimmed_entries:
-            section_lines.append(entry)
-            section_lines.append("")  # Blank line between entries
+            # Build new section content
+            section_lines = [
+                WORKING_MEMORY_HEADER,
+                WORKING_MEMORY_COMMENT,
+                ""  # Blank line after comment
+            ]
+            for entry in trimmed_entries:
+                section_lines.append(entry)
+                section_lines.append("")  # Blank line between entries
 
-        section_text = "\n".join(section_lines)
+            section_text = "\n".join(section_lines)
 
-        # Reconstruct file content
-        if section_header:
-            # Section existed, replace it
-            new_content = before_section + section_text + after_section
-        else:
-            # Section didn't exist, append at end
-            if not content.endswith("\n"):
-                content += "\n"
-            new_content = content + "\n" + section_text
+            # Reconstruct file content
+            if section_header:
+                # Section existed, replace it
+                new_content = before_section + section_text + after_section
+            else:
+                # Section didn't exist, append at end
+                if not content.endswith("\n"):
+                    content += "\n"
+                new_content = content + "\n" + section_text
 
-        # Write back to file
-        claude_md_path.write_text(new_content, encoding="utf-8")
-        os.chmod(str(claude_md_path), 0o600)
+            # Write back to file
+            claude_md_path.write_text(new_content, encoding="utf-8")
+            os.chmod(str(claude_md_path), 0o600)
 
         logger.info("Synced memory to CLAUDE.md Working Memory section")
         return True
@@ -732,73 +812,78 @@ def sync_retrieved_to_claude_md(
         return False
 
     try:
-        # Read current content
-        content = claude_md_path.read_text(encoding="utf-8")
+        # Serialize the FULL read-modify-write window (see sync_to_claude_md for
+        # the lock-identity / CLAUDE_PROJECT_DIR rationale): read-under-lock is
+        # the load-bearing property — a write-only lock would let a 2nd writer
+        # read stale content and clobber this section on release.
+        with file_lock(claude_md_path):
+            # Read current content
+            content = claude_md_path.read_text(encoding="utf-8")
 
-        # Parse existing retrieved context section
-        before_section, section_header, after_section, existing_entries = \
-            _parse_retrieved_context_section(content)
+            # Parse existing retrieved context section
+            before_section, section_header, after_section, existing_entries = \
+                _parse_retrieved_context_section(content)
 
-        # Format new entries (only the top result to avoid clutter)
-        new_entries = []
-        top_memory = memories[0]
-        score = scores[0] if scores else None
-        memory_id = memory_ids[0] if memory_ids else None
-        new_entry = _format_retrieved_entry(top_memory, query, score, memory_id)
-        new_entries.append(new_entry)
+            # Format new entries (only the top result to avoid clutter)
+            new_entries = []
+            top_memory = memories[0]
+            score = scores[0] if scores else None
+            memory_id = memory_ids[0] if memory_ids else None
+            new_entry = _format_retrieved_entry(top_memory, query, score, memory_id)
+            new_entries.append(new_entry)
 
-        # Build new entries list: new entry first, then existing (up to max - 1)
-        all_entries = new_entries + existing_entries
-        trimmed_entries = all_entries[:MAX_RETRIEVED_MEMORIES]
+            # Build new entries list: new entry first, then existing (up to max - 1)
+            all_entries = new_entries + existing_entries
+            trimmed_entries = all_entries[:MAX_RETRIEVED_MEMORIES]
 
-        # Apply token budget: reduce entry count if over budget.
-        # Retrieved entries are already compact (~200 chars each), drop oldest rather than compress.
-        # Subtract the popped entry's tokens instead of recalculating the full sum.
-        total_tokens = sum(_estimate_tokens(e) for e in trimmed_entries)
-        while len(trimmed_entries) > 1 and total_tokens > RETRIEVED_CONTEXT_TOKEN_BUDGET:
-            removed = trimmed_entries.pop()
-            total_tokens -= _estimate_tokens(removed)
+            # Apply token budget: reduce entry count if over budget.
+            # Retrieved entries are already compact (~200 chars each), drop oldest rather than compress.
+            # Subtract the popped entry's tokens instead of recalculating the full sum.
+            total_tokens = sum(_estimate_tokens(e) for e in trimmed_entries)
+            while len(trimmed_entries) > 1 and total_tokens > RETRIEVED_CONTEXT_TOKEN_BUDGET:
+                removed = trimmed_entries.pop()
+                total_tokens -= _estimate_tokens(removed)
 
-        # Build new section content
-        section_lines = [
-            RETRIEVED_CONTEXT_HEADER,
-            RETRIEVED_CONTEXT_COMMENT,
-            ""  # Blank line after comment
-        ]
-        for entry in trimmed_entries:
-            section_lines.append(entry)
-            section_lines.append("")  # Blank line between entries
+            # Build new section content
+            section_lines = [
+                RETRIEVED_CONTEXT_HEADER,
+                RETRIEVED_CONTEXT_COMMENT,
+                ""  # Blank line after comment
+            ]
+            for entry in trimmed_entries:
+                section_lines.append(entry)
+                section_lines.append("")  # Blank line between entries
 
-        section_text = "\n".join(section_lines)
+            section_text = "\n".join(section_lines)
 
-        # Reconstruct file content
-        if section_header:
-            # Section existed, replace it
-            # Ensure blank line before next section
-            if after_section and not after_section.startswith("\n"):
-                new_content = before_section + section_text + "\n" + after_section
+            # Reconstruct file content
+            if section_header:
+                # Section existed, replace it
+                # Ensure blank line before next section
+                if after_section and not after_section.startswith("\n"):
+                    new_content = before_section + section_text + "\n" + after_section
+                else:
+                    new_content = before_section + section_text + after_section
             else:
-                new_content = before_section + section_text + after_section
-        else:
-            # Section didn't exist, insert before Working Memory if it exists
-            working_memory_match = re.search(
-                r'^## Working Memory',
-                content,
-                re.MULTILINE
-            )
-            if working_memory_match:
-                # Insert before Working Memory with blank line
-                insert_pos = working_memory_match.start()
-                new_content = content[:insert_pos] + section_text + "\n" + content[insert_pos:]
-            else:
-                # Append at end
-                if not content.endswith("\n"):
-                    content += "\n"
-                new_content = content + "\n" + section_text
+                # Section didn't exist, insert before Working Memory if it exists
+                working_memory_match = re.search(
+                    r'^## Working Memory',
+                    content,
+                    re.MULTILINE
+                )
+                if working_memory_match:
+                    # Insert before Working Memory with blank line
+                    insert_pos = working_memory_match.start()
+                    new_content = content[:insert_pos] + section_text + "\n" + content[insert_pos:]
+                else:
+                    # Append at end
+                    if not content.endswith("\n"):
+                        content += "\n"
+                    new_content = content + "\n" + section_text
 
-        # Write back to file
-        claude_md_path.write_text(new_content, encoding="utf-8")
-        os.chmod(str(claude_md_path), 0o600)
+            # Write back to file
+            claude_md_path.write_text(new_content, encoding="utf-8")
+            os.chmod(str(claude_md_path), 0o600)
 
         logger.info("Synced retrieved memories to CLAUDE.md Retrieved Context section")
         return True

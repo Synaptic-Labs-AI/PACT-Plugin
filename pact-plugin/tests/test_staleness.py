@@ -1213,3 +1213,75 @@ class TestPinCapsTwinCopyDrift:
             "literal. Fix by restoring the `chr(k) for k in "
             "pin_caps._FORBIDDEN_TERMINATOR_TABLE.keys()` form."
         )
+
+
+class TestFileLockTwinCopyDrift:
+    """Drift detection for the file_lock twin vendored into working_memory.
+
+    file_lock is twin-copied from hooks/shared/claude_md_manager into
+    skills/pact-memory/scripts/working_memory (skills/ cannot import from
+    hooks/shared/). The function BODY must stay byte-identical so the skill
+    serializes against the hook on the same sidecar inode; the docstring may
+    differ. This fails loudly when the executable logic drifts.
+    """
+
+    @staticmethod
+    def _extract_body(source: str) -> str:
+        """Return the executable body, stripping decorators, the def line,
+        and a leading docstring; then dedent + normalize.
+
+        Unlike TestEstimateTokensEquivalence._extract_body, file_lock carries a
+        @contextmanager decorator, so this skips ALL leading ``@`` lines before
+        dropping the def line. This makes the comparison docstring-tolerant
+        (the twin carries a shorter docstring) while pinning the logic.
+        """
+        lines = source.split("\n")
+        idx = 0
+        while idx < len(lines) and lines[idx].lstrip().startswith("@"):
+            idx += 1
+        # lines[idx] is the def line; drop it too.
+        body_lines = lines[idx + 1:]
+        body_text = textwrap.dedent("\n".join(body_lines)).strip()
+        for quote in ['"""', "'''"]:
+            if body_text.startswith(quote):
+                end_idx = body_text.find(quote, len(quote))
+                if end_idx != -1:
+                    body_text = body_text[end_idx + len(quote):].strip()
+                break
+        return body_text
+
+    def test_file_lock_bodies_are_identical(self):
+        """The file_lock body MUST be byte-identical across the two copies.
+
+        Cross-process serialization correctness depends on the twin behaving
+        exactly like the canonical lock (same sidecar path, same fcntl flock
+        semantics, same timeout/poll loop). Compares logic only — docstrings
+        are allowed to differ.
+        """
+        from shared.claude_md_manager import file_lock as canonical
+        from working_memory import file_lock as twin
+
+        canonical_body = self._extract_body(inspect.getsource(canonical))
+        twin_body = self._extract_body(inspect.getsource(twin))
+
+        assert canonical_body == twin_body, (
+            "file_lock twin drift between hooks/shared/claude_md_manager.py "
+            "and skills/pact-memory/scripts/working_memory.py — update both "
+            "in the SAME commit.\n"
+            f"canonical body:\n{canonical_body}\n\n"
+            f"twin body:\n{twin_body}"
+        )
+
+    def test_lock_timeout_constants_match(self):
+        """The two lock-tuning constants are part of the twin and must match."""
+        import shared.claude_md_manager as cmm
+        import working_memory as wm
+
+        assert cmm._LOCK_TIMEOUT_SECONDS == wm._LOCK_TIMEOUT_SECONDS, (
+            "_LOCK_TIMEOUT_SECONDS drift between claude_md_manager.py and "
+            "working_memory.py — update both in the same commit"
+        )
+        assert cmm._LOCK_POLL_INTERVAL == wm._LOCK_POLL_INTERVAL, (
+            "_LOCK_POLL_INTERVAL drift between claude_md_manager.py and "
+            "working_memory.py — update both in the same commit"
+        )
