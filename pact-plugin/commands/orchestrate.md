@@ -117,7 +117,7 @@ The `Agent()` `prompt` does NOT change shape — the Teachback-Gated Dispatch is
 **Carve-outs** — single-task dispatch still applies for:
 
 - **Auditor signal-tasks** (`metadata.completion_type="signal"`): no TEACHBACK, no Task B; self-completes tasks.
-- **Secretary** (`member.agentType="pact-secretary"`): no TEACHBACK (single-task dispatch); self-completes memory-save tasks.
+- **Secretary** (`member.agentType="pact-secretary"`): no TEACHBACK (single-task dispatch); self-completes its session briefing + memory-save tasks.
 - **imPACT force-termination**: `TaskStop` + team-lead-set `metadata.terminated=true` is its own out-of-band path. See [imPACT.md](imPACT.md).
 
 **Skipped phases**: Mark directly `completed` (no `in_progress` — no work occurs):

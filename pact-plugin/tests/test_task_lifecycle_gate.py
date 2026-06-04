@@ -402,7 +402,7 @@ def test_silent_when_owner_is_teachback_exempt_secretary(tmp_path, monkeypatch, 
     payload = {
         "tool_name": "TaskCreate",
         "tool_input": {
-            "subject": "secretary: session briefing + HANDOFF readiness",
+            "subject": "secretary: deliver session briefing",
             "owner": "pact-secretary",
             # no addBlockedBy — single-task dispatch shape
         },

@@ -5,10 +5,15 @@ Summary: `intentional_wait` metadata schema — the teammate-facing contract
          approval, inter-commit hold, peer reply, etc.). Also the canonical
          self-complete-exemption predicate for team-lead-side TaskGet inspection
          and audit tooling.
-Used by: teammate-authored metadata on Task records, team-lead inspection, and
-         audit tooling. The exemption predicate (is_self_complete_exempt)
-         is NOT a hook — it is a pure function consumed by team-lead instructions
-         and future audit consumers. See skills/pact-agent-teams/SKILL.md
+Used by: teammate-authored metadata on Task records, team-lead inspection,
+         audit tooling, and the PostToolUse advisory gate
+         `task_lifecycle_gate.py`. The exemption predicate
+         (is_self_complete_exempt) is a pure function read by that advisory
+         gate (advisory-only — it cannot DENY; it emits a `self_completion`
+         advisory + a `completion_disputed` writeback when a non-exempt
+         teammate self-completes) as well as by team-lead instructions and
+         audit consumers. No hook BLOCKS on it; the exemption is not enforced
+         (it stays instruction-level). See skills/pact-agent-teams/SKILL.md
          and agents/pact-orchestrator.md for the contract.
 
 Contract: pure functions; never raise. Malformed flags fail loud — e.g.
@@ -352,10 +357,14 @@ def is_self_complete_exempt(
     via json.loads); defaults to False on missing or malformed fields
     (conservative — never silently exempt).
 
-    NOT a hook predicate. There is no hook reading this — the function is
-    the canonical predicate for team-lead-side TaskGet inspection, audit tooling,
-    and future consumers. Hooks must use the inline-literal mirror to avoid
-    reintroducing livelock-capable hook surface.
+    Read by the PostToolUse advisory gate `task_lifecycle_gate.py` (the
+    `self_completion` advisory) as well as team-lead-side TaskGet inspection,
+    audit tooling, and future consumers. That gate is advisory-only — it
+    cannot DENY; on a non-exempt self-completion it emits an advisory + a
+    `completion_disputed` writeback. No hook BLOCKS on it and the exemption
+    is not enforced (nothing forces an exempt teammate to self-complete —
+    that remains instruction-level), so reading it here introduces no
+    livelock-capable hook surface.
 
     TRUST BOUNDARY: `owner` is teammate-writable via TaskUpdate(owner=...),
     BUT exemption now requires the team config to record that owner with
