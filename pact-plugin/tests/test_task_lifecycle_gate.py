@@ -9,9 +9,6 @@ Rule coverage:
     addBlocks=[<work_task_id>] → advisory
   - work_addblockedby_missing — TaskCreate pact-* non-TEACHBACK
     without addBlockedBy → advisory
-  - completion_no_paired_send — TaskUpdate(completed) teachback
-    Task without paired SendMessage → advisory
-        Boundary tested at 119s (silent) and 121s (advisory).
   - handoff_missing — TaskUpdate(completed) pact-* work Task
     without metadata.handoff → advisory
   - self_completion — Teammate self-completes Task → advisory +
@@ -549,7 +546,10 @@ def test_advisory_when_pact_owner_not_in_members_fails_closed(tmp_path, monkeypa
 
 
 # =============================================================================
-# completion_no_paired_send — teachback completion without paired SendMessage (120s window)
+# Shared inbox-seeding fixture — used by the teachback/variety tests below to
+# seed a team-lead inbox message in isolation. (The gate no longer reads the
+# inbox; the seed is now an inert convenience for tests that want a realistic
+# team-inbox on disk.)
 # =============================================================================
 
 
@@ -585,104 +585,6 @@ def _setup_team_inbox(
     (inbox_dir / f"{owner}.json").write_text(
         json.dumps(messages), encoding="utf-8"
     )
-
-
-def test_silent_when_paired_sendmessage_within_window(
-    tmp_path, monkeypatch, pact_context
-):
-    """Paired SendMessage 30s ago (well within 120s) → no completion_no_paired_send advisory."""
-    pact_context(team_name="test-team", session_id="test-session")
-    _setup_team_inbox(
-        tmp_path, monkeypatch, owner="preparer", team_name="test-team",
-        paired_offset_seconds=30,
-    )
-    payload = {
-        "tool_name": "TaskUpdate",
-        "tool_input": {"taskId": "1", "status": "completed"},
-        "tool_response": {
-            "task": {
-                "id": "1",
-                "subject": "preparer: TEACHBACK for foo",
-                "owner": "preparer",
-                "metadata": {},
-            }
-        },
-    }
-    advisories = tlg.evaluate_lifecycle(payload)
-    assert not any(rule == "completion_no_paired_send" for rule, _ in advisories), (
-        f"expected silent within 120s window, got: {advisories}"
-    )
-
-
-def test_silent_at_119s_boundary(tmp_path, monkeypatch, pact_context):
-    """119s ago is still within the 120s window → silent."""
-    pact_context(team_name="test-team", session_id="test-session")
-    _setup_team_inbox(
-        tmp_path, monkeypatch, owner="preparer", team_name="test-team",
-        paired_offset_seconds=119,
-    )
-    payload = {
-        "tool_name": "TaskUpdate",
-        "tool_input": {"taskId": "1", "status": "completed"},
-        "tool_response": {
-            "task": {
-                "id": "1",
-                "subject": "preparer: TEACHBACK for foo",
-                "owner": "preparer",
-                "metadata": {},
-            }
-        },
-    }
-    advisories = tlg.evaluate_lifecycle(payload)
-    assert not any(rule == "completion_no_paired_send" for rule, _ in advisories)
-
-
-def test_advisory_at_121s_boundary(tmp_path, monkeypatch, pact_context):
-    """121s ago is outside the 120s window → completion_no_paired_send fires."""
-    pact_context(team_name="test-team", session_id="test-session")
-    _setup_team_inbox(
-        tmp_path, monkeypatch, owner="preparer", team_name="test-team",
-        paired_offset_seconds=121,
-    )
-    payload = {
-        "tool_name": "TaskUpdate",
-        "tool_input": {"taskId": "1", "status": "completed"},
-        "tool_response": {
-            "task": {
-                "id": "1",
-                "subject": "preparer: TEACHBACK for foo",
-                "owner": "preparer",
-                "metadata": {},
-            }
-        },
-    }
-    advisories = tlg.evaluate_lifecycle(payload)
-    assert any(rule == "completion_no_paired_send" for rule, _ in advisories), (
-        f"expected completion_no_paired_send outside window, got: {advisories}"
-    )
-
-
-def test_advisory_when_inbox_empty(tmp_path, monkeypatch, pact_context):
-    """No paired SendMessage at all → completion_no_paired_send fires."""
-    pact_context(team_name="test-team", session_id="test-session")
-    _setup_team_inbox(
-        tmp_path, monkeypatch, owner="preparer", team_name="test-team",
-        paired_offset_seconds=None,
-    )
-    payload = {
-        "tool_name": "TaskUpdate",
-        "tool_input": {"taskId": "1", "status": "completed"},
-        "tool_response": {
-            "task": {
-                "id": "1",
-                "subject": "preparer: TEACHBACK for foo",
-                "owner": "preparer",
-                "metadata": {},
-            }
-        },
-    }
-    advisories = tlg.evaluate_lifecycle(payload)
-    assert any(rule == "completion_no_paired_send" for rule, _ in advisories)
 
 
 # =============================================================================
@@ -1261,8 +1163,8 @@ def test_advisory_when_teachback_completed_without_teachback_submit(
 ):
     """Teachback subject task completed with empty metadata.teachback_submit
     → R1 fires. Disjoint from R2 (no schema check on missing payload).
-    Paired-send setup mirrors the existing completion_no_paired_send tests
-    so we isolate R1 from completion_no_paired_send."""
+    Seeds a recent team-lead inbox message so the test exercises R1 against a
+    realistic on-disk team inbox (the gate does not read it; the seed is inert)."""
     pact_context(team_name="test-team", session_id="test-session")
     _setup_team_inbox(
         tmp_path, monkeypatch, owner="preparer", team_name="test-team",

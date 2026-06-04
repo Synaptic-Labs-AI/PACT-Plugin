@@ -33,8 +33,6 @@ Rule coverage:
     AND task_a.blocks is empty (benign late-wiring guard).
   - work_addblockedby_missing — pact-* work Task created without
     addBlockedBy=[<teachback_id>]
-  - completion_no_paired_send — Teachback Task completed without paired
-    wake-SendMessage to owner within the configured window
   - handoff_missing — pact-* work Task completed without
     metadata.handoff payload
   - self_completion — Teammate self-completed a Task without carve-out
@@ -112,7 +110,6 @@ def _emit_load_failure_advisory(stage: str, error: BaseException) -> NoReturn:
 try:
     import re
     import time
-    from datetime import datetime, timezone
     from pathlib import Path
 
     import shared.pact_context as pact_context
@@ -138,13 +135,6 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
 
 
 # ─── constants ────────────────────────────────────────────────────────────────
-
-# Paired-SendMessage time window (seconds) for the teachback-completion
-# rule. Window: 120s — sized to cover normal lead reaction time between
-# the teachback-completing TaskUpdate and the paired wake-SendMessage,
-# while still detecting genuinely-missing pairs before the teammate's
-# idle-poll cycle.
-PAIRED_SENDMESSAGE_WINDOW_S = 120
 
 # Self-completion carve-out resolution is delegated entirely to
 # is_self_complete_exempt(task, team_name) in shared.intentional_wait
@@ -219,75 +209,6 @@ def _is_teachback_subject(subject: str) -> bool:
     if not isinstance(subject, str):
         return False
     return _TEACHBACK_SUBJECT_PATTERN.match(subject) is not None
-
-
-# ─── paired-SendMessage check (for teachback completion) ─────────────────────
-
-
-def _has_paired_sendmessage(owner: str, window_s: int) -> bool:
-    """Return True iff the owner's inbox file shows ANY message from
-    team-lead with timestamp within the last `window_s` seconds.
-
-    Inbox path: ~/.claude/teams/{team_name}/inboxes/{owner}.json
-    Format: JSON array of {from, text, timestamp, ...}.
-
-    Path-traversal defense: owner is sanitized (alphanumeric, '-', '_' only)
-    to prevent escape from the inboxes directory. team_name comes from
-    pact_context (harness-set).
-
-    Fail-OPEN: any error reading/parsing returns False (advisory will fire).
-    Conservative since the goal is to surface a missing wake-message, not
-    suppress on read errors.
-    """
-    if not owner or not isinstance(owner, str):
-        return False
-    if not re.fullmatch(r"[A-Za-z0-9_\-]+", owner):
-        return False
-    team_name = pact_context.get_team_name() if hasattr(pact_context, "get_team_name") else ""
-    if not team_name:
-        # Best-effort: read from pact_context cache directly
-        try:
-            team_name = pact_context.get_pact_context().get("team_name", "")
-        except Exception:
-            team_name = ""
-    if not team_name or not re.fullmatch(r"[A-Za-z0-9_\-]+", team_name):
-        return False
-    inbox_path = (
-        Path.home() / ".claude" / "teams" / team_name / "inboxes" / f"{owner}.json"
-    )
-    try:
-        if not inbox_path.is_file():
-            return False
-        content = inbox_path.read_text(encoding="utf-8")
-        messages = json.loads(content)
-    except (OSError, ValueError, json.JSONDecodeError):
-        return False
-    if not isinstance(messages, list):
-        return False
-
-    now_utc = datetime.now(timezone.utc)
-    cutoff_ts = now_utc.timestamp() - window_s
-    for msg in messages:
-        if not isinstance(msg, dict):
-            continue
-        sender = msg.get("from")
-        ts_str = msg.get("timestamp")
-        if not isinstance(sender, str) or sender != "team-lead":
-            continue
-        if not isinstance(ts_str, str):
-            continue
-        try:
-            # Accept both Z-suffix and offset forms; datetime.fromisoformat
-            # handles offsets directly; replace Z with +00:00 for safety.
-            normalized = ts_str.replace("Z", "+00:00")
-            ts_dt = datetime.fromisoformat(normalized)
-            if ts_dt.tzinfo is None:
-                ts_dt = ts_dt.replace(tzinfo=timezone.utc)
-            if ts_dt.timestamp() >= cutoff_ts:
-                return True
-        except (ValueError, TypeError):
-            continue
-    return False
 
 
 # ─── metadata.completion_disputed writeback (direct FS) ──────────────────────
@@ -763,8 +684,8 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
             )
 
         # Teachback-subject completion-time checks: teachback_submit presence
-        # + schema, then paired wake-SendMessage. R1/R2 are disjoint by the
-        # same handoff_missing/handoff_schema_invalid pattern at L607-613:
+        # + schema. R1/R2 are disjoint by the same
+        # handoff_missing/handoff_schema_invalid pattern at L607-613:
         #   teachback_submit missing/empty → R1, skip schema check.
         #   present but malformed → R2.
         if is_teachback and owner:
@@ -788,14 +709,17 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                         f"{schema_problem}.",
                     ))
 
-            if not _has_paired_sendmessage(owner, PAIRED_SENDMESSAGE_WINDOW_S):
-                advisories.append((
-                    "completion_no_paired_send",
-                    f"PACT task_lifecycle_gate: Teachback Task {task_id} "
-                    f"completed without a paired wake-SendMessage to "
-                    f"{owner!r} in the last {PAIRED_SENDMESSAGE_WINDOW_S}s. "
-                    "blockedBy is pull-only; teammate idles indefinitely.",
-                ))
+            # NOTE (#897): a per-completion paired-wake detector was removed
+            # here. It read inboxes/{owner}.json, but that store is
+            # platform-written ASYNC on delivery (file mtime == embedded msg
+            # ts) — AFTER this synchronous PostToolUse(TaskUpdate-completed)
+            # read — and SendMessage is not in the Pre/PostToolUse-hookable
+            # tool set, so there is no send event to key on. The check was
+            # ~100% false-positive by construction (the from-field was already
+            # literal "team-lead", so it was never a from-field bug). Do NOT
+            # restore it pointed at the same store. The genuine missed-wake gap
+            # (teammate idles on awaiting_lead_completion) has no automated net
+            # today; it is tracked as a separate follow-up.
 
         # Teammate self-completion check. Carve-out is a single boolean
         # via is_self_complete_exempt(task, team_name) — the predicate is
