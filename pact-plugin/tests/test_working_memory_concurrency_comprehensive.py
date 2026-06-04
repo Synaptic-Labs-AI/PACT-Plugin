@@ -178,27 +178,37 @@ def _run_barrier_procs(target, arg_tuples):
 # ---------------------------------------------------------------------------
 
 class TestNWriterLostUpdate:
-    """Lock contention at scale: N>2 barrier-synchronized writers must ALL
-    survive. The verification companion proves N=2; this proves the lock
-    serializes an arbitrary fan-in, not just a pair."""
+    """Lock contention at scale: N>2 barrier-synchronized writers. The
+    verification companion proves N=2; this proves the lock serializes an
+    arbitrary fan-in into a well-formed rolling window, not just a pair."""
 
     @pytest.mark.parametrize("n_writers", [4, 8])
-    def test_n_concurrent_writers_all_entries_survive(self, n_writers, tmp_path):
+    def test_n_concurrent_writers_fill_rolling_window(self, n_writers, tmp_path):
         """N real processes that enter their read-modify-write window
-        simultaneously must EACH have their Working Memory entry in the final
-        file. Pre-fix (unlocked), barrier-forced interleave drops all-but-one
-        on every run; under the lock all N serialize and survive.
+        simultaneously must serialize into a well-formed rolling window.
 
-        NOTE: MAX_WORKING_MEMORIES caps the *displayed* rolling window, but the
-        lost-update bug is about writers clobbering each other's just-written
-        base — distinct from the intended trim. With N writers serialized, the
-        final file holds the most-recent MAX_WORKING_MEMORIES entries; the
-        load-bearing assertion is that the LAST writer to commit did not erase
-        a prior committed entry's contribution to the running file (i.e. the
-        section reflects serialized appends, not a single lone survivor). We
-        assert the file contains exactly MAX entries and they are a contiguous
-        suffix of the commit order — never a single entry, which is the
-        unlocked-clobber signature.
+        What is verified (and why it is non-vacuous):
+        MAX_WORKING_MEMORIES caps the *displayed* window, so for N>MAX only the
+        most-recent MAX writers persist BY DESIGN — "all N survive" is false for
+        N>MAX. The lost-update bug is orthogonal: a 2nd writer reading a stale
+        base re-writes a file missing the 1st writer's entry, collapsing the
+        section toward a SINGLE lone survivor. So the discriminating assertions
+        are:
+          (1) exactly min(N, MAX) distinct survivors — a clobber collapses this
+              toward 1 (the unlocked signature; RED-on-revert measured 1);
+          (2) every survivor marker appears EXACTLY ONCE — no duplicate or
+              interleaved entry, which a torn read-modify-write could produce;
+          (3) the survivor-marker count equals the ``###`` entry-header count in
+              the section — no torn/partial entries (every header has its body);
+          (4) the survivors are extracted IN FILE ORDER (newest-first, since the
+              SUT prepends) and are all distinct — a real positional read, NOT
+              the old ``present == sorted(present)`` check which was vacuous
+              (that list was built by iterating ``range(N)`` ascending, so it
+              was sorted by construction and could never fail).
+
+        Barrier scheduling is non-deterministic, so WHICH min(N, MAX) writers
+        win the lock is not predictable; we therefore assert the shape of a
+        serialized rolling window, not a specific writer-id suffix.
         """
         from importlib import import_module
         sys.path.insert(0, _SCRIPTS_DIR)
@@ -213,20 +223,33 @@ class TestNWriterLostUpdate:
         )
 
         final = claude_md.read_text(encoding="utf-8")
-        present = [wid for wid in range(n_writers) if f"WM-WRITER-{wid}" in final]
+        section = final[final.find("## Working Memory"):]
 
-        # The unlocked-clobber signature is exactly one survivor; the lock must
-        # produce the full rolling window of the most-recent writers.
-        assert len(present) == min(n_writers, max_wm), (
+        # Extract survivors IN FILE ORDER (top = newest, the SUT prepends) — a
+        # real positional read of the rendered section, not a range() scan.
+        survivors_in_file_order = re.findall(r"WM-WRITER-(\d+)", section)
+        survivor_set = set(survivors_in_file_order)
+        entry_headers = section.count("### ")
+
+        # (1) Clobber discriminator: a lost update collapses toward 1 survivor.
+        assert len(survivors_in_file_order) == min(n_writers, max_wm), (
             f"Expected {min(n_writers, max_wm)} survivors (rolling window of "
-            f"{max_wm}), got {len(present)}: {present}. A single survivor is "
+            f"{max_wm}), got {len(survivors_in_file_order)}: "
+            f"{survivors_in_file_order}. Collapse toward a single survivor is "
             "the lost-update signature — the lock did not serialize the "
-            f"read-modify-write window.\n{final[final.find('## Working Memory'):]}"
+            f"read-modify-write window.\n{section}"
         )
-        # Survivors must be a contiguous suffix of the commit order: serialized
-        # appends each preserve the prior writers' entries until the window
-        # trims the OLDEST, never an arbitrary lone winner.
-        assert present == sorted(present), "survivor set is not ordered"
+        # (2) No duplicate/interleaved markers — each survivor appears once.
+        assert len(survivor_set) == len(survivors_in_file_order), (
+            "A survivor marker appears more than once — a torn or interleaved "
+            f"read-modify-write duplicated an entry: {survivors_in_file_order}"
+        )
+        # (3) No torn/partial entries: one marker per rendered entry header.
+        assert entry_headers == len(survivors_in_file_order), (
+            f"Entry-header count ({entry_headers}) != survivor-marker count "
+            f"({len(survivors_in_file_order)}) — a partial/torn entry was "
+            f"written under contention.\n{section}"
+        )
 
 
 # ---------------------------------------------------------------------------

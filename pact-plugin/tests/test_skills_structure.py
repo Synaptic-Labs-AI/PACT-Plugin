@@ -337,3 +337,47 @@ class TestOrderingInvariantPhraseCount:
             f"refactor changes the count, update EXPECTED_COUNTS with a comment "
             f"naming which site was added or removed and why."
         )
+
+
+class TestHarvestPerTeamSectionDirective:
+    """Content-presence pin for the agent-memory per-team-section overwrite
+    directive in the harvest skill's save step.
+
+    The secretary's processed-tasks read-back file is shared by every concurrent
+    same-named secretary instance (one per team). The load-bearing fix re-scopes
+    the save step from a whole-file overwrite to a per-``## team={team_id}``
+    section overwrite, so a secretary in team A cannot clobber team B's section.
+    Because every agent-memory write is LLM-driven prose (no runtime code path),
+    this directive has no executable regression test of its own — a future edit
+    could silently revert the save step to a whole-file overwrite and nothing
+    would fail. This pin closes that gap: it asserts the verbatim directive
+    phrases survive, so the per-team scoping cannot be elided without a RED.
+
+    Pin style mirrors the EXPECTED_COUNTS content-presence pattern above.
+    """
+
+    REL_PATH = "pact-handoff-harvest/SKILL.md"
+
+    # Verbatim load-bearing substrings of the save-step directive. If a
+    # deliberate rewording changes these, update them here with a comment
+    # confirming the per-team-section scoping (not whole-file overwrite) is
+    # still expressed.
+    REQUIRED_PHRASES = (
+        "Overwrite only your own team's section",
+        "never modify, overwrite, or remove another team's",
+    )
+
+    @pytest.mark.parametrize("phrase", REQUIRED_PHRASES, ids=lambda p: p[:32])
+    def test_per_team_overwrite_directive_present(self, phrase):
+        skill_md = SKILLS_DIR / self.REL_PATH
+        assert skill_md.is_file(), f"{self.REL_PATH} must exist"
+        text = skill_md.read_text(encoding="utf-8")
+        assert phrase in text, (
+            f"{self.REL_PATH} must contain the per-team-section overwrite "
+            f"directive phrase {phrase!r}. Its absence means the save step may "
+            f"have silently reverted to a whole-file overwrite, which lets a "
+            f"secretary in one team clobber another team's section in the "
+            f"shared processed-tasks file. If a deliberate rewording changed "
+            f"the phrase, update REQUIRED_PHRASES — but confirm the per-team "
+            f"scoping (not whole-file overwrite) is still expressed."
+        )
