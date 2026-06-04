@@ -27,7 +27,7 @@ Both calls are **required**, and the ordering matches Acceptance for the same re
 | Carve-out | Trigger | Rule |
 |---|---|---|
 | Signal-tasks | `metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}` | Auditor + algedonic-emitting agents self-complete; the task IS the signal, no HANDOFF to judge. |
-| Memory-save | Owner's team-config `agentType` ∈ `SELF_COMPLETE_EXEMPT_AGENT_TYPES` (currently `{pact-secretary}`) | Secretary self-completes memory-save tasks; team-lead has no acceptance criteria for memory bookkeeping. Resolved via team-config lookup on `member.agentType`, so the carve-out applies regardless of spawn name (`session-secretary`, etc.). |
+| Secretary briefing + memory-save | Owner's team-config `agentType` ∈ `SELF_COMPLETE_EXEMPT_AGENT_TYPES` (currently `{pact-secretary}`) | Secretary self-completes its session-briefing deliverable (`secretary: deliver session briefing`) as the final act of delivering the briefing, and its memory-save tasks; team-lead has no acceptance criteria for the secretary's own briefing or memory bookkeeping. Self-completion does not end the secretary's role (it stays alive as consultant + harvester). Resolved via team-config lookup on `member.agentType`, so the carve-out applies regardless of spawn name (`session-secretary`, etc.). |
 
 The canonical predicate `is_self_complete_exempt(task, team_name)` in `shared/intentional_wait.py` witnesses ONLY these two surfaces — pure function for your TaskGet inspection and audit tooling. No hook reads it. Pass `team_name` (read from session context) to get accurate exemption signal for surface 1; surface 2 is independent of `team_name`.
 

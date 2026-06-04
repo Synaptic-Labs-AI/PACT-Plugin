@@ -1004,7 +1004,7 @@ The aggregation feeds back into Learning II calibration data alongside the featu
 | `/PACT:plan-mode` | None (consultant writes consultation HANDOFF, idles) | All consultant tasks; the plan-mode parent task |
 | `/PACT:imPACT` | None (triage agent writes triage HANDOFF, idles) | All triage tasks; the imPACT parent task |
 
-Carve-outs apply across all workflows: signal-tasks (auditor), memory-save (secretary), force-termination (imPACT). See [pact-completion-authority.md](pact-completion-authority.md) for the full acceptance + rejection recipes and carve-out rationale; [Completion Authority](pact-completion-authority.md#completion-authority) holds the slim team-lead-side summary.
+Carve-outs apply across all workflows: signal-tasks (auditor), briefing + memory-save (secretary), force-termination (imPACT). See [pact-completion-authority.md](pact-completion-authority.md) for the full acceptance + rejection recipes and carve-out rationale; [Completion Authority](pact-completion-authority.md#completion-authority) holds the slim team-lead-side summary.
 
 ---
 
@@ -1212,7 +1212,7 @@ Feature Task (created by orchestrator)
 | Phase | Orchestrator | Orchestrator | Active during phase |
 | Agent | Orchestrator | Specialist (claim-only); Orchestrator (completion authority) | Specialist claims via `TaskUpdate(status="in_progress")`; orchestrator completes via `TaskUpdate(status="completed")` paired with a wake-signal SendMessage |
 
-Under Agent Teams, specialists claim agent tasks (`pending → in_progress`) and store HANDOFFs in `metadata.handoff`, but the orchestrator transitions agent tasks to `completed` after inspecting the HANDOFF. Two narrow carve-outs (signal-tasks; secretary memory-save) self-complete; see [Completion Authority](pact-completion-authority.md#completion-authority).
+Under Agent Teams, specialists claim agent tasks (`pending → in_progress`) and store HANDOFFs in `metadata.handoff`, but the orchestrator transitions agent tasks to `completed` after inspecting the HANDOFF. Two narrow carve-outs (signal-tasks; secretary briefing + memory-save) self-complete; see [Completion Authority](pact-completion-authority.md#completion-authority).
 
 ### Task States
 
@@ -1229,7 +1229,7 @@ Tasks progress through: `pending` → `in_progress` → `completed`
 | `pending → in_progress` (claim) | Teammate | Owns the task; `blockedBy` is empty |
 | `in_progress → in_progress` (metadata work) | Teammate | Writes `metadata.handoff` / `metadata.teachback_submit` |
 | `in_progress → in_progress` (rejection metadata) | Lead | Writes `metadata.teachback_rejection` / `metadata.handoff_rejection` + sends wake-signal SendMessage |
-| `in_progress → completed` | **LEAD ONLY** on teammate-owned tasks | Pairs with wake-signal SendMessage; carve-outs: signal-tasks, secretary memory-save, imPACT force-term |
+| `in_progress → completed` | **LEAD ONLY** on teammate-owned tasks | Pairs with wake-signal SendMessage; carve-outs: signal-tasks, secretary briefing + memory-save, imPACT force-term |
 | `pending → completed` (skip) | Lead | Phase-skip with `metadata.skipped = true` |
 
 ### Task A + Task B Dispatch Shape
@@ -2073,7 +2073,7 @@ Both calls are **required**, and the ordering matches Acceptance for the same re
 | Carve-out | Trigger | Rule |
 |---|---|---|
 | Signal-tasks | `metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}` | Auditor + algedonic-emitting agents self-complete; the task IS the signal, no HANDOFF to judge. |
-| Memory-save | Owner's team-config `agentType` ∈ `SELF_COMPLETE_EXEMPT_AGENT_TYPES` (currently `{pact-secretary}`) | Secretary self-completes memory-save tasks; team-lead has no acceptance criteria for memory bookkeeping. Resolved via team-config lookup on `member.agentType`, so the carve-out applies regardless of spawn name (`session-secretary`, etc.). |
+| Secretary briefing + memory-save | Owner's team-config `agentType` ∈ `SELF_COMPLETE_EXEMPT_AGENT_TYPES` (currently `{pact-secretary}`) | Secretary self-completes its session-briefing deliverable (`secretary: deliver session briefing`) as the final act of delivering the briefing, and its memory-save tasks; team-lead has no acceptance criteria for the secretary's own briefing or memory bookkeeping. Self-completion does not end the secretary's role (it stays alive as consultant + harvester). Resolved via team-config lookup on `member.agentType`, so the carve-out applies regardless of spawn name (`session-secretary`, etc.). |
 
 The canonical predicate `is_self_complete_exempt(task, team_name)` in `shared/intentional_wait.py` witnesses ONLY these two surfaces — pure function for your TaskGet inspection and audit tooling. No hook reads it. Pass `team_name` (read from session context) to get accurate exemption signal for surface 1; surface 2 is independent of `team_name`.
 

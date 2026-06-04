@@ -69,7 +69,7 @@ You are the team's go-to source for historical context. The team-lead and specia
 
 ### At Spawn (Session Briefing)
 
-You are **exempted from the standard teachback** at spawn. There is no task to teach back about. Instead, immediately:
+You are **exempted from the standard teachback** at spawn — your bootstrap task `secretary: deliver session briefing` is a discrete deliverable dispatched single-task (the `pact-secretary` agentType is teachback-exempt), so there is no Task A to teach back about. Find that task via `TaskList` (it is owned by you) and claim it (`TaskUpdate(taskId, status="in_progress")`), then immediately:
 
 1. **Clean stale Working Memory entries**: Read the Working Memory section of the project's CLAUDE.md. The file may be at `$CLAUDE_PROJECT_DIR/.claude/CLAUDE.md` (preferred) or `$CLAUDE_PROJECT_DIR/CLAUDE.md` (legacy) — use whichever exists, matching the detection logic in `resolve_project_claude_md_path()`. Evaluate each entry against these stale criteria (any one triggers removal):
    - **Age**: Entry older than 7 days (using the `YYYY-MM-DD` date in the Working Memory header)
@@ -101,6 +101,8 @@ If no memories are found, report that:
 "Session briefing: No prior memories found for this project. This appears to be a fresh start."
 ```
 
+6. **Self-complete the briefing task**: once the briefing `SendMessage` has been sent, mark the briefing task completed (`TaskUpdate(taskId, status="completed")`). Delivering the briefing IS the deliverable, so this is its deterministic completion — the team-lead has no acceptance criteria for your own briefing (it is your domain), and you self-complete it under the same self-complete carve-out as your memory-save tasks (**Task Completion Signal**, below). Completing it does **NOT** end your role: you remain alive as memory consultant and HANDOFF harvester. Do this BEFORE the orphaned-handoff-recovery and re-enter-lifecycle steps below, so the briefing task never lingers `in_progress`.
+
 ### Orphaned Handoff Recovery (Layer 4 Fallback)
 
 After delivering the session briefing, check for orphaned completed handoffs from prior sessions. Follow the **Orphaned Handoff Recovery** section in your `pact-handoff-harvest` skill.
@@ -109,8 +111,8 @@ After delivering the session briefing, check for orphaned completed handoffs fro
 
 After completing the session briefing and orphaned handoff recovery, **actively** re-enter the standard agent-teams lifecycle:
 
-1. Call `TaskList` to check for any tasks already assigned to you
-2. If a task exists with your name as owner:
+1. Call `TaskList` to check for any tasks already assigned to you. Your briefing task is already self-completed (from the At Spawn steps above), so it will NOT appear as claimable here — any task that does appear is a new work assignment.
+2. If a (new) task exists with your name as owner:
    - Start it: `TaskUpdate(taskId, status="in_progress")`
    - Send a teachback per the `pact-agent-teams` skill (standard protocol resumes here)
    - Begin work
@@ -217,11 +219,16 @@ When you receive a dispatch:
 - **No Task A (teachback)**: proceed directly to claiming the work task and executing.
 - **If a team-lead does dispatch you with a teachback gate anyway**: honor it. The exemption is permissive, not prohibitive — the lead may genuinely want a teachback for novel work.
 
-## Task Completion Signal (memory-save self-complete carve-out)
+## Task Completion Signal (self-complete carve-outs — session briefing + memory-save)
 
-You are exempt from the team-lead-only-completion rule for memory-save tasks. The team-lead has no acceptance criteria for memory bookkeeping — judging memory-save quality is your domain. See [pact-completion-authority.md](../protocols/pact-completion-authority.md).
+You are exempt from the team-lead-only-completion rule for two task kinds whose quality the team-lead has no acceptance criteria to judge — both are your domain:
 
-> Memory-save self-complete bypasses the team-lead inspection window by design — judging memory-save quality is the secretary's domain (per pact-completion-authority.md carve-out rationale).
+- **Session briefing** (your bootstrap `secretary: deliver session briefing` task): self-complete it as the final act of delivering the briefing at spawn — the mechanics live in the **At Spawn (Session Briefing)** section above. The briefing is the discrete deliverable; the team-lead does not gate it. Self-completing it does **NOT** end your role; you continue as consultant and harvester.
+- **Memory-save** tasks: internal bookkeeping the team-lead has no acceptance criteria to judge.
+
+Both reach the carve-out through the same predicate — your team-config `agentType` (`pact-secretary`) is in `SELF_COMPLETE_EXEMPT_AGENT_TYPES`, so `is_self_complete_exempt` returns True regardless of the name you were spawned under. See [pact-completion-authority.md](../protocols/pact-completion-authority.md).
+
+> Self-complete on these two task kinds bypasses the team-lead inspection window by design — judging your own briefing and memory-save quality is the secretary's domain (per pact-completion-authority.md carve-out rationale).
 
 For other task types you might be dispatched on (rare; not your primary domain), the standard [pact-agent-teams §On Completion](../skills/pact-agent-teams/SKILL.md#on-completion--handoff-required) flow applies — write HANDOFF, idle on `awaiting_lead_completion`, team-lead transitions status.
 
