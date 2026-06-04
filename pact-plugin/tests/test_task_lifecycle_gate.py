@@ -765,6 +765,118 @@ def test_retire_leaves_sibling_teachback_completion_advisories_intact(pact_conte
     ), f"sibling handoff_missing advisory must still fire, got: {work_advisories}"
 
 
+# Allowlist SSOT: the complete set of advisory rule-names a teachback-subject
+# TaskUpdate(status=completed) may LEGITIMATELY emit. Derived from the gate's
+# `if is_teachback and owner:` completion branch + the adjacent self-completion
+# check:
+#   - teachback_submit_missing            (teachback_submit absent/empty)
+#   - teachback_submit_schema_invalid     (present but malformed)
+#   - self_completion                     (actor == owner, not carve-out exempt)
+# handoff_missing / handoff_schema_invalid are gated on is_work_task
+# (= not is_teachback) and are unreachable here; the write-time rules
+# (reasoning_reconstruction_in_handoff, teachback_addblocks_missing, the
+# variety_acknowledgment / reasoning_reconstruction / intentional_wait
+# write-time advisories) are gated on status != "completed"; agent_handoff is
+# a journal side-effect (append_event), not a returned advisory, and is
+# skipped for teachback subjects. A future maintainer who adds a NEW legitimate
+# teachback-completion advisory MUST add its rule-name here — that deliberate
+# update is the intended human gate, and is exactly what makes the pin below a
+# name-agnostic guard rather than a brittle one.
+_TEACHBACK_COMPLETION_ALLOWED_RULES = frozenset({
+    "teachback_submit_missing",
+    "teachback_submit_schema_invalid",
+    "self_completion",
+})
+
+
+def _teachback_completion_metadata_for(shape: str) -> dict:
+    """Build a teachback-completion `metadata` dict for the named shape. Called
+    inside the test body (runtime), NOT at collection time, so the late-defined
+    `_well_formed_teachback_submit` helper is resolvable. Shapes mirror what the
+    gate's `if is_teachback and owner:` branch distinguishes: empty → R1,
+    well_formed → nothing, missing_<field> → R2."""
+    if shape == "empty":
+        return {}
+    if shape == "well_formed":
+        return {"teachback_submit": _well_formed_teachback_submit()}
+    assert shape.startswith("missing_"), shape
+    field = shape[len("missing_"):]
+    tb = _well_formed_teachback_submit()
+    tb.pop(field)
+    return {"teachback_submit": tb}
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "empty",
+        "well_formed",
+        "missing_understanding",
+        "missing_most_likely_wrong",
+        "missing_least_confident_item",
+        "missing_first_action",
+        "missing_variety_acknowledgment",
+    ],
+)
+def test_teachback_completion_emits_only_allowlisted_rule_names(shape, pact_context):
+    """Name-agnostic anti-fossil pin: a teachback-subject completion emits ONLY
+    rule-names from the known-good allowlist. This closes the one re-intro
+    vector the symbol-absence + emission-surface pins miss — a paired-wake
+    detector re-introduced under BOTH a renamed helper AND a renamed rule-name
+    (so neither name-keyed pin fires) would still ADD an unexpected rule-name to
+    a teachback completion's output, and this catches it regardless of the name
+    chosen.
+
+    Parametrized over every teachback-completion metadata shape the gate
+    distinguishes (empty → R1, well_formed → nothing, each malformed variant →
+    R2) so the allowlist's COMPLETENESS is validated against the full surface:
+    if any legitimate shape emitted a rule-name outside the allowlist, this
+    fails and surfaces it (which would mean the allowlist needs widening, not
+    that a re-intro occurred)."""
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "1",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "preparer",
+                "metadata": _teachback_completion_metadata_for(shape),
+            }
+        },
+    }
+    rule_names = {rule for rule, _ in tlg.evaluate_lifecycle(payload)}
+    unexpected = rule_names - _TEACHBACK_COMPLETION_ALLOWED_RULES
+    assert not unexpected, (
+        "teachback completion emitted rule-name(s) outside the allowlist: "
+        f"{unexpected} — a re-introduced detector under any name would surface "
+        f"here. Full output: {rule_names}"
+    )
+
+
+def test_allowlist_pin_catches_a_foreign_rule_name():
+    """Non-vacuity proof for the allowlist pin, read-only (no hook revert — the
+    shared worktree forbids it). Simulates a re-introduced detector by injecting
+    a synthetic foreign rule-name into a teachback completion's output, then
+    applies the SAME allowlist predicate the pin above uses, and asserts it
+    flags the foreign name. This proves the pin would catch a renamed re-intro
+    on its face: if the allowlist were vacuous (e.g. it accidentally contained
+    every name, or the subtraction logic were inverted) this would not fire."""
+    # A re-introduced paired-wake detector would append an advisory tuple under
+    # some new rule-name — model that with a representative synthetic name that
+    # is NOT in the allowlist.
+    simulated_reintroduced_output = {
+        "teachback_submit_missing",          # a legitimate advisory that did fire
+        "wake_not_paired_v2",                # the foreign, re-introduced detector
+    }
+    unexpected = simulated_reintroduced_output - _TEACHBACK_COMPLETION_ALLOWED_RULES
+    assert unexpected == {"wake_not_paired_v2"}, (
+        "allowlist predicate must flag a foreign re-introduced rule-name "
+        f"regardless of its name; got unexpected={unexpected}"
+    )
+
+
 # =============================================================================
 # handoff_missing — pact-* work-Task completed with empty metadata.handoff
 # =============================================================================
