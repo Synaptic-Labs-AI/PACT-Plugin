@@ -146,13 +146,11 @@ def _is_exempt_agent_type(
 
     NOT a hook predicate — pure helper for
     shared.intentional_wait.is_self_complete_exempt.
-    Mirrors the auditor_reminder._team_has_auditor precedent in
-    parameter shape (owner-or-role + team_name + teams_dir override) and
-    in upstream-config-read delegation, BUT inverts the error semantics:
-    `_team_has_auditor` fail-OPENs (returns True on missing/malformed
-    config to suppress a noisy reminder), whereas this helper fail-
-    CLOSEs (returns False to deny exemption). Both choices are
-    conservative for their own consumer — see the docstring header.
+    Parameter shape is owner-or-role + team_name + teams_dir override, with
+    upstream-config-read delegation to `_iter_members`. The error semantics
+    deliberately fail-CLOSE (return False to deny exemption) rather than
+    fail-OPEN: denying exemption on a missing/malformed config is the
+    conservative choice for this consumer — see the docstring header.
 
     Args:
         owner: Task owner name (matched against member.name).

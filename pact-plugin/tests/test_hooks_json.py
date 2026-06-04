@@ -45,7 +45,6 @@ MUST_BE_SYNC = {
     "agent_handoff_emitter.py",  # Writes agent_handoff journal event on TaskCompleted
     "git_commit_check.py",  # Checks git commit conventions
     "track_files.py",     # Tracks file edits (PostToolUse, non-async)
-    "auditor_reminder.py",  # Injects auditor dispatch reminder into context
     "precompact_state_reminder.py",  # Emits state snapshot before compaction
     "postcompact_archive.py",  # Archives compact_summary to disk for session_init + secretary
 }
@@ -53,7 +52,6 @@ MUST_BE_SYNC = {
 # Hooks that SHOULD be async (non-blocking, fire-and-forget)
 SHOULD_BE_ASYNC = {
     "session_end.py",     # Fire-and-forget cleanup
-    "file_size_check.py", # Advisory warning only
     "file_tracker.py",    # Advisory tracking only
 }
 
@@ -214,16 +212,6 @@ class TestNewSDKOptimizationEntries:
                 if "file_tracker.py" in hook.get("command", ""):
                     assert hook.get("async") is True, (
                         "file_tracker.py should be async:true"
-                    )
-
-    def test_file_size_check_is_async(self, hooks_config):
-        """file_size_check.py PostToolUse hook should be async."""
-        entries = hooks_config["hooks"].get("PostToolUse", [])
-        for entry in entries:
-            for hook in entry.get("hooks", []):
-                if "file_size_check.py" in hook.get("command", ""):
-                    assert hook.get("async") is True, (
-                        "file_size_check.py should be async:true"
                     )
 
     def test_track_files_is_sync(self, hooks_config):
@@ -450,7 +438,7 @@ class TestSessionStartCardinality:
 
 
 class TestSpawnToolMatchersPost662:
-    """#662: matcher='Agent' on team_guard + auditor_reminder; the
+    """#662: matcher='Agent' on team_guard; the
     'TaskCreate|TaskUpdate' Cat-2 matcher (now on task_lifecycle_gate) is
     PRESERVED. The earlier matcher='Task' was wrong — the canonical Claude
     Code platform tool name for sub-agent spawning is `Agent`. Cat-2
@@ -483,19 +471,6 @@ class TestSpawnToolMatchersPost662:
                 )
                 return
         pytest.fail("team_guard.py entry not found in hooks.json")
-
-    def test_auditor_reminder_matcher_is_agent(self, hooks_config):
-        """PostToolUse auditor_reminder matcher MUST be 'Agent' (#662 Cat-1)."""
-        for event_type, matcher, commands in self._all_matcher_pairs(
-            hooks_config
-        ):
-            if any("auditor_reminder.py" in c for c in commands):
-                assert matcher == "Agent", (
-                    f"auditor_reminder.py matcher must be 'Agent' (#662); "
-                    f"got {matcher!r} on {event_type}"
-                )
-                return
-        pytest.fail("auditor_reminder.py entry not found in hooks.json")
 
     def test_no_matcher_is_bare_task_string(self, hooks_config):
         """Regression-prevention: NO matcher should be the bare 'Task'

@@ -42,9 +42,9 @@ def _fresh_wait(**overrides):
 
 
 def _write_team_config(teams_dir, team_name, members):
-    """Mirror of the auditor_reminder fixture pattern. Writes a minimal
-    team config with the given members[] list and returns the teams_dir
-    path as a string for passing to _is_exempt_agent_type / is_self_complete_exempt.
+    """Writes a minimal team config with the given members[] list and
+    returns the teams_dir path as a string for passing to
+    _is_exempt_agent_type / is_self_complete_exempt.
     """
     team_dir = Path(teams_dir) / team_name
     team_dir.mkdir(parents=True, exist_ok=True)
@@ -57,7 +57,7 @@ def _write_team_config(teams_dir, team_name, members):
 
 @pytest.fixture
 def teams_dir(tmp_path):
-    """Per-test temp teams directory; mirrors test_auditor_reminder.teams_dir."""
+    """Per-test temp teams directory."""
     d = tmp_path / "teams"
     d.mkdir()
     return str(d)

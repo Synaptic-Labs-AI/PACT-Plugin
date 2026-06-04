@@ -9,8 +9,6 @@ Rule coverage:
     addBlocks=[<work_task_id>] → advisory
   - work_addblockedby_missing — TaskCreate pact-* non-TEACHBACK
     without addBlockedBy → advisory
-  - handoff_missing — TaskUpdate(completed) pact-* work Task
-    without metadata.handoff → advisory
   - self_completion — Teammate self-completes Task → advisory +
     completion_disputed writeback
         Carve-outs: secretary self-complete (team-config agentType in
@@ -20,10 +18,11 @@ Rule coverage:
         recursion-marker skip.
         Sketch-A: actor unresolvable → CURRENT skip behavior; encoded with
         explicit deviation-documenting test referencing architect §5.3.
-  - handoff_schema_invalid — TaskUpdate(completed) with malformed
-    metadata.handoff → advisory (disjoint from handoff_missing —
-    handoff present but schema-incomplete).
   - module-load failure → advisory + hookEventName=PostToolUse + exit 0
+  (RETIRED: the handoff_missing / handoff_schema_invalid completion-time
+   advisories — gated on a permanently-dormant is_work_task / owner.startswith
+   ("pact-") guard that never matched bare teammate owner names — were
+   retired along with their branch; the tests exercising them were removed.)
   Anti-sprawl — single evaluate_lifecycle composition.
 
 Disciplines applied:
@@ -719,12 +718,11 @@ def test_paired_send_advisory_absent_from_teachback_completion_output(pact_conte
 
 def test_retire_leaves_sibling_teachback_completion_advisories_intact(pact_context):
     """Regression-safety: removing the paired-send sub-check did not
-    collaterally disable the sibling advisories that share the same
+    collaterally disable the sibling advisory that shares the same
     `if is_teachback and owner:` completion branch. A teachback completion
-    with empty metadata must still fire `teachback_submit_missing` (R1); a
-    pact-* work-task completion with empty metadata.handoff must still fire
-    `handoff_missing`. Focused confirmation only — the dedicated R1/handoff
-    test sections cover these in depth; this asserts the retire was surgical."""
+    with empty metadata must still fire `teachback_submit_missing` (R1).
+    Focused confirmation only — the dedicated R1 test section covers this in
+    depth; this asserts the retire was surgical."""
     pact_context(team_name="test-team", session_id="test-session")
 
     teachback_payload = {
@@ -747,23 +745,6 @@ def test_retire_leaves_sibling_teachback_completion_advisories_intact(pact_conte
         f"{teachback_advisories}"
     )
 
-    work_payload = {
-        "tool_name": "TaskUpdate",
-        "tool_input": {"taskId": "2", "status": "completed"},
-        "tool_response": {
-            "task": {
-                "id": "2",
-                "subject": "implement foo",
-                "owner": "pact-backend-coder",
-                "metadata": {},
-            }
-        },
-    }
-    work_advisories = tlg.evaluate_lifecycle(work_payload)
-    assert any(
-        rule == "handoff_missing" for rule, _ in work_advisories
-    ), f"sibling handoff_missing advisory must still fire, got: {work_advisories}"
-
 
 # Allowlist SSOT: the complete set of advisory rule-names a teachback-subject
 # TaskUpdate(status=completed) may LEGITIMATELY emit. Derived from the gate's
@@ -772,8 +753,9 @@ def test_retire_leaves_sibling_teachback_completion_advisories_intact(pact_conte
 #   - teachback_submit_missing            (teachback_submit absent/empty)
 #   - teachback_submit_schema_invalid     (present but malformed)
 #   - self_completion                     (actor == owner, not carve-out exempt)
-# handoff_missing / handoff_schema_invalid are gated on is_work_task
-# (= not is_teachback) and are unreachable here; the write-time rules
+# (the former handoff_missing / handoff_schema_invalid completion advisories
+# were retired with their permanently-dormant is_work_task branch, so they
+# cannot appear here either); the write-time rules
 # (reasoning_reconstruction_in_handoff, teachback_addblocks_missing, the
 # variety_acknowledgment / reasoning_reconstruction / intentional_wait
 # write-time advisories) are gated on status != "completed"; agent_handoff is
@@ -878,148 +860,14 @@ def test_allowlist_pin_catches_a_foreign_rule_name():
 
 
 # =============================================================================
-# handoff_missing — pact-* work-Task completed with empty metadata.handoff
+# RETIRED: the handoff_missing / handoff_schema_invalid completion-time
+# advisories were gated on a permanently-dormant `is_work_task` (owner
+# .startswith("pact-")) guard — real teammate owners are bare names, so the
+# branch never fired in production. The branch and both advisories were
+# retired; the tests that exercised them via synthetic pact-* owners were
+# removed with it. Lead-side HANDOFF presence is still covered by the
+# _emit_lead_side_agent_handoff path (see its own coverage below).
 # =============================================================================
-
-
-def test_silent_when_handoff_well_formed(pact_context):
-    """Valid handoff schema → no handoff_missing and no handoff_schema_invalid."""
-    pact_context(team_name="test-team", session_id="test-session")
-    payload = {
-        "tool_name": "TaskUpdate",
-        "tool_input": {"taskId": "42", "status": "completed"},
-        "tool_response": {
-            "task": {
-                "id": "42",
-                "subject": "implement foo",
-                "owner": "pact-backend-coder",
-                "metadata": {
-                    "handoff": {
-                        "produced": "x",
-                        "decisions": "x",
-                        "reasoning_chain": "x",
-                        "uncertainty": "x",
-                        "integration": "x",
-                        "open_questions": "x",
-                    }
-                },
-            }
-        },
-    }
-    advisories = tlg.evaluate_lifecycle(payload)
-    assert not any(rule == "handoff_missing" for rule, _ in advisories)
-    assert not any(rule == "handoff_schema_invalid" for rule, _ in advisories)
-
-
-@pytest.mark.parametrize(
-    "metadata_shape",
-    [
-        {},  # absent metadata.handoff
-        {"handoff": {}},  # empty-dict metadata.handoff
-        {"handoff": None},  # explicit-null metadata.handoff
-    ],
-    ids=["absent", "empty_dict", "null"],
-)
-def test_advisory_when_pact_work_task_completes_without_handoff(
-    metadata_shape, pact_context,
-):
-    """A pact-* work Task that transitions to status=completed without a
-    metadata.handoff payload fires the handoff_missing advisory. Covers
-    three variants of "no handoff": absent key, empty dict, explicit
-    null. The schema-invalid rule must NOT also fire — handoff_missing
-    and handoff_schema_invalid are disjoint per the gate contract.
-    """
-    pact_context(team_name="test-team", session_id="test-session")
-    payload = {
-        "tool_name": "TaskUpdate",
-        "tool_input": {"taskId": "42", "status": "completed"},
-        "tool_response": {
-            "task": {
-                "id": "42",
-                "subject": "implement foo",
-                "owner": "pact-backend-coder",
-                "metadata": metadata_shape,
-            }
-        },
-    }
-    advisories = tlg.evaluate_lifecycle(payload)
-    assert any(rule == "handoff_missing" for rule, _ in advisories), (
-        f"expected handoff_missing advisory for {metadata_shape}, "
-        f"got: {advisories}"
-    )
-    assert not any(rule == "handoff_schema_invalid" for rule, _ in advisories), (
-        "handoff_missing and handoff_schema_invalid must be disjoint; "
-        f"both fired for {metadata_shape}"
-    )
-
-
-# =============================================================================
-# handoff_schema_invalid — handoff present but schema malformed (disjoint from handoff_missing)
-# =============================================================================
-
-
-@pytest.mark.parametrize(
-    "missing_field",
-    [
-        "produced",
-        "decisions",
-        "reasoning_chain",
-        "uncertainty",
-        "integration",
-        "open_questions",
-    ],
-)
-def test_advisory_for_each_missing_required_field(missing_field, pact_context):
-    """Handoff present but missing one required field → handoff_schema_invalid. Disjoint
-    from handoff_missing — handoff_missing fires only on missing/empty handoff payload entirely.
-    """
-    pact_context(team_name="test-team", session_id="test-session")
-    full_handoff = {
-        "produced": "x",
-        "decisions": "x",
-        "reasoning_chain": "x",
-        "uncertainty": "x",
-        "integration": "x",
-        "open_questions": "x",
-    }
-    full_handoff.pop(missing_field)
-    payload = {
-        "tool_name": "TaskUpdate",
-        "tool_input": {"taskId": "42", "status": "completed"},
-        "tool_response": {
-            "task": {
-                "id": "42",
-                "subject": "implement foo",
-                "owner": "pact-backend-coder",
-                "metadata": {"handoff": full_handoff},
-            }
-        },
-    }
-    advisories = tlg.evaluate_lifecycle(payload)
-    assert any(rule == "handoff_schema_invalid" for rule, _ in advisories), (
-        f"expected handoff_schema_invalid advisory for missing {missing_field}, got: {advisories}"
-    )
-    # handoff_missing must NOT also fire — disjoint per impl / lead clarification.
-    assert not any(rule == "handoff_missing" for rule, _ in advisories)
-
-
-def test_advisory_when_handoff_is_non_dict(pact_context):
-    """metadata.handoff is a string instead of a dict → handoff_schema_invalid advisory."""
-    pact_context(team_name="test-team", session_id="test-session")
-    payload = {
-        "tool_name": "TaskUpdate",
-        "tool_input": {"taskId": "42", "status": "completed"},
-        "tool_response": {
-            "task": {
-                "id": "42",
-                "subject": "implement foo",
-                "owner": "pact-backend-coder",
-                "metadata": {"handoff": "just a string"},
-            }
-        },
-    }
-    advisories = tlg.evaluate_lifecycle(payload)
-    assert any(rule == "handoff_schema_invalid" for rule, _ in advisories)
 
 
 # =============================================================================
@@ -1327,18 +1175,19 @@ def test_main_no_op_on_malformed_stdin(capsys):
 
 
 def test_legacy_envelope_extracts_via_fallback():
-    """Legacy `tool_output` envelope (no `tool_response`) → handoff_missing fires.
+    """Legacy `tool_output` envelope (no `tool_response`) → task is extracted.
 
     Constructs a payload with NO `tool_response` field and the task data
     under `tool_output` (the pre-rename envelope shape). evaluate_lifecycle
     must extract the task via the `or tool_output` fallback; the
-    handoff_missing rule then fires because the work task carries no
-    metadata.handoff.
+    teachback_submit_missing rule then fires because the extracted teachback
+    task carries no metadata.teachback_submit — proving the subject/owner were
+    read from the legacy envelope.
 
     A regression that strips the `or tool_output` branch causes
     tool_response to resolve to {}, task.get("subject") to be empty, and
-    handoff_missing to NOT fire (the rule is gated on subject + owner
-    being a pact-* work task) — which would leak past this assertion.
+    teachback_submit_missing to NOT fire (the rule is gated on subject being
+    teachback-shaped + owner present) — which would leak past this assertion.
     """
     payload = {
         "tool_name": "TaskUpdate",
@@ -1347,15 +1196,15 @@ def test_legacy_envelope_extracts_via_fallback():
         "tool_output": {
             "task": {
                 "id": "1",
-                "subject": "pact-backend-coder: implement foo",
-                "owner": "pact-backend-coder",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "preparer",
                 "metadata": {},
             }
         },
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert any(rule == "handoff_missing" for rule, _ in advisories), (
-        f"expected handoff_missing via tool_output fallback, got: {advisories}"
+    assert any(rule == "teachback_submit_missing" for rule, _ in advisories), (
+        f"expected teachback_submit_missing via tool_output fallback, got: {advisories}"
     )
 
 
@@ -1372,16 +1221,16 @@ def test_canonical_tool_response_takes_precedence_over_legacy():
     payload = {
         "tool_name": "TaskUpdate",
         "tool_input": {"taskId": "1", "status": "completed"},
-        # Canonical envelope: pact-* work task, no handoff → handoff_missing fires.
+        # Canonical envelope: teachback task, no submit → teachback_submit_missing fires.
         "tool_response": {
             "task": {
                 "id": "1",
-                "subject": "pact-backend-coder: implement canonical",
-                "owner": "pact-backend-coder",
+                "subject": "preparer: TEACHBACK for canonical",
+                "owner": "preparer",
                 "metadata": {},
             }
         },
-        # Legacy envelope: non-pact owner → handoff_missing would NOT fire if read.
+        # Legacy envelope: non-teachback → teachback_submit_missing would NOT fire if read.
         "tool_output": {
             "task": {
                 "id": "1",
@@ -1392,8 +1241,8 @@ def test_canonical_tool_response_takes_precedence_over_legacy():
         },
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    # Canonical was read → backend-coder pact-* work task → handoff_missing fires.
-    assert any(rule == "handoff_missing" for rule, _ in advisories), (
+    # Canonical was read → teachback task → teachback_submit_missing fires.
+    assert any(rule == "teachback_submit_missing" for rule, _ in advisories), (
         "canonical tool_response must take precedence over legacy tool_output"
     )
 
@@ -1519,7 +1368,7 @@ def test_silent_on_non_teachback_subject_without_teachback_submit(
 ):
     """Non-teachback subject completed without teachback_submit → R1 silent.
     R1 is gated on _is_teachback_subject; non-teachback completions never
-    fire R1 (handoff_missing covers work-task completions)."""
+    fire R1."""
     pact_context(team_name="test-team", session_id="test-session")
     payload = {
         "tool_name": "TaskUpdate",

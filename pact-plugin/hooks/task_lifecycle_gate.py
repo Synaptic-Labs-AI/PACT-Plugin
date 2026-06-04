@@ -33,12 +33,8 @@ Rule coverage:
     AND task_a.blocks is empty (benign late-wiring guard).
   - work_addblockedby_missing — pact-* work Task created without
     addBlockedBy=[<teachback_id>]
-  - handoff_missing — pact-* work Task completed without
-    metadata.handoff payload
   - self_completion — Teammate self-completed a Task without carve-out
     → advisory + completion_disputed writeback
-  - handoff_schema_invalid — metadata.handoff present but malformed
-    (disjoint with handoff_missing)
   - teachback_submit_missing — Teachback Task completed without
     metadata.teachback_submit payload
   - teachback_submit_schema_invalid — metadata.teachback_submit present
@@ -297,9 +293,11 @@ def _emit_lead_side_agent_handoff(
     (is_signal_task, occupant_hash, already_emitted) are SHARED via
     shared.agent_handoff_marker so the two paths cannot drift on signal-task
     exclusion or the dedup key (#887 class). The b2-specific topology gate
-    (is_lead) is applied by the caller. Deliberately NOT gated on the gate's
-    is_work_task `pact-` prefix, which no-ops for bare owner names — an
-    orthogonal pre-existing matter, out of scope here.
+    (is_lead) is applied by the caller. Eligibility keys on handoff PRESENCE
+    (owner / not-teachback / not-signal / handoff-present), never on an
+    owner-name prefix — bare owner names are the convention, so a `pact-`
+    prefix gate would no-op. (A now-retired completion-time branch above once
+    carried such a prefix gate; it was permanently dormant and was removed.)
 
     Shares the occupant-keyed marker with b1: if a mid-turn TaskUpdate ALSO
     dispatches TaskCompleted (R2 — open until the real-tmux smoke), b1 and b2
@@ -643,36 +641,25 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
         raw_metadata = task.get("metadata")
         metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
 
-        # handoff_missing vs handoff_schema_invalid are disjoint per lead
-        # clarification:
-        #   handoff missing/empty → handoff_missing advisory, skip schema
-        #     check (no payload to validate).
-        #   handoff present but schema malformed → handoff_schema_invalid
-        #     advisory.
-        is_work_task = not is_teachback and owner.startswith("pact-")
-        if is_work_task:
-            handoff = metadata.get("handoff")
-            if not handoff:
-                advisories.append((
-                    "handoff_missing",
-                    f"PACT task_lifecycle_gate: Task {task_id} "
-                    f"(owner={owner!r}) marked completed without "
-                    "metadata.handoff. HANDOFF synthesis was missed.",
-                ))
-            else:
-                schema_problem = _validate_handoff_schema(handoff)
-                if schema_problem:
-                    advisories.append((
-                        "handoff_schema_invalid",
-                        f"PACT task_lifecycle_gate: Task {task_id} "
-                        f"metadata.handoff schema is invalid — {schema_problem}.",
-                    ))
+        # RETIRED: the work-task handoff-presence/schema branch (gated on
+        # `is_work_task = not is_teachback and owner.startswith("pact-")`,
+        # emitting handoff_missing / handoff_schema_invalid) was permanently
+        # dormant. Real teammate owners are bare names (devops, auditor,
+        # backend), never "pact-"-prefixed, so the guard was always False and
+        # neither advisory could fire. Disposition is to retire rather than
+        # re-point at bare owners: the lead-side emitter below already covers
+        # HANDOFF presence at acceptance-commit (its own handoff-present
+        # eligibility), so re-activating would duplicate coverage, not fill a
+        # gap. _validate_handoff_schema is retained for its co-location pattern
+        # and as the structural sibling of _validate_teachback_submit_schema
+        # (which mirrors it).
 
         # Fix A (#869): lead-side agent_handoff emission at acceptance-commit.
-        # Independent of the is_work_task `pact-` discriminator above (which
-        # no-ops for bare owner names) — _emit_lead_side_agent_handoff applies
-        # the b1-mirrored emit-eligibility (owner / not-teachback / not-signal
-        # / handoff-present) + the shared occupant-keyed dedup. Gated on
+        # Self-contained, with no owner-name prefix gate (none is needed — bare
+        # owner names are the convention; cf. the retired branch above):
+        # _emit_lead_side_agent_handoff applies the b1-mirrored emit-eligibility
+        # (owner / not-teachback / not-signal / handoff-present) + the shared
+        # occupant-keyed dedup. Gated on
         # is_lead so the emit only runs in the lead's process, where
         # get_session_dir() resolves the canonical journal; a teammate
         # self-completion (carve-out / disputed) has no populated context and
@@ -683,8 +670,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
             )
 
         # Teachback-subject completion-time checks: teachback_submit presence
-        # + schema. R1/R2 are disjoint by the same
-        # handoff_missing/handoff_schema_invalid pattern at L607-613:
+        # + schema. R1/R2 are disjoint on the missing-vs-malformed split:
         #   teachback_submit missing/empty → R1, skip schema check.
         #   present but malformed → R2.
         if is_teachback and owner:

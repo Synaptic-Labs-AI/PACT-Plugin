@@ -313,9 +313,8 @@ PACT registers hooks across 11 Claude Code event surfaces, including `SessionSta
 | `dispatch_gate.py` | PreToolUse (Agent) | Catch malformed teammate spawns at dispatch time |
 | `pin_caps_gate.py` | PreToolUse (Edit/Write) | Enforce caps on CLAUDE.md pinned-memory section |
 | `postcompact_archive.py` | PostCompact | Archive pre-compaction state for recovery |
-| `auditor_reminder.py` | SubagentStart + PostToolUse:Agent | Surface auditor presence/skip decisions |
 
-See [`pact-plugin/hooks/hooks.json`](pact-plugin/hooks/hooks.json) for the full registration matrix; the [`hooks/`](pact-plugin/hooks/) directory contains the 26 top-level hooks plus `shared/` utilities and a `refresh/` subsystem for transcript replay and checkpoint reconstruction.
+See [`pact-plugin/hooks/hooks.json`](pact-plugin/hooks/hooks.json) for the full registration matrix, which registers 22 distinct hook scripts; the [`hooks/`](pact-plugin/hooks/) directory holds those plus 2 co-located helper modules (`pin_caps.py`, `staleness.py`) — 24 top-level `.py` files in all — alongside `shared/` utilities and a `refresh/` subsystem for transcript replay and checkpoint reconstruction.
 
 ### Protocols
 
@@ -606,7 +605,7 @@ When installed as a plugin, PACT lives in your plugin cache:
 │   └── cache/
 │       └── pact-plugin/
 │           └── PACT/
-│               └── 4.4.6/      # Plugin version
+│               └── 4.4.7/      # Plugin version
 │                   ├── agents/
 │                   ├── commands/
 │                   ├── skills/
@@ -649,7 +648,7 @@ PACT-Plugin/
 │   ├── agents/                 # 12 specialist agents + 1 orchestrator
 │   ├── commands/               # 15 PACT workflow commands
 │   ├── skills/                 # 20 skill modules
-│   ├── hooks/                  # Lifecycle automation (29 top-level + shared/ + refresh/)
+│   ├── hooks/                  # Lifecycle automation (24 top-level + shared/ + refresh/)
 │   ├── protocols/              # 22 coordination protocols
 │   ├── reference/              # VSM glossary
 │   ├── telegram/               # Telegram bridge MCP server
