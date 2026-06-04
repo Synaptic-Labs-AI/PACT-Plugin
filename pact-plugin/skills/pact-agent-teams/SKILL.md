@@ -167,7 +167,7 @@ If ANY precondition is unmet, KEEP WORKING. Do not write `metadata.handoff` to "
    - **Accepts**: `TaskUpdate(taskId, status="completed")` plus a wake-signal SendMessage. On wake, CLEAR `intentional_wait` and check `TaskList` for follow-up work.
    - **Rejects**: writes `metadata.handoff_rejection = {reason, corrections, since, revision_number}` plus a wake-signal SendMessage. Follow §On Rejection below.
 
-> ⚠️ Do NOT call `TaskUpdate(taskId, status="completed")` on your own task. The team-lead-as-completion-gate is the discipline; teammate self-completion bypasses HANDOFF inspection. Two narrow exemptions (signal-tasks; secretary memory-save) are documented at the relevant agent bodies — those carve-outs apply only to those agents, not to you unless your agent body says so.
+> ⚠️ Do NOT call `TaskUpdate(taskId, status="completed")` on your own task. The team-lead-as-completion-gate is the discipline; teammate self-completion bypasses HANDOFF inspection. Two narrow exemptions (signal-tasks; secretary briefing + memory-save) are documented at the relevant agent bodies — those carve-outs apply only to those agents, not to you unless your agent body says so.
 
 > **Why idle, not poll?** You cannot self-wake while idle. The team-lead's wake-signal SendMessage brings you back to read the acceptance/rejection. Trust the wake; do not poll TaskList speculatively.
 
