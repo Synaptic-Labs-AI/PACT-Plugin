@@ -21,8 +21,8 @@ Tool classification rationale:
     governance is loaded. The agent-dispatch tool name is `Agent` — the
     canonical Claude Code platform name (verified against
     code.claude.com/docs/en/agent-teams.md and sub-agents.md as of
-    2026-05-06; #662). hooks.json matcher='Agent' entries (PreToolUse
-    team_guard + PostToolUse auditor_reminder) fire on Agent invocations.
+    2026-05-06; #662). hooks.json matcher='Agent' entries (e.g. the
+    PreToolUse team_guard) fire on Agent invocations.
     Earlier `Task` literal in this file (commit 4c286c1f, 2026-05-05)
     was based on a misread of production matchers — those matchers were
     silently NOT firing on spawn events, mistaken for "production

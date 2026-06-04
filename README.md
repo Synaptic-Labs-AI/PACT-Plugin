@@ -313,9 +313,8 @@ PACT registers hooks across 11 Claude Code event surfaces, including `SessionSta
 | `dispatch_gate.py` | PreToolUse (Agent) | Catch malformed teammate spawns at dispatch time |
 | `pin_caps_gate.py` | PreToolUse (Edit/Write) | Enforce caps on CLAUDE.md pinned-memory section |
 | `postcompact_archive.py` | PostCompact | Archive pre-compaction state for recovery |
-| `auditor_reminder.py` | SubagentStart + PostToolUse:Agent | Surface auditor presence/skip decisions |
 
-See [`pact-plugin/hooks/hooks.json`](pact-plugin/hooks/hooks.json) for the full registration matrix; the [`hooks/`](pact-plugin/hooks/) directory contains the 26 top-level hooks plus `shared/` utilities and a `refresh/` subsystem for transcript replay and checkpoint reconstruction.
+See [`pact-plugin/hooks/hooks.json`](pact-plugin/hooks/hooks.json) for the full registration matrix; the [`hooks/`](pact-plugin/hooks/) directory contains the 24 top-level hooks plus `shared/` utilities and a `refresh/` subsystem for transcript replay and checkpoint reconstruction.
 
 ### Protocols
 
