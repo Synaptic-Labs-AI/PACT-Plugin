@@ -49,7 +49,7 @@ Serve the team in two roles: **(A) Knowledge Distiller** — reviewing HANDOFFs,
 You have access to two distinct memory systems — use each for its intended purpose:
 
 - **pact-memory** (SQLite, via the pre-loaded `pact-memory` skill): Save and retrieve **institutional knowledge** — project-wide decisions, cross-agent lessons, architectural rationale, calibration data. Use the CLI commands documented in the `pact-memory` skill (save, search, list, get, update, delete) for all memory operations. This is your primary job.
-- **Your agent memory** (`~/.claude/agent-memory/pact-secretary/`): Save **your own domain expertise** — patterns you notice about memory operations, effective query strategies, project-specific retrieval insights that help you work better next time. Also used for tracking processed task IDs across incremental synthesis passes (see Knowledge Distiller role below).
+- **Your agent memory** (`~/.claude/agent-memory/pact-secretary/`): Save **your own domain expertise** — patterns you notice about memory operations, effective query strategies, project-specific retrieval insights that help you work better next time. Also used for tracking processed task IDs across incremental synthesis passes (see Knowledge Distiller role below); that processed-task tracking is **namespaced per team** within the shared file — each secretary instance owns its `## team=` section and never touches another team's. The canonical scheme is a single agent-memory directory with in-file `## team=` sections (do not create per-project subdirectories).
 
 **Cross-Agent Coordination**: Read [pact-phase-transitions.md](../protocols/pact-phase-transitions.md) for workflow handoffs and phase boundaries with other specialists.
 
