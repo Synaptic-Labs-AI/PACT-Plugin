@@ -588,6 +588,184 @@ def _setup_team_inbox(
 
 
 # =============================================================================
+# Retired paired-send detector (#897) — regression guard
+#
+# The per-completion paired-wake detector was removed: it read
+# inboxes/{owner}.json to confirm a paired wake-SendMessage before a teachback
+# completion, but that store is platform-written ASYNC on delivery (after the
+# synchronous PostToolUse(TaskUpdate-completed) read), and SendMessage is
+# unhookable, so the advisory was ~100%-false-positive by construction.
+#
+# The issue's originally-proposed non-vacuity test ("a teachback completion
+# WITH a real paired wake must NOT emit the advisory") is UN-BUILDABLE: you
+# cannot deterministically construct a teachback completion where a real paired
+# wake is visible to the racing synchronous read — that race IS the bug. The
+# buildable inverse is asserted here instead: the advisory NEVER fires, under
+# ANY inbox state. Before the retire, the in-window state was silent while the
+# empty/out-of-window states FIRED; now all four are uniformly silent, which
+# proves the advisory is GONE, not merely silent on a happy path.
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    "paired_offset_seconds",
+    [
+        30,    # paired wake well within the old 120s window (was silent)
+        121,   # paired wake outside the old 120s window (FIRED before retire)
+        None,  # empty inbox, no paired wake at all (FIRED before retire)
+    ],
+    ids=["paired_in_window", "paired_out_of_window", "inbox_empty"],
+)
+def test_no_paired_send_advisory_with_inbox_on_disk(
+    paired_offset_seconds, tmp_path, monkeypatch, pact_context,
+):
+    """A teachback-subject TaskUpdate(status=completed) NEVER emits the
+    retired `completion_no_paired_send` advisory, regardless of the on-disk
+    team-inbox state. Covers the three states the deleted tests pinned —
+    paired-in-window (was silent), paired-out-of-window and empty-inbox (both
+    FIRED before retire). The seed exercises a realistic inbox; the gate no
+    longer reads it, so all three states are uniformly silent post-retire."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_team_inbox(
+        tmp_path, monkeypatch, owner="preparer", team_name="test-team",
+        paired_offset_seconds=paired_offset_seconds,
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "1",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "preparer",
+                "metadata": {},
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "completion_no_paired_send" for rule, _ in advisories
+    ), f"retired advisory must never fire, got: {advisories}"
+
+
+def test_no_paired_send_advisory_when_no_inbox_file(pact_context):
+    """The fourth (production-faithful) inbox state: no inbox file on disk at
+    all. This is the real shape the retired advisory could never observe — the
+    teachback completion branch consumes `tool_response.task` directly and the
+    gate performs NO inbox/Path.home read post-retire, so this test seeds
+    nothing (no `_setup_team_inbox`, no home monkeypatch). The advisory must
+    still never fire. Building this without monkeypatching home is deliberate:
+    faking an empty home would be wrong-reason-green theater for a branch that
+    never touches home."""
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "1",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "preparer",
+                "metadata": {},
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(
+        rule == "completion_no_paired_send" for rule, _ in advisories
+    ), f"retired advisory must never fire, got: {advisories}"
+
+
+def test_paired_send_detector_symbols_stay_retired():
+    """Anti-fossil liveness pin: the retired detector's symbols must NOT be
+    re-introduced into the gate module. Goes RED loudly if someone "restores"
+    the dead check (which cannot work — see the provenance NOTE at the removal
+    site). Guards both the helper and its orphaned window constant."""
+    assert not hasattr(tlg, "_has_paired_sendmessage"), (
+        "_has_paired_sendmessage was retired in #897 (read-before-async-write "
+        "race; ~100%-false-positive) — do not re-introduce it"
+    )
+    assert not hasattr(tlg, "PAIRED_SENDMESSAGE_WINDOW_S"), (
+        "PAIRED_SENDMESSAGE_WINDOW_S was orphaned by the retire — its only "
+        "consumers were the removed detector and its advisory message"
+    )
+
+
+def test_paired_send_advisory_absent_from_teachback_completion_output(pact_context):
+    """Structural anti-fossil pin at the emission surface: a teachback
+    completion that previously hit the empty-inbox FIRE path emits zero
+    advisories whose rule-name is `completion_no_paired_send`. Complements the
+    symbol-absence pin — even a re-introduction under a different helper name
+    would be caught here as long as it reused the canonical rule-name."""
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "1",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "preparer",
+                "metadata": {},
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    rule_names = [rule for rule, _ in advisories]
+    assert "completion_no_paired_send" not in rule_names, (
+        f"retired rule-name must not appear in gate output, got: {rule_names}"
+    )
+
+
+def test_retire_leaves_sibling_teachback_completion_advisories_intact(pact_context):
+    """Regression-safety: removing the paired-send sub-check did not
+    collaterally disable the sibling advisories that share the same
+    `if is_teachback and owner:` completion branch. A teachback completion
+    with empty metadata must still fire `teachback_submit_missing` (R1); a
+    pact-* work-task completion with empty metadata.handoff must still fire
+    `handoff_missing`. Focused confirmation only — the dedicated R1/handoff
+    test sections cover these in depth; this asserts the retire was surgical."""
+    pact_context(team_name="test-team", session_id="test-session")
+
+    teachback_payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "1",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "preparer",
+                "metadata": {},
+            }
+        },
+    }
+    teachback_advisories = tlg.evaluate_lifecycle(teachback_payload)
+    assert any(
+        rule == "teachback_submit_missing" for rule, _ in teachback_advisories
+    ), (
+        "sibling R1 advisory must still fire after retire, got: "
+        f"{teachback_advisories}"
+    )
+
+    work_payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "2", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "2",
+                "subject": "implement foo",
+                "owner": "pact-backend-coder",
+                "metadata": {},
+            }
+        },
+    }
+    work_advisories = tlg.evaluate_lifecycle(work_payload)
+    assert any(
+        rule == "handoff_missing" for rule, _ in work_advisories
+    ), f"sibling handoff_missing advisory must still fire, got: {work_advisories}"
+
+
+# =============================================================================
 # handoff_missing — pact-* work-Task completed with empty metadata.handoff
 # =============================================================================
 
