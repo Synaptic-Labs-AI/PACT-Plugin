@@ -648,7 +648,7 @@ PACT-Plugin/
 │   ├── agents/                 # 12 specialist agents + 1 orchestrator
 │   ├── commands/               # 15 PACT workflow commands
 │   ├── skills/                 # 20 skill modules
-│   ├── hooks/                  # Lifecycle automation (29 top-level + shared/ + refresh/)
+│   ├── hooks/                  # Lifecycle automation (24 top-level + shared/ + refresh/)
 │   ├── protocols/              # 22 coordination protocols
 │   ├── reference/              # VSM glossary
 │   ├── telegram/               # Telegram bridge MCP server
