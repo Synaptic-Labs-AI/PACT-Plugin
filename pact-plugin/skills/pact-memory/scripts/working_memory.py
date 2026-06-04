@@ -99,6 +99,14 @@ def file_lock(target_file: Path):
     Twin of hooks/shared/claude_md_manager.file_lock — kept local because
     skills/pact-memory/scripts/ cannot import from hooks/shared/. Body MUST
     stay byte-identical to the canonical copy (drift test enforces this).
+
+    NOT RE-ENTRANT: fcntl.flock is non-re-entrant at the OS level. Nesting one
+    sync site inside another under the SAME target would self-deadlock until the
+    fail-open TimeoutError (after _LOCK_TIMEOUT_SECONDS). This is not reachable
+    on the current call graph — the two sync sites are independent top-level
+    calls, never nested — so no behavioral re-entrancy guard is added (a guard
+    would alter this body and trip the drift test; the OS-level non-re-entrancy
+    plus the callers' fail-open already bound the worst case).
     """
     lock_path = target_file.parent / f".{target_file.name}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -142,6 +150,25 @@ def file_lock(target_file: Path):
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
         finally:
             os.close(lock_fd)
+
+
+# Why the sync sites lock the WHOLE read->mutate->write window (not just the
+# write). This rationale is shared by both sync_to_claude_md and
+# sync_retrieved_to_claude_md, which each carry only a short pointer back here.
+# (Distinct from the "why an inline twin" note above: that explains WHY the lock
+# is vendored; this explains WHY the lock spans the whole window.)
+#   - read-under-lock is the load-bearing no-clobber property: a write-only lock
+#     would let a 2nd writer read stale (pre-this-write) content, mutate it, and
+#     overwrite this writer's entry the instant the lock releases — the exact
+#     lost update the lock exists to prevent.
+#   - lock identity is the sidecar inode of the RESOLVED CLAUDE.md path, so this
+#     serializes against session_init / session_resume: all writers resolve to
+#     the same .claude/CLAUDE.md (CLAUDE_PROJECT_DIR is set every session → all
+#     hit the env-var branch first) and thus share one .CLAUDE.md.lock sidecar.
+#   - CLAUDE_PROJECT_DIR edge: if it were ever unset AND the git-root/cwd
+#     fallbacks diverged between processes, the sidecars would differ and the
+#     lock would not serialize — accepted as out-of-contract (no safe fallback
+#     action exists if the paths genuinely diverge).
 
 
 def extract_managed_region(content: str) -> Optional[Tuple[str, int]]:
@@ -598,16 +625,9 @@ def sync_to_claude_md(
         return False
 
     try:
-        # Serialize the FULL read-modify-write window: read-under-lock is what
-        # prevents the lost update (a write-only lock would let a 2nd writer
-        # read stale content and clobber this entry the instant we release).
-        # Lock identity is the sidecar of the resolved CLAUDE.md path, so this
-        # serializes against session_init/session_resume because all writers
-        # resolve to the same .claude/CLAUDE.md (CLAUDE_PROJECT_DIR is set every
-        # session → all hit the env-var branch first). If CLAUDE_PROJECT_DIR is
-        # ever unset AND the git-root/cwd fallbacks diverge between processes,
-        # the sidecars would differ and the lock would not serialize — accepted
-        # as out-of-contract (no safe fallback action exists if paths diverge).
+        # Serialize the FULL read-modify-write window under the shared sidecar
+        # lock (see the "why lock the whole window" note above file_lock for the
+        # read-under-lock / lock-identity / CLAUDE_PROJECT_DIR rationale).
         with file_lock(claude_md_path):
             # Read current content
             content = claude_md_path.read_text(encoding="utf-8")
@@ -812,10 +832,9 @@ def sync_retrieved_to_claude_md(
         return False
 
     try:
-        # Serialize the FULL read-modify-write window (see sync_to_claude_md for
-        # the lock-identity / CLAUDE_PROJECT_DIR rationale): read-under-lock is
-        # the load-bearing property — a write-only lock would let a 2nd writer
-        # read stale content and clobber this section on release.
+        # Serialize the FULL read-modify-write window under the shared sidecar
+        # lock (see the "why lock the whole window" note above file_lock for the
+        # read-under-lock / lock-identity / CLAUDE_PROJECT_DIR rationale).
         with file_lock(claude_md_path):
             # Read current content
             content = claude_md_path.read_text(encoding="utf-8")
