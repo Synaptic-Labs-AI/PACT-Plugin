@@ -109,7 +109,6 @@ def _emit_load_failure_advisory(stage: str, error: BaseException) -> NoReturn:
 # ─── fail-closed wrapper around cross-package imports ─────────────────────────
 try:
     import re
-    import time
     from pathlib import Path
 
     import shared.pact_context as pact_context
