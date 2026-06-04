@@ -8,7 +8,8 @@ the load-bearing decisions in place so a future regression surfaces fast:
   S1. teachback_addblocks_missing advisory: TEACHBACK Task owner-wiring TaskUpdate
       lands without paired addBlocks and task_a has no pre-existing blocks
   S2. work_addblockedby_missing advisory: pact-* Task created without addBlockedBy
-  S3. handoff_missing advisory: pact-* work-Task completed with empty metadata.handoff
+  S3. RETIRED — the handoff_missing / handoff_schema_invalid completion advisories
+      (dormant is_work_task branch) were retired; their smoke case was removed
   S4. self_completion advisory + writeback: teammate self-completes; assert
       metadata.completion_disputed=True AND gate_writeback=True written
       to disk
@@ -104,29 +105,11 @@ def test_work_task_create_without_addblockedby(pact_context, capsys):
     )
 
 
-# ─── S3: handoff_missing — pact-* work-Task completed without metadata.handoff ──
-
-
-def test_work_task_completed_without_handoff(pact_context, capsys):
-    pact_context(team_name="test-team", session_id="test-session")
-    payload = {
-        "tool_name": "TaskUpdate",
-        "tool_input": {"taskId": "42", "status": "completed"},
-        "tool_response": {
-            "task": {
-                "id": "42",
-                "subject": "implement foo",
-                "owner": "pact-backend-coder",
-                "metadata": {},
-            }
-        },
-    }
-    advisories = tlg.evaluate_lifecycle(payload)
-    assert any(rule == "handoff_missing" for rule, _ in advisories), (
-        f"expected handoff_missing advisory, got: {advisories}"
-    )
-    # handoff_schema_invalid must NOT also fire — disjoint per lead clarification.
-    assert not any(rule == "handoff_schema_invalid" for rule, _ in advisories)
+# ─── S3: RETIRED — the handoff_missing / handoff_schema_invalid completion ─────
+# advisories were gated on a permanently-dormant is_work_task / owner.startswith
+# ("pact-") guard (bare teammate owner names never matched) and were retired
+# with their branch; the smoke case that exercised them via a synthetic pact-*
+# owner was removed. Lead-side HANDOFF presence is covered elsewhere.
 
 
 # ─── S4: self_completion — teammate self-completes → advisory + FS writeback ────
@@ -160,7 +143,7 @@ def test_self_completion_writeback(tmp_path, monkeypatch, pact_context):
                 "subject": "implement foo",
                 "owner": "backend-coder-3",
                 "metadata": {
-                    "handoff": {  # well-formed so handoff_missing/handoff_schema_invalid don't also fire
+                    "handoff": {  # well-formed handoff; this test isolates the self_completion advisory
                         "produced": "x",
                         "decisions": "x",
                         "reasoning_chain": "x",
