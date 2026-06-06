@@ -30,6 +30,7 @@ import json
 import sys
 from typing import Any
 
+from shared import pact_context
 from shared.error_output import hook_error_json
 from shared.session_state import summarize_session_state
 
@@ -135,11 +136,20 @@ def build_hook_output(
 
 def main():
     try:
-        # Consume stdin (PreCompact may provide transcript_path, etc.)
+        # Parse stdin (PreCompact provides session_id, transcript_path, etc.)
         try:
-            json.load(sys.stdin)
+            input_data = json.load(sys.stdin)
         except (json.JSONDecodeError, ValueError):
-            pass
+            input_data = {}
+
+        # Initialize session context BEFORE building output. Without this,
+        # build_hook_output() -> summarize_session_state() (called with no
+        # session_dir/team_name overrides) resolves scope from an
+        # uninitialized pact_context (empty team_name/session_dir), so the
+        # compaction reminder ships blank ("phase: unknown / agents: none
+        # found") on every compaction. Inside the outer try/except so the
+        # fail-open path below is preserved for any malformed input_data.
+        pact_context.init(input_data)
 
         output = build_hook_output()
         print(json.dumps(output))
