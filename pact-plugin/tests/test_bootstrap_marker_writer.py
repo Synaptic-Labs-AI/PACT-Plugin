@@ -39,7 +39,7 @@ Fail-closed wrapper (P0 — architect §8.6):
     with hookEventName == "UserPromptSubmit"
 18. Runtime exception in _try_write_marker → suppressOutput at exit 0
 
-Captured fixture (P1 — architect §8.7, synthetic placeholder):
+Captured fixture (P1 — architect §8.7, real captured frame):
 19. Loading the fixture stdin and running main() produces clean exit 0
     with suppressOutput (verifies the platform-shape parser runs)
 
@@ -483,16 +483,17 @@ class TestFailClosedWrapper:
 
 
 # =============================================================================
-# Captured fixture (synthetic placeholder; TODO replace per architect §8.7)
+# Captured fixture round-trip — real captured-from-production UserPromptSubmit
+# stdin exercises the platform-shape parser end-to-end through main().
 # =============================================================================
 
 
 class TestCapturedFixtureRoundTrip:
-    """Architect §8.7. Placeholder synthetic fixture exercises the
-    platform-shape parser; replace with real captured-from-production
-    stdin per the follow-up issue. The hook should run cleanly on the
-    fixture even though the synthetic session_id has no team config in
-    the test environment (verify-and-refuse silent path)."""
+    """The fixture is a REAL captured UserPromptSubmit frame (qualified lead
+    spelling, Claude Code 2.1.167), carrying ``_meta.capture_method``
+    provenance. The hook should run cleanly on it: the captured session_id has
+    no team config in the test environment, so main() takes the silent
+    verify-and-refuse / no-session-dir path and exits 0."""
 
     FIXTURE = (
         Path(__file__).parent / "fixtures" /
@@ -501,24 +502,23 @@ class TestCapturedFixtureRoundTrip:
 
     def test_fixture_exists(self):
         assert self.FIXTURE.exists(), (
-            "synthetic fixture missing; placeholder is required even "
-            "before captured-from-production replacement"
+            "captured UserPromptSubmit fixture missing"
         )
 
     def test_main_runs_on_fixture(self, capsys):
         from bootstrap_marker_writer import main
 
         fixture_data = json.loads(self.FIXTURE.read_text(encoding="utf-8"))
-        # Strip the _comment field — the platform doesn't deliver it.
-        fixture_data.pop("_comment", None)
+        # Strip the _meta provenance key — the platform doesn't deliver it.
+        fixture_data.pop("_meta", None)
 
         with patch("sys.stdin", io.StringIO(json.dumps(fixture_data))):
             with pytest.raises(SystemExit) as exc_info:
                 main()
         captured = capsys.readouterr()
         assert exc_info.value.code == 0
-        # Synthetic session_id has no real team config; expect silent
-        # suppressOutput (verify-and-refuse path).
+        # Captured session_id has no real team config in the test env; expect
+        # silent suppressOutput (verify-and-refuse / no-session-dir path).
         assert json.loads(captured.out.strip()) == _SUPPRESS_EXPECTED
 
 
@@ -1213,18 +1213,23 @@ class TestConstantsRelocationRegression:
 
 
 # =============================================================================
-# Captured-fixture parity: synthetic shape contains documented platform fields
+# Captured-fixture parity: the real fixture carries the platform fields a
+# UserPromptSubmit frame actually delivers (and omits the ones it does not).
 # =============================================================================
 
 
 class TestFixtureShapeParity:
-    """The synthetic fixture is replaced post-merge with a real captured-
-    from-production stdin (architect §8.7). Until then, the synthetic
-    must include the documented platform fields so a partial regression
-    of the platform schema is visible at fixture-replacement time.
+    """The fixture is a real captured-from-production UserPromptSubmit frame.
+    Pin the platform fields it must carry so a partial regression of the
+    platform schema is visible.
 
-    Pinned shape: hook_event_name, session_id, prompt, source. These are
-    the fields the writer's main() and pact_context.init() actually read."""
+    Pinned shape: hook_event_name, session_id, prompt, permission_mode — the
+    fields a real UserPromptSubmit frame delivers (session_id is the one
+    pact_context.init() reads to resolve the session path). NOTE: the prior
+    synthetic placeholder asserted a ``source`` field here, but ``source`` is a
+    SessionStart-only field — a real UserPromptSubmit frame does NOT carry it.
+    That synthetic-vs-real discrepancy is exactly what this fixture promotion
+    corrects, so the negative is pinned below."""
 
     FIXTURE = (
         Path(__file__).parent / "fixtures" /
@@ -1233,29 +1238,18 @@ class TestFixtureShapeParity:
 
     def test_fixture_contains_documented_platform_fields(self):
         data = json.loads(self.FIXTURE.read_text(encoding="utf-8"))
-        # _comment is the synthetic-fixture marker; strip before checking.
-        data.pop("_comment", None)
-        for required in ("hook_event_name", "session_id", "prompt", "source"):
+        # _meta is our provenance annotation; the platform doesn't deliver it.
+        data.pop("_meta", None)
+        for required in ("hook_event_name", "session_id", "prompt",
+                         "permission_mode"):
             assert required in data, (
-                f"fixture missing platform field {required!r}; the "
-                f"synthetic placeholder must mirror the documented "
-                f"UserPromptSubmit stdin shape until the captured-from-"
-                f"production version replaces it (architect §8.7)."
+                f"fixture missing platform field {required!r}; the captured "
+                f"UserPromptSubmit fixture must mirror the real platform "
+                f"stdin shape."
             )
         assert data["hook_event_name"] == "UserPromptSubmit"
-
-    def test_fixture_synthetic_marker_present(self):
-        """The _comment field marks the fixture as synthetic. When the
-        captured-from-production version lands, this test should be
-        DELETED (not updated) — the synthetic-marker check is intentionally
-        scoped to the synthetic placeholder phase."""
-        data = json.loads(self.FIXTURE.read_text(encoding="utf-8"))
-        assert "_comment" in data, (
-            "synthetic-fixture _comment field absent; if you've replaced "
-            "with a real captured fixture, also delete this test "
-            "(per the test docstring)."
-        )
-        assert "TODO" in data["_comment"]
+        # `source` is SessionStart-only; a real UserPromptSubmit frame omits it.
+        assert "source" not in data
 
 
 # =============================================================================

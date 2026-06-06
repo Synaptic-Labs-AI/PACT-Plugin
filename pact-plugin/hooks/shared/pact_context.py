@@ -408,6 +408,21 @@ def is_lead(input_data: dict) -> bool:
     file-under-review, tool arguments cannot forge it) — but a future
     author must NOT hang an access-control decision on this function.
 
+    EMPIRICAL PROVENANCE. ``agent_type`` is the UNIVERSAL role discriminator:
+    it is the field that carries the lead/teammate signal on every hook event
+    where this predicate is read — SessionStart, UserPromptSubmit, PreToolUse /
+    PostToolUse (including the ``TaskCreate`` / ``TaskUpdate``-matched frames),
+    TaskCompleted, and PostCompact — confirmed by verbatim stdin captured under
+    tmux on Claude Code 2.1.167. The signal is VALUE-MEMBERSHIP, not field-
+    presence: a lead stamps one of the two ``LEAD_AGENT_TYPES`` spellings, a
+    teammate stamps its specialist value (e.g. ``pact-architect``), and a plain
+    / non-PACT primary frame omits the field entirely. ``agent_id`` /
+    ``agent_name`` / ``team_name`` are ABSENT on tmux frames — a predicate keyed
+    on any of those would mis-resolve, which is exactly why this one keys on
+    ``agent_type`` alone. The captured frames substantiating this live in
+    ``tests/fixtures/role_frames.py`` (the ``captured_*`` accessors); the per-
+    event truth table is in ``hooks/shared/HOOK_STDIN_DISCRIMINATORS.md``.
+
     Args:
         input_data: Parsed stdin JSON from the hook.
 
