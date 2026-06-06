@@ -142,13 +142,26 @@ def main():
         except (json.JSONDecodeError, ValueError):
             input_data = {}
 
+        # Coerce non-dict JSON (null / [] / scalar) to {} so it degrades
+        # identically to the empty-dict path. A non-dict would otherwise make
+        # pact_context.init() raise AttributeError on .get() and route to the
+        # fail-open except (an error systemMessage); coercing here yields the
+        # normal empty-state reminder instead, and keeps non-dict handling
+        # consistent with the sibling compaction hook postcompact_archive.py
+        # (which guards isinstance(dict)). Production PreCompact stdin is
+        # always a JSON object, so this is defense-in-depth.
+        if not isinstance(input_data, dict):
+            input_data = {}
+
         # Initialize session context BEFORE building output. Without this,
         # build_hook_output() -> summarize_session_state() (called with no
         # session_dir/team_name overrides) resolves scope from an
         # uninitialized pact_context (empty team_name/session_dir), so the
         # compaction reminder ships blank ("phase: unknown / agents: none
-        # found") on every compaction. Inside the outer try/except so the
-        # fail-open path below is preserved for any malformed input_data.
+        # found") on every compaction. init() stays inside the outer
+        # try/except as defense-in-depth for genuinely-unexpected errors;
+        # malformed/non-dict input_data is already coerced to {} above, so it
+        # no longer reaches the fail-open except path.
         pact_context.init(input_data)
 
         output = build_hook_output()

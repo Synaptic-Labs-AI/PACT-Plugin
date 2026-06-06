@@ -475,10 +475,20 @@ class TestPrecompactFailOpen:
     def test_null_input_exits_zero(self):
         result = run_hook("null")
         assert result.returncode == 0
+        # Non-dict valid JSON coerces to {} -> empty-state reminder, NOT the
+        # fail-open error channel. (Pre-guard: init(None) raised -> systemMessage.)
+        output = json.loads(result.stdout.strip())
+        assert "custom_instructions" in output
+        assert "systemMessage" not in output
 
     def test_array_input_exits_zero(self):
         result = run_hook("[]")
         assert result.returncode == 0
+        # Non-dict valid JSON coerces to {} -> empty-state reminder, NOT the
+        # fail-open error channel. (Pre-guard: init([]) raised -> systemMessage.)
+        output = json.loads(result.stdout.strip())
+        assert "custom_instructions" in output
+        assert "systemMessage" not in output
 
     def test_disk_read_error_fails_open(self, tmp_path):
         """Unreadable tasks/teams dirs must not raise — build_hook_output
