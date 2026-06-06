@@ -52,7 +52,7 @@ empty.
 |---|---|---|---|---|---|---|
 | SessionStart | `agent_type` | lead spelling | `pact-<specialist>` | absent | no | lead: yes (persists context) · teammate: no |
 | UserPromptSubmit | `agent_type` | lead spelling | *(no teammate fire path — see note)* | absent | no | lead: yes |
-| PreToolUse `†` (incl. `TaskCreate` / `TaskUpdate`) | `agent_type` | lead spelling | `pact-<specialist>` | — | **no** | lead: yes · teammate: no |
+| PreToolUse `†` | `agent_type` | lead spelling | `pact-<specialist>` | — | **no** | lead: yes · teammate: no |
 | PostToolUse (incl. `TaskCreate` / `TaskUpdate`) | `agent_type` | lead spelling | `pact-<specialist>` | — | **no** | lead: yes · teammate: no |
 | TaskCompleted | `agent_type` | lead spelling | `pact-<specialist>` | — | lead: **no** · teammate: **yes** (also `teammate_name`) | lead: yes · teammate: no |
 | PostCompact `†` | `agent_type` | lead spelling | `pact-<specialist>` | — | no | lead: yes · teammate: no |
@@ -63,7 +63,11 @@ SessionStart / UserPromptSubmit / PostToolUse / TaskCompleted frames establish.
 `is_lead` is READ on PreToolUse and PostCompact (and SessionStart /
 UserPromptSubmit / PostToolUse) but is NOT read on TaskCompleted — that frame is
 captured for the #917 emit-path, which gates on `team_name` + journal
-writability rather than this predicate.
+writability rather than this predicate. On PreToolUse, `is_lead` is read via the
+match-all `bootstrap_gate` (matcher `''`, so it fires before every tool —
+including `TaskCreate` / `TaskUpdate`) and the `Edit` / `Write` pin gates; there
+is no `TaskCreate` / `TaskUpdate`-matched PreToolUse hook (that matcher is
+PostToolUse-only — `task_lifecycle_gate`, the row above).
 
 ### UserPromptSubmit has no teammate fire path
 
