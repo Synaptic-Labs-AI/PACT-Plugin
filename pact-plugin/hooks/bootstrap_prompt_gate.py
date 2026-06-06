@@ -10,7 +10,8 @@ message, checks for the session-scoped bootstrap-complete marker file:
   - Marker exists → suppressOutput (zero tokens, sub-ms)
   - No marker + PACT team-lead session (is_lead) → inject additionalContext instructing bootstrap
   - Non-PACT session (no context file) → no-op passthrough
-  - Teammate / non-lead frame (not is_lead) → no-op passthrough
+  - Non-lead / plain primary frame (not is_lead) → no-op passthrough
+    (NOT a teammate: teammates have no UserPromptSubmit-fire path)
 
 SACROSANCT (post-#662 module-load fail-closed retrofit): module-load
 failures emit an advisory `additionalContext` block at exit 0 —
@@ -94,7 +95,8 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
     """Determine whether a bootstrap instruction should be injected.
 
     Returns the additionalContext string to inject, or None if the gate
-    should be a no-op (marker exists, non-PACT session, or teammate).
+    should be a no-op (marker exists, non-PACT session, or a plain/non-lead
+    primary frame — NOT a teammate; teammates never fire UserPromptSubmit).
     """
     # Initialize context (sets session-scoped path from input_data)
     pact_context.init(input_data)
@@ -114,10 +116,15 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
         return None
 
     # Lead-role gate (#878): only the team-lead drives the bootstrap ritual.
-    # Migrated from the negative `resolve_agent_name(...) != ""` heuristic to
-    # the positive is_lead predicate — the old heuristic returned non-empty for
-    # BOTH lead spellings (Step-4 prefix-strip), so under tmux the lead itself
-    # took this teammate-bypass branch. is_lead keys on the harness-set
+    # This is NOT a teammate discriminator: an Agent-spawned team teammate has
+    # no UserPromptSubmit-fire path (it wakes via inbox/SendMessage, which is
+    # not hookable), so this event never carries a teammate frame (empirically
+    # confirmed by the discriminator audit). The guard ensures a plain /
+    # non-PACT primary frame (agent_type absent → is_lead False) does not drive
+    # bootstrap. Migrated from the negative `resolve_agent_name(...) != ""`
+    # heuristic — which returned non-empty for BOTH lead spellings (Step-4
+    # prefix-strip), so under tmux the lead itself took this non-lead bypass
+    # branch — to the positive is_lead predicate keyed on the harness-set
     # agent_type directly.
     if not pact_context.is_lead(input_data):
         return None

@@ -217,10 +217,16 @@ def _try_write_marker(input_data: dict) -> None:
         return
 
     # Lead-role gate (#878): only the team-lead drives bootstrap (writes the
-    # marker). Migrated from the negative `resolve_agent_name(...) != ""`
-    # heuristic — which returned non-empty for BOTH lead spellings, so the lead
-    # itself took this bypass branch under tmux — to the positive is_lead
-    # predicate keyed on the harness-set agent_type.
+    # marker). This is NOT a teammate discriminator: an Agent-spawned team
+    # teammate has no UserPromptSubmit-fire path (it wakes via inbox/SendMessage,
+    # which is not hookable), so this event never carries a teammate frame
+    # (empirically confirmed by the discriminator audit). The guard ensures a
+    # plain / non-PACT primary frame (agent_type absent → is_lead False) does
+    # not write the marker. Migrated from the negative
+    # `resolve_agent_name(...) != ""` heuristic — which returned non-empty for
+    # BOTH lead spellings, so the lead itself took this non-lead bypass branch
+    # under tmux — to the positive is_lead predicate keyed on the harness-set
+    # agent_type.
     if not pact_context.is_lead(input_data):
         return
 

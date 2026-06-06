@@ -115,7 +115,7 @@ try:
     )
     from shared.dispatch_helpers import trustworthy_actor_name
     from shared.intentional_wait import is_self_complete_exempt, is_teachback_exempt
-    from shared.session_journal import append_event, make_event
+    from shared.session_journal import append_event, get_journal_path, make_event
     from shared.task_utils import read_task_json
     from shared.teachback_schema import (
         TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN,
@@ -313,8 +313,26 @@ def _emit_lead_side_agent_handoff(
             return
         if is_signal_task(task_metadata):
             return
+        # M1: handoff must be a dict (the journal schema requires it). A
+        # truthy-but-non-dict handoff (str/list) would pass a bare presence
+        # check, claim the O_EXCL marker, then FAIL append_event's schema
+        # validation — an orphaned/poisoned marker. isinstance makes a
+        # malformed handoff DEFER (claim nothing). Mirrors b1's gate.
         handoff = task_metadata.get("handoff")
-        if not handoff:
+        if not isinstance(handoff, dict) or not handoff:
+            return
+        # #917 symmetry: same writability precondition as b1
+        # (agent_handoff_emitter). In the lead's gate process this is a no-op
+        # (the lead's context is persisted -> get_journal_path() resolves), but
+        # keeping both emit paths' marker-claim preconditions IDENTICAL prevents
+        # the b1/b2 divergence class (#887/#901): a future change that makes b2
+        # reachable from a non-lead / unresolvable context cannot silently
+        # claim-without-write and poison the shared marker. Pure read; the
+        # mark-then-write order below is unchanged.
+        # F3: this gate is the TWIN of agent_handoff_emitter.main — keep both
+        # in parity. Mark-then-write / O_EXCL contract:
+        # shared/agent_handoff_marker.already_emitted.
+        if not get_journal_path():
             return
         occupant = occupant_hash(owner, subject)
         if already_emitted(team_name, task_id, occupant):

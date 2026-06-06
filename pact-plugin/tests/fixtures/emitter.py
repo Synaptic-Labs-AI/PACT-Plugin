@@ -25,9 +25,30 @@ VALID_HANDOFF = {
     "open_questions": [],
 }
 
+# Shared non-empty sentinel for the in-hook get_journal_path() return (F2 —
+# the single source of truth, imported by every harness site + the
+# test-engineer regression test rather than re-literalled). The path is never
+# written (append_event is spied), so any truthy value works — it only needs to
+# satisfy the #917 marker-claim writability gate
+# (`if not get_journal_path(): defer`). Modelling a WRITABLE-journal b1 process
+# is the correct default: these tests assert b1's emit / dedup / sanitization
+# behaviour GIVEN that the canonical journal is writable (the normal
+# lead-or-resolvable-context fire). The journal-UNWRITABLE defer path is
+# exercised directly in test_handoff_writability_parity.py.
+WRITABLE_TEST_JOURNAL = "/pact-test-session/session-journal.jsonl"
 
-def _run_main(stdin_payload, task_data, append_calls):
-    """Invoke agent_handoff_emitter.main() with patched IO/deps."""
+
+def _run_main(stdin_payload, task_data, append_calls, journal_path=WRITABLE_TEST_JOURNAL):
+    """Invoke agent_handoff_emitter.main() with patched IO/deps.
+
+    ``journal_path`` is the value the in-hook ``get_journal_path()`` returns
+    inside ``main()``. Defaults to a non-empty sentinel so the helper models a
+    WRITABLE-journal b1 process (the #917 writability gate passes and emission
+    proceeds as before the gate). Pass ``""`` to exercise the journal-
+    UNWRITABLE defer path. The hook imports get_journal_path by value, so the
+    patch targets the symbol bound in ``agent_handoff_emitter`` — NOT
+    ``session_journal`` — or the gate would read the real resolution.
+    """
     # Lazy import: sys.path is configured in conftest.py before this module loads.
     # Do not hoist to module-level — sys.path coupling depends on conftest load order.
     from agent_handoff_emitter import main
@@ -38,6 +59,7 @@ def _run_main(stdin_payload, task_data, append_calls):
 
     with patch("agent_handoff_emitter.read_task_json", return_value=task_data), \
          patch("agent_handoff_emitter.append_event", side_effect=_append_spy), \
+         patch("agent_handoff_emitter.get_journal_path", return_value=journal_path), \
          patch("sys.stdin", io.StringIO(json.dumps(stdin_payload))):
         with pytest.raises(SystemExit) as exc_info:
             main()

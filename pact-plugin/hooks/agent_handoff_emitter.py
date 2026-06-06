@@ -72,7 +72,7 @@ from shared.agent_handoff_marker import (
     sanitize_path_component,
 )
 from shared.pact_context import get_team_name
-from shared.session_journal import append_event, make_event
+from shared.session_journal import append_event, get_journal_path, make_event
 from shared.task_utils import read_task_json
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths.
@@ -186,12 +186,40 @@ def main() -> None:
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
-        # Handoff-presence gate. Suppress emission AND skip marker creation
-        # when `metadata.handoff` is absent or empty. Required so that a
-        # fire arriving before the teammate has stored handoff cannot claim
-        # the O_EXCL marker with empty content; the substantive completion
-        # (with handoff populated) claims it instead.
-        if not task_metadata.get("handoff"):
+        # Handoff-presence + type gate. Suppress emission AND skip marker
+        # creation when `metadata.handoff` is absent, empty, or NOT A DICT.
+        # Required so that a fire arriving before the teammate has stored
+        # handoff cannot claim the O_EXCL marker with empty content; the
+        # substantive completion (with handoff populated) claims it instead.
+        # M1: the journal schema requires handoff to be a dict, so a
+        # truthy-but-non-dict handoff (str/list) would pass a bare presence
+        # check, claim the marker, then FAIL append_event's schema validation
+        # — an orphaned/poisoned marker (the same failure class the #917
+        # writability gate below closes for the unwritable case). isinstance
+        # makes a malformed handoff DEFER (claim nothing) too.
+        handoff = task_metadata.get("handoff")
+        if not isinstance(handoff, dict) or not handoff:
+            print(_SUPPRESS_OUTPUT)
+            sys.exit(0)
+
+        # #917: canonical-journal writability precondition. The O_EXCL marker
+        # below is an optimistic "we emitted it" promise claimed BEFORE
+        # append_event. b1 can resolve a team_name for the marker dir (a stdin
+        # team_name on a teammate TaskCompleted frame) while its OWN session
+        # context is unpersisted (teammate persist is is_lead-gated, #877) ->
+        # get_journal_path() == "" -> the append below would FAIL after the
+        # marker is claimed, poisoning it and permanently suppressing the
+        # lead-side b2 emit via already_emitted(). Gate the claim on writability
+        # so a non-writable fire DEFERS to a writable one (the lead's b2)
+        # instead of poisoning. This is a PURE read (get_journal_path does not
+        # create the marker); mark-then-write exactly-once below is unchanged —
+        # only the precondition is added. get_journal_path() and append_event()
+        # resolve from the same _journal_path()/get_session_dir() source, so the
+        # gate cannot false-negative a fire that append would have written.
+        # F3: this gate is the TWIN of task_lifecycle_gate._emit_lead_side_agent_handoff
+        # — keep both in parity. Mark-then-write / O_EXCL contract:
+        # shared/agent_handoff_marker.already_emitted.
+        if not get_journal_path():
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
@@ -234,7 +262,7 @@ def main() -> None:
                 agent=teammate_name,
                 task_id=task_id,
                 task_subject=task_subject,
-                handoff=task_metadata.get("handoff"),
+                handoff=handoff,
             ),
         )
 

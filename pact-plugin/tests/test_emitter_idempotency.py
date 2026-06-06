@@ -20,7 +20,7 @@ from unittest.mock import patch
 
 import pytest
 
-from fixtures.emitter import VALID_HANDOFF, _run_main
+from fixtures.emitter import VALID_HANDOFF, WRITABLE_TEST_JOURNAL, _run_main
 
 
 class TestIdempotency:
@@ -184,6 +184,17 @@ class TestMarkerFailOpen:
         #528 amplification class) is strictly more important than
         recovering a rare single-event loss on journal-write failure.
 
+        #917 NARROWING: the marker-claim is now gated on get_journal_path()
+        being non-empty (the canonical-journal writability precondition). So
+        the UNWRITABLE-journal cause of append failure (get_journal_path()=="")
+        now DEFERS before claiming the marker — no claim-without-write poison.
+        This test patches get_journal_path() to a writable value, isolating the
+        RESIDUAL scenario this asymmetry still covers: a WRITABLE journal whose
+        append_event nonetheless fails (e.g. a write error after path
+        resolution). The marker-persists trade-off remains intentional there.
+        The unwritable→defer behavior is pinned in
+        test_handoff_writability_parity.py.
+
         This test pins the CURRENT behavior so a future reviewer reading
         `_already_emitted` → `append_event` → `_mark_emitted` ordering
         does not mistake it for a bug. If the ordering is ever inverted
@@ -221,8 +232,12 @@ class TestMarkerFailOpen:
 
         # First invocation: marker gets created (by already_emitted),
         # append_event returns None (silent failure), event is lost.
+        # get_journal_path patched truthy → the #917 writability gate passes,
+        # isolating the residual writable-but-write-fails scenario (see docstring).
         with patch("agent_handoff_emitter.read_task_json", return_value=task_data), \
              patch("agent_handoff_emitter.append_event", side_effect=_append_silent_fail), \
+             patch("agent_handoff_emitter.get_journal_path",
+                   return_value=WRITABLE_TEST_JOURNAL), \
              patch("sys.stdin", io.StringIO(json.dumps(payload))):
             with pytest.raises(SystemExit) as exc1:
                 main()
@@ -252,6 +267,8 @@ class TestMarkerFailOpen:
         # intact despite the lost event.
         with patch("agent_handoff_emitter.read_task_json", return_value=task_data), \
              patch("agent_handoff_emitter.append_event", side_effect=_append_silent_fail), \
+             patch("agent_handoff_emitter.get_journal_path",
+                   return_value=WRITABLE_TEST_JOURNAL), \
              patch("sys.stdin", io.StringIO(json.dumps(payload))):
             with pytest.raises(SystemExit) as exc2:
                 main()
