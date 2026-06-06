@@ -410,18 +410,26 @@ def is_lead(input_data: dict) -> bool:
 
     EMPIRICAL PROVENANCE. ``agent_type`` is the UNIVERSAL role discriminator:
     it is the field that carries the lead/teammate signal on every hook event
-    where this predicate is read — SessionStart, UserPromptSubmit, PreToolUse /
+    where this predicate is READ — SessionStart, UserPromptSubmit, PreToolUse,
     PostToolUse (including the ``TaskCreate`` / ``TaskUpdate``-matched frames),
-    TaskCompleted, and PostCompact — confirmed by verbatim stdin captured under
-    tmux on Claude Code 2.1.167. The signal is VALUE-MEMBERSHIP, not field-
-    presence: a lead stamps one of the two ``LEAD_AGENT_TYPES`` spellings, a
-    teammate stamps its specialist value (e.g. ``pact-architect``), and a plain
-    / non-PACT primary frame omits the field entirely. ``agent_id`` /
-    ``agent_name`` / ``team_name`` are ABSENT on tmux frames — a predicate keyed
-    on any of those would mis-resolve, which is exactly why this one keys on
-    ``agent_type`` alone. The captured frames substantiating this live in
-    ``tests/fixtures/role_frames.py`` (the ``captured_*`` accessors); the per-
-    event truth table is in ``hooks/shared/HOOK_STDIN_DISCRIMINATORS.md``.
+    and PostCompact. The signal is VALUE-MEMBERSHIP, not field-presence: a lead
+    stamps one of the two ``LEAD_AGENT_TYPES`` spellings, a teammate stamps its
+    specialist value (e.g. ``pact-architect``), and a plain / non-PACT primary
+    frame omits the field entirely. ``agent_id`` / ``agent_name`` / ``team_name``
+    are ABSENT on tmux frames — a predicate keyed on any of those would mis-
+    resolve, which is exactly why this one keys on ``agent_type`` alone.
+
+    Capture scope (Claude Code 2.1.167). Verbatim tmux stdin was captured for
+    SessionStart, UserPromptSubmit, PostToolUse, and TaskCompleted — note
+    TaskCompleted was captured for the #917 emit-path, NOT because is_lead is
+    read there (it is not; the TaskCompleted hook gates on ``team_name`` +
+    journal writability, not this predicate). PreToolUse and PostCompact were
+    NOT separately captured: their ``agent_type`` shape is inferred from the
+    uniform harness-stamping the captured frames establish (PostCompact has only
+    a synthesized-from-matrix builder; PreToolUse has no frame). The captured
+    frames live in ``tests/fixtures/role_frames.py`` (the ``captured_*``
+    accessors); the per-event truth table — which rows are captured vs inferred
+    — is in ``hooks/shared/HOOK_STDIN_DISCRIMINATORS.md``.
 
     Args:
         input_data: Parsed stdin JSON from the hook.

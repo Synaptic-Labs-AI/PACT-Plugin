@@ -37,19 +37,33 @@ spelling `pact-orchestrator` as a teammate.
 
 ## Per-event truth table
 
-Values below are from verbatim stdin captured under tmux (Claude Code 2.1.167).
-"journal-resolvable in this process?" = does `session_journal.get_journal_path()`
-return a non-empty path — i.e. can THIS process write the canonical session
-journal. It is **process-scoped**: a teammate process has no persisted
-session-context file, so its journal path is empty.
+Values below are grounded in verbatim stdin captured under tmux (Claude Code
+2.1.167) for **SessionStart, UserPromptSubmit, PostToolUse, and TaskCompleted**.
+The **PreToolUse** and **PostCompact** rows are NOT separately captured (marked
+`†`): their `agent_type` shape is inferred from the uniform harness-stamping the
+captured frames establish (PostCompact has only a synthesized-from-matrix
+builder; PreToolUse has no frame). "journal-resolvable in this process?" = does
+`session_journal.get_journal_path()` return a non-empty path — i.e. can THIS
+process write the canonical session journal. It is **process-scoped**: a
+teammate process has no persisted session-context file, so its journal path is
+empty.
 
 | Hook event | Role field | Lead value | Teammate value | Plain | `team_name` in stdin? | journal-resolvable here? |
 |---|---|---|---|---|---|---|
 | SessionStart | `agent_type` | lead spelling | `pact-<specialist>` | absent | no | lead: yes (persists context) · teammate: no |
 | UserPromptSubmit | `agent_type` | lead spelling | *(no teammate fire path — see note)* | absent | no | lead: yes |
-| PreToolUse / PostToolUse (incl. `TaskCreate` / `TaskUpdate`) | `agent_type` | lead spelling | `pact-<specialist>` | — | **no** | lead: yes · teammate: no |
+| PreToolUse `†` (incl. `TaskCreate` / `TaskUpdate`) | `agent_type` | lead spelling | `pact-<specialist>` | — | **no** | lead: yes · teammate: no |
+| PostToolUse (incl. `TaskCreate` / `TaskUpdate`) | `agent_type` | lead spelling | `pact-<specialist>` | — | **no** | lead: yes · teammate: no |
 | TaskCompleted | `agent_type` | lead spelling | `pact-<specialist>` | — | lead: **no** · teammate: **yes** (also `teammate_name`) | lead: yes · teammate: no |
-| PostCompact | `agent_type` | lead spelling | `pact-<specialist>` | — | no | lead: yes · teammate: no |
+| PostCompact `†` | `agent_type` | lead spelling | `pact-<specialist>` | — | no | lead: yes · teammate: no |
+
+`†` PreToolUse and PostCompact are NOT separately captured this campaign; their
+`agent_type` shape is inferred from the uniform harness-stamping the captured
+SessionStart / UserPromptSubmit / PostToolUse / TaskCompleted frames establish.
+`is_lead` is READ on PreToolUse and PostCompact (and SessionStart /
+UserPromptSubmit / PostToolUse) but is NOT read on TaskCompleted — that frame is
+captured for the #917 emit-path, which gates on `team_name` + journal
+writability rather than this predicate.
 
 ### UserPromptSubmit has no teammate fire path
 
