@@ -60,6 +60,10 @@ from unittest.mock import patch
 
 import pytest
 
+# F2: the single shared writable-journal sentinel (SSOT in fixtures.emitter),
+# imported rather than re-literalled. tests/ is on sys.path via conftest.
+from fixtures.emitter import WRITABLE_TEST_JOURNAL
+
 
 # ---------------------------------------------------------------------------
 # Path constants — resolved relative to this test file so refactors of the
@@ -298,7 +302,7 @@ def _run_emitter(stdin_payload, task_data, append_calls, tmp_home, monkeypatch):
     with patch("agent_handoff_emitter.read_task_json", return_value=task_data), \
          patch("agent_handoff_emitter.append_event", side_effect=_append_spy), \
          patch("agent_handoff_emitter.get_journal_path",
-               return_value="/pact-test-session/session-journal.jsonl"), \
+               return_value=WRITABLE_TEST_JOURNAL), \
          patch("sys.stdin", io.StringIO(json.dumps(stdin_payload))):
         with pytest.raises(SystemExit) as exc_info:
             main()
@@ -640,7 +644,7 @@ class TestLayer4_CounterTestByRevert:
              patch("agent_handoff_emitter.append_event",
                    side_effect=lambda e: (calls.append(e), True)[1]), \
              patch("agent_handoff_emitter.get_journal_path",
-                   return_value="/pact-test-session/session-journal.jsonl"), \
+                   return_value=WRITABLE_TEST_JOURNAL), \
              patch("sys.stdin", io.StringIO(json.dumps(payload))):
             with pytest.raises(SystemExit):
                 main()

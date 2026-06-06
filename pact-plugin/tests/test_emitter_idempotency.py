@@ -20,7 +20,7 @@ from unittest.mock import patch
 
 import pytest
 
-from fixtures.emitter import VALID_HANDOFF, _run_main
+from fixtures.emitter import VALID_HANDOFF, WRITABLE_TEST_JOURNAL, _run_main
 
 
 class TestIdempotency:
@@ -237,7 +237,7 @@ class TestMarkerFailOpen:
         with patch("agent_handoff_emitter.read_task_json", return_value=task_data), \
              patch("agent_handoff_emitter.append_event", side_effect=_append_silent_fail), \
              patch("agent_handoff_emitter.get_journal_path",
-                   return_value="/pact-test-session/session-journal.jsonl"), \
+                   return_value=WRITABLE_TEST_JOURNAL), \
              patch("sys.stdin", io.StringIO(json.dumps(payload))):
             with pytest.raises(SystemExit) as exc1:
                 main()
@@ -268,7 +268,7 @@ class TestMarkerFailOpen:
         with patch("agent_handoff_emitter.read_task_json", return_value=task_data), \
              patch("agent_handoff_emitter.append_event", side_effect=_append_silent_fail), \
              patch("agent_handoff_emitter.get_journal_path",
-                   return_value="/pact-test-session/session-journal.jsonl"), \
+                   return_value=WRITABLE_TEST_JOURNAL), \
              patch("sys.stdin", io.StringIO(json.dumps(payload))):
             with pytest.raises(SystemExit) as exc2:
                 main()

@@ -25,18 +25,20 @@ VALID_HANDOFF = {
     "open_questions": [],
 }
 
-# Non-empty sentinel for the in-hook get_journal_path() return. The path is
-# never written (append_event is spied), so any truthy value works — it only
-# needs to satisfy the #917 marker-claim writability gate
+# Shared non-empty sentinel for the in-hook get_journal_path() return (F2 —
+# the single source of truth, imported by every harness site + the
+# test-engineer regression test rather than re-literalled). The path is never
+# written (append_event is spied), so any truthy value works — it only needs to
+# satisfy the #917 marker-claim writability gate
 # (`if not get_journal_path(): defer`). Modelling a WRITABLE-journal b1 process
-# is the correct default for this helper: these tests assert b1's emit /
-# dedup / sanitization behaviour GIVEN that the canonical journal is writable
-# (the normal lead-or-resolvable-context fire). The journal-UNWRITABLE defer
-# path is exercised directly in test_handoff_writability_parity.py.
-_WRITABLE_JOURNAL_SENTINEL = "/pact-test-session/session-journal.jsonl"
+# is the correct default: these tests assert b1's emit / dedup / sanitization
+# behaviour GIVEN that the canonical journal is writable (the normal
+# lead-or-resolvable-context fire). The journal-UNWRITABLE defer path is
+# exercised directly in test_handoff_writability_parity.py.
+WRITABLE_TEST_JOURNAL = "/pact-test-session/session-journal.jsonl"
 
 
-def _run_main(stdin_payload, task_data, append_calls, journal_path=_WRITABLE_JOURNAL_SENTINEL):
+def _run_main(stdin_payload, task_data, append_calls, journal_path=WRITABLE_TEST_JOURNAL):
     """Invoke agent_handoff_emitter.main() with patched IO/deps.
 
     ``journal_path`` is the value the in-hook ``get_journal_path()`` returns

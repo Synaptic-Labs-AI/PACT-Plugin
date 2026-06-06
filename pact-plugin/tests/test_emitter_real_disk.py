@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
-from fixtures.emitter import VALID_HANDOFF, _run_main
+from fixtures.emitter import VALID_HANDOFF, WRITABLE_TEST_JOURNAL, _run_main
 
 
 # Verbatim 9-field stdin shape captured by 3 real-platform probes during #551
@@ -121,7 +121,7 @@ class TestRealDiskRead:
             # (read_task_json), not the journal write (spied). Model a writable
             # journal so the marker-claim writability gate passes.
             "agent_handoff_emitter.get_journal_path",
-            return_value="/pact-test-session/session-journal.jsonl",
+            return_value=WRITABLE_TEST_JOURNAL,
         ), patch("sys.stdin", io.StringIO(json.dumps({
             "session_id": "test-session-1",
             "hook_event_name": "TaskCompleted",
@@ -188,7 +188,7 @@ class TestRealDiskRead:
         ), patch(
             # #917: writable journal (real-disk fidelity is the task.json read).
             "agent_handoff_emitter.get_journal_path",
-            return_value="/pact-test-session/session-journal.jsonl",
+            return_value=WRITABLE_TEST_JOURNAL,
         ), patch("sys.stdin", io.StringIO(json.dumps({
             "session_id": "test-session-1",
             "hook_event_name": "TaskCompleted",
