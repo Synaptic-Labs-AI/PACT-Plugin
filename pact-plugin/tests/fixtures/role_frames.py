@@ -19,9 +19,11 @@ This module serves TWO frame sets, kept deliberately separate by provenance:
    TaskCompleted frames). Each frame carries its own ``_meta.capture_method``
    provenance. Absolute paths (``cwd`` / ``transcript_path``) are sanitized to
    ``<cwd>`` / ``<transcript_path>`` placeholders and the verbose
-   ``task_description`` / ``task_subject`` values are elided; the
-   role-discriminator shapes (``agent_type`` / ``session_id`` / ``team_name`` /
-   ``teammate_name``) are preserved verbatim because they are the point.
+   ``task_description`` value is elided (it is not read by the discriminator or
+   emit paths); ``task_subject`` is preserved verbatim (it is a load-bearing
+   input to the emit-path ``occupant_hash``). The role-discriminator shapes
+   (``agent_type`` / ``session_id`` / ``team_name`` / ``teammate_name``) are
+   preserved verbatim because they are the point.
 
 These captured frames are the committed source of ground truth for the
 discriminator tests and the #917 marker-poisoning regression - the raw capture
@@ -94,10 +96,11 @@ def postcompact_frame(agent_type, compact_summary="post-compaction summary text"
 # =============================================================================
 # CAPTURED (real) frames - promoted from the #812 empirical discriminator audit
 # (Claude Code 2.1.167, 2026-06-06). Provenance in each frame's _meta.
-# Absolute paths sanitized to <cwd> / <transcript_path>; verbose task text
-# elided; role-discriminator shapes preserved verbatim. Parsed from a verbatim
-# JSON blob (not hand-transcribed Python literals) so each frame stays byte-
-# faithful to its capture and is trivially diffable.
+# Absolute paths sanitized to <cwd> / <transcript_path>; task_description elided
+# (unread by the discriminator/emit paths); task_subject preserved (load-bearing
+# occupant_hash input); role-discriminator shapes preserved verbatim. Parsed
+# from a verbatim JSON blob (not hand-transcribed Python literals) so each frame
+# stays byte-faithful to its capture and is trivially diffable.
 # =============================================================================
 
 _CAPTURED_FRAMES_JSON = r'''
@@ -192,7 +195,7 @@ _CAPTURED_FRAMES_JSON = r'''
     "session_id": "e5e2be7d-84fb-4eb8-a932-1ca4557b4a43",
     "task_description": "<elided for fixture - not read by the discriminator or emit paths>",
     "task_id": "10",
-    "task_subject": "<elided for fixture>",
+    "task_subject": "architect: design #917 emit-path fix + #812 AC closures",
     "transcript_path": "<transcript_path>"
   },
   "lead_userpromptsubmit_qualified": {
@@ -266,7 +269,7 @@ _CAPTURED_FRAMES_JSON = r'''
     "session_id": "ce2de714-7b5c-48b5-a202-d6275bd5de47",
     "task_description": "<elided for fixture - not read by the discriminator or emit paths>",
     "task_id": "10",
-    "task_subject": "<elided for fixture>",
+    "task_subject": "architect: design #917 emit-path fix + #812 AC closures",
     "team_name": "pact-e5e2be7d",
     "teammate_name": "architect",
     "transcript_path": "<transcript_path>"
