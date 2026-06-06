@@ -320,6 +320,107 @@ class TestBothModesCaptured:
         )
 
 
+class TestReverseOrderingBenign:
+    """F1 completeness pins: the BENIGN reverse orderings — a LEGITIMATELY-claimed
+    marker (a writable fire that actually wrote) followed by an unwritable fire —
+    CANNOT poison.
+
+    These are deliberately NOT gate-coupled: already_emitted() would dedup the
+    second fire even without the writability gate, which is EXACTLY why the
+    reverse direction is safe. #917's poison requires the UNWRITABLE fire to come
+    FIRST and claim the marker before any successful write (the headline
+    SEQUENCE). Here the writable fire claims first, so the marker honestly
+    reflects a written event and the later unwritable fire (a) defers at its
+    writability gate and (b) could not corrupt the marker even if it reached
+    already_emitted(). These pin no-double-emit + marker-integrity for the two
+    orderings the headline SEQUENCE does not cover.
+
+    Writability is modeled NATURALLY (consistent with this file): a writable
+    process sets a resolvable pact_context; the unwritable process sets a context
+    whose team_name resolves (so the fire still reads the handoff and REACHES the
+    gate) but whose session_id is empty, so get_journal_path()=='' — the same
+    team-resolvable / journal-unresolvable split that defines the #917 hazard.
+    """
+
+    def test_writable_b1_then_unwritable_b2_cannot_poison(
+        self, tmp_path, monkeypatch, pact_context
+    ):
+        """(a) A writable b1 legitimately claims the marker + emits; a SUBSEQUENT
+        b2 in a journal-unwritable process DEFERS at the C2 gate without touching
+        the existing marker. Net: exactly ONE event, marker intact, no poison."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        teammate = captured_teammate_taskcompleted()
+        lead = captured_lead_posttooluse_taskupdate_completed()
+        subject = teammate["task_subject"]
+        occupant = occupant_hash(OWNER, subject)
+        task_data = _task_data(subject)
+        calls: list = []
+
+        # b1 WRITABLE → legitimate claim + emit
+        pact_context(team_name=TEAM, session_id=LEAD_SESSION)
+        _run_b1(teammate, task_data, calls, monkeypatch)
+        assert get_journal_path() != "", "b1 model check: writable"
+        assert _marker_files(tmp_path) == [f"{TASK_ID}-{occupant}"], "b1 claims the marker"
+        assert len(calls) == 1, "b1 emits once"
+
+        # b2 UNWRITABLE (team_name resolves so it reads the handoff + reaches the
+        # gate; session_id empty so the journal is unresolvable) → C2 defers
+        pact_context(team_name=TEAM, session_id="")
+        assert get_journal_path() == "", (
+            "b2 model check: journal unwritable while team still resolvable "
+            "(the #917 split)."
+        )
+        lead["tool_input"]["taskId"] = TASK_ID
+        _run_b2(lead, task_data, calls, monkeypatch)
+
+        assert len(calls) == 1, (
+            "the unwritable b2 must add NO event (C2 defer) — cannot poison a "
+            "legitimately-claimed marker."
+        )
+        assert _marker_files(tmp_path) == [f"{TASK_ID}-{occupant}"], (
+            "the legitimately-claimed marker is untouched by the deferred b2."
+        )
+
+    def test_writable_b2_then_unwritable_b1_cannot_poison(
+        self, tmp_path, monkeypatch, pact_context
+    ):
+        """(b) The realistic reverse of the #917 sequence: the lead's writable b2
+        emits + claims first (legitimate), THEN the platform Stop-sweep dispatches
+        an unwritable teammate b1 for the same task — it DEFERS at the C1 gate
+        (and already_emitted would dedup it anyway). Net: exactly ONE event,
+        marker intact, no poison."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        teammate = captured_teammate_taskcompleted()
+        lead = captured_lead_posttooluse_taskupdate_completed()
+        subject = teammate["task_subject"]
+        occupant = occupant_hash(OWNER, subject)
+        task_data = _task_data(subject)
+        calls: list = []
+
+        # b2 WRITABLE (lead) → legitimate claim + emit
+        pact_context(team_name=TEAM, session_id=LEAD_SESSION)
+        lead["tool_input"]["taskId"] = TASK_ID
+        _run_b2(lead, task_data, calls, monkeypatch)
+        assert _marker_files(tmp_path) == [f"{TASK_ID}-{occupant}"], "b2 claims the marker"
+        assert len(calls) == 1, "b2 emits once"
+
+        # b1 UNWRITABLE (teammate, unpersisted journal) for the SAME key → C1 defers
+        pact_context(team_name=TEAM, session_id="")
+        assert get_journal_path() == "", "b1 model check: journal unwritable"
+        _run_b1(teammate, task_data, calls, monkeypatch)
+
+        assert len(calls) == 1, (
+            "the unwritable b1 must add NO event (C1 defer) — a Stop-sweep "
+            "TaskCompleted arriving after the lead's legitimate emit cannot "
+            "poison."
+        )
+        assert _marker_files(tmp_path) == [f"{TASK_ID}-{occupant}"], (
+            "the legitimately-claimed marker is untouched by the deferred b1."
+        )
+
+
 class TestFixtureProvenance:
     """T7 — the captured fixtures carry auditable provenance and the synthetic
     placeholder has been retired (#880 no-synthetic-stdin)."""
