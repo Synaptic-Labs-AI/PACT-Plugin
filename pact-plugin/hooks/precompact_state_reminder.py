@@ -30,6 +30,7 @@ import json
 import sys
 from typing import Any
 
+from shared import pact_context
 from shared.error_output import hook_error_json
 from shared.session_state import summarize_session_state
 
@@ -135,11 +136,33 @@ def build_hook_output(
 
 def main():
     try:
-        # Consume stdin (PreCompact may provide transcript_path, etc.)
+        # Parse stdin (PreCompact provides session_id, transcript_path, etc.)
         try:
-            json.load(sys.stdin)
+            input_data = json.load(sys.stdin)
         except (json.JSONDecodeError, ValueError):
-            pass
+            input_data = {}
+
+        # Coerce non-dict JSON (null / [] / scalar) to {} so it degrades
+        # identically to the empty-dict path. A non-dict would otherwise make
+        # pact_context.init() raise AttributeError on .get() and route to the
+        # fail-open except (an error systemMessage); coercing here yields the
+        # normal empty-state reminder instead, and keeps non-dict handling
+        # consistent with the sibling compaction hook postcompact_archive.py
+        # (which guards isinstance(dict)). Production PreCompact stdin is
+        # always a JSON object, so this is defense-in-depth.
+        if not isinstance(input_data, dict):
+            input_data = {}
+
+        # Initialize session context BEFORE building output. Without this,
+        # build_hook_output() -> summarize_session_state() (called with no
+        # session_dir/team_name overrides) resolves scope from an
+        # uninitialized pact_context (empty team_name/session_dir), so the
+        # compaction reminder ships blank ("phase: unknown / agents: none
+        # found") on every compaction. init() stays inside the outer
+        # try/except as defense-in-depth for genuinely-unexpected errors;
+        # malformed/non-dict input_data is already coerced to {} above, so it
+        # no longer reaches the fail-open except path.
+        pact_context.init(input_data)
 
         output = build_hook_output()
         print(json.dumps(output))

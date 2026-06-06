@@ -16,6 +16,7 @@ Note: Disk state gathering (task analysis, team scanning) is tested in
 test_session_state.py since those functions now live in shared/session_state.py.
 """
 import json
+import os
 import subprocess
 import sys
 from io import StringIO
@@ -30,14 +31,25 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 HOOK_PATH = str(Path(__file__).parent.parent / "hooks" / "precompact_state_reminder.py")
 
 
-def run_hook(stdin_data: str | None = None) -> subprocess.CompletedProcess:
-    """Run the hook as a subprocess and return the result."""
+def run_hook(
+    stdin_data: str | None = None,
+    env: dict | None = None,
+) -> subprocess.CompletedProcess:
+    """Run the hook as a subprocess and return the result.
+
+    env: when provided, REPLACES the subprocess environment (pass a merged
+    {**os.environ, ...} to keep PATH etc.). Used by the context-init wiring
+    test to override HOME + CLAUDE_PROJECT_DIR so the hook resolves
+    on-disk fixtures under a temp tree instead of the real ~/.claude. When
+    None, the subprocess inherits the current environment (prior behavior).
+    """
     return subprocess.run(
         [sys.executable, HOOK_PATH],
         input=stdin_data or "",
         capture_output=True,
         text=True,
         timeout=10,
+        env=env,
     )
 
 
@@ -292,6 +304,153 @@ class TestPrecompactSubprocess:
 
 
 # ---------------------------------------------------------------------------
+# Context-init wiring (regression: hook must call pact_context.init)
+# ---------------------------------------------------------------------------
+
+
+class TestPrecompactContextInitWiring:
+    """Pin the pact_context.init() wiring in main().
+
+    Regression guard: main() must call pact_context.init(input_data) after
+    parsing stdin and before build_hook_output(). Without it,
+    build_hook_output() -> summarize_session_state() (invoked with no
+    session_dir/team_name overrides) resolves scope from an uninitialized
+    pact_context (empty team_name/session_dir), so the compaction reminder
+    ships blank ("Current phase: unknown / Active agents: none found") on
+    every compaction even with live teammates and an active phase.
+
+    This exercises the REAL main() -> pact_context.init -> summarize_session_state
+    path via subprocess: stdin carries session_id, and HOME +
+    CLAUDE_PROJECT_DIR are overridden so the hook resolves on-disk fixtures
+    under a temp tree (build_hook_output does not override the home-relative
+    teams/tasks base dirs, so the fixtures must live under the temp ~/.claude).
+    Neutering the init() call makes the teammate/phase assertions below fail.
+    """
+
+    def _build_session_fixture(self, home: Path, proj: Path) -> tuple[str, str]:
+        """Lay down the on-disk state the hook reads once init() resolves it.
+
+        Returns (session_id, team_name). Both use allowlist-only characters
+        so pact_context's sanitize-substitute leaves them unchanged and the
+        directories we create match the paths the hook resolves.
+        """
+        from shared.session_journal import make_event
+
+        slug = proj.name
+        session_id = "sess-913-wiring"
+        team_name = "pact-wiring913"
+
+        # Session-scoped context file: init() resolves _context_path to
+        # ~/.claude/pact-sessions/{slug}/{session_id}/pact-session-context.json
+        # from stdin session_id + CLAUDE_PROJECT_DIR; get_pact_context() then
+        # reads team_name/session_id from here.
+        session_dir = home / ".claude" / "pact-sessions" / slug / session_id
+        session_dir.mkdir(parents=True)
+        (session_dir / "pact-session-context.json").write_text(
+            json.dumps({
+                "team_name": team_name,
+                "session_id": session_id,
+                "project_dir": str(proj),
+                "plugin_root": "",
+                "started_at": "",
+            }),
+            encoding="utf-8",
+        )
+
+        # Session journal with an active (started, not completed) phase —
+        # summarize_session_state reads it from get_session_dir().
+        (session_dir / "session-journal.jsonl").write_text(
+            json.dumps(make_event(
+                "phase_transition", phase="CODE", status="started",
+                ts="2026-06-06T00:00:01Z",
+            )) + "\n",
+            encoding="utf-8",
+        )
+
+        # Team config with several members — summarize_session_state reads
+        # ~/.claude/teams/{team_name}/config.json (home-relative default).
+        team_dir = home / ".claude" / "teams" / team_name
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text(
+            json.dumps({
+                "name": team_name,
+                "members": [
+                    {"name": "frontend"},
+                    {"name": "backend"},
+                    {"name": "tester"},
+                ],
+            }),
+            encoding="utf-8",
+        )
+
+        return session_id, team_name
+
+    def test_init_wiring_surfaces_teammates_and_phase(self, tmp_path):
+        """custom_instructions must LIST the live teammates and active phase.
+
+        Asserts the reminder is NOT the empty-state default. This fails if
+        main() omits the pact_context.init(input_data) call (the #913 bug).
+        """
+        home = tmp_path / "home"
+        proj = tmp_path / "proj"
+        proj.mkdir(parents=True)
+        session_id, team_name = self._build_session_fixture(home, proj)
+
+        env = {
+            **os.environ,
+            "HOME": str(home),
+            "CLAUDE_PROJECT_DIR": str(proj),
+        }
+        result = run_hook(json.dumps({"session_id": session_id}), env=env)
+
+        assert result.returncode == 0
+        output = json.loads(result.stdout.strip())
+        ci = output["custom_instructions"]
+
+        # The active phase from the journal is surfaced (not "unknown").
+        assert "Current phase: CODE" in ci
+        assert "Current phase: unknown" not in ci
+
+        # Every live teammate is listed (not "none found").
+        assert "frontend" in ci
+        assert "backend" in ci
+        assert "tester" in ci
+        assert "none found" not in ci
+
+        # The resolved team name surfaces too — corroborates that
+        # get_team_name() (hence init()) resolved real context.
+        assert team_name in ci
+
+    def test_empty_stdin_with_init_still_fails_open(self, tmp_path):
+        """The new init() call must preserve fail-open on empty/no-context
+        stdin: no session_id -> _context_path stays None -> empty-state
+        reminder, exit 0, custom_instructions still emitted.
+
+        Runs under a temp HOME with NO fixtures so the hook cannot resolve
+        any context — the canonical "init() ran but session is unresolved"
+        path that must degrade gracefully rather than crash.
+        """
+        home = tmp_path / "home"
+        proj = tmp_path / "proj"
+        proj.mkdir(parents=True)
+        env = {
+            **os.environ,
+            "HOME": str(home),
+            "CLAUDE_PROJECT_DIR": str(proj),
+        }
+        # Empty JSON object: parses fine, init({}) finds no session_id and
+        # leaves _context_path None (no raise) -> empty-state reminder.
+        result = run_hook(json.dumps({}), env=env)
+
+        assert result.returncode == 0
+        output = json.loads(result.stdout.strip())
+        ci = output["custom_instructions"]
+        assert "CRITICAL CONTEXT" in ci
+        assert "none found" in ci  # no teammates resolvable
+        assert "systemMessage" not in output
+
+
+# ---------------------------------------------------------------------------
 # Fail-open tests
 # ---------------------------------------------------------------------------
 
@@ -316,10 +475,20 @@ class TestPrecompactFailOpen:
     def test_null_input_exits_zero(self):
         result = run_hook("null")
         assert result.returncode == 0
+        # Non-dict valid JSON coerces to {} -> empty-state reminder, NOT the
+        # fail-open error channel. (Pre-guard: init(None) raised -> systemMessage.)
+        output = json.loads(result.stdout.strip())
+        assert "custom_instructions" in output
+        assert "systemMessage" not in output
 
     def test_array_input_exits_zero(self):
         result = run_hook("[]")
         assert result.returncode == 0
+        # Non-dict valid JSON coerces to {} -> empty-state reminder, NOT the
+        # fail-open error channel. (Pre-guard: init([]) raised -> systemMessage.)
+        output = json.loads(result.stdout.strip())
+        assert "custom_instructions" in output
+        assert "systemMessage" not in output
 
     def test_disk_read_error_fails_open(self, tmp_path):
         """Unreadable tasks/teams dirs must not raise — build_hook_output
