@@ -313,8 +313,13 @@ def _emit_lead_side_agent_handoff(
             return
         if is_signal_task(task_metadata):
             return
+        # M1: handoff must be a dict (the journal schema requires it). A
+        # truthy-but-non-dict handoff (str/list) would pass a bare presence
+        # check, claim the O_EXCL marker, then FAIL append_event's schema
+        # validation — an orphaned/poisoned marker. isinstance makes a
+        # malformed handoff DEFER (claim nothing). Mirrors b1's gate.
         handoff = task_metadata.get("handoff")
-        if not handoff:
+        if not isinstance(handoff, dict) or not handoff:
             return
         # #917 symmetry: same writability precondition as b1
         # (agent_handoff_emitter). In the lead's gate process this is a no-op
@@ -324,6 +329,9 @@ def _emit_lead_side_agent_handoff(
         # reachable from a non-lead / unresolvable context cannot silently
         # claim-without-write and poison the shared marker. Pure read; the
         # mark-then-write order below is unchanged.
+        # F3: this gate is the TWIN of agent_handoff_emitter.main — keep both
+        # in parity. Mark-then-write / O_EXCL contract:
+        # shared/agent_handoff_marker.already_emitted.
         if not get_journal_path():
             return
         occupant = occupant_hash(owner, subject)

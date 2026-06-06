@@ -74,15 +74,16 @@ def _marker_files(home: Path) -> list[str]:
     return sorted(p.name for p in marker_dir.iterdir()) if marker_dir.exists() else []
 
 
-def _drive_b1(*, writable: bool, tmp_path: Path, monkeypatch, append_calls: list) -> None:
+def _drive_b1(*, writable: bool, tmp_path: Path, monkeypatch, append_calls: list, handoff=HANDOFF) -> None:
     """Fire b1 (agent_handoff_emitter.main) for one handoff-bearing completed
     TaskCompleted frame. `writable` controls the in-hook get_journal_path()
-    return ('' = unwritable). The real already_emitted runs under the patched
-    HOME; append_event is spied."""
+    return ('' = unwritable). `handoff` is the metadata.handoff value (default
+    a valid dict; pass a non-dict to exercise the M1 type gate). The real
+    already_emitted runs under the patched HOME; append_event is spied."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     journal = str(tmp_path / "session-journal.jsonl") if writable else ""
-    task_data = {"status": "completed", "owner": OWNER, "metadata": {"handoff": HANDOFF}}
+    task_data = {"status": "completed", "owner": OWNER, "metadata": {"handoff": handoff}}
     stdin = {
         "task_id": TASK_ID,
         "task_subject": SUBJECT,
@@ -101,17 +102,19 @@ def _drive_b1(*, writable: bool, tmp_path: Path, monkeypatch, append_calls: list
             b1.main()
 
 
-def _drive_b2(*, writable: bool, tmp_path: Path, monkeypatch, pact_context, append_calls: list) -> None:
+def _drive_b2(*, writable: bool, tmp_path: Path, monkeypatch, pact_context, append_calls: list, handoff=HANDOFF) -> None:
     """Fire b2 (_emit_lead_side_agent_handoff, reached via evaluate_lifecycle
     with a LEAD frame so is_lead is True). Same writability control + append
-    spy; the real already_emitted runs under the patched HOME."""
+    spy; `handoff` is the metadata.handoff value (default a valid dict; pass a
+    non-dict to exercise the M1 type gate). The real already_emitted runs under
+    the patched HOME."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     pact_context(team_name=TEAM, session_id="s1")
     journal = str(tmp_path / "session-journal.jsonl") if writable else ""
     monkeypatch.setattr(tlg, "get_journal_path", lambda: journal)
     monkeypatch.setattr(tlg, "append_event", lambda e: append_calls.append(e) or True)
-    task = {"id": TASK_ID, "subject": SUBJECT, "owner": OWNER, "metadata": {"handoff": HANDOFF}}
+    task = {"id": TASK_ID, "subject": SUBJECT, "owner": OWNER, "metadata": {"handoff": handoff}}
     tlg.evaluate_lifecycle({
         "agent_type": LEAD,
         "tool_name": "TaskUpdate",
@@ -123,13 +126,14 @@ def _drive_b2(*, writable: bool, tmp_path: Path, monkeypatch, pact_context, appe
 # Relational driver table: both emit paths exercised by the SAME assertions.
 # A param is (label, driver) where driver(writable, tmp_path, monkeypatch,
 # pact_context, append_calls) fires that path once.
-def _b1_driver(writable, tmp_path, monkeypatch, pact_context, append_calls):
-    _drive_b1(writable=writable, tmp_path=tmp_path, monkeypatch=monkeypatch, append_calls=append_calls)
+def _b1_driver(writable, tmp_path, monkeypatch, pact_context, append_calls, handoff=HANDOFF):
+    _drive_b1(writable=writable, tmp_path=tmp_path, monkeypatch=monkeypatch,
+              append_calls=append_calls, handoff=handoff)
 
 
-def _b2_driver(writable, tmp_path, monkeypatch, pact_context, append_calls):
+def _b2_driver(writable, tmp_path, monkeypatch, pact_context, append_calls, handoff=HANDOFF):
     _drive_b2(writable=writable, tmp_path=tmp_path, monkeypatch=monkeypatch,
-              pact_context=pact_context, append_calls=append_calls)
+              pact_context=pact_context, append_calls=append_calls, handoff=handoff)
 
 
 _PATHS = [("b1", _b1_driver), ("b2", _b2_driver)]
@@ -186,6 +190,45 @@ class TestWritabilityGateParity:
         assert len(calls) == 1, (
             f"{label}: a re-fire for the same occupant must dedup to one event "
             "(exactly-once must survive the new writability precondition)."
+        )
+
+
+# M1: truthy-but-non-dict handoff values that must DEFER. The journal schema
+# requires handoff to be a dict; without the isinstance gate any of these would
+# pass a bare presence check, claim the O_EXCL marker, then fail append_event's
+# schema validation — an orphaned/poisoned marker.
+_NON_DICT_HANDOFFS = [
+    ("string", "a handoff string"),
+    ("list", ["produced", "decisions"]),
+    ("int", 42),
+    ("bool", True),
+]
+
+
+class TestHandoffTypeGateParity:
+    """M1: a truthy-but-NON-DICT metadata.handoff must DEFER on BOTH paths —
+    claim NO marker, write NO event — exactly like the unwritable case. The
+    journal is WRITABLE here, so the ONLY defer cause under test is the handoff
+    TYPE (isolated from the #917 writability gate). The valid-dict positive
+    control is TestWritabilityGateParity::test_writable_fire_claims_marker_and_
+    emits_once, so this is not 'always suppress'. NON-VACUOUS: dropping the
+    isinstance(dict) guard lets the marker get claimed (file appears) and these
+    fail."""
+
+    @pytest.mark.parametrize("label,driver", _PATHS)
+    @pytest.mark.parametrize("kind,handoff", _NON_DICT_HANDOFFS)
+    def test_non_dict_handoff_defers_no_marker_no_event(
+        self, label, driver, kind, handoff, tmp_path, monkeypatch, pact_context
+    ):
+        calls: list = []
+        driver(True, tmp_path, monkeypatch, pact_context, calls, handoff=handoff)
+        assert _marker_files(tmp_path) == [], (
+            f"{label}: a non-dict handoff ({kind}) must claim NO marker — a "
+            "marker means the isinstance(dict) type gate is missing or runs "
+            "AFTER already_emitted (orphaned-marker poison, M1)."
+        )
+        assert calls == [], (
+            f"{label}: a non-dict handoff ({kind}) must write no event."
         )
 
 
