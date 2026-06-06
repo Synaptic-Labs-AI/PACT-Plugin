@@ -291,8 +291,14 @@ def _run_emitter(stdin_payload, task_data, append_calls, tmp_home, monkeypatch):
         append_calls.append(event)
         return True
 
+    # #917: model a WRITABLE-journal b1 process so the marker-claim
+    # writability gate passes (append_event is spied, so the path is never
+    # written — any truthy value satisfies the gate). The journal-unwritable
+    # defer path is covered in test_handoff_writability_parity.py.
     with patch("agent_handoff_emitter.read_task_json", return_value=task_data), \
          patch("agent_handoff_emitter.append_event", side_effect=_append_spy), \
+         patch("agent_handoff_emitter.get_journal_path",
+               return_value="/pact-test-session/session-journal.jsonl"), \
          patch("sys.stdin", io.StringIO(json.dumps(stdin_payload))):
         with pytest.raises(SystemExit) as exc_info:
             main()
@@ -628,9 +634,13 @@ class TestLayer4_CounterTestByRevert:
             "teammate_name": "test-agent",
             "team_name": "pact-counter",
         }
+        # #917: writable-journal b1 process (the gate is orthogonal to the
+        # status-gate this counter-test targets; append_event is spied).
         with patch("agent_handoff_emitter.read_task_json", return_value=completed_task), \
              patch("agent_handoff_emitter.append_event",
                    side_effect=lambda e: (calls.append(e), True)[1]), \
+             patch("agent_handoff_emitter.get_journal_path",
+                   return_value="/pact-test-session/session-journal.jsonl"), \
              patch("sys.stdin", io.StringIO(json.dumps(payload))):
             with pytest.raises(SystemExit):
                 main()
