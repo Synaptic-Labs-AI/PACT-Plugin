@@ -1817,14 +1817,17 @@ class TestLibraryModuleInitContract:
     """
 
     def test_task_utils_get_task_list_after_init(self, pact_context, monkeypatch, tmp_path):
-        """task_utils.get_task_list() should read session_id via get_session_id() after init()."""
+        """task_utils.get_task_list() should resolve team_name via get_team_name()
+        after init() (a team session reads ~/.claude/tasks/{team_name}/)."""
         from shared.task_utils import get_task_list
 
         session_id = "contract-test-session"
-        pact_context(session_id=session_id)
+        team_name = "test-team"
+        pact_context(session_id=session_id, team_name=team_name)
 
-        # Create a task file at the expected path so get_task_list finds it
-        tasks_dir = tmp_path / ".claude" / "tasks" / session_id
+        # Create a task file under the TEAM dir so get_task_list's team branch
+        # finds it (the fixture defaults team_name="test-team").
+        tasks_dir = tmp_path / ".claude" / "tasks" / team_name
         tasks_dir.mkdir(parents=True)
         task_file = tasks_dir / "1.json"
         task_file.write_text(json.dumps({

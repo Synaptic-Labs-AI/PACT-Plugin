@@ -39,8 +39,10 @@ class TestGetTaskList:
     """Tests for get_task_list() — filesystem-based task reading."""
 
     def test_returns_none_when_no_session_id(self, monkeypatch, pact_context):
+        # SOLO context (team_name="") so this exercises the REAL solo no-id
+        # guard, not a vacuous pass via the team-branch short-circuit.
         from task_utils import get_task_list
-        pact_context(session_id="")  # No session ID available
+        pact_context(session_id="", team_name="")  # No session ID, no team
         monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
         result = get_task_list()
         assert result is None
@@ -54,12 +56,14 @@ class TestGetTaskList:
         assert result is None
 
     def test_reads_tasks_from_filesystem(self, tmp_path, monkeypatch, pact_context):
+        # TEAM branch: the pact_context fixture defaults team_name="test-team",
+        # so a team session resolves tasks under {team_name}, not {session_id}.
         from task_utils import get_task_list
         pact_context(session_id="test-session")
         monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        tasks_dir = tmp_path / ".claude" / "tasks" / "test-session"
+        tasks_dir = tmp_path / ".claude" / "tasks" / "test-team"
         tasks_dir.mkdir(parents=True)
         write_task(tasks_dir, "1", {"subject": "Test task", "status": "pending"})
         write_task(tasks_dir, "2", {"subject": "Another task", "status": "in_progress"})
@@ -69,8 +73,12 @@ class TestGetTaskList:
         assert len(result) == 2
 
     def test_prefers_task_list_id_over_session_id(self, tmp_path, monkeypatch, pact_context):
+        # SOLO context (team_name=""): CLAUDE_CODE_TASK_LIST_ID is honored only
+        # in the solo branch (the team branch resolves by team_name and ignores
+        # the env var). Verifies the preserved solo env-var precedence + gives
+        # the solo branch positive real-resolver coverage.
         from task_utils import get_task_list
-        pact_context(session_id="session-id")
+        pact_context(session_id="session-id", team_name="")
         monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", "task-list-id")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
@@ -84,8 +92,11 @@ class TestGetTaskList:
         assert len(result) == 1
 
     def test_returns_none_for_empty_dir(self, tmp_path, monkeypatch, pact_context):
+        # SOLO context (team_name="") so the empty-dir->None path is exercised
+        # through the REAL solo resolver (session_id dir), not vacuously via the
+        # team-branch short-circuit.
         from task_utils import get_task_list
-        pact_context(session_id="test-session")
+        pact_context(session_id="test-session", team_name="")
         monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
@@ -96,12 +107,14 @@ class TestGetTaskList:
         assert result is None
 
     def test_skips_invalid_json_files(self, tmp_path, monkeypatch, pact_context):
+        # TEAM branch (default team_name="test-team"). iter_team_task_jsons
+        # skips the unparseable file the same way the solo glob did.
         from task_utils import get_task_list
         pact_context(session_id="test-session")
         monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        tasks_dir = tmp_path / ".claude" / "tasks" / "test-session"
+        tasks_dir = tmp_path / ".claude" / "tasks" / "test-team"
         tasks_dir.mkdir(parents=True)
         (tasks_dir / "bad.json").write_text("not json", encoding="utf-8")
         write_task(tasks_dir, "1", {"subject": "Good task", "status": "pending"})
@@ -111,8 +124,12 @@ class TestGetTaskList:
         assert len(result) == 1
 
     def test_returns_none_on_exception(self, tmp_path, monkeypatch, pact_context):
+        # SOLO context (team_name="") so the glob raises inside the solo
+        # branch's own try/except — the path this test targets. Under a team
+        # context the team branch would short-circuit before the patched glob,
+        # making the assertion vacuous.
         from task_utils import get_task_list
-        pact_context(session_id="test-session")
+        pact_context(session_id="test-session", team_name="")
         monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
@@ -122,6 +139,26 @@ class TestGetTaskList:
         with patch.object(Path, "glob", side_effect=PermissionError("denied")):
             result = get_task_list()
         assert result is None
+
+    def test_solo_resolves_tasks_by_session_id(self, tmp_path, monkeypatch, pact_context):
+        # Positive real-resolver coverage of the SOLO branch's bare-session_id
+        # path (no CLAUDE_CODE_TASK_LIST_ID): team_name="" routes to the solo
+        # branch, which must resolve ~/.claude/tasks/{session_id}/ and read it.
+        # Guards the preserved solo path the team-dir fix must NOT regress, and
+        # is non-vacuous (a team context would short-circuit before this path).
+        from task_utils import get_task_list
+        pact_context(session_id="solo-session", team_name="")
+        monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        tasks_dir = tmp_path / ".claude" / "tasks" / "solo-session"
+        tasks_dir.mkdir(parents=True)
+        write_task(tasks_dir, "1", {"subject": "Solo task", "status": "in_progress"})
+
+        result = get_task_list()
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["subject"] == "Solo task"
 
 
 # ---------------------------------------------------------------------------

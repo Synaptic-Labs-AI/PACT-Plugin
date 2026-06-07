@@ -4,9 +4,11 @@ Summary: Shared Task system integration utilities for PACT hooks.
 Used by: session_init.py, agent_handoff_emitter.py
 
 This module provides common functions for reading and analyzing Tasks from
-the Claude Task system. Tasks are stored at ~/.claude/tasks/{sessionId}/*.json
-and survive context compaction, making them the primary state source for
-workflow recovery.
+the Claude Task system. Tasks live under one of two storage topologies, keyed
+on a structural signal (team_name): a TEAM session stores tasks at
+~/.claude/tasks/{team_name}/*.json, a SOLO/no-team session at
+~/.claude/tasks/{session_id}/*.json. They survive context compaction, making
+them the primary state source for workflow recovery.
 
 Functions:
     get_task_list: Read all tasks from the Task system
@@ -25,20 +27,47 @@ import re
 from pathlib import Path
 from typing import Any, Iterator
 
-from shared.pact_context import get_session_id
+from shared.pact_context import get_session_id, get_team_name
 from shared.session_state import is_safe_path_component
 
 
-def get_task_list() -> list[dict[str, Any]] | None:
+def get_task_list(tasks_base_dir: str | None = None) -> list[dict[str, Any]] | None:
     """
     Read TaskList from the Claude Task system.
 
-    Tasks are stored at ~/.claude/tasks/{sessionId}/*.json and survive compaction.
-    This function reads directly from the filesystem since hooks cannot call Task tools.
+    Two live storage topologies, keyed on a structural signal (team_name):
+      - TEAM session -> tasks under ~/.claude/tasks/{team_name}/   (Agent Teams)
+      - SOLO session -> tasks under ~/.claude/tasks/{session_id}/  (no team)
+    team_name is mode-independent (resolves identically under in-process and
+    tmux), so the team branch needs no teammateMode detection. This function
+    reads directly from the filesystem since hooks cannot call Task tools.
+
+    Args:
+        tasks_base_dir: Override for the ~/.claude/tasks base dir (testing only;
+            production default None resolves the real home path). Mirrors the
+            institutional test seam in _read_task_counts / read_task_json.
 
     Returns:
         List of task dicts, or None if tasks unavailable
     """
+    # TEAM branch (the team-dir resolution fix): a team session stores tasks
+    # under {team_name}, NOT the bare session_id. Reuse the path-traversal-safe
+    # SSOT reader. An empty/absent team dir returns None and MUST NOT fall
+    # through to the solo session_id dir: a team session with no tasks yet is
+    # still a team session (branch key = "is this a team session?", not "did the
+    # team dir have tasks?"). The return lives INSIDE the `if` to guarantee that
+    # invariant — control never reaches the solo branch when team_name is truthy.
+    team_name = get_team_name()
+    if team_name:
+        tasks = list(iter_team_task_jsons(team_name, tasks_base_dir=tasks_base_dir))
+        return tasks if tasks else None
+
+    # SOLO / no-team branch: the existing resolution, preserved. The
+    # CLAUDE_CODE_TASK_LIST_ID-or-session_id key choice and the raw glob are kept
+    # verbatim — the env var is user-controlled and may hold a value the
+    # validated team reader would reject, so the solo path is deliberately NOT
+    # routed through iter_team_task_jsons. Only the base root is parameterized
+    # (for the test seam); resolution semantics are unchanged from before.
     session_id = get_session_id()
     # Also check for multi-session task list ID
     task_list_id = os.environ.get("CLAUDE_CODE_TASK_LIST_ID", session_id)
@@ -46,7 +75,8 @@ def get_task_list() -> list[dict[str, Any]] | None:
     if not task_list_id:
         return None
 
-    tasks_dir = Path.home() / ".claude" / "tasks" / task_list_id
+    base = Path(tasks_base_dir) if tasks_base_dir else (Path.home() / ".claude" / "tasks")
+    tasks_dir = base / task_list_id
     if not tasks_dir.exists():
         return None
 
@@ -267,7 +297,10 @@ def build_post_compaction_checkpoint(
     return "\n".join(lines)
 
 
-def iter_team_task_jsons(team_name: str) -> Iterator[dict]:
+def iter_team_task_jsons(
+    team_name: str,
+    tasks_base_dir: str | None = None,
+) -> Iterator[dict]:
     """
     Yield parsed task JSON dicts from ~/.claude/tasks/{team_name}/*.json.
 
@@ -278,6 +311,14 @@ def iter_team_task_jsons(team_name: str) -> Iterator[dict]:
         separators, controls, whitespace).
       - tasks_root resolved once; team_dir resolved and asserted under
         tasks_root via relative_to (symlink-escape defense).
+
+    Args:
+        team_name: Team identifier; the {team_name} path component.
+        tasks_base_dir: Override for the ~/.claude/tasks base dir (testing
+            only; production default None resolves the real home path). The
+            symlink-escape relative_to assertion still anchors to this base,
+            so the path-traversal defense holds for any base. Mirrors the
+            institutional test seam in _read_task_counts / read_task_json.
 
     Pure generator; never raises. Yields nothing on any error
     (unsafe team_name, missing dir, symlink escape, IO error). Individual
@@ -291,7 +332,8 @@ def iter_team_task_jsons(team_name: str) -> Iterator[dict]:
     if not is_safe_path_component(team_name):
         return
     try:
-        tasks_root = (Path.home() / ".claude" / "tasks").resolve()
+        base = Path(tasks_base_dir) if tasks_base_dir else (Path.home() / ".claude" / "tasks")
+        tasks_root = base.resolve()
     except OSError:
         return
     team_dir = tasks_root / team_name

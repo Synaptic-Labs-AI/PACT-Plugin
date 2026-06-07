@@ -2942,15 +2942,20 @@ class TestSessionStartSourceField:
 
 @pytest.fixture
 def _compact_tasks_dir(tmp_path, monkeypatch, pact_context):
-    """Create a real ~/.claude/tasks/{session_id}/ under tmp_path and
+    """Create a real ~/.claude/tasks/{team_name}/ under tmp_path and
     route session_init's Path.home() to tmp_path. Yields the tasks dir
-    so each test can drop task JSON files into it. The session_id
-    matches the stdin session_id used by the migrated tests below.
+    so each test can drop task JSON files into it.
+
+    Post team-dir-resolution fix: session_init runs in a team context, so
+    get_task_list resolves tasks under {team_name} (pact-aabb1122 — matching
+    the team config the compact-branch tests create). The session_id still
+    matches the stdin session_id used by the tests below.
     """
     session_id = "aabb1122-0000-0000-0000-000000000000"
-    tasks_dir = tmp_path / ".claude" / "tasks" / session_id
+    team_name = "pact-aabb1122"
+    tasks_dir = tmp_path / ".claude" / "tasks" / team_name
     tasks_dir.mkdir(parents=True)
-    pact_context(session_id=session_id)
+    pact_context(session_id=session_id, team_name=team_name)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     return tasks_dir
@@ -4837,7 +4842,8 @@ class TestSessionInitCompactBranchExceptions:
         from session_init import main
 
         session_id = "aabb1122-0000-0000-0000-000000000000"
-        pact_context(session_id=session_id)
+        team_name = "pact-aabb1122"
+        pact_context(session_id=session_id, team_name=team_name)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
@@ -4848,8 +4854,9 @@ class TestSessionInitCompactBranchExceptions:
         # Put an in_progress task on disk so the 5 downstream helpers are
         # actually reached — without it, the `if _in_progress` gate short-
         # circuits and find_feature_task / find_current_phase / etc. never
-        # fire, making their parametrize cases vacuously pass.
-        tasks_dir = tmp_path / ".claude" / "tasks" / session_id
+        # fire, making their parametrize cases vacuously pass. Team session →
+        # tasks resolve under {team_name} (the team-dir resolution fix).
+        tasks_dir = tmp_path / ".claude" / "tasks" / team_name
         tasks_dir.mkdir(parents=True)
         (tasks_dir / "f-1.json").write_text(json.dumps({
             "id": "f-1",
@@ -5044,7 +5051,8 @@ class TestSessionInitDirectiveAcrossAllSources:
         from session_init import main
 
         session_id = "aabb1122-0000-0000-0000-000000000000"
-        pact_context(session_id=session_id)
+        team_name = "pact-aabb1122"
+        pact_context(session_id=session_id, team_name=team_name)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
@@ -5052,7 +5060,8 @@ class TestSessionInitDirectiveAcrossAllSources:
         team_dir.mkdir(parents=True, exist_ok=True)
         (team_dir / "config.json").write_text('{"members": []}')
 
-        tasks_dir = tmp_path / ".claude" / "tasks" / session_id
+        # Team session → tasks resolve under {team_name} (team-dir fix).
+        tasks_dir = tmp_path / ".claude" / "tasks" / team_name
         tasks_dir.mkdir(parents=True)
         feature = {
             "id": "f-order",

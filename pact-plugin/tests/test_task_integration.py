@@ -31,15 +31,21 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 @pytest.fixture
 def mock_tasks_dir(tmp_path: Path, monkeypatch, pact_context):
     """
-    Create mock ~/.claude/tasks/{sessionId}/ structure.
+    Create mock ~/.claude/tasks/{team_name}/ structure.
+
+    Post team-dir-resolution fix: a team session (team_name truthy) resolves
+    tasks under {team_name}, so the fixture builds the team-named dir and sets
+    a matching team_name on the context. Tests writing JSON into the returned
+    dir exercise the real team branch of get_task_list.
 
     Returns:
-        Path to the tasks directory for the test session
+        Path to the tasks directory for the test team
     """
     session_id = "test-session-123"
-    tasks_dir = tmp_path / ".claude" / "tasks" / session_id
+    team_name = "test-team"
+    tasks_dir = tmp_path / ".claude" / "tasks" / team_name
     tasks_dir.mkdir(parents=True)
-    pact_context(session_id=session_id)
+    pact_context(session_id=session_id, team_name=team_name)
     monkeypatch.setenv("HOME", str(tmp_path))
 
     # Patch Path.home() to return our temp directory
@@ -182,11 +188,16 @@ class TestGetTaskList:
         assert result[0]["subject"] == "Valid task"
 
     def test_returns_none_when_session_id_not_set(self, tmp_path, monkeypatch, pact_context):
-        """Test returns None when session ID is not available."""
+        """Test returns None when session ID is not available.
+
+        Solo context (team_name="") so this exercises the REAL solo branch's
+        no-id guard rather than passing vacuously via the team-branch
+        short-circuit. Real-resolver coverage of the preserved solo path.
+        """
         from shared.task_utils import get_task_list
 
-        # Set up pact_context with empty session_id
-        pact_context(session_id="")
+        # Set up pact_context with empty session_id AND empty team_name (solo)
+        pact_context(session_id="", team_name="")
         monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
@@ -195,14 +206,21 @@ class TestGetTaskList:
         assert result is None
 
     def test_uses_task_list_id_when_provided(self, tmp_path, monkeypatch, make_task, pact_context):
-        """Test uses CLAUDE_CODE_TASK_LIST_ID when available."""
+        """Test uses CLAUDE_CODE_TASK_LIST_ID when available.
+
+        CLAUDE_CODE_TASK_LIST_ID is honored in the SOLO branch (the team
+        branch ignores it — team sessions resolve by team_name). So this test
+        runs in a solo context (team_name="") to exercise the preserved
+        env-var precedence. Doubles as real-resolver coverage of the solo
+        branch (the path the team-dir fix must NOT regress).
+        """
         from shared.task_utils import get_task_list
 
         # Setup with different session_id and task_list_id
         session_id = "session-abc"
         task_list_id = "shared-task-list-xyz"
 
-        pact_context(session_id=session_id)
+        pact_context(session_id=session_id, team_name="")
         monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", task_list_id)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
