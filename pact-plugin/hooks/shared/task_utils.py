@@ -65,12 +65,15 @@ def get_task_list(tasks_base_dir: str | None = None) -> list[dict[str, Any]] | N
         return tasks if tasks else None
 
     # SOLO / no-team branch: the CLAUDE_CODE_TASK_LIST_ID-or-session_id key
-    # choice and the raw glob are preserved — the solo path keeps its own glob
-    # rather than being routed through iter_team_task_jsons (it does NOT adopt
-    # that reader's resolve/relative_to/symlink pipeline). Only the base root is
-    # parameterized (test seam); the user-controlled task_list_id is now
-    # validated via is_safe_path_component before use — symmetric with the team
-    # branch (see the F2 guard below) — so a traversal value is rejected.
+    # choice is preserved, and the dir is read by this branch's own direct glob
+    # (NOT routed through iter_team_task_jsons) — but with the SAME path-safety
+    # defenses applied INLINE: is_safe_path_component on the name (F2 guard
+    # below), a resolve/relative_to base-anchor on the dir, and a per-file
+    # is_symlink skip (R3). The solo branch is therefore NOT raw/unvalidated: it
+    # has defense PARITY with the team branch (component-validation + anchor +
+    # symlink-skip), just implemented inline. Surgical-inline duplication (NOT a
+    # shared-helper refactor) is the accepted trade-off to avoid touching the
+    # working/tested team path. Only the base root is parameterized (test seam).
     session_id = get_session_id()
     # Also check for multi-session task list ID
     task_list_id = os.environ.get("CLAUDE_CODE_TASK_LIST_ID", session_id)
@@ -95,12 +98,32 @@ def get_task_list(tasks_base_dir: str | None = None) -> list[dict[str, Any]] | N
 
     base = Path(tasks_base_dir) if tasks_base_dir else (Path.home() / ".claude" / "tasks")
     tasks_dir = base / task_list_id
+
+    # R3 (security): the {task_list_id} dir could itself be a SYMLINK that
+    # escapes the tasks base. is_safe_path_component (above) rejects '../' in the
+    # NAME, but not a safe-NAME dir that resolves out-of-base via a symlink.
+    # Mirror the team branch's anchor (iter_team_task_jsons): resolve the dir and
+    # assert it stays under the resolved base. A legit (non-symlink) dir resolves
+    # to itself and passes unchanged; only an escaping symlink-dir is rejected.
+    try:
+        tasks_dir.resolve().relative_to(base.resolve())
+    except (OSError, ValueError):
+        return None
+
     if not tasks_dir.exists():
         return None
 
     tasks = []
     try:
         for task_file in tasks_dir.glob("*.json"):
+            # R3 (security): skip a *.json that is a SYMLINK — it could point
+            # outside the tasks base. Mirrors the team branch's per-file
+            # is_symlink skip; real task files are regular files, unaffected.
+            try:
+                if task_file.is_symlink():
+                    continue
+            except OSError:
+                continue
             try:
                 content = task_file.read_text(encoding='utf-8')
                 task = json.loads(content)

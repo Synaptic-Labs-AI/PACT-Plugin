@@ -201,6 +201,54 @@ class TestGetTaskList:
         assert result is not None and len(result) == 1
         assert result[0]["subject"] == "Legit"
 
+    def test_solo_skips_symlinked_json_file(self, tmp_path, monkeypatch, pact_context):
+        # R3 (security): a *.json INSIDE the (legit) tasks dir that is a SYMLINK
+        # to a file OUTSIDE the base must be SKIPPED, not followed-and-read.
+        # NON-VACUOUS: the symlink targets a planted out-of-base secret; WITHOUT
+        # the per-file is_symlink skip the glob follows it and reads LEAKED. The
+        # defense skips it; only the real (regular-file) task is returned.
+        from task_utils import get_task_list
+        pact_context(session_id="session-id", team_name="")
+        base = tmp_path / "tasks"
+        tdir = base / "solo-x"
+        tdir.mkdir(parents=True)
+        secret = tmp_path / "secret.json"  # OUTSIDE base
+        secret.write_text(json.dumps({"id": "leak", "subject": "LEAKED"}), encoding="utf-8")
+        write_task(tdir, "1", {"subject": "Real", "status": "in_progress"})
+        (tdir / "leak.json").symlink_to(secret)
+        monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", "solo-x")
+        result = get_task_list(tasks_base_dir=str(base))
+        subjects = {t["subject"] for t in (result or [])}
+        assert "LEAKED" not in subjects, (
+            "a symlinked *.json pointing outside the base must be SKIPPED, not "
+            "read — without the is_symlink skip the glob follows it -> LEAKED"
+        )
+        assert subjects == {"Real"}
+
+    def test_solo_rejects_symlink_dir_escaping_base(self, tmp_path, monkeypatch, pact_context):
+        # R3 (security): a {task_list_id} dir that is itself a SYMLINK escaping
+        # the base must yield None — the resolve/relative_to anchor rejects it.
+        # The NAME passes is_safe_path_component (safe component); the escape is
+        # via the symlink TARGET. NON-VACUOUS: without the anchor, exists()
+        # follows the symlink and the glob reads the planted out-of-base secret.
+        from task_utils import get_task_list
+        pact_context(session_id="session-id", team_name="")
+        base = tmp_path / "tasks"
+        base.mkdir(parents=True)
+        outside = tmp_path / "escapedir"  # OUTSIDE base
+        outside.mkdir()
+        (outside / "secret.json").write_text(
+            json.dumps({"id": "leak", "subject": "LEAKED"}), encoding="utf-8"
+        )
+        (base / "evil-link").symlink_to(outside, target_is_directory=True)
+        monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", "evil-link")
+        result = get_task_list(tasks_base_dir=str(base))
+        assert result is None, (
+            "a {task_list_id} dir that is a symlink escaping the base must be "
+            "rejected by the resolve/relative_to anchor -> None (without it, "
+            "exists() follows the symlink and the glob reads the out-of-base secret)"
+        )
+
 
 # ---------------------------------------------------------------------------
 # find_feature_task
