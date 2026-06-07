@@ -41,6 +41,14 @@ Sections-passed denominator is 4 per runbook §5 (§1, §2, §3, §4). The inlin
 
 Sections-passed denominator is 3 per runbook (standard-teammate first-action; secretary register-before-briefing; registry-non-empty assertion). The inline-mission mode column does not apply (`n/a`). Unlike the post-merge runbooks above, this is a **PRE-merge overlay smoke** — the empirical gate the LEG-4 NO-GO requires before this PR merges. If any section is RED, apply an architecture-doc §8.6 contingency and do **not** merge. The overlay revert (§Step 5) is mandatory regardless of outcome.
 
+## 923-missed-wake-live-probe.md
+
+| Run date (UTC) | Operator | Plugin version | Sections passed | inline-mission mode | Notes / per-mode observations |
+| -------------- | -------- | -------------- | --------------- | ------------------- | -------------------------------- |
+| _pending — execute POST-merge in fresh sessions (tmux mandatory; in-process real-or-synthetic)_ | | | /2 | n/a | tmux live-probe: SURFACE (§2a) PASS/FAIL · FORENSIC exactly-one (§2b) PASS/FAIL · PERSISTENT+DEDUP (§2c) PASS/FAIL · AUTO-CLEAR (§2d) PASS/FAIL · teammate_idle 2nd-bug fires (§2 Step 5) PASS/FAIL · CONTINGENCY tripwire CLAUDE_CODE_TASK_LIST_ID unset (§2 Step 6) PASS/FAIL. in-process live-probe: same six (real preferred / faithful-synthetic fallback). |
+
+Sections-passed denominator is 2 per runbook §4 (tmux live-probe; in-process live-probe), each gated on all of §2 (a)+(b)+(c)+(d)+Step 5 with the Step 6 tripwire clear. The inline-mission mode column does not apply (`n/a`). Unlike a pre-merge overlay smoke, this is the **POST-merge acceptance gate** — a green suite does NOT close #923; the tmux live-probe is mandatory. If tmux is RED, re-open and route back to the resolver. If the Step 6 tripwire finds `CLAUDE_CODE_TASK_LIST_ID` SET in a team session, HALT + architect escalation (Design A/B divergence, devops contingency C).
+
 ## v4.0.0-launch-and-isolation.md
 
 | Run date (UTC) | Operator | Plugin version | Sections passed | Notes / fallback-ladder signals |
