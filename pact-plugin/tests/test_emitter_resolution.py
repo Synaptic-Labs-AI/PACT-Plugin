@@ -72,10 +72,17 @@ class TestTeammateNamePrecedence:
     def test_owner_whitespace_only_is_treated_as_falsy(
         self, tmp_path, monkeypatch
     ):
-        """Whitespace-only owner — Python `or` treats non-empty strings
-        as truthy, so '   ' would pass. This test pins the CURRENT
-        behavior: whitespace owner IS used as agent name. If we want
-        stricter validation (strip+empty check), that's a follow-up.
+        """#917 R2 (validate-before-claim): a whitespace-only owner is treated
+        as ABSENT, so the stdin teammate_name fallback preserves the handoff.
+
+        A whitespace-only owner ('   ') fails the journal's non-empty-str
+        `agent` schema (session_journal._validate_event_schema). Before R2 it
+        was truthy in Python's `or`, so it both masked the valid stdin name AND
+        would claim the O_EXCL marker then fail append_event — the
+        claim-without-write poison the v4.4.10 writability gate only narrowed.
+        R2 nulls a whitespace owner so resolution falls through to the valid
+        stdin teammate_name and emits with THAT name (preservation-optimal),
+        rather than poisoning or losing the handoff.
         """
         monkeypatch.setenv("HOME", str(tmp_path))
         calls = []
@@ -88,18 +95,18 @@ class TestTeammateNamePrecedence:
             },
             task_data={
                 "status": "completed",
-                "owner": "   ",  # whitespace-only but truthy in Python
+                "owner": "   ",  # whitespace-only → treated as absent (R2)
                 "metadata": {"handoff": VALID_HANDOFF},
             },
             append_calls=calls,
         )
-        # Current behavior: whitespace-only is truthy; it wins over stdin
-        # teammate_name. This pins the CURRENT contract — if a future
-        # hardening wants strict validation, update this test.
+        # R2: whitespace owner is treated as falsy → falls back to the valid
+        # stdin teammate_name; the handoff is preserved under "proper-agent".
         assert len(calls) == 1
-        assert calls[0]["agent"] == "   ", (
-            "whitespace-only owner IS currently truthy; this test pins "
-            "that behavior. If stricter validation lands, update here."
+        assert calls[0]["agent"] == "proper-agent", (
+            "whitespace-only owner is treated as absent (R2); resolution "
+            "falls back to the stdin teammate_name rather than emitting a "
+            "schema-invalid whitespace agent (which would poison the marker)."
         )
 
 class TestFallbackFieldStderr:

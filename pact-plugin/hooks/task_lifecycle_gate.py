@@ -112,6 +112,7 @@ try:
         already_emitted,
         is_signal_task,
         occupant_hash,
+        unclaim,
     )
     from shared.dispatch_helpers import trustworthy_actor_name
     from shared.intentional_wait import is_self_complete_exempt, is_teachback_exempt
@@ -309,7 +310,11 @@ def _emit_lead_side_agent_handoff(
     try:
         # Emit-eligibility (mirrors b1). owner-empty / teachback / signal-task
         # / handoff-absent all suppress, same as the emitter's bypass gates.
-        if not owner or _is_teachback_subject(subject):
+        # #917 R2 (validate-before-claim): also reject a WHITESPACE-only owner —
+        # it passes a bare falsy check but FAILS the journal's non-empty-str
+        # `agent` schema, so it would claim the O_EXCL marker then fail
+        # append_event (claim-without-write poison). Mirrors b1's owner guard.
+        if not owner or not owner.strip() or _is_teachback_subject(subject):
             return
         if is_signal_task(task_metadata):
             return
@@ -321,6 +326,14 @@ def _emit_lead_side_agent_handoff(
         handoff = task_metadata.get("handoff")
         if not isinstance(handoff, dict) or not handoff:
             return
+        # #917 R2 (validate-before-claim): substitute the sentinel for a
+        # whitespace-only / empty subject (mirrors b1's falsy+whitespace
+        # substitution) so a degenerate subject is schema-valid BEFORE the
+        # claim rather than poisoning the marker. _is_teachback_subject above
+        # already ran on the original subject (a blank subject is not a
+        # teachback), so substituting here does not change the teachback gate.
+        if not subject or not subject.strip():
+            subject = "(no subject)"
         # #917 symmetry: same writability precondition as b1
         # (agent_handoff_emitter). In the lead's gate process this is a no-op
         # (the lead's context is persisted -> get_journal_path() resolves), but
@@ -337,15 +350,27 @@ def _emit_lead_side_agent_handoff(
         occupant = occupant_hash(owner, subject)
         if already_emitted(team_name, task_id, occupant):
             return
-        append_event(
-            make_event(
-                "agent_handoff",
-                agent=owner,
-                task_id=task_id,
-                task_subject=subject,
-                handoff=handoff,
+        # #917 R1 (compensating-unclaim): we OWN the marker here (already_emitted
+        # returned False = fresh O_EXCL claim). Roll the claim back if the write
+        # returns False (schema rejection / unwritable dir — the residual paths
+        # the writability gate does NOT cover) OR raises, so a later writable
+        # fire can re-emit instead of being permanently suppressed by the
+        # poisoned marker. Best-effort + fail-safe (worst case reverts to
+        # today's behavior). F3 twin of agent_handoff_emitter.main.
+        try:
+            written = append_event(
+                make_event(
+                    "agent_handoff",
+                    agent=owner,
+                    task_id=task_id,
+                    task_subject=subject,
+                    handoff=handoff,
+                )
             )
-        )
+        except Exception:
+            written = False
+        if not written:
+            unclaim(team_name, task_id, occupant)
     except Exception:
         # Fail-open: a journal-emit failure must never break the gate's
         # advisory evaluation or its exit-0 contract.

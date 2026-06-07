@@ -70,6 +70,7 @@ from shared.agent_handoff_marker import (
     is_signal_task,
     occupant_hash,
     sanitize_path_component,
+    unclaim,
 )
 from shared.pact_context import get_team_name
 from shared.session_journal import append_event, get_journal_path, make_event
@@ -123,9 +124,20 @@ def main() -> None:
         raw_task_id = input_data.get("task_id")
         raw_task_subject = input_data.get("task_subject")
         task_id_was_missing = not raw_task_id
-        task_subject_was_missing = not raw_task_subject
+        # #917 R2 (validate-before-claim): treat a WHITESPACE-only subject as
+        # missing, not just a falsy one. The journal schema rejects empty /
+        # whitespace-only str fields (session_journal._validate_event_schema),
+        # so a "   " subject would pass this bare-falsy check, claim the O_EXCL
+        # marker, then FAIL append_event — the claim-without-write poison the
+        # writability gate only NARROWED. Substituting the sentinel here makes
+        # the subject deterministically schema-valid before the claim.
+        task_subject_was_missing = not (
+            raw_task_subject and str(raw_task_subject).strip()
+        )
         task_id = raw_task_id or "unknown"
-        task_subject = raw_task_subject or "(no subject)"
+        task_subject = (
+            raw_task_subject if not task_subject_was_missing else "(no subject)"
+        )
 
         # Sanitize path-joining components symmetrically with
         # task_utils.read_task_json. task_id and team_name both flow into
@@ -143,10 +155,20 @@ def main() -> None:
         # Owner field (set at dispatch) is the authoritative "agent completed
         # this task" signal. Platform-provided teammate_name is fallback for
         # tasks without an owner (e.g. direct Agent dispatches).
-        teammate_name = task_data.get("owner") or input_data.get("teammate_name")
-        if not teammate_name:
-            # Non-agent completion (feature task, infrastructure task, etc.).
-            # No HANDOFF to persist.
+        # #917 R2 (validate-before-claim): a WHITESPACE-only owner is not a valid
+        # agent name — it fails the journal's non-empty-str `agent` schema
+        # (session_journal._validate_event_schema) and would claim the O_EXCL
+        # marker then fail append_event (the claim-without-write poison the
+        # writability gate only narrowed). Treat it as ABSENT so the stdin
+        # teammate_name fallback can still preserve the handoff; suppress only
+        # when NEITHER source yields a non-whitespace name.
+        owner_value = task_data.get("owner")
+        if isinstance(owner_value, str) and not owner_value.strip():
+            owner_value = None
+        teammate_name = owner_value or input_data.get("teammate_name")
+        if not teammate_name or not str(teammate_name).strip():
+            # Non-agent completion (feature/infra task) OR no valid (non-
+            # whitespace) agent name from either source — no HANDOFF to persist.
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
@@ -226,9 +248,11 @@ def main() -> None:
         # Idempotency guard — suppress duplicate fires for the same
         # (team, task_id, occupant). The marker is created ONLY when
         # handoff-presence is verified above; the optimistic ordering (marker
-        # created before append_event completes) trades one rare write-failure
-        # event loss against repeated duplicate emission (see
-        # shared.agent_handoff_marker.already_emitted for empirical basis).
+        # created before append_event completes) is now made safe by the #917
+        # R1 compensating-unclaim below: a write that fails rolls the claim back
+        # so a later writable/valid fire can re-emit. (Concurrency dedup is
+        # preserved — the claim is still taken FIRST, so two simultaneous fires
+        # cannot both write; only the loser-on-write rolls back its own marker.)
         #
         # Fix B (#887): occupant-identity marker key. A re-scoped subject →
         # one extra emit (biases to HANDOFF preservation, never loss).
@@ -256,15 +280,29 @@ def main() -> None:
         # TestStdinShapePin asserts no leakage of session_id /
         # transcript_path / cwd / hook_event_name / team_name /
         # teammate_name / task_description into the event.
-        append_event(
-            make_event(
-                "agent_handoff",
-                agent=teammate_name,
-                task_id=task_id,
-                task_subject=task_subject,
-                handoff=handoff,
-            ),
-        )
+        #
+        # #917 R1 (compensating-unclaim): we OWN the marker here (already_emitted
+        # returned False = a fresh O_EXCL claim). If the write returns False
+        # (schema rejection, or a resolvable-but-unwritable journal dir — the
+        # residual paths the writability gate does NOT cover) OR raises, roll the
+        # claim back so a later writable/valid fire can re-emit instead of being
+        # permanently suppressed by the poisoned marker. Best-effort + fail-safe:
+        # worst case the marker persists (today's pre-R1 behavior). F3 twin:
+        # mirror this in task_lifecycle_gate._emit_lead_side_agent_handoff.
+        try:
+            written = append_event(
+                make_event(
+                    "agent_handoff",
+                    agent=teammate_name,
+                    task_id=task_id,
+                    task_subject=task_subject,
+                    handoff=handoff,
+                ),
+            )
+        except Exception:
+            written = False
+        if not written:
+            unclaim(team_name, task_id, occupant)
 
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)

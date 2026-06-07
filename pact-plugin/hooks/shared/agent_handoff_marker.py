@@ -3,7 +3,10 @@
 Location: pact-plugin/hooks/shared/agent_handoff_marker.py
 Summary: SSOT for agent_handoff emission — the shape-agnostic emit-eligibility
          atom (is_signal_task) + occupant-identity marker key derivation +
-         the O_EXCL test-and-set. Imported by BOTH agent_handoff emit paths
+         the O_EXCL test-and-set (already_emitted) + the compensating-unclaim
+         rollback (unclaim, #901) that removes a marker whose journal write
+         failed, both resolving the marker path via one SSOT derivation.
+         Imported by BOTH agent_handoff emit paths
          so they derive the SAME emit decision and the SAME marker key and
          dedup to exactly one agent_handoff event per (team, task_id,
          occupant):
@@ -132,34 +135,29 @@ def _marker_dir(team_name: str) -> Path:
     return Path.home() / ".claude" / "teams" / team_name / ".agent_handoff_emitted"
 
 
-def already_emitted(team_name: str, task_id: str, occupant: str) -> bool:
+def _resolve_marker_target(
+    team_name: str, task_id: str, occupant: str
+) -> "tuple[int | None, str | None]":
     """
-    Test-and-set the per-(team, task_id, occupant) marker.
+    Sanitize + validate + pin the marker directory; return the open directory
+    descriptor and the marker filename for the O_EXCL test-and-set.
 
-    Returns True iff a prior fire for the same key already created the marker
-    (caller should suppress the journal write). Returns False on fresh fires —
-    the marker is created as a side-effect of this call, making the
-    test-and-set atomic at the kernel level (O_CREAT | O_EXCL).
+    SSOT for the marker path derivation (#901): BOTH already_emitted() (the
+    optimistic CLAIM) and unclaim() (the compensating ROLLBACK) resolve the
+    marker target through THIS one function, so the claim and the rollback can
+    never reference divergent paths. Divergent path-reconstruction across two
+    sites is the #877/#878 parallel-path-rot class — a single derivation makes
+    alignment structural rather than a convention two sites must each remember.
 
-    Marker filename: f"{task_id}-{occupant}" (occupant-identity keyed, #887).
+    Returns (dir_fd, filename) on success — the caller MUST os.close(dir_fd).
+    Returns (None, None) on any degenerate-key / symlink / containment /
+    resolution failure; the caller fail-opens (already_emitted → emit;
+    unclaim → no-op).
 
-    Inputs are sanitized internally (idempotent for already-clean callers like
-    the emitter, which pre-sanitizes task_id/team_name for its read_task_json
-    path) so a caller that has NOT pre-sanitized (the #869 lead-side gate)
-    cannot drive raw traversal fragments into the marker join.
-
-    Fail-open: on any OSError other than EEXIST (permission denied, ENOSPC,
-    filesystem race), returns False so the caller emits the event anyway.
-    Data-integrity (preserving the HANDOFF in the journal) outweighs
-    duplication-prevention when the marker subsystem itself breaks; worst case
-    the caller falls back to per-fire emission for this one task.
-
-    Graceful-degrade caveat: a pre-existing non-symlink file at the marker
-    path (manually created, or stale state surviving an unclean cleanup) also
-    returns True via EEXIST and suppresses emission permanently for that key —
-    the O_EXCL test cannot distinguish "prior fire owns it" from "external
-    file was placed here." Acceptable trade-off versus read-the-file-to-verify
-    (which races and complicates the atomic test-and-set).
+    The returned dir_fd pins marker_dir by descriptor (opened with
+    O_DIRECTORY|O_NOFOLLOW) so the caller's create/unlink, performed RELATIVE
+    to the fd, cannot be redirected through a symlinked directory swapped in
+    after this resolution.
     """
     # Centralized normalization (SSOT): case-fold + sanitize team_name HERE so
     # every caller derives a BYTE-IDENTICAL marker dir regardless of what it
@@ -182,8 +180,8 @@ def already_emitted(team_name: str, task_id: str, occupant: str) -> bool:
     # file) — but the task_id guard is retained for defense + behavioral
     # parity with the pre-occupant key, and a missing occupant (only possible
     # if a caller bypasses occupant_hash()) is treated as "no valid key".
-    # In every degenerate case: emit rather than suppress (accept the rare
-    # duplication risk over silent event loss).
+    # In every degenerate case: signal "no valid target" so the caller
+    # fail-opens (already_emitted emits rather than suppresses; unclaim no-ops).
     if (
         not team_name
         or team_name in (".", "..")
@@ -191,7 +189,7 @@ def already_emitted(team_name: str, task_id: str, occupant: str) -> bool:
         or task_id in (".", "..")
         or not occupant
     ):
-        return False
+        return None, None
 
     marker_dir = _marker_dir(team_name)
     # Symlink-containment pre-check: if marker_dir already exists as a
@@ -199,12 +197,12 @@ def already_emitted(team_name: str, task_id: str, occupant: str) -> bool:
     # creation outside the team directory). Fail-open emit rather than risk
     # writing to an attacker-controlled location.
     if marker_dir.is_symlink():
-        return False
+        return None, None
     try:
         marker_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     except OSError:
         # Directory creation failed; fall back to fail-open (emit).
-        return False
+        return None, None
 
     # TOCTOU containment re-check (closes the window between the is_symlink()
     # pre-check above and this mkdir): a symlink race could swap marker_dir
@@ -215,16 +213,16 @@ def already_emitted(team_name: str, task_id: str, occupant: str) -> bool:
     # /teams/foobar prefix-collision) is the robust containment test; chosen
     # over Path.is_relative_to because pyproject pins requires-python >=3.7
     # and is_relative_to is 3.9+. On breach OR any resolution error: fail-open
-    # emit (return False) WITHOUT writing a marker at the escaped path —
+    # emit (return None) WITHOUT writing a marker at the escaped path —
     # consistent with the is_symlink() pre-check's fail-open posture.
     team_base = Path.home() / ".claude" / "teams" / team_name
     try:
         real_marker = os.path.realpath(marker_dir)
         real_base = os.path.realpath(team_base)
         if os.path.commonpath([real_marker, real_base]) != real_base:
-            return False
+            return None, None
     except (OSError, ValueError):
-        return False
+        return None, None
 
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     # Intermediate-dir TOCTOU close-out. O_NOFOLLOW on the marker FILE guards
@@ -245,10 +243,52 @@ def already_emitted(team_name: str, task_id: str, occupant: str) -> bool:
         dir_fd = os.open(str(marker_dir), dir_flags)
     except OSError:
         # Symlinked / vanished marker_dir → fail-open emit, no marker write.
+        return None, None
+    return dir_fd, f"{task_id}-{occupant}"
+
+
+def already_emitted(team_name: str, task_id: str, occupant: str) -> bool:
+    """
+    Test-and-set the per-(team, task_id, occupant) marker.
+
+    Returns True iff a prior fire for the same key already created the marker
+    (caller should suppress the journal write). Returns False on fresh fires —
+    the marker is created as a side-effect of this call, making the
+    test-and-set atomic at the kernel level (O_CREAT | O_EXCL).
+
+    Marker filename: f"{task_id}-{occupant}" (occupant-identity keyed, #887).
+
+    Inputs are sanitized internally (idempotent for already-clean callers like
+    the emitter, which pre-sanitizes task_id/team_name for its read_task_json
+    path) so a caller that has NOT pre-sanitized (the #869 lead-side gate)
+    cannot drive raw traversal fragments into the marker join. The
+    sanitization + containment + dir_fd pinning is shared with unclaim() via
+    _resolve_marker_target() so the CLAIM and the compensating ROLLBACK can
+    never diverge (#901).
+
+    Fail-open: on any OSError other than EEXIST (permission denied, ENOSPC,
+    filesystem race), returns False so the caller emits the event anyway.
+    Data-integrity (preserving the HANDOFF in the journal) outweighs
+    duplication-prevention when the marker subsystem itself breaks; worst case
+    the caller falls back to per-fire emission for this one task.
+
+    Graceful-degrade caveat: a pre-existing non-symlink file at the marker
+    path (manually created, or stale state surviving an unclean cleanup) also
+    returns True via EEXIST and suppresses emission permanently for that key —
+    the O_EXCL test cannot distinguish "prior fire owns it" from "external
+    file was placed here." Acceptable trade-off versus read-the-file-to-verify
+    (which races and complicates the atomic test-and-set). The #901
+    compensating-unclaim closes the OTHER suppression source (a marker this
+    process claimed but whose journal write then failed) — see unclaim().
+    """
+    dir_fd, filename = _resolve_marker_target(team_name, task_id, occupant)
+    if dir_fd is None:
+        # Degenerate key / symlink-guarded / unresolvable → fail-open emit.
         return False
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(
-            f"{task_id}-{occupant}",
+            filename,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
             0o600,
             dir_fd=dir_fd,
@@ -259,5 +299,42 @@ def already_emitted(team_name: str, task_id: str, occupant: str) -> bool:
         if e.errno == errno.EEXIST:
             return True  # prior fire owns the marker; suppress
         return False  # any other error (incl. ELOOP) → fail-open, emit anyway
+    finally:
+        os.close(dir_fd)
+
+
+def unclaim(team_name: str, task_id: str, occupant: str) -> None:
+    """
+    Compensating rollback (#901, R1) — remove the marker THIS process just
+    created when the subsequent journal write FAILED (append_event returned
+    False or raised). Without it, the optimistic O_EXCL claim is poisoned:
+    the marker exists but no journal entry was written, so already_emitted()
+    suppresses every later fire for the key forever (the silent-permanent-loss
+    residual the writability gate only narrowed, not closed).
+
+    Caller contract: invoke ONLY when this process OWNS the marker — i.e.
+    already_emitted() returned False on THIS fire (a fresh O_EXCL create).
+    Calling it after a True (prior-fire-owns) result could remove a marker a
+    different fire legitimately owns; the b1/b2 call sites honor this by
+    unclaiming exclusively on the not-already-emitted → write-failed path.
+
+    Resolves the marker target through the SAME _resolve_marker_target() SSOT
+    as already_emitted(), so the unlink can never target a path that diverges
+    from the claim, and removes the marker RELATIVE to the pinned dir_fd
+    (mirrors the create's symlink-safety: directory identity held by the
+    descriptor, not re-resolved by path).
+
+    Fail-SAFE: any error (including the marker already gone) is swallowed.
+    Worst case the marker persists and behavior reverts to today's (a poisoned
+    marker) — strictly no worse than not having the rollback. Never raises.
+    """
+    dir_fd, filename = _resolve_marker_target(team_name, task_id, occupant)
+    if dir_fd is None:
+        return
+    try:
+        os.unlink(filename, dir_fd=dir_fd)
+    except OSError:
+        # Marker already removed, vanished dir, or permission — best-effort.
+        pass
     finally:
         os.close(dir_fd)
