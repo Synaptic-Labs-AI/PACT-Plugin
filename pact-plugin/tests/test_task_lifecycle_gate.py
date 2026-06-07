@@ -3315,3 +3315,57 @@ def test_906_no_advisory_when_lead_reaffirms_authored_value(
     assert not any(r == "audit_summary_overwrite" for r, _ in advisories), (
         f"lead re-affirming the authored verdict is not an overwrite; got: {advisories}"
     )
+
+
+# =============================================================================
+# M2 (security #38) — NUL-byte taskId advisory-suppression DoS closure
+#
+# A NUL byte in tool_input.taskId reaches read_task_json's task_file.exists(),
+# which raises ValueError('embedded null byte'). Before the fix that propagated
+# to main()'s catch-all → _emit_load_failure_advisory → rule enforcement skipped
+# for the turn. read_task_json now catches ValueError (degrade to {}), and the
+# two writeback helpers sanitize via sanitize_path_component (strip C0/\x00).
+# =============================================================================
+
+
+def test_M2_value_error_in_task_read_does_not_suppress_gate(
+    tmp_path, monkeypatch, pact_context
+):
+    """End-to-end: a task-file stat that raises ValueError (the NUL-byte
+    exists() raise on a vulnerable Python) must NOT propagate out of
+    evaluate_lifecycle — else it reaches main()'s catch-all and skips rule
+    enforcement for the turn (advisory-suppression DoS). The fix in
+    read_task_json degrades the read to {}.
+
+    Determinism: exists()'s NUL behavior is Python-version-dependent (3.14
+    returns False), so we FORCE the raise via a conditional exists() that raises
+    ONLY for the NUL-containing task file — leaving the pact_context context-file
+    read (no NUL) unaffected, so team_name still resolves and the #906 read path
+    is genuinely reached. This is RED-on-revert: drop ValueError from
+    read_task_json's except and evaluate_lifecycle propagates the ValueError.
+    """
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _real_exists = Path.exists
+
+    def _conditional_exists(self):
+        if "\x00" in str(self):
+            raise ValueError("embedded null byte")
+        return _real_exists(self)
+
+    monkeypatch.setattr(Path, "exists", _conditional_exists)
+    payload = {
+        "tool_name": "TaskUpdate",
+        "agent_type": "pact-orchestrator",
+        "tool_input": {
+            "taskId": "9\x00x",
+            "metadata": {"audit_summary": {"signal": "GREEN"}},
+        },
+        "tool_response": {},
+    }
+    # Must return a list (no exception). Before the fix this propagated ValueError.
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert isinstance(advisories, list)
+    assert not any(r == "audit_summary_overwrite" for r, _ in advisories), (
+        "NUL-byte taskId read degraded to {} → no authored mirror → no overwrite fire"
+    )

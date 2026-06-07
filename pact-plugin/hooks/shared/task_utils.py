@@ -372,10 +372,17 @@ def read_task_json(
 
     for task_dir in task_dirs:
         task_file = task_dir / f"{task_id}.json"
-        if task_file.exists():
-            try:
+        # M2 (security): exists() is INSIDE the try and ValueError is caught.
+        # A NUL byte in task_id that slips past the sanitizer raises
+        # ValueError('embedded null byte') from the path syscall in exists();
+        # catching it degrades to the fail-open {} (same as a missing/malformed
+        # file) instead of propagating to a caller's catch-all — e.g. the
+        # lifecycle gate, where an uncaught exception skips rule enforcement for
+        # the turn (advisory-suppression DoS).
+        try:
+            if task_file.exists():
                 return json.loads(task_file.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, IOError):
-                return {}
+        except (json.JSONDecodeError, IOError, ValueError):
+            return {}
 
     return {}

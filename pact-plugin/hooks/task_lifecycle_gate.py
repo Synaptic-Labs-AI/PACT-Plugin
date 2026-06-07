@@ -112,6 +112,7 @@ try:
         already_emitted,
         is_signal_task,
         occupant_hash,
+        sanitize_path_component,
         unclaim,
     )
     from shared.dispatch_helpers import trustworthy_actor_name
@@ -232,7 +233,12 @@ def _writeback_dispute(task_id: str) -> bool:
     """
     if not task_id or not isinstance(task_id, str):
         return False
-    sanitized_id = re.sub(r"[/\\]|\.\.", "", task_id)
+    # M2 (security): sanitize_path_component strips C0 / \x00 control chars too —
+    # a bare `re.sub(r'[/\\]|\.\.')` lets a NUL byte through to task_file.exists(),
+    # which raises an uncaught ValueError ('embedded null byte') that propagates to
+    # the gate catch-all and suppresses rule-enforcement for the turn (advisory-
+    # suppression DoS). read_task_json's ValueError catch backstops other callers.
+    sanitized_id = sanitize_path_component(task_id)
     if not sanitized_id:
         return False
     try:
@@ -327,7 +333,12 @@ def _writeback_audit_recovery(task_id: str, updates: dict) -> bool:
     """
     if not task_id or not isinstance(task_id, str):
         return False
-    sanitized_id = re.sub(r"[/\\]|\.\.", "", task_id)
+    # M2 (security): sanitize_path_component strips C0 / \x00 control chars too —
+    # a bare `re.sub(r'[/\\]|\.\.')` lets a NUL byte through to task_file.exists(),
+    # which raises an uncaught ValueError ('embedded null byte') that propagates to
+    # the gate catch-all and suppresses rule-enforcement for the turn (advisory-
+    # suppression DoS). read_task_json's ValueError catch backstops other callers.
+    sanitized_id = sanitize_path_component(task_id)
     if not sanitized_id:
         return False
     try:
