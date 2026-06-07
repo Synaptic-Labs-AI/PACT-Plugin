@@ -407,22 +407,33 @@ class TestLayer2_RuntimeEmissionBounds:
 
 
 # ---------------------------------------------------------------------------
-# Layer 3 — hooks.json config invariants (_REMOVED_HOOK_BASENAMES + Stop absence)
+# Layer 3 — hooks.json config invariants (_REMOVED_HOOK_BASENAMES + Stop carrier)
 # ---------------------------------------------------------------------------
 
 class TestLayer3_HooksJsonInvariants:
     """Config-level assertions — every hook in _REMOVED_HOOK_BASENAMES MUST
-    be absent from every command string, Stop event key MUST be absent,
+    be absent from every command string, Stop MUST bind only to
+    missed_wake_scan.py (the #903 missed-wake carrier),
     TaskCompleted
     MUST bind to agent_handoff_emitter.py, TeammateIdle MUST bind only
     to teammate_idle.py."""
 
-    def test_stop_event_key_absent(self):
+    def test_stop_event_binds_only_to_missed_wake_scan(self):
+        """Stop is the #903 deferred missed-wake carrier: the lead's turn-end
+        Stop fires the lead-side stale-wait scan (the carrier sweep ratified
+        Stop because the LEAD's own Stop fires lead-process in BOTH topologies,
+        independent of teammate presence). It must bind ONLY to
+        missed_wake_scan.py — any other Stop handler is an unreviewed addition
+        that could reintroduce a livelock-capable per-Stop emission. (This
+        supersedes the earlier 'no bare Stop' premise that the carrier sweep
+        corrected.)
+        """
         hooks_config = _load_hooks_json()
-        assert "Stop" not in hooks_config.get("hooks", {}), (
-            "Stop event key must be dropped entirely per plan v2 §C2b; "
-            "devops verified the empty-block form is not a runtime-safe "
-            "alternative and the key must not exist."
+        paths = _hook_script_paths_for_event(hooks_config, "Stop")
+        basenames = sorted(p.name for p in paths)
+        assert basenames == ["missed_wake_scan.py"], (
+            f"Stop must bind only to missed_wake_scan.py (the #903 carrier); "
+            f"got {basenames}."
         )
 
     @pytest.mark.parametrize("removed_hook", _REMOVED_HOOK_BASENAMES)

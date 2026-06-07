@@ -123,6 +123,16 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
         "task_subject": str,
         "handoff": dict,
     },
+    # hooks/missed_wake_scan.py writes missed_wake (the #903 deferred
+    # missed-wake alarm) with task_id, agent (the idle teammate / task owner),
+    # and since (the intentional_wait timestamp — also the re-arm discriminator
+    # for the per-(team,task_id,since) marker). All three are load-bearing:
+    # which task is stuck, who is waiting, and since when.
+    "missed_wake": {
+        "task_id": str,
+        "agent": str,
+        "since": str,
+    },
     # commands/orchestrate.md writes s2_state_seeded with worktree (quoted
     # string), agents (JSON list), and boundaries (JSON object → dict).
     # No hook-based writer; CLI-only event.
@@ -234,6 +244,16 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
         "pass": int,
         "task_count": int,
         "memories_saved": int,
+    },
+    # hooks/missed_wake_scan.py writes missed_wake with optional task_subject
+    # (human-readable task label) and reason (the intentional_wait reason —
+    # always "awaiting_lead_completion" for this alarm, recorded for journal
+    # readers). The required-fields registration above ("missed_wake": {...})
+    # is what ACTIVATES this optional check — _validate_event_schema
+    # short-circuits on unknown types and would otherwise skip the optional loop.
+    "missed_wake": {
+        "task_subject": str,
+        "reason": str,
     },
 }
 

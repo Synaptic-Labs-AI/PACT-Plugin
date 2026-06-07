@@ -398,42 +398,56 @@ class TestBootstrapGateInvariants:
 
 
 class TestSessionStartCardinality:
-    """Post-#444 SessionStart registration invariant.
+    """SessionStart registration invariant.
 
     Before #444, SessionStart had two entries: session_init.py and
     compaction_refresh.py. The Secondary-layer consolidation folded the
     post-compaction checkpoint logic into session_init.py's source=compact
-    branch and deleted compaction_refresh.py. SessionStart now has exactly
-    one entry. A second entry (accidental restoration OR new hook addition)
-    could interact with session_init's state-reset logic in subtle ways:
-    - Ordering: Claude Code runs SessionStart hooks sequentially; a second
-      hook's stdin consumption could starve session_init or vice versa.
-    - Marker races: bootstrap_marker cleanup in session_init assumes it is
-      the sole writer to additionalContext on source=compact.
-    - Context budget: each hook's additionalContext counts against the
-      same budget; duplicate PACT ROLE markers or overlapping directives
-      would violate the single-source-of-truth invariant.
-    Pin the cardinality so a new hook addition is a conscious decision,
-    not a silent merge.
+    branch and deleted compaction_refresh.py — leaving session_init.py the
+    sole entry.
+
+    The #903 deferred missed-wake alarm then ADDED missed_wake_scan.py as a
+    SessionStart recovery backstop (it scans for cross-session stale
+    awaiting_lead_completion waits at session start). SessionStart now has
+    exactly TWO entries, in order: session_init.py then missed_wake_scan.py.
+    The original cardinality concerns are satisfied because missed_wake_scan.py
+    is journal-only:
+    - Ordering / stdin: Claude Code runs SessionStart hooks sequentially, but
+      each is a SEPARATE process with its own stdin copy — no starvation
+      between session_init and missed_wake_scan. session_init runs first.
+    - Marker / additionalContext races: missed_wake_scan emits NO
+      additionalContext (it returns suppressOutput and writes only a journal
+      event), so it does not touch session_init's bootstrap_marker /
+      additionalContext single-source-of-truth on source=compact.
+    - Context budget: missed_wake_scan contributes no additionalContext, so the
+      budget invariant is preserved.
+    Pin the exact set + order so any FURTHER hook addition is a conscious
+    decision, not a silent merge.
     """
 
-    def test_session_start_has_exactly_one_hook(self, hooks_config):
-        """SessionStart must have exactly one entry post-#444
-        (compaction_refresh.py was consolidated into session_init.py).
+    def test_session_start_registration(self, hooks_config):
+        """SessionStart must have exactly two entries, in order:
+        session_init.py (state-reset) then missed_wake_scan.py
+        (the #903 missed-wake recovery backstop).
         """
         session_start = hooks_config["hooks"].get("SessionStart", [])
-        assert len(session_start) == 1, (
-            "SessionStart must have exactly one entry post-#444 "
-            "(compaction_refresh.py was consolidated into session_init.py). "
-            "A second entry indicates either accidental restoration or new "
-            "hook addition that may interact with session_init's state-reset "
-            "logic."
+        assert len(session_start) == 2, (
+            "SessionStart must have exactly two entries: session_init.py and "
+            "missed_wake_scan.py (the #903 missed-wake recovery backstop). A "
+            "different count indicates accidental restoration or a new hook "
+            "addition that may interact with session_init's state-reset logic."
         )
-        assert len(session_start[0]["hooks"]) == 1, (
-            "SessionStart's sole entry must contain exactly one hook command."
-        )
+        for entry in session_start:
+            assert len(entry["hooks"]) == 1, (
+                "Each SessionStart entry must contain exactly one hook command."
+            )
         assert "session_init.py" in session_start[0]["hooks"][0]["command"], (
-            "SessionStart's sole hook must be session_init.py."
+            "SessionStart's first hook must be session_init.py "
+            "(runs before the #903 backstop)."
+        )
+        assert "missed_wake_scan.py" in session_start[1]["hooks"][0]["command"], (
+            "SessionStart's second hook must be missed_wake_scan.py "
+            "(the #903 missed-wake recovery backstop)."
         )
 
 

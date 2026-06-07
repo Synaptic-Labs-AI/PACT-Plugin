@@ -26,6 +26,14 @@
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/session_init.py\""
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/missed_wake_scan.py\""
+          }
+        ]
       }
     ],
     "PreCompact": [
@@ -107,6 +115,16 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/validate_handoff.py\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/missed_wake_scan.py\""
           }
         ]
       }

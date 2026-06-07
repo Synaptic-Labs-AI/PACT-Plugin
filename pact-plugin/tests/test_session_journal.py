@@ -3213,6 +3213,11 @@ class TestValidateEventSchemaPerType:
             "task_subject": "CODE: thing",
             "handoff": {"decisions": ["x"]},
         },
+        "missed_wake": {
+            "agent": "devops",
+            "task_id": "1",
+            "since": "2026-01-01T00:00:00+00:00",
+        },
         "s2_state_seeded": {
             "worktree": "/tmp/wt",
             "agents": ["c1", "c2"],
