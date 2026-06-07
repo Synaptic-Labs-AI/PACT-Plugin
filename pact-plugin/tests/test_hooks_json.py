@@ -451,6 +451,43 @@ class TestSessionStartCardinality:
         )
 
 
+class TestMissedWakeSurfacerRegistration:
+    """#903 B1 remediation: the missed-wake SURFACER (missed_wake_scan.py) binds
+    UserPromptSubmit (turn-start additionalContext) + SessionStart (cross-session
+    recovery) — the record-only Stop carrier was DROPPED (Stop fired at turn-END
+    and could only suppressOutput, so it never surfaced). Pins the post-B1
+    registration so a regression to the record-only Stop shape is caught."""
+
+    def test_missed_wake_scan_on_user_prompt_submit(self, hooks_config):
+        commands = [
+            c["command"]
+            for entry in hooks_config["hooks"].get("UserPromptSubmit", [])
+            for c in entry["hooks"]
+        ]
+        assert any("missed_wake_scan.py" in c for c in commands), (
+            "missed_wake_scan.py must be registered under UserPromptSubmit "
+            "(the #903 B1 turn-start surfacer)."
+        )
+
+    def test_missed_wake_scan_on_session_start(self, hooks_config):
+        commands = [
+            c["command"]
+            for entry in hooks_config["hooks"].get("SessionStart", [])
+            for c in entry["hooks"]
+        ]
+        assert any("missed_wake_scan.py" in c for c in commands), (
+            "missed_wake_scan.py must be registered under SessionStart "
+            "(the #903 cross-session recovery backstop)."
+        )
+
+    def test_stop_event_not_registered(self, hooks_config):
+        assert "Stop" not in hooks_config["hooks"], (
+            "Stop must NOT be registered — the #903 record-only Stop carrier was "
+            "dropped in the B1 surfacing remediation; UserPromptSubmit + "
+            "SessionStart now carry the surfacer."
+        )
+
+
 class TestSpawnToolMatchersPost662:
     """#662: matcher='Agent' on team_guard; the
     'TaskCreate|TaskUpdate' Cat-2 matcher (now on task_lifecycle_gate) is

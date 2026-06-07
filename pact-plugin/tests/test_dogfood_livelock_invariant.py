@@ -407,33 +407,40 @@ class TestLayer2_RuntimeEmissionBounds:
 
 
 # ---------------------------------------------------------------------------
-# Layer 3 — hooks.json config invariants (_REMOVED_HOOK_BASENAMES + Stop carrier)
+# Layer 3 — hooks.json config invariants (_REMOVED_HOOK_BASENAMES +
+# UserPromptSubmit missed-wake surfacer)
 # ---------------------------------------------------------------------------
 
 class TestLayer3_HooksJsonInvariants:
     """Config-level assertions — every hook in _REMOVED_HOOK_BASENAMES MUST
-    be absent from every command string, Stop MUST bind only to
-    missed_wake_scan.py (the #903 missed-wake carrier),
+    be absent from every command string, UserPromptSubmit MUST bind
+    missed_wake_scan.py (the #903 missed-wake surfacer),
     TaskCompleted
     MUST bind to agent_handoff_emitter.py, TeammateIdle MUST bind only
     to teammate_idle.py."""
 
-    def test_stop_event_binds_only_to_missed_wake_scan(self):
-        """Stop is the #903 deferred missed-wake carrier: the lead's turn-end
-        Stop fires the lead-side stale-wait scan (the carrier sweep ratified
-        Stop because the LEAD's own Stop fires lead-process in BOTH topologies,
-        independent of teammate presence). It must bind ONLY to
-        missed_wake_scan.py — any other Stop handler is an unreviewed addition
-        that could reintroduce a livelock-capable per-Stop emission. (This
-        supersedes the earlier 'no bare Stop' premise that the carrier sweep
-        corrected.)
+    def test_userpromptsubmit_binds_missed_wake_scan(self):
+        """#903 missed-wake SURFACER: the lead-side stale-wait scan surfaces via
+        UserPromptSubmit additionalContext (turn-START, lead-injectable) — the B1
+        remediation that replaced the record-only Stop carrier (Stop fired at
+        turn-END and could only suppressOutput, so it recorded but never
+        surfaced). missed_wake_scan.py MUST be among the UserPromptSubmit hooks;
+        Stop MUST NOT be registered (the record-only Stop path was dropped, which
+        also dissolved the Stop empirical-grounding row).
         """
         hooks_config = _load_hooks_json()
-        paths = _hook_script_paths_for_event(hooks_config, "Stop")
-        basenames = sorted(p.name for p in paths)
-        assert basenames == ["missed_wake_scan.py"], (
-            f"Stop must bind only to missed_wake_scan.py (the #903 carrier); "
-            f"got {basenames}."
+        assert "Stop" not in hooks_config.get("hooks", {}), (
+            "Stop must NOT be registered — the #903 record-only Stop carrier was "
+            "dropped in the B1 surfacing remediation; UserPromptSubmit + "
+            "SessionStart now carry the surfacer."
+        )
+        ups_basenames = {
+            p.name
+            for p in _hook_script_paths_for_event(hooks_config, "UserPromptSubmit")
+        }
+        assert "missed_wake_scan.py" in ups_basenames, (
+            f"UserPromptSubmit must bind missed_wake_scan.py (the #903 surfacer); "
+            f"got {sorted(ups_basenames)}."
         )
 
     @pytest.mark.parametrize("removed_hook", _REMOVED_HOOK_BASENAMES)

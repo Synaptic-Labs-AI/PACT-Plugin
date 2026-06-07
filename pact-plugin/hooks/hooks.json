@@ -16,6 +16,14 @@
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/bootstrap_prompt_gate.py\""
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/missed_wake_scan.py\""
+          }
+        ]
       }
     ],
     "SessionStart": [
@@ -115,16 +123,6 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/validate_handoff.py\""
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/missed_wake_scan.py\""
           }
         ]
       }
