@@ -327,13 +327,23 @@ class TestRunScanBothModes:
 
 
 class TestIsLeadCarrierFrames:
-    """Auditor TEST-FOCUS (a): is_lead classifies the REAL captured carrier
-    frames correctly, in both modes (the gate keys on agent_type, which is
-    topology-invariant). SessionStart frames are REAL captures. The STOP
-    carrier frame is NOT YET in role_frames.captured_* (not in the #812 truth
-    table) — that row is DEFERRED behind the capture prerequisite (dual-mode
-    Consequence 3: no assertion on synthetic Stop stdin). See
-    test_stop_carrier_islead_DEFERRED below."""
+    """Auditor TEST-FOCUS (a): is_lead classifies the carrier frames correctly,
+    in both modes. is_lead reads ONLY agent_type — the universal discriminator
+    present on EVERY event in both topologies (HOOK_STDIN_DISCRIMINATORS.md; its
+    purity is pinned by test_is_lead.py). So it is event-AGNOSTIC: a Stop-shaped
+    frame is classified solely by its agent_type, identically to a SessionStart
+    frame.
+
+    Two DISTINCT claims, two test treatments:
+      - is_lead GATING (this process is/ isn't lead): agent_type-only, topology-
+        invariant → faithfully exercised by a SYNTHESIZED Stop frame. NOT
+        deferred (a real frame adds nothing the agent_type doesn't carry).
+      - PLATFORM behavior ('bare Stop FIRES lead-process in both topologies and
+        carries agent_type'): a real-capture / live claim — preparer-CONFIRMED
+        via the live probe, NOT a unit test. THIS is what dual-mode
+        Consequence 3 governs (the real-capture prerequisite), not the gating.
+    SessionStart rows use REAL captures; the Stop gating row uses a synthesized
+    frame; a real captured Stop frame is an OPTIONAL completeness item below."""
 
     def test_sessionstart_carrier_islead_real_frames(self):
         assert mw.is_lead(captured_lead_sessionstart_qualified()) is True
@@ -341,9 +351,25 @@ class TestIsLeadCarrierFrames:
         assert mw.is_lead(captured_teammate_sessionstart()) is False
         assert mw.is_lead(captured_plain_sessionstart()) is False
 
-    @pytest.mark.skip(reason="#903 Stop carrier frame not yet in role_frames.captured_* "
-                             "(not in #812 truth table); real-tmux capture is a prerequisite "
-                             "per dual-mode Consequence 3 — do NOT assert on synthetic Stop "
-                             "stdin. Un-skip once devops/preparer land a captured Stop frame.")
-    def test_stop_carrier_islead_DEFERRED(self):
+    def test_stop_carrier_islead_gating_synthesized_frame(self):
+        # is_lead is agent_type-only + event-agnostic → a SYNTHESIZED Stop frame
+        # faithfully exercises the GATING. This is NOT a Consequence-3 platform
+        # claim (that bare Stop fires + carries agent_type is preparer-confirmed
+        # via the live probe); it is the role-classification the run_scan gate
+        # relies on, asserted on the carrier's own event shape.
+        assert mw.is_lead(_frame(LEAD_AGENT_TYPE)) is True
+        assert mw.is_lead({"hook_event_name": "Stop", "agent_type": "pact-orchestrator"}) is True
+        assert mw.is_lead(_frame(TEAMMATE_AGENT_TYPE)) is False
+        assert mw.is_lead(_frame(None)) is False  # plain / non-PACT (agent_type absent)
+
+    @pytest.mark.skip(reason="OPTIONAL completeness only — bind to a REAL captured Stop frame "
+                             "once devops/preparer land one. The is_lead GATING is already "
+                             "covered (synthesized Stop above + run_scan's synthesized-Stop "
+                             "both-modes tests + test_is_lead's purity pin); the 'bare Stop fires "
+                             "lead-process in both topologies + carries agent_type' PLATFORM claim "
+                             "is preparer-CONFIRMED via the live probe (dual-mode Consequence 3 "
+                             "governs that platform claim, NOT this agent_type-only gating). "
+                             "Un-skip: assert is_lead(captured_lead_stop) is True / "
+                             "is_lead(captured_teammate_stop) is False.")
+    def test_stop_carrier_islead_real_frame_completeness(self):
         raise AssertionError("placeholder: bind to captured_lead_stop / captured_teammate_stop")
