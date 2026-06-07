@@ -249,6 +249,80 @@ class TestGetTaskList:
             "exists() follows the symlink and the glob reads the out-of-base secret)"
         )
 
+    def test_solo_skips_dotfile_json(self, tmp_path, monkeypatch, pact_context):
+        # R4 (content-hygiene parity): a dotfile-prefixed *.json in the solo
+        # tasks dir must be SKIPPED, mirroring the team branch. NON-VACUOUS:
+        # pathlib glob('*.json') INCLUDES '.evil.json', so WITHOUT the
+        # dotfile-skip get_task_list reads it (count inflation). (Revert the
+        # dotfile-skip -> DOTFILE-INJECTED appears -> this FAILS.)
+        from task_utils import get_task_list
+        pact_context(session_id="session-id", team_name="")
+        base = tmp_path / "tasks"
+        tdir = base / "solo-x"
+        tdir.mkdir(parents=True)
+        write_task(tdir, "1", {"subject": "Real", "status": "in_progress"})
+        (tdir / ".evil.json").write_text(
+            json.dumps({"id": "e", "subject": "DOTFILE-INJECTED"}), encoding="utf-8"
+        )
+        monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", "solo-x")
+        result = get_task_list(tasks_base_dir=str(base))
+        subjects = {t["subject"] for t in (result or [])}
+        assert "DOTFILE-INJECTED" not in subjects, (
+            "a dotfile-prefixed *.json must be skipped (pathlib glob includes "
+            "it; without the dotfile-skip it is read)"
+        )
+        assert subjects == {"Real"}
+
+    def test_solo_skips_non_dict_json(self, tmp_path, monkeypatch, pact_context):
+        # R4 (content-hygiene parity): a malformed-but-valid JSON that parses to
+        # a NON-dict (list/int/str) must be SKIPPED, not appended, mirroring the
+        # team branch's isinstance(dict) guard. NON-VACUOUS: without the guard
+        # the non-dict is appended AND a downstream reader (find_feature_task)
+        # calls .get() on it -> AttributeError. (Revert the guard -> this FAILS,
+        # either the all-dict assert or the find_feature_task crash.)
+        from task_utils import get_task_list, find_feature_task
+        pact_context(session_id="session-id", team_name="")
+        base = tmp_path / "tasks"
+        tdir = base / "solo-x"
+        tdir.mkdir(parents=True)
+        write_task(tdir, "1", {"subject": "Real", "status": "in_progress"})
+        (tdir / "bad.json").write_text(json.dumps([1, 2, 3]), encoding="utf-8")  # valid JSON, non-dict
+        monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", "solo-x")
+        result = get_task_list(tasks_base_dir=str(base))
+        assert result is not None
+        assert all(isinstance(t, dict) for t in result), (
+            "a non-dict parse ([1,2,3]) must be skipped, not appended"
+        )
+        assert {t["subject"] for t in result} == {"Real"}
+        # Downstream consumer must not crash on the returned list.
+        find_feature_task(result)  # raises AttributeError if a non-dict leaked through
+
+    def test_solo_r1_unique_nonallowlisted_in_base_name(self, tmp_path, monkeypatch, pact_context):
+        # R2-F3 (R1-UNIQUENESS pin, spec'd by test-engineer): a non-allowlisted
+        # but IN-BASE task_list_id must be rejected by is_safe_path_component
+        # (R1) BEFORE the path-join. "a b" (space ∉ [A-Za-z0-9_-]) is rejected by
+        # R1, but base/"a b" resolves UNDER base so R3's resolve/relative_to
+        # anchor PASSES it — only R1 catches it. NON-VACUOUS vs R1 ALONE: revert
+        # ONLY the is_safe_path_component guard (R3 intact) -> base/"a b" passes
+        # the anchor + exists -> the planted task is read -> non-None -> this
+        # FAILS. (NUL / "../escape" would NOT prove this — R3 masks them:
+        # resolve() raises ValueError / escapes base, so both R1+R3 catch them.)
+        from task_utils import get_task_list
+        pact_context(session_id="session-id", team_name="")
+        base = tmp_path / "tasks"
+        d = base / "a b"
+        d.mkdir(parents=True)
+        (d / "1.json").write_text(
+            json.dumps({"id": "1", "subject": "NONALLOWLISTED"}), encoding="utf-8"
+        )
+        monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", "a b")
+        assert get_task_list(tasks_base_dir=str(base)) is None, (
+            "a non-allowlisted in-base task_list_id must be rejected by "
+            "is_safe_path_component (R1) BEFORE the path-join — R3's anchor "
+            "passes it (in-base), so this is the R1-UNIQUE case proving the "
+            "guard is load-bearing"
+        )
+
 
 # ---------------------------------------------------------------------------
 # find_feature_task

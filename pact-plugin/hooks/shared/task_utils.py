@@ -66,14 +66,16 @@ def get_task_list(tasks_base_dir: str | None = None) -> list[dict[str, Any]] | N
 
     # SOLO / no-team branch: the CLAUDE_CODE_TASK_LIST_ID-or-session_id key
     # choice is preserved, and the dir is read by this branch's own direct glob
-    # (NOT routed through iter_team_task_jsons) — but with the SAME path-safety
-    # defenses applied INLINE: is_safe_path_component on the name (F2 guard
-    # below), a resolve/relative_to base-anchor on the dir, and a per-file
-    # is_symlink skip (R3). The solo branch is therefore NOT raw/unvalidated: it
-    # has defense PARITY with the team branch (component-validation + anchor +
-    # symlink-skip), just implemented inline. Surgical-inline duplication (NOT a
-    # shared-helper refactor) is the accepted trade-off to avoid touching the
-    # working/tested team path. Only the base root is parameterized (test seam).
+    # (NOT routed through iter_team_task_jsons) — but with the SAME FIVE
+    # path-safety + content-hygiene defenses applied INLINE, in FULL PARITY with
+    # the team branch (iter_team_task_jsons): (1) is_safe_path_component on the
+    # name (F2 guard below), (2) a resolve/relative_to base-anchor on the dir,
+    # (3) a per-file is_symlink skip, (4) a dotfile-prefixed-file skip, and
+    # (5) an isinstance(dict) parse guard. The solo branch is therefore NOT
+    # raw/unvalidated: it has FULL 5/5 defense parity with the team branch, just
+    # implemented inline. Surgical-inline duplication (NOT a shared-helper
+    # refactor) is the accepted trade-off to avoid touching the working/tested
+    # team path. Only the base root is parameterized (test seam).
     session_id = get_session_id()
     # Also check for multi-session task list ID
     task_list_id = os.environ.get("CLAUDE_CODE_TASK_LIST_ID", session_id)
@@ -116,6 +118,12 @@ def get_task_list(tasks_base_dir: str | None = None) -> list[dict[str, Any]] | N
     tasks = []
     try:
         for task_file in tasks_dir.glob("*.json"):
+            # R4 (hygiene parity): skip dotfile-prefixed JSON. pathlib glob
+            # INCLUDES them, but the platform task system never writes them; an
+            # attacker dropping one into the user's own tasks dir could otherwise
+            # inflate the task count. Mirrors the team branch's dotfile skip.
+            if task_file.name.startswith("."):
+                continue
             # R3 (security): skip a *.json that is a SYMLINK — it could point
             # outside the tasks base. Mirrors the team branch's per-file
             # is_symlink skip; real task files are regular files, unaffected.
@@ -127,6 +135,12 @@ def get_task_list(tasks_base_dir: str | None = None) -> list[dict[str, Any]] | N
             try:
                 content = task_file.read_text(encoding='utf-8')
                 task = json.loads(content)
+                # R4 (hygiene parity): skip a parse that is not a dict (e.g.
+                # [1,2,3]/42/"x" from a malformed-but-valid JSON). Mirrors the
+                # team branch's isinstance(dict) yield-guard; downstream readers
+                # (find_feature_task etc.) call .get() and need a dict.
+                if not isinstance(task, dict):
+                    continue
                 tasks.append(task)
             except (IOError, json.JSONDecodeError):
                 continue
