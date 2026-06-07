@@ -1,7 +1,9 @@
 """
 Location: pact-plugin/hooks/shared/task_utils.py
 Summary: Shared Task system integration utilities for PACT hooks.
-Used by: session_init.py, agent_handoff_emitter.py
+Used by: PACT lifecycle/wake hooks (via get_task_list), the lifecycle gate
+and handoff machinery (via read_task_json), and dispatch helpers (via
+iter_team_task_jsons).
 
 This module provides common functions for reading and analyzing Tasks from
 the Claude Task system. Tasks live under one of two storage topologies, keyed
@@ -62,17 +64,33 @@ def get_task_list(tasks_base_dir: str | None = None) -> list[dict[str, Any]] | N
         tasks = list(iter_team_task_jsons(team_name, tasks_base_dir=tasks_base_dir))
         return tasks if tasks else None
 
-    # SOLO / no-team branch: the existing resolution, preserved. The
-    # CLAUDE_CODE_TASK_LIST_ID-or-session_id key choice and the raw glob are kept
-    # verbatim — the env var is user-controlled and may hold a value the
-    # validated team reader would reject, so the solo path is deliberately NOT
-    # routed through iter_team_task_jsons. Only the base root is parameterized
-    # (for the test seam); resolution semantics are unchanged from before.
+    # SOLO / no-team branch: the CLAUDE_CODE_TASK_LIST_ID-or-session_id key
+    # choice and the raw glob are preserved — the solo path keeps its own glob
+    # rather than being routed through iter_team_task_jsons (it does NOT adopt
+    # that reader's resolve/relative_to/symlink pipeline). Only the base root is
+    # parameterized (test seam); the user-controlled task_list_id is now
+    # validated via is_safe_path_component before use — symmetric with the team
+    # branch (see the F2 guard below) — so a traversal value is rejected.
     session_id = get_session_id()
     # Also check for multi-session task list ID
     task_list_id = os.environ.get("CLAUDE_CODE_TASK_LIST_ID", session_id)
 
     if not task_list_id:
+        return None
+
+    # F2 (security): task_list_id is USER-CONTROLLED via the
+    # CLAUDE_CODE_TASK_LIST_ID env var, then used as a path component. Validate
+    # it with the same positive allowlist the team branch already applies to
+    # team_name (is_safe_path_component, inside iter_team_task_jsons) so a
+    # traversal value ("../secret") cannot escape the tasks base and read *.json
+    # outside it. Legitimate task-list IDs (pact-<slug>, UUIDs, multi-session
+    # pointers) are single [A-Za-z0-9_-] components and pass unchanged — no solo
+    # behavior change for real inputs (the env var must name a ~/.claude/tasks/
+    # dir, which the platform generates within that alphabet). Validating BEFORE
+    # the path-join also rejects an embedded-NUL value before the .exists() call
+    # (which could otherwise raise ValueError on some Python versions). Fail
+    # CLOSED (return None) to preserve the None-on-unavailable contract.
+    if not is_safe_path_component(task_list_id):
         return None
 
     base = Path(tasks_base_dir) if tasks_base_dir else (Path.home() / ".claude" / "tasks")

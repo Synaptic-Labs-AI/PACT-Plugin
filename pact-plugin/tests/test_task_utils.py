@@ -160,6 +160,47 @@ class TestGetTaskList:
         assert len(result) == 1
         assert result[0]["subject"] == "Solo task"
 
+    def test_solo_rejects_traversal_task_list_id(self, tmp_path, monkeypatch, pact_context):
+        # F2 (security): a user-controlled CLAUDE_CODE_TASK_LIST_ID that is not a
+        # safe single path component must be rejected (-> None) BEFORE the
+        # path-join, so it cannot escape the tasks base and read *.json outside.
+        # Solo context (team_name="") — the env var is consulted only there.
+        # NON-VACUOUS: a *.json is planted at the traversal target, so WITHOUT
+        # the is_safe_path_component guard get_task_list would resolve
+        # base/"../escape" -> the planted dir and return the LEAKED task
+        # (non-None). The guard makes it None. (Revert the guard -> this FAILS.)
+        from task_utils import get_task_list
+        pact_context(session_id="session-id", team_name="")
+        base = tmp_path / "tasks"
+        base.mkdir(parents=True)
+        escape = tmp_path / "escape"
+        escape.mkdir()
+        (escape / "secret.json").write_text(
+            json.dumps({"id": "x", "subject": "LEAKED"}), encoding="utf-8"
+        )
+        for hostile in ("../escape", "../../etc", "..", "a/b", "foo/../bar"):
+            monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", hostile)
+            assert get_task_list(tasks_base_dir=str(base)) is None, (
+                f"unsafe task_list_id {hostile!r} must be rejected before the "
+                f"path-join — must NOT resolve out-of-base and read the planted "
+                f"secret (that is the F2 traversal-read vector)"
+            )
+
+    def test_solo_accepts_legit_task_list_id(self, tmp_path, monkeypatch, pact_context):
+        # Guardrail: a legitimate single-component task-list id (pact-<slug> /
+        # UUID / multi-session pointer) still passes is_safe_path_component and
+        # resolves — proves the F2 validation adds NO solo regression.
+        from task_utils import get_task_list
+        pact_context(session_id="session-id", team_name="")
+        monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", "pact-abcd1234")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        tasks_dir = tmp_path / ".claude" / "tasks" / "pact-abcd1234"
+        tasks_dir.mkdir(parents=True)
+        write_task(tasks_dir, "1", {"subject": "Legit", "status": "in_progress"})
+        result = get_task_list()
+        assert result is not None and len(result) == 1
+        assert result[0]["subject"] == "Legit"
+
 
 # ---------------------------------------------------------------------------
 # find_feature_task
