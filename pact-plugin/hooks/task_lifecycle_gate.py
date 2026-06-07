@@ -270,6 +270,102 @@ def _writeback_dispute(task_id: str) -> bool:
         return False
 
 
+# #906: auditor verdict severity ladder for destructive-downgrade detection.
+# Higher rank = more severe. A lead overwrite that LOWERS the rank (e.g.
+# RED->GREEN) is a destructive downgrade that escalates the advisory SEVERITY
+# only — ranks are NEVER used to gate preservation (always-preserve regardless
+# of direction, per the architect ruling). Unknown / non-dict signals yield
+# None → no escalation (the advisory still fires, without the downgrade
+# emphasis).
+_AUDIT_SIGNAL_RANK = {"GREEN": 0, "YELLOW": 1, "RED": 2}
+
+
+def _audit_signal_rank(audit_summary: object) -> "int | None":
+    """Return the severity rank of an audit_summary's `signal`, or None if the
+    shape/signal is unrankable. Pure; never raises."""
+    if not isinstance(audit_summary, dict):
+        return None
+    signal = audit_summary.get("signal")
+    if not isinstance(signal, str):
+        return None
+    return _AUDIT_SIGNAL_RANK.get(signal.strip().upper())
+
+
+def _is_destructive_audit_downgrade(prior: object, incoming: object) -> bool:
+    """Return True iff `incoming` LOWERS `prior`'s verdict severity (e.g.
+    RED->GREEN). Unknown signals on either side → False (cannot rank → no
+    escalation). Pure; never raises. Used ONLY for advisory wording — preservation
+    is unconditional regardless of the return value."""
+    prior_rank = _audit_signal_rank(prior)
+    incoming_rank = _audit_signal_rank(incoming)
+    if prior_rank is None or incoming_rank is None:
+        return False
+    return incoming_rank < prior_rank
+
+
+def _writeback_audit_recovery(task_id: str, updates: dict) -> bool:
+    """#906 codified-mirror writeback — durable, direct-FS metadata update for
+    auditor-verdict overwrite-protection. Mirrors _writeback_dispute exactly
+    (read via shared.task_utils.read_task_json [path-traversal safe] → mutate
+    metadata → atomic .tmp + os.replace), and sets the gate_writeback recursion
+    guard so a replayed metadata change cannot re-fire the gate.
+
+    Used by BOTH branches of the codified mirror:
+      - MIRROR  : updates={"audit_summary_authored": <authored verdict>}
+      - RECOVER : updates={"lead_close_note": <lead's overwriting value>}
+
+    Task JSON lives in the team dir (~/.claude/tasks/{team}/), which is writable
+    from ANY teammate process — unlike the session journal, which self-drops in
+    a teammate context (#877). That is precisely why the auditor's verdict can
+    be captured at AUTHOR time (the MIRROR), sidestepping the post-overwrite
+    read-of-a-clobbered-value problem.
+
+    Fail-OPEN by design: any IOError swallowed → returns False. The advisory is
+    the load-bearing user-facing signal; the metadata writeback is best-effort
+    accounting (same convention as _writeback_dispute). Returns True iff the
+    writeback succeeded.
+    """
+    if not task_id or not isinstance(task_id, str):
+        return False
+    sanitized_id = re.sub(r"[/\\]|\.\.", "", task_id)
+    if not sanitized_id:
+        return False
+    try:
+        team_name = pact_context.get_pact_context().get("team_name", "")
+    except Exception:
+        team_name = ""
+    if not team_name or not re.fullmatch(r"[A-Za-z0-9_\-]+", team_name):
+        return False
+
+    task = read_task_json(sanitized_id, team_name)
+    if not task:
+        return False
+
+    metadata = task.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        task["metadata"] = metadata
+    for key, value in updates.items():
+        metadata[key] = value
+    metadata["gate_writeback"] = True
+
+    tasks_root = Path.home() / ".claude" / "tasks" / team_name
+    target = tasks_root / f"{sanitized_id}.json"
+    tmp = tasks_root / f".{sanitized_id}.json.tmp"
+    try:
+        tasks_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        tmp.write_text(json.dumps(task), encoding="utf-8")
+        os.replace(str(tmp), str(target))
+        return True
+    except OSError:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+        return False
+
+
 def _emit_lead_side_agent_handoff(
     team_name: str,
     task_id: str,
@@ -579,6 +675,78 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
         team_name = pact_context.get_pact_context().get("team_name", "")
     except Exception:
         team_name = ""
+
+    # ②a #906 auditor-verdict overwrite-protection (codified mirror).
+    # ONE hook, TWO structural branches keyed on is_lead (no new matcher):
+    #   MIRROR (non-lead writes audit_summary): durably snapshot the authored
+    #     verdict → metadata.audit_summary_authored so a later lead overwrite of
+    #     the live audit_summary key cannot lose it. Task JSON is team-dir-scoped
+    #     → writable from the auditor's teammate process (unlike the session
+    #     journal, which self-drops in a teammate context, #877). Capturing at
+    #     AUTHOR time is what sidesteps the post-overwrite read-of-a-clobbered-
+    #     value problem (the prior is saved BEFORE the lead can clobber it).
+    #   RECOVER (lead overwrites a DIVERGENT authored verdict): the prior is
+    #     ALREADY preserved in audit_summary_authored (no clobbered read); emit
+    #     the audit_summary_overwrite advisory + route the lead's value →
+    #     metadata.lead_close_note. Preservation is UNCONDITIONAL; a destructive
+    #     downgrade (severity lowered, e.g. RED->GREEN) escalates the advisory
+    #     SEVERITY only — never gates preservation (an upgrade / lateral change
+    #     must preserve the auditor's detail too). Gated on audit_summary_authored
+    #     EXISTING so a lead-authored-from-scratch summary is not a false fire.
+    # Both branches persist via _writeback_audit_recovery (the _writeback_dispute
+    # sibling). The platform's synchronous task-JSON write has already landed by
+    # PostToolUse, so this writeback is the LAST write and is not clobbered.
+    if tool_name == "TaskUpdate":
+        incoming_audit = (
+            incoming_metadata.get("audit_summary")
+            if isinstance(incoming_metadata, dict)
+            else None
+        )
+        ah_task_id = tool_input.get("taskId", "") or ""
+        if incoming_audit is not None and team_name and ah_task_id:
+            ah_task = read_task_json(ah_task_id, team_name)
+            ah_meta = ah_task.get("metadata") if isinstance(ah_task, dict) else None
+            authored = (
+                ah_meta.get("audit_summary_authored")
+                if isinstance(ah_meta, dict)
+                else None
+            )
+            if pact_context.is_lead(input_data):
+                # RECOVER — only when a DIFFERENT authored verdict exists.
+                if authored is not None and authored != incoming_audit:
+                    downgrade = _is_destructive_audit_downgrade(
+                        authored, incoming_audit
+                    )
+                    _writeback_audit_recovery(
+                        ah_task_id, {"lead_close_note": incoming_audit}
+                    )
+                    advisories.append((
+                        "audit_summary_overwrite",
+                        f"PACT task_lifecycle_gate: lead TaskUpdate "
+                        f"{'DESTRUCTIVELY DOWNGRADED' if downgrade else 'overwrote'} "
+                        f"Task {ah_task_id}'s auditor audit_summary. The auditor's "
+                        "authored verdict is PRESERVED in "
+                        "metadata.audit_summary_authored and the lead's value was "
+                        "routed to metadata.lead_close_note — the verdict is not "
+                        "lost. "
+                        + (
+                            "DESTRUCTIVE DOWNGRADE (verdict severity lowered, "
+                            "e.g. RED->GREEN / terminal->reopen): confirm the "
+                            "auditor's concern was genuinely resolved before "
+                            "closing. "
+                            if downgrade
+                            else ""
+                        )
+                        + "Never infer auditor silence from a read-after-write "
+                        "timeout — the window is unbounded.",
+                    ))
+            else:
+                # MIRROR — snapshot/refresh the authored verdict. Idempotent:
+                # skip the FS write when the mirror already matches.
+                if authored != incoming_audit:
+                    _writeback_audit_recovery(
+                        ah_task_id, {"audit_summary_authored": incoming_audit}
+                    )
 
     # ② TaskCreate rules — teachback addBlocks + work-task addBlockedBy
     if tool_name == "TaskCreate":
