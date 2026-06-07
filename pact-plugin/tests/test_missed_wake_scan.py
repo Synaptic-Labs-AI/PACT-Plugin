@@ -446,3 +446,124 @@ class TestAdditionalContextInjectionSanitization:
         out = mw.build_surface(stale, now=FIXED_NOW)
         assert "design the API" in out and "architect" in out and "#9" in out
         assert len(out.splitlines()) == 2 and out.count("ACTION:") == 1
+
+
+# ===========================================================================
+# 8. R2-M1 — F31 empty-after-sanitize fallback (build_surface graceful degrade)
+# ===========================================================================
+class TestBuildSurfaceEmptyAfterSanitizeFallback:
+    """R2-M1 (round-2 coverage gap): when a teammate-authored field is ALL
+    control chars, _sanitize_member_name returns '' and build_surface must
+    degrade gracefully — task_id->'#?', owner->'unknown', subject dropped — not
+    crash and not render a blank/odd label. The F31 payloads with surviving
+    content never exercised this branch."""
+
+    def test_all_control_fields_degrade_to_fallback_labels(self):
+        # owner / subject / task_id are all-control-char -> sanitize to '' ->
+        # build_surface falls back to 'unknown' / no-subject / '?'.
+        stale = [{
+            "id": "\x0b\x0c",                         # VT + FF -> '' after sanitize
+            "owner": "\n\t\x07",                       # -> '' after sanitize
+            "subject": "\x00\x1b\x7f",                 # -> '' after sanitize
+            "status": "in_progress",
+            "metadata": {"intentional_wait": {
+                "reason": "awaiting_lead_completion", "expected_resolver": "lead",
+                "since": _since_of(FIXED_NOW, 45)}},
+        }]
+        out = mw.build_surface(stale, now=FIXED_NOW)
+        assert out is not None, "must not crash / return None on all-control fields"
+        rendered = out.splitlines()
+        assert len(rendered) == 2, "still exactly header + one task line"
+        line = rendered[1]
+        # task_id->'?' + owner->'unknown' fallback; the empty subject is DROPPED
+        # so '(unknown)' closes immediately (no '(unknown: ...)' subject segment).
+        assert "#? (unknown)" in line, "fallback labels; got %r" % (line,)
+        assert "(unknown:" not in line, "empty subject must be dropped (no ': ' label)"
+        # none of the payload's control chars survived into the render (the
+        # single legit '\n' header/task separator is covered by len(rendered)==2).
+        for ch in ("\t", "\x07", "\x00", "\x1b", "\x7f", "\x0b", "\x0c"):
+            assert ch not in out, "control %r must be stripped" % (ch,)
+
+    def test_partial_survivor_keeps_real_content(self):
+        # Positive control: a field with SOME surviving content keeps it (the
+        # fallback fires only on fully-empty-after-sanitize).
+        stale = [_task(task_id="5", owner="ad\x07min", subject="de\x00sign",
+                       wait=_wait(since=_since_of(FIXED_NOW, 40)))]
+        out = mw.build_surface(stale, now=FIXED_NOW)
+        assert "admin" in out and "design" in out and "#5" in out
+        assert "unknown" not in out and "#?" not in out
+
+
+# ===========================================================================
+# 9. R2-F1 — forensic JOURNAL-write sanitize + dedup-key-stays-raw convergence
+# ===========================================================================
+class TestForensicJournalSanitizationGuard:
+    """R2-F1 (security #64 verdict): emit_forensic sanitizes the render-bound
+    `agent` (owner) and `task_subject` (subject) fields of the missed_wake event
+    (defense-in-depth — a future render consumer can't be injected) WHILE keeping
+    the dedup key (task_id, since) RAW so dedup still converges.
+
+    The sanitize assertion is BOUND to devops's #65 emit_forensic change — it is
+    RED against the pre-#65 (raw-write) source and green once #65 lands (the
+    bundle's non-vacuity by construction). The dedup-convergence invariant holds
+    in BOTH states (the key is (task_id, since), unaffected by field sanitize).
+    """
+
+    def test_journal_event_owner_and_subject_are_sanitized(self, journal):
+        # control chars in owner/subject WITH surviving content (avoids the
+        # empty-after-sanitize edge): the emitted event's agent + task_subject
+        # must have the control chars STRIPPED. RED until #65.
+        stale = [_task(task_id="7", owner="ad\x07min", subject="de\x00sign\x85x",
+                       wait=_wait(since="2026-06-07T11:00:00+00:00"))]
+        mw.emit_forensic(stale)
+        assert len(journal["emitted"]) == 1
+        ev = journal["emitted"][0]
+        def _clean(v):
+            return all(ord(c) >= 0x20 and ord(c) != 0x7f and ord(c) not in (0x85, 0x2028, 0x2029)
+                       for c in v)
+        assert _clean(ev["agent"]), "missed_wake `agent` (owner) must be sanitized (#65)"
+        assert _clean(ev.get("task_subject", "")), "missed_wake `task_subject` must be sanitized (#65)"
+        assert ev["agent"] == "admin" and ev["task_subject"] == "designx"
+        assert ev["task_id"] == "7" and ev["since"] == "2026-06-07T11:00:00+00:00", "dedup-key fields stay RAW"
+
+    def test_dedup_key_stays_raw_and_converges(self, journal):
+        # The dedup key is (task_id, since) RAW — convergence/re-arm are unaffected
+        # by owner/subject sanitize. (Invariant: green pre- AND post-#65.)
+        since = "2026-06-07T11:00:00+00:00"
+        stale = [_task(task_id="42", owner="o\x07wn", subject="s\x00ub", wait=_wait(since=since))]
+        mw.emit_forensic(stale)
+        assert len(journal["emitted"]) == 1
+        # the journal now carries this (task_id, since) for the next read
+        journal["seed"] = [{"task_id": "42", "since": since, "type": "missed_wake"}]
+        mw.emit_forensic(stale)
+        assert len(journal["emitted"]) == 1, "re-fire with same (task_id, since) converges — no double-emit"
+        # fresh since -> re-arm
+        journal["seed"] = [{"task_id": "42", "since": since, "type": "missed_wake"}]
+        mw.emit_forensic([_task(task_id="42", owner="o\x07wn", subject="s\x00ub",
+                                wait=_wait(since="2026-06-07T11:40:00+00:00"))])
+        assert len(journal["emitted"]) == 2, "a fresh since re-arms (dedup key is raw (task_id, since))"
+
+    def test_empty_sanitized_owner_skips_forensic_but_surface_still_alerts(self, journal):
+        """Addendum (devops #65 edge): an all-control-char OWNER sanitizes to ''
+        -> emit_forensic best-effort SKIPS the event (the journal non-empty
+        `agent` schema would reject it; no crash) and does NOT mark (task_id,
+        since) emitted (so a later valid value records) -- WHILE build_surface
+        still ALERTS via the 'unknown' fallback. Surface and forensic
+        intentionally DIVERGE on this pathological input."""
+        since = "2026-06-07T11:00:00+00:00"
+        bad = _task(task_id="9", owner="\n\t\x07", subject="ok", wait=_wait(since=since))
+        mw.emit_forensic([bad])
+        assert journal["emitted"] == [], (
+            "all-control owner -> forensic best-effort SKIPS (empty agent rejected); no crash"
+        )
+        out = mw.build_surface([bad], now=FIXED_NOW)
+        assert out is not None and "unknown" in out, (
+            "surface must still alert via the 'unknown' owner-fallback (divergence from the "
+            "forensic skip); label is '(unknown: ok)' since the subject survives"
+        )
+        # the skip did NOT dedup-mark (task_id, since) -> a later VALID owner records
+        mw.emit_forensic([_task(task_id="9", owner="realowner", subject="ok", wait=_wait(since=since))])
+        assert len(journal["emitted"]) == 1, (
+            "a later valid owner for the same (task, since) still records -- the skip "
+            "must NOT mark the key emitted"
+        )

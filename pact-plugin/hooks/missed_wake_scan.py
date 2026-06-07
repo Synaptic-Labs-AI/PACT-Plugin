@@ -179,9 +179,26 @@ def emit_forensic(stale: list) -> None:
                 continue
             if (task_id, since) in emitted:
                 continue
-            fields = {"task_id": task_id, "agent": owner, "since": since}
-            if subject:
-                fields["task_subject"] = subject
+            # R2-F1 (defense-in-depth): owner/subject sanitized at WRITE for
+            # safe-by-construction symmetry with build_surface (closes the
+            # asymmetric-defense pattern the F31 lesson warns against) — no current
+            # consumer renders missed_wake, but this avoids relying on that.
+            # task_id + since are kept RAW as the dedup key — they are matched
+            # against the raw (task_id, since) that _emitted_keys() reads back;
+            # sanitizing them would entangle dedup with the sanitizer and break
+            # convergence (security #64).
+            safe_owner = _sanitize_member_name(owner)
+            if not safe_owner:
+                # Pathological all-control-char owner sanitizes to empty, which the
+                # journal's non-empty `agent` schema would reject anyway — skip the
+                # forensic event EXPLICITLY rather than attempt a doomed write. The
+                # SURFACE still alerts (build_surface falls back to 'unknown'). Do
+                # NOT mark (task_id, since) emitted, so a later valid value records.
+                continue
+            safe_subject = _sanitize_member_name(subject) if subject else ""
+            fields = {"task_id": task_id, "agent": safe_owner, "since": since}
+            if safe_subject:
+                fields["task_subject"] = safe_subject
             fields["reason"] = _MISSED_WAKE_REASON
             append_event(make_event("missed_wake", **fields))
             # Track within this fire so two stale waits sharing a (task_id, since)
