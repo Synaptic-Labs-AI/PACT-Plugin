@@ -247,3 +247,46 @@ class TestNoFireGuards:
         }
         adv = tlg.evaluate_lifecycle(payload)
         assert not _has(adv), "the overwrite gate is TaskUpdate-scoped"
+
+
+# An audit_summary whose signal is NOT on the GREEN<YELLOW<RED ladder (or absent)
+# → _audit_signal_rank returns None → unrankable.
+UNRANKABLE = {"signal": "PURPLE", "note": "off the GREEN<YELLOW<RED ladder"}
+
+
+class TestUnknownRankRecover:
+    """M5: a RECOVER where the prior OR incoming verdict is UNRANKABLE — the
+    INTEGRATION the coverage review flagged. _is_destructive_audit_downgrade
+    returns False when either side can't be ranked (cannot rank → no escalation),
+    so the advisory STILL fires + preserves + routes lead_close_note, but WITHOUT
+    the DESTRUCTIVE-DOWNGRADE wording. (The pure logic is pinned in
+    TestDestructiveDowngrade; this exercises it through evaluate_lifecycle.)"""
+
+    def test_unrankable_incoming_advises_without_downgrade_wording(
+        self, tmp_path, monkeypatch, pact_context
+    ):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        pact_context(team_name=TEAM, session_id="test-session")
+        _seed(tmp_path, metadata={"audit_summary": RED, "audit_summary_authored": RED})
+        adv = tlg.evaluate_lifecycle(_update("pact-orchestrator", UNRANKABLE))
+        assert _has(adv), "an overwrite of an authored verdict fires even when incoming is unrankable"
+        assert "DESTRUCTIVE DOWNGRADE" not in _msg(adv), (
+            "unrankable incoming → cannot rank → no downgrade escalation (the advisory "
+            "still fires, just without the severity-lowered emphasis)"
+        )
+        back = _read_back(tmp_path)
+        assert back["metadata"]["audit_summary_authored"] == RED, "authored verdict still PRESERVED"
+        assert back["metadata"]["lead_close_note"] == UNRANKABLE, "lead value routed to lead_close_note"
+
+    def test_unrankable_authored_advises_without_downgrade_wording(
+        self, tmp_path, monkeypatch, pact_context
+    ):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        pact_context(team_name=TEAM, session_id="test-session")
+        _seed(tmp_path, metadata={"audit_summary": UNRANKABLE, "audit_summary_authored": UNRANKABLE})
+        adv = tlg.evaluate_lifecycle(_update("pact-orchestrator", GREEN))
+        assert _has(adv), "advisory fires (authored != incoming)"
+        assert "DESTRUCTIVE DOWNGRADE" not in _msg(adv), (
+            "unrankable authored → cannot rank → no downgrade escalation"
+        )
+        assert _read_back(tmp_path)["metadata"]["audit_summary_authored"] == UNRANKABLE, "preserved"

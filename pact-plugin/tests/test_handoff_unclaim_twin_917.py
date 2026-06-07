@@ -102,3 +102,59 @@ class TestB2CompensatingUnclaimTwin:
         tlg._emit_lead_side_agent_handoff(TEAM, TASK_ID, OWNER, SUBJECT, meta)
         assert calls["n"] == 1, "the claimed marker dedups the second fire to exactly one event"
         assert _marker(tmp_path).exists(), "a successful claim is NOT unclaimed on a dedup'd re-fire"
+
+
+class TestB2R2WhitespaceTwin:
+    """M4: #917/#901 R2 (validate-before-claim) F3 TWIN for b2. b1's R2 whitespace
+    handling is pinned by test_emitter_resolution.py::test_owner_whitespace_only_
+    is_treated_as_falsy; b2 (_emit_lead_side_agent_handoff) implements the SAME
+    guards (task_lifecycle_gate.py:413 `not owner.strip()`, :431-432 `not
+    subject.strip()`→"(no subject)") but had NO twin coverage (the gap the
+    coverage review surfaced). R2 guards the claim-without-write poison on the
+    LEAD path: a whitespace-only owner would pass a bare `not owner` check, claim
+    the O_EXCL marker, then FAIL append_event's non-empty-str `agent` schema.
+
+    NON-VACUITY (documented for the verifier): neuter the owner guard
+    (`not owner.strip()` → `not owner`) in an ISOLATED throwaway worktree
+    (`git worktree add --detach /tmp/verifyM4 HEAD`), NEVER the shared tree → the
+    whitespace-owner row emits with agent="   " instead of deferring → its
+    no-emit assertion flips RED. Restore via `git worktree remove --force`.
+    """
+
+    def test_b2_whitespace_owner_treated_as_absent_no_emit(self, tmp_path, monkeypatch, pact_context):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        pact_context(team_name=TEAM, session_id="lead-session")
+        calls = []
+        monkeypatch.setattr(tlg, "append_event", lambda e: calls.append(e) or True)
+        tlg._emit_lead_side_agent_handoff(TEAM, TASK_ID, "   ", SUBJECT, {"handoff": VALID_HANDOFF})
+        assert calls == [], (
+            "b2 R2: a whitespace-only owner is treated as ABSENT → no emit (parity "
+            "with b1's test_owner_whitespace_only_is_treated_as_falsy). Without R2 it "
+            "would claim the marker then fail append's non-empty-str agent schema."
+        )
+
+    def test_b2_whitespace_subject_substitutes_sentinel_and_emits(self, tmp_path, monkeypatch, pact_context):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        pact_context(team_name=TEAM, session_id="lead-session")
+        calls = []
+        monkeypatch.setattr(tlg, "append_event", lambda e: calls.append(e) or True)
+        tlg._emit_lead_side_agent_handoff(TEAM, TASK_ID, OWNER, "   ", {"handoff": VALID_HANDOFF})
+        assert len(calls) == 1, "a whitespace subject is schema-FIXED (not deferred) → emits"
+        assert calls[0]["task_subject"] == "(no subject)", (
+            "b2 R2: a whitespace-only subject → '(no subject)' sentinel before the "
+            "claim (parity with b1), so a degenerate subject is schema-valid not poisoning."
+        )
+
+    def test_b2_empty_owner_no_emit_positive_control(self, tmp_path, monkeypatch, pact_context):
+        # Positive control: the EMPTY-owner case (pre-R2 `not owner`) ALSO no-emits,
+        # confirming the whitespace row exercises the R2 .strip() refinement, not the
+        # pre-existing empty guard.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        pact_context(team_name=TEAM, session_id="lead-session")
+        calls = []
+        monkeypatch.setattr(tlg, "append_event", lambda e: calls.append(e) or True)
+        tlg._emit_lead_side_agent_handoff(TEAM, TASK_ID, "", SUBJECT, {"handoff": VALID_HANDOFF})
+        assert calls == [], "empty owner → no emit (the owner-half, pre-R2)"
