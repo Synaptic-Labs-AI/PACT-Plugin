@@ -73,6 +73,7 @@ import shared.pact_context as pact_context
 from shared.intentional_wait import validate_wait, wait_stale
 from shared.pact_context import is_lead
 from shared.session_journal import append_event, get_journal_path, make_event, read_events
+from shared.session_state import _sanitize_member_name
 from shared.task_utils import get_task_list
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths.
@@ -215,6 +216,17 @@ def build_surface(stale: list, now: "datetime | None" = None) -> "str | None":
     lines = []
     for task in stale:
         task_id, owner, since, subject = _wait_fields(task)
+        # F31: sanitize the teammate-authored fields (task_id, owner, subject)
+        # BEFORE interpolating them into the lead's turn-start additionalContext.
+        # Without this, embedded \n / NEL / U+2028 / U+2029 / control chars could
+        # forge extra alarm or system-looking lines in the injected context. The
+        # canonical render-bound sanitizer (shared.session_state) strips exactly
+        # those. `since` is NOT interpolated — only its int age is — so it needs
+        # no sanitization. Empty-after-sanitize degrades gracefully: the label
+        # falls back to '?' / 'unknown' / no-subject.
+        task_id = _sanitize_member_name(task_id)
+        owner = _sanitize_member_name(owner)
+        subject = _sanitize_member_name(subject)
         age = _age_minutes(since, now)
         age_str = f"~{age}min" if age is not None else "stale"
         label = f"#{task_id or '?'} ({owner or 'unknown'}"
