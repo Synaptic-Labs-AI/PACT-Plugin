@@ -386,3 +386,54 @@ class TestFindBlockers:
         ]
         result = find_blockers(tasks)
         assert len(result) == 2
+
+
+# ---------------------------------------------------------------------------
+# read_task_json — M2 NUL-byte advisory-suppression DoS regression
+# ---------------------------------------------------------------------------
+
+class TestReadTaskJsonNulByteSafety:
+    """M2 (security #38): read_task_json must NOT propagate a ValueError from the
+    task-file stat (exists() raises 'embedded null byte' on a NUL-containing
+    path). Uncaught, it propagates to a caller's catch-all — in the lifecycle
+    gate it skips rule enforcement for the turn (advisory-suppression DoS). The
+    fix catches ValueError and degrades to the fail-open {}.
+
+    NOTE: exists()'s NUL behavior is Python-VERSION-DEPENDENT — CPython 3.14's
+    exists() returns False on a NUL path (open()/read_text() is the raiser
+    there), while other/platform Pythons raise ValueError from exists() itself.
+    The monkeypatch test FORCES the raising behavior so the catch is exercised
+    DETERMINISTICALLY regardless of the runner's Python; the plain-input test is
+    version-tolerant (never-raises either way).
+    """
+
+    def test_value_error_from_stat_degrades_to_empty(self, tmp_path, monkeypatch):
+        from task_utils import read_task_json
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        # Force the vulnerable-platform behavior, but CONDITIONALLY — raise only
+        # for the target task file (path contains the sentinel task_id), leaving
+        # pytest's own Path.exists() calls intact. A global always-raise breaks
+        # the test runner itself; a clean RED-on-revert needs this narrow scope.
+        _real_exists = Path.exists
+
+        def _raise_for_task_file(self):
+            if "m2-sentinel-task" in str(self):
+                raise ValueError("embedded null byte")
+            return _real_exists(self)
+
+        monkeypatch.setattr(Path, "exists", _raise_for_task_file)
+        result = read_task_json("m2-sentinel-task", "test-team")
+        assert result == {}, (
+            "a ValueError from the task-file stat must degrade to {} (fail-open) "
+            "rather than propagate — else the lifecycle gate's rule enforcement "
+            "is suppressed for the turn (advisory-suppression DoS)"
+        )
+
+    def test_nul_byte_task_id_never_raises(self, tmp_path, monkeypatch):
+        # Version-tolerant smoke: on a Python whose exists() raises on NUL the
+        # catch returns {}; on 3.14 (exists() returns False) the loop falls
+        # through to {} naturally. Either way read_task_json never raises.
+        from task_utils import read_task_json
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        assert read_task_json("12\x00bad", "test-team") == {}
+        assert read_task_json("\x00", "team", tasks_base_dir=str(tmp_path)) == {}

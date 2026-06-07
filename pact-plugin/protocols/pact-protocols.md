@@ -2022,6 +2022,14 @@ The auditor uses signal-based completion rather than standard HANDOFF:
 }
 ```
 
+#### Lead-side handling of the audit verdict
+
+The auditor is **non-blocking**. The team-lead MUST NOT infer auditor-silence from a timeout: there is no bounded read-after-write window on the verdict, so an absent `audit_summary` means "not written yet," never "no signal." Proceed with the workflow and let the auditor self-complete on its own cadence; a send-side `success: true` on the dispatch is authoritative that the request was delivered.
+
+The team-lead retains the authority to override an auditor verdict (a `TaskUpdate` that rewrites `audit_summary`), and that override is made safe rather than blocked. When a lead `TaskUpdate` overwrites an auditor-authored verdict, the lifecycle gate preserves the auditor's original to `metadata.audit_summary_authored`, routes the lead's value to `metadata.lead_close_note`, and emits an `audit_summary_overwrite` advisory (severity-escalated when the override lowers the verdict, e.g. RED→GREEN). The verdict is therefore never silently lost; a consumer reading the authoritative auditor signal should prefer `metadata.audit_summary_authored` when present. This front-line discipline (never overwrite on timeout-inferred silence) reduces how often the gate fires — the gate is the durable backstop, not a substitute for the discipline.
+
+**Reading the verdict**: to READ an auditor's verdict, prefer `metadata.audit_summary_authored` (the durable mirror written at auditor-author time) over `metadata.audit_summary` — a lead close/overwrite may have replaced `audit_summary` with a lead-authored value, and the mirror survives it. Fall back to `audit_summary` only if no mirror exists. (Today no code consumer reads the verdict VALUE — `validate_handoff` keys on `audit_summary` PRESENCE, not its content — so this is guidance for the team-lead and any future value-consumer.)
+
 ### Algedonic Escalation
 
 If the auditor discovers a viability threat (not just a quality issue), bypass the signal system and emit a full algedonic signal per [algedonic.md](algedonic.md). Examples:

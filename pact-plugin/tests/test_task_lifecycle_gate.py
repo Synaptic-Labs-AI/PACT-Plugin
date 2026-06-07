@@ -3157,3 +3157,215 @@ def test_r3_boundary_variety_total_11_required_band_fires_on_missing_rr(
         rule == "reasoning_reconstruction_missing_at_required_band"
         for rule, _ in advisories
     ), f"expected R3 to fire at variety=11, got: {advisories}"
+
+
+# =============================================================================
+# #906 auditor-verdict overwrite-protection (codified mirror)
+#
+# Two structural branches keyed on is_lead (top-level agent_type), all in this
+# one hook (no new matcher):
+#   MIRROR  (non-lead audit_summary write) → durable audit_summary_authored
+#   RECOVER (lead divergent overwrite)     → advisory + lead_close_note, with
+#            the authored verdict preserved (NO read of the clobbered value).
+# Disk reads/writes resolve under the monkeypatched HOME via _seed_task_a /
+# read_task_json / _writeback_audit_recovery.
+# =============================================================================
+
+
+def _read_task_back(tmp_path: Path, team_name: str, task_id: str) -> dict:
+    p = tmp_path / ".claude" / "tasks" / team_name / f"{task_id}.json"
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def test_906_mirror_snapshots_authored_verdict_on_non_lead_write(
+    tmp_path, monkeypatch, pact_context
+):
+    """MIRROR: a non-lead TaskUpdate that writes metadata.audit_summary durably
+    snapshots it to metadata.audit_summary_authored (silent — no advisory)."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    verdict = {"signal": "RED", "findings": ["sql injection"], "scope": "backend"}
+    _seed_task_a(
+        tmp_path, "test-team", "1",
+        subject="auditor: observe", owner="auditor",
+        metadata={"completion_type": "signal", "audit_summary": verdict},
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "agent_type": "pact-auditor",  # non-lead
+        "tool_input": {"taskId": "1", "metadata": {"audit_summary": verdict}},
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    back = _read_task_back(tmp_path, "test-team", "1")
+    assert back["metadata"].get("audit_summary_authored") == verdict, (
+        "MIRROR must durably snapshot the authored verdict to "
+        "audit_summary_authored"
+    )
+    assert not any(r == "audit_summary_overwrite" for r, _ in advisories), (
+        "MIRROR is silent — no overwrite advisory on the auditor's own write"
+    )
+
+
+def test_906_recover_preserves_authored_and_routes_lead_note(
+    tmp_path, monkeypatch, pact_context
+):
+    """RECOVER: a lead TaskUpdate that overwrites a DIVERGENT authored verdict
+    fires the advisory, preserves audit_summary_authored, and routes the lead's
+    value to lead_close_note (the verdict is not lost)."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    authored = {"signal": "RED", "findings": ["sql injection"], "scope": "backend"}
+    lead_note = {"signal": "GREEN", "note": "closing — no signal observed"}
+    _seed_task_a(
+        tmp_path, "test-team", "1",
+        subject="auditor: observe", owner="auditor",
+        metadata={"audit_summary": authored, "audit_summary_authored": authored},
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "agent_type": "pact-orchestrator",  # lead
+        "tool_input": {"taskId": "1", "metadata": {"audit_summary": lead_note}},
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert any(r == "audit_summary_overwrite" for r, _ in advisories), (
+        f"expected audit_summary_overwrite advisory, got: {advisories}"
+    )
+    back = _read_task_back(tmp_path, "test-team", "1")
+    assert back["metadata"].get("audit_summary_authored") == authored, (
+        "authored verdict MUST remain preserved in audit_summary_authored"
+    )
+    assert back["metadata"].get("lead_close_note") == lead_note, (
+        "lead's overwriting value MUST be routed to lead_close_note"
+    )
+
+
+def test_906_recover_flags_destructive_downgrade(
+    tmp_path, monkeypatch, pact_context
+):
+    """RED->GREEN is a destructive downgrade — advisory text escalates."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    authored = {"signal": "RED", "findings": ["auth bypass"], "scope": "api"}
+    lead_note = {"signal": "GREEN", "note": "closing"}
+    _seed_task_a(
+        tmp_path, "test-team", "1",
+        subject="auditor: observe", owner="auditor",
+        metadata={"audit_summary": authored, "audit_summary_authored": authored},
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "agent_type": "pact-orchestrator",
+        "tool_input": {"taskId": "1", "metadata": {"audit_summary": lead_note}},
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    msg = next((m for r, m in advisories if r == "audit_summary_overwrite"), "")
+    assert "DESTRUCTIVE DOWNGRADE" in msg, (
+        f"RED->GREEN must escalate advisory severity, got: {msg!r}"
+    )
+
+
+def test_906_no_advisory_when_no_authored_mirror_exists(
+    tmp_path, monkeypatch, pact_context
+):
+    """No false-positive: a lead writing audit_summary from scratch (no prior
+    audit_summary_authored mirror) does NOT fire the overwrite advisory."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    lead_note = {"signal": "GREEN", "note": "lead-authored from scratch"}
+    _seed_task_a(
+        tmp_path, "test-team", "1",
+        subject="auditor: observe", owner="auditor", metadata={},
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "agent_type": "pact-orchestrator",
+        "tool_input": {"taskId": "1", "metadata": {"audit_summary": lead_note}},
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(r == "audit_summary_overwrite" for r, _ in advisories), (
+        "no mirror exists → no overwrite (lead-authored-from-scratch is not a "
+        f"false fire); got: {advisories}"
+    )
+
+
+def test_906_no_advisory_when_lead_reaffirms_authored_value(
+    tmp_path, monkeypatch, pact_context
+):
+    """No fire when the lead's audit_summary EQUALS the authored mirror
+    (re-affirmation, not an overwrite)."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    authored = {"signal": "YELLOW", "findings": ["stale comment"], "scope": "x"}
+    _seed_task_a(
+        tmp_path, "test-team", "1",
+        subject="auditor: observe", owner="auditor",
+        metadata={"audit_summary": authored, "audit_summary_authored": authored},
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "agent_type": "pact-orchestrator",
+        "tool_input": {"taskId": "1", "metadata": {"audit_summary": authored}},
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(r == "audit_summary_overwrite" for r, _ in advisories), (
+        f"lead re-affirming the authored verdict is not an overwrite; got: {advisories}"
+    )
+
+
+# =============================================================================
+# M2 (security #38) — NUL-byte taskId advisory-suppression DoS closure
+#
+# A NUL byte in tool_input.taskId reaches read_task_json's task_file.exists(),
+# which raises ValueError('embedded null byte'). Before the fix that propagated
+# to main()'s catch-all → _emit_load_failure_advisory → rule enforcement skipped
+# for the turn. read_task_json now catches ValueError (degrade to {}), and the
+# two writeback helpers sanitize via sanitize_path_component (strip C0/\x00).
+# =============================================================================
+
+
+def test_M2_value_error_in_task_read_does_not_suppress_gate(
+    tmp_path, monkeypatch, pact_context
+):
+    """End-to-end: a task-file stat that raises ValueError (the NUL-byte
+    exists() raise on a vulnerable Python) must NOT propagate out of
+    evaluate_lifecycle — else it reaches main()'s catch-all and skips rule
+    enforcement for the turn (advisory-suppression DoS). The fix in
+    read_task_json degrades the read to {}.
+
+    Determinism: exists()'s NUL behavior is Python-version-dependent (3.14
+    returns False), so we FORCE the raise via a conditional exists() that raises
+    ONLY for the NUL-containing task file — leaving the pact_context context-file
+    read (no NUL) unaffected, so team_name still resolves and the #906 read path
+    is genuinely reached. This is RED-on-revert: drop ValueError from
+    read_task_json's except and evaluate_lifecycle propagates the ValueError.
+    """
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _real_exists = Path.exists
+
+    def _conditional_exists(self):
+        if "\x00" in str(self):
+            raise ValueError("embedded null byte")
+        return _real_exists(self)
+
+    monkeypatch.setattr(Path, "exists", _conditional_exists)
+    payload = {
+        "tool_name": "TaskUpdate",
+        "agent_type": "pact-orchestrator",
+        "tool_input": {
+            "taskId": "9\x00x",
+            "metadata": {"audit_summary": {"signal": "GREEN"}},
+        },
+        "tool_response": {},
+    }
+    # Must return a list (no exception). Before the fix this propagated ValueError.
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert isinstance(advisories, list)
+    assert not any(r == "audit_summary_overwrite" for r, _ in advisories), (
+        "NUL-byte taskId read degraded to {} → no authored mirror → no overwrite fire"
+    )

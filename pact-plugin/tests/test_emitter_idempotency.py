@@ -170,43 +170,40 @@ class TestMarkerFailOpen:
             "agent_handoff event — data-integrity carve-out per §2.4."
         )
 
-    def test_journal_write_failure_loses_event_but_marker_persists(
+    def test_journal_write_failure_unclaims_marker_so_a_retry_can_reemit(
         self, tmp_path, monkeypatch
     ):
-        """Document the marker-before-emit ordering asymmetry
-        (backend-reviewer LOW #2, task #12).
+        """#917 R1 (compensating-unclaim): a journal-write failure ROLLS BACK
+        the optimistic marker claim, so a later fire can re-emit — closing the
+        claim-without-write poison.
 
-        `_already_emitted` creates the sidecar marker BEFORE `append_event`
-        is called. If `append_event` silently fails (session_journal.py
-        fail-open contract — returns None/False rather than raising), the
-        marker persists but the event is lost from the journal. This is
-        the intentional trade-off: avoiding 37× duplicate emission (the
-        #528 amplification class) is strictly more important than
-        recovering a rare single-event loss on journal-write failure.
+        The emitter claims the sidecar O_EXCL marker BEFORE `append_event`
+        (mark-then-write — required so two CONCURRENT fires cannot both write).
+        If `append_event` then fails (session_journal's fail-open returns
+        None/False, OR an exception), the marker WITHOUT R1 would persist while
+        no journal entry was written — `already_emitted` would suppress every
+        later fire for that key forever (silent permanent loss).
 
-        #917 NARROWING: the marker-claim is now gated on get_journal_path()
-        being non-empty (the canonical-journal writability precondition). So
-        the UNWRITABLE-journal cause of append failure (get_journal_path()=="")
-        now DEFERS before claiming the marker — no claim-without-write poison.
-        This test patches get_journal_path() to a writable value, isolating the
-        RESIDUAL scenario this asymmetry still covers: a WRITABLE journal whose
-        append_event nonetheless fails (e.g. a write error after path
-        resolution). The marker-persists trade-off remains intentional there.
-        The unwritable→defer behavior is pinned in
-        test_handoff_writability_parity.py.
+        R1 captures append_event's return and, on failure, calls unclaim() to
+        remove the marker THIS process created. The mark-then-write order is
+        unchanged (concurrency dedup preserved — a simultaneous fire still loses
+        the O_EXCL race and never double-writes); only the FAILED writer rolls
+        back its own claim.
 
-        This test pins the CURRENT behavior so a future reviewer reading
-        `_already_emitted` → `append_event` → `_mark_emitted` ordering
-        does not mistake it for a bug. If the ordering is ever inverted
-        (journal-write first, marker second) — e.g., to try to prevent
-        the loss — this test would fail and force the change to be
-        justified against the amplification-prevention property.
+        The v4.4.10 writability gate already DEFERS before claiming when the
+        journal path is unresolvable (get_journal_path()==""); this test patches
+        it truthy to isolate the RESIDUAL case the gate does NOT cover — a
+        writable-path append that nonetheless returns False. The unwritable→defer
+        behavior is pinned in test_handoff_writability_parity.py.
 
-        Mock choice: `append_event` returning None simulates
-        session_journal's silent fail-open. An exception path from
-        append_event would be caught by the outer try/except (task #16
-        fix) and is covered by TestUnexpectedExceptionSuppression —
-        we specifically exercise the NON-exception failure here.
+        If R1 is ever removed (marker left claimed on write-failure), the
+        second-invocation retry assertion below fails and forces the regression
+        to be justified against the silent-permanent-loss property.
+
+        Mock choice: `append_event` returning None simulates session_journal's
+        silent fail-open. The exception path is covered by
+        TestUnexpectedExceptionSuppression; here we exercise the NON-exception
+        False return.
         """
         monkeypatch.setenv("HOME", str(tmp_path))
         from agent_handoff_emitter import main
@@ -253,30 +250,38 @@ class TestMarkerFailOpen:
             tmp_path / ".claude" / "teams" / "pact-test"
             / ".agent_handoff_emitted" / f"journal-fail-probe-{occ}"
         )
-        assert marker.exists(), (
-            "marker persists despite journal-write failure — this is the "
-            "intentional asymmetry. `already_emitted` creates the marker "
-            "BEFORE `append_event` is called; a silent fail in append_event "
-            "does NOT unwind the marker. Trade-off: prevents 37× duplicate "
-            "emission at the cost of rare single-event loss."
+        assert not marker.exists(), (
+            "#917 R1: a failed journal write must UNCLAIM the marker — the "
+            "emitter claims it BEFORE append_event, and on a False/None return "
+            "rolls the claim back via unclaim(). Without the rollback the marker "
+            "would persist with no journal entry and permanently suppress every "
+            "later fire for this key (the claim-without-write poison)."
         )
 
-        # Second invocation with same (team, task_id): marker-based dedup
-        # engages, append_event is NOT called again, exit 0 suppressOutput.
-        # This property is what the trade-off buys us — dedup remains
-        # intact despite the lost event.
+        # Second invocation with same (team, task_id): because R1 unclaimed the
+        # poisoned marker, already_emitted() returns False again → the write IS
+        # retried (no permanent suppression). This time append_event succeeds,
+        # so the event lands and the marker is (re)claimed and persists.
+        def _append_succeed(event):
+            append_call_count["n"] += 1
+            return True
+
         with patch("agent_handoff_emitter.read_task_json", return_value=task_data), \
-             patch("agent_handoff_emitter.append_event", side_effect=_append_silent_fail), \
+             patch("agent_handoff_emitter.append_event", side_effect=_append_succeed), \
              patch("agent_handoff_emitter.get_journal_path",
                    return_value=WRITABLE_TEST_JOURNAL), \
              patch("sys.stdin", io.StringIO(json.dumps(payload))):
             with pytest.raises(SystemExit) as exc2:
                 main()
         assert exc2.value.code == 0
-        assert append_call_count["n"] == 1, (
-            "second invocation with same (team, task_id) must NOT retry "
-            "append_event — marker-based dedup engaged. If this assertion "
-            "fails, the dedup property is broken and amplification returns."
+        assert append_call_count["n"] == 2, (
+            "second invocation MUST retry append_event — R1 unclaimed the "
+            "marker after the first write failed, so the key is no longer "
+            "permanently suppressed. If this stays at 1, the poison regressed."
+        )
+        assert marker.exists(), (
+            "after a successful retry the marker is (re)claimed and persists — "
+            "normal dedup resumes for subsequent fires."
         )
 
 class TestMarkerDirSymlinkGuard:
