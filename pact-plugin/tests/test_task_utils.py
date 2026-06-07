@@ -39,8 +39,10 @@ class TestGetTaskList:
     """Tests for get_task_list() — filesystem-based task reading."""
 
     def test_returns_none_when_no_session_id(self, monkeypatch, pact_context):
+        # SOLO context (team_name="") so this exercises the REAL solo no-id
+        # guard, not a vacuous pass via the team-branch short-circuit.
         from task_utils import get_task_list
-        pact_context(session_id="")  # No session ID available
+        pact_context(session_id="", team_name="")  # No session ID, no team
         monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
         result = get_task_list()
         assert result is None
@@ -54,12 +56,14 @@ class TestGetTaskList:
         assert result is None
 
     def test_reads_tasks_from_filesystem(self, tmp_path, monkeypatch, pact_context):
+        # TEAM branch: the pact_context fixture defaults team_name="test-team",
+        # so a team session resolves tasks under {team_name}, not {session_id}.
         from task_utils import get_task_list
         pact_context(session_id="test-session")
         monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        tasks_dir = tmp_path / ".claude" / "tasks" / "test-session"
+        tasks_dir = tmp_path / ".claude" / "tasks" / "test-team"
         tasks_dir.mkdir(parents=True)
         write_task(tasks_dir, "1", {"subject": "Test task", "status": "pending"})
         write_task(tasks_dir, "2", {"subject": "Another task", "status": "in_progress"})
@@ -69,8 +73,12 @@ class TestGetTaskList:
         assert len(result) == 2
 
     def test_prefers_task_list_id_over_session_id(self, tmp_path, monkeypatch, pact_context):
+        # SOLO context (team_name=""): CLAUDE_CODE_TASK_LIST_ID is honored only
+        # in the solo branch (the team branch resolves by team_name and ignores
+        # the env var). Verifies the preserved solo env-var precedence + gives
+        # the solo branch positive real-resolver coverage.
         from task_utils import get_task_list
-        pact_context(session_id="session-id")
+        pact_context(session_id="session-id", team_name="")
         monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", "task-list-id")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
@@ -84,8 +92,11 @@ class TestGetTaskList:
         assert len(result) == 1
 
     def test_returns_none_for_empty_dir(self, tmp_path, monkeypatch, pact_context):
+        # SOLO context (team_name="") so the empty-dir->None path is exercised
+        # through the REAL solo resolver (session_id dir), not vacuously via the
+        # team-branch short-circuit.
         from task_utils import get_task_list
-        pact_context(session_id="test-session")
+        pact_context(session_id="test-session", team_name="")
         monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
@@ -96,12 +107,14 @@ class TestGetTaskList:
         assert result is None
 
     def test_skips_invalid_json_files(self, tmp_path, monkeypatch, pact_context):
+        # TEAM branch (default team_name="test-team"). iter_team_task_jsons
+        # skips the unparseable file the same way the solo glob did.
         from task_utils import get_task_list
         pact_context(session_id="test-session")
         monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        tasks_dir = tmp_path / ".claude" / "tasks" / "test-session"
+        tasks_dir = tmp_path / ".claude" / "tasks" / "test-team"
         tasks_dir.mkdir(parents=True)
         (tasks_dir / "bad.json").write_text("not json", encoding="utf-8")
         write_task(tasks_dir, "1", {"subject": "Good task", "status": "pending"})
@@ -111,8 +124,12 @@ class TestGetTaskList:
         assert len(result) == 1
 
     def test_returns_none_on_exception(self, tmp_path, monkeypatch, pact_context):
+        # SOLO context (team_name="") so the glob raises inside the solo
+        # branch's own try/except — the path this test targets. Under a team
+        # context the team branch would short-circuit before the patched glob,
+        # making the assertion vacuous.
         from task_utils import get_task_list
-        pact_context(session_id="test-session")
+        pact_context(session_id="test-session", team_name="")
         monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
@@ -122,6 +139,189 @@ class TestGetTaskList:
         with patch.object(Path, "glob", side_effect=PermissionError("denied")):
             result = get_task_list()
         assert result is None
+
+    def test_solo_resolves_tasks_by_session_id(self, tmp_path, monkeypatch, pact_context):
+        # Positive real-resolver coverage of the SOLO branch's bare-session_id
+        # path (no CLAUDE_CODE_TASK_LIST_ID): team_name="" routes to the solo
+        # branch, which must resolve ~/.claude/tasks/{session_id}/ and read it.
+        # Guards the preserved solo path the team-dir fix must NOT regress, and
+        # is non-vacuous (a team context would short-circuit before this path).
+        from task_utils import get_task_list
+        pact_context(session_id="solo-session", team_name="")
+        monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        tasks_dir = tmp_path / ".claude" / "tasks" / "solo-session"
+        tasks_dir.mkdir(parents=True)
+        write_task(tasks_dir, "1", {"subject": "Solo task", "status": "in_progress"})
+
+        result = get_task_list()
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["subject"] == "Solo task"
+
+    def test_solo_rejects_traversal_task_list_id(self, tmp_path, monkeypatch, pact_context):
+        # F2 (security): a user-controlled CLAUDE_CODE_TASK_LIST_ID that is not a
+        # safe single path component must be rejected (-> None) BEFORE the
+        # path-join, so it cannot escape the tasks base and read *.json outside.
+        # Solo context (team_name="") — the env var is consulted only there.
+        # NON-VACUOUS: a *.json is planted at the traversal target, so WITHOUT
+        # the is_safe_path_component guard get_task_list would resolve
+        # base/"../escape" -> the planted dir and return the LEAKED task
+        # (non-None). The guard makes it None. (Revert the guard -> this FAILS.)
+        from task_utils import get_task_list
+        pact_context(session_id="session-id", team_name="")
+        base = tmp_path / "tasks"
+        base.mkdir(parents=True)
+        escape = tmp_path / "escape"
+        escape.mkdir()
+        (escape / "secret.json").write_text(
+            json.dumps({"id": "x", "subject": "LEAKED"}), encoding="utf-8"
+        )
+        for hostile in ("../escape", "../../etc", "..", "a/b", "foo/../bar"):
+            monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", hostile)
+            assert get_task_list(tasks_base_dir=str(base)) is None, (
+                f"unsafe task_list_id {hostile!r} must be rejected before the "
+                f"path-join — must NOT resolve out-of-base and read the planted "
+                f"secret (that is the F2 traversal-read vector)"
+            )
+
+    def test_solo_accepts_legit_task_list_id(self, tmp_path, monkeypatch, pact_context):
+        # Guardrail: a legitimate single-component task-list id (pact-<slug> /
+        # UUID / multi-session pointer) still passes is_safe_path_component and
+        # resolves — proves the F2 validation adds NO solo regression.
+        from task_utils import get_task_list
+        pact_context(session_id="session-id", team_name="")
+        monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", "pact-abcd1234")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        tasks_dir = tmp_path / ".claude" / "tasks" / "pact-abcd1234"
+        tasks_dir.mkdir(parents=True)
+        write_task(tasks_dir, "1", {"subject": "Legit", "status": "in_progress"})
+        result = get_task_list()
+        assert result is not None and len(result) == 1
+        assert result[0]["subject"] == "Legit"
+
+    def test_solo_skips_symlinked_json_file(self, tmp_path, monkeypatch, pact_context):
+        # R3 (security): a *.json INSIDE the (legit) tasks dir that is a SYMLINK
+        # to a file OUTSIDE the base must be SKIPPED, not followed-and-read.
+        # NON-VACUOUS: the symlink targets a planted out-of-base secret; WITHOUT
+        # the per-file is_symlink skip the glob follows it and reads LEAKED. The
+        # defense skips it; only the real (regular-file) task is returned.
+        from task_utils import get_task_list
+        pact_context(session_id="session-id", team_name="")
+        base = tmp_path / "tasks"
+        tdir = base / "solo-x"
+        tdir.mkdir(parents=True)
+        secret = tmp_path / "secret.json"  # OUTSIDE base
+        secret.write_text(json.dumps({"id": "leak", "subject": "LEAKED"}), encoding="utf-8")
+        write_task(tdir, "1", {"subject": "Real", "status": "in_progress"})
+        (tdir / "leak.json").symlink_to(secret)
+        monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", "solo-x")
+        result = get_task_list(tasks_base_dir=str(base))
+        subjects = {t["subject"] for t in (result or [])}
+        assert "LEAKED" not in subjects, (
+            "a symlinked *.json pointing outside the base must be SKIPPED, not "
+            "read — without the is_symlink skip the glob follows it -> LEAKED"
+        )
+        assert subjects == {"Real"}
+
+    def test_solo_rejects_symlink_dir_escaping_base(self, tmp_path, monkeypatch, pact_context):
+        # R3 (security): a {task_list_id} dir that is itself a SYMLINK escaping
+        # the base must yield None — the resolve/relative_to anchor rejects it.
+        # The NAME passes is_safe_path_component (safe component); the escape is
+        # via the symlink TARGET. NON-VACUOUS: without the anchor, exists()
+        # follows the symlink and the glob reads the planted out-of-base secret.
+        from task_utils import get_task_list
+        pact_context(session_id="session-id", team_name="")
+        base = tmp_path / "tasks"
+        base.mkdir(parents=True)
+        outside = tmp_path / "escapedir"  # OUTSIDE base
+        outside.mkdir()
+        (outside / "secret.json").write_text(
+            json.dumps({"id": "leak", "subject": "LEAKED"}), encoding="utf-8"
+        )
+        (base / "evil-link").symlink_to(outside, target_is_directory=True)
+        monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", "evil-link")
+        result = get_task_list(tasks_base_dir=str(base))
+        assert result is None, (
+            "a {task_list_id} dir that is a symlink escaping the base must be "
+            "rejected by the resolve/relative_to anchor -> None (without it, "
+            "exists() follows the symlink and the glob reads the out-of-base secret)"
+        )
+
+    def test_solo_skips_dotfile_json(self, tmp_path, monkeypatch, pact_context):
+        # R4 (content-hygiene parity): a dotfile-prefixed *.json in the solo
+        # tasks dir must be SKIPPED, mirroring the team branch. NON-VACUOUS:
+        # pathlib glob('*.json') INCLUDES '.evil.json', so WITHOUT the
+        # dotfile-skip get_task_list reads it (count inflation). (Revert the
+        # dotfile-skip -> DOTFILE-INJECTED appears -> this FAILS.)
+        from task_utils import get_task_list
+        pact_context(session_id="session-id", team_name="")
+        base = tmp_path / "tasks"
+        tdir = base / "solo-x"
+        tdir.mkdir(parents=True)
+        write_task(tdir, "1", {"subject": "Real", "status": "in_progress"})
+        (tdir / ".evil.json").write_text(
+            json.dumps({"id": "e", "subject": "DOTFILE-INJECTED"}), encoding="utf-8"
+        )
+        monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", "solo-x")
+        result = get_task_list(tasks_base_dir=str(base))
+        subjects = {t["subject"] for t in (result or [])}
+        assert "DOTFILE-INJECTED" not in subjects, (
+            "a dotfile-prefixed *.json must be skipped (pathlib glob includes "
+            "it; without the dotfile-skip it is read)"
+        )
+        assert subjects == {"Real"}
+
+    def test_solo_skips_non_dict_json(self, tmp_path, monkeypatch, pact_context):
+        # R4 (content-hygiene parity): a malformed-but-valid JSON that parses to
+        # a NON-dict (list/int/str) must be SKIPPED, not appended, mirroring the
+        # team branch's isinstance(dict) guard. NON-VACUOUS: without the guard
+        # the non-dict is appended AND a downstream reader (find_feature_task)
+        # calls .get() on it -> AttributeError. (Revert the guard -> this FAILS,
+        # either the all-dict assert or the find_feature_task crash.)
+        from task_utils import get_task_list, find_feature_task
+        pact_context(session_id="session-id", team_name="")
+        base = tmp_path / "tasks"
+        tdir = base / "solo-x"
+        tdir.mkdir(parents=True)
+        write_task(tdir, "1", {"subject": "Real", "status": "in_progress"})
+        (tdir / "bad.json").write_text(json.dumps([1, 2, 3]), encoding="utf-8")  # valid JSON, non-dict
+        monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", "solo-x")
+        result = get_task_list(tasks_base_dir=str(base))
+        assert result is not None
+        assert all(isinstance(t, dict) for t in result), (
+            "a non-dict parse ([1,2,3]) must be skipped, not appended"
+        )
+        assert {t["subject"] for t in result} == {"Real"}
+        # Downstream consumer must not crash on the returned list.
+        find_feature_task(result)  # raises AttributeError if a non-dict leaked through
+
+    def test_solo_r1_unique_nonallowlisted_in_base_name(self, tmp_path, monkeypatch, pact_context):
+        # R2-F3 (R1-UNIQUENESS pin, spec'd by test-engineer): a non-allowlisted
+        # but IN-BASE task_list_id must be rejected by is_safe_path_component
+        # (R1) BEFORE the path-join. "a b" (space ∉ [A-Za-z0-9_-]) is rejected by
+        # R1, but base/"a b" resolves UNDER base so R3's resolve/relative_to
+        # anchor PASSES it — only R1 catches it. NON-VACUOUS vs R1 ALONE: revert
+        # ONLY the is_safe_path_component guard (R3 intact) -> base/"a b" passes
+        # the anchor + exists -> the planted task is read -> non-None -> this
+        # FAILS. (NUL / "../escape" would NOT prove this — R3 masks them:
+        # resolve() raises ValueError / escapes base, so both R1+R3 catch them.)
+        from task_utils import get_task_list
+        pact_context(session_id="session-id", team_name="")
+        base = tmp_path / "tasks"
+        d = base / "a b"
+        d.mkdir(parents=True)
+        (d / "1.json").write_text(
+            json.dumps({"id": "1", "subject": "NONALLOWLISTED"}), encoding="utf-8"
+        )
+        monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", "a b")
+        assert get_task_list(tasks_base_dir=str(base)) is None, (
+            "a non-allowlisted in-base task_list_id must be rejected by "
+            "is_safe_path_component (R1) BEFORE the path-join — R3's anchor "
+            "passes it (in-base), so this is the R1-UNIQUE case proving the "
+            "guard is load-bearing"
+        )
 
 
 # ---------------------------------------------------------------------------

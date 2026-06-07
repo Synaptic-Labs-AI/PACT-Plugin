@@ -1,12 +1,16 @@
 """
 Location: pact-plugin/hooks/shared/task_utils.py
 Summary: Shared Task system integration utilities for PACT hooks.
-Used by: session_init.py, agent_handoff_emitter.py
+Used by: PACT lifecycle/wake hooks (via get_task_list), the lifecycle gate
+and handoff machinery (via read_task_json), and dispatch helpers (via
+iter_team_task_jsons).
 
 This module provides common functions for reading and analyzing Tasks from
-the Claude Task system. Tasks are stored at ~/.claude/tasks/{sessionId}/*.json
-and survive context compaction, making them the primary state source for
-workflow recovery.
+the Claude Task system. Tasks live under one of two storage topologies, keyed
+on a structural signal (team_name): a TEAM session stores tasks at
+~/.claude/tasks/{team_name}/*.json, a SOLO/no-team session at
+~/.claude/tasks/{session_id}/*.json. They survive context compaction, making
+them the primary state source for workflow recovery.
 
 Functions:
     get_task_list: Read all tasks from the Task system
@@ -25,20 +29,53 @@ import re
 from pathlib import Path
 from typing import Any, Iterator
 
-from shared.pact_context import get_session_id
+from shared.pact_context import get_session_id, get_team_name
 from shared.session_state import is_safe_path_component
 
 
-def get_task_list() -> list[dict[str, Any]] | None:
+def get_task_list(tasks_base_dir: str | None = None) -> list[dict[str, Any]] | None:
     """
     Read TaskList from the Claude Task system.
 
-    Tasks are stored at ~/.claude/tasks/{sessionId}/*.json and survive compaction.
-    This function reads directly from the filesystem since hooks cannot call Task tools.
+    Two live storage topologies, keyed on a structural signal (team_name):
+      - TEAM session -> tasks under ~/.claude/tasks/{team_name}/   (Agent Teams)
+      - SOLO session -> tasks under ~/.claude/tasks/{session_id}/  (no team)
+    team_name is mode-independent (resolves identically under in-process and
+    tmux), so the team branch needs no teammateMode detection. This function
+    reads directly from the filesystem since hooks cannot call Task tools.
+
+    Args:
+        tasks_base_dir: Override for the ~/.claude/tasks base dir (testing only;
+            production default None resolves the real home path). Mirrors the
+            institutional test seam in _read_task_counts / read_task_json.
 
     Returns:
         List of task dicts, or None if tasks unavailable
     """
+    # TEAM branch (the team-dir resolution fix): a team session stores tasks
+    # under {team_name}, NOT the bare session_id. Reuse the path-traversal-safe
+    # SSOT reader. An empty/absent team dir returns None and MUST NOT fall
+    # through to the solo session_id dir: a team session with no tasks yet is
+    # still a team session (branch key = "is this a team session?", not "did the
+    # team dir have tasks?"). The return lives INSIDE the `if` to guarantee that
+    # invariant — control never reaches the solo branch when team_name is truthy.
+    team_name = get_team_name()
+    if team_name:
+        tasks = list(iter_team_task_jsons(team_name, tasks_base_dir=tasks_base_dir))
+        return tasks if tasks else None
+
+    # SOLO / no-team branch: the CLAUDE_CODE_TASK_LIST_ID-or-session_id key
+    # choice is preserved, and the dir is read by this branch's own direct glob
+    # (NOT routed through iter_team_task_jsons) — but with the SAME FIVE
+    # path-safety + content-hygiene defenses applied INLINE, in FULL PARITY with
+    # the team branch (iter_team_task_jsons): (1) is_safe_path_component on the
+    # name (F2 guard below), (2) a resolve/relative_to base-anchor on the dir,
+    # (3) a per-file is_symlink skip, (4) a dotfile-prefixed-file skip, and
+    # (5) an isinstance(dict) parse guard. The solo branch is therefore NOT
+    # raw/unvalidated: it has FULL 5/5 defense parity with the team branch, just
+    # implemented inline. Surgical-inline duplication (NOT a shared-helper
+    # refactor) is the accepted trade-off to avoid touching the working/tested
+    # team path. Only the base root is parameterized (test seam).
     session_id = get_session_id()
     # Also check for multi-session task list ID
     task_list_id = os.environ.get("CLAUDE_CODE_TASK_LIST_ID", session_id)
@@ -46,16 +83,64 @@ def get_task_list() -> list[dict[str, Any]] | None:
     if not task_list_id:
         return None
 
-    tasks_dir = Path.home() / ".claude" / "tasks" / task_list_id
+    # F2 (security): task_list_id is USER-CONTROLLED via the
+    # CLAUDE_CODE_TASK_LIST_ID env var, then used as a path component. Validate
+    # it with the same positive allowlist the team branch already applies to
+    # team_name (is_safe_path_component, inside iter_team_task_jsons) so a
+    # traversal value ("../secret") cannot escape the tasks base and read *.json
+    # outside it. Legitimate task-list IDs (pact-<slug>, UUIDs, multi-session
+    # pointers) are single [A-Za-z0-9_-] components and pass unchanged — no solo
+    # behavior change for real inputs (the env var must name a ~/.claude/tasks/
+    # dir, which the platform generates within that alphabet). Validating BEFORE
+    # the path-join also rejects an embedded-NUL value before the .exists() call
+    # (which could otherwise raise ValueError on some Python versions). Fail
+    # CLOSED (return None) to preserve the None-on-unavailable contract.
+    if not is_safe_path_component(task_list_id):
+        return None
+
+    base = Path(tasks_base_dir) if tasks_base_dir else (Path.home() / ".claude" / "tasks")
+    tasks_dir = base / task_list_id
+
+    # R3 (security): the {task_list_id} dir could itself be a SYMLINK that
+    # escapes the tasks base. is_safe_path_component (above) rejects '../' in the
+    # NAME, but not a safe-NAME dir that resolves out-of-base via a symlink.
+    # Mirror the team branch's anchor (iter_team_task_jsons): resolve the dir and
+    # assert it stays under the resolved base. A legit (non-symlink) dir resolves
+    # to itself and passes unchanged; only an escaping symlink-dir is rejected.
+    try:
+        tasks_dir.resolve().relative_to(base.resolve())
+    except (OSError, ValueError):
+        return None
+
     if not tasks_dir.exists():
         return None
 
     tasks = []
     try:
         for task_file in tasks_dir.glob("*.json"):
+            # R4 (hygiene parity): skip dotfile-prefixed JSON. pathlib glob
+            # INCLUDES them, but the platform task system never writes them; an
+            # attacker dropping one into the user's own tasks dir could otherwise
+            # inflate the task count. Mirrors the team branch's dotfile skip.
+            if task_file.name.startswith("."):
+                continue
+            # R3 (security): skip a *.json that is a SYMLINK — it could point
+            # outside the tasks base. Mirrors the team branch's per-file
+            # is_symlink skip; real task files are regular files, unaffected.
+            try:
+                if task_file.is_symlink():
+                    continue
+            except OSError:
+                continue
             try:
                 content = task_file.read_text(encoding='utf-8')
                 task = json.loads(content)
+                # R4 (hygiene parity): skip a parse that is not a dict (e.g.
+                # [1,2,3]/42/"x" from a malformed-but-valid JSON). Mirrors the
+                # team branch's isinstance(dict) yield-guard; downstream readers
+                # (find_feature_task etc.) call .get() and need a dict.
+                if not isinstance(task, dict):
+                    continue
                 tasks.append(task)
             except (IOError, json.JSONDecodeError):
                 continue
@@ -267,7 +352,10 @@ def build_post_compaction_checkpoint(
     return "\n".join(lines)
 
 
-def iter_team_task_jsons(team_name: str) -> Iterator[dict]:
+def iter_team_task_jsons(
+    team_name: str,
+    tasks_base_dir: str | None = None,
+) -> Iterator[dict]:
     """
     Yield parsed task JSON dicts from ~/.claude/tasks/{team_name}/*.json.
 
@@ -278,6 +366,14 @@ def iter_team_task_jsons(team_name: str) -> Iterator[dict]:
         separators, controls, whitespace).
       - tasks_root resolved once; team_dir resolved and asserted under
         tasks_root via relative_to (symlink-escape defense).
+
+    Args:
+        team_name: Team identifier; the {team_name} path component.
+        tasks_base_dir: Override for the ~/.claude/tasks base dir (testing
+            only; production default None resolves the real home path). The
+            symlink-escape relative_to assertion still anchors to this base,
+            so the path-traversal defense holds for any base. Mirrors the
+            institutional test seam in _read_task_counts / read_task_json.
 
     Pure generator; never raises. Yields nothing on any error
     (unsafe team_name, missing dir, symlink escape, IO error). Individual
@@ -291,7 +387,8 @@ def iter_team_task_jsons(team_name: str) -> Iterator[dict]:
     if not is_safe_path_component(team_name):
         return
     try:
-        tasks_root = (Path.home() / ".claude" / "tasks").resolve()
+        base = Path(tasks_base_dir) if tasks_base_dir else (Path.home() / ".claude" / "tasks")
+        tasks_root = base.resolve()
     except OSError:
         return
     team_dir = tasks_root / team_name
