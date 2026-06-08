@@ -18,16 +18,17 @@ discipline): the detector is exercised against synthetic source that DOES and
 does NOT contain the construction, so the negative leg cannot be a vacuous
 always-pass. A guard that can't fail is the inert class we are fighting.
 
-Allowlist — exactly the two legitimate residual `Path.home()/".claude"` roots
+Allowlist — the ONE legitimate residual `Path.home() / ".claude"` LITERAL
 (verified by hand + by the detector run at authoring time):
   - shared/symlinks.py   — the C6 dual-location protocols-symlink HOME-side root
                            (the link is created in BOTH ~/.claude and $CONFIG when
                            they differ; the home-side is intentional + answer-immune).
-  - shared/session_registry.py — the inline `_config_root()` env-UNSET fallback
-                           (`return Path.home() / ".claude"`), which mirrors the
-                           canonical resolver's own fallback.
-(shared/paths.py's fallback is `home / ".claude"` on a param, NOT the literal
-`Path.home() / ".claude"`, so it does not match the detector and needs no entry.)
+(shared/session_registry.py's inline `_config_root()` env-UNSET fallback and
+shared/paths.py's fallback are BOTH param-style `home / ".claude"` — NOT the
+literal `Path.home() / ".claude"` — so they do NOT match the detector and need
+no allowlist entry. session_registry was a literal until the home-once refactor
+aligned it with paths.py's canonical structure; the allowlist-rot test below
+prunes-by-failing if a residual ever vanishes, which is what dropped it here.)
 """
 import ast
 from pathlib import Path
@@ -39,7 +40,6 @@ HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
 # (basename, exact unparsed construction) pairs that are legitimate residuals.
 ALLOWLIST = {
     ("symlinks.py", "Path.home() / '.claude'"),
-    ("session_registry.py", "Path.home() / '.claude'"),
 }
 
 

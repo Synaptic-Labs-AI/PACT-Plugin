@@ -83,13 +83,14 @@ def _config_root() -> Path:
     through this one copy, or ``register()``'s ``_is_under_pact_sessions`` gate
     fail-closes under a non-default CLAUDE_CONFIG_DIR (silent name-recovery loss).
     """
+    home = Path.home()
     raw = (os.environ.get("CLAUDE_CONFIG_DIR") or "").strip()
     if not raw:
-        return Path.home() / ".claude"
+        return home / ".claude"
     if raw == "~":
-        return Path.home()
+        return home
     if raw.startswith("~/"):
-        return Path.home() / raw[2:]
+        return home / raw[2:]
     return Path(raw)
 
 
