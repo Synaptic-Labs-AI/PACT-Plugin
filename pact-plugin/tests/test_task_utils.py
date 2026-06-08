@@ -637,3 +637,69 @@ class TestReadTaskJsonNulByteSafety:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         assert read_task_json("12\x00bad", "test-team") == {}
         assert read_task_json("\x00", "team", tasks_base_dir=str(tmp_path)) == {}
+
+
+# ---------------------------------------------------------------------------
+# read_task_json — bounded containment parity (team_name guards 1+2)
+# ---------------------------------------------------------------------------
+
+class TestReadTaskJsonContainmentParity:
+    """read_task_json gains the 2-of-5 sibling-reader guards that apply to a
+    single-named-file reader: (1) is_safe_path_component(team_name) and (2)
+    resolve()+relative_to(base) containment. The glob-result hygiene guards
+    (per-file is_symlink / dotfile skip / isinstance(dict)) are correctly
+    ABSENT — read_task_json reads ONE named file, it never globs.
+    """
+
+    def test_legit_team_dir_still_read(self, tmp_path):
+        # Happy path preserved: a legit team_name + real dir is read unchanged.
+        from task_utils import read_task_json
+        base = tmp_path / "tasks"
+        tdir = base / "pact-legit-team"
+        tdir.mkdir(parents=True)
+        (tdir / "5.json").write_text(
+            json.dumps({"id": "5", "subject": "Real"}), encoding="utf-8"
+        )
+        result = read_task_json("5", "pact-legit-team", tasks_base_dir=str(base))
+        assert result.get("subject") == "Real"
+
+    def test_symlink_team_dir_escaping_base_rejected(self, tmp_path):
+        # Guard (2): a safe-NAMED team dir that is a SYMLINK escaping the base
+        # must be rejected by resolve()/relative_to -> falls through to bare
+        # base -> {}. NON-VACUOUS: without the guard, exists() follows the
+        # symlink and reads the planted out-of-base secret.
+        from task_utils import read_task_json
+        base = tmp_path / "tasks"
+        base.mkdir(parents=True)
+        outside = tmp_path / "escapedir"
+        outside.mkdir()
+        (outside / "7.json").write_text(
+            json.dumps({"id": "7", "subject": "LEAKED"}), encoding="utf-8"
+        )
+        (base / "evil-team").symlink_to(outside, target_is_directory=True)
+        result = read_task_json("7", "evil-team", tasks_base_dir=str(base))
+        assert result == {}, (
+            "a team dir that is a symlink escaping the base must be rejected by "
+            "the resolve()/relative_to containment (without it, exists() follows "
+            "the symlink and reads the out-of-base secret -> LEAKED)"
+        )
+
+    def test_unsafe_team_name_falls_through_to_bare_base(self, tmp_path):
+        # Guard (1): an is_safe_path_component-failing team_name (here a slash
+        # name that stays UNDER base, so guard (2) alone would NOT catch it)
+        # must skip the team dir and fall through to the bare-base read.
+        # NON-VACUOUS for guard (1) specifically: without it, base/"sub/evil" is
+        # under base (guard 2 passes) and read_task_json reads NESTED.
+        from task_utils import read_task_json
+        base = tmp_path / "tasks"
+        nested = base / "sub" / "evil"
+        nested.mkdir(parents=True)
+        (nested / "3.json").write_text(
+            json.dumps({"id": "3", "subject": "NESTED"}), encoding="utf-8"
+        )
+        # bare base has no 3.json -> guard (1) skip -> fall-through yields {}
+        result = read_task_json("3", "sub/evil", tasks_base_dir=str(base))
+        assert result == {}, (
+            "an unsafe (multi-segment) team_name must be rejected by "
+            "is_safe_path_component and skip the team dir -> bare-base fall-through"
+        )

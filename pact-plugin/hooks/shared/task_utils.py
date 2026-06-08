@@ -459,16 +459,32 @@ def read_task_json(
         return {}
 
     if tasks_base_dir is None:
-        tasks_base_dir = str(Path.home() / ".claude" / "tasks")
+        tasks_base_dir = str(get_claude_config_dir() / "tasks")
 
     base = Path(tasks_base_dir)
 
     task_dirs = []
-    if team_name:
+    # Bounded containment parity, guard (1): reject a traversal team_name
+    # (mirror iter_team_task_jsons's is_safe_path_component return-on-invalid).
+    # An unsafe team_name skips the team dir and falls through to the bare-base
+    # read, preserving the fail-open {} contract. Legit pact-<slug>/UUID names
+    # are single [A-Za-z0-9_-] components and pass unchanged.
+    if team_name and is_safe_path_component(team_name):
         task_dirs.append(base / team_name)
     task_dirs.append(base)
 
     for task_dir in task_dirs:
+        # Bounded containment parity, guard (2): skip a task_dir that resolves
+        # OUTSIDE base — e.g. a safe-named team dir that is a SYMLINK escaping
+        # the tasks base. Mirror the sibling readers' resolve()+relative_to;
+        # fail-open (continue to the bare-base fallback), preserving {}. Only
+        # guards (1)+(2) apply to this single-named-file reader; the glob-result
+        # hygiene guards (per-file is_symlink / dotfile skip / isinstance(dict))
+        # are correctly absent — read_task_json reads ONE named file, never globs.
+        try:
+            task_dir.resolve().relative_to(base.resolve())
+        except (ValueError, OSError):
+            continue
         task_file = task_dir / f"{task_id}.json"
         # M2 (security): exists() is INSIDE the try and ValueError is caught.
         # A NUL byte in task_id that slips past the sanitizer raises
