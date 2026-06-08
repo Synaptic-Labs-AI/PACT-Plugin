@@ -27,15 +27,23 @@ hook path. The companion meta-test re-derives the closure from the live import
 graph and asserts equality, so drift between this literal and the real import
 graph is caught at test time, not silently in production.
 
-The closure is TRANSITIVE and covers EVERY hooks/ module (both top-level helper
-modules AND hooks/shared/ helpers), not direct-imports-only and not shared-only:
-a seam hook may reach a helper via a multi-hop chain. Two real 2-hop cases this
-catches:
-  - task_lifecycle_gate -> teachback_schema -> variety_scorer  (shared helper)
-  - session_init -> staleness -> pin_caps                      (top-level helper)
-A direct-import-only OR shared-only map would MISS both — recreating a miniature
-inert-ship false-negative at the classifier layer. The asymmetry favors closure:
-a false positive costs one L2 test; a false negative is the inert-ship class.
+The closure is FULL-TRANSITIVE, derived via AST over the live import graph
+following ABSOLUTE and RELATIVE (`from .X import` / `from . import X`) and
+function-level imports, covering EVERY hooks/ module (top-level helper modules
+AND hooks/shared/ helpers) — not direct-only, not shared-only, not
+absolute-only: a seam hook may reach a helper via a multi-hop and/or relative
+chain. Three real multi-hop cases this catches:
+  - task_lifecycle_gate -> teachback_schema -> variety_scorer   (shared 2-hop)
+  - session_init -> staleness -> pin_caps                       (top-level 2-hop)
+  - <every pact_context importer> -> pact_context -(relative)-> session_registry
+    (session_registry is the identity-resolution seam — reached by 11 hooks via
+    pact_context's `from .session_registry import`; a regex deriver that skips
+    relative edges under-attributes it to just the 2 direct importers)
+A direct-only, shared-only, OR absolute-only map would MISS these — recreating a
+miniature inert-ship false-negative at the classifier layer. The asymmetry
+favors closure: a false positive costs one L2 test; a false negative is the
+inert-ship class. The companion meta-test's oracle MUST also be AST
+relative-following, or it reproduces the blind spot.
 """
 
 from __future__ import annotations
@@ -96,25 +104,28 @@ L3_CANDIDATE_HOOKS: frozenset[str] = frozenset({
 
 # ─── Transitive helper import closure (authoritative SSOT data) ─────────────
 
-# Per-seam-hook TRANSITIVE helper import closure: for each seam hook, the set of
-# helper modules (top-level hooks/ helpers AND hooks/shared/ helpers, EXCLUDING
-# the seam hooks themselves) it reaches via the import graph (direct AND
-# multi-hop). Computed from the live hooks/ import edges at authoring time; the
-# meta-test re-derives and asserts equality so this literal cannot drift. An
-# edit to any helper in a hook's closure can change that hook's behavior -> the
-# edit is SECONDARY.
+# Per-seam-hook FULL-TRANSITIVE helper import closure: for each seam hook, the
+# set of helper modules (top-level hooks/ helpers AND hooks/shared/ helpers,
+# EXCLUDING the seam hooks themselves) it reaches via the import graph. Derived
+# via AST following ABSOLUTE + RELATIVE (`from .X`) + function-level imports
+# (NOT regex — regex silently skips relative edges, e.g. pact_context's
+# `from .session_registry import resolve`, which under-attributes session_registry
+# to its 2 direct importers instead of all 11 pact_context importers). The
+# meta-test re-derives the same way (AST, relative-following) and asserts
+# equality so this literal cannot drift. An edit to any helper in a hook's
+# closure can change that hook's behavior -> the edit is SECONDARY.
 _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     "missed_wake_scan": frozenset({
         "constants", "intentional_wait", "pact_context", "session_journal",
-        "session_state", "task_utils",
+        "session_registry", "session_state", "task_utils",
     }),
     "teammate_idle": frozenset({
         "constants", "error_output", "pact_context", "session_journal",
-        "session_state", "task_utils",
+        "session_registry", "session_state", "task_utils",
     }),
     "agent_handoff_emitter": frozenset({
         "agent_handoff_marker", "constants", "pact_context", "session_journal",
-        "session_state", "task_utils",
+        "session_registry", "session_state", "task_utils",
     }),
     "session_init": frozenset({
         "claude_md_manager", "constants", "dispatch_helpers", "failure_log",
@@ -122,8 +133,8 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "pin_staleness_gate", "plugin_manifest", "session_journal",
         "session_registry", "session_resume", "session_state", "staleness",
         "symlinks", "task_utils", "teammate_mode",
-    }),  # the 3 top-level helpers (pin_caps, staleness, pin_staleness_gate) are
-         # reached here: session_init -> staleness -> pin_caps; session_init ->
+    }),  # top-level helpers (pin_caps, staleness, pin_staleness_gate) reached
+         # here: session_init -> staleness -> pin_caps; session_init ->
          # pin_staleness_gate -> pin_caps.
     "session_end": frozenset({
         "constants", "error_output", "pact_context", "session_journal",
@@ -131,17 +142,30 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     }),
     "dispatch_gate": frozenset({
         "constants", "dispatch_helpers", "pact_context", "session_journal",
-        "session_state", "task_utils",
+        "session_registry", "session_state", "task_utils",
     }),
     "task_lifecycle_gate": frozenset({
         "agent_handoff_marker", "constants", "dispatch_helpers",
-        "intentional_wait", "pact_context", "session_journal", "session_state",
-        "task_utils", "teachback_schema", "tool_response", "variety_scorer",
+        "intentional_wait", "pact_context", "session_journal",
+        "session_registry", "session_state", "task_utils", "teachback_schema",
+        "tool_response", "variety_scorer",
     }),
-    "bootstrap_gate": frozenset({"marker_schema", "pact_context"}),
-    "bootstrap_marker_writer": frozenset({"marker_schema", "pact_context"}),
-    "file_tracker": frozenset({"pact_context"}),
-    "peer_inject": frozenset({"pact_context", "peer_context", "plugin_manifest"}),
+    "bootstrap_gate": frozenset({
+        "constants", "marker_schema", "pact_context", "session_journal",
+        "session_registry", "session_state",
+    }),
+    "bootstrap_marker_writer": frozenset({
+        "constants", "marker_schema", "pact_context", "session_journal",
+        "session_registry", "session_state",
+    }),
+    "file_tracker": frozenset({
+        "constants", "pact_context", "session_journal", "session_registry",
+        "session_state",
+    }),
+    "peer_inject": frozenset({
+        "constants", "pact_context", "peer_context", "plugin_manifest",
+        "session_journal", "session_registry", "session_state",
+    }),
     "validate_handoff": frozenset({"error_output"}),
 }
 
