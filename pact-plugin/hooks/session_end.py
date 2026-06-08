@@ -42,7 +42,7 @@ from shared.session_journal import (
 )
 
 from shared.session_state import is_safe_path_component
-from shared.session_registry import REGISTRY_PATH as _REGISTRY_PATH
+from shared.session_registry import get_registry_path as _get_registry_path
 from shared.task_utils import get_task_list
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
@@ -694,14 +694,14 @@ def _prune_registry_dead_teams(
     cannot redirect the write.
 
     Args:
-        registry_path: the registry file. Defaults to the shared REGISTRY_PATH.
+        registry_path: the registry file. Defaults to the shared get_registry_path().
         teams_dir: the live-teams root. Defaults to ~/.claude/teams.
 
     Returns:
         Number of lines pruned (0 if the file is absent or nothing was stale).
     """
     if registry_path is None:
-        registry_path = _REGISTRY_PATH
+        registry_path = _get_registry_path()
     if teams_dir is None:
         teams_dir = Path.home() / ".claude" / "teams"
 

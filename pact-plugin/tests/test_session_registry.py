@@ -31,7 +31,7 @@ def registry_env(tmp_path, monkeypatch):
     fake_home = tmp_path
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
     reg_path = fake_home / ".claude" / "pact-sessions" / ".teammate-registry.jsonl"
-    monkeypatch.setattr(session_registry, "REGISTRY_PATH", reg_path)
+    monkeypatch.setattr(session_registry, "get_registry_path", lambda: reg_path)
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
 
     class _Env:
@@ -227,7 +227,7 @@ def test_register_never_raises_on_bad_input(registry_env):
 def test_registry_path_is_under_pact_sessions_not_teams():
     """The path is under pact-sessions/ (PACT-owned), NOT under teams/
     (shared, not PACT-owned). LOCKED team-agnostic global fixed path."""
-    p = session_registry.REGISTRY_PATH
+    p = session_registry.get_registry_path()
     parts = p.parts
     assert "pact-sessions" in parts
     assert "teams" not in parts
@@ -265,3 +265,54 @@ def test_path_containment_rejects_sibling_prefix_of_root(registry_env):
     child = root / "sub" / "x.jsonl"
     assert session_registry._is_under_pact_sessions(root) is True
     assert session_registry._is_under_pact_sessions(child) is True
+
+
+# ---------------------------------------------------------------------------
+# C4b — inline config-root resolver parity (session_registry is a standalone-
+# script leaf that can't import shared.paths, so it inlines the resolver). These
+# parity tests enforce the inline copy never drifts from the canonical resolver,
+# and guard the silent-bail trap. Mirrors the _is_safe_team_segment dual-copy
+# parity precedent (test_session_registry_trust_partition.py).
+# ---------------------------------------------------------------------------
+
+class TestConfigRootInlineParity:
+
+    @pytest.mark.parametrize("env_value", [
+        None,                 # unset -> home/.claude
+        "",                   # empty == unset
+        "   ",                # whitespace == unset
+        "/abs/config",        # absolute
+        "~",                  # home
+        "~/.claude-kimi",     # ~/x exact-prefix slice
+        "rel/dir",            # relative, honored as-is
+    ])
+    def test_inline_config_root_matches_canonical_resolver(self, env_value, monkeypatch, tmp_path):
+        # (a) the inline _config_root() MUST be byte-equivalent to the canonical
+        # shared.paths.get_claude_config_dir() across every env scenario.
+        import shared.session_registry as sr
+        from shared.paths import get_claude_config_dir
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        if env_value is None:
+            monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        else:
+            monkeypatch.setenv("CLAUDE_CONFIG_DIR", env_value)
+        assert sr._config_root() == get_claude_config_dir(), (
+            f"inline _config_root drifted from get_claude_config_dir for "
+            f"CLAUDE_CONFIG_DIR={env_value!r}"
+        )
+
+    def test_is_under_pact_sessions_holds_under_nondefault_config_dir(self, monkeypatch, tmp_path):
+        # (b) THE SILENT-BAIL TRAP GUARD: under a non-default CLAUDE_CONFIG_DIR,
+        # the registry path AND the _is_under_pact_sessions anchor must resolve
+        # through the SAME inline root, or register()/resolve() fail-closed at the
+        # containment gate (teammate-name recovery silently dies). NON-VACUOUS:
+        # if the anchor lagged on Path.home() the candidate (under $CONFIG) would
+        # not be under sessions_root (under ~/.claude) -> False -> this FAILS.
+        import shared.session_registry as sr
+        config_dir = tmp_path / "kimi-config"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+        assert sr._is_under_pact_sessions(sr.get_registry_path()) is True, (
+            "_is_under_pact_sessions rejected the registry path under a non-default "
+            "CLAUDE_CONFIG_DIR — the containment anchor is not co-routed through the "
+            "inline _config_root() (register() would silently bail)"
+        )
