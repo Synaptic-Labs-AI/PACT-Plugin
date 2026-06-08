@@ -706,3 +706,42 @@ class TestPerFileBroadExceptContract:
         )
         assert resolve_effective_teammate_mode() == "auto"
         assert should_emit_inprocess_notice() is True
+
+
+class TestConfigDirSettingsAndLegacy:
+    """C6 (#926): the user settings.json source (:120) and the legacy
+    ~/.claude.json fallback (:147) follow CLAUDE_CONFIG_DIR. The legacy file is
+    a SIBLING-asymmetry special case: $HOME/.claude.json when unset (NOT
+    $HOME/.claude/.claude.json), $CONFIG_DIR/.claude.json when set."""
+
+    def test_user_settings_follows_config_dir(self, mode_env, monkeypatch):
+        # :120 — env-set: the user settings source is $CONFIG/settings.json.
+        # NON-VACUOUS: if it still read $HOME/.claude/settings.json, the file
+        # below wouldn't be found and resolution would fall through to "auto".
+        config_dir = mode_env.root / "config-kimi"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+        mode_env._write(config_dir / "settings.json", {"teammateMode": "tmux"})
+        assert resolve_effective_teammate_mode() == "tmux"
+
+    def test_old_home_settings_not_read_when_config_dir_set(self, mode_env, monkeypatch):
+        # env-set: the OLD $HOME/.claude/settings.json is NOT in the source list.
+        config_dir = mode_env.root / "config-kimi"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+        mode_env.write_user({"teammateMode": "tmux"})  # $HOME/.claude/settings.json
+        # $CONFIG has no settings + no legacy → default
+        assert resolve_effective_teammate_mode() == "auto"
+
+    def test_legacy_claude_json_follows_config_dir_when_set(self, mode_env, monkeypatch):
+        # :147 — env-set: legacy reads $CONFIG/.claude.json.
+        config_dir = mode_env.root / "config-kimi"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+        mode_env._write(config_dir / ".claude.json", {"teammateMode": "in-process"})
+        assert resolve_effective_teammate_mode() == "in-process"
+
+    def test_legacy_claude_json_preserves_home_sibling_when_unset(self, mode_env, monkeypatch):
+        # :147 — env-UNSET: legacy reads $HOME/.claude.json (sibling). NON-VACUOUS:
+        # a blind get_claude_config_dir()/".claude.json" would yield
+        # $HOME/.claude/.claude.json and miss the file below → "auto".
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        mode_env.write_legacy({"teammateMode": "in-process"})  # $HOME/.claude.json
+        assert resolve_effective_teammate_mode() == "in-process"
