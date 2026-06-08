@@ -18,20 +18,25 @@ nothing-was-tested)
 A zero-tear result is only meaningful if the tear DETECTOR can actually catch a
 tear. So the file pairs the positive leg with a CONTROL:
 
-  * CONTROL (``test_non_atomic_writer_tears_and_detector_catches_it``): an
-    intentionally NON-ATOMIC appender splits each logical line into TWO
-    ``os.write`` calls. Under the same N-process contention those two halves
-    interleave across processes -> torn lines, which the JSON-parse detector
-    CATCHES (asserts torn > 0). This is what a NON-atomic writer — or, on a
-    stricter filesystem, a kernel-split write that exceeds the platform atomicity
-    bound — would produce.
+  * CONTROL (``test_tear_detector_is_non_vacuous_on_a_known_torn_line``):
+    DETERMINISTICALLY construct the torn byte-pattern a two-``os.write``
+    interleave produces (two records split mid-line, halves interleaved
+    first_a+first_b+second_a+second_b) plus one clean line, then assert the
+    JSON-parse detector CATCHES it (torn > 0, AND torn < total so it does not
+    over-flag the intact line). This proves the detector is non-vacuous on ANY
+    environment WITHOUT depending on the OS scheduler to win a race. (An earlier
+    timing-induced control RACED non-atomic appenders hoping the halves
+    interleaved; on a low-core CI runner they never did -> 0 torn lines -> a
+    false CI failure. The constructed pattern IS exactly what that interleave —
+    or, on a stricter filesystem, a kernel-split write exceeding the platform
+    atomicity bound — would produce, just made deterministically.)
   * POSITIVE (``test_single_write_appender_never_tears``): the PRODUCTION
-    single-``os.write`` syscall shape (exactly what ``register`` does) under the
-    SAME contention -> ZERO torn lines.
+    single-``os.write`` syscall shape (exactly what ``register`` does) under
+    REAL N-process contention -> ZERO torn lines.
 
-The control catching tears + the positive yielding zero, under identical
-contention, is the proof that the zero-tear result reflects real atomicity, not a
-test that exercised nothing.
+The control proving the detector CAN catch a torn line + the positive yielding
+zero under real contention, together prove that the zero-tear result reflects
+real single-write atomicity, not a test that exercised nothing.
 
 A NOTE ON LINE SIZE vs SYSCALL COUNT (empirically grounded)
 -----------------------------------------------------------
