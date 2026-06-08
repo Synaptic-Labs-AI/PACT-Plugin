@@ -31,6 +31,7 @@ from typing import Any, Iterator
 
 from shared.pact_context import get_session_id, get_team_name
 from shared.session_state import is_safe_path_component
+from shared.paths import get_claude_config_dir
 
 
 def get_task_list(tasks_base_dir: str | None = None) -> list[dict[str, Any]] | None:
@@ -98,7 +99,7 @@ def get_task_list(tasks_base_dir: str | None = None) -> list[dict[str, Any]] | N
     if not is_safe_path_component(task_list_id):
         return None
 
-    base = Path(tasks_base_dir) if tasks_base_dir else (Path.home() / ".claude" / "tasks")
+    base = Path(tasks_base_dir) if tasks_base_dir else (get_claude_config_dir() / "tasks")
     tasks_dir = base / task_list_id
 
     # R3 (security): the {task_list_id} dir could itself be a SYMLINK that
@@ -387,7 +388,7 @@ def iter_team_task_jsons(
     if not is_safe_path_component(team_name):
         return
     try:
-        base = Path(tasks_base_dir) if tasks_base_dir else (Path.home() / ".claude" / "tasks")
+        base = Path(tasks_base_dir) if tasks_base_dir else (get_claude_config_dir() / "tasks")
         tasks_root = base.resolve()
     except OSError:
         return

@@ -95,6 +95,7 @@ try:
         has_task_assigned,
     )
     from shared.session_journal import append_event, make_event
+    from shared.paths import get_claude_config_dir
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_deny("module imports", _module_load_error)
 
@@ -258,7 +259,7 @@ def _team_member_names(team_name: str) -> set[str]:
     dispatch_helpers.py because task_lifecycle_gate has no need for the
     member roster.
     """
-    cfg_path = Path.home() / ".claude" / "teams" / team_name / "config.json"
+    cfg_path = get_claude_config_dir() / "teams" / team_name / "config.json"
     try:
         data = json.loads(cfg_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):

@@ -91,6 +91,7 @@ from shared.failure_log import append_failure
 from shared.plugin_manifest import format_plugin_banner
 from shared.peer_context import get_peer_context
 from shared.session_registry import resolve as _registry_resolve
+from shared.paths import get_claude_config_dir
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import setup_plugin_symlinks
@@ -430,7 +431,7 @@ def _validate_under_pact_sessions(path: str) -> str | None:
     fail-closed — callers already treat None as "no previous session").
     """
     try:
-        sessions_root = (Path.home() / ".claude" / "pact-sessions").resolve()
+        sessions_root = (get_claude_config_dir() / "pact-sessions").resolve()
         candidate = Path(path).resolve(strict=False)
         if candidate == sessions_root or sessions_root in candidate.parents:
             return path
@@ -528,7 +529,7 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
             # Use project root basename (not worktree) for slug
             slug = Path(project_dir).name
             derived = str(
-                Path.home() / ".claude" / "pact-sessions" / slug / session_id
+                get_claude_config_dir() / "pact-sessions" / slug / session_id
             )
             return _validate_under_pact_sessions(derived)
 

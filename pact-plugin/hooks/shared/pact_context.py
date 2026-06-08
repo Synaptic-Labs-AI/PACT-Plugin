@@ -23,6 +23,7 @@ from .session_state import SESSION_ID_CONTROL_CHARS_RE
 # nothing from shared.*), so this introduces NO circular import. Used by
 # resolve_agent_name Step 3.5 to recover a tmux teammate's friendly name.
 from .session_registry import resolve as _registry_resolve
+from .paths import get_claude_config_dir
 
 # Slug sanitizer: collapse any character outside the safe-path-component
 # allowlist into "_". The slug derives from CLAUDE_PROJECT_DIR's basename
@@ -110,7 +111,7 @@ def _build_session_path(slug: str, session_id: str) -> Path:
     so sessions with unusual project-dir names still proceed.
     """
     safe_slug = _UNSAFE_SLUG_CHARS_RE.sub("_", slug) if slug else slug
-    sessions_root = Path.home() / ".claude" / "pact-sessions"
+    sessions_root = get_claude_config_dir() / "pact-sessions"
     candidate = sessions_root / safe_slug / session_id
     try:
         sessions_root_resolved = sessions_root.resolve()
@@ -513,7 +514,7 @@ def _iter_members(
         config_path = Path(teams_dir) / team_name / "config.json"
     else:
         config_path = (
-            Path.home() / ".claude" / "teams" / team_name / "config.json"
+            get_claude_config_dir() / "teams" / team_name / "config.json"
         )
     try:
         data = json.loads(config_path.read_text(encoding="utf-8"))
