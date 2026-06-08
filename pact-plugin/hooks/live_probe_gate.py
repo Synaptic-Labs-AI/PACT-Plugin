@@ -74,6 +74,16 @@ except Exception:
 # problem (see the module docstring's "Coverage split").
 _GATE_COMMAND_RES = (_GH_PR_MERGE_RE, _GH_PR_CLOSE_RE)
 
+# Genuine-PASS token for the RUNBOOK_RUN_DATES freshness scan. Case-SENSITIVE
+# and bounded so it matches a real verdict ("PASS.", "2/2 ... PASS",
+# "in-process = PASS (real)") but NOT: an unfilled "PASS/FAIL" template
+# placeholder (trailing "/" excluded), "bypass" / "BYPASS" (preceding letter
+# excluded), or "non-genuine-pass" (lowercase). A substring `"pass" in low`
+# match would false-satisfy on all three -> a non-genuine/pending row could
+# silently disarm the gate before any real probe (the recursive inert class
+# this gate exists to prevent).
+_PASS_TOKEN_RE = re.compile(r"(?<![A-Za-z])PASS(?![A-Za-z/])")
+
 # pact_context is optional parity with sibling Bash hooks (warms the context
 # cache). Best-effort: the advisory does not depend on it, so an import failure
 # must NOT disable the hook.
@@ -174,9 +184,18 @@ def _has_satisfied_row(root: Path, version: str, waiver_ok: bool) -> bool:
         if not version_re.search(line):
             continue
         low = line.lower()
+        # Skip pending/template rows (belt-and-suspenders): a `_pending`
+        # placeholder row must NEVER count as a satisfied probe.
+        if "_pending" in low:
+            continue
         if waiver_ok and "waived" in low:
             return True
-        if "tmux" in low and "in-process" in low and "pass" in low:
+        # A genuine both-mode PASS row. The PASS verdict is matched
+        # case-SENSITIVELY on the ORIGINAL `line` via _PASS_TOKEN_RE so an
+        # unfilled "PASS/FAIL" placeholder, "bypass", or "non-genuine-pass"
+        # never false-satisfies. tmux/in-process stay substring on `low` —
+        # those tokens aren't the bug.
+        if "tmux" in low and "in-process" in low and _PASS_TOKEN_RE.search(line):
             return True
     return False
 
