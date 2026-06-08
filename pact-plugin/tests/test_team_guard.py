@@ -152,3 +152,63 @@ class TestMainEntryPoint:
                 main()
 
         assert exc_info.value.code == 0
+
+
+class TestFailClosedModuleLoad:
+    """C5b (#926 / PR #660 discipline): a raise from team_guard's cross-package
+    import must DENY (exit 2 + permissionDecision='deny'), NOT crash-and-fail-open.
+    A crashed PreToolUse hook (exit 1) is treated by the platform as non-blocking,
+    so the Task would PROCEED and the team-existence gate would silently fail-open.
+    Mirrors test_dispatch_gate_smoke.test_fail_closed_module_load: subprocess
+    isolation, a sabotaged copy of shared/ (never pop shared.* from sys.modules in
+    the test process)."""
+
+    def test_fail_closed_module_load(self, tmp_path):
+        import os
+        import shutil
+        import subprocess
+
+        repo_hooks = Path(__file__).parent.parent / "hooks"
+        sabotage_root = tmp_path / "sabotage"
+        sabotage_shared = sabotage_root / "shared"
+        # Copy the real shared/ tree so every OTHER submodule imports normally.
+        shutil.copytree(repo_hooks / "shared", sabotage_shared)
+        # Overwrite ONLY paths.py — team_guard's sole shared import — with a raise
+        # so the wrapped `from shared.paths import ...` fires the except branch.
+        (sabotage_shared / "paths.py").write_text(
+            "raise ImportError('sabotage: forced module-load failure')\n",
+            encoding="utf-8",
+        )
+
+        env = os.environ.copy()
+        # Sabotage dir FIRST so its `shared` package wins. team_guard's
+        # conditional `if str(_hooks_dir) not in sys.path` insert is skipped here
+        # (repo_hooks is already on PYTHONPATH), preserving this ordering.
+        env["PYTHONPATH"] = os.pathsep.join([str(sabotage_root), str(repo_hooks)])
+        env["PYTHONSAFEPATH"] = "1"  # disable script-dir auto-insert → PYTHONPATH wins
+
+        proc = subprocess.run(
+            [sys.executable, str(repo_hooks / "team_guard.py")],
+            input=json.dumps({
+                "hook_event_name": "PreToolUse",
+                "session_id": "test",
+                "tool_name": "Task",
+                "tool_input": {"team_name": "pact-x"},
+            }),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=10,
+        )
+        assert proc.returncode == 2, (
+            f"expected exit 2 (fail-closed deny), got {proc.returncode}. "
+            f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+        )
+        out = json.loads(proc.stdout.strip())
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "deny"
+        assert (
+            "load failure" in hso["permissionDecisionReason"].lower()
+            or "module imports" in hso["permissionDecisionReason"].lower()
+        )
