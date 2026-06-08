@@ -1486,3 +1486,112 @@ class TestIsSafePathComponent_Public:
         assert hasattr(shared, "SAFE_PATH_COMPONENT_RE")
         assert shared.is_safe_path_component("pact-0001639f") is True
         assert shared.is_safe_path_component("../etc") is False
+
+
+class TestSessionStateTaskReaderContainmentParity:
+    """#926 remediation: session_state's 3 task/team readers gained bounded
+    containment parity (mirror iter_team_task_jsons / read_task_json). The
+    CONTAINMENT tests drive the DI seam (teams_base_dir / tasks_base_dir) -- the
+    correct use: they exercise the resolve()/relative_to anchor under an injected
+    base, NOT the resolver (resolver-derivation is covered by the env-SET sibling
+    tests + the central resolver L1). Per-reader guard asymmetry:
+      - GLOB reader _read_task_counts: full hygiene set -- containment +
+        per-file is_symlink skip + dotfile skip (it COUNTS, so plants inflate).
+      - SINGLE-FILE readers _read_team_members / _read_feature_subject_from_disk:
+        only is_safe_path_component + containment; dotfile/symlink-file guards
+        are CORRECTLY ABSENT (they read ONE named file, never glob) -- so this
+        suite does NOT assert those guards on them (an absent-guard test would be
+        a wrong-expectation test).
+
+    NON-VACUITY (per guard, surgical-neuter against 5080ae2b, verified):
+      - neuter the relative_to anchor in a reader -> that reader's escape-reject FAILS.
+      - neuter _read_task_counts dotfile-skip -> dotfile-not-inflated FAILS.
+      - neuter _read_task_counts per-file is_symlink skip -> symlink-skip FAILS.
+    """
+
+    # --- _read_team_members (single-file: config.json) ---
+    def test_team_members_legit_accepted(self, tmp_path):
+        from shared.session_state import _read_team_members
+        base = tmp_path / "teams"
+        td = base / "pact-legit"
+        td.mkdir(parents=True)
+        (td / "config.json").write_text(
+            json.dumps({"members": [{"name": "alice"}]}), encoding="utf-8")
+        assert _read_team_members("pact-legit", teams_base_dir=str(base)) == ["alice"]
+
+    def test_team_members_symlink_team_dir_escape_rejected(self, tmp_path):
+        from shared.session_state import _read_team_members
+        base = tmp_path / "teams"
+        base.mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "config.json").write_text(
+            json.dumps({"members": [{"name": "evil"}]}), encoding="utf-8")
+        (base / "pact-escape").symlink_to(outside)  # safe-named team dir escaping base
+        assert _read_team_members("pact-escape", teams_base_dir=str(base)) == []
+
+    # --- _read_feature_subject_from_disk (single-file: {feature_id}.json) ---
+    def test_feature_subject_legit_accepted(self, tmp_path):
+        from shared.session_state import _read_feature_subject_from_disk
+        base = tmp_path / "tasks"
+        td = base / "pact-legit"
+        td.mkdir(parents=True)
+        (td / "F1.json").write_text(json.dumps({"subject": "the feature"}), encoding="utf-8")
+        assert _read_feature_subject_from_disk(
+            "pact-legit", "F1", tasks_base_dir=str(base)) == "the feature"
+
+    def test_feature_subject_symlink_team_dir_escape_rejected(self, tmp_path):
+        from shared.session_state import _read_feature_subject_from_disk
+        base = tmp_path / "tasks"
+        base.mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "F1.json").write_text(json.dumps({"subject": "evil"}), encoding="utf-8")
+        (base / "pact-escape").symlink_to(outside)
+        assert _read_feature_subject_from_disk(
+            "pact-escape", "F1", tasks_base_dir=str(base)) is None
+
+    # --- _read_task_counts (GLOB reader: full hygiene set) ---
+    def test_task_counts_legit_counted(self, tmp_path):
+        from shared.session_state import _read_task_counts
+        base = tmp_path / "tasks"
+        td = base / "pact-legit"
+        td.mkdir(parents=True)
+        (td / "1.json").write_text(json.dumps({"status": "pending"}), encoding="utf-8")
+        (td / "2.json").write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+        c = _read_task_counts("pact-legit", tasks_base_dir=str(base))
+        assert c["total"] == 2 and c["pending"] == 1 and c["completed"] == 1
+
+    def test_task_counts_symlink_team_dir_escape_rejected(self, tmp_path):
+        from shared.session_state import _read_task_counts
+        base = tmp_path / "tasks"
+        base.mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "1.json").write_text(json.dumps({"status": "pending"}), encoding="utf-8")
+        (base / "pact-escape").symlink_to(outside)
+        assert _read_task_counts("pact-escape", tasks_base_dir=str(base))["total"] == 0
+
+    def test_task_counts_per_file_symlink_skipped(self, tmp_path):
+        from shared.session_state import _read_task_counts
+        base = tmp_path / "tasks"
+        td = base / "pact-legit"
+        td.mkdir(parents=True)
+        (td / "1.json").write_text(json.dumps({"status": "pending"}), encoding="utf-8")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "evil.json").write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+        (td / "2.json").symlink_to(outside / "evil.json")  # *.json symlink -> skipped
+        assert _read_task_counts("pact-legit", tasks_base_dir=str(base))["total"] == 1
+
+    def test_task_counts_dotfile_not_inflated(self, tmp_path):
+        from shared.session_state import _read_task_counts
+        base = tmp_path / "tasks"
+        td = base / "pact-legit"
+        td.mkdir(parents=True)
+        (td / "1.json").write_text(json.dumps({"status": "pending"}), encoding="utf-8")
+        (td / ".evil.json").write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+        # glob('*.json') DOES match dotfiles; the dotfile-skip guard prevents the
+        # planted .evil.json from inflating the count. (Verified non-vacuous: neuter
+        # the dotfile-skip -> total becomes 2.)
+        assert _read_task_counts("pact-legit", tasks_base_dir=str(base))["total"] == 1

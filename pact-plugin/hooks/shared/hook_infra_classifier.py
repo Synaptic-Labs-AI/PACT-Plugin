@@ -125,56 +125,64 @@ L3_CANDIDATE_HOOKS: frozenset[str] = frozenset({
 # meta-test re-derives the same way (AST, relative-following) and asserts
 # equality so this literal cannot drift. An edit to any helper in a hook's
 # closure can change that hook's behavior -> the edit is SECONDARY.
+#
+# `paths` (shared/paths.py) is the CLAUDE_CONFIG_DIR / config-dir SSOT resolver
+# added by the config-dir refactor; it is now reached by 11 of the 12 seam hooks
+# (all but validate_handoff) because the path-consuming shared helpers
+# (constants, pact_context, session_state, task_utils, ... via `from .paths
+# import get_claude_config_dir`) sit in nearly every closure. It is a genuine
+# path-seam resolver -> a legitimate SECONDARY helper (the C6-A oracle caught its
+# arrival as designed; this literal was regenerated from the live derivation).
 _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     "missed_wake_scan": frozenset({
-        "constants", "intentional_wait", "pact_context", "session_journal",
-        "session_registry", "session_state", "task_utils",
+        "constants", "intentional_wait", "pact_context", "paths",
+        "session_journal", "session_registry", "session_state", "task_utils",
     }),
     "teammate_idle": frozenset({
-        "constants", "error_output", "pact_context", "session_journal",
+        "constants", "error_output", "pact_context", "paths", "session_journal",
         "session_registry", "session_state", "task_utils",
     }),
     "agent_handoff_emitter": frozenset({
-        "agent_handoff_marker", "constants", "pact_context", "session_journal",
-        "session_registry", "session_state", "task_utils",
+        "agent_handoff_marker", "constants", "pact_context", "paths",
+        "session_journal", "session_registry", "session_state", "task_utils",
     }),
     "session_init": frozenset({
         "claude_md_manager", "constants", "dispatch_helpers", "failure_log",
-        "merge_guard_common", "pact_context", "peer_context", "pin_caps",
-        "pin_staleness_gate", "plugin_manifest", "session_journal",
+        "merge_guard_common", "pact_context", "paths", "peer_context",
+        "pin_caps", "pin_staleness_gate", "plugin_manifest", "session_journal",
         "session_registry", "session_resume", "session_state", "staleness",
         "symlinks", "task_utils", "teammate_mode",
     }),  # top-level helpers (pin_caps, staleness, pin_staleness_gate) reached
          # here: session_init -> staleness -> pin_caps; session_init ->
          # pin_staleness_gate -> pin_caps.
     "session_end": frozenset({
-        "constants", "error_output", "pact_context", "session_journal",
+        "constants", "error_output", "pact_context", "paths", "session_journal",
         "session_registry", "session_state", "task_utils",
     }),
     "dispatch_gate": frozenset({
-        "constants", "dispatch_helpers", "pact_context", "session_journal",
-        "session_registry", "session_state", "task_utils",
+        "constants", "dispatch_helpers", "pact_context", "paths",
+        "session_journal", "session_registry", "session_state", "task_utils",
     }),
     "task_lifecycle_gate": frozenset({
         "agent_handoff_marker", "constants", "dispatch_helpers",
-        "intentional_wait", "pact_context", "session_journal",
+        "intentional_wait", "pact_context", "paths", "session_journal",
         "session_registry", "session_state", "task_utils", "teachback_schema",
         "tool_response", "variety_scorer",
     }),
     "bootstrap_gate": frozenset({
-        "constants", "marker_schema", "pact_context", "session_journal",
-        "session_registry", "session_state",
+        "constants", "marker_schema", "pact_context", "paths",
+        "session_journal", "session_registry", "session_state",
     }),
     "bootstrap_marker_writer": frozenset({
-        "constants", "marker_schema", "pact_context", "session_journal",
-        "session_registry", "session_state",
+        "constants", "marker_schema", "pact_context", "paths",
+        "session_journal", "session_registry", "session_state",
     }),
     "file_tracker": frozenset({
-        "constants", "pact_context", "session_journal", "session_registry",
-        "session_state",
+        "constants", "pact_context", "paths", "session_journal",
+        "session_registry", "session_state",
     }),
     "peer_inject": frozenset({
-        "constants", "pact_context", "peer_context", "plugin_manifest",
+        "constants", "pact_context", "paths", "peer_context", "plugin_manifest",
         "session_journal", "session_registry", "session_state",
     }),
     "validate_handoff": frozenset({"error_output"}),
@@ -188,7 +196,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
 # waiver path.
 SEAM_READING_HELPERS: frozenset[str] = frozenset().union(
     *_SEAM_HOOK_HELPER_CLOSURE.values()
-)  # 25 (22 shared helpers + 3 top-level helpers)
+)  # 26 (23 shared helpers — incl. paths, the config-dir SSOT — + 3 top-level)
 
 
 # ─── Path predicates ────────────────────────────────────────────────────────

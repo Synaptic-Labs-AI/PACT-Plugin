@@ -161,9 +161,9 @@ def test_defaults_resolve_without_args(monkeypatch, tmp_path):
     default registry is a clean 0 (no raise)."""
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     import session_end
-    # patch the module-bound REGISTRY_PATH default to the isolated home
+    # patch the module-bound registry-path accessor to the isolated home
     monkeypatch.setattr(
-        session_end, "_REGISTRY_PATH",
-        tmp_path / ".claude" / "pact-sessions" / ".teammate-registry.jsonl",
+        session_end, "_get_registry_path",
+        lambda: tmp_path / ".claude" / "pact-sessions" / ".teammate-registry.jsonl",
     )
     assert session_end._prune_registry_dead_teams() == 0

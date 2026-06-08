@@ -179,7 +179,7 @@ class TestTrustPartitionNoRegistryImport:
         "from shared.session_registry import resolve as _registry_resolve\n",
         "import shared.session_registry\n",
         "from shared import session_registry\n",          # aliased module-as-name
-        "from shared.session_registry import REGISTRY_PATH\n",
+        "from shared.session_registry import get_registry_path\n",
     ])
     def test_detector_fires_on_synthetic_import(self, src):
         """Phantom-green guard: the no-import detector FIRES on EVERY import shape
@@ -456,22 +456,22 @@ class TestTeamSegmentValidatorParity:
 
 class TestPathNotTeamScoped:
     def test_registry_path_under_pact_sessions_not_teams(self):
-        from shared.session_registry import REGISTRY_PATH
-        parts = REGISTRY_PATH.parts
+        from shared.session_registry import get_registry_path
+        p = get_registry_path()
+        parts = p.parts
         assert "pact-sessions" in parts, (
-            f"REGISTRY_PATH {REGISTRY_PATH} must live under pact-sessions/ "
-            f"(PACT-owned)."
+            f"registry path {p} must live under pact-sessions/ (PACT-owned)."
         )
         assert "teams" not in parts, (
-            f"REGISTRY_PATH {REGISTRY_PATH} is team-scoped (under teams/). It "
-            f"MUST be global + team-agnostic — a team-scoped path re-opens the "
-            f"bootstrap paradox (a tmux teammate cannot compute its lead's team "
-            f"to locate a team-scoped file)."
+            f"registry path {p} is team-scoped (under teams/). It MUST be global "
+            f"+ team-agnostic — a team-scoped path re-opens the bootstrap paradox "
+            f"(a tmux teammate cannot compute its lead's team to locate a "
+            f"team-scoped file)."
         )
 
     def test_registry_path_filename_is_the_locked_constant(self):
-        from shared.session_registry import REGISTRY_PATH
-        assert REGISTRY_PATH.name == ".teammate-registry.jsonl"
+        from shared.session_registry import get_registry_path
+        assert get_registry_path().name == ".teammate-registry.jsonl"
 
 
 # ===========================================================================
@@ -494,9 +494,10 @@ class TestBothModesMatrix:
     @pytest.fixture
     def registry(self, tmp_path, monkeypatch):
         import shared.session_registry as sr
+        # get_registry_path() follows the patched Path.home() via the inline
+        # _config_root() (C4b's accessor refactor removed the module-level
+        # REGISTRY_PATH constant, so there is nothing to override here).
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-        reg = tmp_path / ".claude" / "pact-sessions" / ".teammate-registry.jsonl"
-        monkeypatch.setattr(sr, "REGISTRY_PATH", reg)
         monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
 
         def write_team(team, members):

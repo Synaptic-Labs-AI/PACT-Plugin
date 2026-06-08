@@ -20,6 +20,7 @@ from pathlib import Path
 
 import shared.pact_context as pact_context
 from shared.pact_context import get_session_id, get_team_name, resolve_agent_name
+from shared.paths import get_claude_config_dir
 
 try:
     import fcntl
@@ -229,7 +230,7 @@ def main():
     session_id = get_session_id()
 
     tracking_path = str(
-        Path.home() / ".claude" / "teams" / team_name / "file-edits.json"
+        get_claude_config_dir() / "teams" / team_name / "file-edits.json"
     )
 
     # Check for conflict BEFORE recording this edit. Pass the same

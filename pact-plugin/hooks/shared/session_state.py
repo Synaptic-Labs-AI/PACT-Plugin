@@ -34,6 +34,7 @@ from typing import Any
 
 from shared import pact_context
 from shared.constants import SYSTEM_TASK_PREFIXES
+from shared.paths import get_claude_config_dir
 from shared.session_journal import read_events_from
 
 
@@ -395,12 +396,23 @@ def _read_team_members(
         return []
 
     try:
-        if teams_base_dir:
-            config_path = Path(teams_base_dir) / team_name / "config.json"
-        else:
-            config_path = (
-                Path.home() / ".claude" / "teams" / team_name / "config.json"
-            )
+        teams_base = (
+            Path(teams_base_dir) if teams_base_dir
+            else get_claude_config_dir() / "teams"
+        )
+        team_dir = teams_base / team_name
+        # Bounded containment parity (mirror iter_team_task_jsons / read_task_json
+        # C3): reject a safe-NAMED team_dir that resolves OUTSIDE the teams base
+        # (a SYMLINK escaping it); fail-open (return []) on the escape or an
+        # unreadable path. SINGLE-named-file reader (reads ONE config.json, never
+        # globs) -> only the 2-of-5 guards apply: is_safe_path_component (above) +
+        # this resolve()/relative_to. The glob-result hygiene guards (per-file
+        # is_symlink / dotfile skip) are correctly ABSENT.
+        try:
+            team_dir.resolve().relative_to(teams_base.resolve())
+        except (ValueError, OSError):
+            return []
+        config_path = team_dir / "config.json"
 
         if not config_path.exists():
             return []
@@ -450,15 +462,37 @@ def _read_task_counts(
         return counts
 
     try:
-        if tasks_base_dir:
-            team_dir = Path(tasks_base_dir) / team_name
-        else:
-            team_dir = Path.home() / ".claude" / "tasks" / team_name
+        tasks_base = (
+            Path(tasks_base_dir) if tasks_base_dir
+            else get_claude_config_dir() / "tasks"
+        )
+        team_dir = tasks_base / team_name
+        # Bounded containment parity: reject a team_dir SYMLINK escaping the base
+        # (fail-open). This is the GLOB reader, so it ALSO gets the per-file
+        # is_symlink skip below (a *.json symlink could resolve outside the base
+        # even when team_dir is contained) — mirroring iter_team_task_jsons.
+        try:
+            team_dir.resolve().relative_to(tasks_base.resolve())
+        except (ValueError, OSError):
+            return counts
 
         if not team_dir.exists():
             return counts
 
         for task_file in team_dir.glob("*.json"):
+            # Dotfile skip (glob-result hygiene): glob('*.json') DOES match
+            # dotfile-prefixed names; this is a COUNT reader, so a planted
+            # `.evil.json` would inflate the tally. Mirror iter_team_task_jsons's
+            # dotfile exclusion. (Security #37 5-mirror guard #4.)
+            if task_file.name.startswith("."):
+                continue
+            # Per-file symlink skip (glob-result hygiene): glob returns symlink
+            # entries; one could resolve outside the base. Skip silently.
+            try:
+                if task_file.is_symlink():
+                    continue
+            except OSError:
+                continue
             try:
                 data = json.loads(
                     task_file.read_text(encoding="utf-8", errors="replace")
@@ -503,18 +537,21 @@ def _read_feature_subject_from_disk(
         return None
 
     try:
-        if tasks_base_dir:
-            task_path = (
-                Path(tasks_base_dir) / team_name / f"{feature_id}.json"
-            )
-        else:
-            task_path = (
-                Path.home()
-                / ".claude"
-                / "tasks"
-                / team_name
-                / f"{feature_id}.json"
-            )
+        tasks_base = (
+            Path(tasks_base_dir) if tasks_base_dir
+            else get_claude_config_dir() / "tasks"
+        )
+        team_dir = tasks_base / team_name
+        # Bounded containment parity (single-named-file reader -> 2-of-5 guards:
+        # is_safe_path_component on team_name+feature_id above + this
+        # resolve()/relative_to; glob-result hygiene guards correctly ABSENT —
+        # reads ONE {feature_id}.json, never globs). Fail-open (return None) on a
+        # team_dir symlink escaping the base or an unreadable path.
+        try:
+            team_dir.resolve().relative_to(tasks_base.resolve())
+        except (ValueError, OSError):
+            return None
+        task_path = team_dir / f"{feature_id}.json"
 
         if not task_path.exists():
             return None

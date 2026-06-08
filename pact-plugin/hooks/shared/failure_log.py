@@ -48,14 +48,18 @@ from pathlib import Path
 from typing import Any
 
 from .claude_md_manager import file_lock
+from .paths import get_claude_config_dir
 
 
 # Locked decision: global log at the pact-sessions root. Underscore prefix
 # prevents cleanup_old_sessions from reaping it (that reaper filters on
 # _UUID_PATTERN, which "_session_init_failures.log" never matches).
-LOG_PATH = (
-    Path.home() / ".claude" / "pact-sessions" / "_session_init_failures.log"
-)
+# Accessor (B1) — resolves $CLAUDE_CONFIG_DIR at CALL time (avoids the
+# import-time freeze; consumers call get_failure_log_path()).
+def get_failure_log_path() -> Path:
+    return (
+        get_claude_config_dir() / "pact-sessions" / "_session_init_failures.log"
+    )
 
 # Bounded ring buffer cap: large enough to see a multi-day failure pattern,
 # small enough that read-truncate-write stays fast (~10KB file at steady state).
@@ -123,29 +127,30 @@ def append_failure(
             "source": source[:_ERROR_MAX_CHARS] if source is not None else None,
         }
 
+        log_path = get_failure_log_path()
         # Ensure parent dir exists. 0o700 matches the rest of PACT's
         # secure-by-default permission scheme.
-        LOG_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        log_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         # file_lock serializes the read-mutate-write critical section.
         # Timeout fails open via the outer try/except below.
-        with file_lock(LOG_PATH):
+        with file_lock(log_path):
             # Symlink guard (TOCTOU defense): inside the lock so no concurrent
             # writer can swap the file between check and write. is_symlink()
             # is lstat-based and does not follow the link, so an attacker who
-            # replaces LOG_PATH with a symlink to /etc/passwd cannot trick us
+            # replaces log_path with a symlink to /etc/passwd cannot trick us
             # into clobbering the target. Silent fail-open preserves the
             # SACROSANCT invariant.
-            if LOG_PATH.is_symlink():
+            if log_path.is_symlink():
                 return
 
             existing_lines: list[str] = []
-            if LOG_PATH.exists():
+            if log_path.exists():
                 try:
                     # errors="replace" matches session_journal read conventions:
                     # a single bad byte substitutes U+FFFD instead of raising,
                     # so a corrupt byte in one line cannot poison the whole read.
-                    existing_lines = LOG_PATH.read_text(
+                    existing_lines = log_path.read_text(
                         encoding="utf-8", errors="replace"
                     ).splitlines()
                 except OSError:
@@ -176,11 +181,11 @@ def append_failure(
             # Single write under the lock — read-truncate-write is correct
             # for a bounded ring buffer and avoids O_APPEND's "lose oldest"
             # impossibility.
-            LOG_PATH.write_text(
+            log_path.write_text(
                 "\n".join(kept) + "\n", encoding="utf-8"
             )
             try:
-                LOG_PATH.chmod(0o600)
+                log_path.chmod(0o600)
             except OSError:
                 # Permission bump is best-effort; the write already succeeded.
                 pass
@@ -210,13 +215,14 @@ def read_failures() -> list[dict[str, Any]]:
         or when the log does not exist.
     """
     try:
-        if not LOG_PATH.exists():
+        log_path = get_failure_log_path()
+        if not log_path.exists():
             return []
-        with file_lock(LOG_PATH):
+        with file_lock(log_path):
             # errors="replace" prevents one bad byte from poisoning the scan.
             # A single stray byte substitutes U+FFFD rather than raising,
             # so a corrupt byte cannot block reads of the surviving entries.
-            content = LOG_PATH.read_text(encoding="utf-8", errors="replace")
+            content = log_path.read_text(encoding="utf-8", errors="replace")
         entries: list[dict[str, Any]] = []
         for line in content.splitlines():
             stripped = line.strip()

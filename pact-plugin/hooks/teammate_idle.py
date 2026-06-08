@@ -41,6 +41,7 @@ if str(_hooks_dir) not in sys.path:
 from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
 from shared.pact_context import get_team_name
+from shared.paths import get_claude_config_dir
 from shared.task_utils import get_task_list
 
 
@@ -319,7 +320,7 @@ def main():
             sys.exit(0)
 
         idle_counts_path = str(
-            Path.home() / ".claude" / "teams" / team_name / "idle_counts.json"
+            get_claude_config_dir() / "teams" / team_name / "idle_counts.json"
         )
 
         messages = []

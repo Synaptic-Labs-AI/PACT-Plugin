@@ -28,6 +28,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from .paths import get_claude_config_dir
+
 # Full allowed value set (CLI .choices + settings-UI enum). A value outside
 # this set is treated as "not defined here" (fail-open → skip the source).
 VALID_TEAMMATE_MODES = frozenset({"auto", "tmux", "in-process"})
@@ -117,7 +119,7 @@ def _settings_source_paths() -> list[Path]:
         _managed_settings_path(),
         project_claude / "settings.local.json",
         project_claude / "settings.json",
-        Path.home() / ".claude" / "settings.json",
+        get_claude_config_dir() / "settings.json",
     ]
 
 
@@ -144,7 +146,16 @@ def resolve_effective_teammate_mode() -> str:
             value = _read_teammate_mode(path)
             if value is not None:
                 return value
-        legacy = _read_teammate_mode(Path.home() / ".claude.json")
+        # Legacy ~/.claude.json (F*, #926): SIBLING-file asymmetry — the default
+        # lives at $HOME/.claude.json (a sibling of .claude/), but under a
+        # non-default CLAUDE_CONFIG_DIR it relocates to $CONFIG_DIR/.claude.json.
+        # NOT get_claude_config_dir()/".claude.json" blindly — when unset that
+        # would yield $HOME/.claude/.claude.json (wrong). Explicit env branch:
+        if (os.environ.get("CLAUDE_CONFIG_DIR") or "").strip():
+            legacy_path = get_claude_config_dir() / ".claude.json"
+        else:
+            legacy_path = Path.home() / ".claude.json"  # preserve $HOME sibling default
+        legacy = _read_teammate_mode(legacy_path)
         if legacy is not None:
             return legacy
         return _DEFAULT_MODE
