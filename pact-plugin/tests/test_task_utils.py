@@ -703,3 +703,45 @@ class TestReadTaskJsonContainmentParity:
             "an unsafe (multi-segment) team_name must be rejected by "
             "is_safe_path_component and skip the team dir -> bare-base fall-through"
         )
+
+
+class TestReadTaskJsonResolverEnvSet:
+    """#926 remediation (was F2/Future, folded in): read_task_json's
+    tasks_base_dir=None resolver-derivation must resolve under a non-default
+    CLAUDE_CONFIG_DIR (get_claude_config_dir()/"tasks"). The containment-parity
+    tests inject tasks_base_dir= (correct -- they test the defense); the existing
+    no-base tests run env-UNSET. This covers the env-SET resolver path.
+
+    NON-VACUITY: Path.home is redirected to a SEPARATE EMPTY dir, so a revert of
+    the resolver call (back to Path.home()/".claude"/"tasks") reads the empty home
+    -> file absent -> {} -> the positive assertion FAILS behaviorally.
+    """
+
+    def test_resolves_task_under_relocated_config(self, tmp_path, monkeypatch):
+        from task_utils import read_task_json
+
+        config_dir = tmp_path / "config"
+        team_dir = config_dir / "tasks" / "pact-relocated"
+        team_dir.mkdir(parents=True)
+        (team_dir / "7.json").write_text(
+            json.dumps({"id": "7", "subject": "relocated task"}), encoding="utf-8")
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+
+        # tasks_base_dir=None -> exercises get_claude_config_dir()/"tasks".
+        assert read_task_json("7", "pact-relocated").get("subject") == "relocated task"
+
+    def test_absent_task_under_relocated_config_returns_empty(self, tmp_path, monkeypatch):
+        # Complement so the positive isn't trivially always-truthy.
+        from task_utils import read_task_json
+
+        config_dir = tmp_path / "config"
+        (config_dir / "tasks" / "pact-relocated").mkdir(parents=True)
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+
+        assert read_task_json("999", "pact-relocated") == {}

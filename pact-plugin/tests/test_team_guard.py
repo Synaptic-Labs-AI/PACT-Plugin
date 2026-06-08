@@ -212,3 +212,47 @@ class TestFailClosedModuleLoad:
             "load failure" in hso["permissionDecisionReason"].lower()
             or "module imports" in hso["permissionDecisionReason"].lower()
         )
+
+
+class TestTeamsDirResolverDerivationUnderConfigDir:
+    """F1 (#926 review): the teams_dir=None resolver path
+    (get_claude_config_dir() / "teams") must resolve under a non-default
+    CLAUDE_CONFIG_DIR. Every other team_guard test injects teams_dir= (DI seam,
+    bypasses the resolver) or mocks check_team_exists, so this DISPATCH-CRITICAL
+    path -- a wrong teams dir -> 'team does not exist' -> deny -> blocks Task
+    dispatch (the #926 symptom for team_guard) -- is otherwise unexercised in-CI.
+
+    NON-VACUITY: Path.home is redirected to a SEPARATE EMPTY dir. If the resolver
+    call were reverted to Path.home()/".claude"/"teams", it would read the empty
+    home -> team 'missing' -> deny-reason -> the allow assertion FAILS
+    behaviorally (verified: source-neuter of team_guard's resolver line -> {1 failed}).
+    """
+
+    def test_allows_existing_team_under_relocated_config(self, tmp_path, monkeypatch):
+        from team_guard import check_team_exists
+
+        config_dir = tmp_path / "config"
+        team_dir = config_dir / "teams" / "pact-relocated"
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text('{"members": []}')
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+
+        # teams_dir=None -> exercises the get_claude_config_dir()/"teams" path.
+        assert check_team_exists({"team_name": "pact-relocated"}) is None
+
+    def test_blocks_absent_team_under_relocated_config(self, tmp_path, monkeypatch):
+        # Complement so the allow-assertion above is not trivially always-None:
+        # a genuinely absent team under $CONFIG/teams -> deny-reason (not None).
+        from team_guard import check_team_exists
+
+        config_dir = tmp_path / "config"
+        (config_dir / "teams").mkdir(parents=True)
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+
+        assert check_team_exists({"team_name": "pact-missing"}) is not None
