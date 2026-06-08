@@ -211,3 +211,38 @@ def _resync_staleness_resolver_bindings():
     _resync()
     yield
     _resync()
+
+
+@pytest.fixture(autouse=True)
+def _restore_claude_project_dir_env():
+    """Snapshot + restore ``os.environ['CLAUDE_PROJECT_DIR']`` around every test
+    (#930). Runs for EVERY test (autouse).
+
+    Some concurrency tests (test_working_memory_concurrency*.py) set
+    ``os.environ['CLAUDE_PROJECT_DIR']`` via DIRECT assignment (NOT
+    ``monkeypatch.setenv``), so it is never restored and LEAKS into later tests
+    — an order-dependent pollution vector. The #924 dogfood hit it: a leaked
+    ``CLAUDE_PROJECT_DIR`` redirects ``live_probe_gate._resolve_repo_root`` /
+    ``staleness.get_project_claude_md_path`` away from the test's intended root,
+    so a later test silently resolves the wrong project dir. ``monkeypatch``-
+    based env tests are immune (auto-revert); the leak is the direct-assignment
+    ones specifically.
+
+    This fixture SNAPSHOTS the var at setup and RESTORES it at teardown
+    (set-to-original, or DELETE if it was originally unset) — an unconditional
+    restore, immune to dirty-baseline chains, and a no-op for the vast majority
+    of tests that never touch it. Co-located with the other env/module-state
+    autouse resets (``_reset_pact_context_state`` / ``_reset_specialist_registry_cache``
+    / ``_resync_staleness_resolver_bindings``). CLAUDE_PROJECT_DIR is the
+    CONFIRMED leaker (the only ``CLAUDE_*`` the working_memory tests set); if a
+    sibling direct-assignment leak is ever confirmed (e.g. ``CLAUDE_PLUGIN_ROOT``
+    in test_plugin_manifest.py), generalize this snapshot to the ``CLAUDE_*``
+    namespace.
+    """
+    _UNSET = object()
+    original = os.environ.get("CLAUDE_PROJECT_DIR", _UNSET)
+    yield
+    if original is _UNSET:
+        os.environ.pop("CLAUDE_PROJECT_DIR", None)
+    else:
+        os.environ["CLAUDE_PROJECT_DIR"] = original
