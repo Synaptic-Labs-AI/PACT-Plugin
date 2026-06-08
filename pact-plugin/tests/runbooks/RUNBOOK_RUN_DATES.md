@@ -90,16 +90,29 @@ closed — record tmux as `pending` and close only after the real tmux probe
 lands. A PRIMARY-but-not-SECONDARY change is the only path that closes WITHOUT a
 both-modes PASS, and only via an explicit WAIVED row.
 
-**Parser-coupling note (keep these tokens, single row).** The locus-b freshness
-advisory (`live_probe_gate.py`) decides WARN-vs-silent by scanning these rows for
-a *satisfied* row at the current plugin version. Its match is layout-tolerant but
-keys on tokens that MUST stay co-located in ONE `|`-delimited row: the bare plugin
-**version** (exact, not a substring of a longer version) AND (`tmux` + `in-process`
-+ `PASS`) → a satisfied both-modes probe row; OR `WAIVED` → satisfied iff the change
-is PRIMARY-not-SECONDARY. Therefore: keep both modes in a SINGLE row (do not split
-tmux/in-process across rows), and keep the verdict tokens `PASS`/`WAIVED` literal.
-If a future layout splits the modes or renames the verdict tokens, update
-`live_probe_gate.py`'s row parser to match.
+**Parser-coupling note (keep these tokens, single row, exact verdict).** The
+locus-b freshness advisory (`live_probe_gate.py`) decides WARN-vs-silent by
+scanning these rows for a *satisfied* row at the current plugin version. Its
+match keys on tokens that MUST stay in ONE `|`-delimited row:
+
+- the plugin **version** in the **"Plugin version" column** — COLUMN-ANCHORED to
+  the 3rd cell, NOT matched anywhere-in-line. So a *different*-version row that
+  merely mentions this version in its Notes prose does NOT satisfy the gate.
+  Keep `Plugin version` as the 3rd column.
+- (`tmux` + `in-process` + the verdict token `PASS`) → a satisfied both-modes
+  probe row; OR `WAIVED` → satisfied iff the change is PRIMARY-not-SECONDARY.
+
+The per-mode verdict MUST be the EXACT token **`PASS`** — never `PASSED` /
+`passed` / `Pass`. The parser matches `PASS` case-sensitively with word
+boundaries, so it (correctly) REJECTS `bypass`, `non-genuine-pass`, and the
+unfilled `PASS/FAIL` placeholder — which is what stops a pending/template row
+from silently satisfying the gate — but it ALSO rejects `PASSED`. Writing
+`PASSED` would make a genuine probe row fail the freshness check (a false WARN).
+So: keep both modes in a SINGLE row (do not split tmux/in-process across rows),
+keep `Plugin version` as the 3rd column, and write the verdict literally as
+`PASS` / `FAIL` / `WAIVED`. If a future layout moves the version column, splits
+the modes, or renames the verdict tokens, update `live_probe_gate.py`'s row
+parser to match.
 
 ## v4.0.0-launch-and-isolation.md
 

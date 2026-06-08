@@ -74,23 +74,25 @@ except Exception:
 # problem (see the module docstring's "Coverage split").
 _GATE_COMMAND_RES = (_GH_PR_MERGE_RE, _GH_PR_CLOSE_RE)
 
-# Genuine-PASS token for the RUNBOOK_RUN_DATES freshness scan. Case-SENSITIVE
-# and bounded so it matches a real verdict ("PASS.", "2/2 ... PASS",
-# "in-process = PASS (real)") but NOT: an unfilled "PASS/FAIL" template
-# placeholder (trailing "/" excluded), "bypass" / "BYPASS" (preceding letter
-# excluded), or "non-genuine-pass" (lowercase). A substring `"pass" in low`
-# match would false-satisfy on all three -> a non-genuine/pending row could
+# Genuine-PASS verdict token for the RUNBOOK_RUN_DATES freshness scan. The
+# `(?:ED)?` accepts BOTH "PASS" and "PASSED" (so a genuine probe row written
+# either way satisfies the gate — kills the over-warn WITHOUT relying on
+# operators typing exactly "PASS"). Case-SENSITIVE + bounded so it STILL
+# rejects: the unfilled "PASS/FAIL" template placeholder (trailing "/"
+# excluded), "bypass"/"BYPASS"/"BYPASSED" (preceding letter excluded by the
+# lookbehind), and "non-genuine-pass" (lowercase). A substring `"pass" in low`
+# match would false-satisfy on all of those -> a non-genuine/pending row could
 # silently disarm the gate before any real probe (the recursive inert class
-# this gate exists to prevent).
-_PASS_TOKEN_RE = re.compile(r"(?<![A-Za-z])PASS(?![A-Za-z/])")
+# this gate exists to prevent). This single regex threads both review findings:
+# the over-warn (a genuine "PASSED" row was rejected) AND the disarm (a
+# placeholder/bypass row was accepted).
+_PASS_TOKEN_RE = re.compile(r"(?<![A-Za-z])PASS(?:ED)?(?![A-Za-z/])")
 
-# pact_context is optional parity with sibling Bash hooks (warms the context
-# cache). Best-effort: the advisory does not depend on it, so an import failure
-# must NOT disable the hook.
-try:
-    import shared.pact_context as pact_context  # type: ignore
-except Exception:
-    pact_context = None  # type: ignore
+# NOTE: this hook deliberately does NOT init shared.pact_context. Earlier it
+# called pact_context.init() "for parity" with sibling Bash hooks, but it never
+# READS the context — so the init was avoidable IO on EVERY Bash invocation (it
+# ran before the command-match guard). Dropped entirely: the advisory needs only
+# tool_input.command from stdin. Do not re-add it without a real consumer.
 
 
 def _silent_allow() -> NoReturn:
@@ -130,7 +132,9 @@ def _plugin_marker(root: Path) -> Optional[dict]:
     marker = root / "pact-plugin" / ".claude-plugin" / "plugin.json"
     try:
         data = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, ValueError, UnicodeDecodeError):
+        # ValueError/UnicodeDecodeError are explicit fail-safe intent (JSON/
+        # decode errors are ValueError subclasses; the outer net also catches).
         return None
     if isinstance(data, dict) and data.get("name") and data.get("version"):
         return data
@@ -165,23 +169,36 @@ def _changed_paths() -> Optional[list[str]]:
 
 def _has_satisfied_row(root: Path, version: str, waiver_ok: bool) -> bool:
     """True iff RUNBOOK_RUN_DATES.md has, for `version`, EITHER a both-mode PASS
-    row (tmux + in-process + PASS) OR — when `waiver_ok` — a logged WAIVED row.
+    row (tmux + in-process + an exact-PASS verdict) OR — when `waiver_ok` — a
+    logged WAIVED row.
 
-    Deliberately ROBUST to the exact column layout (the per-mode row schema is
-    authored concurrently in the docs stream): scans markdown table rows that
-    mention the version and looks for the mode/PASS tokens. A read failure
-    returns False (cannot confirm a probe -> WARN), which is the safe advisory
-    direction."""
+    Version matching is COLUMN-ANCHORED: `version` must appear in the row's
+    "Plugin version" cell (the 3rd markdown column across every table in this
+    ledger), NOT anywhere-in-line. Anchoring kills the false-satisfy where a
+    DIFFERENT-version row merely MENTIONS this version in its prose Notes cell.
+    The PASS verdict is matched case-sensitively via _PASS_TOKEN_RE, which
+    accepts "PASS" OR "PASSED" but rejects "bypass"/"BYPASSED" and the
+    "PASS/FAIL" placeholder. A read failure returns False (cannot confirm a
+    probe -> WARN) — the safe advisory direction."""
     runbook = root / "pact-plugin" / "tests" / "runbooks" / "RUNBOOK_RUN_DATES.md"
     try:
         text = runbook.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, ValueError, UnicodeDecodeError):
+        # ValueError/UnicodeDecodeError = explicit fail-safe intent (the outer
+        # net also catches); a read failure must never satisfy the gate.
         return False
     version_re = re.compile(r"(?<![\d.])" + re.escape(version) + r"(?![\d.])")
     for line in text.splitlines():
-        if not line.lstrip().startswith("|"):
+        stripped = line.strip()
+        if not stripped.startswith("|"):
             continue
-        if not version_re.search(line):
+        # Markdown row -> cells: "| a | b | c |" -> ["a", "b", "c"]. The
+        # "Plugin version" column is the 3rd cell in every ledger table
+        # (| Run date | Operator | Plugin version | ... |). COLUMN-ANCHOR the
+        # version match THERE, not anywhere-in-line, so a different-version row
+        # that mentions this version in its Notes prose cannot false-satisfy.
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if len(cells) < 3 or not version_re.search(cells[2]):
             continue
         low = line.lower()
         # Skip pending/template rows (belt-and-suspenders): a `_pending`
@@ -238,12 +255,6 @@ def main() -> None:
 
         if not isinstance(input_data, dict):
             _silent_allow()
-
-        if pact_context is not None:
-            try:
-                pact_context.init(input_data)
-            except Exception:
-                pass  # context cache is best-effort
 
         command = (input_data.get("tool_input") or {}).get("command", "")
         if not command or not any(rx.search(command) for rx in _GATE_COMMAND_RES):
