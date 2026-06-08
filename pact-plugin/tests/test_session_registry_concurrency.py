@@ -114,28 +114,11 @@ def _register_worker(args):
         sr.register(value)
 
 
-def _non_atomic_worker(args):
-    """CONTROL worker: deliberately NON-atomic — split each logical line into TWO
-    os.write calls. Under contention the halves interleave -> torn lines. This is
-    the negative leg that proves the detector is real (it is NOT register())."""
-    home, session_id, n = args
-    _prepare_child(home)
-    reg_path = Path(home) / ".claude" / "pact-sessions" / ".teammate-registry.jsonl"
-    reg_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = (
-        json.dumps({"session_id": session_id, "value": "y" * 40}) + "\n"
-    ).encode("utf-8")
-    half = len(payload) // 2
-    first, second = payload[:half], payload[half:]
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
-    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | nofollow
-    for _ in range(n):
-        fd = os.open(str(reg_path), flags, 0o600)
-        try:
-            os.write(fd, first)   # two syscalls per line -> interleave window
-            os.write(fd, second)
-        finally:
-            os.close(fd)
+# NOTE: the former `_non_atomic_worker` (a racing two-os.write appender used to
+# INDUCE tearing) was removed when the non-vacuity control became deterministic
+# (test_tear_detector_is_non_vacuous_on_a_known_torn_line constructs the torn
+# byte-pattern directly). The production positive test still races real
+# single-os.write register() processes via `_register_worker`.
 
 
 # ---------------------------------------------------------------------------
@@ -194,28 +177,50 @@ def concurrency_env(tmp_path, monkeypatch):
 # CONTROL (non-vacuity) — a non-atomic writer DOES tear, detector DOES catch it
 # ===========================================================================
 
-def test_non_atomic_writer_tears_and_detector_catches_it(concurrency_env):
-    """NON-VACUITY CONTROL: an intentionally non-atomic appender (two os.write
-    calls per line) racing N processes produces torn lines, and the JSON-parse
-    detector catches them (torn > 0). Without this leg, a zero-tear positive
-    result could be green-because-nothing-was-tested. The two halves interleaving
-    across processes is exactly what a non-atomic (or kernel-split-beyond-the-
-    atomicity-bound) write would do."""
-    args = [
-        (concurrency_env.home, f"sess-control-{i}", _WRITES_PER_PROC)
-        for i in range(_N_PROCS)
-    ]
-    with _MP.Pool(_N_PROCS) as pool:
-        pool.map(_non_atomic_worker, args)
+def test_tear_detector_is_non_vacuous_on_a_known_torn_line(concurrency_env):
+    """NON-VACUITY CONTROL (DETERMINISTIC, CI-robust): construct a registry file
+    containing a KNOWN torn line — exactly the byte shape a two-``os.write``
+    interleave produces (two records' halves mashed onto shared physical lines)
+    — and assert the JSON-parse tear detector CATCHES it (torn > 0). This proves
+    ``_count_torn`` is NON-VACUOUS on ANY environment: without this leg, the
+    zero-tear positive result (test_single_write_appender_never_tears) could be
+    green-because-nothing-was-tested.
 
-    total, torn = _count_torn(concurrency_env.registry_path)
+    Why DETERMINISTIC, not a race: the prior control RACED N non-atomic
+    appenders and HOPED the OS scheduler interleaved their two half-writes. On a
+    low-core CI runner the halves never interleaved -> 0 torn lines -> a false
+    CI failure, even though the detector works fine. The non-vacuity PROOF (the
+    detector can catch a torn line) must not depend on the environment actually
+    producing a race. We construct the identical torn byte-pattern directly:
+    split two logical lines mid-record (as a non-atomic writer does) and
+    interleave the halves firstA+firstB+secondA+secondB, so the physical lines
+    (split on '\\n') are two mashed-together JSON objects that DO NOT parse.
+    """
+    reg = concurrency_env.registry_path
+    reg.parent.mkdir(parents=True, exist_ok=True)
+    payload_a = (json.dumps({"session_id": "sess-control-a", "value": "y" * 40}) + "\n").encode("utf-8")
+    payload_b = (json.dumps({"session_id": "sess-control-b", "value": "z" * 40}) + "\n").encode("utf-8")
+    ha, hb = len(payload_a) // 2, len(payload_b) // 2
+    first_a, second_a = payload_a[:ha], payload_a[ha:]
+    first_b, second_b = payload_b[:hb], payload_b[hb:]
+    # Writer B's first half lands between writer A's two halves -> the bytes mash
+    # onto shared physical lines, exactly as a real two-syscall interleave would.
+    torn_bytes = first_a + first_b + second_a + second_b
+    # Include one CLEAN line so `total` proves the detector distinguishes torn
+    # from intact (not just "everything is torn").
+    clean = (json.dumps({"session_id": "sess-clean", "value": "ok"}) + "\n").encode("utf-8")
+    with open(reg, "wb") as fh:
+        fh.write(torn_bytes + clean)
+
+    total, torn = _count_torn(reg)
     assert total > 0, "the control wrote nothing — the harness itself is broken"
     assert torn > 0, (
-        f"the non-atomic control produced {torn} torn lines out of {total}. "
-        f"It MUST tear (two-syscall interleave under contention) — if it does "
-        f"not, the tear detector is vacuous and the zero-tear positive result "
-        f"below proves nothing."
+        f"the tear detector caught {torn} torn lines out of {total} on a KNOWN "
+        f"torn write — it MUST catch >=1. If it does not, _count_torn is vacuous "
+        f"and the zero-tear positive result below proves nothing."
     )
+    # And it must NOT over-count: the single clean line parses, so torn < total.
+    assert torn < total, "the clean line must parse — detector must not flag intact lines"
 
 
 # ===========================================================================
