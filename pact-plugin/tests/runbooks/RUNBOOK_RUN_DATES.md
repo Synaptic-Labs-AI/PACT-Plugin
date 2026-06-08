@@ -61,16 +61,19 @@ OBSERVED `session_id`s (so the mode claim is checkable, not self-asserted), the
 real journal-event timestamp, and the stale age — a fabricated PASS should be
 detectable from the row.
 
-**Probe row** (one record covers BOTH mode cells — tmux real PASS + in-process
-real-or-faithful-synthetic PASS):
+**Probe row** — ONE record covers BOTH mode cells in a SINGLE `|`-delimited row.
+The per-mode verdict column carries the explicit `PASS|FAIL` token PER MODE so the
+verdict is machine-recognizable, not buried in prose (see the parser-coupling note
+below):
 
 ```
-| Run date (UTC) | Operator | Plugin version | Sections passed (PER MODE: tmux N/N, in-process N/N) | Mode-discriminator evidence (session_ids observed) | Notes (real vs synthetic; journal event ts; stale age; tripwire state) |
+| Run date (UTC) | Operator | Plugin version | Per-mode verdict (tmux PASS|FAIL N/N · in-process PASS|FAIL N/N) | Mode-discriminator evidence (session_ids observed) | Notes (real vs synthetic; journal event ts; stale age; tripwire state) |
 ```
 
-| Run date (UTC) | Operator | Plugin version | Sections passed (tmux N/N, in-process N/N) | Mode-discriminator evidence (session_ids observed) | Notes (real vs synthetic; journal ts; stale age; tripwire) |
-| -------------- | -------- | -------------- | ------------------------------------------ | -------------------------------------------------- | ---------------------------------------------------------- |
-| _pending — execute post-merge per `live-probe-template.md` §2_ | | | tmux _/2, in-process _/2 | lead `{session_id}`; teammates `{session_id…}` (distinct ⇒ tmux) | real vs synthetic per cell · `{JOURNAL_EVENT}` ts · stale age · §2 Step E tripwire CLEAR/TRIPPED |
+| Run date (UTC) | Operator | Plugin version | Per-mode verdict (tmux PASS\|FAIL N/N · in-process PASS\|FAIL N/N) | Mode-discriminator evidence (session_ids observed) | Notes (real vs synthetic; journal ts; stale age; tripwire) |
+| -------------- | -------- | -------------- | ----------------------------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------- |
+| _pending — execute post-merge per `live-probe-template.md` §2_ | | | tmux PENDING, in-process PENDING | lead `{session_id}`; teammates `{session_id…}` (distinct ⇒ tmux) | real vs synthetic per cell · `{JOURNAL_EVENT}` ts · stale age · §2 Step E tripwire CLEAR/TRIPPED |
+| _satisfied-row form_ → | `<operator>` | `<version V>` | tmux PASS 2/2 · in-process PASS 2/2 | lead `<sid>`; teammates `<sid…>` (distinct ⇒ tmux) | tmux real, in-process synthetic; `<journal ts>`; `<stale age>`; tripwire CLEAR |
 
 **Waiver row variant** — for a change that trips the PRIMARY hook-infra signal
 but NOT the SECONDARY seam signal (touches `hooks/` but changes no
@@ -86,6 +89,17 @@ evidence:
 closed — record tmux as `pending` and close only after the real tmux probe
 lands. A PRIMARY-but-not-SECONDARY change is the only path that closes WITHOUT a
 both-modes PASS, and only via an explicit WAIVED row.
+
+**Parser-coupling note (keep these tokens, single row).** The locus-b freshness
+advisory (`live_probe_gate.py`) decides WARN-vs-silent by scanning these rows for
+a *satisfied* row at the current plugin version. Its match is layout-tolerant but
+keys on tokens that MUST stay co-located in ONE `|`-delimited row: the bare plugin
+**version** (exact, not a substring of a longer version) AND (`tmux` + `in-process`
++ `PASS`) → a satisfied both-modes probe row; OR `WAIVED` → satisfied iff the change
+is PRIMARY-not-SECONDARY. Therefore: keep both modes in a SINGLE row (do not split
+tmux/in-process across rows), and keep the verdict tokens `PASS`/`WAIVED` literal.
+If a future layout splits the modes or renames the verdict tokens, update
+`live_probe_gate.py`'s row parser to match.
 
 ## v4.0.0-launch-and-isolation.md
 

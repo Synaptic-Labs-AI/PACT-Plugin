@@ -18,6 +18,14 @@ depends on state resolved at RUNTIME from ambient context — team_name /
 session_id / an env-keyed path — and which FAILS SILENT when that resolution
 yields empty/None).
 
+> **Which hooks are seam-dependent (the authoritative list).** Do not restate or
+> re-derive the seam-hook set here — `hooks/shared/hook_infra_classifier.py` is
+> the single source of truth: `SEAM_DEPENDENT_HOOKS` (all require an L2 non-mocked
+> integration test), `L3_LIVE_PROBE_HOOKS` (additionally require this live probe),
+> and `L3_CANDIDATE_HOOKS` (L3 only if a fails-silent check confirms a
+> consequential silent no-op). Consult that module to decide whether `{HOOK}`
+> needs this probe at all.
+
 **Fill-in legend** (replace throughout):
 
 | Placeholder | Meaning | 923 instance |

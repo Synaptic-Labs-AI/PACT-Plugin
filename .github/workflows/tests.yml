@@ -77,8 +77,15 @@ jobs:
         with:
           python-version: "3.13"
 
-      # See "DEPENDENCY SET" header note for why each lib is required.
       - name: Install test dependencies
+        # See the "DEPENDENCY SET" header note for why each lib is required.
+        # pytest-asyncio is REQUIRED, not optional: the suite has ~143
+        # @pytest.mark.asyncio tests. Without this plugin they FAIL on
+        # pytest >= 9 (unknown-mark, ~143 failures here) or — worse — SILENTLY
+        # SKIP on pytest 8.x (green-looking, but the tests never run). Do NOT
+        # drop it to "shorten" the line: that silently re-opens the exact
+        # inert-test gap (green suite, tests not actually running) this
+        # project's live-probe gate exists to catch.
         run: python -m pip install --upgrade pip pytest hypothesis httpx pytest-asyncio
 
       # rootdir must be pact-plugin/ (CWD-relative conftest sys.path + local
