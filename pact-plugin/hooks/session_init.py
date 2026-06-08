@@ -322,7 +322,7 @@ def check_additional_directories() -> str | None:
     Fail-open: returns None on any error (file missing, malformed JSON, etc.).
     """
     try:
-        settings_path = Path.home() / ".claude" / "settings.json"
+        settings_path = get_claude_config_dir() / "settings.json"
         if not settings_path.exists():
             return None  # No settings file — nothing to check
 
@@ -348,9 +348,9 @@ def check_additional_directories() -> str | None:
 
         # Check which required directories are missing
         required = {
-            "~/.claude/teams": (Path.home() / ".claude" / "teams").resolve(),
+            "~/.claude/teams": (get_claude_config_dir() / "teams").resolve(),
             "~/.claude/pact-sessions": (
-                Path.home() / ".claude" / "pact-sessions"
+                get_claude_config_dir() / "pact-sessions"
             ).resolve(),
         }
         missing = [
@@ -1133,7 +1133,7 @@ def main():
                 )
 
         try:
-            team_config = Path.home() / ".claude" / "teams" / team_name / "config.json"
+            team_config = get_claude_config_dir() / "teams" / team_name / "config.json"
             team_exists = team_config.exists()
         except OSError:
             # Fail-open: if filesystem check fails, assume fresh session

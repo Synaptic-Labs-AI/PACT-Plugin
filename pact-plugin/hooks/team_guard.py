@@ -16,6 +16,15 @@ import json
 import sys
 from pathlib import Path
 
+# Add hooks/ to sys.path for the shared import below (mirrors the sibling
+# PreToolUse hooks). Needed now that the team-existence check derives the teams
+# dir from the shared CLAUDE_CONFIG_DIR resolver instead of a hardcoded ~/.claude.
+_hooks_dir = Path(__file__).parent
+if str(_hooks_dir) not in sys.path:
+    sys.path.insert(0, str(_hooks_dir))
+
+from shared.paths import get_claude_config_dir
+
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 
@@ -36,7 +45,7 @@ def check_team_exists(tool_input: dict, teams_dir: str | None = None) -> str | N
     team_name = team_name.lower()
 
     if teams_dir is None:
-        teams_dir = str(Path.home() / ".claude" / "teams")
+        teams_dir = str(get_claude_config_dir() / "teams")
 
     team_config = Path(teams_dir) / team_name / "config.json"
     if not team_config.exists():

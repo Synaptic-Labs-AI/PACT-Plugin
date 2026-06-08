@@ -34,6 +34,7 @@ from typing import Any
 
 from shared import pact_context
 from shared.constants import SYSTEM_TASK_PREFIXES
+from shared.paths import get_claude_config_dir
 from shared.session_journal import read_events_from
 
 
@@ -399,7 +400,7 @@ def _read_team_members(
             config_path = Path(teams_base_dir) / team_name / "config.json"
         else:
             config_path = (
-                Path.home() / ".claude" / "teams" / team_name / "config.json"
+                get_claude_config_dir() / "teams" / team_name / "config.json"
             )
 
         if not config_path.exists():
@@ -453,7 +454,7 @@ def _read_task_counts(
         if tasks_base_dir:
             team_dir = Path(tasks_base_dir) / team_name
         else:
-            team_dir = Path.home() / ".claude" / "tasks" / team_name
+            team_dir = get_claude_config_dir() / "tasks" / team_name
 
         if not team_dir.exists():
             return counts
@@ -509,8 +510,7 @@ def _read_feature_subject_from_disk(
             )
         else:
             task_path = (
-                Path.home()
-                / ".claude"
+                get_claude_config_dir()
                 / "tasks"
                 / team_name
                 / f"{feature_id}.json"

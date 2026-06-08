@@ -42,6 +42,8 @@ import os
 import re
 from pathlib import Path
 
+from .paths import get_claude_config_dir
+
 # Hex chars of the SHA-256 digest retained for the occupant component of the
 # marker key. 16 hex chars = 64 bits — collision-negligible for the tiny
 # per-(team, task_id) occupant namespace (a handful of occupants per task at
@@ -132,7 +134,7 @@ def _marker_dir(team_name: str) -> Path:
     pause/resume: a secretary standing task that spans sessions must emit
     its agent_handoff event exactly once across the whole team lifespan.
     """
-    return Path.home() / ".claude" / "teams" / team_name / ".agent_handoff_emitted"
+    return get_claude_config_dir() / "teams" / team_name / ".agent_handoff_emitted"
 
 
 def _resolve_marker_target(
@@ -215,7 +217,7 @@ def _resolve_marker_target(
     # and is_relative_to is 3.9+. On breach OR any resolution error: fail-open
     # emit (return None) WITHOUT writing a marker at the escaped path —
     # consistent with the is_symlink() pre-check's fail-open posture.
-    team_base = Path.home() / ".claude" / "teams" / team_name
+    team_base = get_claude_config_dir() / "teams" / team_name
     try:
         real_marker = os.path.realpath(marker_dir)
         real_base = os.path.realpath(team_base)

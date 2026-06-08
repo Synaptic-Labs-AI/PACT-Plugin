@@ -108,6 +108,7 @@ try:
     from pathlib import Path
 
     import shared.pact_context as pact_context
+    from shared.paths import get_claude_config_dir
     from shared.agent_handoff_marker import (
         already_emitted,
         is_signal_task,
@@ -259,7 +260,7 @@ def _writeback_dispute(task_id: str) -> bool:
     metadata["completion_disputed"] = True
     metadata["gate_writeback"] = True
 
-    tasks_root = Path.home() / ".claude" / "tasks" / team_name
+    tasks_root = get_claude_config_dir() / "tasks" / team_name
     target = tasks_root / f"{sanitized_id}.json"
     tmp = tasks_root / f".{sanitized_id}.json.tmp"
     try:
@@ -360,7 +361,7 @@ def _writeback_audit_recovery(task_id: str, updates: dict) -> bool:
         metadata[key] = value
     metadata["gate_writeback"] = True
 
-    tasks_root = Path.home() / ".claude" / "tasks" / team_name
+    tasks_root = get_claude_config_dir() / "tasks" / team_name
     target = tasks_root / f"{sanitized_id}.json"
     tmp = tasks_root / f".{sanitized_id}.json.tmp"
     try:
