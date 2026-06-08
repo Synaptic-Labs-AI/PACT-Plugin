@@ -142,3 +142,46 @@ def test_resolver_has_no_logging_or_print_in_code():
     code = _code_tokens(src)
     for forbidden in ("print", "logging", "logger", "stderr"):
         assert forbidden not in code, f"{forbidden!r} must not appear in the pure resolver code (DATA-G1)"
+
+
+# ---------------------------------------------------------------------------
+# C4 — the B1 accessors FOLLOW $CLAUDE_CONFIG_DIR at call time (proves the
+# import-time freeze is gone). env-set → config root; env-unset → home/.claude.
+# ---------------------------------------------------------------------------
+
+def test_get_tracking_dir_follows_config_dir(tmp_path, monkeypatch):
+    from track_files import get_tracking_dir
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    assert get_tracking_dir() == tmp_path / "pact-memory" / "session-tracking"
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    assert get_tracking_dir() == tmp_path / ".claude" / "pact-memory" / "session-tracking"
+
+
+def test_get_failure_log_path_follows_config_dir(tmp_path, monkeypatch):
+    from shared.failure_log import get_failure_log_path
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    assert get_failure_log_path() == tmp_path / "pact-sessions" / "_session_init_failures.log"
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    assert get_failure_log_path() == tmp_path / ".claude" / "pact-sessions" / "_session_init_failures.log"
+
+
+def test_get_compact_summary_path_follows_config_dir(tmp_path, monkeypatch):
+    from shared.constants import get_compact_summary_path
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    assert get_compact_summary_path() == tmp_path / "pact-sessions" / "compact-summary.txt"
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    assert get_compact_summary_path() == tmp_path / ".claude" / "pact-sessions" / "compact-summary.txt"
+
+
+def test_token_dir_b2_is_ssot_derived_not_rehardcoded():
+    # B2 contract: TOKEN_DIR is an eager import-time constant, but it MUST derive
+    # from the SSOT resolver (get_claude_config_dir()), NOT a re-hardcoded
+    # Path.home()/".claude" (re-hardcode would re-open the drift the SSOT closes).
+    # Structural check — runtime equality can't distinguish the two when the env
+    # is unset (both yield home/.claude), so we assert on the source idiom.
+    src = (Path(__file__).parent.parent / "hooks" / "shared" / "merge_guard_common.py").read_text(encoding="utf-8")
+    assert "TOKEN_DIR = get_claude_config_dir()" in src
+    assert 'TOKEN_DIR = Path.home()' not in src

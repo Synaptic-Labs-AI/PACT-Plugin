@@ -37,7 +37,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 from shared import failure_log
 from shared.failure_log import (
-    LOG_PATH,
     MAX_ENTRIES,
     append_failure,
     read_failures,
@@ -50,15 +49,16 @@ from shared.failure_log import (
 
 @pytest.fixture
 def failure_log_home(tmp_path, monkeypatch):
-    """Redirect Path.home() and the module-level LOG_PATH to tmp_path.
+    """Redirect Path.home() into tmp_path; the accessor follows it.
 
-    The module caches LOG_PATH at import time, so monkeypatching Path.home()
-    alone is not enough — we also override failure_log.LOG_PATH to the tmp
-    location. Symmetric with how test_session_journal pins its paths.
+    get_failure_log_path() resolves $CLAUDE_CONFIG_DIR at CALL time (B1), so
+    with the env unset it derives the log path from the monkeypatched
+    Path.home() — no module-level constant override needed (the import-time
+    freeze is gone). delenv guarantees the fallback branch deterministically.
     """
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     tmp_log = tmp_path / ".claude" / "pact-sessions" / "_session_init_failures.log"
-    monkeypatch.setattr(failure_log, "LOG_PATH", tmp_log)
     return tmp_log
 
 

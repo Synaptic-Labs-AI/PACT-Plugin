@@ -19,6 +19,7 @@ from pathlib import Path
 from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
 from shared.pact_context import get_session_id
+from shared.paths import get_claude_config_dir
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -30,13 +31,16 @@ except ImportError:
     HAS_FLOCK = False
 
 
-# Directory for tracking data
-TRACKING_DIR = Path.home() / ".claude" / "pact-memory" / "session-tracking"
+# Directory for tracking data. Accessor (B1) — resolves $CLAUDE_CONFIG_DIR at
+# CALL time via the shared resolver, so a non-default config dir is honored and
+# the import-time freeze (a #924-class inert trap) is avoided.
+def get_tracking_dir() -> Path:
+    return get_claude_config_dir() / "pact-memory" / "session-tracking"
 
 
 def ensure_tracking_dir():
     """Ensure the tracking directory exists."""
-    TRACKING_DIR.mkdir(parents=True, exist_ok=True)
+    get_tracking_dir().mkdir(parents=True, exist_ok=True)
 
 
 def get_session_tracking_file() -> Path:
@@ -46,7 +50,7 @@ def get_session_tracking_file() -> Path:
     reads from the correct session-scoped context file.
     """
     session_id = get_session_id() or "unknown"
-    return TRACKING_DIR / f"{session_id}.json"
+    return get_tracking_dir() / f"{session_id}.json"
 
 
 def load_tracked_files() -> dict:

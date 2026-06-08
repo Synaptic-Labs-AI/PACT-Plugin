@@ -11,7 +11,7 @@ Used by: hooks.json PostCompact hook
 
 After compaction completes:
 1. Reads compact_summary from stdin (PostCompact input field)
-2. Writes the compact_summary to the canonical COMPACT_SUMMARY_PATH
+2. Writes the compact_summary to the canonical get_compact_summary_path()
 3. Emits suppressOutput to avoid false "hook error" UI display on clean exits
 
 This is a non-blocking side effect (always exits 0), not a gate.
@@ -25,7 +25,7 @@ import os
 import sys
 from pathlib import Path
 
-from shared.constants import COMPACT_SUMMARY_PATH
+from shared.constants import get_compact_summary_path
 from shared.error_output import hook_error_json
 from shared.pact_context import is_lead
 
@@ -40,8 +40,8 @@ def _get_summary_path(
 ) -> Path:
     """Get the path for the compact summary file."""
     if sessions_base_dir is None:
-        return COMPACT_SUMMARY_PATH
-    return Path(sessions_base_dir) / COMPACT_SUMMARY_PATH.name
+        return get_compact_summary_path()
+    return Path(sessions_base_dir) / get_compact_summary_path().name
 
 
 def write_compact_summary(
@@ -86,7 +86,7 @@ def main():
         # "Post-compaction: critical context preserved" message was reassurance
         # that could suppress orchestrator self-check (see issue #444 root cause).
         #
-        # Lead-only (#881): COMPACT_SUMMARY_PATH is a GLOBAL SINGLETON the lead
+        # Lead-only (#881): the compact-summary path is a GLOBAL SINGLETON the lead
         # reads on resume; the write is O_TRUNC, so a teammate/plain frame's
         # PostCompact would CLOBBER the lead's summary (the 2nd acute clobber
         # after #877). Gate the write behind is_lead. is_lead is total and only

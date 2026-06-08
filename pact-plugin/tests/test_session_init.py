@@ -425,7 +425,7 @@ class TestCompactSummaryCleanup:
         summary_file = sessions_dir / "compact-summary.txt"
         summary_file.write_text("Prior compaction context")
 
-        # Patch COMPACT_SUMMARY_PATH to point to our tmp_path version
+        # Patch get_compact_summary_path() to return our tmp_path version
         patched_path = summary_file
 
         stdin_data = json.dumps({
@@ -433,7 +433,7 @@ class TestCompactSummaryCleanup:
             "source": source,
         })
 
-        with patch("session_init.COMPACT_SUMMARY_PATH", patched_path), \
+        with patch("session_init.get_compact_summary_path", lambda: patched_path), \
              patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \

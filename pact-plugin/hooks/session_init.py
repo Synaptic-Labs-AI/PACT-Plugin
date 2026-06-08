@@ -76,7 +76,7 @@ from pin_caps import (  # noqa: F401
 )
 
 from shared import BOOTSTRAP_MARKER_NAME, SESSION_ID_CONTROL_CHARS_RE, build_session_path
-from shared.constants import COMPACT_SUMMARY_PATH
+from shared.constants import get_compact_summary_path
 from shared.pact_context import (
     build_context_cache,
     classify_session_role,
@@ -789,7 +789,7 @@ def main():
         # Only "compact" source needs it (just written by postcompact_archive).
         if source != "compact":
             try:
-                COMPACT_SUMMARY_PATH.unlink(missing_ok=True)
+                get_compact_summary_path().unlink(missing_ok=True)
             except OSError:
                 pass  # Fail-open: don't block session init for cleanup
 
@@ -1267,7 +1267,7 @@ def main():
                 context_parts.insert(0, (
                     f'{_team_reuse} '
                     f'After bootstrap, recover session state: '
-                    f'(1) Read {COMPACT_SUMMARY_PATH} for prior context, '
+                    f'(1) Read {get_compact_summary_path()} for prior context, '
                     f'(2) Run TaskList to find in-progress work, '
                     f'(3) TaskGet on in-progress tasks for details. '
                     f"Re-engage secretary: SendMessage(to='secretary', "
