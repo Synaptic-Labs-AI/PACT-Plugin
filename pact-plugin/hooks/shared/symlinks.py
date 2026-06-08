@@ -55,10 +55,13 @@ def setup_plugin_symlinks() -> str | None:
             protocols_roots.append(config_root)
         for root in protocols_roots:
             protocols_dst = root / "protocols" / "pact-plugin"
-            # mode=0o700 applies to the leaf directory only; parent dirs use umask
-            protocols_dst.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-
             try:
+                # mkdir INSIDE the try (#926): a pathological config_root
+                # (relative / unwritable / file-in-path) must fail-open per this
+                # function's "returns None/status, never raises" contract, not
+                # propagate to the caller. mode=0o700 applies to the leaf dir
+                # only; parent dirs use umask.
+                protocols_dst.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 if protocols_dst.is_symlink():
                     if protocols_dst.resolve() != protocols_src.resolve():
                         protocols_dst.unlink()
