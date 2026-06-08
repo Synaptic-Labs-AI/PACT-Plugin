@@ -160,3 +160,54 @@ def _reset_specialist_registry_cache():
     dispatch_helpers._specialist_registry.cache_clear()
     yield
     dispatch_helpers._specialist_registry.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _resync_staleness_resolver_bindings():
+    """Unconditional cross-test isolation for the project-CLAUDE.md staleness
+    resolver (#928). Runs for EVERY test (autouse).
+
+    ROOT CAUSE (instrumented): a test elsewhere in the suite replaces
+    ``sys.modules['staleness']`` with a fresh module object (e.g. a delete +
+    re-import), ORPHANING the staleness functions that ``session_init`` bound at
+    its own import time: ``session_init._staleness_check`` (==
+    ``staleness.check_pinned_staleness``) and the re-imported
+    ``session_init._get_project_claude_md_path`` keep pointing at the OLD
+    staleness module's ``__dict__``. Then
+    ``test_staleness.py::test_no_claude_md_returns_none`` patches the CURRENT
+    ``staleness._get_project_claude_md_path`` to None, but
+    ``session_init.check_pinned_staleness`` delegates to its orphaned
+    ``_staleness_check``, which resolves ``_get_project_claude_md_path`` in the
+    OLD module's globals (UNPATCHED) → reads the REAL project CLAUDE.md instead
+    of None. Order-dependent + cumulative (needs session_init imported BEFORE the
+    staleness replacement), so it only surfaces under certain suite orderings —
+    a PRE-EXISTING latent defect, not specific to any one PR.
+
+    FIX: before AND after every test, re-align ``session_init``'s bound staleness
+    functions to whatever ``sys.modules['staleness']`` currently is (NOT a value
+    captured at conftest-import, which would itself be the stale module). This is
+    a no-op in the normal case (the bindings already match) and repairs the
+    orphaning after a replacement, so a test that patches ``staleness`` reaches
+    the resolution ``session_init`` actually uses. Also re-point the underscore
+    alias to the current public resolver so the two never diverge within a
+    module. Gated on ``sys.modules`` so this fixture never forces the heavy
+    ``session_init`` import itself.
+    """
+    def _resync():
+        st = sys.modules.get("staleness")
+        si = sys.modules.get("session_init")
+        if st is not None:
+            real = getattr(st, "get_project_claude_md_path", None)
+            if real is not None:
+                st._get_project_claude_md_path = real
+                if si is not None:
+                    si._get_project_claude_md_path = real
+        if st is not None and si is not None:
+            if hasattr(st, "check_pinned_staleness"):
+                si._staleness_check = st.check_pinned_staleness
+            if hasattr(st, "check_pinned_block_signal"):
+                si._staleness_block_check = st.check_pinned_block_signal
+
+    _resync()
+    yield
+    _resync()
