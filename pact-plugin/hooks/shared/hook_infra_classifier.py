@@ -100,6 +100,17 @@ L3_CANDIDATE_HOOKS: frozenset[str] = frozenset({
 # uncertainty path is exit(2) DENY, and they make no get_task_list call) -> they
 # fail LOUD, never silent-inert -> L2-only, never L3. (CODE-confirmed: their
 # exit(0) paths are input-side fail-open + legitimate ALLOW, not seam-error.)
+#
+# live_probe_gate (the locus-b advisory itself) is DELIBERATELY excluded from
+# SEAM_DEPENDENT_HOOKS even though it meets the seam predicate (its WARN depends
+# on a runtime-resolved git root / marker / RUNBOOK_RUN_DATES path, and it
+# silent-allows on any resolution failure). The exclusion is intentional, not an
+# oversight: its silent-failure is BENIGN -- it merely stops warning and the gate
+# degrades to pin-only enforcement (never a false "checked & clear"), so it needs
+# no inert-alarm L2/L3 treatment (parallel to file_tracker's benign-degrade
+# L2-only reasoning above). It is covered this cycle by
+# test_live_probe_gate_structure.py + the dogfood probe; a maintainer editing it
+# should preserve this rationale.
 
 
 # ─── Transitive helper import closure (authoritative SSOT data) ─────────────
