@@ -4,12 +4,21 @@ Live-Probe Gate (locus-b advisory)
 
 Location: pact-plugin/hooks/live_probe_gate.py
 
-Summary: PreToolUse(Bash) ADVISORY hook. When a `gh pr merge` / `gh pr close` /
-`gh issue close` command runs in the PACT-plugin DEV repo on a branch that
-touches the hooks/ tree but has no fresh both-modes live-probe row logged in
-RUNBOOK_RUN_DATES.md for the current plugin version, it emits a NON-BLOCKING
-WARN reminding the operator to run (and log) the live-probe before closing the
-originating issue.
+Summary: PreToolUse(Bash) ADVISORY hook. When a `gh pr merge` / `gh pr close`
+command runs in the PACT-plugin DEV repo on a branch that touches the hooks/
+tree but has no fresh both-modes live-probe row logged in RUNBOOK_RUN_DATES.md
+for the current plugin version, it emits a NON-BLOCKING WARN reminding the
+operator to run (and log) the live-probe before closing the originating issue.
+
+Coverage split (honest about what this hook does NOT do): the runtime WARN
+fires ONLY at MERGE-time (`gh pr merge` / `gh pr close`), where the branch diff
+(`git diff base...HEAD`) is non-empty and classifies correctly. Issue-close is
+NOT a runtime arm of this hook: on `main` post-merge `base...HEAD` is EMPTY, so
+a `gh issue close` classification would silently no-op -> a false
+"checked & clear" signal, the exact registered-but-inert class this gate exists
+to prevent (recursively, inside the gate). Issue-close is therefore enforced
+PROCEDURALLY by the project CLAUDE.md pin + the no-Closes-#N sub-rule (close the
+originating issue manually after the probe row is logged), NOT by this hook.
 
 Posture (the two load-bearing invariants):
   - WARN-not-BLOCK: this hook ALWAYS exits 0; it never returns a
@@ -48,7 +57,6 @@ try:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from shared.hook_infra_classifier import classify_diff
     from shared.merge_guard_common import (
-        _GH_PREFIX,
         _GH_PR_MERGE_RE,
         _GH_PR_CLOSE_RE,
     )
@@ -56,13 +64,15 @@ except Exception:
     print(_SUPPRESS_OUTPUT)
     sys.exit(0)
 
-# Issue-close regex — NEW here. merge_guard never targeted `gh issue close`
-# (issue close is reversible, so it was never a merge-guard concern). Built from
-# the shared _GH_PREFIX for PARITY with the merge/close siblings (catches
-# `gh <global-flags> issue close`), which is strictly more correct than a bare
-# `\bgh\s+issue\s+close\b` literal.
-_GH_ISSUE_CLOSE_RE = re.compile(_GH_PREFIX + r"issue\s+close\b")
-_GATE_COMMAND_RES = (_GH_PR_MERGE_RE, _GH_PR_CLOSE_RE, _GH_ISSUE_CLOSE_RE)
+# Matched commands: `gh pr merge` / `gh pr close` ONLY. `gh issue close` is
+# DELIBERATELY absent: a runtime issue-close arm would classify via
+# `git diff base...HEAD`, which is EMPTY on `main` post-merge, and would
+# silently no-op -> a false "checked & clear" signal = the registered-but-inert
+# class this gate exists to prevent. Issue-close is enforced PROCEDURALLY (the
+# project pin + the no-Closes-#N sub-rule), not at runtime. Do NOT re-add an
+# issue-close matcher without first solving the empty-diff classification
+# problem (see the module docstring's "Coverage split").
+_GATE_COMMAND_RES = (_GH_PR_MERGE_RE, _GH_PR_CLOSE_RE)
 
 # pact_context is optional parity with sibling Bash hooks (warms the context
 # cache). Best-effort: the advisory does not depend on it, so an import failure
