@@ -110,6 +110,54 @@ class TestFreshnessRowSpec:
         assert g._has_satisfied_row(root, VERSION, waiver_ok=True) is True
         assert g._has_satisfied_row(root, VERSION, waiver_ok=False) is False
 
+    # FIX (review cycle 1, finding #2 hardening) — COLUMN-ANCHOR:
+    def test_different_version_row_mentioning_v_in_notes_not_satisfied(self, tmp_path):
+        # A DIFFERENT-version both-mode PASS row whose NOTES cell merely MENTIONS
+        # the current version V must NOT satisfy — the version match is anchored
+        # to the "Plugin version" cell (3rd column), not anywhere-in-line. (Pre-
+        # hardening this false-satisfied via the version mention in prose.)
+        row = ("| 2026-06-08 | op | 4.1.3 | tmux 2/2, in-process 2/2 | sids | "
+               f"both modes PASS — backport note referencing {VERSION} |\n")
+        root = _make_root(tmp_path, "| h |\n" + row)
+        assert g._has_satisfied_row(root, VERSION, waiver_ok=False) is False, (
+            "a row with a DIFFERENT version in the Plugin-version column must NOT "
+            "satisfy just because it mentions V in its Notes prose (column-anchor)"
+        )
+
+    # FIX (review cycle 1, finding #2 hardening) — EXACT-PASS verdict.
+    # NOTE: devops's committed regex `(?<![A-Za-z])PASS(?:ED)?(?![A-Za-z/])`
+    # DELIBERATELY accepts the genuine verdicts "PASS" AND "PASSED" (operators
+    # write either), while rejecting the non-genuine / case-variant / placeholder
+    # forms below. (The lead's #2 spec listed "PASSED" as a non-satisfier; that
+    # conflicts with devops's shipped `(?:ED)?` — surfaced to the lead/devops for
+    # a ruling. This test pins the UNAMBIGUOUS rejections that hold under EITHER
+    # interpretation so it is correct against the shipped code today.)
+    def test_non_genuine_pass_verdicts_do_not_satisfy(self, tmp_path):
+        for verdict in ("both modes Passed",        # mixed-case (not exact)
+                        "both modes passed",         # lowercase (not exact)
+                        "tmux bypass, in-process x",  # substring 'pass' in 'bypass'
+                        "both modes BYPASSED",        # lookbehind: 'PASS' preceded by 'Y'
+                        "both modes non-genuine-pass",
+                        "arm (§a) PASS/FAIL · forensic PASS/FAIL"):  # unfilled template
+            row = (f"| 2026-06-08 | op | {VERSION} | tmux 2/2, in-process 2/2 | "
+                   f"sids | {verdict} |\n")
+            root = _make_root(tmp_path, "| h |\n" + row)
+            assert g._has_satisfied_row(root, VERSION, waiver_ok=False) is False, (
+                f"verdict {verdict!r} must NOT satisfy the gate"
+            )
+
+    def test_genuine_pass_and_passed_verdicts_satisfy(self, tmp_path):
+        # Both "PASS" and "PASSED" are genuine verdicts -> satisfy (devops's
+        # shipped behavior). If the lead rules "PASSED" must be rejected, devops
+        # drops `(?:ED)?` and this flips to PASSED-not-satisfying.
+        for verdict in ("both modes PASS.", "both modes PASSED"):
+            row = (f"| 2026-06-08 | op | {VERSION} | tmux 2/2, in-process 2/2 | "
+                   f"sids | {verdict} |\n")
+            root = _make_root(tmp_path, "| h |\n" + row)
+            assert g._has_satisfied_row(root, VERSION, waiver_ok=False) is True, (
+                f"genuine verdict {verdict!r} must satisfy the gate"
+            )
+
 
 # ── WARN-PATH: drive main() end-to-end in a real temp git repo (no mock) ──
 
@@ -143,7 +191,13 @@ def _make_git_repo(tmp: Path, runbook_body: str, touch_hooks: bool) -> Path:
 def _run_main(root: Path, command: str, monkeypatch, capsys) -> tuple[int, str]:
     import io
     monkeypatch.chdir(root)
-    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    # Pin CLAUDE_PROJECT_DIR to THIS test's temp root so _resolve_repo_root is
+    # deterministic and IMMUNE to a leaked value from an upstream test (some
+    # tests set os.environ["CLAUDE_PROJECT_DIR"] without cleanup). A bare delenv
+    # is NOT leak-immune: if the var is re-set after our delenv, or if we relied
+    # on the git-rev-parse fallback, an upstream leak could redirect repo-root
+    # resolution away from our temp repo and silently suppress the WARN.
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(root))
     monkeypatch.setattr(sys, "stdin",
                         io.StringIO(json.dumps({"tool_input": {"command": command}})))
     code = 0

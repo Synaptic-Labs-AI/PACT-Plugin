@@ -315,14 +315,27 @@ class TestSeamHookL2Presence:
 
 def _monkeypatches_resolver(text: str) -> list[str]:
     """Return resolver symbols this file monkeypatches/patches (the anti-pattern).
-    Heuristic but precise: flags `monkeypatch.setattr(... <sym> ...)` /
-    `mock.patch(... <sym> ...)` / `patch(... "<sym>" ...)` lines that name a
-    resolver symbol as the patch TARGET. Ignores plain imports/calls of the
-    resolver (those are the REAL-seam exercise we want)."""
+    Heuristic tripwire (backstopped by the revert-cardinality non-vacuity gate —
+    a mocked-seam test, however it mocks, cannot pass a source-revert): flags any
+    patch/setattr line that names a resolver symbol as the TARGET. Ignores plain
+    imports/calls of the resolver (those are the REAL-seam exercise we want).
+
+    FIX (review cycle 1, finding MINOR-2): the original only caught
+    `monkeypatch.setattr` / `.patch(` / `@patch`. It was EVADABLE by
+    `patch.object(...)`, a bare builtin `setattr(...)`, and an aliased
+    `mp.setattr(...)`. Broadened below to catch all three; still a tripwire, not
+    a proof (a string-built target or an exotic idiom can still slip — the
+    revert-cardinality gate is the airtight layer)."""
     hits: list[str] = []
     for line in text.splitlines():
         s = line.strip()
-        is_patch = ("monkeypatch.setattr" in s) or (".patch(" in s) or s.startswith("patch(") or s.startswith("@patch")
+        is_patch = (
+            "setattr(" in s            # monkeypatch.setattr / aliased mp.setattr / bare builtin setattr
+            or ".patch(" in s          # mock.patch( / patch( context-manager
+            or "patch.object(" in s    # mock.patch.object(...) — the prior evasion
+            or s.startswith("patch(")  # bare patch(
+            or s.startswith("@patch")  # @patch / @patch.object decorator
+        )
         if not is_patch:
             continue
         for sym in RESOLVER_SYMBOLS:
@@ -364,6 +377,21 @@ class TestSeamL2FilesDoNotMockTheResolver:
         assert _monkeypatches_resolver(violating) == ["get_task_list"]
         assert _monkeypatches_resolver(clean) == []
 
+    def test_anti_mock_detector_catches_evasion_idioms(self):
+        # FIX (MINOR-2): the 3 idioms that EVADED the original detector are now
+        # caught. A plain CALL of the resolver (not a patch target) stays clean.
+        assert _monkeypatches_resolver(
+            'patch.object(task_utils, "get_task_list")') == ["get_task_list"]
+        assert _monkeypatches_resolver(
+            'setattr(task_utils, "get_task_list", x)') == ["get_task_list"]
+        assert _monkeypatches_resolver(
+            'mp.setattr(task_utils, "get_task_list", x)') == ["get_task_list"]
+        assert _monkeypatches_resolver(
+            'with mock.patch.object(tu, "get_task_list"):') == ["get_task_list"]
+        # a real-seam CALL (the pattern we WANT) must NOT be flagged:
+        assert _monkeypatches_resolver(
+            "members = dispatch_gate._team_member_names(team)") == []
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # C6-B — CLASSIFIER quiet/loud behavior (silent on non-hook, fires on seam)
@@ -387,3 +415,88 @@ class TestClassifierQuietAndLoud:
 
     def test_l3_set_is_subset_of_seam_set(self):
         assert L3_LIVE_PROBE_HOOKS <= SEAM_DEPENDENT_HOOKS
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C6-A BOUND BACKSTOP — enforce the oracle's STATIC-import / module-set bound
+# (review cycle 1, finding MINOR-1)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The closure oracle (TestClosureMatchesLiveImportGraph) re-derives the closure
+# from STATIC `import` / `from X import` AST nodes within the hooks/*.py +
+# hooks/shared/*.py module set. Two edge classes would be invisible to BOTH the
+# oracle AND the SSOT literal's authoring derivation (same algorithm) → they
+# would AGREE VACUOUSLY (a false-pass) on a missed edge:
+#   (1) a DYNAMIC import (importlib.import_module / __import__) of a hook/helper;
+#   (2) an edge into the hooks/refresh/ subpackage (NOT in the oracle's idx glob).
+# Both are ABSENT today (verified at authoring). This backstop fails LOUDLY if a
+# future edit introduces either, so the oracle's bound is ENFORCED rather than
+# silently exceeded. If a legitimate non-hook dynamic import is ever needed,
+# allowlist that specific line explicitly (never blanket-disable the scan).
+
+import re as _re  # noqa: E402
+
+
+def _is_dynamic_import_line(line: str) -> bool:
+    """True for a dynamic-import idiom the static AST oracle cannot resolve."""
+    s = line.strip()
+    if s.startswith("#"):
+        return False
+    return ("importlib" in s) or bool(_re.search(r"\b__import__\s*\(", s))
+
+
+def _is_refresh_edge_line(line: str) -> bool:
+    """True for an import edge into the hooks/refresh/ subpackage (outside the
+    oracle's idx glob of hooks/*.py + hooks/shared/*.py)."""
+    s = line.strip()
+    if s.startswith("#"):
+        return False
+    return bool(_re.search(r"\b(?:from|import)\s+\.?refresh\b", s))
+
+
+def _scan_hook_modules(predicate) -> list[tuple[str, int, str]]:
+    """Run `predicate(line)` over every line of hooks/*.py + hooks/shared/*.py;
+    return (filename, lineno, line) hits. Mirrors the oracle's module-set scope."""
+    hits: list[tuple[str, int, str]] = []
+    for d in (HOOKS, HOOKS / "shared"):
+        for p in sorted(d.glob("*.py")):
+            for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+                if predicate(line):
+                    hits.append((p.name, i, line.strip()))
+    return hits
+
+
+class TestOracleStaticImportBoundBackstop:
+    """Enforce the C6-A oracle's bound so a future dynamic/refresh edge fails
+    HERE instead of slipping past the closure equality as a vacuous false-pass."""
+
+    def test_no_dynamic_import_of_hook_modules(self):
+        hits = _scan_hook_modules(_is_dynamic_import_line)
+        assert not hits, (
+            "a DYNAMIC import (importlib/__import__) appeared in the hooks tree — "
+            "the C6-A static-AST oracle CANNOT see it, so the closure literal could "
+            "silently false-pass on this edge. Either use a static import, or (if a "
+            "legit non-hook dynamic import) allowlist this exact line + extend the "
+            f"oracle. Offending: {hits}"
+        )
+
+    def test_no_refresh_subpackage_edge_in_hooks(self):
+        hits = _scan_hook_modules(_is_refresh_edge_line)
+        assert not hits, (
+            "an import edge into hooks/refresh/ appeared — it is OUTSIDE the C6-A "
+            "oracle's idx glob (hooks/*.py + hooks/shared/*.py), so both the oracle "
+            "and the literal would miss it (vacuous false-pass). Extend the oracle's "
+            f"idx to include hooks/refresh/ before adding such an edge. Offending: {hits}"
+        )
+
+    def test_backstop_detectors_are_non_vacuous(self):
+        # PROVE the backstop would FIRE on an injected edge (else it is vacuous).
+        assert _is_dynamic_import_line('mod = importlib.import_module("staleness")')
+        assert _is_dynamic_import_line('__import__("task_utils")')
+        assert not _is_dynamic_import_line("from shared.task_utils import get_task_list")
+        assert not _is_dynamic_import_line("# importlib note in a comment")
+        assert _is_refresh_edge_line("from refresh.checkpoint_builder import build")
+        assert _is_refresh_edge_line("import refresh.patterns")
+        assert _is_refresh_edge_line("from .refresh import x")
+        assert not _is_refresh_edge_line("refresh_token = compute()")  # word-boundary
+        assert not _is_refresh_edge_line("# refresh the cache")
