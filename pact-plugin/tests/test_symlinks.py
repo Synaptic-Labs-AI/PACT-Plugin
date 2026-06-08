@@ -214,3 +214,91 @@ class TestSetupPluginSymlinks:
 
         assert result is not None
         assert "protocols failed" in result
+
+
+class TestConfigDirSymlinks:
+    """C6 (#926): under a non-default CLAUDE_CONFIG_DIR, agents follow the config
+    dir and the protocols symlink is created in BOTH roots (dual-location,
+    answer-immune to the @-import ~ resolution question)."""
+
+    @staticmethod
+    def _plugin(tmp_path):
+        plugin_root = tmp_path / "plugin"
+        (plugin_root / "protocols").mkdir(parents=True)
+        (plugin_root / "agents").mkdir(parents=True)
+        (plugin_root / "agents" / "pact-secretary.md").write_text("x", encoding="utf-8")
+        return plugin_root
+
+    def test_protocols_dual_location_when_config_dir_differs(self, tmp_path, monkeypatch):
+        from shared.symlinks import setup_plugin_symlinks
+        plugin_root = self._plugin(tmp_path)
+        home = tmp_path / "home"
+        (home / ".claude").mkdir(parents=True)
+        config_dir = tmp_path / "config-kimi"
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+        monkeypatch.setattr(Path, "home", lambda: home)
+        setup_plugin_symlinks()
+        src = (plugin_root / "protocols").resolve()
+        home_link = home / ".claude" / "protocols" / "pact-plugin"
+        config_link = config_dir / "protocols" / "pact-plugin"
+        assert home_link.is_symlink() and home_link.resolve() == src
+        assert config_link.is_symlink() and config_link.resolve() == src
+
+    def test_agents_follow_config_dir(self, tmp_path, monkeypatch):
+        from shared.symlinks import setup_plugin_symlinks
+        plugin_root = self._plugin(tmp_path)
+        home = tmp_path / "home"
+        (home / ".claude").mkdir(parents=True)
+        config_dir = tmp_path / "config-kimi"
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+        monkeypatch.setattr(Path, "home", lambda: home)
+        setup_plugin_symlinks()
+        # agents discovered from $CONFIG/agents — NOT $HOME/.claude/agents
+        assert (config_dir / "agents" / "pact-secretary.md").is_symlink()
+        assert not (home / ".claude" / "agents" / "pact-secretary.md").exists()
+
+    def test_protocols_single_location_when_env_unset(self, tmp_path, monkeypatch):
+        from shared.symlinks import setup_plugin_symlinks
+        plugin_root = self._plugin(tmp_path)
+        home = tmp_path / "home"
+        (home / ".claude").mkdir(parents=True)
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+        monkeypatch.setattr(Path, "home", lambda: home)
+        setup_plugin_symlinks()
+        # env unset → config root == $HOME/.claude → single create there
+        assert (home / ".claude" / "protocols" / "pact-plugin").is_symlink()
+        assert (home / ".claude" / "agents" / "pact-secretary.md").is_symlink()
+
+
+class TestProtocolsMkdirFailOpen:
+    """#926 (ea74cd0d): the protocols-symlink parent mkdir moved INSIDE the
+    per-root try, so a pathological config_root whose mkdir raises must fail-open
+    (a 'protocols failed' status), honoring setup_plugin_symlinks's
+    'returns None/status, never raises' contract.
+
+    NON-VACUITY: with the mkdir OUTSIDE the try (the pre-ea74cd0d shape) the
+    OSError would PROPAGATE and setup_plugin_symlinks would RAISE -> this test
+    (asserting no-raise + 'protocols failed') would ERROR. Verified: moving the
+    mkdir above the try -> this test raises. Complements
+    test_protocols_oserror_reports_failure, which covers the symlink_to (not
+    mkdir) failure path.
+    """
+
+    def test_mkdir_failure_is_caught_and_reported(self, tmp_path, monkeypatch):
+        from shared.symlinks import setup_plugin_symlinks
+
+        plugin_root = tmp_path / "plugin"
+        (plugin_root / "protocols").mkdir(parents=True)
+        # No agents/ dir -> the (un-tried) agents mkdir block is skipped, so the
+        # patched mkdir below only hits the protocols parent mkdir (in-try).
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+        with patch.object(Path, "mkdir", side_effect=OSError("Read-only file system")):
+            result = setup_plugin_symlinks()  # must NOT raise
+
+        assert result is not None
+        assert "protocols failed" in result

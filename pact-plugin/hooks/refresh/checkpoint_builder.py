@@ -20,6 +20,7 @@ if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
 from shared.pact_context import get_session_id as _pact_get_session_id
+from shared.paths import get_claude_config_dir
 
 from .workflow_detector import WorkflowInfo
 from .step_extractor import StepInfo
@@ -142,7 +143,7 @@ def get_checkpoint_path(encoded_path: str) -> Path:
     Returns:
         Path to the checkpoint file
     """
-    return Path.home() / ".claude" / "pact-refresh" / f"{encoded_path}.json"
+    return get_claude_config_dir() / "pact-refresh" / f"{encoded_path}.json"
 
 
 def get_session_id() -> str:

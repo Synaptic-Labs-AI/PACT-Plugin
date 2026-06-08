@@ -50,6 +50,14 @@ Sections-passed denominator is 3 per runbook (standard-teammate first-action; se
 
 Sections-passed denominator is 2 per runbook §4 (tmux live-probe; in-process live-probe), each gated on all of §2 (a)+(b)+(c)+(d)+Step 5 with the Step 6 tripwire clear. The inline-mission mode column does not apply (`n/a`). Unlike a pre-merge overlay smoke, this is the **POST-merge acceptance gate** — a green suite does NOT close #923; the tmux live-probe is mandatory. If tmux is RED, re-open and route back to the resolver. If the Step 6 tripwire finds `CLAUDE_CODE_TASK_LIST_ID` SET in a team session, HALT + architect escalation (Design A/B divergence, devops contingency C).
 
+## 926-config-dir-live-probe.md
+
+| Run date (UTC) | Operator | Plugin version | Sections passed | inline-mission mode | Notes / per-mode observations |
+| -------------- | -------- | -------------- | --------------- | ------------------- | -------------------------------- |
+| _pending — execute POST-merge under a real non-default CLAUDE_CONFIG_DIR session (e.g. kimi-cli, or `export CLAUDE_CONFIG_DIR=~/.claude-kimi` in tmux)_ | | 4.4.13 | /4 per mode | n/a | (a) dispatch unblocks — `has_task_assigned` resolves task under `$CONFIG/tasks` (the original bug) PASS/FAIL · (b) agents resolve from `$CONFIG/agents` (team spawns specialists) PASS/FAIL · (c) ≥1 `@~/.claude/protocols/...` import resolves non-empty PASS/FAIL · (d) session-dir under `$CONFIG/pact-sessions` + Resume line correct (validates `session_init:433` anchor) PASS/FAIL. Cross-check the L2 counter-test cardinality `{4 failed, 7 passed}` from `test_config_dir_comprehensive.py` if any criterion shows a home-anchored resolution. |
+
+Sections-passed denominator is 4 per mode per runbook §3 (criteria a/b/c/d). This is the **POST-merge runtime-confirmation gate** (#861 class) — a green CI suite (L1+L2, 8246 passed) does NOT close #926; the live run under a non-default `CLAUDE_CONFIG_DIR` is mandatory. The resolver is mode-independent (keys on the env var, not session topology — proven by the L2 both-modes pair), so a divergence between in-process and tmux is itself a finding. On any FAIL, capture resolved-vs-expected path and route back to the resolver / call-site.
+
 ## v4.0.0-launch-and-isolation.md
 
 | Run date (UTC) | Operator | Plugin version | Sections passed | Notes / fallback-ladder signals |

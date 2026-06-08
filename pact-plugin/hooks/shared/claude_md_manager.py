@@ -28,6 +28,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from .paths import get_claude_config_dir
+
 # Project-level CLAUDE.md is preferred at .claude/CLAUDE.md (the new default)
 # but Claude Code also accepts ./CLAUDE.md for backwards compatibility.
 _DOT_CLAUDE_RELATIVE = Path(".claude") / "CLAUDE.md"
@@ -310,7 +312,7 @@ def strip_orphan_kernel_block() -> str | None:
         on defensive no-op (malformed marker state; session_init.py
         routes these to systemMessages via the "failed"/"skipped" check).
     """
-    target_file = Path.home() / ".claude" / "CLAUDE.md"
+    target_file = get_claude_config_dir() / "CLAUDE.md"
     if not target_file.exists():
         return None
 

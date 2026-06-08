@@ -47,7 +47,7 @@ def registry_env(tmp_path, monkeypatch):
     fake_home = tmp_path
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
     reg_path = fake_home / ".claude" / "pact-sessions" / ".teammate-registry.jsonl"
-    monkeypatch.setattr(session_registry, "REGISTRY_PATH", reg_path)
+    monkeypatch.setattr(session_registry, "get_registry_path", lambda: reg_path)
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
 
     class _Env:

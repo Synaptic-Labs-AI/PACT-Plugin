@@ -53,11 +53,20 @@ import re
 import time
 from pathlib import Path
 
+from .paths import get_claude_config_dir
+
 # Token TTL in seconds (5 minutes)
 TOKEN_TTL = 300
 
-# Directory for token files
-TOKEN_DIR = Path.home() / ".claude"
+# Directory for token files. B2 (import-time binding): CLAUDE_CONFIG_DIR is
+# fixed per-process before this module is imported, so an eager SSOT-derived
+# read is production-correct here; the merge-guard tests patch THIS attribute
+# (not the env), so they stay valid and non-vacuous. Derive from the SSOT
+# resolver eagerly — do NOT re-hardcode Path.home()/".claude" (that breaks the
+# single-source-of-truth). Convert to a call-time accessor only if call-time
+# env-following is ever needed (TOKEN_DIR's write+read are both PACT-side, so it
+# never needs to follow a post-import env change).
+TOKEN_DIR = get_claude_config_dir()
 
 # Token file prefix
 TOKEN_PREFIX = "merge-authorized-"

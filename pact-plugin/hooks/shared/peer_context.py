@@ -23,6 +23,7 @@ import re
 from pathlib import Path
 
 from shared.plugin_manifest import format_plugin_banner
+from shared.paths import get_claude_config_dir
 
 
 _TEACHBACK_REMINDER = (
@@ -144,7 +145,7 @@ def get_peer_context(
         return None
 
     if teams_dir is None:
-        teams_dir = str(Path.home() / ".claude" / "teams")
+        teams_dir = str(get_claude_config_dir() / "teams")
 
     config_path = Path(teams_dir) / team_name / "config.json"
     if not config_path.exists():

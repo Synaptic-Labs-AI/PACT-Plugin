@@ -76,7 +76,7 @@ from pin_caps import (  # noqa: F401
 )
 
 from shared import BOOTSTRAP_MARKER_NAME, SESSION_ID_CONTROL_CHARS_RE, build_session_path
-from shared.constants import COMPACT_SUMMARY_PATH
+from shared.constants import get_compact_summary_path
 from shared.pact_context import (
     build_context_cache,
     classify_session_role,
@@ -91,6 +91,7 @@ from shared.failure_log import append_failure
 from shared.plugin_manifest import format_plugin_banner
 from shared.peer_context import get_peer_context
 from shared.session_registry import resolve as _registry_resolve
+from shared.paths import get_claude_config_dir
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import setup_plugin_symlinks
@@ -321,7 +322,7 @@ def check_additional_directories() -> str | None:
     Fail-open: returns None on any error (file missing, malformed JSON, etc.).
     """
     try:
-        settings_path = Path.home() / ".claude" / "settings.json"
+        settings_path = get_claude_config_dir() / "settings.json"
         if not settings_path.exists():
             return None  # No settings file — nothing to check
 
@@ -347,9 +348,9 @@ def check_additional_directories() -> str | None:
 
         # Check which required directories are missing
         required = {
-            "~/.claude/teams": (Path.home() / ".claude" / "teams").resolve(),
+            "~/.claude/teams": (get_claude_config_dir() / "teams").resolve(),
             "~/.claude/pact-sessions": (
-                Path.home() / ".claude" / "pact-sessions"
+                get_claude_config_dir() / "pact-sessions"
             ).resolve(),
         }
         missing = [
@@ -430,7 +431,7 @@ def _validate_under_pact_sessions(path: str) -> str | None:
     fail-closed — callers already treat None as "no previous session").
     """
     try:
-        sessions_root = (Path.home() / ".claude" / "pact-sessions").resolve()
+        sessions_root = (get_claude_config_dir() / "pact-sessions").resolve()
         candidate = Path(path).resolve(strict=False)
         if candidate == sessions_root or sessions_root in candidate.parents:
             return path
@@ -528,7 +529,7 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
             # Use project root basename (not worktree) for slug
             slug = Path(project_dir).name
             derived = str(
-                Path.home() / ".claude" / "pact-sessions" / slug / session_id
+                get_claude_config_dir() / "pact-sessions" / slug / session_id
             )
             return _validate_under_pact_sessions(derived)
 
@@ -788,7 +789,7 @@ def main():
         # Only "compact" source needs it (just written by postcompact_archive).
         if source != "compact":
             try:
-                COMPACT_SUMMARY_PATH.unlink(missing_ok=True)
+                get_compact_summary_path().unlink(missing_ok=True)
             except OSError:
                 pass  # Fail-open: don't block session init for cleanup
 
@@ -1132,7 +1133,7 @@ def main():
                 )
 
         try:
-            team_config = Path.home() / ".claude" / "teams" / team_name / "config.json"
+            team_config = get_claude_config_dir() / "teams" / team_name / "config.json"
             team_exists = team_config.exists()
         except OSError:
             # Fail-open: if filesystem check fails, assume fresh session
@@ -1266,7 +1267,7 @@ def main():
                 context_parts.insert(0, (
                     f'{_team_reuse} '
                     f'After bootstrap, recover session state: '
-                    f'(1) Read {COMPACT_SUMMARY_PATH} for prior context, '
+                    f'(1) Read {get_compact_summary_path()} for prior context, '
                     f'(2) Run TaskList to find in-progress work, '
                     f'(3) TaskGet on in-progress tasks for details. '
                     f"Re-engage secretary: SendMessage(to='secretary', "

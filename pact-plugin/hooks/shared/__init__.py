@@ -42,7 +42,7 @@ from .claude_md_manager import (
 from .failure_log import (
     append_failure,
     read_failures,
-    LOG_PATH as FAILURE_LOG_PATH,
+    get_failure_log_path,
     MAX_ENTRIES as FAILURE_LOG_MAX_ENTRIES,
 )
 from .session_resume import (
@@ -139,7 +139,7 @@ __all__ = [
     "PACT_BOUNDARY_PREFIXES",
     "append_failure",
     "read_failures",
-    "FAILURE_LOG_PATH",
+    "get_failure_log_path",
     "FAILURE_LOG_MAX_ENTRIES",
     "update_session_info",
     "restore_last_session",

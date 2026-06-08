@@ -59,7 +59,44 @@ from pathlib import Path
 # the value's @team carries the team. Team-scoping would re-open the bootstrap
 # paradox a tmux teammate cannot compute its lead's team to locate a team-scoped
 # file).
-REGISTRY_PATH = Path.home() / ".claude" / "pact-sessions" / ".teammate-registry.jsonl"
+
+
+def _config_root() -> Path:
+    """Claude Code config/state root — INLINE copy of the canonical
+    ``shared.paths.get_claude_config_dir()``.
+
+    session_registry is a standalone-SCRIPT leaf (the team-registration CLI runs
+    it as ``python session_registry.py``), so it MUST NOT import ``shared.*`` — a
+    relative or ``shared.X`` import raises ImportError in __main__ script mode
+    (module docstring + test_cli_runs_from_foreign_cwd_no_shared_import_error
+    enforce this). This inline copy mirrors the established ``_is_safe_team_segment``
+    dual-copy precedent in this same file.
+
+    DRIFT-ANCHOR: keep byte-equivalent to ``shared.paths.get_claude_config_dir()``;
+    a behavioral parity test enforces they never diverge. A1: sources
+    CLAUDE_CONFIG_DIR from ``os.environ`` ONLY (never a teammate-writable
+    artifact). Returns an UNRESOLVED path — the single ``.resolve()`` stays at the
+    containment call site (``_is_under_pact_sessions``).
+
+    ALL THREE config-root derivations in this module (the registry path, the
+    ``_is_under_pact_sessions`` anchor, and the team-config path) MUST route
+    through this one copy, or ``register()``'s ``_is_under_pact_sessions`` gate
+    fail-closes under a non-default CLAUDE_CONFIG_DIR (silent name-recovery loss).
+    """
+    home = Path.home()
+    raw = (os.environ.get("CLAUDE_CONFIG_DIR") or "").strip()
+    if not raw:
+        return home / ".claude"
+    if raw == "~":
+        return home
+    if raw.startswith("~/"):
+        return home / raw[2:]
+    return Path(raw)
+
+
+def get_registry_path() -> Path:
+    """The global teammate-registry path (config-dir-aware; resolved at call time)."""
+    return _config_root() / "pact-sessions" / ".teammate-registry.jsonl"
 
 # Portable single-write atomicity bound. POSIX guarantees os.write atomicity
 # up to PIPE_BUF (512 bytes on macOS); a registry line is realistically
@@ -104,7 +141,7 @@ def _is_under_pact_sessions(path: Path) -> bool:
     Never raises — returns False on any error.
     """
     try:
-        sessions_root = (Path.home() / ".claude" / "pact-sessions").resolve()
+        sessions_root = (_config_root() / "pact-sessions").resolve()
         candidate = path.resolve(strict=False)
         return candidate == sessions_root or sessions_root in candidate.parents
     except (TypeError, ValueError, OSError):
@@ -141,7 +178,8 @@ def register(name_at_team: str) -> None:
             return
         value = _sanitize_agent_name(name) + "@" + team
 
-        if not _is_under_pact_sessions(REGISTRY_PATH):
+        registry_path = get_registry_path()
+        if not _is_under_pact_sessions(registry_path):
             return  # defense-in-depth: refuse to write outside the tree
 
         line = json.dumps(
@@ -153,12 +191,12 @@ def register(name_at_team: str) -> None:
         if len(encoded) > _MAX_LINE_BYTES:
             return  # over the portable single-write atomicity bound → skip
 
-        REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        registry_path.parent.mkdir(parents=True, exist_ok=True)
         # O_NOFOLLOW (POSIX) so a planted symlink at the registry path cannot
         # redirect the write; getattr fallback for platforms that lack it.
         nofollow = getattr(os, "O_NOFOLLOW", 0)
         flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | nofollow
-        fd = os.open(str(REGISTRY_PATH), flags, 0o600)
+        fd = os.open(str(registry_path), flags, 0o600)
         try:
             os.write(fd, encoded)  # single <=PIPE_BUF write → atomic, no lock
         finally:
@@ -188,13 +226,14 @@ def resolve(session_id: str) -> str | None:
     try:
         if not session_id:
             return None
-        if not _is_under_pact_sessions(REGISTRY_PATH):
+        registry_path = get_registry_path()
+        if not _is_under_pact_sessions(registry_path):
             return None
 
         # O_NOFOLLOW open for read so a planted symlink can't redirect us.
         nofollow = getattr(os, "O_NOFOLLOW", 0)
         try:
-            fd = os.open(str(REGISTRY_PATH), os.O_RDONLY | nofollow)
+            fd = os.open(str(registry_path), os.O_RDONLY | nofollow)
         except OSError:
             return None  # missing / symlink (ELOOP) / unreadable → miss
         try:
@@ -274,7 +313,7 @@ def _name_is_team_member(name: str, team: str) -> bool:
     if not _is_safe_team_segment(team):
         return False
     try:
-        config_path = Path.home() / ".claude" / "teams" / team / "config.json"
+        config_path = _config_root() / "teams" / team / "config.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
         if not isinstance(config, dict):
             return False

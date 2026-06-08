@@ -177,16 +177,17 @@ class TestConstants:
     """Verify module-level constants."""
 
     def test_compact_summary_path_from_shared_constants(self):
-        from shared.constants import COMPACT_SUMMARY_PATH
-        assert COMPACT_SUMMARY_PATH.name == "compact-summary.txt"
-        assert "pact-sessions" in str(COMPACT_SUMMARY_PATH)
+        from shared.constants import get_compact_summary_path
+        p = get_compact_summary_path()
+        assert p.name == "compact-summary.txt"
+        assert "pact-sessions" in str(p)
 
     def test_postcompact_uses_shared_path(self):
-        """Verify postcompact_archive imports COMPACT_SUMMARY_PATH from shared."""
+        """Verify postcompact_archive derives the default path from the shared accessor."""
         from postcompact_archive import _get_summary_path
-        from shared.constants import COMPACT_SUMMARY_PATH
-        # Default path (no override) should match the shared constant
-        assert _get_summary_path() == COMPACT_SUMMARY_PATH
+        from shared.constants import get_compact_summary_path
+        # Default path (no override) should match the shared accessor's result
+        assert _get_summary_path() == get_compact_summary_path()
 
 
 # ---------------------------------------------------------------------------
@@ -324,12 +325,11 @@ class TestPostcompactLeadGateRealDisk:
     against a REAL file on disk: a teammate/plain frame through main() must NOT
     truncate the global-singleton compact-summary file (#881's O_TRUNC clobber).
 
-    COMPACT_SUMMARY_PATH is computed at IMPORT in shared.constants
-    (Path.home()/...), so a post-import Path.home monkeypatch does NOT redirect
-    it; we monkeypatch the name postcompact_archive binds (it does
-    `from shared.constants import COMPACT_SUMMARY_PATH`) to a tmp file. main()
-    calls write_compact_summary(summary) with no base-dir → _get_summary_path()
-    returns this redirected path.
+    The compact-summary path is now a call-time accessor
+    (get_compact_summary_path, B1). postcompact_archive binds it via
+    `from shared.constants import get_compact_summary_path`; we monkeypatch that
+    name to return a tmp file. main() calls write_compact_summary(summary) with
+    no base-dir → _get_summary_path() returns this redirected path.
     """
 
     _SENTINEL = "PRIOR LEAD SUMMARY — must survive a teammate PostCompact"
@@ -339,9 +339,9 @@ class TestPostcompactLeadGateRealDisk:
 
         summary_path = tmp_path / "compact-summary.txt"
         summary_path.write_text(self._SENTINEL, encoding="utf-8")
-        # Redirect the global-singleton path (import-frozen constant) to tmp.
+        # Redirect the global-singleton path by patching the call-time accessor.
         monkeypatch.setattr(
-            "postcompact_archive.COMPACT_SUMMARY_PATH", summary_path
+            "postcompact_archive.get_compact_summary_path", lambda: summary_path
         )
 
         with patch("sys.stdin", StringIO(json.dumps(frame))):
