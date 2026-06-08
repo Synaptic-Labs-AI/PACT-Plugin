@@ -133,6 +133,8 @@ Check for open PRs associated with the current worktree branch:
 - **PR merged or no PR**: Invoke `/PACT:worktree-cleanup` to remove the worktree cleanly.
 - **PR still open**: Skip worktree cleanup. Write a `session_paused` event to the journal (see the `session_paused` field table in [pause.md step 5](pause.md#5-write-paused-state-to-session-journal) for the event schema — wrap-up writes only the `session_paused` event here; the `session_consolidated` event was already emitted in step 5 above). Set `consolidation_completed: true` because wrap-up steps 1-4 already performed memory consolidation. Report: "Worktree preserved — PR still open. Use `/PACT:pause` to consolidate and pause, or `/PACT:peer-review` to continue review."
 
+> **Hook live-probe gate (projects with runtime hooks).** If this PR modifies a runtime hook and the project defines a live-probe procedure, that procedure MUST pass and be logged before the originating issue is closed. Not applicable to projects without runtime hooks.
+
 ## 7. Task Audit
 
 Audit and optionally clean up Task state:

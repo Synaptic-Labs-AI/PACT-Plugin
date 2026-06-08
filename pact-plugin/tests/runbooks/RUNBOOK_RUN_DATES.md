@@ -50,6 +50,43 @@ Sections-passed denominator is 3 per runbook (standard-teammate first-action; se
 
 Sections-passed denominator is 2 per runbook §4 (tmux live-probe; in-process live-probe), each gated on all of §2 (a)+(b)+(c)+(d)+Step 5 with the Step 6 tripwire clear. The inline-mission mode column does not apply (`n/a`). Unlike a pre-merge overlay smoke, this is the **POST-merge acceptance gate** — a green suite does NOT close #923; the tmux live-probe is mandatory. If tmux is RED, re-open and route back to the resolver. If the Step 6 tripwire finds `CLAUDE_CODE_TASK_LIST_ID` SET in a team session, HALT + architect escalation (Design A/B divergence, devops contingency C).
 
+## Live-probe-template instances — per-mode gate-record row schema
+
+Any runbook instantiated from `live-probe-template.md` (the missed-wake runbook
+`923-missed-wake-live-probe.md` above is the first worked instance) records its
+runs with the **per-mode** schema below. This convention is **append-only** —
+add a new row per run; never rewrite a prior row (the existing rows above keep
+their original column shape on purpose). Specifics MUST be falsifiable: log the
+OBSERVED `session_id`s (so the mode claim is checkable, not self-asserted), the
+real journal-event timestamp, and the stale age — a fabricated PASS should be
+detectable from the row.
+
+**Probe row** (one record covers BOTH mode cells — tmux real PASS + in-process
+real-or-faithful-synthetic PASS):
+
+```
+| Run date (UTC) | Operator | Plugin version | Sections passed (PER MODE: tmux N/N, in-process N/N) | Mode-discriminator evidence (session_ids observed) | Notes (real vs synthetic; journal event ts; stale age; tripwire state) |
+```
+
+| Run date (UTC) | Operator | Plugin version | Sections passed (tmux N/N, in-process N/N) | Mode-discriminator evidence (session_ids observed) | Notes (real vs synthetic; journal ts; stale age; tripwire) |
+| -------------- | -------- | -------------- | ------------------------------------------ | -------------------------------------------------- | ---------------------------------------------------------- |
+| _pending — execute post-merge per `live-probe-template.md` §2_ | | | tmux _/2, in-process _/2 | lead `{session_id}`; teammates `{session_id…}` (distinct ⇒ tmux) | real vs synthetic per cell · `{JOURNAL_EVENT}` ts · stale age · §2 Step E tripwire CLEAR/TRIPPED |
+
+**Waiver row variant** — for a change that trips the PRIMARY hook-infra signal
+but NOT the SECONDARY seam signal (touches `hooks/` but changes no
+seam-dependent behavior, e.g. a pure `hooks/shared/` helper edit). The waiver is
+a LOGGED row, never a silent pass — it is the gate's non-vacuity-on-the-quiet-side
+evidence:
+
+```
+| <date UTC> | <operator> | <version> | WAIVED | n/a | hooks/ touched, no seam-dependent behavior changed → live-probe waived; <one-line reason> |
+```
+
+**tmux is the MANDATORY real cell.** If tmux is RED or missing, the issue is NOT
+closed — record tmux as `pending` and close only after the real tmux probe
+lands. A PRIMARY-but-not-SECONDARY change is the only path that closes WITHOUT a
+both-modes PASS, and only via an explicit WAIVED row.
+
 ## v4.0.0-launch-and-isolation.md
 
 | Run date (UTC) | Operator | Plugin version | Sections passed | Notes / fallback-ladder signals |
