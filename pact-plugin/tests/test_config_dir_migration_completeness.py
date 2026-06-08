@@ -97,7 +97,7 @@ class TestNoHardcodedStatePathDrift:
             f"instead:\n" + "\n".join(f"  {f}:{ln}: {u}" for f, ln, u in offenders)
         )
 
-    def test_both_allowlisted_residuals_still_present(self):
+    def test_the_allowlisted_residual_still_present(self):
         """Guard the allowlist against rot: if a residual is itself migrated away,
         prune the allowlist (so it cannot mask a future real offender at that
         basename). Keeps the allowlist honest."""
