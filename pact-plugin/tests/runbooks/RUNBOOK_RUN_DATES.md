@@ -122,15 +122,31 @@ per-mode verdict as the 4th, and **always write each mode's verdict WITH a
 complete count** — `PASS 2/2` (or `FAIL 0/2` / `WAIVED`); a count-less or
 partial `PASS` will NOT satisfy.
 
-The older single-mode `Sections passed` sections (923-missed-wake,
-926-config-dir) predate the per-mode cell and are matched by a legacy path —
-which now scopes BOTH the PASS token AND the mode token to the **verdict cell**
-(not the whole line): a target-version row whose verdict is `FAIL`/`n/a` but
-whose Notes prose merely mentions `PASS` does NOT satisfy. So put the real
-verdict (`tmux 6/6 — PASS` / `in-process 4/4 — PASS`) in the verdict cell, not
-only in Notes; a `_deferred … n/a …` row with PASS only in prose will NOT count.
+**CROSS-ROW AGGREGATION + the older single-mode sections.** Satisfaction is
+decided ACROSS all of a version's rows, not per-row: the parser builds a per-mode
+status (PASS / FAIL / DEFERRED / absent) for tmux AND in-process from the verdict
+cells, and a version satisfies iff BOTH modes are {PASS or DEFERRED}, ≥1 is PASS,
+and neither is FAIL. This is what lets the older single-mode sections
+(923-missed-wake: separate `tmux 6/6 — PASS` + `in-process 6/6 — PASS` rows;
+926-config-dir: `in-process 4/4 — PASS` + a deferred tmux row) certify across
+their two rows — while a LONE single-mode PASS with the other mode neither PASSed
+nor deferred does NOT satisfy (you cannot certify a two-mode probe with one
+mode). The verdict cell is matched position-independently for both shapes
+(`tmux PASS 2/2` per-mode template AND `tmux 6/6 — PASS` legacy), still requiring
+a complete `N/N` count and rejecting PASS-only-in-Notes.
+
+**To defer a mode** (a mode that genuinely cannot run — e.g. tmux under a custom
+`CLAUDE_CONFIG_DIR`): the row's **verdict cell must be `n/a`** AND the **row label
+(1st column) must name the deferred mode** as `_deferred — <mode> …` (e.g.
+`_deferred — tmux mode under non-default CLAUDE_CONFIG_DIR`). The parser counts
+that mode as DEFERRED (covered) ONLY from that explicit label+`n/a` pairing — a
+FAIL is never deferred, and an unmentioned mode is never deferred. A `_deferred`
+row whose PASS appears only in Notes does NOT by itself satisfy (the other mode
+must still be a real PASS).
+
 If a future layout moves the version column, changes the per-mode verdict cell,
-or renames the verdict tokens, update `live_probe_gate.py`'s row parser to match.
+the deferral label, or renames the verdict tokens, update `live_probe_gate.py`'s
+row parser to match.
 
 ## 926-config-dir-live-probe.md
 

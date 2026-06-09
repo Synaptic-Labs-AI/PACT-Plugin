@@ -202,6 +202,13 @@ class TestPerModePassParsing:
         ("tmux PASS 1/2 · in-process PASS 1/2", False),        # partial (num<denom)
         ("tmux PASS 0/0 · in-process PASS 0/0", False),        # vacuous zero denominator
         ("tmux PASS 2/2 · in-process PASS 1/2", False),        # one mode incomplete
+        # --- F-A residual count-bypass (#70 re-verify of the count parser):
+        # malformed/incomplete counts reject; a complete N/N (any magnitude,
+        # leading zeros normalized) accepts.
+        ("tmux PASS 3/2 · in-process PASS 3/2", False),        # num>denom (impossible)
+        ("tmux PASS 2/2/2 · in-process PASS 2/2/2", False),    # triple-segment count
+        ("tmux PASS 02/2 · in-process PASS 02/2", True),       # leading zero, 02==2 complete
+        ("tmux PASS 999999/999999 · in-process PASS 999999/999999", True),  # huge complete
     ])
     def test_per_mode_verdict(self, tmp_path, verdict, satisfies):
         root = _make_root(tmp_path, "| h |\n" + _per_mode_row(verdict))
@@ -209,18 +216,11 @@ class TestPerModePassParsing:
             f"per-mode verdict {verdict!r} expected satisfies={satisfies}"
         )
 
-    def test_legacy_aggregate_pass_row_still_satisfies(self, tmp_path):
-        # OLDER/aggregate shape (923/926 — not the "tmux PASS N/N" per-mode token,
-        # but a mode token + a genuine PASS IN THE VERDICT CELL, e.g.
-        # "tmux 6/6 — PASS"): preserved on the LEGACY path, which #66 (F-B) now
-        # scopes to the verdict cell (cells[3]), NOT the whole row.
-        legacy = (f"| 2026-06-02 | op | {VERSION} | tmux 6/6 — PASS (real platform surface) | "
-                  f"n/a | preserved legacy verdict-cell path |\n")
-        root = _make_root(tmp_path, "| h |\n" + legacy)
-        assert g._has_satisfied_row(root, VERSION, waiver_ok=False) is True, (
-            "an older single-mode aggregate row with PASS IN THE VERDICT CELL "
-            "must still satisfy via the preserved (verdict-cell-scoped) legacy path"
-        )
+    # NOTE: the legacy single-mode-row "still satisfies" case moved to
+    # TestCrossRowAggregation — under #70 (Option-A) a LONE single-mode row no
+    # longer satisfies on its own (the other mode is ABSENT). The legacy
+    # verdict-cell shape ("tmux 6/6 — PASS") now participates in CROSS-ROW
+    # aggregation (the 923 two-row case there), not per-row.
 
     def test_per_mode_column_anchor_preserved(self, tmp_path):
         # A DIFFERENT-version per-mode both-PASS row that mentions V in its Notes
@@ -240,63 +240,105 @@ class TestPerModePassParsing:
         assert g._has_satisfied_row(root, VERSION, waiver_ok=False) is False
 
 
-class TestLegacyVerdictCellScope:
-    """FINDING F-B (#67, pairs devops #66): the LEGACY/aggregate satisfy path
-    (older 923/926 single-mode-per-row 'Sections passed' rows) now scopes the
-    PASS check to the VERDICT CELL (cells[3]) — a mode token AND a genuine PASS
-    must both be IN the verdict cell, NOT anywhere in the row. This closes the
-    F-B exploit where a row with PASS only in the Notes prose (verdict cell n/a)
-    false-satisfied via the old whole-line scan. Uses the REAL merged-in 926/923
-    RUNBOOK rows (faithful verdict-cell shapes) as live cases. 923 single-mode
-    rows satisfy PER-ROW (the scan returns on the first satisfying row), not
-    aggregated across rows (devops #66 contract)."""
+class TestCrossRowAggregation:
+    """FINDING F-C (#71, pairs devops #70 Option-A): a version satisfies by
+    CROSS-ROW AGGREGATION — scan ALL rows for version V, build a per-mode status
+    (tmux, in-process) from each row's VERDICT CELL (cells[3]) merging worst-wins
+    (FAIL > PASS > DEFERRED > absent), and SATISFY iff BOTH modes ∈ {PASS,
+    DEFERRED} AND ≥1 is a genuine PASS AND neither is FAIL. This closes F-C: a
+    LONE single-mode row (e.g. only tmux) no longer satisfies on its own — the
+    other mode is ABSENT. Preserves the real 923 (two separate single-mode rows)
+    and 926 (in-process PASS + tmux _deferred) shapes. DEFERRED requires the
+    verdict cell == 'n/a' AND the row LABEL (cells[0]) naming THAT mode as
+    '_deferred — <mode> …' (FAIL ≠ deferred; ABSENT ≠ deferred). Uses the REAL
+    merged-in 923/926 RUNBOOK row shapes as live cases."""
 
     @staticmethod
-    def _row(version, verdict_cell, notes="x"):
-        return f"| 2026-06-09 | michael-wojcik | {version} | {verdict_cell} | n/a | {notes} |\n"
+    def _row(version, verdict_cell, notes="x", date="2026-06-09"):
+        return f"| {date} | michael-wojcik | {version} | {verdict_cell} | n/a | {notes} |\n"
 
-    def test_real_926_in_process_pass_in_verdict_cell_satisfies(self, tmp_path):
-        # Real 926 row (L131): the verdict cell carries "in-process 4/4 — PASS".
-        root = _make_root(
-            tmp_path, "| h |\n" + self._row("4.4.13", "in-process 4/4 — PASS"),
-            version="4.4.13")
-        assert g._has_satisfied_row(root, "4.4.13", waiver_ok=False) is True
+    @staticmethod
+    def _deferred(version, mode):
+        # 926-style deferral row: the LABEL cell (cells[0]) names the deferred
+        # mode; the verdict cell (cells[3]) is "n/a".
+        return (f"| _deferred — {mode} mode under non-default CLAUDE_CONFIG_DIR | | "
+                f"{version} | n/a | n/a | the {mode} live-probe is deferred |\n")
 
-    def test_real_926_deferred_pass_only_in_notes_does_not_satisfy(self, tmp_path):
-        # Real 926 _deferred row (L132): verdict cell "n/a"; the ONLY PASS is in
-        # the Notes prose (which also carries tmux + in-process tokens). THE F-B
-        # EXPLOIT — the old whole-line legacy rule would false-satisfy here.
-        notes = ("OPERATIONAL CONSTRAINT: tmux mode under non-default "
-                 "CLAUDE_CONFIG_DIR; the in-process live-probe (4/4 PASS) "
-                 "confirms runtime correctness.")
-        root = _make_root(
-            tmp_path, "| h |\n" + self._row("4.4.13", "n/a", notes), version="4.4.13")
-        assert g._has_satisfied_row(root, "4.4.13", waiver_ok=False) is False, (
-            "PASS only in the Notes prose (verdict cell = n/a) must NOT satisfy — "
-            "the F-B exploit closed by verdict-cell-scoping"
+    # ---- SATISFY via aggregation ----
+    def test_923_two_separate_rows_both_pass_aggregate_satisfies(self, tmp_path):
+        # Real 923 @4.4.12 (L48 + L49): tmux PASS row + in-process PASS row, as
+        # two SEPARATE single-mode rows. Aggregate: both modes PASS → satisfy.
+        body = ("| h |\n"
+                + self._row("4.4.12", "tmux 6/6 — PASS (real platform surface confirmed)")
+                + self._row("4.4.12", "in-process 6/6 — PASS (real hook, real resolver)"))
+        root = _make_root(tmp_path, body, version="4.4.12")
+        assert g._has_satisfied_row(root, "4.4.12", waiver_ok=False) is True, (
+            "923 two separate single-mode PASS rows must AGGREGATE to satisfy"
         )
 
-    def test_fail_verdict_cell_with_pass_in_notes_does_not_satisfy(self, tmp_path):
-        # Synthetic: the verdict cell is a FAIL; PASS appears only in the Notes.
-        root = _make_root(
-            tmp_path,
-            "| h |\n" + self._row("4.4.13", "in-process 4/4 — FAIL",
-                                   "rerun later; an earlier 4/4 PASS was noted"),
-            version="4.4.13")
-        assert g._has_satisfied_row(root, "4.4.13", waiver_ok=False) is False, (
-            "a FAIL verdict cell must NOT satisfy even when PASS appears in Notes"
+    def test_926_in_process_pass_plus_tmux_deferred_aggregate_satisfies(self, tmp_path):
+        # Real 926 @4.4.13 (L131 + L132): in-process PASS row + tmux _deferred
+        # row. Aggregate: in-process PASS + tmux DEFERRED → both ∈{PASS,DEFERRED},
+        # ≥1 PASS, no FAIL → satisfy.
+        body = ("| h |\n"
+                + self._row("4.4.13", "in-process 4/4 — PASS")
+                + self._deferred("4.4.13", "tmux"))
+        root = _make_root(tmp_path, body, version="4.4.13")
+        assert g._has_satisfied_row(root, "4.4.13", waiver_ok=False) is True, (
+            "926 in-process PASS + tmux DEFERRED must aggregate to satisfy"
         )
 
-    def test_real_923_tmux_pass_in_verdict_cell_satisfies_preservation(self, tmp_path):
-        # Real 923 row (L48) at 4.4.12: "tmux 6/6 — PASS ..." in the verdict cell.
-        # 923 single-mode rows satisfy PER-ROW — this row alone satisfies 4.4.12.
+    # ---- F-C: lone single-mode row does NOT satisfy (the key new close) ----
+    def test_lone_tmux_pass_no_in_process_row_does_not_satisfy(self, tmp_path):
+        # THE F-C CLOSE: a lone "tmux … — PASS" row with NO in-process row →
+        # in-process ABSENT → NOT satisfy. (Pre-#70 this satisfied per-row.)
         root = _make_root(
             tmp_path,
             "| h |\n" + self._row("4.4.12", "tmux 6/6 — PASS (real platform surface confirmed)"),
             version="4.4.12")
-        assert g._has_satisfied_row(root, "4.4.12", waiver_ok=False) is True, (
-            "older 923 single-mode aggregate row with PASS in the verdict cell "
-            "must still satisfy PER-ROW via the verdict-cell-scoped legacy path"
+        assert g._has_satisfied_row(root, "4.4.12", waiver_ok=False) is False, (
+            "a lone tmux PASS row (in-process ABSENT) must NOT satisfy under "
+            "cross-row aggregation — the F-C close"
+        )
+
+    def test_lone_in_process_pass_no_tmux_row_does_not_satisfy(self, tmp_path):
+        # Symmetric F-C: lone in-process PASS, NO tmux row (and no tmux deferral).
+        root = _make_root(
+            tmp_path, "| h |\n" + self._row("4.4.13", "in-process 4/4 — PASS"),
+            version="4.4.13")
+        assert g._has_satisfied_row(root, "4.4.13", waiver_ok=False) is False, (
+            "a lone in-process PASS row (tmux ABSENT) must NOT satisfy"
+        )
+
+    # ---- aggregate rejects ----
+    def test_one_mode_fail_aggregate_does_not_satisfy(self, tmp_path):
+        # tmux FAIL row + in-process PASS row → a FAIL anywhere → NOT satisfy.
+        body = ("| h |\n"
+                + self._row("4.4.13", "tmux 0/2 — FAIL")
+                + self._row("4.4.13", "in-process 4/4 — PASS"))
+        root = _make_root(tmp_path, body, version="4.4.13")
+        assert g._has_satisfied_row(root, "4.4.13", waiver_ok=False) is False, (
+            "no mode may be FAIL — tmux FAIL + in-process PASS must NOT satisfy"
+        )
+
+    def test_deferred_alone_no_pass_does_not_satisfy(self, tmp_path):
+        # tmux DEFERRED with NO in-process PASS row → no genuine PASS present →
+        # NOT satisfy (≥1 PASS required). Also the F-B point: the deferred row's
+        # Notes mention "4/4 PASS" but Notes are NOT scanned.
+        body = "| h |\n" + self._deferred("4.4.13", "tmux")
+        root = _make_root(tmp_path, body, version="4.4.13")
+        assert g._has_satisfied_row(root, "4.4.13", waiver_ok=False) is False, (
+            "a lone DEFERRED mode with no genuine PASS must NOT satisfy "
+            "(≥1 PASS required; Notes-PASS is ignored)"
+        )
+
+    def test_fail_verdict_cell_with_pass_in_notes_does_not_satisfy(self, tmp_path):
+        # F-B stays closed: the verdict cell is a FAIL; PASS appears only in Notes.
+        body = "| h |\n" + self._row(
+            "4.4.13", "in-process 4/4 — FAIL", "rerun later; an earlier 4/4 PASS was noted")
+        root = _make_root(tmp_path, body, version="4.4.13")
+        assert g._has_satisfied_row(root, "4.4.13", waiver_ok=False) is False, (
+            "a FAIL verdict cell must NOT satisfy even when PASS appears in Notes"
         )
 
 
