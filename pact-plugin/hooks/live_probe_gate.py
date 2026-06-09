@@ -101,19 +101,31 @@ _PASS_TOKEN_RE = re.compile(r"(?<![A-Za-z])PASS(?:ED)?(?![A-Za-z/])")
 # Per-mode verdict parsing for the #924 template-instance row shape, whose
 # verdict cell reads "tmux PASS|FAIL N/N · in-process PASS|FAIL N/N".
 # _PER_MODE_VERDICT_RE detects that shape (a mode token immediately followed by
-# a PASS/FAIL verdict); satisfaction then requires BOTH per-mode PASS regexes to
-# hit. Each per-mode PASS requires a TRAILING COUNT — PASS(?:ED)? then
-# whitespace then a digit ("tmux PASS 2/2"). A real verdict ALWAYS has the count;
-# EVERY unfilled-placeholder form has a non-digit after PASS — "PASS/FAIL",
-# "PASS|FAIL", "PASS, FAIL", "PASS FAIL", or a bare "PASS" with no count — so the
-# `\s+\d` requirement rejects the WHOLE separator-placeholder class in one stroke
-# (it supersedes the old no-trailing-slash lookahead, which only excluded
-# letters+slash and let comma/space placeholders through). Combined with the
-# both-modes-must-PASS rule, this also keeps "tmux FAIL N/N · in-process PASS N/N"
-# rejected (the dangerous-direction inert-ship the round-2 fix closed).
+# a PASS/FAIL verdict); satisfaction then requires BOTH modes to be a COMPLETE
+# pass (see _mode_complete_pass). Each per-mode PASS regex CAPTURES the count
+# `(\d+)/(\d+)` after PASS(?:ED)?; _mode_complete_pass then requires the count to
+# be numerator>0 AND numerator==denominator (all sections passed). This:
+#   - rejects the WHOLE separator-placeholder class in one stroke — "PASS/FAIL",
+#     "PASS|FAIL", "PASS, FAIL", "PASS FAIL", bare "PASS" (no count) all lack the
+#     "N/N" form so the regex never matches;
+#   - rejects an INCOMPLETE/vacuous count — "PASS 0/2" (zero), "PASS 1/2"
+#     (partial), "PASS 0/0" (vacuous) — which a digit-only `\s+\d` had let through;
+#   - keeps "tmux FAIL N/N · in-process PASS N/N" rejected (per-mode, both must pass).
 _PER_MODE_VERDICT_RE = re.compile(r"(?:tmux|in-process)\s+(?:PASS|FAIL)")
-_TMUX_PASS_RE = re.compile(r"tmux\s+PASS(?:ED)?\s+\d")
-_INPROC_PASS_RE = re.compile(r"in-process\s+PASS(?:ED)?\s+\d")
+_TMUX_PASS_RE = re.compile(r"tmux\s+PASS(?:ED)?\s+(\d+)/(\d+)")
+_INPROC_PASS_RE = re.compile(r"in-process\s+PASS(?:ED)?\s+(\d+)/(\d+)")
+
+
+def _mode_complete_pass(verdict_cell: str, mode_re: "re.Pattern[str]") -> bool:
+    """A per-mode PASS is genuine ONLY with a COMPLETE count: PASS N/N where
+    numerator > 0 AND numerator == denominator (every section passed). Rejects
+    "0/2" (zero passed), "1/2" (partial), "0/0" (vacuous), and — because the
+    regex requires the "N/N" shape — every separator-placeholder form."""
+    match = mode_re.search(verdict_cell)
+    if match is None:
+        return False
+    numerator, denominator = int(match.group(1)), int(match.group(2))
+    return numerator > 0 and numerator == denominator
 
 # NOTE: this hook deliberately does NOT init shared.pact_context. Earlier it
 # called pact_context.init() "for parity" with sibling Bash hooks, but it never
@@ -205,17 +217,24 @@ def _has_satisfied_row(root: Path, version: str, waiver_ok: bool) -> bool:
 
     Verdict matching is PER-MODE for the #924 template-instance row shape (the
     verdict cell reads "tmux PASS|FAIL N/N · in-process PASS|FAIL N/N"): BOTH the
-    tmux verdict AND the in-process verdict must be a genuine PASS/PASSED. This
-    closes the dangerous false-satisfy where token-presence alone let a row that
-    mixes a real FAIL with a real PASS ("tmux FAIL · in-process PASS") satisfy
-    the gate. The older single-mode "Sections passed" sections (923-missed-wake,
-    926-config-dir) predate the per-mode cell and have no one-row two-mode
-    false-satisfy risk; they fall through to the original token-presence check so
-    their satisfy behavior is preserved. Each per-mode PASS REQUIRES A TRAILING
-    COUNT ("tmux PASS 2/2") — PASS/PASSED then a digit — so every unfilled
-    placeholder ("PASS/FAIL", "PASS|FAIL", "PASS, FAIL", "PASS FAIL", bare "PASS")
-    is rejected; "bypass"/"BYPASSED"/lowercase are rejected too. A read failure
-    returns False (cannot confirm a probe -> WARN) — the safe advisory direction."""
+    tmux verdict AND the in-process verdict must be a COMPLETE pass — PASS/PASSED
+    with a count "N/N" where N>0 and numerator==denominator. This closes (a) the
+    mixed FAIL/PASS false-satisfy ("tmux FAIL · in-process PASS"), (b) every
+    separator placeholder (no "N/N" form: "PASS/FAIL", "PASS|FAIL", "PASS, FAIL",
+    "PASS FAIL", bare "PASS"), and (c) an incomplete/vacuous count ("PASS 0/2",
+    "PASS 1/2", "PASS 0/0").
+
+    For the older single-mode "Sections passed" sections (923-missed-wake,
+    926-config-dir, which predate the per-mode cell) the PASS token AND the mode
+    presence are BOTH scoped to the VERDICT CELL (not the whole line): a
+    target-version row whose verdict is FAIL/n-a but whose Notes prose merely
+    mentions "PASS" does NOT satisfy. These sections are single-mode-per-row, so
+    the legacy check requires AT LEAST ONE mode in the verdict cell plus a
+    case-sensitive PASS there (requiring BOTH modes would wrongly reject the real
+    single-mode PASS rows, e.g. 926's in-process-only row with tmux `_deferred`).
+
+    A read failure returns False (cannot confirm a probe -> WARN) — the safe
+    advisory direction."""
     runbook = root / "pact-plugin" / "tests" / "runbooks" / "RUNBOOK_RUN_DATES.md"
     try:
         text = runbook.read_text(encoding="utf-8")
@@ -245,22 +264,32 @@ def _has_satisfied_row(root: Path, version: str, waiver_ok: bool) -> bool:
             return True
         verdict_cell = cells[3] if len(cells) > 3 else ""
         # PER-MODE verdict shape (the #924 template-instance): the verdict cell
-        # carries an explicit per-mode verdict ("tmux PASS|FAIL · in-process
-        # PASS|FAIL"). HARDEN: require BOTH modes to be a genuine PASS. Token
-        # presence alone is NOT enough — "tmux FAIL N/N · in-process PASS N/N"
-        # has a "PASS" but tmux actually FAILED, so it must NOT satisfy.
+        # carries an explicit per-mode verdict ("tmux PASS|FAIL N/N · in-process
+        # PASS|FAIL N/N"). HARDEN: require BOTH modes to be a COMPLETE pass
+        # (PASS N/N with N>0 and num==denom). This rejects "tmux FAIL N/N ·
+        # in-process PASS N/N" (a mode FAILed), every separator placeholder, AND
+        # an incomplete/vacuous count ("PASS 0/2", "PASS 1/2", "PASS 0/0").
         if _PER_MODE_VERDICT_RE.search(verdict_cell):
-            if _TMUX_PASS_RE.search(verdict_cell) and _INPROC_PASS_RE.search(verdict_cell):
+            if (_mode_complete_pass(verdict_cell, _TMUX_PASS_RE)
+                    and _mode_complete_pass(verdict_cell, _INPROC_PASS_RE)):
                 return True
-            # A mode FAILed or is an unfilled "PASS/FAIL" placeholder -> this row
-            # does NOT satisfy; keep scanning (do not fall through).
+            # A mode FAILed, is a placeholder, or has an incomplete count ->
+            # this row does NOT satisfy; keep scanning (do not fall through).
             continue
         # Older / aggregate "Sections passed" shape (923-missed-wake,
-        # 926-config-dir): single-mode-per-row sections that predate the
-        # per-mode cell -> preserve the original token-presence behavior. The
-        # PASS verdict is matched case-SENSITIVELY via _PASS_TOKEN_RE so an
-        # unfilled "PASS/FAIL" placeholder / "bypass" / lowercase never matches.
-        if "tmux" in low and "in-process" in low and _PASS_TOKEN_RE.search(line):
+        # 926-config-dir): single-mode-per-row sections that predate the per-mode
+        # cell. The PASS token is scoped to the VERDICT CELL (not the whole
+        # line) so a target-version row whose verdict is FAIL/n-a but whose Notes
+        # prose merely mentions "PASS" does NOT satisfy (the F-B exploit). Mode
+        # presence is ALSO scoped to the verdict cell, requiring AT LEAST ONE
+        # mode: these sections are single-mode-per-row (923 has separate tmux /
+        # in-process PASS rows; 926 has an in-process PASS row + a `_deferred`
+        # tmux n/a row), so requiring BOTH modes in one row would wrongly reject
+        # the real single-mode PASS rows. _PASS_TOKEN_RE stays case-sensitive so
+        # a "PASS/FAIL" placeholder / "bypass" / lowercase never matches.
+        verdict_low = verdict_cell.lower()
+        if (("tmux" in verdict_low or "in-process" in verdict_low)
+                and _PASS_TOKEN_RE.search(verdict_cell)):
             return True
     return False
 

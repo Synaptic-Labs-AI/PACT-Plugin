@@ -108,21 +108,29 @@ MUST stay in ONE `|`-delimited row:
   OR `WAIVED` → satisfied iff the change is PRIMARY-not-SECONDARY.
 
 The per-mode verdict is matched case-sensitively and accepts either **`PASS`** or
-**`PASSED`** per mode — but the COUNT IS REQUIRED: the verdict must be written
-`PASS N/N` (a digit follows the verdict, e.g. `PASS 2/2`). This single rule
-rejects EVERY unfilled-placeholder form — `PASS/FAIL`, `PASS|FAIL`, `PASS, FAIL`,
-`PASS FAIL`, and a bare `PASS` with no count — because each has a non-digit after
-`PASS`; it also rejects `bypass`/`BYPASSED`/lowercase. That is what stops a
-pending/template row from silently satisfying the gate. So: keep both modes in a
-SINGLE row with the per-mode `tmux PASS|FAIL N/N · in-process PASS|FAIL N/N`
-shape (do not split tmux/in-process across rows), keep `Plugin version` as the
-3rd column and the per-mode verdict as the 4th, and **always write each mode's
-verdict WITH its count** — `PASS 2/2` / `FAIL 0/2` (or `WAIVED`); a count-less
-`PASS` will NOT satisfy. (The older single-mode `Sections passed` sections —
-923-missed-wake, 926-config-dir — predate the per-mode cell and are still
-matched by the legacy token-presence path; don't retrofit them.) If a future
-layout moves the version column, changes the per-mode verdict cell, or renames
-the verdict tokens, update `live_probe_gate.py`'s row parser to match.
+**`PASSED`** per mode — but a **COMPLETE COUNT IS REQUIRED**: the verdict must be
+written `PASS N/N` where the count is non-zero and numerator==denominator (ALL
+sections passed), e.g. `PASS 2/2` or `PASS 4/4`. This rejects: EVERY
+unfilled-placeholder form (`PASS/FAIL`, `PASS|FAIL`, `PASS, FAIL`, `PASS FAIL`,
+bare `PASS`) which lacks the `N/N` shape; an INCOMPLETE or vacuous count
+(`PASS 0/2` zero, `PASS 1/2` partial, `PASS 0/0` vacuous); and
+`bypass`/`BYPASSED`/lowercase. That is what stops a pending/template/partial row
+from silently satisfying the gate. So: keep both modes in a SINGLE row with the
+per-mode `tmux PASS|FAIL N/N · in-process PASS|FAIL N/N` shape (do not split
+tmux/in-process across rows), keep `Plugin version` as the 3rd column and the
+per-mode verdict as the 4th, and **always write each mode's verdict WITH a
+complete count** — `PASS 2/2` (or `FAIL 0/2` / `WAIVED`); a count-less or
+partial `PASS` will NOT satisfy.
+
+The older single-mode `Sections passed` sections (923-missed-wake,
+926-config-dir) predate the per-mode cell and are matched by a legacy path —
+which now scopes BOTH the PASS token AND the mode token to the **verdict cell**
+(not the whole line): a target-version row whose verdict is `FAIL`/`n/a` but
+whose Notes prose merely mentions `PASS` does NOT satisfy. So put the real
+verdict (`tmux 6/6 — PASS` / `in-process 4/4 — PASS`) in the verdict cell, not
+only in Notes; a `_deferred … n/a …` row with PASS only in prose will NOT count.
+If a future layout moves the version column, changes the per-mode verdict cell,
+or renames the verdict tokens, update `live_probe_gate.py`'s row parser to match.
 
 ## 926-config-dir-live-probe.md
 

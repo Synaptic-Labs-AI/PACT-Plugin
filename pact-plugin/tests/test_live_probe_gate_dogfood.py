@@ -56,9 +56,13 @@ def _make_root(tmp: Path, runbook_body: str, version: str = VERSION) -> Path:
 
 # ── FRESHNESS-SPEC: _has_satisfied_row against real RUNBOOK files ──
 
+# Canonical GENUINE satisfied row = the PRODUCTION #924 per-mode template: the
+# verdict cell (cells[3]) carries the per-mode counted PASS. (Pre-#66 this put
+# PASS in the Notes cell; #66's F-B verdict-cell-scope correctly stopped honoring
+# a Notes-only PASS, so the genuine row must carry PASS in the verdict cell.)
 GENUINE_PASS_ROW = (
     "| header |\n"
-    f"| 2026-06-08 | michael-wojcik | {VERSION} | tmux 2/2, in-process 2/2 | "
+    f"| 2026-06-08 | michael-wojcik | {VERSION} | tmux PASS 2/2 · in-process PASS 2/2 | "
     "sids observed | both modes PASS. journal ev ts recorded. |\n"
 )
 BYPASS_ROW = f"| 2026-06-08 | op | {VERSION} | tmux | in-process | bypass |\n"
@@ -147,15 +151,14 @@ class TestFreshnessRowSpec:
             )
 
     def test_genuine_pass_and_passed_verdicts_satisfy(self, tmp_path):
-        # Both "PASS" and "PASSED" are genuine verdicts -> satisfy (devops's
-        # shipped behavior). If the lead rules "PASSED" must be rejected, devops
-        # drops `(?:ED)?` and this flips to PASSED-not-satisfying.
-        for verdict in ("both modes PASS.", "both modes PASSED"):
-            row = (f"| 2026-06-08 | op | {VERSION} | tmux 2/2, in-process 2/2 | "
-                   f"sids | {verdict} |\n")
+        # Both "PASS" and "PASSED" (counted, per-mode, in the VERDICT cell) are
+        # genuine verdicts -> satisfy. The PASS(?:ED)? tolerance is settled.
+        for verdict_cell in ("tmux PASS 2/2 · in-process PASS 2/2",
+                             "tmux PASSED 2/2 · in-process PASSED 2/2"):
+            row = f"| 2026-06-08 | op | {VERSION} | {verdict_cell} | sids | both modes |\n"
             root = _make_root(tmp_path, "| h |\n" + row)
             assert g._has_satisfied_row(root, VERSION, waiver_ok=False) is True, (
-                f"genuine verdict {verdict!r} must satisfy the gate"
+                f"genuine verdict cell {verdict_cell!r} must satisfy the gate"
             )
 
 
@@ -192,6 +195,13 @@ class TestPerModePassParsing:
         ("tmux PASS FAIL · in-process PASS FAIL", False),      # SPACE separator
         ("tmux PASS|FAIL · in-process PASS|FAIL", False),      # PIPE (count req + markdown cell-split)
         ("tmux PASS · in-process PASS", False),                # bare — NO count at all
+        # --- F-A (#66 count-VALUE): a counted PASS satisfies IFF num==denom>0
+        # (a complete run). An incomplete/zero/vacuous count is not a real probe.
+        ("tmux PASS 4/4 · in-process PASS 4/4", True),         # complete, larger count
+        ("tmux PASS 0/2 · in-process PASS 0/2", False),        # zero numerator
+        ("tmux PASS 1/2 · in-process PASS 1/2", False),        # partial (num<denom)
+        ("tmux PASS 0/0 · in-process PASS 0/0", False),        # vacuous zero denominator
+        ("tmux PASS 2/2 · in-process PASS 1/2", False),        # one mode incomplete
     ])
     def test_per_mode_verdict(self, tmp_path, verdict, satisfies):
         root = _make_root(tmp_path, "| h |\n" + _per_mode_row(verdict))
@@ -200,15 +210,16 @@ class TestPerModePassParsing:
         )
 
     def test_legacy_aggregate_pass_row_still_satisfies(self, tmp_path):
-        # OLDER/aggregate shape (923/926 — no per-mode PASS/FAIL token in the
-        # verdict cell): preserved on the LEGACY token-presence path (tmux +
-        # in-process tokens + a genuine PASS anywhere in the row).
-        legacy = (f"| 2026-06-02 | op | {VERSION} | tmux 3/3, in-process 3/3 | "
-                  f"n/a | both modes PASS. |\n")
+        # OLDER/aggregate shape (923/926 — not the "tmux PASS N/N" per-mode token,
+        # but a mode token + a genuine PASS IN THE VERDICT CELL, e.g.
+        # "tmux 6/6 — PASS"): preserved on the LEGACY path, which #66 (F-B) now
+        # scopes to the verdict cell (cells[3]), NOT the whole row.
+        legacy = (f"| 2026-06-02 | op | {VERSION} | tmux 6/6 — PASS (real platform surface) | "
+                  f"n/a | preserved legacy verdict-cell path |\n")
         root = _make_root(tmp_path, "| h |\n" + legacy)
         assert g._has_satisfied_row(root, VERSION, waiver_ok=False) is True, (
-            "an older aggregate-PASS row (no per-mode verdict cell) must still "
-            "satisfy via the preserved legacy path"
+            "an older single-mode aggregate row with PASS IN THE VERDICT CELL "
+            "must still satisfy via the preserved (verdict-cell-scoped) legacy path"
         )
 
     def test_per_mode_column_anchor_preserved(self, tmp_path):
@@ -227,6 +238,66 @@ class TestPerModePassParsing:
         root = _make_root(tmp_path, "| h |\n" + waiver)
         assert g._has_satisfied_row(root, VERSION, waiver_ok=True) is True
         assert g._has_satisfied_row(root, VERSION, waiver_ok=False) is False
+
+
+class TestLegacyVerdictCellScope:
+    """FINDING F-B (#67, pairs devops #66): the LEGACY/aggregate satisfy path
+    (older 923/926 single-mode-per-row 'Sections passed' rows) now scopes the
+    PASS check to the VERDICT CELL (cells[3]) — a mode token AND a genuine PASS
+    must both be IN the verdict cell, NOT anywhere in the row. This closes the
+    F-B exploit where a row with PASS only in the Notes prose (verdict cell n/a)
+    false-satisfied via the old whole-line scan. Uses the REAL merged-in 926/923
+    RUNBOOK rows (faithful verdict-cell shapes) as live cases. 923 single-mode
+    rows satisfy PER-ROW (the scan returns on the first satisfying row), not
+    aggregated across rows (devops #66 contract)."""
+
+    @staticmethod
+    def _row(version, verdict_cell, notes="x"):
+        return f"| 2026-06-09 | michael-wojcik | {version} | {verdict_cell} | n/a | {notes} |\n"
+
+    def test_real_926_in_process_pass_in_verdict_cell_satisfies(self, tmp_path):
+        # Real 926 row (L131): the verdict cell carries "in-process 4/4 — PASS".
+        root = _make_root(
+            tmp_path, "| h |\n" + self._row("4.4.13", "in-process 4/4 — PASS"),
+            version="4.4.13")
+        assert g._has_satisfied_row(root, "4.4.13", waiver_ok=False) is True
+
+    def test_real_926_deferred_pass_only_in_notes_does_not_satisfy(self, tmp_path):
+        # Real 926 _deferred row (L132): verdict cell "n/a"; the ONLY PASS is in
+        # the Notes prose (which also carries tmux + in-process tokens). THE F-B
+        # EXPLOIT — the old whole-line legacy rule would false-satisfy here.
+        notes = ("OPERATIONAL CONSTRAINT: tmux mode under non-default "
+                 "CLAUDE_CONFIG_DIR; the in-process live-probe (4/4 PASS) "
+                 "confirms runtime correctness.")
+        root = _make_root(
+            tmp_path, "| h |\n" + self._row("4.4.13", "n/a", notes), version="4.4.13")
+        assert g._has_satisfied_row(root, "4.4.13", waiver_ok=False) is False, (
+            "PASS only in the Notes prose (verdict cell = n/a) must NOT satisfy — "
+            "the F-B exploit closed by verdict-cell-scoping"
+        )
+
+    def test_fail_verdict_cell_with_pass_in_notes_does_not_satisfy(self, tmp_path):
+        # Synthetic: the verdict cell is a FAIL; PASS appears only in the Notes.
+        root = _make_root(
+            tmp_path,
+            "| h |\n" + self._row("4.4.13", "in-process 4/4 — FAIL",
+                                   "rerun later; an earlier 4/4 PASS was noted"),
+            version="4.4.13")
+        assert g._has_satisfied_row(root, "4.4.13", waiver_ok=False) is False, (
+            "a FAIL verdict cell must NOT satisfy even when PASS appears in Notes"
+        )
+
+    def test_real_923_tmux_pass_in_verdict_cell_satisfies_preservation(self, tmp_path):
+        # Real 923 row (L48) at 4.4.12: "tmux 6/6 — PASS ..." in the verdict cell.
+        # 923 single-mode rows satisfy PER-ROW — this row alone satisfies 4.4.12.
+        root = _make_root(
+            tmp_path,
+            "| h |\n" + self._row("4.4.12", "tmux 6/6 — PASS (real platform surface confirmed)"),
+            version="4.4.12")
+        assert g._has_satisfied_row(root, "4.4.12", waiver_ok=False) is True, (
+            "older 923 single-mode aggregate row with PASS in the verdict cell "
+            "must still satisfy PER-ROW via the verdict-cell-scoped legacy path"
+        )
 
 
 # ── WARN-PATH: drive main() end-to-end in a real temp git repo (no mock) ──
