@@ -101,14 +101,19 @@ _PASS_TOKEN_RE = re.compile(r"(?<![A-Za-z])PASS(?:ED)?(?![A-Za-z/])")
 # Per-mode verdict parsing for the #924 template-instance row shape, whose
 # verdict cell reads "tmux PASS|FAIL N/N · in-process PASS|FAIL N/N".
 # _PER_MODE_VERDICT_RE detects that shape (a mode token immediately followed by
-# a PASS/FAIL verdict); satisfaction then requires BOTH per-mode regexes to hit
-# (the PASS(?:ED)? tolerance + the no-trailing-slash boundary still reject the
-# unfilled "PASS/FAIL" placeholder). This is what stops a row that mixes a real
-# FAIL with a real PASS ("tmux FAIL N/N · in-process PASS N/N") from
-# false-satisfying on token-presence alone — the dangerous-direction inert-ship.
+# a PASS/FAIL verdict); satisfaction then requires BOTH per-mode PASS regexes to
+# hit. Each per-mode PASS requires a TRAILING COUNT — PASS(?:ED)? then
+# whitespace then a digit ("tmux PASS 2/2"). A real verdict ALWAYS has the count;
+# EVERY unfilled-placeholder form has a non-digit after PASS — "PASS/FAIL",
+# "PASS|FAIL", "PASS, FAIL", "PASS FAIL", or a bare "PASS" with no count — so the
+# `\s+\d` requirement rejects the WHOLE separator-placeholder class in one stroke
+# (it supersedes the old no-trailing-slash lookahead, which only excluded
+# letters+slash and let comma/space placeholders through). Combined with the
+# both-modes-must-PASS rule, this also keeps "tmux FAIL N/N · in-process PASS N/N"
+# rejected (the dangerous-direction inert-ship the round-2 fix closed).
 _PER_MODE_VERDICT_RE = re.compile(r"(?:tmux|in-process)\s+(?:PASS|FAIL)")
-_TMUX_PASS_RE = re.compile(r"tmux\s+PASS(?:ED)?(?![A-Za-z/])")
-_INPROC_PASS_RE = re.compile(r"in-process\s+PASS(?:ED)?(?![A-Za-z/])")
+_TMUX_PASS_RE = re.compile(r"tmux\s+PASS(?:ED)?\s+\d")
+_INPROC_PASS_RE = re.compile(r"in-process\s+PASS(?:ED)?\s+\d")
 
 # NOTE: this hook deliberately does NOT init shared.pact_context. Earlier it
 # called pact_context.init() "for parity" with sibling Bash hooks, but it never
@@ -206,10 +211,11 @@ def _has_satisfied_row(root: Path, version: str, waiver_ok: bool) -> bool:
     the gate. The older single-mode "Sections passed" sections (923-missed-wake,
     926-config-dir) predate the per-mode cell and have no one-row two-mode
     false-satisfy risk; they fall through to the original token-presence check so
-    their satisfy behavior is preserved. PASS/PASSED both accepted; the
-    "PASS/FAIL" placeholder, "bypass"/"BYPASSED", and lowercase are rejected. A
-    read failure returns False (cannot confirm a probe -> WARN) — the safe
-    advisory direction."""
+    their satisfy behavior is preserved. Each per-mode PASS REQUIRES A TRAILING
+    COUNT ("tmux PASS 2/2") — PASS/PASSED then a digit — so every unfilled
+    placeholder ("PASS/FAIL", "PASS|FAIL", "PASS, FAIL", "PASS FAIL", bare "PASS")
+    is rejected; "bypass"/"BYPASSED"/lowercase are rejected too. A read failure
+    returns False (cannot confirm a probe -> WARN) — the safe advisory direction."""
     runbook = root / "pact-plugin" / "tests" / "runbooks" / "RUNBOOK_RUN_DATES.md"
     try:
         text = runbook.read_text(encoding="utf-8")

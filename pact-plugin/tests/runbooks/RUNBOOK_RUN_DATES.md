@@ -101,22 +101,24 @@ MUST stay in ONE `|`-delimited row:
   Keep `Plugin version` as the 3rd column.
 - a **PER-MODE** verdict in the **"Per-mode verdict" column** (the 4th cell):
   the parser reads `tmux <verdict>` AND `in-process <verdict>` SEPARATELY and
-  requires BOTH to be a genuine `PASS`/`PASSED`. A row that mixes a real FAIL
-  with a real PASS — `tmux FAIL N/N · in-process PASS N/N` — does **NOT** satisfy
-  (token-presence alone would have wrongly accepted it via the `PASS` in the
-  in-process half; per-mode parsing closes that dangerous false-satisfy).
+  requires BOTH to be a genuine `PASS`/`PASSED` **immediately followed by the
+  trailing count** (`tmux PASS 2/2`). A row that mixes a real FAIL with a real
+  PASS — `tmux FAIL N/N · in-process PASS N/N` — does **NOT** satisfy (per-mode
+  parsing closes that dangerous false-satisfy).
   OR `WAIVED` → satisfied iff the change is PRIMARY-not-SECONDARY.
 
-The verdict token is matched case-sensitively with word boundaries and accepts
-either **`PASS`** or **`PASSED`** per mode — so you don't have to type it exactly
-one way — while still REJECTING `bypass` / `BYPASSED` (case-sensitive lookbehind),
-`non-genuine-pass` (lowercase), and the unfilled `PASS/FAIL` placeholder (the
-trailing-`/` lookahead) — which is what stops a pending/template row from
-silently satisfying the gate. So: keep both modes in a SINGLE row with the
-per-mode `tmux PASS|FAIL N/N · in-process PASS|FAIL N/N` shape (do not split
-tmux/in-process across rows), keep `Plugin version` as the 3rd column and the
-per-mode verdict as the 4th, and write each mode's verdict as `PASS`/`PASSED`
-(or `FAIL`/`WAIVED`). (The older single-mode `Sections passed` sections —
+The per-mode verdict is matched case-sensitively and accepts either **`PASS`** or
+**`PASSED`** per mode — but the COUNT IS REQUIRED: the verdict must be written
+`PASS N/N` (a digit follows the verdict, e.g. `PASS 2/2`). This single rule
+rejects EVERY unfilled-placeholder form — `PASS/FAIL`, `PASS|FAIL`, `PASS, FAIL`,
+`PASS FAIL`, and a bare `PASS` with no count — because each has a non-digit after
+`PASS`; it also rejects `bypass`/`BYPASSED`/lowercase. That is what stops a
+pending/template row from silently satisfying the gate. So: keep both modes in a
+SINGLE row with the per-mode `tmux PASS|FAIL N/N · in-process PASS|FAIL N/N`
+shape (do not split tmux/in-process across rows), keep `Plugin version` as the
+3rd column and the per-mode verdict as the 4th, and **always write each mode's
+verdict WITH its count** — `PASS 2/2` / `FAIL 0/2` (or `WAIVED`); a count-less
+`PASS` will NOT satisfy. (The older single-mode `Sections passed` sections —
 923-missed-wake, 926-config-dir — predate the per-mode cell and are still
 matched by the legacy token-presence path; don't retrofit them.) If a future
 layout moves the version column, changes the per-mode verdict cell, or renames
