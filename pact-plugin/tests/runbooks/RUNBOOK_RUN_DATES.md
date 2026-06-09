@@ -50,6 +50,104 @@ Sections-passed denominator is 3 per runbook (standard-teammate first-action; se
 
 Sections-passed denominator is 2 per runbook §4 (tmux live-probe; in-process live-probe), each gated on all of §2 (a)+(b)+(c)+(d)+Step 5 with the Step 6 tripwire clear. The inline-mission mode column does not apply (`n/a`). Unlike a pre-merge overlay smoke, this is the **POST-merge acceptance gate** — a green suite does NOT close #923; the tmux live-probe is mandatory. If tmux is RED, re-open and route back to the resolver. If the Step 6 tripwire finds `CLAUDE_CODE_TASK_LIST_ID` SET in a team session, HALT + architect escalation (Design A/B divergence, devops contingency C).
 
+## Live-probe-template instances — per-mode gate-record row schema
+
+Any runbook instantiated from `live-probe-template.md` (the missed-wake runbook
+`923-missed-wake-live-probe.md` above is the first worked instance) records its
+runs with the **per-mode** schema below. This convention is **append-only** —
+add a new row per run; never rewrite a prior row (the existing rows above keep
+their original column shape on purpose). Specifics MUST be falsifiable: log the
+OBSERVED `session_id`s (so the mode claim is checkable, not self-asserted), the
+real journal-event timestamp, and the stale age — a fabricated PASS should be
+detectable from the row.
+
+**Probe row** — ONE record covers BOTH mode cells in a SINGLE `|`-delimited row.
+The per-mode verdict column carries the explicit `PASS|FAIL` token PER MODE so the
+verdict is machine-recognizable, not buried in prose (see the parser-coupling note
+below):
+
+```
+| Run date (UTC) | Operator | Plugin version | Per-mode verdict (tmux PASS|FAIL N/N · in-process PASS|FAIL N/N) | Mode-discriminator evidence (session_ids observed) | Notes (real vs synthetic; journal event ts; stale age; tripwire state) |
+```
+
+| Run date (UTC) | Operator | Plugin version | Per-mode verdict (tmux PASS\|FAIL N/N · in-process PASS\|FAIL N/N) | Mode-discriminator evidence (session_ids observed) | Notes (real vs synthetic; journal ts; stale age; tripwire) |
+| -------------- | -------- | -------------- | ----------------------------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------- |
+| _pending — execute post-merge per `live-probe-template.md` §2_ | | | tmux PENDING, in-process PENDING | lead `{session_id}`; teammates `{session_id…}` (distinct ⇒ tmux) | real vs synthetic per cell · `{JOURNAL_EVENT}` ts · stale age · §2 Step E tripwire CLEAR/TRIPPED |
+| _satisfied-row form_ → | `<operator>` | `<version V>` | tmux PASS 2/2 · in-process PASS 2/2 | lead `<sid>`; teammates `<sid…>` (distinct ⇒ tmux) | tmux real, in-process synthetic; `<journal ts>`; `<stale age>`; tripwire CLEAR |
+
+**Waiver row variant** — for a change that trips the PRIMARY hook-infra signal
+but NOT the SECONDARY seam signal (touches `hooks/` but changes no
+seam-dependent behavior, e.g. a pure `hooks/shared/` helper edit). The waiver is
+a LOGGED row, never a silent pass — it is the gate's non-vacuity-on-the-quiet-side
+evidence:
+
+```
+| <date UTC> | <operator> | <version> | WAIVED | n/a | hooks/ touched, no seam-dependent behavior changed → live-probe waived; <one-line reason> |
+```
+
+**tmux is the MANDATORY real cell.** If tmux is RED or missing, the issue is NOT
+closed — record tmux as `pending` and close only after the real tmux probe
+lands. A PRIMARY-but-not-SECONDARY change is the only path that closes WITHOUT a
+both-modes PASS, and only via an explicit WAIVED row.
+
+**Parser-coupling note (keep these tokens, single row).** The locus-b freshness
+advisory (`live_probe_gate.py`) decides WARN-vs-silent by scanning these rows for
+a *satisfied* row at the current plugin version. Its match keys on tokens that
+MUST stay in ONE `|`-delimited row:
+
+- the plugin **version** in the **"Plugin version" column** — COLUMN-ANCHORED to
+  the 3rd cell, NOT matched anywhere-in-line. So a *different*-version row that
+  merely mentions this version in its Notes prose does NOT satisfy the gate.
+  Keep `Plugin version` as the 3rd column.
+- a **PER-MODE** verdict in the **"Per-mode verdict" column** (the 4th cell):
+  the parser reads `tmux <verdict>` AND `in-process <verdict>` SEPARATELY and
+  requires BOTH to be a genuine `PASS`/`PASSED` **immediately followed by the
+  trailing count** (`tmux PASS 2/2`). A row that mixes a real FAIL with a real
+  PASS — `tmux FAIL N/N · in-process PASS N/N` — does **NOT** satisfy (per-mode
+  parsing closes that dangerous false-satisfy).
+  OR `WAIVED` → satisfied iff the change is PRIMARY-not-SECONDARY.
+
+The per-mode verdict is matched case-sensitively and accepts either **`PASS`** or
+**`PASSED`** per mode — but a **COMPLETE COUNT IS REQUIRED**: the verdict must be
+written `PASS N/N` where the count is non-zero and numerator==denominator (ALL
+sections passed), e.g. `PASS 2/2` or `PASS 4/4`. This rejects: EVERY
+unfilled-placeholder form (`PASS/FAIL`, `PASS|FAIL`, `PASS, FAIL`, `PASS FAIL`,
+bare `PASS`) which lacks the `N/N` shape; an INCOMPLETE or vacuous count
+(`PASS 0/2` zero, `PASS 1/2` partial, `PASS 0/0` vacuous); and
+`bypass`/`BYPASSED`/lowercase. That is what stops a pending/template/partial row
+from silently satisfying the gate. So: keep both modes in a SINGLE row with the
+per-mode `tmux PASS|FAIL N/N · in-process PASS|FAIL N/N` shape (do not split
+tmux/in-process across rows), keep `Plugin version` as the 3rd column and the
+per-mode verdict as the 4th, and **always write each mode's verdict WITH a
+complete count** — `PASS 2/2` (or `FAIL 0/2` / `WAIVED`); a count-less or
+partial `PASS` will NOT satisfy.
+
+**CROSS-ROW AGGREGATION + the older single-mode sections.** Satisfaction is
+decided ACROSS all of a version's rows, not per-row: the parser builds a per-mode
+status (PASS / FAIL / DEFERRED / absent) for tmux AND in-process from the verdict
+cells, and a version satisfies iff BOTH modes are {PASS or DEFERRED}, ≥1 is PASS,
+and neither is FAIL. This is what lets the older single-mode sections
+(923-missed-wake: separate `tmux 6/6 — PASS` + `in-process 6/6 — PASS` rows;
+926-config-dir: `in-process 4/4 — PASS` + a deferred tmux row) certify across
+their two rows — while a LONE single-mode PASS with the other mode neither PASSed
+nor deferred does NOT satisfy (you cannot certify a two-mode probe with one
+mode). The verdict cell is matched position-independently for both shapes
+(`tmux PASS 2/2` per-mode template AND `tmux 6/6 — PASS` legacy), still requiring
+a complete `N/N` count and rejecting PASS-only-in-Notes.
+
+**To defer a mode** (a mode that genuinely cannot run — e.g. tmux under a custom
+`CLAUDE_CONFIG_DIR`): the row's **verdict cell must be `n/a`** AND the **row label
+(1st column) must name the deferred mode** as `_deferred — <mode> …` (e.g.
+`_deferred — tmux mode under non-default CLAUDE_CONFIG_DIR`). The parser counts
+that mode as DEFERRED (covered) ONLY from that explicit label+`n/a` pairing — a
+FAIL is never deferred, and an unmentioned mode is never deferred. A `_deferred`
+row whose PASS appears only in Notes does NOT by itself satisfy (the other mode
+must still be a real PASS).
+
+If a future layout moves the version column, changes the per-mode verdict cell,
+the deferral label, or renames the verdict tokens, update `live_probe_gate.py`'s
+row parser to match.
+
 ## 926-config-dir-live-probe.md
 
 | Run date (UTC) | Operator | Plugin version | Sections passed | inline-mission mode | Notes / per-mode observations |

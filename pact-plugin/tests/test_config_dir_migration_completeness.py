@@ -87,8 +87,8 @@ def _unallowlisted(violations: list[tuple[str, int, str]]) -> list[tuple[str, in
 
 class TestNoHardcodedStatePathDrift:
     def test_no_unallowlisted_home_claude_sites(self):
-        """Every `Path.home()/".claude"` construction in hooks/**/*.py must be one
-        of the two known-legitimate residuals. A future re-added/regressed
+        """Every `Path.home()/".claude"` construction in hooks/**/*.py must be the
+        one known-legitimate residual (`symlinks.py`). A future re-added/regressed
         hardcoded state path is NOT in the allowlist -> this FAILS loudly."""
         offenders = _unallowlisted(_scan_hooks())
         assert offenders == [], (
@@ -97,7 +97,7 @@ class TestNoHardcodedStatePathDrift:
             f"instead:\n" + "\n".join(f"  {f}:{ln}: {u}" for f, ln, u in offenders)
         )
 
-    def test_both_allowlisted_residuals_still_present(self):
+    def test_the_allowlisted_residual_still_present(self):
         """Guard the allowlist against rot: if a residual is itself migrated away,
         prune the allowlist (so it cannot mask a future real offender at that
         basename). Keeps the allowlist honest."""

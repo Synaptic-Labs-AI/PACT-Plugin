@@ -393,6 +393,8 @@ JSON
 
 4. State merge readiness (only after ALL blocking fixes complete AND minor/future item handling is done): "Ready to merge" or "Changes requested: [specifics]"
 
+   > **Hook live-probe gate (projects with runtime hooks).** If this PR modifies a runtime hook and the project defines a live-probe procedure, that procedure MUST pass and be logged before the originating issue is closed. Not applicable to projects without runtime hooks.
+
    **Journal event**: When merge-ready, write a `pr_ready` event:
    ```bash
    set -e

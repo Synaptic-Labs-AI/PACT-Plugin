@@ -160,3 +160,89 @@ def _reset_specialist_registry_cache():
     dispatch_helpers._specialist_registry.cache_clear()
     yield
     dispatch_helpers._specialist_registry.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _resync_staleness_resolver_bindings():
+    """Unconditional cross-test isolation for the project-CLAUDE.md staleness
+    resolver (#928). Runs for EVERY test (autouse).
+
+    ROOT CAUSE (instrumented): a test elsewhere in the suite replaces
+    ``sys.modules['staleness']`` with a fresh module object (e.g. a delete +
+    re-import), ORPHANING the staleness functions that ``session_init`` bound at
+    its own import time: ``session_init._staleness_check`` (==
+    ``staleness.check_pinned_staleness``) and the re-imported
+    ``session_init._get_project_claude_md_path`` keep pointing at the OLD
+    staleness module's ``__dict__``. Then
+    ``test_staleness.py::test_no_claude_md_returns_none`` patches the CURRENT
+    ``staleness._get_project_claude_md_path`` to None, but
+    ``session_init.check_pinned_staleness`` delegates to its orphaned
+    ``_staleness_check``, which resolves ``_get_project_claude_md_path`` in the
+    OLD module's globals (UNPATCHED) → reads the REAL project CLAUDE.md instead
+    of None. Order-dependent + cumulative (needs session_init imported BEFORE the
+    staleness replacement), so it only surfaces under certain suite orderings —
+    a PRE-EXISTING latent defect, not specific to any one PR.
+
+    FIX: before AND after every test, re-align ``session_init``'s bound staleness
+    functions to whatever ``sys.modules['staleness']`` currently is (NOT a value
+    captured at conftest-import, which would itself be the stale module). This is
+    a no-op in the normal case (the bindings already match) and repairs the
+    orphaning after a replacement, so a test that patches ``staleness`` reaches
+    the resolution ``session_init`` actually uses. Also re-point the underscore
+    alias to the current public resolver so the two never diverge within a
+    module. Gated on ``sys.modules`` so this fixture never forces the heavy
+    ``session_init`` import itself.
+    """
+    def _resync():
+        st = sys.modules.get("staleness")
+        si = sys.modules.get("session_init")
+        if st is not None:
+            real = getattr(st, "get_project_claude_md_path", None)
+            if real is not None:
+                st._get_project_claude_md_path = real
+                if si is not None:
+                    si._get_project_claude_md_path = real
+        if st is not None and si is not None:
+            if hasattr(st, "check_pinned_staleness"):
+                si._staleness_check = st.check_pinned_staleness
+            if hasattr(st, "check_pinned_block_signal"):
+                si._staleness_block_check = st.check_pinned_block_signal
+
+    _resync()
+    yield
+    _resync()
+
+
+@pytest.fixture(autouse=True)
+def _restore_claude_project_dir_env():
+    """Snapshot + restore ``os.environ['CLAUDE_PROJECT_DIR']`` around every test
+    (#930). Runs for EVERY test (autouse).
+
+    Some concurrency tests (test_working_memory_concurrency*.py) set
+    ``os.environ['CLAUDE_PROJECT_DIR']`` via DIRECT assignment (NOT
+    ``monkeypatch.setenv``), so it is never restored and LEAKS into later tests
+    — an order-dependent pollution vector. The #924 dogfood hit it: a leaked
+    ``CLAUDE_PROJECT_DIR`` redirects ``live_probe_gate._resolve_repo_root`` /
+    ``staleness.get_project_claude_md_path`` away from the test's intended root,
+    so a later test silently resolves the wrong project dir. ``monkeypatch``-
+    based env tests are immune (auto-revert); the leak is the direct-assignment
+    ones specifically.
+
+    This fixture SNAPSHOTS the var at setup and RESTORES it at teardown
+    (set-to-original, or DELETE if it was originally unset) — an unconditional
+    restore, immune to dirty-baseline chains, and a no-op for the vast majority
+    of tests that never touch it. Co-located with the other env/module-state
+    autouse resets (``_reset_pact_context_state`` / ``_reset_specialist_registry_cache``
+    / ``_resync_staleness_resolver_bindings``). CLAUDE_PROJECT_DIR is the
+    CONFIRMED leaker (the only ``CLAUDE_*`` the working_memory tests set); if a
+    sibling direct-assignment leak is ever confirmed (e.g. ``CLAUDE_PLUGIN_ROOT``
+    in test_plugin_manifest.py), generalize this snapshot to the ``CLAUDE_*``
+    namespace.
+    """
+    _UNSET = object()
+    original = os.environ.get("CLAUDE_PROJECT_DIR", _UNSET)
+    yield
+    if original is _UNSET:
+        os.environ.pop("CLAUDE_PROJECT_DIR", None)
+    else:
+        os.environ["CLAUDE_PROJECT_DIR"] = original

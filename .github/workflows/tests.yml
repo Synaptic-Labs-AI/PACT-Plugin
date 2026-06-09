@@ -1,0 +1,124 @@
+# PACT plugin test suite — continuous integration.
+#
+# WHAT THIS DOES
+#   Runs the pact-plugin pytest suite on every pull request and on pushes to
+#   `main`. Its primary job for the live-probe gate is to auto-run the
+#   structural + meta-tests (the seam-dependent-hook presence/anti-mock checks)
+#   on every hook-infra PR, so a regression in those gates cannot merge unseen.
+#   It also keeps `main` green by catching direct pushes.
+#
+#   This is locus-a auto-enforcement. It is NOT a runtime hook — it never loads
+#   into any consumer project's session, so it carries zero consumer-pollution
+#   risk and may reference concrete project specifics freely.
+#
+# WHY A SINGLE PYTHON (3.13), NOT A >=3.7 MATRIX
+#   The dev runtime is 3.14.x; the declared `requires-python = ">=3.7"` floor is
+#   aspirational and NOT test-verified (the suite has never been run on 3.7).
+#   The gate's value — auto-running the structural/meta-tests — needs exactly
+#   ONE Python. 3.13 is GA on ubuntu-latest and is the closest-stable to the
+#   3.14 dev runtime. A 3.7-inclusive matrix is documented as a commented
+#   fallback below, to be adopted ONLY AFTER a separate task verifies the suite
+#   actually passes there (likely 3.14-era syntax has crept in) — never on faith.
+#
+# WHY `working-directory: pact-plugin`
+#   `tests/conftest.py` inserts sys.path entries relative to its own location and
+#   resolves the local `telegram/` package via the current working directory, so
+#   pytest's rootdir MUST be `pact-plugin/`. This is the idiomatic encoding of
+#   the canonical `cd pact-plugin && python -m pytest tests/` invocation.
+#
+# DEPENDENCY SET (empirically verified — see note below)
+#   The suite is stdlib + four third-party libraries that are HARD requirements
+#   for a green run:
+#     - pytest           : the runner (hard import everywhere).
+#     - httpx            : UNGUARDED top-level import in the local telegram
+#                          package (telegram/voice.py, telegram/telegram_client.py)
+#                          and two telegram test modules → without it,
+#                          `python -m pytest tests/` ERRORS at COLLECTION.
+#     - pytest-asyncio   : the suite has ~143 `@pytest.mark.asyncio` tests.
+#                          On pytest >= 9, an unhandled async test FAILS (not
+#                          skips). Without this plugin the suite is 143 RED.
+#     - hypothesis       : property tests guard it with try/except + skipif, so
+#                          it is technically optional, but it is installed so the
+#                          property tests actually RUN rather than silently skip.
+#   `telegram` is the LOCAL package under pact-plugin/, NOT the pip library — it
+#   needs no install (it resolves via the working-directory on sys.path).
+#
+#   VERIFICATION: clean-venv full runs (the dep set proven, not grepped):
+#     - Python 3.13.13 (this CI version): 8187 passed, 17 skipped, 0 failed.
+#     - Python 3.14.5  (dev host):        8195 passed,  9 skipped, 0 failed.
+#   With `pytest httpx hypothesis` but NO pytest-asyncio (pytest 9.0.3):
+#     143 FAILED — the exact async-test cohort. The plugin is mandatory.
+#   All remaining skips are intentional carve-outs (live-tmux-only probes,
+#   orchestrator carve-out, pin-caps test-design, fuzz-strategy edges) and
+#   version-conditional cases — green-with-skips is the accepted CI outcome;
+#   skipped is not failed.
+
+name: tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+# Minimal privilege: this workflow only checks out the repo and runs pytest —
+# it needs read access to repo contents and nothing else. Pinning the token
+# scope here drops the default broader GITHUB_TOKEN permissions.
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      # Third-party actions are pinned to a full commit SHA (supply-chain
+      # hardening: a moving tag like @v5 can be repointed to malicious code).
+      # The trailing comment records the human-readable tag the SHA resolves to.
+      # These majors run on Node24 (checkout@v4 / setup-python@v5 were Node20,
+      # deprecated by GitHub — forced off by 2026-06-16, so re-pinned forward).
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        # See the "DEPENDENCY SET" header note for why each lib is required.
+        # pytest-asyncio is REQUIRED, not optional: the suite has ~143
+        # @pytest.mark.asyncio tests. Without this plugin they FAIL on
+        # pytest >= 9 (unknown-mark, ~143 failures here) or — worse — SILENTLY
+        # SKIP on pytest 8.x (green-looking, but the tests never run). Do NOT
+        # drop it to "shorten" the line: that silently re-opens the exact
+        # inert-test gap (green suite, tests not actually running) this
+        # project's live-probe gate exists to catch.
+        run: python -m pip install --upgrade pip pytest hypothesis httpx pytest-asyncio
+
+      # rootdir must be pact-plugin/ (CWD-relative conftest sys.path + local
+      # `telegram` package). Equivalent to `cd pact-plugin && python -m pytest tests/`.
+      - name: Run test suite
+        working-directory: pact-plugin
+        run: python -m pytest tests/
+
+  # ---------------------------------------------------------------------------
+  # OPTIONAL FALLBACKS (do NOT enable without the stated verification first)
+  #
+  # (1) Cross-version matrix — adopt ONLY after a one-off task confirms the
+  #     suite passes on the lowest target. The >=3.7 floor is unverified.
+  #
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       python-version: ["3.13", "3.12", "3.11"]   # extend downward post-verify
+  #   ...
+  #     - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+  #       with:
+  #         python-version: ${{ matrix.python-version }}
+  #
+  # (2) Heavier native-dep coverage — the memory/vector tests run on stdlib
+  #     sqlite3 by default (the suite is green without these). Add ONLY to
+  #     exercise the pysqlite3 + sqlite-vec loadable-extension path, and only
+  #     after confirming the wheels install + the extension loads on
+  #     ubuntu-latest (loadable-extension support is a known CI flake source):
+  #
+  #     run: python -m pip install --upgrade pip pytest hypothesis httpx pytest-asyncio pysqlite3-binary sqlite-vec
+  # ---------------------------------------------------------------------------
