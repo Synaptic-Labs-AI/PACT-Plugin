@@ -175,12 +175,23 @@ class TestPerModePassParsing:
     legacy token-presence path."""
 
     @pytest.mark.parametrize("verdict, satisfies", [
+        # --- real per-mode verdicts (satisfy IFF both modes a counted PASS) ---
         ("tmux PASS 2/2 · in-process PASS 2/2", True),
         ("tmux PASSED 2/2 · in-process PASSED 2/2", True),     # PASSED variant
-        ("tmux FAIL 0/2 · in-process PASS 2/2", False),        # THE FIX — dangerous direction
+        # --- round-2 partial-mode guard (one mode FAIL → not satisfy) ---
+        ("tmux FAIL 0/2 · in-process PASS 2/2", False),        # THE round-2 FIX — dangerous direction
         ("tmux PASS 2/2 · in-process FAIL 0/2", False),
+        ("tmux PASS 2/2 · in-process FAIL 1/2", False),        # in-process FAIL w/ count
         ("tmux FAIL 0/2 · in-process FAIL 0/2", False),
-        ("tmux PASS/FAIL · in-process PASS/FAIL", False),      # unfilled placeholder
+        # --- SEPARATOR-PLACEHOLDER class (#62 trailing-count hardening): a
+        # verdict with NO count after PASS is an unfilled/template placeholder,
+        # never a real probe → must NOT satisfy. The count requirement
+        # (`PASS(?:ED)?\s+\d`) is what closes the architect-found separator edges.
+        ("tmux PASS/FAIL · in-process PASS/FAIL", False),      # slash placeholder
+        ("tmux PASS, FAIL · in-process PASS, FAIL", False),    # COMMA — architect edge
+        ("tmux PASS FAIL · in-process PASS FAIL", False),      # SPACE separator
+        ("tmux PASS|FAIL · in-process PASS|FAIL", False),      # PIPE (count req + markdown cell-split)
+        ("tmux PASS · in-process PASS", False),                # bare — NO count at all
     ])
     def test_per_mode_verdict(self, tmp_path, verdict, satisfies):
         root = _make_root(tmp_path, "| h |\n" + _per_mode_row(verdict))
@@ -315,10 +326,18 @@ class TestDogfoodWarnPath:
         # CLAUDE_CONFIG_DIR must NOT false-satisfy. If a future change makes the
         # gate read CLAUDE_CONFIG_DIR, the forged row would silence it -> FAIL here.
         root = _make_git_repo(tmp_path / "repo", "| h |\n", touch_hooks=True)  # no satisfied row
-        forged = _make_root(tmp_path / "forged_config", "| h |\n" + GENUINE_PASS_ROW)  # satisfied
-        # NON-VACUITY precondition: the forged RUNBOOK IS genuinely satisfying, so
-        # the gate ignoring it (below) is the real assertion — not the forged row
-        # happening to be empty/unsatisfied.
+        # Forge a row that satisfies via the STRICT PER-MODE (production #924
+        # template) path — "tmux PASS 2/2 · in-process PASS 2/2" — NOT the legacy
+        # token-presence path (security #61 alignment: exercise the real
+        # production satisfy-path so the guard reflects how a real satisfied
+        # RUNBOOK is recognized).
+        forged = _make_root(
+            tmp_path / "forged_config",
+            "| h |\n" + _per_mode_row("tmux PASS 2/2 · in-process PASS 2/2"),
+        )
+        # NON-VACUITY precondition: the forged RUNBOOK GENUINELY satisfies the
+        # (strict per-mode) parser, so the gate ignoring it (below) is the real
+        # assertion — not the forged row happening to be empty/unsatisfied.
         assert g._has_satisfied_row(forged, VERSION, waiver_ok=False) is True
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(forged))
         code, err = _run_main(root, "gh pr merge 1 --squash", monkeypatch, capsys)
