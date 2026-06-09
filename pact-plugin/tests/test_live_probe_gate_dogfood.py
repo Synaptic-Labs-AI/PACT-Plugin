@@ -159,6 +159,65 @@ class TestFreshnessRowSpec:
             )
 
 
+def _per_mode_row(verdict_cell: str, version: str = VERSION) -> str:
+    """A #924-template per-mode row: the VERDICT cell is the 4th column (cells[3])
+    and reads 'tmux PASS|FAIL N/N · in-process PASS|FAIL N/N'."""
+    return f"| 2026-06-08 | op | {version} | {verdict_cell} | sids observed | per-mode probe |\n"
+
+
+class TestPerModePassParsing:
+    """FINDING #1 (#57, pairs with devops #56): the freshness check parses the
+    per-mode verdict cell and satisfies IFF BOTH tmux AND in-process are a genuine
+    PASS — closing the false-satisfy where a per-mode FAIL rode alongside a PASS.
+    Contract per devops #56: per-mode shape detected by `(?:tmux|in-process)\\s+
+    (?:PASS|FAIL)` in cells[3]; both `tmux PASS(?:ED)?` and `in-process PASS(?:ED)?`
+    must hit. Aggregate/older shape (no per-mode token in cells[3]) keeps the
+    legacy token-presence path."""
+
+    @pytest.mark.parametrize("verdict, satisfies", [
+        ("tmux PASS 2/2 · in-process PASS 2/2", True),
+        ("tmux PASSED 2/2 · in-process PASSED 2/2", True),     # PASSED variant
+        ("tmux FAIL 0/2 · in-process PASS 2/2", False),        # THE FIX — dangerous direction
+        ("tmux PASS 2/2 · in-process FAIL 0/2", False),
+        ("tmux FAIL 0/2 · in-process FAIL 0/2", False),
+        ("tmux PASS/FAIL · in-process PASS/FAIL", False),      # unfilled placeholder
+    ])
+    def test_per_mode_verdict(self, tmp_path, verdict, satisfies):
+        root = _make_root(tmp_path, "| h |\n" + _per_mode_row(verdict))
+        assert g._has_satisfied_row(root, VERSION, waiver_ok=False) is satisfies, (
+            f"per-mode verdict {verdict!r} expected satisfies={satisfies}"
+        )
+
+    def test_legacy_aggregate_pass_row_still_satisfies(self, tmp_path):
+        # OLDER/aggregate shape (923/926 — no per-mode PASS/FAIL token in the
+        # verdict cell): preserved on the LEGACY token-presence path (tmux +
+        # in-process tokens + a genuine PASS anywhere in the row).
+        legacy = (f"| 2026-06-02 | op | {VERSION} | tmux 3/3, in-process 3/3 | "
+                  f"n/a | both modes PASS. |\n")
+        root = _make_root(tmp_path, "| h |\n" + legacy)
+        assert g._has_satisfied_row(root, VERSION, waiver_ok=False) is True, (
+            "an older aggregate-PASS row (no per-mode verdict cell) must still "
+            "satisfy via the preserved legacy path"
+        )
+
+    def test_per_mode_column_anchor_preserved(self, tmp_path):
+        # A DIFFERENT-version per-mode both-PASS row that mentions V in its Notes
+        # cell must NOT satisfy (column-anchor on cells[2] still holds post-#56).
+        row = (f"| 2026-06-08 | op | 4.1.3 | tmux PASS 2/2 · in-process PASS 2/2 | "
+               f"sids | per-mode for {VERSION} backport |\n")
+        root = _make_root(tmp_path, "| h |\n" + row)
+        assert g._has_satisfied_row(root, VERSION, waiver_ok=False) is False, (
+            "per-mode row with a DIFFERENT version in cells[2] must not satisfy "
+            "just because Notes mention V (column-anchor preserved)"
+        )
+
+    def test_per_mode_waived_still_gated_on_waiver_ok(self, tmp_path):
+        waiver = f"| 2026-06-08 | op | {VERSION} | WAIVED | n/a | hooks/-only, no seam change |\n"
+        root = _make_root(tmp_path, "| h |\n" + waiver)
+        assert g._has_satisfied_row(root, VERSION, waiver_ok=True) is True
+        assert g._has_satisfied_row(root, VERSION, waiver_ok=False) is False
+
+
 # ── WARN-PATH: drive main() end-to-end in a real temp git repo (no mock) ──
 
 def _git(cwd: Path, *args: str) -> None:
@@ -244,3 +303,28 @@ class TestDogfoodWarnPath:
         root = _make_git_repo(tmp_path, "| h |\n", touch_hooks=True)
         _, err = _run_main(root, "gh pr close 999", monkeypatch, capsys)
         assert "live-probe-gate" in err
+
+    def test_config_dir_independence_forged_runbook_does_not_false_satisfy(
+            self, tmp_path, monkeypatch, capsys):
+        # #57 / security #55 regression guard: the gate keys off CLAUDE_PROJECT_DIR
+        # (the dev-repo root, via _resolve_repo_root) and IGNORES CLAUDE_CONFIG_DIR
+        # (~/.claude relocation — the #926 surface). Forge a SATISFIED RUNBOOK +
+        # fake plugin.json under a CLAUDE_CONFIG_DIR temp dir; the REAL repo
+        # (CLAUDE_PROJECT_DIR) has a hooks/-touching diff + NO satisfied row. The
+        # gate must STILL WARN — a forged satisfied RUNBOOK under a non-default
+        # CLAUDE_CONFIG_DIR must NOT false-satisfy. If a future change makes the
+        # gate read CLAUDE_CONFIG_DIR, the forged row would silence it -> FAIL here.
+        root = _make_git_repo(tmp_path / "repo", "| h |\n", touch_hooks=True)  # no satisfied row
+        forged = _make_root(tmp_path / "forged_config", "| h |\n" + GENUINE_PASS_ROW)  # satisfied
+        # NON-VACUITY precondition: the forged RUNBOOK IS genuinely satisfying, so
+        # the gate ignoring it (below) is the real assertion — not the forged row
+        # happening to be empty/unsatisfied.
+        assert g._has_satisfied_row(forged, VERSION, waiver_ok=False) is True
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(forged))
+        code, err = _run_main(root, "gh pr merge 1 --squash", monkeypatch, capsys)
+        assert code == 0, "advisory must always exit 0 (WARN-not-BLOCK)"
+        assert "live-probe-gate" in err, (
+            "the gate must key off CLAUDE_PROJECT_DIR (repo root) and IGNORE "
+            "CLAUDE_CONFIG_DIR — a forged satisfied RUNBOOK under a non-default "
+            "CLAUDE_CONFIG_DIR must NOT false-satisfy the gate (security #55 regression)"
+        )
