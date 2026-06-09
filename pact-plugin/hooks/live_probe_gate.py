@@ -53,6 +53,16 @@ _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 # Critical imports: the classifier SSOT + the merge_guard PR command regexes.
 # A failure here means we cannot classify -> disable the advisory (silent-allow),
 # never block. INVERSE of merge_guard's fail-closed module-load guard.
+#
+# INERT config-dir coupling (do NOT assume zero coupling): importing
+# merge_guard_common transitively resolves the Claude config-dir at import time
+# (merge_guard_common derives a module-level TOKEN_DIR from
+# shared.paths.get_claude_config_dir). This gate uses ONLY the two command
+# regexes from that module — never TOKEN_DIR — so the config-dir coupling is
+# INERT here: the gate's WARN-vs-silent decision is driven by CLAUDE_PROJECT_DIR
+# (via _resolve_repo_root) + the RUNBOOK row scan, NOT by the config-dir. The
+# coupling is import-transitive only; a future editor should not treat this hook
+# as config-dir-free, but also need not route its decision through the config-dir.
 try:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from shared.hook_infra_classifier import classify_diff
@@ -87,6 +97,18 @@ _GATE_COMMAND_RES = (_GH_PR_MERGE_RE, _GH_PR_CLOSE_RE)
 # the over-warn (a genuine "PASSED" row was rejected) AND the disarm (a
 # placeholder/bypass row was accepted).
 _PASS_TOKEN_RE = re.compile(r"(?<![A-Za-z])PASS(?:ED)?(?![A-Za-z/])")
+
+# Per-mode verdict parsing for the #924 template-instance row shape, whose
+# verdict cell reads "tmux PASS|FAIL N/N · in-process PASS|FAIL N/N".
+# _PER_MODE_VERDICT_RE detects that shape (a mode token immediately followed by
+# a PASS/FAIL verdict); satisfaction then requires BOTH per-mode regexes to hit
+# (the PASS(?:ED)? tolerance + the no-trailing-slash boundary still reject the
+# unfilled "PASS/FAIL" placeholder). This is what stops a row that mixes a real
+# FAIL with a real PASS ("tmux FAIL N/N · in-process PASS N/N") from
+# false-satisfying on token-presence alone — the dangerous-direction inert-ship.
+_PER_MODE_VERDICT_RE = re.compile(r"(?:tmux|in-process)\s+(?:PASS|FAIL)")
+_TMUX_PASS_RE = re.compile(r"tmux\s+PASS(?:ED)?(?![A-Za-z/])")
+_INPROC_PASS_RE = re.compile(r"in-process\s+PASS(?:ED)?(?![A-Za-z/])")
 
 # NOTE: this hook deliberately does NOT init shared.pact_context. Earlier it
 # called pact_context.init() "for parity" with sibling Bash hooks, but it never
@@ -169,17 +191,25 @@ def _changed_paths() -> Optional[list[str]]:
 
 def _has_satisfied_row(root: Path, version: str, waiver_ok: bool) -> bool:
     """True iff RUNBOOK_RUN_DATES.md has, for `version`, EITHER a both-mode PASS
-    row (tmux + in-process + an exact-PASS verdict) OR — when `waiver_ok` — a
-    logged WAIVED row.
+    row OR — when `waiver_ok` — a logged WAIVED row.
 
     Version matching is COLUMN-ANCHORED: `version` must appear in the row's
     "Plugin version" cell (the 3rd markdown column across every table in this
     ledger), NOT anywhere-in-line. Anchoring kills the false-satisfy where a
     DIFFERENT-version row merely MENTIONS this version in its prose Notes cell.
-    The PASS verdict is matched case-sensitively via _PASS_TOKEN_RE, which
-    accepts "PASS" OR "PASSED" but rejects "bypass"/"BYPASSED" and the
-    "PASS/FAIL" placeholder. A read failure returns False (cannot confirm a
-    probe -> WARN) — the safe advisory direction."""
+
+    Verdict matching is PER-MODE for the #924 template-instance row shape (the
+    verdict cell reads "tmux PASS|FAIL N/N · in-process PASS|FAIL N/N"): BOTH the
+    tmux verdict AND the in-process verdict must be a genuine PASS/PASSED. This
+    closes the dangerous false-satisfy where token-presence alone let a row that
+    mixes a real FAIL with a real PASS ("tmux FAIL · in-process PASS") satisfy
+    the gate. The older single-mode "Sections passed" sections (923-missed-wake,
+    926-config-dir) predate the per-mode cell and have no one-row two-mode
+    false-satisfy risk; they fall through to the original token-presence check so
+    their satisfy behavior is preserved. PASS/PASSED both accepted; the
+    "PASS/FAIL" placeholder, "bypass"/"BYPASSED", and lowercase are rejected. A
+    read failure returns False (cannot confirm a probe -> WARN) — the safe
+    advisory direction."""
     runbook = root / "pact-plugin" / "tests" / "runbooks" / "RUNBOOK_RUN_DATES.md"
     try:
         text = runbook.read_text(encoding="utf-8")
@@ -207,11 +237,23 @@ def _has_satisfied_row(root: Path, version: str, waiver_ok: bool) -> bool:
             continue
         if waiver_ok and "waived" in low:
             return True
-        # A genuine both-mode PASS row. The PASS verdict is matched
-        # case-SENSITIVELY on the ORIGINAL `line` via _PASS_TOKEN_RE so an
-        # unfilled "PASS/FAIL" placeholder, "bypass", or "non-genuine-pass"
-        # never false-satisfies. tmux/in-process stay substring on `low` —
-        # those tokens aren't the bug.
+        verdict_cell = cells[3] if len(cells) > 3 else ""
+        # PER-MODE verdict shape (the #924 template-instance): the verdict cell
+        # carries an explicit per-mode verdict ("tmux PASS|FAIL · in-process
+        # PASS|FAIL"). HARDEN: require BOTH modes to be a genuine PASS. Token
+        # presence alone is NOT enough — "tmux FAIL N/N · in-process PASS N/N"
+        # has a "PASS" but tmux actually FAILED, so it must NOT satisfy.
+        if _PER_MODE_VERDICT_RE.search(verdict_cell):
+            if _TMUX_PASS_RE.search(verdict_cell) and _INPROC_PASS_RE.search(verdict_cell):
+                return True
+            # A mode FAILed or is an unfilled "PASS/FAIL" placeholder -> this row
+            # does NOT satisfy; keep scanning (do not fall through).
+            continue
+        # Older / aggregate "Sections passed" shape (923-missed-wake,
+        # 926-config-dir): single-mode-per-row sections that predate the
+        # per-mode cell -> preserve the original token-presence behavior. The
+        # PASS verdict is matched case-SENSITIVELY via _PASS_TOKEN_RE so an
+        # unfilled "PASS/FAIL" placeholder / "bypass" / lowercase never matches.
         if "tmux" in low and "in-process" in low and _PASS_TOKEN_RE.search(line):
             return True
     return False

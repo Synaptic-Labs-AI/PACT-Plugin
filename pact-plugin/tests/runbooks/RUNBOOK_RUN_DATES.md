@@ -99,19 +99,28 @@ MUST stay in ONE `|`-delimited row:
   the 3rd cell, NOT matched anywhere-in-line. So a *different*-version row that
   merely mentions this version in its Notes prose does NOT satisfy the gate.
   Keep `Plugin version` as the 3rd column.
-- (`tmux` + `in-process` + a `PASS` verdict) → a satisfied both-modes probe row;
+- a **PER-MODE** verdict in the **"Per-mode verdict" column** (the 4th cell):
+  the parser reads `tmux <verdict>` AND `in-process <verdict>` SEPARATELY and
+  requires BOTH to be a genuine `PASS`/`PASSED`. A row that mixes a real FAIL
+  with a real PASS — `tmux FAIL N/N · in-process PASS N/N` — does **NOT** satisfy
+  (token-presence alone would have wrongly accepted it via the `PASS` in the
+  in-process half; per-mode parsing closes that dangerous false-satisfy).
   OR `WAIVED` → satisfied iff the change is PRIMARY-not-SECONDARY.
 
 The verdict token is matched case-sensitively with word boundaries and accepts
-either **`PASS`** or **`PASSED`** — so you don't have to type it exactly one way
-— while still REJECTING `bypass` / `BYPASSED` (case-sensitive lookbehind),
+either **`PASS`** or **`PASSED`** per mode — so you don't have to type it exactly
+one way — while still REJECTING `bypass` / `BYPASSED` (case-sensitive lookbehind),
 `non-genuine-pass` (lowercase), and the unfilled `PASS/FAIL` placeholder (the
 trailing-`/` lookahead) — which is what stops a pending/template row from
-silently satisfying the gate. So: keep both modes in a SINGLE row (do not split
-tmux/in-process across rows), keep `Plugin version` as the 3rd column, and write
-the verdict as `PASS`/`PASSED` (or `FAIL`/`WAIVED`). If a future layout moves the
-version column, splits the modes, or renames the verdict tokens, update
-`live_probe_gate.py`'s row parser to match.
+silently satisfying the gate. So: keep both modes in a SINGLE row with the
+per-mode `tmux PASS|FAIL N/N · in-process PASS|FAIL N/N` shape (do not split
+tmux/in-process across rows), keep `Plugin version` as the 3rd column and the
+per-mode verdict as the 4th, and write each mode's verdict as `PASS`/`PASSED`
+(or `FAIL`/`WAIVED`). (The older single-mode `Sections passed` sections —
+923-missed-wake, 926-config-dir — predate the per-mode cell and are still
+matched by the legacy token-presence path; don't retrofit them.) If a future
+layout moves the version column, changes the per-mode verdict cell, or renames
+the verdict tokens, update `live_probe_gate.py`'s row parser to match.
 
 ## 926-config-dir-live-probe.md
 
