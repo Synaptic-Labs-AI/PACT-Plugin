@@ -2161,13 +2161,21 @@ def test_r3_band_unresolvable_when_variety_absent_on_task_b(
     )
 
 
-def test_r3_band_unresolvable_when_variety_total_non_int(
+def test_r3_band_unresolvable_when_no_candidate_resolves(
     tmp_path, monkeypatch, pact_context,
 ):
-    """Task B.variety.total is a string → band_unresolvable."""
+    """Task B.variety has a non-int total AND no recoverable fallback
+    (no score, no top-level variety_score, dimensions stripped so the
+    dimension-sum cannot fire) → every resolver candidate is invalid →
+    band_unresolvable. A non-int total alone no longer yields unresolvable
+    when a valid dimension-sum or score fallback exists."""
     pact_context(team_name="test-team", session_id="test-session")
     variety = _well_formed_variety()
     variety["total"] = "twelve"
+    # Strip the four dimension scores so the dimension-sum fallback cannot
+    # resolve; the rationales (not resolution candidates) stay.
+    for dim in ("novelty", "scope", "uncertainty", "risk"):
+        variety.pop(dim, None)
     _setup_blocks_pair(
         tmp_path, monkeypatch, "test-team", "1", "2",
         variety=variety,

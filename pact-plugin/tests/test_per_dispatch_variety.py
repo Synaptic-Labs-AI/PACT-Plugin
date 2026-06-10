@@ -62,6 +62,25 @@ def _well_formed_variety(**overrides):
     return payload
 
 
+def _no_fallback_variety(**overrides):
+    """Return a variety dict whose `total` is the ONLY total candidate —
+    the four dimension scores are omitted so the dimension-sum fallback
+    cannot resolve, and there is no `score` key. Use this to exercise the
+    "every resolver candidate invalid → unresolvable" path: override `total`
+    with a bad value (or pop it) and no other candidate can recover it. The
+    rationales (not resolution candidates) are kept so the write-time schema
+    check still treats the shape as rationale-complete."""
+    payload = {
+        "novelty_rationale": "x",
+        "scope_rationale": "x",
+        "uncertainty_rationale": "x",
+        "risk_rationale": "x",
+        "total": 8,
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _seed_task_b(
     tmp_path, monkeypatch, team_name, task_b_id,
     metadata=None,
@@ -283,9 +302,12 @@ class TestBandUnresolvableFailOpen:
             {"blocks": ["2"]}, "test-team"
         ) == "unresolvable"
 
-    def test_variety_total_missing(self, tmp_path, monkeypatch):
-        """Task B.metadata.variety has no `total` key → unresolvable."""
-        variety = _well_formed_variety()
+    def test_variety_total_missing_and_no_fallback(self, tmp_path, monkeypatch):
+        """Task B.metadata.variety has no `total` key AND no recoverable
+        fallback (dimensions stripped) → unresolvable. A missing total alone
+        now resolves via the dimension-sum fallback when the four dimensions
+        are valid; unresolvable requires every candidate to be invalid."""
+        variety = _no_fallback_variety()
         variety.pop("total")
         _seed_task_b(
             tmp_path, monkeypatch, "test-team", "2",
@@ -295,34 +317,36 @@ class TestBandUnresolvableFailOpen:
             {"blocks": ["2"]}, "test-team"
         ) == "unresolvable"
 
-    def test_variety_total_non_int_string(self, tmp_path, monkeypatch):
-        """Task B.metadata.variety.total = "twelve" → unresolvable."""
+    def test_variety_total_non_int_string_and_no_fallback(self, tmp_path, monkeypatch):
+        """Task B.metadata.variety.total = "twelve" with no recoverable
+        fallback → unresolvable."""
         _seed_task_b(
             tmp_path, monkeypatch, "test-team", "2",
-            metadata={"variety": _well_formed_variety(total="twelve")},
+            metadata={"variety": _no_fallback_variety(total="twelve")},
         )
         assert tlg._resolve_required_band_via_blocks(
             {"blocks": ["2"]}, "test-team"
         ) == "unresolvable"
 
-    def test_variety_total_bool_rejected(self, tmp_path, monkeypatch):
-        """Task B.metadata.variety.total = True → unresolvable.
-        Defensive: bool is a subclass of int in Python; reject explicitly.
-        """
+    def test_variety_total_bool_rejected_and_no_fallback(self, tmp_path, monkeypatch):
+        """Task B.metadata.variety.total = True with no recoverable fallback
+        → unresolvable. Defensive: bool is a subclass of int in Python;
+        reject explicitly."""
         _seed_task_b(
             tmp_path, monkeypatch, "test-team", "2",
-            metadata={"variety": _well_formed_variety(total=True)},
+            metadata={"variety": _no_fallback_variety(total=True)},
         )
         assert tlg._resolve_required_band_via_blocks(
             {"blocks": ["2"]}, "test-team"
         ) == "unresolvable"
 
-    def test_variety_total_float(self, tmp_path, monkeypatch):
-        """Task B.metadata.variety.total = 12.5 → unresolvable. The
-        traversal accepts ints only; floats indicate malformed data."""
+    def test_variety_total_float_and_no_fallback(self, tmp_path, monkeypatch):
+        """Task B.metadata.variety.total = 12.5 with no recoverable fallback
+        → unresolvable. The resolver accepts ints only; floats indicate
+        malformed data."""
         _seed_task_b(
             tmp_path, monkeypatch, "test-team", "2",
-            metadata={"variety": _well_formed_variety(total=12.5)},
+            metadata={"variety": _no_fallback_variety(total=12.5)},
         )
         assert tlg._resolve_required_band_via_blocks(
             {"blocks": ["2"]}, "test-team"
