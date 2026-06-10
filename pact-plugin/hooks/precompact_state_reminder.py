@@ -33,6 +33,8 @@ from typing import Any
 from shared import pact_context
 from shared.error_output import hook_error_json
 from shared.session_state import summarize_session_state
+from shared.teachback_schema import resolve_variety_total
+from shared.variety_scorer import MAX_SCORE, MIN_SCORE
 
 
 # ---------------------------------------------------------------------------
@@ -45,26 +47,30 @@ def _extract_variety_total(variety: Any) -> int | None:
     Normalize the `variety_score` field (opaque passthrough from the
     journal) into a scalar suitable for f-string rendering.
 
-    The journal writer stores variety as a dict
-    `{"novelty": N, "scope": N, "uncertainty": N, "risk": N,
-    "total": N}`. The module-boundary contract is "opaque dict";
-    consumers that want a clean scalar render call this helper. Bool
-    is rejected because it subclasses int — a `True`/`False` in the
-    dict would otherwise surface as a variety score of 1/0.
+    Render-scoped wrapper over the shared resolve_variety_total resolver.
+    Both input shapes are range-gated to [MIN_SCORE, MAX_SCORE] (4..16) — the
+    resolver's no-clamp/no-fabricate policy: an out-of-range candidate is
+    dropped (line omitted), never clamped or rendered verbatim.
+      - A bare int is accepted only when it is a non-bool int IN range; an
+        out-of-range bare int (e.g. 99 or 0) drops the line rather than
+        rendering an impossible score. Bool is rejected because it
+        subclasses int — a True/False would surface as 1/0.
+      - The dict path delegates to the shared resolver, so a non-canonical
+        stamp (score / dimension-sum) now renders a total instead of
+        silently dropping the line, while an out-of-range dict `total`
+        (e.g. {"total": 99}) drops the line for the same reason. precompact
+        calls the resolver with only `variety` (no metadata) — the variety
+        object IS the journal's variety_score render context; there is no
+        separate sibling key.
 
-    Returns `None` if no usable total is present (caller should omit
+    Returns `None` if no usable in-range total is present (caller should omit
     the variety line from its rendered output).
     """
-    if isinstance(variety, dict):
-        total = variety.get("total")
-        if isinstance(total, int) and not isinstance(total, bool):
-            return total
-        return None
     if isinstance(variety, int) and not isinstance(variety, bool):
-        # Defensive: a legacy or test-fixture payload may pass a bare
-        # int. Render it as-is rather than dropping it.
-        return variety
-    return None
+        # Bare-int render affordance, range-gated to match the resolver's
+        # [MIN_SCORE, MAX_SCORE] policy (an out-of-range bare int drops the line).
+        return variety if MIN_SCORE <= variety <= MAX_SCORE else None
+    return resolve_variety_total(variety)  # dict path → canonical + fallbacks
 
 
 def build_custom_instructions(state: dict) -> str:

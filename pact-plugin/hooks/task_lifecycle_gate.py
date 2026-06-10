@@ -44,10 +44,12 @@ Rule coverage:
     submitted at REQUIRED band (Task B variety.total >= 11) without
     reasoning_reconstruction
   - reasoning_reconstruction_band_unresolvable — band traversal failed
-    (missing blocks, missing Task B, missing variety); fail-open advisory
-    documents the gap without blocking lifecycle
+    (missing blocks, missing Task B, missing variety, or variety present
+    but no resolvable total); fail-open advisory documents the gap without
+    blocking lifecycle
   - variety_missing_on_dispatch_task — pact-* work Task created without
-    metadata.variety OR with malformed per-dimension rationales
+    metadata.variety, with malformed per-dimension rationales, OR with no
+    resolvable variety total
   - variety_acknowledgment_missing — Teachback submitted without
     variety_acknowledgment field (D10 teammate verification)
   - variety_acknowledgment_schema_invalid_at_write_time — Teachback
@@ -121,10 +123,12 @@ try:
     from shared.session_journal import append_event, get_journal_path, make_event
     from shared.task_utils import read_task_json
     from shared.teachback_schema import (
+        TEACHBACK_RECOMMENDED_BAND_MIN,
         TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN,
         TEACHBACK_REQUIRED_FIELDS,
         TEACHBACK_REQUIRED_SUBKEYS,
         TEACHBACK_VARIETY_ACK_VALID_VALUES,
+        resolve_variety_total,
         validate_reasoning_reconstruction,
     )
     from shared.tool_response import extract_tool_response
@@ -176,6 +180,15 @@ _VARIETY_REQUIRED_RATIONALES = (
     "scope_rationale",
     "uncertainty_rationale",
     "risk_rationale",
+)
+
+# Sentinel problem string returned by _validate_variety_schema when the
+# rationales are well-formed but no resolvable variety total exists. The R4
+# rule keys on this exact value to select the distinct unresolvable-total
+# advisory message (vs. the rationale-malformed message).
+_NO_RESOLVABLE_TOTAL = (
+    "no resolvable total (need an integer 4-16 under key 'total', "
+    "or a recoverable fallback)"
 )
 
 
@@ -571,14 +584,27 @@ def _validate_teachback_submit_schema(teachback: object) -> str | None:
     return None
 
 
-def _validate_variety_schema(variety: object) -> str | None:
+def _validate_variety_schema(
+    variety: object, metadata: object = None
+) -> str | None:
     """Return None if metadata.variety is well-formed per D11, or a short
     reason string. Pure function; never raises.
 
     Validates the four per-dimension rationale fields (presence +
-    non-empty string). Dimension score range checks (1-4) are the
-    orchestrator's authority; this hook is defense-in-depth for the
-    cargo-cult-prevention property D11 codifies.
+    non-empty string) AND that the stamp carries a resolvable variety
+    total. The total check consults the same shared resolver the
+    read-time band resolver uses (resolve_variety_total) — this is the
+    cross-rule consistency property: any variety shape that passes
+    write-time validation MUST resolve at read-time. Dimension score
+    range checks (1-4) are the orchestrator's authority; this hook is
+    defense-in-depth for the cargo-cult-prevention property D11 codifies.
+
+    The optional `metadata` argument is forwarded to the resolver so the
+    non-canonical top-level `variety_score` sibling is reachable. Callers
+    that only have the variety dict may omit it (the resolver simply skips
+    that candidate). Rationale problems are checked first (cheap dict +
+    string checks), then the total (one resolver call); the first problem
+    found is returned, preserving the single-string-return contract.
     """
     if not isinstance(variety, dict):
         return f"must be object, got {type(variety).__name__}"
@@ -599,6 +625,8 @@ def _validate_variety_schema(variety: object) -> str | None:
             f"per-dimension rationales empty/non-string: "
             f"{', '.join(empty)}"
         )
+    if resolve_variety_total(variety, metadata) is None:
+        return _NO_RESOLVABLE_TOTAL
     return None
 
 
@@ -609,12 +637,17 @@ def _resolve_required_band_via_blocks(
     via blocks traversal to Task B.
 
     Returns one of:
-      - "required": Task B.metadata.variety.total >= 11
-      - "recommended": 7 <= total <= 10
-      - "skipped": total <= 6
+      - "required": resolved total >= TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN
+      - "recommended": TEACHBACK_RECOMMENDED_BAND_MIN <= total < required-min
+      - "skipped": total < TEACHBACK_RECOMMENDED_BAND_MIN
       - "unresolvable": blocks link missing, Task B file missing, or
-        variety absent/malformed on Task B (fail-open: caller emits a
-        separate band_unresolvable advisory documenting the gap)
+        variety absent/malformed/untotaled on Task B (fail-open: caller
+        emits a separate band_unresolvable advisory documenting the gap)
+
+    The total is resolved via the shared resolve_variety_total helper, so a
+    non-canonical stamp (score / top-level variety_score / dimension-sum)
+    resolves rather than reading as "unresolvable" — the same resolver the
+    write-time validator consults (the cross-rule consistency property).
     """
     blocks = task_a.get("blocks")
     if not isinstance(blocks, list) or not blocks:
@@ -636,12 +669,12 @@ def _resolve_required_band_via_blocks(
     variety = metadata.get("variety")
     if not isinstance(variety, dict):
         return "unresolvable"
-    total = variety.get("total")
-    if not isinstance(total, int) or isinstance(total, bool):
+    total = resolve_variety_total(variety, metadata)
+    if total is None:
         return "unresolvable"
     if total >= TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN:
         return "required"
-    if total >= 7:
+    if total >= TEACHBACK_RECOMMENDED_BAND_MIN:
         return "recommended"
     return "skipped"
 
@@ -808,20 +841,20 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
         # R4: variety_missing_on_dispatch_task (D11-refined).
         # Same discriminator pattern as work_addblockedby_missing
         # (not-teachback + pact-* owner + not exempt). Single rule with
-        # two trigger paths (absent variety OR malformed per-dimension
-        # rationales); distinct message text per path, same rule name —
-        # the lead-side correction is the same (re-stamp variety) in
-        # either case. Clause order mirrors L575-580: cheap dict-lookups
-        # first, disk-touching exempt-check last (cached via `_exempt()`
-        # so the second invocation reuses the first call's result).
+        # three trigger paths (absent variety OR malformed per-dimension
+        # rationales OR no resolvable total); distinct message text per
+        # path, same rule name — the lead-side correction is the same
+        # (re-stamp variety) in every case. Clause order mirrors L575-580:
+        # cheap dict-lookups first, disk-touching exempt-check last
+        # (cached via `_exempt()` so the second invocation reuses the
+        # first call's result).
         if (
             not is_teachback
             and owner.startswith("pact-")
             and not _exempt()
         ):
-            incoming_variety = (
-                tool_input.get("metadata") or {}
-            ).get("variety")
+            incoming_metadata = tool_input.get("metadata") or {}
+            incoming_variety = incoming_metadata.get("variety")
             if not incoming_variety:
                 advisories.append((
                     "variety_missing_on_dispatch_task",
@@ -832,8 +865,28 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                     "peer-review dispatch surfaces.",
                 ))
             else:
-                schema_problem = _validate_variety_schema(incoming_variety)
-                if schema_problem:
+                # The validator forwards the surrounding metadata so the
+                # non-canonical top-level variety_score sibling is reachable
+                # by the shared resolver. It returns the rationale problem
+                # first (if any), then the total problem; the total problem
+                # carries the distinctive _NO_RESOLVABLE_TOTAL sentinel so
+                # the two paths emit distinct message text under one rule.
+                schema_problem = _validate_variety_schema(
+                    incoming_variety, incoming_metadata
+                )
+                if schema_problem == _NO_RESOLVABLE_TOTAL:
+                    advisories.append((
+                        "variety_missing_on_dispatch_task",
+                        f"PACT task_lifecycle_gate: pact-* Task created "
+                        f"(owner={owner!r}) with metadata.variety carrying "
+                        "no resolvable total (need an integer 4-16 under "
+                        "key 'total', or a recoverable fallback). Per "
+                        "pact-variety.md the canonical key is 'total'. The "
+                        "hook's read-time band resolver requires a "
+                        "resolvable total; stamping without one trips a "
+                        "band-unresolvable advisory at teachback-submit time.",
+                    ))
+                elif schema_problem:
                     advisories.append((
                         "variety_missing_on_dispatch_task",
                         f"PACT task_lifecycle_gate: pact-* Task created "
@@ -1148,13 +1201,16 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                     advisories.append((
                         "reasoning_reconstruction_band_unresolvable",
                         f"PACT task_lifecycle_gate: Teachback Task "
-                        f"{task_id} cannot resolve variety band — "
-                        "Task A.blocks link missing OR Task B file "
-                        "missing OR Task B.metadata.variety absent. "
-                        "Hook advisory skipped; lead should enforce "
-                        "variety stamping via teachback_addblocks_missing "
-                        "wiring-time enforcement upstream + "
-                        "variety_missing_on_dispatch_task at TaskCreate.",
+                        f"{task_id} cannot resolve the variety band. One "
+                        "of: Task A.blocks is missing/empty; team context "
+                        "is unavailable; the Task B file is missing; or "
+                        "Task B.metadata.variety is absent OR present but "
+                        "carries no resolvable total (no integer 4-16 under "
+                        "'total' or a recoverable fallback). Advisory only "
+                        "— not blocking. If the variety stamp is the cause, "
+                        "re-stamp Task B with a canonical "
+                        "metadata.variety.total (see pact-variety.md "
+                        "Per-Dispatch Variety Stamping).",
                     ))
 
     return advisories

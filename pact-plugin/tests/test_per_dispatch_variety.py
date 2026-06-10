@@ -62,6 +62,25 @@ def _well_formed_variety(**overrides):
     return payload
 
 
+def _no_fallback_variety(**overrides):
+    """Return a variety dict whose `total` is the ONLY total candidate —
+    the four dimension scores are omitted so the dimension-sum fallback
+    cannot resolve, and there is no `score` key. Use this to exercise the
+    "every resolver candidate invalid → unresolvable" path: override `total`
+    with a bad value (or pop it) and no other candidate can recover it. The
+    rationales (not resolution candidates) are kept so the write-time schema
+    check still treats the shape as rationale-complete."""
+    payload = {
+        "novelty_rationale": "x",
+        "scope_rationale": "x",
+        "uncertainty_rationale": "x",
+        "risk_rationale": "x",
+        "total": 8,
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _seed_task_b(
     tmp_path, monkeypatch, team_name, task_b_id,
     metadata=None,
@@ -164,11 +183,10 @@ class TestRequiredBandResolution:
     def test_band_threshold_constants_aligned_with_variety_scorer(self):
         """Pin the alignment between
         TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN and
-        variety_scorer.ORCHESTRATE_MAX. PLAN_MODE_MIN-implied threshold is
+        variety_scorer. The threshold binds to PLAN_MODE_MIN, which is itself
         ORCHESTRATE_MAX + 1 = 11. If variety_scorer's thresholds shift and
         this module's constant doesn't, this test fails and the drift is
-        surfaced. Grep-at-edit-time discipline applies until the SSOT
-        migration trajectory lands."""
+        surfaced."""
         from shared import variety_scorer
         from shared.teachback_schema import (
             TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN,
@@ -181,6 +199,101 @@ class TestRequiredBandResolution:
             "shared.teachback_schema constant drifted from variety_scorer "
             "SSOT — see teachback_schema.py inline comment"
         )
+
+
+# =============================================================================
+# Resolvable-via-fallback: non-canonical stamps that now resolve a band
+#
+# Before the shared-resolver fix, only a strict int `total` resolved; a stamp
+# carrying a non-canonical score / top-level variety_score / valid dimension
+# scores read as "unresolvable". These cases pin that such stamps now resolve
+# to the correct band — the false-positive the fix removes. They exercise the
+# caller's int→band mapping through each fallback candidate, so a regression
+# in either the resolver chain or the band cuts surfaces here.
+# =============================================================================
+
+
+class TestBandResolvableViaFallback:
+    """Non-canonical variety stamps resolve to a band via the shared
+    resolver's fallback chain, instead of reading as unresolvable."""
+
+    def test_score_fallback_resolves_band_for_field_report_shape(
+        self, tmp_path, monkeypatch,
+    ):
+        """The exact reported false-positive shape: rationales + a
+        non-canonical `score` int (no `total`), with a sibling top-level
+        `variety_score`. Must resolve to a band — NOT unresolvable."""
+        variety = _no_fallback_variety(score=12)
+        variety.pop("total")
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": variety, "variety_score": 12},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "required"
+
+    def test_score_fallback_maps_to_recommended_band(
+        self, tmp_path, monkeypatch,
+    ):
+        """score=8 (no total) → recommended band (7..10)."""
+        variety = _no_fallback_variety(score=8)
+        variety.pop("total")
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": variety},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "recommended"
+
+    def test_top_level_variety_score_fallback_resolves_band(
+        self, tmp_path, monkeypatch,
+    ):
+        """No `total`, no `score`, but a top-level metadata.variety_score
+        int → resolves via candidate 3 (reachable because the caller passes
+        Task B's full metadata to the resolver)."""
+        variety = _no_fallback_variety()
+        variety.pop("total")
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": variety, "variety_score": 11},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "required"
+
+    def test_dimension_sum_fallback_resolves_band(
+        self, tmp_path, monkeypatch,
+    ):
+        """No total/score/variety_score, but all four dimension scores
+        valid → resolves to the sum's band. _well_formed_variety carries
+        2/2/2/2 = 8, so popping `total` lands on recommended via the sum."""
+        variety = _well_formed_variety()
+        variety.pop("total")
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": variety},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "recommended"
+
+    def test_junk_total_falls_through_to_dimension_sum_band(
+        self, tmp_path, monkeypatch,
+    ):
+        """An out-of-range `total` does not shadow a recoverable dimension
+        sum: total=99 with dims 3/3/3/3=12 → required (the sum's band)."""
+        variety = _well_formed_variety(
+            total=99, novelty=3, scope=3, uncertainty=3, risk=3,
+        )
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": variety},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "required"
 
 
 # =============================================================================
@@ -283,9 +396,12 @@ class TestBandUnresolvableFailOpen:
             {"blocks": ["2"]}, "test-team"
         ) == "unresolvable"
 
-    def test_variety_total_missing(self, tmp_path, monkeypatch):
-        """Task B.metadata.variety has no `total` key → unresolvable."""
-        variety = _well_formed_variety()
+    def test_variety_total_missing_and_no_fallback(self, tmp_path, monkeypatch):
+        """Task B.metadata.variety has no `total` key AND no recoverable
+        fallback (dimensions stripped) → unresolvable. A missing total alone
+        now resolves via the dimension-sum fallback when the four dimensions
+        are valid; unresolvable requires every candidate to be invalid."""
+        variety = _no_fallback_variety()
         variety.pop("total")
         _seed_task_b(
             tmp_path, monkeypatch, "test-team", "2",
@@ -295,34 +411,36 @@ class TestBandUnresolvableFailOpen:
             {"blocks": ["2"]}, "test-team"
         ) == "unresolvable"
 
-    def test_variety_total_non_int_string(self, tmp_path, monkeypatch):
-        """Task B.metadata.variety.total = "twelve" → unresolvable."""
+    def test_variety_total_non_int_string_and_no_fallback(self, tmp_path, monkeypatch):
+        """Task B.metadata.variety.total = "twelve" with no recoverable
+        fallback → unresolvable."""
         _seed_task_b(
             tmp_path, monkeypatch, "test-team", "2",
-            metadata={"variety": _well_formed_variety(total="twelve")},
+            metadata={"variety": _no_fallback_variety(total="twelve")},
         )
         assert tlg._resolve_required_band_via_blocks(
             {"blocks": ["2"]}, "test-team"
         ) == "unresolvable"
 
-    def test_variety_total_bool_rejected(self, tmp_path, monkeypatch):
-        """Task B.metadata.variety.total = True → unresolvable.
-        Defensive: bool is a subclass of int in Python; reject explicitly.
-        """
+    def test_variety_total_bool_rejected_and_no_fallback(self, tmp_path, monkeypatch):
+        """Task B.metadata.variety.total = True with no recoverable fallback
+        → unresolvable. Defensive: bool is a subclass of int in Python;
+        reject explicitly."""
         _seed_task_b(
             tmp_path, monkeypatch, "test-team", "2",
-            metadata={"variety": _well_formed_variety(total=True)},
+            metadata={"variety": _no_fallback_variety(total=True)},
         )
         assert tlg._resolve_required_band_via_blocks(
             {"blocks": ["2"]}, "test-team"
         ) == "unresolvable"
 
-    def test_variety_total_float(self, tmp_path, monkeypatch):
-        """Task B.metadata.variety.total = 12.5 → unresolvable. The
-        traversal accepts ints only; floats indicate malformed data."""
+    def test_variety_total_float_and_no_fallback(self, tmp_path, monkeypatch):
+        """Task B.metadata.variety.total = 12.5 with no recoverable fallback
+        → unresolvable. The resolver accepts ints only; floats indicate
+        malformed data."""
         _seed_task_b(
             tmp_path, monkeypatch, "test-team", "2",
-            metadata={"variety": _well_formed_variety(total=12.5)},
+            metadata={"variety": _no_fallback_variety(total=12.5)},
         )
         assert tlg._resolve_required_band_via_blocks(
             {"blocks": ["2"]}, "test-team"
