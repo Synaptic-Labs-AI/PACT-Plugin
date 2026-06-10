@@ -75,11 +75,19 @@ class TestConstants:
         assert TEACHBACK_VARIETY_ACK_VALID_VALUES == ("yes", "no", "concern")
 
     def test_required_min_threshold_is_11(self):
-        # Mirror of variety_scorer: ORCHESTRATE_MAX=10, PLAN_MODE_MAX=14
-        # → plan-mode-and-above starts at >= 11.
-        from shared.variety_scorer import ORCHESTRATE_MAX, PLAN_MODE_MAX
+        # Mirror the source derivation: the threshold binds to the plan-mode
+        # floor PLAN_MODE_MIN, and PLAN_MODE_MIN itself is the SSOT relation
+        # ORCHESTRATE_MAX + 1. Asserting both links catches drift at either
+        # one — a change to PLAN_MODE_MIN's definition surfaces on the second
+        # assertion even though the threshold tracks it on the first.
+        from shared.variety_scorer import (
+            ORCHESTRATE_MAX,
+            PLAN_MODE_MAX,
+            PLAN_MODE_MIN,
+        )
 
-        assert TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN == ORCHESTRATE_MAX + 1
+        assert TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN == PLAN_MODE_MIN
+        assert PLAN_MODE_MIN == ORCHESTRATE_MAX + 1
         assert TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN <= PLAN_MODE_MAX
 
 

@@ -33,6 +33,12 @@ ORCHESTRATE_MAX = 10  # 7-10 -> orchestrate
 PLAN_MODE_MAX = 14    # 11-14 -> plan-mode + orchestrate
 # 15-16 -> research spike
 
+# Inclusive LOWER bound of the plan-mode band: the first score above the
+# orchestrate band (= ORCHESTRATE_MAX + 1 = 11). Named so consumers that gate
+# on "plan-mode and above" reference a band-floor constant instead of the
+# off-by-one expression.
+PLAN_MODE_MIN = ORCHESTRATE_MAX + 1  # 11
+
 # ---------------------------------------------------------------------------
 # Workflow route names
 # ---------------------------------------------------------------------------

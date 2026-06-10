@@ -6,6 +6,8 @@ Summary: Canonical teachback_submit schema constants and validators. SSOT
          (L1.5 method gate per pact-ct-teachback.md), and the variety-band
          threshold at which reasoning_reconstruction is REQUIRED.
 Used by: hooks/task_lifecycle_gate.py (write-time + completion-time gates),
+         hooks/precompact_state_reminder.py (resolve_variety_total for the
+         compaction-state render),
          tests/test_teachback_reasoning_reconstruction.py (schema gate),
          tests/test_task_lifecycle_gate.py (rule-fixture inputs),
          tests/test_teachback_schema.py (constants + validator).
@@ -25,10 +27,8 @@ Public surface:
 - TEACHBACK_VARIETY_ACK_VALID_VALUES — enum tuple for
   variety_acknowledgment.rationale_articulates_this_dispatch.
 - TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN — variety band threshold
-  (>= 11 → REQUIRED). Derived at module-load from
-  `variety_scorer.ORCHESTRATE_MAX + 1`; substitute
-  `from shared.variety_scorer import PLAN_MODE_MIN` when that constant
-  lands.
+  (>= 11 → REQUIRED). Bound at module-load to `variety_scorer.PLAN_MODE_MIN`
+  (the plan-mode band floor).
 - TEACHBACK_RECOMMENDED_BAND_MIN — variety band threshold
   (>= 7 → RECOMMENDED, below it → SKIPPED). Derived from
   `variety_scorer.COMPACT_MAX + 1`.
@@ -50,7 +50,7 @@ from shared.variety_scorer import (
     MAX_SCORE,
     MIN_DIMENSION,
     MIN_SCORE,
-    ORCHESTRATE_MAX,
+    PLAN_MODE_MIN,
 )
 
 
@@ -76,12 +76,11 @@ TEACHBACK_REQUIRED_SUBKEYS: tuple[str, ...] = (
 #   {rationale_articulates_this_dispatch: <enum>, concern: <str when != yes>}.
 TEACHBACK_VARIETY_ACK_VALID_VALUES: tuple[str, ...] = ("yes", "no", "concern")
 
-# REQUIRED-band threshold for reasoning_reconstruction. Derived from
-# variety_scorer.ORCHESTRATE_MAX semantics: plan-mode-and-above starts at
-# ORCHESTRATE_MAX + 1 (i.e. >= 11 given ORCHESTRATE_MAX = 10). When
-# variety_scorer.py exports an explicit PLAN_MODE_MIN, this should be
-# replaced with `from shared.variety_scorer import PLAN_MODE_MIN`.
-TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN: int = ORCHESTRATE_MAX + 1
+# REQUIRED-band threshold for reasoning_reconstruction: reasoning_reconstruction
+# is REQUIRED at plan-mode-and-above (>= 11). Bound to variety_scorer's
+# PLAN_MODE_MIN (the plan-mode band floor) so the threshold tracks the SSOT
+# band cuts directly instead of an off-by-one expression.
+TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN: int = PLAN_MODE_MIN
 
 # RECOMMENDED-band floor for reasoning_reconstruction. Totals strictly above
 # COMPACT_MAX (i.e. >= COMPACT_MAX + 1 = 7) and below the REQUIRED threshold
