@@ -183,11 +183,10 @@ class TestRequiredBandResolution:
     def test_band_threshold_constants_aligned_with_variety_scorer(self):
         """Pin the alignment between
         TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN and
-        variety_scorer.ORCHESTRATE_MAX. PLAN_MODE_MIN-implied threshold is
+        variety_scorer. The threshold binds to PLAN_MODE_MIN, which is itself
         ORCHESTRATE_MAX + 1 = 11. If variety_scorer's thresholds shift and
         this module's constant doesn't, this test fails and the drift is
-        surfaced. Grep-at-edit-time discipline applies until the SSOT
-        migration trajectory lands."""
+        surfaced."""
         from shared import variety_scorer
         from shared.teachback_schema import (
             TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN,

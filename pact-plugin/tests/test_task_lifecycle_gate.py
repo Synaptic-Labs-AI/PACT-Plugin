@@ -3670,7 +3670,7 @@ def test_multi_rule_concurrent_emission_all_four_advisory_rules_fire_together(
 
 # =============================================================================
 # 10|11 variety-band boundary disambiguation — pin the exact cut so that
-# future variety_scorer threshold changes (e.g. PLAN_MODE_MIN export) are
+# variety_scorer threshold changes (e.g. a shift in PLAN_MODE_MIN) are
 # caught here rather than silently re-routing recommended/required cases.
 # =============================================================================
 
