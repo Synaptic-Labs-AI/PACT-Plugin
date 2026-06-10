@@ -2349,6 +2349,115 @@ def test_band_unresolvable_message_names_no_resolvable_total(
 
 
 # =============================================================================
+# Read-time band MAPPING through the fallback candidates — advisory surface.
+#
+# The unit-layer counterpart in test_per_dispatch_variety.py asserts the band
+# STRING returned by _resolve_required_band_via_blocks for each fallback. These
+# tests assert the complementary observable: a fallback-only stamp seeded on
+# disk drives a full evaluate_lifecycle teachback-submit through to the
+# user-visible required-band advisory (reasoning_reconstruction_missing_at_
+# required_band) — and emits no band_unresolvable. Belt (advisory) + suspenders
+# (unit band string) cover different change classes: a regression that left the
+# band string correct but broke the advisory wiring, or vice versa, fails on
+# exactly one layer. Each stamp omits the canonical total so only the named
+# fallback can resolve, and lands at the required band (total >=
+# TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN) so R3 is observable.
+# =============================================================================
+
+
+def _assert_required_band_advisory(advisories):
+    """The read-time required-band advisory fired and no unresolvable
+    advisory was emitted alongside it."""
+    rules = [rule for rule, _ in advisories]
+    assert "reasoning_reconstruction_missing_at_required_band" in rules, (
+        f"expected the required-band advisory to fire, got: {rules}"
+    )
+    assert "reasoning_reconstruction_band_unresolvable" not in rules, (
+        f"a resolvable fallback stamp must not emit unresolvable, got: {rules}"
+    )
+
+
+def test_r3_fires_at_read_time_via_score_fallback(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Task B carries a non-canonical `score` at the required band (no
+    `total`) → read-time resolves via the score fallback and the required-
+    band advisory fires. teachback_submit omits reasoning_reconstruction so
+    R3 is the expected miss."""
+    pact_context(team_name="test-team", session_id="test-session")
+    variety = _well_formed_variety(score=tlg.TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN)
+    variety.pop("total")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety=variety,
+    )
+    advisories = tlg.evaluate_lifecycle({
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": _well_formed_teachback_submit()},
+        },
+        "tool_response": {},
+    })
+    _assert_required_band_advisory(advisories)
+
+
+def test_r3_fires_at_read_time_via_top_level_variety_score_fallback(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Task B has no in-dict total/score but a top-level
+    metadata.variety_score at the required band → read-time resolves via the
+    sibling candidate (the caller forwards Task B's full metadata) and the
+    required-band advisory fires."""
+    pact_context(team_name="test-team", session_id="test-session")
+    variety = _well_formed_variety()
+    variety.pop("total")
+    for dim in ("novelty", "scope", "uncertainty", "risk"):
+        variety.pop(dim, None)
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety=variety,
+    )
+    # Add the top-level sibling onto the seeded Task B metadata.
+    tasks_dir = tmp_path / ".claude" / "tasks" / "test-team"
+    task_b = json.loads((tasks_dir / "2.json").read_text(encoding="utf-8"))
+    task_b["metadata"]["variety_score"] = (
+        tlg.TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN
+    )
+    (tasks_dir / "2.json").write_text(json.dumps(task_b), encoding="utf-8")
+    advisories = tlg.evaluate_lifecycle({
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": _well_formed_teachback_submit()},
+        },
+        "tool_response": {},
+    })
+    _assert_required_band_advisory(advisories)
+
+
+def test_r3_fires_at_read_time_via_dimension_sum_fallback(
+    tmp_path, monkeypatch, pact_context,
+):
+    """Task B has no total/score/variety_score but four valid dimension
+    scores summing into the required band (3+3+3+3=12) → read-time resolves
+    via the dimension-sum fallback and the required-band advisory fires."""
+    pact_context(team_name="test-team", session_id="test-session")
+    variety = _well_formed_variety(novelty=3, scope=3, uncertainty=3, risk=3)
+    variety.pop("total")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety=variety,
+    )
+    advisories = tlg.evaluate_lifecycle({
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": _well_formed_teachback_submit()},
+        },
+        "tool_response": {},
+    })
+    _assert_required_band_advisory(advisories)
+
+
+# =============================================================================
 # R3 + R5 write-time branch — TaskUpdate writing teachback_submit metadata
 # =============================================================================
 

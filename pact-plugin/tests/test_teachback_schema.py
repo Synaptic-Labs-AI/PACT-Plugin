@@ -375,6 +375,9 @@ class TestResolverCandidateDimensionSum:
         assert resolve_variety_total(_dimensions(2, 3, 1, 4)) == 10
 
     @pytest.mark.parametrize(
+        "position", ["novelty", "scope", "uncertainty", "risk"]
+    )
+    @pytest.mark.parametrize(
         "bad",
         [
             pytest.param(MIN_DIMENSION - 1, id="below_min_dim"),  # 0
@@ -385,16 +388,23 @@ class TestResolverCandidateDimensionSum:
             pytest.param(None, id="none"),
         ],
     )
-    def test_one_bad_dimension_invalidates_the_sum(self, bad):
+    def test_one_bad_dimension_invalidates_the_sum(self, bad, position):
         # A single out-of-range / wrong-typed dimension means the all-four
         # guard fails → the candidate does not fire → None (no other source).
+        # Parametrized across every dimension position so an asymmetric guard
+        # that skipped checking one dimension would surface here.
         v = _dimensions(2, 2, 2, 2)
-        v["uncertainty"] = bad
+        v[position] = bad
         assert resolve_variety_total(v) is None
 
-    def test_one_missing_dimension_invalidates_the_sum(self):
+    @pytest.mark.parametrize(
+        "position", ["novelty", "scope", "uncertainty", "risk"]
+    )
+    def test_one_missing_dimension_invalidates_the_sum(self, position):
+        # Every dimension position must be required by the all-four guard;
+        # dropping any one yields None.
         v = _dimensions(2, 2, 2, 2)
-        del v["risk"]
+        del v[position]
         assert resolve_variety_total(v) is None
 
 
