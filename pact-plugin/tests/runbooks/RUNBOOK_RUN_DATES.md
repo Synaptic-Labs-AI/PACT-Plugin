@@ -148,6 +148,14 @@ If a future layout moves the version column, changes the per-mode verdict cell,
 the deferral label, or renames the verdict tokens, update `live_probe_gate.py`'s
 row parser to match.
 
+## 924-locus-b-dogfood-probe.md
+
+Per-mode schema per `live-probe-template.md` (§Live-probe-template instances above); denominator = 2 (tmux dogfood; in-process dogfood) per the 924 runbook §4.
+
+| Run date (UTC) | Operator | Plugin version | Per-mode verdict (tmux PASS\|FAIL N/N · in-process PASS\|FAIL N/N) | Mode-discriminator evidence (session_ids observed) | Notes (findings; tracking) |
+| -------------- | -------- | -------------- | ----------------------------------------------------------------- | -------------------------------------------------- | -------------------------- |
+| 2026-06-10 | michael-wojcik | 4.4.14 | tmux n/a (BLOCKED — #932) · in-process n/a | lead `54ad4a1d…`; secretary `ee689856…`; devops `e9edfc32…` (3 distinct ⇒ separate-process / iterm2) | PROBE BLOCKED — gate stays armed (no satisfied row). (A) gate self-disables from a teammate whose `CLAUDE_PROJECT_DIR` is the `pact-plugin` SUBDIR → `_plugin_marker` None → `silent:no_marker` (git-common-dir fallback shadowed). (B) §2c surfacing NEGATIVE — via a temp/reverted git-fallback patch the gate reached EMIT_WARN but the stderr-on-exit-0 advisory did not reach the agent (`merge_guard` exit-2 deny did — positive control). WARN→SILENT mechanism confirmed via a synthetic satisfied row (reverted). Tracked in #932 (fix `_resolve_repo_root` marker-validation + `_emit_warn`→`hookSpecificOutput`, then re-probe). #924 stays OPEN. |
+
 ## 926-config-dir-live-probe.md
 
 | Run date (UTC) | Operator | Plugin version | Sections passed | inline-mission mode | Notes / per-mode observations |
