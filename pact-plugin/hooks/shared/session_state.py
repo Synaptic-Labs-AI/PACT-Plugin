@@ -351,11 +351,13 @@ def _derive_variety_from_journal(
 ) -> Any:
     """
     Return the variety dict from the first variety_assessed event, or
-    None if no such event exists. Opaque passthrough — callers only
-    check `is not None` and/or read `.get("total")`. Keeping the full
-    dict preserves future flexibility (novelty/scope/uncertainty/risk
-    dimensions are rendered by consumers that want them; the default
-    compaction-hook render uses `.get("total")`).
+    None if no such event exists. Opaque passthrough — this helper does
+    not interpret the dict; consumers resolve the scalar total they need.
+    Keeping the full dict preserves future flexibility (the
+    novelty/scope/uncertainty/risk dimensions stay available to consumers
+    that want them; the compaction-hook render resolves a single total
+    via the shared `resolve_variety_total` helper, which prefers the
+    canonical `total` key — see its docstring for the fallback chain).
     """
     variety_events = sorted(
         [e for e in events if e.get("type") == "variety_assessed"],
