@@ -135,7 +135,10 @@ class TestBuildCustomInstructions:
         result = build_custom_instructions(state)
         assert "Variety" not in result
 
-    def test_variety_zero_included(self):
+    def test_out_of_range_bare_int_omits_variety_line(self):
+        """A bare int below the valid score range (0 < MIN_SCORE=4) is an
+        impossible variety total — the line is omitted rather than rendering
+        "Variety score: 0", per the range-gate on the bare-int branch."""
         from precompact_state_reminder import build_custom_instructions
         state = {
             "feature_subject": "X", "feature_id": "1",
@@ -143,7 +146,7 @@ class TestBuildCustomInstructions:
             "teammates": [], "team_names": [],
         }
         result = build_custom_instructions(state)
-        assert "Variety score: 0" in result
+        assert "Variety" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -155,16 +158,12 @@ class TestExtractVarietyTotal:
     """Direct tests for the _extract_variety_total helper.
 
     Defensive code rejects bool because Python's bool is a subclass of
-    int — `isinstance(True, int) is True`. Without the explicit
-    `not isinstance(_, bool)` guards, a `variety_score: True` would
-    render as "Variety score: 1" in the compaction-model context, and
-    a dict `{"total": False}` would render as "Variety score: 0". Both
-    are misleading.
-
-    Round-2 review (PR #426 F4) found these guards silently removable.
-    Counter-test: removing `and not isinstance(_, bool)` from the two
-    type checks at precompact_state_reminder.py:56,59 makes these
-    fail with the assertion `is None` violated."""
+    int — `isinstance(True, int) is True`. The bare-int branch carries an
+    explicit `not isinstance(_, bool)` guard so a `variety_score: True`
+    cannot render as "Variety score: 1" in the compaction-model context;
+    the dict path delegates bool rejection to the shared resolver, which
+    rejects `{"total": False}` for the same reason. Removing the bare-int
+    guard makes the bool cases below fail the `is None` assertion."""
 
     def test_bool_true_at_top_level_rejected(self):
         from precompact_state_reminder import _extract_variety_total
@@ -201,19 +200,28 @@ class TestExtractVarietyTotal:
         from precompact_state_reminder import _extract_variety_total
         assert _extract_variety_total({"total": 99}) is None
 
-    # ----- bare-int passthrough (render affordance, kept local) ---------
+    # ----- bare-int render affordance, range-gated to [MIN_SCORE, MAX_SCORE] -
 
-    def test_bare_int_passes_through(self):
+    def test_bare_int_in_range_passes_through(self):
         from precompact_state_reminder import _extract_variety_total
         assert _extract_variety_total(8) == 8
 
-    def test_bare_int_passthrough_does_not_range_check(self):
-        """The bare-int passthrough is a render affordance and intentionally
-        does NOT range-check (unlike the dict path, which goes through the
-        range-enforcing shared resolver). A bare 99 renders as-is."""
+    def test_bare_int_at_range_bounds_passes_through(self):
+        """The inclusive [4, 16] bounds (MIN_SCORE/MAX_SCORE) both pass."""
         from precompact_state_reminder import _extract_variety_total
-        assert _extract_variety_total(99) == 99
-        assert _extract_variety_total(0) == 0
+        assert _extract_variety_total(4) == 4
+        assert _extract_variety_total(16) == 16
+
+    def test_out_of_range_bare_int_returns_none(self):
+        """The bare-int branch is range-gated to match the resolver's
+        no-clamp/no-fabricate [4, 16] policy: an out-of-range bare int is
+        dropped (line omitted), not rendered verbatim. Above the max (99)
+        and below the min (0, 3) both return None."""
+        from precompact_state_reminder import _extract_variety_total
+        assert _extract_variety_total(99) is None
+        assert _extract_variety_total(17) is None
+        assert _extract_variety_total(3) is None
+        assert _extract_variety_total(0) is None
 
     # ----- junk → None --------------------------------------------------
 
