@@ -203,6 +203,101 @@ class TestRequiredBandResolution:
 
 
 # =============================================================================
+# Resolvable-via-fallback: non-canonical stamps that now resolve a band
+#
+# Before the shared-resolver fix, only a strict int `total` resolved; a stamp
+# carrying a non-canonical score / top-level variety_score / valid dimension
+# scores read as "unresolvable". These cases pin that such stamps now resolve
+# to the correct band — the false-positive the fix removes. They exercise the
+# caller's int→band mapping through each fallback candidate, so a regression
+# in either the resolver chain or the band cuts surfaces here.
+# =============================================================================
+
+
+class TestBandResolvableViaFallback:
+    """Non-canonical variety stamps resolve to a band via the shared
+    resolver's fallback chain, instead of reading as unresolvable."""
+
+    def test_score_fallback_resolves_band_for_field_report_shape(
+        self, tmp_path, monkeypatch,
+    ):
+        """The exact reported false-positive shape: rationales + a
+        non-canonical `score` int (no `total`), with a sibling top-level
+        `variety_score`. Must resolve to a band — NOT unresolvable."""
+        variety = _no_fallback_variety(score=12)
+        variety.pop("total")
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": variety, "variety_score": 12},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "required"
+
+    def test_score_fallback_maps_to_recommended_band(
+        self, tmp_path, monkeypatch,
+    ):
+        """score=8 (no total) → recommended band (7..10)."""
+        variety = _no_fallback_variety(score=8)
+        variety.pop("total")
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": variety},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "recommended"
+
+    def test_top_level_variety_score_fallback_resolves_band(
+        self, tmp_path, monkeypatch,
+    ):
+        """No `total`, no `score`, but a top-level metadata.variety_score
+        int → resolves via candidate 3 (reachable because the caller passes
+        Task B's full metadata to the resolver)."""
+        variety = _no_fallback_variety()
+        variety.pop("total")
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": variety, "variety_score": 11},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "required"
+
+    def test_dimension_sum_fallback_resolves_band(
+        self, tmp_path, monkeypatch,
+    ):
+        """No total/score/variety_score, but all four dimension scores
+        valid → resolves to the sum's band. _well_formed_variety carries
+        2/2/2/2 = 8, so popping `total` lands on recommended via the sum."""
+        variety = _well_formed_variety()
+        variety.pop("total")
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": variety},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "recommended"
+
+    def test_junk_total_falls_through_to_dimension_sum_band(
+        self, tmp_path, monkeypatch,
+    ):
+        """An out-of-range `total` does not shadow a recoverable dimension
+        sum: total=99 with dims 3/3/3/3=12 → required (the sum's band)."""
+        variety = _well_formed_variety(
+            total=99, novelty=3, scope=3, uncertainty=3, risk=3,
+        )
+        _seed_task_b(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": variety},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "required"
+
+
+# =============================================================================
 # Fail-open paths: every "unresolvable" return path
 # =============================================================================
 

@@ -179,6 +179,90 @@ class TestExtractVarietyTotal:
         assert _extract_variety_total({"total": True}) is None
         assert _extract_variety_total({"total": False}) is None
 
+    # ----- dict path delegates to the shared resolver -------------------
+
+    def test_dict_with_canonical_total(self):
+        from precompact_state_reminder import _extract_variety_total
+        assert _extract_variety_total({"total": 8}) == 8
+
+    def test_dict_with_score_only_resolves_via_shared_resolver(self):
+        """NEW behavior: a non-canonical `score`-only stamp now renders a
+        total instead of silently dropping the line. Before convergence on
+        the shared resolver, precompact only read `total` and dropped this."""
+        from precompact_state_reminder import _extract_variety_total
+        assert _extract_variety_total({"score": 8}) == 8
+
+    def test_dict_with_dimension_scores_resolves_via_shared_resolver(self):
+        from precompact_state_reminder import _extract_variety_total
+        v = {"novelty": 2, "scope": 3, "uncertainty": 1, "risk": 4}
+        assert _extract_variety_total(v) == 10
+
+    def test_dict_with_out_of_range_total_no_fallback_returns_none(self):
+        from precompact_state_reminder import _extract_variety_total
+        assert _extract_variety_total({"total": 99}) is None
+
+    # ----- bare-int passthrough (render affordance, kept local) ---------
+
+    def test_bare_int_passes_through(self):
+        from precompact_state_reminder import _extract_variety_total
+        assert _extract_variety_total(8) == 8
+
+    def test_bare_int_passthrough_does_not_range_check(self):
+        """The bare-int passthrough is a render affordance and intentionally
+        does NOT range-check (unlike the dict path, which goes through the
+        range-enforcing shared resolver). A bare 99 renders as-is."""
+        from precompact_state_reminder import _extract_variety_total
+        assert _extract_variety_total(99) == 99
+        assert _extract_variety_total(0) == 0
+
+    # ----- junk → None --------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "junk",
+        [None, 8.0, 8.5, "8", "high", [8], {"total": "twelve"}, {}],
+    )
+    def test_junk_returns_none(self, junk):
+        from precompact_state_reminder import _extract_variety_total
+        assert _extract_variety_total(junk) is None
+
+
+class TestExtractVarietyTotalRenders:
+    """build_custom_instructions renders or omits the variety line per the
+    resolver's verdict — the consumer-side of the precompact convergence."""
+
+    def _state(self, variety_score):
+        return {
+            "feature_subject": "X", "feature_id": "1",
+            "current_phase": "Phase: TEST", "variety_score": variety_score,
+            "teammates": ["a"], "team_names": ["t"],
+        }
+
+    def test_renders_line_for_score_only_dict(self):
+        from precompact_state_reminder import build_custom_instructions
+        result = build_custom_instructions(self._state({"score": 9}))
+        assert "Variety score: 9" in result
+
+    def test_renders_line_for_dimension_sum_dict(self):
+        from precompact_state_reminder import build_custom_instructions
+        v = {"novelty": 2, "scope": 3, "uncertainty": 1, "risk": 4}
+        result = build_custom_instructions(self._state(v))
+        assert "Variety score: 10" in result
+
+    def test_omits_line_for_unresolvable_dict(self):
+        from precompact_state_reminder import build_custom_instructions
+        result = build_custom_instructions(self._state({"total": 99}))
+        assert "Variety" not in result
+
+    def test_renders_line_for_bare_int(self):
+        from precompact_state_reminder import build_custom_instructions
+        result = build_custom_instructions(self._state(12))
+        assert "Variety score: 12" in result
+
+    def test_omits_line_for_junk(self):
+        from precompact_state_reminder import build_custom_instructions
+        result = build_custom_instructions(self._state("not-a-number"))
+        assert "Variety" not in result
+
 
 # ---------------------------------------------------------------------------
 # Unit tests: build_hook_output (full composition)

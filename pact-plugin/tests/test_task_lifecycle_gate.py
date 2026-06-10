@@ -1158,6 +1158,110 @@ def test_main_no_op_on_malformed_stdin(capsys):
 
 
 # =============================================================================
+# Exception-safety (negative property) — hook level.
+#
+# The hook fires on every Task-tool use; no malformed variety shape may
+# raise out of it. The resolver-leg of this property lives in
+# test_teachback_schema.py; this is the full-hook leg: each malformed variety
+# is run through a complete main() invocation in BOTH a TaskCreate envelope
+# (write-time R4 path) and a TaskUpdate-to-completed-teachback envelope
+# (read-time band path). The hook must exit 0 with valid JSON in every case.
+# =============================================================================
+
+
+# Malformed variety values that flow into the resolver via both surfaces. The
+# hook receives its input as already-parsed JSON from stdin, so these values
+# are restricted to JSON-representable shapes (a real hook can never receive a
+# Python object() / NaN — those non-serializable inputs are covered at the
+# pure-helper leg in test_teachback_schema.py, which has no stdin round-trip).
+# The hook must absorb every one of these.
+_MALFORMED_VARIETIES = [
+    pytest.param(None, id="none"),
+    pytest.param([], id="empty_list"),
+    pytest.param("a string", id="string"),
+    pytest.param(42, id="bare_int"),
+    pytest.param(8.5, id="float"),
+    pytest.param(True, id="bool"),
+    pytest.param({"total": [1, 2, 3]}, id="total_list"),
+    pytest.param({"total": {"k": "v"}}, id="total_dict"),
+    pytest.param({"score": {"nested": "junk"}}, id="score_nested_dict"),
+    pytest.param({"novelty": "two", "scope": 1,
+                  "uncertainty": 1, "risk": 1}, id="dimension_wrong_type"),
+    pytest.param({"total": "twelve", "score": "eight"}, id="all_string_candidates"),
+    pytest.param({"deeply": {"nested": {"junk": [1, 2]}}}, id="unrelated_nested"),
+]
+
+
+def _assert_exits_zero_with_valid_json(payload, capsys):
+    """Run main() on the payload; assert it exits 0 and emits parseable JSON.
+    SystemExit(0) is the hook's normal termination; any OTHER exception is a
+    failure of the never-raise contract."""
+    code, out = _capture_main(payload, capsys)
+    assert code == 0
+    assert out is not None  # parseable JSON object (or None only if no output)
+
+
+@pytest.mark.parametrize("variety", _MALFORMED_VARIETIES)
+def test_hook_absorbs_malformed_variety_on_taskcreate(variety, capsys, pact_context):
+    """Write-time envelope: a pact-* work-task TaskCreate carrying a
+    malformed variety must not raise out of the hook."""
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskCreate",
+        "tool_input": {
+            "subject": "implement foo",
+            "owner": "pact-backend-coder",
+            "addBlockedBy": ["41"],
+            "metadata": {"variety": variety},
+        },
+        "tool_response": {},
+    }
+    _assert_exits_zero_with_valid_json(payload, capsys)
+
+
+@pytest.mark.parametrize("variety", _MALFORMED_VARIETIES)
+def test_hook_absorbs_malformed_variety_on_teachback_submit(
+    variety, capsys, tmp_path, monkeypatch, pact_context,
+):
+    """Read-time envelope: a teachback-submit TaskUpdate whose blocked Task B
+    carries a malformed variety must not raise out of the hook (the band
+    resolver consults resolve_variety_total on the on-disk shape)."""
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety=variety,
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": _well_formed_teachback_submit()},
+        },
+        "tool_response": {},
+    }
+    _assert_exits_zero_with_valid_json(payload, capsys)
+
+
+def test_hook_absorbs_malformed_metadata_envelope_on_taskcreate(
+    capsys, pact_context,
+):
+    """The whole metadata object is malformed (a string, not a dict) → the
+    hook tolerates it and exits 0. Exercises the metadata-not-dict guard
+    above the variety lookup."""
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskCreate",
+        "tool_input": {
+            "subject": "implement foo",
+            "owner": "pact-backend-coder",
+            "addBlockedBy": ["41"],
+            "metadata": "not-a-dict",
+        },
+        "tool_response": {},
+    }
+    _assert_exits_zero_with_valid_json(payload, capsys)
+
+
+# =============================================================================
 # Defensive fallback: `tool_response or tool_output or {}`
 # =============================================================================
 #
@@ -1894,6 +1998,354 @@ def test_advisory_r4_on_d4_legacy_single_rationale(pact_context):
     assert any(
         rule == "variety_missing_on_dispatch_task" for rule, _ in advisories
     )
+
+
+# =============================================================================
+# variety_missing_on_dispatch_task (R4) — the third (NEW) message path:
+# valid rationales present, but no resolvable variety total. Distinct from the
+# absent-variety and malformed-rationale paths; same rule name, distinct text.
+# =============================================================================
+
+
+def _r4_create_payload(variety, metadata_extra=None):
+    """A TaskCreate payload for a pact-* work task carrying the given variety
+    dict. metadata_extra merges into the task metadata alongside `variety`
+    (e.g. a top-level variety_score sibling)."""
+    metadata = {"variety": variety}
+    if metadata_extra:
+        metadata.update(metadata_extra)
+    return {
+        "tool_name": "TaskCreate",
+        "tool_input": {
+            "subject": "implement foo",
+            "owner": "pact-backend-coder",
+            "addBlockedBy": ["41"],
+            "metadata": metadata,
+        },
+        "tool_response": {},
+    }
+
+
+def _r4_message(advisories):
+    """Return the variety_missing_on_dispatch_task message text, or None if
+    the rule did not fire."""
+    for rule, message in advisories:
+        if rule == "variety_missing_on_dispatch_task":
+            return message
+    return None
+
+
+def _rationales_only_variety(**overrides):
+    """A variety dict with the four valid rationales but NO resolvable total
+    candidate (no total, no score, no dimension scores). Forces the
+    unresolvable-total path while staying rationale-complete. Overrides let a
+    test add back a single candidate (e.g. an out-of-range total)."""
+    variety = {
+        "novelty_rationale": "x",
+        "scope_rationale": "x",
+        "uncertainty_rationale": "x",
+        "risk_rationale": "x",
+    }
+    variety.update(overrides)
+    return variety
+
+
+def test_r4_unresolvable_total_path_fires_with_distinct_message(pact_context):
+    """Valid rationales + no resolvable total (out-of-range `total`, no
+    other candidate) → R4 fires on the NEW unresolvable-total path. The
+    message names the no-resolvable-total condition and does NOT name the
+    unrelated wiring rule that caused the original field misattribution."""
+    pact_context(team_name="test-team", session_id="test-session")
+    variety = _rationales_only_variety(total=99)
+    advisories = tlg.evaluate_lifecycle(_r4_create_payload(variety))
+    message = _r4_message(advisories)
+    assert message is not None, "expected R4 to fire on unresolvable total"
+    assert "no resolvable total" in message
+    assert "teachback_addblocks_missing" not in message
+
+
+def test_r4_unresolvable_total_message_distinct_from_rationale_path(pact_context):
+    """The unresolvable-total message text differs from the malformed-
+    rationale message text — the single rule emits path-specific detail."""
+    pact_context(team_name="test-team", session_id="test-session")
+    unresolvable = _r4_message(
+        tlg.evaluate_lifecycle(_r4_create_payload(_rationales_only_variety(total=99)))
+    )
+    missing_rationale_variety = _well_formed_variety()
+    missing_rationale_variety.pop("novelty_rationale")
+    malformed = _r4_message(
+        tlg.evaluate_lifecycle(_r4_create_payload(missing_rationale_variety))
+    )
+    assert unresolvable is not None and malformed is not None
+    assert unresolvable != malformed
+    assert "no resolvable total" in unresolvable
+    assert "no resolvable total" not in malformed
+
+
+def test_r4_unresolvable_total_message_distinct_from_absent_path(pact_context):
+    """The unresolvable-total message differs from the absent-variety
+    message — three distinct paths under one rule name."""
+    pact_context(team_name="test-team", session_id="test-session")
+    unresolvable = _r4_message(
+        tlg.evaluate_lifecycle(_r4_create_payload(_rationales_only_variety(total=99)))
+    )
+    absent_payload = {
+        "tool_name": "TaskCreate",
+        "tool_input": {
+            "subject": "implement foo",
+            "owner": "pact-backend-coder",
+            "addBlockedBy": ["41"],
+        },
+        "tool_response": {},
+    }
+    absent = _r4_message(tlg.evaluate_lifecycle(absent_payload))
+    assert unresolvable is not None and absent is not None
+    assert unresolvable != absent
+
+
+def test_r4_rationale_problem_reported_before_total_problem(pact_context):
+    """A stamp missing BOTH a rationale AND a total surfaces the rationale
+    problem first (return-the-first-problem contract). The unresolvable-total
+    detail appears only once rationales are complete."""
+    pact_context(team_name="test-team", session_id="test-session")
+    variety = _rationales_only_variety(total=99)
+    variety.pop("scope_rationale")  # now also rationale-incomplete
+    message = _r4_message(tlg.evaluate_lifecycle(_r4_create_payload(variety)))
+    assert message is not None
+    assert "no resolvable total" not in message
+    assert "scope_rationale" in message
+
+
+def test_r4_silent_when_score_fallback_resolves(pact_context):
+    """Valid rationales + a non-canonical `score` (no `total`) → R4 SILENT,
+    because the shared resolver resolves the total via the score fallback.
+    This is the write-time half of the consistency property for the exact
+    reported field shape."""
+    pact_context(team_name="test-team", session_id="test-session")
+    variety = _rationales_only_variety(score=12)
+    advisories = tlg.evaluate_lifecycle(_r4_create_payload(variety))
+    assert not any(
+        rule == "variety_missing_on_dispatch_task" for rule, _ in advisories
+    )
+
+
+def test_r4_silent_when_top_level_variety_score_resolves(pact_context):
+    """Valid rationales + no in-dict candidate but a top-level
+    metadata.variety_score → R4 SILENT. The validator forwards the
+    surrounding metadata so the sibling candidate is reachable."""
+    pact_context(team_name="test-team", session_id="test-session")
+    variety = _rationales_only_variety()
+    advisories = tlg.evaluate_lifecycle(
+        _r4_create_payload(variety, metadata_extra={"variety_score": 8})
+    )
+    assert not any(
+        rule == "variety_missing_on_dispatch_task" for rule, _ in advisories
+    )
+
+
+def test_r4_silent_when_dimension_sum_resolves(pact_context):
+    """Valid rationales + valid dimension scores (no explicit total) → R4
+    SILENT via the dimension-sum fallback."""
+    pact_context(team_name="test-team", session_id="test-session")
+    variety = _well_formed_variety()
+    variety.pop("total")
+    advisories = tlg.evaluate_lifecycle(_r4_create_payload(variety))
+    assert not any(
+        rule == "variety_missing_on_dispatch_task" for rule, _ in advisories
+    )
+
+
+# =============================================================================
+# Cross-rule consistency property (LOAD-BEARING) — the single test that pins
+# this bug closed. For a representative set of variety shapes (all
+# rationale-complete, so the rationale leg never confounds), the write-time
+# rule must NOT fire on its total leg if and only if the shared resolver
+# returns a non-None total. The two surfaces consult the same resolver, so
+# they cannot disagree. Includes the original reported field shape.
+# =============================================================================
+
+
+# (variety, metadata_extra, description). Every variety is rationale-complete
+# so the ONLY thing that can drive R4 is the total leg — isolating the
+# property under test. The metadata_extra carries any top-level sibling.
+_CONSISTENCY_SHAPES = [
+    pytest.param(
+        _rationales_only_variety(total=8), None,
+        id="canonical_total_in_range",
+    ),
+    pytest.param(
+        _rationales_only_variety(total=11), None,
+        id="canonical_total_required_band",
+    ),
+    pytest.param(
+        _rationales_only_variety(total=99), None,
+        id="total_out_of_range_no_fallback",
+    ),
+    pytest.param(
+        _rationales_only_variety(total="twelve"), None,
+        id="total_non_numeric_string_no_fallback",
+    ),
+    pytest.param(
+        _rationales_only_variety(total=True), None,
+        id="total_bool_no_fallback",
+    ),
+    pytest.param(
+        _rationales_only_variety(total=8.0), None,
+        id="total_float_no_fallback",
+    ),
+    pytest.param(
+        _rationales_only_variety(score=12), None,
+        id="field_report_shape_score_only",
+    ),
+    pytest.param(
+        _rationales_only_variety(score=99), None,
+        id="score_out_of_range_no_other",
+    ),
+    pytest.param(
+        _rationales_only_variety(total=99, score=8), None,
+        id="junk_total_recovered_by_score",
+    ),
+    pytest.param(
+        _rationales_only_variety(), {"variety_score": 8},
+        id="top_level_variety_score_only",
+    ),
+    pytest.param(
+        _rationales_only_variety(), {"variety_score": 99},
+        id="top_level_variety_score_out_of_range",
+    ),
+    pytest.param(
+        _well_formed_variety(),  # carries total=8 + valid dims
+        None,
+        id="full_well_formed",
+    ),
+    pytest.param(
+        {**_well_formed_variety(), "total": "bad"},  # dims still 2/2/2/2
+        None,
+        id="junk_total_recovered_by_dimension_sum",
+    ),
+    pytest.param(
+        _rationales_only_variety(), None,
+        id="no_candidate_at_all",
+    ),
+]
+
+
+@pytest.mark.parametrize("variety, metadata_extra", _CONSISTENCY_SHAPES)
+def test_write_time_silence_iff_resolver_resolves(
+    variety, metadata_extra, pact_context,
+):
+    """CONSISTENCY PROPERTY: variety_missing_on_dispatch_task does NOT fire
+    (rationales held valid, so only the total leg is in play) if and only if
+    resolve_variety_total returns a non-None total for the same (variety,
+    metadata). No stamp-time-accepted shape may read as unresolvable later."""
+    pact_context(team_name="test-team", session_id="test-session")
+    metadata = {"variety": variety}
+    if metadata_extra:
+        metadata.update(metadata_extra)
+
+    resolved = tlg.resolve_variety_total(variety, metadata)
+    advisories = tlg.evaluate_lifecycle(_r4_create_payload(variety, metadata_extra))
+    r4_fired = any(
+        rule == "variety_missing_on_dispatch_task" for rule, _ in advisories
+    )
+
+    # iff: silent (not fired) ⟺ resolver resolved.
+    assert (not r4_fired) == (resolved is not None), (
+        f"consistency violated: r4_fired={r4_fired}, "
+        f"resolved={resolved!r} for variety={variety!r} "
+        f"metadata_extra={metadata_extra!r}"
+    )
+
+
+def test_field_report_shape_agrees_across_both_surfaces(
+    tmp_path, monkeypatch, pact_context,
+):
+    """The exact reported false-positive shape — rationales + a non-canonical
+    `score` int with a sibling top-level `variety_score` — must AGREE across
+    both surfaces post-fix: write-time SILENT (TaskCreate) AND read-time
+    RESOLVABLE to a band (no band_unresolvable advisory at teachback submit).
+    This is the regression that the whole fix exists to close."""
+    pact_context(team_name="test-team", session_id="test-session")
+    field_variety = _rationales_only_variety(score=12)
+
+    # Write-time surface: TaskCreate is silent.
+    create_advisories = tlg.evaluate_lifecycle(
+        _r4_create_payload(field_variety, metadata_extra={"variety_score": 12})
+    )
+    assert not any(
+        rule == "variety_missing_on_dispatch_task"
+        for rule, _ in create_advisories
+    ), "write-time surface fired on a resolvable field shape"
+
+    # Read-time surface: teachback submit resolves the band, no unresolvable.
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2",
+        variety=field_variety,
+    )
+    # Add the top-level sibling onto the seeded Task B metadata.
+    tasks_dir = tmp_path / ".claude" / "tasks" / "test-team"
+    task_b = json.loads((tasks_dir / "2.json").read_text(encoding="utf-8"))
+    task_b["metadata"]["variety_score"] = 12
+    (tasks_dir / "2.json").write_text(json.dumps(task_b), encoding="utf-8")
+
+    submit_advisories = tlg.evaluate_lifecycle({
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": _well_formed_teachback_submit()},
+        },
+        "tool_response": {},
+    })
+    assert not any(
+        rule == "reasoning_reconstruction_band_unresolvable"
+        for rule, _ in submit_advisories
+    ), "read-time surface emitted unresolvable for a resolvable field shape"
+
+
+# =============================================================================
+# reasoning_reconstruction_band_unresolvable — rewritten advisory text.
+# The message must enumerate the no-resolvable-total cause and must NOT name
+# the unrelated wiring rule that caused the original field misattribution.
+# Text is asserted on normalized substrings (the prod text is word-identical
+# to the spec but reflowed as f-string continuations), never byte-equality.
+# =============================================================================
+
+
+def _band_unresolvable_message(advisories):
+    for rule, message in advisories:
+        if rule == "reasoning_reconstruction_band_unresolvable":
+            return message
+    return None
+
+
+def test_band_unresolvable_message_names_no_resolvable_total(
+    tmp_path, monkeypatch, pact_context,
+):
+    """When Task B variety is present but every resolver candidate is
+    invalid, the rewritten advisory enumerates the no-resolvable-total cause
+    and drops the misattributing cross-name."""
+    pact_context(team_name="test-team", session_id="test-session")
+    variety = _well_formed_variety()
+    variety["total"] = "twelve"
+    for dim in ("novelty", "scope", "uncertainty", "risk"):
+        variety.pop(dim, None)
+    _setup_blocks_pair(
+        tmp_path, monkeypatch, "test-team", "1", "2", variety=variety,
+    )
+    advisories = tlg.evaluate_lifecycle({
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "1",
+            "metadata": {"teachback_submit": _well_formed_teachback_submit()},
+        },
+        "tool_response": {},
+    })
+    message = _band_unresolvable_message(advisories)
+    assert message is not None
+    normalized = " ".join(message.split())
+    assert "no resolvable total" in normalized
+    assert "cannot resolve the variety band" in normalized
+    assert "teachback_addblocks_missing" not in normalized
 
 
 # =============================================================================

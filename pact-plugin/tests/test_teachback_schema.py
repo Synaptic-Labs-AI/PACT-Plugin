@@ -27,7 +27,14 @@ from shared.teachback_schema import (
     TEACHBACK_REQUIRED_FIELDS,
     TEACHBACK_REQUIRED_SUBKEYS,
     TEACHBACK_VARIETY_ACK_VALID_VALUES,
+    resolve_variety_total,
     validate_reasoning_reconstruction,
+)
+from shared.variety_scorer import (
+    MAX_DIMENSION,
+    MAX_SCORE,
+    MIN_DIMENSION,
+    MIN_SCORE,
 )
 
 
@@ -228,3 +235,270 @@ class TestValidatorPurity:
         # Should return malformed reason, not raise
         result = validate_reasoning_reconstruction(weird_input)
         assert result == "malformed_reasoning_reconstruction"
+
+
+# ============================================================================
+# resolve_variety_total — per-candidate type matrix
+#
+# The resolver walks an ordered candidate chain (total → score →
+# metadata.variety_score → dimension-sum) and returns the first valid
+# in-range int, or None when nothing resolves. These tests isolate each
+# candidate so the value-type acceptance/rejection contract is pinned for
+# every candidate independently; precedence interactions are covered in the
+# precedence section below.
+#
+# In-range means MIN_SCORE..MAX_SCORE (4..16) for the total/score/
+# variety_score candidates, and MIN_DIMENSION..MAX_DIMENSION (1..4) per
+# dimension for the dimension-sum candidate — referenced via the
+# variety_scorer constants, never hard-coded.
+# ============================================================================
+
+
+# A set of values that are NOT a valid in-range int under any candidate.
+# `id`s double as readable parametrize labels.
+_REJECTED_VALUES = [
+    pytest.param(True, id="bool_true"),
+    pytest.param(False, id="bool_false"),
+    pytest.param(8.0, id="float_whole"),
+    pytest.param(8.5, id="float_fractional"),
+    pytest.param("8", id="numeric_string"),
+    pytest.param("high", id="non_numeric_string"),
+    pytest.param(None, id="none"),
+    pytest.param([8], id="list"),
+    pytest.param({"x": 8}, id="dict"),
+]
+
+# Out-of-range ints for the [4, 16] total/score candidates: below MIN_SCORE
+# and above MAX_SCORE. These are well-typed ints that still must NOT resolve.
+_OUT_OF_RANGE_SCORE_INTS = [
+    pytest.param(0, id="zero"),
+    pytest.param(MIN_SCORE - 1, id="below_min"),  # 3
+    pytest.param(MAX_SCORE + 1, id="above_max"),  # 17
+    pytest.param(99, id="far_above_max"),
+]
+
+# Boundary + interior in-range ints. The 6/7 and 10/11 pairs straddle the
+# band cuts the CALLER applies; the resolver itself returns the int unchanged
+# for any of them (band mapping is the caller's job, asserted separately).
+_IN_RANGE_SCORE_INTS = [4, 6, 7, 8, 10, 11, 16]
+
+
+class TestResolverCandidateTotal:
+    """Candidate 1: variety['total'] in isolation (no other candidate
+    present, so a fall-through lands on None)."""
+
+    @pytest.mark.parametrize("value", _IN_RANGE_SCORE_INTS)
+    def test_in_range_total_resolves_to_itself(self, value):
+        assert resolve_variety_total({"total": value}) == value
+
+    @pytest.mark.parametrize("value", _OUT_OF_RANGE_SCORE_INTS)
+    def test_out_of_range_total_does_not_resolve(self, value):
+        assert resolve_variety_total({"total": value}) is None
+
+    @pytest.mark.parametrize("value", _REJECTED_VALUES)
+    def test_wrong_typed_total_does_not_resolve(self, value):
+        assert resolve_variety_total({"total": value}) is None
+
+    def test_absent_total_does_not_resolve(self):
+        assert resolve_variety_total({}) is None
+
+
+class TestResolverCandidateScore:
+    """Candidate 2: variety['score'] in isolation (no 'total' key, so the
+    canonical candidate is absent and the chain reaches 'score')."""
+
+    @pytest.mark.parametrize("value", _IN_RANGE_SCORE_INTS)
+    def test_in_range_score_resolves_to_itself(self, value):
+        assert resolve_variety_total({"score": value}) == value
+
+    @pytest.mark.parametrize("value", _OUT_OF_RANGE_SCORE_INTS)
+    def test_out_of_range_score_does_not_resolve(self, value):
+        assert resolve_variety_total({"score": value}) is None
+
+    @pytest.mark.parametrize("value", _REJECTED_VALUES)
+    def test_wrong_typed_score_does_not_resolve(self, value):
+        assert resolve_variety_total({"score": value}) is None
+
+
+class TestResolverCandidateVarietyScore:
+    """Candidate 3: metadata['variety_score'] in isolation — a top-level
+    sibling reached only when the `metadata` argument is supplied. The
+    variety dict carries no resolvable candidate of its own."""
+
+    @pytest.mark.parametrize("value", _IN_RANGE_SCORE_INTS)
+    def test_in_range_variety_score_resolves_to_itself(self, value):
+        assert resolve_variety_total({}, {"variety_score": value}) == value
+
+    @pytest.mark.parametrize("value", _OUT_OF_RANGE_SCORE_INTS)
+    def test_out_of_range_variety_score_does_not_resolve(self, value):
+        assert resolve_variety_total({}, {"variety_score": value}) is None
+
+    @pytest.mark.parametrize("value", _REJECTED_VALUES)
+    def test_wrong_typed_variety_score_does_not_resolve(self, value):
+        assert resolve_variety_total({}, {"variety_score": value}) is None
+
+    def test_variety_score_skipped_when_metadata_absent(self):
+        # The sibling lives on metadata, never inside the variety dict. With
+        # no metadata argument it must NOT be consulted, even if a same-named
+        # key sits inside the variety dict.
+        assert resolve_variety_total({"variety_score": 8}) is None
+
+    def test_variety_score_skipped_when_metadata_not_dict(self):
+        assert resolve_variety_total({}, "not-a-dict") is None
+
+
+def _dimensions(novelty, scope, uncertainty, risk):
+    """A variety dict carrying ONLY the four per-dimension scores (no total,
+    no score), so the dimension-sum candidate is the only one that can fire."""
+    return {
+        "novelty": novelty,
+        "scope": scope,
+        "uncertainty": uncertainty,
+        "risk": risk,
+    }
+
+
+class TestResolverCandidateDimensionSum:
+    """Candidate 4: sum of the four dimension scores, valid only when ALL
+    four are in-range dimension ints (1..4 each). The sum is in [4, 16] by
+    construction."""
+
+    def test_all_min_dimensions_sums_to_min_score(self):
+        v = _dimensions(MIN_DIMENSION, MIN_DIMENSION, MIN_DIMENSION, MIN_DIMENSION)
+        assert resolve_variety_total(v) == MIN_SCORE  # 4
+
+    def test_all_max_dimensions_sums_to_max_score(self):
+        v = _dimensions(MAX_DIMENSION, MAX_DIMENSION, MAX_DIMENSION, MAX_DIMENSION)
+        assert resolve_variety_total(v) == MAX_SCORE  # 16
+
+    def test_mixed_in_range_dimensions_sum(self):
+        assert resolve_variety_total(_dimensions(2, 3, 1, 4)) == 10
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            pytest.param(MIN_DIMENSION - 1, id="below_min_dim"),  # 0
+            pytest.param(MAX_DIMENSION + 1, id="above_max_dim"),  # 5
+            pytest.param(True, id="bool"),
+            pytest.param(2.0, id="float"),
+            pytest.param("2", id="numeric_string"),
+            pytest.param(None, id="none"),
+        ],
+    )
+    def test_one_bad_dimension_invalidates_the_sum(self, bad):
+        # A single out-of-range / wrong-typed dimension means the all-four
+        # guard fails → the candidate does not fire → None (no other source).
+        v = _dimensions(2, 2, 2, 2)
+        v["uncertainty"] = bad
+        assert resolve_variety_total(v) is None
+
+    def test_one_missing_dimension_invalidates_the_sum(self):
+        v = _dimensions(2, 2, 2, 2)
+        del v["risk"]
+        assert resolve_variety_total(v) is None
+
+
+# ============================================================================
+# resolve_variety_total — precedence & conflict combinations
+# ============================================================================
+
+
+class TestResolverPrecedence:
+    """Ordered first-valid-match precedence and the fall-through-on-invalid
+    robustness property: a junk higher-precedence candidate never shadows a
+    recoverable lower-precedence one."""
+
+    def test_canonical_total_wins_over_all_other_candidates(self):
+        v = {"total": 12, "score": 8, "novelty": 1, "scope": 1,
+             "uncertainty": 1, "risk": 1}
+        assert resolve_variety_total(v, {"variety_score": 8}) == 12
+
+    def test_invalid_total_falls_through_to_valid_score(self):
+        # Out-of-range canonical total must not halt the chain.
+        assert resolve_variety_total({"total": 99, "score": 8}) == 8
+
+    @pytest.mark.parametrize(
+        "junk_total",
+        [99, 0, True, 8.0, "8", "high", None, [8]],
+    )
+    def test_any_invalid_total_falls_through_to_score(self, junk_total):
+        v = {"total": junk_total, "score": 9}
+        assert resolve_variety_total(v) == 9
+
+    def test_falls_through_total_and_score_to_variety_score(self):
+        v = {"total": 99, "score": 0}
+        assert resolve_variety_total(v, {"variety_score": 11}) == 11
+
+    def test_score_absent_total_absent_resolves_variety_score(self):
+        assert resolve_variety_total({}, {"variety_score": 7}) == 7
+
+    def test_falls_through_to_dimension_sum_when_higher_candidates_invalid(self):
+        # total junk, score junk, no variety_score, but all four dims valid.
+        v = {"total": 99, "score": "bad", "novelty": 3, "scope": 3,
+             "uncertainty": 2, "risk": 2}
+        assert resolve_variety_total(v, {"variety_score": "bad"}) == 10
+
+    def test_divergent_total_and_score_returns_total_silently(self):
+        # Canonical wins; the resolver returns a single deterministic answer
+        # and emits no divergence signal (it is a pure int-or-None function).
+        result = resolve_variety_total({"total": 12, "score": 8})
+        assert result == 12
+
+    def test_all_candidates_absent_returns_none(self):
+        assert resolve_variety_total({}, {}) is None
+
+    def test_all_candidates_invalid_returns_none(self):
+        v = {"total": 99, "score": 0, "novelty": 5, "scope": 0,
+             "uncertainty": 2, "risk": 2}
+        assert resolve_variety_total(v, {"variety_score": 99}) is None
+
+
+# ============================================================================
+# resolve_variety_total — exception-safety negative property
+#
+# The hook fires on every Task-tool use; the resolver must be total (defined
+# for every input) and never raise. This is the helper-leg of the negative
+# property; the hook-level leg (full evaluate_lifecycle envelopes) lives in
+# test_task_lifecycle_gate.py.
+# ============================================================================
+
+
+class TestResolverNeverRaises:
+    """No input — well-formed, malformed, or exotic — escapes as an
+    exception; the resolver always returns an int or None."""
+
+    @pytest.mark.parametrize(
+        "variety",
+        [
+            None,
+            [],
+            "string",
+            42,
+            8.5,
+            True,
+            (1, 2),
+            object(),
+            {"total": object()},
+            {"total": float("nan")},
+            {"score": [1, 2, 3]},
+            {"novelty": {"nested": "junk"}},
+            {"total": {"deeply": {"nested": "junk"}}},
+        ],
+    )
+    def test_malformed_variety_returns_int_or_none_never_raises(self, variety):
+        result = resolve_variety_total(variety)
+        assert result is None or isinstance(result, int)
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [None, [], "string", 42, object(), {"variety_score": object()}],
+    )
+    def test_malformed_metadata_returns_int_or_none_never_raises(self, metadata):
+        result = resolve_variety_total({}, metadata)
+        assert result is None or isinstance(result, int)
+
+    def test_resolved_value_is_never_a_bool(self):
+        # bool subclasses int; a True total must not surface as 1.
+        for v in ({"total": True}, {"score": False}):
+            result = resolve_variety_total(v)
+            assert result is None or not isinstance(result, bool)
