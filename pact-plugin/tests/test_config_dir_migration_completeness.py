@@ -51,7 +51,7 @@ def _hardcoded_home_claude(tree: ast.AST, basename: str) -> list[tuple[str, int,
     `Path.home() / '.claude'`, so it catches BOTH the bare 2-segment root AND any
     3+-segment state path (`.../"tasks"`, etc.), and is multi-line-robust (the AST
     normalizes a line-wrapped construction into one expression — a same-line grep
-    would miss the `session_state.py:511-517`-style multi-line form). Nested
+    would miss the `session_state.py:513-519`-style multi-line form). Nested
     BinOps at one site are deduped to the outermost (longest) per (file, lineno).
     """
     found: dict[tuple[str, int], str] = {}

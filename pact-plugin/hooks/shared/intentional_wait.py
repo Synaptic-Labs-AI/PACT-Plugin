@@ -92,8 +92,8 @@ DEFAULT_THRESHOLD_MINUTES = 30
 #
 # Auditor signal-tasks are NOT in this set — they self-complete via
 # `metadata.completion_type == "signal"` + `metadata.type in {"blocker",
-# "algedonic"}` (the inline-literal pattern at task_utils.py:184 /
-# session_resume.py:525). Two distinct exemption surfaces:
+# "algedonic"}` (the inline-literal pattern at task_utils.py:276 /
+# session_resume.py:522). Two distinct exemption surfaces:
 # - SELF_COMPLETE_EXEMPT_AGENT_TYPES: by team-config agentType lookup.
 # - signal-task pattern: by task metadata, applies to any agent.
 SELF_COMPLETE_EXEMPT_AGENT_TYPES: frozenset = frozenset({
@@ -352,8 +352,8 @@ def is_self_complete_exempt(
        surface short-circuits to False (fail-closed).
     2. By signal-task metadata: task.metadata.completion_type == "signal" AND
        task.metadata.type in {"blocker", "algedonic"}. Mirrors the inline
-       literal at agent_handoff_emitter.py / task_utils.py:184 /
-       session_resume.py:525. Independent of `team_name`.
+       literal at agent_handoff_emitter.py / task_utils.py:276 /
+       session_resume.py:522. Independent of `team_name`.
 
     Pure function; never raises on plain dicts (PACT task representation
     via json.loads); defaults to False on missing or malformed fields

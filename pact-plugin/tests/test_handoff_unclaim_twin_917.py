@@ -108,7 +108,7 @@ class TestB2R2WhitespaceTwin:
     """M4: #917/#901 R2 (validate-before-claim) F3 TWIN for b2. b1's R2 whitespace
     handling is pinned by test_emitter_resolution.py::test_owner_whitespace_only_
     is_treated_as_falsy; b2 (_emit_lead_side_agent_handoff) implements the SAME
-    guards (task_lifecycle_gate.py:413 `not owner.strip()`, :431-432 `not
+    guards (task_lifecycle_gate.py:440 `not owner.strip()`, :458-459 `not
     subject.strip()`→"(no subject)") but had NO twin coverage (the gap the
     coverage review surfaced). R2 guards the claim-without-write poison on the
     LEAD path: a whitespace-only owner would pass a bare `not owner` check, claim

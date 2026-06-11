@@ -22,7 +22,7 @@ class TestMalformedStdin:
     """#10 remediation (per task #16): closes the header promise-drift at
     lines 6-8 — "Comprehensive coverage (malformed stdin, ...) lands in
     the TEST phase." Marker-OSError and fallback-field landed in initial
-    TEST; JSONDecodeError path at agent_handoff_emitter.py:134-138 did
+    TEST; JSONDecodeError path at agent_handoff_emitter.py:99-102 did
     not. These tests pin that path directly.
 
     AC #8 invariant under test: no matter what stdin carries, the

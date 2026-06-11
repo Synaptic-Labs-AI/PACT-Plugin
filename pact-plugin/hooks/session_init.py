@@ -1200,7 +1200,7 @@ def main():
         #
         # Fail-open layering (defense in depth):
         #   1. Primary: get_task_list() has its own internal try/except
-        #      (shared/task_utils.py:50-59) that returns None on any
+        #      (shared/task_utils.py:52-61) that returns None on any
         #      filesystem or JSON parse error. Callers never see a raise
         #      from a corrupted tasks dir.
         #   2. Belt-and-suspenders: main()'s outer try/except catches

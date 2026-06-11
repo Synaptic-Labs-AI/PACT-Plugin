@@ -401,7 +401,7 @@ class TestTeamMembers:
         could inject a fake role-marker line into the compaction-model
         context — same vector as `\\n`, just via a different code point.
 
-        Counter-test: revert `_RENDER_STRIP_RE` at session_state.py:77 to
+        Counter-test: revert `_RENDER_STRIP_RE` at session_state.py:93 to
         the pre-A1 set `[\\x00-\\x1f\\x7f]` (drop the `\\u0085\\u2028\\u2029`
         suffix) — this test fails because the U+2028 survives the read
         path.
@@ -687,7 +687,7 @@ class TestSummarize:
         unexpected-exception path.
 
         Counter-test: changing the outer `except Exception: return
-        _default_state(...)` at session_state.py:596-601 to bare
+        _default_state(...)` at session_state.py:707-712 to bare
         `raise` makes this test fail with the RuntimeError propagating.
 
         Round-2 review (PR #426 F5) found this handler is claimed
@@ -1094,7 +1094,7 @@ class TestDeriveFeatureFromJournal:
         secretary's briefing dispatch — typically chronologically first —
         would be mis-identified as the feature task.
 
-        Counter-test: removing the filter at session_state.py:286-290
+        Counter-test: removing the filter at session_state.py:288-292
         makes this fail with feature_id == "1" instead of "2".
 
         Round-2 review (PR #426 F1) found the journal-side filter was

@@ -183,7 +183,7 @@ def _validate_override_rationale(rationale: Optional[str]) -> Optional[str]:
         )
     # Unreached at runtime under the current call graph: both the gate's
     # `_extract_override_rationale` AND the parser's `parse_pins` use
-    # str.splitlines() (pin_caps.py:166, post-#492-F1). splitlines()
+    # str.splitlines() (pin_caps.py:191, post-#492-F1). splitlines()
     # recognizes \n, \r, U+2028, U+2029, U+0085 (and VT, FF, FS, GS, RS)
     # as line boundaries, so any rationale containing one of those chars
     # is split before OVERRIDE_COMMENT_RE.fullmatch sees it — fullmatch

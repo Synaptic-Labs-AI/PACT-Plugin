@@ -51,7 +51,7 @@ _NAME_MAX_CHARS = 200
 # input containing anything outside [A-Za-z0-9_-] is rejected. This
 # matches the shape of legitimate values:
 #   - team_name: "pact-" + hex-with-hyphens (per generate_team_name
-#     at session_init.py:173, which uses `re.sub(r"[^a-f0-9-]", "",
+#     at session_init.py:376, which uses `re.sub(r"[^a-f0-9-]", "",
 #     session_id[:8])`).
 #   - feature_id: numeric task IDs or UUIDs (hex + hyphens).
 # Rejects ".", "..", "../etc", path separators, control chars, null,
@@ -142,7 +142,7 @@ def is_safe_path_component(value: str) -> bool:
 
     Defense-in-depth against path-traversal via tampered session
     context (see security review Finding 2). The upstream allowlist
-    lives at `session_init.py:173` — `re.sub(r"[^a-f0-9-]", "",
+    lives at `session_init.py:401` — `re.sub(r"[^a-f0-9-]", "",
     session_id[:8])` — which already filters path separators, `..`,
     nulls, and controls at team-name generation time. This guard is a
     second line of defense at the I/O boundary.

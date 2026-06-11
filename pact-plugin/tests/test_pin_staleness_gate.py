@@ -564,7 +564,7 @@ class TestPinStalenessGate_DecoyBypass:
     """Arch-M3 managed-region bounding of `_count_pin_comments`.
 
     Load-bearing coverage for the bounded-count defense at
-    `pin_staleness_gate.py:120-127` (extract_managed_region import
+    `pin_staleness_gate.py:128-138` (extract_managed_region import
     block). Before this defense, a `<!-- pinned:` token appearing in
     user-authored prose or a fenced code block OUTSIDE the managed
     region would inflate the gate's count and either:
@@ -574,7 +574,7 @@ class TestPinStalenessGate_DecoyBypass:
         structural reality).
 
     Counter-test-by-revert: commenting out the try-block at
-    `pin_staleness_gate.py:120-127` (so `_count_pin_comments` always
+    `pin_staleness_gate.py:128-138` (so `_count_pin_comments` always
     falls through to `text.count(...)`) MUST cause at least one test
     here to fail. Without that proof, the defense is phantom-green.
     """
@@ -678,7 +678,7 @@ class TestPinStalenessGate_DecoyBypass:
         assert result is not None, (
             "In-region ADD masked by outside decoy removal — Arch-M3 bounding "
             "bypassed. If you see this failure after reverting "
-            "pin_staleness_gate.py lines 120-127, that is the counter-test "
+            "pin_staleness_gate.py lines 128-138, that is the counter-test "
             "proof the defense is load-bearing."
         )
         assert "stale pins" in result
