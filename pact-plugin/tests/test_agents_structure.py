@@ -107,6 +107,41 @@ class TestAgentFrontmatter:
             assert len(desc) > 0, f"{name} has empty description"
 
 
+class TestTeammateModelInheritance:
+    """Every teammate agent def must pin `model: inherit` in frontmatter.
+
+    Teammates are spawned via Agent() from the lead's session; without an
+    explicit `model:` key the harness falls back to its own default model
+    instead of the lead's, silently splitting the team across models.
+    `inherit` resolves the lead's full model ID at spawn time.
+
+    This is the positive half of a deliberate frontmatter asymmetry: the
+    orchestrator is launched via `claude --agent` with no parent to inherit
+    from, so pact-orchestrator.md must NOT carry the key — that negative
+    half is enforced by test_pact_orchestrator_agent.py::
+    test_pact_orchestrator_omits_model_permissionmode_tools.
+    """
+
+    def test_all_teammates_declare_model_inherit(self, teammate_agent_files):
+        # Cardinality pin: guards THIS test's iteration surface against a
+        # vacuous pass if the fixture glob silently yields fewer files
+        # (test_no_unexpected_agents guards the on-disk closed set, not
+        # this loop's coverage).
+        names = {f.stem for f in teammate_agent_files}
+        assert names == TEAMMATE_AGENT_NAMES and len(names) == 12, (
+            f"Expected exactly the 12 teammate agent defs, got {len(names)}: "
+            f"{sorted(names)}"
+        )
+        for f in teammate_agent_files:
+            fm = parse_frontmatter(f.read_text(encoding="utf-8"))
+            assert fm is not None, f"{f.name}: frontmatter failed to parse"
+            assert fm.get("model") == "inherit", (
+                f"{f.name}: frontmatter `model` must be 'inherit' so the "
+                f"spawned teammate inherits the lead session's model "
+                f"(got {fm.get('model')!r})"
+            )
+
+
 class TestAgentBody:
     def test_has_system_prompt_content(self, agent_files):
         for f in agent_files:
