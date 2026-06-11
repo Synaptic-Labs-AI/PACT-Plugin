@@ -415,6 +415,44 @@ class TestEndToEndParity:
         assert stored is not None
         assert stored.project_id == main.name
 
+    def test_worktree_save_writes_worktree_block_not_main(
+        self, worktree_repo, clean_env
+    ):
+        """A worktree-rooted save() writes the display block to the WORKTREE file
+        and leaves the main repo untouched.
+
+        This isolates the display leg of the acceptance criterion. Unlike the
+        joint test above, it asserts only the display target, so it stays coupled
+        to the display-target resolver even if the database-key path regresses.
+        """
+        main, worktree = worktree_repo
+        db_path = worktree.parent / "memory.db"
+        mem = PACTMemory(db_path=db_path)
+
+        mem.save({"context": "Worktree display leg"})
+
+        worktree_text = (worktree / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+        main_text = (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "Worktree display leg" in _working_memory_block(worktree_text)
+        assert "Worktree display leg" not in main_text
+
+    def test_worktree_save_keys_db_row_to_main_repo(self, worktree_repo, clean_env):
+        """A worktree-rooted save() keys the database row to the MAIN repo slug.
+
+        This isolates the database-key leg of the acceptance criterion. It
+        asserts only the stored project_id, so it stays coupled to the
+        project-id detector even if the display-write path regresses.
+        """
+        main, worktree = worktree_repo
+        db_path = worktree.parent / "memory.db"
+        mem = PACTMemory(db_path=db_path)
+
+        memory_id = mem.save({"context": "Worktree key leg"})
+
+        stored = mem.get(memory_id)
+        assert stored is not None
+        assert stored.project_id == main.name
+
     def test_main_session_save_populates_main_block(self, tmp_path, clean_env):
         """A plain main-repo save() writes the main Working Memory block and
         keys the row to the main slug."""
