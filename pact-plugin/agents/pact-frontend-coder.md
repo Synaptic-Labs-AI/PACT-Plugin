@@ -4,6 +4,7 @@ description: |
   Use this agent to implement frontend code: responsive, accessible user interfaces with
   proper state management. Use after architectural specifications are ready.
 color: "#32CD32"
+model: inherit
 permissionMode: acceptEdits
 memory: user
 skills:

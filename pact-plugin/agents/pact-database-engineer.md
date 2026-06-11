@@ -4,6 +4,7 @@ description: |
   Use this agent to implement database solutions: schemas, optimized queries, data models,
   indexes, and data integrity. Use after architectural specifications are ready.
 color: "#FFBF00"
+model: inherit
 permissionMode: acceptEdits
 memory: user
 skills:

@@ -5,6 +5,7 @@ description: |
   comparing against architecture specs, and emitting GREEN/YELLOW/RED signals. Does not write
   code — observes while others build.
 color: "#4169E1"
+model: inherit
 permissionMode: byDefault
 memory: user
 skills:
