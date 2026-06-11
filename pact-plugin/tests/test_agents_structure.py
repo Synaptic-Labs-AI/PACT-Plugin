@@ -241,13 +241,12 @@ class TestNoSkillInvocationOnFirstAction:
         This is scoped to this test class rather than extended in helpers.py
         to avoid destabilizing other tests that rely on the flattened form.
         """
-        if not text.startswith("---"):
-            return []
         try:
-            end = text.index("---", 3)
+            fm_text = frontmatter_block(text)
         except ValueError:
             return []
-        fm_text = text[3:end]
+        if fm_text is None:
+            return []
         lines = fm_text.split("\n")
         skills = []
         in_skills = False
