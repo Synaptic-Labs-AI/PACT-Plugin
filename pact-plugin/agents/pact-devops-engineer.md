@@ -4,6 +4,7 @@ description: |
   Use this agent to implement infrastructure and build systems: CI/CD pipelines, Dockerfiles,
   shell scripts, Makefiles, and infrastructure as code. Use after architectural specifications are ready.
 color: "#FF6600"
+model: inherit
 permissionMode: acceptEdits
 memory: user
 skills:

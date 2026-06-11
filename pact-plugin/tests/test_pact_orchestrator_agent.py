@@ -70,7 +70,12 @@ def test_pact_orchestrator_color_is_gold():
 
 
 def test_pact_orchestrator_omits_model_permissionmode_tools():
-    """Frontmatter asymmetry: orchestrator inherits defaults; teammate files keep them."""
+    """Frontmatter asymmetry: orchestrator inherits defaults; teammate files keep them.
+
+    Negative half of the contract; the positive half (every teammate def
+    must pin `model: inherit`) is enforced by test_agents_structure.py::
+    TestTeammateModelInheritance.
+    """
     text = ORCHESTRATOR_PATH.read_text()
     fm = parse_frontmatter(text)
     forbidden = {"model", "permissionMode", "tools"}

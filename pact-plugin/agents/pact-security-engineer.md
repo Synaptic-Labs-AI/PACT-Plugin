@@ -4,6 +4,7 @@ description: |
   Use this agent for adversarial security code review: finding vulnerabilities, auth flaws,
   injection risks, and data exposure. Does not fix issues — reports findings for coders to address.
 color: "#8B0000"
+model: inherit
 permissionMode: acceptEdits
 memory: user
 skills:

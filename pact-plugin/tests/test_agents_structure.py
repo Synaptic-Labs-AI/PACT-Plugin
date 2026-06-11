@@ -5,7 +5,7 @@ Tests cover:
 1. All agent files exist and are readable
 2. YAML frontmatter is valid and contains required fields
 3. Agent names follow pact-{role} convention
-4. Required frontmatter keys: name, description, color, permissionMode
+4. Required frontmatter keys: name, description
 5. Skills reference exists
 6. Agent body contains expected sections
 """
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers import parse_frontmatter
+from helpers import frontmatter_block, parse_frontmatter
 
 AGENTS_DIR = Path(__file__).parent.parent / "agents"
 
@@ -107,6 +107,63 @@ class TestAgentFrontmatter:
             assert len(desc) > 0, f"{name} has empty description"
 
 
+class TestTeammateModelInheritance:
+    """Every teammate agent def must pin `model: inherit` in frontmatter.
+
+    Teammates are spawned via Agent() from the lead's session; without an
+    explicit `model:` key the harness falls back to its own default model
+    instead of the lead's, silently splitting the team across models.
+    `inherit` resolves the lead's full model ID at spawn time.
+
+    This is the positive half of a deliberate frontmatter asymmetry: the
+    orchestrator is launched via `claude --agent` with no parent to inherit
+    from, so pact-orchestrator.md must NOT carry the key — that negative
+    half is enforced by test_pact_orchestrator_agent.py::
+    test_pact_orchestrator_omits_model_permissionmode_tools.
+
+    The value check is deliberately byte-form-strict: YAML-equivalent
+    spellings such as a quoted "inherit" or a trailing comment fail by
+    design (false-fail direction), enforcing one uniform authoring shape
+    across all teammate defs.
+    """
+
+    def test_all_teammates_declare_model_inherit(self, teammate_agent_files):
+        # Addition-ratchet: the set-equality leg alone already fails on a
+        # missing/unexpected def and on a vacuous fixture glob. The `== 12`
+        # literal is therefore not a vacuity guard — it exists to force a
+        # conscious edit HERE when a teammate def is added, because
+        # set-equality would silently auto-track an EXPECTED_AGENTS
+        # addition.
+        names = {f.stem for f in teammate_agent_files}
+        assert names == TEAMMATE_AGENT_NAMES and len(names) == 12, (
+            f"Expected exactly the 12 teammate agent defs, got {len(names)}: "
+            f"{sorted(names)}. If a teammate def was deliberately added or "
+            f"removed, update the count literal (and EXPECTED_AGENTS) with a "
+            f"comment naming which def changed and why — this failure is the "
+            f"ratchet prompting that conscious update, not a defect."
+        )
+        for f in teammate_agent_files:
+            text = f.read_text(encoding="utf-8")
+            fm = parse_frontmatter(text)
+            assert fm is not None, f"{f.name}: frontmatter failed to parse"
+            fm_block = frontmatter_block(text)
+            model_lines = [
+                ln for ln in fm_block.splitlines()
+                if ln.startswith("model:")
+            ]
+            assert len(model_lines) == 1, (
+                f"{f.name}: expected exactly one `model:` line in "
+                f"frontmatter, got {len(model_lines)} — duplicate keys "
+                f"resolve last-wins and can silently shadow the intended "
+                f"value"
+            )
+            assert fm.get("model") == "inherit", (
+                f"{f.name}: frontmatter `model` must be 'inherit' so the "
+                f"spawned teammate inherits the lead session's model "
+                f"(got {fm.get('model')!r})"
+            )
+
+
 class TestAgentBody:
     def test_has_system_prompt_content(self, agent_files):
         for f in agent_files:
@@ -184,13 +241,12 @@ class TestNoSkillInvocationOnFirstAction:
         This is scoped to this test class rather than extended in helpers.py
         to avoid destabilizing other tests that rely on the flattened form.
         """
-        if not text.startswith("---"):
-            return []
         try:
-            end = text.index("---", 3)
+            fm_text = frontmatter_block(text)
         except ValueError:
             return []
-        fm_text = text[3:end]
+        if fm_text is None:
+            return []
         lines = fm_text.split("\n")
         skills = []
         in_skills = False

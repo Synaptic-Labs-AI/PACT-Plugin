@@ -4,6 +4,7 @@ description: |
   Use this agent for runtime verification: starting the app, navigating pages, testing interactions,
   and catching regressions invisible to static analysis. Requires a runnable dev server.
 color: "#FF69B4"
+model: inherit
 permissionMode: acceptEdits
 memory: user
 skills:

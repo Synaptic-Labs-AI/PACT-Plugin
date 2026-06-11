@@ -28,6 +28,7 @@ description: |
   <commentary>The secretary proactively searches pact-memory at spawn, cleans stale Working Memory entries, and delivers a session briefing — no explicit query needed.</commentary>
   </example>
 color: "#708090"
+model: inherit
 permissionMode: acceptEdits
 memory: user
 skills:

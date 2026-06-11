@@ -4,6 +4,7 @@ description: |
   Use this agent to create and run tests: unit tests, integration tests, E2E tests,
   performance tests, and security tests. Use after code implementation is complete.
 color: "#DC143C"
+model: inherit
 permissionMode: acceptEdits
 memory: user
 skills:
