@@ -5,7 +5,7 @@ Tests cover:
 1. All agent files exist and are readable
 2. YAML frontmatter is valid and contains required fields
 3. Agent names follow pact-{role} convention
-4. Required frontmatter keys: name, description, color, permissionMode
+4. Required frontmatter keys: name, description
 5. Skills reference exists
 6. Agent body contains expected sections
 """
@@ -120,21 +120,43 @@ class TestTeammateModelInheritance:
     from, so pact-orchestrator.md must NOT carry the key — that negative
     half is enforced by test_pact_orchestrator_agent.py::
     test_pact_orchestrator_omits_model_permissionmode_tools.
+
+    The value check is deliberately byte-form-strict: YAML-equivalent
+    spellings such as a quoted "inherit" or a trailing comment fail by
+    design (false-fail direction), enforcing one uniform authoring shape
+    across all teammate defs.
     """
 
     def test_all_teammates_declare_model_inherit(self, teammate_agent_files):
-        # Cardinality pin: guards THIS test's iteration surface against a
-        # vacuous pass if the fixture glob silently yields fewer files
-        # (test_no_unexpected_agents guards the on-disk closed set, not
-        # this loop's coverage).
+        # Addition-ratchet: the set-equality leg alone already fails on a
+        # missing/unexpected def and on a vacuous fixture glob. The `== 12`
+        # literal is therefore not a vacuity guard — it exists to force a
+        # conscious edit HERE when a teammate def is added, because
+        # set-equality would silently auto-track an EXPECTED_AGENTS
+        # addition.
         names = {f.stem for f in teammate_agent_files}
         assert names == TEAMMATE_AGENT_NAMES and len(names) == 12, (
             f"Expected exactly the 12 teammate agent defs, got {len(names)}: "
-            f"{sorted(names)}"
+            f"{sorted(names)}. If a teammate def was deliberately added or "
+            f"removed, update the count literal (and EXPECTED_AGENTS) with a "
+            f"comment naming which def changed and why — this failure is the "
+            f"ratchet prompting that conscious update, not a defect."
         )
         for f in teammate_agent_files:
-            fm = parse_frontmatter(f.read_text(encoding="utf-8"))
+            text = f.read_text(encoding="utf-8")
+            fm = parse_frontmatter(text)
             assert fm is not None, f"{f.name}: frontmatter failed to parse"
+            fm_block = text[3:text.index("---", 3)]
+            model_lines = [
+                ln for ln in fm_block.splitlines()
+                if ln.startswith("model:")
+            ]
+            assert len(model_lines) == 1, (
+                f"{f.name}: expected exactly one `model:` line in "
+                f"frontmatter, got {len(model_lines)} — duplicate keys "
+                f"resolve last-wins and can silently shadow the intended "
+                f"value"
+            )
             assert fm.get("model") == "inherit", (
                 f"{f.name}: frontmatter `model` must be 'inherit' so the "
                 f"spawned teammate inherits the lead session's model "
