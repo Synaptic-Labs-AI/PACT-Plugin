@@ -127,6 +127,36 @@ def _detect_project_id_under_test():
     # Strategy 1: Environment variable (original behavior)
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
     if project_dir:
+        # When CLAUDE_PROJECT_DIR points below a repo's root (a worktree OR
+        # an in-repo subdirectory), its basename is not the project name and
+        # would fragment the project_id across sessions. Prefer the MAIN
+        # repo's basename so every session of a project shares one key,
+        # aligning this env branch (Strategy 1) with the git-root and
+        # cwd-marker branches (Strategies 2/3), which already resolve to the
+        # repo root. The rewrite fires when git resolves a main repo whose
+        # root differs from the env path; only a repo-root env path or a
+        # non-git path (where the main anchor equals, or cannot be resolved
+        # from, the env path) keeps the original basename.
+        try:
+            result = subprocess.run(
+                ["git", "-C", project_dir, "rev-parse", "--git-common-dir"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                common_dir = Path(result.stdout.strip())
+                if not common_dir.is_absolute():
+                    common_dir = Path(project_dir) / common_dir
+                main_repo_root = common_dir.resolve().parent
+                if main_repo_root != Path(project_dir).resolve():
+                    logger.debug(
+                        "project_id detected from CLAUDE_PROJECT_DIR worktree main repo: %s",
+                        main_repo_root.name,
+                    )
+                    return main_repo_root.name
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
         logger.debug("project_id detected from CLAUDE_PROJECT_DIR: %s", Path(project_dir).name)
         return Path(project_dir).name
 
@@ -263,8 +293,14 @@ class TestDetectProjectId:
             result = _detect_project_id_under_test()
         assert result == "cool-repo"
 
-    def test_env_var_takes_priority_over_git(self):
-        """Env var should win even when git would return a different value."""
+    def test_env_var_worktree_prefers_main_repo_basename(self):
+        """When CLAUDE_PROJECT_DIR is a worktree, the MAIN repo basename wins.
+
+        A worktree env path resolves via git to a main repo whose root differs
+        from the env path; the project_id must be the main repo's basename so
+        all sessions of the project share one key, rather than the worktree's
+        own (fragmenting) basename.
+        """
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = "/some/git/repo/.git\n"
@@ -272,7 +308,7 @@ class TestDetectProjectId:
         with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/env/var/project"}), \
              patch("subprocess.run", return_value=mock_result):
             result = _detect_project_id_under_test()
-        assert result == "project"
+        assert result == "repo"
 
     # --- Strategy 2: Git repo root ---
 
