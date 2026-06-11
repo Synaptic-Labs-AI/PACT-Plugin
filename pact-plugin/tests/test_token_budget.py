@@ -236,7 +236,7 @@ class TestSyncToClaudeMdBudgetEnforcement:
         )
         claude_md = self._create_claude_md(tmp_path, existing_content)
 
-        with patch("working_memory._get_claude_md_path", return_value=claude_md):
+        with patch("working_memory._resolve_display_claude_md_path", return_value=claude_md):
             result = sync_to_claude_md(
                 {"context": "New context entry", "goal": "New goal"},
                 memory_id="test123"
@@ -260,7 +260,7 @@ class TestSyncToClaudeMdBudgetEnforcement:
         )
         claude_md = self._create_claude_md(tmp_path, content)
 
-        with patch("working_memory._get_claude_md_path", return_value=claude_md):
+        with patch("working_memory._resolve_display_claude_md_path", return_value=claude_md):
             sync_to_claude_md({"context": "Test"}, memory_id="id1")
 
         new_content = claude_md.read_text(encoding="utf-8")
@@ -286,7 +286,7 @@ class TestSyncToClaudeMdBudgetEnforcement:
         )
         claude_md = self._create_claude_md(tmp_path, existing_content)
 
-        with patch("working_memory._get_claude_md_path", return_value=claude_md):
+        with patch("working_memory._resolve_display_claude_md_path", return_value=claude_md):
             result = sync_to_claude_md(
                 {"context": "Brand new entry"},
                 memory_id="new123"
@@ -347,7 +347,7 @@ class TestSyncRetrievedBudgetEnforcement:
         )
         claude_md = self._create_claude_md(tmp_path, existing_content)
 
-        with patch("working_memory._get_claude_md_path", return_value=claude_md):
+        with patch("working_memory._resolve_display_claude_md_path", return_value=claude_md):
             result = sync_retrieved_to_claude_md(
                 [{"context": "New retrieved", "goal": "test"}],
                 query="test search",

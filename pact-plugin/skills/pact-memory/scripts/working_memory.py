@@ -266,6 +266,60 @@ def _get_claude_md_path() -> Optional[Path]:
     return _find_existing_claude_md(Path.cwd())
 
 
+def _resolve_display_claude_md_path() -> Optional[Path]:
+    """
+    Resolve the CLAUDE.md the CURRENT SESSION displays, so Working Memory /
+    Retrieved Context syncs land in the file the session actually reads.
+
+    Resolution order:
+      1. CLAUDE_PROJECT_DIR env var, if set -> that dir's .claude/CLAUDE.md
+         (preferred) or ./CLAUDE.md (legacy).
+      2. Git worktree root via `git rev-parse --show-toplevel` -> the same
+         .claude/-then-legacy probe under the worktree root.
+      3. Current working directory -> the same probe.
+
+    Unlike _get_claude_md_path (which anchors to the MAIN repo via
+    --git-common-dir so it can find a single shared CLAUDE.md), this anchors
+    to the WORKTREE root via --show-toplevel so a worktree-rooted session
+    updates its OWN display file — the same file session_init/session_resume
+    create and read. In a non-worktree checkout the two anchors coincide, so
+    the resolved path is identical to _get_claude_md_path's.
+
+    This never CREATES a CLAUDE.md (the orchestrator manages the file's
+    lifecycle); it only probes for an existing one and returns its Path, or
+    None when none exists at the resolved base (callers skip the sync).
+
+    Returns:
+        Path to the existing display CLAUDE.md, or None if none exists.
+    """
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if project_dir:
+        found = _find_existing_claude_md(Path(project_dir))
+        if found is not None:
+            return found
+
+    # Worktree root: --show-toplevel returns the worktree directory when run
+    # inside a worktree (and the main repo root otherwise), matching the
+    # directory session_init/session_resume target for the session's CLAUDE.md.
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            worktree_root = Path(result.stdout.strip())
+            found = _find_existing_claude_md(worktree_root)
+            if found is not None:
+                return found
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+
+    # Last resort: current working directory
+    return _find_existing_claude_md(Path.cwd())
+
+
 def _estimate_tokens(text: str) -> int:
     """
     Estimate token count for a text string.
@@ -618,7 +672,7 @@ def sync_to_claude_md(
     Returns:
         True if sync succeeded, False otherwise.
     """
-    claude_md_path = _get_claude_md_path()
+    claude_md_path = _resolve_display_claude_md_path()
 
     if claude_md_path is None:
         logger.debug("CLAUDE.md not found, skipping working memory sync")
@@ -825,7 +879,7 @@ def sync_retrieved_to_claude_md(
     if not memories:
         return False
 
-    claude_md_path = _get_claude_md_path()
+    claude_md_path = _resolve_display_claude_md_path()
 
     if claude_md_path is None:
         logger.debug("CLAUDE.md not found, skipping retrieved context sync")
