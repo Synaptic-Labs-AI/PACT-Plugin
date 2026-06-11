@@ -19,16 +19,31 @@ from typing import Any
 # Shared Utilities: Frontmatter Parser
 # =============================================================================
 
+def frontmatter_block(text):
+    """Return the unstripped frontmatter text between the opening and
+    closing --- delimiters, or None if text does not start with ---.
+
+    Single source of the delimiter logic, shared by parse_frontmatter and
+    structure tests that need the raw block (e.g. line-level key counting).
+    Raises ValueError (via str.index) when an opening delimiter has no
+    closing delimiter, preserving parse_frontmatter's historical behavior.
+    """
+    if not text.startswith("---"):
+        return None
+    end = text.index("---", 3)
+    return text[3:end]
+
+
 def parse_frontmatter(text):
     """Parse YAML frontmatter from markdown text.
 
     Handles simple key: value pairs and multiline values using the | block
     scalar indicator. Used by agent, command, and skill structure tests.
     """
-    if not text.startswith("---"):
+    block = frontmatter_block(text)
+    if block is None:
         return None
-    end = text.index("---", 3)
-    fm_text = text[3:end].strip()
+    fm_text = block.strip()
     result = {}
     current_key = None
     for line in fm_text.split("\n"):

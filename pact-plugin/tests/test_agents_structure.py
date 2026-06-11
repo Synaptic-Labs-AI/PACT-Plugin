@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers import parse_frontmatter
+from helpers import frontmatter_block, parse_frontmatter
 
 AGENTS_DIR = Path(__file__).parent.parent / "agents"
 
@@ -146,7 +146,7 @@ class TestTeammateModelInheritance:
             text = f.read_text(encoding="utf-8")
             fm = parse_frontmatter(text)
             assert fm is not None, f"{f.name}: frontmatter failed to parse"
-            fm_block = text[3:text.index("---", 3)]
+            fm_block = frontmatter_block(text)
             model_lines = [
                 ln for ln in fm_block.splitlines()
                 if ln.startswith("model:")
