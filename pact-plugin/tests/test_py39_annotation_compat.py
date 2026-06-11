@@ -2,14 +2,28 @@
 Location: pact-plugin/tests/test_py39_annotation_compat.py
 Summary: Static AST guard keeping pact-plugin/hooks/ importable under
          Python 3.9 (GUI-launched macOS sessions run hooks on
-         /usr/bin/python3 = 3.9.x). Three rules:
-         R1 every scanned .py carries `from __future__ import annotations`;
+         /usr/bin/python3 = 3.9.x). Four rules:
+         R0 every scanned .py parses at ast feature_version=(3, 9) — a
+            best-effort syntax floor per CPython policy: it rejects
+            match/case but accepts some newer forms (notably
+            parenthesized multi-item `with`), so it narrows, rather
+            than replaces, live 3.9 import verification at fix time;
+         R1 every scanned .py defers annotation evaluation via
+            `from __future__ import annotations` in its leading
+            __future__-import block;
          R2 no runtime-position type unions (the future import cannot
             defer those);
-         R3 no typing.get_type_hints / typing.cast anywhere in scanned
-            roots — their absence is what makes universal annotation
-            stringification safe on 3.9.
-         Pure static analysis: runs identically under any CI interpreter.
+         R3 no runtime annotation evaluators (typing.cast,
+            typing.get_type_hints, inspect.get_annotations,
+            functools.singledispatch/singledispatchmethod) anywhere in
+            scanned roots — their absence is what makes universal
+            annotation stringification safe on 3.9.
+         Pure static analysis: nothing scanned is imported or executed.
+         Because R0 pins feature_version statically, the suite needs no
+         Python 3.9 CI interpreter — any modern interpreter enforces
+         the same floor. (Under an actual 3.9 interpreter, py310+
+         syntax would surface as parse ERRORS in R1-R3 instead of clean
+         R0 violations — the gate goes red either way.)
 Used by: pact-plugin test suite (standing merge gate).
 """
 from __future__ import annotations
@@ -43,7 +57,17 @@ TYPE_NAMES = frozenset({
 
 _CLASS_LIKE = re.compile(r"^[A-Z][A-Za-z0-9]*[a-z][A-Za-z0-9]*$")  # CamelCase, NOT ALL_CAPS
 
-ANNOTATION_EVAL_NAMES = frozenset({"cast", "get_type_hints"})
+# Per-module runtime annotation evaluators. typing.cast/get_type_hints and
+# inspect.get_annotations re-evaluate stringified annotations directly;
+# functools.singledispatch/singledispatchmethod evaluate them via an internal
+# typing.get_type_hints call on the annotation-inference @register path.
+# Any of them silently re-introduces the 3.9 crash class that universal
+# stringification avoids, so their count in scanned roots must stay zero.
+ANNOTATION_EVAL_NAMES = {
+    "typing": frozenset({"cast", "get_type_hints"}),
+    "inspect": frozenset({"get_annotations"}),
+    "functools": frozenset({"singledispatch", "singledispatchmethod"}),
+}
 
 FUTURE_IMPORT_LINE = "from __future__ import annotations"
 
@@ -52,7 +76,7 @@ FUTURE_IMPORT_LINE = "from __future__ import annotations"
 class Violation:
     relpath: str
     lineno: int
-    rule: str      # "missing_future_import" | "runtime_type_union" | "annotation_eval_api"
+    rule: str      # "py310_syntax" | "missing_future_import" | "runtime_type_union" | "annotation_eval_api"
     detail: str
 
 
@@ -183,12 +207,33 @@ def _operand_type_likeness(node: ast.expr) -> Optional[str]:
 # drive them with synthetic strings.
 # ---------------------------------------------------------------------------
 
+def check_py39_syntax_floor(source: str, relpath: str) -> List[Violation]:
+    """R0: the file must parse at feature_version=(3, 9). Catches py310+
+    statement syntax (e.g. match/case) that R1's deferred annotations cannot
+    fix and that would otherwise pass R1-R3 silently under a modern
+    interpreter. Best-effort per CPython policy: some newer forms
+    (parenthesized multi-item `with`) parse anyway, so a clean R0 is
+    necessary, not sufficient — live 3.9 import verification at fix time
+    remains the ground truth for what feature_version misses."""
+    try:
+        ast.parse(source, feature_version=(3, 9))
+    except SyntaxError as exc:
+        return [Violation(
+            relpath=relpath, lineno=exc.lineno or 1, rule="py310_syntax",
+            detail="not parseable at feature_version=(3, 9): {}".format(exc.msg),
+        )]
+    return []
+
+
 def check_future_import(source: str, relpath: str) -> List[Violation]:
-    """R1: the first non-docstring statement must be the annotations future
-    import. Position is checked, not just presence — a future import buried
-    below other imports is a 3.9 SyntaxError. On failure the detail cites
-    every annotation-position union in the file (the lines that would crash
-    Python 3.9)."""
+    """R1: `from __future__ import annotations` must appear in the module's
+    leading __future__-import block — after the docstring, before the first
+    statement that is not itself a __future__ import. That is exactly the
+    placement Python permits for future imports, so every layout this rule
+    accepts is valid 3.9 source with annotation evaluation fully deferred;
+    a future import buried below other imports is a 3.9 SyntaxError. On
+    failure the detail cites every annotation-position union in the file
+    (the lines that would crash Python 3.9)."""
     tree = ast.parse(source)
     body = tree.body
 
@@ -199,14 +244,12 @@ def check_future_import(source: str, relpath: str) -> List[Violation]:
         )]
 
     first_index = 1 if _is_docstring_stmt(body[0]) else 0
-    if first_index < len(body):
-        first_stmt = body[first_index]
-        if (
-            isinstance(first_stmt, ast.ImportFrom)
-            and first_stmt.module == "__future__"
-            and any(alias.name == "annotations" for alias in first_stmt.names)
-        ):
-            return []
+    for stmt in body[first_index:]:
+        if isinstance(stmt, ast.ImportFrom) and stmt.module == "__future__":
+            if any(alias.name == "annotations" for alias in stmt.names):
+                return []
+            continue   # another __future__ import; keep scanning the block
+        break          # first non-future statement ends the leading block
 
     union_lines = _annotation_union_lines(tree)
     enrichment = (
@@ -218,8 +261,8 @@ def check_future_import(source: str, relpath: str) -> List[Violation]:
     return [Violation(
         relpath=relpath, lineno=1, rule="missing_future_import",
         detail=(
-            "`{}` must be the first statement after the module docstring{}"
-            .format(FUTURE_IMPORT_LINE, enrichment)
+            "`{}` must appear in the leading __future__-import block after "
+            "the module docstring{}".format(FUTURE_IMPORT_LINE, enrichment)
         ),
     )]
 
@@ -268,35 +311,46 @@ def check_runtime_type_unions(source: str, relpath: str) -> List[Violation]:
 
 
 def check_annotation_eval_apis(source: str, relpath: str) -> List[Violation]:
-    """R3: typing.cast / typing.get_type_hints re-evaluate stringified
-    annotations at runtime and would silently re-introduce the 3.9 crash
-    class. Their count in the scanned roots is zero and must stay zero.
-    Detects both `from typing import cast` (any alias) and attribute access
-    through `import typing` / `import typing as T` bindings."""
+    """R3: runtime annotation evaluators (see ANNOTATION_EVAL_NAMES) would
+    silently re-introduce the 3.9 crash class. Their count in the scanned
+    roots is zero and must stay zero. Detects both `from <module> import
+    <name>` (under any asname) and attribute access through
+    `import <module>` / `import <module> as M` bindings.
+    functools.singledispatch is banned at presence level: only its
+    annotation-inference @register path evaluates annotations, but no
+    legitimate use exists in scanned roots — if one ever does, narrow this
+    rule deliberately rather than working around it."""
     tree = ast.parse(source)
-    typing_aliases = set()
+    module_bindings = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name == "typing":
-                    typing_aliases.add(alias.asname or "typing")
+                if alias.name in ANNOTATION_EVAL_NAMES:
+                    module_bindings[alias.asname or alias.name] = alias.name
 
     violations = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "typing":
+        if isinstance(node, ast.ImportFrom) and node.module in ANNOTATION_EVAL_NAMES:
             for alias in node.names:
-                if alias.name in ANNOTATION_EVAL_NAMES:
+                if alias.name in ANNOTATION_EVAL_NAMES[node.module]:
                     violations.append(Violation(
                         relpath=relpath, lineno=node.lineno, rule="annotation_eval_api",
-                        detail="`from typing import {}` re-evaluates stringified "
-                               "annotations at runtime".format(alias.name),
+                        detail="`from {} import {}` re-evaluates stringified "
+                               "annotations at runtime (directly or via an "
+                               "internal typing.get_type_hints)"
+                               .format(node.module, alias.name),
                     ))
-        elif isinstance(node, ast.Attribute) and node.attr in ANNOTATION_EVAL_NAMES:
-            if isinstance(node.value, ast.Name) and node.value.id in typing_aliases:
+        elif isinstance(node, ast.Attribute):
+            if (
+                isinstance(node.value, ast.Name)
+                and node.value.id in module_bindings
+                and node.attr in ANNOTATION_EVAL_NAMES[module_bindings[node.value.id]]
+            ):
                 violations.append(Violation(
                     relpath=relpath, lineno=node.lineno, rule="annotation_eval_api",
                     detail="`{}.{}` re-evaluates stringified annotations at "
-                           "runtime".format(node.value.id, node.attr),
+                           "runtime (directly or via an internal "
+                           "typing.get_type_hints)".format(node.value.id, node.attr),
                 ))
     return violations
 
@@ -314,6 +368,31 @@ _SCANNED_FILES = list(iter_python_files())
 # ---------------------------------------------------------------------------
 # Live-tree rules
 # ---------------------------------------------------------------------------
+
+class TestDiscoveryFloor:
+    """Discovery must never silently collapse to an empty scan."""
+
+    def test_scanned_file_count_floor(self):
+        # If SCANNED_ROOTS resolves empty (directory rename, anchor break),
+        # the per-file parameter sets degrade to a single skip each and the
+        # aggregate rules pass vacuously over zero files — silently green.
+        # Floor rather than exact count so adding hooks never breaks it;
+        # bump the floor as hooks/ grows, never lower it without a
+        # deliberate scope decision.
+        assert len(_SCANNED_FILES) >= 63
+
+
+class TestPy39SyntaxFloor:
+    """R0 over every scanned file, one test per file."""
+
+    @pytest.mark.parametrize(
+        "path", _SCANNED_FILES, ids=[_relpath(p) for p in _SCANNED_FILES]
+    )
+    def test_parses_at_py39_feature_version(self, path):
+        source = path.read_text(encoding="utf-8")
+        violations = check_py39_syntax_floor(source, _relpath(path))
+        assert not violations, _format_violations(violations)
+
 
 class TestFutureImportPresence:
     """R1 over every scanned file, one test per file."""
@@ -357,6 +436,26 @@ class TestNoAnnotationEvalAPIs:
 
 class TestDetectorNonVacuity:
 
+    def test_match_statement_fires_syntax_floor(self):
+        source = (
+            "def f(x):\n"
+            "    match x:\n"
+            "        case 1:\n"
+            "            return 'one'\n"
+            "    return 'other'\n"
+        )
+        violations = check_py39_syntax_floor(source, "synthetic.py")
+        assert len(violations) == 1
+        assert violations[0].rule == "py310_syntax"
+
+    def test_py39_clean_source_passes_syntax_floor(self):
+        source = (
+            "from __future__ import annotations\n"
+            "\n"
+            "def f(x: str | None) -> int | None: ...\n"
+        )
+        assert check_py39_syntax_floor(source, "synthetic.py") == []
+
     def test_union_annotation_without_future_import_fires(self):
         source = "def f(x: str | None): ...\n"
         violations = check_future_import(source, "synthetic.py")
@@ -386,6 +485,16 @@ class TestDetectorNonVacuity:
         source = (
             '"""Docstring."""\n'
             "\n"
+            "from __future__ import annotations\n"
+        )
+        assert check_future_import(source, "synthetic.py") == []
+
+    def test_annotations_after_other_future_import_passes(self):
+        # Multiple __future__ imports may share the leading block in any
+        # order — valid Python with annotations fully deferred, so R1's
+        # position rule is relative to non-future statements only.
+        source = (
+            "from __future__ import generators\n"
             "from __future__ import annotations\n"
         )
         assert check_future_import(source, "synthetic.py") == []
@@ -428,6 +537,27 @@ class TestDetectorNonVacuity:
         )
         assert check_runtime_type_unions(source, "synthetic.py") == []
 
+    def test_all_caps_bare_name_or_stays_silent(self):
+        # ALL_CAPS names fail _CLASS_LIKE (no lowercase char) — integer-flag
+        # constants outside FLAG_MODULES must not flag.
+        source = "flags = DEFAULT_FLAGS | EXTRA_FLAGS\n"
+        assert check_runtime_type_unions(source, "synthetic.py") == []
+
+    def test_all_caps_attr_outside_flag_modules_stays_silent(self):
+        source = (
+            "import customflags\n"
+            "\n"
+            "flags = customflags.FLAG_A | customflags.FLAG_B\n"
+        )
+        assert check_runtime_type_unions(source, "synthetic.py") == []
+
+    def test_three_operand_runtime_chain_fires_once(self):
+        # The chain-flattening dedup must report `a | b | c` as ONE
+        # violation on the outermost node, not one per nested BinOp.
+        source = "x = isinstance(y, str | int | None)\n"
+        violations = check_runtime_type_unions(source, "synthetic.py")
+        assert len(violations) == 1
+
     def test_annotation_position_union_not_flagged_by_r2(self):
         source = (
             "from __future__ import annotations\n"
@@ -454,6 +584,61 @@ class TestDetectorNonVacuity:
         assert len(violations) == 1
         assert violations[0].rule == "annotation_eval_api"
         assert violations[0].lineno == 4
+
+    @pytest.mark.parametrize("name", sorted(ANNOTATION_EVAL_NAMES["typing"]))
+    @pytest.mark.parametrize(
+        "form", ["from_import", "module_attr", "aliased_module_attr"]
+    )
+    def test_typing_eval_api_name_form_matrix_fires(self, name, form):
+        source = {
+            "from_import": "from typing import {}\n".format(name),
+            "module_attr": (
+                "import typing\n"
+                "\n"
+                "result = typing.{}(object)\n".format(name)
+            ),
+            "aliased_module_attr": (
+                "import typing as t\n"
+                "\n"
+                "result = t.{}(object)\n".format(name)
+            ),
+        }[form]
+        violations = check_annotation_eval_apis(source, "synthetic.py")
+        assert len(violations) == 1
+        assert violations[0].rule == "annotation_eval_api"
+
+    def test_inspect_get_annotations_fires(self):
+        source = (
+            "import inspect\n"
+            "\n"
+            "def f(): ...\n"
+            "hints = inspect.get_annotations(f)\n"
+        )
+        violations = check_annotation_eval_apis(source, "synthetic.py")
+        assert len(violations) == 1
+        assert violations[0].rule == "annotation_eval_api"
+
+    def test_functools_singledispatch_fires(self):
+        source = (
+            "from functools import singledispatch\n"
+            "\n"
+            "@singledispatch\n"
+            "def f(x): ...\n"
+        )
+        violations = check_annotation_eval_apis(source, "synthetic.py")
+        assert len(violations) == 1
+        assert violations[0].rule == "annotation_eval_api"
+
+    def test_functools_non_banned_names_stay_silent(self):
+        source = (
+            "import functools\n"
+            "from functools import lru_cache\n"
+            "\n"
+            "@lru_cache(maxsize=None)\n"
+            "def f(): ...\n"
+            "g = functools.partial(f)\n"
+        )
+        assert check_annotation_eval_apis(source, "synthetic.py") == []
 
     def test_unrelated_attribute_named_cast_stays_silent(self):
         source = (
