@@ -244,6 +244,9 @@ def _get_claude_md_path() -> Optional[Path]:
     # returns the worktree path when run inside a worktree, which may not
     # contain CLAUDE.md. --git-common-dir always points to the shared .git
     # directory; its parent is the main repo root where CLAUDE.md lives.
+    # git returns this path relative to the invoking directory when run at a
+    # repo root (the bare ".git") and absolute elsewhere, so resolve a relative
+    # result against the cwd before taking its parent.
     # NOTE: Twin pattern in memory_api.py (_detect_project_id) and
     #       hooks/staleness.py (get_project_claude_md_path) -- keep in sync.
     try:
@@ -254,8 +257,10 @@ def _get_claude_md_path() -> Optional[Path]:
             timeout=5
         )
         if result.returncode == 0 and result.stdout.strip():
-            git_common_dir = result.stdout.strip()
-            repo_root = Path(git_common_dir).resolve().parent
+            common_dir = Path(result.stdout.strip())
+            if not common_dir.is_absolute():
+                common_dir = Path.cwd() / common_dir
+            repo_root = common_dir.resolve().parent
             found = _find_existing_claude_md(repo_root)
             if found is not None:
                 return found
@@ -292,32 +297,39 @@ def _resolve_display_claude_md_path() -> Optional[Path]:
     Returns:
         Path to the existing display CLAUDE.md, or None if none exists.
     """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-    if project_dir:
-        found = _find_existing_claude_md(Path(project_dir))
-        if found is not None:
-            return found
-
-    # Worktree root: --show-toplevel returns the worktree directory when run
-    # inside a worktree (and the main repo root otherwise), matching the
-    # directory session_init/session_resume target for the session's CLAUDE.md.
+    # Resolution must never raise into the sync path; on any failure (a bad
+    # CLAUDE_PROJECT_DIR value, an inaccessible probe target, or a deleted cwd)
+    # return None so the caller skips the sync and the save still succeeds.
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            worktree_root = Path(result.stdout.strip())
-            found = _find_existing_claude_md(worktree_root)
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+        if project_dir:
+            found = _find_existing_claude_md(Path(project_dir))
             if found is not None:
                 return found
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        pass
 
-    # Last resort: current working directory
-    return _find_existing_claude_md(Path.cwd())
+        # Worktree root: --show-toplevel returns the worktree directory when run
+        # inside a worktree (and the main repo root otherwise), matching the
+        # directory session_init/session_resume target for the session's CLAUDE.md.
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                worktree_root = Path(result.stdout.strip())
+                found = _find_existing_claude_md(worktree_root)
+                if found is not None:
+                    return found
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
+        # Last resort: current working directory
+        return _find_existing_claude_md(Path.cwd())
+    except Exception as e:
+        logger.debug("display CLAUDE.md resolution failed, skipping sync: %s", e)
+        return None
 
 
 def _estimate_tokens(text: str) -> int:

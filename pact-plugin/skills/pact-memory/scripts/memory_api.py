@@ -76,7 +76,6 @@ from .working_memory import (
     RETRIEVED_CONTEXT_HEADER,
     RETRIEVED_CONTEXT_COMMENT,
     MAX_RETRIEVED_MEMORIES,
-    _get_claude_md_path,
     _format_memory_entry,
     _parse_working_memory_section,
 )
@@ -264,7 +263,12 @@ class PACTMemory:
                     if not common_dir.is_absolute():
                         common_dir = Path(project_dir) / common_dir
                     main_repo_root = common_dir.resolve().parent
-                    if main_repo_root != Path(project_dir).resolve():
+                    # Compare via normcase so a case-insensitive filesystem does
+                    # not fire the rewrite for paths that differ only in case
+                    # (a no-op on case-sensitive systems, where normcase is
+                    # identity).
+                    env_root = Path(project_dir).resolve()
+                    if os.path.normcase(str(main_repo_root)) != os.path.normcase(str(env_root)):
                         logger.debug(
                             "project_id detected from CLAUDE_PROJECT_DIR worktree main repo: %s",
                             main_repo_root.name,
@@ -280,6 +284,9 @@ class PACTMemory:
         # returns the worktree path when run inside a worktree, fragmenting
         # project_id across sessions. --git-common-dir always points to the
         # shared .git directory; its parent is the main repo root.
+        # git returns this path relative to the invoking directory when run at
+        # a repo root (the bare ".git") and absolute elsewhere, so resolve a
+        # relative result against the cwd before taking its parent.
         # NOTE: Twin pattern in working_memory.py (_get_claude_md_path) and
         #       hooks/staleness.py (get_project_claude_md_path) -- keep in sync.
         try:
@@ -290,8 +297,10 @@ class PACTMemory:
                 timeout=5,
             )
             if result.returncode == 0 and result.stdout.strip():
-                git_common_dir = result.stdout.strip()
-                repo_root = Path(git_common_dir).resolve().parent
+                common_dir = Path(result.stdout.strip())
+                if not common_dir.is_absolute():
+                    common_dir = Path.cwd() / common_dir
+                repo_root = common_dir.resolve().parent
                 project_name = repo_root.name
                 logger.debug("project_id detected from git root: %s", project_name)
                 return project_name

@@ -94,6 +94,9 @@ def get_project_claude_md_path() -> Optional[Path]:
     # returns the worktree path when run inside a worktree, which may not
     # contain CLAUDE.md. --git-common-dir always points to the shared .git
     # directory; its parent is the main repo root where CLAUDE.md lives.
+    # git returns this path relative to the invoking directory when run at a
+    # repo root (the bare ".git") and absolute elsewhere, so resolve a relative
+    # result against the cwd before taking its parent.
     # NOTE: Twin pattern in skills/pact-memory/scripts/memory_api.py
     #       (_detect_project_id) and working_memory.py (_get_claude_md_path)
     #       -- keep in sync.
@@ -105,8 +108,10 @@ def get_project_claude_md_path() -> Optional[Path]:
             timeout=5
         )
         if result.returncode == 0 and result.stdout.strip():
-            git_common_dir = result.stdout.strip()
-            repo_root = Path(git_common_dir).resolve().parent
+            common_dir = Path(result.stdout.strip())
+            if not common_dir.is_absolute():
+                common_dir = Path.cwd() / common_dir
+            repo_root = common_dir.resolve().parent
             found = _find_existing_claude_md(repo_root)
             if found is not None:
                 return found
