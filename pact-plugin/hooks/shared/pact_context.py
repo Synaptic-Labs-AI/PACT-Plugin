@@ -10,6 +10,8 @@ by session_init.py and read by subsequent hooks via init() + accessors.
 See: docs/architecture/pact-context-module.md for full design rationale.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re

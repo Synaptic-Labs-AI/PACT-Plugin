@@ -47,6 +47,8 @@ Public surface:
   Consumed by task_lifecycle_gate.work_addblockedby_missing.
 """
 
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from typing import Any
 

@@ -26,6 +26,8 @@ Input: JSON from stdin (PreCompact event data)
 Output: JSON with custom_instructions on stdout
 """
 
+from __future__ import annotations
+
 import json
 import sys
 from typing import Any

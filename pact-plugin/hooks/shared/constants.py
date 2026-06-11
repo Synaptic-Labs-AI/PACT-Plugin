@@ -6,6 +6,9 @@ Used by: test_patterns.py (cross-list consistency checks),
          postcompact_archive.py (get_compact_summary_path),
          session_init.py (get_compact_summary_path).
 """
+
+from __future__ import annotations
+
 from pathlib import Path
 
 from .paths import get_claude_config_dir

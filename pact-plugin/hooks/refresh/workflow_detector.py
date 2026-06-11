@@ -8,6 +8,8 @@ checking for trigger commands, agent invocations, and termination
 signals.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 from .transcript_parser import Turn, find_trigger_turn_index

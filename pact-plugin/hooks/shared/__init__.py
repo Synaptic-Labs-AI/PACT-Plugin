@@ -17,6 +17,8 @@ This package provides shared utilities for hooks:
 - gh_helpers: Shared gh CLI wrappers (fail-open by construction)
 """
 
+from __future__ import annotations
+
 from .task_utils import (
     get_task_list,
     find_feature_task,

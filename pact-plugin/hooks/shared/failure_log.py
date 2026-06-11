@@ -42,6 +42,8 @@ File location: ~/.claude/pact-sessions/_session_init_failures.log
 Permissions: 0o600 (owner read/write only); parent directory 0o700.
 """
 
+from __future__ import annotations
+
 import json
 from datetime import datetime, timezone
 from pathlib import Path

@@ -31,6 +31,8 @@ Input: JSON from stdin with session context
 Output: JSON with `hookSpecificOutput.additionalContext` for status
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re

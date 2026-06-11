@@ -8,6 +8,8 @@ refresh plan, suitable for writing to disk and later refresh.
 Also provides shared utilities for checkpoint path resolution.
 """
 
+from __future__ import annotations
+
 import os
 import sys
 from datetime import datetime, timezone

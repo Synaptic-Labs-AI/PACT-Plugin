@@ -56,6 +56,8 @@ Output: JSON with hookSpecificOutput.permissionDecision (deny case)
         or {"suppressOutput": true} (allow / passthrough)
 """
 
+from __future__ import annotations
+
 # ─── stdlib first (used by _emit_load_failure_deny BEFORE wrapped imports) ───
 import json
 import os

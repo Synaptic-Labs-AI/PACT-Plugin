@@ -27,6 +27,8 @@ Architecture reference: docs/architecture/journal-based-task-scanner.md
 in the fix/journal-based-task-scanner worktree.
 """
 
+from __future__ import annotations
+
 import json
 import re
 from pathlib import Path

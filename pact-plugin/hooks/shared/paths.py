@@ -8,6 +8,9 @@ Used by: shared/{constants,session_registry,failure_log,merge_guard_common,
          task_utils,pact_context,...}.py and the hook entrypoints
          (dispatch_gate, session_init, session_end, ...).
 """
+
+from __future__ import annotations
+
 import os
 from pathlib import Path
 

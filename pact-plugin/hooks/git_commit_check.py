@@ -13,6 +13,8 @@ Input: JSON from stdin with tool_input containing the command
 Output: Exit code 2 to block, 0 to allow; errors to stderr
 """
 
+from __future__ import annotations
+
 import sys
 import json
 import re

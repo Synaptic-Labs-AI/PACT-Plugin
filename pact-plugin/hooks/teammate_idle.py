@@ -22,6 +22,8 @@ Input: JSON from stdin with teammate_name, team_name
 Output: JSON with systemMessage (shutdown suggestion / force request)
 """
 
+from __future__ import annotations
+
 import json
 import sys
 from collections.abc import Callable

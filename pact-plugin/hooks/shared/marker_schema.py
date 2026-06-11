@@ -24,6 +24,8 @@ signature is a fingerprint that closes the trivial Bash-touch bypass
 (#662) and creates a detection surface for forgery; it is not a MAC.
 """
 
+from __future__ import annotations
+
 import hashlib
 
 # Marker schema version. Bump if marker JSON shape changes; verifier

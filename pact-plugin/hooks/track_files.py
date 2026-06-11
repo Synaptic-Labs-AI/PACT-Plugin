@@ -11,6 +11,8 @@ Input: JSON from stdin with tool_name, tool_input, tool_response
 Output: None (writes to tracking file for later memory association)
 """
 
+from __future__ import annotations
+
 import json
 import sys
 from datetime import datetime, timezone

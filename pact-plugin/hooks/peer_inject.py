@@ -17,6 +17,8 @@ Input: JSON from stdin with agent_id, agent_type
 Output: JSON with hookSpecificOutput.additionalContext
 """
 
+from __future__ import annotations
+
 import json
 import sys
 from pathlib import Path  # noqa: F401  # re-export: corpus patches peer_inject.Path.home

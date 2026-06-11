@@ -19,6 +19,8 @@ barrier); a drift-detection test in test_staleness.py guards against
 divergence.
 """
 
+from __future__ import annotations
+
 import re
 from typing import List, Literal, NamedTuple, Optional
 

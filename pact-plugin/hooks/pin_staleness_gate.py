@@ -29,6 +29,8 @@ Output: JSON with hookSpecificOutput.permissionDecision (deny case)
         or {\"suppressOutput\": true} (allow / passthrough)
 """
 
+from __future__ import annotations
+
 import json
 import sys
 from pathlib import Path

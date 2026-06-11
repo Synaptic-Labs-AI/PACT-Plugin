@@ -24,6 +24,8 @@ Input: JSON from stdin with tool_name (AskUserQuestion or Bash), tool_input,
 Output: None (side effect: writes or retires token file).
 """
 
+from __future__ import annotations
+
 import glob
 import json
 import os

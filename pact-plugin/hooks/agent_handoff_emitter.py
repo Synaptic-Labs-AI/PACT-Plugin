@@ -61,6 +61,8 @@ Input: JSON from stdin with task_id, task_subject, task_description,
 Output: {"suppressOutput": true} on every path; exit 0.
 """
 
+from __future__ import annotations
+
 import json
 import sys
 

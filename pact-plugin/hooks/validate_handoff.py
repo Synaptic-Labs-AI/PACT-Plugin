@@ -35,6 +35,8 @@ Input: JSON from stdin with `last_assistant_message` (preferred, SDK v2.1.47+),
 Output: JSON with `systemMessage` if handoff format is incomplete
 """
 
+from __future__ import annotations
+
 import json
 import sys
 import re

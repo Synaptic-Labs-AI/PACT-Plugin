@@ -49,6 +49,8 @@ Input: JSON from stdin (tool_name, tool_input, agent_id, etc.)
 Output: stdout JSON per harness contract.
 """
 
+from __future__ import annotations
+
 # ─── stdlib first (used by _emit_load_failure_deny BEFORE wrapped imports) ─
 import json
 import sys
