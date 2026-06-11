@@ -26,6 +26,7 @@ Output: None (side effect: writes or retires token file).
 
 from __future__ import annotations
 
+# ─── stdlib first (used by _emit_load_failure_alert BEFORE wrapped imports) ─
 import glob
 import json
 import os
@@ -33,26 +34,68 @@ import re
 import sys
 import time
 from pathlib import Path
+from typing import NoReturn
 
-import shared.pact_context as pact_context
-from shared.pact_context import get_session_id
 
-# Shared constants and cleanup — single source of truth for both hooks
-sys.path.insert(0, str(Path(__file__).parent))
-from shared.error_output import hook_error_json
+def _emit_load_failure_alert(stage: str, error: BaseException) -> NoReturn:
+    """Stdlib-only fail-LOUD alert for module-load failure. PostToolUse cannot
+    DENY (the tool already ran), so this is the nearest fail-closed equivalent.
 
-from shared.merge_guard_common import (
-    TOKEN_TTL,
-    TOKEN_DIR,
-    TOKEN_PREFIX,
-    MAX_USES,
-    USE_MARKER_SUFFIX,
-    LAYER1_SUCCESS_STDOUT_PATTERNS,
-    cleanup_consumed_tokens as _cleanup_consumed_tokens,
-    cleanup_unused_tokens as _cleanup_unused_tokens,
-    detect_command_operation_type,
-)
-from shared.tool_response import extract_tool_response
+    Channel semantics: on a non-zero exit the platform does NOT parse stdout
+    JSON — for PostToolUse exit 2 the channel that reaches the model is
+    STDERR. The complete advisory therefore lives on stderr; the stdout JSON
+    below is forensic belt-and-braces only. Exit 2 (never 0) keeps the
+    failure rc-visible — an additionalContext advisory + exit 0 would be
+    rc-clean while bricked, the self-masking shape this gate family avoids.
+
+    Both branches of this hook are skipped on load failure, hence the two
+    consequences named in the message: the Bash branch cannot RETIRE a
+    consumed merge token, and the AskUserQuestion branch cannot WRITE new
+    authorization tokens.
+    """
+    message = (
+        f"PACT merge_guard_post {stage} failure — merge-token write/retirement "
+        f"SKIPPED this turn; a consumed token may remain live, and subsequent "
+        f"merge approvals will also fail to record — expect merge_guard_pre "
+        f"denials until fixed. {type(error).__name__}: {error}. Check hook "
+        "installation and shared module availability."
+    )
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": message,
+        }
+    }))
+    print(
+        f"Hook load error (merge_guard_post / {stage}): {message}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+# ─── fail-loud wrapper on cross-package imports ─────────────────────────────
+try:
+    import shared.pact_context as pact_context
+    from shared.pact_context import get_session_id
+
+    # Shared constants and cleanup — single source of truth for both hooks
+    sys.path.insert(0, str(Path(__file__).parent))
+    from shared.error_output import hook_error_json
+
+    from shared.merge_guard_common import (
+        TOKEN_TTL,
+        TOKEN_DIR,
+        TOKEN_PREFIX,
+        MAX_USES,
+        USE_MARKER_SUFFIX,
+        LAYER1_SUCCESS_STDOUT_PATTERNS,
+        cleanup_consumed_tokens as _cleanup_consumed_tokens,
+        cleanup_unused_tokens as _cleanup_unused_tokens,
+        detect_command_operation_type,
+    )
+    from shared.tool_response import extract_tool_response
+except BaseException as _module_load_error:  # noqa: BLE001 — fail-loud catch-all
+    _emit_load_failure_alert("module imports", _module_load_error)
 
 
 # Regex for a quoted-command region inside question prose. Tries

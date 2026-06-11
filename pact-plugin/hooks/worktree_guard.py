@@ -18,8 +18,46 @@ import json
 import sys
 import os
 from pathlib import Path
+from typing import NoReturn
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
+
+def _emit_load_failure_deny(stage: str, error: BaseException) -> NoReturn:
+    """Stdlib-only fail-closed deny. Mirrors the ``team_guard`` /
+    ``dispatch_gate`` / ``bootstrap_gate`` analogue.
+
+    This module imports only stdlib, so there is no cross-package import to
+    wrap (an import wrapper here would be vacuous). The live fail-open
+    exposure is RUNTIME: an uncaught gate-logic exception crashes the hook
+    (exit 1), which the platform treats as a NON-blocking PreToolUse hook —
+    the Edit/Write would PROCEED outside the worktree boundary. main() wraps
+    everything after stdin parsing in ``except Exception`` routing here
+    (stdin-parse failure stays fail-open: input-side failure is the
+    harness's domain and cannot be evaluated, mirroring bootstrap_gate).
+
+    Residual not covered here: an in-file SyntaxError / parse-time crash
+    still exits 1 → fail-open; no in-file code can close that (a file cannot
+    wrap its own parse). That class is held closed by the static
+    annotation-compat guard in tests/ (Python 3.9 importability rules).
+    hookEventName MUST be present.
+    """
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (
+                f"PACT worktree_guard {stage} failure — blocking for safety. "
+                f"{type(error).__name__}: {error}. Check hook installation "
+                "and shared module availability."
+            ),
+        }
+    }))
+    print(
+        f"Hook load error (worktree_guard / {stage}): {error}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 # Paths always allowed regardless of worktree
 ALLOW_PATTERNS = [
@@ -206,12 +244,22 @@ def main():
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
-    file_path = input_data.get("tool_input", {}).get("file_path", "")
-    if not file_path:
-        print(_SUPPRESS_OUTPUT)
-        sys.exit(0)
+    try:
+        file_path = input_data.get("tool_input", {}).get("file_path", "")
+        if not file_path:
+            print(_SUPPRESS_OUTPUT)
+            sys.exit(0)
 
-    error = check_worktree_boundary(file_path, worktree_path)
+        error = check_worktree_boundary(file_path, worktree_path)
+    except Exception as e:
+        # Runtime fail-CLOSED — a gate-logic exception must DENY. Uncaught it
+        # would exit 1, which PreToolUse treats as NON-blocking, and the
+        # Edit/Write would proceed outside the worktree boundary. The wrap
+        # starts at tool_input extraction: a valid-JSON-but-non-dict
+        # tool_input raises AttributeError right here. except Exception (not
+        # BaseException) so SystemExit from the legitimate decision paths
+        # above passes through.
+        _emit_load_failure_deny("runtime", e)
 
     if error:
         # hookEventName is required by the harness; missing it silently fails open
