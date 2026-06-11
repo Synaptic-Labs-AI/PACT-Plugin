@@ -310,6 +310,67 @@ class TestDetectProjectId:
             result = _detect_project_id_under_test()
         assert result == "repo"
 
+    def test_env_var_in_repo_subdir_prefers_main_repo_basename(self):
+        """An env path inside a repo (a subdirectory) keys to the main basename.
+
+        The subdirectory's git common-dir resolves to the repo's shared .git,
+        whose parent differs from the subdirectory, so the env branch returns the
+        repo basename — aligning Strategy 1 with the repo-root semantics of
+        Strategies 2 and 3 and preventing per-subdirectory key fragmentation.
+        """
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "/home/user/myrepo/.git\n"
+
+        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/home/user/myrepo/src/mod"}), \
+             patch("subprocess.run", return_value=mock_result):
+            result = _detect_project_id_under_test()
+        assert result == "myrepo"
+
+    def test_env_var_worktree_subdir_prefers_main_repo_basename(self):
+        """An env path inside a worktree (a subdirectory) keys to the main basename.
+
+        A worktree subdirectory's common-dir still points at the main repo's
+        shared .git, so it resolves to the main basename like the worktree root
+        and an in-repo subdirectory do.
+        """
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "/home/user/myrepo/.git\n"
+
+        with patch.dict(os.environ,
+                        {"CLAUDE_PROJECT_DIR": "/home/user/wt-feature/src/mod"}), \
+             patch("subprocess.run", return_value=mock_result):
+            result = _detect_project_id_under_test()
+        assert result == "myrepo"
+
+    def test_env_var_repo_root_keeps_env_basename(self):
+        """At a repo ROOT, --git-common-dir is the relative '.git', which resolves
+        back to the root itself, so the rewrite does not fire and the env
+        basename is kept.
+        """
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = ".git\n"
+
+        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/home/user/myrepo"}), \
+             patch("subprocess.run", return_value=mock_result):
+            result = _detect_project_id_under_test()
+        assert result == "myrepo"
+
+    def test_env_var_non_git_keeps_env_basename(self):
+        """A non-git env path cannot resolve a main repo (git returns non-zero),
+        so the original env basename is returned unchanged.
+        """
+        mock_result = MagicMock()
+        mock_result.returncode = 128
+        mock_result.stdout = ""
+
+        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/tmp/loose-dir"}), \
+             patch("subprocess.run", return_value=mock_result):
+            result = _detect_project_id_under_test()
+        assert result == "loose-dir"
+
     # --- Strategy 2: Git repo root ---
 
     def test_uses_git_when_env_var_not_set(self, clean_env_no_claude_project_dir):
