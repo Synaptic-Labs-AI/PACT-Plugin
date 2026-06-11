@@ -261,9 +261,19 @@ class TestSyncToClaudeMdBudgetEnforcement:
         claude_md = self._create_claude_md(tmp_path, content)
 
         with patch("working_memory._resolve_display_claude_md_path", return_value=claude_md):
-            sync_to_claude_md({"context": "Test"}, memory_id="id1")
+            result = sync_to_claude_md({"context": "Test"}, memory_id="id1")
 
         new_content = claude_md.read_text(encoding="utf-8")
+        # The synced entry must actually be rendered into the Working Memory
+        # block. A no-op sync that left the file untouched would still satisfy
+        # the structural assertions below, so pin the entry content directly.
+        assert result is True
+        wm_block = re.search(
+            r"## Working Memory\n(.*?)(?=\n## |\Z)", new_content, re.DOTALL
+        ).group(1)
+        assert "**Context**: Test" in wm_block
+        assert "**Memory ID**: id1" in wm_block
+        # Surrounding structure is preserved.
         assert "## Pinned Context" in new_content
         assert "Some pinned stuff" in new_content
 
