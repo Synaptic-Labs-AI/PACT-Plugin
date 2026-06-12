@@ -1342,3 +1342,270 @@ class TestAtomicityTempFileLocation:
         assert captured["dir"] == str(session_dir)
         assert captured["prefix"] == ".bootstrap-complete-"
         assert captured["suffix"] == ".tmp"
+
+
+class TestSubprocessSelfHeal:
+    """Subprocess integration for the UserPromptSubmit self-heal: the
+    TestSubprocessIntegration scaffold MINUS the context file. A lead-frame
+    run must HEAL the missing pact-session-context.json (assert exists +
+    content) while STILL refusing the marker when the team-config
+    pre-conditions are unmet — heal never forges bootstrap completion.
+
+    Self-masker rule: marker_writer exits 0 on every path, so health is
+    asserted via stdout envelope + on-disk effects, never via returncode
+    alone.
+    """
+
+    def test_lead_run_heals_missing_context_but_refuses_marker(self, tmp_path):
+        import subprocess
+
+        home = tmp_path
+        slug = "healproj"
+        # Hex prefix → deterministic generated team name "pact-deadbeef".
+        session_id = "deadbeef-4242-4242-4242-deadbeef4242"
+
+        plugin_root = home / "plugin"
+        plugin_root.mkdir(parents=True)
+
+        # Session dir intentionally NOT created; context file ABSENT;
+        # team config for "pact-deadbeef" intentionally NOT created.
+        session_dir = home / ".claude" / "pact-sessions" / slug / session_id
+        ctx = session_dir / "pact-session-context.json"
+
+        hook_path = (
+            Path(__file__).parent.parent / "hooks" /
+            "bootstrap_marker_writer.py"
+        )
+        assert hook_path.exists(), f"writer hook missing at {hook_path}"
+
+        stdin_payload = json.dumps({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": session_id,
+            "prompt": "first prompt after session_init crashed",
+            "source": "startup",
+            "agent_type": "pact-orchestrator",
+        })
+
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env.pop("CLAUDE_CONFIG_DIR", None)  # force the HOME/.claude fallback
+        env["CLAUDE_PROJECT_DIR"] = f"/tmp/{slug}"
+        env["CLAUDE_PLUGIN_ROOT"] = str(plugin_root)
+
+        result = subprocess.run(
+            [sys.executable, str(hook_path)],
+            input=stdin_payload,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(home),
+            timeout=10,
+        )
+
+        # Content assertion FIRST (self-masker rule), rc second.
+        out = json.loads(result.stdout.strip())
+        assert out["suppressOutput"] is True
+        assert out["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+        assert result.returncode == 0, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+
+        # Healed: context file re-created with session_init-parity content.
+        assert ctx.exists(), "self-heal should re-create the context file"
+        content = json.loads(ctx.read_text(encoding="utf-8"))
+        assert content["team_name"] == "pact-deadbeef"
+        assert content["session_id"] == session_id
+        assert content["project_dir"] == f"/tmp/{slug}"
+        assert content["plugin_root"] == str(plugin_root)
+        assert content["started_at"]
+
+        # Heal != forged bootstrap: the team-config pre-condition is unmet
+        # (no ~/.claude/teams/pact-deadbeef/config.json with a secretary),
+        # so the marker MUST NOT be written.
+        marker = session_dir / BOOTSTRAP_MARKER_NAME
+        assert not marker.exists(), (
+            "heal must not forge bootstrap completion — marker pre-conditions "
+            "are unmet"
+        )
+
+    def test_teammate_run_does_not_heal(self, tmp_path):
+        """Same scaffold, teammate frame → no heal (is_lead gate, #877).
+
+        Single-variable discipline: the env (including CLAUDE_PLUGIN_ROOT
+        and the plugin_root dir on disk) mirrors the lead positive control
+        above EXACTLY, so agent_type is the ONLY input that differs — the
+        no-heal outcome is attributable to the is_lead gate alone, not to
+        an incidentally missing env var."""
+        import subprocess
+
+        home = tmp_path
+        slug = "healproj"
+        session_id = "deadbeef-4242-4242-4242-deadbeef4242"
+
+        plugin_root = home / "plugin"
+        plugin_root.mkdir(parents=True)
+
+        session_dir = home / ".claude" / "pact-sessions" / slug / session_id
+        ctx = session_dir / "pact-session-context.json"
+
+        hook_path = (
+            Path(__file__).parent.parent / "hooks" /
+            "bootstrap_marker_writer.py"
+        )
+
+        stdin_payload = json.dumps({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": session_id,
+            "prompt": "teammate frame",
+            "source": "startup",
+            "agent_type": "pact-backend-coder",
+        })
+
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env.pop("CLAUDE_CONFIG_DIR", None)
+        env["CLAUDE_PROJECT_DIR"] = f"/tmp/{slug}"
+        env["CLAUDE_PLUGIN_ROOT"] = str(plugin_root)
+
+        result = subprocess.run(
+            [sys.executable, str(hook_path)],
+            input=stdin_payload,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(home),
+            timeout=10,
+        )
+
+        out = json.loads(result.stdout.strip())
+        assert out["suppressOutput"] is True
+        assert result.returncode == 0
+        assert not ctx.exists(), "teammate frame must never heal (#877)"
+
+
+class TestConcurrentTwoHealerRace:
+    """TRUE parallel-process model of the two-healer race: on the SAME
+    UserPromptSubmit, the platform runs bootstrap_marker_writer and
+    bootstrap_prompt_gate in parallel; with the context file ABSENT, BOTH
+    are eligible to heal. persist_context is atomic (mkstemp + rename) and
+    both healers compute identical content except started_at, so NO
+    interleaving may produce a torn/malformed file, a crashed hook, or a
+    forged marker — and the assertions below are winner-agnostic.
+
+    Scope honesty: a single run cannot force a specific interleaving (the
+    OS schedules the two processes); what this pins is that the REAL
+    parallel composition holds the invariants on every observed schedule.
+    Content parity across healers is pinned deterministically by the
+    sequential-equivalence unit test
+    (test_pact_context.py::TestHealContextIfMissing::
+    test_sequential_heals_equivalent_content).
+
+    Self-masker rule: both hooks exit 0 on every path — health asserted on
+    stdout envelopes + on-disk effects, never returncode alone.
+    """
+
+    def test_parallel_healers_yield_one_wellformed_context_no_marker(
+            self, tmp_path):
+        import subprocess
+
+        home = tmp_path
+        slug = "raceproj"
+        # Hex prefix → deterministic generated team name "pact-deadbeef".
+        session_id = "deadbeef-5555-6666-7777-deadbeef8888"
+
+        plugin_root = home / "plugin"
+        plugin_root.mkdir(parents=True)
+
+        # Context ABSENT; no team config (marker pre-conditions unmet, so
+        # the writer must refuse the marker on every schedule).
+        session_dir = home / ".claude" / "pact-sessions" / slug / session_id
+        ctx = session_dir / "pact-session-context.json"
+
+        hooks_dir = Path(__file__).parent.parent / "hooks"
+        writer_path = hooks_dir / "bootstrap_marker_writer.py"
+        gate_path = hooks_dir / "bootstrap_prompt_gate.py"
+        assert writer_path.exists() and gate_path.exists()
+
+        stdin_payload = json.dumps({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": session_id,
+            "prompt": "first prompt after session_init crashed",
+            "agent_type": "pact-orchestrator",
+        }).encode("utf-8")
+
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env.pop("CLAUDE_CONFIG_DIR", None)
+        env["CLAUDE_PROJECT_DIR"] = f"/tmp/{slug}"
+        env["CLAUDE_PLUGIN_ROOT"] = str(plugin_root)
+
+        # Start BOTH processes, feed both stdins, THEN reap — the payload
+        # is far below the pipe buffer, so the writes don't block and the
+        # two hooks genuinely execute concurrently (a communicate() on the
+        # first process before spawning work on the second would serialize
+        # them and silently test the sequential case instead).
+        procs = [
+            subprocess.Popen(
+                [sys.executable, str(path)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                cwd=str(home),
+            )
+            for path in (writer_path, gate_path)
+        ]
+        for proc in procs:
+            proc.stdin.write(stdin_payload)
+            proc.stdin.close()
+        outs = []
+        for proc in procs:
+            out = proc.stdout.read().decode("utf-8")
+            err = proc.stderr.read().decode("utf-8")
+            rc = proc.wait(timeout=15)
+            outs.append((rc, out, err))
+
+        writer_rc, writer_out, writer_err = outs[0]
+        gate_rc, gate_out, gate_err = outs[1]
+
+        # Both hooks emitted their healthy envelopes (no crash on any
+        # schedule); content first, rc alongside.
+        writer_json = json.loads(writer_out.strip())
+        assert writer_json["suppressOutput"] is True
+        assert (writer_json["hookSpecificOutput"]["hookEventName"]
+                == "UserPromptSubmit")
+        assert writer_rc == 0, f"writer stderr={writer_err!r}"
+
+        gate_json = json.loads(gate_out.strip())
+        gate_hso = gate_json["hookSpecificOutput"]
+        assert gate_hso["hookEventName"] == "UserPromptSubmit"
+        assert "PACT:bootstrap" in gate_hso["additionalContext"], (
+            "healed lead session without marker must inject, not suppress"
+        )
+        assert gate_rc == 0, f"gate stderr={gate_err!r}"
+
+        # Exactly one well-formed context file with the expected content,
+        # whichever healer won the rename race.
+        assert ctx.exists(), "at least one healer must land the file"
+        content = json.loads(ctx.read_text(encoding="utf-8"))
+        assert set(content.keys()) == {
+            "team_name", "session_id", "project_dir", "plugin_root",
+            "started_at",
+        }
+        assert content["team_name"] == "pact-deadbeef"
+        assert content["session_id"] == session_id
+        assert content["project_dir"] == f"/tmp/{slug}"
+        assert content["plugin_root"] == str(plugin_root)
+        assert content["started_at"]
+
+        # No leftover mkstemp temp files (atomic-rename hygiene).
+        stray = [p for p in session_dir.iterdir()
+                 if p.name != "pact-session-context.json"]
+        assert stray == [], f"unexpected files after race: {stray}"
+
+        # Heal != forged bootstrap on EVERY schedule: marker pre-conditions
+        # are unmet (no team config), so the marker must not exist.
+        marker = session_dir / BOOTSTRAP_MARKER_NAME
+        assert not marker.exists(), (
+            "two-healer race must never forge bootstrap completion"
+        )

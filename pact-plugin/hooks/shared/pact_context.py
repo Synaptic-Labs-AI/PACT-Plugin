@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -286,8 +287,104 @@ def get_session_dir() -> str:
 
 
 def get_plugin_root() -> str:
-    """Convenience: return plugin_root from context. Empty string on error."""
-    return get_pact_context().get("plugin_root", "")
+    """Convenience: return plugin_root from context. Falls back to the
+    CLAUDE_PLUGIN_ROOT env var (exported into every hook process by the
+    harness) when the context-file value is empty or the file is missing.
+
+    Fallback-AFTER-file-read, never a replacement: the file value wins
+    whenever it is non-empty, and the uniform ``or`` covers both the
+    file-missing and field-empty cases. If the platform ever regresses
+    the env export, behavior degrades to the historical file-only read
+    rather than introducing a new failure mode. Empty string when both
+    sources are unavailable.
+    """
+    # Provenance / defense-in-depth (security review): in the empty-context
+    # case the env value flows into is_marker_set's signature computation
+    # (sha256(sid|plugin_root|version|1)), i.e. the fallback root PARTICIPATES
+    # in bootstrap-marker verification. CLAUDE_PLUGIN_ROOT is operator/
+    # harness-owned — exported by the platform into every hook process, the
+    # same trust domain as this hook itself — and is not reflectable from
+    # untrusted request content. No new privilege boundary: a wrong or
+    # tampered env value makes the marker's compare_digest FAIL → marker
+    # False → fail-closed, and the context-file value always wins when
+    # non-empty.
+    return get_pact_context().get("plugin_root", "") or os.environ.get(
+        "CLAUDE_PLUGIN_ROOT", ""
+    )
+
+
+def generate_team_name(input_data: dict) -> str:
+    """
+    Generate a session-unique PACT team name.
+
+    Uses the first 8 characters of the session_id from the SessionStart hook
+    stdin JSON to create a unique team name like "pact-0001639f". Falls back
+    to a random 8-character hex suffix if session_id is not in stdin.
+
+    Args:
+        input_data: Parsed JSON from stdin (SessionStart hook input)
+
+    Returns:
+        Team name string like "pact-0001639f"
+    """
+    # INVARIANT: all team directory names MUST be produced by this
+    # function. Output is lowercase ASCII hex ([a-f0-9-]) prefixed with
+    # "pact-" — the session_end reaper's exact-match skip predicate
+    # (cleanup_old_teams) and the union skip-set for cleanup_old_tasks
+    # rely on this shape. A writer that creates ~/.claude/teams/ dirs
+    # with characters outside this charset (uppercase, unicode,
+    # separators) could bypass the skip predicate and be reaped on the
+    # NEXT session_end.
+    raw_id = input_data.get("session_id")
+    session_id = str(raw_id) if raw_id else ""
+    if session_id:
+        suffix = re.sub(r"[^a-f0-9-]", "", session_id[:8]) or secrets.token_hex(4)
+    else:
+        suffix = secrets.token_hex(4)
+    return f"pact-{suffix}"
+
+
+def _is_unknown_or_missing_session(raw_id: object) -> bool:
+    """Return True if the session_id is missing, blank, a sentinel, or contains control chars.
+
+    Single canonical predicate for the malformed-stdin gate. Three call
+    sites consult this helper so the gates can never drift: the persistence
+    call sites at the top of session_init's main() (build_context_cache +
+    persist_context + append_event), the CLAUDE.md write at session_init
+    step 5b, and the self-heal gate in heal_context_if_missing() below
+    (a missing/sentinel id would make generate_team_name go RANDOM and
+    create an unreapable session dir). Drift previously allowed
+    three corruption classes:
+
+    * Whitespace-only ids (e.g. `"   "`) were truthy and bypassed
+      `not raw_id`, leaking through to the context-persist path
+      (build_context_cache resolves it, persist_context mkdir's it) as a
+      literal directory name.
+    * An attacker-supplied `"unknown-foo"` value passed `not raw_id` because
+      the string is non-empty, then later passed `startswith("unknown")`
+      and was written into CLAUDE.md anyway via a different code path.
+    * A session_id containing C0 control characters (newline, CR, NUL,
+      etc.) passed all existing non-empty/non-sentinel checks but, when
+      interpolated into ``f"- Resume: `claude --resume {session_id}`"``
+      by update_session_info, could inject a fake CLAUDE.md line via
+      embedded newlines. The unified helper strips C0 controls to close
+      this injection path at the session_id entry point.
+
+    The unified helper rejects all of: None, non-strings, empty strings,
+    whitespace-only strings, any string already shaped like the
+    `unknown-*` sentinel, and any string containing C0 control characters
+    or DEL.
+    """
+    if not raw_id:
+        return True
+    if not isinstance(raw_id, str):
+        return True
+    stripped = raw_id.strip()
+    if not stripped:
+        return True
+    if SESSION_ID_CONTROL_CHARS_RE.search(raw_id):
+        return True
+    return stripped.startswith("unknown-")
 
 
 def resolve_agent_name(
@@ -711,3 +808,110 @@ def write_context(
     result = build_context_cache(team_name, session_id, project_dir, plugin_root)
     if result is not None:
         persist_context(*result)
+
+
+def describe_context_failure() -> str:
+    """One-line diagnosis of WHY session context is empty, for embedding in
+    consumer deny messages (e.g. dispatch_gate). Returns '' when context is
+    healthy (file present and readable). Cases:
+
+      - _context_path is None → 'session context underivable (no session_id
+        in hook stdin or CLAUDE_PROJECT_DIR unset)'
+      - path set, file absent → 'context file not found: {path} — ...'
+        naming the derived path, the likely session_init root cause, and
+        the two recovery actions (self-heal on next prompt / /PACT:bootstrap)
+      - path set, file present (readable or not) → '' (not a missing-context
+        failure; read errors are already stderr-logged by get_pact_context)
+
+    Deliberately NOT auto-injected into get_pact_context(), which must stay
+    silent on file-absent (normal for pre-session_init hooks and non-PACT
+    sessions). TOTAL: no exceptions escape — an OSError from exists() maps
+    to the file-absent arm (an unstattable path is not a healthy context).
+    """
+    if _context_path is None:
+        return (
+            "session context underivable (no session_id in hook stdin or "
+            "CLAUDE_PROJECT_DIR unset)"
+        )
+    try:
+        file_present = _context_path.exists()
+    except OSError:
+        file_present = False
+    if not file_present:
+        return (
+            f"context file not found: {_context_path} — session_init may "
+            "have failed at SessionStart; submit any message to trigger "
+            "self-heal, or run /PACT:bootstrap"
+        )
+    return ""
+
+
+def heal_context_if_missing(input_data: dict) -> bool:
+    """Re-create a missing pact-session-context.json from the same inputs
+    session_init would use (stdin session_id, CLAUDE_PROJECT_DIR,
+    CLAUDE_PLUGIN_ROOT). Lead frames only (#877). Returns True iff healed.
+
+    Fires ONLY when ALL hold:
+      1. init(input_data) derived a path (_context_path is not None)
+      2. the file is ABSENT on disk — a present-but-malformed file is NOT
+         clobbered (different failure class, preserve the evidence; read
+         errors are already stderr-logged by get_pact_context)
+      3. is_lead(input_data) — a teammate/plain frame must never create
+         or clobber the lead's on-disk file (#877). UserPromptSubmit has
+         no teammate fire path; the residual non-lead frame is a plain
+         session (agent_type absent) → no heal, exactly as intended
+      4. NOT _is_unknown_or_missing_session(input_data.get("session_id"))
+         — a missing/sentinel id would make generate_team_name go RANDOM
+         (fabricated team name) and create an unreapable session dir;
+         mirrors session_init's session_id_was_missing persist gate
+
+    Heal = write_context(generate_team_name(input_data), str(raw_id),
+    CLAUDE_PROJECT_DIR, CLAUDE_PLUGIN_ROOT) — the existing
+    build+cache+persist seam: atomic write (mkstemp+rename), 0o600, and
+    build_context_cache resets _cache so THIS process's subsequent
+    get_team_name()/get_session_dir() calls see the healed values.
+
+    Content parity with session_init: session_id is persisted as
+    str(raw_id) — RAW, exactly as session_init's main() persists it
+    (init() sanitizes only the PATH segment, not the stored value).
+    started_at is heal time, not session start — its consumers are
+    journal-naming/display only (cosmetic), documented trade-off.
+
+    Two-healer race (bootstrap_marker_writer + bootstrap_prompt_gate fire
+    on the same prompt; the platform runs same-event hooks in parallel):
+    persist_context is atomic (mkstemp + rename), and both healers compute
+    IDENTICAL content except started_at → last-writer-wins with equivalent
+    content. Benign.
+
+    TOTAL: never raises — any internal exception is swallowed to a stderr
+    line and False (both callers are fail-open hooks; the heal must not
+    convert a degraded session into a crashed hook).
+
+    Args:
+        input_data: Parsed stdin JSON from the hook (UserPromptSubmit frame).
+
+    Returns:
+        True iff the context file was absent and is now healed on disk.
+    """
+    try:
+        if _context_path is None:
+            return False
+        if _context_path.exists():
+            return False
+        if not is_lead(input_data):
+            return False
+        raw_id = input_data.get("session_id")
+        if _is_unknown_or_missing_session(raw_id):
+            return False
+        write_context(
+            generate_team_name(input_data),
+            str(raw_id),
+            os.environ.get("CLAUDE_PROJECT_DIR", ""),
+            os.environ.get("CLAUDE_PLUGIN_ROOT", ""),
+        )
+        # write_context's persist half is fail-open (errors swallowed to
+        # stderr) — verify on disk so the contract "True iff healed" holds.
+        return _context_path.exists()
+    except Exception as e:
+        print(f"pact_context: self-heal failed: {e}", file=sys.stderr)
+        return False

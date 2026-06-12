@@ -39,7 +39,7 @@ import re
 import secrets
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 # Add hooks directory to path for shared package imports
 _hooks_dir = Path(__file__).parent
@@ -80,8 +80,10 @@ from pin_caps import (  # noqa: F401
 from shared import BOOTSTRAP_MARKER_NAME, SESSION_ID_CONTROL_CHARS_RE, build_session_path
 from shared.constants import get_compact_summary_path
 from shared.pact_context import (
+    _is_unknown_or_missing_session,
     build_context_cache,
     classify_session_role,
+    generate_team_name,
     get_session_dir,
     get_session_id,
     is_lead,
@@ -373,37 +375,6 @@ def check_additional_directories() -> str | None:
         return None  # Fail-open: never block session start
 
 
-def generate_team_name(input_data: dict[str, Any]) -> str:
-    """
-    Generate a session-unique PACT team name.
-
-    Uses the first 8 characters of the session_id from the SessionStart hook
-    stdin JSON to create a unique team name like "pact-0001639f". Falls back
-    to a random 8-character hex suffix if session_id is not in stdin.
-
-    Args:
-        input_data: Parsed JSON from stdin (SessionStart hook input)
-
-    Returns:
-        Team name string like "pact-0001639f"
-    """
-    # INVARIANT: all team directory names MUST be produced by this
-    # function. Output is lowercase ASCII hex ([a-f0-9-]) prefixed with
-    # "pact-" — the session_end reaper's exact-match skip predicate
-    # (cleanup_old_teams) and the union skip-set for cleanup_old_tasks
-    # rely on this shape. A writer that creates ~/.claude/teams/ dirs
-    # with characters outside this charset (uppercase, unicode,
-    # separators) could bypass the skip predicate and be reaped on the
-    # NEXT session_end.
-    raw_id = input_data.get("session_id")
-    session_id = str(raw_id) if raw_id else ""
-    if session_id:
-        suffix = re.sub(r"[^a-f0-9-]", "", session_id[:8]) or secrets.token_hex(4)
-    else:
-        suffix = secrets.token_hex(4)
-    return f"pact-{suffix}"
-
-
 def _validate_under_pact_sessions(path: str) -> str | None:
     """Reject extracted session paths that escape the pact-sessions root.
 
@@ -553,45 +524,11 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
 # strip sets across interpolation sinks become the attacker's entry point.
 _SESSION_ID_CONTROL_CHARS_RE = SESSION_ID_CONTROL_CHARS_RE
 
-
-def _is_unknown_or_missing_session(raw_id: object) -> bool:
-    """Return True if the session_id is missing, blank, a sentinel, or contains control chars.
-
-    Single canonical predicate for the malformed-stdin gate. Both the
-    persistence call sites at the top of main() (build_context_cache +
-    persist_context + append_event) and the CLAUDE.md write at step 5b consult
-    this helper so the two gates can never drift. Drift previously allowed
-    three corruption classes:
-
-    * Whitespace-only ids (e.g. `"   "`) were truthy and bypassed
-      `not raw_id`, leaking through to the context-persist path
-      (build_context_cache resolves it, persist_context mkdir's it) as a
-      literal directory name.
-    * An attacker-supplied `"unknown-foo"` value passed `not raw_id` because
-      the string is non-empty, then later passed `startswith("unknown")`
-      and was written into CLAUDE.md anyway via a different code path.
-    * A session_id containing C0 control characters (newline, CR, NUL,
-      etc.) passed all existing non-empty/non-sentinel checks but, when
-      interpolated into ``f"- Resume: `claude --resume {session_id}`"``
-      by update_session_info, could inject a fake CLAUDE.md line via
-      embedded newlines. The unified helper strips C0 controls to close
-      this injection path at the session_id entry point.
-
-    The unified helper rejects all of: None, non-strings, empty strings,
-    whitespace-only strings, any string already shaped like the
-    `unknown-*` sentinel, and any string containing C0 control characters
-    or DEL.
-    """
-    if not raw_id:
-        return True
-    if not isinstance(raw_id, str):
-        return True
-    stripped = raw_id.strip()
-    if not stripped:
-        return True
-    if _SESSION_ID_CONTROL_CHARS_RE.search(raw_id):
-        return True
-    return stripped.startswith("unknown-")
+# _is_unknown_or_missing_session — the single canonical session-id validity
+# predicate — now lives in shared.pact_context (imported above), where the
+# context self-heal gate consumes it alongside this module's persistence and
+# CLAUDE.md-write gates. One definition, three call sites: the gates can
+# never drift.
 
 
 def _build_safety_net_context(

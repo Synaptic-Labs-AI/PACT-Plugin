@@ -201,6 +201,13 @@ def _try_write_marker(input_data: dict) -> None:
     """
     pact_context.init(input_data)
 
+    # Self-heal: re-create a MISSING context file (session_init crashed at
+    # SessionStart) before reading session_dir. Total/never-raises; no-op
+    # unless lead frame + valid session_id + file absent. The verify-and-
+    # refuse pre-conditions below still gate the marker write — a healed
+    # context never forges bootstrap completion.
+    pact_context.heal_context_if_missing(input_data)
+
     # Trust boundary: session_dir comes from pact_context.get_session_dir(),
     # which derives it via shared.build_session_path's path-traversal guard
     # (Path.parents containment check). The writer trusts that upstream

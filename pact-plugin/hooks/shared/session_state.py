@@ -51,7 +51,7 @@ _NAME_MAX_CHARS = 200
 # input containing anything outside [A-Za-z0-9_-] is rejected. This
 # matches the shape of legitimate values:
 #   - team_name: "pact-" + hex-with-hyphens (per generate_team_name
-#     at session_init.py:376, which uses `re.sub(r"[^a-f0-9-]", "",
+#     in shared/pact_context.py, which uses `re.sub(r"[^a-f0-9-]", "",
 #     session_id[:8])`).
 #   - feature_id: numeric task IDs or UUIDs (hex + hyphens).
 # Rejects ".", "..", "../etc", path separators, control chars, null,

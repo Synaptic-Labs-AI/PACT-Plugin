@@ -246,3 +246,35 @@ def _restore_claude_project_dir_env():
         os.environ.pop("CLAUDE_PROJECT_DIR", None)
     else:
         os.environ["CLAUDE_PROJECT_DIR"] = original
+
+
+@pytest.fixture(autouse=True)
+def _scrub_claude_plugin_root_env():
+    """Pop + restore ``os.environ['CLAUDE_PLUGIN_ROOT']`` around every test.
+    Runs for EVERY test (autouse).
+
+    ``shared.pact_context.get_plugin_root()`` falls back to the
+    CLAUDE_PLUGIN_ROOT env var when the context-file value is empty or the
+    file is missing. That fallback makes ambient process env VISIBLE to
+    production code under test: running the suite inside an environment
+    that exports CLAUDE_PLUGIN_ROOT (e.g. a Claude Code hook process, or a
+    developer shell that sourced one) would silently flip the
+    empty-plugin_root pins (test_pact_context.py
+    ``test_returns_empty_when_plugin_root_missing``, test_bootstrap_gate.py
+    ``test_rejects_when_plugin_root_missing``) from deterministic to
+    environment-sensitive.
+
+    Unlike the CLAUDE_PROJECT_DIR sibling above (snapshot/restore only —
+    guarding cross-test LEAKS), this fixture POPS the var at setup so every
+    test starts from a guaranteed-unset baseline, then restores the original
+    value at teardown. Tests that exercise the fallback set the var
+    explicitly via monkeypatch.setenv. This is the generalization the
+    sibling fixture's closing comment anticipated for CLAUDE_PLUGIN_ROOT.
+    """
+    _UNSET = object()
+    original = os.environ.pop("CLAUDE_PLUGIN_ROOT", _UNSET)
+    yield
+    if original is _UNSET:
+        os.environ.pop("CLAUDE_PLUGIN_ROOT", None)
+    else:
+        os.environ["CLAUDE_PLUGIN_ROOT"] = original

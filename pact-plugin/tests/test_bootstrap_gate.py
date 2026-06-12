@@ -497,7 +497,9 @@ class TestFailClosedGateLogic:
 
 class TestErrorSuppressMutualExclusivity:
     """P0: input-side fail-open uses suppressOutput; deny path (block + runtime fail-closed
-    fail-closed) uses hookSpecificOutput. systemMessage is never emitted.
+    fail-closed) uses hookSpecificOutput. systemMessage is never emitted on
+    suppress/deny paths; the degraded warn path (#942, defer/ask) is the
+    single deliberate systemMessage emitter (see TestDegradedMode).
     """
 
     def test_malformed_stdin_no_system_message(self, capsys):
@@ -1139,19 +1141,29 @@ class TestAuditAnchorParity:
     """Every JSON output path bootstrap_gate produces MUST carry
     hookSpecificOutput.hookEventName == "PreToolUse". Missing the field
     silently fails open at the platform layer (per pinned context). The
-    invariant is parametrized over the three distinct emit shapes:
+    invariant is parametrized over the five distinct emit shapes:
 
     - "deny-load-failure": _emit_load_failure_deny advisory
     - "deny-runtime": runtime-exception deny via _emit_load_failure_deny
     - "suppress": every other exit path via the _SUPPRESS_OUTPUT constant
+    - "degraded-warn-import": #942 warn-without-granting (defer/ask),
+      import stage (direct _emit_degraded_warning invocation)
+    - "degraded-warn-runtime": #942 warn-without-granting (defer/ask),
+      runtime stage (gate-logic exception + allowlisted tool through main())
 
-    All three MUST carry the audit anchor — parametrizing pins the
+    All five MUST carry the audit anchor — parametrizing pins the
     invariant so no future emit path can be added without it. Mirrors
     bootstrap_marker_writer's test_every_emit_shape_carries_hook_event_name
     so all three bootstrap-related hooks share one parity contract.
     """
 
-    @pytest.mark.parametrize("shape", ["deny-load-failure", "deny-runtime", "suppress"])
+    @pytest.mark.parametrize("shape", [
+        "deny-load-failure",
+        "deny-runtime",
+        "suppress",
+        "degraded-warn-import",
+        "degraded-warn-runtime",
+    ])
     def test_every_emit_shape_carries_hook_event_name(self, shape, capsys):
         if shape == "deny-load-failure":
             from bootstrap_gate import _emit_load_failure_deny
@@ -1166,6 +1178,26 @@ class TestAuditAnchorParity:
                 side_effect=RuntimeError("boom"),
             ):
                 with patch("sys.stdin", io.StringIO(json.dumps(_make_input()))):
+                    with pytest.raises(SystemExit):
+                        main()
+            captured = capsys.readouterr()
+            out = json.loads(captured.out.strip())
+        elif shape == "degraded-warn-import":
+            from bootstrap_gate import _emit_degraded_warning
+            with pytest.raises(SystemExit):
+                _emit_degraded_warning("module imports", RuntimeError("x"), "Read")
+            captured = capsys.readouterr()
+            out = json.loads(captured.out.strip())
+        elif shape == "degraded-warn-runtime":
+            from bootstrap_gate import main
+            with patch(
+                "bootstrap_gate._check_tool_allowed",
+                side_effect=RuntimeError("boom"),
+            ):
+                with patch(
+                    "sys.stdin",
+                    io.StringIO(json.dumps(_make_input(tool_name="Read"))),
+                ):
                     with pytest.raises(SystemExit):
                         main()
             captured = capsys.readouterr()
@@ -1185,6 +1217,767 @@ class TestAuditAnchorParity:
             f"shape={shape} emit MUST carry hookEventName=='PreToolUse'; "
             f"got {hso!r}"
         )
+
+
+# =============================================================================
+# Degraded mode (#942) — verification slice (CODE phase)
+# =============================================================================
+
+
+def _break_shared_syntax(scaffold):
+    """Canonical vector: shared/ exists but its __init__.py is syntax-broken."""
+    (scaffold / "shared").mkdir(parents=True)
+    (scaffold / "shared" / "__init__.py").write_text(
+        "this is not valid python (", encoding="utf-8"
+    )
+
+
+def _break_shared_absent(scaffold):
+    """shared/ package absent entirely (deleted / never installed)."""
+    # Deliberately create nothing — `import shared.pact_context` raises
+    # ModuleNotFoundError at module load.
+
+
+def _break_shared_missing_transitive(scaffold):
+    """shared/__init__.py parses fine but its body fails a from-import of a
+    name that does not exist (the missing-transitive-dependency shape) —
+    raises ImportError (NOT its ModuleNotFoundError subclass)."""
+    (scaffold / "shared").mkdir(parents=True)
+    (scaffold / "shared" / "__init__.py").write_text(
+        "from json import name_that_does_not_exist_in_json\n",
+        encoding="utf-8",
+    )
+
+
+# Breakage-vector table for the degraded-import scaffold: vector name →
+# (scaffold-breaker, exception type name the warning must carry). The
+# production degraded region is `except BaseException`, so the defer/deny
+# split must be IDENTICAL no matter HOW shared/ broke; the distinct
+# exception type names make each vector's diagnosability assertable. The
+# 2026-06-11 incident vector (py3.9 TypeError from annotation evaluation)
+# is exercised separately by test_degraded_path_runs_on_python39_floor on
+# a real 3.9 interpreter.
+_BREAKAGE_VECTORS = {
+    "syntax-broken-init": (_break_shared_syntax, "SyntaxError"),
+    "shared-package-absent": (_break_shared_absent, "ModuleNotFoundError"),
+    "missing-transitive-import": (
+        _break_shared_missing_transitive, "ImportError",
+    ),
+}
+
+
+def _run_degraded_subprocess(tmp_path, stdin_text, interpreter=None,
+                             vector="syntax-broken-init"):
+    """Run bootstrap_gate.py as a subprocess inside a scaffold whose
+    `shared` package is deliberately broken per ``vector`` (a
+    _BREAKAGE_VECTORS key; default = the canonical syntax-broken
+    __init__.py), forcing the import-stage degraded path. Returns the
+    CompletedProcess.
+
+    ``interpreter`` defaults to the dev interpreter (sys.executable); the
+    py3.9-floor test passes a discovered 3.9 binary to exercise the
+    stdlib-only degraded region on the production system interpreter
+    (GUI-launched macOS sessions run hooks on /usr/bin/python3 = 3.9.x).
+    """
+    import subprocess
+
+    hook_src = Path(__file__).parent.parent / "hooks" / "bootstrap_gate.py"
+    scaffold = tmp_path / "scaffold"
+    scaffold.mkdir(parents=True)
+    (scaffold / "bootstrap_gate.py").write_text(
+        hook_src.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    _BREAKAGE_VECTORS[vector][0](scaffold)
+    return subprocess.run(
+        [interpreter or sys.executable, str(scaffold / "bootstrap_gate.py")],
+        input=stdin_text,
+        capture_output=True,
+        text=True,
+        cwd=str(scaffold),
+        timeout=10,
+    )
+
+
+def _find_python39():
+    """Best-effort discovery of a Python 3.9 interpreter for the floor
+    exercise: an explicit ``python3.9`` on PATH, else the macOS system
+    ``/usr/bin/python3`` when it reports 3.9.x (the actual interpreter
+    GUI-launched sessions run hooks on). Returns None when unavailable —
+    callers skip; the static AST floor guard
+    (test_py39_annotation_compat.py) remains the unconditional gate.
+    """
+    import shutil
+    import subprocess
+
+    candidates = [shutil.which("python3.9"), "/usr/bin/python3"]
+    for candidate in candidates:
+        if not candidate or not Path(candidate).exists():
+            continue
+        try:
+            probe = subprocess.run(
+                [candidate, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if (probe.stdout + probe.stderr).strip().startswith("Python 3.9"):
+            return candidate
+    return None
+
+
+# Canonical degraded-allowlist literal — deliberately independent of
+# bootstrap_gate._READ_ONLY_TOOLS (same convention as
+# _CANONICAL_DENY_REASON_LITERAL above): the parametrized subprocess matrix
+# anchors on this literal so a member silently dropped from (or added to)
+# the production set cannot shrink the matrix unnoticed. The set-equality +
+# cardinality pin in TestDegradedMode is the two-site edit surface: any
+# intentional allowlist change must update BOTH the production frozenset
+# AND this literal, forcing the matrix to follow.
+_DEGRADED_ALLOWLIST_LITERAL = (
+    "AskUserQuestion",
+    "ExitPlanMode",
+    "Glob",
+    "Grep",
+    "Read",
+    "Skill",
+    "TaskGet",
+    "TaskList",
+    "ToolSearch",
+    "WebFetch",
+    "WebSearch",
+)
+
+# Deny matrix: representatives of every non-member class — blocked mutating
+# tools, the deliberate healthy/degraded asymmetry (Bash, mcp__*), task-
+# mutation tools excluded from the read-only views, and an unknown/future
+# name proving deny-by-default needs no enumeration.
+_DEGRADED_DENY_MATRIX = (
+    "Write",
+    "Agent",
+    "NotebookEdit",
+    "Bash",
+    "mcp__computer-use__key",
+    "TaskCreate",
+    "TaskUpdate",
+    "SomeFutureTool",
+)
+
+
+class TestDegradedMode:
+    """#942 degraded-mode handler: while the gate cannot evaluate (import
+    or runtime failure), verified read-only tools are routed onward WITH a
+    warning at exit 0 — permissionDecision "defer" (normal permission
+    flow) for local tools, "ask" (explicit user approval) for outbound
+    WebFetch/WebSearch, NEVER "allow" — so degraded mode is a
+    permission-layer subset by construction. Everything else keeps the
+    unchanged fail-closed deny at exit 2. Malformed/unverifiable stdin in
+    the degraded path is fail-CLOSED (deny) — the opposite of the healthy
+    path's input-side fail-open, because in degraded mode this module IS
+    the broken layer.
+    """
+
+    # --- structural invariant pins (master safety property) -------------
+    # MEMBERSHIP-CHANGE INVARIANT GUARD: the three tests below re-derive
+    # the degraded⊆healthy safety property from the PRODUCTION sets
+    # (_READ_ONLY_TOOLS, _DEGRADED_ASK_TOOLS, _BLOCKED_TOOLS) on every
+    # run. They exist to catch FUTURE membership edits: any tool added to
+    # the degraded allowlist that the healthy gate would deny — or any
+    # ask-tool that is not an allowlist member — fails here before it can
+    # ship. Do not weaken these to literal snapshots.
+
+    def test_allowlist_disjoint_from_blocked_tools(self):
+        """Membership invariant, part 1: no allowlist member is ever in
+        the blocked set, and every ask-escalation tool is itself an
+        allowlist member (ask is a refinement of membership, not a
+        side-channel). Re-derived from production sets — guards future
+        membership edits."""
+        from bootstrap_gate import (
+            _BLOCKED_TOOLS,
+            _DEGRADED_ASK_TOOLS,
+            _READ_ONLY_TOOLS,
+        )
+
+        assert _READ_ONLY_TOOLS & _BLOCKED_TOOLS == frozenset()
+        assert _DEGRADED_ASK_TOOLS <= _READ_ONLY_TOOLS, (
+            "_DEGRADED_ASK_TOOLS must be a subset of _READ_ONLY_TOOLS — an "
+            "ask-tool outside the allowlist would never reach the ask arm "
+            "(denied first), masking a dead or drifted entry"
+        )
+
+    def test_allowlist_excludes_bash_and_mcp(self):
+        """Membership invariant, part 2 (deliberate strictness asymmetry):
+        Bash and MCP tools are allowed on the healthy pre-marker path but
+        must NOT be degraded-recognized. Re-derived from the production
+        set — guards future membership edits."""
+        from bootstrap_gate import _READ_ONLY_TOOLS
+
+        assert "Bash" not in _READ_ONLY_TOOLS
+        assert not any(t.startswith("mcp__") for t in _READ_ONLY_TOOLS)
+
+    def test_every_allowlist_member_allowed_on_healthy_gated_branch(
+        self, monkeypatch, tmp_path
+    ):
+        """Membership invariant, part 3 (degraded ⊆ healthy, empirical):
+        on the strictest healthy branch (lead, no marker), every allowlist
+        member is allowed by the REAL production gate. A future membership
+        edit that adds a healthy-denied tool fails here — degraded mode
+        must never route a tool the healthy gate denies onward to the
+        permission flow."""
+        from bootstrap_gate import _READ_ONLY_TOOLS, _check_tool_allowed
+
+        _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        for tool in sorted(_READ_ONLY_TOOLS):
+            assert _check_tool_allowed(_make_input(tool)) is None, (
+                f"allowlist member {tool!r} must be allowed on the healthy "
+                f"lead+no-marker branch — degraded mode may never route "
+                f"onward something the healthy gate denies"
+            )
+
+    # --- M1: bounded error interpolation ---------------------------------
+
+    def test_degraded_warning_bounds_error_text(self, capsys):
+        """Exception text interpolated into the context-bound warning is
+        sanitized (control chars stripped) and truncated with an explicit
+        marker; the stderr diagnostic channel keeps the full text."""
+        from bootstrap_gate import _ERROR_TEXT_MAX, _emit_degraded_warning
+
+        payload = "X" * 1000 + "\x07\x1b[31m\ninjected"
+        with pytest.raises(SystemExit) as exc_info:
+            _emit_degraded_warning("runtime", RuntimeError(payload), "Read")
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        out = json.loads(captured.out.strip())
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "...[truncated]" in reason
+        # The embedded exception rendering is bounded: the 1000-char payload
+        # must not appear in full in any context-bound field.
+        assert "X" * (_ERROR_TEXT_MAX + 1) not in reason
+        assert "X" * (_ERROR_TEXT_MAX + 1) not in out["hookSpecificOutput"]["additionalContext"]
+        # Control / escape characters never reach the context-bound warning.
+        assert "\x07" not in reason and "\x1b" not in reason
+        # Full text still goes to stderr (debug channel).
+        assert "X" * 999 in captured.err
+
+    # --- runtime stage (in-process, symmetric with import stage) ---
+
+    def test_runtime_exception_with_readonly_tool_defers_with_warning(self, capsys):
+        """Gate-logic exception + local allowlisted tool → exit 0, JSON with
+        permissionDecision="defer" (normal permission flow — never "allow"),
+        warning text and systemMessage (the single deliberate emitter)."""
+        from bootstrap_gate import main
+
+        with patch(
+            "bootstrap_gate._check_tool_allowed",
+            side_effect=RuntimeError("boom"),
+        ):
+            with patch(
+                "sys.stdin", io.StringIO(json.dumps(_make_input(tool_name="Read")))
+            ):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+        assert exc_info.value.code == 0
+        out = json.loads(capsys.readouterr().out.strip())
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "defer"
+        for field in ("permissionDecisionReason", "additionalContext"):
+            assert "runtime" in hso[field]
+            assert "RuntimeError" in hso[field]
+            assert "DEGRADED" in hso[field]
+        assert "systemMessage" in out
+
+    def test_runtime_exception_with_outbound_tool_asks(self, capsys):
+        """Gate-logic exception + outbound tool (WebFetch) → exit 0,
+        permissionDecision="ask": network traffic under a broken gate
+        escalates to explicit user approval rather than deferring."""
+        from bootstrap_gate import main
+
+        with patch(
+            "bootstrap_gate._check_tool_allowed",
+            side_effect=RuntimeError("boom"),
+        ):
+            with patch(
+                "sys.stdin",
+                io.StringIO(json.dumps(_make_input(tool_name="WebFetch"))),
+            ):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+        assert exc_info.value.code == 0
+        out = json.loads(capsys.readouterr().out.strip())
+        hso = out["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "ask"
+        assert "DEGRADED" in hso["permissionDecisionReason"]
+        assert "systemMessage" in out
+
+    def test_runtime_exception_with_mutating_tool_still_denies(self, capsys):
+        """Symmetry must not weaken the deny arm: Edit under a gate-logic
+        exception keeps today's fail-closed deny (exit 2)."""
+        from bootstrap_gate import main
+
+        with patch(
+            "bootstrap_gate._check_tool_allowed",
+            side_effect=RuntimeError("boom"),
+        ):
+            with patch(
+                "sys.stdin", io.StringIO(json.dumps(_make_input(tool_name="Edit")))
+            ):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+        assert exc_info.value.code == 2
+        out = json.loads(capsys.readouterr().out.strip())
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "systemMessage" not in out
+
+    def test_runtime_exception_with_missing_tool_name_denies(self, capsys):
+        """Unverifiable tool name in the degraded runtime path → fail-CLOSED
+        deny, same as the import stage."""
+        from bootstrap_gate import main
+
+        frame = _make_input()
+        del frame["tool_name"]
+        with patch(
+            "bootstrap_gate._check_tool_allowed",
+            side_effect=RuntimeError("boom"),
+        ):
+            with patch("sys.stdin", io.StringIO(json.dumps(frame))):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+        assert exc_info.value.code == 2
+        out = json.loads(capsys.readouterr().out.strip())
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_runtime_exception_with_non_dict_frame_denies(self, capsys):
+        """Valid-JSON non-dict stdin (e.g. a list) raises inside the gate
+        logic; the degraded handler must not crash on the .get and must
+        deny fail-closed (rc 2 with structured JSON, never a traceback)."""
+        from bootstrap_gate import main
+
+        with patch("sys.stdin", io.StringIO(json.dumps([1, 2, 3]))):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2
+        out = json.loads(capsys.readouterr().out.strip())
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    # --- import stage (subprocess smoke; full matrix is TEST phase) ---
+
+    def test_subprocess_broken_import_readonly_tool_defers(self, tmp_path):
+        """Broken `shared` import + tool_name=Read → defer-with-warning,
+        rc 0 (rc IS the emit contract: JSON only honored on exit 0 — pair
+        with content asserts, never rc alone)."""
+        result = _run_degraded_subprocess(
+            tmp_path, json.dumps(_make_input(tool_name="Read"))
+        )
+        assert result.returncode == 0, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "defer"
+        assert "module imports" in hso["permissionDecisionReason"]
+        assert "systemMessage" in out
+        assert result.stderr.strip(), "stderr diagnostic line expected"
+
+    def test_subprocess_broken_import_mutating_tool_denies(self, tmp_path):
+        """Broken import + tool_name=Edit → byte-shape of today's
+        _emit_load_failure_deny, rc 2, stderr non-empty."""
+        result = _run_degraded_subprocess(
+            tmp_path, json.dumps(_make_input(tool_name="Edit"))
+        )
+        assert result.returncode == 2, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "deny"
+        assert "module imports failure" in hso["permissionDecisionReason"]
+        assert "systemMessage" not in out
+        assert result.stderr.strip()
+
+    def test_subprocess_broken_import_malformed_stdin_denies(self, tmp_path):
+        """Broken import + unparseable stdin → fail-CLOSED deny (decision
+        (b)): the degraded path inverts the healthy input-side fail-open."""
+        result = _run_degraded_subprocess(tmp_path, "not valid json {")
+        assert result.returncode == 2, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    # --- comprehensive subprocess matrix (TEST phase) ---
+
+    def test_allowlist_literal_matches_production_set(self):
+        """Two-site edit pin: the parametrization literal and the production
+        frozenset must stay in lockstep, at the architecturally-settled
+        cardinality of 11. A drop OR an addition on either side fails here,
+        so the subprocess matrix below can never silently under-cover the
+        live allowlist (per-member parametrization, not per-container)."""
+        from bootstrap_gate import _READ_ONLY_TOOLS
+
+        assert len(_DEGRADED_ALLOWLIST_LITERAL) == 11
+        assert len(set(_DEGRADED_ALLOWLIST_LITERAL)) == 11, (
+            "literal must not contain duplicates — each matrix row must be "
+            "a distinct member"
+        )
+        assert set(_DEGRADED_ALLOWLIST_LITERAL) == set(_READ_ONLY_TOOLS), (
+            "allowlist literal drifted from bootstrap_gate._READ_ONLY_TOOLS "
+            "— update BOTH sites (intentional change) or revert the "
+            "production edit (accidental)"
+        )
+
+    @pytest.mark.parametrize("tool", _DEGRADED_ALLOWLIST_LITERAL)
+    def test_subprocess_broken_import_full_allowlist_warns(self, tmp_path, tool):
+        """T1 full matrix: EVERY allowlist member gets warn-without-granting
+        from a real broken-import process — permissionDecision "defer" for
+        local tools, "ask" for outbound WebFetch/WebSearch, NEVER "allow" —
+        rc 0 (the emit contract: stdout JSON is only honored on exit 0),
+        full emit shape pinned key-by-key, warning carries stage + exception
+        type + the tool name, systemMessage present, stderr diagnostic
+        non-empty. Expected decision is re-derived from the production
+        _DEGRADED_ASK_TOOLS set so a membership edit moves this pin with it."""
+        from bootstrap_gate import _DEGRADED_ASK_TOOLS
+
+        result = _run_degraded_subprocess(
+            tmp_path, json.dumps(_make_input(tool_name=tool))
+        )
+
+        # Content asserts first; rc is asserted WITH content, never alone.
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        assert set(out.keys()) == {"hookSpecificOutput", "systemMessage"}, (
+            f"degraded-warn emit shape drifted for {tool!r}: {out.keys()!r}"
+        )
+        hso = out["hookSpecificOutput"]
+        assert set(hso.keys()) == {
+            "hookEventName",
+            "permissionDecision",
+            "permissionDecisionReason",
+            "additionalContext",
+        }
+        assert hso["hookEventName"] == "PreToolUse"
+        expected_decision = "ask" if tool in _DEGRADED_ASK_TOOLS else "defer"
+        assert hso["permissionDecision"] == expected_decision, (
+            f"{tool!r} must {expected_decision} under a degraded gate — and "
+            f"never 'allow' (degraded mode is a permission-layer subset by "
+            f"construction)"
+        )
+        assert hso["permissionDecision"] != "allow"
+        for field in ("permissionDecisionReason", "additionalContext"):
+            assert "DEGRADED" in hso[field]
+            assert "module imports" in hso[field], "stage must be named"
+            assert "SyntaxError" in hso[field], (
+                "exception type from the broken shared/__init__.py must be "
+                "named so the warning is diagnosable"
+            )
+            assert f"'{tool}'" in hso[field], "allowed tool must be named"
+        assert hso["permissionDecisionReason"] == hso["additionalContext"], (
+            "both fields carry the SAME warning (docs ambiguity hedge)"
+        )
+        assert "degraded" in out["systemMessage"]
+        assert result.returncode == 0, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        assert result.stderr.strip(), "stderr diagnostic line expected"
+
+    @pytest.mark.parametrize("tool", _DEGRADED_DENY_MATRIX)
+    def test_subprocess_broken_import_full_deny_matrix_denies(self, tmp_path, tool):
+        """T2 full matrix: every non-member class — mutating tools, the
+        Bash/mcp__ healthy-vs-degraded asymmetry, task-mutation tools, and
+        an unknown/future name — takes the byte-shape of today's
+        _emit_load_failure_deny at rc 2 with non-empty stderr. Deny is the
+        default: nothing here requires enumerating 'the hookable set'."""
+        result = _run_degraded_subprocess(
+            tmp_path, json.dumps(_make_input(tool_name=tool))
+        )
+
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        # Byte-shape pin of the unchanged deny emitter: exactly one
+        # top-level key, exactly three hookSpecificOutput keys.
+        assert set(out.keys()) == {"hookSpecificOutput"}, (
+            f"deny emit shape drifted for {tool!r}: {out.keys()!r}"
+        )
+        hso = out["hookSpecificOutput"]
+        assert set(hso.keys()) == {
+            "hookEventName",
+            "permissionDecision",
+            "permissionDecisionReason",
+        }
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "deny"
+        assert "module imports failure" in hso["permissionDecisionReason"]
+        assert "blocking for safety" in hso["permissionDecisionReason"]
+        assert "systemMessage" not in out, (
+            "error/suppress-style exclusivity: the deny arm never carries "
+            "the degraded-warn banner"
+        )
+        assert result.returncode == 2, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        assert result.stderr.strip()
+
+    @pytest.mark.parametrize("label,stdin_text", [
+        ("missing-tool-name", json.dumps({
+            k: v for k, v in _make_input().items() if k != "tool_name"
+        })),
+        ("null-tool-name", json.dumps(dict(_make_input(), tool_name=None))),
+        ("int-tool-name", json.dumps(dict(_make_input(), tool_name=123))),
+        ("list-tool-name", json.dumps(dict(_make_input(), tool_name=["Read"]))),
+        ("empty-string-tool-name", json.dumps(dict(_make_input(), tool_name=""))),
+        ("empty-stdin", ""),
+        ("non-dict-frame-list", json.dumps([1, 2, 3])),
+        ("non-dict-frame-bare-string", json.dumps("Read")),
+    ])
+    def test_subprocess_broken_import_unverifiable_stdin_denies(
+        self, tmp_path, label, stdin_text
+    ):
+        """T3 full matrix: every unverifiable-stdin class — absent, null,
+        non-string, empty tool_name; empty stdin; valid-JSON non-dict
+        frames (including a bare string "Read", which must NOT be read as
+        a tool name) — is fail-CLOSED deny at rc 2. The degraded path
+        inverts the healthy input-side fail-open because in degraded mode
+        this module IS the broken layer."""
+        result = _run_degraded_subprocess(tmp_path, stdin_text)
+
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "deny", (
+            f"stdin class {label!r} must deny fail-closed"
+        )
+        assert "module imports failure" in hso["permissionDecisionReason"]
+        assert "systemMessage" not in out
+        assert result.returncode == 2, (
+            f"{label}: stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+
+    # --- breakage-vector agnosticism (beyond the canonical SyntaxError) ---
+
+    @pytest.mark.parametrize("vector", sorted(_BREAKAGE_VECTORS))
+    def test_subprocess_breakage_vectors_readonly_defers(self, tmp_path, vector):
+        """The degraded region catches BaseException, so the warn arm must
+        behave IDENTICALLY no matter HOW shared/ broke: syntax-broken
+        __init__.py (SyntaxError), package absent (ModuleNotFoundError),
+        or a failing from-import inside an otherwise-parseable __init__.py
+        (ImportError — the missing-transitive-dependency shape). Read
+        defers with the vector's exception type named in the warning
+        (diagnosability), rc 0 alongside content."""
+        result = _run_degraded_subprocess(
+            tmp_path, json.dumps(_make_input(tool_name="Read")), vector=vector
+        )
+
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "defer", (
+            f"vector {vector!r} must take the same defer arm as the "
+            f"canonical syntax vector"
+        )
+        expected_exc = _BREAKAGE_VECTORS[vector][1]
+        for field in ("permissionDecisionReason", "additionalContext"):
+            assert "DEGRADED" in hso[field]
+            assert "module imports" in hso[field], "stage must be named"
+            assert expected_exc in hso[field], (
+                f"vector {vector!r} must name its exception type "
+                f"({expected_exc}) so the warning is diagnosable"
+            )
+        assert "systemMessage" in out
+        assert result.returncode == 0, (
+            f"{vector}: stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        assert result.stderr.strip(), "stderr diagnostic line expected"
+
+    @pytest.mark.parametrize("vector", sorted(_BREAKAGE_VECTORS))
+    def test_subprocess_breakage_vectors_mutating_denies(self, tmp_path, vector):
+        """Deny-arm twin of the vector matrix: Edit takes the unchanged
+        fail-closed deny at rc 2 under EVERY breakage vector, with the
+        vector's exception type named in the deny reason."""
+        result = _run_degraded_subprocess(
+            tmp_path, json.dumps(_make_input(tool_name="Edit")), vector=vector
+        )
+
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "deny", (
+            f"vector {vector!r} must keep the fail-closed deny arm"
+        )
+        assert "module imports failure" in hso["permissionDecisionReason"]
+        assert _BREAKAGE_VECTORS[vector][1] in hso["permissionDecisionReason"]
+        assert "systemMessage" not in out
+        assert result.returncode == 2, (
+            f"{vector}: stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        assert result.stderr.strip()
+
+    # --- py3.9 floor exercise (conditional on an available interpreter) ---
+
+    def test_degraded_path_runs_on_python39_floor(self, tmp_path):
+        """The degraded region is stdlib-only and must execute on the
+        production system interpreter (GUI-launched macOS sessions run
+        hooks on /usr/bin/python3 = 3.9.x). Exercise the three behavior
+        classes — warn(defer), deny, fail-closed-stdin — under a REAL 3.9
+        interpreter when one is discoverable; the static AST floor guard
+        (test_py39_annotation_compat.py R0–R3) remains the unconditional
+        merge gate when none is."""
+        py39 = _find_python39()
+        if py39 is None:
+            pytest.skip(
+                "no Python 3.9 interpreter discoverable (python3.9 on PATH "
+                "or /usr/bin/python3 reporting 3.9.x); static floor guard "
+                "test_py39_annotation_compat.py covers the syntax floor"
+            )
+
+        warn = _run_degraded_subprocess(
+            tmp_path / "warn", json.dumps(_make_input(tool_name="Read")),
+            interpreter=py39,
+        )
+        out = json.loads(warn.stdout.strip().splitlines()[0])
+        assert out["hookSpecificOutput"]["permissionDecision"] == "defer"
+        assert "DEGRADED" in out["hookSpecificOutput"]["permissionDecisionReason"]
+        assert warn.returncode == 0, (
+            f"stderr={warn.stderr!r} stdout={warn.stdout!r}"
+        )
+
+        deny = _run_degraded_subprocess(
+            tmp_path / "deny", json.dumps(_make_input(tool_name="Edit")),
+            interpreter=py39,
+        )
+        out = json.loads(deny.stdout.strip().splitlines()[0])
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert deny.returncode == 2
+
+        malformed = _run_degraded_subprocess(
+            tmp_path / "malformed", "not valid json {", interpreter=py39,
+        )
+        out = json.loads(malformed.stdout.strip().splitlines()[0])
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert malformed.returncode == 2
+
+
+# =============================================================================
+# Marker verification × CLAUDE_PLUGIN_ROOT env fallback — healthy path
+# =============================================================================
+
+
+class TestMarkerVerifyEnvFallback:
+    """is_marker_set derives plugin_root via pact_context.get_plugin_root(),
+    which falls back to the CLAUDE_PLUGIN_ROOT env var when the context-file
+    value is empty or the file is missing. These tests pin that the
+    fallback participates in MARKER VERIFICATION on the healthy path — the
+    realistic shape being a context file healed (or written) while
+    CLAUDE_PLUGIN_ROOT was absent, leaving plugin_root='' on disk while the
+    env var is exported into every subsequent hook process.
+
+    Three arms: (1) env rescues verification — a validly-signed marker
+    verifies with the context plugin_root unavailable; (2) both sources
+    absent fails closed (the conftest autouse scrub guarantees the env
+    baseline); (3) a WRONG env root fails the SIGNATURE — proving the env
+    value participates in the HMAC input, not merely the non-empty check.
+    """
+
+    def _scaffold(self, monkeypatch, tmp_path, context_state):
+        """Session dir + plugin root (plugin.json v9.9.9) + validly-signed
+        marker; the context file is per ``context_state``: 'absent' (never
+        written) or 'empty-plugin-root' (present, plugin_root='')."""
+        import shared.pact_context as ctx_module
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        session_dir = tmp_path / ".claude" / "pact-sessions" / _SLUG / _SESSION_ID
+        session_dir.mkdir(parents=True)
+
+        plugin_root = tmp_path / "plugin"
+        (plugin_root / ".claude-plugin").mkdir(parents=True)
+        (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"version": "9.9.9"}), encoding="utf-8"
+        )
+        _write_f24_marker(session_dir, plugin_root)
+
+        context_file = session_dir / "pact-session-context.json"
+        if context_state == "empty-plugin-root":
+            context_file.write_text(json.dumps({
+                "team_name": "",
+                "session_id": _SESSION_ID,
+                "project_dir": _PROJECT_DIR,
+                "plugin_root": "",
+                "started_at": "2026-01-01T00:00:00Z",
+            }), encoding="utf-8")
+        # 'absent': deliberately not written.
+
+        monkeypatch.setattr(ctx_module, "_context_path", context_file)
+        monkeypatch.setattr(ctx_module, "_cache", None)
+        return session_dir, plugin_root
+
+    @pytest.mark.parametrize("context_state", ["absent", "empty-plugin-root"])
+    def test_env_fallback_rescues_marker_verification(
+            self, monkeypatch, tmp_path, context_state):
+        """Context plugin_root unavailable + CLAUDE_PLUGIN_ROOT exported →
+        the validly-signed marker verifies via the env-derived root."""
+        from bootstrap_gate import is_marker_set
+
+        session_dir, plugin_root = self._scaffold(
+            monkeypatch, tmp_path, context_state)
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+
+        assert is_marker_set(session_dir) is True
+
+    @pytest.mark.parametrize("context_state", ["absent", "empty-plugin-root"])
+    def test_both_sources_absent_fails_closed(
+            self, monkeypatch, tmp_path, context_state):
+        """Same scaffold, env NOT set (conftest scrub guarantees the unset
+        baseline) → plugin_root resolves '' → marker verification fails
+        closed, single-variable counterpart of the rescue arm above."""
+        from bootstrap_gate import is_marker_set
+
+        session_dir, _ = self._scaffold(monkeypatch, tmp_path, context_state)
+
+        assert is_marker_set(session_dir) is False
+
+    def test_wrong_env_root_fails_signature(self, monkeypatch, tmp_path):
+        """Env pointing at a DIFFERENT root (own valid plugin.json, SAME
+        version, so only the root path differs in the HMAC input) → the
+        signature mismatch rejects the marker — the env value participates
+        in verification, it does not merely satisfy the non-empty check."""
+        from bootstrap_gate import is_marker_set
+
+        session_dir, _ = self._scaffold(monkeypatch, tmp_path, "absent")
+        other_root = tmp_path / "other-plugin"
+        (other_root / ".claude-plugin").mkdir(parents=True)
+        (other_root / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"version": "9.9.9"}), encoding="utf-8"
+        )
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(other_root))
+
+        assert is_marker_set(session_dir) is False
+
+    def test_empty_plugin_root_context_marker_fast_path_via_env(
+            self, monkeypatch, tmp_path):
+        """Integration through the real gate: context file PRESENT with
+        plugin_root='' (the heal-without-env shape) + env exported → the
+        marker fast path allows a normally-blocked tool; with the env
+        absent the SAME scaffold denies — the discriminating pair pins
+        that the env fallback is what carries the fast path."""
+        from bootstrap_gate import _check_tool_allowed
+
+        session_dir, plugin_root = self._scaffold(
+            monkeypatch, tmp_path, "empty-plugin-root")
+
+        # Without the env var (scrubbed baseline): marker unverifiable →
+        # lead+no-marker branch → Edit denied.
+        assert _check_tool_allowed(_make_input("Edit")) is not None
+
+        # With the env var: marker verifies → fast path allows Edit.
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+        assert _check_tool_allowed(_make_input("Edit")) is None
 
 
 # =============================================================================

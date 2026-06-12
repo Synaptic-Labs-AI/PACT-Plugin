@@ -307,6 +307,58 @@ class TestGetPluginRoot:
         assert get_plugin_root() == ""
 
 
+class TestGetPluginRootEnvFallback:
+    """Fallback matrix for get_plugin_root()'s CLAUDE_PLUGIN_ROOT env
+    fallback. File value wins when non-empty; env covers file-missing AND
+    field-empty; both absent → "". The autouse conftest scrub pops
+    CLAUDE_PLUGIN_ROOT before every test, so the env var is only present
+    when a test sets it explicitly.
+    """
+
+    def test_file_value_wins_over_env(self, pact_context, monkeypatch):
+        """A non-empty context-file plugin_root beats a differing env value."""
+        from shared.pact_context import get_plugin_root
+
+        pact_context(plugin_root="/from/context/file")
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/from/env/var")
+
+        assert get_plugin_root() == "/from/context/file"
+
+    def test_env_fallback_when_file_missing(self, monkeypatch, tmp_path):
+        """File missing entirely → env value is returned."""
+        import shared.pact_context as ctx_module
+
+        monkeypatch.setattr(ctx_module, "_context_path", tmp_path / "missing.json")
+        monkeypatch.setattr(ctx_module, "_cache", None)
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/from/env/var")
+
+        assert ctx_module.get_plugin_root() == "/from/env/var"
+
+    def test_env_fallback_when_field_empty(self, pact_context, monkeypatch):
+        """File present but plugin_root empty → env value is returned."""
+        from shared.pact_context import get_plugin_root
+
+        pact_context()  # plugin_root defaults to ""
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/from/env/var")
+
+        assert get_plugin_root() == "/from/env/var"
+
+    def test_empty_when_both_absent(self, monkeypatch, tmp_path):
+        """File missing and env unset (conftest scrub guarantees) → ''."""
+        import shared.pact_context as ctx_module
+
+        monkeypatch.setattr(ctx_module, "_context_path", tmp_path / "missing.json")
+        monkeypatch.setattr(ctx_module, "_cache", None)
+
+        assert ctx_module.get_plugin_root() == ""
+
+    def test_conftest_scrub_pops_ambient_env(self):
+        """The autouse scrub guarantees CLAUDE_PLUGIN_ROOT is absent at test
+        start — this is the isolation contract the empty-plugin_root pins
+        (here and in test_bootstrap_gate.py) rely on under the fallback."""
+        assert "CLAUDE_PLUGIN_ROOT" not in os.environ
+
+
 class TestGetSessionDir:
     """Tests for get_session_dir() — session-scoped directory path."""
 
@@ -2255,3 +2307,341 @@ class TestParallelSessionIsolation:
         assert dir_a != dir_b
         assert "project-a" in dir_a
         assert "project-b" in dir_b
+
+
+class TestHealContextIfMissing:
+    """Tests for heal_context_if_missing() — UserPromptSubmit self-heal that
+    re-creates a MISSING pact-session-context.json for a lead frame with a
+    valid session_id. Four guards: path derivable, file absent, is_lead,
+    session-id validity (the same canonical predicate session_init's
+    persistence gates use). Total: never raises.
+    """
+
+    _VALID_SID = "deadbeef-1111-2222-3333-444455556666"
+
+    def _absent_context(self, monkeypatch, tmp_path):
+        """Point _context_path at an ABSENT file under tmp_path."""
+        import shared.pact_context as ctx_module
+
+        target = tmp_path / "session" / "pact-session-context.json"
+        monkeypatch.setattr(ctx_module, "_context_path", target)
+        monkeypatch.setattr(ctx_module, "_cache", None)
+        return target
+
+    @pytest.mark.parametrize("lead_frame_builder", ["qualified", "unqualified"])
+    def test_lead_frame_absent_file_heals(self, monkeypatch, tmp_path,
+                                          lead_frame_builder):
+        """Lead frame + derivable path + absent file → healed with expected
+        content, and same-process accessors immediately resolve (cache reset
+        proof)."""
+        import shared.pact_context as ctx_module
+        from fixtures.role_frames import lead_frame_qualified, lead_frame_unqualified
+
+        builder = (lead_frame_qualified if lead_frame_builder == "qualified"
+                   else lead_frame_unqualified)
+        frame = builder(session_id=self._VALID_SID)
+        target = self._absent_context(monkeypatch, tmp_path)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/test/heal-project")
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/test/plugin-root")
+
+        assert ctx_module.heal_context_if_missing(frame) is True
+
+        assert target.exists()
+        content = json.loads(target.read_text(encoding="utf-8"))
+        assert content["team_name"] == ctx_module.generate_team_name(frame)
+        assert content["session_id"] == self._VALID_SID
+        assert content["project_dir"] == "/test/heal-project"
+        assert content["plugin_root"] == "/test/plugin-root"
+        assert content["started_at"]  # ISO timestamp, non-empty
+
+        # In-process chain effect: accessors resolve WITHOUT re-reading disk
+        # (build_context_cache reset _cache as part of the heal).
+        assert ctx_module.get_team_name() == content["team_name"]
+        assert ctx_module.get_session_id() == self._VALID_SID
+
+    def test_team_name_matches_generate_team_name_deterministically(
+            self, monkeypatch, tmp_path):
+        """Hex session_id prefix → deterministic generated team name."""
+        import shared.pact_context as ctx_module
+        from fixtures.role_frames import lead_frame_qualified
+
+        frame = lead_frame_qualified(session_id=self._VALID_SID)
+        target = self._absent_context(monkeypatch, tmp_path)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/test/heal-project")
+
+        assert ctx_module.heal_context_if_missing(frame) is True
+        content = json.loads(target.read_text(encoding="utf-8"))
+        assert content["team_name"] == "pact-deadbeef"
+
+    def test_teammate_frames_never_heal(self, monkeypatch, tmp_path):
+        """Teammate frames (synthesized AND captured-tmux) must not heal —
+        the gate keys ONLY on agent_type via is_lead, never a mode flag
+        (both-modes rule)."""
+        import shared.pact_context as ctx_module
+        from fixtures.role_frames import (
+            captured_teammate_sessionstart,
+            teammate_frame,
+        )
+
+        frames = [
+            teammate_frame(session_id=self._VALID_SID),  # in-process shape
+            captured_teammate_sessionstart(),            # real tmux capture
+        ]
+        for frame in frames:
+            target = self._absent_context(monkeypatch, tmp_path)
+            monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/test/heal-project")
+
+            assert ctx_module.heal_context_if_missing(frame) is False
+            assert not target.exists()
+
+    def test_plain_frame_never_heals(self, monkeypatch, tmp_path):
+        """Plain frame (agent_type absent → is_lead False) must not heal."""
+        import shared.pact_context as ctx_module
+        from fixtures.role_frames import plain_frame
+
+        frame = plain_frame(session_id=self._VALID_SID)
+        target = self._absent_context(monkeypatch, tmp_path)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/test/heal-project")
+
+        assert ctx_module.heal_context_if_missing(frame) is False
+        assert not target.exists()
+
+    @pytest.mark.parametrize("bad_sid", [
+        None,            # missing
+        "",              # empty
+        "   ",           # whitespace-only
+        "\t\n",          # whitespace-only (tabs/newlines)
+        "unknown-abc123",  # sentinel
+        "unknown-",        # sentinel edge
+        "abc\ndef",        # C0 control char (newline injection)
+        True,              # non-string truthy
+        0,                 # non-string falsy
+    ])
+    def test_invalid_session_id_never_heals(self, monkeypatch, tmp_path, bad_sid):
+        """Predicate parity with session_init's persistence gate: the same
+        value classes TestIsUnknownOrMissingSession pins as rejected must
+        also block the heal (a sentinel id would fabricate a RANDOM team
+        name and an unreapable session dir)."""
+        import shared.pact_context as ctx_module
+        from fixtures.role_frames import lead_frame_qualified
+
+        frame = lead_frame_qualified()
+        if bad_sid is not None:
+            frame["session_id"] = bad_sid
+        target = self._absent_context(monkeypatch, tmp_path)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/test/heal-project")
+
+        assert ctx_module.heal_context_if_missing(frame) is False
+        assert not target.exists()
+
+    def test_underived_path_never_heals(self, monkeypatch):
+        """Guard 1: _context_path is None (init() could not derive) → no heal."""
+        import shared.pact_context as ctx_module
+        from fixtures.role_frames import lead_frame_qualified
+
+        monkeypatch.setattr(ctx_module, "_context_path", None)
+        monkeypatch.setattr(ctx_module, "_cache", None)
+
+        assert ctx_module.heal_context_if_missing(
+            lead_frame_qualified(session_id=self._VALID_SID)
+        ) is False
+
+    def test_present_valid_file_untouched(self, monkeypatch, tmp_path, pact_context):
+        """File PRESENT and valid → no heal, byte-unchanged."""
+        import shared.pact_context as ctx_module
+        from fixtures.role_frames import lead_frame_qualified
+
+        ctx_file = pact_context(team_name="pact-original")
+        original_bytes = ctx_file.read_bytes()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/test/heal-project")
+
+        frame = lead_frame_qualified(session_id=self._VALID_SID)
+        assert ctx_module.heal_context_if_missing(frame) is False
+        assert ctx_file.read_bytes() == original_bytes
+
+    def test_present_malformed_file_not_clobbered(self, monkeypatch, tmp_path):
+        """File PRESENT but malformed → NOT clobbered (different failure
+        class; preserve the evidence)."""
+        import shared.pact_context as ctx_module
+        from fixtures.role_frames import lead_frame_qualified
+
+        target = tmp_path / "pact-session-context.json"
+        target.write_text("{not valid json — evidence!!", encoding="utf-8")
+        original_bytes = target.read_bytes()
+        monkeypatch.setattr(ctx_module, "_context_path", target)
+        monkeypatch.setattr(ctx_module, "_cache", None)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/test/heal-project")
+
+        frame = lead_frame_qualified(session_id=self._VALID_SID)
+        assert ctx_module.heal_context_if_missing(frame) is False
+        assert target.read_bytes() == original_bytes
+
+    def test_second_heal_is_noop(self, monkeypatch, tmp_path):
+        """Idempotency: a second call observes the healed file and no-ops
+        (returns False, content unchanged)."""
+        import shared.pact_context as ctx_module
+        from fixtures.role_frames import lead_frame_qualified
+
+        frame = lead_frame_qualified(session_id=self._VALID_SID)
+        target = self._absent_context(monkeypatch, tmp_path)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/test/heal-project")
+
+        assert ctx_module.heal_context_if_missing(frame) is True
+        first_bytes = target.read_bytes()
+
+        assert ctx_module.heal_context_if_missing(frame) is False
+        assert target.read_bytes() == first_bytes
+
+    def test_sequential_heals_equivalent_content(self, monkeypatch, tmp_path):
+        """Two-healer race model: sequential heals from identical input
+        produce equivalent content (started_at aside) — last-writer-wins
+        is benign."""
+        import shared.pact_context as ctx_module
+        from fixtures.role_frames import lead_frame_qualified
+
+        frame = lead_frame_qualified(session_id=self._VALID_SID)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/test/heal-project")
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/test/plugin-root")
+
+        target = self._absent_context(monkeypatch, tmp_path)
+        assert ctx_module.heal_context_if_missing(frame) is True
+        content_a = json.loads(target.read_text(encoding="utf-8"))
+
+        # Simulate the second healer: fresh process state, file gone again.
+        target.unlink()
+        ctx_module.reset_for_tests()
+        import shared.pact_context as ctx2
+        monkeypatch.setattr(ctx2, "_context_path", target)
+        monkeypatch.setattr(ctx2, "_cache", None)
+        assert ctx2.heal_context_if_missing(frame) is True
+        content_b = json.loads(target.read_text(encoding="utf-8"))
+
+        content_a.pop("started_at")
+        content_b.pop("started_at")
+        assert content_a == content_b
+
+    def test_total_never_raises(self, monkeypatch, tmp_path, capsys):
+        """Internal exception (write seam raising) → swallowed to stderr +
+        False; the heal must not convert a degraded session into a crashed
+        hook."""
+        import shared.pact_context as ctx_module
+        from fixtures.role_frames import lead_frame_qualified
+
+        target = self._absent_context(monkeypatch, tmp_path)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/test/heal-project")
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("simulated write failure")
+
+        monkeypatch.setattr(ctx_module, "write_context", _boom)
+
+        frame = lead_frame_qualified(session_id=self._VALID_SID)
+        assert ctx_module.heal_context_if_missing(frame) is False
+        assert not target.exists()
+        assert "self-heal failed" in capsys.readouterr().err
+
+    def test_unwritable_session_dir_real_oserror_returns_false(
+            self, monkeypatch, tmp_path, capsys):
+        """TOTAL under a REAL permission failure (no mocked seam): the
+        session dir exists but is unwritable (mode 0o500), so the atomic
+        write's mkstemp raises a genuine PermissionError inside
+        persist_context. The heal must return False (its disk-verified
+        'True iff healed' contract — persist_context swallows the error,
+        so only the exists() re-check keeps the return honest), must not
+        raise, must leave no file and no stray temp, and the swallowed
+        error must be named on stderr. Complements the mocked-seam
+        sibling above: that row pins the never-raises property at the
+        write_context boundary; this row drives the REAL OSError path
+        through persist_context's mkdir/mkstemp sequence."""
+        import shared.pact_context as ctx_module
+        from fixtures.role_frames import lead_frame_qualified
+
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            pytest.skip("running as root — mode bits are not enforced, "
+                        "the PermissionError cannot be provoked")
+
+        target = self._absent_context(monkeypatch, tmp_path)
+        session_dir = target.parent
+        session_dir.mkdir(parents=True)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/test/heal-project")
+
+        frame = lead_frame_qualified(session_id=self._VALID_SID)
+        session_dir.chmod(0o500)  # r-x: traversable+listable, NOT writable
+        try:
+            assert ctx_module.heal_context_if_missing(frame) is False
+            err = capsys.readouterr().err
+            assert "could not write context file" in err, (
+                "persist_context must name the swallowed write failure "
+                "on stderr"
+            )
+            assert not target.exists()
+            assert list(session_dir.iterdir()) == [], (
+                "no stray mkstemp temp file may survive the failure"
+            )
+        finally:
+            session_dir.chmod(0o700)  # restore so tmp_path cleanup works
+
+
+class TestDescribeContextFailure:
+    """Three-arm unit tests for describe_context_failure() — the shared
+    diagnosis helper consumer deny messages embed. '' means healthy
+    (present file), regardless of readability (read errors are logged
+    elsewhere)."""
+
+    def test_underivable_path_arm(self, monkeypatch):
+        """_context_path is None → 'session context underivable' naming the
+        two possible causes."""
+        import shared.pact_context as ctx_module
+
+        monkeypatch.setattr(ctx_module, "_context_path", None)
+
+        result = ctx_module.describe_context_failure()
+        assert "session context underivable" in result
+        assert "session_id" in result
+        assert "CLAUDE_PROJECT_DIR" in result
+
+    def test_file_absent_arm(self, monkeypatch, tmp_path):
+        """Path derived but file absent → diagnosis names the DERIVED path,
+        the session_init root cause, and both recovery actions."""
+        import shared.pact_context as ctx_module
+
+        target = tmp_path / "pact-session-context.json"
+        monkeypatch.setattr(ctx_module, "_context_path", target)
+
+        result = ctx_module.describe_context_failure()
+        assert str(target) in result
+        assert "session_init may have failed" in result
+        assert "self-heal" in result
+        assert "/PACT:bootstrap" in result
+
+    def test_file_present_arm_returns_empty(self, monkeypatch, tmp_path):
+        """File present (even malformed) → '' — not a missing-context
+        failure; read errors are already stderr-logged by get_pact_context."""
+        import shared.pact_context as ctx_module
+
+        for content in ('{"team_name": "t"}', "{malformed!!"):
+            target = tmp_path / "ctx.json"
+            target.write_text(content, encoding="utf-8")
+            monkeypatch.setattr(ctx_module, "_context_path", target)
+
+            assert ctx_module.describe_context_failure() == ""
+
+    def test_oserror_maps_to_file_absent_arm(self, monkeypatch, tmp_path):
+        """An OSError from exists() maps to the file-absent arm (total
+        function — an unstattable path is not a healthy context)."""
+        import shared.pact_context as ctx_module
+
+        target = tmp_path / "ctx.json"
+        monkeypatch.setattr(ctx_module, "_context_path", target)
+
+        original_exists = Path.exists
+
+        def _raising_exists(self, *args, **kwargs):
+            if self == target:
+                raise OSError("simulated stat failure")
+            return original_exists(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "exists", _raising_exists)
+
+        result = ctx_module.describe_context_failure()
+        assert "context file not found" in result

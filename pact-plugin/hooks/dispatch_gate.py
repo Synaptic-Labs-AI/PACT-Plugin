@@ -356,11 +356,25 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
                 "role-descriptive name.",
                 "name_reserved_token")
 
-    # ⑤ Plugin agents/ presence (cheap stat). Caught BEFORE the registry
+    # ⑤a Context/plugin_root resolution. With the env fallback in
+    # get_plugin_root() and the UserPromptSubmit self-heal, an empty
+    # plugin_root requires context-file-missing AND env-missing — when it
+    # does happen, name the REAL cause (the derived context path and the
+    # session_init root cause) instead of misdirecting recovery at the
+    # plugin install. Caught BEFORE the agents/ stat so the two causes
+    # (context unresolvable vs plugin install broken) stay separable.
+    plugin_root = pact_context.get_plugin_root()
+    if not plugin_root:
+        return ("DENY",
+                "PACT dispatch_gate: plugin_root is unavailable. "
+                + (pact_context.describe_context_failure()
+                   or "pact-session-context.json has an empty plugin_root "
+                      "and CLAUDE_PLUGIN_ROOT is not exported."),
+                "plugin_root_unavailable")
+    # ⑤b Plugin agents/ presence (cheap stat). Caught BEFORE the registry
     # check so a missing plugin install gets the more actionable
     # "plugin broken" message rather than "specialist not registered".
-    plugin_root = pact_context.get_plugin_root()
-    if not plugin_root or not (Path(plugin_root) / "agents").is_dir():
+    if not (Path(plugin_root) / "agents").is_dir():
         return ("DENY",
                 "PACT dispatch_gate: plugin agents/ directory is "
                 "unavailable. Plugin install may be broken; check "
@@ -383,11 +397,16 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
     # spawn-input side.
     session_team = pact_context.get_team_name()
     if not session_team:
-        return ("DENY",
-                "PACT dispatch_gate: session team_name is unavailable "
-                "(pact-session-context.json missing or unreadable). "
-                "Re-run /PACT:bootstrap to restore session context.",
-                "team_name_unavailable")
+        message = ("PACT dispatch_gate: session team_name is unavailable "
+                   "(pact-session-context.json missing or unreadable). "
+                   "Re-run /PACT:bootstrap to restore session context.")
+        # Append the shared context diagnosis (non-empty only when the
+        # context file is underivable/absent) so the deny names the real
+        # root cause instead of leaving recovery to guesswork.
+        diagnosis = pact_context.describe_context_failure()
+        if diagnosis:
+            message += " " + diagnosis
+        return ("DENY", message, "team_name_unavailable")
     if team_name != session_team:
         return ("DENY",
                 f"PACT dispatch_gate: team_name {team_name!r} does not "
