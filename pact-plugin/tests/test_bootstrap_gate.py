@@ -498,8 +498,8 @@ class TestFailClosedGateLogic:
 class TestErrorSuppressMutualExclusivity:
     """P0: input-side fail-open uses suppressOutput; deny path (block + runtime fail-closed
     fail-closed) uses hookSpecificOutput. systemMessage is never emitted on
-    suppress/deny paths; the degraded-allow path (#942) is the single
-    deliberate systemMessage emitter (see TestDegradedMode).
+    suppress/deny paths; the degraded warn path (#942, defer/ask) is the
+    single deliberate systemMessage emitter (see TestDegradedMode).
     """
 
     def test_malformed_stdin_no_system_message(self, capsys):
@@ -1146,10 +1146,10 @@ class TestAuditAnchorParity:
     - "deny-load-failure": _emit_load_failure_deny advisory
     - "deny-runtime": runtime-exception deny via _emit_load_failure_deny
     - "suppress": every other exit path via the _SUPPRESS_OUTPUT constant
-    - "degraded-allow-import": #942 allow-with-warning, import stage
-      (direct _emit_degraded_allow invocation)
-    - "degraded-allow-runtime": #942 allow-with-warning, runtime stage
-      (gate-logic exception + allowlisted tool through main())
+    - "degraded-warn-import": #942 warn-without-granting (defer/ask),
+      import stage (direct _emit_degraded_warning invocation)
+    - "degraded-warn-runtime": #942 warn-without-granting (defer/ask),
+      runtime stage (gate-logic exception + allowlisted tool through main())
 
     All five MUST carry the audit anchor — parametrizing pins the
     invariant so no future emit path can be added without it. Mirrors
@@ -1161,8 +1161,8 @@ class TestAuditAnchorParity:
         "deny-load-failure",
         "deny-runtime",
         "suppress",
-        "degraded-allow-import",
-        "degraded-allow-runtime",
+        "degraded-warn-import",
+        "degraded-warn-runtime",
     ])
     def test_every_emit_shape_carries_hook_event_name(self, shape, capsys):
         if shape == "deny-load-failure":
@@ -1182,13 +1182,13 @@ class TestAuditAnchorParity:
                         main()
             captured = capsys.readouterr()
             out = json.loads(captured.out.strip())
-        elif shape == "degraded-allow-import":
-            from bootstrap_gate import _emit_degraded_allow
+        elif shape == "degraded-warn-import":
+            from bootstrap_gate import _emit_degraded_warning
             with pytest.raises(SystemExit):
-                _emit_degraded_allow("module imports", RuntimeError("x"), "Read")
+                _emit_degraded_warning("module imports", RuntimeError("x"), "Read")
             captured = capsys.readouterr()
             out = json.loads(captured.out.strip())
-        elif shape == "degraded-allow-runtime":
+        elif shape == "degraded-warn-runtime":
             from bootstrap_gate import main
             with patch(
                 "bootstrap_gate._check_tool_allowed",
@@ -1325,29 +1325,50 @@ _DEGRADED_DENY_MATRIX = (
 
 class TestDegradedMode:
     """#942 degraded-mode handler: while the gate cannot evaluate (import
-    or runtime failure), verified read-only tools are allowed WITH a
-    warning at exit 0; everything else keeps the unchanged fail-closed
-    deny at exit 2. Malformed/unverifiable stdin in the degraded path is
-    fail-CLOSED (deny) — the opposite of the healthy path's input-side
-    fail-open, because in degraded mode this module IS the broken layer.
-
-    CODE-phase verification slice only: structural allowlist pins, the
-    runtime-stage branch in-process, and an import-stage subprocess smoke.
-    The comprehensive subprocess matrix is TEST-phase scope.
+    or runtime failure), verified read-only tools are routed onward WITH a
+    warning at exit 0 — permissionDecision "defer" (normal permission
+    flow) for local tools, "ask" (explicit user approval) for outbound
+    WebFetch/WebSearch, NEVER "allow" — so degraded mode is a
+    permission-layer subset by construction. Everything else keeps the
+    unchanged fail-closed deny at exit 2. Malformed/unverifiable stdin in
+    the degraded path is fail-CLOSED (deny) — the opposite of the healthy
+    path's input-side fail-open, because in degraded mode this module IS
+    the broken layer.
     """
 
-    # --- structural invariant pins (master safety property) ---
+    # --- structural invariant pins (master safety property) -------------
+    # MEMBERSHIP-CHANGE INVARIANT GUARD: the three tests below re-derive
+    # the degraded⊆healthy safety property from the PRODUCTION sets
+    # (_READ_ONLY_TOOLS, _DEGRADED_ASK_TOOLS, _BLOCKED_TOOLS) on every
+    # run. They exist to catch FUTURE membership edits: any tool added to
+    # the degraded allowlist that the healthy gate would deny — or any
+    # ask-tool that is not an allowlist member — fails here before it can
+    # ship. Do not weaken these to literal snapshots.
 
     def test_allowlist_disjoint_from_blocked_tools(self):
-        """Degraded-allow ⊆ healthy-allow, part 1: no allowlist member is
-        ever in the blocked set."""
-        from bootstrap_gate import _BLOCKED_TOOLS, _READ_ONLY_TOOLS
+        """Membership invariant, part 1: no allowlist member is ever in
+        the blocked set, and every ask-escalation tool is itself an
+        allowlist member (ask is a refinement of membership, not a
+        side-channel). Re-derived from production sets — guards future
+        membership edits."""
+        from bootstrap_gate import (
+            _BLOCKED_TOOLS,
+            _DEGRADED_ASK_TOOLS,
+            _READ_ONLY_TOOLS,
+        )
 
         assert _READ_ONLY_TOOLS & _BLOCKED_TOOLS == frozenset()
+        assert _DEGRADED_ASK_TOOLS <= _READ_ONLY_TOOLS, (
+            "_DEGRADED_ASK_TOOLS must be a subset of _READ_ONLY_TOOLS — an "
+            "ask-tool outside the allowlist would never reach the ask arm "
+            "(denied first), masking a dead or drifted entry"
+        )
 
     def test_allowlist_excludes_bash_and_mcp(self):
-        """Deliberate strictness asymmetry: Bash and MCP tools are allowed
-        on the healthy pre-marker path but must NOT be degraded-allowable."""
+        """Membership invariant, part 2 (deliberate strictness asymmetry):
+        Bash and MCP tools are allowed on the healthy pre-marker path but
+        must NOT be degraded-recognized. Re-derived from the production
+        set — guards future membership edits."""
         from bootstrap_gate import _READ_ONLY_TOOLS
 
         assert "Bash" not in _READ_ONLY_TOOLS
@@ -1356,22 +1377,53 @@ class TestDegradedMode:
     def test_every_allowlist_member_allowed_on_healthy_gated_branch(
         self, monkeypatch, tmp_path
     ):
-        """Degraded-allow ⊆ healthy-allow, part 2: on the strictest healthy
-        branch (lead, no marker), every allowlist member is allowed."""
+        """Membership invariant, part 3 (degraded ⊆ healthy, empirical):
+        on the strictest healthy branch (lead, no marker), every allowlist
+        member is allowed by the REAL production gate. A future membership
+        edit that adds a healthy-denied tool fails here — degraded mode
+        must never route a tool the healthy gate denies onward to the
+        permission flow."""
         from bootstrap_gate import _READ_ONLY_TOOLS, _check_tool_allowed
 
         _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
         for tool in sorted(_READ_ONLY_TOOLS):
             assert _check_tool_allowed(_make_input(tool)) is None, (
                 f"allowlist member {tool!r} must be allowed on the healthy "
-                f"lead+no-marker branch — degraded mode may never grant "
-                f"something the healthy gate denies"
+                f"lead+no-marker branch — degraded mode may never route "
+                f"onward something the healthy gate denies"
             )
+
+    # --- M1: bounded error interpolation ---------------------------------
+
+    def test_degraded_warning_bounds_error_text(self, capsys):
+        """Exception text interpolated into the context-bound warning is
+        sanitized (control chars stripped) and truncated with an explicit
+        marker; the stderr diagnostic channel keeps the full text."""
+        from bootstrap_gate import _ERROR_TEXT_MAX, _emit_degraded_warning
+
+        payload = "X" * 1000 + "\x07\x1b[31m\ninjected"
+        with pytest.raises(SystemExit) as exc_info:
+            _emit_degraded_warning("runtime", RuntimeError(payload), "Read")
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        out = json.loads(captured.out.strip())
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "...[truncated]" in reason
+        # The embedded exception rendering is bounded: the 1000-char payload
+        # must not appear in full in any context-bound field.
+        assert "X" * (_ERROR_TEXT_MAX + 1) not in reason
+        assert "X" * (_ERROR_TEXT_MAX + 1) not in out["hookSpecificOutput"]["additionalContext"]
+        # Control / escape characters never reach the context-bound warning.
+        assert "\x07" not in reason and "\x1b" not in reason
+        # Full text still goes to stderr (debug channel).
+        assert "X" * 999 in captured.err
 
     # --- runtime stage (in-process, symmetric with import stage) ---
 
-    def test_runtime_exception_with_readonly_tool_allows_with_warning(self, capsys):
-        """Gate-logic exception + allowlisted tool → exit 0, allow JSON with
+    def test_runtime_exception_with_readonly_tool_defers_with_warning(self, capsys):
+        """Gate-logic exception + local allowlisted tool → exit 0, JSON with
+        permissionDecision="defer" (normal permission flow — never "allow"),
         warning text and systemMessage (the single deliberate emitter)."""
         from bootstrap_gate import main
 
@@ -1389,11 +1441,35 @@ class TestDegradedMode:
         out = json.loads(capsys.readouterr().out.strip())
         hso = out["hookSpecificOutput"]
         assert hso["hookEventName"] == "PreToolUse"
-        assert hso["permissionDecision"] == "allow"
+        assert hso["permissionDecision"] == "defer"
         for field in ("permissionDecisionReason", "additionalContext"):
             assert "runtime" in hso[field]
             assert "RuntimeError" in hso[field]
             assert "DEGRADED" in hso[field]
+        assert "systemMessage" in out
+
+    def test_runtime_exception_with_outbound_tool_asks(self, capsys):
+        """Gate-logic exception + outbound tool (WebFetch) → exit 0,
+        permissionDecision="ask": network traffic under a broken gate
+        escalates to explicit user approval rather than deferring."""
+        from bootstrap_gate import main
+
+        with patch(
+            "bootstrap_gate._check_tool_allowed",
+            side_effect=RuntimeError("boom"),
+        ):
+            with patch(
+                "sys.stdin",
+                io.StringIO(json.dumps(_make_input(tool_name="WebFetch"))),
+            ):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+        assert exc_info.value.code == 0
+        out = json.loads(capsys.readouterr().out.strip())
+        hso = out["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "ask"
+        assert "DEGRADED" in hso["permissionDecisionReason"]
         assert "systemMessage" in out
 
     def test_runtime_exception_with_mutating_tool_still_denies(self, capsys):
@@ -1451,8 +1527,8 @@ class TestDegradedMode:
 
     # --- import stage (subprocess smoke; full matrix is TEST phase) ---
 
-    def test_subprocess_broken_import_readonly_tool_allows(self, tmp_path):
-        """Broken `shared` import + tool_name=Read → allow-with-warning,
+    def test_subprocess_broken_import_readonly_tool_defers(self, tmp_path):
+        """Broken `shared` import + tool_name=Read → defer-with-warning,
         rc 0 (rc IS the emit contract: JSON only honored on exit 0 — pair
         with content asserts, never rc alone)."""
         result = _run_degraded_subprocess(
@@ -1464,7 +1540,7 @@ class TestDegradedMode:
         out = json.loads(result.stdout.strip().splitlines()[0])
         hso = out["hookSpecificOutput"]
         assert hso["hookEventName"] == "PreToolUse"
-        assert hso["permissionDecision"] == "allow"
+        assert hso["permissionDecision"] == "defer"
         assert "module imports" in hso["permissionDecisionReason"]
         assert "systemMessage" in out
         assert result.stderr.strip(), "stderr diagnostic line expected"
@@ -1518,12 +1594,17 @@ class TestDegradedMode:
         )
 
     @pytest.mark.parametrize("tool", _DEGRADED_ALLOWLIST_LITERAL)
-    def test_subprocess_broken_import_full_allowlist_allows(self, tmp_path, tool):
-        """T1 full matrix: EVERY allowlist member gets allow-with-warning
-        from a real broken-import process — rc 0 (the emit contract: stdout
-        JSON is only honored on exit 0), full emit shape pinned key-by-key,
-        warning carries stage + exception type + the tool name, systemMessage
-        present, stderr diagnostic non-empty."""
+    def test_subprocess_broken_import_full_allowlist_warns(self, tmp_path, tool):
+        """T1 full matrix: EVERY allowlist member gets warn-without-granting
+        from a real broken-import process — permissionDecision "defer" for
+        local tools, "ask" for outbound WebFetch/WebSearch, NEVER "allow" —
+        rc 0 (the emit contract: stdout JSON is only honored on exit 0),
+        full emit shape pinned key-by-key, warning carries stage + exception
+        type + the tool name, systemMessage present, stderr diagnostic
+        non-empty. Expected decision is re-derived from the production
+        _DEGRADED_ASK_TOOLS set so a membership edit moves this pin with it."""
+        from bootstrap_gate import _DEGRADED_ASK_TOOLS
+
         result = _run_degraded_subprocess(
             tmp_path, json.dumps(_make_input(tool_name=tool))
         )
@@ -1531,7 +1612,7 @@ class TestDegradedMode:
         # Content asserts first; rc is asserted WITH content, never alone.
         out = json.loads(result.stdout.strip().splitlines()[0])
         assert set(out.keys()) == {"hookSpecificOutput", "systemMessage"}, (
-            f"degraded-allow emit shape drifted for {tool!r}: {out.keys()!r}"
+            f"degraded-warn emit shape drifted for {tool!r}: {out.keys()!r}"
         )
         hso = out["hookSpecificOutput"]
         assert set(hso.keys()) == {
@@ -1541,7 +1622,13 @@ class TestDegradedMode:
             "additionalContext",
         }
         assert hso["hookEventName"] == "PreToolUse"
-        assert hso["permissionDecision"] == "allow"
+        expected_decision = "ask" if tool in _DEGRADED_ASK_TOOLS else "defer"
+        assert hso["permissionDecision"] == expected_decision, (
+            f"{tool!r} must {expected_decision} under a degraded gate — and "
+            f"never 'allow' (degraded mode is a permission-layer subset by "
+            f"construction)"
+        )
+        assert hso["permissionDecision"] != "allow"
         for field in ("permissionDecisionReason", "additionalContext"):
             assert "DEGRADED" in hso[field]
             assert "module imports" in hso[field], "stage must be named"
@@ -1588,7 +1675,7 @@ class TestDegradedMode:
         assert "blocking for safety" in hso["permissionDecisionReason"]
         assert "systemMessage" not in out, (
             "error/suppress-style exclusivity: the deny arm never carries "
-            "the degraded-allow banner"
+            "the degraded-warn banner"
         )
         assert result.returncode == 2, (
             f"stderr={result.stderr!r} stdout={result.stdout!r}"
@@ -1636,7 +1723,7 @@ class TestDegradedMode:
         """The degraded region is stdlib-only and must execute on the
         production system interpreter (GUI-launched macOS sessions run
         hooks on /usr/bin/python3 = 3.9.x). Exercise the three behavior
-        classes — allow, deny, fail-closed-stdin — under a REAL 3.9
+        classes — warn(defer), deny, fail-closed-stdin — under a REAL 3.9
         interpreter when one is discoverable; the static AST floor guard
         (test_py39_annotation_compat.py R0–R3) remains the unconditional
         merge gate when none is."""
@@ -1648,15 +1735,15 @@ class TestDegradedMode:
                 "test_py39_annotation_compat.py covers the syntax floor"
             )
 
-        allow = _run_degraded_subprocess(
-            tmp_path / "allow", json.dumps(_make_input(tool_name="Read")),
+        warn = _run_degraded_subprocess(
+            tmp_path / "warn", json.dumps(_make_input(tool_name="Read")),
             interpreter=py39,
         )
-        out = json.loads(allow.stdout.strip().splitlines()[0])
-        assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+        out = json.loads(warn.stdout.strip().splitlines()[0])
+        assert out["hookSpecificOutput"]["permissionDecision"] == "defer"
         assert "DEGRADED" in out["hookSpecificOutput"]["permissionDecisionReason"]
-        assert allow.returncode == 0, (
-            f"stderr={allow.stderr!r} stdout={allow.stdout!r}"
+        assert warn.returncode == 0, (
+            f"stderr={warn.stderr!r} stdout={warn.stdout!r}"
         )
 
         deny = _run_degraded_subprocess(

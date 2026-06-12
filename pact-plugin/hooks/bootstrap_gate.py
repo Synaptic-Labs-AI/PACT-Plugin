@@ -56,11 +56,14 @@ Tool classification rationale:
 SACROSANCT (post-#662, amended #942): module-load failures and runtime
 gate-logic exceptions are fail-CLOSED (deny) per #658 defect class —
 EXCEPT for verified read-only tools (_READ_ONLY_TOOLS), which are
-allowed WITH an explicit degraded-mode warning at exit 0 so the failure
-can be diagnosed (#942). Malformed stdin in the HEALTHY path remains
-fail-OPEN (input-side failure → harness's domain); malformed stdin in
-the DEGRADED path is fail-CLOSED — an unparseable frame means the tool
-name cannot be verified read-only.
+routed onward WITH an explicit degraded-mode warning at exit 0 so the
+failure can be diagnosed (#942): permissionDecision "defer" (normal
+permission flow) for local tools, "ask" (explicit user approval) for
+outbound WebFetch/WebSearch — degraded mode never emits "allow", so it
+is a permission-layer subset by construction. Malformed stdin in the
+HEALTHY path remains fail-OPEN (input-side failure → harness's domain);
+malformed stdin in the DEGRADED path is fail-CLOSED — an unparseable
+frame means the tool name cannot be verified read-only.
 
 Input: JSON from stdin with tool_name, tool_input, session_id, etc.
 Output: JSON with hookSpecificOutput.permissionDecision (deny case)
@@ -102,10 +105,13 @@ def _emit_load_failure_deny(stage: str, error: BaseException) -> NoReturn:
     sys.exit(2)
 
 
-# Verified read-only tools allowed in DEGRADED mode (gate cannot evaluate).
-# Membership ⇒ allow-with-warning; EVERYTHING else ⇒ deny (unknown/future
-# tool names fail safe automatically — do NOT enumerate "the hookable set";
-# entries for tools that never fire PreToolUse are harmless dead entries).
+# Verified read-only tools recognized in DEGRADED mode (gate cannot
+# evaluate). Membership ⇒ warn-without-granting: permissionDecision
+# "defer" (normal permission flow) for local tools, "ask" (explicit user
+# approval) for outbound _DEGRADED_ASK_TOOLS — NEVER "allow". EVERYTHING
+# else ⇒ deny (unknown/future tool names fail safe automatically — do NOT
+# enumerate "the hookable set"; entries for tools that never fire
+# PreToolUse are harmless dead entries).
 # INVARIANT (pinned by test): this set must be disjoint from _BLOCKED_TOOLS
 # and every member must be allowed on every healthy-path branch — degraded
 # mode can never grant something the healthy gate would deny.
@@ -141,18 +147,58 @@ def _read_stdin_tool_name() -> "str | None":
         return None
 
 
-def _emit_degraded_allow(stage: str, error: BaseException, tool_name: str) -> NoReturn:
-    """Allow-with-warning for a verified read-only tool while the gate is
-    degraded. MUST exit 0 — stdout JSON is only honored on exit 0 (official
-    hooks docs, re-verified 2026-06-12: 'JSON output is only processed on
-    exit 0'; on exit 2 stdout is ignored and stderr is fed to Claude).
-    permissionDecisionReason and additionalContext carry the same warning
-    (docs are ambiguous on which is surfaced for `allow`; both costs
-    nothing); systemMessage is the user-visible banner."""
+# Outbound-network members of _READ_ONLY_TOOLS: under a degraded gate these
+# escalate to the user permission prompt ("ask") instead of deferring —
+# network traffic under a broken governance gate warrants explicit user
+# approval. INVARIANT (pinned by test): subset of _READ_ONLY_TOOLS.
+_DEGRADED_ASK_TOOLS = frozenset({"WebFetch", "WebSearch"})
+
+# Cap on exception text interpolated into context-bound output (warning
+# strings reaching Claude's context and the user banner). Exception
+# messages can embed attacker-influencable content (file contents, paths,
+# crafted payloads in tracebacks) — bound + sanitize before interpolation.
+# The stderr diagnostic line keeps the full text (debug channel).
+_ERROR_TEXT_MAX = 200
+
+
+def _bounded_error_text(error: BaseException) -> str:
+    """Sanitized, length-bounded rendering of an exception for embedding in
+    context-bound warning text: control/non-printable characters become
+    spaces, and the result is truncated to _ERROR_TEXT_MAX chars with an
+    explicit marker. Full text still goes to stderr at the call site."""
+    text = f"{type(error).__name__}: {error}"
+    text = "".join(ch if ch.isprintable() else " " for ch in text)
+    if len(text) > _ERROR_TEXT_MAX:
+        text = text[:_ERROR_TEXT_MAX] + "...[truncated]"
+    return text
+
+
+def _emit_degraded_warning(stage: str, error: BaseException, tool_name: str) -> NoReturn:
+    """Warn-WITHOUT-granting for a verified read-only tool while the gate is
+    degraded. Local read-only tools emit permissionDecision="defer" — a
+    documented PreToolUse decision value (official hooks docs enum
+    allow/deny/ask/defer, re-verified 2026-06-12) that routes the call
+    through the NORMAL permission flow; outbound tools
+    (_DEGRADED_ASK_TOOLS) emit "ask" so the user explicitly approves
+    network traffic under a broken gate. Degraded mode therefore never
+    emits "allow" at all — it is a permission-layer SUBSET by
+    construction and cannot grant anything the permission system
+    wouldn't. MUST exit 0 — stdout JSON is only honored on exit 0
+    ('JSON output is only processed on exit 0'; on exit 2 stdout is
+    ignored and stderr is fed to Claude). permissionDecisionReason and
+    additionalContext carry the same warning; systemMessage is the
+    user-visible banner."""
+    decision = "ask" if tool_name in _DEGRADED_ASK_TOOLS else "defer"
+    routed = (
+        "escalated to your explicit approval"
+        if decision == "ask"
+        else "deferred to the normal permission flow"
+    )
     warning = (
         f"PACT bootstrap_gate is DEGRADED ({stage} failure — "
-        f"{type(error).__name__}: {error}). Read-only tool '{tool_name}' "
-        "allowed so the failure can be diagnosed. Mutating tools (Edit, "
+        f"{_bounded_error_text(error)}). Read-only tool '{tool_name}' is "
+        f"{routed} so the failure can be diagnosed; nothing is "
+        "auto-allowed while the gate is degraded. Mutating tools (Edit, "
         "Write, Agent, NotebookEdit), Bash, and MCP tools remain blocked "
         "fail-closed. Surface this to the user: PACT hooks are failing — "
         "check Python version compatibility and the plugin install under "
@@ -162,17 +208,18 @@ def _emit_degraded_allow(stage: str, error: BaseException, tool_name: str) -> No
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
-            "permissionDecision": "allow",
+            "permissionDecision": decision,
             "permissionDecisionReason": warning,
             "additionalContext": warning,
         },
         "systemMessage": (
             f"PACT bootstrap_gate degraded ({stage} failure): read-only "
-            "tools allowed with warning; mutating tools blocked."
+            "tools routed to the normal permission flow with a warning; "
+            "mutating tools blocked."
         ),
     }))
     print(
-        f"Hook degraded-allow (bootstrap_gate / {stage}): {tool_name} — {error}",
+        f"Hook degraded-{decision} (bootstrap_gate / {stage}): {tool_name} — {error}",
         file=sys.stderr,
     )
     sys.exit(0)
@@ -180,10 +227,11 @@ def _emit_degraded_allow(stage: str, error: BaseException, tool_name: str) -> No
 
 def _degraded_decision(stage: str, error: BaseException, tool_name: "str | None") -> NoReturn:
     """Single decision point for BOTH degraded stages (import + runtime).
-    Membership ⇒ allow-with-warning; everything else (incl. tool_name=None
-    from unparseable stdin — fail-CLOSED) ⇒ the unchanged deny emitter."""
+    Membership ⇒ warn-without-granting (defer / ask, never allow);
+    everything else (incl. tool_name=None from unparseable stdin —
+    fail-CLOSED) ⇒ the unchanged deny emitter."""
     if tool_name is not None and tool_name in _READ_ONLY_TOOLS:
-        _emit_degraded_allow(stage, error, tool_name)
+        _emit_degraded_warning(stage, error, tool_name)
     _emit_load_failure_deny(stage, error)
 
 
@@ -201,10 +249,11 @@ try:
         expected_marker_signature,
     )
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
-    # Degraded mode (#942): verified read-only tools allow-with-warning so
-    # the failure can be diagnosed; everything else takes the unchanged
-    # fail-closed deny. Stdin is parsed here by stdlib-only code (the
-    # healthy path's json.load in main() is never reached on this branch).
+    # Degraded mode (#942): verified read-only tools defer/ask with a
+    # warning so the failure can be diagnosed; everything else takes the
+    # unchanged fail-closed deny. Stdin is parsed here by stdlib-only code
+    # (the healthy path's json.load in main() is never reached on this
+    # branch).
     _degraded_decision("module imports", _module_load_error, _read_stdin_tool_name())
 
 
