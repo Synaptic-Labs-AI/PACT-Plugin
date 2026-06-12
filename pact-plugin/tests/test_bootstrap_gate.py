@@ -1224,10 +1224,55 @@ class TestAuditAnchorParity:
 # =============================================================================
 
 
-def _run_degraded_subprocess(tmp_path, stdin_text, interpreter=None):
+def _break_shared_syntax(scaffold):
+    """Canonical vector: shared/ exists but its __init__.py is syntax-broken."""
+    (scaffold / "shared").mkdir(parents=True)
+    (scaffold / "shared" / "__init__.py").write_text(
+        "this is not valid python (", encoding="utf-8"
+    )
+
+
+def _break_shared_absent(scaffold):
+    """shared/ package absent entirely (deleted / never installed)."""
+    # Deliberately create nothing — `import shared.pact_context` raises
+    # ModuleNotFoundError at module load.
+
+
+def _break_shared_missing_transitive(scaffold):
+    """shared/__init__.py parses fine but its body fails a from-import of a
+    name that does not exist (the missing-transitive-dependency shape) —
+    raises ImportError (NOT its ModuleNotFoundError subclass)."""
+    (scaffold / "shared").mkdir(parents=True)
+    (scaffold / "shared" / "__init__.py").write_text(
+        "from json import name_that_does_not_exist_in_json\n",
+        encoding="utf-8",
+    )
+
+
+# Breakage-vector table for the degraded-import scaffold: vector name →
+# (scaffold-breaker, exception type name the warning must carry). The
+# production degraded region is `except BaseException`, so the defer/deny
+# split must be IDENTICAL no matter HOW shared/ broke; the distinct
+# exception type names make each vector's diagnosability assertable. The
+# 2026-06-11 incident vector (py3.9 TypeError from annotation evaluation)
+# is exercised separately by test_degraded_path_runs_on_python39_floor on
+# a real 3.9 interpreter.
+_BREAKAGE_VECTORS = {
+    "syntax-broken-init": (_break_shared_syntax, "SyntaxError"),
+    "shared-package-absent": (_break_shared_absent, "ModuleNotFoundError"),
+    "missing-transitive-import": (
+        _break_shared_missing_transitive, "ImportError",
+    ),
+}
+
+
+def _run_degraded_subprocess(tmp_path, stdin_text, interpreter=None,
+                             vector="syntax-broken-init"):
     """Run bootstrap_gate.py as a subprocess inside a scaffold whose
-    `shared` package is deliberately syntax-broken, forcing the import-stage
-    degraded path. Returns the CompletedProcess.
+    `shared` package is deliberately broken per ``vector`` (a
+    _BREAKAGE_VECTORS key; default = the canonical syntax-broken
+    __init__.py), forcing the import-stage degraded path. Returns the
+    CompletedProcess.
 
     ``interpreter`` defaults to the dev interpreter (sys.executable); the
     py3.9-floor test passes a discovered 3.9 binary to exercise the
@@ -1238,14 +1283,11 @@ def _run_degraded_subprocess(tmp_path, stdin_text, interpreter=None):
 
     hook_src = Path(__file__).parent.parent / "hooks" / "bootstrap_gate.py"
     scaffold = tmp_path / "scaffold"
-    (scaffold / "shared").mkdir(parents=True)
+    scaffold.mkdir(parents=True)
     (scaffold / "bootstrap_gate.py").write_text(
         hook_src.read_text(encoding="utf-8"), encoding="utf-8"
     )
-    # Syntax error → ImportError class failure at module load.
-    (scaffold / "shared" / "__init__.py").write_text(
-        "this is not valid python (", encoding="utf-8"
-    )
+    _BREAKAGE_VECTORS[vector][0](scaffold)
     return subprocess.run(
         [interpreter or sys.executable, str(scaffold / "bootstrap_gate.py")],
         input=stdin_text,
@@ -1717,6 +1759,65 @@ class TestDegradedMode:
             f"{label}: stderr={result.stderr!r} stdout={result.stdout!r}"
         )
 
+    # --- breakage-vector agnosticism (beyond the canonical SyntaxError) ---
+
+    @pytest.mark.parametrize("vector", sorted(_BREAKAGE_VECTORS))
+    def test_subprocess_breakage_vectors_readonly_defers(self, tmp_path, vector):
+        """The degraded region catches BaseException, so the warn arm must
+        behave IDENTICALLY no matter HOW shared/ broke: syntax-broken
+        __init__.py (SyntaxError), package absent (ModuleNotFoundError),
+        or a failing from-import inside an otherwise-parseable __init__.py
+        (ImportError — the missing-transitive-dependency shape). Read
+        defers with the vector's exception type named in the warning
+        (diagnosability), rc 0 alongside content."""
+        result = _run_degraded_subprocess(
+            tmp_path, json.dumps(_make_input(tool_name="Read")), vector=vector
+        )
+
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "defer", (
+            f"vector {vector!r} must take the same defer arm as the "
+            f"canonical syntax vector"
+        )
+        expected_exc = _BREAKAGE_VECTORS[vector][1]
+        for field in ("permissionDecisionReason", "additionalContext"):
+            assert "DEGRADED" in hso[field]
+            assert "module imports" in hso[field], "stage must be named"
+            assert expected_exc in hso[field], (
+                f"vector {vector!r} must name its exception type "
+                f"({expected_exc}) so the warning is diagnosable"
+            )
+        assert "systemMessage" in out
+        assert result.returncode == 0, (
+            f"{vector}: stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        assert result.stderr.strip(), "stderr diagnostic line expected"
+
+    @pytest.mark.parametrize("vector", sorted(_BREAKAGE_VECTORS))
+    def test_subprocess_breakage_vectors_mutating_denies(self, tmp_path, vector):
+        """Deny-arm twin of the vector matrix: Edit takes the unchanged
+        fail-closed deny at rc 2 under EVERY breakage vector, with the
+        vector's exception type named in the deny reason."""
+        result = _run_degraded_subprocess(
+            tmp_path, json.dumps(_make_input(tool_name="Edit")), vector=vector
+        )
+
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "deny", (
+            f"vector {vector!r} must keep the fail-closed deny arm"
+        )
+        assert "module imports failure" in hso["permissionDecisionReason"]
+        assert _BREAKAGE_VECTORS[vector][1] in hso["permissionDecisionReason"]
+        assert "systemMessage" not in out
+        assert result.returncode == 2, (
+            f"{vector}: stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        assert result.stderr.strip()
+
     # --- py3.9 floor exercise (conditional on an available interpreter) ---
 
     def test_degraded_path_runs_on_python39_floor(self, tmp_path):
@@ -1760,6 +1861,123 @@ class TestDegradedMode:
         out = json.loads(malformed.stdout.strip().splitlines()[0])
         assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert malformed.returncode == 2
+
+
+# =============================================================================
+# Marker verification × CLAUDE_PLUGIN_ROOT env fallback — healthy path
+# =============================================================================
+
+
+class TestMarkerVerifyEnvFallback:
+    """is_marker_set derives plugin_root via pact_context.get_plugin_root(),
+    which falls back to the CLAUDE_PLUGIN_ROOT env var when the context-file
+    value is empty or the file is missing. These tests pin that the
+    fallback participates in MARKER VERIFICATION on the healthy path — the
+    realistic shape being a context file healed (or written) while
+    CLAUDE_PLUGIN_ROOT was absent, leaving plugin_root='' on disk while the
+    env var is exported into every subsequent hook process.
+
+    Three arms: (1) env rescues verification — a validly-signed marker
+    verifies with the context plugin_root unavailable; (2) both sources
+    absent fails closed (the conftest autouse scrub guarantees the env
+    baseline); (3) a WRONG env root fails the SIGNATURE — proving the env
+    value participates in the HMAC input, not merely the non-empty check.
+    """
+
+    def _scaffold(self, monkeypatch, tmp_path, context_state):
+        """Session dir + plugin root (plugin.json v9.9.9) + validly-signed
+        marker; the context file is per ``context_state``: 'absent' (never
+        written) or 'empty-plugin-root' (present, plugin_root='')."""
+        import shared.pact_context as ctx_module
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        session_dir = tmp_path / ".claude" / "pact-sessions" / _SLUG / _SESSION_ID
+        session_dir.mkdir(parents=True)
+
+        plugin_root = tmp_path / "plugin"
+        (plugin_root / ".claude-plugin").mkdir(parents=True)
+        (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"version": "9.9.9"}), encoding="utf-8"
+        )
+        _write_f24_marker(session_dir, plugin_root)
+
+        context_file = session_dir / "pact-session-context.json"
+        if context_state == "empty-plugin-root":
+            context_file.write_text(json.dumps({
+                "team_name": "",
+                "session_id": _SESSION_ID,
+                "project_dir": _PROJECT_DIR,
+                "plugin_root": "",
+                "started_at": "2026-01-01T00:00:00Z",
+            }), encoding="utf-8")
+        # 'absent': deliberately not written.
+
+        monkeypatch.setattr(ctx_module, "_context_path", context_file)
+        monkeypatch.setattr(ctx_module, "_cache", None)
+        return session_dir, plugin_root
+
+    @pytest.mark.parametrize("context_state", ["absent", "empty-plugin-root"])
+    def test_env_fallback_rescues_marker_verification(
+            self, monkeypatch, tmp_path, context_state):
+        """Context plugin_root unavailable + CLAUDE_PLUGIN_ROOT exported →
+        the validly-signed marker verifies via the env-derived root."""
+        from bootstrap_gate import is_marker_set
+
+        session_dir, plugin_root = self._scaffold(
+            monkeypatch, tmp_path, context_state)
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+
+        assert is_marker_set(session_dir) is True
+
+    @pytest.mark.parametrize("context_state", ["absent", "empty-plugin-root"])
+    def test_both_sources_absent_fails_closed(
+            self, monkeypatch, tmp_path, context_state):
+        """Same scaffold, env NOT set (conftest scrub guarantees the unset
+        baseline) → plugin_root resolves '' → marker verification fails
+        closed, single-variable counterpart of the rescue arm above."""
+        from bootstrap_gate import is_marker_set
+
+        session_dir, _ = self._scaffold(monkeypatch, tmp_path, context_state)
+
+        assert is_marker_set(session_dir) is False
+
+    def test_wrong_env_root_fails_signature(self, monkeypatch, tmp_path):
+        """Env pointing at a DIFFERENT root (own valid plugin.json, SAME
+        version, so only the root path differs in the HMAC input) → the
+        signature mismatch rejects the marker — the env value participates
+        in verification, it does not merely satisfy the non-empty check."""
+        from bootstrap_gate import is_marker_set
+
+        session_dir, _ = self._scaffold(monkeypatch, tmp_path, "absent")
+        other_root = tmp_path / "other-plugin"
+        (other_root / ".claude-plugin").mkdir(parents=True)
+        (other_root / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"version": "9.9.9"}), encoding="utf-8"
+        )
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(other_root))
+
+        assert is_marker_set(session_dir) is False
+
+    def test_empty_plugin_root_context_marker_fast_path_via_env(
+            self, monkeypatch, tmp_path):
+        """Integration through the real gate: context file PRESENT with
+        plugin_root='' (the heal-without-env shape) + env exported → the
+        marker fast path allows a normally-blocked tool; with the env
+        absent the SAME scaffold denies — the discriminating pair pins
+        that the env fallback is what carries the fast path."""
+        from bootstrap_gate import _check_tool_allowed
+
+        session_dir, plugin_root = self._scaffold(
+            monkeypatch, tmp_path, "empty-plugin-root")
+
+        # Without the env var (scrubbed baseline): marker unverifiable →
+        # lead+no-marker branch → Edit denied.
+        assert _check_tool_allowed(_make_input("Edit")) is not None
+
+        # With the env var: marker verifies → fast path allows Edit.
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+        assert _check_tool_allowed(_make_input("Edit")) is None
 
 
 # =============================================================================

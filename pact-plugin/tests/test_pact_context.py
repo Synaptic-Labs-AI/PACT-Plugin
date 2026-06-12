@@ -2540,6 +2540,47 @@ class TestHealContextIfMissing:
         assert not target.exists()
         assert "self-heal failed" in capsys.readouterr().err
 
+    def test_unwritable_session_dir_real_oserror_returns_false(
+            self, monkeypatch, tmp_path, capsys):
+        """TOTAL under a REAL permission failure (no mocked seam): the
+        session dir exists but is unwritable (mode 0o500), so the atomic
+        write's mkstemp raises a genuine PermissionError inside
+        persist_context. The heal must return False (its disk-verified
+        'True iff healed' contract — persist_context swallows the error,
+        so only the exists() re-check keeps the return honest), must not
+        raise, must leave no file and no stray temp, and the swallowed
+        error must be named on stderr. Complements the mocked-seam
+        sibling above: that row pins the never-raises property at the
+        write_context boundary; this row drives the REAL OSError path
+        through persist_context's mkdir/mkstemp sequence."""
+        import shared.pact_context as ctx_module
+        from fixtures.role_frames import lead_frame_qualified
+
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            pytest.skip("running as root — mode bits are not enforced, "
+                        "the PermissionError cannot be provoked")
+
+        target = self._absent_context(monkeypatch, tmp_path)
+        session_dir = target.parent
+        session_dir.mkdir(parents=True)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/test/heal-project")
+
+        frame = lead_frame_qualified(session_id=self._VALID_SID)
+        session_dir.chmod(0o500)  # r-x: traversable+listable, NOT writable
+        try:
+            assert ctx_module.heal_context_if_missing(frame) is False
+            err = capsys.readouterr().err
+            assert "could not write context file" in err, (
+                "persist_context must name the swallowed write failure "
+                "on stderr"
+            )
+            assert not target.exists()
+            assert list(session_dir.iterdir()) == [], (
+                "no stray mkstemp temp file may survive the failure"
+            )
+        finally:
+            session_dir.chmod(0o700)  # restore so tmp_path cleanup works
+
 
 class TestDescribeContextFailure:
     """Three-arm unit tests for describe_context_failure() — the shared

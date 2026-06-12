@@ -1429,12 +1429,22 @@ class TestSubprocessSelfHeal:
         )
 
     def test_teammate_run_does_not_heal(self, tmp_path):
-        """Same scaffold, teammate frame → no heal (is_lead gate, #877)."""
+        """Same scaffold, teammate frame → no heal (is_lead gate, #877).
+
+        Single-variable discipline: the env (including CLAUDE_PLUGIN_ROOT
+        and the plugin_root dir on disk) mirrors the lead positive control
+        above EXACTLY, so agent_type is the ONLY input that differs — the
+        no-heal outcome is attributable to the is_lead gate alone, not to
+        an incidentally missing env var."""
         import subprocess
 
         home = tmp_path
         slug = "healproj"
         session_id = "deadbeef-4242-4242-4242-deadbeef4242"
+
+        plugin_root = home / "plugin"
+        plugin_root.mkdir(parents=True)
+
         session_dir = home / ".claude" / "pact-sessions" / slug / session_id
         ctx = session_dir / "pact-session-context.json"
 
@@ -1455,6 +1465,7 @@ class TestSubprocessSelfHeal:
         env["HOME"] = str(home)
         env.pop("CLAUDE_CONFIG_DIR", None)
         env["CLAUDE_PROJECT_DIR"] = f"/tmp/{slug}"
+        env["CLAUDE_PLUGIN_ROOT"] = str(plugin_root)
 
         result = subprocess.run(
             [sys.executable, str(hook_path)],
