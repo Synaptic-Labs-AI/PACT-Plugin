@@ -102,10 +102,10 @@ edits. Recommended non-mocked test coverage, **priority by blast radius**:
 
 | # | Caller | Severity under Agent Teams (pre-fix) | Own non-mocked test? | Test shape |
 |---|--------|--------------------------------------|----------------------|------------|
-| 1 | `missed_wake_scan.py:274` | **INERT** — alarm never fires (the #923 subject) | **DONE** — `test_missed_wake_scan_integration.py` IT-1/IT-2 | `run_surface` e2e via `Path.home` redirect + real team dir → surfaces + 1 journal event |
-| 2 | `teammate_idle.py:316` | **INERT** — idle-cleanup + auto-shutdown nudge dead (2nd live bug) | **SMOKE DONE** (IT-6); fuller e2e RECOMMENDED | arg-less `get_task_list()` resolves the team dir → `check_idle_cleanup` escalation path runs |
-| 3 | `session_init.py:1211` | **PARTIAL** — post-compaction checkpoint degrades to the bootstrap safety-net | RECOMMENDED (medium) | build the post-compaction checkpoint from a real team dir → `find_feature_task`/`current_phase`/`active_agents` non-empty |
-| 4 | `session_end.py:837` | **MINOR** — only the secondary untracked-PR scan lost (primary PR-unpause path still fires via journal) | OPTIONAL (low) | `check_unpaused_pr` reads a real team dir for the secondary scan |
+| 1 | `missed_wake_scan.py:276` | **INERT** — alarm never fires (the #923 subject) | **DONE** — `test_missed_wake_scan_integration.py` IT-1/IT-2 | `run_surface` e2e via `Path.home` redirect + real team dir → surfaces + 1 journal event |
+| 2 | `teammate_idle.py:319` | **INERT** — idle-cleanup + auto-shutdown nudge dead (2nd live bug) | **SMOKE DONE** (IT-6); fuller e2e RECOMMENDED | arg-less `get_task_list()` resolves the team dir → `check_idle_cleanup` escalation path runs |
+| 3 | `session_init.py:1214` | **PARTIAL** — post-compaction checkpoint degrades to the bootstrap safety-net | RECOMMENDED (medium) | build the post-compaction checkpoint from a real team dir → `find_feature_task`/`current_phase`/`active_agents` non-empty |
+| 4 | `session_end.py:840` | **MINOR** — only the secondary untracked-PR scan lost (primary PR-unpause path still fires via journal) | OPTIONAL (low) | `check_unpaused_pr` reads a real team dir for the secondary scan |
 
 **Key framing:** callers 3 & 4 are already REPAIRED by the GLOBAL fix — their
 own non-mocked tests would be **regression-pinning** coverage (prevent a future

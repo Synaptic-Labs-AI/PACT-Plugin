@@ -21,6 +21,8 @@ Input: JSON from stdin with tool_input containing the command
 Output: JSON with hookSpecificOutput.permissionDecision if blocking
 """
 
+from __future__ import annotations
+
 import glob
 import json
 import os

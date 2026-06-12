@@ -11,6 +11,8 @@ STEP_DESCRIPTIONS and PROSE_CONTEXT_TEMPLATES are imported from
 shared_constants.py to centralize constants shared by refresh consumers.
 """
 
+from __future__ import annotations
+
 # Import shared constants for re-export
 from .shared_constants import STEP_DESCRIPTIONS, PROSE_CONTEXT_TEMPLATES
 

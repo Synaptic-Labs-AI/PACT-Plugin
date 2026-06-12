@@ -425,7 +425,7 @@ class TestPinCapsGate_Matrix_Edit:
         """Upstream-split invariant (per auditor-2 recommendation,
         2026-04-21 consultant mode): Python's str.splitlines() recognizes
         every char in `_FORBIDDEN_RATIONALE_CHARS` as a line boundary,
-        which is WHY the char check at `pin_caps_gate.py:148` is not
+        which is WHY the char check at `pin_caps_gate.py:184` is not
         runtime-reachable in the current call graph.
 
         `_extract_override_rationale` applies `splitlines()` and then
@@ -440,7 +440,7 @@ class TestPinCapsGate_Matrix_Edit:
         future refactor of `_extract_override_rationale` stops calling
         splitlines (e.g., moves to a regex that scans the whole fragment
         in one pass), this test fails loudly and the char-check block at
-        `pin_caps_gate.py:148` becomes the load-bearing defense. Converts
+        `pin_caps_gate.py:184` becomes the load-bearing defense. Converts
         the latent dead-code tradeoff into a loud one.
         """
         # The canonical override-comment fragment, with a forbidden char
@@ -453,7 +453,7 @@ class TestPinCapsGate_Matrix_Edit:
         # At least two parts — splitlines recognized the terminator.
         assert len(parts) >= 2, (
             f"splitlines() did NOT split on {ord_hex} ({terminator!r}) — "
-            f"if this fails, the forbidden-char check at pin_caps_gate.py:148 "
+            f"if this fails, the forbidden-char check at pin_caps_gate.py:184 "
             f"has become runtime-reachable. Update the inline comment in "
             f"that file and re-verify the char-check block is exercised."
         )
@@ -534,7 +534,7 @@ class TestPinCapsGate_Matrix_Edit:
         )
         assert parser_rationale is None, (
             f"Parser still captured a rationale on {ord_hex} despite "
-            f"splitlines-based parsing (pin_caps.py:166 fix regressed). "
+            f"splitlines-based parsing (pin_caps.py:191 fix regressed). "
             f"Size cap bypass is live again."
         )
 

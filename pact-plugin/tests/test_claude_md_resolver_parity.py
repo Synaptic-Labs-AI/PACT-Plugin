@@ -119,11 +119,11 @@ def resolver_memory_api(tmp: Path, monkeypatch) -> str:
 def resolver_worktree_guard(tmp: Path, monkeypatch) -> str:
     """
     worktree_guard has no importable helper -- its probe is inline at
-    worktree_guard.py:139-144. This wrapper mirrors that exact expression.
+    worktree_guard.py:179-184. This wrapper mirrors that exact expression.
     Because the inline probe is a bool, drift here is especially easy to
     miss without this parity test.
     """
-    # Mirror worktree_guard.py lines 139-144 exactly
+    # Mirror worktree_guard.py lines 179-184 exactly
     is_project_dir = (
         (tmp / "CLAUDE.md").exists()
         or (tmp / ".claude" / "CLAUDE.md").exists()

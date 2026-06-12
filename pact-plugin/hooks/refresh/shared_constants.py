@@ -9,6 +9,8 @@ test_checkpoint_builder.py). Extracting these to a shared module eliminates
 code duplication (DRY principle).
 """
 
+from __future__ import annotations
+
 # === STEP DESCRIPTIONS ===
 # Human-readable descriptions for workflow steps, used in refresh messages
 # to help the AI understand what each state means when resuming after compaction

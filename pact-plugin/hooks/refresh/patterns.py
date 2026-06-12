@@ -19,6 +19,8 @@ parseable. Dispatch code (bootstrap_gate, hooks.json matchers, persona,
 commands, skills, protocols) is clean Agent only — no dual-naming.
 """
 
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
 

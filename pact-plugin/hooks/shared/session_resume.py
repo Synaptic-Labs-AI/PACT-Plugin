@@ -12,6 +12,8 @@ Manages:
 4. Detecting paused state from session journal
 """
 
+from __future__ import annotations
+
 import os
 import re
 import sys

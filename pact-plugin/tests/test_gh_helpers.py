@@ -73,7 +73,7 @@ class TestCheckPrStateGhHelpersHappyPath:
 
         Pins the `.upper()` in the return path. Old gh releases and some
         JSON clients can return canonical states in lowercase; the
-        detector's string comparison at session_end.py:157 is
+        detector's string comparison at session_end.py:160 is
         uppercase-sensitive, so the wrapper MUST normalize.
         """
         from shared.gh_helpers import check_pr_state

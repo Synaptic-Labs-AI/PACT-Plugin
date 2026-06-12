@@ -12,6 +12,8 @@ Input: JSON from stdin with tool_input containing Task parameters
 Output: JSON with hookSpecificOutput.permissionDecision if blocking
 """
 
+from __future__ import annotations
+
 # ─── stdlib first (used by _emit_load_failure_deny BEFORE wrapped imports) ─
 import json
 import sys

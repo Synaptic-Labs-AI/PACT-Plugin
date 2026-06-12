@@ -3190,7 +3190,7 @@ class TestReaperBehaviorPins:
 
 
 class TestTaskListIdAllowlistRejection:
-    """Pins `re.fullmatch(r"[A-Za-z0-9_-]+", ...)` guard at session_end.py:615.
+    """Pins `re.fullmatch(r"[A-Za-z0-9_-]+", ...)` guard at session_end.py:642-644.
 
     The cycle-1 happy-path test (`test_main_assembles_union_skip_set`)
     covers a well-formed `task-C` passing through to skip_names. But it
@@ -3273,7 +3273,7 @@ class TestTaskListIdAllowlistRejection:
         assert hostile_value not in skip_names, (
             f"Hostile CLAUDE_CODE_TASK_LIST_ID={hostile_value!r} leaked into "
             f"skip_names={skip_names!r}. Regex allowlist at "
-            f"session_end.py:615 must be filtering it."
+            f"session_end.py:642-644 must be filtering it."
         )
         # Sanity: the other two skip members still pass through.
         assert "team-A" in skip_names
@@ -3374,7 +3374,7 @@ class TestTaskListIdAllowlistRejection:
 
 
 class TestTaskDirMtimeInnerSymlink:
-    """Pins `child.stat(follow_symlinks=False)` at session_end.py:358.
+    """Pins `child.stat(follow_symlinks=False)` at session_end.py:384.
 
     `_task_dir_mtime` iterates each `*.json` child to compute the tight
     max-mtime used as the dir's reap decision. If `stat()` FOLLOWED
@@ -3432,7 +3432,7 @@ class TestTaskDirMtimeInnerSymlink:
             "Old-link-with-fresh-target scenario must reap — link lstat "
             "mtime (40d) should win over target stat mtime (fresh). "
             "If this fails, `follow_symlinks=False` was likely removed "
-            "from session_end.py:358."
+            "from session_end.py:384."
         )
         assert not d.exists()
         # Target must survive (rmtree on the parent dir unlinks the
@@ -3480,7 +3480,7 @@ class TestTaskDirMtimeInnerSymlink:
             "Fresh-link-with-old-target scenario must preserve — link "
             "lstat mtime (fresh) should win over target stat mtime (60d). "
             "If this fails, `follow_symlinks=False` was likely removed "
-            "from session_end.py:358."
+            "from session_end.py:384."
         )
         assert d.exists()
         assert target.exists()
@@ -4523,7 +4523,7 @@ class TestTeamNameAllowlist:
         """Each hostile current_team_name is filtered from skip_names.
 
         COUNTER-TEST BY REVERT target: removing the `safe_team_name`
-        allowlist at session_end.py:769-773 (restoring the direct
+        allowlist at session_end.py:641-646 (restoring the direct
         `{current_team_name, task_list_id, safe_session_id}` shape)
         flips this test — hostile team_names leak into skip_names.
         """
@@ -4564,7 +4564,7 @@ class TestTeamNameAllowlist:
         assert hostile_value not in skip_names, (
             f"Hostile current_team_name={hostile_value!r} leaked into "
             f"skip_names={skip_names!r}. Cycle-7 allowlist on team_name "
-            f"(session_end.py:769-773) must filter it — mirroring the "
+            f"(session_end.py:641-646) must filter it — mirroring the "
             f"task_list_id and session_id channels."
         )
         # Sanity: the other two skip members still pass through.
@@ -4698,7 +4698,7 @@ class TestSentinelFalseReapHardening:
         Mirrors `test_caller_skips_on_sentinel_no_false_reap` but via
         `cleanup_old_teams` rather than `cleanup_old_tasks`. The
         sentinel-handling guard exists in BOTH reapers (cleanup_old_teams
-        at session_end.py:527-529 and cleanup_old_tasks at 600-602). Test
+        at session_end.py:502-504 and cleanup_old_tasks at 576-578). Test
         4's original caller-integration pin only probes the tasks path —
         a regression that removes ONLY the teams-side guard would not be
         caught. This pin closes that coverage gap.
@@ -4740,7 +4740,7 @@ class TestSentinelFalseReapHardening:
         assert reaped == 0, (
             "teams caller must NOT reap on sentinel. If reaped == 1, the "
             "teams-side `if mtime is None: skipped += 1; continue` guard "
-            "(session_end.py:527-529) was removed or short-circuited."
+            "(session_end.py:502-504) was removed or short-circuited."
         )
         assert skipped == 1
         assert d.exists()

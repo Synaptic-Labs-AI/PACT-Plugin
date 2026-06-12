@@ -7,6 +7,8 @@ Analyzes transcript turns after a workflow trigger to determine
 the current step/phase and any pending user action.
 """
 
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass, field
 from typing import Any

@@ -23,6 +23,8 @@ Module-load discipline (architect §5.6):
   re-raised BaseException.
 """
 
+from __future__ import annotations
+
 import json
 import sys
 import os

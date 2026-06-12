@@ -49,6 +49,8 @@ Fail-safe everywhere: register() is a no-op and never raises; resolve()
     no-op as "use current behavior".
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re

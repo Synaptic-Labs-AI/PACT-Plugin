@@ -17,6 +17,8 @@ Input: JSON from stdin with session context
 Output: None (SessionEnd hooks cannot inject context)
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re

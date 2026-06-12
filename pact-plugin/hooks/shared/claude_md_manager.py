@@ -20,6 +20,8 @@ The resolve_project_claude_md_path() helper picks whichever exists, with
 default path so creators land at the preferred location.
 """
 
+from __future__ import annotations
+
 import fcntl  # Unix-only; PACT supports macOS/Linux. No Windows compat shim.
 import os
 import re

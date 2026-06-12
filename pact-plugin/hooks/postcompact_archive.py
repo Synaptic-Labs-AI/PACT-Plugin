@@ -20,6 +20,8 @@ Input: JSON from stdin with compact_summary field
 Output: JSON suppressOutput on stdout (clean path) or hook_error_json (failure)
 """
 
+from __future__ import annotations
+
 import json
 import os
 import sys

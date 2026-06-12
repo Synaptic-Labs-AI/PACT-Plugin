@@ -36,6 +36,8 @@ event. This biases to HANDOFF preservation, never loss — the intended
 trade-off (see occupant_hash).
 """
 
+from __future__ import annotations
+
 import errno
 import hashlib
 import os

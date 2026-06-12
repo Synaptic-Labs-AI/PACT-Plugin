@@ -19,6 +19,8 @@ barrier); a drift-detection test in test_staleness.py guards against
 divergence.
 """
 
+from __future__ import annotations
+
 import re
 from typing import List, Literal, NamedTuple, Optional
 
@@ -224,7 +226,7 @@ def parse_pins(pinned_content: str) -> List[Pin]:
                 # (`test_gate_forbidden_chars_derived_from_parser_table`)
                 # has a stable parser-side counterpart. Not "mitigation"
                 # — prevention via upstream split. Mirrors
-                # `pin_caps_gate.py:148-180`.
+                # `pin_caps_gate.py:184-216`.
                 rationale = rationale.translate(_FORBIDDEN_TERMINATOR_TABLE)
                 # Strict parser: empty rationale or > max → treat as no-override.
                 if rationale and len(rationale) <= OVERRIDE_RATIONALE_MAX:
@@ -473,9 +475,9 @@ def _violation_for_kind(pins: List[Pin], kind: str) -> Optional[CapViolation]:
 
     Post-parse-derivable from candidate new_body (not from post_pins):
       - `"embedded_pin"` — constructed in `check_add_allowed`
-                      (`pin_caps.py:313`) when `parse_pins(new_body)`
+                      (`pin_caps.py:315`) when `parse_pins(new_body)`
                       returns non-empty. Also rendered via the
-                      `compute_deny_reason` shortcut at `pin_caps.py:666-668`
+                      `compute_deny_reason` shortcut at `pin_caps.py:686-687`
                       which returns `DENY_REASON_EMBEDDED_PIN` directly
                       (no CapViolation constructor; the shortcut
                       bypasses `_render_deny_reason`). Not derivable
@@ -487,10 +489,10 @@ def _violation_for_kind(pins: List[Pin], kind: str) -> Optional[CapViolation]:
       - `"empty"`            — reserved for a future empty-pin predicate.
       - `"invalid_override"` — intent was to represent an invalid
                       override rationale, but the actual emitter path at
-                      `pin_caps_gate.py:248-250` returns a bare formatted
+                      `pin_caps_gate.py:293-295` returns a bare formatted
                       string (`f"Pin cap violation (invalid override):
                       {reason}"`) without constructing a CapViolation.
-                      A render branch at `pin_caps.py:802-806` remains
+                      A render branch at `pin_caps.py:821-825` remains
                       but is unreachable under the current emitter
                       graph. If a future refactor routes override
                       failures through a CapViolation, the render

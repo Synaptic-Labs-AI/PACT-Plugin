@@ -19,6 +19,8 @@ a SECURITY warning to stderr identifying it as a possible
 envelope-confusion attack, and returns the canonical `tool_response` value.
 """
 
+from __future__ import annotations
+
 import sys
 
 

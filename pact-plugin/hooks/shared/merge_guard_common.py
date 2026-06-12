@@ -47,6 +47,8 @@ eager-cleanup at session start). Disk-hygiene defense — not a primary
 security check; the primary check is I-3 TTL expiry at 5 minutes.
 """
 
+from __future__ import annotations
+
 import glob
 import os
 import re

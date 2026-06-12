@@ -5091,7 +5091,7 @@ class TestSessionScoping:
         the AND-short-circuit on `not token_session` left tokens with empty
         session_id through — the bypass surface SEC-S1 closes.
 
-        Cycle-2 revised asymmetric predicate at merge_guard_pre.py:633:
+        Cycle-2 revised asymmetric predicate at merge_guard_pre.py:635:
         `if current_session: if not token_session or current_session != token_session: continue`
         — when current_session IS populated, both an empty token_session AND
         a foreign token_session reject. Graceful-degradation preserved at
@@ -5102,7 +5102,7 @@ class TestSessionScoping:
         for the design rationale.
 
         # counter-test: remove the inner `if not token_session` half of the
-        #               predicate at merge_guard_pre.py:643 → empty token_
+        #               predicate at merge_guard_pre.py:645 → empty token_
         #               session falls through to acceptance (the cycle-1
         #               attack surface re-opens); assertion `result is None`
         #               FAILS because result is a valid token dict.
@@ -5135,7 +5135,7 @@ class TestSessionScoping:
         Both are bypass-surface attacker shapes under the cycle-1 predicate;
         both reject under cycle-2.
 
-        # counter-test: revert merge_guard_pre.py:633-644 to the cycle-1
+        # counter-test: revert merge_guard_pre.py:635-646 to the cycle-1
         #               short-circuit predicate
         #                   `if current_session and token_session and
         #                    current_session != token_session: continue`
@@ -5174,12 +5174,12 @@ class TestSessionScoping:
         This is the cycle-1 behavior preserved verbatim (foreign session
         always rejected) but anchored under the new asymmetric predicate
         framing. Documents that the AND-tightening at
-        merge_guard_pre.py:643 (`if not token_session OR current_session
+        merge_guard_pre.py:645 (`if not token_session OR current_session
         != token_session`) preserves the foreign-session rejection half
         exactly while ADDING the empty-token_session rejection half.
 
         # counter-test: remove the inner `current_session != token_session`
-        #               half of the predicate at merge_guard_pre.py:643 →
+        #               half of the predicate at merge_guard_pre.py:645 →
         #               foreign-session token would fall through to
         #               acceptance; assertion FAILS.
         # expected RED cardinality: {1}

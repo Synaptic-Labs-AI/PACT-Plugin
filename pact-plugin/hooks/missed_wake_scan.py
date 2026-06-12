@@ -59,6 +59,8 @@ Output: hookSpecificOutput.additionalContext on the surface path; otherwise
         {"suppressOutput": true}. Exit 0 on every path.
 """
 
+from __future__ import annotations
+
 import json
 import sys
 from datetime import datetime, timezone

@@ -27,6 +27,8 @@ Output: JSON with hookSpecificOutput.additionalContext (inject case)
         or {"suppressOutput": true} (fast path / passthrough)
 """
 
+from __future__ import annotations
+
 # ─── stdlib first (used by _emit_load_failure_advisory BEFORE wrapped imports) ─
 import json
 import sys

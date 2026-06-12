@@ -9,6 +9,8 @@ Claude Code's UI can display hook errors to the user instead of showing
 "hook error (No output)" or silently suppressing the error.
 """
 
+from __future__ import annotations
+
 import json
 
 

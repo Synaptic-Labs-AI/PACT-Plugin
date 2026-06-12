@@ -44,6 +44,8 @@ Output: JSON with hookSpecificOutput.additionalContext (load-failure case)
         or {"suppressOutput": true} (every other path)
 """
 
+from __future__ import annotations
+
 # ─── stdlib first (used by _emit_load_failure_advisory BEFORE wrapped imports) ─
 import json
 import sys

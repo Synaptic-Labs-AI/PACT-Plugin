@@ -49,28 +49,64 @@ Output: JSON with hookSpecificOutput.permissionDecision (deny case)
         or {"suppressOutput": true} (allow / passthrough)
 """
 
+from __future__ import annotations
+
+# ─── stdlib first (used by _emit_load_failure_deny BEFORE wrapped imports) ─
 import json
 import sys
 from pathlib import Path
-from typing import Optional
-
-import shared.pact_context as pact_context
-from shared import (
-    file_lock,
-    match_project_claude_md,
-)
-from shared.failure_log import append_failure
-import pin_caps
-from pin_caps import (
-    OVERRIDE_COMMENT_RE,
-    OVERRIDE_RATIONALE_MAX,
-    apply_edit_and_parse,
-    compute_deny_reason,
-    evaluate_full_state,
-    parse_pins,
-)
+from typing import NoReturn, Optional
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
+
+def _emit_load_failure_deny(stage: str, error: BaseException) -> NoReturn:
+    """Stdlib-only fail-closed deny for module-load failure. Mirrors the
+    ``team_guard`` / ``dispatch_gate`` / ``bootstrap_gate`` analogue.
+
+    Without this, a raise from the cross-package imports below would crash the
+    hook (exit 1), which the platform treats as a NON-blocking PreToolUse hook
+    — the Edit/Write tool would PROCEED and the pin-caps gate would silently
+    FAIL-OPEN. Emitting a deny + exit 2 keeps the gate fail-CLOSED.
+    hookEventName MUST be present.
+    """
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (
+                f"PACT pin_caps_gate {stage} failure — blocking for safety. "
+                f"{type(error).__name__}: {error}. Check hook installation "
+                "and shared module availability."
+            ),
+        }
+    }))
+    print(
+        f"Hook load error (pin_caps_gate / {stage}): {error}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+# ─── fail-closed wrapper on cross-package imports ──────────────────────────
+try:
+    import shared.pact_context as pact_context
+    from shared import (
+        file_lock,
+        match_project_claude_md,
+    )
+    from shared.failure_log import append_failure
+    import pin_caps
+    from pin_caps import (
+        OVERRIDE_COMMENT_RE,
+        OVERRIDE_RATIONALE_MAX,
+        apply_edit_and_parse,
+        compute_deny_reason,
+        evaluate_full_state,
+        parse_pins,
+    )
+except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
+    _emit_load_failure_deny("module imports", _module_load_error)
 
 _GATED_TOOLS = frozenset({"Edit", "Write"})
 
@@ -147,7 +183,7 @@ def _validate_override_rationale(rationale: Optional[str]) -> Optional[str]:
         )
     # Unreached at runtime under the current call graph: both the gate's
     # `_extract_override_rationale` AND the parser's `parse_pins` use
-    # str.splitlines() (pin_caps.py:166, post-#492-F1). splitlines()
+    # str.splitlines() (pin_caps.py:191, post-#492-F1). splitlines()
     # recognizes \n, \r, U+2028, U+2029, U+0085 (and VT, FF, FS, GS, RS)
     # as line boundaries, so any rationale containing one of those chars
     # is split before OVERRIDE_COMMENT_RE.fullmatch sees it — fullmatch

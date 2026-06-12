@@ -1954,7 +1954,7 @@ class TestExtractPrevSessionDirDualLocation:
         """M3: derives session dir from Resume line + project basename when
         the `- Session dir:` line is absent.
 
-        Targets the fallback branch at session_init.py:207-218. Backward-compat
+        Targets the fallback branch at session_init.py:524-536. Backward-compat
         path for sessions written before the Session dir line existed: when only
         the `- Resume:` line is present, the function reconstructs the path as
         ~/.claude/pact-sessions/<project-basename>/<session-id>.
@@ -2452,7 +2452,7 @@ class TestPluginRootEnvWiring:
     The happy-path tests (TestWriteContextIntegration) cover the case where
     CLAUDE_PLUGIN_ROOT is unset (empty string is passed through). These tests
     cover the complementary case where the Claude Code plugin loader sets
-    CLAUDE_PLUGIN_ROOT BEFORE session_init runs. session_init.py:317 reads
+    CLAUDE_PLUGIN_ROOT BEFORE session_init runs. session_init.py:319 reads
     the env var directly:
 
         plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")

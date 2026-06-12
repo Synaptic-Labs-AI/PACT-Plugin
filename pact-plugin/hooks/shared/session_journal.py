@@ -44,6 +44,8 @@ Permissions: 0o600 (owner read/write only)
 Directory permissions: 0o700 (owner only)
 """
 
+from __future__ import annotations
+
 import fcntl
 import json
 import os

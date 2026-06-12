@@ -532,7 +532,7 @@ class TestBannerContractInvariants:
 
     # --- Project-wide sanitization regex contract (mirrors session_state._RENDER_STRIP_RE) ---
     # plugin_manifest.py exposes `_sanitize()` with the same
-    # regex `[\x00-\x1f\x7f\u0085\u2028\u2029]` used by session_state.py:83
+    # regex `[\x00-\x1f\x7f\u0085\u2028\u2029]` used by session_state.py:89
     # Replacement is space (not empty).
     # Tests below assert the output-level contract (characters absent from banner,
     # banner remains single-line) — robust to whether the fix ships as an

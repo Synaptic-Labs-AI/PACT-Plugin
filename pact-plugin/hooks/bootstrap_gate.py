@@ -56,6 +56,8 @@ Output: JSON with hookSpecificOutput.permissionDecision (deny case)
         or {"suppressOutput": true} (allow / passthrough)
 """
 
+from __future__ import annotations
+
 # ─── stdlib first (used by _emit_load_failure_deny BEFORE wrapped imports) ───
 import json
 import os
@@ -172,7 +174,7 @@ def _is_canonical_secretary_spawn(input_data: dict) -> bool:
       3. tool_input.name == "secretary" (_SECRETARY_NAME, canonical literal)
       4. tool_input.team_name == pact_context.get_team_name()
          (note: get_team_name() returns the disk team_name lowercased per
-         pact_context.py:221; the binding is case-INsensitive against the
+         pact_context.py:256; the binding is case-INsensitive against the
          disk value. Current session-slug naming is lowercase-by-
          construction, so this normalization is unreachable in practice.)
       5. NOT _team_has_secretary(team_name) — one-shot semantic; flips to

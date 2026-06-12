@@ -13,14 +13,51 @@ Input: JSON from stdin with tool_input containing the command
 Output: Exit code 2 to block, 0 to allow; errors to stderr
 """
 
+from __future__ import annotations
+
+# ─── stdlib first (used by _emit_load_failure_deny BEFORE wrapped imports) ─
 import sys
 import json
 import re
-
-from shared.error_output import hook_error_json
-from shared.git_helpers import run_git
+from typing import NoReturn
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
+
+def _emit_load_failure_deny(stage: str, error: BaseException) -> NoReturn:
+    """Stdlib-only fail-closed deny for module-load failure. Mirrors the
+    ``team_guard`` / ``dispatch_gate`` / ``bootstrap_gate`` analogue.
+
+    Without this, a raise from the cross-package imports below would crash the
+    hook (exit 1), which the platform treats as a NON-blocking PreToolUse hook
+    — the Bash tool would PROCEED and the commit-compliance gate (credential
+    scanning included) would silently FAIL-OPEN. Emitting a deny + exit 2
+    keeps the gate fail-CLOSED. hookEventName MUST be present.
+    """
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (
+                f"PACT git_commit_check {stage} failure — blocking for safety. "
+                f"{type(error).__name__}: {error}. Check hook installation "
+                "and shared module availability."
+            ),
+        }
+    }))
+    print(
+        f"Hook load error (git_commit_check / {stage}): {error}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+# ─── fail-closed wrapper on cross-package imports ──────────────────────────
+try:
+    from shared.error_output import hook_error_json
+    from shared.git_helpers import run_git
+except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
+    _emit_load_failure_deny("module imports", _module_load_error)
 
 
 def get_staged_files():

@@ -129,7 +129,7 @@ class TestPinCapsGate_Smoke:
         parsed as an extra pin on reload and defeat the count cap.
 
         Pre-fix: `_extract_new_body` returned "" for Write, so
-        compute_deny_reason's embedded-pin check at pin_caps.py:557 never
+        compute_deny_reason's embedded-pin check at pin_caps.py:686-687 never
         ran on Write. Only the count cap caught pin inflation, and a
         smuggled heading inside a body wouldn't register in the count
         cap because the smuggle becomes visible only AFTER a reload.

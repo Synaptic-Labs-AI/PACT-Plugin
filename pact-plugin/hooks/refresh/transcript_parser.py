@@ -12,6 +12,8 @@ Supports both dispatch models for agent detection:
 - Agent Teams teammate: name and team_name fields in Task input
 """
 
+from __future__ import annotations
+
 import json
 import sys
 from dataclasses import dataclass, field

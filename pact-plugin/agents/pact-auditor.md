@@ -189,7 +189,7 @@ Common triggers:
 Your task uses `completion_type: "signal"` (not standard HANDOFF). This places you in the **signal-task carve-out** to the team-lead-only-completion rule (see [pact-completion-authority.md](../protocols/pact-completion-authority.md)). You self-complete because:
 
 - The task IS the signal — there is no HANDOFF deliverable for the team-lead to inspect.
-- The canonical predicate is `metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}` (mirrored at `agent_handoff_emitter.py`, `task_utils.py:184`, `session_resume.py:525`).
+- The canonical predicate is `metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}` (mirrored at `agent_handoff_emitter.py`, `task_utils.py:276`, `session_resume.py:522`).
 
 1. Store your final signal as `metadata.audit_summary` via TaskUpdate:
    ```

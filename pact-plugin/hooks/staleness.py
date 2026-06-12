@@ -15,6 +15,8 @@ Extracted from session_init.py to keep that file focused on hook orchestration
 and under the 500-line maintainability limit.
 """
 
+from __future__ import annotations
+
 import os
 import re
 import subprocess

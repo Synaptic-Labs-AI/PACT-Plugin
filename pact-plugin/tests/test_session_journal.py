@@ -2219,7 +2219,7 @@ class TestCheckJournalPausedState:
     def test_unparseable_ts_does_not_crash(self, journal_home, session_dir, journal_file):
         """M5: corrupted `ts` field is swallowed, function falls through to PR check.
 
-        The TTL gate at session_resume.py:358-369 catches
+        The TTL gate at session_resume.py:605-618 catches
         (ValueError, TypeError, OverflowError) from datetime.fromisoformat(...)
         and pass-throughs to the active-PR check. With PR state mocked to OPEN,
         the standard 'Paused work detected' message must be returned -- the
@@ -2278,7 +2278,7 @@ class TestCheckJournalPausedState:
         """M5: missing `ts` field is treated as fail-open (skips TTL gate).
 
         When the `ts` field is absent (empty string from .get default), the
-        `if ts_str:` guard at session_resume.py:358 short-circuits past the
+        `if ts_str:` guard at session_resume.py:607 short-circuits past the
         TTL block entirely and falls through to the PR check. With PR mocked
         to OPEN, the standard paused message is returned.
         """
@@ -4031,7 +4031,7 @@ class TestValidateOptionalFieldTypes:
 
         Note: value=None is NOT tested as a reject case because the
         validator's optional-field path explicitly treats None as
-        "field absent" (session_journal.py:324) — consistent with the
+        "field absent" (session_journal.py:394) — consistent with the
         `continue` semantics for missing optional fields. This is
         intentional and correct for OPTIONAL fields.
         """
@@ -4090,7 +4090,7 @@ class TestValidateOptionalFieldTypes:
         session_end in `_REQUIRED_FIELDS_BY_TYPE` combined with the
         `{"warning": str}` entry here IS the activation mechanism.
 
-        session_end.py:687-688 writes `make_event("session_end",
+        session_end.py:850-851 writes `make_event("session_end",
         warning=<str>)` when check_unpaused_pr detects an open-but-
         unpaused PR. Without the schema entry, a future writer could
         pass a non-string warning (e.g. a dict of findings) and no

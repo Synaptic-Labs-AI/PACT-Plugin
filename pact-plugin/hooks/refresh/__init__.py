@@ -8,6 +8,8 @@ for the compaction refresh system. The main entry point is
 `extract_workflow_state()` which returns a checkpoint-ready dict.
 """
 
+from __future__ import annotations
+
 from .transcript_parser import parse_transcript, Turn
 from .workflow_detector import detect_active_workflow, WorkflowInfo
 from .step_extractor import extract_current_step, StepInfo, PendingAction

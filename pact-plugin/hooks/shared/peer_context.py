@@ -18,6 +18,8 @@ agent_name under tmux, so re-claiming a role would reintroduce the mis-roling
 this relocation fixes).
 """
 
+from __future__ import annotations
+
 import json
 import re
 from pathlib import Path

@@ -67,6 +67,8 @@ Rule coverage:
   - Every gate decision emits a session_journal lifecycle_decision event
 """
 
+from __future__ import annotations
+
 # ─── stdlib first (used by _emit_load_failure_advisory BEFORE wrapped imports) ─
 import json
 import os

@@ -23,6 +23,8 @@ Functions:
     read_task_json: Read the raw task JSON by id + team_name (path-traversal safe)
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re

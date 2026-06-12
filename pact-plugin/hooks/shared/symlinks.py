@@ -11,6 +11,8 @@ Creates two types of symlinks:
    (enables non-prefixed agent names like "pact-secretary")
 """
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
 
