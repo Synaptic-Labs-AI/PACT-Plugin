@@ -298,6 +298,16 @@ def get_plugin_root() -> str:
     rather than introducing a new failure mode. Empty string when both
     sources are unavailable.
     """
+    # Provenance / defense-in-depth (security review): in the empty-context
+    # case the env value flows into is_marker_set's signature computation
+    # (sha256(sid|plugin_root|version|1)), i.e. the fallback root PARTICIPATES
+    # in bootstrap-marker verification. CLAUDE_PLUGIN_ROOT is operator/
+    # harness-owned — exported by the platform into every hook process, the
+    # same trust domain as this hook itself — and is not reflectable from
+    # untrusted request content. No new privilege boundary: a wrong or
+    # tampered env value makes the marker's compare_digest FAIL → marker
+    # False → fail-closed, and the context-file value always wins when
+    # non-empty.
     return get_pact_context().get("plugin_root", "") or os.environ.get(
         "CLAUDE_PLUGIN_ROOT", ""
     )
