@@ -286,8 +286,20 @@ def get_session_dir() -> str:
 
 
 def get_plugin_root() -> str:
-    """Convenience: return plugin_root from context. Empty string on error."""
-    return get_pact_context().get("plugin_root", "")
+    """Convenience: return plugin_root from context. Falls back to the
+    CLAUDE_PLUGIN_ROOT env var (exported into every hook process by the
+    harness) when the context-file value is empty or the file is missing.
+
+    Fallback-AFTER-file-read, never a replacement: the file value wins
+    whenever it is non-empty, and the uniform ``or`` covers both the
+    file-missing and field-empty cases. If the platform ever regresses
+    the env export, behavior degrades to the historical file-only read
+    rather than introducing a new failure mode. Empty string when both
+    sources are unavailable.
+    """
+    return get_pact_context().get("plugin_root", "") or os.environ.get(
+        "CLAUDE_PLUGIN_ROOT", ""
+    )
 
 
 def resolve_agent_name(

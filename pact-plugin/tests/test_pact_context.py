@@ -307,6 +307,59 @@ class TestGetPluginRoot:
         assert get_plugin_root() == ""
 
 
+class TestGetPluginRootEnvFallback:
+    """Fallback matrix for get_plugin_root()'s CLAUDE_PLUGIN_ROOT env
+    fallback. File value wins when non-empty; env covers file-missing AND
+    field-empty; both absent → "". The autouse conftest scrub pops
+    CLAUDE_PLUGIN_ROOT before every test, so the env var is only present
+    when a test sets it explicitly.
+    """
+
+    def test_file_value_wins_over_env(self, pact_context, monkeypatch):
+        """A non-empty context-file plugin_root beats a differing env value."""
+        from shared.pact_context import get_plugin_root
+
+        pact_context(plugin_root="/from/context/file")
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/from/env/var")
+
+        assert get_plugin_root() == "/from/context/file"
+
+    def test_env_fallback_when_file_missing(self, monkeypatch, tmp_path):
+        """File missing entirely → env value is returned."""
+        import shared.pact_context as ctx_module
+
+        monkeypatch.setattr(ctx_module, "_context_path", tmp_path / "missing.json")
+        monkeypatch.setattr(ctx_module, "_cache", None)
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/from/env/var")
+
+        assert ctx_module.get_plugin_root() == "/from/env/var"
+
+    def test_env_fallback_when_field_empty(self, pact_context, monkeypatch):
+        """File present but plugin_root empty → env value is returned."""
+        from shared.pact_context import get_plugin_root
+
+        pact_context()  # plugin_root defaults to ""
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/from/env/var")
+
+        assert get_plugin_root() == "/from/env/var"
+
+    def test_empty_when_both_absent(self, monkeypatch, tmp_path):
+        """File missing and env unset (conftest scrub guarantees) → ''."""
+        import shared.pact_context as ctx_module
+
+        monkeypatch.setattr(ctx_module, "_context_path", tmp_path / "missing.json")
+        monkeypatch.setattr(ctx_module, "_cache", None)
+
+        assert ctx_module.get_plugin_root() == ""
+
+    def test_conftest_scrub_pops_ambient_env(self):
+        """The autouse scrub guarantees CLAUDE_PLUGIN_ROOT is absent at test
+        start — this is the isolation contract the empty-plugin_root pins
+        (here and in test_bootstrap_gate.py) rely on under the fallback."""
+        assert "CLAUDE_PLUGIN_ROOT" not in os.environ
+
+
+
 class TestGetSessionDir:
     """Tests for get_session_dir() — session-scoped directory path."""
 
