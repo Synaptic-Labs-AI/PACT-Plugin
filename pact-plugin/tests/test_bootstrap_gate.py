@@ -497,7 +497,9 @@ class TestFailClosedGateLogic:
 
 class TestErrorSuppressMutualExclusivity:
     """P0: input-side fail-open uses suppressOutput; deny path (block + runtime fail-closed
-    fail-closed) uses hookSpecificOutput. systemMessage is never emitted.
+    fail-closed) uses hookSpecificOutput. systemMessage is never emitted on
+    suppress/deny paths; the degraded-allow path (#942) is the single
+    deliberate systemMessage emitter (see TestDegradedMode).
     """
 
     def test_malformed_stdin_no_system_message(self, capsys):
@@ -1139,19 +1141,29 @@ class TestAuditAnchorParity:
     """Every JSON output path bootstrap_gate produces MUST carry
     hookSpecificOutput.hookEventName == "PreToolUse". Missing the field
     silently fails open at the platform layer (per pinned context). The
-    invariant is parametrized over the three distinct emit shapes:
+    invariant is parametrized over the five distinct emit shapes:
 
     - "deny-load-failure": _emit_load_failure_deny advisory
     - "deny-runtime": runtime-exception deny via _emit_load_failure_deny
     - "suppress": every other exit path via the _SUPPRESS_OUTPUT constant
+    - "degraded-allow-import": #942 allow-with-warning, import stage
+      (direct _emit_degraded_allow invocation)
+    - "degraded-allow-runtime": #942 allow-with-warning, runtime stage
+      (gate-logic exception + allowlisted tool through main())
 
-    All three MUST carry the audit anchor — parametrizing pins the
+    All five MUST carry the audit anchor — parametrizing pins the
     invariant so no future emit path can be added without it. Mirrors
     bootstrap_marker_writer's test_every_emit_shape_carries_hook_event_name
     so all three bootstrap-related hooks share one parity contract.
     """
 
-    @pytest.mark.parametrize("shape", ["deny-load-failure", "deny-runtime", "suppress"])
+    @pytest.mark.parametrize("shape", [
+        "deny-load-failure",
+        "deny-runtime",
+        "suppress",
+        "degraded-allow-import",
+        "degraded-allow-runtime",
+    ])
     def test_every_emit_shape_carries_hook_event_name(self, shape, capsys):
         if shape == "deny-load-failure":
             from bootstrap_gate import _emit_load_failure_deny
@@ -1166,6 +1178,26 @@ class TestAuditAnchorParity:
                 side_effect=RuntimeError("boom"),
             ):
                 with patch("sys.stdin", io.StringIO(json.dumps(_make_input()))):
+                    with pytest.raises(SystemExit):
+                        main()
+            captured = capsys.readouterr()
+            out = json.loads(captured.out.strip())
+        elif shape == "degraded-allow-import":
+            from bootstrap_gate import _emit_degraded_allow
+            with pytest.raises(SystemExit):
+                _emit_degraded_allow("module imports", RuntimeError("x"), "Read")
+            captured = capsys.readouterr()
+            out = json.loads(captured.out.strip())
+        elif shape == "degraded-allow-runtime":
+            from bootstrap_gate import main
+            with patch(
+                "bootstrap_gate._check_tool_allowed",
+                side_effect=RuntimeError("boom"),
+            ):
+                with patch(
+                    "sys.stdin",
+                    io.StringIO(json.dumps(_make_input(tool_name="Read"))),
+                ):
                     with pytest.raises(SystemExit):
                         main()
             captured = capsys.readouterr()
@@ -1185,6 +1217,216 @@ class TestAuditAnchorParity:
             f"shape={shape} emit MUST carry hookEventName=='PreToolUse'; "
             f"got {hso!r}"
         )
+
+
+# =============================================================================
+# Degraded mode (#942) — verification slice (CODE phase)
+# =============================================================================
+
+
+def _run_degraded_subprocess(tmp_path, stdin_text):
+    """Run bootstrap_gate.py as a subprocess inside a scaffold whose
+    `shared` package is deliberately syntax-broken, forcing the import-stage
+    degraded path. Returns the CompletedProcess.
+
+    Minimal smoke scaffold (CODE-phase verification); the comprehensive
+    broken-import behavior matrix (full allowlist/deny parametrization)
+    is TEST-phase scope.
+    """
+    import subprocess
+
+    hook_src = Path(__file__).parent.parent / "hooks" / "bootstrap_gate.py"
+    scaffold = tmp_path / "scaffold"
+    (scaffold / "shared").mkdir(parents=True)
+    (scaffold / "bootstrap_gate.py").write_text(
+        hook_src.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    # Syntax error → ImportError class failure at module load.
+    (scaffold / "shared" / "__init__.py").write_text(
+        "this is not valid python (", encoding="utf-8"
+    )
+    return subprocess.run(
+        [sys.executable, str(scaffold / "bootstrap_gate.py")],
+        input=stdin_text,
+        capture_output=True,
+        text=True,
+        cwd=str(scaffold),
+        timeout=10,
+    )
+
+
+class TestDegradedMode:
+    """#942 degraded-mode handler: while the gate cannot evaluate (import
+    or runtime failure), verified read-only tools are allowed WITH a
+    warning at exit 0; everything else keeps the unchanged fail-closed
+    deny at exit 2. Malformed/unverifiable stdin in the degraded path is
+    fail-CLOSED (deny) — the opposite of the healthy path's input-side
+    fail-open, because in degraded mode this module IS the broken layer.
+
+    CODE-phase verification slice only: structural allowlist pins, the
+    runtime-stage branch in-process, and an import-stage subprocess smoke.
+    The comprehensive subprocess matrix is TEST-phase scope.
+    """
+
+    # --- structural invariant pins (master safety property) ---
+
+    def test_allowlist_disjoint_from_blocked_tools(self):
+        """Degraded-allow ⊆ healthy-allow, part 1: no allowlist member is
+        ever in the blocked set."""
+        from bootstrap_gate import _BLOCKED_TOOLS, _READ_ONLY_TOOLS
+
+        assert _READ_ONLY_TOOLS & _BLOCKED_TOOLS == frozenset()
+
+    def test_allowlist_excludes_bash_and_mcp(self):
+        """Deliberate strictness asymmetry: Bash and MCP tools are allowed
+        on the healthy pre-marker path but must NOT be degraded-allowable."""
+        from bootstrap_gate import _READ_ONLY_TOOLS
+
+        assert "Bash" not in _READ_ONLY_TOOLS
+        assert not any(t.startswith("mcp__") for t in _READ_ONLY_TOOLS)
+
+    def test_every_allowlist_member_allowed_on_healthy_gated_branch(
+        self, monkeypatch, tmp_path
+    ):
+        """Degraded-allow ⊆ healthy-allow, part 2: on the strictest healthy
+        branch (lead, no marker), every allowlist member is allowed."""
+        from bootstrap_gate import _READ_ONLY_TOOLS, _check_tool_allowed
+
+        _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        for tool in sorted(_READ_ONLY_TOOLS):
+            assert _check_tool_allowed(_make_input(tool)) is None, (
+                f"allowlist member {tool!r} must be allowed on the healthy "
+                f"lead+no-marker branch — degraded mode may never grant "
+                f"something the healthy gate denies"
+            )
+
+    # --- runtime stage (in-process, symmetric with import stage) ---
+
+    def test_runtime_exception_with_readonly_tool_allows_with_warning(self, capsys):
+        """Gate-logic exception + allowlisted tool → exit 0, allow JSON with
+        warning text and systemMessage (the single deliberate emitter)."""
+        from bootstrap_gate import main
+
+        with patch(
+            "bootstrap_gate._check_tool_allowed",
+            side_effect=RuntimeError("boom"),
+        ):
+            with patch(
+                "sys.stdin", io.StringIO(json.dumps(_make_input(tool_name="Read")))
+            ):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+        assert exc_info.value.code == 0
+        out = json.loads(capsys.readouterr().out.strip())
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "allow"
+        for field in ("permissionDecisionReason", "additionalContext"):
+            assert "runtime" in hso[field]
+            assert "RuntimeError" in hso[field]
+            assert "DEGRADED" in hso[field]
+        assert "systemMessage" in out
+
+    def test_runtime_exception_with_mutating_tool_still_denies(self, capsys):
+        """Symmetry must not weaken the deny arm: Edit under a gate-logic
+        exception keeps today's fail-closed deny (exit 2)."""
+        from bootstrap_gate import main
+
+        with patch(
+            "bootstrap_gate._check_tool_allowed",
+            side_effect=RuntimeError("boom"),
+        ):
+            with patch(
+                "sys.stdin", io.StringIO(json.dumps(_make_input(tool_name="Edit")))
+            ):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+        assert exc_info.value.code == 2
+        out = json.loads(capsys.readouterr().out.strip())
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "systemMessage" not in out
+
+    def test_runtime_exception_with_missing_tool_name_denies(self, capsys):
+        """Unverifiable tool name in the degraded runtime path → fail-CLOSED
+        deny, same as the import stage."""
+        from bootstrap_gate import main
+
+        frame = _make_input()
+        del frame["tool_name"]
+        with patch(
+            "bootstrap_gate._check_tool_allowed",
+            side_effect=RuntimeError("boom"),
+        ):
+            with patch("sys.stdin", io.StringIO(json.dumps(frame))):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+        assert exc_info.value.code == 2
+        out = json.loads(capsys.readouterr().out.strip())
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_runtime_exception_with_non_dict_frame_denies(self, capsys):
+        """Valid-JSON non-dict stdin (e.g. a list) raises inside the gate
+        logic; the degraded handler must not crash on the .get and must
+        deny fail-closed (rc 2 with structured JSON, never a traceback)."""
+        from bootstrap_gate import main
+
+        with patch("sys.stdin", io.StringIO(json.dumps([1, 2, 3]))):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2
+        out = json.loads(capsys.readouterr().out.strip())
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    # --- import stage (subprocess smoke; full matrix is TEST phase) ---
+
+    def test_subprocess_broken_import_readonly_tool_allows(self, tmp_path):
+        """Broken `shared` import + tool_name=Read → allow-with-warning,
+        rc 0 (rc IS the emit contract: JSON only honored on exit 0 — pair
+        with content asserts, never rc alone)."""
+        result = _run_degraded_subprocess(
+            tmp_path, json.dumps(_make_input(tool_name="Read"))
+        )
+        assert result.returncode == 0, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "allow"
+        assert "module imports" in hso["permissionDecisionReason"]
+        assert "systemMessage" in out
+        assert result.stderr.strip(), "stderr diagnostic line expected"
+
+    def test_subprocess_broken_import_mutating_tool_denies(self, tmp_path):
+        """Broken import + tool_name=Edit → byte-shape of today's
+        _emit_load_failure_deny, rc 2, stderr non-empty."""
+        result = _run_degraded_subprocess(
+            tmp_path, json.dumps(_make_input(tool_name="Edit"))
+        )
+        assert result.returncode == 2, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "deny"
+        assert "module imports failure" in hso["permissionDecisionReason"]
+        assert "systemMessage" not in out
+        assert result.stderr.strip()
+
+    def test_subprocess_broken_import_malformed_stdin_denies(self, tmp_path):
+        """Broken import + unparseable stdin → fail-CLOSED deny (decision
+        (b)): the degraded path inverts the healthy input-side fail-open."""
+        result = _run_degraded_subprocess(tmp_path, "not valid json {")
+        assert result.returncode == 2, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 # =============================================================================
