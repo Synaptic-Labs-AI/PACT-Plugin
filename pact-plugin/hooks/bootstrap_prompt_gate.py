@@ -123,10 +123,19 @@ def _detect_stale_session_block(input_data: dict) -> str | None:
     string for additionalContext composition. Returns None (no warning)
     when:
 
-      1. stdin session_id is missing/empty (nothing to compare)
+      1. stdin session_id is missing or invalid per the canonical
+         _is_unknown_or_missing_session predicate (None/non-string/empty/
+         whitespace-only/`unknown-*` sentinel/C0-control chars) — nothing
+         trustworthy to compare, and an unvalidated stdin id must never be
+         interpolated into the warning text
       2. CLAUDE_PROJECT_DIR is unset (cannot locate CLAUDE.md)
-      3. neither CLAUDE.md location exists, or reading raises OSError
-         (worktrees: CLAUDE.md is gitignored/absent → silent skip)
+      3. neither CLAUDE.md location exists, or reading raises OSError or
+         UnicodeDecodeError (worktrees: CLAUDE.md is gitignored/absent →
+         silent skip; a non-UTF-8/corrupted CLAUDE.md → silent skip — this
+         helper is ADVISORY, so its failure budget is "no warning", never
+         "no bootstrap instruction": an uncaught raise here would propagate
+         to main()'s fail-open and suppress the ENTIRE injection, primary
+         instruction included)
       4. no Resume line matches the regex (tampered/garbage → no claim)
       5. recorded session_id equals this session's (healthy resume)
 
@@ -138,7 +147,13 @@ def _detect_stale_session_block(input_data: dict) -> str | None:
     session_id.
     """
     raw_id = input_data.get("session_id")
-    if not raw_id:
+    # Canonical validity predicate (shared with the heal gate and
+    # session_init's persist/CLAUDE.md-write gates) — subsumes the plain
+    # truthiness check and additionally rejects non-string, whitespace-only,
+    # `unknown-*` sentinel, and C0-control-char ids, so `actual` below is
+    # never an attacker-shaped or sentinel value interpolated into the
+    # warning. The predicate is total for any input.
+    if pact_context._is_unknown_or_missing_session(raw_id):
         return None
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
     if not project_dir:
@@ -154,7 +169,13 @@ def _detect_stale_session_block(input_data: dict) -> str | None:
                 break
         if content is None:
             return None
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError (a ValueError, NOT an OSError) from read_text
+        # on a non-UTF-8 CLAUDE.md — e.g. a latin-1 byte from a wrong-editor
+        # save, or the partial/corrupted session_init write this detector
+        # exists to flag. Must be swallowed HERE: this helper composes into
+        # the load-bearing bootstrap instruction by concatenation, and an
+        # escape to main()'s fail-open suppresses the whole injection.
         return None
     match = _RESUME_LINE_RE.search(content)
     if not match:

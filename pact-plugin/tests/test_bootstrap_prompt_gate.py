@@ -649,6 +649,29 @@ class TestStalenessDetection:
         assert _detect_stale_session_block(
             {"session_id": self._ACTUAL}) is None
 
+    def test_non_utf8_claude_md_returns_none(self, monkeypatch, tmp_path):
+        """Non-UTF-8 CLAUDE.md (e.g. a latin-1 byte from a wrong-editor
+        save, or a partial/corrupted session_init write — the very failure
+        neighborhood this detector exists to flag) → silent skip, NOT a
+        raise. UnicodeDecodeError is a ValueError, not an OSError; an
+        OSError-only catch lets it escape (RED on reverting the widened
+        catch tuple)."""
+        from bootstrap_prompt_gate import _detect_stale_session_block
+
+        project = tmp_path / "proj"
+        target = project / ".claude" / "CLAUDE.md"
+        target.parent.mkdir(parents=True)
+        # Valid stale Resume line followed by one invalid UTF-8
+        # continuation byte (0xE9 = latin-1 'é').
+        target.write_bytes(
+            f"- Resume: `claude --resume {self._STALE}`\n".encode("utf-8")
+            + b"caf\xe9\n"
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+
+        assert _detect_stale_session_block(
+            {"session_id": self._ACTUAL}) is None
+
     @pytest.mark.parametrize("layout", ["both", "preferred_only",
                                         "legacy_only", "neither"])
     def test_precedence_parity_with_resolver(self, monkeypatch, tmp_path,
@@ -757,6 +780,70 @@ class TestStalenessComposition:
         assert result is not None
         assert "PACT:bootstrap" in result
         assert "stale session block" not in result
+
+    def test_non_utf8_claude_md_keeps_instruction(
+            self, monkeypatch, tmp_path, capsys):
+        """Blast-radius pin: a non-UTF-8 CLAUDE.md must degrade to
+        instruction-only — NEVER suppress the bootstrap instruction.
+
+        The advisory detector composes onto the load-bearing instruction by
+        concatenation inside _check_bootstrap_needed; before the catch was
+        widened to UnicodeDecodeError, the raise escaped to main()'s
+        fail-open and the ENTIRE injection (primary instruction included)
+        was silently suppressed on every prompt. End-to-end arm through
+        main() so the pin covers the real escape path, not just the helper.
+        (RED on reverting the widened catch tuple.)"""
+        _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        project = tmp_path / "proj"
+        target = project / ".claude" / "CLAUDE.md"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(
+            f"- Resume: `claude --resume {self._STALE}`\n".encode("utf-8")
+            + b"caf\xe9\n"  # one invalid UTF-8 continuation byte
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+
+        exit_code, output = _run_main(
+            _make_input(session_id=self._ACTUAL_HEX), capsys)
+
+        assert exit_code == 0
+        injected = output.get("hookSpecificOutput", {}).get(
+            "additionalContext", "")
+        assert "PACT:bootstrap" in injected, (
+            "non-UTF-8 CLAUDE.md must not suppress the bootstrap "
+            "instruction — the advisory's failure budget is 'no warning', "
+            "never 'no bootstrap'"
+        )
+        assert "stale session block" not in injected, (
+            "unreadable CLAUDE.md → no staleness claim"
+        )
+
+    @pytest.mark.parametrize("invalid_id", [
+        "   ",                                    # whitespace-only (truthy)
+        "unknown-deadbeef",                       # sentinel shape
+        "deadbeef-0000\nINJECTED LINE",           # C0 control char (newline)
+    ], ids=["whitespace_only", "unknown_sentinel", "control_char"])
+    def test_invalid_stdin_id_suppresses_warning_keeps_instruction(
+            self, monkeypatch, tmp_path, invalid_id):
+        """An invalid-but-truthy stdin session_id (whitespace-only,
+        `unknown-*` sentinel, or control-char-bearing) must suppress the
+        staleness warning — the unvalidated id is never interpolated into
+        the warning's {actual} slot — while the bootstrap instruction
+        stays intact. Gated by the canonical
+        _is_unknown_or_missing_session predicate, shared with the heal
+        gate; a plain truthiness check passes all three of these shapes."""
+        from bootstrap_prompt_gate import _check_bootstrap_needed
+
+        _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        self._stale_project(monkeypatch, tmp_path)
+
+        result = _check_bootstrap_needed(_make_input(
+            session_id=invalid_id))
+
+        assert result is not None
+        assert "PACT:bootstrap" in result            # instruction intact
+        assert "stale session block" not in result   # no warning
+        assert "INJECTED LINE" not in result         # id never interpolated
 
     def test_no_claude_md_returns_instruction_only(
             self, monkeypatch, tmp_path):
