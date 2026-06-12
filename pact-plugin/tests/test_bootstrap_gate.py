@@ -1224,14 +1224,15 @@ class TestAuditAnchorParity:
 # =============================================================================
 
 
-def _run_degraded_subprocess(tmp_path, stdin_text):
+def _run_degraded_subprocess(tmp_path, stdin_text, interpreter=None):
     """Run bootstrap_gate.py as a subprocess inside a scaffold whose
     `shared` package is deliberately syntax-broken, forcing the import-stage
     degraded path. Returns the CompletedProcess.
 
-    Minimal smoke scaffold (CODE-phase verification); the comprehensive
-    broken-import behavior matrix (full allowlist/deny parametrization)
-    is TEST-phase scope.
+    ``interpreter`` defaults to the dev interpreter (sys.executable); the
+    py3.9-floor test passes a discovered 3.9 binary to exercise the
+    stdlib-only degraded region on the production system interpreter
+    (GUI-launched macOS sessions run hooks on /usr/bin/python3 = 3.9.x).
     """
     import subprocess
 
@@ -1246,13 +1247,80 @@ def _run_degraded_subprocess(tmp_path, stdin_text):
         "this is not valid python (", encoding="utf-8"
     )
     return subprocess.run(
-        [sys.executable, str(scaffold / "bootstrap_gate.py")],
+        [interpreter or sys.executable, str(scaffold / "bootstrap_gate.py")],
         input=stdin_text,
         capture_output=True,
         text=True,
         cwd=str(scaffold),
         timeout=10,
     )
+
+
+def _find_python39():
+    """Best-effort discovery of a Python 3.9 interpreter for the floor
+    exercise: an explicit ``python3.9`` on PATH, else the macOS system
+    ``/usr/bin/python3`` when it reports 3.9.x (the actual interpreter
+    GUI-launched sessions run hooks on). Returns None when unavailable —
+    callers skip; the static AST floor guard
+    (test_py39_annotation_compat.py) remains the unconditional gate.
+    """
+    import shutil
+    import subprocess
+
+    candidates = [shutil.which("python3.9"), "/usr/bin/python3"]
+    for candidate in candidates:
+        if not candidate or not Path(candidate).exists():
+            continue
+        try:
+            probe = subprocess.run(
+                [candidate, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if (probe.stdout + probe.stderr).strip().startswith("Python 3.9"):
+            return candidate
+    return None
+
+
+# Canonical degraded-allowlist literal — deliberately independent of
+# bootstrap_gate._READ_ONLY_TOOLS (same convention as
+# _CANONICAL_DENY_REASON_LITERAL above): the parametrized subprocess matrix
+# anchors on this literal so a member silently dropped from (or added to)
+# the production set cannot shrink the matrix unnoticed. The set-equality +
+# cardinality pin in TestDegradedMode is the two-site edit surface: any
+# intentional allowlist change must update BOTH the production frozenset
+# AND this literal, forcing the matrix to follow.
+_DEGRADED_ALLOWLIST_LITERAL = (
+    "AskUserQuestion",
+    "ExitPlanMode",
+    "Glob",
+    "Grep",
+    "Read",
+    "Skill",
+    "TaskGet",
+    "TaskList",
+    "ToolSearch",
+    "WebFetch",
+    "WebSearch",
+)
+
+# Deny matrix: representatives of every non-member class — blocked mutating
+# tools, the deliberate healthy/degraded asymmetry (Bash, mcp__*), task-
+# mutation tools excluded from the read-only views, and an unknown/future
+# name proving deny-by-default needs no enumeration.
+_DEGRADED_DENY_MATRIX = (
+    "Write",
+    "Agent",
+    "NotebookEdit",
+    "Bash",
+    "mcp__computer-use__key",
+    "TaskCreate",
+    "TaskUpdate",
+    "SomeFutureTool",
+)
 
 
 class TestDegradedMode:
@@ -1427,6 +1495,184 @@ class TestDegradedMode:
         )
         out = json.loads(result.stdout.strip().splitlines()[0])
         assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    # --- comprehensive subprocess matrix (TEST phase) ---
+
+    def test_allowlist_literal_matches_production_set(self):
+        """Two-site edit pin: the parametrization literal and the production
+        frozenset must stay in lockstep, at the architecturally-settled
+        cardinality of 11. A drop OR an addition on either side fails here,
+        so the subprocess matrix below can never silently under-cover the
+        live allowlist (per-member parametrization, not per-container)."""
+        from bootstrap_gate import _READ_ONLY_TOOLS
+
+        assert len(_DEGRADED_ALLOWLIST_LITERAL) == 11
+        assert len(set(_DEGRADED_ALLOWLIST_LITERAL)) == 11, (
+            "literal must not contain duplicates — each matrix row must be "
+            "a distinct member"
+        )
+        assert set(_DEGRADED_ALLOWLIST_LITERAL) == set(_READ_ONLY_TOOLS), (
+            "allowlist literal drifted from bootstrap_gate._READ_ONLY_TOOLS "
+            "— update BOTH sites (intentional change) or revert the "
+            "production edit (accidental)"
+        )
+
+    @pytest.mark.parametrize("tool", _DEGRADED_ALLOWLIST_LITERAL)
+    def test_subprocess_broken_import_full_allowlist_allows(self, tmp_path, tool):
+        """T1 full matrix: EVERY allowlist member gets allow-with-warning
+        from a real broken-import process — rc 0 (the emit contract: stdout
+        JSON is only honored on exit 0), full emit shape pinned key-by-key,
+        warning carries stage + exception type + the tool name, systemMessage
+        present, stderr diagnostic non-empty."""
+        result = _run_degraded_subprocess(
+            tmp_path, json.dumps(_make_input(tool_name=tool))
+        )
+
+        # Content asserts first; rc is asserted WITH content, never alone.
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        assert set(out.keys()) == {"hookSpecificOutput", "systemMessage"}, (
+            f"degraded-allow emit shape drifted for {tool!r}: {out.keys()!r}"
+        )
+        hso = out["hookSpecificOutput"]
+        assert set(hso.keys()) == {
+            "hookEventName",
+            "permissionDecision",
+            "permissionDecisionReason",
+            "additionalContext",
+        }
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "allow"
+        for field in ("permissionDecisionReason", "additionalContext"):
+            assert "DEGRADED" in hso[field]
+            assert "module imports" in hso[field], "stage must be named"
+            assert "SyntaxError" in hso[field], (
+                "exception type from the broken shared/__init__.py must be "
+                "named so the warning is diagnosable"
+            )
+            assert f"'{tool}'" in hso[field], "allowed tool must be named"
+        assert hso["permissionDecisionReason"] == hso["additionalContext"], (
+            "both fields carry the SAME warning (docs ambiguity hedge)"
+        )
+        assert "degraded" in out["systemMessage"]
+        assert result.returncode == 0, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        assert result.stderr.strip(), "stderr diagnostic line expected"
+
+    @pytest.mark.parametrize("tool", _DEGRADED_DENY_MATRIX)
+    def test_subprocess_broken_import_full_deny_matrix_denies(self, tmp_path, tool):
+        """T2 full matrix: every non-member class — mutating tools, the
+        Bash/mcp__ healthy-vs-degraded asymmetry, task-mutation tools, and
+        an unknown/future name — takes the byte-shape of today's
+        _emit_load_failure_deny at rc 2 with non-empty stderr. Deny is the
+        default: nothing here requires enumerating 'the hookable set'."""
+        result = _run_degraded_subprocess(
+            tmp_path, json.dumps(_make_input(tool_name=tool))
+        )
+
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        # Byte-shape pin of the unchanged deny emitter: exactly one
+        # top-level key, exactly three hookSpecificOutput keys.
+        assert set(out.keys()) == {"hookSpecificOutput"}, (
+            f"deny emit shape drifted for {tool!r}: {out.keys()!r}"
+        )
+        hso = out["hookSpecificOutput"]
+        assert set(hso.keys()) == {
+            "hookEventName",
+            "permissionDecision",
+            "permissionDecisionReason",
+        }
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "deny"
+        assert "module imports failure" in hso["permissionDecisionReason"]
+        assert "blocking for safety" in hso["permissionDecisionReason"]
+        assert "systemMessage" not in out, (
+            "error/suppress-style exclusivity: the deny arm never carries "
+            "the degraded-allow banner"
+        )
+        assert result.returncode == 2, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        assert result.stderr.strip()
+
+    @pytest.mark.parametrize("label,stdin_text", [
+        ("missing-tool-name", json.dumps({
+            k: v for k, v in _make_input().items() if k != "tool_name"
+        })),
+        ("null-tool-name", json.dumps(dict(_make_input(), tool_name=None))),
+        ("int-tool-name", json.dumps(dict(_make_input(), tool_name=123))),
+        ("list-tool-name", json.dumps(dict(_make_input(), tool_name=["Read"]))),
+        ("empty-string-tool-name", json.dumps(dict(_make_input(), tool_name=""))),
+        ("empty-stdin", ""),
+        ("non-dict-frame-list", json.dumps([1, 2, 3])),
+        ("non-dict-frame-bare-string", json.dumps("Read")),
+    ])
+    def test_subprocess_broken_import_unverifiable_stdin_denies(
+        self, tmp_path, label, stdin_text
+    ):
+        """T3 full matrix: every unverifiable-stdin class — absent, null,
+        non-string, empty tool_name; empty stdin; valid-JSON non-dict
+        frames (including a bare string "Read", which must NOT be read as
+        a tool name) — is fail-CLOSED deny at rc 2. The degraded path
+        inverts the healthy input-side fail-open because in degraded mode
+        this module IS the broken layer."""
+        result = _run_degraded_subprocess(tmp_path, stdin_text)
+
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "deny", (
+            f"stdin class {label!r} must deny fail-closed"
+        )
+        assert "module imports failure" in hso["permissionDecisionReason"]
+        assert "systemMessage" not in out
+        assert result.returncode == 2, (
+            f"{label}: stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+
+    # --- py3.9 floor exercise (conditional on an available interpreter) ---
+
+    def test_degraded_path_runs_on_python39_floor(self, tmp_path):
+        """The degraded region is stdlib-only and must execute on the
+        production system interpreter (GUI-launched macOS sessions run
+        hooks on /usr/bin/python3 = 3.9.x). Exercise the three behavior
+        classes — allow, deny, fail-closed-stdin — under a REAL 3.9
+        interpreter when one is discoverable; the static AST floor guard
+        (test_py39_annotation_compat.py R0–R3) remains the unconditional
+        merge gate when none is."""
+        py39 = _find_python39()
+        if py39 is None:
+            pytest.skip(
+                "no Python 3.9 interpreter discoverable (python3.9 on PATH "
+                "or /usr/bin/python3 reporting 3.9.x); static floor guard "
+                "test_py39_annotation_compat.py covers the syntax floor"
+            )
+
+        allow = _run_degraded_subprocess(
+            tmp_path / "allow", json.dumps(_make_input(tool_name="Read")),
+            interpreter=py39,
+        )
+        out = json.loads(allow.stdout.strip().splitlines()[0])
+        assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+        assert "DEGRADED" in out["hookSpecificOutput"]["permissionDecisionReason"]
+        assert allow.returncode == 0, (
+            f"stderr={allow.stderr!r} stdout={allow.stdout!r}"
+        )
+
+        deny = _run_degraded_subprocess(
+            tmp_path / "deny", json.dumps(_make_input(tool_name="Edit")),
+            interpreter=py39,
+        )
+        out = json.loads(deny.stdout.strip().splitlines()[0])
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert deny.returncode == 2
+
+        malformed = _run_degraded_subprocess(
+            tmp_path / "malformed", "not valid json {", interpreter=py39,
+        )
+        out = json.loads(malformed.stdout.strip().splitlines()[0])
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert malformed.returncode == 2
 
 
 # =============================================================================

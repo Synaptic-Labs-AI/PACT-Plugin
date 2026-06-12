@@ -17,6 +17,7 @@ Tests cover:
 
 import io
 import json
+import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -816,3 +817,167 @@ class TestStalenessComposition:
 
         assert result is None
         assert calls == []
+
+    @pytest.mark.parametrize("frame_kind", [
+        "teammate-in-process",
+        "teammate-captured-tmux",
+    ])
+    def test_teammate_frames_both_modes_never_run_staleness(
+            self, monkeypatch, tmp_path, frame_kind):
+        """Both-modes gate: the lead/non-lead split keys ONLY on the
+        structural agent_type signal via is_lead — never a mode flag. A
+        synthesized in-process teammate frame AND a real captured tmux
+        teammate frame must both suppress without ever invoking the
+        staleness check (the plain-frame sibling above covers the third
+        non-lead shape)."""
+        import bootstrap_prompt_gate as gate_module
+        from fixtures.role_frames import (
+            captured_teammate_sessionstart,
+            teammate_frame,
+        )
+
+        _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        self._stale_project(monkeypatch, tmp_path)
+
+        if frame_kind == "teammate-in-process":
+            frame = teammate_frame(session_id=self._ACTUAL_HEX)
+        else:
+            frame = captured_teammate_sessionstart()  # real tmux capture
+
+        calls = []
+        monkeypatch.setattr(
+            gate_module, "_detect_stale_session_block",
+            lambda input_data: calls.append(1) or None,
+        )
+
+        result = gate_module._check_bootstrap_needed(frame)
+
+        assert result is None, f"{frame_kind} must suppress (is_lead False)"
+        assert calls == [], (
+            f"{frame_kind} must never reach the staleness check"
+        )
+
+
+class TestSubprocessStalenessE2E:
+    """Full-process E2E for the #943 incident chain: session_init crashed
+    at SessionStart → pact-session-context.json ABSENT → the prompt gate's
+    self-heal re-creates it in the SAME invocation → the lead+no-marker
+    inject branch is reached → the staleness check reads the project
+    CLAUDE.md and (on a recorded-vs-actual session mismatch) appends the
+    advisory warning to the bootstrap instruction. In-process tests mock
+    pieces of this chain; a fresh subprocess proves the chain end-to-end
+    with real module loading, real env reads, and real disk I/O.
+
+    Self-masker rule: bootstrap_prompt_gate exits 0 on EVERY path, so
+    health is asserted on stdout content + on-disk effects; returncode is
+    asserted only alongside content.
+    """
+
+    # Hex-only ids (the production _RESUME_LINE_RE matches [0-9a-f-]).
+    _SID = "deadbeef-4242-4242-4242-deadbeef4242"
+    _STALE_SID = "0badcafe-9999-8888-7777-666655554444"
+
+    def _run_gate_subprocess(self, tmp_path, recorded_sid):
+        """Scaffold: HOME under tmp_path, real project dir whose
+        .claude/CLAUDE.md records ``recorded_sid``, context file ABSENT,
+        lead UserPromptSubmit frame for ``_SID``. Returns
+        (CompletedProcess, healed_context_path)."""
+        import subprocess
+
+        home = tmp_path
+        project = home / "staleproj"
+        claude_md = project / ".claude" / "CLAUDE.md"
+        claude_md.parent.mkdir(parents=True)
+        claude_md.write_text(
+            "# Project\n\n## Current Session\n"
+            f"- Resume: `claude --resume {recorded_sid}`\n"
+            "- Team: `pact-old`\n",
+            encoding="utf-8",
+        )
+
+        plugin_root = home / "plugin"
+        plugin_root.mkdir(parents=True)
+
+        # Session dir intentionally NOT created; context file ABSENT.
+        ctx = (home / ".claude" / "pact-sessions" / "staleproj" /
+               self._SID / "pact-session-context.json")
+
+        hook_path = (
+            Path(__file__).parent.parent / "hooks" /
+            "bootstrap_prompt_gate.py"
+        )
+        assert hook_path.exists(), f"gate hook missing at {hook_path}"
+
+        stdin_payload = json.dumps({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": self._SID,
+            "prompt": "first prompt after session_init crashed",
+            "agent_type": "pact-orchestrator",
+        })
+
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env.pop("CLAUDE_CONFIG_DIR", None)  # force the HOME/.claude fallback
+        env["CLAUDE_PROJECT_DIR"] = str(project)
+        env["CLAUDE_PLUGIN_ROOT"] = str(plugin_root)
+
+        result = subprocess.run(
+            [sys.executable, str(hook_path)],
+            input=stdin_payload,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(home),
+            timeout=10,
+        )
+        return result, ctx
+
+    def test_heal_chain_with_stale_block_injects_instruction_and_warning(
+            self, tmp_path):
+        """Mismatch (CLAUDE.md records the PREVIOUS session) → ONE
+        additionalContext string carrying the bootstrap instruction with
+        the staleness warning APPENDED, both ids named; the context file
+        is healed on disk with session_init-parity content."""
+        result, ctx = self._run_gate_subprocess(
+            tmp_path, recorded_sid=self._STALE_SID
+        )
+
+        # Content first (self-masker rule), rc alongside.
+        out = json.loads(result.stdout.strip())
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "UserPromptSubmit"
+        context = hso["additionalContext"]
+        assert "PACT:bootstrap" in context
+        assert "PACT_SESSION_DIR=" in context
+        assert "stale session block" in context
+        assert self._STALE_SID in context, "recorded (stale) id named"
+        assert self._SID in context, "actual id named"
+        assert context.index("PACT:bootstrap") < context.index(
+            "stale session block"), "warning is APPENDED, not prepended"
+        assert "suppressOutput" not in out
+        assert result.returncode == 0, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+
+        # Heal landed on disk (the chain's enabling step).
+        assert ctx.exists(), "self-heal should re-create the context file"
+        content = json.loads(ctx.read_text(encoding="utf-8"))
+        assert content["team_name"] == "pact-deadbeef"
+        assert content["session_id"] == self._SID
+
+    def test_heal_chain_with_matching_block_injects_instruction_only(
+            self, tmp_path):
+        """Match (healthy resume shape) → instruction WITHOUT the warning;
+        the heal still lands (it is independent of staleness)."""
+        result, ctx = self._run_gate_subprocess(
+            tmp_path, recorded_sid=self._SID
+        )
+
+        out = json.loads(result.stdout.strip())
+        context = out["hookSpecificOutput"]["additionalContext"]
+        assert "PACT:bootstrap" in context
+        assert "stale session block" not in context
+        assert result.returncode == 0, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        assert ctx.exists()
