@@ -493,3 +493,64 @@ class TestAuditAnchorParity:
             f"shape={shape} emit MUST carry hookEventName=='UserPromptSubmit'; "
             f"got {hso!r}"
         )
+
+
+class TestSelfHealWiring:
+    """Wiring tests for the heal_context_if_missing call in
+    _check_bootstrap_needed: a missing context file is healed in-line
+    (lead frame + valid session_id), after which the SAME invocation
+    resolves the session dir and flows into the normal no-marker inject
+    branch — the heal unbricks the gate without forging bootstrap.
+    """
+
+    _SID = "deadbeef-7777-8888-9999-aaaabbbbcccc"
+
+    def test_missing_context_healed_then_instruction_injected(
+            self, monkeypatch, tmp_path):
+        """Context file ABSENT + lead frame → healed + bootstrap
+        instruction returned (chain effect; heal does NOT suppress)."""
+        import shared.pact_context as ctx_module
+        from bootstrap_prompt_gate import _check_bootstrap_needed
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/test/project")
+
+        # init() is a no-op when _context_path is pre-set: derive the path
+        # exactly as a fresh hook process would, but pointed under tmp_path.
+        target = (tmp_path / ".claude" / "pact-sessions" / "project" /
+                  self._SID / "pact-session-context.json")
+        monkeypatch.setattr(ctx_module, "_context_path", target)
+        monkeypatch.setattr(ctx_module, "_cache", None)
+        assert not target.exists()
+
+        result = _check_bootstrap_needed(_make_input(session_id=self._SID))
+
+        assert target.exists(), "gate should heal the missing context file"
+        assert result is not None, (
+            "healed lead session without marker must flow into the inject "
+            "branch, not suppress"
+        )
+        assert "PACT:bootstrap" in result
+        assert "PACT_SESSION_DIR=" in result
+
+    def test_missing_context_plain_frame_no_heal_no_inject(
+            self, monkeypatch, tmp_path):
+        """Context file ABSENT + plain frame (agent_type absent) → no heal,
+        no instruction (existing non-PACT passthrough preserved)."""
+        import shared.pact_context as ctx_module
+        from bootstrap_prompt_gate import _check_bootstrap_needed
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/test/project")
+
+        target = (tmp_path / ".claude" / "pact-sessions" / "project" /
+                  self._SID / "pact-session-context.json")
+        monkeypatch.setattr(ctx_module, "_context_path", target)
+        monkeypatch.setattr(ctx_module, "_cache", None)
+
+        result = _check_bootstrap_needed(
+            _make_input(session_id=self._SID, agent_type=None)
+        )
+
+        assert not target.exists()
+        assert result is None

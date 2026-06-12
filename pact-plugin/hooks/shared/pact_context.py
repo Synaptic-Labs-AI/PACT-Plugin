@@ -798,3 +798,74 @@ def write_context(
     result = build_context_cache(team_name, session_id, project_dir, plugin_root)
     if result is not None:
         persist_context(*result)
+
+
+def heal_context_if_missing(input_data: dict) -> bool:
+    """Re-create a missing pact-session-context.json from the same inputs
+    session_init would use (stdin session_id, CLAUDE_PROJECT_DIR,
+    CLAUDE_PLUGIN_ROOT). Lead frames only (#877). Returns True iff healed.
+
+    Fires ONLY when ALL hold:
+      1. init(input_data) derived a path (_context_path is not None)
+      2. the file is ABSENT on disk — a present-but-malformed file is NOT
+         clobbered (different failure class, preserve the evidence; read
+         errors are already stderr-logged by get_pact_context)
+      3. is_lead(input_data) — a teammate/plain frame must never create
+         or clobber the lead's on-disk file (#877). UserPromptSubmit has
+         no teammate fire path; the residual non-lead frame is a plain
+         session (agent_type absent) → no heal, exactly as intended
+      4. NOT _is_unknown_or_missing_session(input_data.get("session_id"))
+         — a missing/sentinel id would make generate_team_name go RANDOM
+         (fabricated team name) and create an unreapable session dir;
+         mirrors session_init's session_id_was_missing persist gate
+
+    Heal = write_context(generate_team_name(input_data), str(raw_id),
+    CLAUDE_PROJECT_DIR, CLAUDE_PLUGIN_ROOT) — the existing
+    build+cache+persist seam: atomic write (mkstemp+rename), 0o600, and
+    build_context_cache resets _cache so THIS process's subsequent
+    get_team_name()/get_session_dir() calls see the healed values.
+
+    Content parity with session_init: session_id is persisted as
+    str(raw_id) — RAW, exactly as session_init's main() persists it
+    (init() sanitizes only the PATH segment, not the stored value).
+    started_at is heal time, not session start — its consumers are
+    journal-naming/display only (cosmetic), documented trade-off.
+
+    Two-healer race (bootstrap_marker_writer + bootstrap_prompt_gate fire
+    on the same prompt; the platform runs same-event hooks in parallel):
+    persist_context is atomic (mkstemp + rename), and both healers compute
+    IDENTICAL content except started_at → last-writer-wins with equivalent
+    content. Benign.
+
+    TOTAL: never raises — any internal exception is swallowed to a stderr
+    line and False (both callers are fail-open hooks; the heal must not
+    convert a degraded session into a crashed hook).
+
+    Args:
+        input_data: Parsed stdin JSON from the hook (UserPromptSubmit frame).
+
+    Returns:
+        True iff the context file was absent and is now healed on disk.
+    """
+    try:
+        if _context_path is None:
+            return False
+        if _context_path.exists():
+            return False
+        if not is_lead(input_data):
+            return False
+        raw_id = input_data.get("session_id")
+        if _is_unknown_or_missing_session(raw_id):
+            return False
+        write_context(
+            generate_team_name(input_data),
+            str(raw_id),
+            os.environ.get("CLAUDE_PROJECT_DIR", ""),
+            os.environ.get("CLAUDE_PLUGIN_ROOT", ""),
+        )
+        # write_context's persist half is fail-open (errors swallowed to
+        # stderr) — verify on disk so the contract "True iff healed" holds.
+        return _context_path.exists()
+    except Exception as e:
+        print(f"pact_context: self-heal failed: {e}", file=sys.stderr)
+        return False

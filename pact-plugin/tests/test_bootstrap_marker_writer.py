@@ -1342,3 +1342,131 @@ class TestAtomicityTempFileLocation:
         assert captured["dir"] == str(session_dir)
         assert captured["prefix"] == ".bootstrap-complete-"
         assert captured["suffix"] == ".tmp"
+
+
+class TestSubprocessSelfHeal:
+    """Subprocess integration for the UserPromptSubmit self-heal: the
+    TestSubprocessIntegration scaffold MINUS the context file. A lead-frame
+    run must HEAL the missing pact-session-context.json (assert exists +
+    content) while STILL refusing the marker when the team-config
+    pre-conditions are unmet — heal never forges bootstrap completion.
+
+    Self-masker rule: marker_writer exits 0 on every path, so health is
+    asserted via stdout envelope + on-disk effects, never via returncode
+    alone.
+    """
+
+    def test_lead_run_heals_missing_context_but_refuses_marker(self, tmp_path):
+        import subprocess
+
+        home = tmp_path
+        slug = "healproj"
+        # Hex prefix → deterministic generated team name "pact-deadbeef".
+        session_id = "deadbeef-4242-4242-4242-deadbeef4242"
+
+        plugin_root = home / "plugin"
+        plugin_root.mkdir(parents=True)
+
+        # Session dir intentionally NOT created; context file ABSENT;
+        # team config for "pact-deadbeef" intentionally NOT created.
+        session_dir = home / ".claude" / "pact-sessions" / slug / session_id
+        ctx = session_dir / "pact-session-context.json"
+
+        hook_path = (
+            Path(__file__).parent.parent / "hooks" /
+            "bootstrap_marker_writer.py"
+        )
+        assert hook_path.exists(), f"writer hook missing at {hook_path}"
+
+        stdin_payload = json.dumps({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": session_id,
+            "prompt": "first prompt after session_init crashed",
+            "source": "startup",
+            "agent_type": "pact-orchestrator",
+        })
+
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env.pop("CLAUDE_CONFIG_DIR", None)  # force the HOME/.claude fallback
+        env["CLAUDE_PROJECT_DIR"] = f"/tmp/{slug}"
+        env["CLAUDE_PLUGIN_ROOT"] = str(plugin_root)
+
+        result = subprocess.run(
+            [sys.executable, str(hook_path)],
+            input=stdin_payload,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(home),
+            timeout=10,
+        )
+
+        # Content assertion FIRST (self-masker rule), rc second.
+        out = json.loads(result.stdout.strip())
+        assert out["suppressOutput"] is True
+        assert out["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+        assert result.returncode == 0, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+
+        # Healed: context file re-created with session_init-parity content.
+        assert ctx.exists(), "self-heal should re-create the context file"
+        content = json.loads(ctx.read_text(encoding="utf-8"))
+        assert content["team_name"] == "pact-deadbeef"
+        assert content["session_id"] == session_id
+        assert content["project_dir"] == f"/tmp/{slug}"
+        assert content["plugin_root"] == str(plugin_root)
+        assert content["started_at"]
+
+        # Heal != forged bootstrap: the team-config pre-condition is unmet
+        # (no ~/.claude/teams/pact-deadbeef/config.json with a secretary),
+        # so the marker MUST NOT be written.
+        marker = session_dir / BOOTSTRAP_MARKER_NAME
+        assert not marker.exists(), (
+            "heal must not forge bootstrap completion — marker pre-conditions "
+            "are unmet"
+        )
+
+    def test_teammate_run_does_not_heal(self, tmp_path):
+        """Same scaffold, teammate frame → no heal (is_lead gate, #877)."""
+        import subprocess
+
+        home = tmp_path
+        slug = "healproj"
+        session_id = "deadbeef-4242-4242-4242-deadbeef4242"
+        session_dir = home / ".claude" / "pact-sessions" / slug / session_id
+        ctx = session_dir / "pact-session-context.json"
+
+        hook_path = (
+            Path(__file__).parent.parent / "hooks" /
+            "bootstrap_marker_writer.py"
+        )
+
+        stdin_payload = json.dumps({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": session_id,
+            "prompt": "teammate frame",
+            "source": "startup",
+            "agent_type": "pact-backend-coder",
+        })
+
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env.pop("CLAUDE_CONFIG_DIR", None)
+        env["CLAUDE_PROJECT_DIR"] = f"/tmp/{slug}"
+
+        result = subprocess.run(
+            [sys.executable, str(hook_path)],
+            input=stdin_payload,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(home),
+            timeout=10,
+        )
+
+        out = json.loads(result.stdout.strip())
+        assert out["suppressOutput"] is True
+        assert result.returncode == 0
+        assert not ctx.exists(), "teammate frame must never heal (#877)"

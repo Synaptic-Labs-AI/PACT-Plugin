@@ -103,6 +103,13 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
     # Initialize context (sets session-scoped path from input_data)
     pact_context.init(input_data)
 
+    # Self-heal: re-create a MISSING context file (session_init crashed at
+    # SessionStart) so this gate and downstream consumers can resolve the
+    # session again. Total/never-raises; no-op unless lead frame + valid
+    # session_id + file absent. Does NOT forge bootstrap completion — a
+    # healed session still flows into the no-marker inject branch below.
+    pact_context.heal_context_if_missing(input_data)
+
     # Fast path: check marker first (cheapest check, most common case)
     session_dir = pact_context.get_session_dir()
     if not session_dir:
