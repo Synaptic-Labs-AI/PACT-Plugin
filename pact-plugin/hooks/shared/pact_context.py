@@ -800,6 +800,42 @@ def write_context(
         persist_context(*result)
 
 
+def describe_context_failure() -> str:
+    """One-line diagnosis of WHY session context is empty, for embedding in
+    consumer deny messages (e.g. dispatch_gate). Returns '' when context is
+    healthy (file present and readable). Cases:
+
+      - _context_path is None → 'session context underivable (no session_id
+        in hook stdin or CLAUDE_PROJECT_DIR unset)'
+      - path set, file absent → 'context file not found: {path} — ...'
+        naming the derived path, the likely session_init root cause, and
+        the two recovery actions (self-heal on next prompt / /PACT:bootstrap)
+      - path set, file present (readable or not) → '' (not a missing-context
+        failure; read errors are already stderr-logged by get_pact_context)
+
+    Deliberately NOT auto-injected into get_pact_context(), which must stay
+    silent on file-absent (normal for pre-session_init hooks and non-PACT
+    sessions). TOTAL: no exceptions escape — an OSError from exists() maps
+    to the file-absent arm (an unstattable path is not a healthy context).
+    """
+    if _context_path is None:
+        return (
+            "session context underivable (no session_id in hook stdin or "
+            "CLAUDE_PROJECT_DIR unset)"
+        )
+    try:
+        file_present = _context_path.exists()
+    except OSError:
+        file_present = False
+    if not file_present:
+        return (
+            f"context file not found: {_context_path} — session_init may "
+            "have failed at SessionStart; submit any message to trigger "
+            "self-heal, or run /PACT:bootstrap"
+        )
+    return ""
+
+
 def heal_context_if_missing(input_data: dict) -> bool:
     """Re-create a missing pact-session-context.json from the same inputs
     session_init would use (stdin session_id, CLAUDE_PROJECT_DIR,

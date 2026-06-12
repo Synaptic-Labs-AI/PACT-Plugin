@@ -359,7 +359,6 @@ class TestGetPluginRootEnvFallback:
         assert "CLAUDE_PLUGIN_ROOT" not in os.environ
 
 
-
 class TestGetSessionDir:
     """Tests for get_session_dir() — session-scoped directory path."""
 
@@ -2540,3 +2539,68 @@ class TestHealContextIfMissing:
         assert ctx_module.heal_context_if_missing(frame) is False
         assert not target.exists()
         assert "self-heal failed" in capsys.readouterr().err
+
+
+class TestDescribeContextFailure:
+    """Three-arm unit tests for describe_context_failure() — the shared
+    diagnosis helper consumer deny messages embed. '' means healthy
+    (present file), regardless of readability (read errors are logged
+    elsewhere)."""
+
+    def test_underivable_path_arm(self, monkeypatch):
+        """_context_path is None → 'session context underivable' naming the
+        two possible causes."""
+        import shared.pact_context as ctx_module
+
+        monkeypatch.setattr(ctx_module, "_context_path", None)
+
+        result = ctx_module.describe_context_failure()
+        assert "session context underivable" in result
+        assert "session_id" in result
+        assert "CLAUDE_PROJECT_DIR" in result
+
+    def test_file_absent_arm(self, monkeypatch, tmp_path):
+        """Path derived but file absent → diagnosis names the DERIVED path,
+        the session_init root cause, and both recovery actions."""
+        import shared.pact_context as ctx_module
+
+        target = tmp_path / "pact-session-context.json"
+        monkeypatch.setattr(ctx_module, "_context_path", target)
+
+        result = ctx_module.describe_context_failure()
+        assert str(target) in result
+        assert "session_init may have failed" in result
+        assert "self-heal" in result
+        assert "/PACT:bootstrap" in result
+
+    def test_file_present_arm_returns_empty(self, monkeypatch, tmp_path):
+        """File present (even malformed) → '' — not a missing-context
+        failure; read errors are already stderr-logged by get_pact_context."""
+        import shared.pact_context as ctx_module
+
+        for content in ('{"team_name": "t"}', "{malformed!!"):
+            target = tmp_path / "ctx.json"
+            target.write_text(content, encoding="utf-8")
+            monkeypatch.setattr(ctx_module, "_context_path", target)
+
+            assert ctx_module.describe_context_failure() == ""
+
+    def test_oserror_maps_to_file_absent_arm(self, monkeypatch, tmp_path):
+        """An OSError from exists() maps to the file-absent arm (total
+        function — an unstattable path is not a healthy context)."""
+        import shared.pact_context as ctx_module
+
+        target = tmp_path / "ctx.json"
+        monkeypatch.setattr(ctx_module, "_context_path", target)
+
+        original_exists = Path.exists
+
+        def _raising_exists(self, *args, **kwargs):
+            if self == target:
+                raise OSError("simulated stat failure")
+            return original_exists(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "exists", _raising_exists)
+
+        result = ctx_module.describe_context_failure()
+        assert "context file not found" in result

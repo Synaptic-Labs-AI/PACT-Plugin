@@ -17,6 +17,9 @@ Rule coverage:
     disposition controlled by PACT_DISPATCH_INLINE_MISSION_MODE
     (warn|deny|shadow) → WARN | DENY | ALLOW(shadow)
   - name_not_unique — name already in team config members → DENY
+  - plugin_root_unavailable — plugin_root unresolvable (context file
+    missing/underivable AND no CLAUDE_PLUGIN_ROOT env) → DENY with the
+    context diagnosis from describe_context_failure()
   - plugin_agents_missing — plugin_root agents/ directory missing → DENY
   - Runtime gate-logic exception → fail-closed DENY (covered via
     subprocess in smoke)
@@ -1101,3 +1104,85 @@ class TestIsRegisteredSpecialistPluginRootParam:
         assert dh.is_registered_pact_specialist(
             "pact-architect", plugin_root=""
         ) is True  # "" → cache fallback, which resolves to the seeded root
+
+
+# =============================================================================
+# plugin_root_unavailable — context/plugin_root resolution (rule 5a split)
+# =============================================================================
+
+
+def test_deny_when_plugin_root_unavailable_context_file_absent(
+    tmp_path, monkeypatch, capsys
+):
+    """Context file ABSENT + no CLAUDE_PLUGIN_ROOT (conftest scrub) →
+    plugin_root_unavailable DENY whose message names the derived context
+    path and the session_init root cause — not the misleading
+    'plugin install may be broken'."""
+    import shared.pact_context as ctx_module
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    ctx_path = tmp_path / "pact-session-context.json"  # never written
+    monkeypatch.setattr(ctx_module, "_context_path", ctx_path)
+    monkeypatch.setattr(ctx_module, "_cache", None)
+    monkeypatch.setattr(ctx_module, "init", lambda input_data: None)
+    _seed_team(tmp_path, members=(), tasks=((_NAME, "pending"),))
+
+    code, out = _run_main(_make_input(), capsys)
+
+    assert code == 2
+    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "plugin_root is unavailable" in reason
+    assert str(ctx_path) in reason
+    assert "session_init may have failed" in reason
+    assert "plugin install may be broken" not in reason.lower()
+
+
+def test_deny_when_plugin_root_unavailable_context_underivable(
+    tmp_path, monkeypatch, capsys
+):
+    """Context path underivable (init() could not derive) → the underivable
+    arm of describe_context_failure() is embedded in the deny."""
+    import shared.pact_context as ctx_module
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(ctx_module, "_context_path", None)
+    monkeypatch.setattr(ctx_module, "_cache", None)
+    monkeypatch.setattr(ctx_module, "init", lambda input_data: None)
+    _seed_team(tmp_path, members=(), tasks=((_NAME, "pending"),))
+
+    code, out = _run_main(_make_input(), capsys)
+
+    assert code == 2
+    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "plugin_root is unavailable" in reason
+    assert "session context underivable" in reason
+
+
+def test_env_fallback_rescues_plugin_root_and_team_deny_names_cause(
+    tmp_path, monkeypatch, capsys
+):
+    """Context file ABSENT but CLAUDE_PLUGIN_ROOT exported → rule 5a is
+    rescued by the env fallback (plugin checks pass); the gate then denies
+    at rule 6 (empty session team) with the context diagnosis APPENDED, so
+    the deny names the real root cause."""
+    import shared.pact_context as ctx_module
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    plugin_root = tmp_path / "plugin"
+    _seed_plugin(plugin_root)
+    ctx_path = tmp_path / "pact-session-context.json"  # never written
+    monkeypatch.setattr(ctx_module, "_context_path", ctx_path)
+    monkeypatch.setattr(ctx_module, "_cache", None)
+    monkeypatch.setattr(ctx_module, "init", lambda input_data: None)
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+    _seed_team(tmp_path, members=(), tasks=((_NAME, "pending"),))
+
+    code, out = _run_main(_make_input(), capsys)
+
+    assert code == 2
+    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+    # Existing first sentence preserved (no-touch pin on rule 6)...
+    assert "session team_name is unavailable" in reason
+    # ...with the shared diagnosis appended naming the missing file.
+    assert str(ctx_path) in reason
+    assert "session_init may have failed" in reason
