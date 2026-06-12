@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -300,6 +301,80 @@ def get_plugin_root() -> str:
     return get_pact_context().get("plugin_root", "") or os.environ.get(
         "CLAUDE_PLUGIN_ROOT", ""
     )
+
+
+def generate_team_name(input_data: dict) -> str:
+    """
+    Generate a session-unique PACT team name.
+
+    Uses the first 8 characters of the session_id from the SessionStart hook
+    stdin JSON to create a unique team name like "pact-0001639f". Falls back
+    to a random 8-character hex suffix if session_id is not in stdin.
+
+    Args:
+        input_data: Parsed JSON from stdin (SessionStart hook input)
+
+    Returns:
+        Team name string like "pact-0001639f"
+    """
+    # INVARIANT: all team directory names MUST be produced by this
+    # function. Output is lowercase ASCII hex ([a-f0-9-]) prefixed with
+    # "pact-" — the session_end reaper's exact-match skip predicate
+    # (cleanup_old_teams) and the union skip-set for cleanup_old_tasks
+    # rely on this shape. A writer that creates ~/.claude/teams/ dirs
+    # with characters outside this charset (uppercase, unicode,
+    # separators) could bypass the skip predicate and be reaped on the
+    # NEXT session_end.
+    raw_id = input_data.get("session_id")
+    session_id = str(raw_id) if raw_id else ""
+    if session_id:
+        suffix = re.sub(r"[^a-f0-9-]", "", session_id[:8]) or secrets.token_hex(4)
+    else:
+        suffix = secrets.token_hex(4)
+    return f"pact-{suffix}"
+
+
+def _is_unknown_or_missing_session(raw_id: object) -> bool:
+    """Return True if the session_id is missing, blank, a sentinel, or contains control chars.
+
+    Single canonical predicate for the malformed-stdin gate. Three call
+    sites consult this helper so the gates can never drift: the persistence
+    call sites at the top of session_init's main() (build_context_cache +
+    persist_context + append_event), the CLAUDE.md write at session_init
+    step 5b, and the self-heal gate in heal_context_if_missing() below
+    (a missing/sentinel id would make generate_team_name go RANDOM and
+    create an unreapable session dir). Drift previously allowed
+    three corruption classes:
+
+    * Whitespace-only ids (e.g. `"   "`) were truthy and bypassed
+      `not raw_id`, leaking through to the context-persist path
+      (build_context_cache resolves it, persist_context mkdir's it) as a
+      literal directory name.
+    * An attacker-supplied `"unknown-foo"` value passed `not raw_id` because
+      the string is non-empty, then later passed `startswith("unknown")`
+      and was written into CLAUDE.md anyway via a different code path.
+    * A session_id containing C0 control characters (newline, CR, NUL,
+      etc.) passed all existing non-empty/non-sentinel checks but, when
+      interpolated into ``f"- Resume: `claude --resume {session_id}`"``
+      by update_session_info, could inject a fake CLAUDE.md line via
+      embedded newlines. The unified helper strips C0 controls to close
+      this injection path at the session_id entry point.
+
+    The unified helper rejects all of: None, non-strings, empty strings,
+    whitespace-only strings, any string already shaped like the
+    `unknown-*` sentinel, and any string containing C0 control characters
+    or DEL.
+    """
+    if not raw_id:
+        return True
+    if not isinstance(raw_id, str):
+        return True
+    stripped = raw_id.strip()
+    if not stripped:
+        return True
+    if SESSION_ID_CONTROL_CHARS_RE.search(raw_id):
+        return True
+    return stripped.startswith("unknown-")
 
 
 def resolve_agent_name(

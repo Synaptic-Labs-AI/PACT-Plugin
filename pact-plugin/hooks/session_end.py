@@ -178,7 +178,7 @@ _UUID_PATTERN = re.compile(
 )
 
 # Regex for validating PACT team directory names. Intentionally LOOSER
-# than what `generate_team_name` in session_init.py actually emits —
+# than what `generate_team_name` in shared/pact_context.py actually emits —
 # the producer emits `pact-` + `secrets.token_hex(4)` (8 lowercase hex
 # chars, no internal hyphens) or the session-id-prefix fallback
 # (`pact-` + 8 hex chars). This regex accepts any `pact-`-prefixed
@@ -422,7 +422,7 @@ def cleanup_old_teams(
     Three defense layers:
     1. Name-pattern gate — only directories matching `_TEAM_NAME_PATTERN`
        (`^pact-[a-f0-9-]+$`) are candidates. This mirrors the INVARIANT
-       documented on `generate_team_name` in session_init.py. Non-PACT
+       documented on `generate_team_name` in shared/pact_context.py. Non-PACT
        writers that create `~/.claude/teams/foo-bar/` are out of scope:
        `~/.claude/teams/` is shared space, not PACT-owned space.
     2. Current-team skip — exact-match skip of `current_team_name`.
@@ -478,7 +478,7 @@ def cleanup_old_teams(
             if not entry.is_dir():
                 continue
             # Name-shape gate: only touch PACT-shaped team dirs. Mirrors
-            # the generate_team_name INVARIANT in session_init.py. Non-
+            # the generate_team_name INVARIANT in shared/pact_context.py. Non-
             # matching entries belong to other tooling and are out of
             # scope for this reaper.
             if not _TEAM_NAME_PATTERN.match(entry.name):
