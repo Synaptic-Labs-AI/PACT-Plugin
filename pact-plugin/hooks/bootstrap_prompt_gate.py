@@ -31,6 +31,8 @@ from __future__ import annotations
 
 # ─── stdlib first (used by _emit_load_failure_advisory BEFORE wrapped imports) ─
 import json
+import os
+import re
 import sys
 from typing import NoReturn
 
@@ -92,6 +94,79 @@ _SESSION_DIR_HINT = (
     "\n\nPACT_SESSION_DIR={session_dir}"
 )
 
+# Mirrors the Resume-line fallback regex in session_init's
+# _extract_prev_session_dir — the established defensive parse for the
+# session_resume.update_session_info managed block. Parity with
+# claude_md_manager.resolve_project_claude_md_path's existing-file
+# precedence is pinned by test (NOT by a runtime import — every new
+# top-level import here widens the import-failure blast radius the
+# bootstrap-resilience work exists to shrink).
+_RESUME_LINE_RE = re.compile(r"- Resume:\s*`claude --resume\s+([0-9a-f-]+)`")
+
+_STALENESS_WARNING_TEMPLATE = (
+    "\n\nWARNING — stale session block: the project CLAUDE.md 'Current "
+    "Session' block records session {recorded} but this session is "
+    "{actual}. session_init likely failed at SessionStart this session "
+    "(or the CLAUDE.md write failed). Do NOT trust the recorded Team/"
+    "Session dir/Resume lines for THIS session; completing bootstrap "
+    "will rewrite them."
+)
+
+
+def _detect_stale_session_block(input_data: dict) -> str | None:
+    """Detect a stale 'Current Session' block in the project CLAUDE.md.
+
+    When session_init crashes at SessionStart, the previous session's
+    Resume/Team/Session-dir lines survive in CLAUDE.md and misdirect
+    recovery. Compare the recorded Resume-line session_id against this
+    frame's raw stdin session_id; on mismatch, return an advisory warning
+    string for additionalContext composition. Returns None (no warning)
+    when:
+
+      1. stdin session_id is missing/empty (nothing to compare)
+      2. CLAUDE_PROJECT_DIR is unset (cannot locate CLAUDE.md)
+      3. neither CLAUDE.md location exists, or reading raises OSError
+         (worktrees: CLAUDE.md is gitignored/absent → silent skip)
+      4. no Resume line matches the regex (tampered/garbage → no claim)
+      5. recorded session_id equals this session's (healthy resume)
+
+    Stdlib-only two-path read: .claude/CLAUDE.md preferred, legacy
+    ./CLAUDE.md fallback — same existing-file precedence as
+    resolve_project_claude_md_path (parity pinned by test). False
+    positives: none in healthy flows — session_init rewrites the block
+    before the first prompt on startup/clear, and resume keeps the same
+    session_id.
+    """
+    raw_id = input_data.get("session_id")
+    if not raw_id:
+        return None
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if not project_dir:
+        return None
+    try:
+        content = None
+        for candidate in (
+            Path(project_dir) / ".claude" / "CLAUDE.md",
+            Path(project_dir) / "CLAUDE.md",
+        ):
+            if candidate.exists():
+                content = candidate.read_text(encoding="utf-8")
+                break
+        if content is None:
+            return None
+    except OSError:
+        return None
+    match = _RESUME_LINE_RE.search(content)
+    if not match:
+        return None
+    recorded = match.group(1)
+    actual = str(raw_id)
+    if recorded != actual:
+        return _STALENESS_WARNING_TEMPLATE.format(
+            recorded=recorded, actual=actual
+        )
+    return None
+
 
 def _check_bootstrap_needed(input_data: dict) -> str | None:
     """Determine whether a bootstrap instruction should be injected.
@@ -138,10 +213,14 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
     if not pact_context.is_lead(input_data):
         return None
 
-    # Lead session, no marker → inject bootstrap instruction with session dir
+    # Lead session, no marker → inject bootstrap instruction with session
+    # dir, composed with the staleness advisory (or "") by concatenation.
+    # Staleness runs ONLY here (lead + no-marker): the marker-set fast path
+    # above keeps its zero-tokens/sub-ms contract (no per-prompt file read),
+    # and a marker-set session has by definition completed bootstrap.
     return _BOOTSTRAP_INSTRUCTION_TEMPLATE.format(
         session_dir_hint=_SESSION_DIR_HINT.format(session_dir=session_dir)
-    )
+    ) + (_detect_stale_session_block(input_data) or "")
 
 
 def main():

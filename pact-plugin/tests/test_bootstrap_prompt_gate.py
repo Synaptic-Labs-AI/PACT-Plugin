@@ -554,3 +554,265 @@ class TestSelfHealWiring:
 
         assert not target.exists()
         assert result is None
+
+
+class TestStalenessDetection:
+    """Unit tests for _detect_stale_session_block() — the stdlib-only
+    Resume-line session_id compare that flags a stale CLAUDE.md 'Current
+    Session' block after a session_init crash."""
+
+    _ACTUAL = "deadbeef-0000-1111-2222-333344445555"
+    _STALE = "01dcafe0-9999-8888-7777-666655554444"
+
+    def _project_with_claude_md(self, tmp_path, recorded_sid,
+                                location=".claude"):
+        """Create a project dir whose CLAUDE.md records ``recorded_sid``."""
+        project = tmp_path / "proj"
+        if location == ".claude":
+            target = project / ".claude" / "CLAUDE.md"
+        else:
+            target = project / "CLAUDE.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "# Project\n\n## Current Session\n"
+            f"- Resume: `claude --resume {recorded_sid}`\n"
+            "- Team: `pact-old`\n",
+            encoding="utf-8",
+        )
+        return project
+
+    def test_mismatch_returns_warning(self, monkeypatch, tmp_path):
+        from bootstrap_prompt_gate import _detect_stale_session_block
+
+        project = self._project_with_claude_md(tmp_path, self._STALE)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+
+        result = _detect_stale_session_block({"session_id": self._ACTUAL})
+
+        assert result is not None
+        assert "stale session block" in result
+        assert self._STALE in result
+        assert self._ACTUAL in result
+
+    def test_match_returns_none(self, monkeypatch, tmp_path):
+        """Recorded == actual (healthy resume) → no warning."""
+        from bootstrap_prompt_gate import _detect_stale_session_block
+
+        project = self._project_with_claude_md(tmp_path, self._ACTUAL)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+
+        assert _detect_stale_session_block(
+            {"session_id": self._ACTUAL}) is None
+
+    def test_no_claude_md_returns_none(self, monkeypatch, tmp_path):
+        """Worktree case: CLAUDE.md absent at both locations → silent skip."""
+        from bootstrap_prompt_gate import _detect_stale_session_block
+
+        project = tmp_path / "proj"
+        project.mkdir()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+
+        assert _detect_stale_session_block(
+            {"session_id": self._ACTUAL}) is None
+
+    def test_garbage_resume_line_returns_none(self, monkeypatch, tmp_path):
+        """Tampered/garbage Resume line that misses the regex → no claim."""
+        from bootstrap_prompt_gate import _detect_stale_session_block
+
+        project = tmp_path / "proj"
+        target = project / ".claude" / "CLAUDE.md"
+        target.parent.mkdir(parents=True)
+        target.write_text(
+            "## Current Session\n- Resume: claude --resume NOT_HEX_$(rm -rf)\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+
+        assert _detect_stale_session_block(
+            {"session_id": self._ACTUAL}) is None
+
+    def test_missing_session_id_returns_none(self, monkeypatch, tmp_path):
+        from bootstrap_prompt_gate import _detect_stale_session_block
+
+        project = self._project_with_claude_md(tmp_path, self._STALE)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+
+        assert _detect_stale_session_block({}) is None
+        assert _detect_stale_session_block({"session_id": ""}) is None
+
+    def test_missing_project_dir_returns_none(self, monkeypatch):
+        from bootstrap_prompt_gate import _detect_stale_session_block
+
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+        assert _detect_stale_session_block(
+            {"session_id": self._ACTUAL}) is None
+
+    @pytest.mark.parametrize("layout", ["both", "preferred_only",
+                                        "legacy_only", "neither"])
+    def test_precedence_parity_with_resolver(self, monkeypatch, tmp_path,
+                                             layout):
+        """Precedence parity pin (the drift guard for the no-runtime-import
+        decision): for every file-existence layout, the staleness reader's
+        CHOSEN file must equal resolve_project_claude_md_path's result
+        whenever source != 'new_default'. Distinct recorded ids per file
+        reveal which one was read. (Tests MAY import claude_md_manager —
+        tests are not hooks.)"""
+        from bootstrap_prompt_gate import _detect_stale_session_block
+        from shared.claude_md_manager import resolve_project_claude_md_path
+
+        sid_by_location = {
+            ".claude": "aaaa1111-aaaa-1111-aaaa-111111111111",
+            "legacy": "bbbb2222-bbbb-2222-bbbb-222222222222",
+        }
+        project = tmp_path / "proj"
+        project.mkdir()
+        if layout in ("both", "preferred_only"):
+            self._project_with_claude_md(
+                tmp_path, sid_by_location[".claude"], location=".claude")
+        if layout in ("both", "legacy_only"):
+            self._project_with_claude_md(
+                tmp_path, sid_by_location["legacy"], location="legacy")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+
+        result = _detect_stale_session_block({"session_id": self._ACTUAL})
+
+        resolved_path, source = resolve_project_claude_md_path(str(project))
+        if source == "new_default":
+            assert result is None, "neither file exists → silent skip"
+        else:
+            resolver_recorded = _RE_RESUME_TEST.search(
+                resolved_path.read_text(encoding="utf-8")
+            ).group(1)
+            assert result is not None
+            assert resolver_recorded in result, (
+                f"staleness reader and resolver disagree on which CLAUDE.md "
+                f"to read for layout={layout}"
+            )
+
+
+# Test-local mirror of the production regex, used ONLY to extract the
+# resolver-chosen file's recorded id in the parity test above.
+import re as _re_for_parity  # noqa: E402
+_RE_RESUME_TEST = _re_for_parity.compile(
+    r"- Resume:\s*`claude --resume\s+([0-9a-f-]+)`"
+)
+
+
+class TestStalenessComposition:
+    """Placement tests: staleness composes onto the bootstrap instruction
+    ONLY on the lead+no-marker inject branch; the marker-set fast path
+    never reads CLAUDE.md (perf contract pin)."""
+
+    _ACTUAL_HEX = "deadbeef-0000-1111-2222-333344445555"
+    _STALE = "01dcafe0-9999-8888-7777-666655554444"
+
+    def _stale_project(self, monkeypatch, tmp_path):
+        project = tmp_path / "proj"
+        target = project / ".claude" / "CLAUDE.md"
+        target.parent.mkdir(parents=True)
+        target.write_text(
+            f"- Resume: `claude --resume {self._STALE}`\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+        return project
+
+    def test_mismatch_composes_instruction_and_warning(
+            self, monkeypatch, tmp_path):
+        """Lead + no marker + stale block → BOTH the bootstrap instruction
+        AND the staleness warning in one additionalContext string."""
+        from bootstrap_prompt_gate import _check_bootstrap_needed
+
+        _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        self._stale_project(monkeypatch, tmp_path)
+
+        result = _check_bootstrap_needed(_make_input(
+            session_id=self._ACTUAL_HEX))
+
+        # NOTE: _setup_pact_session pre-writes the context file keyed on
+        # _SESSION_ID; the heal is a no-op here (file present).
+        assert result is not None
+        assert "PACT:bootstrap" in result            # instruction present
+        assert "stale session block" in result       # warning appended
+        assert result.index("PACT:bootstrap") < result.index(
+            "stale session block"), "warning is APPENDED, not prepended"
+
+    def test_match_returns_instruction_only(self, monkeypatch, tmp_path):
+        from bootstrap_prompt_gate import _check_bootstrap_needed
+
+        _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        project = tmp_path / "proj"
+        target = project / ".claude" / "CLAUDE.md"
+        target.parent.mkdir(parents=True)
+        target.write_text(
+            f"- Resume: `claude --resume {self._ACTUAL_HEX}`\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+
+        result = _check_bootstrap_needed(_make_input(
+            session_id=self._ACTUAL_HEX))
+
+        assert result is not None
+        assert "PACT:bootstrap" in result
+        assert "stale session block" not in result
+
+    def test_no_claude_md_returns_instruction_only(
+            self, monkeypatch, tmp_path):
+        """Worktree case: no CLAUDE.md → instruction only, no warning."""
+        from bootstrap_prompt_gate import _check_bootstrap_needed
+
+        _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        project = tmp_path / "proj"
+        project.mkdir()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+
+        result = _check_bootstrap_needed(_make_input())
+
+        assert result is not None
+        assert "PACT:bootstrap" in result
+        assert "stale session block" not in result
+
+    def test_marker_set_fast_path_never_runs_staleness(
+            self, monkeypatch, tmp_path):
+        """Perf contract pin: the marker-set fast path suppresses WITHOUT
+        any CLAUDE.md read — _detect_stale_session_block must not be
+        called at all."""
+        import bootstrap_prompt_gate as gate_module
+
+        _setup_pact_session(monkeypatch, tmp_path, with_marker=True)
+        self._stale_project(monkeypatch, tmp_path)
+
+        calls = []
+        monkeypatch.setattr(
+            gate_module, "_detect_stale_session_block",
+            lambda input_data: calls.append(1) or None,
+        )
+
+        result = gate_module._check_bootstrap_needed(_make_input(
+            session_id=self._ACTUAL_HEX))
+
+        assert result is None, "marker set → suppress"
+        assert calls == [], (
+            "fast path must not invoke the staleness check (zero-read "
+            "perf contract)"
+        )
+
+    def test_non_lead_path_never_runs_staleness(self, monkeypatch, tmp_path):
+        """Plain frame (non-lead) → suppress without staleness check."""
+        import bootstrap_prompt_gate as gate_module
+
+        _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        self._stale_project(monkeypatch, tmp_path)
+
+        calls = []
+        monkeypatch.setattr(
+            gate_module, "_detect_stale_session_block",
+            lambda input_data: calls.append(1) or None,
+        )
+
+        result = gate_module._check_bootstrap_needed(_make_input(
+            session_id=self._ACTUAL_HEX, agent_type=None))
+
+        assert result is None
+        assert calls == []
