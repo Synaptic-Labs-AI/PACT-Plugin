@@ -3938,3 +3938,229 @@ def test_M2_value_error_in_task_read_does_not_suppress_gate(
     assert not any(r == "audit_summary_overwrite" for r, _ in advisories), (
         "NUL-byte taskId read degraded to {} → no authored mirror → no overwrite fire"
     )
+
+
+# =============================================================================
+# Crash-path health marker (#951) — runtime-stage legs, journal pin,
+# error bounding. Import-stage subprocess matrix lives in
+# test_task_lifecycle_gate_degraded.py.
+# =============================================================================
+
+
+def _raise_runtime_failure(_input_data):
+    raise RuntimeError("simulated evaluate failure")
+
+
+def test_advisory_output_carries_no_health_marker(
+    capsys, monkeypatch, tmp_path, pact_context,
+):
+    """Healthy advisory shape is unchanged: a real rule firing through a
+    full main() invocation emits hookEventName + additionalContext and
+    NEITHER pactGateHealth NOR systemMessage — the marker decorates only
+    crash paths, never healthy advisories. (The suppress-shape twin pins
+    are byte-identity asserts elsewhere in this file and in the degraded
+    sibling module.)"""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskCreate",
+        "tool_input": {
+            "subject": "implement foo",
+            "owner": "pact-backend-coder",
+            "addBlockedBy": ["41"],
+            "metadata": {"variety": None},
+        },
+        "tool_response": {},
+    }
+    code, out = _capture_main(payload, capsys)
+    assert code == 0
+    hso = out["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PostToolUse"
+    assert "additionalContext" in hso
+    assert "pactGateHealth" not in out
+    assert "systemMessage" not in out
+
+
+def test_runtime_failure_emits_health_marker_with_runtime_stage(
+    capsys, monkeypatch, tmp_path,
+):
+    """evaluate_lifecycle raising inside main() → exit 0 with the full
+    machine marker at stage "runtime", the systemMessage mirror, and the
+    bounded error text naming the exception type. With no session context
+    resolvable (CLAUDE_PROJECT_DIR unset, config dir sandboxed) the
+    best-effort journal emit deterministically degrades to the
+    append-returned-False stderr disposition — never a raise."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.setattr(tlg, "evaluate_lifecycle", _raise_runtime_failure)
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "in_progress"},
+        "tool_response": {},
+        "session_id": "health-marker-session",
+    }
+    with patch.object(sys, "stdin", _stdin(payload)):
+        with pytest.raises(SystemExit) as exc:
+            tlg.main()
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    out = json.loads(captured.out.strip())
+    marker = out["pactGateHealth"]
+    assert set(marker) == {"v", "hook", "status", "stage", "error"}
+    assert marker["v"] == 1
+    assert marker["hook"] == "task_lifecycle_gate"
+    assert marker["status"] == "failed"
+    assert marker["stage"] == "runtime"
+    assert "RuntimeError" in marker["error"]
+    assert "simulated evaluate failure" in marker["error"]
+    hso = out["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PostToolUse"
+    assert out["systemMessage"] == hso["additionalContext"]
+    assert "RuntimeError" in hso["additionalContext"]
+    assert "gate_health journal emit skipped" in captured.err, (
+        "no-session journal degradation must surface on the debug channel "
+        "(append_event returned False), never raise"
+    )
+
+
+def test_runtime_failure_writes_gate_health_journal_event(
+    capsys, monkeypatch, tmp_path, pact_context,
+):
+    """The journal channel's ONE pin, on the path where it is contractually
+    expected to work (imports fine, context initialized, context FILE on
+    disk): a runtime failure appends exactly one gate_health event with
+    the full field set to the session journal — and neither stderr
+    disposition line fires.
+
+    Sandbox: the context file lives in tmp_path (pact_context fixture)
+    and CLAUDE_CONFIG_DIR points inside tmp_path, so get_session_dir
+    resolves the journal under the sandbox, never the real ~/.claude."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+    pact_context(team_name="test-team", session_id="test-session")
+    monkeypatch.setattr(tlg, "evaluate_lifecycle", _raise_runtime_failure)
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "in_progress"},
+        "tool_response": {},
+        "session_id": "test-session",
+    }
+    with patch.object(sys, "stdin", _stdin(payload)):
+        with pytest.raises(SystemExit) as exc:
+            tlg.main()
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+
+    # The context file's project_dir is /test/project → slug "project";
+    # session_id comes from the context file, not stdin.
+    journal = (
+        tmp_path / "cfg" / "pact-sessions" / "project" / "test-session"
+        / "session-journal.jsonl"
+    )
+    assert journal.exists(), (
+        f"journal not written; stderr={captured.err!r}"
+    )
+    events = [
+        json.loads(line)
+        for line in journal.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    health_events = [e for e in events if e.get("type") == "gate_health"]
+    assert len(health_events) == 1, (
+        f"exactly one gate_health event expected, got {len(health_events)}: "
+        f"{health_events!r}"
+    )
+    event = health_events[0]
+    assert set(event) == {
+        "v", "type", "ts", "hook", "status", "stage", "error", "tool_name",
+    }
+    assert event["v"] == 1
+    assert event["hook"] == "task_lifecycle_gate"
+    assert event["status"] == "failed"
+    assert event["stage"] == "runtime"
+    assert "RuntimeError" in event["error"]
+    assert event["tool_name"] == "TaskUpdate"
+    assert event["ts"]
+
+    # Journal-event error text and marker error text are the same bounded
+    # rendering — one bounding discipline across every context-bound surface.
+    out = json.loads(captured.out.strip())
+    assert event["error"] == out["pactGateHealth"]["error"]
+
+    assert "gate_health journal emit" not in captured.err, (
+        "neither disposition line (skipped / unavailable) may fire on the "
+        "working journal path"
+    )
+
+
+def test_init_failure_routes_through_runtime_advisory(
+    capsys, monkeypatch, tmp_path,
+):
+    """pact_context.init raising inside main() → the runtime crash mask,
+    NOT an unmasked traceback: exit 0 with the stage-"runtime" marker
+    naming the init failure. Pins the guarded-init routing (previously
+    the file's one unmasked crash path). The journal emit's own lazy
+    init call hits the same patched raise inside its guard → the
+    "unavailable" stderr disposition, never a propagated exception."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setattr(
+        tlg.pact_context,
+        "init",
+        lambda _input_data: (_ for _ in ()).throw(
+            RuntimeError("simulated init failure")
+        ),
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "in_progress"},
+        "tool_response": {},
+        "session_id": "init-failure-session",
+    }
+    with patch.object(sys, "stdin", _stdin(payload)):
+        with pytest.raises(SystemExit) as exc:
+            tlg.main()
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    out = json.loads(captured.out.strip())
+    marker = out["pactGateHealth"]
+    assert marker["stage"] == "runtime"
+    assert marker["status"] == "failed"
+    assert "RuntimeError" in marker["error"]
+    assert "simulated init failure" in marker["error"]
+    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+    assert "gate_health journal emit unavailable" in captured.err, (
+        "the journal emitter's lazy init hits the same raise and must "
+        "degrade to the unavailable disposition inside its guard"
+    )
+
+
+def test_health_marker_error_text_is_bounded_and_sanitized(capsys):
+    """Direct helper invoke with pathological exception text (1000+ chars,
+    embedded control characters): every context-bound surface (marker
+    error, advisory, systemMessage) carries the SAME sanitized rendering
+    truncated at the cap with an explicit marker — while the stderr
+    diagnostic keeps the full raw text (debug-channel split)."""
+    noisy = "a" * 500 + "\x00\x07\x1b" + "b" * 600
+    err = ValueError(noisy)
+    with pytest.raises(SystemExit) as exc:
+        tlg._emit_load_failure_advisory("runtime", err)
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    out = json.loads(captured.out.strip())
+
+    error_field = out["pactGateHealth"]["error"]
+    suffix = "...[truncated]"
+    assert error_field.endswith(suffix)
+    assert len(error_field) == 200 + len(suffix)
+    assert error_field.startswith("ValueError: ")
+    assert all(ch.isprintable() for ch in error_field), (
+        f"control characters must be sanitized: {error_field!r}"
+    )
+
+    # Same bounded text on every context-bound surface.
+    hso = out["hookSpecificOutput"]
+    assert error_field in hso["additionalContext"]
+    assert error_field in out["systemMessage"]
+    assert "\x00" not in out["systemMessage"]
+
+    # Debug channel keeps the full raw text (well past the cap).
+    assert "b" * 600 in captured.err
