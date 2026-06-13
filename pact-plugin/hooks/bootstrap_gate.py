@@ -184,7 +184,11 @@ _ERROR_TEXT_MAX = 200
 # realistic hook frame and must not be slurped unbounded. An over-cap
 # frame truncates mid-JSON → JSONDecodeError → the existing except at
 # each read site (fail-open suppress on the primary; fail-closed deny on
-# the degraded read). VALUE MUST EQUAL task_lifecycle_gate._STDIN_READ_MAX
+# the degraded read).
+# This cap bounds MEMORY only — it does NOT reject sub-cap input: a frame
+# with a valid JSON prefix still parses (harmless — degraded never grants
+# allow, primary fails-open).
+# VALUE MUST EQUAL task_lifecycle_gate._STDIN_READ_MAX
 # (independent module literal — twin-VALUE discipline, like _ERROR_TEXT_MAX).
 _STDIN_READ_MAX = 8 * 1024 * 1024  # 8 MB
 
