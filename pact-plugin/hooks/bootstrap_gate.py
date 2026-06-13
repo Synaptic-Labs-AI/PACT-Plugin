@@ -165,8 +165,15 @@ def _bounded_error_text(error: BaseException) -> str:
     """Sanitized, length-bounded rendering of an exception for embedding in
     context-bound warning text: control/non-printable characters become
     spaces, and the result is truncated to _ERROR_TEXT_MAX chars with an
-    explicit marker. Full text still goes to stderr at the call site."""
-    text = f"{type(error).__name__}: {error}"
+    explicit marker. Full text still goes to stderr at the call site.
+
+    Total over hostile exceptions: rendering the message runs the
+    exception's own __str__ (arbitrary code that can itself raise) — fall
+    back to the type name, which renders for any exception class."""
+    try:
+        text = f"{type(error).__name__}: {error}"
+    except BaseException:  # noqa: BLE001 — hostile __str__ must not escape the renderer
+        text = f"{type(error).__name__}: <exception str() raised>"
     text = "".join(ch if ch.isprintable() else " " for ch in text)
     if len(text) > _ERROR_TEXT_MAX:
         text = text[:_ERROR_TEXT_MAX] + "...[truncated]"
