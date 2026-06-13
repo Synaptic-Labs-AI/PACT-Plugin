@@ -222,9 +222,12 @@ def _bounded_error_text(error: BaseException) -> str:
         text = f"{type_name}: {error}"
     except BaseException:  # noqa: BLE001 — hostile __str__ must not escape the renderer
         text = f"{type_name}: <exception str() raised>"
+    truncated = len(text) > _ERROR_TEXT_MAX
+    if truncated:
+        text = text[:_ERROR_TEXT_MAX]        # bound BEFORE the O(n) sanitize join
     text = "".join(ch if ch.isprintable() else " " for ch in text)
-    if len(text) > _ERROR_TEXT_MAX:
-        text = text[:_ERROR_TEXT_MAX] + "...[truncated]"
+    if truncated:
+        text = text + "...[truncated]"
     return text
 
 
