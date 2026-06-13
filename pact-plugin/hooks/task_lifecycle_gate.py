@@ -292,6 +292,7 @@ try:
     from shared.dispatch_helpers import trustworthy_actor_name
     from shared.intentional_wait import is_self_complete_exempt, is_teachback_exempt
     from shared.session_journal import append_event, get_journal_path, make_event
+    from shared.task_utils import is_teachback_subject as _is_teachback_subject
     from shared.task_utils import read_task_json
     from shared.teachback_schema import (
         TEACHBACK_RECOMMENDED_BAND_MIN,
@@ -363,34 +364,12 @@ _NO_RESOLVABLE_TOTAL = (
 )
 
 
-# Canonical Teachback Task subject pattern: `<teammate-name>: TEACHBACK
-# for <mission descriptor>`. The leading `[a-z0-9-]+:` is the canonical
-# teammate-prefix shape used across the plugin (matches names like
-# `backend-coder-2`, `secretary`, `architect-1`); `TEACHBACK for ` is
-# the canonical mission-framing per pact-completion-authority.md.
-#
-# WHY a structural match instead of substring `"teachback" in subject`:
-# the substring form fires on ANY task subject containing the word —
-# including planning/discussion subjects like `"Plan: wake-lifecycle
-# teachback re-arm fix"` — and produces benign-but-noisy false-positive
-# advisories. The structural match pins the pattern to the canonical
-# Teachback-Gated Dispatch shape so only actual teachback tasks trip
-# the rules.
-_TEACHBACK_SUBJECT_PATTERN = re.compile(r"^[a-z0-9-]+: TEACHBACK for ")
-
-
-def _is_teachback_subject(subject: str) -> bool:
-    """Return True iff `subject` matches the canonical Teachback Task
-    shape (`<teammate-name>: TEACHBACK for <mission>`).
-
-    Pure function; never raises. Returns False on non-string input or
-    any subject that does not match the anchored pattern. Replaces the
-    legacy `"TEACHBACK" in subject_upper` substring check across the
-    gate's TaskCreate and TaskUpdate rule paths.
-    """
-    if not isinstance(subject, str):
-        return False
-    return _TEACHBACK_SUBJECT_PATTERN.match(subject) is not None
+# `_is_teachback_subject` (the canonical Teachback Task subject predicate) was
+# HOISTED to shared/task_utils.py so the handoff_ordering_gate PreToolUse hook
+# can reuse it without importing this PostToolUse module. It is re-imported at
+# the top of this file as `_is_teachback_subject` (private-name alias preserving
+# the gate's existing call sites). SINGLE definition lives in task_utils; do NOT
+# re-introduce the regex here — duplication reopens the drift class.
 
 
 # ─── metadata.completion_disputed writeback (direct FS) ──────────────────────
@@ -1383,6 +1362,46 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                         "metadata.variety.total (see pact-variety.md "
                         "Per-Dispatch Variety Stamping).",
                     ))
+
+        # #956 write-time BACKSTOP — re-emit agent_handoff when a metadata-only
+        # TaskUpdate SETS handoff on an ALREADY-completed task. b1 (TaskCompleted-
+        # keyed) and b2 (lead-side at the completing TaskUpdate) both gate on
+        # metadata.handoff PRESENCE at completion time, so a handoff written
+        # AFTER completion is observed by NEITHER — the residual write-after-
+        # completion race. This ④ block (status != "completed") is exactly where
+        # that later metadata-only write lands (D4 — runtime-confirmed: a
+        # metadata-only TaskUpdate setting handoff reaches this block). Re-call
+        # the SAME b2 emitter; _emit_lead_side_agent_handoff owns all eligibility
+        # (owner / not-teachback / not-signal / handoff-is-dict) AND the shared
+        # O_EXCL occupant marker, so this re-fire is idempotent — if b1/b2 already
+        # emitted, already_emitted() short-circuits it to a safe no-op. No new
+        # eligibility logic here; the backstop's only job is to CALL the emitter
+        # on the write event b1/b2 structurally cannot see.
+        #
+        # is_lead-gated (mirrors b2 at the completion surface): only the lead's
+        # process resolves the canonical journal; a teammate frame self-drops
+        # (#877). The in-process/lead branch is the fail-safe default.
+        if (
+            pact_context.is_lead(input_data)
+            and isinstance(incoming_handoff, dict)
+            and incoming_handoff
+            and isinstance(task_a, dict)
+            and task_a
+            and task_a.get("status") == "completed"
+        ):
+            owner_bs = task_a.get("owner") or ""
+            subject_bs = task_a.get("subject") or ""
+            # Pass the incoming handoff merged onto the on-disk metadata view so
+            # the emitter sees it explicitly (order-independent: the platform's
+            # synchronous metadata write has landed by PostToolUse, so the
+            # on-disk handoff IS the incoming handoff — but pass it resolved to
+            # stay correct regardless of write-ordering). _emit_lead_side_agent_handoff
+            # re-validates owner/teachback/signal/handoff-dict + dedups.
+            meta_bs = task_a.get("metadata") if isinstance(task_a.get("metadata"), dict) else {}
+            meta_for_emit = {**meta_bs, "handoff": incoming_handoff}
+            _emit_lead_side_agent_handoff(
+                team_name, task_id, owner_bs, subject_bs, meta_for_emit
+            )
 
     return advisories
 
