@@ -1962,6 +1962,141 @@ class TestHostileStrCrashPath:
 
 
 # =============================================================================
+# Cycle-2 regression: hostile-metaclass __name__ on the crash path.
+#
+# A metaclass can make type(error).__name__ a property that RAISES. The
+# degraded warn path (_emit_degraded_warning) renders the error inline via
+# _bounded_error_text with NO constant fallback around the call — so before
+# 7155516d the helper's own fallback re-accessed type(error).__name__ and
+# re-raised, the warn path exited 1 (a PreToolUse non-blocking error that
+# SUPPRESSED the warning), and the degraded gate silently failed open. The
+# fix captures the type name once → literal "exception". These pins lock
+# the restored exit-0 defer; counter-test: source-revert 7155516d → the
+# defer leg regresses to exit 1.
+#
+# HAZARD: the breakage modules define the hostile metaclass entirely in the
+# subprocess scaffold text — no in-process class whose __name__ pytest
+# could bomb during collection.
+# =============================================================================
+
+
+def _break_shared_hostile_name(scaffold):
+    """shared/__init__.py raises an exception whose metaclass makes
+    __name__ a raising property (normal __str__). Rendering the caught
+    error's type name runs metaclass code that raises."""
+    (scaffold / "shared").mkdir(parents=True)
+    (scaffold / "shared" / "__init__.py").write_text(
+        "class _HostileNameMeta(type):\n"
+        "    @property\n"
+        "    def __name__(cls):\n"
+        "        raise RuntimeError('hostile __name__')\n"
+        "class NameBomb(Exception, metaclass=_HostileNameMeta):\n"
+        "    pass\n"
+        "raise NameBomb('boom')\n",
+        encoding="utf-8",
+    )
+
+
+def _break_shared_hostile_name_and_str(scaffold):
+    """Both hostile: metaclass __name__ raises AND __str__ raises — both
+    helper fallbacks fire (type name → 'exception', message → marker)."""
+    (scaffold / "shared").mkdir(parents=True)
+    (scaffold / "shared" / "__init__.py").write_text(
+        "class _HostileNameMeta(type):\n"
+        "    @property\n"
+        "    def __name__(cls):\n"
+        "        raise RuntimeError('hostile __name__')\n"
+        "class BothBomb(Exception, metaclass=_HostileNameMeta):\n"
+        "    def __str__(self):\n"
+        "        raise RuntimeError('hostile __str__')\n"
+        "raise BothBomb('boom')\n",
+        encoding="utf-8",
+    )
+
+
+class TestHostileNameCrashPath:
+
+    def _run(self, tmp_path, stdin_text, breaker):
+        import subprocess
+
+        hook_src = Path(__file__).parent.parent / "hooks" / "bootstrap_gate.py"
+        scaffold = tmp_path / "scaffold"
+        scaffold.mkdir(parents=True)
+        (scaffold / "bootstrap_gate.py").write_text(
+            hook_src.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        breaker(scaffold)
+        return subprocess.run(
+            [sys.executable, str(scaffold / "bootstrap_gate.py")],
+            input=stdin_text,
+            capture_output=True,
+            text=True,
+            cwd=str(scaffold),
+            timeout=10,
+        )
+
+    @pytest.mark.parametrize(
+        "breaker",
+        [_break_shared_hostile_name, _break_shared_hostile_name_and_str],
+        ids=["hostile-name", "hostile-name-and-str"],
+    )
+    def test_readonly_defer_intact_under_hostile_name(self, tmp_path, breaker):
+        """The regression pin: a read-only tool under a hostile-__name__
+        (or both-hostile) module crash must take the defer arm at exit 0,
+        decision JSON intact, with the "exception" type-name fallback in
+        the warning. Pre-7155516d this exited 1 with the warning
+        suppressed."""
+        result = self._run(
+            tmp_path, json.dumps(_make_input(tool_name="Read")), breaker
+        )
+        assert result.returncode == 0, (
+            "hostile __name__ must not regress the degraded path to a "
+            f"nonzero exit (the suppressed-warning bug): "
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "defer"
+        for field in ("permissionDecisionReason", "additionalContext"):
+            assert "DEGRADED" in hso[field]
+            assert "module imports" in hso[field]
+            # Type-name fallback fired: the literal "exception", never a
+            # real class name (the metaclass made the name unrenderable).
+            assert "failure — exception:" in hso[field], (
+                f"warning must carry the captured-name fallback: "
+                f"{hso[field]!r}"
+            )
+        assert "systemMessage" in out
+        assert "Hook degraded-defer (bootstrap_gate / module imports)" in (
+            result.stderr
+        )
+
+    @pytest.mark.parametrize(
+        "breaker",
+        [_break_shared_hostile_name, _break_shared_hostile_name_and_str],
+        ids=["hostile-name", "hostile-name-and-str"],
+    )
+    def test_mutating_deny_intact_under_hostile_name(self, tmp_path, breaker):
+        """Deny-arm twin: a mutating tool under hostile __name__ still
+        denies at exit 2 (blocking). The deny render has its OWN constant
+        guard (landed in the prior cycle), so under hostile __name__ its
+        reason carries "<error text unavailable>" rather than the
+        "exception" helper fallback — distinct render site, both total."""
+        result = self._run(
+            tmp_path, json.dumps(_make_input(tool_name="Edit")), breaker
+        )
+        assert result.returncode == 2, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "deny"
+        assert "<error text unavailable>" in hso["permissionDecisionReason"]
+
+
+# =============================================================================
 # Marker verification × CLAUDE_PLUGIN_ROOT env fallback — healthy path
 # =============================================================================
 

@@ -4306,3 +4306,87 @@ def test_journal_event_renders_non_str_tool_name_as_placeholder(
     ]
     assert len(events) == 1
     assert events[0]["tool_name"] == "<non-str int>"
+
+
+# =============================================================================
+# Cycle-2: _bounded_error_text total against a hostile-metaclass __name__.
+# A metaclass can make type(error).__name__ a property that RAISES; the
+# helper captures the type name once defensively (→ literal "exception")
+# so neither the type-name nor the message render can escape it. Pins the
+# residual review-security found: pre-fix the helper's own fallback
+# re-accessed __name__ and re-raised, crashing the bootstrap degraded path
+# (exit 1, suppressed warning). The bootstrap-path regression pin is the
+# subprocess matrix in test_bootstrap_gate.py::TestHostileNameCrashPath;
+# these are the in-process helper-totality + tlg-path pins.
+#
+# HAZARD: never reference these classes' __name__ in test ids, labels, or
+# assertion reprs — the metaclass property bombs the access itself. Pass
+# instances positionally and assert only on returned STRINGS.
+# =============================================================================
+
+
+class _HostileNameMeta(type):
+    @property
+    def __name__(cls):  # noqa: N805 — metaclass property over the class
+        raise RuntimeError("hostile __name__")
+
+
+class _NameBomb(Exception, metaclass=_HostileNameMeta):
+    """Raising __name__, normal __str__."""
+
+
+class _BothBomb(Exception, metaclass=_HostileNameMeta):
+    """Raising __name__ AND raising __str__."""
+
+    def __str__(self):
+        raise RuntimeError("hostile __str__")
+
+
+def test_bounded_error_text_total_against_hostile_name():
+    """The helper returns a string for an exception whose metaclass
+    __name__ raises — type name captured once → literal "exception", with
+    the message render still guarded for the both-hostile case. Counter-
+    test: revert 7155516d → the fallback re-accesses __name__ and the
+    helper re-raises (RuntimeError escapes)."""
+    # Assert on returned strings ONLY; never let pytest repr a hostile
+    # instance (its default Exception repr accesses __name__).
+    assert tlg._bounded_error_text(_NameBomb("msg")) == "exception: msg"
+    assert tlg._bounded_error_text(_BothBomb("msg")) == (
+        "exception: <exception str() raised>"
+    )
+
+
+def test_bounded_error_text_common_cases_unchanged_by_cycle2():
+    """No string-ripple (shape (b)): the common-case renderings are
+    unchanged — only the hostile-__name__ path degrades to "exception:".
+    Guards against a cycle-2 refactor silently altering the normal text."""
+    assert tlg._bounded_error_text(ValueError("plain")) == "ValueError: plain"
+    # Hostile __str__ but renderable __name__ → real type name preserved.
+    assert tlg._bounded_error_text(_HostileStrError("m")) == (
+        "_HostileStrError: <exception str() raised>"
+    )
+
+
+def test_hostile_name_exception_emits_floor_marker_via_helper_totality(capsys):
+    """End-to-end through the full crash path: a real hostile-__name__
+    exception renders "exception: ..." in the marker error (the helper
+    handled it), NOT the call-site "<error text unavailable>" constant —
+    proving the helper-totality branch, not the defense-in-depth fallback,
+    is what carries a genuine hostile-__name__ exception. Floor marker
+    intact, exit 0."""
+    with pytest.raises(SystemExit) as exc:
+        tlg._emit_load_failure_advisory("runtime", _NameBomb("boom"))
+    assert exc.value.code == 0
+    out = json.loads(capsys.readouterr().out.strip())
+    marker = out["pactGateHealth"]
+    assert marker["status"] == "failed"
+    assert marker["stage"] == "runtime"
+    assert marker["error"] == "exception: boom", (
+        f"helper-totality path expected; got {marker['error']!r}"
+    )
+    # Distinguish from the call-site constant guard (that path only fires
+    # if the whole helper raises — here the helper is total, so it must
+    # NOT appear).
+    assert marker["error"] != "<error text unavailable>"
+    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+    assert out["systemMessage"] == out["hookSpecificOutput"]["additionalContext"]
