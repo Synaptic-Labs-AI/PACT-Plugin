@@ -4134,12 +4134,19 @@ def test_init_failure_routes_through_runtime_advisory(
 
 
 def test_health_marker_error_text_is_bounded_and_sanitized(capsys):
-    """Direct helper invoke with pathological exception text (1000+ chars,
+    """Direct helper invoke with pathological exception text (600+ chars,
     embedded control characters): every context-bound surface (marker
     error, advisory, systemMessage) carries the SAME sanitized rendering
     truncated at the cap with an explicit marker — while the stderr
-    diagnostic keeps the full raw text (debug-channel split)."""
-    noisy = "a" * 500 + "\x00\x07\x1b" + "b" * 600
+    diagnostic keeps the full raw text (debug-channel split).
+
+    The control characters sit INSIDE the truncation window (sanitized-
+    text indices 62-64, well under the 200-char cap), so the sanitize
+    step itself — not truncation — is what removes them: with the
+    sanitize substitution deleted from _bounded_error_text, the
+    positional and printability asserts below fail. Hostile bytes placed
+    past the cap would make every sanitization assert vacuously true."""
+    noisy = "a" * 50 + "\x00\x07\x1b" + "b" * 600
     err = ValueError(noisy)
     with pytest.raises(SystemExit) as exc:
         tlg._emit_load_failure_advisory("runtime", err)
@@ -4152,6 +4159,14 @@ def test_health_marker_error_text_is_bounded_and_sanitized(capsys):
     assert error_field.endswith(suffix)
     assert len(error_field) == 200 + len(suffix)
     assert error_field.startswith("ValueError: ")
+    # Positional pin: "ValueError: " (12) + 50 a's puts the three control
+    # characters at indices 62-64 — each must have become a space.
+    assert error_field[61] == "a"
+    assert error_field[62:65] == "   ", (
+        f"control characters inside the cap window must be substituted "
+        f"with spaces by sanitization: {error_field[55:70]!r}"
+    )
+    assert error_field[65] == "b"
     assert all(ch.isprintable() for ch in error_field), (
         f"control characters must be sanitized: {error_field!r}"
     )
@@ -4162,5 +4177,132 @@ def test_health_marker_error_text_is_bounded_and_sanitized(capsys):
     assert error_field in out["systemMessage"]
     assert "\x00" not in out["systemMessage"]
 
-    # Debug channel keeps the full raw text (well past the cap).
+    # Debug channel keeps the full raw text — past the cap AND unsanitized
+    # (the raw control bytes survive only on stderr).
     assert "b" * 600 in captured.err
+    assert "\x00\x07\x1b" in captured.err
+
+
+class _HostileStrError(Exception):
+    """Exception whose __str__ raises — the hostile-renderer shape the
+    crash-path floor must survive (rendering an exception message runs
+    arbitrary exception-class code)."""
+
+    def __str__(self):
+        raise RuntimeError("hostile __str__")
+
+
+def test_hostile_str_exception_still_emits_floor_marker(capsys):
+    """An exception whose __str__ raises must not void the floor: the
+    helper falls back to the type-name + placeholder rendering, the full
+    marker still prints, exit stays 0, and the guarded stderr diagnostic
+    carries the placeholder instead of propagating the renderer raise."""
+    err = _HostileStrError()
+    with pytest.raises(SystemExit) as exc:
+        tlg._emit_load_failure_advisory("runtime", err)
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    out = json.loads(captured.out.strip())
+
+    marker = out["pactGateHealth"]
+    assert set(marker) == {"v", "hook", "status", "stage", "error"}
+    assert marker["status"] == "failed"
+    assert marker["stage"] == "runtime"
+    assert marker["error"] == "_HostileStrError: <exception str() raised>"
+
+    hso = out["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PostToolUse"
+    assert marker["error"] in hso["additionalContext"]
+    assert out["systemMessage"] == hso["additionalContext"]
+
+    # Guarded stderr full-text line: placeholder, never a propagated raise.
+    assert "Hook load error (task_lifecycle_gate / runtime)" in captured.err
+    assert "<exception str() raised>" in captured.err
+
+
+def test_renderer_defect_falls_back_to_raise_proof_constant(
+    capsys, monkeypatch,
+):
+    """Defense-in-depth call-site guard: if the (now-total) bounded
+    renderer itself somehow raises, the floor still prints — with the
+    raise-proof CONSTANT. type(error).__name__ is deliberately not the
+    fallback: a hostile metaclass __name__ would re-invoke the same
+    attribute access that just failed, at the one site that must never
+    raise."""
+    monkeypatch.setattr(
+        tlg,
+        "_bounded_error_text",
+        lambda _err: (_ for _ in ()).throw(
+            RuntimeError("simulated renderer defect")
+        ),
+    )
+    with pytest.raises(SystemExit) as exc:
+        tlg._emit_load_failure_advisory("runtime", ValueError("boom"))
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    out = json.loads(captured.out.strip())
+    assert out["pactGateHealth"]["error"] == "<error text unavailable>"
+    assert "<error text unavailable>" in out["systemMessage"]
+    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+
+
+def test_journal_event_sanitizes_hostile_tool_name(
+    capsys, monkeypatch, tmp_path, pact_context,
+):
+    """tool_name is attacker-set stdin on the import-stage path — the
+    journal event must carry the same sanitize+bound discipline as the
+    error text: control characters become spaces and over-cap text is
+    truncated with the explicit marker."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+    pact_context(team_name="test-team", session_id="test-session")
+    hostile = "Task\x00Update" + "x" * 300
+    tlg._emit_gate_health_event(
+        "module imports", "SomeError: detail", {"tool_name": hostile}
+    )
+    captured = capsys.readouterr()
+    assert "gate_health journal emit" not in captured.err, (
+        f"emit must succeed on the working path: {captured.err!r}"
+    )
+    journal = (
+        tmp_path / "cfg" / "pact-sessions" / "project" / "test-session"
+        / "session-journal.jsonl"
+    )
+    events = [
+        json.loads(line)
+        for line in journal.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(events) == 1
+    recorded = events[0]["tool_name"]
+    suffix = "...[truncated]"
+    assert recorded.endswith(suffix)
+    assert len(recorded) == 200 + len(suffix)
+    assert recorded.startswith("Task Update"), (
+        f"control char must become a space: {recorded[:15]!r}"
+    )
+    assert all(ch.isprintable() for ch in recorded)
+
+
+def test_journal_event_renders_non_str_tool_name_as_placeholder(
+    capsys, monkeypatch, tmp_path, pact_context,
+):
+    """A non-string tool_name (type-confused stdin) becomes a typed
+    placeholder in the journal event rather than a raw non-str value."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+    pact_context(team_name="test-team", session_id="test-session")
+    tlg._emit_gate_health_event(
+        "module imports", "SomeError: detail", {"tool_name": 42}
+    )
+    captured = capsys.readouterr()
+    assert "gate_health journal emit" not in captured.err
+    journal = (
+        tmp_path / "cfg" / "pact-sessions" / "project" / "test-session"
+        / "session-journal.jsonl"
+    )
+    events = [
+        json.loads(line)
+        for line in journal.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(events) == 1
+    assert events[0]["tool_name"] == "<non-str int>"

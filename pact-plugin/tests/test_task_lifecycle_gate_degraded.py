@@ -24,12 +24,16 @@ platform's non-strict output schema strips unknown top-level keys):
   - On a HEALTHY scaffold the output shapes are byte-identical to the
     pre-marker gate: no ``pactGateHealth``, no ``systemMessage``.
 
-Deliberately NOT asserted here: the best-effort ``gate_health`` journal
-event. All three breakage vectors break ``shared/__init__``-level
-imports, which also kills the late lazy import inside the journal
-emitter — those vectors are stdout-marker-only by design. The journal
-channel's one pin lives in the in-process suite, on the runtime path
-where the channel is contractually expected to work.
+Journal-channel split across this module: the three breakage vectors in
+the crash matrix all break ``shared/__init__``-level imports, which also
+kills the late lazy import inside the journal emitter — those vectors
+are stdout-marker-only by design. The import-stage journal-SUCCESS
+shape (a gauntlet-only module is broken while pact_context /
+session_journal stay importable, and a prior hook already wrote the
+session context file) is pinned separately in
+TestImportStageJournalSuccess — the one subprocess leg that exercises
+the crash handler's late stdin read on its success path. The runtime-path journal pin lives in the in-process suite, where
+the channel is contractually expected to work.
 
 Scaffold/vector machinery is imported from tests.test_bootstrap_gate
 (the #942/#950 degraded-mode suite) so the breakage-vector family stays
@@ -256,6 +260,183 @@ class TestHealthyLifecycleGateUnchanged:
             f"stderr={result.stderr!r} stdout={result.stdout!r}"
         )
         assert json.loads(result.stdout.strip()) == {"suppressOutput": True}
+
+
+# =============================================================================
+# Import-stage crash with a LIVE journal channel — partial breakage
+# =============================================================================
+
+
+def _build_partial_breakage_scaffold(tmp_path):
+    """Scaffold for the import-stage-crash-with-live-journal family:
+    ``shared`` is intact EXCEPT for one gauntlet-only module
+    (agent_handoff_marker) — the gauntlet from-import crashes
+    (ModuleNotFoundError) while pact_context/session_journal stay
+    importable — and a prior hook in the session already wrote the
+    context file (the production precondition for the import-stage
+    durable channel). Returns (scaffold, env, session_dir, session_id).
+
+    Includes the premise assert (import-graph-rot guard): the journal
+    channel must import WITHOUT agent_handoff_marker, or this vector no
+    longer isolates "gauntlet broken, journal alive" and the family
+    needs a different gauntlet-only module.
+    """
+    hooks_src = Path(__file__).parent.parent / "hooks"
+    scaffold = tmp_path / "scaffold"
+    scaffold.mkdir(parents=True)
+    (scaffold / "task_lifecycle_gate.py").write_text(
+        (hooks_src / "task_lifecycle_gate.py").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    shutil.copytree(hooks_src / "shared", scaffold / "shared")
+    (scaffold / "pin_caps.py").write_text(
+        (hooks_src / "pin_caps.py").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (scaffold / "shared" / "agent_handoff_marker.py").unlink()
+
+    premise = subprocess.run(
+        [sys.executable, "-c",
+         "import shared.pact_context, shared.session_journal"],
+        capture_output=True,
+        text=True,
+        cwd=str(scaffold),
+        timeout=10,
+    )
+    assert premise.returncode == 0, (
+        "vector premise broken: shared.pact_context/session_journal "
+        "no longer import without agent_handoff_marker — pick a "
+        f"different gauntlet-only module. {premise.stderr!r}"
+    )
+
+    # Context-file path mirrors init(): slug from CLAUDE_PROJECT_DIR's
+    # basename + the stdin session_id.
+    env = _scaffold_env(tmp_path)
+    session_id = "lifecycle-degraded-session"
+    session_dir = (
+        Path(env["CLAUDE_CONFIG_DIR"]) / "pact-sessions"
+        / Path(env["CLAUDE_PROJECT_DIR"]).name / session_id
+    )
+    session_dir.mkdir(parents=True)
+    (session_dir / "pact-session-context.json").write_text(
+        json.dumps({
+            "team_name": "degraded-team",
+            "session_id": session_id,
+            "project_dir": env["CLAUDE_PROJECT_DIR"],
+            "plugin_root": "",
+            "started_at": "2026-01-01T00:00:00Z",
+        }),
+        encoding="utf-8",
+    )
+    return scaffold, env, session_dir, session_id
+
+
+class TestImportStageJournalSuccess:
+
+    def test_partial_breakage_writes_import_stage_journal_event(
+        self, tmp_path,
+    ):
+        """Partial-breakage shape: the gauntlet crashes but the crash
+        handler's lazy import of pact_context/session_journal succeeds,
+        the handler reads the still-unconsumed stdin itself, and the
+        durable gate_health event lands in the session journal at stage
+        "module imports" — alongside the full stdout marker.
+
+        This is the only leg exercising the late-stdin-read SUCCESS
+        branch: every crash-matrix vector dies before the read, and the
+        in-process runtime legs always hand input_data in directly.
+        """
+        scaffold, env, session_dir, session_id = (
+            _build_partial_breakage_scaffold(tmp_path)
+        )
+        result = subprocess.run(
+            [sys.executable, str(scaffold / "task_lifecycle_gate.py")],
+            input=json.dumps(_make_gate_input(session_id=session_id)),
+            capture_output=True,
+            text=True,
+            cwd=str(scaffold),
+            timeout=10,
+            env=env,
+        )
+
+        # Stdout marker contract — identical to the crash matrix.
+        out = _assert_crash_marker_shape(result, "ModuleNotFoundError")
+
+        # Durable channel: exactly one gate_health event, full field
+        # set, same bounded error rendering as the stdout marker.
+        journal = session_dir / "session-journal.jsonl"
+        assert journal.exists(), (
+            f"journal not written; stderr={result.stderr!r}"
+        )
+        events = [
+            json.loads(line)
+            for line in journal.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        health_events = [
+            e for e in events if e.get("type") == "gate_health"
+        ]
+        assert len(health_events) == 1, (
+            f"exactly one gate_health event expected: {health_events!r}"
+        )
+        event = health_events[0]
+        assert set(event) == {
+            "v", "type", "ts", "hook", "status", "stage", "error",
+            "tool_name",
+        }
+        assert event["v"] == 1
+        assert event["hook"] == "task_lifecycle_gate"
+        assert event["status"] == "failed"
+        assert event["stage"] == "module imports"
+        assert "ModuleNotFoundError" in event["error"]
+        assert event["tool_name"] == "TaskUpdate"
+        assert event["ts"]
+        assert event["error"] == out["pactGateHealth"]["error"]
+
+        # Neither degradation disposition may fire on the success path.
+        assert "gate_health journal emit" not in result.stderr, (
+            "no skipped/unavailable disposition on the working "
+            f"import-stage journal path: {result.stderr!r}"
+        )
+
+    def test_oversized_stdin_degrades_to_marker_only_without_hang(
+        self, tmp_path,
+    ):
+        """The crash handler's late stdin read is capped: an over-cap
+        frame truncates mid-JSON inside the handler, degrades to the
+        "unavailable" stderr disposition, and the stdout floor marker
+        stays fully intact — no hang, no raise, no journal write, even
+        though the journal channel itself is alive (same live-channel
+        scaffold as the success leg, so the cap — not a dead channel —
+        is what stops the write)."""
+        scaffold, env, session_dir, session_id = (
+            _build_partial_breakage_scaffold(tmp_path)
+        )
+        frame = _make_gate_input(session_id=session_id)
+        # Pad well past the read cap with valid JSON so truncation —
+        # not malformed input — is what breaks the parse.
+        frame["pad"] = "a" * (9 * 1024 * 1024)
+        result = subprocess.run(
+            [sys.executable, str(scaffold / "task_lifecycle_gate.py")],
+            input=json.dumps(frame),
+            capture_output=True,
+            text=True,
+            cwd=str(scaffold),
+            timeout=30,
+            env=env,
+        )
+
+        # Floor marker contract fully intact despite the oversized frame.
+        _assert_crash_marker_shape(result, "ModuleNotFoundError")
+
+        # Best-effort channel degrades inside its guard: unavailable
+        # disposition on stderr, and nothing reaches the journal.
+        assert "gate_health journal emit unavailable" in result.stderr, (
+            f"over-cap frame must degrade in-guard: {result.stderr!r}"
+        )
+        assert not (session_dir / "session-journal.jsonl").exists(), (
+            "truncated frame must not produce a journal event"
+        )
 
 
 # =============================================================================

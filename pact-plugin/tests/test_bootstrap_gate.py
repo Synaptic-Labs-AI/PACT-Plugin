@@ -1864,6 +1864,104 @@ class TestDegradedMode:
 
 
 # =============================================================================
+# Hostile-__str__ crash path — every error-text render must fall back
+# =============================================================================
+
+
+def _break_shared_hostile_str(scaffold):
+    """shared/__init__.py raises an exception whose own __str__ raises —
+    the hostile-renderer shape: rendering an exception message runs
+    arbitrary exception-class code, so every interpolation of the caught
+    error on the crash path must fall back instead of letting the render
+    raise. Deliberately NOT in _BREAKAGE_VECTORS: the matrix asserts the
+    exception type is named in the DENY reason, which the raise-proof
+    constant fallback (no type prefix) intentionally does not satisfy."""
+    (scaffold / "shared").mkdir(parents=True)
+    (scaffold / "shared" / "__init__.py").write_text(
+        "class HostileStrError(Exception):\n"
+        "    def __str__(self):\n"
+        "        raise RuntimeError('hostile __str__')\n"
+        "raise HostileStrError()\n",
+        encoding="utf-8",
+    )
+
+
+class TestHostileStrCrashPath:
+
+    def _run(self, tmp_path, stdin_text):
+        import subprocess
+
+        hook_src = Path(__file__).parent.parent / "hooks" / "bootstrap_gate.py"
+        scaffold = tmp_path / "scaffold"
+        scaffold.mkdir(parents=True)
+        (scaffold / "bootstrap_gate.py").write_text(
+            hook_src.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        _break_shared_hostile_str(scaffold)
+        return subprocess.run(
+            [sys.executable, str(scaffold / "bootstrap_gate.py")],
+            input=stdin_text,
+            capture_output=True,
+            text=True,
+            cwd=str(scaffold),
+            timeout=10,
+        )
+
+    def test_mutating_deny_json_intact_under_hostile_str(self, tmp_path):
+        """Hostile __str__ must not suppress the deny: an unguarded render
+        raising before the deny print would exit nonzero-non-2 — a
+        non-blocking PreToolUse error, so the tool call would PROCEED
+        (fail-open). The deny JSON must print with the raise-proof
+        constant in the reason and the exit-2 blocking path intact."""
+        result = self._run(tmp_path, json.dumps(_make_input(tool_name="Edit")))
+        assert result.returncode == 2, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "deny"
+        reason = hso["permissionDecisionReason"]
+        assert "module imports" in reason
+        assert "<error text unavailable>" in reason, (
+            f"deny reason must carry the raise-proof constant: {reason!r}"
+        )
+        # Guarded stderr full-text line: placeholder, exit-2 preserved.
+        assert "Hook load error (bootstrap_gate / module imports)" in (
+            result.stderr
+        )
+        assert "<exception str() raised>" in result.stderr
+
+    def test_readonly_defer_intact_under_hostile_str(self, tmp_path):
+        """Degraded warn arm under hostile __str__: the bounded renderer
+        falls back to the type-prefixed placeholder inside the warning
+        (diagnosability preserved — the type name still appears), the
+        defer decision and exit 0 stay intact, and the guarded stderr
+        line carries the placeholder instead of voiding the decision
+        with a nonzero exit."""
+        result = self._run(tmp_path, json.dumps(_make_input(tool_name="Read")))
+        assert result.returncode == 0, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "defer"
+        for field in ("permissionDecisionReason", "additionalContext"):
+            assert "DEGRADED" in hso[field]
+            assert "module imports" in hso[field]
+            assert "HostileStrError: <exception str() raised>" in hso[field], (
+                f"warning must carry the type-prefixed placeholder: "
+                f"{hso[field]!r}"
+            )
+        assert "systemMessage" in out
+        assert "Hook degraded-defer (bootstrap_gate / module imports)" in (
+            result.stderr
+        )
+        assert "<exception str() raised>" in result.stderr
+
+
+# =============================================================================
 # Marker verification × CLAUDE_PLUGIN_ROOT env fallback — healthy path
 # =============================================================================
 
