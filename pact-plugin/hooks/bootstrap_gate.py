@@ -182,13 +182,20 @@ def _bounded_error_text(error: BaseException) -> str:
     spaces, and the result is truncated to _ERROR_TEXT_MAX chars with an
     explicit marker. Full text still goes to stderr at the call site.
 
-    Total over hostile exceptions: rendering the message runs the
-    exception's own __str__ (arbitrary code that can itself raise) — fall
-    back to the type name, which renders for any exception class."""
+    Total over hostile exceptions: BOTH renderings that run exception-owned
+    code are guarded. The type name is captured first — a metaclass can make
+    __name__ a property that raises — falling back to a literal; the message
+    runs the exception's own __str__ (arbitrary code that can itself raise),
+    falling back to a marker. Neither fallback touches the exception again,
+    so the function returns a string for any exception object."""
     try:
-        text = f"{type(error).__name__}: {error}"
+        type_name = type(error).__name__
+    except BaseException:  # noqa: BLE001 — hostile metaclass __name__ must not escape
+        type_name = "exception"
+    try:
+        text = f"{type_name}: {error}"
     except BaseException:  # noqa: BLE001 — hostile __str__ must not escape the renderer
-        text = f"{type(error).__name__}: <exception str() raised>"
+        text = f"{type_name}: <exception str() raised>"
     text = "".join(ch if ch.isprintable() else " " for ch in text)
     if len(text) > _ERROR_TEXT_MAX:
         text = text[:_ERROR_TEXT_MAX] + "...[truncated]"
