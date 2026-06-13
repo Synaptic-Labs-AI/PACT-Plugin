@@ -2357,6 +2357,152 @@ class TestBaseExceptionBreadthAtImport:
 
 
 # =============================================================================
+# Cycle-4 regression: __name__ that returns a str SUBCLASS whose formatting
+# hooks raise. isinstance(str_subclass, str) is True, so the cycle-3 isinstance
+# guard waved it through and _bounded_error_text raised out of both f-string
+# branches (str.__format__'s empty-spec path delegates to the overridden
+# __str__). cede8629 uses an EXACT-type guard (type(...) is str) that rejects
+# str subclasses too, collapsing the prefix to "exception". These pins lock the
+# restored exit-0 defer / exit-2 deny; counter-test: revert cede8629 (restore
+# isinstance) → the defer leg raises out of the renderer → exit 1 (fail-open).
+#
+# HAZARD: the hostile str subclass lives entirely in the subprocess scaffold
+# text — no in-process class whose __name__ pytest could bomb on collection.
+# =============================================================================
+
+
+def _break_shared_str_subclass_format_name(scaffold):
+    """shared/__init__.py raises an exception whose metaclass __name__ RETURNS
+    a str SUBCLASS instance whose __format__ raises."""
+    (scaffold / "shared").mkdir(parents=True)
+    (scaffold / "shared" / "__init__.py").write_text(
+        "class _FmtStr(str):\n"
+        "    def __format__(self, spec):\n"
+        "        raise RuntimeError('hostile str-subclass __format__')\n"
+        "class _FmtStrNameMeta(type):\n"
+        "    @property\n"
+        "    def __name__(cls):\n"
+        "        return _FmtStr('HostileFmtName')\n"
+        "class FmtStrNameBomb(Exception, metaclass=_FmtStrNameMeta):\n"
+        "    pass\n"
+        "raise FmtStrNameBomb('boom')\n",
+        encoding="utf-8",
+    )
+
+
+def _break_shared_str_subclass_str_name(scaffold):
+    """shared/__init__.py raises an exception whose metaclass __name__ RETURNS
+    a str SUBCLASS instance whose __str__ raises (str.__format__'s empty-spec
+    delegation to __str__ makes the f-string interpolation raise)."""
+    (scaffold / "shared").mkdir(parents=True)
+    (scaffold / "shared" / "__init__.py").write_text(
+        "class _StrStr(str):\n"
+        "    def __str__(self):\n"
+        "        raise RuntimeError('hostile str-subclass __str__')\n"
+        "class _StrStrNameMeta(type):\n"
+        "    @property\n"
+        "    def __name__(cls):\n"
+        "        return _StrStr('HostileStrName')\n"
+        "class StrStrNameBomb(Exception, metaclass=_StrStrNameMeta):\n"
+        "    pass\n"
+        "raise StrStrNameBomb('boom')\n",
+        encoding="utf-8",
+    )
+
+
+class TestStrSubclassNameReturnCrashPath:
+
+    def _run(self, tmp_path, stdin_text, breaker):
+        import subprocess
+
+        hook_src = Path(__file__).parent.parent / "hooks" / "bootstrap_gate.py"
+        scaffold = tmp_path / "scaffold"
+        scaffold.mkdir(parents=True)
+        (scaffold / "bootstrap_gate.py").write_text(
+            hook_src.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        breaker(scaffold)
+        return subprocess.run(
+            [sys.executable, str(scaffold / "bootstrap_gate.py")],
+            input=stdin_text,
+            capture_output=True,
+            text=True,
+            cwd=str(scaffold),
+            timeout=10,
+        )
+
+    @pytest.mark.parametrize(
+        "breaker",
+        [
+            _break_shared_str_subclass_format_name,
+            _break_shared_str_subclass_str_name,
+        ],
+        ids=["name-returns-str-subclass-format-bomb",
+             "name-returns-str-subclass-str-bomb"],
+    )
+    def test_readonly_defer_intact_under_str_subclass_name(
+        self, tmp_path, breaker,
+    ):
+        """The cycle-4 regression pin: a read-only tool under a module crash
+        whose __name__ RETURNS a hostile str SUBCLASS must take the defer arm
+        at exit 0, decision JSON intact, with the "exception" fallback in the
+        warning. Pre-cede8629 (isinstance guard) the str subclass passed the
+        guard and the renderer raised → exit 1, warning suppressed
+        (fail-open)."""
+        result = self._run(
+            tmp_path, json.dumps(_make_input(tool_name="Read")), breaker
+        )
+        assert result.returncode == 0, (
+            "a str-subclass __name__ must not regress the degraded path to a "
+            f"nonzero exit (the suppressed-warning fail-open): "
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "defer"
+        for field in ("permissionDecisionReason", "additionalContext"):
+            assert "DEGRADED" in hso[field]
+            assert "module imports" in hso[field]
+            assert "failure — exception:" in hso[field], (
+                f"warning must carry the exact-type-coerced fallback: "
+                f"{hso[field]!r}"
+            )
+        assert "systemMessage" in out
+        assert "Hook degraded-defer (bootstrap_gate / module imports)" in (
+            result.stderr
+        )
+
+    @pytest.mark.parametrize(
+        "breaker",
+        [
+            _break_shared_str_subclass_format_name,
+            _break_shared_str_subclass_str_name,
+        ],
+        ids=["name-returns-str-subclass-format-bomb",
+             "name-returns-str-subclass-str-bomb"],
+    )
+    def test_mutating_deny_intact_under_str_subclass_name(
+        self, tmp_path, breaker,
+    ):
+        """Deny-arm twin: a mutating tool under a str-subclass-__name__ module
+        crash still denies at exit 2 (blocking). The deny render's own constant
+        guard carries "<error text unavailable>" when the str subclass bombs
+        its render, so the blocking exit-2 path stays intact."""
+        result = self._run(
+            tmp_path, json.dumps(_make_input(tool_name="Edit")), breaker
+        )
+        assert result.returncode == 2, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "deny"
+        assert "module imports" in hso["permissionDecisionReason"]
+
+
+# =============================================================================
 # Marker verification × CLAUDE_PLUGIN_ROOT env fallback — healthy path
 # =============================================================================
 

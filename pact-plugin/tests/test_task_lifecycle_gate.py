@@ -4509,3 +4509,125 @@ def test_bounded_error_text_common_cases_unchanged_by_cycle3():
     assert tlg._bounded_error_text(ValueError("plain")) == "ValueError: plain"
     # Cycle-2 raising-__name__ path still degrades via its own try/except.
     assert tlg._bounded_error_text(_NameBomb("msg")) == "exception: msg"
+
+
+# =============================================================================
+# Cycle-4: _bounded_error_text total against __name__ that returns a str
+# SUBCLASS whose own __format__/__str__ raises. isinstance(str_subclass, str)
+# is True, so the cycle-3 isinstance guard would WAVE IT THROUGH and the
+# f-string interpolation (incl. str.__format__'s empty-spec delegation to the
+# overridden __str__) would raise out of both branches. cede8629 replaces the
+# guard with an EXACT-type check (type(type_name) is str) that rejects str
+# subclasses too, reducing type_name to an exact str whose __format__/__str__
+# are str's own unpatchable built-ins. Counter-test: revert cede8629 (restore
+# isinstance) → the str-subclass legs RAISE out of the helper.
+#
+# HAZARD (mirrors cycle-2/cycle-3): these metaclass __name__ properties return
+# str-subclass instances that bomb on format/str. Never let pytest repr a
+# hostile instance — pass instances positionally, assert on returned STRINGS.
+# =============================================================================
+
+
+class _RaisingFormatStr(str):
+    """A str SUBCLASS whose __format__ raises — isinstance(_, str) is True, so
+    only an exact-type guard coerces it."""
+
+    def __format__(self, spec):
+        raise RuntimeError("hostile str-subclass __format__")
+
+
+class _RaisingStrStr(str):
+    """A str SUBCLASS whose __str__ raises. str.__format__ with an empty spec
+    delegates to __str__, so f-string interpolation of this instance raises
+    too (verified empirically)."""
+
+    def __str__(self):
+        raise RuntimeError("hostile str-subclass __str__")
+
+
+class _NameReturnsFormatStrMeta(type):
+    @property
+    def __name__(cls):  # noqa: N805 — metaclass property over the class
+        return _RaisingFormatStr("HostileFmtName")
+
+
+class _FmtStrNameError(Exception, metaclass=_NameReturnsFormatStrMeta):
+    """__name__ RETURNS a str SUBCLASS whose __format__ raises."""
+
+
+class _NameReturnsStrSubMeta(type):
+    @property
+    def __name__(cls):  # noqa: N805 — metaclass property over the class
+        return _RaisingStrStr("HostileStrName")
+
+
+class _StrSubNameError(Exception, metaclass=_NameReturnsStrSubMeta):
+    """__name__ RETURNS a str SUBCLASS whose __str__ raises."""
+
+
+class _FmtStrNameRaisingMsgError(Exception, metaclass=_NameReturnsFormatStrMeta):
+    """__name__ RETURNS a hostile str subclass AND the exception's own __str__
+    raises — both halves of the render must be guarded."""
+
+    def __str__(self):
+        raise RuntimeError("hostile error __str__")
+
+
+def test_bounded_error_text_total_against_str_subclass_name():
+    """The exact-type guard coerces a str-SUBCLASS __name__ (which isinstance
+    would wave through) to "exception", so neither the subclass's hostile
+    __format__ nor its hostile __str__ ever runs — the helper returns a clean
+    str. Counter-test: revert cede8629 (restore the isinstance guard) →
+    isinstance(str_subclass, str) is True → the poison passes → the helper
+    raises out of both f-string branches.
+
+    Assert on returned STRINGS only; never let pytest repr a hostile
+    instance."""
+    assert tlg._bounded_error_text(_FmtStrNameError("m")) == "exception: m"
+    assert tlg._bounded_error_text(_StrSubNameError("m")) == "exception: m"
+
+
+def test_bounded_error_text_str_subclass_name_with_raising_error_message():
+    """Both halves hostile: a str-subclass __name__ AND a raising error
+    __str__ → the prefix collapses to "exception" (exact-type guard) and the
+    message half falls back to the guarded placeholder."""
+    assert tlg._bounded_error_text(_FmtStrNameRaisingMsgError("m")) == (
+        "exception: <exception str() raised>"
+    )
+
+
+def test_str_subclass_name_exception_emits_floor_marker_via_helper_totality(
+    capsys,
+):
+    """End-to-end through the crash path: a real str-subclass-__name__
+    exception renders "exception: ..." in the marker error (the exact-type
+    guard handled it), NOT the call-site "<error text unavailable>" constant —
+    the helper-totality branch, not the defense-in-depth fallback, carries it.
+    Floor marker intact, exit 0. Counter-test: revert cede8629 → the helper
+    raises and the call-site constant fires instead."""
+    with pytest.raises(SystemExit) as exc:
+        tlg._emit_load_failure_advisory("runtime", _FmtStrNameError("boom"))
+    assert exc.value.code == 0
+    out = json.loads(capsys.readouterr().out.strip())
+    marker = out["pactGateHealth"]
+    assert marker["status"] == "failed"
+    assert marker["stage"] == "runtime"
+    assert marker["error"] == "exception: boom", (
+        f"helper-totality (exact-type guard) path expected; "
+        f"got {marker['error']!r}"
+    )
+    assert marker["error"] != "<error text unavailable>"
+    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+    assert out["systemMessage"] == out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_bounded_error_text_genuine_str_name_unchanged_by_cycle4():
+    """Discriminator pin: the exact-type guard must NOT over-coerce a GENUINE
+    (exact) str __name__ — a normal class keeps its real name. Without this,
+    `type(...) is not str` could be mistaken for a blunt always-coerce. The
+    cycle-2/3 hostile fallbacks are also re-asserted to prove zero churn."""
+    assert tlg._bounded_error_text(ValueError("plain")) == "ValueError: plain"
+    assert tlg._bounded_error_text(_HostileStrError("m")) == (
+        "_HostileStrError: <exception str() raised>"
+    )
+    assert tlg._bounded_error_text(_IntNameError("msg")) == "exception: msg"
