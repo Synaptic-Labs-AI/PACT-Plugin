@@ -92,6 +92,7 @@ _ERROR_TEXT_MAX = 200
 # realistic hook frame and must not be slurped unbounded by a best-effort
 # emitter. An over-cap frame truncates mid-JSON → JSONDecodeError → the
 # guard's stderr disposition (marker-only outcome, never a raise).
+# VALUE MUST EQUAL bootstrap_gate._STDIN_READ_MAX (twin-VALUE discipline).
 _STDIN_READ_MAX = 8 * 1024 * 1024  # 8 MB
 
 

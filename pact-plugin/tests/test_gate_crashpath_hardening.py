@@ -496,8 +496,16 @@ class TestStderrBrokenPipeGuards:
         Driven through the real lazy import by making append_event return
         False (a live session_journal whose append fails). NON-VACUITY:
         write_calls >= 1 (the skip print ran AND raised) AND the helper
-        returned without escaping. With the inner guard removed the
-        BrokenPipeError would escape _emit_gate_health_event.
+        returned without escaping. Note this site is defense-in-depth: the
+        skip print sits INSIDE _emit_gate_health_event's outer
+        `except BaseException`, so removing the inner guard re-routes the
+        BrokenPipeError to that outer except (still caught — NOT an escape).
+        The inner guard is therefore explicit/documentary rather than the
+        load-bearing escape barrier; this test documents the now-explicit
+        guard and confirms the no-escape contract holds. (The genuinely
+        load-bearing T3 site — where a missing guard DOES flip the exit code
+        — is the except-handler print at tlg:201, covered by
+        test_tlg_gate_health_escape_handler_stderr_brokenpipe_no_exit_flip.)
         """
         import shared.session_journal as sj
 
