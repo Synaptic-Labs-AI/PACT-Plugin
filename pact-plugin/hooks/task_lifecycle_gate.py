@@ -99,6 +99,51 @@ def _bounded_error_text(error: BaseException) -> str:
     return text
 
 
+def _emit_gate_health_event(
+    stage: str, error_text: str, input_data: dict | None
+) -> None:
+    """Best-effort durable journal emit for a crash-path gate_health event.
+
+    Lazy-imports pact_context + session_journal so it stays functional on
+    the import-stage crash path (works unless the breakage hits those very
+    modules or shared/__init__ — then the lazy import raises into the guard
+    below and the stdout marker remains the only record; prep §2.1 table).
+    On the import-stage path stdin is still unconsumed: read + init here.
+    Never raises; never load-bearing (tmux teammate fires self-drop, #877).
+    """
+    try:
+        import shared.pact_context as _lazy_pact_context
+        import shared.session_journal as _lazy_session_journal
+
+        if input_data is None:
+            input_data = json.load(sys.stdin)
+        if not isinstance(input_data, dict):
+            return
+        if not _lazy_pact_context.is_initialized():
+            _lazy_pact_context.init(input_data)
+        event = _lazy_session_journal.make_event(
+            "gate_health",
+            hook="task_lifecycle_gate",
+            status="failed",
+            stage=stage,
+            error=error_text,
+            tool_name=input_data.get("tool_name", ""),
+        )
+        written = _lazy_session_journal.append_event(event)
+        if not written:
+            print(
+                "task_lifecycle_gate: gate_health journal emit skipped "
+                "(append_event returned False)",
+                file=sys.stderr,
+            )
+    except Exception:  # noqa: BLE001 — the crash handler must not crash
+        print(
+            "task_lifecycle_gate: gate_health journal emit unavailable "
+            "(late import or init failed)",
+            file=sys.stderr,
+        )
+
+
 def _emit_load_failure_advisory(
     stage: str, error: BaseException, input_data: dict | None = None
 ) -> NoReturn:
@@ -141,6 +186,7 @@ def _emit_load_failure_advisory(
         f"Hook load error (task_lifecycle_gate / {stage}): {error}",  # full text
         file=sys.stderr,
     )
+    _emit_gate_health_event(stage, error_text, input_data)      # bonus LAST
     sys.exit(0)
 
 
