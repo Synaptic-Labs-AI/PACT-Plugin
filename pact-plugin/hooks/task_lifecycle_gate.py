@@ -134,9 +134,9 @@ def _bounded_error_text(error: BaseException) -> str:
         text = f"{type_name}: <exception str() raised>"
     truncated = len(text) > _ERROR_TEXT_MAX
     if truncated:
-        # MemoryError-safe by STRUCTURE: bounding first keeps the join below
-        # O(cap) not O(n) — a multi-GB input never materializes a sanitized
-        # copy; asserted structurally, not via a multi-GB runtime test.
+        # MemoryError-safe by STRUCTURE: bounding first keeps the sanitize
+        # join O(cap) not O(n) — a multi-GB input never materializes a
+        # sanitized copy; asserted structurally, not via a runtime test.
         text = text[:_ERROR_TEXT_MAX]        # bound BEFORE the O(n) sanitize join
     text = "".join(ch if ch.isprintable() else " " for ch in text)
     if truncated:
