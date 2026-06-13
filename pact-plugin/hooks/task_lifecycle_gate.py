@@ -101,24 +101,28 @@ def _bounded_error_text(error: BaseException) -> str:
     spaces, and the result is truncated to _ERROR_TEXT_MAX chars with an
     explicit marker. Full text still goes to stderr at the call site.
 
-    Total over hostile exceptions: BOTH renderings that run exception-owned
-    code are guarded. The type name is captured first — a metaclass can make
-    __name__ a property that raises (caught; falls back to a literal) or
-    return a non-str object whose own __str__/__format__ raises (coerced to a
-    literal by the isinstance guard below, so type_name is provably a str
-    before interpolation); the message then runs the exception's own __str__
-    (arbitrary code that can itself raise), falling back to a marker. After
-    the coercion neither branch can raise on type_name, so the function
-    returns a string for any exception object."""
+    Total over hostile exceptions, structurally: the type name is captured
+    first — a metaclass can make __name__ a property that raises (caught;
+    falls back to a literal) or return any non-str value, INCLUDING a str
+    subclass whose own __str__/__format__ raises. The exact-type check below
+    (type(...) is str, which rejects str subclasses too) reduces type_name to
+    an EXACT str, whose __format__/__str__ are str's own built-ins and cannot
+    be overridden — so neither f-string branch below can raise on type_name
+    regardless of the original __name__ value. The only exception-owned code
+    left is the message render (error's own __str__), isolated to the main
+    branch and guarded by the fallback. The function therefore returns a
+    string for ANY exception object."""
     try:
         type_name = type(error).__name__
     except BaseException:  # noqa: BLE001 — hostile metaclass __name__ must not escape
         type_name = "exception"
-    # __name__ can also RETURN (not raise) a non-str object whose own
-    # __str__/__format__ raises; that poisoned value would defeat BOTH
-    # f-string branches below (the fallback re-interpolates type_name too).
-    # Coerce to a guaranteed str so the renderer is total for any exception.
-    if not isinstance(type_name, str):
+    # __name__ can also RETURN (not raise) a non-str value — including a str
+    # SUBCLASS whose own __str__/__format__ raises, which an isinstance check
+    # would wave through. An EXACT-type check (type(...) is str) rejects
+    # subclasses too, so type_name is provably an exact str whose formatting
+    # uses str's own unpatchable built-ins → both f-string branches below
+    # (incl. the fallback, which re-interpolates type_name) cannot raise on it.
+    if type(type_name) is not str:
         type_name = "exception"
     try:
         text = f"{type_name}: {error}"
