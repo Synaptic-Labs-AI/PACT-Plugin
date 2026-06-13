@@ -92,6 +92,10 @@ _ERROR_TEXT_MAX = 200
 # realistic hook frame and must not be slurped unbounded by a best-effort
 # emitter. An over-cap frame truncates mid-JSON → JSONDecodeError → the
 # guard's stderr disposition (marker-only outcome, never a raise).
+# This cap bounds MEMORY only — it does NOT reject sub-cap input: a frame
+# with a valid JSON prefix still parses (harmless — degraded never grants
+# allow, primary fails-open).
+# VALUE MUST EQUAL bootstrap_gate._STDIN_READ_MAX (twin-VALUE discipline).
 _STDIN_READ_MAX = 8 * 1024 * 1024  # 8 MB
 
 
@@ -128,9 +132,15 @@ def _bounded_error_text(error: BaseException) -> str:
         text = f"{type_name}: {error}"
     except BaseException:  # noqa: BLE001 — hostile __str__ must not escape the renderer
         text = f"{type_name}: <exception str() raised>"
+    truncated = len(text) > _ERROR_TEXT_MAX
+    if truncated:
+        # MemoryError-safe by STRUCTURE: bounding first keeps the sanitize
+        # join O(cap) not O(n) — a multi-GB input never materializes a
+        # sanitized copy; asserted structurally, not via a runtime test.
+        text = text[:_ERROR_TEXT_MAX]        # bound BEFORE the O(n) sanitize join
     text = "".join(ch if ch.isprintable() else " " for ch in text)
-    if len(text) > _ERROR_TEXT_MAX:
-        text = text[:_ERROR_TEXT_MAX] + "...[truncated]"
+    if truncated:
+        text = text + "...[truncated]"
     return text
 
 
@@ -177,22 +187,28 @@ def _emit_gate_health_event(
         )
         written = _lazy_session_journal.append_event(event)
         if not written:
-            print(
-                "task_lifecycle_gate: gate_health journal emit skipped "
-                "(append_event returned False)",
-                file=sys.stderr,
-            )
+            try:
+                print(
+                    "task_lifecycle_gate: gate_health journal emit skipped "
+                    "(append_event returned False)",
+                    file=sys.stderr,
+                )
+            except BaseException:  # noqa: BLE001 — a diagnostic-write raise must not flip the exit code
+                pass
     except BaseException:  # noqa: BLE001 — the crash handler must not crash:
         # mirror the import gauntlet's breadth (except BaseException at the
         # wrapped-import block). The lazy imports execute arbitrary module
         # bodies — a module-level sys.exit or KeyboardInterrupt surfacing
         # here would exit nonzero AFTER the floor marker printed, and stdout
         # JSON is only honored on exit 0.
-        print(
-            "task_lifecycle_gate: gate_health journal emit unavailable "
-            "(late import or init failed)",
-            file=sys.stderr,
-        )
+        try:
+            print(
+                "task_lifecycle_gate: gate_health journal emit unavailable "
+                "(late import or init failed)",
+                file=sys.stderr,
+            )
+        except BaseException:  # noqa: BLE001 — a diagnostic-write raise must not flip the exit code
+            pass
 
 
 def _emit_load_failure_advisory(
@@ -248,10 +264,13 @@ def _emit_load_failure_advisory(
         error_full = f"{error}"
     except BaseException:  # noqa: BLE001 — hostile __str__; keep the exit-0 path
         error_full = "<exception str() raised>"
-    print(
-        f"Hook load error (task_lifecycle_gate / {stage}): {error_full}",  # full text
-        file=sys.stderr,
-    )
+    try:
+        print(
+            f"Hook load error (task_lifecycle_gate / {stage}): {error_full}",  # full text
+            file=sys.stderr,
+        )
+    except BaseException:  # noqa: BLE001 — a diagnostic-write raise must not flip the exit code
+        pass
     _emit_gate_health_event(stage, error_text, input_data)      # bonus LAST
     sys.exit(0)
 
@@ -1402,7 +1421,7 @@ def _journal_lifecycle_decision(
 
 def main() -> None:
     try:
-        input_data = json.load(sys.stdin)
+        input_data = json.loads(sys.stdin.read(_STDIN_READ_MAX))
     except (json.JSONDecodeError, ValueError):
         # Malformed stdin → no-op (input-side failure is harness's domain).
         print(_SUPPRESS_OUTPUT)

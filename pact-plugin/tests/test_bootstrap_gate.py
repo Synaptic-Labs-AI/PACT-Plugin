@@ -1923,8 +1923,9 @@ class TestHostileStrCrashPath:
         assert hso["permissionDecision"] == "deny"
         reason = hso["permissionDecisionReason"]
         assert "module imports" in reason
-        assert "<error text unavailable>" in reason, (
-            f"deny reason must carry the raise-proof constant: {reason!r}"
+        assert "HostileStrError: <exception str() raised>" in reason, (
+            f"deny reason must name the hostile exception type via the bounded "
+            f"renderer (parity with the degraded path): {reason!r}"
         )
         # Guarded stderr full-text line: placeholder, exit-2 preserved.
         assert "Hook load error (bootstrap_gate / module imports)" in (
@@ -2079,10 +2080,12 @@ class TestHostileNameCrashPath:
     )
     def test_mutating_deny_intact_under_hostile_name(self, tmp_path, breaker):
         """Deny-arm twin: a mutating tool under hostile __name__ still
-        denies at exit 2 (blocking). The deny render has its OWN constant
-        guard (landed in the prior cycle), so under hostile __name__ its
-        reason carries "<error text unavailable>" rather than the
-        "exception" helper fallback — distinct render site, both total."""
+        denies at exit 2 (blocking). The deny render now routes through
+        _bounded_error_text (item 1: collapse the distinct render site into
+        the shared helper for M1-consistency), which is total — so under
+        hostile __name__ the reason carries the helper's "exception:"
+        type-name fallback (parity with the degraded arm), not the old
+        call-site "<error text unavailable>" constant. Deny still exits 2."""
         result = self._run(
             tmp_path, json.dumps(_make_input(tool_name="Edit")), breaker
         )
@@ -2093,7 +2096,16 @@ class TestHostileNameCrashPath:
         hso = out["hookSpecificOutput"]
         assert hso["hookEventName"] == "PreToolUse"
         assert hso["permissionDecision"] == "deny"
-        assert "<error text unavailable>" in hso["permissionDecisionReason"]
+        expected_render = (
+            "exception: boom"
+            if breaker is _break_shared_hostile_name
+            else "exception: <exception str() raised>"
+        )
+        assert expected_render in hso["permissionDecisionReason"], (
+            f"deny reason must carry the bounded-helper fallback (hostile "
+            f"__name__ → 'exception:' type-name fallback), parity with the "
+            f"degraded arm: {hso['permissionDecisionReason']!r}"
+        )
 
 
 # =============================================================================
@@ -2486,9 +2498,11 @@ class TestStrSubclassNameReturnCrashPath:
         self, tmp_path, breaker,
     ):
         """Deny-arm twin: a mutating tool under a str-subclass-__name__ module
-        crash still denies at exit 2 (blocking). The deny render's own constant
-        guard carries "<error text unavailable>" when the str subclass bombs
-        its render, so the blocking exit-2 path stays intact."""
+        crash still denies at exit 2 (blocking). The deny render routes
+        through the total _bounded_error_text (item 1), so a str-subclass
+        __name__ that bombs its own render is coerced to the "exception"
+        type-name fallback rather than raising — the blocking exit-2 path
+        stays intact."""
         result = self._run(
             tmp_path, json.dumps(_make_input(tool_name="Edit")), breaker
         )

@@ -93,7 +93,7 @@ def _emit_load_failure_deny(stage: str, error: BaseException) -> NoReturn:
     # PROCEEDS (fail-open). The deny must print for any exception; the
     # fallback is a raise-proof constant.
     try:
-        error_render = f"{type(error).__name__}: {error}"
+        error_render = _bounded_error_text(error)
     except BaseException:  # noqa: BLE001 — hostile __str__ must not suppress the deny
         error_render = "<error text unavailable>"
     print(json.dumps({
@@ -113,10 +113,13 @@ def _emit_load_failure_deny(stage: str, error: BaseException) -> NoReturn:
         error_full = f"{error}"
     except BaseException:  # noqa: BLE001 — hostile __str__; keep the exit-2 path
         error_full = "<exception str() raised>"
-    print(
-        f"Hook load error (bootstrap_gate / {stage}): {error_full}",
-        file=sys.stderr,
-    )
+    try:
+        print(
+            f"Hook load error (bootstrap_gate / {stage}): {error_full}",
+            file=sys.stderr,
+        )
+    except BaseException:  # noqa: BLE001 — a diagnostic-write raise must not flip the exit code
+        pass
     sys.exit(2)
 
 
@@ -155,7 +158,7 @@ def _read_stdin_tool_name() -> "str | None":
     preserving, since a module-load failure denied before stdin was ever
     read pre-#942)."""
     try:
-        data = json.load(sys.stdin)
+        data = json.loads(sys.stdin.read(_STDIN_READ_MAX))
         name = data.get("tool_name")
         return name if isinstance(name, str) and name else None
     except Exception:
@@ -174,6 +177,20 @@ _DEGRADED_ASK_TOOLS = frozenset({"WebFetch", "WebSearch"})
 # crafted payloads in tracebacks) — bound + sanitize before interpolation.
 # The stderr diagnostic line keeps the full text (debug channel).
 _ERROR_TEXT_MAX = 200
+
+# Cap on every stdin read in this hook (primary main() read + the
+# degraded import-stage read). Generous: real PreToolUse frames embed
+# tool_input payloads and stay well under this; anything larger is not a
+# realistic hook frame and must not be slurped unbounded. An over-cap
+# frame truncates mid-JSON → JSONDecodeError → the existing except at
+# each read site (fail-open suppress on the primary; fail-closed deny on
+# the degraded read).
+# This cap bounds MEMORY only — it does NOT reject sub-cap input: a frame
+# with a valid JSON prefix still parses (harmless — degraded never grants
+# allow, primary fails-open).
+# VALUE MUST EQUAL task_lifecycle_gate._STDIN_READ_MAX
+# (independent module literal — twin-VALUE discipline, like _ERROR_TEXT_MAX).
+_STDIN_READ_MAX = 8 * 1024 * 1024  # 8 MB
 
 
 def _bounded_error_text(error: BaseException) -> str:
@@ -209,9 +226,15 @@ def _bounded_error_text(error: BaseException) -> str:
         text = f"{type_name}: {error}"
     except BaseException:  # noqa: BLE001 — hostile __str__ must not escape the renderer
         text = f"{type_name}: <exception str() raised>"
+    truncated = len(text) > _ERROR_TEXT_MAX
+    if truncated:
+        # MemoryError-safe by STRUCTURE: bounding first keeps the sanitize
+        # join O(cap) not O(n) — a multi-GB input never materializes a
+        # sanitized copy; asserted structurally, not via a runtime test.
+        text = text[:_ERROR_TEXT_MAX]        # bound BEFORE the O(n) sanitize join
     text = "".join(ch if ch.isprintable() else " " for ch in text)
-    if len(text) > _ERROR_TEXT_MAX:
-        text = text[:_ERROR_TEXT_MAX] + "...[truncated]"
+    if truncated:
+        text = text + "...[truncated]"
     return text
 
 
@@ -267,10 +290,13 @@ def _emit_degraded_warning(stage: str, error: BaseException, tool_name: str) -> 
         error_full = f"{error}"
     except BaseException:  # noqa: BLE001 — hostile __str__; keep the exit-0 path
         error_full = "<exception str() raised>"
-    print(
-        f"Hook degraded-{decision} (bootstrap_gate / {stage}): {tool_name} — {error_full}",
-        file=sys.stderr,
-    )
+    try:
+        print(
+            f"Hook degraded-{decision} (bootstrap_gate / {stage}): {tool_name} — {error_full}",
+            file=sys.stderr,
+        )
+    except BaseException:  # noqa: BLE001 — a diagnostic-write raise must not flip the exit code
+        pass
     sys.exit(0)
 
 
@@ -597,7 +623,7 @@ def _check_tool_allowed(input_data: dict) -> str | None:
 
 def main():
     try:
-        input_data = json.load(sys.stdin)
+        input_data = json.loads(sys.stdin.read(_STDIN_READ_MAX))
     except (json.JSONDecodeError, ValueError):
         # Malformed stdin → fail-OPEN (input-side failure is harness's domain).
         # Cannot evaluate without input; cannot DENY meaningfully.
