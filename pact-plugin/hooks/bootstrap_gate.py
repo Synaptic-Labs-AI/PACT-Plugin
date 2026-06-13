@@ -155,7 +155,7 @@ def _read_stdin_tool_name() -> "str | None":
     preserving, since a module-load failure denied before stdin was ever
     read pre-#942)."""
     try:
-        data = json.load(sys.stdin)
+        data = json.loads(sys.stdin.read(_STDIN_READ_MAX))
         name = data.get("tool_name")
         return name if isinstance(name, str) and name else None
     except Exception:
@@ -174,6 +174,16 @@ _DEGRADED_ASK_TOOLS = frozenset({"WebFetch", "WebSearch"})
 # crafted payloads in tracebacks) — bound + sanitize before interpolation.
 # The stderr diagnostic line keeps the full text (debug channel).
 _ERROR_TEXT_MAX = 200
+
+# Cap on every stdin read in this hook (primary main() read + the
+# degraded import-stage read). Generous: real PreToolUse frames embed
+# tool_input payloads and stay well under this; anything larger is not a
+# realistic hook frame and must not be slurped unbounded. An over-cap
+# frame truncates mid-JSON → JSONDecodeError → the existing except at
+# each read site (fail-open suppress on the primary; fail-closed deny on
+# the degraded read). VALUE MUST EQUAL task_lifecycle_gate._STDIN_READ_MAX
+# (independent module literal — twin-VALUE discipline, like _ERROR_TEXT_MAX).
+_STDIN_READ_MAX = 8 * 1024 * 1024  # 8 MB
 
 
 def _bounded_error_text(error: BaseException) -> str:
@@ -597,7 +607,7 @@ def _check_tool_allowed(input_data: dict) -> str | None:
 
 def main():
     try:
-        input_data = json.load(sys.stdin)
+        input_data = json.loads(sys.stdin.read(_STDIN_READ_MAX))
     except (json.JSONDecodeError, ValueError):
         # Malformed stdin → fail-OPEN (input-side failure is harness's domain).
         # Cannot evaluate without input; cannot DENY meaningfully.

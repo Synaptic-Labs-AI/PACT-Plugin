@@ -1402,7 +1402,7 @@ def _journal_lifecycle_decision(
 
 def main() -> None:
     try:
-        input_data = json.load(sys.stdin)
+        input_data = json.loads(sys.stdin.read(_STDIN_READ_MAX))
     except (json.JSONDecodeError, ValueError):
         # Malformed stdin → no-op (input-side failure is harness's domain).
         print(_SUPPRESS_OUTPUT)
