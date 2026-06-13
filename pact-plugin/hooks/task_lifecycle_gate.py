@@ -1354,9 +1354,8 @@ def main() -> None:
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
-    pact_context.init(input_data)
-
     try:
+        pact_context.init(input_data)
         advisories = evaluate_lifecycle(input_data)
     except Exception as e:  # noqa: BLE001 — runtime catch-all → advisory
         _emit_load_failure_advisory("runtime", e, input_data)
