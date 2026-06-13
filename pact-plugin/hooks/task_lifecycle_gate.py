@@ -79,28 +79,66 @@ from typing import NoReturn
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 
-def _emit_load_failure_advisory(stage: str, error: BaseException) -> NoReturn:
+# Cap on exception text interpolated into context-bound output (warning
+# strings reaching Claude's context and the user banner). Exception
+# messages can embed attacker-influencable content (file contents, paths,
+# crafted payloads in tracebacks) — bound + sanitize before interpolation.
+# The stderr diagnostic line keeps the full text (debug channel).
+_ERROR_TEXT_MAX = 200
+
+
+def _bounded_error_text(error: BaseException) -> str:
+    """Sanitized, length-bounded rendering of an exception for embedding in
+    context-bound warning text: control/non-printable characters become
+    spaces, and the result is truncated to _ERROR_TEXT_MAX chars with an
+    explicit marker. Full text still goes to stderr at the call site."""
+    text = f"{type(error).__name__}: {error}"
+    text = "".join(ch if ch.isprintable() else " " for ch in text)
+    if len(text) > _ERROR_TEXT_MAX:
+        text = text[:_ERROR_TEXT_MAX] + "...[truncated]"
+    return text
+
+
+def _emit_load_failure_advisory(
+    stage: str, error: BaseException, input_data: dict | None = None
+) -> NoReturn:
     """Stdlib-only fail-advisory (PostToolUse cannot DENY).
 
     Mirrors bootstrap_gate._emit_load_failure_deny but for PostToolUse —
     advisory output + exit 0 since deny is not a valid PostToolUse verdict.
     Uses ONLY stdlib (json, sys) so it remains functional even when every
     wrapped import below fails.
+
+    Crash-path health surfacing: a top-level pactGateHealth key (stripped by
+    the platform's non-strict output schema; assertable on RAW stdout only)
+    plus a systemMessage mirror of the advisory, plus a best-effort
+    gate_health journal event. Error text is bounded/sanitized for all
+    context-bound output; the stderr diagnostic keeps the full text.
     """
+    error_text = _bounded_error_text(error)
+    advisory = (
+        f"PACT task_lifecycle_gate {stage} failure — lifecycle "
+        f"rule enforcement skipped this turn. "
+        f"{error_text}. Investigate hook "
+        "installation and shared module availability."
+    )
     output = {
         "hookSpecificOutput": {
             "hookEventName": "PostToolUse",
-            "additionalContext": (
-                f"PACT task_lifecycle_gate {stage} failure — lifecycle "
-                f"rule enforcement skipped this turn. "
-                f"{type(error).__name__}: {error}. Investigate hook "
-                "installation and shared module availability."
-            ),
-        }
+            "additionalContext": advisory,
+        },
+        "systemMessage": advisory,
+        "pactGateHealth": {
+            "v": 1,
+            "hook": "task_lifecycle_gate",
+            "status": "failed",
+            "stage": stage,
+            "error": error_text,
+        },
     }
-    print(json.dumps(output))
+    print(json.dumps(output))                                   # floor FIRST
     print(
-        f"Hook load error (task_lifecycle_gate / {stage}): {error}",
+        f"Hook load error (task_lifecycle_gate / {stage}): {error}",  # full text
         file=sys.stderr,
     )
     sys.exit(0)
@@ -1275,7 +1313,7 @@ def main() -> None:
     try:
         advisories = evaluate_lifecycle(input_data)
     except Exception as e:  # noqa: BLE001 — runtime catch-all → advisory
-        _emit_load_failure_advisory("runtime", e)
+        _emit_load_failure_advisory("runtime", e, input_data)
         return  # unreachable; helper exits
 
     _journal_lifecycle_decision(input_data, advisories)
