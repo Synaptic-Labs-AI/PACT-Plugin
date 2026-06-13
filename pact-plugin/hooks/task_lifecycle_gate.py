@@ -79,30 +79,180 @@ from typing import NoReturn
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 
-def _emit_load_failure_advisory(stage: str, error: BaseException) -> NoReturn:
+# Cap on exception text interpolated into context-bound output (warning
+# strings reaching Claude's context and the user banner). Exception
+# messages can embed attacker-influencable content (file contents, paths,
+# crafted payloads in tracebacks) — bound + sanitize before interpolation.
+# The stderr diagnostic line keeps the full text (debug channel).
+_ERROR_TEXT_MAX = 200
+
+# Cap on the crash-path stdin read in _emit_gate_health_event. Generous:
+# real PostToolUse frames embed tool_response payloads (file contents,
+# command output) and stay well under this; anything larger is not a
+# realistic hook frame and must not be slurped unbounded by a best-effort
+# emitter. An over-cap frame truncates mid-JSON → JSONDecodeError → the
+# guard's stderr disposition (marker-only outcome, never a raise).
+_STDIN_READ_MAX = 8 * 1024 * 1024  # 8 MB
+
+
+def _bounded_error_text(error: BaseException) -> str:
+    """Sanitized, length-bounded rendering of an exception for embedding in
+    context-bound warning text: control/non-printable characters become
+    spaces, and the result is truncated to _ERROR_TEXT_MAX chars with an
+    explicit marker. Full text still goes to stderr at the call site.
+
+    Total over hostile exceptions, structurally: the type name is captured
+    first — a metaclass can make __name__ a property that raises (caught;
+    falls back to a literal) or return any non-str value, INCLUDING a str
+    subclass whose own __str__/__format__ raises. The exact-type check below
+    (type(...) is str, which rejects str subclasses too) reduces type_name to
+    an EXACT str, whose __format__/__str__ are str's own built-ins and cannot
+    be overridden — so neither f-string branch below can raise on type_name
+    regardless of the original __name__ value. The only exception-owned code
+    left is the message render (error's own __str__), isolated to the main
+    branch and guarded by the fallback. The function therefore returns a
+    string for ANY exception object."""
+    try:
+        type_name = type(error).__name__
+    except BaseException:  # noqa: BLE001 — hostile metaclass __name__ must not escape
+        type_name = "exception"
+    # __name__ can also RETURN (not raise) a non-str value — including a str
+    # SUBCLASS whose own __str__/__format__ raises, which an isinstance check
+    # would wave through. An EXACT-type check (type(...) is str) rejects
+    # subclasses too, so type_name is provably an exact str whose formatting
+    # uses str's own unpatchable built-ins → both f-string branches below
+    # (incl. the fallback, which re-interpolates type_name) cannot raise on it.
+    if type(type_name) is not str:
+        type_name = "exception"
+    try:
+        text = f"{type_name}: {error}"
+    except BaseException:  # noqa: BLE001 — hostile __str__ must not escape the renderer
+        text = f"{type_name}: <exception str() raised>"
+    text = "".join(ch if ch.isprintable() else " " for ch in text)
+    if len(text) > _ERROR_TEXT_MAX:
+        text = text[:_ERROR_TEXT_MAX] + "...[truncated]"
+    return text
+
+
+def _emit_gate_health_event(
+    stage: str, error_text: str, input_data: dict | None
+) -> None:
+    """Best-effort durable journal emit for a crash-path gate_health event.
+
+    Lazy-imports pact_context + session_journal so it stays functional on
+    the import-stage crash path (works unless the breakage hits those very
+    modules or shared/__init__ — then the lazy import raises into the guard
+    below and the stdout marker remains the only record; prep §2.1 table).
+    On the import-stage path stdin is still unconsumed: read (capped at
+    _STDIN_READ_MAX) + init here.
+    Never raises; never load-bearing (tmux teammate fires self-drop, #877).
+    """
+    try:
+        import shared.pact_context as _lazy_pact_context
+        import shared.session_journal as _lazy_session_journal
+
+        if input_data is None:
+            input_data = json.loads(sys.stdin.read(_STDIN_READ_MAX))
+        if not isinstance(input_data, dict):
+            return
+        if not _lazy_pact_context.is_initialized():
+            _lazy_pact_context.init(input_data)
+        # tool_name is attacker-set stdin on the import-stage path (main()'s
+        # TaskCreate/TaskUpdate allowlist short-circuit never ran) — apply
+        # the same sanitize+bound discipline as the error text before it
+        # reaches the durable journal.
+        tool_name = input_data.get("tool_name", "")
+        if not isinstance(tool_name, str):
+            tool_name = f"<non-str {type(tool_name).__name__}>"
+        tool_name = "".join(ch if ch.isprintable() else " " for ch in tool_name)
+        if len(tool_name) > _ERROR_TEXT_MAX:
+            tool_name = tool_name[:_ERROR_TEXT_MAX] + "...[truncated]"
+        event = _lazy_session_journal.make_event(
+            "gate_health",
+            hook="task_lifecycle_gate",
+            status="failed",
+            stage=stage,
+            error=error_text,
+            tool_name=tool_name,
+        )
+        written = _lazy_session_journal.append_event(event)
+        if not written:
+            print(
+                "task_lifecycle_gate: gate_health journal emit skipped "
+                "(append_event returned False)",
+                file=sys.stderr,
+            )
+    except BaseException:  # noqa: BLE001 — the crash handler must not crash:
+        # mirror the import gauntlet's breadth (except BaseException at the
+        # wrapped-import block). The lazy imports execute arbitrary module
+        # bodies — a module-level sys.exit or KeyboardInterrupt surfacing
+        # here would exit nonzero AFTER the floor marker printed, and stdout
+        # JSON is only honored on exit 0.
+        print(
+            "task_lifecycle_gate: gate_health journal emit unavailable "
+            "(late import or init failed)",
+            file=sys.stderr,
+        )
+
+
+def _emit_load_failure_advisory(
+    stage: str, error: BaseException, input_data: dict | None = None
+) -> NoReturn:
     """Stdlib-only fail-advisory (PostToolUse cannot DENY).
 
     Mirrors bootstrap_gate._emit_load_failure_deny but for PostToolUse —
     advisory output + exit 0 since deny is not a valid PostToolUse verdict.
     Uses ONLY stdlib (json, sys) so it remains functional even when every
     wrapped import below fails.
+
+    Crash-path health surfacing: a top-level pactGateHealth key (stripped by
+    the platform's non-strict output schema; assertable on RAW stdout only)
+    plus a systemMessage mirror of the advisory, plus a best-effort
+    gate_health journal event. Error text is bounded/sanitized for all
+    context-bound output; the stderr diagnostic keeps the full text.
     """
+    # Thin call-site fallback (defense-in-depth over the now-total helper):
+    # the FLOOR below must print no matter what the renderer does. The
+    # fallback is a raise-proof CONSTANT — type(error).__name__ would
+    # re-invoke the same attribute access (hostile metaclass __name__) that
+    # is the helper's one remaining fall-through path.
+    try:
+        error_text = _bounded_error_text(error)
+    except BaseException:  # noqa: BLE001 — floor must survive any renderer defect
+        error_text = "<error text unavailable>"
+    advisory = (
+        f"PACT task_lifecycle_gate {stage} failure — lifecycle "
+        f"rule enforcement skipped this turn. "
+        f"{error_text}. Investigate hook "
+        "installation and shared module availability."
+    )
     output = {
         "hookSpecificOutput": {
             "hookEventName": "PostToolUse",
-            "additionalContext": (
-                f"PACT task_lifecycle_gate {stage} failure — lifecycle "
-                f"rule enforcement skipped this turn. "
-                f"{type(error).__name__}: {error}. Investigate hook "
-                "installation and shared module availability."
-            ),
-        }
+            "additionalContext": advisory,
+        },
+        "systemMessage": advisory,
+        "pactGateHealth": {
+            "v": 1,
+            "hook": "task_lifecycle_gate",
+            "status": "failed",
+            "stage": stage,
+            "error": error_text,
+        },
     }
-    print(json.dumps(output))
+    print(json.dumps(output))                                   # floor FIRST
+    # Guarded full-text rendering: this line runs AFTER the floor printed,
+    # but an unguarded str(error) raising here would exit nonzero — and
+    # stdout JSON is only honored on exit 0, voiding the floor retroactively.
+    try:
+        error_full = f"{error}"
+    except BaseException:  # noqa: BLE001 — hostile __str__; keep the exit-0 path
+        error_full = "<exception str() raised>"
     print(
-        f"Hook load error (task_lifecycle_gate / {stage}): {error}",
+        f"Hook load error (task_lifecycle_gate / {stage}): {error_full}",  # full text
         file=sys.stderr,
     )
+    _emit_gate_health_event(stage, error_text, input_data)      # bonus LAST
     sys.exit(0)
 
 
@@ -1270,12 +1420,11 @@ def main() -> None:
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
-    pact_context.init(input_data)
-
     try:
+        pact_context.init(input_data)
         advisories = evaluate_lifecycle(input_data)
     except Exception as e:  # noqa: BLE001 — runtime catch-all → advisory
-        _emit_load_failure_advisory("runtime", e)
+        _emit_load_failure_advisory("runtime", e, input_data)
         return  # unreachable; helper exits
 
     _journal_lifecycle_decision(input_data, advisories)

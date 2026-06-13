@@ -3938,3 +3938,696 @@ def test_M2_value_error_in_task_read_does_not_suppress_gate(
     assert not any(r == "audit_summary_overwrite" for r, _ in advisories), (
         "NUL-byte taskId read degraded to {} → no authored mirror → no overwrite fire"
     )
+
+
+# =============================================================================
+# Crash-path health marker (#951) — runtime-stage legs, journal pin,
+# error bounding. Import-stage subprocess matrix lives in
+# test_task_lifecycle_gate_degraded.py.
+# =============================================================================
+
+
+def _raise_runtime_failure(_input_data):
+    raise RuntimeError("simulated evaluate failure")
+
+
+def test_advisory_output_carries_no_health_marker(
+    capsys, monkeypatch, tmp_path, pact_context,
+):
+    """Healthy advisory shape is unchanged: a real rule firing through a
+    full main() invocation emits hookEventName + additionalContext and
+    NEITHER pactGateHealth NOR systemMessage — the marker decorates only
+    crash paths, never healthy advisories. (The suppress-shape twin pins
+    are byte-identity asserts elsewhere in this file and in the degraded
+    sibling module.)"""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskCreate",
+        "tool_input": {
+            "subject": "implement foo",
+            "owner": "pact-backend-coder",
+            "addBlockedBy": ["41"],
+            "metadata": {"variety": None},
+        },
+        "tool_response": {},
+    }
+    code, out = _capture_main(payload, capsys)
+    assert code == 0
+    hso = out["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PostToolUse"
+    assert "additionalContext" in hso
+    assert "pactGateHealth" not in out
+    assert "systemMessage" not in out
+
+
+def test_runtime_failure_emits_health_marker_with_runtime_stage(
+    capsys, monkeypatch, tmp_path,
+):
+    """evaluate_lifecycle raising inside main() → exit 0 with the full
+    machine marker at stage "runtime", the systemMessage mirror, and the
+    bounded error text naming the exception type. With no session context
+    resolvable (CLAUDE_PROJECT_DIR unset, config dir sandboxed) the
+    best-effort journal emit deterministically degrades to the
+    append-returned-False stderr disposition — never a raise."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.setattr(tlg, "evaluate_lifecycle", _raise_runtime_failure)
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "in_progress"},
+        "tool_response": {},
+        "session_id": "health-marker-session",
+    }
+    with patch.object(sys, "stdin", _stdin(payload)):
+        with pytest.raises(SystemExit) as exc:
+            tlg.main()
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    out = json.loads(captured.out.strip())
+    marker = out["pactGateHealth"]
+    assert set(marker) == {"v", "hook", "status", "stage", "error"}
+    assert marker["v"] == 1
+    assert marker["hook"] == "task_lifecycle_gate"
+    assert marker["status"] == "failed"
+    assert marker["stage"] == "runtime"
+    assert "RuntimeError" in marker["error"]
+    assert "simulated evaluate failure" in marker["error"]
+    hso = out["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PostToolUse"
+    assert out["systemMessage"] == hso["additionalContext"]
+    assert "RuntimeError" in hso["additionalContext"]
+    assert "gate_health journal emit skipped" in captured.err, (
+        "no-session journal degradation must surface on the debug channel "
+        "(append_event returned False), never raise"
+    )
+
+
+def test_runtime_failure_writes_gate_health_journal_event(
+    capsys, monkeypatch, tmp_path, pact_context,
+):
+    """The journal channel's ONE pin, on the path where it is contractually
+    expected to work (imports fine, context initialized, context FILE on
+    disk): a runtime failure appends exactly one gate_health event with
+    the full field set to the session journal — and neither stderr
+    disposition line fires.
+
+    Sandbox: the context file lives in tmp_path (pact_context fixture)
+    and CLAUDE_CONFIG_DIR points inside tmp_path, so get_session_dir
+    resolves the journal under the sandbox, never the real ~/.claude."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+    pact_context(team_name="test-team", session_id="test-session")
+    monkeypatch.setattr(tlg, "evaluate_lifecycle", _raise_runtime_failure)
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "in_progress"},
+        "tool_response": {},
+        "session_id": "test-session",
+    }
+    with patch.object(sys, "stdin", _stdin(payload)):
+        with pytest.raises(SystemExit) as exc:
+            tlg.main()
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+
+    # The context file's project_dir is /test/project → slug "project";
+    # session_id comes from the context file, not stdin.
+    journal = (
+        tmp_path / "cfg" / "pact-sessions" / "project" / "test-session"
+        / "session-journal.jsonl"
+    )
+    assert journal.exists(), (
+        f"journal not written; stderr={captured.err!r}"
+    )
+    events = [
+        json.loads(line)
+        for line in journal.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    health_events = [e for e in events if e.get("type") == "gate_health"]
+    assert len(health_events) == 1, (
+        f"exactly one gate_health event expected, got {len(health_events)}: "
+        f"{health_events!r}"
+    )
+    event = health_events[0]
+    assert set(event) == {
+        "v", "type", "ts", "hook", "status", "stage", "error", "tool_name",
+    }
+    assert event["v"] == 1
+    assert event["hook"] == "task_lifecycle_gate"
+    assert event["status"] == "failed"
+    assert event["stage"] == "runtime"
+    assert "RuntimeError" in event["error"]
+    assert event["tool_name"] == "TaskUpdate"
+    assert event["ts"]
+
+    # Journal-event error text and marker error text are the same bounded
+    # rendering — one bounding discipline across every context-bound surface.
+    out = json.loads(captured.out.strip())
+    assert event["error"] == out["pactGateHealth"]["error"]
+
+    assert "gate_health journal emit" not in captured.err, (
+        "neither disposition line (skipped / unavailable) may fire on the "
+        "working journal path"
+    )
+
+
+def test_init_failure_routes_through_runtime_advisory(
+    capsys, monkeypatch, tmp_path,
+):
+    """pact_context.init raising inside main() → the runtime crash mask,
+    NOT an unmasked traceback: exit 0 with the stage-"runtime" marker
+    naming the init failure. Pins the guarded-init routing (previously
+    the file's one unmasked crash path). The journal emit's own lazy
+    init call hits the same patched raise inside its guard → the
+    "unavailable" stderr disposition, never a propagated exception."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setattr(
+        tlg.pact_context,
+        "init",
+        lambda _input_data: (_ for _ in ()).throw(
+            RuntimeError("simulated init failure")
+        ),
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "in_progress"},
+        "tool_response": {},
+        "session_id": "init-failure-session",
+    }
+    with patch.object(sys, "stdin", _stdin(payload)):
+        with pytest.raises(SystemExit) as exc:
+            tlg.main()
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    out = json.loads(captured.out.strip())
+    marker = out["pactGateHealth"]
+    assert marker["stage"] == "runtime"
+    assert marker["status"] == "failed"
+    assert "RuntimeError" in marker["error"]
+    assert "simulated init failure" in marker["error"]
+    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+    assert "gate_health journal emit unavailable" in captured.err, (
+        "the journal emitter's lazy init hits the same raise and must "
+        "degrade to the unavailable disposition inside its guard"
+    )
+
+
+def test_health_marker_error_text_is_bounded_and_sanitized(capsys):
+    """Direct helper invoke with pathological exception text (600+ chars,
+    embedded control characters): every context-bound surface (marker
+    error, advisory, systemMessage) carries the SAME sanitized rendering
+    truncated at the cap with an explicit marker — while the stderr
+    diagnostic keeps the full raw text (debug-channel split).
+
+    The control characters sit INSIDE the truncation window (sanitized-
+    text indices 62-64, well under the 200-char cap), so the sanitize
+    step itself — not truncation — is what removes them: with the
+    sanitize substitution deleted from _bounded_error_text, the
+    positional and printability asserts below fail. Hostile bytes placed
+    past the cap would make every sanitization assert vacuously true."""
+    noisy = "a" * 50 + "\x00\x07\x1b" + "b" * 600
+    err = ValueError(noisy)
+    with pytest.raises(SystemExit) as exc:
+        tlg._emit_load_failure_advisory("runtime", err)
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    out = json.loads(captured.out.strip())
+
+    error_field = out["pactGateHealth"]["error"]
+    suffix = "...[truncated]"
+    assert error_field.endswith(suffix)
+    assert len(error_field) == 200 + len(suffix)
+    assert error_field.startswith("ValueError: ")
+    # Positional pin: "ValueError: " (12) + 50 a's puts the three control
+    # characters at indices 62-64 — each must have become a space.
+    assert error_field[61] == "a"
+    assert error_field[62:65] == "   ", (
+        f"control characters inside the cap window must be substituted "
+        f"with spaces by sanitization: {error_field[55:70]!r}"
+    )
+    assert error_field[65] == "b"
+    assert all(ch.isprintable() for ch in error_field), (
+        f"control characters must be sanitized: {error_field!r}"
+    )
+
+    # Same bounded text on every context-bound surface.
+    hso = out["hookSpecificOutput"]
+    assert error_field in hso["additionalContext"]
+    assert error_field in out["systemMessage"]
+    assert "\x00" not in out["systemMessage"]
+
+    # Debug channel keeps the full raw text — past the cap AND unsanitized
+    # (the raw control bytes survive only on stderr).
+    assert "b" * 600 in captured.err
+    assert "\x00\x07\x1b" in captured.err
+
+
+class _HostileStrError(Exception):
+    """Exception whose __str__ raises — the hostile-renderer shape the
+    crash-path floor must survive (rendering an exception message runs
+    arbitrary exception-class code)."""
+
+    def __str__(self):
+        raise RuntimeError("hostile __str__")
+
+
+def test_hostile_str_exception_still_emits_floor_marker(capsys):
+    """An exception whose __str__ raises must not void the floor: the
+    helper falls back to the type-name + placeholder rendering, the full
+    marker still prints, exit stays 0, and the guarded stderr diagnostic
+    carries the placeholder instead of propagating the renderer raise."""
+    err = _HostileStrError()
+    with pytest.raises(SystemExit) as exc:
+        tlg._emit_load_failure_advisory("runtime", err)
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    out = json.loads(captured.out.strip())
+
+    marker = out["pactGateHealth"]
+    assert set(marker) == {"v", "hook", "status", "stage", "error"}
+    assert marker["status"] == "failed"
+    assert marker["stage"] == "runtime"
+    assert marker["error"] == "_HostileStrError: <exception str() raised>"
+
+    hso = out["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PostToolUse"
+    assert marker["error"] in hso["additionalContext"]
+    assert out["systemMessage"] == hso["additionalContext"]
+
+    # Guarded stderr full-text line: placeholder, never a propagated raise.
+    assert "Hook load error (task_lifecycle_gate / runtime)" in captured.err
+    assert "<exception str() raised>" in captured.err
+
+
+def test_renderer_defect_falls_back_to_raise_proof_constant(
+    capsys, monkeypatch,
+):
+    """Defense-in-depth call-site guard: if the (now-total) bounded
+    renderer itself somehow raises, the floor still prints — with the
+    raise-proof CONSTANT. type(error).__name__ is deliberately not the
+    fallback: a hostile metaclass __name__ would re-invoke the same
+    attribute access that just failed, at the one site that must never
+    raise."""
+    monkeypatch.setattr(
+        tlg,
+        "_bounded_error_text",
+        lambda _err: (_ for _ in ()).throw(
+            RuntimeError("simulated renderer defect")
+        ),
+    )
+    with pytest.raises(SystemExit) as exc:
+        tlg._emit_load_failure_advisory("runtime", ValueError("boom"))
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    out = json.loads(captured.out.strip())
+    assert out["pactGateHealth"]["error"] == "<error text unavailable>"
+    assert "<error text unavailable>" in out["systemMessage"]
+    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+
+
+def test_journal_event_sanitizes_hostile_tool_name(
+    capsys, monkeypatch, tmp_path, pact_context,
+):
+    """tool_name is attacker-set stdin on the import-stage path — the
+    journal event must carry the same sanitize+bound discipline as the
+    error text: control characters become spaces and over-cap text is
+    truncated with the explicit marker."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+    pact_context(team_name="test-team", session_id="test-session")
+    hostile = "Task\x00Update" + "x" * 300
+    tlg._emit_gate_health_event(
+        "module imports", "SomeError: detail", {"tool_name": hostile}
+    )
+    captured = capsys.readouterr()
+    assert "gate_health journal emit" not in captured.err, (
+        f"emit must succeed on the working path: {captured.err!r}"
+    )
+    journal = (
+        tmp_path / "cfg" / "pact-sessions" / "project" / "test-session"
+        / "session-journal.jsonl"
+    )
+    events = [
+        json.loads(line)
+        for line in journal.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(events) == 1
+    recorded = events[0]["tool_name"]
+    suffix = "...[truncated]"
+    assert recorded.endswith(suffix)
+    assert len(recorded) == 200 + len(suffix)
+    assert recorded.startswith("Task Update"), (
+        f"control char must become a space: {recorded[:15]!r}"
+    )
+    assert all(ch.isprintable() for ch in recorded)
+
+
+def test_journal_event_renders_non_str_tool_name_as_placeholder(
+    capsys, monkeypatch, tmp_path, pact_context,
+):
+    """A non-string tool_name (type-confused stdin) becomes a typed
+    placeholder in the journal event rather than a raw non-str value."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+    pact_context(team_name="test-team", session_id="test-session")
+    tlg._emit_gate_health_event(
+        "module imports", "SomeError: detail", {"tool_name": 42}
+    )
+    captured = capsys.readouterr()
+    assert "gate_health journal emit" not in captured.err
+    journal = (
+        tmp_path / "cfg" / "pact-sessions" / "project" / "test-session"
+        / "session-journal.jsonl"
+    )
+    events = [
+        json.loads(line)
+        for line in journal.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(events) == 1
+    assert events[0]["tool_name"] == "<non-str int>"
+
+
+# =============================================================================
+# Cycle-2: _bounded_error_text total against a hostile-metaclass __name__.
+# A metaclass can make type(error).__name__ a property that RAISES; the
+# helper captures the type name once defensively (→ literal "exception")
+# so neither the type-name nor the message render can escape it. Pins the
+# residual review-security found: pre-fix the helper's own fallback
+# re-accessed __name__ and re-raised, crashing the bootstrap degraded path
+# (exit 1, suppressed warning). The bootstrap-path regression pin is the
+# subprocess matrix in test_bootstrap_gate.py::TestHostileNameCrashPath;
+# these are the in-process helper-totality + tlg-path pins.
+#
+# HAZARD: never reference these classes' __name__ in test ids, labels, or
+# assertion reprs — the metaclass property bombs the access itself. Pass
+# instances positionally and assert only on returned STRINGS.
+# =============================================================================
+
+
+class _HostileNameMeta(type):
+    @property
+    def __name__(cls):  # noqa: N805 — metaclass property over the class
+        raise RuntimeError("hostile __name__")
+
+
+class _NameBomb(Exception, metaclass=_HostileNameMeta):
+    """Raising __name__, normal __str__."""
+
+
+class _BothBomb(Exception, metaclass=_HostileNameMeta):
+    """Raising __name__ AND raising __str__."""
+
+    def __str__(self):
+        raise RuntimeError("hostile __str__")
+
+
+def test_bounded_error_text_total_against_hostile_name():
+    """The helper returns a string for an exception whose metaclass
+    __name__ raises — type name captured once → literal "exception", with
+    the message render still guarded for the both-hostile case. Counter-
+    test: revert 7155516d → the fallback re-accesses __name__ and the
+    helper re-raises (RuntimeError escapes)."""
+    # Assert on returned strings ONLY; never let pytest repr a hostile
+    # instance (its default Exception repr accesses __name__).
+    assert tlg._bounded_error_text(_NameBomb("msg")) == "exception: msg"
+    assert tlg._bounded_error_text(_BothBomb("msg")) == (
+        "exception: <exception str() raised>"
+    )
+
+
+def test_bounded_error_text_common_cases_unchanged_by_cycle2():
+    """No string-ripple (shape (b)): the common-case renderings are
+    unchanged — only the hostile-__name__ path degrades to "exception:".
+    Guards against a cycle-2 refactor silently altering the normal text."""
+    assert tlg._bounded_error_text(ValueError("plain")) == "ValueError: plain"
+    # Hostile __str__ but renderable __name__ → real type name preserved.
+    assert tlg._bounded_error_text(_HostileStrError("m")) == (
+        "_HostileStrError: <exception str() raised>"
+    )
+
+
+def test_hostile_name_exception_emits_floor_marker_via_helper_totality(capsys):
+    """End-to-end through the full crash path: a real hostile-__name__
+    exception renders "exception: ..." in the marker error (the helper
+    handled it), NOT the call-site "<error text unavailable>" constant —
+    proving the helper-totality branch, not the defense-in-depth fallback,
+    is what carries a genuine hostile-__name__ exception. Floor marker
+    intact, exit 0."""
+    with pytest.raises(SystemExit) as exc:
+        tlg._emit_load_failure_advisory("runtime", _NameBomb("boom"))
+    assert exc.value.code == 0
+    out = json.loads(capsys.readouterr().out.strip())
+    marker = out["pactGateHealth"]
+    assert marker["status"] == "failed"
+    assert marker["stage"] == "runtime"
+    assert marker["error"] == "exception: boom", (
+        f"helper-totality path expected; got {marker['error']!r}"
+    )
+    # Distinguish from the call-site constant guard (that path only fires
+    # if the whole helper raises — here the helper is total, so it must
+    # NOT appear).
+    assert marker["error"] != "<error text unavailable>"
+    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+    assert out["systemMessage"] == out["hookSpecificOutput"]["additionalContext"]
+
+
+# =============================================================================
+# Cycle-3: _bounded_error_text total against __name__ that RETURNS (not raises)
+# a hostile non-str object. The cycle-2 try/except guards a __name__ that
+# RAISES, but a metaclass __name__ can instead RETURN a non-str whose own
+# __format__/__str__ raises — that poisoned value defeats BOTH f-string
+# branches, because the except-branch fallback re-interpolates the same
+# type_name. b6e9125a coerces a non-str type_name to the literal "exception"
+# (isinstance guard) BEFORE interpolation, so the renderer is total for any
+# exception object. Counter-test: revert b6e9125a → (i) the int case renders
+# the raw "42: ..." instead of "exception: ...", and (ii)/(iii) the
+# format/str-bomb cases re-raise out of the helper (RuntimeError escapes).
+#
+# HAZARD (mirrors the cycle-2 block): these metaclass __name__ properties
+# return objects, one of which bombs on format/str. Never let pytest repr a
+# hostile instance — pass instances positionally and assert only on the
+# returned STRINGS.
+# =============================================================================
+
+
+class _NameReturnsIntMeta(type):
+    @property
+    def __name__(cls):  # noqa: N805 — metaclass property over the class
+        return 42
+
+
+class _IntNameError(Exception, metaclass=_NameReturnsIntMeta):
+    """type(error).__name__ RETURNS a non-str int (renderable, but not a str)."""
+
+
+class _FormatBomb:
+    """A non-str object whose __format__ (and __str__) raise — interpolating
+    it in an f-string raises."""
+
+    def __format__(self, spec):
+        raise RuntimeError("hostile __format__")
+
+    def __str__(self):
+        raise RuntimeError("hostile __str__")
+
+
+class _NameReturnsFormatBombMeta(type):
+    @property
+    def __name__(cls):  # noqa: N805 — metaclass property over the class
+        return _FormatBomb()
+
+
+class _FormatNameError(Exception, metaclass=_NameReturnsFormatBombMeta):
+    """type(error).__name__ RETURNS an object whose __format__ raises."""
+
+
+class _StrBomb:
+    """A non-str object whose __str__ raises (default __format__ delegates to
+    __str__, so f-string interpolation raises)."""
+
+    def __str__(self):
+        raise RuntimeError("hostile __str__")
+
+
+class _NameReturnsStrBombMeta(type):
+    @property
+    def __name__(cls):  # noqa: N805 — metaclass property over the class
+        return _StrBomb()
+
+
+class _StrNameError(Exception, metaclass=_NameReturnsStrBombMeta):
+    """type(error).__name__ RETURNS an object whose __str__ raises."""
+
+
+def test_bounded_error_text_total_against_hostile_name_return():
+    """The helper returns a clean str for an exception whose metaclass
+    __name__ RETURNS a hostile non-str object — int, __format__-raising, or
+    __str__-raising — all coerced to the "exception" literal before
+    interpolation. Counter-test: revert b6e9125a (the isinstance coercion) →
+    the int case renders "42: msg" (≠ expected) and the format/str-bomb cases
+    re-raise RuntimeError out of the helper.
+
+    Assert on returned STRINGS only; never let pytest repr a hostile
+    instance (the format/str bomb objects bomb on format/str)."""
+    assert tlg._bounded_error_text(_IntNameError("msg")) == "exception: msg"
+    assert tlg._bounded_error_text(_FormatNameError("msg")) == "exception: msg"
+    assert tlg._bounded_error_text(_StrNameError("msg")) == "exception: msg"
+
+
+def test_hostile_name_return_exception_emits_floor_marker_via_helper_totality(
+    capsys,
+):
+    """End-to-end through the crash path: a real __name__-returns-hostile
+    exception renders "exception: ..." in the marker error (the helper handled
+    it via the isinstance coercion), NOT the call-site "<error text
+    unavailable>" constant — proving the helper-totality branch, not the
+    defense-in-depth fallback, carries a genuine returns-hostile exception.
+    Floor marker intact, exit 0. Counter-test: revert b6e9125a → the helper
+    re-raises and the call-site constant fires instead."""
+    with pytest.raises(SystemExit) as exc:
+        tlg._emit_load_failure_advisory("runtime", _FormatNameError("boom"))
+    assert exc.value.code == 0
+    out = json.loads(capsys.readouterr().out.strip())
+    marker = out["pactGateHealth"]
+    assert marker["status"] == "failed"
+    assert marker["stage"] == "runtime"
+    assert marker["error"] == "exception: boom", (
+        f"helper-totality (isinstance coercion) path expected; "
+        f"got {marker['error']!r}"
+    )
+    assert marker["error"] != "<error text unavailable>"
+    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+    assert out["systemMessage"] == out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_bounded_error_text_common_cases_unchanged_by_cycle3():
+    """No string-ripple from b6e9125a: the common-case and cycle-2 hostile
+    renderings are unchanged — only a non-str __name__ RETURN newly degrades
+    to "exception:". Guards against the cycle-3 coercion silently altering
+    normal text or the prior hostile-__name__ (raising) fallback."""
+    assert tlg._bounded_error_text(ValueError("plain")) == "ValueError: plain"
+    # Cycle-2 raising-__name__ path still degrades via its own try/except.
+    assert tlg._bounded_error_text(_NameBomb("msg")) == "exception: msg"
+
+
+# =============================================================================
+# Cycle-4: _bounded_error_text total against __name__ that returns a str
+# SUBCLASS whose own __format__/__str__ raises. isinstance(str_subclass, str)
+# is True, so the cycle-3 isinstance guard would WAVE IT THROUGH and the
+# f-string interpolation (incl. str.__format__'s empty-spec delegation to the
+# overridden __str__) would raise out of both branches. cede8629 replaces the
+# guard with an EXACT-type check (type(type_name) is str) that rejects str
+# subclasses too, reducing type_name to an exact str whose __format__/__str__
+# are str's own unpatchable built-ins. Counter-test: revert cede8629 (restore
+# isinstance) → the str-subclass legs RAISE out of the helper.
+#
+# HAZARD (mirrors cycle-2/cycle-3): these metaclass __name__ properties return
+# str-subclass instances that bomb on format/str. Never let pytest repr a
+# hostile instance — pass instances positionally, assert on returned STRINGS.
+# =============================================================================
+
+
+class _RaisingFormatStr(str):
+    """A str SUBCLASS whose __format__ raises — isinstance(_, str) is True, so
+    only an exact-type guard coerces it."""
+
+    def __format__(self, spec):
+        raise RuntimeError("hostile str-subclass __format__")
+
+
+class _RaisingStrStr(str):
+    """A str SUBCLASS whose __str__ raises. str.__format__ with an empty spec
+    delegates to __str__, so f-string interpolation of this instance raises
+    too (verified empirically)."""
+
+    def __str__(self):
+        raise RuntimeError("hostile str-subclass __str__")
+
+
+class _NameReturnsFormatStrMeta(type):
+    @property
+    def __name__(cls):  # noqa: N805 — metaclass property over the class
+        return _RaisingFormatStr("HostileFmtName")
+
+
+class _FmtStrNameError(Exception, metaclass=_NameReturnsFormatStrMeta):
+    """__name__ RETURNS a str SUBCLASS whose __format__ raises."""
+
+
+class _NameReturnsStrSubMeta(type):
+    @property
+    def __name__(cls):  # noqa: N805 — metaclass property over the class
+        return _RaisingStrStr("HostileStrName")
+
+
+class _StrSubNameError(Exception, metaclass=_NameReturnsStrSubMeta):
+    """__name__ RETURNS a str SUBCLASS whose __str__ raises."""
+
+
+class _FmtStrNameRaisingMsgError(Exception, metaclass=_NameReturnsFormatStrMeta):
+    """__name__ RETURNS a hostile str subclass AND the exception's own __str__
+    raises — both halves of the render must be guarded."""
+
+    def __str__(self):
+        raise RuntimeError("hostile error __str__")
+
+
+def test_bounded_error_text_total_against_str_subclass_name():
+    """The exact-type guard coerces a str-SUBCLASS __name__ (which isinstance
+    would wave through) to "exception", so neither the subclass's hostile
+    __format__ nor its hostile __str__ ever runs — the helper returns a clean
+    str. Counter-test: revert cede8629 (restore the isinstance guard) →
+    isinstance(str_subclass, str) is True → the poison passes → the helper
+    raises out of both f-string branches.
+
+    Assert on returned STRINGS only; never let pytest repr a hostile
+    instance."""
+    assert tlg._bounded_error_text(_FmtStrNameError("m")) == "exception: m"
+    assert tlg._bounded_error_text(_StrSubNameError("m")) == "exception: m"
+
+
+def test_bounded_error_text_str_subclass_name_with_raising_error_message():
+    """Both halves hostile: a str-subclass __name__ AND a raising error
+    __str__ → the prefix collapses to "exception" (exact-type guard) and the
+    message half falls back to the guarded placeholder."""
+    assert tlg._bounded_error_text(_FmtStrNameRaisingMsgError("m")) == (
+        "exception: <exception str() raised>"
+    )
+
+
+def test_str_subclass_name_exception_emits_floor_marker_via_helper_totality(
+    capsys,
+):
+    """End-to-end through the crash path: a real str-subclass-__name__
+    exception renders "exception: ..." in the marker error (the exact-type
+    guard handled it), NOT the call-site "<error text unavailable>" constant —
+    the helper-totality branch, not the defense-in-depth fallback, carries it.
+    Floor marker intact, exit 0. Counter-test: revert cede8629 → the helper
+    raises and the call-site constant fires instead."""
+    with pytest.raises(SystemExit) as exc:
+        tlg._emit_load_failure_advisory("runtime", _FmtStrNameError("boom"))
+    assert exc.value.code == 0
+    out = json.loads(capsys.readouterr().out.strip())
+    marker = out["pactGateHealth"]
+    assert marker["status"] == "failed"
+    assert marker["stage"] == "runtime"
+    assert marker["error"] == "exception: boom", (
+        f"helper-totality (exact-type guard) path expected; "
+        f"got {marker['error']!r}"
+    )
+    assert marker["error"] != "<error text unavailable>"
+    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+    assert out["systemMessage"] == out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_bounded_error_text_genuine_str_name_unchanged_by_cycle4():
+    """Discriminator pin: the exact-type guard must NOT over-coerce a GENUINE
+    (exact) str __name__ — a normal class keeps its real name. Without this,
+    `type(...) is not str` could be mistaken for a blunt always-coerce. The
+    cycle-2/3 hostile fallbacks are also re-asserted to prove zero churn."""
+    assert tlg._bounded_error_text(ValueError("plain")) == "ValueError: plain"
+    assert tlg._bounded_error_text(_HostileStrError("m")) == (
+        "_HostileStrError: <exception str() raised>"
+    )
+    assert tlg._bounded_error_text(_IntNameError("msg")) == "exception: msg"

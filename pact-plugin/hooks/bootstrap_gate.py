@@ -87,19 +87,34 @@ def _emit_load_failure_deny(stage: str, error: BaseException) -> NoReturn:
     import below fails. Audit anchor: hookEventName must be present in any
     deny output.
     """
+    # Guarded rendering BEFORE the deny print: an unguarded hostile/raising
+    # __str__ here would suppress the deny output and exit nonzero-non-2 —
+    # for PreToolUse that is a non-blocking error and the tool call
+    # PROCEEDS (fail-open). The deny must print for any exception; the
+    # fallback is a raise-proof constant.
+    try:
+        error_render = f"{type(error).__name__}: {error}"
+    except BaseException:  # noqa: BLE001 — hostile __str__ must not suppress the deny
+        error_render = "<error text unavailable>"
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
             "permissionDecisionReason": (
                 f"PACT bootstrap_gate {stage} failure — blocking for safety. "
-                f"{type(error).__name__}: {error}. Check hook installation "
+                f"{error_render}. Check hook installation "
                 "and shared module availability."
             ),
         }
     }))
+    # Guarded full-text rendering: a raise here would replace the deliberate
+    # exit 2 (blocking) with a traceback exit 1 (non-blocking → fail-open).
+    try:
+        error_full = f"{error}"
+    except BaseException:  # noqa: BLE001 — hostile __str__; keep the exit-2 path
+        error_full = "<exception str() raised>"
     print(
-        f"Hook load error (bootstrap_gate / {stage}): {error}",
+        f"Hook load error (bootstrap_gate / {stage}): {error_full}",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -165,8 +180,35 @@ def _bounded_error_text(error: BaseException) -> str:
     """Sanitized, length-bounded rendering of an exception for embedding in
     context-bound warning text: control/non-printable characters become
     spaces, and the result is truncated to _ERROR_TEXT_MAX chars with an
-    explicit marker. Full text still goes to stderr at the call site."""
-    text = f"{type(error).__name__}: {error}"
+    explicit marker. Full text still goes to stderr at the call site.
+
+    Total over hostile exceptions, structurally: the type name is captured
+    first — a metaclass can make __name__ a property that raises (caught;
+    falls back to a literal) or return any non-str value, INCLUDING a str
+    subclass whose own __str__/__format__ raises. The exact-type check below
+    (type(...) is str, which rejects str subclasses too) reduces type_name to
+    an EXACT str, whose __format__/__str__ are str's own built-ins and cannot
+    be overridden — so neither f-string branch below can raise on type_name
+    regardless of the original __name__ value. The only exception-owned code
+    left is the message render (error's own __str__), isolated to the main
+    branch and guarded by the fallback. The function therefore returns a
+    string for ANY exception object."""
+    try:
+        type_name = type(error).__name__
+    except BaseException:  # noqa: BLE001 — hostile metaclass __name__ must not escape
+        type_name = "exception"
+    # __name__ can also RETURN (not raise) a non-str value — including a str
+    # SUBCLASS whose own __str__/__format__ raises, which an isinstance check
+    # would wave through. An EXACT-type check (type(...) is str) rejects
+    # subclasses too, so type_name is provably an exact str whose formatting
+    # uses str's own unpatchable built-ins → both f-string branches below
+    # (incl. the fallback, which re-interpolates type_name) cannot raise on it.
+    if type(type_name) is not str:
+        type_name = "exception"
+    try:
+        text = f"{type_name}: {error}"
+    except BaseException:  # noqa: BLE001 — hostile __str__ must not escape the renderer
+        text = f"{type_name}: <exception str() raised>"
     text = "".join(ch if ch.isprintable() else " " for ch in text)
     if len(text) > _ERROR_TEXT_MAX:
         text = text[:_ERROR_TEXT_MAX] + "...[truncated]"
@@ -218,8 +260,15 @@ def _emit_degraded_warning(stage: str, error: BaseException, tool_name: str) -> 
             "mutating tools blocked."
         ),
     }))
+    # Guarded full-text rendering: this line runs AFTER the decision JSON
+    # printed, but a raise here would exit nonzero — and stdout JSON is only
+    # honored on exit 0, voiding the defer/ask decision retroactively.
+    try:
+        error_full = f"{error}"
+    except BaseException:  # noqa: BLE001 — hostile __str__; keep the exit-0 path
+        error_full = "<exception str() raised>"
     print(
-        f"Hook degraded-{decision} (bootstrap_gate / {stage}): {tool_name} — {error}",
+        f"Hook degraded-{decision} (bootstrap_gate / {stage}): {tool_name} — {error_full}",
         file=sys.stderr,
     )
     sys.exit(0)
