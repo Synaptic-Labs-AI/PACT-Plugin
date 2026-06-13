@@ -103,13 +103,22 @@ def _bounded_error_text(error: BaseException) -> str:
 
     Total over hostile exceptions: BOTH renderings that run exception-owned
     code are guarded. The type name is captured first — a metaclass can make
-    __name__ a property that raises — falling back to a literal; the message
-    runs the exception's own __str__ (arbitrary code that can itself raise),
-    falling back to a marker. Neither fallback touches the exception again,
-    so the function returns a string for any exception object."""
+    __name__ a property that raises (caught; falls back to a literal) or
+    return a non-str object whose own __str__/__format__ raises (coerced to a
+    literal by the isinstance guard below, so type_name is provably a str
+    before interpolation); the message then runs the exception's own __str__
+    (arbitrary code that can itself raise), falling back to a marker. After
+    the coercion neither branch can raise on type_name, so the function
+    returns a string for any exception object."""
     try:
         type_name = type(error).__name__
     except BaseException:  # noqa: BLE001 — hostile metaclass __name__ must not escape
+        type_name = "exception"
+    # __name__ can also RETURN (not raise) a non-str object whose own
+    # __str__/__format__ raises; that poisoned value would defeat BOTH
+    # f-string branches below (the fallback re-interpolates type_name too).
+    # Coerce to a guaranteed str so the renderer is total for any exception.
+    if not isinstance(type_name, str):
         type_name = "exception"
     try:
         text = f"{type_name}: {error}"
