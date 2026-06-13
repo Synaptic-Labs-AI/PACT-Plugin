@@ -177,22 +177,28 @@ def _emit_gate_health_event(
         )
         written = _lazy_session_journal.append_event(event)
         if not written:
-            print(
-                "task_lifecycle_gate: gate_health journal emit skipped "
-                "(append_event returned False)",
-                file=sys.stderr,
-            )
+            try:
+                print(
+                    "task_lifecycle_gate: gate_health journal emit skipped "
+                    "(append_event returned False)",
+                    file=sys.stderr,
+                )
+            except BaseException:  # noqa: BLE001 — a diagnostic-write raise must not flip the exit code
+                pass
     except BaseException:  # noqa: BLE001 — the crash handler must not crash:
         # mirror the import gauntlet's breadth (except BaseException at the
         # wrapped-import block). The lazy imports execute arbitrary module
         # bodies — a module-level sys.exit or KeyboardInterrupt surfacing
         # here would exit nonzero AFTER the floor marker printed, and stdout
         # JSON is only honored on exit 0.
-        print(
-            "task_lifecycle_gate: gate_health journal emit unavailable "
-            "(late import or init failed)",
-            file=sys.stderr,
-        )
+        try:
+            print(
+                "task_lifecycle_gate: gate_health journal emit unavailable "
+                "(late import or init failed)",
+                file=sys.stderr,
+            )
+        except BaseException:  # noqa: BLE001 — a diagnostic-write raise must not flip the exit code
+            pass
 
 
 def _emit_load_failure_advisory(
@@ -248,10 +254,13 @@ def _emit_load_failure_advisory(
         error_full = f"{error}"
     except BaseException:  # noqa: BLE001 — hostile __str__; keep the exit-0 path
         error_full = "<exception str() raised>"
-    print(
-        f"Hook load error (task_lifecycle_gate / {stage}): {error_full}",  # full text
-        file=sys.stderr,
-    )
+    try:
+        print(
+            f"Hook load error (task_lifecycle_gate / {stage}): {error_full}",  # full text
+            file=sys.stderr,
+        )
+    except BaseException:  # noqa: BLE001 — a diagnostic-write raise must not flip the exit code
+        pass
     _emit_gate_health_event(stage, error_text, input_data)      # bonus LAST
     sys.exit(0)
 

@@ -113,10 +113,13 @@ def _emit_load_failure_deny(stage: str, error: BaseException) -> NoReturn:
         error_full = f"{error}"
     except BaseException:  # noqa: BLE001 — hostile __str__; keep the exit-2 path
         error_full = "<exception str() raised>"
-    print(
-        f"Hook load error (bootstrap_gate / {stage}): {error_full}",
-        file=sys.stderr,
-    )
+    try:
+        print(
+            f"Hook load error (bootstrap_gate / {stage}): {error_full}",
+            file=sys.stderr,
+        )
+    except BaseException:  # noqa: BLE001 — a diagnostic-write raise must not flip the exit code
+        pass
     sys.exit(2)
 
 
@@ -277,10 +280,13 @@ def _emit_degraded_warning(stage: str, error: BaseException, tool_name: str) -> 
         error_full = f"{error}"
     except BaseException:  # noqa: BLE001 — hostile __str__; keep the exit-0 path
         error_full = "<exception str() raised>"
-    print(
-        f"Hook degraded-{decision} (bootstrap_gate / {stage}): {tool_name} — {error_full}",
-        file=sys.stderr,
-    )
+    try:
+        print(
+            f"Hook degraded-{decision} (bootstrap_gate / {stage}): {tool_name} — {error_full}",
+            file=sys.stderr,
+        )
+    except BaseException:  # noqa: BLE001 — a diagnostic-write raise must not flip the exit code
+        pass
     sys.exit(0)
 
 
