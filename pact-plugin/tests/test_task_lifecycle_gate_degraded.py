@@ -465,3 +465,88 @@ class TestPython39Floor:
             tmp_path, json.dumps(_make_gate_input()), interpreter=py39
         )
         _assert_crash_marker_shape(result, "SyntaxError")
+
+
+# =============================================================================
+# BaseException-breadth regression: a module-level sys.exit() / KeyboardInterrupt
+# AT IMPORT time is a BaseException that is NOT an Exception subclass. The
+# import-gauntlet guard (task_lifecycle_gate.py `except BaseException`) and the
+# crash handler's own `_emit_gate_health_event` guard are deliberately broad so
+# such a vector is caught and the floor marker still prints at exit 0. None of
+# the _BREAKAGE_VECTORS exercises this (all three raise Exception subclasses),
+# so narrowing either guard to `except Exception` would silently re-introduce
+# the #951 masking (SystemExit/KeyboardInterrupt escapes → nonzero exit →
+# stdout JSON ignored → no health marker). These pins lock the breadth.
+#
+# Counter-test: narrow the import-gauntlet guard to `except Exception` → the
+# crash escapes the gauntlet, nothing prints, exit nonzero. Separately narrow
+# the `_emit_gate_health_event` guard to `except Exception` → the marker prints
+# but the lazy re-import's SystemExit escapes before sys.exit(0), so the
+# process exits nonzero and the stdout marker is ignored. Either narrowing
+# fails the `returncode == 0` + marker-present assertions below.
+# =============================================================================
+
+
+def _break_shared_sys_exit(scaffold):
+    """shared/__init__.py calls sys.exit(1) at import time → SystemExit (a
+    BaseException, NOT an Exception) propagates out of the gauntlet import."""
+    (scaffold / "shared").mkdir(parents=True)
+    (scaffold / "shared" / "__init__.py").write_text(
+        "import sys\nsys.exit(1)\n", encoding="utf-8"
+    )
+
+
+def _break_shared_keyboard_interrupt(scaffold):
+    """shared/__init__.py raises KeyboardInterrupt at import time → a
+    BaseException that `except Exception` would NOT catch."""
+    (scaffold / "shared").mkdir(parents=True)
+    (scaffold / "shared" / "__init__.py").write_text(
+        "raise KeyboardInterrupt('simulated at import')\n", encoding="utf-8"
+    )
+
+
+def _run_with_breaker(tmp_path, stdin_text, breaker):
+    """Copy the lifecycle hook into a scaffold, apply an arbitrary breaker
+    (not constrained to the _BREAKAGE_VECTORS dict), run as a subprocess with
+    both config roots sandboxed inside tmp_path."""
+    hook_src = Path(__file__).parent.parent / "hooks" / "task_lifecycle_gate.py"
+    scaffold = tmp_path / "scaffold"
+    scaffold.mkdir(parents=True)
+    (scaffold / "task_lifecycle_gate.py").write_text(
+        hook_src.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    breaker(scaffold)
+    return subprocess.run(
+        [sys.executable, str(scaffold / "task_lifecycle_gate.py")],
+        input=stdin_text,
+        capture_output=True,
+        text=True,
+        cwd=str(scaffold),
+        timeout=10,
+        env=_scaffold_env(tmp_path),
+    )
+
+
+class TestBaseExceptionBreadthAtImport:
+
+    @pytest.mark.parametrize(
+        "breaker,expected_exc",
+        [
+            (_break_shared_sys_exit, "SystemExit"),
+            (_break_shared_keyboard_interrupt, "KeyboardInterrupt"),
+        ],
+        ids=["import-sys-exit", "import-keyboard-interrupt"],
+    )
+    def test_non_exception_baseexception_at_import_still_emits_marker(
+        self, tmp_path, breaker, expected_exc,
+    ):
+        """A module-level sys.exit(1) / KeyboardInterrupt at import is caught
+        by the gauntlet's `except BaseException`, so the full pactGateHealth
+        marker still emits at exit 0 with the BaseException type named in the
+        bounded error text. Narrowing the gauntlet (or the
+        _emit_gate_health_event) guard to `except Exception` re-masks: the
+        crash escapes → nonzero exit → the stdout marker is ignored."""
+        result = _run_with_breaker(
+            tmp_path, json.dumps(_make_gate_input()), breaker
+        )
+        _assert_crash_marker_shape(result, expected_exc)

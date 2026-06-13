@@ -2097,6 +2097,266 @@ class TestHostileNameCrashPath:
 
 
 # =============================================================================
+# Cycle-3 regression: __name__ that RETURNS (not raises) a hostile non-str.
+#
+# The cycle-2 fix (7155516d) guards a metaclass __name__ that RAISES. A
+# metaclass __name__ can instead RETURN a non-str object whose own
+# __format__/__str__ raises — that poisoned value defeats BOTH f-string
+# branches of _bounded_error_text (the except-branch fallback re-interpolates
+# the same type_name), so before b6e9125a the degraded warn path raised out of
+# the renderer and exited 1: a PreToolUse non-blocking error that SUPPRESSED
+# the warning, silently failing open. b6e9125a coerces a non-str type_name to
+# the literal "exception" (isinstance guard). These pins lock the restored
+# exit-0 defer / exit-2 deny under the returns-hostile shape; counter-test:
+# source-revert b6e9125a → the defer leg regresses to exit 1.
+#
+# HAZARD: the hostile metaclass lives entirely in the subprocess scaffold
+# text — no in-process class whose __name__ pytest could bomb on collection.
+# =============================================================================
+
+
+def _break_shared_hostile_format_name(scaffold):
+    """shared/__init__.py raises an exception whose metaclass __name__ RETURNS
+    a non-str object whose __format__ (and __str__) raise. Rendering the
+    caught error's type name interpolates that poisoned value → raises unless
+    the renderer coerces it to a str first (b6e9125a)."""
+    (scaffold / "shared").mkdir(parents=True)
+    (scaffold / "shared" / "__init__.py").write_text(
+        "class _FormatBomb:\n"
+        "    def __format__(self, spec):\n"
+        "        raise RuntimeError('hostile __format__')\n"
+        "    def __str__(self):\n"
+        "        raise RuntimeError('hostile __str__')\n"
+        "class _HostileFormatNameMeta(type):\n"
+        "    @property\n"
+        "    def __name__(cls):\n"
+        "        return _FormatBomb()\n"
+        "class FormatNameBomb(Exception, metaclass=_HostileFormatNameMeta):\n"
+        "    pass\n"
+        "raise FormatNameBomb('boom')\n",
+        encoding="utf-8",
+    )
+
+
+def _break_shared_hostile_int_name(scaffold):
+    """shared/__init__.py raises an exception whose metaclass __name__ RETURNS
+    a non-str int. The int interpolates without raising, but the type name is
+    nonsense ('42: ...'); b6e9125a coerces it to 'exception' so the degraded
+    warning carries the same diagnosable fallback as the raising case."""
+    (scaffold / "shared").mkdir(parents=True)
+    (scaffold / "shared" / "__init__.py").write_text(
+        "class _IntNameMeta(type):\n"
+        "    @property\n"
+        "    def __name__(cls):\n"
+        "        return 42\n"
+        "class IntNameBomb(Exception, metaclass=_IntNameMeta):\n"
+        "    pass\n"
+        "raise IntNameBomb('boom')\n",
+        encoding="utf-8",
+    )
+
+
+class TestHostileNameReturnCrashPath:
+
+    def _run(self, tmp_path, stdin_text, breaker):
+        import subprocess
+
+        hook_src = Path(__file__).parent.parent / "hooks" / "bootstrap_gate.py"
+        scaffold = tmp_path / "scaffold"
+        scaffold.mkdir(parents=True)
+        (scaffold / "bootstrap_gate.py").write_text(
+            hook_src.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        breaker(scaffold)
+        return subprocess.run(
+            [sys.executable, str(scaffold / "bootstrap_gate.py")],
+            input=stdin_text,
+            capture_output=True,
+            text=True,
+            cwd=str(scaffold),
+            timeout=10,
+        )
+
+    @pytest.mark.parametrize(
+        "breaker",
+        [_break_shared_hostile_format_name, _break_shared_hostile_int_name],
+        ids=["name-returns-format-bomb", "name-returns-int"],
+    )
+    def test_readonly_defer_intact_under_hostile_name_return(
+        self, tmp_path, breaker,
+    ):
+        """The cycle-3 regression pin: a read-only tool under a module crash
+        whose __name__ RETURNS a hostile non-str must take the defer arm at
+        exit 0, decision JSON intact, with the "exception" type-name fallback
+        in the warning. Pre-b6e9125a the format-bomb variant exited 1 with the
+        warning suppressed (the renderer raised out of both f-string
+        branches)."""
+        result = self._run(
+            tmp_path, json.dumps(_make_input(tool_name="Read")), breaker
+        )
+        assert result.returncode == 0, (
+            "hostile __name__ RETURN must not regress the degraded path to a "
+            f"nonzero exit (the suppressed-warning fail-open): "
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "defer"
+        for field in ("permissionDecisionReason", "additionalContext"):
+            assert "DEGRADED" in hso[field]
+            assert "module imports" in hso[field]
+            # Coerced fallback fired: the literal "exception", never a raw
+            # non-str type name ("42:") or a render crash.
+            assert "failure — exception:" in hso[field], (
+                f"warning must carry the coerced-name fallback: {hso[field]!r}"
+            )
+        assert "systemMessage" in out
+        assert "Hook degraded-defer (bootstrap_gate / module imports)" in (
+            result.stderr
+        )
+
+    @pytest.mark.parametrize(
+        "breaker",
+        [_break_shared_hostile_format_name, _break_shared_hostile_int_name],
+        ids=["name-returns-format-bomb", "name-returns-int"],
+    )
+    def test_mutating_deny_intact_under_hostile_name_return(
+        self, tmp_path, breaker,
+    ):
+        """Deny-arm twin: a mutating tool under a __name__-returns-hostile
+        module crash still denies at exit 2 (blocking). The deny render has
+        its own guard (constant fallback on the format-bomb; the int renders
+        cleanly), so the blocking exit-2 path stays intact either way."""
+        result = self._run(
+            tmp_path, json.dumps(_make_input(tool_name="Edit")), breaker
+        )
+        assert result.returncode == 2, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "deny"
+        assert "module imports" in hso["permissionDecisionReason"]
+
+
+# =============================================================================
+# BaseException-breadth regression (symmetric with the lifecycle-gate pin): a
+# module-level sys.exit() / KeyboardInterrupt AT IMPORT is a BaseException that
+# is NOT an Exception subclass. The import-gauntlet guard (`except
+# BaseException`) is deliberately broad so such a vector is caught and routed
+# to the degraded decision (read-only → defer exit 0; mutating → deny exit 2).
+# None of the _BREAKAGE_VECTORS exercises this (all raise Exception
+# subclasses), so narrowing the guard to `except Exception` would silently
+# fail open: SystemExit/KeyboardInterrupt escapes → exit 1, which for
+# PreToolUse is a non-blocking error → the tool PROCEEDS (mutating) or the
+# defer decision is lost (read-only). These pins lock the breadth.
+#
+# Counter-test: narrow the gauntlet guard to `except Exception` → the crash
+# escapes, no decision JSON prints, exit 1 → both arms below fail.
+# =============================================================================
+
+
+def _break_shared_sys_exit(scaffold):
+    """shared/__init__.py calls sys.exit(1) at import → SystemExit (a
+    BaseException, NOT an Exception) propagates out of the gauntlet import."""
+    (scaffold / "shared").mkdir(parents=True)
+    (scaffold / "shared" / "__init__.py").write_text(
+        "import sys\nsys.exit(1)\n", encoding="utf-8"
+    )
+
+
+def _break_shared_keyboard_interrupt(scaffold):
+    """shared/__init__.py raises KeyboardInterrupt at import → a BaseException
+    that `except Exception` would NOT catch."""
+    (scaffold / "shared").mkdir(parents=True)
+    (scaffold / "shared" / "__init__.py").write_text(
+        "raise KeyboardInterrupt('simulated at import')\n", encoding="utf-8"
+    )
+
+
+class TestBaseExceptionBreadthAtImport:
+
+    def _run(self, tmp_path, stdin_text, breaker):
+        import subprocess
+
+        hook_src = Path(__file__).parent.parent / "hooks" / "bootstrap_gate.py"
+        scaffold = tmp_path / "scaffold"
+        scaffold.mkdir(parents=True)
+        (scaffold / "bootstrap_gate.py").write_text(
+            hook_src.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        breaker(scaffold)
+        return subprocess.run(
+            [sys.executable, str(scaffold / "bootstrap_gate.py")],
+            input=stdin_text,
+            capture_output=True,
+            text=True,
+            cwd=str(scaffold),
+            timeout=10,
+        )
+
+    @pytest.mark.parametrize(
+        "breaker,expected_exc",
+        [
+            (_break_shared_sys_exit, "SystemExit"),
+            (_break_shared_keyboard_interrupt, "KeyboardInterrupt"),
+        ],
+        ids=["import-sys-exit", "import-keyboard-interrupt"],
+    )
+    def test_readonly_defer_intact_under_non_exception_baseexception(
+        self, tmp_path, breaker, expected_exc,
+    ):
+        """A read-only tool under a module-level sys.exit()/KeyboardInterrupt
+        at import takes the defer arm at exit 0 (the gauntlet's `except
+        BaseException` catches the non-Exception BaseException). Narrowing to
+        `except Exception` re-masks: the crash escapes → exit 1, defer lost."""
+        result = self._run(
+            tmp_path, json.dumps(_make_input(tool_name="Read")), breaker
+        )
+        assert result.returncode == 0, (
+            "a non-Exception BaseException at import must be caught by the "
+            f"gauntlet's BaseException breadth (defer exit 0): "
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "defer"
+        assert "DEGRADED" in hso["permissionDecisionReason"]
+        assert "module imports" in hso["permissionDecisionReason"]
+        assert expected_exc in hso["permissionDecisionReason"], (
+            f"degraded warning must name the BaseException type "
+            f"({expected_exc}): {hso['permissionDecisionReason']!r}"
+        )
+
+    @pytest.mark.parametrize(
+        "breaker",
+        [_break_shared_sys_exit, _break_shared_keyboard_interrupt],
+        ids=["import-sys-exit", "import-keyboard-interrupt"],
+    )
+    def test_mutating_deny_intact_under_non_exception_baseexception(
+        self, tmp_path, breaker,
+    ):
+        """A mutating tool under the same non-Exception BaseException at import
+        still denies at exit 2 (blocking). Narrowing the gauntlet to `except
+        Exception` lets the crash escape → exit 1, a non-blocking PreToolUse
+        error → the mutating tool would PROCEED (fail-open)."""
+        result = self._run(
+            tmp_path, json.dumps(_make_input(tool_name="Edit")), breaker
+        )
+        assert result.returncode == 2, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        out = json.loads(result.stdout.strip().splitlines()[0])
+        hso = out["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "deny"
+        assert "module imports" in hso["permissionDecisionReason"]
+
+
+# =============================================================================
 # Marker verification × CLAUDE_PLUGIN_ROOT env fallback — healthy path
 # =============================================================================
 

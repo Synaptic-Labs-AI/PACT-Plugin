@@ -4390,3 +4390,122 @@ def test_hostile_name_exception_emits_floor_marker_via_helper_totality(capsys):
     assert marker["error"] != "<error text unavailable>"
     assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
     assert out["systemMessage"] == out["hookSpecificOutput"]["additionalContext"]
+
+
+# =============================================================================
+# Cycle-3: _bounded_error_text total against __name__ that RETURNS (not raises)
+# a hostile non-str object. The cycle-2 try/except guards a __name__ that
+# RAISES, but a metaclass __name__ can instead RETURN a non-str whose own
+# __format__/__str__ raises — that poisoned value defeats BOTH f-string
+# branches, because the except-branch fallback re-interpolates the same
+# type_name. b6e9125a coerces a non-str type_name to the literal "exception"
+# (isinstance guard) BEFORE interpolation, so the renderer is total for any
+# exception object. Counter-test: revert b6e9125a → (i) the int case renders
+# the raw "42: ..." instead of "exception: ...", and (ii)/(iii) the
+# format/str-bomb cases re-raise out of the helper (RuntimeError escapes).
+#
+# HAZARD (mirrors the cycle-2 block): these metaclass __name__ properties
+# return objects, one of which bombs on format/str. Never let pytest repr a
+# hostile instance — pass instances positionally and assert only on the
+# returned STRINGS.
+# =============================================================================
+
+
+class _NameReturnsIntMeta(type):
+    @property
+    def __name__(cls):  # noqa: N805 — metaclass property over the class
+        return 42
+
+
+class _IntNameError(Exception, metaclass=_NameReturnsIntMeta):
+    """type(error).__name__ RETURNS a non-str int (renderable, but not a str)."""
+
+
+class _FormatBomb:
+    """A non-str object whose __format__ (and __str__) raise — interpolating
+    it in an f-string raises."""
+
+    def __format__(self, spec):
+        raise RuntimeError("hostile __format__")
+
+    def __str__(self):
+        raise RuntimeError("hostile __str__")
+
+
+class _NameReturnsFormatBombMeta(type):
+    @property
+    def __name__(cls):  # noqa: N805 — metaclass property over the class
+        return _FormatBomb()
+
+
+class _FormatNameError(Exception, metaclass=_NameReturnsFormatBombMeta):
+    """type(error).__name__ RETURNS an object whose __format__ raises."""
+
+
+class _StrBomb:
+    """A non-str object whose __str__ raises (default __format__ delegates to
+    __str__, so f-string interpolation raises)."""
+
+    def __str__(self):
+        raise RuntimeError("hostile __str__")
+
+
+class _NameReturnsStrBombMeta(type):
+    @property
+    def __name__(cls):  # noqa: N805 — metaclass property over the class
+        return _StrBomb()
+
+
+class _StrNameError(Exception, metaclass=_NameReturnsStrBombMeta):
+    """type(error).__name__ RETURNS an object whose __str__ raises."""
+
+
+def test_bounded_error_text_total_against_hostile_name_return():
+    """The helper returns a clean str for an exception whose metaclass
+    __name__ RETURNS a hostile non-str object — int, __format__-raising, or
+    __str__-raising — all coerced to the "exception" literal before
+    interpolation. Counter-test: revert b6e9125a (the isinstance coercion) →
+    the int case renders "42: msg" (≠ expected) and the format/str-bomb cases
+    re-raise RuntimeError out of the helper.
+
+    Assert on returned STRINGS only; never let pytest repr a hostile
+    instance (the format/str bomb objects bomb on format/str)."""
+    assert tlg._bounded_error_text(_IntNameError("msg")) == "exception: msg"
+    assert tlg._bounded_error_text(_FormatNameError("msg")) == "exception: msg"
+    assert tlg._bounded_error_text(_StrNameError("msg")) == "exception: msg"
+
+
+def test_hostile_name_return_exception_emits_floor_marker_via_helper_totality(
+    capsys,
+):
+    """End-to-end through the crash path: a real __name__-returns-hostile
+    exception renders "exception: ..." in the marker error (the helper handled
+    it via the isinstance coercion), NOT the call-site "<error text
+    unavailable>" constant — proving the helper-totality branch, not the
+    defense-in-depth fallback, carries a genuine returns-hostile exception.
+    Floor marker intact, exit 0. Counter-test: revert b6e9125a → the helper
+    re-raises and the call-site constant fires instead."""
+    with pytest.raises(SystemExit) as exc:
+        tlg._emit_load_failure_advisory("runtime", _FormatNameError("boom"))
+    assert exc.value.code == 0
+    out = json.loads(capsys.readouterr().out.strip())
+    marker = out["pactGateHealth"]
+    assert marker["status"] == "failed"
+    assert marker["stage"] == "runtime"
+    assert marker["error"] == "exception: boom", (
+        f"helper-totality (isinstance coercion) path expected; "
+        f"got {marker['error']!r}"
+    )
+    assert marker["error"] != "<error text unavailable>"
+    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+    assert out["systemMessage"] == out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_bounded_error_text_common_cases_unchanged_by_cycle3():
+    """No string-ripple from b6e9125a: the common-case and cycle-2 hostile
+    renderings are unchanged — only a non-str __name__ RETURN newly degrades
+    to "exception:". Guards against the cycle-3 coercion silently altering
+    normal text or the prior hostile-__name__ (raising) fallback."""
+    assert tlg._bounded_error_text(ValueError("plain")) == "ValueError: plain"
+    # Cycle-2 raising-__name__ path still degrades via its own try/except.
+    assert tlg._bounded_error_text(_NameBomb("msg")) == "exception: msg"
