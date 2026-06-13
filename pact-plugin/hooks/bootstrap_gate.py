@@ -87,19 +87,34 @@ def _emit_load_failure_deny(stage: str, error: BaseException) -> NoReturn:
     import below fails. Audit anchor: hookEventName must be present in any
     deny output.
     """
+    # Guarded rendering BEFORE the deny print: an unguarded hostile/raising
+    # __str__ here would suppress the deny output and exit nonzero-non-2 —
+    # for PreToolUse that is a non-blocking error and the tool call
+    # PROCEEDS (fail-open). The deny must print for any exception; the
+    # fallback is a raise-proof constant.
+    try:
+        error_render = f"{type(error).__name__}: {error}"
+    except BaseException:  # noqa: BLE001 — hostile __str__ must not suppress the deny
+        error_render = "<error text unavailable>"
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
             "permissionDecisionReason": (
                 f"PACT bootstrap_gate {stage} failure — blocking for safety. "
-                f"{type(error).__name__}: {error}. Check hook installation "
+                f"{error_render}. Check hook installation "
                 "and shared module availability."
             ),
         }
     }))
+    # Guarded full-text rendering: a raise here would replace the deliberate
+    # exit 2 (blocking) with a traceback exit 1 (non-blocking → fail-open).
+    try:
+        error_full = f"{error}"
+    except BaseException:  # noqa: BLE001 — hostile __str__; keep the exit-2 path
+        error_full = "<exception str() raised>"
     print(
-        f"Hook load error (bootstrap_gate / {stage}): {error}",
+        f"Hook load error (bootstrap_gate / {stage}): {error_full}",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -225,8 +240,15 @@ def _emit_degraded_warning(stage: str, error: BaseException, tool_name: str) -> 
             "mutating tools blocked."
         ),
     }))
+    # Guarded full-text rendering: this line runs AFTER the decision JSON
+    # printed, but a raise here would exit nonzero — and stdout JSON is only
+    # honored on exit 0, voiding the defer/ask decision retroactively.
+    try:
+        error_full = f"{error}"
+    except BaseException:  # noqa: BLE001 — hostile __str__; keep the exit-0 path
+        error_full = "<exception str() raised>"
     print(
-        f"Hook degraded-{decision} (bootstrap_gate / {stage}): {tool_name} — {error}",
+        f"Hook degraded-{decision} (bootstrap_gate / {stage}): {tool_name} — {error_full}",
         file=sys.stderr,
     )
     sys.exit(0)

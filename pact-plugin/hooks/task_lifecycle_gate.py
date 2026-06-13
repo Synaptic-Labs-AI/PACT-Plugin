@@ -192,12 +192,14 @@ def _emit_load_failure_advisory(
     context-bound output; the stderr diagnostic keeps the full text.
     """
     # Thin call-site fallback (defense-in-depth over the now-total helper):
-    # the FLOOR below must print no matter what the renderer does. The type
-    # name alone is renderable for any exception class.
+    # the FLOOR below must print no matter what the renderer does. The
+    # fallback is a raise-proof CONSTANT — type(error).__name__ would
+    # re-invoke the same attribute access (hostile metaclass __name__) that
+    # is the helper's one remaining fall-through path.
     try:
         error_text = _bounded_error_text(error)
     except BaseException:  # noqa: BLE001 — floor must survive any renderer defect
-        error_text = type(error).__name__
+        error_text = "<error text unavailable>"
     advisory = (
         f"PACT task_lifecycle_gate {stage} failure — lifecycle "
         f"rule enforcement skipped this turn. "
