@@ -1046,6 +1046,45 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                         "be present as non-empty strings.",
                     ))
 
+        # #955 dispatch_variety emit — GC-immune mirror of the per-dispatch
+        # variety stamp. Fires on the TaskCreate of a Task-B carrying
+        # metadata.variety (one per dispatch, D3). Keyed on is_lead +
+        # metadata.variety PRESENCE — NOT on owner (per orchestrate.md the
+        # TaskCreate(B) sets metadata.variety but leaves owner empty; owner is
+        # wired by a SEPARATE later TaskUpdate, so an owner gate here would never
+        # fire). The new Task-B id comes from the create-result post-state
+        # (tool_response.task.id — the same shape the ③ completion branch reads),
+        # falling back to tool_input.taskId if the harness echoes it. Best-effort:
+        # a missing id or an append failure skips the emit (coverage degrades by
+        # one dispatch) but never breaks the gate's advisory evaluation or its
+        # exit-0 contract.
+        if pact_context.is_lead(input_data):
+            create_variety = (
+                incoming_metadata.get("variety")
+                if isinstance(incoming_metadata, dict)
+                else None
+            )
+            if isinstance(create_variety, dict) and create_variety:
+                created_task = (
+                    tool_response.get("task")
+                    if isinstance(tool_response, dict)
+                    else None
+                )
+                new_task_id = ""
+                if isinstance(created_task, dict):
+                    new_task_id = str(created_task.get("id") or "")
+                if not new_task_id:
+                    new_task_id = str(tool_input.get("taskId") or "")
+                if new_task_id:
+                    try:
+                        append_event(make_event(
+                            "dispatch_variety",
+                            task_id=new_task_id,
+                            variety=create_variety,
+                        ))
+                    except Exception:
+                        pass  # fail-open: emit failure never breaks the gate
+
     # ③ TaskUpdate-to-completed rules — paired-send, handoff presence,
     # handoff schema, self-completion
     if tool_name == "TaskUpdate" and tool_input.get("status") == "completed":
@@ -1119,6 +1158,32 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                         f"PACT task_lifecycle_gate: Teachback Task {task_id} "
                         f"{schema_problem}.",
                     ))
+
+            # #955 teachback_ack emit — GC-immune mirror of the teammate's
+            # variety_acknowledgment, emitted at the lead's TaskUpdate(A,
+            # completed) accepting the teachback. The ack lives on the DISK
+            # Task-A (the teammate wrote teachback_submit earlier; the lead's
+            # accept TaskUpdate carries only status), so read it from `metadata`
+            # (the on-disk post-state resolved above). is_lead-gated (mirrors b2):
+            # only the lead's process resolves the canonical journal; a teammate
+            # frame self-drops (#877). Best-effort: any malformed/absent ack or an
+            # append failure skips the emit without breaking the gate.
+            if pact_context.is_lead(input_data) and isinstance(teachback_submit, dict):
+                ack = teachback_submit.get("variety_acknowledgment")
+                if isinstance(ack, dict):
+                    flag = ack.get("rationale_articulates_this_dispatch")
+                    if isinstance(flag, str) and flag:
+                        ack_fields = {
+                            "task_id": str(task_id),
+                            "rationale_articulates_this_dispatch": flag,
+                        }
+                        concern = ack.get("concern")
+                        if isinstance(concern, str) and concern.strip():
+                            ack_fields["concern"] = concern  # optional field
+                        try:
+                            append_event(make_event("teachback_ack", **ack_fields))
+                        except Exception:
+                            pass  # fail-open
 
             # NOTE (#897): a per-completion paired-wake detector was removed
             # here. It read inboxes/{owner}.json, but that store is
