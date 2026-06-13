@@ -93,7 +93,7 @@ def _emit_load_failure_deny(stage: str, error: BaseException) -> NoReturn:
     # PROCEEDS (fail-open). The deny must print for any exception; the
     # fallback is a raise-proof constant.
     try:
-        error_render = f"{type(error).__name__}: {error}"
+        error_render = _bounded_error_text(error)
     except BaseException:  # noqa: BLE001 — hostile __str__ must not suppress the deny
         error_render = "<error text unavailable>"
     print(json.dumps({
