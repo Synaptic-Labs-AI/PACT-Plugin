@@ -88,6 +88,7 @@ TaskUpdate(A_id, owner="{teammate-name}")
 B_id = TaskCreate(
     subject="{role}: {primary mission}",
     description="{full mission per Recommended Agent Prompting Structure}\n\n"
+                "FIRST claim this task (TaskUpdate status=in_progress) before any implementation tool-use — it is pre-assigned to you but still pending; you flip it, not the lead.\n\n"
                 "Per dogfood directive: DO NOT mark this task completed yourself. "
                 "After staging artifacts, write metadata.handoff, send notify SendMessage to team-lead, "
                 "SET intentional_wait{reason=awaiting_lead_completion}. Idle. Lead will mark "
