@@ -207,6 +207,69 @@ class TestBackstopScoping:
 
 
 # =============================================================================
+# Malformed non-dict handoff on the backstop path — guard + no marker poison
+# =============================================================================
+class TestBackstopMalformedHandoff:
+    """The backstop guard requires `isinstance(incoming_handoff, dict)` BEFORE
+    calling the emitter, so a handoff set to a non-dict (str / list / int / bool)
+    on an already-completed task must NOT reach _emit_lead_side_agent_handoff —
+    it neither emits NOR claims the shared O_EXCL occupant marker. This pins the
+    isinstance guard against a future refactor that drops it (which would feed a
+    malformed handoff to the emitter and risk poisoning the marker so a later
+    legitimate fire is permanently suppressed)."""
+
+    @pytest.mark.parametrize(
+        "bad_handoff",
+        ["a-string-handoff", ["list", "handoff"], 123, True, {}],
+        ids=["str", "list", "int", "bool", "empty-dict"],
+    )
+    def test_non_dict_handoff_no_emit(
+        self, tmp_path, monkeypatch, pact_context, emit_events, bad_handoff
+    ):
+        """A non-dict (or empty-dict) handoff on the backstop path → no emit.
+        `incoming_handoff` must be a truthy dict; an empty dict is falsy so it is
+        also filtered."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        pact_context(team_name=TEAM, session_id="s1")
+        _seed_task(
+            tmp_path, TEAM, "42",
+            subject="devops: CODE the thing", owner="devops",
+            status="completed", metadata={},
+        )
+        tlg.evaluate_lifecycle(_metadata_only_handoff_update("42", handoff=bad_handoff))
+        assert len(emit_events) == 0, (
+            f"non-dict/empty handoff {bad_handoff!r} must not emit"
+        )
+
+    def test_malformed_attempt_does_not_poison_marker(
+        self, tmp_path, monkeypatch, pact_context, emit_events
+    ):
+        """NON-VACUITY (the load-bearing assertion): after a malformed non-dict
+        handoff attempt, a SUBSEQUENT well-formed handoff on the SAME completed
+        task STILL emits exactly once. Proves the bad attempt never claimed the
+        O_EXCL marker (a poisoned marker would suppress this legitimate fire). If
+        the isinstance guard were dropped AND the emitter claimed-then-aborted on
+        the malformed handoff, this second emit would be 0 instead of 1."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        pact_context(team_name=TEAM, session_id="s1")
+        _seed_task(
+            tmp_path, TEAM, "42",
+            subject="devops: CODE the thing", owner="devops",
+            status="completed", metadata={},
+        )
+        # Malformed attempt first — must be a no-op (no emit, no marker claim).
+        tlg.evaluate_lifecycle(_metadata_only_handoff_update("42", handoff="bad-string"))
+        assert len(emit_events) == 0
+        # A later well-formed handoff still fires — marker was NOT poisoned.
+        tlg.evaluate_lifecycle(_metadata_only_handoff_update("42", handoff=HANDOFF))
+        assert len(emit_events) == 1, (
+            "well-formed handoff after a malformed attempt must still emit "
+            "(the malformed attempt must not have claimed/poisoned the marker)"
+        )
+
+
+# =============================================================================
 # M8 — idempotent dedup against a prior b2 fire (shared O_EXCL occupant marker)
 # =============================================================================
 class TestBackstopDedup:
