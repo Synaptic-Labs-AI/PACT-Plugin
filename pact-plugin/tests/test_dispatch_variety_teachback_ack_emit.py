@@ -30,6 +30,22 @@ LEAD = "PACT:pact-orchestrator"
 TEAMMATE = "pact-devops-engineer"
 VARIETY = {"novelty": 3, "scope": 3, "uncertainty": 3, "risk": 3, "total": 12}
 
+# The canonical 5 keys the dispatch_variety emit must project to (§5.1: the 4
+# dimensions + total — the *_rationale strings are NOT mirrored).
+CANONICAL_VARIETY_KEYS = {"novelty", "scope", "uncertainty", "risk", "total"}
+
+# A realistic on-disk stamp as the orchestrator writes it: the 5 canonical keys
+# PLUS the four per-dimension rationale strings. The emit must DROP the
+# rationales (they are calibration noise in the GC-immune journal; wrap-up Q5
+# reads only .total). Feeding this proves the projection actually trims.
+VARIETY_WITH_RATIONALES = {
+    "novelty": 3, "novelty_rationale": "new-but-conventional",
+    "scope": 3, "scope_rationale": "bounded diff",
+    "uncertainty": 3, "uncertainty_rationale": "careful cold read",
+    "risk": 3, "risk_rationale": "high blast radius",
+    "total": 12,
+}
+
 
 @pytest.fixture
 def emit_events(monkeypatch):
@@ -57,6 +73,51 @@ class TestM9DispatchVariety:
         assert len(dv) == 1
         assert dv[0]["task_id"] == "99"
         assert dv[0]["variety"] == VARIETY
+        # The projection is canonical: exactly the 5 §5.1 keys, no extras.
+        assert set(dv[0]["variety"].keys()) == CANONICAL_VARIETY_KEYS
+
+    def test_emit_projects_to_canonical_keys_dropping_rationales(self, emit_events):
+        """§5.1 trim: a stamp carrying *_rationale strings emits ONLY the 4
+        dimensions + total — the rationale keys are NOT mirrored to the journal.
+        NON-VACUITY: the input dict explicitly contains four *_rationale keys;
+        without the projection the emitted variety would carry all 9 keys."""
+        tlg.evaluate_lifecycle({
+            "tool_name": "TaskCreate",
+            "agent_type": LEAD,
+            "tool_input": {
+                "subject": "devops: implement",
+                "metadata": {"variety": VARIETY_WITH_RATIONALES},
+            },
+            "tool_response": {"task": {"id": "99"}},
+        })
+        dv = _typed(emit_events, "dispatch_variety")
+        assert len(dv) == 1
+        emitted = dv[0]["variety"]
+        # Exactly the 5 canonical keys — no *_rationale leaked through.
+        assert set(emitted.keys()) == CANONICAL_VARIETY_KEYS
+        assert not any(k.endswith("_rationale") for k in emitted)
+        # Values for the canonical keys are preserved verbatim.
+        assert emitted == {
+            "novelty": 3, "scope": 3, "uncertainty": 3, "risk": 3, "total": 12,
+        }
+
+    def test_emit_tolerates_partial_stamp(self, emit_events):
+        """A stamp missing some dimensions emits only the present canonical keys
+        (the projection's `if k in` guard) — never KeyErrors, never invents."""
+        tlg.evaluate_lifecycle({
+            "tool_name": "TaskCreate",
+            "agent_type": LEAD,
+            "tool_input": {
+                "subject": "devops: implement",
+                # total + a subset of dims, plus a stray rationale to drop.
+                "metadata": {"variety": {"total": 7, "novelty": 2,
+                                         "novelty_rationale": "x"}},
+            },
+            "tool_response": {"task": {"id": "99"}},
+        })
+        dv = _typed(emit_events, "dispatch_variety")
+        assert len(dv) == 1
+        assert dv[0]["variety"] == {"total": 7, "novelty": 2}
 
     def test_id_falls_back_to_tool_input_taskid(self, emit_events):
         """If the create-result omits task.id, fall back to tool_input.taskId."""

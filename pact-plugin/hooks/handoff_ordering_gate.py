@@ -25,6 +25,14 @@ deny, and a crashed PreToolUse hook (exit 1) is treated as non-blocking by the
 platform (the fail-open outcome), so on load failure we simply suppress + exit 0
 rather than denying like the fail-CLOSED gates (bootstrap_gate / pin_*_gate).
 
+WHY PreToolUse (not PostToolUse): the choice is about advisory TIMING, not
+deny power — this gate never denies on EITHER event. PreToolUse surfaces the
+nudge in the SAME turn, BEFORE the completion lands, so the lead can choose
+handoff-then-complete in the clean order while the decision is still live. A
+PostToolUse advisory would arrive after the completion already applied — too
+late to reorder. (The backstop, which DOES need the after-state, lives on the
+PostToolUse lifecycle gate; this nudge wants the before-state.)
+
 DUAL-MODE: lead-frame-only. The advisory is for the lead performing the
 completion; key on pact_context.is_lead (reads agent_type — the only tmux-safe
 discriminator; agent_id/team_name are absent on tmux frames). Emit nothing in a
@@ -131,6 +139,12 @@ def _evaluate(input_data: dict) -> str | None:
     if not isinstance(owner, str) or not owner.strip():
         return None  # no owner → not a teammate work task
     subject = task.get("subject") or ""
+    # The is_self_complete_exempt arm suppresses the warn for the agent types in
+    # SELF_COMPLETE_EXEMPT_AGENT_TYPES (currently the secretary) + signal tasks.
+    # If that exempt set GROWS, re-audit this suppression: a newly-exempt type
+    # that DOES carry a HANDOFF would silently lose the nudge here. See the
+    # is_self_complete_exempt docstring (shared/intentional_wait.py) for the
+    # canonical exempt-surface definition.
     if is_self_complete_exempt(task, team_name) or is_teachback_subject(subject):
         return None  # exempt → no handoff expected, no warn
 

@@ -254,3 +254,83 @@ class TestMainContract:
             gate.main()
         assert exc.value.code == 0
         assert json.loads(capsys.readouterr().out) == {"suppressOutput": True}
+
+
+# =============================================================================
+# main() through the REAL pact_context on-disk resolution (advisory path)
+# =============================================================================
+class TestMainRealContextResolution:
+    """The other main() tests (TestMainContract) use the `pact_context`
+    fixture, which monkeypatches `pact_context._context_path` to a pre-written
+    file. Because `init()` early-returns when `_context_path is not None`, those
+    tests SKIP the gate's real session-context resolution chain — the path
+    `init(input_data)` resolves from `input_data.session_id` + CLAUDE_PROJECT_DIR,
+    then `get_pact_context()` reads the on-disk pact-session-context.json to
+    recover `team_name`, then `read_task_json(task_id, team_name)`.
+
+    This test deliberately does NOT use the `pact_context` fixture. It writes a
+    REAL on-disk context via `pact_context.write_context(...)`, leaves
+    `_context_path`/`_cache` UNSET (None) so `init()` performs the genuine
+    resolution, and drives `main()` end-to-end for the POSITIVE-advisory path.
+    It proves team_name resolution from real disk reaches the warn branch — not
+    just the pre-injected-path shortcut. (Non-vacuity: if the advisory path or
+    the real context resolution is broken, team_name resolves empty, the gate
+    bypasses, and the additionalContext assertion fails.)
+    """
+
+    def test_advisory_path_through_real_on_disk_context(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        import os
+        import shared.pact_context as pc
+
+        sid = "real-ctx-session-001"
+        project_dir = str(tmp_path / "PACT-Plugin")  # basename slug == "PACT-Plugin"
+
+        # Filesystem isolation: every Path.home() (write_context, init's path
+        # builder, read_task_json) resolves under tmp_path.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        # CLAUDE_PROJECT_DIR is the OTHER half of init()'s path resolution.
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", project_dir)
+
+        # Write the REAL on-disk session-context file at the session-scoped path.
+        # Start from clean module state so write_context resolves freshly.
+        monkeypatch.setattr(pc, "_context_path", None)
+        monkeypatch.setattr(pc, "_cache", None)
+        pc.write_context(TEAM, sid, project_dir)
+
+        # CRITICAL: write_context populates `_cache` (and `_context_path`). Reset
+        # BOTH to None so the gate's init()/get_pact_context() must perform the
+        # genuine on-disk resolution rather than hitting the warm cache — that
+        # resolution chain is exactly what this test exists to exercise.
+        monkeypatch.setattr(pc, "_context_path", None)
+        monkeypatch.setattr(pc, "_cache", None)
+
+        # Seed the on-disk task: completed, HANDOFF-expecting (owner, no handoff).
+        _seed_task(
+            tmp_path, TEAM, "42",
+            subject="devops: CODE the thing", owner="devops",
+            status="completed", metadata={},
+        )
+
+        # Frame carries agent_type (is_lead reads it directly) AND session_id
+        # (init() reads it to resolve the context path). No pre-set _context_path.
+        frame = _complete_update("42", agent_type=LEAD)
+        frame["session_id"] = sid
+
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(frame)))
+        with pytest.raises(SystemExit) as exc:
+            gate.main()
+        out = capsys.readouterr().out
+
+        assert exc.value.code == 0, "WARN gate must ALWAYS exit 0 — never deny"
+        parsed = json.loads(out)
+        hso = parsed["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert "additionalContext" in hso, (
+            "the advisory must fire through the REAL on-disk context resolution "
+            "(team_name recovered from the written pact-session-context.json); a "
+            "missing advisory means the resolution chain or the warn branch broke"
+        )
+        assert "42" in hso["additionalContext"] and "devops" in hso["additionalContext"]
+        assert "permissionDecision" not in hso, "a WARN gate must NEVER emit a deny"

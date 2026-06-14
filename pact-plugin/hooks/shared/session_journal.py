@@ -112,10 +112,13 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # metadata.variety is reaped by the teams/tasks reaper, so wrap-up Q5 read
     # false-empty after GC; this journal event is the durable source.
     # task_id is the Task-B id; variety is the 5-key dict (4 dims + total).
-    # Read by wrap-up Q5 as the GC-immune source for compute_variety_divergence's
-    # dispatch_varieties list. (variety is typed `dict`, so extra/missing dims
-    # inside it do not break the schema check — only the top-level task_id+variety
-    # keys are enforced.)
+    # The emitter PROJECTS metadata.variety to exactly these 5 keys
+    # (DISPATCH_VARIETY_KEYS) before append — the *_rationale strings are NOT
+    # mirrored (pact-variety.md §5.1). Read by wrap-up Q5 as the GC-immune
+    # source for compute_variety_divergence's dispatch_varieties list, which
+    # consumes only .total. (variety is typed `dict`, so the schema check
+    # enforces only the top-level task_id+variety keys — the projection lives
+    # at the emit site, not here.)
     "dispatch_variety": {"task_id": str, "variety": dict},
     # hooks/task_lifecycle_gate.py emits teachback_ack on the lead's
     # TaskUpdate(A, status="completed") accepting a teachback whose Task-A

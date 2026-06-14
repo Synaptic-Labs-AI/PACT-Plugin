@@ -295,6 +295,7 @@ try:
     from shared.task_utils import is_teachback_subject as _is_teachback_subject
     from shared.task_utils import read_task_json
     from shared.teachback_schema import (
+        DISPATCH_VARIETY_KEYS,
         TEACHBACK_RECOMMENDED_BAND_MIN,
         TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN,
         TEACHBACK_REQUIRED_FIELDS,
@@ -1076,11 +1077,27 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                 if not new_task_id:
                     new_task_id = str(tool_input.get("taskId") or "")
                 if new_task_id:
+                    # §5.1-fidelity projection: mirror ONLY the 4 dimensions +
+                    # total, dropping the *_rationale strings — the journal is
+                    # the GC-immune CALIBRATION source (wrap-up Q5 reads only
+                    # .total), not a rationale archive. Keys come from the
+                    # canonical DISPATCH_VARIETY_KEYS (derived from
+                    # _VARIETY_DIMENSIONS) so a dimension rename never drifts.
+                    # `if k in` keeps it tolerant of a partial stamp.
+                    projected_variety = {
+                        k: create_variety[k]
+                        for k in DISPATCH_VARIETY_KEYS
+                        if k in create_variety
+                    }
+                    # Append-only, no dedup by design: a Task-B is created ONCE,
+                    # so this fires naturally-once per dispatch (unlike
+                    # agent_handoff, which can re-fire across b1/b2/backstop and
+                    # therefore needs the O_EXCL occupant marker).
                     try:
                         append_event(make_event(
                             "dispatch_variety",
                             task_id=new_task_id,
-                            variety=create_variety,
+                            variety=projected_variety,
                         ))
                     except Exception:
                         pass  # fail-open: emit failure never breaks the gate
@@ -1180,6 +1197,10 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                         concern = ack.get("concern")
                         if isinstance(concern, str) and concern.strip():
                             ack_fields["concern"] = concern  # optional field
+                        # Append-only, no dedup by design: the lead's accepting
+                        # TaskUpdate(A, status="completed") fires naturally-once
+                        # per teachback acceptance, so no occupant marker is
+                        # needed (cf. the dispatch_variety note above).
                         try:
                             append_event(make_event("teachback_ack", **ack_fields))
                         except Exception:
@@ -1446,6 +1467,14 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
         # is_lead-gated (mirrors b2 at the completion surface): only the lead's
         # process resolves the canonical journal; a teammate frame self-drops
         # (#877). The in-process/lead branch is the fail-safe default.
+        #
+        # ACCEPTED RESIDUAL: if this fires-open on a hard crash AND the handoff
+        # is then never set in a later TaskUpdate, exactly one agent_handoff
+        # journal event is lost — recoverable out-of-band (git) when the work
+        # was committed. This is the deliberate posture: the nudge gate is
+        # advisory (never blocks), the backstop is the guarantee, and a
+        # journal-emit failure must never break completion. One lost durable
+        # record is strictly better than a stranded completion.
         if (
             pact_context.is_lead(input_data)
             and isinstance(incoming_handoff, dict)
