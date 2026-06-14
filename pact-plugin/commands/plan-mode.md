@@ -203,6 +203,7 @@ A_id = TaskCreate(
                 "Submit TEACHBACK by writing metadata.teachback_submit (per pact-teachback skill). "
                 "SET intentional_wait{reason=awaiting_lead_completion}. Idle. "
                 "DO NOT mark this task completed — team-lead-only completion.\n\n"
+                "When Task B unblocks, claim it (TaskUpdate status=in_progress) BEFORE any implementation tool-use — it is pre-assigned to you but still pending; you flip it, not the lead.\n\n"
                 "Mission for Task B: see Task #{B_id}."
 )
 TaskUpdate(A_id, owner="{specialist-name}")
@@ -219,7 +220,7 @@ The teachback gate is lightweight ("understanding-confirm" with no implementatio
 
 1. `TaskCreate(subject="{specialist}: TEACHBACK for plan consultation on {feature}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — Task A.
 2. `TaskCreate(subject="{specialist}: plan consultation for {feature}", description=<see below>)` — Task B.
-   - Task B's `description` is "PLANNING CONSULTATION ONLY — No implementation.\n\nTask: {task description}\n\n[full template content from above]\n\nIf upstream context is referenced, read it first by using TaskGet tool."
+   - Task B's `description` is "PLANNING CONSULTATION ONLY — No implementation.\n\nFIRST claim this task (TaskUpdate status=in_progress) before beginning the consultation — pre-assigned to you but still pending; you flip it, not the lead.\n\nTask: {task description}\n\n[full template content from above]\n\nIf upstream context is referenced, read it first by using TaskGet tool."
 3. `TaskUpdate(A_id, owner="{specialist-name}", addBlocks=[B_id])`
 4. `TaskUpdate(B_id, owner="{specialist-name}", addBlockedBy=[A_id])`
 5. Spawn the consultant with the canonical dispatch form:

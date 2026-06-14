@@ -667,15 +667,15 @@ class TestPerLoopDispatchSites:
     # 9 per-loop dispatch sites. Each entry is
     # (relative_command_path, lead_in_line_number_1based, role_or_phase_label).
     SITES = [
-        ("orchestrate.md", 460, "PREPARE"),
-        ("orchestrate.md", 555, "ARCHITECT"),
-        ("orchestrate.md", 678, "CODE"),
-        ("orchestrate.md", 813, "TEST"),
-        ("comPACT.md", 225, "MultipleSpecialists"),
-        ("comPACT.md", 285, "SingleSpecialist"),
-        ("peer-review.md", 190, "Reviewers"),
-        ("plan-mode.md", 218, "Consultants"),
-        ("rePACT.md", 244, "SubScopeSpecialists"),
+        ("orchestrate.md", 462, "PREPARE"),
+        ("orchestrate.md", 557, "ARCHITECT"),
+        ("orchestrate.md", 680, "CODE"),
+        ("orchestrate.md", 815, "TEST"),
+        ("comPACT.md", 226, "MultipleSpecialists"),
+        ("comPACT.md", 286, "SingleSpecialist"),
+        ("peer-review.md", 191, "Reviewers"),
+        ("plan-mode.md", 219, "Consultants"),
+        ("rePACT.md", 245, "SubScopeSpecialists"),
     ]
 
     @staticmethod

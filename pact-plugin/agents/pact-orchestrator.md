@@ -374,7 +374,7 @@ For non-exempt teammates (everyone except `pact-secretary`):
 1. `TaskCreate(subject="{name}: TEACHBACK for {topic}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — create Task A (teachback gate).
 2. `TaskCreate(subject="{name}: {primary work subject}", description="<full mission: CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES per §13 Recommended Agent Prompting Structure>")` — create Task B (primary work).
 3. `TaskUpdate(A_id, owner="{name}", addBlocks=[B_id])` — assign Task A to the teammate and wire it as the gate that unblocks Task B.
-4. `TaskUpdate(B_id, owner="{name}", addBlockedBy=[A_id])` — assign Task B to the same teammate and explicitly mirror the block edge. Do NOT pre-set `status="in_progress"` on either task — the teammate self-claims on arrival.
+4. `TaskUpdate(B_id, owner="{name}", addBlockedBy=[A_id])` — assign Task B to the same teammate and explicitly mirror the block edge. Do NOT pre-set `status="in_progress"` on either task — the teammate self-claims on arrival. Ensure the Task A brief reminds the teammate to claim Task B (`status="in_progress"`) before any implementation tool-use once it unblocks (the command dispatch templates carry this line) — the teammate flips it, never you.
 5. `Agent(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", prompt="YOUR PACT ROLE: teammate ({name}).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. Then check `TaskList` for tasks assigned to you.")` — spawn the teammate. Keep the prompt ≤ 800 chars and include the literal `TaskList` reference (or one of: `task list`, `tasks assigned`, `check your tasks`); the teammate reads the mission via `TaskGet(B_id)`, not from the prompt.
 
 #### First-spawn verification (HARD-RULE)
@@ -434,7 +434,7 @@ Use the same iterate-by-name pattern for any other team-lead-to-many signal (gra
 | Event | Task Operation |
 |-------|----------------|
 | Before dispatching agent | TaskCreate Task A (TEACHBACK) + Task B (work); `TaskUpdate(A, owner=name, addBlocks=[B])` + `TaskUpdate(B, owner=name, addBlockedBy=[A])` — see §11 Dispatch pattern |
-| After dispatching agent | Teammate self-claims via `TaskUpdate(taskId, status="in_progress")`; the team-lead does NOT pre-set `in_progress` |
+| After dispatching agent | Teammate self-claims Task B via `TaskUpdate(taskId, status="in_progress")` **before any implementation tool-use** once it unblocks; the team-lead does NOT pre-set `in_progress` |
 | Teachback submitted (Task A) | Read raw JSON `metadata.teachback_submit`, validate per §12 Teachback Review, then Acceptance two-call atomic pair (§12) auto-unblocks Task B |
 | HANDOFF submitted (Task B) | Read raw JSON `metadata.handoff` (TaskGet is metadata-blind), then Acceptance two-call atomic pair (§12) — paired wake-`SendMessage` + `TaskUpdate(taskId, status="completed")` (SendMessage FIRST per the lifecycle-gate ordering invariant) |
 | Reading agent's full HANDOFF | `cat ~/.claude/tasks/{team_name}/{taskId}.json \| jq .metadata.handoff` (on-demand, raw JSON; `TaskGet` does NOT surface metadata.handoff) |

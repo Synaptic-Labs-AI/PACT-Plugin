@@ -231,10 +231,11 @@ A_id = TaskCreate(
                 "Submit TEACHBACK by writing metadata.teachback_submit (per pact-teachback skill). "
                 "SET intentional_wait{reason=awaiting_lead_completion}. Idle. "
                 "DO NOT mark this task completed — team-lead-only completion.\n\n"
+                "When Task B unblocks, claim it (TaskUpdate status=in_progress) BEFORE any implementation tool-use — it is pre-assigned to you but still pending; you flip it, not the lead.\n\n"
                 "Mission for Task B: see Task #{B_id}."
 )
 TaskUpdate(A_id, owner="{scope-prefixed-name}")
-B_id = TaskCreate(subject="{scope-prefixed-name}: implement {sub-task}", description="<full mission>")
+B_id = TaskCreate(subject="{scope-prefixed-name}: implement {sub-task}", description="<full mission>\n\nFIRST claim this task (TaskUpdate status=in_progress) before any implementation tool-use — it is pre-assigned to you but still pending; you flip it, not the lead.")
 TaskUpdate(B_id, owner="{scope-prefixed-name}", addBlockedBy=[A_id])
 TaskUpdate(A_id, addBlocks=[B_id])
 ```

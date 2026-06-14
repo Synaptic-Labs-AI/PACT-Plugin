@@ -79,6 +79,7 @@ A_id = TaskCreate(
                 "after teachback acceptance, then send a wake-SendMessage confirming Task B is claimable. "
                 "If TEACHBACK is rejected, team-lead writes metadata.teachback_rejection and sends a "
                 "wake-SendMessage with corrections; revise on this same task.\n\n"
+                "When Task B unblocks, claim it (TaskUpdate status=in_progress) BEFORE any implementation tool-use — it is pre-assigned to you but still pending; you flip it, not the lead.\n\n"
                 "Mission for Task B: see Task #{B_id}."
 )
 TaskUpdate(A_id, owner="{teammate-name}")
@@ -87,6 +88,7 @@ TaskUpdate(A_id, owner="{teammate-name}")
 B_id = TaskCreate(
     subject="{role}: {primary mission}",
     description="{full mission per Recommended Agent Prompting Structure}\n\n"
+                "FIRST claim this task (TaskUpdate status=in_progress) before any implementation tool-use — it is pre-assigned to you but still pending; you flip it, not the lead.\n\n"
                 "Per dogfood directive: DO NOT mark this task completed yourself. "
                 "After staging artifacts, write metadata.handoff, send notify SendMessage to team-lead, "
                 "SET intentional_wait{reason=awaiting_lead_completion}. Idle. Lead will mark "

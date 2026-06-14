@@ -40,7 +40,8 @@ A reply to the user that contains content the team-lead needs to act on (a block
 4. **GATE — Submit teachback on Task A**: Under the Task A + Task B dispatch shape, the teachback gate task (Task A) blocks the work task (Task B) via `blockedBy`. Store your teachback in `metadata.teachback_submit` on Task A per the [pact-teachback](../pact-teachback/SKILL.md) skill, **notify the team-lead via SendMessage**, SET `intentional_wait{reason=awaiting_lead_completion}`, and idle. **Ordering invariant**: metadata write FIRST → SendMessage SECOND → `intentional_wait` SET THIRD (load-bearing; see [pact-teachback §Action: store teachback now](../pact-teachback/SKILL.md#action-store-teachback-now) for rationale). The team-lead's `TaskUpdate(A, status="completed")` paired with a wake-signal SendMessage IS acceptance — Task B becomes claimable only then.
    - **DO NOT** call `Edit`, `Write`, or `Bash` for implementation work before storing your teachback
    - See [Teachback](#teachback-conversation-verification) below for the full skill reference
-5. Begin work on Task B — check your agent memory (`~/.claude/agent-memory/<your-name>/`) for relevant patterns and knowledge as part of your working process. When a memory file may be written by concurrent same-named instances across teams, namespace per team (a `## team={your team_id}` section) so instances don't clobber each other.
+5. **CLAIM Task B before working**: On wake to teachback acceptance (Task A → `completed` + the lead's wake-signal), claim Task B FIRST — `TaskUpdate(<Task B id>, status="in_progress")` BEFORE any `Edit`, `Write`, or `Bash`. Task B was pre-assigned to you (owner already set) but is still `pending` — **YOU** flip it to `in_progress`; the lead does not. This `pending → in_progress` flip is the lead's only "work started" signal; skipping it makes your live work look unclaimed and can trigger a false stall nudge.
+6. Begin work on Task B — check your agent memory (`~/.claude/agent-memory/<your-name>/`) for relevant patterns and knowledge as part of your working process. When a memory file may be written by concurrent same-named instances across teams, namespace per team (a `## team={your team_id}` section) so instances don't clobber each other.
 
 > **Worktree Scope**: If you are working in a worktree, files that are gitignored (e.g., `CLAUDE.md`) do not exist there. Do not edit or create `CLAUDE.md` — the orchestrator manages it separately. If you need to reference `CLAUDE.md` content, it is auto-loaded into your context. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead of editing it directly.
 
@@ -171,7 +172,7 @@ If ANY precondition is unmet, KEEP WORKING. Do not write `metadata.handoff` to "
 
 > **Why idle, not poll?** You cannot self-wake while idle. The team-lead's wake-signal SendMessage brings you back to read the acceptance/rejection. Trust the wake; do not poll TaskList speculatively.
 
-After wake on acceptance, check `TaskList` for unassigned, unblocked tasks matching your domain (Task B from your dispatch pair, or other follow-up work). If found, claim via `TaskUpdate(taskId, owner="your-name", status="in_progress")` and begin. If none, idle (you may be consulted or shut down).
+After wake on acceptance, check `TaskList` for unblocked tasks you OWN or can claim — **including your PRE-ASSIGNED Task B** (owner already you, still `pending`). Claiming is a status flip, not only an ownership grab: pre-assigned → `TaskUpdate(taskId, status="in_progress")`; unowned → `TaskUpdate(taskId, owner="your-name", status="in_progress")`. Do this BEFORE any implementation work. If none, idle (you may be consulted or shut down).
 
 ## On Rejection (Wake-Signal Receipt)
 
