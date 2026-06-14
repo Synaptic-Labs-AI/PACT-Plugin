@@ -188,7 +188,7 @@ Under the Task A + Task B dispatch shape, this ordering is structurally reinforc
 
 ## Post-store behavior
 
-Idle on `awaiting_lead_completion` until the team-lead's wake-signal arrives. Do NOT speculatively begin Task B; the team-lead's status flip is the gate.
+Idle on `awaiting_lead_completion` until the team-lead's wake-signal arrives. Do NOT speculatively begin Task B; the team-lead's status flip is the gate. When the wake-signal arrives, claim Task B FIRST — `TaskUpdate(<Task B id>, status="in_progress")` BEFORE any `Edit`/`Write`/`Bash` — then begin: Task B is pre-assigned to you (owner already set) but still `pending`, so YOU flip it to `in_progress` (the lead does not), preserving the lead's "work started" signal.
 
 If you have other claimable, unblocked tasks unrelated to this dispatch (a separate Task A from a different mission), you may claim and work them. The wait is per-task, not per-agent.
 

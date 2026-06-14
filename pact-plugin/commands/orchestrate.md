@@ -79,6 +79,7 @@ A_id = TaskCreate(
                 "after teachback acceptance, then send a wake-SendMessage confirming Task B is claimable. "
                 "If TEACHBACK is rejected, team-lead writes metadata.teachback_rejection and sends a "
                 "wake-SendMessage with corrections; revise on this same task.\n\n"
+                "When Task B unblocks, claim it (TaskUpdate status=in_progress) BEFORE any implementation tool-use — it is pre-assigned to you but still pending; you flip it, not the lead.\n\n"
                 "Mission for Task B: see Task #{B_id}."
 )
 TaskUpdate(A_id, owner="{teammate-name}")
