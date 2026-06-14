@@ -3204,6 +3204,14 @@ class TestValidateEventSchemaPerType:
             "task_id": "42",
             "variety": {"novelty": 1, "scope": 1, "uncertainty": 1, "risk": 1, "total": 4},
         },
+        "dispatch_variety": {
+            "task_id": "42",
+            "variety": {"novelty": 3, "scope": 3, "uncertainty": 3, "risk": 3, "total": 12},
+        },
+        "teachback_ack": {
+            "task_id": "41",
+            "rationale_articulates_this_dispatch": "yes",
+        },
         "phase_transition": {"phase": "CODE", "status": "started"},
         "checkpoint": {"phase": "CODE"},
         "agent_dispatch": {"agent": "coder", "task_id": "1", "phase": "CODE"},
@@ -3880,6 +3888,67 @@ class TestValidateOptionalFieldTypes:
         events = read_events("session_start")
         assert len(events) == 1
         assert events[0].get("source") == "startup"
+
+    def test_teachback_ack_concern_declared_optional(self):
+        """teachback_ack has `concern: str` in _OPTIONAL_FIELDS_BY_TYPE (#955).
+
+        concern is present only when rationale_articulates_this_dispatch is
+        "no"/"concern" (per pact-variety.md); a "yes" ack omits it. The
+        teachback_ack required-fields registration ACTIVATES this optional
+        check (the validator short-circuits on unknown types)."""
+        from shared.session_journal import _OPTIONAL_FIELDS_BY_TYPE
+
+        assert _OPTIONAL_FIELDS_BY_TYPE.get("teachback_ack") == {"concern": str}
+
+    def test_teachback_ack_concern_correct_type_passes(self):
+        """teachback_ack with a str concern validates."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "teachback_ack",
+            task_id="41",
+            rationale_articulates_this_dispatch="concern",
+            concern="the risk rationale understates blast radius",
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True
+        assert reason == "ok"
+
+    def test_teachback_ack_concern_absent_passes(self):
+        """A "yes" ack omits concern entirely — optional absence is valid."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "teachback_ack",
+            task_id="41",
+            rationale_articulates_this_dispatch="yes",
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True
+        assert reason == "ok"
+
+    @pytest.mark.parametrize(
+        "bad_value, got_name",
+        [(42, "int"), ([1], "list"), ({"k": "v"}, "dict"), (True, "bool")],
+        ids=["int", "list", "dict", "bool"],
+    )
+    def test_teachback_ack_concern_wrong_type_rejected(self, bad_value, got_name):
+        """teachback_ack with a non-str concern fails validation with the
+        canonical optional-field reason format."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "teachback_ack",
+            task_id="41",
+            rationale_articulates_this_dispatch="no",
+            concern=bad_value,
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is False, f"concern={bad_value!r} should be rejected"
+        assert reason == (
+            f"optional field 'concern' for type 'teachback_ack' must "
+            f"be str, got {got_name}"
+        )
 
     def test_cleanup_summary_all_fields_pass(self):
         """cleanup_summary happy path — all declared fields with correct types.

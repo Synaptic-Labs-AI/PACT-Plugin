@@ -102,8 +102,31 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # redundant with CLAUDE.md and worktree is empty at write time.
     "session_start": {"session_id": str, "project_dir": str},
     # commands/orchestrate.md writes variety_assessed with task_id (quoted
-    # string) and variety (nested JSON object → dict).
+    # string) and variety (nested JSON object → dict). This is the FEATURE-level
+    # variety (written once for the feature task) — distinct from the
+    # per-dispatch dispatch_variety below.
     "variety_assessed": {"task_id": str, "variety": dict},
+    # hooks/task_lifecycle_gate.py emits dispatch_variety on the TaskCreate of a
+    # Task-B carrying metadata.variety (one per dispatch). The GC-immune mirror
+    # of the per-dispatch variety stamp (#955) — the task store that holds
+    # metadata.variety is reaped by the teams/tasks reaper, so wrap-up Q5 read
+    # false-empty after GC; this journal event is the durable source.
+    # task_id is the Task-B id; variety is the 5-key dict (4 dims + total).
+    # The emitter PROJECTS metadata.variety to exactly these 5 keys
+    # (DISPATCH_VARIETY_KEYS) before append — the *_rationale strings are NOT
+    # mirrored (pact-variety.md §5.1). Read by wrap-up Q5 as the GC-immune
+    # source for compute_variety_divergence's dispatch_varieties list, which
+    # consumes only .total. (variety is typed `dict`, so the schema check
+    # enforces only the top-level task_id+variety keys — the projection lives
+    # at the emit site, not here.)
+    "dispatch_variety": {"task_id": str, "variety": dict},
+    # hooks/task_lifecycle_gate.py emits teachback_ack on the lead's
+    # TaskUpdate(A, status="completed") accepting a teachback whose Task-A
+    # metadata carries teachback_submit.variety_acknowledgment (#955). task_id is
+    # the Task-A id; rationale_articulates_this_dispatch is the teammate's
+    # "yes"|"no"|"concern" flag. The GC-immune mirror read by wrap-up Q6's
+    # cargo_cult_signal_rate (the task store goes false-empty after GC).
+    "teachback_ack": {"task_id": str, "rationale_articulates_this_dispatch": str},
     # commands/orchestrate.md + comPACT.md write phase_transition with
     # phase + status (both quoted strings). session_resume._build_journal_resume
     # subscripts `p["phase"]` — this schema check is the defensive bulwark
@@ -256,6 +279,17 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     "missed_wake": {
         "task_subject": str,
         "reason": str,
+    },
+    # hooks/task_lifecycle_gate.py writes teachback_ack with an optional concern
+    # string — the teammate's variety_acknowledgment.concern, present only when
+    # rationale_articulates_this_dispatch is "no"/"concern" (per pact-variety.md;
+    # a "yes" ack legitimately omits it). The required-fields registration above
+    # ("teachback_ack": {...}) is what ACTIVATES this optional check —
+    # _validate_event_schema short-circuits on unknown types and would otherwise
+    # skip the optional loop (same activation pattern as session_end /
+    # missed_wake).
+    "teachback_ack": {
+        "concern": str,
     },
 }
 

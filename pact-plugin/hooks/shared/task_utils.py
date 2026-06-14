@@ -21,6 +21,7 @@ Functions:
     build_post_compaction_checkpoint: Build [POST-COMPACTION CHECKPOINT] message from Task state
     iter_team_task_jsons: Yield parsed task JSONs from a team dir (path-traversal safe)
     read_task_json: Read the raw task JSON by id + team_name (path-traversal safe)
+    is_teachback_subject: True iff a subject matches the canonical Teachback shape
 """
 
 from __future__ import annotations
@@ -502,3 +503,40 @@ def read_task_json(
             return {}
 
     return {}
+
+
+# Canonical Teachback Task subject pattern: `<teammate-name>: TEACHBACK
+# for <mission descriptor>`. The leading `[a-z0-9-]+:` is the canonical
+# teammate-prefix shape used across the plugin (matches names like
+# `backend-coder-2`, `secretary`, `architect-1`); `TEACHBACK for ` is
+# the canonical mission-framing per pact-completion-authority.md.
+#
+# WHY a structural match instead of substring `"teachback" in subject`:
+# the substring form fires on ANY task subject containing the word —
+# including planning/discussion subjects like `"Plan: wake-lifecycle
+# teachback re-arm fix"` — and produces benign-but-noisy false-positive
+# advisories. The structural match pins the pattern to the canonical
+# Teachback-Gated Dispatch shape so only actual teachback tasks trip
+# the rules.
+#
+# HOISTED here (from task_lifecycle_gate.py) so a second hook surface — the
+# handoff_ordering_gate PreToolUse WARN — can reuse the same predicate without
+# importing the sibling PostToolUse gate module (a coupling smell + import-time
+# side-effect risk). SINGLE definition: the lifecycle gate re-imports it from
+# here, so the regex is never duplicated (duplication would reintroduce the
+# drift class the structural match was introduced to close).
+_TEACHBACK_SUBJECT_PATTERN = re.compile(r"^[a-z0-9-]+: TEACHBACK for ")
+
+
+def is_teachback_subject(subject: str) -> bool:
+    """Return True iff `subject` matches the canonical Teachback Task
+    shape (`<teammate-name>: TEACHBACK for <mission>`).
+
+    Pure function; never raises. Returns False on non-string input or
+    any subject that does not match the anchored pattern. Replaces the
+    legacy `"TEACHBACK" in subject_upper` substring check across the
+    gate's TaskCreate and TaskUpdate rule paths.
+    """
+    if not isinstance(subject, str):
+        return False
+    return _TEACHBACK_SUBJECT_PATTERN.match(subject) is not None

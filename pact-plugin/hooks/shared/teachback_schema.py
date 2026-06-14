@@ -128,6 +128,14 @@ _VARIETY_DIMENSIONS: tuple[str, ...] = (
     "risk",
 )
 
+# Canonical key set for a per-dispatch variety stamp PROJECTED to the journal
+# (pact-variety.md §5.1: the 4 dimensions + their total — the rationale strings
+# are NOT mirrored). Derived from _VARIETY_DIMENSIONS so the dimension names are
+# never duplicated: a future dimension rename/add edits ONE list and both the
+# resolve-fallback above and the dispatch_variety projection in
+# task_lifecycle_gate follow. Read by the #955 dispatch_variety emit.
+DISPATCH_VARIETY_KEYS: tuple[str, ...] = _VARIETY_DIMENSIONS + ("total",)
+
 
 def _is_in_range_int(value: object, low: int, high: int) -> bool:
     """True iff value is a non-bool int within the inclusive [low, high]

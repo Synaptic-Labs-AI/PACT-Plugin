@@ -292,8 +292,10 @@ try:
     from shared.dispatch_helpers import trustworthy_actor_name
     from shared.intentional_wait import is_self_complete_exempt, is_teachback_exempt
     from shared.session_journal import append_event, get_journal_path, make_event
+    from shared.task_utils import is_teachback_subject as _is_teachback_subject
     from shared.task_utils import read_task_json
     from shared.teachback_schema import (
+        DISPATCH_VARIETY_KEYS,
         TEACHBACK_RECOMMENDED_BAND_MIN,
         TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN,
         TEACHBACK_REQUIRED_FIELDS,
@@ -363,34 +365,12 @@ _NO_RESOLVABLE_TOTAL = (
 )
 
 
-# Canonical Teachback Task subject pattern: `<teammate-name>: TEACHBACK
-# for <mission descriptor>`. The leading `[a-z0-9-]+:` is the canonical
-# teammate-prefix shape used across the plugin (matches names like
-# `backend-coder-2`, `secretary`, `architect-1`); `TEACHBACK for ` is
-# the canonical mission-framing per pact-completion-authority.md.
-#
-# WHY a structural match instead of substring `"teachback" in subject`:
-# the substring form fires on ANY task subject containing the word —
-# including planning/discussion subjects like `"Plan: wake-lifecycle
-# teachback re-arm fix"` — and produces benign-but-noisy false-positive
-# advisories. The structural match pins the pattern to the canonical
-# Teachback-Gated Dispatch shape so only actual teachback tasks trip
-# the rules.
-_TEACHBACK_SUBJECT_PATTERN = re.compile(r"^[a-z0-9-]+: TEACHBACK for ")
-
-
-def _is_teachback_subject(subject: str) -> bool:
-    """Return True iff `subject` matches the canonical Teachback Task
-    shape (`<teammate-name>: TEACHBACK for <mission>`).
-
-    Pure function; never raises. Returns False on non-string input or
-    any subject that does not match the anchored pattern. Replaces the
-    legacy `"TEACHBACK" in subject_upper` substring check across the
-    gate's TaskCreate and TaskUpdate rule paths.
-    """
-    if not isinstance(subject, str):
-        return False
-    return _TEACHBACK_SUBJECT_PATTERN.match(subject) is not None
+# `_is_teachback_subject` (the canonical Teachback Task subject predicate) was
+# HOISTED to shared/task_utils.py so the handoff_ordering_gate PreToolUse hook
+# can reuse it without importing this PostToolUse module. It is re-imported at
+# the top of this file as `_is_teachback_subject` (private-name alias preserving
+# the gate's existing call sites). SINGLE definition lives in task_utils; do NOT
+# re-introduce the regex here — duplication reopens the drift class.
 
 
 # ─── metadata.completion_disputed writeback (direct FS) ──────────────────────
@@ -1067,6 +1047,61 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                         "be present as non-empty strings.",
                     ))
 
+        # #955 dispatch_variety emit — GC-immune mirror of the per-dispatch
+        # variety stamp. Fires on the TaskCreate of a Task-B carrying
+        # metadata.variety (one per dispatch, D3). Keyed on is_lead +
+        # metadata.variety PRESENCE — NOT on owner (per orchestrate.md the
+        # TaskCreate(B) sets metadata.variety but leaves owner empty; owner is
+        # wired by a SEPARATE later TaskUpdate, so an owner gate here would never
+        # fire). The new Task-B id comes from the create-result post-state
+        # (tool_response.task.id — the same shape the ③ completion branch reads),
+        # falling back to tool_input.taskId if the harness echoes it. Best-effort:
+        # a missing id or an append failure skips the emit (coverage degrades by
+        # one dispatch) but never breaks the gate's advisory evaluation or its
+        # exit-0 contract.
+        if pact_context.is_lead(input_data):
+            create_variety = (
+                incoming_metadata.get("variety")
+                if isinstance(incoming_metadata, dict)
+                else None
+            )
+            if isinstance(create_variety, dict) and create_variety:
+                created_task = (
+                    tool_response.get("task")
+                    if isinstance(tool_response, dict)
+                    else None
+                )
+                new_task_id = ""
+                if isinstance(created_task, dict):
+                    new_task_id = str(created_task.get("id") or "")
+                if not new_task_id:
+                    new_task_id = str(tool_input.get("taskId") or "")
+                if new_task_id:
+                    # §5.1-fidelity projection: mirror ONLY the 4 dimensions +
+                    # total, dropping the *_rationale strings — the journal is
+                    # the GC-immune CALIBRATION source (wrap-up Q5 reads only
+                    # .total), not a rationale archive. Keys come from the
+                    # canonical DISPATCH_VARIETY_KEYS (derived from
+                    # _VARIETY_DIMENSIONS) so a dimension rename never drifts.
+                    # `if k in` keeps it tolerant of a partial stamp.
+                    projected_variety = {
+                        k: create_variety[k]
+                        for k in DISPATCH_VARIETY_KEYS
+                        if k in create_variety
+                    }
+                    # Append-only, no dedup by design: a Task-B is created ONCE,
+                    # so this fires naturally-once per dispatch (unlike
+                    # agent_handoff, which can re-fire across b1/b2/backstop and
+                    # therefore needs the O_EXCL occupant marker).
+                    try:
+                        append_event(make_event(
+                            "dispatch_variety",
+                            task_id=new_task_id,
+                            variety=projected_variety,
+                        ))
+                    except Exception:
+                        pass  # fail-open: emit failure never breaks the gate
+
     # ③ TaskUpdate-to-completed rules — paired-send, handoff presence,
     # handoff schema, self-completion
     if tool_name == "TaskUpdate" and tool_input.get("status") == "completed":
@@ -1140,6 +1175,36 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                         f"PACT task_lifecycle_gate: Teachback Task {task_id} "
                         f"{schema_problem}.",
                     ))
+
+            # #955 teachback_ack emit — GC-immune mirror of the teammate's
+            # variety_acknowledgment, emitted at the lead's TaskUpdate(A,
+            # completed) accepting the teachback. The ack lives on the DISK
+            # Task-A (the teammate wrote teachback_submit earlier; the lead's
+            # accept TaskUpdate carries only status), so read it from `metadata`
+            # (the on-disk post-state resolved above). is_lead-gated (mirrors b2):
+            # only the lead's process resolves the canonical journal; a teammate
+            # frame self-drops (#877). Best-effort: any malformed/absent ack or an
+            # append failure skips the emit without breaking the gate.
+            if pact_context.is_lead(input_data) and isinstance(teachback_submit, dict):
+                ack = teachback_submit.get("variety_acknowledgment")
+                if isinstance(ack, dict):
+                    flag = ack.get("rationale_articulates_this_dispatch")
+                    if isinstance(flag, str) and flag:
+                        ack_fields = {
+                            "task_id": str(task_id),
+                            "rationale_articulates_this_dispatch": flag,
+                        }
+                        concern = ack.get("concern")
+                        if isinstance(concern, str) and concern.strip():
+                            ack_fields["concern"] = concern  # optional field
+                        # Append-only, no dedup by design: the lead's accepting
+                        # TaskUpdate(A, status="completed") fires naturally-once
+                        # per teachback acceptance, so no occupant marker is
+                        # needed (cf. the dispatch_variety note above).
+                        try:
+                            append_event(make_event("teachback_ack", **ack_fields))
+                        except Exception:
+                            pass  # fail-open
 
             # NOTE (#897): a per-completion paired-wake detector was removed
             # here. It read inboxes/{owner}.json, but that store is
@@ -1383,6 +1448,54 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                         "metadata.variety.total (see pact-variety.md "
                         "Per-Dispatch Variety Stamping).",
                     ))
+
+        # #956 write-time BACKSTOP — re-emit agent_handoff when a metadata-only
+        # TaskUpdate SETS handoff on an ALREADY-completed task. b1 (TaskCompleted-
+        # keyed) and b2 (lead-side at the completing TaskUpdate) both gate on
+        # metadata.handoff PRESENCE at completion time, so a handoff written
+        # AFTER completion is observed by NEITHER — the residual write-after-
+        # completion race. This ④ block (status != "completed") is exactly where
+        # that later metadata-only write lands (D4 — runtime-confirmed: a
+        # metadata-only TaskUpdate setting handoff reaches this block). Re-call
+        # the SAME b2 emitter; _emit_lead_side_agent_handoff owns all eligibility
+        # (owner / not-teachback / not-signal / handoff-is-dict) AND the shared
+        # O_EXCL occupant marker, so this re-fire is idempotent — if b1/b2 already
+        # emitted, already_emitted() short-circuits it to a safe no-op. No new
+        # eligibility logic here; the backstop's only job is to CALL the emitter
+        # on the write event b1/b2 structurally cannot see.
+        #
+        # is_lead-gated (mirrors b2 at the completion surface): only the lead's
+        # process resolves the canonical journal; a teammate frame self-drops
+        # (#877). The in-process/lead branch is the fail-safe default.
+        #
+        # ACCEPTED RESIDUAL: if this fires-open on a hard crash AND the handoff
+        # is then never set in a later TaskUpdate, exactly one agent_handoff
+        # journal event is lost — recoverable out-of-band (git) when the work
+        # was committed. This is the deliberate posture: the nudge gate is
+        # advisory (never blocks), the backstop is the guarantee, and a
+        # journal-emit failure must never break completion. One lost durable
+        # record is strictly better than a stranded completion.
+        if (
+            pact_context.is_lead(input_data)
+            and isinstance(incoming_handoff, dict)
+            and incoming_handoff
+            and isinstance(task_a, dict)
+            and task_a
+            and task_a.get("status") == "completed"
+        ):
+            owner_bs = task_a.get("owner") or ""
+            subject_bs = task_a.get("subject") or ""
+            # Pass the incoming handoff merged onto the on-disk metadata view so
+            # the emitter sees it explicitly (order-independent: the platform's
+            # synchronous metadata write has landed by PostToolUse, so the
+            # on-disk handoff IS the incoming handoff — but pass it resolved to
+            # stay correct regardless of write-ordering). _emit_lead_side_agent_handoff
+            # re-validates owner/teachback/signal/handoff-dict + dedups.
+            meta_bs = task_a.get("metadata") if isinstance(task_a.get("metadata"), dict) else {}
+            meta_for_emit = {**meta_bs, "handoff": incoming_handoff}
+            _emit_lead_side_agent_handoff(
+                team_name, task_id, owner_bs, subject_bs, meta_for_emit
+            )
 
     return advisories
 
