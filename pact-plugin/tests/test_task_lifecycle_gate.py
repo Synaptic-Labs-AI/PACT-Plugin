@@ -44,6 +44,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 import task_lifecycle_gate as tlg  # noqa: E402
+# #958: imported from the SSOT module so the message-body echo assertions
+# below are coupled to the EXACT constant the gate appends — a substring check
+# against this import is non-vacuous (revert the advisory-site append → RED).
+from shared.teachback_schema import TEACHBACK_SCHEMA_ECHO  # noqa: E402
 
 
 # =============================================================================
@@ -1567,6 +1571,18 @@ def test_advisory_when_teachback_submit_missing_required_field(
     assert any(
         rule == "teachback_submit_schema_invalid" for rule, _ in advisories
     ), f"expected R2 for missing {missing_field}, got: {advisories}"
+    # #958 sub-reason (a) — missing required field: the advisory MESSAGE (not
+    # just the rule name) must echo the full canonical schema so a teammate
+    # self-corrects in one read. Non-vacuous: reverting the advisory-site
+    # append drops TEACHBACK_SCHEMA_ECHO from the message → this fails.
+    schema_msgs = [
+        msg for rule, msg in advisories
+        if rule == "teachback_submit_schema_invalid"
+    ]
+    assert TEACHBACK_SCHEMA_ECHO in schema_msgs[0], (
+        f"missing-field advisory must echo full canonical schema, "
+        f"got: {schema_msgs[0]!r}"
+    )
     # Disjoint with R1
     assert not any(
         rule == "teachback_submit_missing" for rule, _ in advisories
@@ -1625,6 +1641,17 @@ def test_advisory_when_teachback_submit_field_is_empty_string(
     advisories = tlg.evaluate_lifecycle(payload)
     assert any(
         rule == "teachback_submit_schema_invalid" for rule, _ in advisories
+    )
+    # #958 sub-reason (b) — empty/non-string string-field: the advisory MESSAGE
+    # must echo the full canonical schema. Non-vacuous: reverting the
+    # advisory-site append drops TEACHBACK_SCHEMA_ECHO from the message → fails.
+    schema_msgs = [
+        msg for rule, msg in advisories
+        if rule == "teachback_submit_schema_invalid"
+    ]
+    assert TEACHBACK_SCHEMA_ECHO in schema_msgs[0], (
+        f"empty-field advisory must echo full canonical schema, "
+        f"got: {schema_msgs[0]!r}"
     )
 
 
@@ -1697,6 +1724,66 @@ def test_advisory_when_variety_ack_is_malformed(
     assert any(
         rule == "teachback_submit_schema_invalid" for rule, _ in advisories
     ), f"expected R2 for {description}, got: {advisories}"
+
+
+def test_schema_invalid_message_echoes_full_schema_for_variety_ack_as_string(
+    tmp_path, monkeypatch, pact_context,
+):
+    """#958 sub-reason (c) — variety_acknowledgment supplied as a free-text
+    STRING. This is the SUBTLE, highest-value path: a string-valued
+    variety_acknowledgment is NOT caught by the empty/non-string string-field
+    branch (which explicitly excludes variety_acknowledgment); it routes
+    through _validate_variety_acknowledgment ('must be object, got str').
+    A per-branch echo edit would have MISSED this case — which is exactly why
+    the echo is appended at the SINGLE schema-invalid advisory funnel. Dedicated
+    (not parametrized) so the routing is self-documenting for future maintainers.
+
+    Asserts both that we exercised the is-OBJECT route AND that the single
+    advisory MESSAGE echoes the full canonical schema. Non-vacuous: reverting
+    the advisory-site append drops TEACHBACK_SCHEMA_ECHO from the message → RED.
+    """
+    pact_context(team_name="test-team", session_id="test-session")
+    _setup_team_inbox(
+        tmp_path, monkeypatch, owner="preparer", team_name="test-team",
+        paired_offset_seconds=30,
+    )
+    # A realistic wrong shape: prose where the OBJECT belongs.
+    tb = _well_formed_teachback_submit(
+        variety_acknowledgment="rationale articulates this dispatch"
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "1",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "preparer",
+                "metadata": {"teachback_submit": tb},
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    schema_msgs = [
+        msg for rule, msg in advisories
+        if rule == "teachback_submit_schema_invalid"
+    ]
+    assert schema_msgs, (
+        f"expected teachback_submit_schema_invalid for variety_ack-as-string, "
+        f"got: {advisories}"
+    )
+    # Proves we hit the _validate_variety_acknowledgment is-OBJECT route (the
+    # short reason names variety_acknowledgment + 'must be object'), NOT the
+    # string-field branch — lowercase 'must be object' is unique to the short
+    # reason and absent from the echo.
+    assert "variety_acknowledgment" in schema_msgs[0]
+    assert "must be object" in schema_msgs[0]
+    # Load-bearing non-vacuity assertion: the full canonical schema echo is
+    # appended after the short reason.
+    assert TEACHBACK_SCHEMA_ECHO in schema_msgs[0], (
+        f"variety_ack-as-string advisory must echo full canonical schema, "
+        f"got: {schema_msgs[0]!r}"
+    )
 
 
 def test_silent_when_variety_ack_is_well_formed_with_concern(

@@ -26,6 +26,7 @@ from shared.teachback_schema import (
     TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN,
     TEACHBACK_REQUIRED_FIELDS,
     TEACHBACK_REQUIRED_SUBKEYS,
+    TEACHBACK_SCHEMA_ECHO,
     TEACHBACK_VARIETY_ACK_VALID_VALUES,
     resolve_variety_total,
     validate_reasoning_reconstruction,
@@ -89,6 +90,43 @@ class TestConstants:
         assert TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN == PLAN_MODE_MIN
         assert PLAN_MODE_MIN == ORCHESTRATE_MAX + 1
         assert TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN <= PLAN_MODE_MAX
+
+
+# ============================================================================
+# TEACHBACK_SCHEMA_ECHO — the remediation string appended to the schema-invalid
+# deny message (#958). Pins the no-hardcoded-copy DERIVATION property and the
+# variety_acknowledgment-is-an-OBJECT note. The gate-side integration (echo is
+# present in the advisory message) is covered in test_task_lifecycle_gate.py;
+# this class pins what the echo SAYS.
+# ============================================================================
+
+
+class TestSchemaEcho:
+    """Pin TEACHBACK_SCHEMA_ECHO's content and its derivation from
+    TEACHBACK_REQUIRED_FIELDS."""
+
+    def test_echo_is_nonempty_string(self):
+        assert isinstance(TEACHBACK_SCHEMA_ECHO, str)
+        assert TEACHBACK_SCHEMA_ECHO.strip()
+
+    def test_echo_names_every_required_field(self):
+        # Derivation pin (no-hardcoded-copy property): EVERY canonical required
+        # field name must appear in the echo. The 4 string fields appear in the
+        # joined list; variety_acknowledgment appears in the is-OBJECT note. A
+        # field added to TEACHBACK_REQUIRED_FIELDS that the echo's derivation
+        # failed to surface would fail here — the echo cannot silently drift
+        # from the enforced tuple.
+        for field in TEACHBACK_REQUIRED_FIELDS:
+            assert field in TEACHBACK_SCHEMA_ECHO, (
+                f"echo must name required field {field!r}; "
+                f"got: {TEACHBACK_SCHEMA_ECHO!r}"
+            )
+
+    def test_echo_notes_variety_acknowledgment_is_an_object(self):
+        # The most common wrong shape is a free-text string, so the echo must
+        # explicitly flag that variety_acknowledgment is an OBJECT.
+        assert "variety_acknowledgment" in TEACHBACK_SCHEMA_ECHO
+        assert "OBJECT" in TEACHBACK_SCHEMA_ECHO
 
 
 # ============================================================================
