@@ -371,7 +371,7 @@ Every specialist dispatch is a Task A (TEACHBACK) + Task B (primary work, `block
 
 For non-exempt teammates (everyone except `pact-secretary`):
 
-1. `TaskCreate(subject="{name}: TEACHBACK for {topic}", description="<teachback gate brief; cross-ref to Task B for the mission>")` — create Task A (teachback gate).
+1. `TaskCreate(subject="{name}: TEACHBACK for {topic}", description="<teachback gate brief — instruct the teammate to write metadata.teachback_submit using the CANONICAL field schema (do NOT improvise key names): understanding, most_likely_wrong, least_confident_item, first_action, variety_acknowledgment (an OBJECT); cross-ref to Task B for the mission>")` — create Task A (teachback gate).
 2. `TaskCreate(subject="{name}: {primary work subject}", description="<full mission: CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES per §13 Recommended Agent Prompting Structure>")` — create Task B (primary work).
 3. `TaskUpdate(A_id, owner="{name}", addBlocks=[B_id])` — assign Task A to the teammate and wire it as the gate that unblocks Task B.
 4. `TaskUpdate(B_id, owner="{name}", addBlockedBy=[A_id])` — assign Task B to the same teammate and explicitly mirror the block edge. Do NOT pre-set `status="in_progress"` on either task — the teammate self-claims on arrival. Ensure the Task A brief reminds the teammate to claim Task B (`status="in_progress"`) before any implementation tool-use once it unblocks (the command dispatch templates carry this line) — the teammate flips it, never you.

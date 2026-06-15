@@ -22,6 +22,10 @@ Functions never raise.
 Public surface:
 - TEACHBACK_REQUIRED_FIELDS — canonical 5-tuple per D10 (4 string fields +
   variety_acknowledgment dict).
+- TEACHBACK_OBJECT_FIELDS — the object-valued subset of
+  TEACHBACK_REQUIRED_FIELDS (currently variety_acknowledgment). SSOT for the
+  string/object partition: both the schema echo and the lifecycle gate's
+  string-field validator derive their carve-out filter from it.
 - TEACHBACK_REQUIRED_SUBKEYS — canonical 3-tuple for reasoning_reconstruction
   per pact-ct-teachback.md §When to Method-Reconstruct.
 - TEACHBACK_VARIETY_ACK_VALID_VALUES — enum tuple for
@@ -32,6 +36,14 @@ Public surface:
 - TEACHBACK_RECOMMENDED_BAND_MIN — variety band threshold
   (>= 7 → RECOMMENDED, below it → SKIPPED). Derived from
   `variety_scorer.COMPACT_MAX + 1`.
+- TEACHBACK_SCHEMA_ECHO — reusable human-readable echo of the canonical
+  teachback_submit schema. The enumerated field names and the field count are
+  derived from TEACHBACK_REQUIRED_FIELDS (the object field is carved out via
+  TEACHBACK_OBJECT_FIELDS), so the list and count cannot drift from the tuple;
+  the is-an-OBJECT note is hand-maintained. Appended to the LEAD-SIDE
+  schema-invalid completion advisory, so the teammate receives the full schema
+  in one read when the lead relays the rejection (not at their own write
+  moment).
 - validate_reasoning_reconstruction(rr) — pure validator returning None
   on well-formed input or a reason-enum string on rejection.
 - resolve_variety_total(variety, metadata=None) — pure resolver returning
@@ -63,6 +75,13 @@ TEACHBACK_REQUIRED_FIELDS: tuple[str, ...] = (
     "variety_acknowledgment",
 )
 
+# The object-valued subset of TEACHBACK_REQUIRED_FIELDS (variety_acknowledgment
+# is a dict; the rest are strings). SSOT for the string/object partition: both
+# TEACHBACK_SCHEMA_ECHO below and the lifecycle gate's string-field validator
+# derive their "skip the object fields" carve-out from this one tuple, so the
+# partition is defined once and is rename-proof.
+TEACHBACK_OBJECT_FIELDS: tuple[str, ...] = ("variety_acknowledgment",)
+
 # Canonical 3 sub-keys for reasoning_reconstruction per pact-ct-teachback.md
 # §When to Method-Reconstruct. Each value is a non-empty string at submit time.
 TEACHBACK_REQUIRED_SUBKEYS: tuple[str, ...] = (
@@ -89,6 +108,30 @@ TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN: int = PLAN_MODE_MIN
 # gate's band mapping references a constant instead of hard-coding 7, while
 # keeping the gate's reach to variety_scorer strictly 2-hop via this module.
 TEACHBACK_RECOMMENDED_BAND_MIN: int = COMPACT_MAX + 1
+
+# Human-readable echo of the full canonical teachback_submit schema. The
+# enumerated field names and the field count are derived from
+# TEACHBACK_REQUIRED_FIELDS (the object field is carved out via
+# TEACHBACK_OBJECT_FIELDS), so the list and count cannot drift from the tuple
+# when a field is added or removed; the is-an-OBJECT note is hand-maintained
+# (it would need a manual edit if a second object field were ever added). The
+# string fields are listed in canonical order, then variety_acknowledgment with
+# the is-an-OBJECT note (the most common wrong shape is a free-text string).
+# Appended to the LEAD-SIDE teachback_submit_schema_invalid completion advisory
+# in task_lifecycle_gate.py: the offending teammate receives the full schema in
+# one read when the lead relays the rejection, not directly at their own write
+# moment.
+TEACHBACK_SCHEMA_ECHO: str = (
+    f"Expected canonical teachback_submit schema "
+    f"(all {len(TEACHBACK_REQUIRED_FIELDS)} fields): "
+    + ", ".join(
+        field
+        for field in TEACHBACK_REQUIRED_FIELDS
+        if field not in TEACHBACK_OBJECT_FIELDS
+    )
+    + " (non-empty strings) + variety_acknowledgment (an OBJECT, not a string)."
+    " See the pact-teachback skill for field semantics."
+)
 
 
 def validate_reasoning_reconstruction(rr: object) -> str | None:

@@ -20,12 +20,16 @@ layered on top by callers.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from shared.teachback_schema import (
+    TEACHBACK_OBJECT_FIELDS,
     TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN,
     TEACHBACK_REQUIRED_FIELDS,
     TEACHBACK_REQUIRED_SUBKEYS,
+    TEACHBACK_SCHEMA_ECHO,
     TEACHBACK_VARIETY_ACK_VALID_VALUES,
     resolve_variety_total,
     validate_reasoning_reconstruction,
@@ -89,6 +93,151 @@ class TestConstants:
         assert TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN == PLAN_MODE_MIN
         assert PLAN_MODE_MIN == ORCHESTRATE_MAX + 1
         assert TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN <= PLAN_MODE_MAX
+
+
+# ============================================================================
+# TEACHBACK_SCHEMA_ECHO — the remediation string appended to the schema-invalid
+# deny message (#958). Pins the no-hardcoded-copy DERIVATION property and the
+# variety_acknowledgment-is-an-OBJECT note. The gate-side integration (echo is
+# present in the advisory message) is covered in test_task_lifecycle_gate.py;
+# this class pins what the echo SAYS.
+# ============================================================================
+
+
+class TestSchemaEcho:
+    """Pin TEACHBACK_SCHEMA_ECHO's content and its derivation from
+    TEACHBACK_REQUIRED_FIELDS."""
+
+    def test_echo_is_nonempty_string(self):
+        assert isinstance(TEACHBACK_SCHEMA_ECHO, str)
+        assert TEACHBACK_SCHEMA_ECHO.strip()
+
+    def test_echo_names_every_required_field(self):
+        # Derivation pin (no-hardcoded-copy property): EVERY canonical required
+        # field name must appear in the echo. The 4 string fields appear in the
+        # joined list; variety_acknowledgment appears in the is-OBJECT note. A
+        # field added to TEACHBACK_REQUIRED_FIELDS that the echo's derivation
+        # failed to surface would fail here — the echo cannot silently drift
+        # from the enforced tuple.
+        for field in TEACHBACK_REQUIRED_FIELDS:
+            assert field in TEACHBACK_SCHEMA_ECHO, (
+                f"echo must name required field {field!r}; "
+                f"got: {TEACHBACK_SCHEMA_ECHO!r}"
+            )
+
+    def test_echo_notes_variety_acknowledgment_is_an_object(self):
+        # The most common wrong shape is a free-text string, so the echo must
+        # explicitly flag that variety_acknowledgment is an OBJECT.
+        assert "variety_acknowledgment" in TEACHBACK_SCHEMA_ECHO
+        assert "OBJECT" in TEACHBACK_SCHEMA_ECHO
+
+
+# ============================================================================
+# TEACHBACK_OBJECT_FIELDS — the string/object partition SSOT (#958 Stage 1).
+# Both TEACHBACK_SCHEMA_ECHO's comma-list carve-out and the lifecycle gate's
+# string-field validator derive their "skip the object fields" set from this
+# one tuple. These tests pin the partition and couple the echo's carve-out
+# back to it so the two cannot silently desync.
+# ============================================================================
+
+
+class TestObjectFieldsPartition:
+    """#958 Future-2 (Stage-1 follow-through): pin TEACHBACK_OBJECT_FIELDS as
+    the string/object partition SSOT."""
+
+    def test_object_fields_is_nonempty_tuple(self):
+        assert isinstance(TEACHBACK_OBJECT_FIELDS, tuple)
+        assert TEACHBACK_OBJECT_FIELDS
+
+    def test_object_fields_subset_of_required(self):
+        # Partition validity: every object field must be a canonical required
+        # field — an object field outside the required tuple would mean the
+        # carve-out skips a name the schema never enforced.
+        assert set(TEACHBACK_OBJECT_FIELDS) <= set(TEACHBACK_REQUIRED_FIELDS)
+
+    def test_variety_acknowledgment_is_an_object_field(self):
+        assert "variety_acknowledgment" in TEACHBACK_OBJECT_FIELDS
+
+    def test_echo_string_list_is_required_minus_object(self):
+        # Structural complement pin: the echo's comma-enumerated string-field
+        # list (the prefix before " (non-empty strings)") must be exactly the
+        # complement TEACHBACK_REQUIRED_FIELDS minus TEACHBACK_OBJECT_FIELDS:
+        # every string field present, every object field absent. This couples
+        # the echo's carve-out to the partition SSOT — if the echo derived its
+        # carve-out from a DIFFERENT partition than TEACHBACK_OBJECT_FIELDS
+        # (e.g. a hardcoded skip of the wrong field), a string field would go
+        # missing from the comma-list and/or an object field would leak in,
+        # failing here.
+        #
+        # NOTE: TEACHBACK_SCHEMA_ECHO is precomputed at import time, so this is a
+        # STRUCTURAL check against the live constant — not a monkeypatch
+        # flow-through (which cannot reach the already-built string).
+        string_fields = tuple(
+            f for f in TEACHBACK_REQUIRED_FIELDS
+            if f not in TEACHBACK_OBJECT_FIELDS
+        )
+        prefix = TEACHBACK_SCHEMA_ECHO.split(" (non-empty strings)")[0]
+        for f in string_fields:
+            assert f in prefix, (
+                f"string field {f!r} must appear in the echo's comma-list; "
+                f"prefix={prefix!r}"
+            )
+        for f in TEACHBACK_OBJECT_FIELDS:
+            assert f not in prefix, (
+                f"object field {f!r} must NOT appear in the echo's string-field "
+                f"comma-list (it belongs in the is-an-OBJECT note); "
+                f"prefix={prefix!r}"
+            )
+
+
+# ============================================================================
+# Doc-surface field enumeration (#958 Future-2a) — the LLM-loaded gate-template
+# surfaces that enumerate the canonical teachback_submit fields must each name
+# EVERY field in TEACHBACK_REQUIRED_FIELDS, so a future field-add can't silently
+# leave a surface stale.
+# ============================================================================
+
+# Hardcoded list of the LLM-loaded surfaces that enumerate the canonical
+# teachback_submit field names. LIMITATION: this list is hardcoded, so a NEW
+# gate-template surface added later is NOT auto-covered — extend this list when
+# adding a surface that enumerates the fields.
+_FIELD_ENUMERATING_SURFACES: tuple[str, ...] = (
+    "agents/pact-orchestrator.md",
+    "commands/orchestrate.md",
+    "commands/peer-review.md",
+    "commands/comPACT.md",
+    "commands/rePACT.md",
+)
+
+# pact-plugin/ root: this test lives at pact-plugin/tests/, so parent.parent.
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+
+
+class TestDocSurfaceFieldEnumeration:
+    """#958 Future-2a: each LLM-loaded gate-template surface must name every
+    canonical teachback_submit field. Substring-per-field (robust to rewording).
+
+    LIMITATIONS (documented):
+      - The surface file LIST (_FIELD_ENUMERATING_SURFACES) is hardcoded — a NEW
+        gate-template surface added later is NOT auto-covered.
+      - "understanding" is a common English word, so its per-file presence check
+        is looser than the 4 distinctive snake_case field names; the snake_case
+        fields carry the real anti-drift signal.
+    """
+
+    @pytest.mark.parametrize("surface", _FIELD_ENUMERATING_SURFACES)
+    def test_surface_names_every_required_field(self, surface):
+        path = _PLUGIN_ROOT / surface
+        assert path.is_file(), (
+            f"expected gate-template surface at {path} "
+            f"(surface moved/renamed — update _FIELD_ENUMERATING_SURFACES?)"
+        )
+        text = path.read_text(encoding="utf-8")
+        for field in TEACHBACK_REQUIRED_FIELDS:
+            assert field in text, (
+                f"{surface} must enumerate canonical field {field!r} "
+                f"(stale surface after a field-add?)"
+            )
 
 
 # ============================================================================
