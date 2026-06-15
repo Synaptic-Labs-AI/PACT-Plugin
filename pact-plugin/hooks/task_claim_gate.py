@@ -30,14 +30,14 @@ THREE BEHAVIORAL TIERS, keyed on a STRUCTURAL signal (never a mode flag):
                             M1 advisory floor / M2 conditional auto-heal of the
                             single owned-unblocked-pending task.
 
-M1 vs M2 (this file ships M1; M2 is an additive follow-up on the single-
-candidate branch):
+M1 + M2 (both implemented; the split is the single-candidate branch):
   • M1 (advisory floor)   — complete, working, fail-open, never-deny advisory
-                            gate. The tmux single-candidate path NUDGES.
-  • M2 (auto-heal)        — the tmux single-candidate path additionally attempts
-                            a direct atomic `pending → in_progress` write of the
-                            task JSON, falling back to the M1 nudge on any write
-                            failure.
+                            gate (is_lead/topology/mine-filter/F1/F2/F3 + the
+                            three advisory shapes).
+  • M2 (auto-heal)        — the tmux single-candidate path attempts a direct
+                            atomic `pending → in_progress` write of the task JSON
+                            (_atomic_claim), falling back to the M1 nudge on any
+                            write failure.
 
 POSTURE — FAIL-OPEN, NEVER DENY: every exception or unresolved precondition →
 suppress + exit 0. Module-load failure → suppress + exit 0. This gate never
@@ -71,6 +71,8 @@ from __future__ import annotations
 
 # ─── stdlib first (used on the input-side fail-open BEFORE wrapped imports) ──
 import json
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -92,9 +94,14 @@ _STDIN_READ_MAX = 8 * 1024 * 1024  # 8 MB
 try:
     import shared.pact_context as pact_context
     from shared.session_registry import resolve as registry_resolve
-    from shared.task_utils import iter_team_task_jsons, is_teachback_subject
+    from shared.task_utils import (
+        iter_team_task_jsons,
+        is_teachback_subject,
+        read_task_json,
+    )
     from shared.intentional_wait import is_self_complete_exempt
     from shared.session_state import is_safe_path_component
+    from shared.agent_handoff_marker import sanitize_path_component
     from shared.paths import get_claude_config_dir
     _IMPORTS_OK = True
 except BaseException:  # noqa: BLE001 — fail-OPEN catch-all (this gate never denies)
@@ -138,6 +145,16 @@ def _claim_nudge_multi(task_ids: list[str]) -> str:
         "implementation work. Claim the one you are working on — "
         "`TaskUpdate(<id>, status=in_progress)` — before continuing, so the "
         "lead's work-started signal stays accurate."
+    )
+
+
+def _auto_claimed_note(task_id: str) -> str:
+    """Transparency note emitted after a successful M2 auto-claim. Non-deny."""
+    return (
+        _NUDGE_PREFIX
+        + f"Auto-claimed your pre-assigned Task #{task_id} "
+        "(`pending → in_progress`) to preserve the lead's work-started "
+        "signal. No action needed."
     )
 
 
@@ -243,16 +260,91 @@ def _any_unclaimed_claim_candidate(tasks: list, by_id: dict, team_name: str) -> 
     return False
 
 
-# ─── core decision (pure-ish read; NO mutation in M1) ────────────────────────
+# ─── M2 atomic auto-heal write (mirrors task_lifecycle_gate._writeback_dispute) ─
+
+
+def _atomic_claim(task_id: str, team_name: str) -> bool:
+    """M2 auto-heal: flip a single owned-unblocked-pending task
+    ``pending → in_progress`` via a direct, atomic filesystem write of the WHOLE
+    task JSON.
+
+    Mirrors ``task_lifecycle_gate._writeback_dispute`` in shape: read the whole
+    dict via ``read_task_json`` (path-traversal safe) → RE-VALIDATE
+    ``status == "pending"`` under the read-back (the load-bearing no-clobber
+    guard against a race between the scan and this write) → flip the TOP-LEVEL
+    status → write the WHOLE json via ``.tmp`` + ``os.replace`` (atomic;
+    preserves every sibling top-level key — the shallow-merge pin).
+
+    Fail-OPEN: any failure (unsafe ids, missing task, status moved, OSError)
+    returns False and the caller degrades to the CLAIM_NUDGE_SINGLE advisory.
+    The flip — not the advisory — is the load-bearing signal: it lands whether
+    or not the advisory channel surfaces (the M2 robustness argument). Never
+    raises.
+
+    Returns True iff the flip was written.
+    """
+    # sanitize_path_component strips C0/\x00 + path-traversal fragments; an empty
+    # result (e.g. a pure-traversal id) → abort. Mirrors _writeback_dispute's
+    # NUL-byte defense (a bare re.sub would let \x00 reach .exists() → ValueError).
+    sanitized = sanitize_path_component(task_id)
+    if not sanitized:
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9_\-]+", team_name):
+        return False
+
+    task = read_task_json(sanitized, team_name)
+    if not task:
+        return False
+
+    # No-clobber re-validation: another actor may have moved the task between the
+    # scan and now. Only flip a still-pending task; never overwrite a status
+    # another actor already changed. (owner / unblocked were validated pre-scan;
+    # this status re-check is the load-bearing race guard.)
+    if task.get("status") != "pending":
+        return False
+
+    task["status"] = "in_progress"  # TOP-LEVEL flip (the case M0 proved honored)
+    metadata = task.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        task["metadata"] = metadata
+    # gate_writeback: set for convention-parity with the _writeback_* recursion
+    # guard, but NON-LOAD-BEARING on this path. This is a direct FS write that
+    # emits NO TaskUpdate event, and the ONLY reader of gate_writeback
+    # (task_lifecycle_gate.py) inspects an INCOMING TaskUpdate's
+    # tool_input.metadata — never on-disk task metadata — so it cannot recursively
+    # re-fire any gate here. Set as belt-and-suspenders / future-proofing against
+    # any future replay path; do NOT mistake it for a load-bearing recursion guard
+    # for the status flip.
+    metadata["gate_writeback"] = True
+
+    tasks_root = get_claude_config_dir() / "tasks" / team_name
+    target = tasks_root / f"{sanitized}.json"
+    tmp = tasks_root / f".{sanitized}.json.tmp"
+    try:
+        tasks_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        tmp.write_text(json.dumps(task), encoding="utf-8")
+        os.replace(str(tmp), str(target))
+        return True
+    except OSError:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+        return False
+
+
+# ─── core decision (pure-ish read; M2 adds one conditional write) ────────────
 
 
 def _evaluate(stdin: dict) -> str | None:
     """Return the advisory string to surface, or None for NO-OP.
 
     Every step is fail-open: any exception or unresolved precondition returns
-    None (the caller suppresses + exits 0). M1 NEVER mutates — it only reads and
-    advises. (M2 adds a single conditional task-JSON write on the tmux
-    single-candidate branch.)
+    None (the caller suppresses + exits 0). The ONLY mutation is the M2
+    auto-heal write on the tmux, identity-confident, exactly-one-candidate
+    branch (_atomic_claim); every other path is read-only.
     """
     # ── Step 0: role early-exit (cheapest; covers the highest-frequency actor) ─
     if pact_context.is_lead(stdin):
@@ -323,9 +415,14 @@ def _evaluate(stdin: dict) -> str | None:
         return None
 
     if len(mine) == 1:
-        # Identity-confident + exactly one candidate. M1: advisory only.
-        # (M2 attempts the atomic auto-flip here, falling back to this nudge.)
-        return _claim_nudge_single(str(mine[0].get("id")))
+        # Identity-confident + exactly one candidate → M2 auto-heal: attempt the
+        # atomic pending→in_progress flip. On any write failure (_atomic_claim
+        # returns False — incl. the no-clobber re-validation aborting) degrade to
+        # the advisory (fail-open, never deny).
+        task_id = str(mine[0].get("id"))
+        if _atomic_claim(task_id, team_name):
+            return _auto_claimed_note(task_id)
+        return _claim_nudge_single(task_id)
 
     # len(mine) > 1: multiple owned-unblocked-pending → list, NEVER guess.
     return _claim_nudge_multi([str(t.get("id")) for t in mine])
