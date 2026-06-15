@@ -32,6 +32,10 @@ Public surface:
 - TEACHBACK_RECOMMENDED_BAND_MIN — variety band threshold
   (>= 7 → RECOMMENDED, below it → SKIPPED). Derived from
   `variety_scorer.COMPACT_MAX + 1`.
+- TEACHBACK_SCHEMA_ECHO — reusable human-readable echo of the canonical
+  5-field schema (derived from TEACHBACK_REQUIRED_FIELDS), appended to the
+  schema-invalid deny message so a teammate that trips the gate self-corrects
+  in one read.
 - validate_reasoning_reconstruction(rr) — pure validator returning None
   on well-formed input or a reason-enum string on rejection.
 - resolve_variety_total(variety, metadata=None) — pure resolver returning
@@ -89,6 +93,24 @@ TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN: int = PLAN_MODE_MIN
 # gate's band mapping references a constant instead of hard-coding 7, while
 # keeping the gate's reach to variety_scorer strictly 2-hop via this module.
 TEACHBACK_RECOMMENDED_BAND_MIN: int = COMPACT_MAX + 1
+
+# Human-readable echo of the full canonical teachback_submit schema, derived
+# from TEACHBACK_REQUIRED_FIELDS so the remediation text can never drift from
+# the tuple. The 4 string fields are listed in canonical order, then
+# variety_acknowledgment with the is-an-OBJECT note (the most common wrong
+# shape is a free-text string). Reused by the schema-invalid deny message in
+# task_lifecycle_gate.py so a teammate that trips the gate self-corrects in
+# one read without opening the skill.
+TEACHBACK_SCHEMA_ECHO: str = (
+    "Expected canonical teachback_submit schema (all 5 fields): "
+    + ", ".join(
+        field
+        for field in TEACHBACK_REQUIRED_FIELDS
+        if field != "variety_acknowledgment"
+    )
+    + " (non-empty strings) + variety_acknowledgment (an OBJECT, not a string)."
+    " See the pact-teachback skill for field semantics."
+)
 
 
 def validate_reasoning_reconstruction(rr: object) -> str | None:

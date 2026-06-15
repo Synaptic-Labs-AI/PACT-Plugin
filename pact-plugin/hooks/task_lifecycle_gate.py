@@ -300,6 +300,7 @@ try:
         TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN,
         TEACHBACK_REQUIRED_FIELDS,
         TEACHBACK_REQUIRED_SUBKEYS,
+        TEACHBACK_SCHEMA_ECHO,
         TEACHBACK_VARIETY_ACK_VALID_VALUES,
         resolve_variety_total,
         validate_reasoning_reconstruction,
@@ -342,7 +343,9 @@ _HANDOFF_REQUIRED_FIELDS = (
 # and the reasoning_reconstruction validator are imported from
 # shared.teachback_schema (SSOT). TEACHBACK_REQUIRED_SUBKEYS and
 # validate_reasoning_reconstruction are consumed by the write-time advisory
-# rules below.
+# rules below. TEACHBACK_SCHEMA_ECHO (also from the SSOT) is appended to the
+# teachback_submit_schema_invalid advisory so the deny message echoes the full
+# canonical schema, not only the offending field(s).
 
 # Required per-dimension rationale fields on metadata.variety (D11).
 # 4-tuple. Each rationale is one sentence explaining THIS dispatch's score
@@ -1170,10 +1173,20 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                     teachback_submit
                 )
                 if schema_problem:
+                    # Echo the FULL canonical schema (all 5 fields, with the
+                    # variety_acknowledgment-is-an-OBJECT note) after the
+                    # specific problem, so a teammate that trips ANY
+                    # schema-invalid sub-reason — missing field, empty/non-string
+                    # field, OR a malformed variety_acknowledgment (e.g. a
+                    # free-text string) — self-corrects in one read without
+                    # opening the skill. Appended at this single advisory site
+                    # (not per validator branch) because all sub-reasons funnel
+                    # into this one `teachback_submit_schema_invalid` advisory;
+                    # TEACHBACK_SCHEMA_ECHO is the DRY schema-derived string.
                     advisories.append((
                         "teachback_submit_schema_invalid",
                         f"PACT task_lifecycle_gate: Teachback Task {task_id} "
-                        f"{schema_problem}.",
+                        f"{schema_problem}. {TEACHBACK_SCHEMA_ECHO}",
                     ))
 
             # #955 teachback_ack emit — GC-immune mirror of the teammate's
