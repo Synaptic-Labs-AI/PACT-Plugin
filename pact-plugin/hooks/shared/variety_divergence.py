@@ -49,6 +49,8 @@ sample output prose. Tests live in test_per_dispatch_variety.py.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 
 # ---------------------------------------------------------------------------
 # Threshold default
@@ -254,3 +256,57 @@ def count_task_b_dispatch_sites(
         if r.get("task_id") not in agent_task_ids
     )
     return len(agent_dispatch_events) + reviewer_count + remediation_count
+
+
+def resolve_arc_start(
+    variety_assessed_events: list[dict],
+    feature_task_id: str,
+) -> str | None:
+    """Resolve the current arc's start timestamp for `--since` scoping.
+
+    Returns the LATEST `ts` among `variety_assessed` events whose `task_id`
+    matches `feature_task_id`. The platform REUSES low task_ids across arcs,
+    so the current feature's id can also match a PRIOR arc's
+    `variety_assessed`; the latest-ts match is the current arc (this is why
+    a plain most-recent `read-last` of ANY feature is wrong). Returns None
+    when no matching `variety_assessed` exists (legacy/trivial session) →
+    the caller omits `--since` → whole-journal read (fail-open; single-arc
+    behavior unchanged).
+
+    Timestamps are PARSED for the max, never lexically compared: `make_event`
+    stamps `ts` as `...Z` while `canonical_since()` emits `...+00:00`, and a
+    lexical compare across the two is wrong (`'+'` 0x2B sorts before `'Z'`
+    0x5A). The 2-line normalize-and-parse is duplicated locally (rather than
+    importing `session_journal._parse_ts`) to keep this module decoupled; if
+    a third ts-parse site ever appears, extract a shared util. The RETURN
+    value is the original `ts` STRING of the latest event, so the caller
+    passes it to `--since`, which `_ts_ge` re-parses. Unparseable entries are
+    skipped; if no matching, parseable entry remains → None.
+
+    arc_start relies on `variety_assessed` being emitted exactly once per arc
+    (sole writer: the orchestrate variety-assessment step). If a future
+    change ever re-emits it mid-arc for the same feature_task_id, switch from
+    latest-ts to earliest-after-prior-arc-boundary — latest-ts would
+    otherwise push arc_start forward and drop early-arc dispatches.
+
+    Pure function — no disk reads, no mutation.
+    """
+    def _parse(value: object) -> datetime:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+    latest_ts: str | None = None
+    latest_dt: datetime | None = None
+    for event in variety_assessed_events:
+        if event.get("task_id") != feature_task_id:
+            continue
+        ts = event.get("ts")
+        if not ts:
+            continue
+        try:
+            dt = _parse(ts)
+        except (ValueError, TypeError):
+            continue
+        if latest_dt is None or dt > latest_dt:
+            latest_dt = dt
+            latest_ts = ts
+    return latest_ts
