@@ -296,6 +296,7 @@ try:
     from shared.task_utils import read_task_json
     from shared.teachback_schema import (
         DISPATCH_VARIETY_KEYS,
+        TEACHBACK_OBJECT_FIELDS,
         TEACHBACK_RECOMMENDED_BAND_MIN,
         TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN,
         TEACHBACK_REQUIRED_FIELDS,
@@ -713,10 +714,12 @@ def _validate_teachback_submit_schema(teachback: object) -> str | None:
             f"metadata.teachback_submit missing required fields: "
             f"{', '.join(missing)}"
         )
-    # Non-empty-string check on the 4 string fields; variety_acknowledgment
-    # is a dict, validated by the dedicated sub-validator below.
+    # Non-empty-string check on the string fields; the object fields
+    # (variety_acknowledgment) are validated by the dedicated sub-validator
+    # below. The carve-out derives from TEACHBACK_OBJECT_FIELDS (SSOT) so this
+    # string/object partition stays in lockstep with the schema-echo derivation.
     string_fields = tuple(
-        f for f in TEACHBACK_REQUIRED_FIELDS if f != "variety_acknowledgment"
+        f for f in TEACHBACK_REQUIRED_FIELDS if f not in TEACHBACK_OBJECT_FIELDS
     )
     empty = [
         f for f in string_fields
@@ -1173,15 +1176,17 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                     teachback_submit
                 )
                 if schema_problem:
-                    # Echo the FULL canonical schema (all 5 fields, with the
+                    # Echo the FULL canonical schema (every field, with the
                     # variety_acknowledgment-is-an-OBJECT note) after the
-                    # specific problem, so a teammate that trips ANY
+                    # specific problem, so the relayed rejection covers ANY
                     # schema-invalid sub-reason — missing field, empty/non-string
                     # field, OR a malformed variety_acknowledgment (e.g. a
-                    # free-text string) — self-corrects in one read without
-                    # opening the skill. Appended at this single advisory site
-                    # (not per validator branch) because all sub-reasons funnel
-                    # into this one `teachback_submit_schema_invalid` advisory;
+                    # free-text string) — in one read. This is the LEAD-SIDE
+                    # completion advisory: the teammate receives the schema when
+                    # the lead relays the rejection, not at their own write
+                    # moment. Appended at this single advisory site (not per
+                    # validator branch) because all sub-reasons funnel into this
+                    # one `teachback_submit_schema_invalid` advisory;
                     # TEACHBACK_SCHEMA_ECHO is the DRY schema-derived string.
                     advisories.append((
                         "teachback_submit_schema_invalid",
