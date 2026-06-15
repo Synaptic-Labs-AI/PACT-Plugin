@@ -50,9 +50,16 @@ output well-formed).
 IDENTITY IS COORDINATION, NOT AUTHORIZATION: the registry identity and is_lead
 are coordination signals only. The registry value is self-asserted/forgeable
 (labeling-only per session_registry's trust-boundary docstring); this resolution
-MUST NOT leak into any authz/trust predicate. The worst forge outcome is a
-teammate flipping ITS OWN already-owned pending task to in_progress — no
-privilege boundary is crossed (all frames run as the same OS user).
+MUST NOT leak into any authz/trust predicate.
+
+FORGE INVARIANT (canonical; mirrored verbatim in the trust-partition test
+comment): The auto-flip targets a task whose owner == the registry-resolved name.
+Identity is COORDINATION-ONLY (the registry is forgeable/labeling). A forged or
+last-wins-collapsed registry entry could resolve to a DIFFERENT member's name, so
+the flip is NOT guaranteed to act on the acting teammate's OWN task. No-escalation
+holds NOT via 'own-task-only' but because the same OS user already has full
+TaskUpdate/FS access and the only mutation is a benign pending→in_progress flip —
+the gate crosses no privilege boundary.
 
 ADVISORY-CHANNEL CAVEAT (known, unresolved platform uncertainty): whether
 PreToolUse additionalContext reliably reaches the model is an open question in
@@ -192,6 +199,19 @@ def _read_lead_session_id(team_name: str, teams_dir: str | None = None) -> str:
     malformed JSON, non-object top-level, or a missing/non-string key. An empty
     return routes the caller to the fail-safe in-process/NO-OP default. Never
     raises.
+
+    CURRENCY DEPENDENCY (the in-process/tmux topology compare rests on this):
+    in-process safety assumes ``config.leadSessionId`` is CURRENT. A STALE value
+    — e.g. after a team resume/reuse where the config retains a prior session's
+    id — could make the caller's ``session_id == leadSessionId`` compare
+    MISCLASSIFY an in-process frame as tmux (or vice-versa). Blast radius is
+    BOUNDED and benign: the discriminator is coordination-only (all frames are the
+    same OS user; no privilege boundary), and the worst misclassification outcome
+    is a benign ``pending → in_progress`` auto-flip of the teammate's OWN
+    owned-unblocked-pending task (in-process misread as tmux) — the very action
+    the teammate was supposed to take — or a missed nudge (tmux misread as
+    in-process). The ``owner == confident_name`` conjunction still bounds it to
+    the resolved teammate's task; no wrong-teammate flip, no escalation.
     """
     if not is_safe_path_component(team_name):
         return ""
@@ -318,7 +338,24 @@ def _atomic_claim(task_id: str, team_name: str) -> bool:
     # for the status flip.
     metadata["gate_writeback"] = True
 
-    tasks_root = get_claude_config_dir() / "tasks" / team_name
+    # Writer/reader symlink-anchoring parity: mirror the sibling READERS'
+    # resolve()+relative_to containment assertion (read_task_json does
+    # `task_dir.resolve().relative_to(base.resolve())`; iter_team_task_jsons
+    # asserts the resolved team dir under the resolved tasks_root) BEFORE writing.
+    # team_name already passed is_safe_path_component (no traversal), but a
+    # SYMLINK at tasks/{team_name} pointing outside base is an ORTHOGONAL escape
+    # vector the readers guard and the writer must too — else os.replace could
+    # land the write outside the anchored tasks tree. Fail-OPEN on mismatch:
+    # return False → caller degrades to the M1 advisory (never deny, never write
+    # outside the anchored dir). Write via the UNresolved path after the check
+    # passes (matches read_task_json; inherits the same accepted TOCTOU window —
+    # parity, not gold-plating).
+    base = get_claude_config_dir() / "tasks"
+    tasks_root = base / team_name
+    try:
+        tasks_root.resolve().relative_to(base.resolve())
+    except (OSError, ValueError):
+        return False
     target = tasks_root / f"{sanitized}.json"
     tmp = tasks_root / f".{sanitized}.json.tmp"
     try:

@@ -70,9 +70,15 @@ _FORBIDDEN_AUTHORITY_CALLS = ("_registry_resolve", "resolve_agent_name")
 #   * session_end.py         — prune (imports REGISTRY_PATH only, no resolver)
 #   * task_claim_gate.py     — F2 strict identity resolve() for the #961 claim
 #     gate: a COORDINATION use, never authority. The resolved name only gates a
-#     fail-open advisory nudge and (M2) a teammate flipping its OWN already-owned
-#     pending task to in_progress — no privilege boundary is crossed. A miss →
-#     advisory, never a typed guess.
+#     fail-open advisory nudge and (M2) an auto-flip. The auto-flip targets a
+#     task whose owner == the registry-resolved name. Identity is
+#     COORDINATION-ONLY (the registry is forgeable/labeling). A forged or
+#     last-wins-collapsed registry entry could resolve to a DIFFERENT member's
+#     name, so the flip is NOT guaranteed to act on the acting teammate's OWN
+#     task. No-escalation holds NOT via 'own-task-only' but because the same OS
+#     user already has full TaskUpdate/FS access and the only mutation is a
+#     benign pending→in_progress flip — the gate crosses no privilege boundary.
+#     A miss → advisory, never a typed guess.
 # Paths are POSIX-relative to HOOKS_DIR. session_registry.py itself is NOT here:
 # the module does not import itself, so the detector does not flag it.
 _ALLOWED_REGISTRY_IMPORTERS = frozenset({

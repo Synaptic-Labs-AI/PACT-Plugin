@@ -211,6 +211,56 @@ def test_T1_structural_keying_same_input_branches_on_topology_only(tmp_path, mon
     assert _read_task(tmp_path, "B")["status"] == "in_progress"
 
 
+def test_T1_stale_lead_session_id_misclassification_bounded_to_own_task(
+    tmp_path, monkeypatch, capsys
+):
+    """Topology robustness: a STALE `config.leadSessionId` (≠ the actual current
+    shared session the in-process teammate runs in) makes the topology compare
+    read `session_id != leadSessionId` → in_process=False → an IN-PROCESS teammate
+    is MISCLASSIFIED as tmux and reaches the enforce path. The blast radius is
+    BOUNDED by the registry-confident-ownership + single-candidate conjunction:
+    the worst the gate can do is auto-claim the actor's OWN single pending task
+    (coordination-only, benign `pending → in_progress`, no privilege crossing). It
+    MUST NEVER flip another member's task, NEVER deny, and always fail-open.
+
+    Non-vacuous: drop the ownership bound and Part 2 inverts (the not-owned task
+    becomes the sole candidate and is wrongly flipped — cross-actor escalation)."""
+    stale_lead_sid = "stale-lead-session-9999"
+    current_shared_sid = "current-shared-session-0001"  # the real in-process session
+    _seed_config(tmp_path, lead_session_id=stale_lead_sid)  # config is STALE
+    _mock_registry(monkeypatch, f"{DEVOPS}@{TEAM}")
+    frame = _payload(session_id=current_shared_sid, agent_type=DEVOPS)
+
+    # Part 1 — BENIGN bound + same-fixture positive control: the actor's OWN task
+    # is the single candidate → auto-claim of its OWN pending task only. Proves the
+    # gate is ACTIVE under the misclassification (not an inert no-op) and the flip
+    # is benign (own task, coordination-only).
+    _seed_task(tmp_path, "B", subject="devops: implement", owner=DEVOPS,
+               status="pending", blockedBy=[])
+    advisory = gate._evaluate(frame)
+    assert "Auto-claimed" in advisory and "#B" in advisory
+    assert _read_task(tmp_path, "B")["status"] == "in_progress"
+
+    # Part 2 — NO cross-actor escalation (the bound): replace the own task with a
+    # NOT-owned task as the SOLE candidate. The ownership filter keeps `mine` empty
+    # → NO-OP; another member's task is never flipped even under the
+    # misclassification. (Drop the ownership bound and X escalates → this inverts.)
+    (tmp_path / ".claude" / "tasks" / TEAM / "B.json").unlink()
+    _seed_task(tmp_path, "X", subject="db: migrate", owner=OTHER,
+               status="pending", blockedBy=[])
+    assert gate._evaluate(frame) is None
+    assert _read_task(tmp_path, "X")["status"] == "pending"  # OTHER's task untouched
+
+    # Part 3 — fail-open / never-deny under the misclassification: main() emits a
+    # PreToolUse advisory + exit 0, never a permissionDecision.
+    _seed_task(tmp_path, "B", subject="devops: implement", owner=DEVOPS,
+               status="pending", blockedBy=[])
+    code, out = _capture_main(frame, capsys)
+    assert code == 0
+    assert out["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+    assert "permissionDecision" not in json.dumps(out)
+
+
 # =============================================================================
 # T2 — TMUX positive: confident identity + exactly one owned-unblocked-pending
 #      → M2 auto-flip; whole-json preserved + gate_writeback marker.
