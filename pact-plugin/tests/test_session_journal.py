@@ -112,6 +112,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
+# Module-level for the arc-scoping / read-contract fixtures (#972 — #963/#966).
+from shared.session_journal import make_event  # noqa: E402
+
 
 # Module-level worker for multi-process concurrency tests.
 # Must be picklable (i.e. top-level) so multiprocessing.Process can spawn it
@@ -4280,3 +4283,351 @@ class TestValidateOptionalFieldTypes:
         ok, reason = _validate_event_schema(event)
         assert ok is True, f"full payload should pass; got {reason!r}"
         assert reason == "ok"
+
+
+# ===========================================================================
+# Arc-scoping: --since / _ts_ge (epic #972, child #963)
+#
+# The wrap-up Q5/Q6 retrospective aggregates over the session journal, which
+# in a resumed/multi-feature session accumulates PRIOR arcs. The --since arc
+# boundary (the current feature's latest variety_assessed.ts) scopes the
+# reads to the current arc. _ts_ge is the parse-not-compare filter that
+# backs it. All fixtures are synthetic journal events — GC-immune (no
+# task-store dependence).
+# ===========================================================================
+
+
+def _write_journal(journal_file, events):
+    """Write pre-built event dicts in the on-disk journal format (one JSON
+    object per line). GC-immune fixture helper for the arc-scoping +
+    read-contract tests below."""
+    journal_file.parent.mkdir(parents=True, exist_ok=True)
+    journal_file.write_text(
+        "".join(json.dumps(e, separators=(",", ":")) + "\n" for e in events)
+    )
+
+
+class TestTsGeArcFilter:
+    """_ts_ge — the parse-not-compare arc-scope timestamp filter (#963)."""
+
+    def test_equal_instant_cross_format_is_included(self):
+        """The arc-start boundary event must be INCLUDED (inclusive >=) even
+        when the event ts and the `since` differ in zone format (Z vs
+        +00:00). make_event stamps `...Z`; canonical_since() emits
+        `...+00:00`."""
+        from shared.session_journal import _ts_ge
+
+        # mission-named direction: since in +00:00, event ts in Z
+        assert _ts_ge("2026-06-14T00:00:00Z", "2026-06-14T00:00:00+00:00") is True
+
+    def test_parse_not_lexical_compare(self):
+        """Non-vacuity: a LEXICAL string compare is WRONG across the format
+        split — '+' (0x2B) sorts before 'Z' (0x5A), so a +00:00 event ts
+        would sort before an equal-instant Z `since` and be wrongly excluded.
+        _ts_ge parses to datetime and includes it."""
+        event_ts = "2026-06-14T00:00:00+00:00"
+        since = "2026-06-14T00:00:00Z"
+        from shared.session_journal import _ts_ge
+
+        assert _ts_ge(event_ts, since) is True  # parsed: equal instant → included
+        assert (event_ts >= since) is False  # lexical: the bug _ts_ge avoids
+
+    def test_earlier_event_excluded(self):
+        from shared.session_journal import _ts_ge
+
+        assert _ts_ge("2026-06-13T23:59:59Z", "2026-06-14T00:00:00Z") is False
+
+    def test_later_event_included(self):
+        from shared.session_journal import _ts_ge
+
+        assert _ts_ge("2026-06-14T00:00:01Z", "2026-06-14T00:00:00Z") is True
+
+    def test_falsy_since_includes_all(self):
+        """Fail-open: a falsy `since` disables filtering (single-arc
+        behavior unchanged — the whole journal is read)."""
+        from shared.session_journal import _ts_ge
+
+        assert _ts_ge("2026-06-14T00:00:00Z", None) is True
+        assert _ts_ge("2026-06-14T00:00:00Z", "") is True
+
+    def test_unparseable_or_missing_ts_is_included_failopen(self):
+        """Fail-open: an unparseable/missing timestamp is INCLUDED (never
+        silently dropped from a scoped read)."""
+        from shared.session_journal import _ts_ge
+
+        assert _ts_ge(None, "2026-06-14T00:00:00Z") is True
+        assert _ts_ge("garbage", "2026-06-14T00:00:00Z") is True
+        assert _ts_ge("2026-06-14T00:00:00Z", "garbage") is True
+
+
+class TestArcScopedDenominator:
+    """End-to-end --since arc-scoping over a RESUMED 2-arc journal (#963).
+
+    The #960 worked example: two arcs written into one session journal.
+    Non-vacuity hinge (R5): the prior and current arcs REUSE task ids
+    8/10/12 — the collision is the whole point. A fixture with unique ids
+    would pass vacuously, because keying the arc boundary on task_id would
+    collide; keying on ts (via --since/_ts_ge) is what makes arc-scoping
+    correct. Unscoped denominator 9 → arc-scoped 4.
+    """
+
+    ARC1_TS = "2026-06-13T12:00:00Z"
+    ARC2_START = "2026-06-14T09:00:00Z"  # current feature's variety_assessed.ts
+    ARC2_TS = "2026-06-14T12:00:00Z"
+
+    def _ad(self, task_id, agent, phase, ts):
+        return make_event(
+            "agent_dispatch", agent=agent, task_id=task_id, phase=phase, ts=ts
+        )
+
+    def _resumed_two_arc_journal(self, journal_file):
+        events = [
+            # --- prior arc (5 dispatches) ---
+            self._ad("8", "preparer", "PREPARE", self.ARC1_TS),
+            self._ad("10", "architect", "ARCHITECT", self.ARC1_TS),
+            self._ad("12", "devops-engineer", "CODE", self.ARC1_TS),
+            self._ad("13", "auditor", "CODE", self.ARC1_TS),  # prior-arc-only
+            self._ad("16", "test-engineer", "TEST", self.ARC1_TS),
+            # --- current arc boundary: the feature's variety_assessed ---
+            make_event(
+                "variety_assessed",
+                task_id="100",
+                variety={
+                    "novelty": 2,
+                    "scope": 2,
+                    "uncertainty": 2,
+                    "risk": 2,
+                    "total": 8,
+                },
+                ts=self.ARC2_START,
+            ),
+            # --- current arc (4 dispatches) — REUSES ids 8/10/12 ---
+            self._ad("8", "preparer", "PREPARE", self.ARC2_TS),
+            self._ad("10", "architect", "ARCHITECT", self.ARC2_TS),
+            self._ad("12", "devops-engineer", "CODE", self.ARC2_TS),
+            self._ad("14", "test-engineer", "TEST", self.ARC2_TS),
+        ]
+        _write_journal(journal_file, events)
+
+    def test_unscoped_denominator_conflates_both_arcs(
+        self, journal_home, session_dir, journal_file
+    ):
+        """Baseline (the bug): without --since the denominator counts BOTH
+        arcs = 9 (the #960 observed value)."""
+        from shared.session_journal import read_events_from
+        from shared.variety_divergence import count_task_b_dispatch_sites
+
+        self._resumed_two_arc_journal(journal_file)
+        agent = read_events_from(session_dir, event_type="agent_dispatch")
+        assert count_task_b_dispatch_sites(agent, [], []) == 9
+
+    def test_arc_scoped_denominator_counts_current_arc_only(
+        self, journal_home, session_dir, journal_file
+    ):
+        """--since arc_start scopes the denominator to the CURRENT arc = 4.
+        The prior-arc-only auditor/task13 and the prior duplicates of
+        8/10/12 are excluded."""
+        from shared.session_journal import read_events_from
+        from shared.variety_divergence import count_task_b_dispatch_sites
+
+        self._resumed_two_arc_journal(journal_file)
+        agent = read_events_from(
+            session_dir, event_type="agent_dispatch", since=self.ARC2_START
+        )
+        assert count_task_b_dispatch_sites(agent, [], []) == 4
+
+    def test_positive_control_current_arc_events_are_counted(
+        self, journal_home, session_dir, journal_file
+    ):
+        """Positive-control-per-exclusion (963-C): the scoping INCLUDES the
+        current arc's events (not merely 'counts nothing') — kills the
+        under-registration false-GREEN. The reused ids 8/10/12 plus the
+        current-only 14 survive; the prior-only 13 is excluded."""
+        from shared.session_journal import read_events_from
+
+        self._resumed_two_arc_journal(journal_file)
+        agent = read_events_from(
+            session_dir, event_type="agent_dispatch", since=self.ARC2_START
+        )
+        task_ids = sorted((e["task_id"] for e in agent), key=int)
+        assert task_ids == ["8", "10", "12", "14"]
+        assert "13" not in task_ids
+
+    def test_single_arc_fresh_session_since_is_noop(
+        self, journal_home, session_dir, journal_file
+    ):
+        """No-change guard (963-B): a single-arc fresh session — --since at
+        the only arc's start is a no-op; scoped count == unscoped count."""
+        from shared.session_journal import read_events_from
+        from shared.variety_divergence import count_task_b_dispatch_sites
+
+        events = [
+            make_event(
+                "variety_assessed",
+                task_id="1",
+                variety={
+                    "novelty": 2,
+                    "scope": 2,
+                    "uncertainty": 2,
+                    "risk": 2,
+                    "total": 8,
+                },
+                ts="2026-06-15T09:00:00Z",
+            ),
+            self._ad("2", "coder", "CODE", "2026-06-15T10:00:00Z"),
+            self._ad("3", "test-engineer", "TEST", "2026-06-15T11:00:00Z"),
+        ]
+        _write_journal(journal_file, events)
+        scoped = read_events_from(
+            session_dir, event_type="agent_dispatch", since="2026-06-15T09:00:00Z"
+        )
+        unscoped = read_events_from(session_dir, event_type="agent_dispatch")
+        assert (
+            count_task_b_dispatch_sites(scoped, [], [])
+            == count_task_b_dispatch_sites(unscoped, [], [])
+            == 2
+        )
+
+
+class TestReadLastSinceParity:
+    """read-last --since parity (#963 — devops uncertainty #3, no production
+    caller yet but parity-complete with the read path)."""
+
+    def test_current_arc_match_returned(
+        self, journal_home, session_dir, journal_file
+    ):
+        from shared.session_journal import read_last_event_from
+
+        events = [
+            make_event("checkpoint", phase="PRIOR_ARC", ts="2026-06-13T12:00:00Z"),
+            make_event("checkpoint", phase="CURRENT_ARC", ts="2026-06-14T12:00:00Z"),
+        ]
+        _write_journal(journal_file, events)
+        ev = read_last_event_from(
+            session_dir, "checkpoint", since="2026-06-14T09:00:00Z"
+        )
+        assert ev is not None
+        assert ev["phase"] == "CURRENT_ARC"
+
+    def test_prior_arc_only_match_is_excluded(
+        self, journal_home, session_dir, journal_file
+    ):
+        """A match that exists ONLY in the prior arc (before `since`) is
+        excluded → None, rather than leaking a prior-arc event."""
+        from shared.session_journal import read_last_event_from
+
+        events = [
+            make_event("checkpoint", phase="PRIOR_ARC", ts="2026-06-13T12:00:00Z"),
+        ]
+        _write_journal(journal_file, events)
+        ev = read_last_event_from(
+            session_dir, "checkpoint", since="2026-06-14T00:00:00Z"
+        )
+        assert ev is None
+
+
+class TestReadJsonArrayParseContract:
+    """The `read` CLI emits a SINGLE JSON array (#966). A line-by-line
+    (JSONL) parse misreads it — the masked false-absence the #966 guidance
+    fixes. Demonstrates why `events = json.loads(output)` (iterate the list)
+    is required and a per-line parse is wrong."""
+
+    def test_read_emits_single_json_array_iterable_as_list(
+        self, journal_home, session_dir, journal_file
+    ):
+        events = [
+            make_event(
+                "dispatch_variety",
+                task_id="8",
+                variety={
+                    "novelty": 1,
+                    "scope": 2,
+                    "uncertainty": 1,
+                    "risk": 2,
+                    "total": 6,
+                },
+                ts="2026-06-15T10:00:00Z",
+            ),
+            make_event(
+                "dispatch_variety",
+                task_id="11",
+                variety={
+                    "novelty": 2,
+                    "scope": 2,
+                    "uncertainty": 2,
+                    "risk": 2,
+                    "total": 8,
+                },
+                ts="2026-06-15T11:00:00Z",
+            ),
+        ]
+        _write_journal(journal_file, events)
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                _SJ_SCRIPT,
+                "read",
+                "--session-dir",
+                session_dir,
+                "--type",
+                "dispatch_variety",
+            ],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 0, result.stderr
+
+        # CORRECT parse: a single JSON array of N event dicts.
+        parsed = json.loads(result.stdout)
+        assert isinstance(parsed, list)
+        assert len(parsed) == 2
+        assert [e["variety"]["total"] for e in parsed] == [6, 8]
+
+    def test_per_line_jsonl_parse_misreads_the_array(
+        self, journal_home, session_dir, journal_file
+    ):
+        """Non-vacuity for the parse guidance: the array is ONE physical
+        line, so a JSONL consumer sees a single 'record' (the whole list),
+        and accessing it as an event dict raises TypeError — the crash the
+        #966 anti-pattern (`2>/dev/null || echo (none)`) silently swallowed
+        as absence."""
+        events = [
+            make_event(
+                "dispatch_variety",
+                task_id="8",
+                variety={"total": 6},
+                ts="2026-06-15T10:00:00Z",
+            ),
+            make_event(
+                "dispatch_variety",
+                task_id="11",
+                variety={"total": 8},
+                ts="2026-06-15T11:00:00Z",
+            ),
+        ]
+        _write_journal(journal_file, events)
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                _SJ_SCRIPT,
+                "read",
+                "--session-dir",
+                session_dir,
+                "--type",
+                "dispatch_variety",
+            ],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 0, result.stderr
+
+        lines = result.stdout.strip().splitlines()
+        assert len(lines) == 1  # a single JSON-array line, NOT N JSONL records
+        # a per-line consumer json.loads()-ing that one line gets a LIST;
+        # treating it as an event dict raises:
+        with pytest.raises(TypeError):
+            json.loads(lines[0])["variety"]

@@ -488,3 +488,24 @@ class TestStructuralVerificationDiscipline:
             f"stdout:\n{result.stdout}\n"
             f"stderr:\n{result.stderr}"
         )
+
+    def test_verify_protocol_extracts_script_is_present(self):
+        """The extracts-sync gate must not silently no-op.
+
+        The companion test above (test_verify_protocol_extracts_concurrent_
+        audit_still_matches) SKIPS when the script is absent — a portability
+        affordance that also means a future deletion of the script would
+        turn the byte-sync gate into a vacuous skip (it would pass without
+        verifying anything). This test asserts the script EXISTS in this
+        repo so its disappearance is caught as a failure rather than masked
+        as a skip — the #972/#966 hardening added byte-identical blockquotes
+        to pact-protocols.md / pact-state-recovery.md / pact-variety.md whose
+        sync this gate is the only guard for.
+        """
+        repo_root = Path(__file__).parent.parent.parent
+        script = repo_root / "scripts" / "verify-protocol-extracts.sh"
+        assert script.exists(), (
+            f"verify-protocol-extracts.sh missing at {script} — the protocol "
+            "extracts sync gate would silently no-op (skip) without it, "
+            "leaving SSOT/extract drift undetected."
+        )
