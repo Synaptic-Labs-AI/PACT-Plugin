@@ -291,6 +291,18 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     "teachback_ack": {
         "concern": str,
     },
+    # commands/peer-review.md writes remediation with an optional task_id —
+    # the fixer's Task-B task id. The Q5 coverage denominator
+    # (variety_divergence.count_task_b_dispatch_sites) uses it to dedup a
+    # comPACT/orchestrate-dispatched remediation that ALSO emits
+    # agent_dispatch for the same task_id, so the site is counted once.
+    # Optional because a remediation may omit it; an id-less remediation is
+    # counted as a distinct site (fail-safe — never undercounts the
+    # denominator). The required-fields registration above
+    # ("remediation": {...}) activates this optional check.
+    "remediation": {
+        "task_id": str,
+    },
 }
 
 
