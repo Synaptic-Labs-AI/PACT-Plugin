@@ -933,6 +933,203 @@ def test_T13c_permissive_unblock_identity_unconfident_blocks_flip(tmp_path, monk
 
 
 # =============================================================================
+# T14 — fail-safe / relevance-guard / path-traversal hardening. Folds in the
+#       secondary-path coverage gaps surfaced in review: the relevance-guard
+#       negative case, the session_id / team_name fail-safes, the F2 identity
+#       split, the _atomic_claim path-traversal + symlink + write-failure guards,
+#       and a full-path real-subprocess run. Each is non-vacuous where a function
+#       seam exists; the _atomic_claim cases lock the security-probed behavior in
+#       as a standing regression test.
+# =============================================================================
+
+
+def test_relevance_guard_negative_in_process_no_candidate_no_op(tmp_path, monkeypatch):
+    """In-process + NO claimable candidate → the relevance-guard returns False →
+    NO-OP (the generic nudge must NOT fire on every in-process Edit/Write/Bash
+    when nothing is claimable). Non-vacuous: neuter the guard to always-True and
+    the same frame inverts to the generic nudge."""
+    _seed_config(tmp_path)
+    _mock_registry(monkeypatch, f"{DEVOPS}@{TEAM}")
+    # only a COMPLETED owned task exists → nothing claimable
+    _seed_task(tmp_path, "B", subject="devops: done", owner=DEVOPS,
+               status="completed", blockedBy=[])
+    frame = _payload(session_id=LEAD_SID, agent_type=DEVOPS)
+    assert gate._evaluate(frame) is None                          # intact: NO-OP
+    monkeypatch.setattr(gate, "_any_unclaimed_claim_candidate", lambda *a, **k: True)
+    assert gate._evaluate(frame) == gate._GENERIC_CLAIM_NUDGE     # neutered: INVERTS
+
+
+def test_relevance_guard_negative_unconfident_tmux_no_candidate_no_op(tmp_path, monkeypatch):
+    """Tmux + registry-UNCONFIDENT + NO claimable candidate → relevance-guard
+    False → NO-OP. Non-vacuous: neuter the guard to always-True → generic nudge."""
+    _seed_config(tmp_path)
+    _mock_registry(monkeypatch, None)  # identity unconfident
+    _seed_task(tmp_path, "B", subject="devops: done", owner=DEVOPS,
+               status="completed", blockedBy=[])
+    frame = _payload(session_id=TMUX_SID, agent_type=DEVOPS, team_name=TEAM)
+    assert gate._evaluate(frame) is None                          # intact: NO-OP
+    monkeypatch.setattr(gate, "_any_unclaimed_claim_candidate", lambda *a, **k: True)
+    assert gate._evaluate(frame) == gate._GENERIC_CLAIM_NUDGE     # neutered: INVERTS
+
+
+def test_missing_or_empty_session_id_fail_safe_no_op(tmp_path, monkeypatch):
+    """A frame with empty / missing session_id → fail-safe NO-OP (no identity or
+    topology can be resolved). Same-fixture positive control: a valid session_id
+    flips B → proves the no-op is the session_id guard, not an inert fixture."""
+    _seed_config(tmp_path)
+    _mock_registry_map(monkeypatch, {TMUX_SID: f"{DEVOPS}@{TEAM}"})  # only TMUX_SID resolves
+    _seed_task(tmp_path, "B", subject="devops: implement", owner=DEVOPS,
+               status="pending", blockedBy=[])
+    # empty session_id → NO-OP
+    assert gate._evaluate(_payload(session_id="", agent_type=DEVOPS, team_name=TEAM)) is None
+    # missing session_id key → NO-OP
+    assert gate._evaluate({"tool_name": "Edit", "agent_type": DEVOPS, "team_name": TEAM}) is None
+    assert _read_task(tmp_path, "B")["status"] == "pending"
+    # positive control: a valid session_id DOES act (flip) in the SAME fixture
+    assert "Auto-claimed" in gate._evaluate(_payload(session_id=TMUX_SID, agent_type=DEVOPS))
+    assert _read_task(tmp_path, "B")["status"] == "in_progress"
+
+
+def test_unresolvable_team_name_fail_safe_no_op(tmp_path, monkeypatch):
+    """Registry miss (no @team half) + no context team + no stdin team_name →
+    team_name unresolvable → fail-safe NO-OP. Same-fixture positive control: with
+    a stdin team_name the gate proceeds (generic advisory) → proves the no-op is
+    the team_name guard."""
+    _seed_config(tmp_path)
+    _mock_registry(monkeypatch, None)  # no @team half
+    monkeypatch.setattr(gate.pact_context, "get_team_name", lambda: "")  # no context team
+    _seed_task(tmp_path, "B", subject="devops: implement", owner=DEVOPS,
+               status="pending", blockedBy=[])
+    # no stdin team_name → unresolvable → NO-OP
+    assert gate._evaluate(_payload(session_id=TMUX_SID, agent_type=DEVOPS)) is None
+    # positive control: stdin team_name resolves → gate proceeds (unconfident → generic)
+    assert gate._evaluate(
+        _payload(session_id=TMUX_SID, agent_type=DEVOPS, team_name=TEAM)
+    ) == gate._GENERIC_CLAIM_NUDGE
+    assert _read_task(tmp_path, "B")["status"] == "pending"
+
+
+def test_split_name_team_malformed_values_are_unconfident(tmp_path, monkeypatch):
+    """The identity split (F2 gate): any value lacking a non-empty name AND a
+    non-empty team → (None, None) = UNCONFIDENT; a '@'-less registry value must
+    never yield a typed owner. Pure-function assertions + an integration check
+    that the unconfident path falls back to the generic (attribution-free)
+    advisory, never a typed flip."""
+    assert gate._split_name_team("malformed-no-at-sign") == (None, None)
+    assert gate._split_name_team("name@") == (None, None)        # empty team
+    assert gate._split_name_team("@team") == (None, None)        # empty name
+    assert gate._split_name_team(123) == (None, None)            # non-string
+    assert gate._split_name_team(None) == (None, None)
+    assert gate._split_name_team("name@team") == ("name", "team")  # positive control
+    # integration: a '@'-less registry value → unconfident → generic, never typed
+    _seed_config(tmp_path)
+    _mock_registry(monkeypatch, "no-at-sign-here")
+    _seed_task(tmp_path, "B", subject="devops: implement", owner=DEVOPS,
+               status="pending", blockedBy=[])
+    advisory = gate._evaluate(
+        _payload(session_id=TMUX_SID, agent_type=DEVOPS, team_name=TEAM)
+    )
+    assert advisory == gate._GENERIC_CLAIM_NUDGE
+    assert "#B" not in advisory
+    assert _read_task(tmp_path, "B")["status"] == "pending"      # never a typed flip
+
+
+def test_atomic_claim_hostile_task_id_and_team_name_return_false(tmp_path):
+    """_atomic_claim contract lock (locks in the security-probed behavior): a
+    hostile task_id / team_name → False, no flip. Defense-in-depth:
+    sanitize_path_component + the team_name regex in _atomic_claim, mirrored by
+    read_task_json's own traversal guards."""
+    _seed_task(tmp_path, "B", subject="devops: implement", owner=DEVOPS,
+               status="pending", blockedBy=[])
+    assert gate._atomic_claim("..", TEAM) is False               # sanitizes to empty → abort
+    assert gate._atomic_claim("../../etc/passwd", TEAM) is False  # → "etcpasswd", not found
+    assert gate._atomic_claim("B", "../evil") is False           # team_name regex reject
+    assert gate._atomic_claim("B", "team/../../etc") is False    # team_name regex reject
+    assert _read_task(tmp_path, "B")["status"] == "pending"      # legit task untouched
+
+
+def test_atomic_claim_refuses_write_through_symlinked_team_dir(tmp_path):
+    """Symlink-anchoring WRITE guard: tasks/{team} is a SYMLINK escaping the base.
+    read_task_json reads the task from the bare base (it skips the escaping
+    symlink), but the WRITE target tasks/{team}/B.json would resolve OUTSIDE the
+    anchored base. _atomic_claim's resolve()+relative_to containment check refuses
+    → False, nothing written outside. Non-vacuous: remove the containment check
+    and os.replace lands the write at outside/B.json."""
+    base = tmp_path / ".claude" / "tasks"
+    base.mkdir(parents=True, exist_ok=True)
+    # B readable at the BARE BASE so read_task_json returns it (status pending)
+    (base / "B.json").write_text(
+        json.dumps({"id": "B", "owner": DEVOPS, "status": "pending", "blockedBy": []}),
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (base / "EVIL").symlink_to(outside, target_is_directory=True)
+    assert gate._atomic_claim("B", "EVIL") is False
+    assert json.loads((base / "B.json").read_text())["status"] == "pending"  # not flipped
+    assert not (outside / "B.json").exists()                     # nothing written outside
+
+
+def test_atomic_claim_write_failure_returns_false_and_cleans_tmp(tmp_path, monkeypatch):
+    """A real OSError during the atomic write (os.replace raises) → _atomic_claim
+    returns False, does NOT flip, and cleans up the .tmp (no leaked temp file).
+    Non-vacuous: removing the except would propagate the OSError (the direct call
+    would raise instead of returning False)."""
+    _seed_task(tmp_path, "B", subject="devops: implement", owner=DEVOPS,
+               status="pending", blockedBy=[])
+
+    def _boom(src, dst):
+        raise OSError("simulated disk-full")
+
+    monkeypatch.setattr(gate.os, "replace", _boom)
+    assert gate._atomic_claim("B", TEAM) is False
+    assert _read_task(tmp_path, "B")["status"] == "pending"      # not flipped
+    tasks_dir = tmp_path / ".claude" / "tasks" / TEAM
+    assert not list(tasks_dir.glob(".*.json.tmp"))              # tmp cleaned up
+
+
+def test_subprocess_full_evaluate_path_exits_zero_no_traceback(tmp_path):
+    """Real subprocess (as the platform runs the hook) through the FULL _evaluate
+    path — valid frame + real config + a claimable task — exits 0 with a
+    well-formed advisory and NO traceback. Complements the malformed-stdin
+    subprocess test (which exits before any config read)."""
+    claude = tmp_path / ".claude"
+    teams_dir = claude / "teams" / TEAM
+    teams_dir.mkdir(parents=True, exist_ok=True)
+    (teams_dir / "config.json").write_text(
+        json.dumps({"name": TEAM, "leadSessionId": LEAD_SID,
+                    "members": [{"id": "a-d", "name": DEVOPS, "agentType": DEVOPS}]}),
+        encoding="utf-8",
+    )
+    tasks_dir = claude / "tasks" / TEAM
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    (tasks_dir / "B.json").write_text(
+        json.dumps({"id": "B", "subject": "devops: implement", "owner": DEVOPS,
+                    "status": "pending", "blockedBy": []}),
+        encoding="utf-8",
+    )
+    env = {
+        "PATH": __import__("os").environ.get("PATH", ""),
+        "PYTHONPATH": str(_HOOKS_DIR),
+        "CLAUDE_CONFIG_DIR": str(claude),
+    }
+    # tmux topology (session_id != leadSessionId). No registry entry exists in a
+    # fresh subprocess → identity unconfident → generic advisory (B claimable).
+    frame = {"tool_name": "Edit", "session_id": TMUX_SID,
+             "agent_type": DEVOPS, "team_name": TEAM}
+    proc = subprocess.run(
+        [sys.executable, str(_HOOK_PATH)],
+        input=json.dumps(frame),
+        text=True, capture_output=True, env=env, timeout=30,
+    )
+    assert proc.returncode == 0
+    assert "Traceback" not in proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert out["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+    assert gate._NUDGE_PREFIX in out["hookSpecificOutput"]["additionalContext"]
+
+
+# =============================================================================
 # §12.3 follow-up — the SINGLE legitimate skip (flag-don't-fake).
 # =============================================================================
 

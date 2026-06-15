@@ -61,6 +61,18 @@ holds NOT via 'own-task-only' but because the same OS user already has full
 TaskUpdate/FS access and the only mutation is a benign pending→in_progress flip —
 the gate crosses no privilege boundary.
 
+THREAT-MODEL BOUNDARY (security F-2): every no-escalation claim above rests on a
+single assumption — ALL team frames (lead, in-process teammate, tmux teammate)
+run as the SAME OS user, who ALREADY holds unrestricted TaskUpdate + filesystem
+access to ~/.claude/tasks/. The gate therefore grants no capability the actor
+lacks; its only mutation is one that actor could already perform directly. This
+guarantee does NOT extend to a multi-user / cross-UID model: if a DIFFERENT OS
+user could write ~/.claude/tasks/ or forge the registry, the "benign own-flip"
+framing would no longer bound the blast radius and these coordination signals
+would need a real authz boundary. PACT is same-OS-user-only; this note marks the
+assumption EXPLICITLY so a future multi-user deployment re-evaluates it rather
+than inheriting it silently.
+
 ADVISORY-CHANNEL CAVEAT (known, unresolved platform uncertainty): whether
 PreToolUse additionalContext reliably reaches the model is an open question in
 this repo. The advisory-only paths (in-process / identity-unconfident / multi-
@@ -79,7 +91,6 @@ from __future__ import annotations
 # ─── stdlib first (used on the input-side fail-open BEFORE wrapped imports) ──
 import json
 import os
-import re
 import sys
 from pathlib import Path
 
@@ -309,7 +320,12 @@ def _atomic_claim(task_id: str, team_name: str) -> bool:
     sanitized = sanitize_path_component(task_id)
     if not sanitized:
         return False
-    if not re.fullmatch(r"[A-Za-z0-9_\-]+", team_name):
+    # team_name was already validated in _evaluate (Step 2); re-check here as
+    # defense-in-depth for any future caller — via the CANONICAL
+    # is_safe_path_component (the SSOT allowlist SAFE_PATH_COMPONENT_RE =
+    # [A-Za-z0-9_-]+) instead of a duplicated inline regex. DRY: one validator,
+    # behaviorally identical to the prior re.fullmatch (verified 0-divergence).
+    if not is_safe_path_component(team_name):
         return False
 
     task = read_task_json(sanitized, team_name)
@@ -414,7 +430,16 @@ def _evaluate(stdin: dict) -> str | None:
     # ── Step 3: topology discriminator (the final D3 signal — a config read) ──
     lead_session_id = _read_lead_session_id(team_name)
     if not lead_session_id:
-        return None  # cannot determine topology → fail-safe (in-process = NO-OP)
+        # ASYMMETRY (design note): an UNKNOWN topology (config unreadable / no
+        # leadSessionId) NO-OPs SILENTLY — no advisory at all — whereas a
+        # CONFIRMED in-process topology DOES emit the generic advisory (below).
+        # Both are "cannot attribute a specific owner" states, yet they diverge by
+        # design: unknown-topology means we cannot even confirm we are a teammate
+        # in a known team, so the most conservative fail-safe (total NO-OP) is
+        # correct; confirmed-in-process is a KNOWN, safe state where the
+        # attribution-free nudge is warranted. The extra suppression on the
+        # unknown path is intentional, not an oversight.
+        return None  # unknown topology → fail-safe total NO-OP (no advisory)
     in_process = session_id == lead_session_id
 
     # ── Step 4: load the team task set ONCE (also feeds the unblocked predicate) ─
