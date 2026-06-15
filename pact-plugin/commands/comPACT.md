@@ -177,7 +177,7 @@ Both are created BEFORE the `Agent(...)` spawn call so the teammate sees them on
 A_id = TaskCreate(
     subject="{specialist}: TEACHBACK for {sub-task}",
     description="DOGFOOD TEACHBACK GATE for {sub-task}.\n\n"
-                "Submit TEACHBACK by writing metadata.teachback_submit (per pact-teachback skill). "
+                "Submit TEACHBACK by writing metadata.teachback_submit using the CANONICAL field schema (do NOT improvise key names): understanding, most_likely_wrong, least_confident_item, first_action, variety_acknowledgment (an OBJECT). See the pact-teachback skill for field semantics. "
                 "SET intentional_wait{reason=awaiting_lead_completion, expected_resolver=team-lead}. Idle. "
                 "DO NOT mark this task completed — team-lead-only completion. Lead will mark completed "
                 "after teachback acceptance, then send a wake-SendMessage confirming Task B is claimable.\n\n"
