@@ -261,6 +261,45 @@ def test_T1_stale_lead_session_id_misclassification_bounded_to_own_task(
     assert "permissionDecision" not in json.dumps(out)
 
 
+def test_T1_stale_lead_session_id_misclassification_multicandidate_and_unconfident_stay_advisory(
+    tmp_path, monkeypatch
+):
+    """Companion bound: under the SAME stale-`leadSessionId` misclassification
+    (in-process misread as tmux), the auto-flip is gated by the FULL conjunction,
+    not ownership alone. (a) MORE THAN ONE owned-unblocked-pending candidate →
+    advisory-LIST, never a flip (the gate must not guess which task the actor is
+    working on). (b) registry-UNCONFIDENT identity → generic attribution-free
+    advisory, never a typed flip. Both bounds hold even though the topology is
+    misclassified — pinning the single-candidate AND registry-confident conjuncts
+    that complement the ownership bound in the sibling test."""
+    stale_lead_sid = "stale-lead-session-9999"
+    current_shared_sid = "current-shared-session-0001"  # the real in-process session
+    _seed_config(tmp_path, lead_session_id=stale_lead_sid)  # config is STALE
+
+    # (a) confident identity + >1 owned candidate → advisory-LIST, NO flip.
+    # (Break the single-candidate bound and one of these would wrongly flip.)
+    _mock_registry(monkeypatch, f"{DEVOPS}@{TEAM}")
+    _seed_task(tmp_path, "B", subject="devops: a", owner=DEVOPS,
+               status="pending", blockedBy=[])
+    _seed_task(tmp_path, "C", subject="devops: b", owner=DEVOPS,
+               status="pending", blockedBy=[])
+    frame = _payload(session_id=current_shared_sid, agent_type=DEVOPS)
+    advisory = gate._evaluate(frame)
+    assert "Auto-claimed" not in advisory and "#B" in advisory and "#C" in advisory
+    assert _read_task(tmp_path, "B")["status"] == "pending"
+    assert _read_task(tmp_path, "C")["status"] == "pending"
+
+    # (b) registry-UNCONFIDENT identity → generic advisory, NO typed flip.
+    # (Break the registry-confident bound and a typed guess could flip.)
+    _mock_registry(monkeypatch, None)
+    advisory = gate._evaluate(
+        _payload(session_id=current_shared_sid, agent_type=DEVOPS, team_name=TEAM)
+    )
+    assert advisory == gate._GENERIC_CLAIM_NUDGE
+    assert _read_task(tmp_path, "B")["status"] == "pending"
+    assert _read_task(tmp_path, "C")["status"] == "pending"
+
+
 # =============================================================================
 # T2 — TMUX positive: confident identity + exactly one owned-unblocked-pending
 #      → M2 auto-flip; whole-json preserved + gate_writeback marker.
