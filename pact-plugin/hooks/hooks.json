@@ -128,6 +128,15 @@
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/handoff_ordering_gate.py\""
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/task_claim_gate.py\""
+          }
+        ]
       }
     ],
     "SubagentStop": [
