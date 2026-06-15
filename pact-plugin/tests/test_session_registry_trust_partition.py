@@ -63,17 +63,29 @@ _FORBIDDEN_AUTHORITY_CALLS = ("_registry_resolve", "resolve_agent_name")
 # the POSITIVE 2-file authority no-import test with a NEGATIVE all-files scan: a
 # NEW importer ANYWHERE under hooks/ — an authority file, a gate, a new helper —
 # trips the backstop, even one the _AUTHORITY_FILES tuple does not enumerate.
-# The three sanctioned consumers are all LABELING / lifecycle uses (the registry
-# value never reaches an authority decision through any of them):
+# The four sanctioned consumers are all LABELING / coordination / lifecycle uses
+# (the registry value never reaches an authority decision through any of them):
 #   * shared/pact_context.py — resolve_agent_name Step 3.5 (human-readable label)
 #   * session_init.py        — teammate-branch lead-team resolution (peer display)
 #   * session_end.py         — prune (imports REGISTRY_PATH only, no resolver)
+#   * task_claim_gate.py     — F2 strict identity resolve() for the #961 claim
+#     gate: a COORDINATION use, never authority. The resolved name only gates a
+#     fail-open advisory nudge and (M2) an auto-flip. The auto-flip targets a
+#     task whose owner == the registry-resolved name. Identity is
+#     COORDINATION-ONLY (the registry is forgeable/labeling). A forged or
+#     last-wins-collapsed registry entry could resolve to a DIFFERENT member's
+#     name, so the flip is NOT guaranteed to act on the acting teammate's OWN
+#     task. No-escalation holds NOT via 'own-task-only' but because the same OS
+#     user already has full TaskUpdate/FS access and the only mutation is a
+#     benign pending→in_progress flip — the gate crosses no privilege boundary.
+#     A miss → advisory, never a typed guess.
 # Paths are POSIX-relative to HOOKS_DIR. session_registry.py itself is NOT here:
 # the module does not import itself, so the detector does not flag it.
 _ALLOWED_REGISTRY_IMPORTERS = frozenset({
     "shared/pact_context.py",
     "session_init.py",
     "session_end.py",
+    "task_claim_gate.py",
 })
 
 
@@ -224,8 +236,8 @@ class TestTrustPartitionNoRegistryImport:
 # ===========================================================================
 
 class TestRegistryImporterAllowlist:
-    """Exactly the three sanctioned LABELING/lifecycle consumers may import the
-    registry. The no-import test above pins the TWO authority files specifically;
+    """Exactly the four sanctioned LABELING/coordination/lifecycle consumers may
+    import the registry. The no-import test above pins the TWO authority files specifically;
     this backstop scans EVERY hook file so a NEW importer anywhere — including one
     the _AUTHORITY_FILES tuple does not list — trips immediately."""
 

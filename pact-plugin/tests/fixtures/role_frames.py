@@ -234,6 +234,70 @@ _CAPTURED_FRAMES_JSON = r'''
     "session_id": "b0f9c52e-8c38-44f0-a876-501ea3a27c7e",
     "transcript_path": "<transcript_path>"
   },
+  "pretooluse_teammate_tmux": {
+    "_meta": {
+      "capture_method": "live-session additive-settings PreToolUse dumper (Claude Code 2.1.177, cycle-2 spike)",
+      "note": "tmux teammate PreToolUse: agent_type PRESENT (pact-test-engineer, a non-lead spelling -> is_lead False); session_id DISTINCT from the lead's (tmux topology); NO top-level agent_id."
+    },
+    "agent_type": "pact-test-engineer",
+    "cwd": "<cwd>",
+    "effort": {
+      "level": "xhigh"
+    },
+    "hook_event_name": "PreToolUse",
+    "permission_mode": "bypassPermissions",
+    "session_id": "6f9d8c47-f03d-4422-ab9c-87fdc8408103",
+    "tool_input": {
+      "content": "<content>",
+      "file_path": "<file_path>"
+    },
+    "tool_name": "Write",
+    "tool_use_id": "toolu_01GfyP2GZYrdWApmbcctBmZs",
+    "transcript_path": "<transcript_path>"
+  },
+  "pretooluse_lead_inprocess": {
+    "_meta": {
+      "capture_method": "live-session additive-settings PreToolUse dumper (Claude Code 2.1.177, cycle-2 spike)",
+      "note": "lead PreToolUse: agent_type PRESENT (PACT:pact-orchestrator, qualified lead spelling -> is_lead True); session_id is the leadSessionId shared by the in-process subagent below (the collapse); NO top-level agent_id."
+    },
+    "agent_type": "PACT:pact-orchestrator",
+    "cwd": "<cwd>",
+    "effort": {
+      "level": "xhigh"
+    },
+    "hook_event_name": "PreToolUse",
+    "permission_mode": "bypassPermissions",
+    "session_id": "9d820be0-7a77-48fb-972f-a130c5a375cc",
+    "tool_input": {
+      "content": "<content>",
+      "file_path": "<file_path>"
+    },
+    "tool_name": "Write",
+    "tool_use_id": "toolu_01GnQLhYGGZBGoMqC6ABzGbK",
+    "transcript_path": "<transcript_path>"
+  },
+  "pretooluse_teammate_inprocess_subagent": {
+    "_meta": {
+      "capture_method": "live-session additive-settings PreToolUse dumper (Claude Code 2.1.177, cycle-2 spike)",
+      "note": "in-process subagent PreToolUse: agent_type PRESENT (general-purpose); session_id EQUALS the lead's (the session_id==leadSessionId in-process collapse, previously M0-INFERRED, now CAPTURED); agent_id PRESENT (the corroborating discriminator, absent on the tmux + lead frames)."
+    },
+    "agent_id": "a41556261a05e62df",
+    "agent_type": "general-purpose",
+    "cwd": "<cwd>",
+    "effort": {
+      "level": "xhigh"
+    },
+    "hook_event_name": "PreToolUse",
+    "permission_mode": "bypassPermissions",
+    "session_id": "9d820be0-7a77-48fb-972f-a130c5a375cc",
+    "tool_input": {
+      "content": "<content>",
+      "file_path": "<file_path>"
+    },
+    "tool_name": "Write",
+    "tool_use_id": "toolu_01JUFbVry6HqG3YsKnbVhFYh",
+    "transcript_path": "<transcript_path>"
+  },
   "teammate_sessionstart": {
     "_meta": {
       "capture_method": "headless-subprocess-additive-settings-dumper (Claude Code 2.1.167, 2026-06-06)",
@@ -342,3 +406,22 @@ def captured_teammate_taskcompleted():
 def captured_lead_taskcompleted():
     """#917 lead-side frame: lead TaskCompleted with NO stdin team_name."""
     return captured_frame("lead_taskcompleted")
+
+
+def captured_pretooluse_teammate_tmux():
+    """Real tmux-teammate PreToolUse: agent_type PRESENT (pact-test-engineer);
+    agent_id ABSENT; session_id DISTINCT from the lead's (tmux topology)."""
+    return captured_frame("pretooluse_teammate_tmux")
+
+
+def captured_pretooluse_lead_inprocess():
+    """Real lead PreToolUse: qualified lead spelling; agent_id ABSENT; session_id
+    is the shared leadSessionId (the in-process anchor)."""
+    return captured_frame("pretooluse_lead_inprocess")
+
+
+def captured_pretooluse_teammate_inprocess_subagent():
+    """Real in-process subagent PreToolUse: agent_type PRESENT (general-purpose);
+    agent_id PRESENT; session_id EQUALS the lead's = the session_id==leadSessionId
+    collapse (was M0-inferred, now captured)."""
+    return captured_frame("pretooluse_teammate_inprocess_subagent")
