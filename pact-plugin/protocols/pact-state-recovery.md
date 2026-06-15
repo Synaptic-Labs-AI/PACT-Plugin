@@ -22,6 +22,8 @@ From most to least durable:
 | **Post-compaction** | Orchestrator rebuilds current session state | CLAUDE.md State Recovery steps + workflow command auto-recovery |
 | **Manual** | User or orchestrator reads journal directly | CLI: `python3 session_journal.py read --session-dir {session_dir}` |
 
+> **Read output format**: the `read` subcommand prints a SINGLE JSON array — parse with `events = json.loads(output)` and iterate the list; never parse line-by-line, and never pipe through `2>/dev/null` / `|| echo` / `head` (they mask a parse crash as emptiness, which can be misread as genuine absence).
+
 ### Journal Event Types
 
 Events are JSONL entries with common fields `v` (schema version), `type`, and `ts` (UTC).
