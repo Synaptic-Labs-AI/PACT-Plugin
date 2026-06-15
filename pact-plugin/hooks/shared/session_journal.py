@@ -614,16 +614,25 @@ def read_events_from(
     return _read_events_at(journal, event_type, since)
 
 
+def _parse_ts(value: Any) -> datetime:
+    """Parse an ISO-8601 timestamp, normalizing a trailing `Z` to `+00:00`.
+
+    `make_event` stamps `ts` as `...Z` while `canonical_since()` emits
+    `...+00:00`; normalizing lets the two compare as equal-instant
+    datetimes. A lexical string compare would be WRONG — `'+'` 0x2B sorts
+    before `'Z'` 0x5A, so a `+00:00` ts would sort before an equal-instant
+    `Z` ts. Raises ValueError/TypeError on missing/malformed input; callers
+    decide the fail-open policy.
+    """
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
 def _ts_ge(event_ts: Any, since: str | None) -> bool:
     """Return True if `event_ts >= since`, compared as parsed datetimes.
 
-    The arc-scope filter (`--since`) MUST parse the timestamps, not
-    string-compare them: `make_event` stamps `ts` as `...Z` while
-    `canonical_since()` emits `...+00:00`, and a lexical compare across the
-    two formats is wrong (`'+'` 0x2B sorts before `'Z'` 0x5A, so a
-    `+00:00` ts would sort before an equal-instant `Z` ts). Normalizing the
-    trailing `Z` to `+00:00` and comparing as `datetime` objects is
-    format-agnostic.
+    The arc-scope filter (`--since`) MUST parse the timestamps (via
+    `_parse_ts`), not string-compare them — see `_parse_ts` for the
+    format-mismatch rationale.
 
     Fail-open: when `since` is falsy the event is included (no filtering);
     when either timestamp is missing or unparseable the event is INCLUDED
@@ -633,10 +642,7 @@ def _ts_ge(event_ts: Any, since: str | None) -> bool:
     if not since:
         return True
     try:
-        def _parse(value: Any) -> datetime:
-            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-
-        return _parse(event_ts) >= _parse(since)
+        return _parse_ts(event_ts) >= _parse_ts(since)
     except (ValueError, TypeError):
         return True
 

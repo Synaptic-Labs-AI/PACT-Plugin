@@ -185,7 +185,7 @@ def count_task_b_dispatch_sites(
     review_dispatch_events: list[dict],
     remediation_events: list[dict],
 ) -> int:
-    """Count the distinct Task-B dispatch SITES — the Q5 coverage denominator.
+    """Count the Task-B dispatch SITES — the Q5 coverage denominator.
 
     coverage = (stamped dispatches) / (this count). The denominator is
     sourced from the variety-INDEPENDENT journal markers (agent_dispatch,
@@ -199,15 +199,36 @@ def count_task_b_dispatch_sites(
             + remediations whose task_id is NOT already an agent_dispatch
               task_id.
 
-    Reviewers are counted via `review_dispatch.reviewers` and are NOT
-    deduped: peer-review emits no `agent_dispatch`, so reviewers are
-    disjoint from the agent_dispatch population by emit-site design. ONLY
-    remediation can collide — a comPACT/orchestrate-dispatched remediation
-    emits BOTH `remediation` AND `agent_dispatch` for the same task_id, so
-    it is deduped to count once (via the agent_dispatch stream); a pure
-    reuse-remediation (no agent_dispatch) is counted via the remediation
-    stream. A remediation with a missing task_id is COUNTED (fail-safe:
-    never undercount, so a dropped id can never inflate coverage above 1.0).
+    agent_dispatch is EVENT-counted (`len`), NOT deduped by distinct
+    task_id. This is correct because the caller arc-scopes the reads FIRST
+    (the journal `--since` boundary) → the input is a SINGLE arc → within
+    one arc every Task-B has a unique task_id → event-count == distinct
+    count. The "one agent_dispatch per task_id" property is GUARANTEED by
+    that arc-scoping precondition, not an unguarded assumption. Do NOT
+    "harden" this to a distinct-id count: across arcs the platform REUSES
+    low task_ids, so a prior arc's task-8 and the current arc's task-8 are
+    GENUINELY DISTINCT dispatches — collapsing them by id would be wrong on
+    unscoped input, buys no real robustness (it leans on the same
+    --since-first precondition that already makes event-count correct), and
+    fails more quietly on misuse than the loud over-count it would replace.
+
+    Reviewers are counted via `review_dispatch.reviewers` (by name) and are
+    NOT deduped: peer-review emits no `agent_dispatch`, so reviewers are
+    disjoint from the agent_dispatch population by emit-site design. A
+    reviewer REUSED as a fixer is not a double-count: reuse creates a NEW
+    fix Task-B (a distinct task_id in `remediation`), so the review-work and
+    the fix-work are two legitimately-distinct dispatches.
+
+    ONLY remediation is deduped against agent_dispatch — a
+    comPACT/orchestrate-dispatched remediation emits BOTH `remediation` AND
+    `agent_dispatch` for the same task_id, so it is counted once (via the
+    agent_dispatch stream); a pure reuse-remediation (no agent_dispatch) is
+    counted via the remediation stream. Two `remediation` events that share
+    a task_id are NOT deduped among themselves: that is a bounded over-count
+    that only UNDER-states coverage (never >1.0) and is backstopped by the
+    `coverage_exceeds_unity` advisory in compute_variety_divergence, so no
+    self-dedup is warranted. A remediation with a missing task_id is COUNTED
+    (fail-safe: never undercount, so a dropped id can't inflate coverage).
 
     By construction this denominator excludes teachback Task-A gates and
     signal/system tasks: they emit none of these three event types, so
