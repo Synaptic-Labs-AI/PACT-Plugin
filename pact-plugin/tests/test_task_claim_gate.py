@@ -25,11 +25,14 @@ Two disciplines run through the whole file (the §11 Test Data Needs caveat):
     The inversion probe (topology) is the calibration case: a guard that, when
     inverted, green-lights the very wrong-flip it exists to prevent.
 
-The SINGLE legitimate skip is the real-tmux PreToolUse `agent_type`
-platform-fidelity fixture (§12.3 follow-up): flag-don't-fake — see
-`test_T12_3_real_pretooluse_agent_type_fixture_DEFERRED`. The decision LOGIC
-(is_lead reads only `agent_type`) is exercised throughout via synthesized
-frames; only the platform-stamps-the-field claim is deferred.
+The §12.3 platform-fidelity check (`test_T12_3_real_pretooluse_frames_platform_fidelity`)
+asserts the role discriminators against THREE real redacted PreToolUse frames
+captured live (Claude Code 2.1.177) and committed to `tests/fixtures/role_frames.py`:
+agent_type presence on all three (tmux teammate / lead / in-process subagent), the
+in-process `session_id == leadSessionId` collapse, and the agent_id present/absent
+corroboration. The decision LOGIC (is_lead reads only `agent_type`) is exercised
+throughout via synthesized frames; the captured fixture confirms the platform
+actually stamps those fields (no remaining skip).
 """
 
 import io
@@ -42,8 +45,10 @@ from unittest.mock import patch
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
+sys.path.insert(0, str(Path(__file__).parent / "fixtures"))
 
 import task_claim_gate as gate  # noqa: E402
+import role_frames  # noqa: E402  — committed real-frame fixtures (§12.3 fidelity)
 
 TEAM = "test-team"
 LEAD_QUALIFIED = "PACT:pact-orchestrator"      # is_lead True (qualified spelling)
@@ -1130,21 +1135,53 @@ def test_subprocess_full_evaluate_path_exits_zero_no_traceback(tmp_path):
 
 
 # =============================================================================
-# §12.3 follow-up — the SINGLE legitimate skip (flag-don't-fake).
+# §12.3 — PLATFORM-FIDELITY against REAL captured PreToolUse frames (un-skipped:
+#         the committed fixture landed). Asserts the role discriminators the gate
+#         depends on hold on three real redacted frames (Claude Code 2.1.177).
 # =============================================================================
 
 
-@pytest.mark.skip(reason=(
-    "PLATFORM-FIDELITY skip (flag-don't-fake): capturing a REAL tmux teammate "
-    "PreToolUse stdin frame to confirm the platform stamps `agent_type` on it "
-    "requires an additive shared-settings dumper (whole-team blast radius) — out "
-    "of scope for a unit suite. The decision LOGIC (is_lead reads ONLY agent_type) "
-    "is exercised throughout this file via synthesized frames; agent_type presence "
-    "on a tmux PreToolUse frame is already empirically established (the #806 "
-    "discriminator sweep) and documented in HOOK_STDIN_DISCRIMINATORS.md (PreToolUse "
-    "row, dagger). UN-SKIP when a committed real-PreToolUse fixture lands in "
-    "tests/fixtures/role_frames.py. Do NOT synthesize a fake platform frame and "
-    "assert platform-fidelity on it."
-))
-def test_T12_3_real_pretooluse_agent_type_fixture_DEFERRED():
-    raise AssertionError("placeholder — see skip reason")
+def test_T12_3_real_pretooluse_frames_platform_fidelity():
+    """The platform stamps the role discriminators the gate relies on. Three REAL
+    redacted PreToolUse frames (committed in tests/fixtures/role_frames.py) confirm:
+      (1) agent_type is PRESENT on ALL three frames — the field is_lead() and the
+          topology resolution read;
+      (2) the in-process subagent's session_id EQUALS the lead's leadSessionId —
+          the session_id==leadSessionId collapse that routes the in-process branch
+          (previously M0-INFERRED, now CAPTURED);
+      (3) the tmux teammate's session_id DIFFERS from the lead's — the tmux topology;
+      (4) agent_id is PRESENT on the in-process subagent and ABSENT on the tmux +
+          lead frames — captured corroboration (is_lead deliberately does NOT read
+          agent_id; this records the captured shape).
+    Finally, the captured frames are fed through the gate's REAL is_lead predicate
+    to confirm they drive the correct role decision."""
+    tmux = role_frames.captured_pretooluse_teammate_tmux()
+    lead = role_frames.captured_pretooluse_lead_inprocess()
+    subagent = role_frames.captured_pretooluse_teammate_inprocess_subagent()
+
+    # all three are real PreToolUse frames
+    for frame in (tmux, lead, subagent):
+        assert frame["hook_event_name"] == "PreToolUse"
+
+    # (1) agent_type PRESENT (non-empty string) on all three captured frames
+    for frame in (tmux, lead, subagent):
+        assert isinstance(frame.get("agent_type"), str) and frame["agent_type"]
+    assert tmux["agent_type"] == "pact-test-engineer"        # non-lead spelling
+    assert lead["agent_type"] == "PACT:pact-orchestrator"    # qualified lead spelling
+    assert subagent["agent_type"] == "general-purpose"
+
+    # (2) in-process collapse: subagent session_id == the lead's leadSessionId
+    assert subagent["session_id"] == lead["session_id"]
+    # (3) tmux topology: a DISTINCT session_id
+    assert tmux["session_id"] != lead["session_id"]
+
+    # (4) agent_id PRESENT on the in-process subagent, ABSENT on tmux + lead
+    assert subagent.get("agent_id")
+    assert "agent_id" not in tmux
+    assert "agent_id" not in lead
+
+    # the captured frames drive the gate's REAL role predicate correctly:
+    # is_lead reads ONLY agent_type → lead True, both teammates False.
+    assert gate.pact_context.is_lead(lead) is True
+    assert gate.pact_context.is_lead(tmux) is False
+    assert gate.pact_context.is_lead(subagent) is False

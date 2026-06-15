@@ -25,9 +25,17 @@ spelling `pact-orchestrator` as a teammate.
 
 ### Do NOT key a role decision on these
 
-- **`agent_id` / `agent_name`** — ABSENT on tmux hook stdin. (On some older
-  bundles a teammate `PostToolUse` frame carried `agent_id`; it is not
-  dependable across bundles. `is_lead` deliberately never reads it.)
+- **`agent_id` / `agent_name`** — ABSENT on tmux hook stdin (a tmux teammate
+  frame and the lead's frame carry no `agent_id`). (On some older bundles a
+  teammate `PostToolUse` frame carried `agent_id`; it is not dependable across
+  bundles. `is_lead` deliberately never reads it.) **Mode-dependent (Claude Code
+  2.1.177, captured):** an *in-process* subagent `PreToolUse` frame DOES carry
+  `agent_id` — under the in-process topology the subagent shares the lead's
+  `session_id` (the identity collapse), so `agent_id` is the only in-frame
+  differentiator there — but it is ABSENT on tmux-teammate and lead frames.
+  Present in one topology and absent in the other, it is NOT a reliable
+  cross-mode role signal: key role on `agent_type` (present in both), never
+  `agent_id`.
 - **`team_name`** — absent on most events; present on stdin only for a
   **teammate `TaskCompleted`** frame (see the table). It identifies the team,
   not the role, and it is NOT a "this is a teammate" flag you can rely on for
@@ -38,11 +46,13 @@ spelling `pact-orchestrator` as a teammate.
 ## Per-event truth table
 
 Values below are grounded in verbatim stdin captured under tmux (Claude Code
-2.1.167) for **SessionStart, UserPromptSubmit, PostToolUse, and TaskCompleted**.
-The **PreToolUse** and **PostCompact** rows are NOT separately captured (marked
-`†`): their `agent_type` shape is inferred from the uniform harness-stamping the
-captured frames establish (PostCompact has only a synthesized-from-matrix
-builder; PreToolUse has no frame). "journal-resolvable in this process?" = does
+2.1.167) for **SessionStart, UserPromptSubmit, PostToolUse, and TaskCompleted**,
+and under Claude Code 2.1.177 for **PreToolUse** (three real frames: a tmux
+teammate, a lead, and an in-process subagent — confirming `agent_type` is stamped
+on `PreToolUse` in both topologies). Only the **PostCompact** row is now NOT
+separately captured (marked `†`): its `agent_type` shape is inferred from the
+uniform harness-stamping the captured frames establish (PostCompact has only a
+synthesized-from-matrix builder). "journal-resolvable in this process?" = does
 `session_journal.get_journal_path()` return a non-empty path — i.e. can THIS
 process write the canonical session journal. It is **process-scoped**: a
 teammate process has no persisted session-context file, so its journal path is
@@ -52,14 +62,14 @@ empty.
 |---|---|---|---|---|---|---|
 | SessionStart | `agent_type` | lead spelling | `pact-<specialist>` | absent | no | lead: yes (persists context) · teammate: no |
 | UserPromptSubmit | `agent_type` | lead spelling | *(no teammate fire path — see note)* | absent | no | lead: yes |
-| PreToolUse `†` | `agent_type` | lead spelling | `pact-<specialist>` | — | **no** | lead: yes · teammate: no |
+| PreToolUse | `agent_type` | lead spelling | `pact-<specialist>` | — | **no** | lead: yes · teammate: no |
 | PostToolUse (incl. `TaskCreate` / `TaskUpdate`) | `agent_type` | lead spelling | `pact-<specialist>` | — | **no** | lead: yes · teammate: no |
 | TaskCompleted | `agent_type` | lead spelling | `pact-<specialist>` | — | lead: **no** · teammate: **yes** (also `teammate_name`) | lead: yes · teammate: no |
 | PostCompact `†` | `agent_type` | lead spelling | `pact-<specialist>` | — | no | lead: yes · teammate: no |
 
-`†` PreToolUse and PostCompact are NOT separately captured this campaign; their
-`agent_type` shape is inferred from the uniform harness-stamping the captured
-SessionStart / UserPromptSubmit / PostToolUse / TaskCompleted frames establish.
+`†` PostCompact is NOT separately captured this campaign; its `agent_type` shape
+is inferred from the uniform harness-stamping the captured SessionStart /
+UserPromptSubmit / PostToolUse / TaskCompleted / PreToolUse frames establish.
 `is_lead` is READ on PreToolUse and PostCompact (and SessionStart /
 UserPromptSubmit / PostToolUse) but is NOT read on TaskCompleted — that frame is
 captured for the #917 emit-path, which gates on `team_name` + journal
@@ -112,8 +122,9 @@ precise one.
 - `HOOK_INPUT_CONVENTIONS.md` (sibling) — conventions for consuming
   `hook_event_name` and pinning the verbatim platform stdin shape.
 - `pact-plugin/tests/fixtures/role_frames.py` — the committed real captured
-  frames substantiating this table (the `captured_*` accessors), each carrying
-  `_meta.capture_method` provenance.
+  frames substantiating this table (the `captured_*` accessors, including the
+  Claude Code 2.1.177 `PreToolUse` captures: tmux teammate, lead, and in-process
+  subagent), each carrying `_meta.capture_method` provenance.
 - `pact-plugin/hooks/shared/pact_context.py` — `is_lead` / `classify_session_role`
   (the resolvers) and `get_journal_path` resolution via the session context.
 

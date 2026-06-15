@@ -312,6 +312,31 @@ def _atomic_claim(task_id: str, team_name: str) -> bool:
     or not the advisory channel surfaces (the M2 robustness argument). Never
     raises.
 
+    CONCURRENCY — ACCEPTED TOCTOU WINDOW (issue #968): this is a LOCK-FREE
+    read-modify-write. The ``status == "pending"`` re-validation below reads at
+    ``read_task_json`` time, NOT atomically with the ``os.replace``; in the
+    read→replace window a concurrent PLATFORM write to the SAME task can be lost
+    (the whole-file replace is last-writer-wins, so a racing platform write — e.g.
+    the lead flipping ``status`` to ``completed`` — would be reverted). NO
+    plugin-side ``fcntl.flock`` is taken to close this, and that is DELIBERATE:
+    the #34 probe established that the platform does NOT ``flock`` the
+    ``{team}/.lock`` when writing tasks (5.2M non-blocking samples, 0 EWOULDBLOCK
+    across 8 confirmed in-window platform writes; the ``.lock`` is universally
+    0 bytes; the platform relies on atomic ``os.replace``). A plugin flock would
+    serialize against nothing — FALSE SAFETY, not real mutual exclusion. The REAL
+    safety is two-fold and sufficient in practice: the atomic ``os.replace`` (no
+    torn write — a reader always sees the whole old or whole new file) plus the
+    ``status == "pending"`` no-clobber re-validation (which catches the COMMON
+    ordering, where the competing write lands before our read). The residual
+    read→replace window is ACCEPTED: low-probability (the lead completes Task B
+    only AFTER the teammate's HANDOFF + idle, never while the teammate is
+    mid-Edit/Write/Bash — the only moment this flip fires), recoverable (a later
+    platform read-modify-write heals it), and at PARITY with the sibling
+    ``_writeback_dispute`` / ``_writeback_audit_recovery`` lock-free writebacks.
+    Tracked as FUTURE in issue #968; the only complete fix — one real lock shared
+    across all three writebacks — awaits a platform-cooperative lock primitive
+    that does not exist today.
+
     Returns True iff the flip was written.
     """
     # sanitize_path_component strips C0/\x00 + path-traversal fragments; an empty
