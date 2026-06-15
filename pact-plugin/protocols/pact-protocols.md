@@ -992,6 +992,8 @@ At wrap-up time, the secretary aggregates `variety_acknowledgment` flag rates ac
 
 The aggregation feeds back into Learning II calibration data alongside the feature-level CalibrationRecord — per-dispatch acknowledgment rates are a leading indicator of orchestrator-side scoring drift.
 
+**Arc scope (resumed/multi-feature sessions)**: both the Q5 divergence aggregation and this Q6 signal aggregation are scoped to the CURRENT arc, not the whole session journal. The wrap-up derives `arc_start` as the latest `variety_assessed.ts` whose `task_id` matches the current `feature_task_id` — the platform reuses task_ids across arcs, so the latest-ts match (NOT a plain most-recent `variety_assessed`) identifies the current arc — then passes `--since arc_start` to every journal read (`dispatch_variety`, `agent_dispatch`, `review_dispatch`, `remediation`, `teachback_ack`). The `--since` filter parses timestamps rather than string-comparing them (emit and arc-start timestamps can differ in UTC-zone suffix), is inclusive of the arc-start instant, and fails open to a whole-journal read when no matching `variety_assessed` exists (single-arc and legacy sessions are unchanged). This keeps prior arcs from inflating the Q5 divergence denominator or skewing the Q6 acknowledgment-signal rate.
+
 ---
 
 ## The PACT Workflow Family

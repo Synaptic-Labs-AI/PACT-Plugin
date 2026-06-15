@@ -1024,9 +1024,9 @@ class TestReadLastEventTailStreamed:
         call_count = {"n": 0}
         original_scan = sj._scan_lines_for_event
 
-        def counting_scan(lines, event_type):
+        def counting_scan(lines, event_type, since=None):
             call_count["n"] += 1
-            return original_scan(lines, event_type)
+            return original_scan(lines, event_type, since)
 
         monkeypatch.setattr(sj, "_scan_lines_for_event", counting_scan)
 
