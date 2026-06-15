@@ -1614,6 +1614,19 @@ def test_advisory_when_teachback_submit_is_non_dict(
     assert any(
         rule == "teachback_submit_schema_invalid" for rule, _ in advisories
     )
+    # #958 Future-2b — teachback_submit-itself-non-dict is also a schema-invalid
+    # sub-reason that funnels into the single teachback_submit_schema_invalid
+    # advisory, so its MESSAGE must carry the full canonical schema echo too.
+    # Non-vacuous: reverting the advisory-site append drops TEACHBACK_SCHEMA_ECHO
+    # from the message → this fails.
+    schema_msgs = [
+        msg for rule, msg in advisories
+        if rule == "teachback_submit_schema_invalid"
+    ]
+    assert TEACHBACK_SCHEMA_ECHO in schema_msgs[0], (
+        f"non-dict teachback_submit advisory must echo full canonical schema, "
+        f"got: {schema_msgs[0]!r}"
+    )
 
 
 def test_advisory_when_teachback_submit_field_is_empty_string(
@@ -1724,6 +1737,21 @@ def test_advisory_when_variety_ack_is_malformed(
     assert any(
         rule == "teachback_submit_schema_invalid" for rule, _ in advisories
     ), f"expected R2 for {description}, got: {advisories}"
+    # #958 Future-2b — echo-presence-per-variant: every malformed-variety_ack
+    # sub-case (non-dict-ack, invalid-enum, missing-concern, empty-concern)
+    # funnels into the SINGLE teachback_submit_schema_invalid advisory, so each
+    # variant's MESSAGE must carry the full canonical schema echo. Pins echo
+    # presence against a hypothetical future per-branch refactor of the single
+    # append site. Non-vacuous: reverting the advisory-site append drops
+    # TEACHBACK_SCHEMA_ECHO from the message → every parametrized variant fails.
+    schema_msgs = [
+        msg for rule, msg in advisories
+        if rule == "teachback_submit_schema_invalid"
+    ]
+    assert TEACHBACK_SCHEMA_ECHO in schema_msgs[0], (
+        f"malformed variety_ack advisory ({description}) must echo full "
+        f"canonical schema, got: {schema_msgs[0]!r}"
+    )
 
 
 def test_schema_invalid_message_echoes_full_schema_for_variety_ack_as_string(
