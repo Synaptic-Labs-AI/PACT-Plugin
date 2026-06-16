@@ -32,19 +32,19 @@ Events are JSONL entries with common fields `v` (schema version), `type`, and `t
 |------|-----------|--------|--------------|
 | `session_start` | session_init hook | `team`, `session_id`, `project_dir`, `worktree`, `source` | Session boundary marker; `source` ∈ {`startup`, `resume`, `compact`, `clear`, `unknown`} attributes the event to startup vs auto-compact vs `/clear` vs `/resume` for direct triage (no timing-cluster triangulation needed) |
 | `session_end` | session_end hook | `warning` (optional) | Detect incomplete shutdowns |
-| `session_paused` | pause command | `pr_number`, `branch`, `worktree_path`, `consolidation_completed`, `team_name` | Resume paused PR work |
+| `session_paused` | pause command | `pr_number`, `pr_url`, `branch`, `worktree_path`, `consolidation_completed`, `team_name` | Resume paused PR work |
 | `session_consolidated` | wrap-up, pause commands | `pass`, `task_count`, `memories_saved` (all optional int) | Signal that Pass 2 memory consolidation ran this session — consumed by `check_unpaused_pr` so SessionEnd does not warn on consolidated sessions regardless of PR state |
-| `variety_assessed` | orchestrate command | `score`, `dimensions` | Restore variety context |
+| `variety_assessed` | orchestrate command | `task_id`, `variety` | Restore variety context |
 | `phase_transition` | orchestrate, comPACT | `phase`, `status` (`started`/`completed`) | Determine current phase |
-| `checkpoint` | orchestrate command | Workflow-specific snapshot | Fast recovery point |
-| `agent_dispatch` | orchestrate, comPACT | `agent`, `task_id`, `domain` | Track active agents |
-| `agent_handoff` | agent_handoff_emitter hook | `agent`, `task_subject`, `handoff` (dict) | Completed work (GC-proof HANDOFF store) |
-| `commit` | orchestrate, comPACT | `hash`, `message` | Track committed work |
-| `s2_state_seeded` | orchestrate command | `boundaries`, `conventions` | Restore S2 coordination state |
-| `review_dispatch` | peer-review command | `reviewers`, `pr_number` | Track review phase |
-| `review_finding` | peer-review command | `reviewer`, `severity`, `summary` | Aggregate review results |
-| `remediation` | peer-review command | `cycle`, `items` | Track fix iterations |
-| `pr_ready` | peer-review command | `pr_number`, `status` | Final review state |
+| `checkpoint` | orchestrate command | `phase` (+ workflow-specific snapshot) | Fast recovery point |
+| `agent_dispatch` | orchestrate, comPACT | `agent`, `task_id`, `phase` | Track active agents |
+| `agent_handoff` | agent_handoff_emitter hook | `agent`, `task_id`, `task_subject`, `handoff` (dict) | Completed work (GC-proof HANDOFF store) |
+| `commit` | orchestrate, comPACT | `sha`, `message`, `phase` | Track committed work |
+| `s2_state_seeded` | orchestrate command | `worktree`, `agents`, `boundaries` | Restore S2 coordination state |
+| `review_dispatch` | peer-review command | `pr_number`, `pr_url`, `reviewers` | Track review phase |
+| `review_finding` | peer-review command | `severity`, `finding`, `reviewer` | Aggregate review results |
+| `remediation` | peer-review command | `cycle`, `items`, `fixer`, `task_id` (optional) | Track fix iterations |
+| `pr_ready` | peer-review command | `pr_number`, `pr_url`, `commits` | Final review state |
 
 ### Recovery Steps
 
