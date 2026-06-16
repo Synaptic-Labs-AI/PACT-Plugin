@@ -608,11 +608,11 @@ class TestVarietyDivergence:
         WORST denominator collapse (every dispatch marker absent while
         variety stamps exist). It trips the coverage_exceeds_unity advisory
         rather than fail-opening to coverage=1.0 (which would HIDE the
-        regression). coverage is the unclamped +inf stamped/0 signal;
-        surfaced stays False (a divergence over a broken denominator is
-        untrustworthy). coverage is a FINITE >=1.0 signal (the stamped
-        count, denominator-treated-as-1) — not +inf — to avoid an inf
-        footgun downstream; it is debug-only here. Contrast None / negative,
+        regression). surfaced stays False (a divergence over a broken
+        denominator is untrustworthy). coverage is a FINITE >=1.0 signal
+        (the stamped count, denominator-treated-as-1) — not +inf — to
+        avoid an inf footgun downstream; it is debug-only here. Contrast
+        None / negative,
         which DO fail-open (see test_total_count_negative_falls_back) — a
         negative count is impossible/garbage, not a meaningful collapse."""
         result = compute_variety_divergence(
