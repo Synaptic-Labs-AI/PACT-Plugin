@@ -165,9 +165,18 @@ def _make_posttooluse_agent_input(
     Mirrors the role-discriminator fields of the captured lead PostToolUse
     frame (tests/fixtures/role_frames.py::lead_posttooluse_taskupdate_completed):
     top-level ``agent_type`` (lead spelling), ``hook_event_name == "PostToolUse"``,
-    ``session_id``, a top-level ``agent_id`` (EMPTY STRING on the lead side per
-    §10.6 / record 0b8d4fd0), and a ``tool_response`` key (present on every
-    PostToolUse frame).
+    ``session_id``, and a ``tool_response`` key (present on every PostToolUse
+    frame).
+
+    On ``agent_id``: the REAL captured lead PostToolUse frame carries NO
+    top-level ``agent_id`` key (its _meta records ``agent_id_top_level: null``);
+    pass ``agent_id=None`` to reproduce that captured shape exactly. The default
+    here is the EMPTY STRING — NOT the captured value, but an additional
+    defensive variant (record 0b8d4fd0 flags empty-string agent_id as a §10.6
+    gotcha). Either way the marker WRITE decision is unaffected: it reads
+    ``agent_type`` via is_lead, never ``agent_id``. TestPostToolUseGotchas
+    parametrizes over {'', None, populated} so both the captured-omission and
+    the empty-string cases are pinned.
 
     The only captured PostToolUse frame is a TaskUpdate frame, so this synthetic
     frame closes the Agent-frame-vs-TaskUpdate-frame residual (§10.6 / Coverage
@@ -175,12 +184,15 @@ def _make_posttooluse_agent_input(
     tool_name-AGNOSTIC: main() -> _try_write_marker reads only agent_type (via
     is_lead), session_id, and members[] on disk — never tool_name or agent_id.
     The synthetic-vs-real fidelity ceiling (a real Agent-spawn-return frame may
-    differ in fields this hook ignores) is a documented unit-level bound; true
-    end-to-end effectiveness is deferred to the §9 post-merge fresh-session probe.
+    differ in fields this hook ignores — e.g. it omits agent_id and adds cwd /
+    duration_ms / effort / permission_mode / tool_use_id / transcript_path, all
+    unread by this hook) is a documented unit-level bound; true end-to-end
+    effectiveness is deferred to the §9 post-merge fresh-session probe.
 
     Pass ``agent_type=None`` for a non-lead/plain frame, or a teammate spelling
     (e.g. "pact-backend-coder") to exercise the is_lead bypass. Pass
-    ``agent_id=None`` to omit the field entirely (vs the empty-string default).
+    ``agent_id=None`` to omit the field entirely (the captured-frame shape; the
+    default '' is the defensive empty-string variant).
     """
     data = {
         "hook_event_name": "PostToolUse",
@@ -1812,6 +1824,130 @@ class TestPostToolUseFailSafeNotFailOpen:
         assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists(), (
             "is_lead gate: a teammate-agent_type PostToolUse(Agent) frame must "
             "not stamp the marker even with the secretary present."
+        )
+
+
+class TestPostToolUseFailSafeEquivalence:
+    """§10.5 (review cycle 1, MINOR-2/3 + FUTURE-1) — pin the fail-safe
+    equivalence across the two firing events end-to-end.
+
+    The adversarial team-config shapes (malformed JSON, top-level non-object,
+    members-not-a-list, member-not-a-dict, member-without-name, non-string-name,
+    members-key-absent) are exercised end-to-end through main() on the
+    UserPromptSubmit frame (TestAdversarialTeamConfig via _make_input) and as
+    event-agnostic direct _team_has_secretary() calls — but were NOT driven
+    through main() on a PostToolUse(Agent) frame. The write decision IS
+    event-agnostic today (main() -> _try_write_marker never branches on the
+    firing event), so the equivalence holds; this class PINS it so a FUTURE
+    change that adds a PostToolUse-specific early branch cannot silently break
+    the SACROSANCT fail-safe on the new event without a RED test.
+
+    Every shape MUST: refuse (no marker on disk) + clean exit 0 + echo the
+    ACTUAL firing event ("PostToolUse", not the safe-default "UserPromptSubmit").
+    The echoed-event assertion is the half that's NEW on this frame — it pins
+    that the dynamic hookEventName resolution (AUDIT-ANCHOR) holds on the refuse
+    paths too, not just the write path."""
+
+    def _write_team_config(self, tmp_path, body):
+        team_dir = tmp_path / ".claude" / "teams" / _TEAM_NAME
+        team_dir.mkdir(parents=True, exist_ok=True)
+        (team_dir / "config.json").write_text(body, encoding="utf-8")
+
+    # (label, raw team_config.json body) — the malformed/secretary-absent shapes.
+    ADVERSARIAL_BODIES = [
+        ("malformed_json", "{ this is not json"),
+        ("non_object_top_level", '["not", "an", "object"]'),
+        ("members_not_a_list", json.dumps({"members": {"name": "secretary"}})),
+        ("member_not_a_dict", json.dumps({"members": ["str", 42, None]})),
+        ("member_without_name",
+         json.dumps({"members": [{"id": "a-1"},
+                                 {"id": "a-2", "agentType": "secretary"}]})),
+        ("member_name_non_string",
+         json.dumps({"members": [{"name": 12345}, {"name": ["secretary"]}]})),
+        ("members_key_absent", json.dumps({"name": _TEAM_NAME})),
+        ("members_empty", json.dumps({"members": []})),
+        ("members_no_secretary",
+         json.dumps({"members": [{"id": "a-1", "name": "preparer"},
+                                 {"id": "a-2", "name": "backend-coder"}]})),
+    ]
+
+    @pytest.mark.parametrize(
+        "label,body",
+        ADVERSARIAL_BODIES,
+        ids=[b[0] for b in ADVERSARIAL_BODIES],
+    )
+    def test_adversarial_team_config_refuses_on_posttooluse_frame(
+        self, monkeypatch, tmp_path, capsys, label, body,
+    ):
+        """Each malformed/secretary-absent team-config shape, driven through
+        main() on a PostToolUse(Agent) lead frame, refuses with no marker +
+        exit 0 + event=='PostToolUse'. Equivalence with the UserPromptSubmit
+        path (TestAdversarialTeamConfig) is thereby pinned on the new event."""
+        # _setup_session with no team config, then plant the adversarial body so
+        # the team-config-read surface (not just the absent-config path) runs.
+        session_dir, _ = _setup_session(
+            monkeypatch, tmp_path, with_team_config=False,
+        )
+        self._write_team_config(tmp_path, body)
+        import shared.pact_context as ctx_module
+        ctx_module._cache = None
+
+        code, out = _run_main(_make_posttooluse_agent_input(), capsys)
+        assert code == 0, f"shape={label}: must exit 0 (no crash)"
+        assert out == {
+            "suppressOutput": True,
+            "hookSpecificOutput": {"hookEventName": "PostToolUse"},
+        }, (
+            f"shape={label}: a PostToolUse(Agent) refuse path must suppress AND "
+            f"echo the actual firing event 'PostToolUse' (AUDIT-ANCHOR holds on "
+            f"refuse paths, not only the write path); got {out!r}"
+        )
+        assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists(), (
+            f"shape={label}: SACROSANCT fail-safe — no marker may land on a "
+            f"PostToolUse(Agent) fire under an adversarial/secretary-absent "
+            f"team_config. This pins the UserPromptSubmit-path equivalence on "
+            f"the new event so a future PTU-specific branch can't fail open."
+        )
+
+    def test_team_config_absent_refuses_on_posttooluse_frame(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """Team config file absent entirely (no team-config-read surface) on a
+        PostToolUse(Agent) frame → refuse, exit 0, event=='PostToolUse'.
+        Complements the adversarial-body cases above (which all HAVE a file)."""
+        session_dir, _ = _setup_session(
+            monkeypatch, tmp_path, with_team_config=False,
+        )
+        code, out = _run_main(_make_posttooluse_agent_input(), capsys)
+        assert code == 0
+        assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+        assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists()
+
+    def test_posttooluse_malformed_stdin_falls_back_to_safe_default(self, capsys):
+        """MINOR-3: when the PostToolUse fire's stdin is unparseable, main()
+        cannot recover the firing event, so it emits the VALID safe default
+        'UserPromptSubmit' (main():327-332). This is correct-by-design — the
+        event is genuinely unrecoverable from a malformed frame — and is pinned
+        here so the safe-default-on-unparseable-frame behavior is explicit for
+        the PostToolUse-intended fire, not only inferred from the unit
+        _resolve_event_name(None) assertions."""
+        from bootstrap_marker_writer import main
+
+        # Not-JSON on stdin: the frame (and thus its hook_event_name) is lost.
+        with patch("sys.stdin", io.StringIO("not-json-at-all")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        captured = capsys.readouterr()
+        assert exc_info.value.code == 0
+        out = json.loads(captured.out.strip())
+        assert out == {
+            "suppressOutput": True,
+            "hookSpecificOutput": {"hookEventName": "UserPromptSubmit"},
+        }, (
+            "a malformed-stdin fire (whatever the intended event) must fall "
+            "back to the VALID safe default 'UserPromptSubmit' — the event is "
+            "unrecoverable without a parsed frame, and a valid default keeps "
+            "the envelope platform-acceptable (never a silent rejection)."
         )
 
 
