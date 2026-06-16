@@ -325,6 +325,17 @@ def resolve_arc_start(
     the caller omits `--since` → whole-journal read (fail-open; single-arc
     behavior unchanged).
 
+    Scope boundary (comPACT-led arcs): only the orchestrate
+    variety-assessment step emits `variety_assessed`, so this returns None
+    for a comPACT feature id. That is BENIGN and never mis-scopes the
+    retrospective: the wrap-up Q5/Q6 retrospective runs only against an
+    orchestrate feature assessment (a comPACT workflow does not invoke the
+    retrospective, and wrap-up skips trivial single-comPACT sessions). In a
+    resumed comPACT-then-orchestrate session the wrap-up's feature id is the
+    orchestrate feature, whose `variety_assessed` anchors `--since` and
+    excludes the prior comPACT arc's events by ts. So None-for-comPACT never
+    occurs on the retro path that consumes this helper.
+
     Timestamps are PARSED for the max, never lexically compared: `make_event`
     stamps `ts` as `...Z` while `canonical_since()` emits `...+00:00`, and a
     lexical compare across the two is wrong (`'+'` 0x2B sorts before `'Z'`
