@@ -312,7 +312,7 @@ JSON
        trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
        python3 "{plugin_root}/hooks/shared/session_journal.py" write \
          --type remediation --session-dir '{session_dir}' --stdin <<'JSON'
-       {"cycle": {cycle_number}, "items": ["{finding_id1}"], "fixer": "{agent-name}"}
+       {"cycle": {cycle_number}, "items": ["{finding_id1}"], "fixer": "{agent-name}", "task_id": "{fixer_task_id}"}
 JSON
        ```
      - After all fixes complete, re-run review to verify fixes only (see Verify-Only Re-Review above)

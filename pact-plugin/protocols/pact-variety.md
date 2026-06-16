@@ -146,6 +146,16 @@ The feature-level CalibrationRecord above coexists with per-dispatch variety sta
 
 **Why per-dimension rationales (not a single rationale)**: A single rationale field tolerates cargo-cult ("matches feature complexity" satisfies it). Four distinct rationale fields, one per dimension, force the orchestrator to articulate four independent judgments — cargo-culting all four with one phrase is mechanically incoherent (cannot coherently explain why novelty AND scope AND uncertainty AND risk are simultaneously "the same as feature" without exposing the copy-paste).
 
+#### Q5 Coverage Denominator (Wrap-Up Aggregation)
+
+The wrap-up retrospective's Q5 (variety divergence) reports `coverage = (stamped dispatches) / (Task-B dispatch sites)`; coverage below 1.0 means at least one Task-B dispatch was not variety-stamped. The denominator is counted by the pure helper `count_task_b_dispatch_sites` from the variety-INDEPENDENT journal markers, because the per-dispatch `dispatch_variety` stream (the numerator) cannot observe its own gaps:
+
+- `len(agent_dispatch)` — orchestrate/comPACT specialist spawns.
+- `Σ len(review_dispatch.reviewers)` — peer-review reviewers; peer-review emits no `agent_dispatch`, so reviewers are disjoint by emit-site design and are not deduped.
+- remediations whose `task_id` is not already an `agent_dispatch` task_id — a comPACT/orchestrate-dispatched remediation emits BOTH `remediation` and `agent_dispatch` for one site, so it is counted once; a pure reuse-remediation (no `agent_dispatch`) is counted via the `remediation` stream. A remediation with a missing `task_id` is counted (fail-safe — never undercounts).
+
+Un-stamped reuse dispatches COUNT in the denominator: there is no variety-exemption carve-out (every Task-B work task is variety-eligible), so an under-stamping gap legitimately lowers coverage — exactly what coverage exists to surface. Teachback Task-A gates and signal/system tasks emit none of these markers and are excluded by construction. Because the platform reuses task_ids across arcs in a resumed session, the remediation/agent_dispatch task_id dedup is correct only within a single arc, so the markers MUST be scoped to the current arc before counting. As defense-in-depth, `compute_variety_divergence` returns `reason="coverage_exceeds_unity"` (an advisory, not a clamp) if the denominator ever regresses below the stamped count, turning a future emit/denominator regression into a self-reporting tripwire.
+
 #### variety_acknowledgment — Teammate Verification Workflow
 
 The teammate becomes the peer reviewer of the orchestrator's variety scoring. The teachback canonical schema includes a required `variety_acknowledgment` sub-field stored alongside the 4 existing teachback fields:
@@ -185,5 +195,7 @@ At wrap-up time, the secretary aggregates `variety_acknowledgment` flag rates ac
 - **Single-no trigger**: a single `"no"` flag (stronger signal than `"concern"`) on a load-bearing dispatch surfaces the specific dispatch + smell in the retrospective, even when rate-trigger does not fire.
 
 The aggregation feeds back into Learning II calibration data alongside the feature-level CalibrationRecord — per-dispatch acknowledgment rates are a leading indicator of orchestrator-side scoring drift.
+
+**Arc scope (resumed/multi-feature sessions)**: both the Q5 divergence aggregation and this Q6 signal aggregation are scoped to the CURRENT arc, not the whole session journal. The wrap-up derives `arc_start` as the latest `variety_assessed.ts` whose `task_id` matches the current `feature_task_id` — the platform reuses task_ids across arcs, so the latest-ts match (NOT a plain most-recent `variety_assessed`) identifies the current arc — then passes `--since arc_start` to every journal read (`dispatch_variety`, `agent_dispatch`, `review_dispatch`, `remediation`, `teachback_ack`). The `--since` filter parses timestamps rather than string-comparing them (emit and arc-start timestamps can differ in UTC-zone suffix), is inclusive of the arc-start instant, and fails open to a whole-journal read when no matching `variety_assessed` exists (single-arc and legacy sessions are unchanged). This keeps prior arcs from inflating the Q5 divergence denominator or skewing the Q6 acknowledgment-signal rate.
 
 ---

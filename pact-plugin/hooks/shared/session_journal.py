@@ -291,6 +291,18 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     "teachback_ack": {
         "concern": str,
     },
+    # commands/peer-review.md writes remediation with an optional task_id —
+    # the fixer's Task-B task id. The Q5 coverage denominator
+    # (variety_divergence.count_task_b_dispatch_sites) uses it to dedup a
+    # comPACT/orchestrate-dispatched remediation that ALSO emits
+    # agent_dispatch for the same task_id, so the site is counted once.
+    # Optional because a remediation may omit it; an id-less remediation is
+    # counted as a distinct site (fail-safe — never undercounts the
+    # denominator). The required-fields registration above
+    # ("remediation": {...}) activates this optional check.
+    "remediation": {
+        "task_id": str,
+    },
 }
 
 
@@ -530,6 +542,7 @@ def append_event(event: dict[str, Any]) -> bool:
 
 def read_events(
     event_type: str | None = None,
+    since: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Read events from the current session's journal, optionally filtered by type.
@@ -561,7 +574,7 @@ def read_events(
                     file=sys.stderr,
                 )
             return []
-        return _read_events_at(journal, event_type)
+        return _read_events_at(journal, event_type, since)
     except Exception:
         return []
 
@@ -569,6 +582,7 @@ def read_events(
 def read_events_from(
     session_dir: str,
     event_type: str | None = None,
+    since: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Read events from a specific session's journal (explicit path).
@@ -597,12 +611,46 @@ def read_events_from(
         )
         return []
     journal = _journal_path_from(session_dir)
-    return _read_events_at(journal, event_type)
+    return _read_events_at(journal, event_type, since)
+
+
+def _parse_ts(value: Any) -> datetime:
+    """Parse an ISO-8601 timestamp, normalizing a trailing `Z` to `+00:00`.
+
+    `make_event` stamps `ts` as `...Z` while `canonical_since()` emits
+    `...+00:00`; normalizing lets the two compare as equal-instant
+    datetimes. A lexical string compare would be WRONG — `'+'` 0x2B sorts
+    before `'Z'` 0x5A, so a `+00:00` ts would sort before an equal-instant
+    `Z` ts. Raises ValueError/TypeError on missing/malformed input; callers
+    decide the fail-open policy.
+    """
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
+def _ts_ge(event_ts: Any, since: str | None) -> bool:
+    """Return True if `event_ts >= since`, compared as parsed datetimes.
+
+    The arc-scope filter (`--since`) MUST parse the timestamps (via
+    `_parse_ts`), not string-compare them — see `_parse_ts` for the
+    format-mismatch rationale.
+
+    Fail-open: when `since` is falsy the event is included (no filtering);
+    when either timestamp is missing or unparseable the event is INCLUDED
+    (returns True) so a malformed/absent ts is never silently dropped from
+    a scoped read.
+    """
+    if not since:
+        return True
+    try:
+        return _parse_ts(event_ts) >= _parse_ts(since)
+    except (ValueError, TypeError):
+        return True
 
 
 def _read_events_at(
     journal: Path,
     event_type: str | None = None,
+    since: str | None = None,
 ) -> list[dict[str, Any]]:
     """Shared read implementation for both implicit and explicit APIs.
 
@@ -614,6 +662,10 @@ def _read_events_at(
     other event in the file is still returned. Without this, one bad
     byte would cause the outer `except Exception` to drop the whole
     file and hide all of its otherwise-valid events.
+
+    `since`: when set, only events whose `ts` is >= `since` (inclusive,
+    parsed via `_ts_ge`) are returned — the arc-scope filter. None/empty
+    returns the whole journal (single-arc behavior unchanged).
     """
     try:
         if not journal.exists():
@@ -630,6 +682,8 @@ def _read_events_at(
                 event = json.loads(line)
                 if event_type and event.get("type") != event_type:
                     continue
+                if not _ts_ge(event.get("ts"), since):
+                    continue
                 events.append(event)
             except (json.JSONDecodeError, ValueError):
                 continue  # Skip malformed lines
@@ -641,6 +695,7 @@ def _read_events_at(
 
 def read_last_event(
     event_type: str,
+    since: str | None = None,
 ) -> dict[str, Any] | None:
     """
     Read the most recent event of a given type from the current session's journal.
@@ -669,7 +724,7 @@ def read_last_event(
                     file=sys.stderr,
                 )
             return None
-        return _read_last_event_at(journal, event_type)
+        return _read_last_event_at(journal, event_type, since)
     except Exception:
         return None
 
@@ -677,6 +732,7 @@ def read_last_event(
 def read_last_event_from(
     session_dir: str,
     event_type: str,
+    since: str | None = None,
 ) -> dict[str, Any] | None:
     """
     Read the most recent event of a given type from a specific session's journal.
@@ -704,18 +760,23 @@ def read_last_event_from(
         )
         return None
     journal = _journal_path_from(session_dir)
-    return _read_last_event_at(journal, event_type)
+    return _read_last_event_at(journal, event_type, since)
 
 
 def _scan_lines_for_event(
     lines: list[str],
     event_type: str,
+    since: str | None = None,
 ) -> dict[str, Any] | None:
     """Reverse-iterate decoded lines, returning the first matching event.
 
     Shared by tail-window and full-slurp scan paths. Skips blank lines and
     silently drops malformed JSON (symmetric with the pre-optimization
     contract: corrupted lines never poison the scan).
+
+    `since`: when set, an event matching `event_type` whose `ts` is < `since`
+    (parsed via `_ts_ge`) is skipped — the reverse scan then returns the
+    most recent matching event at/after `since`, or None.
     """
     for line in reversed(lines):
         line = line.strip()
@@ -723,7 +784,9 @@ def _scan_lines_for_event(
             continue
         try:
             event = json.loads(line)
-            if event.get("type") == event_type:
+            if event.get("type") == event_type and _ts_ge(
+                event.get("ts"), since
+            ):
                 return event
         except (json.JSONDecodeError, ValueError):
             continue
@@ -733,6 +796,7 @@ def _scan_lines_for_event(
 def _read_last_event_at(
     journal: Path,
     event_type: str,
+    since: str | None = None,
 ) -> dict[str, Any] | None:
     """Shared reverse-scan implementation for both implicit and explicit APIs.
 
@@ -773,6 +837,7 @@ def _read_last_event_at(
                     encoding="utf-8", errors="replace"
                 ).splitlines(),
                 event_type,
+                since,
             )
 
         # Large journal: tail-window-first, full-slurp fallback.
@@ -789,18 +854,21 @@ def _read_last_event_at(
         if tail_lines:
             tail_lines = tail_lines[1:]
 
-        match = _scan_lines_for_event(tail_lines, event_type)
+        match = _scan_lines_for_event(tail_lines, event_type, since)
         if match is not None:
             return match
 
         # Tail miss: full-slurp fallback preserves the pre-optimization
         # contract. The target event is older than _TAIL_WINDOW_BYTES from
-        # EOF, or absent entirely.
+        # EOF, or absent entirely. With `since` set, a tail that holds only
+        # pre-`since` matches also lands here and the full scan returns the
+        # most recent match at/after `since` (or None).
         return _scan_lines_for_event(
             journal.read_text(
                 encoding="utf-8", errors="replace"
             ).splitlines(),
             event_type,
+            since,
         )
 
     except Exception:
@@ -1057,6 +1125,10 @@ def main() -> int:
                         help="Session directory path")
     read_p.add_argument("--type", default=None, dest="event_type",
                         help="Filter by event type")
+    read_p.add_argument("--since", default=None,
+                        help="Arc-scope lower bound (inclusive): only events "
+                             "with ts >= this ISO-8601 UTC timestamp. Parsed, "
+                             "not string-compared; fail-open on unparseable.")
 
     # --- read-last ---
     last_p = sub.add_parser("read-last",
@@ -1065,6 +1137,9 @@ def main() -> int:
                         help="Session directory path")
     last_p.add_argument("--type", required=True, dest="event_type",
                         help="Event type to find")
+    last_p.add_argument("--since", default=None,
+                        help="Arc-scope lower bound (inclusive): only consider "
+                             "events with ts >= this ISO-8601 UTC timestamp.")
 
     args = parser.parse_args()
 
@@ -1134,7 +1209,9 @@ def main() -> int:
         rc = _validate_cli_session_dir(args.session_dir)
         if rc != 0:
             return rc
-        events = read_events_from(args.session_dir, event_type=args.event_type)
+        events = read_events_from(
+            args.session_dir, event_type=args.event_type, since=args.since
+        )
         print(json.dumps(events))
         return 0
 
@@ -1142,7 +1219,9 @@ def main() -> int:
         rc = _validate_cli_session_dir(args.session_dir)
         if rc != 0:
             return rc
-        event = read_last_event_from(args.session_dir, args.event_type)
+        event = read_last_event_from(
+            args.session_dir, args.event_type, since=args.since
+        )
         if event is None:
             print("null")
         else:
