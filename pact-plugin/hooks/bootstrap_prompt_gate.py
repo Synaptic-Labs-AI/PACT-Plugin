@@ -37,21 +37,46 @@ import sys
 from typing import NoReturn
 
 
+def _safe_error_detail(error: BaseException) -> str:
+    """Return ``"<TypeName>: <message>"`` for an exception, NEVER raising.
+
+    A hostile exception whose ``__str__`` / ``__repr__`` raises (or a type
+    whose ``__name__`` access raises) must not make the load-failure advisory
+    itself raise while composing its message — that would defeat the
+    fail-closed advisory's whole purpose. Each part is computed behind its own
+    guard with a safe placeholder. stdlib-only (no wrapped imports) so it holds
+    even when the module-load failure that triggered the advisory broke every
+    wrapped import.
+    """
+    try:
+        type_name = type(error).__name__
+    except BaseException:  # noqa: BLE001 — hostile __name__; never propagate
+        type_name = "UnprintableError"
+    try:
+        message = str(error)
+    except BaseException:  # noqa: BLE001 — hostile __str__; never propagate
+        message = "<error message unavailable: str(error) raised>"
+    return f"{type_name}: {message}"
+
+
 def _emit_load_failure_advisory(stage: str, error: BaseException) -> NoReturn:
     """Emit fail-closed advisory for module-load failure.
 
     UserPromptSubmit cannot DENY the prompt; the strongest available signal
     is `additionalContext` injection. Uses ONLY stdlib (json, sys) so it
     remains functional even when every wrapped import below fails. Audit
-    anchor: hookEventName must be present in any structured output.
+    anchor: hookEventName must be present in any structured output. The error
+    detail is composed via _safe_error_detail so a hostile exception whose
+    __str__ raises cannot make this advisory raise while emitting.
     """
+    error_detail = _safe_error_detail(error)
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": (
                 f"PACT bootstrap_prompt_gate {stage} failure — the hook "
-                f"could not verify bootstrap state. {type(error).__name__}: "
-                f"{error}. Until this is resolved, you should invoke "
+                f"could not verify bootstrap state. {error_detail}. "
+                f"Until this is resolved, you should invoke "
                 'Skill("PACT:bootstrap") before any code-editing or agent '
                 "dispatch action; the companion `bootstrap_gate` PreToolUse "
                 "will block those tools fail-closed."
@@ -59,7 +84,7 @@ def _emit_load_failure_advisory(stage: str, error: BaseException) -> NoReturn:
         }
     }))
     print(
-        f"Hook load error (bootstrap_prompt_gate / {stage}): {error}",
+        f"Hook load error (bootstrap_prompt_gate / {stage}): {error_detail}",
         file=sys.stderr,
     )
     sys.exit(0)
