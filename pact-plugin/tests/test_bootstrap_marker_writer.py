@@ -528,16 +528,27 @@ class TestCapturedFixtureRoundTrip:
 
 
 class TestAuditAnchorCompliance:
-    """Architect §8.12. Every JSON output path — the module-load advisory
+    """Architect §5.4. Every JSON output path — the module-load advisory
     AND the suppressOutput envelope — carries
-    hookSpecificOutput.hookEventName == "UserPromptSubmit". Missing the
-    field silently fails open at the platform layer (per pinned context).
-    The shape pin in test_suppress_output_carries_hook_event_name covers
-    the suppress envelope; this test covers the advisory path."""
+    hookSpecificOutput.hookEventName echoing the ACTUAL firing event. Missing
+    or stale hookEventName silently fails open at the platform layer (per
+    pinned context). Post-#975 the event name is DYNAMIC (resolved from the
+    frame's hook_event_name via _resolve_event_name), so these pins assert the
+    dual-event behavior — a PostToolUse fire emits "PostToolUse", a
+    UserPromptSubmit fire emits "UserPromptSubmit" — plus the VALID safe
+    default ("UserPromptSubmit") when the frame is genuinely unavailable."""
 
-    def test_module_load_advisory_carries_hook_event_name(self, capsys):
+    def test_module_load_advisory_carries_hook_event_name(
+        self, capsys, monkeypatch,
+    ):
+        """The import-time advisory best-effort pre-parses stdin for the firing
+        event (#975 §5.3(A)); with no JSON on stdin it falls back to the VALID
+        safe default "UserPromptSubmit". stdin is isolated to an empty stream so
+        the default path is exercised deterministically (capsys does not control
+        stdin)."""
         from bootstrap_marker_writer import _emit_load_failure_advisory
 
+        monkeypatch.setattr(sys, "stdin", io.StringIO(""))
         with pytest.raises(SystemExit) as exc_info:
             _emit_load_failure_advisory("module imports", RuntimeError("boom"))
         captured = capsys.readouterr()
@@ -548,40 +559,77 @@ class TestAuditAnchorCompliance:
         assert "additionalContext" in hso
         assert "bootstrap_marker_writer" in hso["additionalContext"]
 
-    def test_suppress_output_carries_hook_event_name(self):
-        """Every suppressOutput emit path carries the audit anchor —
-        the constant is the single source so all 3 emit sites in
-        bootstrap_marker_writer.main inherit the field."""
-        from bootstrap_marker_writer import _SUPPRESS_OUTPUT
+    @pytest.mark.parametrize(
+        "stdin_event,expected",
+        [
+            ("PostToolUse", "PostToolUse"),
+            ("UserPromptSubmit", "UserPromptSubmit"),
+        ],
+    )
+    def test_module_load_advisory_echoes_frame_event(
+        self, capsys, monkeypatch, stdin_event, expected,
+    ):
+        """When the advisory CAN pre-parse stdin, it echoes the frame's actual
+        firing event (#975 §5.3(A)) — covering both PostToolUse and
+        UserPromptSubmit so a PostToolUse module-load failure is not mislabeled
+        "UserPromptSubmit"."""
+        from bootstrap_marker_writer import _emit_load_failure_advisory
 
-        out = json.loads(_SUPPRESS_OUTPUT)
+        frame = json.dumps({"hook_event_name": stdin_event})
+        monkeypatch.setattr(sys, "stdin", io.StringIO(frame))
+        with pytest.raises(SystemExit) as exc_info:
+            _emit_load_failure_advisory("module imports", RuntimeError("boom"))
+        captured = capsys.readouterr()
+        assert exc_info.value.code == 0
+        out = json.loads(captured.out.strip())
+        assert out["hookSpecificOutput"]["hookEventName"] == expected
+
+    @pytest.mark.parametrize(
+        "event", ["UserPromptSubmit", "PostToolUse"],
+    )
+    def test_suppress_output_carries_hook_event_name(self, event):
+        """The suppressOutput envelope echoes the resolved firing event.
+        Post-#975 the _SUPPRESS_OUTPUT module constant is the _suppress_output
+        function so every main() emit site builds the envelope with the actual
+        event — covering both events here pins that PostToolUse is echoed, not
+        a hard-coded "UserPromptSubmit"."""
+        from bootstrap_marker_writer import _suppress_output
+
+        out = json.loads(_suppress_output(event))
         assert out["suppressOutput"] is True
-        assert out["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+        assert out["hookSpecificOutput"]["hookEventName"] == event
 
+    @pytest.mark.parametrize("event", ["UserPromptSubmit", "PostToolUse"])
     @pytest.mark.parametrize("shape", ["advisory", "suppress"])
-    def test_every_emit_shape_carries_hook_event_name(self, shape, capsys):
-        """Architect §8.12 parametrized over both distinct emit shapes.
+    def test_every_emit_shape_carries_hook_event_name(
+        self, shape, event, capsys, monkeypatch,
+    ):
+        """Architect §5.4 parametrized over (shape × event).
 
         The hook produces exactly two JSON output shapes:
 
-        - "advisory": load-failure path via _emit_load_failure_advisory
-          (line 61-72) — hookSpecificOutput with additionalContext.
-        - "suppress": every other exit path via the _SUPPRESS_OUTPUT
-          constant (line 98-101) — hookSpecificOutput with no other keys.
+        - "advisory": load-failure path via _emit_load_failure_advisory —
+          hookSpecificOutput with additionalContext; resolves the event from a
+          best-effort stdin pre-parse (#975 §5.3(A)).
+        - "suppress": every other exit path via _suppress_output(event) —
+          hookSpecificOutput with no other keys.
 
-        Both MUST carry hookSpecificOutput.hookEventName == "UserPromptSubmit"
-        — missing the field silently fails open at the platform layer per
-        the pinned context. Parametrizing pins the invariant that no
-        future emit path can be added without the audit anchor."""
+        Both MUST carry hookSpecificOutput.hookEventName echoing the GIVEN
+        firing event — missing/stale silently fails open at the platform layer
+        per the pinned context. Parametrizing over both shapes AND both events
+        pins that no emit path can be added without echoing the actual event
+        (the #975 dual-event AUDIT-ANCHOR), not just a hard-coded value."""
         if shape == "advisory":
             from bootstrap_marker_writer import _emit_load_failure_advisory
+            frame = json.dumps({"hook_event_name": event})
+            monkeypatch.setattr(sys, "stdin", io.StringIO(frame))
             with pytest.raises(SystemExit):
                 _emit_load_failure_advisory("module imports", RuntimeError("x"))
             captured = capsys.readouterr()
             out = json.loads(captured.out.strip())
         elif shape == "suppress":
-            from bootstrap_marker_writer import _SUPPRESS_OUTPUT
-            out = json.loads(_SUPPRESS_OUTPUT)
+            from bootstrap_marker_writer import _suppress_output
+            out = json.loads(_suppress_output(event))
         else:  # pragma: no cover
             pytest.fail(f"unknown shape param: {shape}")
 
@@ -590,8 +638,8 @@ class TestAuditAnchorCompliance:
             f"shape={shape} emit MUST carry hookSpecificOutput; missing "
             f"the field silently fails open at the platform layer."
         )
-        assert hso.get("hookEventName") == "UserPromptSubmit", (
-            f"shape={shape} emit MUST carry hookEventName=='UserPromptSubmit'; "
+        assert hso.get("hookEventName") == event, (
+            f"shape={shape} emit MUST echo hookEventName=={event!r}; "
             f"got {hso!r}"
         )
 

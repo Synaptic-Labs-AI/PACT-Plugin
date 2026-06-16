@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/bootstrap_marker_writer.py
-Summary: UserPromptSubmit hook that writes the bootstrap-complete marker
-         once the bootstrap ritual's pre-conditions are observable on disk
-         (team config exists AND `secretary` is in members[]). Verify-and-
-         refuse semantic: hook does NOT create pre-conditions; LLM ritual
-         (commands/bootstrap.md Steps 1-2) still owns TeamCreate + secretary
-         spawn.
-Used by: hooks.json UserPromptSubmit hook (no matcher — fires every prompt)
+Summary: Dual-event hook that writes the bootstrap-complete marker once the
+         bootstrap ritual's pre-conditions are observable on disk (team config
+         exists AND `secretary` is in members[]). Verify-and-refuse semantic:
+         hook does NOT create pre-conditions; LLM ritual (commands/bootstrap.md
+         Steps 1-2) still owns TeamCreate + secretary spawn.
+Used by: hooks.json — registered under TWO events, both running this same
+         verify-and-refuse logic (#975):
+           - UserPromptSubmit (no matcher — fires every prompt): steady-state
+             turn-2+ self-heal; the semantically-strongest "ritual
+             demonstrably completed" surface.
+           - PostToolUse matched on `Agent`: stamps the marker WITHIN the
+             bootstrapping turn — fires after the secretary spawn returns and
+             the platform has written `secretary` into members[], before the
+             next specialist dispatch is gate-checked.
+         The marker CONTENT is byte-identical regardless of which event fired
+         (same _write_marker + signature SSOT); the firing event affects ONLY
+         the echoed hookEventName, never the digest.
 
 Layer in the four-layer bootstrap gate enforcement (#401, #664). On each
 user message, checks:
@@ -41,7 +51,13 @@ this hook silently fails, the next prompt retries.
 
 Input: JSON from stdin with hook_event_name, session_id, prompt, etc.
 Output: JSON with hookSpecificOutput.additionalContext (load-failure case)
-        or {"suppressOutput": true} (every other path)
+        or {"suppressOutput": true} (every other path). Every emit path carries
+        hookSpecificOutput.hookEventName echoing the ACTUAL firing event
+        (resolved from the frame's `hook_event_name` via _resolve_event_name);
+        a VALID safe default ("UserPromptSubmit") is used only when the frame
+        is genuinely unavailable (import-time double-failure or malformed
+        stdin). A missing/stale event name is a silent platform-layer rejection
+        — the AUDIT-ANCHOR this dynamic resolution exists to satisfy.
 """
 
 from __future__ import annotations
@@ -51,6 +67,33 @@ import json
 import sys
 from typing import NoReturn
 
+# Safe default firing event for the structured-output emit paths. A module-load
+# failure (the import-time advisory path) is independent of the firing event, so
+# when the frame is genuinely unavailable the advisory falls back to this VALID
+# event name — the platform accepts it, never a silent schema-validation
+# rejection. It is also the historical default the pins asserted.
+_DEFAULT_HOOK_EVENT = "UserPromptSubmit"
+
+
+def _resolve_event_name(input_data, default: str = _DEFAULT_HOOK_EVENT) -> str:
+    """Return the firing event's name from the parsed frame, else `default`.
+
+    Returns ``input_data['hook_event_name']`` when it is a non-empty ``str``;
+    otherwise (``None`` / non-dict / missing key / non-str / empty) returns
+    ``default``. NEVER raises — this is the AUDIT-ANCHOR safety net: every
+    structured-output emit path must carry a VALID ``hookEventName``, so this
+    resolver cannot itself become a failure source. stdlib-only (no wrapped
+    imports) so it is callable from ``_emit_load_failure_advisory`` even when
+    those imports fail at module-load time.
+    """
+    try:
+        event = input_data.get("hook_event_name")
+    except AttributeError:
+        return default
+    if isinstance(event, str) and event:
+        return event
+    return default
+
 
 def _emit_load_failure_advisory(stage: str, error: BaseException) -> NoReturn:
     """Emit fail-closed advisory for module-load failure.
@@ -58,11 +101,24 @@ def _emit_load_failure_advisory(stage: str, error: BaseException) -> NoReturn:
     UserPromptSubmit cannot DENY the prompt; the strongest available signal
     is `additionalContext` injection. Uses ONLY stdlib (json, sys) so it
     remains functional even when every wrapped import below fails. Audit
-    anchor: hookEventName must be present in any structured output.
+    anchor: hookEventName must be present in any structured output — and must
+    be the ACTUAL firing event, so this path best-effort pre-parses stdin for
+    `hook_event_name` (stdlib-only, guarded), falling back to the safe default.
+
+    stdin single-consumption: this advisory runs ONLY from the module-load
+    `except` block below, which ends in sys.exit(0) → main() never executes
+    and never re-reads stdin. So this one-shot json.load(sys.stdin) is the
+    sole consumer in that path. The happy path never calls this function, so
+    main()'s json.load at the bottom remains its sole stdin consumer there.
     """
+    try:
+        _frame = json.load(sys.stdin)
+    except Exception:  # noqa: BLE001 — best-effort; any failure → safe default
+        _frame = None
+    event_name = _resolve_event_name(_frame)
     print(json.dumps({
         "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
+            "hookEventName": event_name,
             "additionalContext": (
                 f"PACT bootstrap_marker_writer {stage} failure — the hook "
                 f"could not write the bootstrap marker. {type(error).__name__}: "
@@ -97,10 +153,22 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
     _emit_load_failure_advisory("module imports", _module_load_error)
 
 
-_SUPPRESS_OUTPUT = json.dumps({
-    "suppressOutput": True,
-    "hookSpecificOutput": {"hookEventName": "UserPromptSubmit"},
-})
+def _suppress_output(event_name: str) -> str:
+    """Return the JSON suppressOutput envelope carrying
+    ``hookSpecificOutput.hookEventName == event_name``.
+
+    Replaces the former ``_SUPPRESS_OUTPUT`` module constant so the envelope
+    echoes the ACTUAL firing event (UserPromptSubmit vs PostToolUse) rather
+    than a hard-coded value — a static event name under a PostToolUse fire is
+    a silent schema-validation rejection at the platform layer (the
+    AUDIT-ANCHOR trap). Callers pass the resolved event from
+    ``_resolve_event_name``.
+    """
+    return json.dumps({
+        "suppressOutput": True,
+        "hookSpecificOutput": {"hookEventName": event_name},
+    })
+
 
 _SECRETARY_NAME = "secretary"
 
@@ -258,8 +326,15 @@ def main() -> None:
         input_data = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
         # Malformed stdin → fail-OPEN (input-side failure is harness's domain).
-        print(_SUPPRESS_OUTPUT)
+        # No parsed frame, so the firing event is unknown → safe default. This
+        # is the only emit path where the actual event is unrecoverable.
+        print(_suppress_output(_resolve_event_name(None)))
         sys.exit(0)
+
+    # Frame parsed: resolve the actual firing event ONCE and reuse it for every
+    # remaining emit path, so a PostToolUse fire emits "PostToolUse" and a
+    # UserPromptSubmit fire emits "UserPromptSubmit" (AUDIT-ANCHOR).
+    event = _resolve_event_name(input_data)
 
     try:
         _try_write_marker(input_data)
@@ -269,10 +344,10 @@ def main() -> None:
         # retries. Loud advisory on producer-side bug would mislead a
         # healthy session into rebooting. Module-load failures are handled
         # separately (advisory) by the module-load wrapper above.
-        print(_SUPPRESS_OUTPUT)
+        print(_suppress_output(event))
         sys.exit(0)
 
-    print(_SUPPRESS_OUTPUT)
+    print(_suppress_output(event))
     sys.exit(0)
 
 
