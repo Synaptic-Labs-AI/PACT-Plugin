@@ -20,8 +20,14 @@ Functions:
   denominator, counted from variety-independent journal markers.
 
 Return shape (stable keys):
-- `coverage`:  float in [0.0, 1.0] — fraction of pact-* dispatches with
-               variety stamped. When total_pact_dispatch_count is None,
+- `coverage`:  float — fraction of pact-* dispatches with variety stamped;
+               normally in [0.0, 1.0] but NOT clamped. In the
+               `coverage_exceeds_unity` advisory branch it is returned
+               UNCLAMPED >= 1.0 (the stamped/total ratio when total > 0, or
+               a finite stamped-count signal when the computed denominator
+               collapsed to 0 with stamps present) so a denominator
+               regression stays visible; it is debug-only there
+               (surfaced=False). When total_pact_dispatch_count is None,
                assumed 1.0 (all known dispatches were stamped).
 - `mean`:      int | None — rounded mean of stamped dispatch variety
                totals; None when dispatches is empty.
@@ -44,7 +50,10 @@ Return shape (stable keys):
                surfaced=True.
 
 The composer in wrap-up.md §4 reads this dict and produces the §3.4
-sample output prose. Tests live in test_per_dispatch_variety.py.
+sample output prose. compute_variety_divergence tests live in
+test_per_dispatch_variety.py; the net-new helpers
+(count_task_b_dispatch_sites, resolve_arc_start) live in
+test_variety_divergence.py.
 """
 
 from __future__ import annotations
@@ -79,14 +88,36 @@ def compute_variety_divergence(
             for the divergence to be surfaced. Default 2 per pact-variety.md
             (a delta of 2 represents one full variety band off).
 
+    Note: `mean` is round()-ed (banker's rounding, round-half-to-even) and
+    the threshold check uses that rounded mean. At an exact .5 mean (e.g.
+    sum/count == 6.5) round-half-to-even can tip the surfaced decision by
+    one — an accepted minor boundary effect of a heuristic band, not a bug.
+
     Returns:
         dict with keys: coverage, mean, max, min, delta, surfaced, direction,
         reason. See module docstring for semantics.
     """
     # --- Coverage ---
     stamped_count = len(dispatch_varieties)
-    if total_pact_dispatch_count is None or total_pact_dispatch_count <= 0:
+    if total_pact_dispatch_count is None or total_pact_dispatch_count < 0:
+        # None = legacy / no denominator passed; negative = impossible /
+        # garbage input (a real dispatch-site count is never < 0). Both
+        # fail-open to the all-stamped assumption rather than tripping the
+        # regression advisory — a negative is a caller bug, not a meaningful
+        # denominator collapse.
         coverage = 1.0 if stamped_count > 0 else 0.0
+    elif total_pact_dispatch_count == 0:
+        # COMPUTED denominator == 0. With stamps firing (stamped > 0) this is
+        # the WORST denominator regression — every dispatch marker is absent
+        # while variety stamps exist. Do NOT fail-open to 1.0 (that would
+        # HIDE it); the coverage_exceeds_unity advisory below trips.
+        # coverage is a FINITE >=1.0 signal (the stamped count, i.e.
+        # denominator-treated-as-1) rather than +inf, to avoid an inf
+        # footgun in downstream formatting/arithmetic — it is debug-only
+        # (surfaced=False; the composer emits the advisory, not a ratio).
+        # stamped == 0 here is a genuinely empty session and returns via the
+        # empty-dispatch fail-open.
+        coverage = float(stamped_count) if stamped_count > 0 else 0.0
     else:
         coverage = stamped_count / total_pact_dispatch_count
 
@@ -111,19 +142,22 @@ def compute_variety_divergence(
 
     # --- Defense-in-depth: coverage > 1.0 tripwire (advisory, NOT a clamp) ---
     # When the stamped dispatches outnumber the counted Task-B dispatch
-    # sites, coverage exceeds 1.0 — a denominator regression. Surface it as
-    # a self-reporting advisory rather than silently emitting coverage > 1.0
-    # or clamping it (a clamp would HIDE the regression this is meant to
-    # catch). With the distinct-site denominator
-    # (count_task_b_dispatch_sites) this is zero-residual by construction,
-    # so this path fires only on a future emit/denominator regression.
-    # surfaced=False because a divergence computed over a broken denominator
-    # is untrustworthy — the orchestrator should investigate the count, not
-    # report the divergence. coverage is left UNCLAMPED so the anomaly is
-    # visible in the output.
+    # sites (stamped > total), coverage exceeds 1.0 — a denominator
+    # regression. This ALSO covers the computed-total==0-with-stamps
+    # collapse (every marker absent while stamps fire → coverage +inf): the
+    # guard requires total >= 0 (a real, non-negative computed denominator)
+    # AND stamped > total, so the total==0 collapse trips here instead of
+    # fail-opening to coverage=1.0. None (legacy) and negative (garbage)
+    # are handled in the coverage block above and never reach this branch.
+    # Surface it as a self-reporting advisory rather than silently emitting
+    # coverage > 1.0 or clamping it (a clamp would HIDE the regression this
+    # is meant to catch). surfaced=False because a divergence computed over
+    # a broken denominator is untrustworthy — the orchestrator should
+    # investigate the count, not report the divergence. coverage is left
+    # UNCLAMPED so the anomaly is visible in the output.
     if (
         total_pact_dispatch_count is not None
-        and total_pact_dispatch_count > 0
+        and total_pact_dispatch_count >= 0
         and stamped_count > total_pact_dispatch_count
     ):
         delta = (
@@ -232,6 +266,16 @@ def count_task_b_dispatch_sites(
     self-dedup is warranted. A remediation with a missing task_id is COUNTED
     (fail-safe: never undercount, so a dropped id can't inflate coverage).
 
+    DIRECTIONAL backstop caveat: the `coverage_exceeds_unity` advisory in
+    compute_variety_divergence only catches the OVER-count direction
+    (numerator > denominator → coverage >1.0). The OPPOSITE — a
+    remediation↔agent_dispatch task_id THREADING MISMATCH that fails to
+    dedup a site that should have deduped — OVER-counts the denominator and
+    UNDER-states coverage (a false stamping gap), which has NO advisory
+    backstop. That residual is bounded (one extra site per mismatched
+    remediation) and the str-normalized dedup key (below) is the primary
+    guard against the most likely mismatch (int vs str task_id).
+
     By construction this denominator excludes teachback Task-A gates and
     signal/system tasks: they emit none of these three event types, so
     there is nothing to filter out.
@@ -243,17 +287,25 @@ def count_task_b_dispatch_sites(
     read time).
     """
     agent_task_ids = {
-        e.get("task_id")
+        str(e.get("task_id"))
         for e in agent_dispatch_events
         if e.get("task_id") is not None
     }
+    # Count reviewers only when `reviewers` is a list — a stray string value
+    # would otherwise have its CHARACTERS counted by len().
     reviewer_count = sum(
-        len(e.get("reviewers") or []) for e in review_dispatch_events
+        len(e.get("reviewers"))
+        for e in review_dispatch_events
+        if isinstance(e.get("reviewers"), list)
     )
+    # str-normalize the dedup key so an int agent task_id and a str
+    # remediation task_id (or vice versa) still match. A remediation with a
+    # missing task_id stringifies to "None" (never in the agent set, which
+    # excludes None) → counted (fail-safe: never undercount).
     remediation_count = sum(
         1
         for r in remediation_events
-        if r.get("task_id") not in agent_task_ids
+        if str(r.get("task_id")) not in agent_task_ids
     )
     return len(agent_dispatch_events) + reviewer_count + remediation_count
 
@@ -280,8 +332,15 @@ def resolve_arc_start(
     importing `session_journal._parse_ts`) to keep this module decoupled; if
     a third ts-parse site ever appears, extract a shared util. The RETURN
     value is the original `ts` STRING of the latest event, so the caller
-    passes it to `--since`, which `_ts_ge` re-parses. Unparseable entries are
-    skipped; if no matching, parseable entry remains → None.
+    passes it to `--since`, which `_ts_ge` re-parses. The parse AND the
+    max-comparison both run inside one try/except, so an entry that is
+    unparseable OR un-comparable (e.g. a parseable-but-naive ts compared
+    against an aware one → TypeError) is skipped (fail-open), never raised.
+    If no matching, usable entry remains → None.
+
+    task_id matching is str-normalized (`str(event task_id) == str(feature
+    task_id)`) so a future bare-int `variety_assessed` emit still matches a
+    str feature_task_id.
 
     arc_start relies on `variety_assessed` being emitted exactly once per arc
     (sole writer: the orchestrate variety-assessment step). If a future
@@ -297,16 +356,19 @@ def resolve_arc_start(
     latest_ts: str | None = None
     latest_dt: datetime | None = None
     for event in variety_assessed_events:
-        if event.get("task_id") != feature_task_id:
+        if str(event.get("task_id")) != str(feature_task_id):
             continue
         ts = event.get("ts")
         if not ts:
             continue
         try:
             dt = _parse(ts)
+            # The comparison is INSIDE the try (mirroring _ts_ge): comparing
+            # a parseable-but-naive ts against an aware one raises TypeError
+            # — fail open (skip the entry) instead of crashing the read.
+            if latest_dt is None or dt > latest_dt:
+                latest_dt = dt
+                latest_ts = ts
         except (ValueError, TypeError):
             continue
-        if latest_dt is None or dt > latest_dt:
-            latest_dt = dt
-            latest_ts = ts
     return latest_ts

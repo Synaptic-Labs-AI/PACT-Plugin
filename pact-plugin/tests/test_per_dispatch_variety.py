@@ -603,14 +603,24 @@ class TestVarietyDivergence:
         assert result["delta"] == 0
         assert result["surfaced"] is False
 
-    def test_total_count_zero_falls_back(self):
-        """total_pact_dispatch_count=0 (defensive) falls back to assuming
-        all known dispatches stamped (coverage=1.0 when len>0). Avoids
-        division by zero."""
+    def test_total_count_zero_with_stamps_trips_advisory(self):
+        """A COMPUTED total_pact_dispatch_count=0 with stamps firing is the
+        WORST denominator collapse (every dispatch marker absent while
+        variety stamps exist). It trips the coverage_exceeds_unity advisory
+        rather than fail-opening to coverage=1.0 (which would HIDE the
+        regression). coverage is the unclamped +inf stamped/0 signal;
+        surfaced stays False (a divergence over a broken denominator is
+        untrustworthy). coverage is a FINITE >=1.0 signal (the stamped
+        count, denominator-treated-as-1) — not +inf — to avoid an inf
+        footgun downstream; it is debug-only here. Contrast None / negative,
+        which DO fail-open (see test_total_count_negative_falls_back) — a
+        negative count is impossible/garbage, not a meaningful collapse."""
         result = compute_variety_divergence(
             8, [8, 8], total_pact_dispatch_count=0,
         )
-        assert result["coverage"] == 1.0
+        # stamped == 2 → finite stamped-count signal 2.0 (>=1.0), not +inf
+        assert result["coverage"] == 2.0
+        assert result["reason"] == "coverage_exceeds_unity"
         assert result["surfaced"] is False
 
     def test_total_count_negative_falls_back(self):
