@@ -395,3 +395,35 @@ class TestResolveArcStart:
         no parseable match remains → None (caller omits --since)."""
         events = [self._va("100", "garbage"), self._va("100", "also-bad")]
         assert resolve_arc_start(events, "100") is None
+
+    def test_mixed_naive_and_aware_ts_does_not_crash_selects_aware_latest(self):
+        """Regression: a sequence mixing a tz-AWARE ts ('...Z' → +00:00) with a
+        tz-NAIVE-parseable one (a date-only '2026-06-16' → naive datetime via
+        fromisoformat) must NOT raise TypeError ('can't compare offset-naive
+        and offset-aware datetimes'). The `dt > latest_dt` compare lives INSIDE
+        the try/except (mirroring _ts_ge), so the incomparable naive entry is
+        SKIPPED, not fatal, and the latest tz-AWARE ts is returned.
+
+        The date-only entry parses cleanly (it is NOT garbage) but is naive, so
+        comparing it against an already-set AWARE latest is what raised — a
+        parses-OK-but-incompatible probe, distinct from the unparseable case.
+        Note the naive '2026-06-16' is date-wise LATER than both aware entries,
+        so its being SKIPPED (not selected) is load-bearing: a regression that
+        let it through would change the result.
+
+        Structured assert-no-raise (catch → pytest.fail) so a pre-fix revert
+        (compare moved back OUTSIDE the try) yields a deterministic FAILED, not
+        a runtime ERROR that rtk's error-count-dropping summary could hide."""
+        events = [
+            self._va("100", "2026-06-14T12:00:00Z"),  # aware
+            self._va("100", "2026-06-16"),  # naive (date-only) — the crasher
+            self._va("100", "2026-06-15T12:00:00Z"),  # aware, the latest aware
+        ]
+        try:
+            result = resolve_arc_start(events, "100")
+        except TypeError as exc:  # pragma: no cover - the regression we guard
+            pytest.fail(
+                "resolve_arc_start raised on a mixed naive+aware ts sequence "
+                f"(the try-scope regression resurfaced): {exc}"
+            )
+        assert result == "2026-06-15T12:00:00Z"
