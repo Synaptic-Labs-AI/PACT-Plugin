@@ -44,6 +44,7 @@ from shared.session_journal import make_event  # noqa: E402
 from shared.variety_divergence import (  # noqa: E402
     compute_variety_divergence,
     count_task_b_dispatch_sites,
+    resolve_arc_start,
 )
 
 
@@ -276,3 +277,121 @@ class TestCoverageExceedsUnityAdvisory:
         result = compute_variety_divergence(6, _F971_STAMPED_TOTALS, denom)
         assert result["reason"] != "coverage_exceeds_unity"
         assert result["coverage"] <= 1.0
+
+    def test_advisory_silent_at_exact_unity_boundary_within_threshold(self):
+        """The advisory fires on stamped > total (STRICT). At the exact
+        boundary stamped == total (coverage EXACTLY 1.0) it must NOT fire —
+        the normal divergence path runs. feature=8, dispatch=[8,8], total=2:
+        mean=8, delta=0 → within_threshold, coverage 2/2=1.0. This pins the
+        strict-`>` semantics; under a `>`→`>=` regression the advisory would
+        fire here (reason='coverage_exceeds_unity') and this test fails."""
+        result = compute_variety_divergence(
+            feature_variety=8,
+            dispatch_varieties=[8, 8],  # stamped = 2
+            total_pact_dispatch_count=2,  # total = 2  → stamped == total
+        )
+        assert result["coverage"] == pytest.approx(1.0)
+        assert result["reason"] != "coverage_exceeds_unity"
+        assert result["reason"] == "within_threshold"
+        assert result["surfaced"] is False
+
+    def test_advisory_at_unity_boundary_does_not_suppress_real_divergence(self):
+        """The sharper boundary case (the survivor the review found): at
+        stamped == total a REAL divergence must still SURFACE — the advisory
+        must not pre-empt it. feature=4, dispatch=[8,8], total=2: coverage 1.0,
+        mean 8, delta 4 ≥ 2 → SURFACED undershot. A `>`→`>=` regression fires
+        the advisory here (surfaced=False, reason='coverage_exceeds_unity'),
+        SUPPRESSING the divergence → this test fails under that mutation."""
+        result = compute_variety_divergence(
+            feature_variety=4,
+            dispatch_varieties=[8, 8],  # stamped = 2
+            total_pact_dispatch_count=2,  # stamped == total
+        )
+        assert result["coverage"] == pytest.approx(1.0)
+        assert result["surfaced"] is True
+        assert result["reason"] is None
+        assert result["direction"] == "undershot"
+
+
+# =============================================================================
+# resolve_arc_start — the --since arc-boundary resolver (#963)
+# =============================================================================
+
+
+class TestResolveArcStart:
+    """resolve_arc_start(variety_assessed_events, feature_task_id): the LATEST
+    variety_assessed.ts matching feature_task_id (the arc-start for --since),
+    parse-not-lexical, fail-open None. Pure function, journal-event inputs."""
+
+    def _va(self, task_id, ts):
+        return make_event(
+            "variety_assessed",
+            task_id=task_id,
+            variety={
+                "novelty": 2,
+                "scope": 2,
+                "uncertainty": 2,
+                "risk": 2,
+                "total": 8,
+            },
+            ts=ts,
+        )
+
+    def test_returns_latest_ts_for_matching_feature_across_arcs(self):
+        """The platform reuses task_ids across arcs, so the feature's id can
+        match a PRIOR arc's variety_assessed too; the LATEST-ts match is the
+        current arc. (Non-vacuity: a latest→earliest mutation returns the
+        prior-arc ts and fails this.)"""
+        events = [
+            self._va("100", "2026-06-13T12:00:00Z"),  # prior arc
+            self._va("100", "2026-06-14T12:00:00Z"),  # current arc
+        ]
+        assert resolve_arc_start(events, "100") == "2026-06-14T12:00:00Z"
+
+    def test_filters_by_feature_task_id_ignoring_other_features(self):
+        """A LATER variety_assessed for a DIFFERENT feature must NOT leak in —
+        returns the matching feature's latest, not the global latest. (Proves
+        the task_id filter is load-bearing.)"""
+        events = [
+            self._va("100", "2026-06-14T12:00:00Z"),
+            self._va("200", "2026-06-15T12:00:00Z"),  # later, different feature
+        ]
+        assert resolve_arc_start(events, "100") == "2026-06-14T12:00:00Z"
+
+    def test_cross_format_compared_by_instant_returns_original_string(self):
+        """Cross-format (prior arc in +00:00, current in Z) is compared by
+        PARSED instant; the RETURN is the original ts STRING of the max (passed
+        verbatim to --since, which _ts_ge re-parses)."""
+        events = [
+            self._va("100", "2026-06-14T00:00:00+00:00"),  # earlier
+            self._va("100", "2026-06-14T12:00:00Z"),  # later (current)
+        ]
+        assert resolve_arc_start(events, "100") == "2026-06-14T12:00:00Z"
+
+    def test_returns_none_when_no_matching_feature(self):
+        events = [self._va("200", "2026-06-14T12:00:00Z")]
+        assert resolve_arc_start(events, "100") is None
+
+    def test_returns_none_for_empty_events(self):
+        assert resolve_arc_start([], "100") is None
+
+    def test_skips_matching_event_missing_ts_keeps_valid_match(self):
+        """A matching event with no `ts` is skipped; a remaining valid match
+        wins. (Raw dict — make_event would auto-stamp a ts.)"""
+        events = [
+            self._va("100", "2026-06-14T12:00:00Z"),
+            {"type": "variety_assessed", "task_id": "100", "variety": {"total": 8}},
+        ]
+        assert resolve_arc_start(events, "100") == "2026-06-14T12:00:00Z"
+
+    def test_returns_none_when_only_match_missing_ts(self):
+        events = [
+            {"type": "variety_assessed", "task_id": "100", "variety": {"total": 8}},
+        ]
+        assert resolve_arc_start(events, "100") is None
+
+    def test_returns_none_when_all_matches_unparseable(self):
+        """Fail-open: matching entries whose ts is unparseable are skipped; if
+        no parseable match remains → None (caller omits --since)."""
+        events = [self._va("100", "garbage"), self._va("100", "also-bad")]
+        assert resolve_arc_start(events, "100") is None

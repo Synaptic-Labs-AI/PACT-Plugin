@@ -134,3 +134,18 @@ class TestRetroReadHardening:
 
     def test_q6_arc_scoped_with_since(self, q6):
         assert "--since" in q6
+
+    def test_q6_carries_masked_empty_reread_guard(self, q6):
+        """Q6 now MIRRORS Q5's explicit masked-empty re-read guard (the
+        follow-up that closes the Q5/Q6 asymmetry): a masked/crashed
+        teachback_ack read must be re-confirmed against the raw journal before
+        any conclusion, so it cannot be reported as a real 0% cargo-cult
+        signal rate (#966 noted a masked read corrupting Q6 to 0% vs a true
+        44%). The guard must precede the fallback-on-zero branch."""
+        assert "Masked-empty guard" in q6
+        assert "re-read the raw" in q6
+        assert "session-journal.jsonl" in q6
+        assert "genuinely absent" in q6
+        assert "0% signal rate" in q6
+        # ordering: the re-read guard precedes the fallback-on-zero clause
+        assert q6.index("Masked-empty guard") < q6.index("fall back to the legacy")

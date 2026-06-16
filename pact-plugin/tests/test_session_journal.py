@@ -4631,3 +4631,57 @@ class TestReadJsonArrayParseContract:
         # treating it as an event dict raises:
         with pytest.raises(TypeError):
             json.loads(lines[0])["variety"]
+
+
+class TestArcScopingMalformedResilience:
+    """F2: read --since over a journal MIXING a malformed line + a missing-ts
+    event + valid events — the composition the unit tests cover only
+    separately. Confirms malformed lines are skipped UPSTREAM of the _ts_ge
+    arc-filter, a missing-ts event is fail-open INCLUDED (never silently
+    dropped from a scoped read), and valid events are ts-scoped correctly."""
+
+    def test_since_over_malformed_and_missing_ts_journal(
+        self, journal_home, session_dir, journal_file
+    ):
+        from shared.session_journal import read_events_from
+
+        arc_start = "2026-06-14T09:00:00Z"
+        valid_prior = make_event(
+            "agent_dispatch", agent="a", task_id="1", phase="CODE",
+            ts="2026-06-13T12:00:00Z",  # before arc_start → excluded
+        )
+        valid_cur1 = make_event(
+            "agent_dispatch", agent="b", task_id="2", phase="CODE",
+            ts="2026-06-14T12:00:00Z",  # in arc → included
+        )
+        valid_cur2 = make_event(
+            "agent_dispatch", agent="c", task_id="3", phase="TEST",
+            ts="2026-06-14T13:00:00Z",  # in arc → included
+        )
+        # raw dict with NO ts → _ts_ge fail-open INCLUDES it (make_event would
+        # auto-stamp a ts, so the missing-ts case is built by hand)
+        missing_ts = {
+            "v": 1, "type": "agent_dispatch", "agent": "d",
+            "task_id": "4", "phase": "CODE",
+        }
+        journal_file.parent.mkdir(parents=True, exist_ok=True)
+        journal_file.write_text(
+            "\n".join(
+                [
+                    json.dumps(valid_prior, separators=(",", ":")),
+                    "this is not json {{{",  # malformed → skipped
+                    json.dumps(missing_ts, separators=(",", ":")),
+                    json.dumps(valid_cur1, separators=(",", ":")),
+                    json.dumps(valid_cur2, separators=(",", ":")),
+                ]
+            )
+            + "\n"
+        )
+
+        events = read_events_from(
+            session_dir, event_type="agent_dispatch", since=arc_start
+        )
+        task_ids = sorted((e["task_id"] for e in events), key=int)
+        # prior(1) excluded by ts; malformed skipped; missing-ts(4) fail-open
+        # included; current(2,3) ts-scoped in
+        assert task_ids == ["2", "3", "4"]
