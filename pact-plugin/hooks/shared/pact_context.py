@@ -21,7 +21,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .session_state import SESSION_ID_CONTROL_CHARS_RE
+from .session_state import SESSION_ID_CONTROL_CHARS_RE, is_safe_path_component
 # One-directional import: session_registry is a self-contained leaf (imports
 # nothing from shared.*), so this introduces NO circular import. Used by
 # resolve_agent_name Step 3.5 to recover a tmux teammate's friendly name.
@@ -59,6 +59,23 @@ _EMPTY_CONTEXT = {
     "plugin_root": "",
     "started_at": "",
 }
+
+# Read-boundary path-safety guard for team_name. The persisted value is minted
+# by generate_team_name() ("session-<[a-f0-9-]>"), but get_pact_context()
+# re-validates what it reads back so the path-safety guarantee does NOT rest
+# solely on the producer + the downstream sinks: a future writer that bypasses
+# generate_team_name() (a hand-edited context file, a divergent minter) cannot
+# leak a path-unsafe team_name through the read boundary. Validation reuses
+# is_safe_path_component (the SAME positive allowlist the sinks apply —
+# read_task_json's team-dir guard and the marker derivation), so the read
+# boundary is consistent with, not stricter than, the sinks; it still rejects
+# the path-traversal primitives INFO-1 targets (`/`, `\`, `..`, `.`, NUL, C0
+# controls, whitespace). A non-conforming value is REJECTED TO EMPTY ("") rather
+# than sanitized — an empty team_name is the existing fail-open/defer signal
+# everywhere downstream (the _EMPTY_CONTEXT contract), so an invalid value
+# degrades to the same safe state instead of being silently mutated into a
+# different-but-"valid" name (which could mask a real corruption signal and
+# still target an unintended dir).
 
 
 def reset_for_tests() -> None:
@@ -235,8 +252,27 @@ def get_pact_context() -> dict:
 
     try:
         data = json.loads(ctx_path.read_text(encoding="utf-8"))
+        # Read-boundary path-safety re-validation (defense in depth). A team_name
+        # that is not a safe single path component is rejected to "" — the
+        # existing fail-open/defer signal — rather than passed through raw.
+        # is_safe_path_component is False for empty/non-str input, so an
+        # already-empty value stays "" (a no-op that preserves the empty-context
+        # defer path); every value generate_team_name mints passes, so this is
+        # behavior-preserving today. Log the rejection on stderr (an invalid
+        # persisted team_name is an anomaly worth surfacing in debug logs),
+        # mirroring the read-error stderr path below.
+        raw_team_name = str(data.get("team_name", ""))
+        if raw_team_name and not is_safe_path_component(raw_team_name):
+            print(
+                f"pact_context: rejecting unsafe team_name "
+                f"{raw_team_name!r} from context (using empty)",
+                file=sys.stderr,
+            )
+            team_name = ""
+        else:
+            team_name = raw_team_name
         _cache = {
-            "team_name": str(data.get("team_name", "")),
+            "team_name": team_name,
             "session_id": str(data.get("session_id", "")),
             "project_dir": str(data.get("project_dir", "")),
             "plugin_root": str(data.get("plugin_root", "")),
