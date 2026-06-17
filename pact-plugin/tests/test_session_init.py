@@ -3325,14 +3325,14 @@ class TestTeamResumeDetection:
         return output["hookSpecificOutput"]["additionalContext"]
 
     def test_fresh_session_emits_team_create(self, monkeypatch, tmp_path):
-        """When no team config exists on disk, should emit TeamCreate instruction."""
+        """When no team config exists on disk, should emit unified platform directive."""
         additional = self._run_main_with_team_detection(monkeypatch, tmp_path)
 
-        assert "auto-created by the platform for this session" in additional
+        assert "provided by the platform for this session" in additional
         assert "Do not call TeamCreate" not in additional
 
     def test_resume_session_emits_reuse_instruction(self, monkeypatch, tmp_path):
-        """When team config exists on disk, should emit reuse instruction."""
+        """When team config exists on disk, should emit unified platform directive."""
         # Create the team config file to simulate a resumed session
         team_dir = tmp_path / ".claude" / "teams" / "session-aabb1122"
         team_dir.mkdir(parents=True)
@@ -3340,8 +3340,8 @@ class TestTeamResumeDetection:
 
         additional = self._run_main_with_team_detection(monkeypatch, tmp_path)
 
-        assert "existing — resumed session" in additional
-        assert "Do not call TeamCreate" in additional
+        assert "provided by the platform for this session" in additional
+        assert "Do not call TeamCreate" not in additional
         assert "session-aabb1122" in additional
 
     def test_oserror_falls_back_to_team_create(self, monkeypatch, tmp_path):
@@ -3377,7 +3377,7 @@ class TestTeamResumeDetection:
         assert exc_info.value.code == 0
         output = json.loads(mock_stdout.getvalue())
         additional = output["hookSpecificOutput"]["additionalContext"]
-        assert "auto-created by the platform for this session" in additional
+        assert "provided by the platform for this session" in additional
 
     def test_team_instruction_is_first_in_context(self, monkeypatch, tmp_path):
         """Team instruction should be inserted at position 0 (first in context)."""
@@ -3446,12 +3446,12 @@ class TestSourceAwareness:
     # --- Path 1: startup + no team (fresh session) ---
 
     def test_startup_no_team_creates_team(self, monkeypatch, tmp_path):
-        """startup + no team: should emit TeamCreate instruction."""
+        """startup + no team: should emit unified platform directive (bare — no extra recovery text)."""
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="startup", team_exists=False
         )
 
-        assert "auto-created by the platform for this session" in additional
+        assert "provided by the platform for this session" in additional
         assert "Do not call TeamCreate" not in additional
         assert "WARNING" not in additional
 
@@ -3466,14 +3466,13 @@ class TestSourceAwareness:
     # --- Path 2: resume + team exists (normal resume) ---
 
     def test_resume_team_exists_reuse(self, monkeypatch, tmp_path):
-        """resume + team exists: should emit reuse instruction with paused-state hint."""
+        """resume + team exists: should emit unified platform directive with paused-state hint."""
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="resume", team_exists=True
         )
 
-        assert "existing — resumed session" in additional
-        assert "Do not call TeamCreate" in additional
-        assert "session-aabb1122" in additional
+        assert "provided by the platform for this session" in additional
+        assert "Do not call TeamCreate" not in additional
         assert "paused state" in additional
         # Should NOT have recovery instructions for context resets
         assert "compact-summary.txt" not in additional
@@ -3493,19 +3492,18 @@ class TestSourceAwareness:
     def test_compact_team_exists_recovery(self, monkeypatch, tmp_path):
         """compact + team exists: should emit post-bootstrap recovery instructions.
 
-        Post #444: the Primary-layer directive subsumes the "recover state"
-        prefix. The concrete task-resumption bullets (compact-summary, TaskList,
-        secretary re-engage) stay, prefixed by 'After bootstrap, recover
-        session state:'. The Secondary checkpoint block only fires when
-        in_progress tasks exist — get_task_list is patched to None here, so
-        no [POST-COMPACTION CHECKPOINT] block is expected.
+        The unified platform directive is emitted for every source. The concrete
+        task-resumption bullets (compact-summary, TaskList, secretary re-engage)
+        stay, prefixed by 'After bootstrap, recover session state:'. The Secondary
+        checkpoint block only fires when in_progress tasks exist — get_task_list
+        is patched to None here, so no [POST-COMPACTION CHECKPOINT] block is expected.
         """
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="compact", team_exists=True
         )
 
-        assert "existing — resumed session" in additional
-        assert "Do not call TeamCreate" in additional
+        assert "provided by the platform for this session" in additional
+        assert "Do not call TeamCreate" not in additional
         assert "After bootstrap, recover session state:" in additional
         assert "compact-summary.txt" in additional
         assert "TaskList" in additional
@@ -3526,13 +3524,13 @@ class TestSourceAwareness:
     # --- Path 4: clear + team exists (context intentionally cleared) ---
 
     def test_clear_team_exists_context_cleared(self, monkeypatch, tmp_path):
-        """clear + team exists: should emit CONTEXT CLEARED with recovery."""
+        """clear + team exists: should emit unified platform directive with CONTEXT CLEARED recovery."""
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="clear", team_exists=True
         )
 
-        assert "existing — resumed session" in additional
-        assert "Do not call TeamCreate" in additional
+        assert "provided by the platform for this session" in additional
+        assert "Do not call TeamCreate" not in additional
         assert "CONTEXT CLEARED" in additional
         assert "TaskList" in additional
         assert "secretary" in additional
@@ -3550,21 +3548,20 @@ class TestSourceAwareness:
     # --- Path 5: anomalous combinations ---
 
     def test_startup_team_exists_anomalous(self, monkeypatch, tmp_path):
-        """startup + team exists: anomalous — should reuse team with note.
-        Full 4-sentence directive must still fire (removes induction
-        dependency from canonical-path coverage — per review-test-engineer
-        LOW 1, each anomalous path independently verifies the verbatim
-        directive rather than inheriting the guarantee from the shared
-        _team_reuse/_team_create strings).
+        """startup + team exists: now takes the normal startup branch (source-only ladder).
+
+        The team_exists dimension is GONE — source determines the branch. startup
+        takes the bare-directive branch regardless of team state. The anomalous
+        parenthetical ("Unexpected ...") is removed; "provided by the platform for
+        this session" is emitted for all sources. 4-sentence directive still fires.
         """
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="startup", team_exists=True
         )
 
-        assert "existing — resumed session" in additional
-        assert "Do not call TeamCreate" in additional
-        assert "Unexpected" in additional or "Note" in additional
-        assert "TaskList" in additional
+        assert "provided by the platform for this session" in additional
+        assert "Do not call TeamCreate" not in additional
+        assert "Unexpected" not in additional
         # 4-sentence directive verbatim (all four sentences must be present).
         assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
         assert 'Do this before anything else.' in additional
@@ -3572,20 +3569,23 @@ class TestSourceAwareness:
         assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in additional
 
     def test_resume_no_team_anomalous_informational(self, monkeypatch, tmp_path):
-        """R2-B3: resume + no team is anomalous-but-LEGITIMATE (e.g., user
-        ran /clear with no team or compact fired before a team was ever
-        created). Post-R2-B3 this branch emits an INFORMATIONAL note
-        without WARNING tone — the recovery hint stays. Full 4-sentence
-        directive must still fire (LOW 1)."""
+        """resume + no team: now takes the normal resume branch (source-only ladder).
+
+        The team_exists dimension is GONE — source determines the branch. resume
+        takes its own branch regardless of team state, emitting the paused-state
+        hint. "creating fresh team" and WARNING tone are gone. 4-sentence directive
+        still fires. "provided by the platform for this session" is universal.
+        """
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="resume", team_exists=False
         )
 
-        assert "auto-created by the platform for this session" in additional
-        # R2-B3: WARNING tone removed for known-source + no-team case.
+        assert "provided by the platform for this session" in additional
+        # Source-only ladder: resume branch always emits paused-state hint.
+        assert "paused state" in additional
+        # WARNING and creating-fresh-team are gone (old no-team branch deleted).
         assert "WARNING" not in additional
-        assert 'creating fresh team' in additional
-        assert "TaskList" in additional
+        assert 'creating fresh team' not in additional
         # 4-sentence directive verbatim.
         assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
         assert 'Do this before anything else.' in additional
@@ -3593,14 +3593,21 @@ class TestSourceAwareness:
         assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in additional
 
     def test_compact_no_team_anomalous_informational(self, monkeypatch, tmp_path):
-        """R2-B3: compact + no team — informational note, no WARNING tone."""
+        """compact + no team: now takes the normal compact branch (source-only ladder).
+
+        The team_exists dimension is GONE. compact takes its own branch regardless
+        of team state, emitting post-compaction recovery text. "creating fresh team"
+        and WARNING tone are gone. 4-sentence directive still fires.
+        """
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="compact", team_exists=False
         )
 
-        assert "auto-created by the platform for this session" in additional
+        assert "provided by the platform for this session" in additional
+        # Source-only ladder: compact branch always emits recovery instructions.
+        assert "After bootstrap, recover session state:" in additional
         assert "WARNING" not in additional
-        assert 'creating fresh team' in additional
+        assert 'creating fresh team' not in additional
         # 4-sentence directive verbatim.
         assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
         assert 'Do this before anything else.' in additional
@@ -3608,14 +3615,21 @@ class TestSourceAwareness:
         assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in additional
 
     def test_clear_no_team_anomalous_informational(self, monkeypatch, tmp_path):
-        """R2-B3: clear + no team — informational note, no WARNING tone."""
+        """clear + no team: now takes the normal clear branch (source-only ladder).
+
+        The team_exists dimension is GONE. clear takes its own branch regardless
+        of team state, emitting CONTEXT CLEARED recovery text. "creating fresh team"
+        and WARNING tone are gone. 4-sentence directive still fires.
+        """
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="clear", team_exists=False
         )
 
-        assert "auto-created by the platform for this session" in additional
+        assert "provided by the platform for this session" in additional
+        # Source-only ladder: clear branch always emits CONTEXT CLEARED recovery.
+        assert "CONTEXT CLEARED" in additional
         assert "WARNING" not in additional
-        assert 'creating fresh team' in additional
+        assert 'creating fresh team' not in additional
         # 4-sentence directive verbatim.
         assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
         assert 'Do this before anything else.' in additional
@@ -3629,32 +3643,30 @@ class TestSourceAwareness:
     def test_unknown_source_no_team_warns_and_emits_stderr(
         self, raw_source, monkeypatch, tmp_path, capfd
     ):
-        """R2-B3: unrecognized source value + no team — emit WARNING in
-        additionalContext AND stderr observability for debug logs.
+        """Unrecognized source value — new unknown branch (source-only ladder).
 
-        Pre-fix: known-source no-team and unknown-source no-team both
-        produced the same generic WARNING. Post-fix: unknown source is
-        differentiated as the malformed-stdin signal class (legitimate
-        recovery scenarios use the in-KNOWN_SOURCES informational
-        branch); stderr makes the malformation observable to debug-log
-        readers.
-
-        Note: session_init normalizes any non-`_VALID_SOURCES` raw_source
-        to the literal `"unknown"` (cannot inject arbitrary text into
-        additionalContext). So the message + stderr show `"unknown"`,
-        not the raw stdin source value. The parametrize covers the
-        normalization-class spectrum (different raw inputs all collapse
-        to the same `"unknown"` post-normalization)."""
+        Any non-_VALID_SOURCES raw_source normalizes to literal "unknown" and
+        takes the unknown branch. The WARNING and "Unrecognized" tone is GONE;
+        instead a neutral note: 'Note: unrecognized session source "unknown".'
+        The stderr observability line is RETAINED.
+        The unified "provided by the platform for this session" is emitted for
+        all sources including unknown. XSS-clamp: normalization still prevents
+        arbitrary injection ('"unknown"' appears in output, not the raw value).
+        team_exists=False is passed but is now irrelevant (no team_exists dimension).
+        """
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source=raw_source, team_exists=False
         )
 
-        # WARNING tone preserved for malformed-stdin signal class.
-        assert "WARNING" in additional
-        assert "Unrecognized" in additional
-        # Post-normalization the source string is literal "unknown".
+        # Unified directive present for all sources.
+        assert "provided by the platform for this session" in additional
+        # New unknown branch: neutral note with literal "unknown".
         assert '"unknown"' in additional
-        # Stderr observability marker.
+        # Old WARNING/Unrecognized/creating-fresh-team tone is GONE.
+        assert "WARNING" not in additional
+        assert "Unrecognized" not in additional
+        assert "creating fresh team" not in additional
+        # Stderr observability marker is RETAINED.
         captured = capfd.readouterr()
         assert "session_init: unknown source value:" in captured.err
         assert "'unknown'" in captured.err
@@ -3686,24 +3698,30 @@ class TestSourceAwareness:
                 main()
 
         assert exc_info.value.code == 0
-        # Should behave like startup: full init, TeamCreate
+        # Should behave like startup: full init, unified platform directive, no recovery text.
         assert mock_symlinks.called
         output = json.loads(mock_stdout.getvalue())
         additional = output["hookSpecificOutput"]["additionalContext"]
-        assert "auto-created by the platform for this session" in additional
+        assert "provided by the platform for this session" in additional
         assert "POST-COMPACTION" not in additional
         assert "CONTEXT CLEARED" not in additional
 
     def test_unknown_source_with_team_is_anomalous(self, monkeypatch, tmp_path):
-        """Unknown source value + team exists: should reuse team with note.
-        Full 4-sentence directive must still fire (LOW 1: independent
-        verification on each anomalous path)."""
+        """Unknown source value + team exists: now takes the unknown branch (source-only ladder).
+
+        The team_exists dimension is GONE — unrecognized source always takes the
+        unknown branch. "existing — resumed session" and "Unexpected" are gone;
+        "provided by the platform for this session" + note about "unknown" are emitted.
+        4-sentence directive still fires.
+        """
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="unknown_value", team_exists=True
         )
 
-        assert "existing — resumed session" in additional
-        assert "Unexpected" in additional or "Note" in additional
+        assert "provided by the platform for this session" in additional
+        assert '"unknown"' in additional
+        assert "existing — resumed session" not in additional
+        assert "Unexpected" not in additional
         # 4-sentence directive verbatim.
         assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
         assert 'Do this before anything else.' in additional
@@ -3711,15 +3729,21 @@ class TestSourceAwareness:
         assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in additional
 
     def test_unknown_source_without_team_creates_with_warning(self, monkeypatch, tmp_path):
-        """Unknown source value + no team: should create team with warning.
-        Full 4-sentence directive must still fire (LOW 1: independent
-        verification on each anomalous path)."""
+        """Unknown source value + no team: now takes the unknown branch (source-only ladder).
+
+        The team_exists dimension is GONE — unrecognized source always takes the
+        unknown branch regardless of team state. WARNING is gone; neutral note
+        about "unknown" is emitted. "provided by the platform for this session"
+        is the universal platform parenthetical. 4-sentence directive still fires.
+        """
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="unknown_value", team_exists=False
         )
 
-        assert "auto-created by the platform for this session" in additional
-        assert "WARNING" in additional
+        assert "provided by the platform for this session" in additional
+        assert '"unknown"' in additional
+        # WARNING is GONE for unknown source (replaced by neutral note).
+        assert "WARNING" not in additional
         # 4-sentence directive verbatim.
         assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
         assert 'Do this before anything else.' in additional
@@ -3757,11 +3781,13 @@ class TestTeamCreateStringFreshSession:
         assert 'Do not evaluate whether it is needed.' in additional
         assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in additional
 
-    def test_contains_team_create_directive(self, monkeypatch, tmp_path):
+    def test_contains_platform_provided_directive(self, monkeypatch, tmp_path):
+        """The unified platform directive must carry the 'provided by the platform for this session'
+        parenthetical for all sources (team-create string is replaced by unified directive)."""
         additional, _, _ = _run_session_init_for_path(
             monkeypatch, tmp_path, source="startup", team_exists=False
         )
-        assert "auto-created by the platform for this session" in additional
+        assert "provided by the platform for this session" in additional
 
     def test_blocks_premature_action(self, monkeypatch, tmp_path):
         """The fresh prelude must instruct the team-lead not to act before bootstrap."""
@@ -3811,15 +3837,19 @@ class TestTeamReuseStringResumedSession:
         assert "Re-invoke if your context is compacted" not in additional
         assert "Your FIRST action must be" not in additional
 
-    def test_contains_existing_team_marker(self, monkeypatch, tmp_path):
+    def test_contains_platform_provided_marker(self, monkeypatch, tmp_path):
+        """The unified platform directive carries 'provided by the platform for this session'
+        for all sources. 'existing — resumed session' and 'Do not call TeamCreate' are GONE
+        (team-reuse string replaced by the unified directive)."""
         additional, _, _ = _run_session_init_for_path(
             monkeypatch, tmp_path, source="resume", team_exists=True
         )
-        assert "existing — resumed session" in additional
-        assert "Do not call TeamCreate" in additional
+        assert "provided by the platform for this session" in additional
+        assert "auto-created by the platform" not in additional
+        assert "Do not call TeamCreate" not in additional
 
     def test_does_not_contain_team_create_directive(self, monkeypatch, tmp_path):
-        """Resume must NOT instruct TeamCreate (team already exists)."""
+        """Resume must NOT contain the old 'auto-created by the platform' team-create string."""
         additional, _, _ = _run_session_init_for_path(
             monkeypatch, tmp_path, source="resume", team_exists=True
         )
