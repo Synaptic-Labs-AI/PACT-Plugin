@@ -2,14 +2,16 @@
 """
 Location: pact-plugin/hooks/dispatch_gate.py
 Summary: PreToolUse hook (matcher='Agent') validating PACT specialist
-         spawns: required name + team_name, name regex/length/reserved
-         tokens, registered specialist type, session-team match, member
-         uniqueness, task assignment, and prompt heuristics.
-Used by: hooks.json PreToolUse matcher='Agent' (sibling of team_guard.py).
+         spawns: required name, name regex/length/reserved tokens,
+         registered specialist type, SSOT session-team resolution, member
+         uniqueness, task assignment, and prompt heuristics. (#979: the
+         caller team_name arg is platform-ignored — the session team is
+         resolved solely from get_team_name(), never from the spawn arg.)
+Used by: hooks.json PreToolUse matcher='Agent'.
 
-Closes #662 silent-failure surface: spawning pact-* specialists without
-name/team_name, with malformed names, against unregistered subagent_types,
-into the wrong team, before TaskCreate, with long inline missions.
+Closes #662 silent-failure surface: spawning pact-* specialists without a
+name, with malformed names, against unregistered subagent_types, before
+TaskCreate, with long inline missions.
 
 Safety: fail-closed on module-load failure AND on runtime gate-logic
 exception (mirrors PR #660 ``_emit_load_failure_deny`` and the
@@ -19,9 +21,9 @@ WARN → additionalContext + exit 0 (advisory; runbook validates injection
 empirically per architect §7(a) / tests/runbooks/662-dispatch-gate.md).
 
 Cheapest-rule-first ordering with short-circuit on first non-ALLOW:
-  ① SOLO_EXEMPT carve-out          ⑥ session-team match (decision h)
+  ① SOLO_EXEMPT carve-out          ⑥ SSOT session-team resolve (#979)
   ② non-pact-* carve-out            ⑦ member-name uniqueness in team
-  ③ name + team_name presence       ⑧ task-assigned check
+  ③ name presence                   ⑧ task-assigned check
   ④ name length/NFKC/regex/reserved ⑨ prompt heuristic (WARN)
   ⑤ plugin agents/ + specialist registry
 
@@ -299,8 +301,13 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
 
     subagent_type = tool_input.get("subagent_type", "") or ""
     name = tool_input.get("name", "") or ""
-    team_name = tool_input.get("team_name", "") or ""
     prompt = tool_input.get("prompt", "") or ""
+    # NOTE (#979): the spawn-arg team_name is intentionally NOT bound to a
+    # local here. Claude Code v2.1.178+ ignores Agent(team_name=); the session
+    # team is resolved SOLELY from the SSOT (get_team_name()) at ⑥/⑦/⑧ below,
+    # so the caller arg is never used as a path component in this gate. It is
+    # still recorded verbatim in the decision journal (read directly from
+    # tool_input in _journal_decision) for diagnostics.
 
     # ① Carve-outs — sub-microsecond. SOLO_EXEMPT covers research agents
     # (general-purpose / Explore / Plan) that legitimately spawn without
@@ -311,25 +318,18 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
     if not isinstance(subagent_type, str) or not subagent_type.startswith("pact-"):
         return ("ALLOW", None, None)
 
-    # ③ Required string presence on name + team_name.
+    # ③ Required string presence on name. (AC-2 / #979: the team_name-presence
+    # check was dropped — Claude Code v2.1.178+ ignores Agent(team_name=), so
+    # requiring or validating the caller-supplied team_name enforces a contract
+    # the platform no longer honors. name-presence + ALL of rule ④ are KEPT:
+    # name validation is a real injection/reserved-token defense, and the
+    # session team is resolved from the SSOT at ⑥/⑦/⑧, never from the arg, so
+    # the caller team_name needs no presence/normalization handling here.)
     if not isinstance(name, str) or not name:
         return ("DENY",
                 "PACT dispatch_gate: name= parameter is required for "
                 "pact-* specialist spawns. See orchestrator persona §11.",
                 "name_required")
-    if not isinstance(team_name, str) or not team_name:
-        return ("DENY",
-                "PACT dispatch_gate: team_name= parameter is required for "
-                "pact-* specialist spawns.",
-                "team_name_required")
-
-    # Normalize team_name to its canonical form (lowercase, stripped) once
-    # and reuse it for the session-equality check, the team-config read,
-    # and the task-store read. Without this, the session-equality check
-    # would compare against a lowercased copy while the filesystem reads
-    # used the raw value, producing inconsistent behavior on
-    # case-sensitive filesystems.
-    team_name = team_name.strip().lower()
 
     # ④ Name validation. Length cap FIRST (cheap), then NFKC normalization
     # (defends against fullwidth/lookalike unicode that would otherwise
@@ -390,11 +390,16 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
                 "agents/pact-*.md).",
                 "specialist_not_registered")
 
-    # ⑥ Session-team match with empty-source fail-closed (decision h).
-    # An adversary passing team_name='' would equal an empty session_team
-    # if we didn't reject empty session_team upfront — the team_name=
-    # presence rule above already caught explicit empty team_name on the
-    # spawn-input side.
+    # ⑥ Session-team resolution from the SSOT, with empty-source fail-closed.
+    # AC-1 / #979: the prior team_name-arg equality check was DROPPED. Claude
+    # Code v2.1.178+ ignores Agent(team_name=), so the session team is resolved
+    # SOLELY from get_team_name() (the persisted SSOT that generate_team_name
+    # mints as "session-<id8>"). An equality gate against the platform-ignored
+    # arg would DENY a legitimately-dispatched teammate. ⑦/⑧ below resolve
+    # their team-dir reads against session_team, NEVER the caller arg, so the
+    # spawn-arg team_name is not a path component anywhere in this gate. The
+    # empty-session_team fail-closed is RETAINED because ⑦/⑧ structurally
+    # depend on session_team being a non-empty path segment.
     session_team = pact_context.get_team_name()
     if not session_team:
         message = ("PACT dispatch_gate: session team_name is unavailable "
@@ -407,28 +412,23 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
         if diagnosis:
             message += " " + diagnosis
         return ("DENY", message, "team_name_unavailable")
-    if team_name != session_team:
-        return ("DENY",
-                f"PACT dispatch_gate: team_name {team_name!r} does not "
-                f"match current session team {session_team!r}. Use the "
-                "team name listed in CLAUDE.md §Current Session.",
-                "team_name_mismatch")
 
-    # ⑦ Name uniqueness against live team members.
-    members = _team_member_names(team_name)
+    # ⑦ Name uniqueness against live team members (resolved via the SSOT
+    # session team, not the platform-ignored spawn arg).
+    members = _team_member_names(session_team)
     if name in members:
         return ("DENY",
                 f"PACT dispatch_gate: name {name!r} is already a live "
-                f"member of team {team_name!r}. Use a unique name "
+                f"member of team {session_team!r}. Use a unique name "
                 "(append a numeric suffix or role-descriptor variant).",
                 "name_not_unique")
 
     # ⑧ Task assignment — TaskCreate must precede Agent spawn so the
-    # teammate has work on arrival.
-    if not has_task_assigned(team_name, name):
+    # teammate has work on arrival (resolved via the SSOT session team).
+    if not has_task_assigned(session_team, name):
         return ("DENY",
                 f"PACT dispatch_gate: no Task assigned to owner={name!r} "
-                f"in team {team_name!r}. Create Task A (teachback) + "
+                f"in team {session_team!r}. Create Task A (teachback) + "
                 "Task B (work) before spawn so the teammate has work on "
                 "arrival.",
                 "no_task_assigned")

@@ -3,18 +3,18 @@ Tests for session_init.py — SessionStart hook.
 
 Tests cover:
 generate_team_name():
-1. Happy path: session_id from input_data -> "pact-{first 8 chars}"
+1. Happy path: session_id from input_data -> "session-{first 8 chars}"
 2. Random fallback: random hex suffix when input_data has no session_id
 3. Short session_id: less than 8 chars used as-is
 4. Empty session_id: treated as falsy, falls back to random
 5. session_id from input_data used as sole source
-6. Output format validation (pact- prefix, hex suffix)
+6. Output format validation (session- prefix, hex suffix)
 7. None session_id: treated as falsy, falls back to random
 
 Resume-aware team detection (main() integration):
-9. Fresh session (no config file) → TeamCreate instruction emitted
+9. Fresh session (no config file) → fresh-team (create-branch) directive emitted
 10. Resume session (config file exists) → reuse instruction emitted
-11. OSError fallback → TeamCreate instruction (fail-open)
+11. OSError fallback → fresh-team (create-branch) directive (fail-open)
 12. Team instruction is first in context_parts (insert at position 0)
 
 main() integration:
@@ -76,12 +76,12 @@ class TestGenerateTeamName:
     """Tests for generate_team_name() -- session-unique team name generation."""
 
     def test_uses_session_id_from_input_data(self):
-        """Should return pact- followed by first 8 chars of session_id."""
+        """Should return session- followed by first 8 chars of session_id."""
         from session_init import generate_team_name
 
         result = generate_team_name({"session_id": "0001639f-a74f-41c4-bd0b-93d9d206e7f7"})
 
-        assert result == "pact-0001639f"
+        assert result == "session-0001639f"
 
     def test_truncates_session_id_to_8_chars(self):
         """Should use only the first 8 characters of a long session_id."""
@@ -89,7 +89,7 @@ class TestGenerateTeamName:
 
         result = generate_team_name({"session_id": "abcdef1234567890"})
 
-        assert result == "pact-abcdef12"
+        assert result == "session-abcdef12"
 
     def test_random_fallback_when_no_session_id_in_input(self):
         """No session_id in input_data should produce random hex suffix."""
@@ -97,8 +97,8 @@ class TestGenerateTeamName:
 
         result = generate_team_name({})
 
-        assert result.startswith("pact-")
-        suffix = result[len("pact-"):]
+        assert result.startswith("session-")
+        suffix = result[len("session-"):]
         assert len(suffix) == 8
         assert re.fullmatch(r"[a-f0-9]{8}", suffix)
 
@@ -108,8 +108,8 @@ class TestGenerateTeamName:
 
         result = generate_team_name({"other_key": "value"})
 
-        assert result.startswith("pact-")
-        suffix = result[len("pact-"):]
+        assert result.startswith("session-")
+        suffix = result[len("session-"):]
         assert len(suffix) == 8
         assert re.fullmatch(r"[a-f0-9]{8}", suffix)
 
@@ -119,8 +119,8 @@ class TestGenerateTeamName:
 
         result = generate_team_name({})
 
-        assert result.startswith("pact-")
-        suffix = result[len("pact-"):]
+        assert result.startswith("session-")
+        suffix = result[len("session-"):]
         assert len(suffix) == 8
         assert re.fullmatch(r"[a-f0-9]{8}", suffix), f"Expected hex suffix, got: {suffix}"
 
@@ -138,7 +138,7 @@ class TestGenerateTeamName:
 
         result = generate_team_name({"session_id": "abc"})
 
-        assert result == "pact-abc"
+        assert result == "session-abc"
 
     def test_empty_session_id_falls_back_to_random(self):
         """Empty string session_id should be treated as falsy, falling back to random hex."""
@@ -146,8 +146,8 @@ class TestGenerateTeamName:
 
         result = generate_team_name({"session_id": ""})
 
-        assert result.startswith("pact-")
-        suffix = result[len("pact-"):]
+        assert result.startswith("session-")
+        suffix = result[len("session-"):]
         assert len(suffix) == 8
         assert re.fullmatch(r"[a-f0-9]{8}", suffix)
 
@@ -157,14 +157,14 @@ class TestGenerateTeamName:
 
         result = generate_team_name({"session_id": "a1b2c3d4-aaaa-bbbb-cccc-ddddeeeeffff"})
 
-        assert result == "pact-a1b2c3d4"
+        assert result == "session-a1b2c3d4"
 
     def test_non_hex_chars_in_session_id_are_stripped(self):
         """Non-hex characters in session_id prefix are stripped for safe team names."""
         from session_init import generate_team_name
 
         result = generate_team_name({"session_id": "aXbYcZd1-aaaa"})
-        assert result == "pact-abcd1"
+        assert result == "session-abcd1"
 
     def test_exactly_8_char_session_id(self):
         """Should handle a session_id that is exactly 8 characters."""
@@ -172,7 +172,7 @@ class TestGenerateTeamName:
 
         result = generate_team_name({"session_id": "a1b2c3d4"})
 
-        assert result == "pact-a1b2c3d4"
+        assert result == "session-a1b2c3d4"
 
     def test_none_session_id_falls_to_random(self):
         """None session_id in input_data should fall back to random."""
@@ -180,8 +180,8 @@ class TestGenerateTeamName:
 
         result = generate_team_name({"session_id": None})
 
-        assert result.startswith("pact-")
-        suffix = result[len("pact-"):]
+        assert result.startswith("session-")
+        suffix = result[len("session-"):]
         assert len(suffix) == 8
         assert re.fullmatch(r"[a-f0-9]{8}", suffix)
 
@@ -786,7 +786,7 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         )
 
         # Create team config so compact path doesn't hit the anomalous branch
-        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir = tmp_path / ".claude" / "teams" / "session-aabb1122"
         team_dir.mkdir(parents=True)
         (team_dir / "config.json").write_text('{"members": []}')
 
@@ -879,7 +879,7 @@ class TestInprocessModeNoticeIntegration:
 
         # Team config so resume/compact/clear stay on the normal (non-anomalous)
         # path; mirrors the existing context-reset integration tests.
-        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir = tmp_path / ".claude" / "teams" / "session-aabb1122"
         team_dir.mkdir(parents=True)
         (team_dir / "config.json").write_text('{"members": []}')
 
@@ -1138,7 +1138,7 @@ class TestWriteContextIntegration:
         # lead/teammate disk gate moved OUT of this call (it's now persist_context,
         # invoked only when frame_is_lead) — so no write_disk kwarg here.
         mock_build_ctx.assert_called_once_with(
-            "pact-aabb1122",
+            "session-aabb1122",
             "aabb1122-0000-0000-0000-000000000000",
             "/Users/example/Sites/test-project",
             "",  # plugin_root: CLAUDE_PLUGIN_ROOT not set in this test
@@ -2517,7 +2517,7 @@ class TestPluginRootEnvWiring:
         # 4th positional arg is plugin_root; #878 SHAPE-2 moved the disk gate out
         # of this call into persist_context, so no write_disk kwarg here.
         mock_build_ctx.assert_called_once_with(
-            "pact-aabb1122",
+            "session-aabb1122",
             "aabb1122-0000-0000-0000-000000000000",
             str(tmp_path / "proj"),
             plugin_root_value,
@@ -2639,7 +2639,7 @@ class TestPluginRootEnvWiring:
         data = json.loads(context_file.read_text(encoding="utf-8"))
         assert data["plugin_root"] == plugin_root_value
         assert data["session_id"] == session_id
-        assert data["team_name"] == "pact-ccdd3344"
+        assert data["team_name"] == "session-ccdd3344"
 
 
 # ---------------------------------------------------------------------------
@@ -2673,7 +2673,7 @@ def _run_session_init_for_path(
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
     if team_exists:
-        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir = tmp_path / ".claude" / "teams" / "session-aabb1122"
         team_dir.mkdir(parents=True)
         (team_dir / "config.json").write_text('{"members": []}')
 
@@ -2928,7 +2928,7 @@ class TestSessionStartSourceField:
             "aabb1122-0000-0000-0000-000000000000"
         )
         assert event.get("project_dir") == "/Users/example/Sites/test-project"
-        assert event.get("team") == "pact-aabb1122"
+        assert event.get("team") == "session-aabb1122"
         # `worktree` is always written as "" at this point in the hook —
         # the worktree is not yet created. The empty string is the
         # documented placeholder, not a missing value.
@@ -2947,12 +2947,12 @@ def _compact_tasks_dir(tmp_path, monkeypatch, pact_context):
     so each test can drop task JSON files into it.
 
     Post team-dir-resolution fix: session_init runs in a team context, so
-    get_task_list resolves tasks under {team_name} (pact-aabb1122 — matching
+    get_task_list resolves tasks under {team_name} (session-aabb1122 — matching
     the team config the compact-branch tests create). The session_id still
     matches the stdin session_id used by the tests below.
     """
     session_id = "aabb1122-0000-0000-0000-000000000000"
-    team_name = "pact-aabb1122"
+    team_name = "session-aabb1122"
     tasks_dir = tmp_path / ".claude" / "tasks" / team_name
     tasks_dir.mkdir(parents=True)
     pact_context(session_id=session_id, team_name=team_name)
@@ -2978,7 +2978,7 @@ def _run_session_init_compact(
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
     if team_exists:
-        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir = tmp_path / ".claude" / "teams" / "session-aabb1122"
         team_dir.mkdir(parents=True, exist_ok=True)
         (team_dir / "config.json").write_text('{"members": []}')
 
@@ -3328,13 +3328,13 @@ class TestTeamResumeDetection:
         """When no team config exists on disk, should emit TeamCreate instruction."""
         additional = self._run_main_with_team_detection(monkeypatch, tmp_path)
 
-        assert 'TeamCreate(team_name="pact-aabb1122")' in additional
+        assert "auto-created by the platform for this session" in additional
         assert "Do not call TeamCreate" not in additional
 
     def test_resume_session_emits_reuse_instruction(self, monkeypatch, tmp_path):
         """When team config exists on disk, should emit reuse instruction."""
         # Create the team config file to simulate a resumed session
-        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir = tmp_path / ".claude" / "teams" / "session-aabb1122"
         team_dir.mkdir(parents=True)
         (team_dir / "config.json").write_text('{"members": []}')
 
@@ -3342,7 +3342,7 @@ class TestTeamResumeDetection:
 
         assert "existing — resumed session" in additional
         assert "Do not call TeamCreate" in additional
-        assert "pact-aabb1122" in additional
+        assert "session-aabb1122" in additional
 
     def test_oserror_falls_back_to_team_create(self, monkeypatch, tmp_path):
         """When filesystem check raises OSError, should fall back to TeamCreate."""
@@ -3377,7 +3377,7 @@ class TestTeamResumeDetection:
         assert exc_info.value.code == 0
         output = json.loads(mock_stdout.getvalue())
         additional = output["hookSpecificOutput"]["additionalContext"]
-        assert 'TeamCreate(team_name="pact-aabb1122")' in additional
+        assert "auto-created by the platform for this session" in additional
 
     def test_team_instruction_is_first_in_context(self, monkeypatch, tmp_path):
         """Team instruction should be inserted at position 0 (first in context)."""
@@ -3417,7 +3417,7 @@ class TestSourceAwareness:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         if team_exists:
-            team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+            team_dir = tmp_path / ".claude" / "teams" / "session-aabb1122"
             team_dir.mkdir(parents=True)
             (team_dir / "config.json").write_text('{"members": []}')
 
@@ -3451,7 +3451,7 @@ class TestSourceAwareness:
             monkeypatch, tmp_path, source="startup", team_exists=False
         )
 
-        assert 'TeamCreate(team_name="pact-aabb1122")' in additional
+        assert "auto-created by the platform for this session" in additional
         assert "Do not call TeamCreate" not in additional
         assert "WARNING" not in additional
 
@@ -3473,7 +3473,7 @@ class TestSourceAwareness:
 
         assert "existing — resumed session" in additional
         assert "Do not call TeamCreate" in additional
-        assert "pact-aabb1122" in additional
+        assert "session-aabb1122" in additional
         assert "paused state" in additional
         # Should NOT have recovery instructions for context resets
         assert "compact-summary.txt" not in additional
@@ -3581,7 +3581,7 @@ class TestSourceAwareness:
             monkeypatch, tmp_path, source="resume", team_exists=False
         )
 
-        assert 'TeamCreate(team_name="pact-aabb1122")' in additional
+        assert "auto-created by the platform for this session" in additional
         # R2-B3: WARNING tone removed for known-source + no-team case.
         assert "WARNING" not in additional
         assert 'creating fresh team' in additional
@@ -3598,7 +3598,7 @@ class TestSourceAwareness:
             monkeypatch, tmp_path, source="compact", team_exists=False
         )
 
-        assert 'TeamCreate(team_name="pact-aabb1122")' in additional
+        assert "auto-created by the platform for this session" in additional
         assert "WARNING" not in additional
         assert 'creating fresh team' in additional
         # 4-sentence directive verbatim.
@@ -3613,7 +3613,7 @@ class TestSourceAwareness:
             monkeypatch, tmp_path, source="clear", team_exists=False
         )
 
-        assert 'TeamCreate(team_name="pact-aabb1122")' in additional
+        assert "auto-created by the platform for this session" in additional
         assert "WARNING" not in additional
         assert 'creating fresh team' in additional
         # 4-sentence directive verbatim.
@@ -3690,7 +3690,7 @@ class TestSourceAwareness:
         assert mock_symlinks.called
         output = json.loads(mock_stdout.getvalue())
         additional = output["hookSpecificOutput"]["additionalContext"]
-        assert 'TeamCreate(team_name="pact-aabb1122")' in additional
+        assert "auto-created by the platform for this session" in additional
         assert "POST-COMPACTION" not in additional
         assert "CONTEXT CLEARED" not in additional
 
@@ -3718,7 +3718,7 @@ class TestSourceAwareness:
             monkeypatch, tmp_path, source="unknown_value", team_exists=False
         )
 
-        assert 'TeamCreate(team_name="pact-aabb1122")' in additional
+        assert "auto-created by the platform for this session" in additional
         assert "WARNING" in additional
         # 4-sentence directive verbatim.
         assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
@@ -3761,7 +3761,7 @@ class TestTeamCreateStringFreshSession:
         additional, _, _ = _run_session_init_for_path(
             monkeypatch, tmp_path, source="startup", team_exists=False
         )
-        assert 'TeamCreate(team_name="pact-aabb1122")' in additional
+        assert "auto-created by the platform for this session" in additional
 
     def test_blocks_premature_action(self, monkeypatch, tmp_path):
         """The fresh prelude must instruct the team-lead not to act before bootstrap."""
@@ -3769,7 +3769,7 @@ class TestTeamCreateStringFreshSession:
             monkeypatch, tmp_path, source="startup", team_exists=False
         )
         assert "Do not read files" in additional
-        assert "bootstrap and team creation are complete" in additional
+        assert "until bootstrap is complete" in additional
 
     def test_does_not_contain_old_conditional_directive(self, monkeypatch, tmp_path):
         """The #444 unconditional directive must fully replace the old conditional.
@@ -3823,7 +3823,7 @@ class TestTeamReuseStringResumedSession:
         additional, _, _ = _run_session_init_for_path(
             monkeypatch, tmp_path, source="resume", team_exists=True
         )
-        assert 'TeamCreate(team_name="pact-aabb1122")' not in additional
+        assert "auto-created by the platform" not in additional
 
 
 class TestHappyPathOutputInvariant:
@@ -3946,7 +3946,7 @@ class TestBuildSafetyNetContext:
         result = _build_safety_net_context(None)
 
         assert "NOT GENERATED" in result
-        assert "TeamCreate" in result
+        assert "platform auto-creates the session team" in result
 
     def test_with_team_starts_with_pact_role_marker(self):
         """With a team_name the string must still start with the PACT ROLE marker at byte 0."""
@@ -4397,7 +4397,7 @@ class TestMainExceptionSafetyNet:
 
         # The team name captured before the exception must be in the safety net
         # so the team-lead can reuse it rather than creating a second team.
-        assert "pact-aabb1122" in additional
+        assert "session-aabb1122" in additional
         assert "partially failed" in additional
         assert "NOT GENERATED" not in additional, (
             "team_name was captured before the exception — safety net must "
@@ -4642,7 +4642,7 @@ class TestSessionInitCompactPhantomWorkflow:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir = tmp_path / ".claude" / "teams" / "session-aabb1122"
         team_dir.mkdir(parents=True, exist_ok=True)
         (team_dir / "config.json").write_text('{"members": []}')
 
@@ -4703,7 +4703,7 @@ class TestSessionInitCompactPhantomWorkflow:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir = tmp_path / ".claude" / "teams" / "session-aabb1122"
         team_dir.mkdir(parents=True, exist_ok=True)
         (team_dir / "config.json").write_text('{"members": []}')
 
@@ -4756,7 +4756,7 @@ class TestSessionInitCompactBranchExceptions:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir = tmp_path / ".claude" / "teams" / "session-aabb1122"
         team_dir.mkdir(parents=True, exist_ok=True)
         (team_dir / "config.json").write_text('{"members": []}')
 
@@ -4842,12 +4842,12 @@ class TestSessionInitCompactBranchExceptions:
         from session_init import main
 
         session_id = "aabb1122-0000-0000-0000-000000000000"
-        team_name = "pact-aabb1122"
+        team_name = "session-aabb1122"
         pact_context(session_id=session_id, team_name=team_name)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir = tmp_path / ".claude" / "teams" / "session-aabb1122"
         team_dir.mkdir(parents=True, exist_ok=True)
         (team_dir / "config.json").write_text('{"members": []}')
 
@@ -4926,7 +4926,7 @@ class TestSessionInitCompactBranchExceptions:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir = tmp_path / ".claude" / "teams" / "session-aabb1122"
         team_dir.mkdir(parents=True, exist_ok=True)
         (team_dir / "config.json").write_text('{"members": []}')
 
@@ -4975,7 +4975,7 @@ class TestSessionInitDirectiveAcrossAllSources:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir = tmp_path / ".claude" / "teams" / "session-aabb1122"
         team_dir.mkdir(parents=True, exist_ok=True)
         (team_dir / "config.json").write_text('{"members": []}')
 
@@ -5051,12 +5051,12 @@ class TestSessionInitDirectiveAcrossAllSources:
         from session_init import main
 
         session_id = "aabb1122-0000-0000-0000-000000000000"
-        team_name = "pact-aabb1122"
+        team_name = "session-aabb1122"
         pact_context(session_id=session_id, team_name=team_name)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir = tmp_path / ".claude" / "teams" / "session-aabb1122"
         team_dir.mkdir(parents=True, exist_ok=True)
         (team_dir / "config.json").write_text('{"members": []}')
 

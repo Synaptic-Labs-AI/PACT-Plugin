@@ -390,26 +390,31 @@ def _is_canonical_secretary_spawn(input_data: dict) -> bool:
     """Audit anchor: canonical secretary spawn carve-out for #789.
 
     True iff this Agent call is the canonical bootstrap-secretary spawn
-    that commands/bootstrap.md Step 2 prescribes. ALL FIVE BINDINGS must
-    match for the carve-out to fire:
+    that commands/bootstrap.md Step 2 prescribes. Bindings 1/2/3/5 must all
+    match for the carve-out to fire (binding 4 was dropped for #979 — see
+    below):
 
       1. tool_name == "Agent"
       2. tool_input.subagent_type == "pact-secretary" (_SECRETARY_AGENT_TYPE)
       3. tool_input.name == "secretary" (_SECRETARY_NAME, canonical literal)
-      4. tool_input.team_name == pact_context.get_team_name()
-         (note: get_team_name() returns the disk team_name lowercased per
-         pact_context.py:256; the binding is case-INsensitive against the
-         disk value. Current session-slug naming is lowercase-by-
-         construction, so this normalization is unreachable in practice.)
-      5. NOT _team_has_secretary(team_name) — one-shot semantic; flips to
-         False the moment the spawned secretary lands in members[].
+      4. (DROPPED, #979) formerly tool_input.team_name == get_team_name().
+         Claude Code v2.1.178+ ignores the Agent(team_name=) arg, so an
+         equality check against it would wrongly DENY the canonical secretary
+         spawn once the SSOT moved to the platform's "session-<id8>" name
+         (the orchestrator may still pass a stale arg the platform discards).
+         The carve-out stays tight via bindings 2/3 (exact subagent_type +
+         name literals) and binding 5 (one-shot, gated on the REAL team dir).
+      5. NOT _team_has_secretary(get_team_name()) — one-shot semantic; flips
+         to False the moment the spawned secretary lands in members[]. Reads
+         the REAL session team dir (expected_team), which the empty-team
+         fail-closed below guarantees is a non-empty path segment.
 
-    Binding (1) is a hardcoded literal. Bindings (2) and (3) compare
-    against module constants, not tool_input-derived values. Binding (4)
-    compares against a disk-derived value (session context), closing
-    cross-team injection. Binding (5) is a disk read of the team config
-    members[]; True after first successful dispatch, so the carve-out
-    fires at most once per session.
+    Binding (1) is a hardcoded literal. Bindings (2) and (3) compare against
+    module constants, not tool_input-derived values. Binding (5) is a disk
+    read of the team config members[]; True after first successful dispatch,
+    so the carve-out fires at most once per session. With binding 4 dropped,
+    the carve-out reads no tool_input-derived team value — the
+    secretary-presence check resolves against the SSOT team dir only.
 
     On ANY disk-read exception, returns False — caller falls through to
     the existing _BLOCKED_TOOLS deny path so the user sees the canonical
@@ -434,8 +439,11 @@ def _is_canonical_secretary_spawn(input_data: dict) -> bool:
             return False
         if tool_input.get("name") != _SECRETARY_NAME:
             return False
+        # Binding 4 dropped (#979): no comparison against the platform-ignored
+        # tool_input.team_name. The empty-team fail-closed is RETAINED because
+        # binding 5 below reads teams/{expected_team}/config.json.
         expected_team = pact_context.get_team_name()
-        if not expected_team or tool_input.get("team_name") != expected_team:
+        if not expected_team:
             return False
         # Local-import: reciprocal-cycle prevention. bootstrap_marker_writer
         # imports is_marker_set from this module at its OWN top-level; a

@@ -318,30 +318,39 @@ def generate_team_name(input_data: dict) -> str:
     Generate a session-unique PACT team name.
 
     Uses the first 8 characters of the session_id from the SessionStart hook
-    stdin JSON to create a unique team name like "pact-0001639f". Falls back
+    stdin JSON to create a unique team name like "session-0001639f". Falls back
     to a random 8-character hex suffix if session_id is not in stdin.
 
     Args:
         input_data: Parsed JSON from stdin (SessionStart hook input)
 
     Returns:
-        Team name string like "pact-0001639f"
+        Team name string like "session-0001639f"
     """
-    # INVARIANT: all team directory names MUST be produced by this
-    # function. Output is lowercase ASCII hex ([a-f0-9-]) prefixed with
-    # "pact-" — the session_end reaper's exact-match skip predicate
-    # (cleanup_old_teams) and the union skip-set for cleanup_old_tasks
-    # rely on this shape. A writer that creates ~/.claude/teams/ dirs
-    # with characters outside this charset (uppercase, unicode,
-    # separators) could bypass the skip predicate and be reaped on the
-    # NEXT session_end.
+    # INVARIANT: all PACT-minted team directory names MUST be produced by
+    # this function. Output is lowercase ASCII hex ([a-f0-9-]) prefixed
+    # with "session-" to ADOPT the platform's implicit per-session team:
+    # Claude Code v2.1.178+ auto-creates exactly one team per session named
+    # "session-" + session_id[:8] (at ~/.claude/teams/session-<id8>/) and
+    # IGNORES the Agent(team_name=) arg. Deriving the same name makes
+    # get_team_name() resolve the REAL platform store, and every
+    # team-scoped consumer reads through that single minted value.
+    #
+    # Reaper coupling: the cleanup_old_tasks skip-set keys off
+    # get_team_name(), so it protects the current session's tasks dir
+    # (~/.claude/tasks/session-<id8>/). The cleanup_old_teams teams-reaper
+    # stays "^pact-"-scoped and therefore does NOT reap "session-" dirs at
+    # all — the platform owns teardown of its own session-* namespace, so
+    # this prefix change cannot expose the live team dir to reaping. The
+    # [a-f0-9-] charset constraint is retained because the tasks skip-set's
+    # allowlist still relies on it.
     raw_id = input_data.get("session_id")
     session_id = str(raw_id) if raw_id else ""
     if session_id:
         suffix = re.sub(r"[^a-f0-9-]", "", session_id[:8]) or secrets.token_hex(4)
     else:
         suffix = secrets.token_hex(4)
-    return f"pact-{suffix}"
+    return f"session-{suffix}"
 
 
 def _is_unknown_or_missing_session(raw_id: object) -> bool:
@@ -680,7 +689,7 @@ def build_context_cache(
     uniform rule replaced the old ``write_disk`` flag — see ``persist_context``.
 
     Args:
-        team_name: The generated team name (e.g., "pact-0001639f")
+        team_name: The generated team name (e.g., "session-0001639f")
         session_id: Session ID from stdin JSON or env var
         project_dir: CLAUDE_PROJECT_DIR value
         plugin_root: CLAUDE_PLUGIN_ROOT value (path to installed plugin directory)
@@ -800,7 +809,7 @@ def write_context(
     full build+cache+persist and keeps this unchanged public contract.
 
     Args:
-        team_name: The generated team name (e.g., "pact-0001639f")
+        team_name: The generated team name (e.g., "session-0001639f")
         session_id: Session ID from stdin JSON or env var
         project_dir: CLAUDE_PROJECT_DIR value
         plugin_root: CLAUDE_PLUGIN_ROOT value (path to installed plugin directory)

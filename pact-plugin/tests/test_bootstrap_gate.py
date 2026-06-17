@@ -696,18 +696,19 @@ class TestCanonicalSecretarySpawnCarveOut:
     secretary spawn populates the team members[] entry that the marker
     writer requires before writing the marker).
 
-    Five conjunctive bindings (tool_name, subagent_type, name, team_name,
-    NOT _team_has_secretary). Each test below mentally reverts ONE
-    binding and confirms the carve-out closes (predicate returns False
-    → caller returns _DENY_REASON).
+    Four conjunctive bindings (tool_name, subagent_type, name,
+    NOT _team_has_secretary). (#979: binding-4 — the tool_input.team_name
+    equality — was dropped; the Agent(team_name=) arg is platform-ignored.)
+    Each test below mentally reverts ONE binding and confirms the carve-out
+    closes (predicate returns False → caller returns _DENY_REASON).
     """
 
-    # --- Positive case: all five bindings match → allow ---
+    # --- Positive case: all bindings match → allow ---
 
     def test_secretary_spawn_allowed_when_members_lacks_secretary(
         self, monkeypatch, tmp_path,
     ):
-        """All 5 bindings match + no secretary in members[] → allow."""
+        """All bindings match + no secretary in members[] → allow."""
         from bootstrap_gate import _check_tool_allowed
 
         _setup_pact_session_with_team(
@@ -754,15 +755,15 @@ class TestCanonicalSecretarySpawnCarveOut:
 
     # --- Cross-team injection → predicate False → deny ---
 
-    def test_secretary_spawn_with_wrong_team_blocked(self, monkeypatch, tmp_path):
-        """tool_input.team_name != get_team_name() → predicate False → deny.
-
-        Cross-team injection defense: tool_input is LLM-controlled and a
-        prompt-injected dispatch could claim a different team_name to
-        ride the carve-out. The binding compares against the disk-derived
-        session context, not against tool_input.
+    def test_secretary_spawn_ignores_caller_team_name(self, monkeypatch, tmp_path):
+        """#979: binding-4 DROPPED — the carve-out no longer compares the
+        LLM-controlled tool_input.team_name. The Agent(team_name=) arg is
+        platform-ignored, so a spawn passing a DIFFERENT team_name still rides
+        the carve-out (the secretary-presence check resolves via the SSOT
+        get_team_name(), not the spawn arg). Bindings 2/3 (subagent_type + name
+        literals) and 5 (one-shot, gated on the real team dir) keep it tight.
         """
-        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+        from bootstrap_gate import _check_tool_allowed
 
         _setup_pact_session_with_team(
             monkeypatch, tmp_path, team_name="t1", members=[],
@@ -771,7 +772,7 @@ class TestCanonicalSecretarySpawnCarveOut:
         result = _check_tool_allowed(_canonical_secretary_input(
             team_name="other-team",
         ))
-        assert result == _DENY_REASON
+        assert result is None
 
     # --- One-shot closure: secretary already in members[] → deny ---
 
@@ -2937,16 +2938,17 @@ class TestCanonicalSecretarySpawnAdversarial:
 
     @pytest.mark.parametrize(
         "missing_key",
-        ["subagent_type", "name", "team_name"],
+        ["subagent_type", "name"],
     )
     def test_tool_input_missing_required_key_denies(
         self, monkeypatch, tmp_path, missing_key,
     ):
-        """tool_input missing one of (subagent_type, name, team_name) →
-        predicate returns False → deny.
+        """tool_input missing one of (subagent_type, name) → predicate
+        returns False → deny. (#979: team_name dropped from the binding set —
+        the Agent(team_name=) arg is platform-ignored.)
 
         `.get(missing_key)` returns None, which compares unequal to the
-        expected literal/disk-derived value. Mental revert: replacing
+        expected literal value. Mental revert: replacing
         the binding's `!=` with `not ==` would not change behavior; but
         replacing `_SECRETARY_NAME` with None (silently dropping the
         constant) would make missing-name spawns ALLOW. Defends that
@@ -2983,8 +2985,6 @@ class TestCanonicalSecretarySpawnAdversarial:
             ("name", False),
             ("name", 0),
             ("name", {"value": "secretary"}),
-            ("team_name", []),
-            ("team_name", 3.14),
         ],
     )
     def test_wrong_value_type_on_binding_denies(
@@ -2992,6 +2992,8 @@ class TestCanonicalSecretarySpawnAdversarial:
     ):
         """Wrong value TYPE on a binding (int/None/list/dict where str
         is expected) → != comparison against the string constant → deny.
+        (#979: team_name removed from the binding set — its type is no
+        longer checked since the arg is platform-ignored.)
 
         Confirms the carve-out doesn't accidentally truthy-coerce
         non-string values (e.g., `1 == "secretary"` is False — good).
@@ -3133,52 +3135,6 @@ class TestCanonicalSecretarySpawnAdversarial:
 
         result = _check_tool_allowed(_canonical_secretary_input(
             team_name="t1", overrides={"subagent_type": wrong_type},
-        ))
-        assert result == _DENY_REASON
-
-    @pytest.mark.parametrize(
-        "wrong_team",
-        [
-            "T1",
-            "t1 ",
-            " t1",
-            "t1\n",
-            "t1\x00",
-            "t１",
-            "t1-",
-            "",
-        ],
-        ids=[
-            "uppercase",
-            "trailing_space",
-            "leading_space",
-            "trailing_newline",
-            "embedded_null",
-            "fullwidth_digit_one",
-            "trailing_dash",
-            "empty_string",
-        ],
-    )
-    def test_team_name_binding_is_byte_exact(
-        self, monkeypatch, tmp_path, wrong_team,
-    ):
-        """team_name binding compares tool_input.team_name == disk-derived
-        get_team_name(). BYTE-EXACT — no normalization. Case-sensitivity
-        is intentional per spec B1 (tight equality binding).
-
-        The fullwidth_digit_one row (U+FF11) is a Unicode digit that
-        renders visually like ASCII '1' but is a different code point.
-        Tests defend against any future "helpful" Unicode normalization
-        that would treat lookalikes as equivalent.
-        """
-        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
-
-        _setup_pact_session_with_team(
-            monkeypatch, tmp_path, team_name="t1", members=[],
-        )
-
-        result = _check_tool_allowed(_canonical_secretary_input(
-            team_name=wrong_team,
         ))
         assert result == _DENY_REASON
 
@@ -3452,7 +3408,8 @@ class TestCanonicalSecretarySpawnAdversarial:
         [
             ("wrong_subagent_type", {"subagent_type": "pact-architect"}, None),
             ("wrong_name", {"name": "secretari"}, None),
-            ("wrong_team", {"team_name": "other-team"}, None),
+            # (#979: "wrong_team" scenario removed — binding-4 dropped, so a
+            # mismatched team_name no longer denies the carve-out.)
             ("missing_subagent_type", None, "missing_subagent_type"),
             ("oserror_in_team_has_secretary", None, "oserror"),
             ("valueerror_in_team_has_secretary", None, "valueerror"),
