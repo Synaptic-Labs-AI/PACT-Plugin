@@ -857,9 +857,14 @@ def heal_context_if_missing(input_data: dict) -> bool:
          clobbered (different failure class, preserve the evidence; read
          errors are already stderr-logged by get_pact_context)
       3. is_lead(input_data) — a teammate/plain frame must never create
-         or clobber the lead's on-disk file (#877). UserPromptSubmit has
-         no teammate fire path; the residual non-lead frame is a plain
-         session (agent_type absent) → no heal, exactly as intended
+         or clobber the lead's on-disk file (#877). Callable on BOTH the
+         UserPromptSubmit and the PostToolUse(Agent) frame (#975 registers
+         bootstrap_marker_writer under both, and _try_write_marker invokes
+         this heal first); is_lead is PURE and event-agnostic (reads ONLY
+         the top-level agent_type), so binding 3 holds identically on either
+         event — a teammate/plain frame (agent_type a teammate spelling or
+         absent) → no heal regardless of which event fired, exactly as
+         intended
       4. NOT _is_unknown_or_missing_session(input_data.get("session_id"))
          — a missing/sentinel id would make generate_team_name go RANDOM
          (fabricated team name) and create an unreapable session dir;
@@ -888,7 +893,8 @@ def heal_context_if_missing(input_data: dict) -> bool:
     convert a degraded session into a crashed hook).
 
     Args:
-        input_data: Parsed stdin JSON from the hook (UserPromptSubmit frame).
+        input_data: Parsed stdin JSON from the hook (UserPromptSubmit or
+            PostToolUse(Agent) frame — #975).
 
     Returns:
         True iff the context file was absent and is now healed on disk.

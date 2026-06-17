@@ -154,6 +154,62 @@ def _setup_session(monkeypatch, tmp_path, *, with_team_config=False,
     return session_dir, plugin_root
 
 
+def _make_posttooluse_agent_input(
+    session_id=_SESSION_ID,
+    agent_type="pact-orchestrator",
+    agent_id="",
+    tool_name="Agent",
+):
+    """Build a PostToolUse(Agent) hook input dict (#975 Option A).
+
+    Mirrors the role-discriminator fields of the captured lead PostToolUse
+    frame (tests/fixtures/role_frames.py::lead_posttooluse_taskupdate_completed):
+    top-level ``agent_type`` (lead spelling), ``hook_event_name == "PostToolUse"``,
+    ``session_id``, and a ``tool_response`` key (present on every PostToolUse
+    frame).
+
+    On ``agent_id``: the REAL captured lead PostToolUse frame carries NO
+    top-level ``agent_id`` key (its _meta records ``agent_id_top_level: null``);
+    pass ``agent_id=None`` to reproduce that captured shape exactly. The default
+    here is the EMPTY STRING — NOT the captured value, but an additional
+    defensive variant (record 0b8d4fd0 flags empty-string agent_id as a §10.6
+    gotcha). Either way the marker WRITE decision is unaffected: it reads
+    ``agent_type`` via is_lead, never ``agent_id``. TestPostToolUseGotchas
+    parametrizes over {'', None, populated} so both the captured-omission and
+    the empty-string cases are pinned.
+
+    The only captured PostToolUse frame is a TaskUpdate frame, so this synthetic
+    frame closes the Agent-frame-vs-TaskUpdate-frame residual (§10.6 / Coverage
+    item 6). It is structurally faithful because the marker WRITE decision is
+    tool_name-AGNOSTIC: main() -> _try_write_marker reads only agent_type (via
+    is_lead), session_id, and members[] on disk — never tool_name or agent_id.
+    The synthetic-vs-real fidelity ceiling (a real Agent-spawn-return frame may
+    differ in fields this hook ignores — e.g. it omits agent_id and adds cwd /
+    duration_ms / effort / permission_mode / tool_use_id / transcript_path, all
+    unread by this hook) is a documented unit-level bound; true end-to-end
+    effectiveness is deferred to the §9 post-merge fresh-session probe.
+
+    Pass ``agent_type=None`` for a non-lead/plain frame, or a teammate spelling
+    (e.g. "pact-backend-coder") to exercise the is_lead bypass. Pass
+    ``agent_id=None`` to omit the field entirely (the captured-frame shape; the
+    default '' is the defensive empty-string variant).
+    """
+    data = {
+        "hook_event_name": "PostToolUse",
+        "session_id": session_id,
+        "tool_name": tool_name,
+        # tool_input/tool_response are present on every PostToolUse frame; the
+        # writer reads neither, but their presence keeps the frame realistic.
+        "tool_input": {"description": "spawn", "subagent_type": "pact-secretary"},
+        "tool_response": {"content": [{"type": "text", "text": "spawned"}]},
+    }
+    if agent_type is not None:
+        data["agent_type"] = agent_type
+    if agent_id is not None:
+        data["agent_id"] = agent_id
+    return data
+
+
 def _run_main(input_data, capsys):
     """Run bootstrap_marker_writer.main() and return (exit_code, stdout_json)."""
     from bootstrap_marker_writer import main
@@ -528,16 +584,27 @@ class TestCapturedFixtureRoundTrip:
 
 
 class TestAuditAnchorCompliance:
-    """Architect §8.12. Every JSON output path — the module-load advisory
+    """Architect §5.4. Every JSON output path — the module-load advisory
     AND the suppressOutput envelope — carries
-    hookSpecificOutput.hookEventName == "UserPromptSubmit". Missing the
-    field silently fails open at the platform layer (per pinned context).
-    The shape pin in test_suppress_output_carries_hook_event_name covers
-    the suppress envelope; this test covers the advisory path."""
+    hookSpecificOutput.hookEventName echoing the ACTUAL firing event. Missing
+    or stale hookEventName silently fails open at the platform layer (per
+    pinned context). Post-#975 the event name is DYNAMIC (resolved from the
+    frame's hook_event_name via _resolve_event_name), so these pins assert the
+    dual-event behavior — a PostToolUse fire emits "PostToolUse", a
+    UserPromptSubmit fire emits "UserPromptSubmit" — plus the VALID safe
+    default ("UserPromptSubmit") when the frame is genuinely unavailable."""
 
-    def test_module_load_advisory_carries_hook_event_name(self, capsys):
+    def test_module_load_advisory_carries_hook_event_name(
+        self, capsys, monkeypatch,
+    ):
+        """The import-time advisory best-effort pre-parses stdin for the firing
+        event (#975 §5.3(A)); with no JSON on stdin it falls back to the VALID
+        safe default "UserPromptSubmit". stdin is isolated to an empty stream so
+        the default path is exercised deterministically (capsys does not control
+        stdin)."""
         from bootstrap_marker_writer import _emit_load_failure_advisory
 
+        monkeypatch.setattr(sys, "stdin", io.StringIO(""))
         with pytest.raises(SystemExit) as exc_info:
             _emit_load_failure_advisory("module imports", RuntimeError("boom"))
         captured = capsys.readouterr()
@@ -548,40 +615,77 @@ class TestAuditAnchorCompliance:
         assert "additionalContext" in hso
         assert "bootstrap_marker_writer" in hso["additionalContext"]
 
-    def test_suppress_output_carries_hook_event_name(self):
-        """Every suppressOutput emit path carries the audit anchor —
-        the constant is the single source so all 3 emit sites in
-        bootstrap_marker_writer.main inherit the field."""
-        from bootstrap_marker_writer import _SUPPRESS_OUTPUT
+    @pytest.mark.parametrize(
+        "stdin_event,expected",
+        [
+            ("PostToolUse", "PostToolUse"),
+            ("UserPromptSubmit", "UserPromptSubmit"),
+        ],
+    )
+    def test_module_load_advisory_echoes_frame_event(
+        self, capsys, monkeypatch, stdin_event, expected,
+    ):
+        """When the advisory CAN pre-parse stdin, it echoes the frame's actual
+        firing event (#975 §5.3(A)) — covering both PostToolUse and
+        UserPromptSubmit so a PostToolUse module-load failure is not mislabeled
+        "UserPromptSubmit"."""
+        from bootstrap_marker_writer import _emit_load_failure_advisory
 
-        out = json.loads(_SUPPRESS_OUTPUT)
+        frame = json.dumps({"hook_event_name": stdin_event})
+        monkeypatch.setattr(sys, "stdin", io.StringIO(frame))
+        with pytest.raises(SystemExit) as exc_info:
+            _emit_load_failure_advisory("module imports", RuntimeError("boom"))
+        captured = capsys.readouterr()
+        assert exc_info.value.code == 0
+        out = json.loads(captured.out.strip())
+        assert out["hookSpecificOutput"]["hookEventName"] == expected
+
+    @pytest.mark.parametrize(
+        "event", ["UserPromptSubmit", "PostToolUse"],
+    )
+    def test_suppress_output_carries_hook_event_name(self, event):
+        """The suppressOutput envelope echoes the resolved firing event.
+        Post-#975 the _SUPPRESS_OUTPUT module constant is the _suppress_output
+        function so every main() emit site builds the envelope with the actual
+        event — covering both events here pins that PostToolUse is echoed, not
+        a hard-coded "UserPromptSubmit"."""
+        from bootstrap_marker_writer import _suppress_output
+
+        out = json.loads(_suppress_output(event))
         assert out["suppressOutput"] is True
-        assert out["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+        assert out["hookSpecificOutput"]["hookEventName"] == event
 
+    @pytest.mark.parametrize("event", ["UserPromptSubmit", "PostToolUse"])
     @pytest.mark.parametrize("shape", ["advisory", "suppress"])
-    def test_every_emit_shape_carries_hook_event_name(self, shape, capsys):
-        """Architect §8.12 parametrized over both distinct emit shapes.
+    def test_every_emit_shape_carries_hook_event_name(
+        self, shape, event, capsys, monkeypatch,
+    ):
+        """Architect §5.4 parametrized over (shape × event).
 
         The hook produces exactly two JSON output shapes:
 
-        - "advisory": load-failure path via _emit_load_failure_advisory
-          (line 61-72) — hookSpecificOutput with additionalContext.
-        - "suppress": every other exit path via the _SUPPRESS_OUTPUT
-          constant (line 98-101) — hookSpecificOutput with no other keys.
+        - "advisory": load-failure path via _emit_load_failure_advisory —
+          hookSpecificOutput with additionalContext; resolves the event from a
+          best-effort stdin pre-parse (#975 §5.3(A)).
+        - "suppress": every other exit path via _suppress_output(event) —
+          hookSpecificOutput with no other keys.
 
-        Both MUST carry hookSpecificOutput.hookEventName == "UserPromptSubmit"
-        — missing the field silently fails open at the platform layer per
-        the pinned context. Parametrizing pins the invariant that no
-        future emit path can be added without the audit anchor."""
+        Both MUST carry hookSpecificOutput.hookEventName echoing the GIVEN
+        firing event — missing/stale silently fails open at the platform layer
+        per the pinned context. Parametrizing over both shapes AND both events
+        pins that no emit path can be added without echoing the actual event
+        (the #975 dual-event AUDIT-ANCHOR), not just a hard-coded value."""
         if shape == "advisory":
             from bootstrap_marker_writer import _emit_load_failure_advisory
+            frame = json.dumps({"hook_event_name": event})
+            monkeypatch.setattr(sys, "stdin", io.StringIO(frame))
             with pytest.raises(SystemExit):
                 _emit_load_failure_advisory("module imports", RuntimeError("x"))
             captured = capsys.readouterr()
             out = json.loads(captured.out.strip())
         elif shape == "suppress":
-            from bootstrap_marker_writer import _SUPPRESS_OUTPUT
-            out = json.loads(_SUPPRESS_OUTPUT)
+            from bootstrap_marker_writer import _suppress_output
+            out = json.loads(_suppress_output(event))
         else:  # pragma: no cover
             pytest.fail(f"unknown shape param: {shape}")
 
@@ -590,8 +694,8 @@ class TestAuditAnchorCompliance:
             f"shape={shape} emit MUST carry hookSpecificOutput; missing "
             f"the field silently fails open at the platform layer."
         )
-        assert hso.get("hookEventName") == "UserPromptSubmit", (
-            f"shape={shape} emit MUST carry hookEventName=='UserPromptSubmit'; "
+        assert hso.get("hookEventName") == event, (
+            f"shape={shape} emit MUST echo hookEventName=={event!r}; "
             f"got {hso!r}"
         )
 
@@ -1608,4 +1712,686 @@ class TestConcurrentTwoHealerRace:
         marker = session_dir / BOOTSTRAP_MARKER_NAME
         assert not marker.exists(), (
             "two-healer race must never forge bootstrap completion"
+        )
+
+
+# =============================================================================
+# #975 Option A — PostToolUse(Agent) dual-event coverage (design §10).
+#
+# The marker writer is now registered under BOTH UserPromptSubmit (steady-state
+# turn-2+ self-heal) AND PostToolUse matched on Agent (stamps WITHIN the
+# bootstrapping turn). These tests drive a synthetic PostToolUse(Agent) frame
+# through main() to close the §10 coverage items the coder could only prove
+# structurally. The write DECISION is tool_name-agnostic — main() ->
+# _try_write_marker reads only agent_type (via is_lead), session_id, and
+# members[] on disk — so a synthetic Agent frame is structurally faithful for
+# this hook (the synthetic-vs-real fidelity ceiling is deferred to the §9
+# post-merge fresh-session probe; documented per coverage item 6).
+# =============================================================================
+
+
+class TestPostToolUseFailSafeNotFailOpen:
+    """§10.5 — the SACROSANCT invariant (release-blocker-grade).
+
+    A PostToolUse(Agent) fire with the secretary NOT yet in members[] (the
+    tmux-race / too-early-fire simulation) MUST refuse: NO marker written,
+    exit 0, suppressOutput. The writer NEVER stamps on the bare Agent-spawn
+    fact — it re-derives the precondition (secretary observed in members[] on
+    disk via the NAME-keyed _team_has_secretary) and degrades to a silent
+    no-op when unmet. This is "observe, never infer": the firing of the
+    PostToolUse(Agent) hook is the OCCASION to check, never the EVIDENCE that
+    bootstrap completed.
+
+    A failing or missing version of this test is a release blocker (design
+    §8 Risk-gate locus #1, §12 risk #2)."""
+
+    def test_secretary_absent_from_members_refuses_no_marker(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """members[] populated but WITHOUT a secretary entry → refuse.
+
+        This is the worst-case PostToolUse(Agent) fire: the platform ran the
+        Agent tool, but the entry it wrote is NOT the secretary (or the
+        secretary has not landed yet). The writer must NOT mistake the
+        Agent-spawn fact for bootstrap completion."""
+        members = [
+            {"id": "a-1", "name": "preparer"},
+            {"id": "a-2", "name": "backend-coder"},
+        ]
+        session_dir, _ = _setup_session(
+            monkeypatch, tmp_path, with_team_config=True, members=members,
+        )
+        code, out = _run_main(_make_posttooluse_agent_input(), capsys)
+        assert code == 0
+        # Echoes the ACTUAL firing event (AUDIT-ANCHOR) — PostToolUse, not the
+        # hard-coded UserPromptSubmit default.
+        assert out == {
+            "suppressOutput": True,
+            "hookSpecificOutput": {"hookEventName": "PostToolUse"},
+        }
+        assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists(), (
+            "SACROSANCT fail-safe: a PostToolUse(Agent) fire with no secretary "
+            "in members[] must NOT stamp the marker. Stamping here would forge "
+            "bootstrap completion off the bare spawn fact (fail-OPEN), the "
+            "exact failure mode #975's verify-and-refuse design forbids."
+        )
+
+    def test_empty_members_refuses_no_marker(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """members[] empty → refuse. The PostToolUse(Agent) hook fired but the
+        platform has not yet written ANY member; degrade to no-op (the marker
+        lands on a later fire or the UserPromptSubmit fallback)."""
+        session_dir, _ = _setup_session(
+            monkeypatch, tmp_path, with_team_config=True, members=[],
+        )
+        code, out = _run_main(_make_posttooluse_agent_input(), capsys)
+        assert code == 0
+        assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+        assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists()
+
+    def test_team_config_absent_refuses_no_marker(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """Team config absent entirely → refuse silently, no exception."""
+        session_dir, _ = _setup_session(
+            monkeypatch, tmp_path, with_team_config=False,
+        )
+        code, out = _run_main(_make_posttooluse_agent_input(), capsys)
+        assert code == 0
+        assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+        assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists()
+
+    def test_non_lead_agent_frame_refuses_even_with_secretary(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """A PostToolUse(Agent) fire carrying a TEAMMATE agent_type → refuse,
+        even though the secretary IS in members[]. The is_lead gate keys on
+        agent_type, so only the lead's Agent-spawn fire stamps the marker.
+
+        (In practice teammates have no Agent-spawn-fire path, but pinning the
+        is_lead gate on the PostToolUse frame guards against a future frame
+        that carries a teammate agent_type reaching this hook.)"""
+        members = [{"id": "a-1", "name": "secretary"}]
+        session_dir, _ = _setup_session(
+            monkeypatch, tmp_path, with_team_config=True, members=members,
+        )
+        code, out = _run_main(
+            _make_posttooluse_agent_input(agent_type="pact-backend-coder"),
+            capsys,
+        )
+        assert code == 0
+        assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists(), (
+            "is_lead gate: a teammate-agent_type PostToolUse(Agent) frame must "
+            "not stamp the marker even with the secretary present."
+        )
+
+
+class TestPostToolUseFailSafeEquivalence:
+    """§10.5 (review cycle 1, MINOR-2/3 + FUTURE-1) — pin the fail-safe
+    equivalence across the two firing events end-to-end.
+
+    The adversarial team-config shapes (malformed JSON, top-level non-object,
+    members-not-a-list, member-not-a-dict, member-without-name, non-string-name,
+    members-key-absent) are exercised end-to-end through main() on the
+    UserPromptSubmit frame (TestAdversarialTeamConfig via _make_input) and as
+    event-agnostic direct _team_has_secretary() calls — but were NOT driven
+    through main() on a PostToolUse(Agent) frame. The write decision IS
+    event-agnostic today (main() -> _try_write_marker never branches on the
+    firing event), so the equivalence holds; this class PINS it so a FUTURE
+    change that adds a PostToolUse-specific early branch cannot silently break
+    the SACROSANCT fail-safe on the new event without a RED test.
+
+    Every shape MUST: refuse (no marker on disk) + clean exit 0 + echo the
+    ACTUAL firing event ("PostToolUse", not the safe-default "UserPromptSubmit").
+    The echoed-event assertion is the half that's NEW on this frame — it pins
+    that the dynamic hookEventName resolution (AUDIT-ANCHOR) holds on the refuse
+    paths too, not just the write path."""
+
+    def _write_team_config(self, tmp_path, body):
+        team_dir = tmp_path / ".claude" / "teams" / _TEAM_NAME
+        team_dir.mkdir(parents=True, exist_ok=True)
+        (team_dir / "config.json").write_text(body, encoding="utf-8")
+
+    # (label, raw team_config.json body) — the malformed/secretary-absent shapes.
+    ADVERSARIAL_BODIES = [
+        ("malformed_json", "{ this is not json"),
+        ("non_object_top_level", '["not", "an", "object"]'),
+        ("members_not_a_list", json.dumps({"members": {"name": "secretary"}})),
+        ("member_not_a_dict", json.dumps({"members": ["str", 42, None]})),
+        ("member_without_name",
+         json.dumps({"members": [{"id": "a-1"},
+                                 {"id": "a-2", "agentType": "secretary"}]})),
+        ("member_name_non_string",
+         json.dumps({"members": [{"name": 12345}, {"name": ["secretary"]}]})),
+        ("members_key_absent", json.dumps({"name": _TEAM_NAME})),
+        ("members_empty", json.dumps({"members": []})),
+        ("members_no_secretary",
+         json.dumps({"members": [{"id": "a-1", "name": "preparer"},
+                                 {"id": "a-2", "name": "backend-coder"}]})),
+    ]
+
+    @pytest.mark.parametrize(
+        "label,body",
+        ADVERSARIAL_BODIES,
+        ids=[b[0] for b in ADVERSARIAL_BODIES],
+    )
+    def test_adversarial_team_config_refuses_on_posttooluse_frame(
+        self, monkeypatch, tmp_path, capsys, label, body,
+    ):
+        """Each malformed/secretary-absent team-config shape, driven through
+        main() on a PostToolUse(Agent) lead frame, refuses with no marker +
+        exit 0 + event=='PostToolUse'. Equivalence with the UserPromptSubmit
+        path (TestAdversarialTeamConfig) is thereby pinned on the new event."""
+        # _setup_session with no team config, then plant the adversarial body so
+        # the team-config-read surface (not just the absent-config path) runs.
+        session_dir, _ = _setup_session(
+            monkeypatch, tmp_path, with_team_config=False,
+        )
+        self._write_team_config(tmp_path, body)
+        import shared.pact_context as ctx_module
+        ctx_module._cache = None
+
+        code, out = _run_main(_make_posttooluse_agent_input(), capsys)
+        assert code == 0, f"shape={label}: must exit 0 (no crash)"
+        assert out == {
+            "suppressOutput": True,
+            "hookSpecificOutput": {"hookEventName": "PostToolUse"},
+        }, (
+            f"shape={label}: a PostToolUse(Agent) refuse path must suppress AND "
+            f"echo the actual firing event 'PostToolUse' (AUDIT-ANCHOR holds on "
+            f"refuse paths, not only the write path); got {out!r}"
+        )
+        assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists(), (
+            f"shape={label}: SACROSANCT fail-safe — no marker may land on a "
+            f"PostToolUse(Agent) fire under an adversarial/secretary-absent "
+            f"team_config. This pins the UserPromptSubmit-path equivalence on "
+            f"the new event so a future PTU-specific branch can't fail open."
+        )
+
+    def test_team_config_absent_refuses_on_posttooluse_frame(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """Team config file absent entirely (no team-config-read surface) on a
+        PostToolUse(Agent) frame → refuse, exit 0, event=='PostToolUse'.
+        Complements the adversarial-body cases above (which all HAVE a file)."""
+        session_dir, _ = _setup_session(
+            monkeypatch, tmp_path, with_team_config=False,
+        )
+        code, out = _run_main(_make_posttooluse_agent_input(), capsys)
+        assert code == 0
+        assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+        assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists()
+
+    def test_posttooluse_malformed_stdin_falls_back_to_safe_default(self, capsys):
+        """MINOR-3: when the PostToolUse fire's stdin is unparseable, main()
+        cannot recover the firing event, so it emits the VALID safe default
+        'UserPromptSubmit' (main():327-332). This is correct-by-design — the
+        event is genuinely unrecoverable from a malformed frame — and is pinned
+        here so the safe-default-on-unparseable-frame behavior is explicit for
+        the PostToolUse-intended fire, not only inferred from the unit
+        _resolve_event_name(None) assertions."""
+        from bootstrap_marker_writer import main
+
+        # Not-JSON on stdin: the frame (and thus its hook_event_name) is lost.
+        with patch("sys.stdin", io.StringIO("not-json-at-all")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        captured = capsys.readouterr()
+        assert exc_info.value.code == 0
+        out = json.loads(captured.out.strip())
+        assert out == {
+            "suppressOutput": True,
+            "hookSpecificOutput": {"hookEventName": "UserPromptSubmit"},
+        }, (
+            "a malformed-stdin fire (whatever the intended event) must fall "
+            "back to the VALID safe default 'UserPromptSubmit' — the event is "
+            "unrecoverable without a parsed frame, and a valid default keeps "
+            "the envelope platform-acceptable (never a silent rejection)."
+        )
+
+
+class TestPostToolUseEndToEndByteIdentity:
+    """§10.3 / §10.8 — END-TO-END write + cross-event byte-identity.
+
+    Coverage item 1: drive main() with a synthetic PostToolUse(Agent) lead
+    frame where the secretary IS in members[] on disk → assert the marker is
+    actually WRITTEN, and that it is BYTE-IDENTICAL to the marker the same
+    session would produce on a UserPromptSubmit fire.
+
+    Byte-identity is proven by writing BOTH markers in the SAME session
+    (identical session_id / plugin_root / plugin_version → identical digest
+    inputs) and comparing the on-disk bytes — NOT by recomputing an expected
+    value. This closes the coder's structural-only proof: it directly
+    demonstrates the firing event does not enter the digest (design §8)."""
+
+    def test_posttooluse_agent_writes_marker(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """Secretary present + lead PostToolUse(Agent) frame → marker written,
+        valid schema, correct sid."""
+        members = [
+            {"id": "a-1", "name": "secretary"},
+            {"id": "a-2", "name": "preparer"},
+        ]
+        session_dir, _ = _setup_session(
+            monkeypatch, tmp_path, with_team_config=True, members=members,
+        )
+        code, out = _run_main(_make_posttooluse_agent_input(), capsys)
+        assert code == 0
+        assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+        marker = session_dir / BOOTSTRAP_MARKER_NAME
+        assert marker.exists(), (
+            "PostToolUse(Agent) fire with secretary in members[] must stamp "
+            "the marker WITHIN the bootstrapping turn (#975 Option A)."
+        )
+        body = json.loads(marker.read_text(encoding="utf-8"))
+        assert body["v"] == MARKER_SCHEMA_VERSION
+        assert body["sid"] == _SESSION_ID
+        assert set(body.keys()) == {"v", "sid", "sig"}
+
+    def test_marker_byte_identical_across_events(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """The marker bytes produced via the PostToolUse(Agent) path equal the
+        bytes produced via the UserPromptSubmit path, for the SAME session.
+
+        Method: write via PostToolUse(Agent), capture bytes, delete the marker
+        and reset the context cache, then write via UserPromptSubmit and
+        capture bytes. Same session_dir + plugin_root + session_id → the only
+        thing that differs between the two runs is the firing event. Equal
+        bytes prove the event never enters the digest (design §8 byte-identity
+        contract)."""
+        import shared.pact_context as ctx_module
+
+        members = [{"id": "a-1", "name": "secretary"}]
+        session_dir, _ = _setup_session(
+            monkeypatch, tmp_path, with_team_config=True, members=members,
+        )
+        marker = session_dir / BOOTSTRAP_MARKER_NAME
+
+        # --- Write 1: PostToolUse(Agent) fire ---
+        code, out = _run_main(_make_posttooluse_agent_input(), capsys)
+        assert code == 0
+        assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+        assert marker.exists(), "PostToolUse path must write the marker"
+        ptu_bytes = marker.read_bytes()
+
+        # Reset to a clean marker-absent state for the second write. The
+        # context file/path are unchanged so digest inputs stay identical;
+        # only the firing event differs on the second run.
+        marker.unlink()
+        ctx_module._cache = None
+
+        # --- Write 2: UserPromptSubmit fire ---
+        code, out = _run_main(_make_input(), capsys)
+        assert code == 0
+        assert out["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+        assert marker.exists(), "UserPromptSubmit path must write the marker"
+        ups_bytes = marker.read_bytes()
+
+        assert ptu_bytes == ups_bytes, (
+            "marker bytes must be IDENTICAL regardless of firing event "
+            "(design §8): the firing event affects only the echoed "
+            "hookEventName envelope, never the marker digest. "
+            f"PostToolUse={ptu_bytes!r} UserPromptSubmit={ups_bytes!r}"
+        )
+
+
+class TestPostToolUseIdempotency:
+    """§10.4 — IDEMPOTENCY.
+
+    A second PostToolUse(Agent) fire with the marker already valid hits the
+    is_marker_set fast-path and no-ops: _write_marker is NOT called, the marker
+    bytes are unchanged, exit 0. After the bootstrapping turn every subsequent
+    Agent spawn hits this fast-path (design §3b — the general Agent matcher is
+    cheap because of this no-op)."""
+
+    def test_second_posttooluse_agent_fire_is_noop(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        import bootstrap_marker_writer as bmw
+
+        members = [{"id": "a-1", "name": "secretary"}]
+        session_dir, _ = _setup_session(
+            monkeypatch, tmp_path, with_team_config=True, members=members,
+        )
+        marker = session_dir / BOOTSTRAP_MARKER_NAME
+
+        # First fire writes the marker.
+        code, out = _run_main(_make_posttooluse_agent_input(), capsys)
+        assert code == 0
+        assert marker.exists()
+        before = marker.read_bytes()
+
+        # Reset the context cache so the second run re-reads from disk (same as
+        # a fresh hook process would), then spy on _write_marker.
+        import shared.pact_context as ctx_module
+        ctx_module._cache = None
+
+        write_calls = []
+        original_write = bmw._write_marker
+
+        def spy_write(*args, **kwargs):
+            write_calls.append((args, kwargs))
+            return original_write(*args, **kwargs)
+
+        monkeypatch.setattr(bmw, "_write_marker", spy_write)
+
+        # Second PostToolUse(Agent) fire (e.g. spawning the preparer) → no-op.
+        code, out = _run_main(_make_posttooluse_agent_input(), capsys)
+        assert code == 0
+        assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+        assert write_calls == [], (
+            "second PostToolUse(Agent) fire must hit the is_marker_set "
+            f"fast-path and NOT call _write_marker; got {len(write_calls)} "
+            "call(s). Every post-bootstrap Agent spawn no-ops here (§3b)."
+        )
+        assert marker.read_bytes() == before, "marker bytes must be unchanged"
+
+
+class TestPostToolUseGotchas:
+    """§10.6 — agent_id and Agent-internal-name gotchas (record 0b8d4fd0).
+
+    On a lead-side PostToolUse(Agent) frame, the top-level agent_id is the
+    EMPTY STRING (the captured TaskUpdate frame shows agent_id null/absent).
+    The role decision is keyed on agent_type via is_lead, NOT agent_id, so an
+    empty/absent agent_id must NOT block a legitimate stamp, and a non-secretary
+    Agent-internal-name spawn must NOT cause a spurious stamp or crash."""
+
+    @pytest.mark.parametrize("agent_id", ["", None, "agent-xyz-123"])
+    def test_agent_id_variants_do_not_block_legitimate_stamp(
+        self, monkeypatch, tmp_path, capsys, agent_id,
+    ):
+        """agent_id empty-string (lead-side default), absent, or populated —
+        none affect the write decision: with a lead agent_type + secretary in
+        members[], the marker is stamped regardless. Pins that role is keyed on
+        agent_type (is_lead), not agent_id."""
+        members = [{"id": "a-1", "name": "secretary"}]
+        session_dir, _ = _setup_session(
+            monkeypatch, tmp_path, with_team_config=True, members=members,
+        )
+        frame = _make_posttooluse_agent_input(agent_id=agent_id)
+        code, out = _run_main(frame, capsys)
+        assert code == 0
+        assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+        assert (session_dir / BOOTSTRAP_MARKER_NAME).exists(), (
+            f"agent_id={agent_id!r} must not block the stamp — the role "
+            "decision keys on agent_type via is_lead, never agent_id (§10.6)."
+        )
+
+    def test_empty_agent_id_does_not_force_a_stamp_without_secretary(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """The empty-string agent_id is NOT itself treated as a signal: with
+        the secretary ABSENT, an empty agent_id still refuses. (Guards against
+        a future reader mistaking agent_id=='' for a lead/bootstrap signal.)"""
+        members = [{"id": "a-1", "name": "preparer"}]
+        session_dir, _ = _setup_session(
+            monkeypatch, tmp_path, with_team_config=True, members=members,
+        )
+        code, out = _run_main(
+            _make_posttooluse_agent_input(agent_id=""), capsys,
+        )
+        assert code == 0
+        assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists()
+
+    def test_non_secretary_agent_spawn_does_not_stamp(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """A PostToolUse(Agent) fire for a NON-secretary spawn while the
+        secretary is not yet present → no stamp. The tool_input names a
+        non-secretary subagent; the writer ignores tool_input entirely and
+        re-derives from members[], which lacks a secretary → refuse.
+
+        This pins that the writer does not infer 'a secretary spawn happened'
+        from the Agent call's arguments — it only observes members[] on disk."""
+        members = [{"id": "a-1", "name": "preparer"}]
+        session_dir, _ = _setup_session(
+            monkeypatch, tmp_path, with_team_config=True, members=members,
+        )
+        frame = _make_posttooluse_agent_input()
+        # tool_input names a NON-secretary subagent — the writer must ignore it.
+        frame["tool_input"] = {
+            "description": "spawn coder", "subagent_type": "pact-backend-coder",
+        }
+        code, out = _run_main(frame, capsys)
+        assert code == 0
+        assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists(), (
+            "the writer must not infer bootstrap completion from the Agent "
+            "call's tool_input (subagent_type); it observes members[] only."
+        )
+
+    def test_malformed_agent_type_does_not_crash_or_stamp(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """A non-string agent_type (list) on the PostToolUse frame → is_lead is
+        TOTAL (isinstance guard) so it returns False without raising; the
+        writer refuses cleanly, exit 0, no marker."""
+        members = [{"id": "a-1", "name": "secretary"}]
+        session_dir, _ = _setup_session(
+            monkeypatch, tmp_path, with_team_config=True, members=members,
+        )
+        frame = _make_posttooluse_agent_input()
+        frame["agent_type"] = ["PACT:pact-orchestrator"]  # unhashable / non-str
+        code, out = _run_main(frame, capsys)
+        assert code == 0
+        assert out == {
+            "suppressOutput": True,
+            "hookSpecificOutput": {"hookEventName": "PostToolUse"},
+        }
+        assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists()
+
+
+class TestPostToolUsePinIntegrity:
+    """§10.5 (coverage item 5) — INDEPENDENT pin-integrity check.
+
+    The coder updated three §7.1 pins to assert the dual-event behavior. This
+    confirms — independently of merely-passing — that those pins genuinely
+    assert the NEW correct behavior (echo the GIVEN event, including
+    "PostToolUse") and would DETECT a regression to the old hard-coded
+    "UserPromptSubmit". Rather than trust the pins pass, we exercise the
+    underlying contract directly: the suppress envelope and the emit-shape
+    invariant MUST reflect a "PostToolUse" event, not a hard-coded value."""
+
+    def test_suppress_output_echoes_posttooluse_not_hardcoded(self):
+        """_suppress_output("PostToolUse") MUST carry hookEventName ==
+        "PostToolUse" — if a regression reintroduced a hard-coded
+        "UserPromptSubmit" constant, this assertion fails. (Independent of the
+        coder's parametrized pin, which this corroborates.)"""
+        from bootstrap_marker_writer import _suppress_output
+
+        out = json.loads(_suppress_output("PostToolUse"))
+        assert out["suppressOutput"] is True
+        assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse", (
+            "the suppress envelope must ECHO the given event; a hard-coded "
+            "value here is the silent-fail-open AUDIT-ANCHOR trap under a "
+            "PostToolUse fire (design §5.4)."
+        )
+
+    def test_resolve_event_name_returns_posttooluse_from_frame(self):
+        """_resolve_event_name reads the frame's hook_event_name verbatim — a
+        PostToolUse frame resolves to "PostToolUse", proving the dynamic
+        resolution the dual-event design depends on actually reads the frame."""
+        from bootstrap_marker_writer import _resolve_event_name
+
+        assert _resolve_event_name(
+            {"hook_event_name": "PostToolUse"}
+        ) == "PostToolUse"
+        # The safe default only applies when the frame is genuinely unavailable.
+        assert _resolve_event_name(None) == "UserPromptSubmit"
+        assert _resolve_event_name({}) == "UserPromptSubmit"
+        assert _resolve_event_name({"hook_event_name": ""}) == "UserPromptSubmit"
+        assert _resolve_event_name(
+            {"hook_event_name": 123}
+        ) == "UserPromptSubmit"
+
+    def test_main_end_to_end_emits_posttooluse_event(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """End-to-end through main(): a PostToolUse frame's suppress envelope
+        carries hookEventName == "PostToolUse". This is the integration-level
+        corroboration that the dynamic resolution wires through main()'s emit
+        sites, not just the unit helpers — a regression to a static constant
+        would surface here as well as in the coder's parametrized pin."""
+        members = [{"id": "a-1", "name": "secretary"}]
+        _setup_session(
+            monkeypatch, tmp_path, with_team_config=True, members=members,
+        )
+        code, out = _run_main(_make_posttooluse_agent_input(), capsys)
+        assert code == 0
+        assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+
+
+class TestPostToolUseSubprocessIntegration:
+    """Subprocess integration for the PostToolUse(Agent) happy path — the
+    real-process analogue of TestSubprocessIntegration but for the #975 event.
+
+    In-process import+monkeypatch tests can mask sys.path / module-load issues
+    that only surface when the platform spawns the hook as a fresh process; one
+    subprocess test for the new event closes that gap (mirrors the existing
+    UserPromptSubmit subprocess test's scope rationale)."""
+
+    def test_subprocess_posttooluse_agent_writes_marker(self, tmp_path):
+        import subprocess
+
+        home = tmp_path
+        slug = "ptuproj"
+        session_id = "ptu-subproc-session-id"
+        team_name = "pact-ptusubp01"
+        plugin_version = "9.9.9-ptu"
+
+        session_dir = home / ".claude" / "pact-sessions" / slug / session_id
+        session_dir.mkdir(parents=True)
+
+        plugin_root = home / "plugin"
+        (plugin_root / ".claude-plugin").mkdir(parents=True)
+        (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"version": plugin_version}), encoding="utf-8"
+        )
+
+        team_dir = home / ".claude" / "teams" / team_name
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text(
+            json.dumps({"members": [{"id": "a-1", "name": "secretary"}]}),
+            encoding="utf-8",
+        )
+
+        ctx = session_dir / "pact-session-context.json"
+        ctx.write_text(json.dumps({
+            "team_name": team_name,
+            "session_id": session_id,
+            "project_dir": f"/tmp/{slug}",
+            "plugin_root": str(plugin_root),
+            "started_at": "2026-01-01T00:00:00Z",
+        }), encoding="utf-8")
+
+        hook_path = (
+            Path(__file__).parent.parent / "hooks" /
+            "bootstrap_marker_writer.py"
+        )
+        assert hook_path.exists(), f"writer hook missing at {hook_path}"
+
+        # A real PostToolUse(Agent) lead frame: agent_type lead spelling,
+        # hook_event_name PostToolUse, empty agent_id (lead-side), tool_response.
+        stdin_payload = json.dumps({
+            "hook_event_name": "PostToolUse",
+            "session_id": session_id,
+            "tool_name": "Agent",
+            "agent_id": "",
+            "agent_type": "pact-orchestrator",
+            "tool_input": {"subagent_type": "pact-secretary"},
+            "tool_response": {"content": [{"type": "text", "text": "ok"}]},
+        })
+
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env["CLAUDE_PROJECT_DIR"] = f"/tmp/{slug}"
+
+        result = subprocess.run(
+            [sys.executable, str(hook_path)],
+            input=stdin_payload,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(home),
+            timeout=10,
+        )
+        assert result.returncode == 0, (
+            f"subprocess exit non-zero. stderr={result.stderr!r} "
+            f"stdout={result.stdout!r}"
+        )
+        out = json.loads(result.stdout.strip())
+        assert out["suppressOutput"] is True
+        # AUDIT-ANCHOR end-to-end through a fresh process: the echoed event is
+        # PostToolUse, not the hard-coded default.
+        assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+
+        marker = session_dir / BOOTSTRAP_MARKER_NAME
+        assert marker.exists(), (
+            "marker should be written via the PostToolUse(Agent) subprocess fire"
+        )
+        body = json.loads(marker.read_text(encoding="utf-8"))
+        assert body["v"] == 1
+        assert body["sid"] == session_id
+        expected_sig = hashlib.sha256(
+            f"{session_id}|{plugin_root}|{plugin_version}|1".encode()
+        ).hexdigest()
+        assert body["sig"] == expected_sig
+
+
+# =============================================================================
+# #975 — hooks.json registration: PostToolUse(Agent) added; UserPromptSubmit
+# registration + writer-before-prompt-gate ordering UNCHANGED (design §10.7).
+# =============================================================================
+
+
+class TestHooksJsonDualRegistration:
+    """§10.7 — assert the registration delta is exactly as designed: the writer
+    is registered under PostToolUse with matcher 'Agent', AND its
+    UserPromptSubmit registration is retained. (The ordering no-touch pin lives
+    in test_hooks_json.py per §7.2; this corroborates the new block from the
+    writer test's perspective.)"""
+
+    HOOKS_JSON = Path(__file__).parent.parent / "hooks" / "hooks.json"
+
+    def _load(self):
+        return json.loads(self.HOOKS_JSON.read_text(encoding="utf-8"))
+
+    def test_writer_registered_under_posttooluse_agent(self):
+        config = self._load()
+        ptu_blocks = config["hooks"].get("PostToolUse", [])
+        agent_writer_blocks = [
+            block for block in ptu_blocks
+            if block.get("matcher") == "Agent"
+            and any(
+                "bootstrap_marker_writer.py" in h.get("command", "")
+                for h in block.get("hooks", [])
+            )
+        ]
+        assert len(agent_writer_blocks) == 1, (
+            "exactly one PostToolUse block with matcher 'Agent' must register "
+            f"bootstrap_marker_writer.py; found {len(agent_writer_blocks)}."
+        )
+        # Registered synchronously (no async) — the marker must be written
+        # before subsequent dispatches are gate-checked (design §7.2).
+        for h in agent_writer_blocks[0]["hooks"]:
+            assert h.get("type") == "command"
+            assert "async" not in h, (
+                "the PostToolUse(Agent) writer must be synchronous"
+            )
+
+    def test_writer_still_registered_under_userpromptsubmit(self):
+        config = self._load()
+        ups_blocks = config["hooks"].get("UserPromptSubmit", [])
+        ups_writer = [
+            block for block in ups_blocks
+            if any(
+                "bootstrap_marker_writer.py" in h.get("command", "")
+                for h in block.get("hooks", [])
+            )
+        ]
+        assert len(ups_writer) >= 1, (
+            "the UserPromptSubmit registration of the writer must be RETAINED "
+            "as the steady-state self-heal surface (#975 keeps both events)."
         )

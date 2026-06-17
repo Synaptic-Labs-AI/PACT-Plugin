@@ -1118,3 +1118,94 @@ class TestTrackFilesSuppressOutput:
         parsed = json.loads(captured.out.strip())
         assert "systemMessage" in parsed
         assert "suppressOutput" not in parsed
+
+
+# =============================================================================
+# Load-failure advisory hardening against a hostile exception __str__
+# =============================================================================
+
+
+class _HostileStrError(Exception):
+    """An exception whose str()/repr() RAISE — simulates a module-load error
+    whose own stringification is broken (e.g. a dependency's exception with a
+    buggy __str__). Pre-hardening, interpolating this into the advisory's
+    f-string would make the advisory itself raise while emitting, defeating
+    the fail-closed advisory."""
+
+    def __str__(self):  # noqa: D401
+        raise RuntimeError("hostile __str__ raised")
+
+    def __repr__(self):
+        raise RuntimeError("hostile __repr__ raised")
+
+
+class _HostileNameMeta(type):
+    @property
+    def __name__(cls):  # noqa: N805 — metaclass property; access raises
+        raise RuntimeError("hostile __name__ raised")
+
+
+class _HostileNameError(Exception, metaclass=_HostileNameMeta):
+    """An exception whose TYPE's __name__ access raises — the other half of
+    the advisory's `{type(error).__name__}: {error}` interpolation."""
+
+
+class TestLoadFailureAdvisoryHostileException:
+    """Both bootstrap advisories (bootstrap_marker_writer, bootstrap_prompt_gate)
+    compose their module-load advisory message from the triggering exception.
+    A hostile exception whose __str__ (or whose type's __name__) RAISES must
+    NOT make the advisory itself raise while emitting — that would defeat the
+    fail-closed advisory whose entire purpose is to surface the load failure.
+
+    The fix routes the interpolation through _safe_error_detail, which guards
+    each part with a safe placeholder. These pins fail RED on revert (the old
+    `{type(error).__name__}: {error}` f-string raises on either hostile input).
+    Parametrized over both hooks because the advisory pattern is shared verbatim."""
+
+    HOOKS = ["bootstrap_marker_writer", "bootstrap_prompt_gate"]
+
+    @pytest.mark.parametrize("hook_module", HOOKS)
+    def test_safe_error_detail_hostile_str_does_not_raise(self, hook_module):
+        mod = __import__(hook_module)
+        detail = mod._safe_error_detail(_HostileStrError())
+        # Type name still recovered (its __name__ is fine); message is the
+        # safe placeholder, never the raised exception.
+        assert "_HostileStrError" in detail
+        assert "str(error) raised" in detail
+
+    @pytest.mark.parametrize("hook_module", HOOKS)
+    def test_safe_error_detail_hostile_name_does_not_raise(self, hook_module):
+        mod = __import__(hook_module)
+        detail = mod._safe_error_detail(_HostileNameError())
+        # Type name access raised → safe placeholder type name.
+        assert detail.startswith("UnprintableError")
+
+    @pytest.mark.parametrize("hook_module", HOOKS)
+    def test_safe_error_detail_normal_exception_unchanged(self, hook_module):
+        mod = __import__(hook_module)
+        assert mod._safe_error_detail(ValueError("boom")) == "ValueError: boom"
+
+    @pytest.mark.parametrize("hook_module", HOOKS)
+    def test_advisory_emits_valid_json_under_hostile_exception(
+        self, hook_module, capsys, monkeypatch,
+    ):
+        """The advisory must still emit VALID JSON to stdout and exit 0 — no
+        traceback — when its triggering exception has a hostile __str__."""
+        mod = __import__(hook_module)
+        # bootstrap_marker_writer's advisory best-effort reads stdin; give it an
+        # empty stream so it falls to the safe-default event (no effect on the
+        # prompt-gate advisory, which does not read stdin).
+        monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+
+        with pytest.raises(SystemExit) as exc_info:
+            mod._emit_load_failure_advisory("module imports", _HostileStrError())
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        out = json.loads(captured.out.strip())
+        hso = out["hookSpecificOutput"]
+        # Audit anchor preserved: a valid hookEventName is present.
+        assert hso["hookEventName"] in ("UserPromptSubmit", "PostToolUse")
+        # The advisory body is present and carries the safe placeholder, not a
+        # crash.
+        assert "str(error) raised" in hso["additionalContext"]
