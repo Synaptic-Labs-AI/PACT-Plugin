@@ -50,7 +50,7 @@ Every session begins with a one-time ritual that reuses the platform-pre-created
 
 ### What the ritual covers
 
-- **Team creation or reuse** — read `team_name` from the Current Session block in the project's `CLAUDE.md`. Create the session team if absent; reuse if present. Every specialist dispatch requires the team to exist.
+- **Team reuse** — read `team_name` from the Current Session block in the project's `CLAUDE.md`. The platform pre-creates exactly one session team; reuse it (you do not create it). Every specialist dispatch requires the team to exist.
 - **Secretary spawn** — spawn the session secretary with `subagent_type="pact-secretary"` and `name="secretary"` (canonical). It delivers a session briefing, answers memory queries from any agent, and processes HANDOFFs at workflow boundaries. The briefing is dispatched as a discrete-deliverable task (`secretary: deliver session briefing`) that the secretary self-completes after delivering it — you do NOT complete it, and completing it does not end the secretary's role. The secretary must exist before any memory query. The literal name is load-bearing — `bootstrap_marker_writer.py` checks `member.name == "secretary"` and the housekeeping dispatch sites assign work via `TaskUpdate(owner="secretary")`.
 - **Paused-state check** — read `~/.claude/teams/{team_name}/paused-state.json` if it exists. Surface its contents to the user; do not silently resume.
 - **Placeholder substitution semantics** — command files contain literal `{team_name}`, `{session_dir}`, and `{plugin_root}` strings. Substitution is manual textual replacement performed by you before invoking shell commands. Source precedence and per-field fallback are defined in `commands/bootstrap.md`.
@@ -60,7 +60,7 @@ Every session begins with a one-time ritual that reuses the platform-pre-created
 The ritual is per-session and idempotent — the marker survives compaction. Re-invoke `Skill("PACT:bootstrap")` when:
 
 - The session has just resumed (post-compaction or `claude --resume`) and the team-existence assumption needs re-verification.
-- The team config (`~/.claude/teams/{team_name}/config.json`) is missing, or its `members[]` no longer contains a `secretary` entry. The bootstrap ritual is the only path that recreates them.
+- The team config (`~/.claude/teams/{team_name}/config.json`) is missing, or its `members[]` no longer contains a `secretary` entry. The bootstrap ritual is the only path that re-establishes the `secretary` entry (the platform re-provisions the team config itself on the next spawn).
 
 Steady-state marker absences self-heal automatically: the `bootstrap_marker_writer` UserPromptSubmit hook re-creates the marker on the next prompt whenever team config + secretary are still on disk. `/clear` removes only the marker (see `session_init._clear_bootstrap_marker`); the team config persists, so `/clear` falls into the self-healing path and does NOT require manual re-invocation.
 
