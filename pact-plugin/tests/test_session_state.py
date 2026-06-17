@@ -1280,7 +1280,9 @@ class TestIsSafePathComponent:
         assert _is_safe_path_component(None) is False  # type: ignore[arg-type]
 
     def test_accepts_happy_path_team_name(self):
-        # Upstream generate_team_name produces "pact-" + hex-with-hyphens.
+        # Upstream generate_team_name produces "session-" + hex-with-hyphens;
+        # the charset check is prefix-agnostic, so a legacy "pact-" hex name
+        # validates identically.
         assert _is_safe_path_component("pact-b90de955") is True
 
     def test_accepts_numeric_task_id(self):

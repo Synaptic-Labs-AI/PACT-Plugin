@@ -17,10 +17,13 @@ from the acting frame's own session_id.
 These tests pin two invariants as a STANDING merge gate (do NOT collapse to one
 leg, and do NOT re-key the structural branch on a mode flag — there is none):
 
-  1. CI TRIPWIRE — the resolver's output addresses the REAL on-disk platform
-     team dir under the documented `session-<first8>` convention. A future
-     platform rename (or a resolver refactor) fails LOUDLY here in CI rather
-     than silently deadlocking bootstrap in prod.
+  1. CI TRIPWIRE — the resolver's output addresses a dir under the documented
+     `session-<first8>` convention. This is a resolver-vs-documented-convention
+     DRIFT detector, NOT a platform-parity detector: it seeds its OWN dir, so it
+     cannot observe the real platform. It fails LOUDLY on a resolver refactor or
+     a resolver/literal divergence; an UN-MIRRORED real platform rename is NOT
+     caught here (both encodings still agree → GREEN) — that parity check belongs
+     in the post-merge e2e probe.
   2. BOTH-MODES resolution — the gate resolves the LEAD's `session-<lead8>`
      store correctly whether the running frame's session_id == leadSessionId
      (in-process) or != leadSessionId (tmux). The branch is keyed STRUCTURALLY
@@ -201,14 +204,23 @@ def _setup_leg(monkeypatch, tmp_path, *, frame_session_id):
 
 
 def test_resolver_output_addresses_real_platform_store(tmp_path, monkeypatch):
-    """CI TRIPWIRE (rename-risk hedge for the deterministic-resolver decision).
+    """CI TRIPWIRE — a resolver-vs-documented-convention DRIFT detector (NOT a
+    platform-parity detector).
 
     generate_team_name's output MUST address the platform's real on-disk team
     dir. The platform names its implicit team `session-<first 8 of session id>`.
     We encode that convention INDEPENDENTLY as a literal (NOT computed from the
-    SUT), seed a config.json there, and assert the resolver lands on it. If a
-    future platform rename or resolver refactor breaks the convention, this
-    fails LOUDLY in CI instead of silently deadlocking bootstrap in prod.
+    SUT), seed a config.json there, and assert the resolver lands on it.
+
+    SCOPE / LIMITATION: this test seeds its OWN dir and CANNOT observe the real
+    platform. It therefore catches (a) a resolver refactor that changes
+    generate_team_name's output, and (b) DRIFT between the resolver and this
+    documented-convention literal. It does NOT catch an un-mirrored real platform
+    rename: if the platform renames its dir but neither the resolver nor this
+    literal is updated, the two still agree and this stays GREEN while prod
+    silently deadlocks. True platform PARITY belongs in the post-merge e2e probe
+    (a real hook frame), not a unit test — this is a drift hedge, not a
+    rename-proof guarantee.
 
     Counter-test: change `generate_team_name` to any other prefix/truncation and
     this flips RED (the seeded dir no longer matches the derived name)."""
