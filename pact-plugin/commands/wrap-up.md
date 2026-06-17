@@ -125,7 +125,7 @@ esac
 
 The `session_consolidated` write fires under the `true` branch regardless of whether step 6 takes the "PR still open" branch (which ALSO writes `session_paused`) or the "PR merged / no PR" branch (which previously wrote nothing and caused the false-positive warning). `{task_count}` and `{memories_saved}` come from the secretary's consolidation summary (step 1); when the secretary cannot produce exact counts, emit the event with `0` for either field rather than skipping the write — the event's EXISTENCE is the detector signal and the payload is advisory audit trail.
 
-**Recovery note**: The journal lives in `~/.claude/pact-sessions/{slug}/{session_id}/`, independent of the team directory — it survives both natural TTL cleanup and explicit `TeamDelete`. Old session directories are cleaned automatically after 30 days (with paused-session preservation). See [pact-state-recovery.md](../protocols/pact-state-recovery.md) for the full State Recovery Protocol.
+**Recovery note**: The journal lives in `~/.claude/pact-sessions/{slug}/{session_id}/`, independent of the team directory — it survives both natural TTL cleanup and explicit team teardown. Old session directories are cleaned automatically after 30 days (with paused-session preservation). See [pact-state-recovery.md](../protocols/pact-state-recovery.md) for the full State Recovery Protocol.
 
 ## 6. Worktree Cleanup
 
@@ -167,4 +167,3 @@ Use `AskUserQuestion` with these exact options:
 - **"Yes, continue"** (description: "Keep team alive, ready for next task") → On selection: Report "Ready for next task."
 - **"Pause work for now"** (description: "Save session knowledge and pause — resume later") → On selection: invoke `/PACT:pause`
 - **"No, end session"** (description: "Natural cleanup — platform reaps processes, 30-day TTL cleans directories (recommended)") → On selection: Report "Session complete. Teammate processes will be terminated when this session ends. Team and task directories (`~/.claude/teams/`, `~/.claude/tasks/`) are reaped automatically after 30 days by TTL cleanup."
-- **"End session (graceful)"** (description: "Explicit shutdown + TeamDelete — for immediate cleanup or recovery from interrupted sessions") → On selection: Shut down remaining teammates — send `shutdown_request` individually to each active teammate **by name**. Wait for each response. Delete the team (`TeamDelete`). If `TeamDelete` fails because active members remain, report which teammates are still running and ask the user whether to force shutdown or leave them. Report "Session complete."
