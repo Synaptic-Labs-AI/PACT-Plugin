@@ -299,10 +299,22 @@ def _run_emitter(stdin_payload, task_data, append_calls, tmp_home, monkeypatch):
     # writability gate passes (append_event is spied, so the path is never
     # written — any truthy value satisfies the gate). The journal-unwritable
     # defer path is covered in test_handoff_writability_parity.py.
+    # The marker team_name now resolves from the SESSION CONTEXT (not stdin) —
+    # model the context session_init would have persisted, sourcing team_name
+    # from the stdin payload so the marker stays scoped to teams/<team_name>/.
+    _ctx = {
+        "team_name": stdin_payload.get("team_name", ""),
+        "session_id": "",
+        "project_dir": "",
+        "plugin_root": "",
+        "started_at": "",
+    }
     with patch("agent_handoff_emitter.read_task_json", return_value=task_data), \
          patch("agent_handoff_emitter.append_event", side_effect=_append_spy), \
          patch("agent_handoff_emitter.get_journal_path",
                return_value=WRITABLE_TEST_JOURNAL), \
+         patch("agent_handoff_emitter.pact_context.get_pact_context",
+               return_value=_ctx), \
          patch("sys.stdin", io.StringIO(json.dumps(stdin_payload))):
         with pytest.raises(SystemExit) as exc_info:
             main()

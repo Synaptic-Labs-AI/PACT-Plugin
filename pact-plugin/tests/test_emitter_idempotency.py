@@ -231,10 +231,18 @@ class TestMarkerFailOpen:
         # append_event returns None (silent failure), event is lost.
         # get_journal_path patched truthy → the #917 writability gate passes,
         # isolating the residual writable-but-write-fails scenario (see docstring).
+        # Marker team_name now resolves from the session context (not stdin) —
+        # model the persisted context (team_name="pact-test") so the marker
+        # lands at the asserted teams/pact-test/ path.
+        _ctx = {
+            "team_name": "pact-test", "session_id": "", "project_dir": "",
+            "plugin_root": "", "started_at": "",
+        }
         with patch("agent_handoff_emitter.read_task_json", return_value=task_data), \
              patch("agent_handoff_emitter.append_event", side_effect=_append_silent_fail), \
              patch("agent_handoff_emitter.get_journal_path",
                    return_value=WRITABLE_TEST_JOURNAL), \
+             patch("agent_handoff_emitter.pact_context.get_pact_context", return_value=_ctx), \
              patch("sys.stdin", io.StringIO(json.dumps(payload))):
             with pytest.raises(SystemExit) as exc1:
                 main()
@@ -270,6 +278,7 @@ class TestMarkerFailOpen:
              patch("agent_handoff_emitter.append_event", side_effect=_append_succeed), \
              patch("agent_handoff_emitter.get_journal_path",
                    return_value=WRITABLE_TEST_JOURNAL), \
+             patch("agent_handoff_emitter.pact_context.get_pact_context", return_value=_ctx), \
              patch("sys.stdin", io.StringIO(json.dumps(payload))):
             with pytest.raises(SystemExit) as exc2:
                 main()

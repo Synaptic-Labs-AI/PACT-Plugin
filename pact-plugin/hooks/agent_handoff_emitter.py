@@ -74,7 +74,6 @@ from shared.agent_handoff_marker import (
     sanitize_path_component,
     unclaim,
 )
-from shared.pact_context import get_team_name
 from shared.session_journal import append_event, get_journal_path, make_event
 from shared.task_utils import read_task_json
 
@@ -141,16 +140,21 @@ def main() -> None:
             raw_task_subject if not task_subject_was_missing else "(no subject)"
         )
 
-        # Sanitize path-joining components symmetrically with
-        # task_utils.read_task_json. task_id and team_name both flow into
-        # filesystem paths (read_task_json for the status read; the marker
-        # join inside shared.agent_handoff_marker.already_emitted for the
-        # O_EXCL dedup marker). A helper applied at a single producer-side
-        # site ensures the sink paths can never diverge.
+        # task_id (from stdin) is sanitized for the two filesystem sinks it
+        # feeds: read_task_json for the status read, and the marker join inside
+        # shared.agent_handoff_marker.already_emitted for the O_EXCL dedup
+        # marker. team_name is NOT sanitized here: it is read RAW from the
+        # session context (the SSOT minted by pact_context.generate_team_name(),
+        # which produces a "session-<id8>" name constrained to [a-f0-9-] at
+        # production time — path-safe by construction, not an untrusted input).
+        # Reading it raw matches the lead-side emit twin's marker-key derivation
+        # (task_lifecycle_gate._emit_lead_side_agent_handoff reads the same
+        # `get_pact_context().get("team_name", "")`), so all three emit paths
+        # converge on one O_EXCL marker key by construction. The deprecated
+        # stdin `team_name` read is dropped (a teammate-frame stdin value could
+        # diverge from the SSOT and split the marker dir).
         task_id = sanitize_path_component(str(task_id))
-        team_name = sanitize_path_component(
-            str(input_data.get("team_name") or get_team_name()).lower()
-        )
+        team_name = pact_context.get_pact_context().get("team_name", "")
 
         task_data = read_task_json(task_id, team_name)
 
@@ -228,18 +232,21 @@ def main() -> None:
 
         # #917: canonical-journal writability precondition. The O_EXCL marker
         # below is an optimistic "we emitted it" promise claimed BEFORE
-        # append_event. b1 can resolve a team_name for the marker dir (a stdin
-        # team_name on a teammate TaskCompleted frame) while its OWN session
-        # context is unpersisted (teammate persist is is_lead-gated, #877) ->
-        # get_journal_path() == "" -> the append below would FAIL after the
-        # marker is claimed, poisoning it and permanently suppressing the
-        # lead-side b2 emit via already_emitted(). Gate the claim on writability
-        # so a non-writable fire DEFERS to a writable one (the lead's b2)
-        # instead of poisoning. This is a PURE read (get_journal_path does not
-        # create the marker); mark-then-write exactly-once below is unchanged —
-        # only the precondition is added. get_journal_path() and append_event()
-        # resolve from the same _journal_path()/get_session_dir() source, so the
-        # gate cannot false-negative a fire that append would have written.
+        # append_event. On a teammate TaskCompleted frame, b1 resolves the
+        # marker team_name from the session context (get_pact_context, above)
+        # while its OWN session context may be unpersisted (teammate persist is
+        # is_lead-gated, #877) -> get_journal_path() == "" -> the append below
+        # would FAIL after the marker is claimed, poisoning it and permanently
+        # suppressing the lead-side b2 emit via already_emitted(). Gate the claim
+        # on writability so a non-writable fire DEFERS to a writable one (the
+        # lead's b2) instead of poisoning. This is a PURE read (get_journal_path
+        # does not create the marker); mark-then-write exactly-once below is
+        # unchanged — only the precondition is added. The marker team_name and
+        # get_journal_path()/append_event() now resolve from the SAME
+        # get_pact_context()/get_session_dir() source, so a resolvable team_name
+        # implies a resolvable journal path: the gate fires at least as often as
+        # it must and cannot false-negative a fire that append would have
+        # written.
         # F3: this gate is the TWIN of task_lifecycle_gate._emit_lead_side_agent_handoff
         # — keep both in parity. Mark-then-write / O_EXCL contract:
         # shared/agent_handoff_marker.already_emitted.

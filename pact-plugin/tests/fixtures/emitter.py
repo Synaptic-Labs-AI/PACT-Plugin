@@ -48,6 +48,21 @@ def _run_main(stdin_payload, task_data, append_calls, journal_path=WRITABLE_TEST
     UNWRITABLE defer path. The hook imports get_journal_path by value, so the
     patch targets the symbol bound in ``agent_handoff_emitter`` — NOT
     ``session_journal`` — or the gate would read the real resolution.
+
+    The marker ``team_name`` is resolved from the SESSION CONTEXT
+    (``pact_context.get_pact_context()``), NOT from the stdin ``team_name``
+    field — the b1 emitter reads the SSOT context so all three emit paths
+    (b1/b2/b3) converge on one O_EXCL marker key by construction. To model a
+    resolvable-context b1 process, this helper patches ``get_pact_context`` to
+    return a context whose ``team_name`` is taken from the stdin payload's
+    ``team_name`` (the SAME logical name session_init would have persisted to
+    the context). So a payload ``team_name="pact-test"`` still scopes the
+    marker to ``teams/pact-test/`` — the marker now travels through the
+    context channel instead of stdin. (Production guarantees the context
+    team_name is a ``session-<id8>`` value minted by generate_team_name, so a
+    degenerate context team_name cannot occur; tests that probe a degenerate
+    team_name attack via stdin no longer exercise a live path post-rebind —
+    that vector is closed by construction.)
     """
     # Lazy import: sys.path is configured in conftest.py before this module loads.
     # Do not hoist to module-level — sys.path coupling depends on conftest load order.
@@ -57,9 +72,22 @@ def _run_main(stdin_payload, task_data, append_calls, journal_path=WRITABLE_TEST
         append_calls.append(event)
         return True
 
+    # Mirror the context session_init would have persisted: the marker team_name
+    # now flows through get_pact_context(), not stdin. Source it from the stdin
+    # payload's team_name so existing per-test expectations (marker under
+    # teams/<team_name>/) hold under the rebind.
+    _ctx = {
+        "team_name": stdin_payload.get("team_name", ""),
+        "session_id": "",
+        "project_dir": "",
+        "plugin_root": "",
+        "started_at": "",
+    }
+
     with patch("agent_handoff_emitter.read_task_json", return_value=task_data), \
          patch("agent_handoff_emitter.append_event", side_effect=_append_spy), \
          patch("agent_handoff_emitter.get_journal_path", return_value=journal_path), \
+         patch("agent_handoff_emitter.pact_context.get_pact_context", return_value=_ctx), \
          patch("sys.stdin", io.StringIO(json.dumps(stdin_payload))):
         with pytest.raises(SystemExit) as exc_info:
             main()

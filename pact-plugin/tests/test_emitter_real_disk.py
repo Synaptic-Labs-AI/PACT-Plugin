@@ -122,6 +122,16 @@ class TestRealDiskRead:
             # journal so the marker-claim writability gate passes.
             "agent_handoff_emitter.get_journal_path",
             return_value=WRITABLE_TEST_JOURNAL,
+        ), patch(
+            # The team_name passed to read_task_json + the marker key now come
+            # from the SESSION CONTEXT (not stdin). Model the context
+            # session_init persisted (team_name="pact-test") so the on-disk
+            # read resolves the team-scoped task.json written above.
+            "agent_handoff_emitter.pact_context.get_pact_context",
+            return_value={
+                "team_name": "pact-test", "session_id": "", "project_dir": "",
+                "plugin_root": "", "started_at": "",
+            },
         ), patch("sys.stdin", io.StringIO(json.dumps({
             "session_id": "test-session-1",
             "hook_event_name": "TaskCompleted",
@@ -189,6 +199,14 @@ class TestRealDiskRead:
             # #917: writable journal (real-disk fidelity is the task.json read).
             "agent_handoff_emitter.get_journal_path",
             return_value=WRITABLE_TEST_JOURNAL,
+        ), patch(
+            # team_name for read_task_json + marker key now comes from the
+            # session context (not stdin). Model the persisted context.
+            "agent_handoff_emitter.pact_context.get_pact_context",
+            return_value={
+                "team_name": "pact-test", "session_id": "", "project_dir": "",
+                "plugin_root": "", "started_at": "",
+            },
         ), patch("sys.stdin", io.StringIO(json.dumps({
             "session_id": "test-session-1",
             "hook_event_name": "TaskCompleted",

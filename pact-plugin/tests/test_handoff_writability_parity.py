@@ -74,14 +74,24 @@ def _marker_files(home: Path) -> list[str]:
     return sorted(p.name for p in marker_dir.iterdir()) if marker_dir.exists() else []
 
 
-def _drive_b1(*, writable: bool, tmp_path: Path, monkeypatch, append_calls: list, handoff=HANDOFF) -> None:
+def _drive_b1(*, writable: bool, tmp_path: Path, monkeypatch, pact_context, append_calls: list, handoff=HANDOFF) -> None:
     """Fire b1 (agent_handoff_emitter.main) for one handoff-bearing completed
     TaskCompleted frame. `writable` controls the in-hook get_journal_path()
     return ('' = unwritable). `handoff` is the metadata.handoff value (default
     a valid dict; pass a non-dict to exercise the M1 type gate). The real
-    already_emitted runs under the patched HOME; append_event is spied."""
+    already_emitted runs under the patched HOME; append_event is spied.
+
+    b1's marker team_name now resolves from the SESSION CONTEXT
+    (get_pact_context), the SAME source b2 reads — so this driver sets up the
+    real context (team_name=TEAM) via the `pact_context` fixture, exactly as
+    _drive_b2 does. This is the post-rebind convergence: both paths key the
+    O_EXCL marker off the identical context team_name. The writability gate is
+    independent of this (it reads get_journal_path), so the UNWRITABLE-defer
+    #917 property is preserved: an empty journal still defers before the marker
+    claim even with the team_name resolvable."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
+    pact_context(team_name=TEAM, session_id="s1")
     journal = str(tmp_path / "session-journal.jsonl") if writable else ""
     task_data = {"status": "completed", "owner": OWNER, "metadata": {"handoff": handoff}}
     stdin = {
@@ -128,7 +138,7 @@ def _drive_b2(*, writable: bool, tmp_path: Path, monkeypatch, pact_context, appe
 # pact_context, append_calls) fires that path once.
 def _b1_driver(writable, tmp_path, monkeypatch, pact_context, append_calls, handoff=HANDOFF):
     _drive_b1(writable=writable, tmp_path=tmp_path, monkeypatch=monkeypatch,
-              append_calls=append_calls, handoff=handoff)
+              pact_context=pact_context, append_calls=append_calls, handoff=handoff)
 
 
 def _b2_driver(writable, tmp_path, monkeypatch, pact_context, append_calls, handoff=HANDOFF):
