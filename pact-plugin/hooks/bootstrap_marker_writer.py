@@ -218,6 +218,52 @@ def _team_has_secretary(team_name: str) -> bool:
     return False
 
 
+def _debug_log_if_derived_team_dir_missing(team_name: str) -> None:
+    """Best-effort, fail-safe rename-detector (#979). DEBUG-level stderr only.
+
+    Emits a diagnostic IFF the derived team dir ``teams/{team_name}/`` is
+    ABSENT *and* a sibling ``session-*`` team dir exists — the symptom of a
+    FUTURE platform team-naming change (the platform wrote ``teams/<other>/``
+    while ``generate_team_name`` still derives ``{team_name}``). Without this,
+    such a rename would manifest as a SILENT marker-never-written deadlock.
+
+    Distinguishes the rename symptom from the NORMAL pre-bootstrap state
+    (derived dir PRESENT, secretary member simply not joined yet): the cheap
+    happy path is a single ``is_dir()`` check that returns early with NO
+    ``teams/``-scan. The sibling scan runs ONLY when the derived dir is absent.
+
+    NEVER raises (every error swallowed) and NEVER alters the marker write —
+    the caller has already short-circuited the write before calling this. Runs
+    at PostToolUse(Agent)/UserPromptSubmit time, where the platform's team
+    ``config.json`` is guaranteed written, so "derived dir absent" is a real
+    rename signal here, not a SessionStart startup-window artifact.
+    """
+    try:
+        if not team_name:
+            return
+        teams_dir = pact_context.get_claude_config_dir() / "teams"
+        # Cheap happy path: derived dir present → not a rename → no teams/-scan.
+        if (teams_dir / team_name).is_dir():
+            return
+        # Derived dir absent → scan for a sibling "session-*" dir (rename symptom).
+        for entry in teams_dir.iterdir():
+            if (entry.name != team_name
+                    and entry.name.startswith("session-")
+                    and (entry / "config.json").is_file()):
+                print(
+                    "[PACT bootstrap_marker_writer DEBUG #979] derived team "
+                    f"name {team_name!r} has no platform dir, but sibling "
+                    f"{entry.name!r} exists — possible platform team-naming "
+                    "change; team-scoped resolution may be stale (the bootstrap "
+                    "marker will not write until the names reconcile).",
+                    file=sys.stderr,
+                )
+                return
+    except Exception:
+        # Fail-safe: a rename-detector must NEVER raise or block the marker path.
+        return
+
+
 def _read_plugin_version(plugin_root: str) -> str:
     """Return the plugin version from plugin.json, or '' on any I/O / parse
     error. Mirrors the read at bootstrap_gate.py:is_marker_set so producer
@@ -333,6 +379,12 @@ def _try_write_marker(input_data: dict) -> None:
     # Pre-condition: team config + secretary member exist on disk.
     team_name = pact_context.get_team_name()
     if not _team_has_secretary(team_name):
+        # Best-effort, fail-safe rename-detector (#979): the secretary-absent
+        # refuse is exactly where a FUTURE platform team-naming change would
+        # surface as a silent marker-never-written deadlock. Emit a DEBUG
+        # signal IFF the derived team dir is absent AND a sibling session-* dir
+        # exists. Never raises, never alters this already-decided refuse.
+        _debug_log_if_derived_team_dir_missing(team_name)
         return
 
     plugin_root = pact_context.get_plugin_root()
