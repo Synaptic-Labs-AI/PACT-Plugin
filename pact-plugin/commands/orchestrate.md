@@ -256,7 +256,7 @@ Sequential execution is the exception requiring explicit justification. When ass
 ---
 
 1. **Set up worktree**: If already in a worktree for this feature, reuse it. Otherwise, invoke `/PACT:worktree-setup` with the feature branch name. This creates both the feature branch and its worktree. All subsequent phases work in the worktree.
-2. **Verify session team exists**: The `{team_name}` team should already exist from session start. If not, create it now: `TeamCreate(team_name="{team_name}")`.
+2. **Session team**: The `{team_name}` team is provisioned automatically by the platform — use it for dispatches; you do not create it.
 3. **Check for plan** in `docs/plans/` matching this task
 
 ### Plan Status Handling

@@ -5,7 +5,8 @@ Summary: Dual-event hook that writes the bootstrap-complete marker once the
          bootstrap ritual's pre-conditions are observable on disk (team config
          exists AND `secretary` is in members[]). Verify-and-refuse semantic:
          hook does NOT create pre-conditions; LLM ritual (commands/bootstrap.md
-         Steps 1-2) still owns TeamCreate + secretary spawn.
+         Steps 1-2) still owns team resolution + secretary spawn (the platform
+         provisions the session team).
 Used by: hooks.json — registered under TWO events, both running this same
          verify-and-refuse logic (#975):
            - UserPromptSubmit (no matcher — fires every prompt): steady-state

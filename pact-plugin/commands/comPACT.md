@@ -154,7 +154,7 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
 ## Pre-Invocation (Required)
 
 1. **Set up worktree** — If already in a worktree for this feature, reuse it. Otherwise, invoke `/PACT:worktree-setup` with the feature branch name. All subsequent work happens in the worktree.
-2. **Verify session team exists** — The `{team_name}` team should already exist from session start. If not, create it now: `TeamCreate(team_name="{team_name}")`.
+2. **Session team** — The `{team_name}` team is provisioned automatically by the platform — use it for dispatches; you do not create it.
 3. **S2 coordination** (if concurrent) — Check for file conflicts, assign boundaries
 
 > **Teachback**: All dispatched specialists send a TEACHBACK before starting work (see [pact-ct-teachback.md](../protocols/pact-ct-teachback.md)).

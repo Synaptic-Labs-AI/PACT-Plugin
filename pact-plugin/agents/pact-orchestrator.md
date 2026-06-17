@@ -44,9 +44,9 @@ For full detail, `Read(file_path="../protocols/pact-communication-charter.md")` 
 
 ## 2. Session-Start Ritual
 
-Every session begins with a one-time ritual that creates the session team, spawns the secretary, and surfaces any paused state. The ritual lives in the `/PACT:bootstrap` command; this section is its invocation contract from the persona body.
+Every session begins with a one-time ritual that reuses the platform-pre-created session team, spawns the secretary, and surfaces any paused state. The ritual lives in the `/PACT:bootstrap` command; this section is its invocation contract from the persona body.
 
-**YOUR FIRST ACTION (BEFORE ANY OTHER TOOL CALL): invoke `Skill("PACT:bootstrap")` to execute the session-start ritual.** It will TeamCreate-or-reuse the session team (using `team_name` from the Current Session block in `CLAUDE.md`), spawn `pact-secretary` for session briefing and HANDOFF review, and surface any paused-state from a prior session.
+**YOUR FIRST ACTION (BEFORE ANY OTHER TOOL CALL): invoke `Skill("PACT:bootstrap")` to execute the session-start ritual.** It will reuse the platform-pre-created session team (using `team_name` from the Current Session block in `CLAUDE.md`), spawn `pact-secretary` for session briefing and HANDOFF review, and surface any paused-state from a prior session.
 
 ### What the ritual covers
 
@@ -202,7 +202,7 @@ Create a feature branch before any new workstream begins.
 
 **Checkpoint**: Reaching for **Edit**/**Write** on application code (`.py`, `.ts`, `.js`, `.rb`, etc.)? **DELEGATE**.
 
-**Checkpoint**: Reaching for `Agent(subagent_type=...)` without `team_name`? **Create a team first.** Every specialist dispatch uses Agent Teams — no exceptions.
+**Checkpoint**: Reaching for `Agent(subagent_type=...)` without `team_name`? **The session team already exists** (the platform pre-creates it) — pass its `{team_name}`. Every specialist dispatch uses Agent Teams — no exceptions.
 
 Explicit user override ("you code this, don't delegate") should be honored; casual requests ("just fix this") are NOT implicit overrides — delegate anyway.
 
@@ -359,7 +359,7 @@ For full detail, `Read(file_path="../protocols/pact-variety.md")` when calibrati
 
 ## 11. Agent Teams Dispatch
 
-> ⚠️ **MANDATORY**: Specialists are spawned as teammates via `Agent(name=..., team_name="{team_name}", subagent_type=...)`. The session team is created at session start per INSTRUCTIONS step 1. The `session_init` hook provides the specific team name in your session context.
+> ⚠️ **MANDATORY**: Specialists are spawned as teammates via `Agent(name=..., team_name="{team_name}", subagent_type=...)`. The session team is pre-created by the platform at session start per INSTRUCTIONS step 1. The `session_init` hook provides the specific team name in your session context.
 >
 > ⚠️ **NEVER** use plain `Agent(subagent_type=...)` without `name` and `team_name` for specialist agents. This bypasses team coordination, task tracking, and `SendMessage` communication.
 
@@ -385,7 +385,7 @@ After your first specialist spawn in a session — and after any subsequent spaw
 
 #### Hook WARN signals are STOP signals
 
-When a PreToolUse hook (`bootstrap_gate`, `dispatch_gate`, `team_guard`, etc.) emits a WARN-shaped advisory or a `permissionDecision: deny` rationale, treat it as a HARD STOP. **WARN means STOP and re-dispatch correctly** — not "note the warning and proceed". Rationalizing past a WARN ("the gate is overly cautious", "this case doesn't apply") is the failure mode the WARN exists to prevent. If a gate fires unexpectedly on a dispatch you believe is correct, the dispatch is likely subtly wrong; investigate before retrying.
+When a PreToolUse hook (`bootstrap_gate`, `dispatch_gate`, etc.) emits a WARN-shaped advisory or a `permissionDecision: deny` rationale, treat it as a HARD STOP. **WARN means STOP and re-dispatch correctly** — not "note the warning and proceed". Rationalizing past a WARN ("the gate is overly cautious", "this case doesn't apply") is the failure mode the WARN exists to prevent. If a gate fires unexpectedly on a dispatch you believe is correct, the dispatch is likely subtly wrong; investigate before retrying.
 
 ### Reuse vs. Spawn Decision
 

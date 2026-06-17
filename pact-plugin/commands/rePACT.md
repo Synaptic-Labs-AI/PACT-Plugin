@@ -6,7 +6,7 @@ Run a recursive PACT cycle for this sub-task: $ARGUMENTS
 
 This command initiates a **nested P→A→C→T cycle** for a sub-task that is too complex for simple delegation but should remain part of the current feature work.
 
-**Team behavior**: rePACT spawns sub-scope teammates into the existing session team (`pact-{session_hash}`). No new team is created. Use scope-prefixed names (e.g., `backend-coder-auth-scope`) to distinguish sub-scope teammates from parent-scope teammates.
+**Team behavior**: rePACT spawns sub-scope teammates into the session team (`{team_name}`). The platform provisions the team; rePACT does not create a new one. Use scope-prefixed names (e.g., `backend-coder-auth-scope`) to distinguish sub-scope teammates from parent-scope teammates.
 
 ---
 
@@ -211,7 +211,7 @@ Design the sub-component:
 
 Implement the sub-component:
 
-**Verify session team exists**: The `{team_name}` team should already exist from session start. If not, create it now: `TeamCreate(team_name="{team_name}")`.
+**Session team**: The `{team_name}` team is provisioned automatically by the platform — use it for dispatches; you do not create it.
 
 **Teachback-Gated Dispatch**
 
