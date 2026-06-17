@@ -2623,7 +2623,7 @@ class TestSessionInitJournalWrite:
 
         events = read_events("session_start")
         assert len(events) >= 1
-        assert events[0]["team"] == "pact-abc12345"
+        assert events[0]["team"] == "session-abc12345"
         assert events[0].get("source") == expected_on_disk
 
 

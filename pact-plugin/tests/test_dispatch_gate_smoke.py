@@ -158,17 +158,20 @@ def test_deny_empty_name(tmp_path, monkeypatch, capsys):
     assert "name= parameter is required" in hso["permissionDecisionReason"]
 
 
-def test_deny_empty_team_name(tmp_path, monkeypatch, capsys):
+def test_empty_team_name_arg_resolves_via_ssot(tmp_path, monkeypatch, capsys):
+    """#979: an EMPTY team_name arg no longer DENYs. Rule ③'s team_name-presence
+    check was dropped — the platform-ignored caller arg is never a path
+    component — so the gate resolves the session team from the SSOT
+    (get_team_name() → 'pact-test') and ALLOWs when that team carries the
+    owner's task. Mirrors test_dispatch_gate.test_missing_team_name_arg_resolves_via_ssot."""
     plugin_root = tmp_path / "plugin"
     _seed_plugin(plugin_root)
     _setup_session(monkeypatch, tmp_path, plugin_root)
+    _seed_team(tmp_path, members=(), tasks=((_NAME, "pending"),))
 
     code, out = _run_main(_make_input(team_name=""), capsys)
-    assert code == 2
-    hso = out["hookSpecificOutput"]
-    assert hso["hookEventName"] == "PreToolUse"
-    assert hso["permissionDecision"] == "deny"
-    assert "team_name= parameter is required" in hso["permissionDecisionReason"]
+    assert code == 0
+    assert out == _SUPPRESS_EXPECTED
 
 
 def test_deny_reserved_name(tmp_path, monkeypatch, capsys):

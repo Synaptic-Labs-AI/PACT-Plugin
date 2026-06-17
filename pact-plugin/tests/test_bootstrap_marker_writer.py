@@ -1465,14 +1465,14 @@ class TestSubprocessSelfHeal:
 
         home = tmp_path
         slug = "healproj"
-        # Hex prefix → deterministic generated team name "pact-deadbeef".
+        # Hex prefix → deterministic generated team name "session-deadbeef".
         session_id = "deadbeef-4242-4242-4242-deadbeef4242"
 
         plugin_root = home / "plugin"
         plugin_root.mkdir(parents=True)
 
         # Session dir intentionally NOT created; context file ABSENT;
-        # team config for "pact-deadbeef" intentionally NOT created.
+        # team config for "session-deadbeef" intentionally NOT created.
         session_dir = home / ".claude" / "pact-sessions" / slug / session_id
         ctx = session_dir / "pact-session-context.json"
 
@@ -1517,14 +1517,14 @@ class TestSubprocessSelfHeal:
         # Healed: context file re-created with session_init-parity content.
         assert ctx.exists(), "self-heal should re-create the context file"
         content = json.loads(ctx.read_text(encoding="utf-8"))
-        assert content["team_name"] == "pact-deadbeef"
+        assert content["team_name"] == "session-deadbeef"
         assert content["session_id"] == session_id
         assert content["project_dir"] == f"/tmp/{slug}"
         assert content["plugin_root"] == str(plugin_root)
         assert content["started_at"]
 
         # Heal != forged bootstrap: the team-config pre-condition is unmet
-        # (no ~/.claude/teams/pact-deadbeef/config.json with a secretary),
+        # (no ~/.claude/teams/session-deadbeef/config.json with a secretary),
         # so the marker MUST NOT be written.
         marker = session_dir / BOOTSTRAP_MARKER_NAME
         assert not marker.exists(), (
@@ -1614,7 +1614,7 @@ class TestConcurrentTwoHealerRace:
 
         home = tmp_path
         slug = "raceproj"
-        # Hex prefix → deterministic generated team name "pact-deadbeef".
+        # Hex prefix → deterministic generated team name "session-deadbeef".
         session_id = "deadbeef-5555-6666-7777-deadbeef8888"
 
         plugin_root = home / "plugin"
@@ -1696,7 +1696,7 @@ class TestConcurrentTwoHealerRace:
             "team_name", "session_id", "project_dir", "plugin_root",
             "started_at",
         }
-        assert content["team_name"] == "pact-deadbeef"
+        assert content["team_name"] == "session-deadbeef"
         assert content["session_id"] == session_id
         assert content["project_dir"] == f"/tmp/{slug}"
         assert content["plugin_root"] == str(plugin_root)
