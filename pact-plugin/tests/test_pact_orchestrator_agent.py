@@ -132,3 +132,38 @@ def test_pact_orchestrator_body_references_soft_protocols():
     assert not missing, (
         f"orchestrator body missing soft-protocol cross-references: {missing}"
     )
+
+
+def test_dispatch_violation_example_retains_literal_task_form():
+    """Carve-out guard (#979 Phase-2 prose sweep over-reach): the dispatch-
+    violation negative example MUST retain the literal ``Task(...)`` form.
+
+    The Phase-2 sweep renamed the teammate-spawn-tool prose ``Task`` -> ``Agent``
+    (the v2.1.178 platform rename). But the DISPATCH PROTOCOL VIOLATION block
+    deliberately shows ``Task(...)`` as the WRONG/malformed spawn shape that the
+    orchestrator must recognize and correct to the canonical ``Agent(...)``. A
+    sweep that rewrote this ``Task(...)`` -> ``Agent(...)`` would corrupt the
+    negative example into "used Agent(...) instead of Agent(...)" — nonsense
+    that destroys the diagnostic. This pins the carve-out: the malformed-shape
+    literal stays ``Task(...)``.
+
+    NON-VACUITY: asserts BOTH the literal ``Task(...)`` is present AND that it
+    sits in the violation context ("instead of" the canonical Agent form). A
+    sweep over-reach removes the ``Task(...)`` token -> this flips RED.
+    """
+    text = ORCHESTRATOR_PATH.read_text()
+    # The malformed-shape literal must survive verbatim.
+    assert "`Task(...)`" in text, (
+        "the dispatch-violation negative example lost its literal `Task(...)` "
+        "malformed-shape token — the #979 Phase-2 spawn-tool prose sweep "
+        "(Task->Agent) over-reached into the carve-out. This example MUST keep "
+        "`Task(...)` to name the WRONG spawn shape the orchestrator corrects."
+    )
+    # And it must sit in the violation framing (wrong form vs canonical Agent),
+    # so the token is the intended diagnostic, not an incidental survivor.
+    assert "`Task(...)` instead of `Agent(...)`" in text, (
+        "the `Task(...)` token is present but no longer framed as the malformed "
+        "shape 'instead of `Agent(...)`'. The dispatch-violation diagnostic "
+        "must contrast the wrong `Task(...)` form against the canonical "
+        "`Agent(...)` form."
+    )

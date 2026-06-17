@@ -274,3 +274,340 @@ def test_writability_check_precedes_marker_claim_in_source():
             "O_EXCL test-and-set so a non-writable fire defers without claiming "
             "(#917)."
         )
+
+
+class TestMarkerKeyConvergence:
+    """AC-5 (#979 Phase-2) 3-path marker-key convergence guard.
+
+    All three O_EXCL emit paths must derive the marker key
+    ``(team_name, task_id, occupant)`` IDENTICALLY so they cannot split the
+    dedup marker dir (the #887/#901 divergence class):
+
+      b1 = agent_handoff_emitter.main()                       (TaskCompleted)
+      b2 = _emit_lead_side_agent_handoff via lead TaskUpdate-completed
+      b3 = _emit_lead_side_agent_handoff via the second lead call site
+           (SAME function as b2 — see task_lifecycle_gate; convergence with b1
+           is what these tests pin, and b2≡b3 by construction since they are the
+           SAME callee fed the same function-scope team_name).
+
+    The convergence atoms post-rebind:
+      * team_name — BOTH b1 (emitter:157) and b2/b3 (the caller at the
+        function-scope resolution) read ``get_pact_context().get("team_name","")``.
+      * occupant + already_emitted — SHARED via shared.agent_handoff_marker, so
+        occupant_hash(owner, subject) and the marker join cannot drift.
+
+    These tests feed b1 and b2 the SAME real session context (via the
+    ``pact_context`` fixture, which exercises the REAL get_pact_context — so any
+    read-side normalization applied inside get_pact_context applies to BOTH
+    paths equally) and assert the marker key each passed to already_emitted is
+    byte-identical. A future edit that resolved team_name from a different
+    source on one path — or applied a normalization on one call site only —
+    splits the captured keys and flips these RED.
+    """
+
+    def _capture_b1_marker_key(self, tmp_path, monkeypatch, pact_context):
+        """Drive b1 with a writable journal + the shared context; return the
+        (team_name, task_id, occupant) tuple b1 passed to already_emitted."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        pact_context(team_name=TEAM, session_id="s1")
+        captured: list[tuple] = []
+        real = b1.already_emitted
+
+        def _spy(team_name, task_id, occupant):
+            captured.append((team_name, task_id, occupant))
+            return real(team_name, task_id, occupant)
+
+        task_data = {"status": "completed", "owner": OWNER,
+                     "metadata": {"handoff": HANDOFF}}
+        stdin = {"task_id": TASK_ID, "task_subject": SUBJECT,
+                 "teammate_name": OWNER, "team_name": "stdin-ignored"}
+        with patch.object(b1, "get_journal_path",
+                          return_value=str(tmp_path / "j.jsonl")), \
+             patch.object(b1, "read_task_json", return_value=task_data), \
+             patch.object(b1, "already_emitted", side_effect=_spy), \
+             patch.object(b1, "append_event", side_effect=lambda e: True), \
+             patch("sys.stdin", io.StringIO(json.dumps(stdin))):
+            with pytest.raises(SystemExit):
+                b1.main()
+        assert captured, "b1 never reached already_emitted (setup broke)."
+        return captured[0]
+
+    def _capture_b2_marker_key(self, tmp_path, monkeypatch, pact_context):
+        """Drive b2 (lead TaskUpdate-completed) with the shared context; return
+        the (team_name, task_id, occupant) tuple b2 passed to already_emitted."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        pact_context(team_name=TEAM, session_id="s1")
+        captured: list[tuple] = []
+        real = tlg.already_emitted
+
+        def _spy(team_name, task_id, occupant):
+            captured.append((team_name, task_id, occupant))
+            return real(team_name, task_id, occupant)
+
+        monkeypatch.setattr(tlg, "get_journal_path",
+                            lambda: str(tmp_path / "j.jsonl"))
+        monkeypatch.setattr(tlg, "append_event", lambda e: True)
+        monkeypatch.setattr(tlg, "already_emitted", _spy)
+        task = {"id": TASK_ID, "subject": SUBJECT, "owner": OWNER,
+                "metadata": {"handoff": HANDOFF}}
+        tlg.evaluate_lifecycle({
+            "agent_type": LEAD,
+            "tool_name": "TaskUpdate",
+            "tool_input": {"taskId": TASK_ID, "status": "completed"},
+            "tool_response": {"task": task},
+        })
+        assert captured, "b2 never reached already_emitted (setup broke)."
+        return captured[0]
+
+    def test_b1_b2_derive_identical_marker_key(
+        self, tmp_path, monkeypatch, pact_context
+    ):
+        """b1 and b2, fed the SAME session context + same task identity, must
+        pass the IDENTICAL (team_name, task_id, occupant) key to already_emitted.
+
+        NON-VACUITY: the keys are captured from two independent real drives and
+        compared element-wise; a divergence on ANY atom (a different team_name
+        source, a different occupant derivation, a normalization on one path
+        only) makes the tuples unequal and flips this RED. Per-element asserts
+        localize WHICH atom drifted.
+        """
+        # Separate tmp dirs so neither path's marker side-effect dedups the
+        # other (we are comparing the KEY each derived, not exactly-once here).
+        b1_key = self._capture_b1_marker_key(
+            tmp_path / "b1", monkeypatch, pact_context
+        )
+        b2_key = self._capture_b2_marker_key(
+            tmp_path / "b2", monkeypatch, pact_context
+        )
+
+        assert b1_key[0] == b2_key[0], (
+            f"team_name DIVERGENCE: b1 keyed the marker on {b1_key[0]!r} but b2 "
+            f"on {b2_key[0]!r}. Post-AC-5 both MUST resolve team_name from "
+            f"get_pact_context().get('team_name',''); a split source (or a "
+            f"normalization applied on one path only) breaks the shared dedup "
+            f"marker dir (#887/#901 divergence class)."
+        )
+        assert b1_key[1] == b2_key[1], (
+            f"task_id DIVERGENCE: b1={b1_key[1]!r} b2={b2_key[1]!r}."
+        )
+        assert b1_key[2] == b2_key[2], (
+            f"occupant DIVERGENCE: b1={b1_key[2]!r} b2={b2_key[2]!r}. The "
+            f"occupant_hash(owner, subject) derivation must be shared via "
+            f"shared.agent_handoff_marker so the two paths cannot drift."
+        )
+        assert b1_key == b2_key, (
+            f"3-path marker-key convergence broken: b1={b1_key!r} b2={b2_key!r}."
+        )
+
+    def test_both_paths_resolve_team_name_from_get_pact_context(self):
+        """Source pin backstopping the behavioral convergence: BOTH the b1
+        resolution and the b2/b3 caller resolution read team_name from
+        get_pact_context().get("team_name", ...). Fails if a future edit
+        reintroduces a divergent source (e.g. an input_data/stdin read on b1, or
+        a bespoke team_name resolution at the lead-side call site)."""
+        RESOLVE = 'get_pact_context().get("team_name"'
+        b1_src = inspect.getsource(b1.main)
+        assert RESOLVE in b1_src, (
+            "b1 (agent_handoff_emitter.main) no longer resolves the marker "
+            "team_name from get_pact_context().get('team_name', ...) — the AC-5 "
+            "rebind regressed (a divergent source splits the marker key)."
+        )
+        # b2/b3 resolve team_name at the evaluate_lifecycle function scope and
+        # PASS it into _emit_lead_side_agent_handoff. Pin the resolution at the
+        # caller (evaluate_lifecycle), the source of the team_name b2/b3 use.
+        caller_src = inspect.getsource(tlg.evaluate_lifecycle)
+        assert RESOLVE in caller_src, (
+            "the lead-side caller (task_lifecycle_gate.evaluate_lifecycle) no "
+            "longer resolves team_name from get_pact_context().get('team_name', "
+            "...) before feeding _emit_lead_side_agent_handoff — b2/b3 would "
+            "diverge from b1's marker key."
+        )
+
+    @pytest.mark.parametrize(
+        "unsafe_team_name",
+        [
+            "../../etc",        # parent-dir traversal
+            "session-../x",     # embedded traversal under a valid-looking prefix
+            "a/b",              # path separator
+            "..",               # bare parent-dir
+            "foo bar",          # whitespace (not a safe single component)
+        ],
+    )
+    def test_unsafe_persisted_team_name_handled_identically_on_both_paths(
+        self, unsafe_team_name, tmp_path, monkeypatch, pact_context
+    ):
+        """SHARED-normalization convergence (the strongest #887 divergence
+        guard): an UNSAFE persisted team_name is handled IDENTICALLY on b1 and
+        b2 — BOTH reject-to-empty then fail-open to emit WITHOUT claiming a
+        marker. Neither claims a (traversal-bearing) marker dir; both emit
+        exactly once.
+
+        WHY emit-without-marker (not defer): rev-backend's Group-B read-boundary
+        re-validation lives INSIDE get_pact_context() (the SINGLE shared source
+        all three paths read), so an unsafe persisted team_name is
+        rejected-to-empty ('') for EVERY path at once. An empty team_name then
+        hits the marker layer's degenerate-key guard
+        (agent_handoff_marker: team_name in ('', '.', '..') → return None),
+        which FAILS OPEN: already_emitted returns False (no marker claimed) and
+        the emit proceeds — the deliberate bias to HANDOFF preservation over
+        loss (#24 / #887). The load-bearing convergence property is that BOTH
+        paths reach the SAME outcome: NO traversal-bearing marker dir is created
+        AND both emit exactly once. A future edit that re-validated on ONE
+        path's call site only (re-introducing the per-path split this AC-5 work
+        closes) would let the un-normalized path key a marker on the raw unsafe
+        value (a marker dir under the traversal path appears) while the other
+        rejects — and this test flips RED.
+
+        NON-VACUITY: the matching positive control
+        (test_safe_team_name_survives_on_both_paths) drives the SAME machinery
+        with a SAFE team_name and asserts BOTH paths emit + claim a marker under
+        the SAFE team dir — so the no-traversal-marker here is the shared
+        rejection, not 'never claims a marker'. The is_safe_path_component
+        allowlist (option iii) genuinely rejects each parametrized value (proven
+        by the positive control claiming a real marker where these do not).
+        """
+        # The marker dir for the EMPTY (rejected) team_name lives at
+        # teams//.agent_handoff_emitted — but already_emitted returns before
+        # creating it for a degenerate key. The KEY assertion is that NO marker
+        # dir keyed on the raw unsafe token (the per-path-split symptom) exists.
+        def _unsafe_marker_present(home: Path) -> bool:
+            teams = home / ".claude" / "teams"
+            if not teams.exists():
+                return False
+            # Any team dir that is not empty-named and carries an emitted marker
+            # would be the split symptom; the safe path creates none here.
+            return any(
+                (child / ".agent_handoff_emitted").exists()
+                for child in teams.iterdir()
+                if child.name  # ignore the empty-named degenerate root
+            )
+
+        # b1 path.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "b1")
+        monkeypatch.setenv("HOME", str(tmp_path / "b1"))
+        pact_context(team_name=unsafe_team_name, session_id="s1")
+        b1_calls: list = []
+        b1_stdin = {"task_id": TASK_ID, "task_subject": SUBJECT,
+                    "teammate_name": OWNER, "team_name": "stdin-ignored"}
+        b1_task = {"status": "completed", "owner": OWNER,
+                   "metadata": {"handoff": HANDOFF}}
+        with patch.object(b1, "get_journal_path",
+                          return_value=str(tmp_path / "b1" / "j.jsonl")), \
+             patch.object(b1, "read_task_json", return_value=b1_task), \
+             patch.object(b1, "append_event",
+                          side_effect=lambda e: b1_calls.append(e) or True), \
+             patch("sys.stdin", io.StringIO(json.dumps(b1_stdin))):
+            with pytest.raises(SystemExit):
+                b1.main()
+        b1_emitted = len(b1_calls)
+        b1_unsafe_marker = _unsafe_marker_present(tmp_path / "b1")
+        assert not b1_unsafe_marker, (
+            f"b1 claimed a marker keyed on the raw UNSAFE team_name "
+            f"{unsafe_team_name!r} — get_pact_context's read-boundary "
+            f"reject-to-empty did not apply on the b1 path (per-path split)."
+        )
+
+        # b2 path (fresh context for the b2 HOME).
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "b2")
+        monkeypatch.setenv("HOME", str(tmp_path / "b2"))
+        pact_context(team_name=unsafe_team_name, session_id="s1")
+        b2_calls: list = []
+        monkeypatch.setattr(tlg, "get_journal_path",
+                            lambda: str(tmp_path / "b2" / "j.jsonl"))
+        monkeypatch.setattr(tlg, "append_event",
+                            lambda e: b2_calls.append(e) or True)
+        task = {"id": TASK_ID, "subject": SUBJECT, "owner": OWNER,
+                "metadata": {"handoff": HANDOFF}}
+        tlg.evaluate_lifecycle({
+            "agent_type": LEAD,
+            "tool_name": "TaskUpdate",
+            "tool_input": {"taskId": TASK_ID, "status": "completed"},
+            "tool_response": {"task": task},
+        })
+        b2_emitted = len(b2_calls)
+        b2_unsafe_marker = _unsafe_marker_present(tmp_path / "b2")
+        assert not b2_unsafe_marker, (
+            f"b2 claimed a marker keyed on the raw UNSAFE team_name "
+            f"{unsafe_team_name!r} — the read-boundary reject-to-empty did not "
+            f"apply on the b2 path (per-path split, #887 divergence)."
+        )
+
+        # THE CONVERGENCE INVARIANT: both paths reached the IDENTICAL outcome.
+        assert b1_emitted == b2_emitted, (
+            f"b1 and b2 DIVERGED on an unsafe persisted team_name "
+            f"{unsafe_team_name!r}: b1 emitted {b1_emitted}x, b2 emitted "
+            f"{b2_emitted}x. The shared read-boundary normalization must make "
+            f"both paths behave identically (#887 divergence guard)."
+        )
+        assert b1_emitted == 1, (
+            f"unsafe team_name {unsafe_team_name!r}: expected emit-without-marker "
+            f"(reject-to-empty → #24 degenerate-key fail-open biases to handoff "
+            f"PRESERVATION), got {b1_emitted} emits. If this changed to a defer "
+            f"(0 emits) the fail-open contract regressed — update this pin "
+            f"deliberately."
+        )
+
+    @pytest.mark.parametrize("safe_team_name", ["pact-test", "session-deadbeef"])
+    def test_safe_team_name_survives_on_both_paths(
+        self, safe_team_name, tmp_path, monkeypatch, pact_context
+    ):
+        """Positive control + (iii)-vs-(i) decision pin (security-engineer ask):
+        a SAFE persisted team_name SURVIVES get_pact_context's read-boundary
+        re-validation (== itself) so BOTH b1 and b2 EMIT exactly once.
+
+        ``pact-test`` is the load-bearing case: it is NOT a ``session-`` value,
+        so it would be REJECTED by the tighter producer-exact regex (option i)
+        but is ACCEPTED by the chosen is_safe_path_component allowlist (option
+        iii). Its survival here pins the deliberate choice of (iii) over (i) —
+        if a future edit tightened the read-boundary to session-only, this case
+        flips RED (pact-test → '' → defer), surfacing the regression as a
+        test-gated re-decision. ``session-deadbeef`` is the always-valid
+        control. Together with the unsafe-defer test above, this proves the
+        read-boundary rejection is a real allowlist, not 'always suppress'."""
+        # b1.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "b1")
+        monkeypatch.setenv("HOME", str(tmp_path / "b1"))
+        pact_context(team_name=safe_team_name, session_id="s1")
+        b1_calls: list = []
+        b1_stdin = {"task_id": TASK_ID, "task_subject": SUBJECT,
+                    "teammate_name": OWNER, "team_name": "stdin-ignored"}
+        b1_task = {"status": "completed", "owner": OWNER,
+                   "metadata": {"handoff": HANDOFF}}
+        with patch.object(b1, "get_journal_path",
+                          return_value=str(tmp_path / "b1" / "j.jsonl")), \
+             patch.object(b1, "read_task_json", return_value=b1_task), \
+             patch.object(b1, "append_event",
+                          side_effect=lambda e: b1_calls.append(e) or True), \
+             patch("sys.stdin", io.StringIO(json.dumps(b1_stdin))):
+            with pytest.raises(SystemExit):
+                b1.main()
+        assert len(b1_calls) == 1, (
+            f"b1 did NOT emit for SAFE team_name {safe_team_name!r} — the "
+            f"read-boundary wrongly rejected a valid value (too strict: it "
+            f"should accept the is_safe_path_component allowlist, not session-"
+            f"only)."
+        )
+
+        # b2.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "b2")
+        monkeypatch.setenv("HOME", str(tmp_path / "b2"))
+        pact_context(team_name=safe_team_name, session_id="s1")
+        b2_calls: list = []
+        monkeypatch.setattr(tlg, "get_journal_path",
+                            lambda: str(tmp_path / "b2" / "j.jsonl"))
+        monkeypatch.setattr(tlg, "append_event",
+                            lambda e: b2_calls.append(e) or True)
+        task = {"id": TASK_ID, "subject": SUBJECT, "owner": OWNER,
+                "metadata": {"handoff": HANDOFF}}
+        tlg.evaluate_lifecycle({
+            "agent_type": LEAD,
+            "tool_name": "TaskUpdate",
+            "tool_input": {"taskId": TASK_ID, "status": "completed"},
+            "tool_response": {"task": task},
+        })
+        assert len(b2_calls) == 1, (
+            f"b2 did NOT emit for SAFE team_name {safe_team_name!r} — the "
+            f"read-boundary wrongly rejected a valid value on the b2 path."
+        )

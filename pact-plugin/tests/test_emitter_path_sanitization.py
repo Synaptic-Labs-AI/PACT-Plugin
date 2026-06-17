@@ -213,11 +213,20 @@ class TestPathSanitization:
         the context channel is contained by the #24 guard". The companion
         ``test_stdin_team_name_is_inert_post_rebind`` proves the OTHER half:
         a hostile STDIN team_name is inert (cannot reach the marker key)
-        once the context team_name is path-safe. (In production the context
-        team_name is always a ``session-<id8>`` value minted by
-        generate_team_name, so a degenerate CONTEXT team_name cannot occur —
-        these remain regression guards on the guard machinery, not a live
-        production state; see ``test_marker_team_name_source_is_path_safe``.)
+        once the context team_name is path-safe.
+
+        TWO UPSTREAM GUARDS (a degenerate CONTEXT team_name cannot occur in
+        prod): (1) the context team_name is always a ``session-<id8>`` value
+        minted by generate_team_name (see
+        ``test_marker_team_name_source_is_path_safe``); AND (2) #979 Phase-2
+        hardening #2 (KEPT) re-validates the persisted value at the
+        ``get_pact_context()`` READ BOUNDARY via ``is_safe_path_component``,
+        rejecting any degenerate value to ``""`` before it reaches this sink
+        (see ``test_handoff_writability_parity.py::TestMarkerKeyConvergence``).
+        ``_run_main`` patches ``get_pact_context`` directly, bypassing guard (2)
+        so the #24 SINK guard is exercised in isolation — these remain
+        regression guards on the sink guard machinery (defense-in-depth behind
+        the read boundary), not a live production state.
         """
 
         @pytest.mark.parametrize(
@@ -418,13 +427,24 @@ class TestPathSanitization:
             is covered separately by
             ``test_stdin_team_name_is_inert_post_rebind``.
 
-            DEFENSE-IN-DEPTH, NOT A LIVE VECTOR: in production the context
-            team_name is ALWAYS a ``generate_team_name`` value
-            (``session-[a-f0-9-]``, path-safe by construction — pinned by
-            ``test_marker_team_name_source_is_path_safe``), so a degenerate
-            CONTEXT team_name is impossible-in-prod. This test exercises the
-            #24 empty/dot guard as defense-in-depth on a can't-happen input —
-            do NOT re-read it as a live attack path.
+            DEFENSE-IN-DEPTH, NOT A LIVE VECTOR (two upstream guards now make a
+            degenerate CONTEXT team_name unreachable at this sink in prod):
+              (1) PRODUCER: the context team_name is ALWAYS a
+                  ``generate_team_name`` value (``session-[a-f0-9-]``, path-safe
+                  by construction — pinned by
+                  ``test_marker_team_name_source_is_path_safe``).
+              (2) READ BOUNDARY (#979 Phase-2 hardening #2, KEPT): even a
+                  corrupted / hand-edited persisted context value that WERE
+                  degenerate is rejected to ``""`` by ``get_pact_context()``'s
+                  ``is_safe_path_component`` re-validation BEFORE it reaches this
+                  sink (pinned by
+                  ``test_handoff_writability_parity.py::TestMarkerKeyConvergence``).
+            This test deliberately uses ``_run_main``, which patches
+            ``get_pact_context`` DIRECTLY (bypassing guard 2) to feed the
+            degenerate value to the sink in ISOLATION — so the #24 sink guard is
+            exercised on its own as defense-in-depth BEHIND the read boundary.
+            Do NOT re-read it as a live attack path: in production a degenerate
+            value cannot reach here through either guard.
 
             Pre-#24 with team_name='..': marker_dir resolves to
             `home/.claude/teams/../.agent_handoff_emitted`, which Path-
@@ -547,11 +567,18 @@ class TestPathSanitization:
             the first matched branch.
 
             DEFENSE-IN-DEPTH, NOT A LIVE VECTOR: the degenerate CONTEXT
-            team_name axis is impossible-in-prod (the context team_name is
-            always generate_team_name's ``session-[a-f0-9-]`` form — see
-            ``test_marker_team_name_source_is_path_safe``). This compound
-            test is a defensive regression guard on the #24 guard machinery,
-            not a live attack path.
+            team_name axis is impossible-in-prod behind TWO upstream guards —
+            (1) the context team_name is always generate_team_name's
+            ``session-[a-f0-9-]`` form (see
+            ``test_marker_team_name_source_is_path_safe``), AND (2) #979 Phase-2
+            hardening #2 (KEPT) rejects any degenerate persisted value to ``""``
+            at the ``get_pact_context()`` read boundary before it reaches this
+            sink (see
+            ``test_handoff_writability_parity.py::TestMarkerKeyConvergence``).
+            ``_run_main`` patches ``get_pact_context`` directly (bypassing guard
+            2) so this compound test exercises the #24 SINK guard in isolation —
+            a defensive regression guard behind the read boundary, not a live
+            attack path.
             """
             monkeypatch.setenv("HOME", str(tmp_path))
             # Non-vacuity capture: prove the degenerate team_name reached the
@@ -968,4 +995,117 @@ class TestPostRebindMarkerKeyInvariants:
             f"single dot in team_name {team_name!r} — even a lone '.' is a "
             f"degenerate marker-key value the #24 guard would have to catch."
         )
+
+    def test_marker_key_and_task_read_share_one_team_name_source(
+        self, tmp_path, monkeypatch
+    ):
+        """AC-5 single-source invariant: the marker key (already_emitted) and
+        the task-status read (read_task_json) consume the SAME team_name value.
+
+        Post-rebind both sinks read the one ``team_name`` local resolved once
+        from ``get_pact_context()`` at emitter:157 — read_task_json at :159 and
+        already_emitted at :269. A future edit that re-introduced a second
+        team_name source for either sink (e.g. re-reading stdin for the status
+        read, or sanitizing only one of the two) would split the sinks and the
+        marker dir could diverge from the team dir the status read targeted.
+        This pins the two sinks to one source by spying BOTH and asserting they
+        saw the identical value — regression-proof against a sink split.
+
+        NON-VACUITY: the assertion compares the two captured values directly, so
+        it can only pass when both sinks actually fired with the same string. A
+        split that fed one sink a different team_name would make the captured
+        pair unequal and flip this RED. The companion
+        ``test_stdin_team_name_is_inert_post_rebind`` proves the source is the
+        CONTEXT channel; this test proves the two downstream sinks do not
+        diverge from each other.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        import io
+        import json
+        from unittest.mock import patch
+
+        import agent_handoff_emitter as _emitter
+        from shared.agent_handoff_marker import (
+            already_emitted as _real_already_emitted,
+        )
+
+        context_team = "session-cafebabe"
+        ctx = {
+            "team_name": context_team,
+            "session_id": "",
+            "project_dir": "",
+            "plugin_root": "",
+            "started_at": "",
+        }
+        task_data = {
+            "status": "completed",
+            "owner": "probe-agent",
+            "metadata": {"handoff": VALID_HANDOFF},
+        }
+
+        marker_team_names: list[str] = []
+        read_team_names: list[str] = []
+        calls: list[dict] = []
+
+        def _spy_already_emitted(team_name, task_id, occupant):
+            marker_team_names.append(team_name)
+            return _real_already_emitted(team_name, task_id, occupant)
+
+        def _spy_read_task_json(task_id, team_name, *args, **kwargs):
+            read_team_names.append(team_name)
+            return task_data
+
+        def _append_spy(event):
+            calls.append(event)
+            return True
+
+        stdin_payload = {
+            "task_id": "42",
+            "task_subject": "single-source probe",
+            "teammate_name": "probe-agent",
+            # A stdin team_name is present but inert post-rebind; the context
+            # channel is authoritative for BOTH sinks.
+            "team_name": "session-stdin-ignored",
+        }
+
+        # Drive main() directly (NOT via _run_main, whose own read_task_json
+        # patch would shadow the spy) so the read_task_json spy actually fires
+        # and captures the team_name the status read consumed.
+        with patch.object(
+            _emitter.pact_context, "get_pact_context", return_value=ctx
+        ), patch.object(
+            _emitter, "read_task_json", side_effect=_spy_read_task_json
+        ), patch.object(
+            _emitter, "already_emitted", side_effect=_spy_already_emitted
+        ), patch.object(
+            _emitter, "append_event", side_effect=_append_spy
+        ), patch.object(
+            _emitter, "get_journal_path",
+            return_value="/pact-test/session-journal.jsonl",
+        ), patch("sys.stdin", io.StringIO(json.dumps(stdin_payload))):
+            with pytest.raises(SystemExit) as exc_info:
+                _emitter.main()
+
+        assert exc_info.value.code == 0, "emit path must exit 0."
+
+        # Both sinks fired exactly once (the emit path ran end-to-end).
+        assert read_team_names == [context_team], (
+            f"read_task_json saw team_name(s) {read_team_names!r}; the status "
+            f"read must consume the context team_name {context_team!r}."
+        )
+        assert marker_team_names == [context_team], (
+            f"already_emitted saw team_name(s) {marker_team_names!r}; the marker "
+            f"key must consume the context team_name {context_team!r}."
+        )
+        # THE INVARIANT: one source feeds both sinks — the captured values are
+        # identical. A sink split (a second team_name source for either) breaks
+        # this equality.
+        assert read_team_names == marker_team_names, (
+            f"team_name SOURCE SPLIT: read_task_json saw {read_team_names!r} but "
+            f"already_emitted saw {marker_team_names!r}. Post-AC-5 both sinks "
+            f"MUST read the single team_name local resolved once from "
+            f"get_pact_context() at emitter:157 — a divergence means a future "
+            f"edit re-introduced a second team_name source for one sink."
+        )
+        assert len(calls) == 1, "the single-source emit path must emit once."
 

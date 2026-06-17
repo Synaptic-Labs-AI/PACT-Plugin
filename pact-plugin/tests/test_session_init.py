@@ -3409,6 +3409,16 @@ class TestSourceAwareness:
     ):
         """Helper: run main() with given source and team state.
 
+        FIXTURE-ONLY ``team_exists`` (post-#979-Phase-2 source-only collapse):
+        the production directive no longer branches on team existence — the
+        platform pre-creates exactly one team per session, so ``source`` alone
+        selects the branch. ``team_exists`` here ONLY controls whether the
+        on-disk team-config fixture is written (lines below); it does NOT steer
+        any live code path. It is retained so the directive can still be
+        asserted source-only REGARDLESS of on-disk team state (a meaningful
+        regression: the directive must be identical whether or not the team dir
+        happens to exist). Do not read it as exercising a team_exists branch.
+
         Returns (additionalContext, mock_symlinks_called, _legacy_kernel_called=False).
         """
         from session_init import main
@@ -3446,7 +3456,15 @@ class TestSourceAwareness:
     # --- Path 1: startup + no team (fresh session) ---
 
     def test_startup_no_team_creates_team(self, monkeypatch, tmp_path):
-        """startup + no team: should emit unified platform directive (bare — no extra recovery text)."""
+        """startup + NO on-disk team: emit unified platform directive (bare — no recovery text).
+
+        PAIRS WITH ``test_startup_team_exists_anomalous`` (team_exists=True):
+        post-#979-Phase-2 the two differ ONLY in the on-disk team-config
+        fixture state, and together they pin the source-only invariant — the
+        startup directive is byte-identical whether or not the team dir exists
+        (the collapsed ladder no longer branches on team existence). This
+        no-team case is the bare-directive half.
+        """
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="startup", team_exists=False
         )
@@ -3454,6 +3472,10 @@ class TestSourceAwareness:
         assert "provided by the platform for this session" in additional
         assert "Do not call TeamCreate" not in additional
         assert "WARNING" not in additional
+        # Bare startup: no post-bootstrap recovery guidance is appended.
+        assert "After bootstrap, recover session state:" not in additional
+        assert "CONTEXT CLEARED" not in additional
+        assert "paused state" not in additional
 
     def test_startup_calls_symlinks(self, monkeypatch, tmp_path):
         """startup should run symlink setup."""
@@ -3548,12 +3570,18 @@ class TestSourceAwareness:
     # --- Path 5: anomalous combinations ---
 
     def test_startup_team_exists_anomalous(self, monkeypatch, tmp_path):
-        """startup + team exists: now takes the normal startup branch (source-only ladder).
+        """startup + EXISTING on-disk team: takes the SAME startup branch (source-only ladder).
 
-        The team_exists dimension is GONE — source determines the branch. startup
-        takes the bare-directive branch regardless of team state. The anomalous
-        parenthetical ("Unexpected ...") is removed; "provided by the platform for
-        this session" is emitted for all sources. 4-sentence directive still fires.
+        PAIRS WITH ``test_startup_no_team_creates_team`` (team_exists=False):
+        this is the team-exists half of the source-only invariant. Post-#979-
+        Phase-2 the team_exists dimension is GONE — `source` alone selects the
+        branch — so startup must yield the SAME bare directive (no "Unexpected"
+        anomalous parenthetical, no recovery text) whether or not the team dir
+        exists. The distinguishing assertion vs the no-team variant is precisely
+        that the output is IDENTICAL despite the differing on-disk fixture: the
+        `"Unexpected" not in` + bare-directive checks below would have FAILED
+        pre-collapse (the old anomalous branch appended an "Unexpected session
+        source ... with existing team" note here).
         """
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="startup", team_exists=True
@@ -3562,6 +3590,11 @@ class TestSourceAwareness:
         assert "provided by the platform for this session" in additional
         assert "Do not call TeamCreate" not in additional
         assert "Unexpected" not in additional
+        # Source-only invariant: identical to the no-team startup case — the
+        # existing team dir adds NO recovery text and NO anomaly note.
+        assert "After bootstrap, recover session state:" not in additional
+        assert "CONTEXT CLEARED" not in additional
+        assert "paused state" not in additional
         # 4-sentence directive verbatim (all four sentences must be present).
         assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
         assert 'Do this before anything else.' in additional
