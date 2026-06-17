@@ -2425,6 +2425,67 @@ class TestCleanupOldTeams:
                 f"mtime > TTL"
             )
 
+    def test_session_prefixed_dirs_excluded_from_reap_candidacy(self, tmp_path):
+        """SAFETY PIN for the #979 cross-session data-loss invariant: a
+        ``session-<id8>`` team dir is NEVER a reap candidate, because
+        ``_TEAM_NAME_PATTERN`` (``^pact-[a-f0-9-]+$``) excludes it.
+
+        Phase-1 adopts the platform's per-session ``session-<id8>`` team name
+        as PACT's OWN live team — a SHARED platform namespace that concurrent
+        sessions also write into. The resolver INVARIANT comment on
+        ``shared.pact_context.generate_team_name`` documents the load-bearing
+        safety claim that licenses the prefix change: ``cleanup_old_teams``
+        stays ``^pact-``-scoped and therefore does NOT reap ``session-`` dirs
+        at all, so the prefix change cannot expose a live team dir to reaping.
+        If that claim were false, THIS session's ``session_end`` could reap a
+        DIFFERENT, concurrently-live session's team dir (cross-session data
+        loss). This test pins the claim so a future broadening of
+        ``_TEAM_NAME_PATTERN`` to admit ``session-`` cannot land silently.
+
+        Design (isolates the PATTERN-GATE protection, not the current-team
+        skip): the surviving ``session-bbbbbbbb`` dir is NOT the current team
+        and is older than the TTL — so its survival can ONLY be the
+        pattern-gate exclusion, never the skip-set. The aged ``pact-deadbeef``
+        control DOES reap in the same run, proving the reaper is genuinely
+        active (survival is not a dead no-op fixture env).
+
+        NON-VACUITY (the source is intentionally left unchanged): if a future
+        edit broadened ``_TEAM_NAME_PATTERN`` to
+        ``^(pact|session)-[a-f0-9-]+$``, the aged non-current
+        ``session-bbbbbbbb`` would become a reap candidate — ``reaped`` would
+        flip 1 -> 2 and the survival assertion below would flip RED. Verified
+        by an isolated-worktree pattern-broaden probe at authoring time.
+        """
+        from session_end import cleanup_old_teams
+
+        current = "session-aaaaaaaa"  # THIS session's live platform team (#979)
+        # A DIFFERENT, concurrently-live session's dir — aged by mtime and
+        # ABSENT from the skip-set, so survival can only be the ^pact-
+        # pattern-gate exclusion.
+        _make_team_dir(tmp_path, "session-bbbbbbbb", age_days=60)
+        # Legacy PACT-shaped control: MUST reap, proving the reaper is active
+        # this run (so the session- survival is a real exclusion, not a
+        # no-op).
+        _make_team_dir(tmp_path, "pact-deadbeef", age_days=60)
+
+        reaped, skipped = cleanup_old_teams(
+            current_team_name=current,
+            teams_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert reaped == 1, "only the legacy pact- control may reap"
+        assert skipped == 0
+        # The cross-session live team dir is preserved by the pattern gate
+        # even though its mtime is older than the TTL and it is NOT the
+        # current team — broadening _TEAM_NAME_PATTERN to admit session-
+        # would break this and reintroduce cross-session data loss.
+        assert (tmp_path / "session-bbbbbbbb").exists(), (
+            "session- dirs MUST be excluded from reap candidacy (#979 "
+            "data-loss invariant)"
+        )
+        assert not (tmp_path / "pact-deadbeef").exists()
+
 
 # =============================================================================
 # cleanup_old_tasks() Tests — #412 Fix B
