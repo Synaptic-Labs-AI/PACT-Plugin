@@ -1133,7 +1133,7 @@ Invoke multiple specialists when:
 ### Pre-Invocation (Required)
 
 1. **Set up worktree** — If already in a worktree for this feature, reuse it. Otherwise, invoke `/PACT:worktree-setup` with the feature branch name. All subsequent work happens in the worktree.
-2. **Verify session team exists** — The `{team_name}` team should already exist from session start. If not, create it now: `TeamCreate(team_name="{team_name}")`.
+2. **Session team** — The `{team_name}` team is provisioned automatically by the platform — use it for dispatches; you do not create it.
 3. **S2 coordination** (if concurrent) — Check for file conflicts, assign boundaries
 
 ### S2 Light Coordination (for parallel comPACT)
@@ -1786,12 +1786,10 @@ When Claude Code Agent Teams reaches stable release, it could serve as an altern
 
 | Tool | Purpose | PACT Mapping |
 |------|---------|--------------|
-| `TeamCreate` | Create a team (with `team_name`, optional `description`) | One team per scoped orchestration |
 | `Task` (with `team_name`, `name`) | Spawn a teammate into the team | One teammate per sub-scope |
 | `SendMessage` (type: `"message"`) | Direct message from teammate to team-lead | Handoff delivery, blocker reporting |
 | `SendMessage` (type: `"shutdown_request"`) | Request teammate graceful exit | Sub-scope completion acknowledgment |
 | `TaskCreate`/`TaskUpdate` | Shared task list management | Status tracking across sub-scopes |
-| `TeamDelete` | Remove team and task directories | Cleanup after scoped orchestration completes |
 
 **Architectural notes**:
 
@@ -2270,7 +2268,7 @@ From most to least durable:
 
 | Source | Location | Survives | Use For |
 |--------|----------|----------|---------|
-| **Session journal** | `~/.claude/pact-sessions/{slug}/{session_id}/session-journal.jsonl` | Compaction, task GC, TeamDelete, crashes | HANDOFFs, phase progress, variety scores, commits, pause state |
+| **Session journal** | `~/.claude/pact-sessions/{slug}/{session_id}/session-journal.jsonl` | Compaction, task GC, team teardown, crashes | HANDOFFs, phase progress, variety scores, commits, pause state |
 | **Task system** | `TaskList` / `TaskGet` | Compaction (summaries only) | Status, blocking, assignment. Task *files* (metadata) may be GC'd |
 | **pact-memory** | `~/.claude/pact-memory/memory.db` | Permanently | Cross-session knowledge (not workflow state) |
 
@@ -2337,7 +2335,7 @@ The journal survives crashes because:
 - **POSIX O_APPEND** guarantees atomic writes — partial writes don't corrupt earlier entries
 - **JSONL format** — each line is self-contained; one malformed line doesn't affect others
 - **Fail-open reads** — `read_events()` silently skips malformed lines
-- **Session-scoped storage** — the journal lives in `~/.claude/pact-sessions/`, not `~/.claude/teams/`, so `TeamDelete` does not remove it
+- **Session-scoped storage** — the journal lives in `~/.claude/pact-sessions/`, not `~/.claude/teams/`, so team teardown does not remove it
 
 The wrap-up command harvests journal events to pact-memory before session close. The journal persists in the sessions directory for 30 days (TTL cleanup), providing a recovery window even if harvest fails. Paused sessions are exempt from TTL cleanup.
 

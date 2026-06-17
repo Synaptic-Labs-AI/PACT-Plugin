@@ -10,7 +10,7 @@ From most to least durable:
 
 | Source | Location | Survives | Use For |
 |--------|----------|----------|---------|
-| **Session journal** | `~/.claude/pact-sessions/{slug}/{session_id}/session-journal.jsonl` | Compaction, task GC, TeamDelete, crashes | HANDOFFs, phase progress, variety scores, commits, pause state |
+| **Session journal** | `~/.claude/pact-sessions/{slug}/{session_id}/session-journal.jsonl` | Compaction, task GC, team teardown, crashes | HANDOFFs, phase progress, variety scores, commits, pause state |
 | **Task system** | `TaskList` / `TaskGet` | Compaction (summaries only) | Status, blocking, assignment. Task *files* (metadata) may be GC'd |
 | **pact-memory** | `~/.claude/pact-memory/memory.db` | Permanently | Cross-session knowledge (not workflow state) |
 
@@ -77,7 +77,7 @@ The journal survives crashes because:
 - **POSIX O_APPEND** guarantees atomic writes — partial writes don't corrupt earlier entries
 - **JSONL format** — each line is self-contained; one malformed line doesn't affect others
 - **Fail-open reads** — `read_events()` silently skips malformed lines
-- **Session-scoped storage** — the journal lives in `~/.claude/pact-sessions/`, not `~/.claude/teams/`, so `TeamDelete` does not remove it
+- **Session-scoped storage** — the journal lives in `~/.claude/pact-sessions/`, not `~/.claude/teams/`, so team teardown does not remove it
 
 The wrap-up command harvests journal events to pact-memory before session close. The journal persists in the sessions directory for 30 days (TTL cleanup), providing a recovery window even if harvest fails. Paused sessions are exempt from TTL cleanup.
 
