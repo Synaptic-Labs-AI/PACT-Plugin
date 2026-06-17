@@ -24,8 +24,8 @@ _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 
 def _emit_load_failure_deny(stage: str, error: BaseException) -> NoReturn:
-    """Stdlib-only fail-closed deny. Mirrors the ``team_guard`` /
-    ``dispatch_gate`` / ``bootstrap_gate`` analogue.
+    """Stdlib-only fail-closed deny. Mirrors the ``dispatch_gate`` /
+    ``bootstrap_gate`` analogue.
 
     This module imports only stdlib, so there is no cross-package import to
     wrap (an import wrapper here would be vacuous). The live fail-open

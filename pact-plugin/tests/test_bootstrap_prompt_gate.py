@@ -1049,7 +1049,7 @@ class TestSubprocessStalenessE2E:
         # Heal landed on disk (the chain's enabling step).
         assert ctx.exists(), "self-heal should re-create the context file"
         content = json.loads(ctx.read_text(encoding="utf-8"))
-        assert content["team_name"] == "pact-deadbeef"
+        assert content["team_name"] == "session-deadbeef"
         assert content["session_id"] == self._SID
 
     def test_heal_chain_with_matching_block_injects_instruction_only(

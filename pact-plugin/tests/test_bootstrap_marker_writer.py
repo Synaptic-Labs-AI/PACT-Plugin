@@ -1465,14 +1465,14 @@ class TestSubprocessSelfHeal:
 
         home = tmp_path
         slug = "healproj"
-        # Hex prefix → deterministic generated team name "pact-deadbeef".
+        # Hex prefix → deterministic generated team name "session-deadbeef".
         session_id = "deadbeef-4242-4242-4242-deadbeef4242"
 
         plugin_root = home / "plugin"
         plugin_root.mkdir(parents=True)
 
         # Session dir intentionally NOT created; context file ABSENT;
-        # team config for "pact-deadbeef" intentionally NOT created.
+        # team config for "session-deadbeef" intentionally NOT created.
         session_dir = home / ".claude" / "pact-sessions" / slug / session_id
         ctx = session_dir / "pact-session-context.json"
 
@@ -1517,14 +1517,14 @@ class TestSubprocessSelfHeal:
         # Healed: context file re-created with session_init-parity content.
         assert ctx.exists(), "self-heal should re-create the context file"
         content = json.loads(ctx.read_text(encoding="utf-8"))
-        assert content["team_name"] == "pact-deadbeef"
+        assert content["team_name"] == "session-deadbeef"
         assert content["session_id"] == session_id
         assert content["project_dir"] == f"/tmp/{slug}"
         assert content["plugin_root"] == str(plugin_root)
         assert content["started_at"]
 
         # Heal != forged bootstrap: the team-config pre-condition is unmet
-        # (no ~/.claude/teams/pact-deadbeef/config.json with a secretary),
+        # (no ~/.claude/teams/session-deadbeef/config.json with a secretary),
         # so the marker MUST NOT be written.
         marker = session_dir / BOOTSTRAP_MARKER_NAME
         assert not marker.exists(), (
@@ -1614,7 +1614,7 @@ class TestConcurrentTwoHealerRace:
 
         home = tmp_path
         slug = "raceproj"
-        # Hex prefix → deterministic generated team name "pact-deadbeef".
+        # Hex prefix → deterministic generated team name "session-deadbeef".
         session_id = "deadbeef-5555-6666-7777-deadbeef8888"
 
         plugin_root = home / "plugin"
@@ -1696,7 +1696,7 @@ class TestConcurrentTwoHealerRace:
             "team_name", "session_id", "project_dir", "plugin_root",
             "started_at",
         }
-        assert content["team_name"] == "pact-deadbeef"
+        assert content["team_name"] == "session-deadbeef"
         assert content["session_id"] == session_id
         assert content["project_dir"] == f"/tmp/{slug}"
         assert content["plugin_root"] == str(plugin_root)
@@ -2395,3 +2395,111 @@ class TestHooksJsonDualRegistration:
             "the UserPromptSubmit registration of the writer must be RETAINED "
             "as the steady-state self-heal surface (#975 keeps both events)."
         )
+
+
+class TestDerivedTeamRenameDetector:
+    """#979 (C): the best-effort DEBUG-level rename-detector.
+
+    Detects a FUTURE platform team-naming change (the derived `session-<id8>`
+    name no longer matches the real platform team dir) that would otherwise be
+    a SILENT marker-never-written deadlock. Properties under test:
+      - fires (DEBUG → stderr) ONLY on the rename symptom: derived team dir
+        ABSENT + a sibling `session-*` dir present;
+      - stays SILENT on the happy path (derived dir present — secretary just
+        not joined yet) — and the cheap happy path does NOT scan teams/;
+      - stays SILENT when the derived dir is absent but there is no sibling
+        (avoids false-warn during a startup window with no platform dir yet);
+      - NEVER blocks/alters the marker write;
+      - is FAIL-SAFE (never raises).
+    The derived team name in these tests is `_TEAM_NAME` ("pact-test1234"); the
+    rename symptom is modeled by a `session-*` sibling dir.
+    """
+
+    _DEBUG_MARK = "DEBUG #979"
+
+    def test_emits_debug_on_rename_symptom(self, monkeypatch, tmp_path, capsys):
+        """Derived team dir ABSENT + sibling session-* present → DEBUG signal;
+        no marker; no raise."""
+        session_dir, _ = _setup_session(monkeypatch, tmp_path,
+                                        with_team_config=False)
+        sibling = tmp_path / ".claude" / "teams" / "session-deadbeef"
+        sibling.mkdir(parents=True, exist_ok=True)
+        (sibling / "config.json").write_text(
+            json.dumps({"members": []}), encoding="utf-8"
+        )
+
+        from bootstrap_marker_writer import _try_write_marker
+        _try_write_marker(_make_input())  # must not raise
+        captured = capsys.readouterr()
+
+        assert self._DEBUG_MARK in captured.err
+        assert _TEAM_NAME in captured.err
+        assert "session-deadbeef" in captured.err
+        assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists()
+
+    def test_silent_on_happy_path_derived_dir_present(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """Derived dir PRESENT (secretary not joined yet) → no DEBUG, no marker.
+        A sibling session-* also exists, proving the cheap happy path returns
+        BEFORE scanning teams/ (sibling presence is irrelevant when the derived
+        dir is present)."""
+        session_dir, _ = _setup_session(monkeypatch, tmp_path,
+                                        with_team_config=True, members=[])
+        sibling = tmp_path / ".claude" / "teams" / "session-deadbeef"
+        sibling.mkdir(parents=True, exist_ok=True)
+        (sibling / "config.json").write_text(
+            json.dumps({"members": []}), encoding="utf-8"
+        )
+
+        from bootstrap_marker_writer import _try_write_marker
+        _try_write_marker(_make_input())
+        captured = capsys.readouterr()
+
+        assert self._DEBUG_MARK not in captured.err
+        assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists()
+
+    def test_silent_when_no_sibling_session_dir(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """Derived dir absent but NO sibling session-* → SILENT (no false-warn
+        during a startup window where no platform dir exists yet)."""
+        session_dir, _ = _setup_session(monkeypatch, tmp_path,
+                                        with_team_config=False)
+
+        from bootstrap_marker_writer import _try_write_marker
+        _try_write_marker(_make_input())
+        captured = capsys.readouterr()
+
+        assert self._DEBUG_MARK not in captured.err
+        assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists()
+
+    def test_detector_never_blocks_marker_write(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """The detector must not alter the marker outcome: when the secretary
+        IS present, the marker still writes and no DEBUG fires (derived dir
+        present)."""
+        members = [{"id": "a-1", "name": "secretary"}]
+        session_dir, _ = _setup_session(monkeypatch, tmp_path,
+                                        with_team_config=True, members=members)
+
+        from bootstrap_marker_writer import _try_write_marker
+        _try_write_marker(_make_input())
+        captured = capsys.readouterr()
+
+        assert self._DEBUG_MARK not in captured.err
+        assert (session_dir / BOOTSTRAP_MARKER_NAME).exists()  # NOT blocked
+
+    def test_detector_is_fail_safe_never_raises(self, monkeypatch, tmp_path):
+        """A raising config-dir resolver inside the detector is swallowed — the
+        marker path must never crash on the rename-detector."""
+        import shared.pact_context as ctx_module
+
+        def boom():
+            raise OSError("simulated")
+
+        monkeypatch.setattr(ctx_module, "get_claude_config_dir", boom)
+        # Direct unit call — must not raise.
+        from bootstrap_marker_writer import _debug_log_if_derived_team_dir_missing
+        _debug_log_if_derived_team_dir_missing(_TEAM_NAME)

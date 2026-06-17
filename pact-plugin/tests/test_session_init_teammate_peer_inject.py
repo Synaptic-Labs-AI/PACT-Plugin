@@ -394,7 +394,7 @@ class TestTeammateBranchUsesResolver:
         )
         assert mock_gpc.called
         kw = mock_gpc.call_args.kwargs
-        assert kw.get("team_name") == "pact-" + _SESSION_ID[:8]  # generate_team_name fallback
+        assert kw.get("team_name") == "session-" + _SESSION_ID[:8]  # generate_team_name fallback
         assert kw.get("include_role_marker") is False
 
     def test_value_without_at_falls_back(self, monkeypatch, tmp_path):
@@ -406,7 +406,7 @@ class TestTeammateBranchUsesResolver:
         )
         assert mock_gpc.called
         kw = mock_gpc.call_args.kwargs
-        assert kw.get("team_name") == "pact-" + _SESSION_ID[:8]
+        assert kw.get("team_name") == "session-" + _SESSION_ID[:8]
         assert kw.get("include_role_marker") is False
 
 

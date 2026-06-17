@@ -25,12 +25,12 @@ then asserting the REAL additionalContext output.
 REAL RESOLUTION, NOT A TAUTOLOGY (carries the O1 remediation forward)
 --------------------------------------------------------------------
 The team config lives at ``_LEAD_TEAM`` (``pact-realfound``), DELIBERATELY
-DIFFERENT from ``generate_team_name(_SESSION_ID)`` (``pact-aabb1122``). The
+DIFFERENT from ``generate_team_name(_SESSION_ID)`` (``session-aabb1122``). The
 registry maps this teammate's OWN session_id -> ``<own-name>@_LEAD_TEAM``. So
 the peer body is emitted ONLY if ``_registry_resolve`` actually self-looks-up the
 own session_id, recovers the @team half (the lead's team), AND the name half
 validates as a member of that team. If resolution failed, the generate_team_name
-fallback would look at ``pact-aabb1122`` (NO config there) and emit NOTHING. The
+fallback would look at ``session-aabb1122`` (NO config there) and emit NOTHING. The
 fallback rows below (no registry entry / non-matching session_id -> no body) are
 the built-in non-vacuity proof: without real resolution, the teammate rows go
 dark.
@@ -81,10 +81,10 @@ _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 _SESSION_INIT = _PLUGIN_ROOT / "hooks" / "session_init.py"
 
 _SESSION_ID = "aabb1122-0000-0000-0000-000000000000"
-# generate_team_name(session_id) == "pact-" + session_id[:8]. The FALLBACK looks
-# here; we deliberately DO NOT put the config here, so a body can only come from
-# real registry resolution finding the DISTINCT lead team below.
-_DERIVED_FALLBACK_NAME = "pact-" + _SESSION_ID[:8]  # pact-aabb1122
+# generate_team_name(session_id) == "session-" + session_id[:8]. The FALLBACK
+# looks here; we deliberately DO NOT put the config here, so a body can only come
+# from real registry resolution finding the DISTINCT lead team below.
+_DERIVED_FALLBACK_NAME = "session-" + _SESSION_ID[:8]  # session-aabb1122
 _LEAD_TEAM = "pact-realfound"  # the lead's actual team — only registry self-lookup finds it
 assert _LEAD_TEAM != _DERIVED_FALLBACK_NAME
 

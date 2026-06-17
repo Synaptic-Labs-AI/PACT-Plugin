@@ -603,7 +603,7 @@ def _build_safety_net_context(
     return (
         f'{prelude}\n\n'
         'Session team: NOT GENERATED (session_init failed early — check '
-        'systemMessage for details). Call TeamCreate after bootstrap loads.'
+        'systemMessage for details). The platform auto-creates the session team.'
     )
 
 
@@ -1121,8 +1121,8 @@ def main():
             f'Do this before anything else. '
             f'Do not evaluate whether it is needed. '
             f'You must invoke Skill("PACT:bootstrap") on every session start.\n\n'
-            f'After bootstrap completes, your next action is: TeamCreate(team_name="{team_name}"). '
-            f'Do not read files, explore code, or respond to the user until bootstrap and team creation are complete. '
+            f'Your team is `{team_name}` (auto-created by the platform for this session). '
+            f'Do not read files, explore code, or respond to the user until bootstrap is complete. '
             f'{_substitutions}'
         )
 

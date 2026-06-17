@@ -2371,7 +2371,7 @@ class TestHealContextIfMissing:
 
         assert ctx_module.heal_context_if_missing(frame) is True
         content = json.loads(target.read_text(encoding="utf-8"))
-        assert content["team_name"] == "pact-deadbeef"
+        assert content["team_name"] == "session-deadbeef"
 
     def test_teammate_frames_never_heal(self, monkeypatch, tmp_path):
         """Teammate frames (synthesized AND captured-tmux) must not heal —

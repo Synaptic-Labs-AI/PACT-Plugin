@@ -39,7 +39,9 @@ VALID_HOOK_EVENTS = {
 
 # Hooks that MUST be synchronous (blocking) — they affect tool decisions
 MUST_BE_SYNC = {
-    "team_guard.py",      # Blocks Agent dispatch if no team (#662)
+    # (#979: team_guard.py removed from the Agent PreToolUse bind — the
+    # create-before-dispatch model is obsolete; dispatch_gate ⑧ is the
+    # residual fail-closed backstop.)
     "worktree_guard.py",  # Blocks edits outside worktree
     "validate_handoff.py",  # Validates agent output
     "agent_handoff_emitter.py",  # Writes agent_handoff journal event on TaskCompleted
@@ -489,12 +491,13 @@ class TestMissedWakeSurfacerRegistration:
 
 
 class TestSpawnToolMatchersPost662:
-    """#662: matcher='Agent' on team_guard; the
+    """#662: matcher='Agent' on the spawn-gate hooks; the
     'TaskCreate|TaskUpdate' Cat-2 matcher (now on task_lifecycle_gate) is
     PRESERVED. The earlier matcher='Task' was wrong — the canonical Claude
     Code platform tool name for sub-agent spawning is `Agent`. Cat-2
     task-management tools (TaskCreate/TaskUpdate/TaskList/...) are unrelated
-    and MUST stay.
+    and MUST stay. (#979: team_guard was removed from the Agent bind; the
+    surviving Agent-matcher spawn gate is dispatch_gate.)
     """
 
     def _all_matcher_pairs(self, hooks_config):
@@ -510,18 +513,20 @@ class TestSpawnToolMatchersPost662:
                 pairs.append((event_type, entry["matcher"], commands))
         return pairs
 
-    def test_team_guard_matcher_is_agent(self, hooks_config):
-        """PreToolUse team_guard matcher MUST be 'Agent' (#662 Cat-1)."""
+    def test_team_guard_unbound(self, hooks_config):
+        """#979: team_guard.py MUST NOT be bound to any hooks.json event — the
+        create-before-dispatch model is obsolete (its DENY could block the
+        secretary in the bootstrap window and its remediation called the
+        removed TeamCreate). dispatch_gate ⑧ is the residual fail-closed
+        backstop on the Agent PreToolUse bind.
+        """
         for event_type, matcher, commands in self._all_matcher_pairs(
             hooks_config
         ):
-            if any("team_guard.py" in c for c in commands):
-                assert matcher == "Agent", (
-                    f"team_guard.py matcher must be 'Agent' (#662); got "
-                    f"{matcher!r} on {event_type}"
-                )
-                return
-        pytest.fail("team_guard.py entry not found in hooks.json")
+            assert not any("team_guard.py" in c for c in commands), (
+                f"team_guard.py must be UNBOUND (#979); found on "
+                f"{event_type} matcher={matcher!r}"
+            )
 
     def test_no_matcher_is_bare_task_string(self, hooks_config):
         """Regression-prevention: NO matcher should be the bare 'Task'

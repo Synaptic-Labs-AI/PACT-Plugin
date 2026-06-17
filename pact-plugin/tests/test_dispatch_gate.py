@@ -6,12 +6,13 @@ This file expands every rule landed in the gate into a behavioral matrix.
 
 Rule coverage:
   - name_required — name= missing/empty/whitespace → DENY
-  - team_name_required — team_name= empty → DENY
   - name_too_long / name_invalid_regex / name_reserved_token — name
     length/NFKC/regex/reserved-token violations → DENY
   - specialist_not_registered — subagent_type not in agent registry → DENY
-  - team_name_mismatch / team_name_unavailable — team mismatch or empty
-    session source → DENY
+  - team_name_unavailable — SSOT session team empty (fail-closed) → DENY.
+    (#979: team_name_required + team_name_mismatch were DROPPED — the
+    Agent(team_name=) arg is platform-ignored, so the session team is
+    resolved solely from the SSOT, never matched against the spawn arg.)
   - no_task_assigned — no Task with owner=name → DENY
   - long_inline_mission — long inline mission OR no TaskList reference,
     disposition controlled by PACT_DISPATCH_INLINE_MISSION_MODE
@@ -239,18 +240,21 @@ def test_deny_when_name_key_missing(tmp_path, monkeypatch, capsys):
 
 
 # =============================================================================
-# team_name_required — team_name= empty
+# inert team_name arg (#979) — the platform-ignored Agent(team_name=) arg
+# never DENYs and never selects the team dir; the SSOT does
 # =============================================================================
 
 
-def test_deny_when_team_name_key_missing(tmp_path, monkeypatch, capsys):
-    """tool_input lacks team_name → team_name_required DENY (caught BEFORE the session-team check)."""
+def test_missing_team_name_arg_resolves_via_ssot(tmp_path, monkeypatch, capsys):
+    """#979: a MISSING team_name arg no longer DENYs. The arg is
+    platform-ignored, so the gate resolves the session team from the SSOT
+    (get_team_name()) and ALLOWs when the SSOT team carries the owner's task."""
     _full_setup(monkeypatch, tmp_path)
     payload = _make_input()
     del payload["tool_input"]["team_name"]
     code, out = _run_main(payload, capsys)
-    assert code == 2
-    assert "team_name= parameter is required" in out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert code == 0
+    assert out == _SUPPRESS_EXPECTED
 
 
 # =============================================================================
@@ -482,28 +486,29 @@ def test_deny_when_subagent_type_not_in_registry(tmp_path, monkeypatch, capsys):
 
 
 # =============================================================================
-# team_name_mismatch / team_name_unavailable — team_name mismatch or empty session source
+# team_name_unavailable — empty SSOT session source (fail-closed). The
+# inert-arg positive proof (#979 AC-1) lives here too.
 # =============================================================================
 
 
-def test_deny_when_team_name_mismatch(tmp_path, monkeypatch, capsys):
-    """Spawn passes team_name='wrong-team' but session is 'pact-test' → team_name_mismatch DENY."""
+def test_inert_team_name_arg_resolves_against_ssot(tmp_path, monkeypatch, capsys):
+    """#979 AC-1 inert-arg POSITIVE proof: a spawn passing team_name='wrong-team'
+    (!= the SSOT session team 'pact-test') still ALLOWs. The platform-ignored
+    caller arg is never a path component, so the member/task reads resolve
+    teams/pact-test/ (where the owner's task lives), NOT teams/wrong-team/.
+    This proves the rebind: dropping the equality check no longer DENYs when
+    arg != SSOT."""
     _full_setup(monkeypatch, tmp_path)
     code, out = _run_main(_make_input(team_name="wrong-team"), capsys)
-    assert code == 2
-    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "does not match current session team" in reason
+    assert code == 0
+    assert out == _SUPPRESS_EXPECTED
 
 
 def test_deny_when_session_team_unavailable(tmp_path, monkeypatch, capsys):
-    """Empty-source decision (architect §7(h)): when session context has
-    empty team_name, fail-closed — adversary passing team_name='' would
-    otherwise equal the empty session value.
-
-    The team_name_required rule catches the explicit empty team_name on
-    the spawn-input side BEFORE this rule runs, so we exercise this with a
-    non-empty spawn team_name
-    against an empty session team_name.
+    """Empty-source decision (architect §7(h)): when the SSOT session team_name
+    is empty, fail-closed — the member/task reads structurally depend on a
+    non-empty session team as a path segment, so an empty SSOT must DENY (the
+    spawn-arg team_name is platform-ignored and cannot substitute).
     """
     plugin_root = tmp_path / "plugin"
     _seed_plugin(plugin_root)
@@ -686,7 +691,7 @@ def test_solo_exempt_allows_without_name_or_team(
     carve_out_type, tmp_path, monkeypatch, capsys
 ):
     """Research-tier subagents legitimately spawn solo. ALLOW even with
-    name='' and team_name='' (which would otherwise trip name_required/team_name_required).
+    name='' (which would otherwise trip name_required; team_name is ignored).
     """
     _full_setup(monkeypatch, tmp_path)
     code, out = _run_main(

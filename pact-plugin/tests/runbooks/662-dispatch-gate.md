@@ -286,7 +286,9 @@ remediated in-place:
    - `pact-plugin/hooks/task_lifecycle_gate.py` (delete file)
    - `pact-plugin/hooks/shared/dispatch_helpers.py` (delete file)
    - `pact-plugin/hooks/hooks.json` (revert PreToolUse `matcher='Agent'`
-     hooks list to `[team_guard.py]` only; revert PostToolUse
+     hooks list — note: `team_guard.py` was removed in #979, so a full
+     #662 rollback now empties the `matcher='Agent'` hooks list rather than
+     restoring `[team_guard.py]`; revert PostToolUse
      `matcher='TaskCreate|TaskUpdate'` to its pre-#662 membership)
    - `pact-plugin/hooks/bootstrap_gate.py` (revert marker-fingerprint + module-load fail-closed hardening
      from Commit 1)
