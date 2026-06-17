@@ -418,6 +418,14 @@ class TestPathSanitization:
             is covered separately by
             ``test_stdin_team_name_is_inert_post_rebind``.
 
+            DEFENSE-IN-DEPTH, NOT A LIVE VECTOR: in production the context
+            team_name is ALWAYS a ``generate_team_name`` value
+            (``session-[a-f0-9-]``, path-safe by construction — pinned by
+            ``test_marker_team_name_source_is_path_safe``), so a degenerate
+            CONTEXT team_name is impossible-in-prod. This test exercises the
+            #24 empty/dot guard as defense-in-depth on a can't-happen input —
+            do NOT re-read it as a live attack path.
+
             Pre-#24 with team_name='..': marker_dir resolves to
             `home/.claude/teams/../.agent_handoff_emitted`, which Path-
             normalizes to `home/.claude/.agent_handoff_emitted` — a
@@ -537,6 +545,13 @@ class TestPathSanitization:
             collapses). Post-#24 guard returns False on EITHER axis
             being degenerate, so the compound case short-circuits via
             the first matched branch.
+
+            DEFENSE-IN-DEPTH, NOT A LIVE VECTOR: the degenerate CONTEXT
+            team_name axis is impossible-in-prod (the context team_name is
+            always generate_team_name's ``session-[a-f0-9-]`` form — see
+            ``test_marker_team_name_source_is_path_safe``). This compound
+            test is a defensive regression guard on the #24 guard machinery,
+            not a live attack path.
             """
             monkeypatch.setenv("HOME", str(tmp_path))
             # Non-vacuity capture: prove the degenerate team_name reached the
