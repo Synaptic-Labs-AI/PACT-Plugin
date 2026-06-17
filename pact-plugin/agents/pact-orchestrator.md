@@ -216,7 +216,7 @@ Explicit user override ("you code this, don't delegate") should be honored; casu
 
 **Core Principle**: If specialist tasks can run independently, invoke them at once. Sequential dispatch is only for tasks with true dependencies.
 
-**How**: Include multiple `Task` tool calls in a single response. Each specialist runs concurrently.
+**How**: Include multiple `Agent` tool calls in a single response. Each specialist runs concurrently.
 
 | Scenario | Action |
 |----------|--------|

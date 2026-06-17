@@ -222,7 +222,7 @@ Agent(
 )
 ```
 
-Spawn all reviewers in parallel (multiple `Task` calls in one response).
+Spawn all reviewers in parallel (multiple `Agent` calls in one response).
 
 **Journal event**: After dispatching all reviewers, write a `review_dispatch` event:
 ```bash

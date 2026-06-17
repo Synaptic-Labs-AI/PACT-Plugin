@@ -711,7 +711,7 @@ Agent(
 )
 ```
 
-Spawn multiple coders in parallel (multiple `Task` calls in one response). Include worktree path and S2 scope boundaries in each task description.
+Spawn multiple coders in parallel (multiple `Agent` calls in one response). Include worktree path and S2 scope boundaries in each task description.
 
 Completed-phase teammates remain as consultants. Do not shutdown during this workflow.
 

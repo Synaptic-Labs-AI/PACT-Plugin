@@ -1773,7 +1773,7 @@ When Claude Code Agent Teams reaches stable release, it could serve as an altern
 
 | Interface Element | Agent Teams Mapping |
 |-------------------|---------------------|
-| **Input: scope_contract** | Passed in the teammate spawn prompt via `Task` tool (with `team_name` and `name` parameters) |
+| **Input: scope_contract** | Passed in the teammate spawn prompt via `Agent` tool (with `team_name` and `name` parameters) |
 | **Input: feature_context** | Inherited via CLAUDE.md (auto-loaded by teammates) plus the spawn prompt |
 | **Input: worktree_path** | Worktree working directory (teammate operates in the assigned worktree) |
 | **Input: nesting_depth** | Communicated in the spawn prompt; no nested teams allowed (enforced by Agent Teams) |
@@ -1786,7 +1786,7 @@ When Claude Code Agent Teams reaches stable release, it could serve as an altern
 
 | Tool | Purpose | PACT Mapping |
 |------|---------|--------------|
-| `Task` (with `team_name`, `name`) | Spawn a teammate into the team | One teammate per sub-scope |
+| `Agent` (with `team_name`, `name`) | Spawn a teammate into the team | One teammate per sub-scope |
 | `SendMessage` (type: `"message"`) | Direct message from teammate to team-lead | Handoff delivery, blocker reporting |
 | `SendMessage` (type: `"shutdown_request"`) | Request teammate graceful exit | Sub-scope completion acknowledgment |
 | `TaskCreate`/`TaskUpdate` | Shared task list management | Status tracking across sub-scopes |
