@@ -45,7 +45,7 @@ _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 def _emit_load_failure_deny(stage: str, error: BaseException) -> NoReturn:
     """Stdlib-only fail-closed deny for module-load failure. Mirrors the
-    ``team_guard`` / ``dispatch_gate`` / ``bootstrap_gate`` analogue.
+    ``dispatch_gate`` / ``bootstrap_gate`` analogue.
 
     Without this, a raise from the cross-package imports below would crash the
     hook (exit 1), which the platform treats as a NON-blocking PreToolUse hook
