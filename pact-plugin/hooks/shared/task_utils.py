@@ -467,13 +467,22 @@ def read_task_json(
     base = Path(tasks_base_dir)
 
     task_dirs = []
+    # Case-fold for the team-dir lookup so this status-read sink and the O_EXCL
+    # marker sink treat team_name case IDENTICALLY. The marker SSOT
+    # (agent_handoff_marker._resolve_marker_target) lowercases team_name before
+    # deriving its dir; this reader historically did not, so the two sinks could
+    # diverge on a mixed-case name. Harmless today (generate_team_name mints
+    # lowercase-only "session-[a-f0-9-]"), so this is a latent-only convergence:
+    # for any real value lowered == original. Validate the FOLDED value so a
+    # name that is safe only after folding cannot reach the join.
+    team_name_lc = team_name.lower() if team_name else team_name
     # Bounded containment parity, guard (1): reject a traversal team_name
     # (mirror iter_team_task_jsons's is_safe_path_component return-on-invalid).
     # An unsafe team_name skips the team dir and falls through to the bare-base
     # read, preserving the fail-open {} contract. Legit pact-<slug>/UUID names
     # are single [A-Za-z0-9_-] components and pass unchanged.
-    if team_name and is_safe_path_component(team_name):
-        task_dirs.append(base / team_name)
+    if team_name_lc and is_safe_path_component(team_name_lc):
+        task_dirs.append(base / team_name_lc)
     task_dirs.append(base)
 
     for task_dir in task_dirs:

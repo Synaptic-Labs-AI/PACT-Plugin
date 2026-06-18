@@ -12,7 +12,7 @@ Performs PACT environment initialization:
 3b. One-time migration: wraps existing project CLAUDE.md in PACT_MANAGED boundary (#404)
 3d. Strips obsolete PACT_START/PACT_END kernel block from ~/.claude/CLAUDE.md (sunsets before v5.0.0)
 4. Checks for stale pinned context entries in project CLAUDE.md (delegated to staleness.py)
-5. Generates session-unique PACT team name and reminds orchestrator to create it
+5. Generates session-unique PACT team name and writes it to the session context (the platform pre-creates the team)
 5b. Writes session resume info (resume command, team, timestamp) to project CLAUDE.md
 6. Checks for in_progress Tasks (resumption context via Task integration)
 7. Restores last session snapshot for cross-session continuity
@@ -639,7 +639,7 @@ def main():
     3b. One-time migration: wraps existing project CLAUDE.md in PACT_MANAGED boundary (#404)
     3d. Strips obsolete PACT_START/PACT_END kernel block from ~/.claude/CLAUDE.md (sunsets before v5.0.0)
     4. Checks for stale pinned context entries in project CLAUDE.md (delegated to staleness.py)
-    5. Generates session-unique PACT team name and reminds orchestrator to create it
+    5. Generates session-unique PACT team name and writes it to the session context (the platform pre-creates the team)
     5b. Writes session resume info (resume command, team, timestamp) to project CLAUDE.md
     6. Checks for in_progress Tasks (resumption context via Task integration)
     7. Restores last session snapshot for cross-session continuity
@@ -1071,13 +1071,6 @@ def main():
                     ),
                 )
 
-        try:
-            team_config = get_claude_config_dir() / "teams" / team_name / "config.json"
-            team_exists = team_config.exists()
-        except OSError:
-            # Fail-open: if filesystem check fails, assume fresh session
-            team_exists = False
-
         # Resolve session_dir early so substitution instructions can include it.
         # get_session_dir() works here because build_context_cache() populated _cache above.
         # Suppress session_dir for the unknown-* sentinel so the literal
@@ -1087,7 +1080,8 @@ def main():
         # below.
         session_dir = get_session_dir() if not session_id_was_missing else ""
 
-        # Build context message based on source × team_exists (5 paths)
+        # Build context message based on source (post-collapse: the team always
+        # exists — the platform pre-creates exactly one team per session).
         # Session placeholder variable substitution instructions tell the orchestrator how to
         # replace {team_name}, {session_dir}, and {plugin_root} in command snippets.
         if session_dir:
@@ -1105,23 +1099,23 @@ def main():
                 f'do not run commands that depend on {{session_dir}} until next clean start. '
                 f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'
             )
-        _team_reuse = (
+        # Single platform-managed directive for every session source. The
+        # platform pre-creates exactly one team per session (Claude Code
+        # v2.1.178+), so the team always exists by the time the orchestrator
+        # acts — the directive's only job is to name the team and block until
+        # bootstrap completes. "(provided by the platform for this session)" is
+        # correct for both fresh and resumed sessions, so no team-existence
+        # discrimination is needed. The bootstrap-blocking sentence is the
+        # universal floor: it aligns this guidance with the bootstrap_gate
+        # PreToolUse hook, which already mechanically blocks Edit/Write/Agent
+        # until the bootstrap marker is stamped regardless of session source.
+        _team_directive = (
             f'YOUR PACT ROLE: orchestrator.\n\n'
             f'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input. '
             f'Do this before anything else. '
             f'Do not evaluate whether it is needed. '
             f'You must invoke Skill("PACT:bootstrap") on every session start.\n\n'
-            f'Your team is `{team_name}` (existing — resumed session). '
-            f'Do not call TeamCreate — the team already exists. '
-            f'{_substitutions}'
-        )
-        _team_create = (
-            f'YOUR PACT ROLE: orchestrator.\n\n'
-            f'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input. '
-            f'Do this before anything else. '
-            f'Do not evaluate whether it is needed. '
-            f'You must invoke Skill("PACT:bootstrap") on every session start.\n\n'
-            f'Your team is `{team_name}` (auto-created by the platform for this session). '
+            f'Your team is `{team_name}` (provided by the platform for this session). '
             f'Do not read files, explore code, or respond to the user until bootstrap is complete. '
             f'{_substitutions}'
         )
@@ -1199,12 +1193,15 @@ def main():
             except Exception:
                 pass  # fail-open: no injection; never the orchestrator safety-net
         else:
-            if source == "compact" and team_exists:
-                # Post-compaction: bootstrap directive (in _team_reuse) subsumes
-                # "recover state" guidance; keep concrete task-resumption bullets
-                # for the orchestrator's next actions after bootstrap.
+            # The team always exists (the platform pre-creates it), so the
+            # directive is source-agnostic; the per-source branches differ only
+            # in the recovery/state guidance appended after it.
+            if source == "compact":
+                # Post-compaction: bootstrap directive subsumes "recover state"
+                # guidance; keep concrete task-resumption bullets for the
+                # orchestrator's next actions after bootstrap.
                 context_parts.insert(0, (
-                    f'{_team_reuse} '
+                    f'{_team_directive} '
                     f'After bootstrap, recover session state: '
                     f'(1) Read {get_compact_summary_path()} for prior context, '
                     f'(2) Run TaskList to find in-progress work, '
@@ -1228,10 +1225,10 @@ def main():
                             blockers=find_blockers(tasks),
                         )
                         context_parts.append(_checkpoint_block)
-            elif source == "clear" and team_exists:
+            elif source == "clear":
                 # Context cleared via /clear: no compact-summary, but team and tasks survive
                 context_parts.insert(0, (
-                    f'{_team_reuse} '
+                    f'{_team_directive} '
                     f'CONTEXT CLEARED: Your context was cleared via /clear. '
                     f'State recovery: '
                     f'(1) TaskList for current tasks, '
@@ -1239,50 +1236,30 @@ def main():
                     f"Re-engage secretary: SendMessage(to='secretary', "
                     f"message='Context cleared: deliver fresh briefing with current project state.')."
                 ))
-            elif source == "resume" and team_exists:
+            elif source == "resume":
                 # Normal resume: model retains context, team exists
                 context_parts.insert(0, (
-                    f'{_team_reuse} '
+                    f'{_team_directive} '
                     f'Check session journal for paused state from /PACT:pause.'
                 ))
-            elif source == "startup" and not team_exists:
-                # Fresh session: full initialization
-                context_parts.insert(0, _team_create)
-            elif team_exists:
-                # Anomalous: unexpected source but team exists (e.g., startup + team exists)
-                # Reuse team, note the anomaly
-                context_parts.insert(0, (
-                    f'{_team_reuse} '
-                    f'Note: Unexpected session source "{source}" with existing team — '
-                    f'reusing team. Run TaskList to check current state.'
-                ))
+            elif source == "startup":
+                # Fresh session: bare directive (no extra recovery guidance)
+                context_parts.insert(0, _team_directive)
             else:
-                # Differentiate the no-team branch by whether `source` is a
-                # recognized lifecycle value:
-                #   - known source + no team → informational note (recovery
-                #     hint stays; no WARNING tone). Legitimate first-session-
-                #     after-stale-CLAUDE.md class.
-                #   - unknown source + no team → emit WARNING in
-                #     additionalContext AND stderr for observability (debug
-                #     logs surface the malformed-stdin signal).
-                _KNOWN_SOURCES = {"startup", "resume", "compact", "clear"}
-                if source in _KNOWN_SOURCES:
-                    context_parts.insert(0, (
-                        f'{_team_create} '
-                        f'Session source "{source}" without team — '
-                        f'creating fresh team. Run TaskList to check current state.'
-                    ))
-                else:
-                    print(
-                        f"session_init: unknown source value: {source!r}",
-                        file=sys.stderr,
-                    )
-                    context_parts.insert(0, (
-                        f'{_team_create} '
-                        f'WARNING: Unrecognized session source "{source}" — '
-                        f'previous session state may be lost. '
-                        f'Check TaskList for recovery context.'
-                    ))
+                # Unrecognized lifecycle source value. The team still exists
+                # (platform pre-creates it), so there is no "no team" case to
+                # handle — only an observability concern: surface the malformed
+                # `source` in additionalContext AND on stderr so debug logs
+                # capture the unexpected-stdin signal.
+                print(
+                    f"session_init: unknown source value: {source!r}",
+                    file=sys.stderr,
+                )
+                context_parts.insert(0, (
+                    f'{_team_directive} '
+                    f'Note: unrecognized session source "{source}". '
+                    f'Run TaskList to check current state.'
+                ))
 
         # 5a. Capture the PREVIOUS session's dir from project CLAUDE.md
         # before step 5b overwrites the Current Session block with THIS

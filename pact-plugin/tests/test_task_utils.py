@@ -704,6 +704,50 @@ class TestReadTaskJsonContainmentParity:
             "is_safe_path_component and skip the team dir -> bare-base fall-through"
         )
 
+    def test_mixed_case_team_name_resolves_under_lowercased_dir(self, tmp_path):
+        # Case-fold convergence: read_task_json lowercases team_name BEFORE the
+        # safe-path check + path join, so a mixed-case team_name resolves the
+        # task under the LOWERCASED team dir — matching the marker SSOT
+        # (agent_handoff_marker._resolve_marker_target), which also lowercases.
+        # The on-disk dir is the lowercased name; the lookup uses the mixed-case
+        # form and must still find the task.
+        #
+        # NON-VACUITY: without the .lower() the lookup targets the mixed-case dir
+        # name, which does not exist on a case-sensitive filesystem -> the team
+        # dir is skipped -> fall-through to the bare base (no task file there) ->
+        # {}. Reverting the case-fold flips this RED. (Verified by revert.)
+        #
+        # CASE-SENSITIVITY GUARD: on a case-INSENSITIVE filesystem (macOS APFS
+        # default), the OS itself bridges "Session-..." -> "session-..." on disk,
+        # so the regression is unobservable there (the test would false-green
+        # even with the .lower() removed). Skip unless the tmp filesystem is
+        # genuinely case-sensitive, so the assertion is coupled to the case-fold
+        # rather than to OS path semantics. Linux CI is case-sensitive.
+        from task_utils import read_task_json
+        probe_lower = tmp_path / "casefs_probe"
+        probe_lower.mkdir()
+        if (tmp_path / "CASEFS_PROBE").exists():
+            pytest.skip(
+                "case-insensitive filesystem (e.g. macOS APFS) cannot observe "
+                "the case-fold regression — the OS bridges the case difference"
+            )
+        base = tmp_path / "tasks"
+        lowered_dir = base / "session-deadbeef"
+        lowered_dir.mkdir(parents=True)
+        (lowered_dir / "5.json").write_text(
+            json.dumps({"id": "5", "subject": "CaseFolded"}), encoding="utf-8"
+        )
+        result = read_task_json(
+            "5", "Session-DEADBEEF", tasks_base_dir=str(base)
+        )
+        assert result.get("subject") == "CaseFolded", (
+            "a mixed-case team_name must resolve under the lowercased team dir "
+            "(read_task_json .lower()s before the join, converging with the "
+            "marker SSOT). Without the case-fold the lookup targets the "
+            "mixed-case dir name, misses on a case-sensitive FS, and falls "
+            "through to the bare base -> {}."
+        )
+
 
 class TestReadTaskJsonResolverEnvSet:
     """#926 remediation (was F2/Future, folded in): read_task_json's

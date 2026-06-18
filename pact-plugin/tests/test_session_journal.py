@@ -2498,8 +2498,19 @@ class TestAgentHandoffEmitterJournalWrite:
 
         with _patch("sys.stdin", stdin), \
              _patch("agent_handoff_emitter.read_task_json", return_value=task_data), \
-             _patch("agent_handoff_emitter.pact_context"), \
-             _patch("agent_handoff_emitter.get_team_name", return_value="pact-test1234"), \
+             _patch(
+                 # The marker team_name now resolves from the session context
+                 # (get_pact_context), not the dropped stdin read / get_team_name
+                 # wrapper. Return a real context dict so the marker key is a
+                 # plain string (a bare-MagicMock pact_context would feed a
+                 # MagicMock team_name into the path join).
+                 "agent_handoff_emitter.pact_context.get_pact_context",
+                 return_value={
+                     "team_name": "pact-test1234", "session_id": "",
+                     "project_dir": "", "plugin_root": "", "started_at": "",
+                 },
+             ), \
+             _patch("agent_handoff_emitter.get_journal_path", return_value="/pact-test/session-journal.jsonl"), \
              _patch("agent_handoff_emitter.append_event", return_value=True) as mock_append, \
              _patch("agent_handoff_emitter.make_event", wraps=None) as mock_make:
 

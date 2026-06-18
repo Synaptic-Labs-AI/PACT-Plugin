@@ -1,5 +1,5 @@
 ---
-description: PACT session-start ritual — team create/reuse, secretary spawn, paused-state surface, bootstrap marker
+description: PACT session-start ritual — resolve the session team (platform-provisioned), secretary spawn, paused-state surface, bootstrap marker
 ---
 
 # Session-Start Ritual
@@ -8,12 +8,11 @@ The persona body's §2 Session-Start Ritual is your invocation contract; this co
 
 ---
 
-## Step 1 — Team create or reuse
+## Step 1 — Resolve the session team
 
 Read `team_name` from the **Current Session** block in the project's `CLAUDE.md` (preferred location: `$CLAUDE_PROJECT_DIR/.claude/CLAUDE.md`; legacy fallback: `$CLAUDE_PROJECT_DIR/CLAUDE.md`). The `session_init` hook writes this block at session start.
 
-- If `~/.claude/teams/{team_name}/config.json` exists → **reuse**: the team is live; do not recreate.
-- If absent → **create** via the Agent Teams `TeamCreate` action with `name={team_name}`. Every specialist dispatch requires the team to exist.
+The platform manages exactly one team per session, named `{team_name}` — it is provisioned automatically; you do not create it (the `TeamCreate`/`TeamDelete` tools no longer exist). Use `{team_name}` for every specialist dispatch.
 
 ## Step 2 — Spawn `pact-secretary`
 

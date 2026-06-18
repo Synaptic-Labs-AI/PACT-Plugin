@@ -119,7 +119,7 @@ This trigger fires only when remediation occurred and changed things. Skip if no
 
 **PR Review Workflow**
 
-**Verify session team exists**: The `{team_name}` team should already exist from session start. If not, create it now: `TeamCreate(team_name="{team_name}")`.
+**Session team**: The `{team_name}` team is provisioned automatically by the platform — use it for dispatches; you do not create it.
 
 Pull request reviews should mirror real-world team practices where multiple reviewers sign off before merging. Dispatch **at least 3 reviewers in parallel** to provide comprehensive review coverage:
 
@@ -222,7 +222,7 @@ Agent(
 )
 ```
 
-Spawn all reviewers in parallel (multiple `Task` calls in one response).
+Spawn all reviewers in parallel (multiple `Agent` calls in one response).
 
 **Journal event**: After dispatching all reviewers, write a `review_dispatch` event:
 ```bash
