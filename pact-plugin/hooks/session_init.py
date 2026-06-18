@@ -544,7 +544,7 @@ def _build_safety_net_context(
     "YOUR PACT ROLE: orchestrator." and the string includes the
     `Skill("PACT:bootstrap")` invocation so the team-lead still loads its
     operating instructions, governance policy, and workflow protocols even
-    when main() failed before building the normal team-reuse/team-create
+    when main() failed before building the normal team-resolution
     string. For a teammate frame (frame_role == "teammate") the marker is
     "YOUR PACT ROLE: teammate." and the body is a minimal TaskList directive —
     a teammate MUST NOT be handed the orchestrator-only bootstrap directive.
@@ -900,7 +900,7 @@ def main():
         # wrapper at the call site.
         context_parts.append(format_plugin_banner())
 
-        # 5. Remind orchestrator to create session-unique PACT team (or reuse on resume)
+        # 5. Remind orchestrator to resolve the session-unique PACT team (platform-provisioned)
         team_name = generate_team_name(input_data)
 
         # 5a. Build the session context FIRST so get_session_dir() works for
@@ -1337,7 +1337,7 @@ def main():
             output["systemMessage"] = " | ".join(system_messages)
 
         # context_parts is guaranteed non-empty on the happy path: the
-        # team-reuse/team-create instruction is always insert(0, ...)'d
+        # team-resolution instruction is always insert(0, ...)'d
         # earlier in main(), so `output["hookSpecificOutput"]` is always
         # populated by this point. The exception safety net at the bottom
         # of main() builds its own output and never falls through here.

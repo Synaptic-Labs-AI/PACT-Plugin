@@ -213,7 +213,7 @@ def _read_lead_session_id(team_name: str, teams_dir: str | None = None) -> str:
 
     CURRENCY DEPENDENCY (the in-process/tmux topology compare rests on this):
     in-process safety assumes ``config.leadSessionId`` is CURRENT. A STALE value
-    — e.g. after a team resume/reuse where the config retains a prior session's
+    — e.g. after a session resume where the team config retains a prior session's
     id — could make the caller's ``session_id == leadSessionId`` compare
     MISCLASSIFY an in-process frame as tmux (or vice-versa). Blast radius is
     BOUNDED and benign: the discriminator is coordination-only (all frames are the
