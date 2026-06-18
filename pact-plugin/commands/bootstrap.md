@@ -1,5 +1,5 @@
 ---
-description: PACT session-start ritual — resolve the session team (platform-provisioned), secretary spawn, paused-state surface, bootstrap marker
+description: PACT session-start ritual — identify the session team (platform-provisioned), secretary spawn, paused-state surface, bootstrap marker
 ---
 
 # Session-Start Ritual
@@ -8,7 +8,7 @@ The persona body's §2 Session-Start Ritual is your invocation contract; this co
 
 ---
 
-## Step 1 — Resolve the session team
+## Step 1 — Identify the session team
 
 Read `team_name` from the **Current Session** block in the project's `CLAUDE.md` (preferred location: `$CLAUDE_PROJECT_DIR/.claude/CLAUDE.md`; legacy fallback: `$CLAUDE_PROJECT_DIR/CLAUDE.md`). The `session_init` hook writes this block at session start.
 
