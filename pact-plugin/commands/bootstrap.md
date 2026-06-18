@@ -1,5 +1,5 @@
 ---
-description: PACT session-start ritual — resolve the session team (platform-provisioned), secretary spawn, paused-state surface, bootstrap marker
+description: PACT session-start ritual — identify the session team (platform-provisioned), secretary spawn, paused-state surface, bootstrap marker
 ---
 
 # Session-Start Ritual
@@ -8,7 +8,7 @@ The persona body's §2 Session-Start Ritual is your invocation contract; this co
 
 ---
 
-## Step 1 — Resolve the session team
+## Step 1 — Identify the session team
 
 Read `team_name` from the **Current Session** block in the project's `CLAUDE.md` (preferred location: `$CLAUDE_PROJECT_DIR/.claude/CLAUDE.md`; legacy fallback: `$CLAUDE_PROJECT_DIR/CLAUDE.md`). The `session_init` hook writes this block at session start.
 
@@ -29,7 +29,7 @@ Spawn the secretary **only once per session** — reuse the same secretary for a
 
 ## Step 3 — Surface paused state
 
-If `~/.claude/teams/{team_name}/paused-state.json` exists, read it and surface its contents to the user. **Do not silently resume.** Ask the user to confirm whether to continue the paused workflow or start fresh; their choice drives next-step dispatch.
+Paused state is surfaced **automatically** by the `session_init` hook: when the previous session ran `/PACT:pause`, it wrote a `session_paused` event to the session journal, and `session_init` reads that event on resume and injects the paused-work prompt into the SessionStart context. There is **no `paused-state.json` file** — do not attempt to read one (nothing writes it). Watch the SessionStart context for a "Paused work detected" line. If it appears, **do not silently resume.** Surface it to the user and ask whether to continue the paused workflow or start fresh; their choice drives next-step dispatch.
 
 ## Step 4 — Plugin banner
 

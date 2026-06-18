@@ -60,13 +60,13 @@ the marker; marker-fingerprint regressions are diagnosed in
 2. No live session for the test team. Inspect
    `~/.claude/teams/{team_name}/config.json` and remove if present, OR
    choose a fresh team name not yet on disk.
-3. No stale paused-state for the chosen team:
-   ```
-   ls ~/.claude/teams/{team_name}/paused-state.json 2>&1
-   ```
-   Should return `No such file or directory`. If present, the
-   orchestrator surfaces it before the secretary spawn and Section 4 below
-   does not execute cleanly.
+3. No stale paused work for the chosen team: the prior session left no
+   unresolved `session_paused` journal event. (There is **no**
+   `paused-state.json` file — paused state travels via the session journal,
+   which `session_init` reads on resume and surfaces as a "Paused work
+   detected" line in the SessionStart context.) If a prior session paused
+   without resolution, the orchestrator surfaces it before the secretary
+   spawn and Section 4 below does not execute cleanly.
 4. Start a **fresh** `claude --agent PACT:pact-orchestrator` session in
    a project that has the plugin installed. Do not reuse a session that
    authored the merge of the bootstrap change under test — its hook
@@ -347,11 +347,13 @@ the three-call sequence executed regardless of team-create vs reuse path.
 
 ### 6.3 Paused state surfaces before secretary spawn
 
-If `~/.claude/teams/{team_name}/paused-state.json` exists at session
-start, the bootstrap ritual surfaces it to the user BEFORE Step 2.
-Section 1's pass criteria do not apply until the user resolves the
-paused-state choice. Treat this as a "runbook prerequisite not met"
-rather than a §1 failure — re-run after clearing paused state per
+If the prior session left an unresolved `session_paused` journal event,
+`session_init` injects a "Paused work detected" line into the SessionStart
+context and the bootstrap ritual surfaces it to the user BEFORE Step 2.
+(There is **no** `paused-state.json` file — paused state travels via the
+session journal.) Section 1's pass criteria do not apply until the user
+resolves the paused-work choice. Treat this as a "runbook prerequisite not
+met" rather than a §1 failure — re-run after resolving the paused work per
 prerequisites above.
 
 ### 6.4 Inline-mission WARN with `PACT_DISPATCH_INLINE_MISSION_MODE=shadow`

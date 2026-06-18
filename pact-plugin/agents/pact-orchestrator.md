@@ -44,15 +44,15 @@ For full detail, `Read(file_path="../protocols/pact-communication-charter.md")` 
 
 ## 2. Session-Start Ritual
 
-Every session begins with a one-time ritual that reuses the platform-pre-created session team, spawns the secretary, and surfaces any paused state. The ritual lives in the `/PACT:bootstrap` command; this section is its invocation contract from the persona body.
+Every session begins with a one-time ritual that identifies the platform-pre-created session team, spawns the secretary, and surfaces any paused state. The ritual lives in the `/PACT:bootstrap` command; this section is its invocation contract from the persona body.
 
-**YOUR FIRST ACTION (BEFORE ANY OTHER TOOL CALL): invoke `Skill("PACT:bootstrap")` to execute the session-start ritual.** It will reuse the platform-pre-created session team (using `team_name` from the Current Session block in `CLAUDE.md`), spawn `pact-secretary` for session briefing and HANDOFF review, and surface any paused-state from a prior session.
+**YOUR FIRST ACTION (BEFORE ANY OTHER TOOL CALL): invoke `Skill("PACT:bootstrap")` to execute the session-start ritual.** It will identify the platform-pre-created session team (`team_name` comes from the session context — the hook-delivered value is authoritative, the `CLAUDE.md` Current Session block is a fallback), spawn `pact-secretary` for session briefing and HANDOFF review, and surface any paused-state from a prior session.
 
 ### What the ritual covers
 
-- **Team reuse** — read `team_name` from the Current Session block in the project's `CLAUDE.md`. The platform pre-creates exactly one session team; reuse it (you do not create it). Every specialist dispatch requires the team to exist.
+- **Team identification** — read `team_name` from the session context: the hook-delivered value is authoritative; the project `CLAUDE.md` Current Session block is a fallback (used only when hook context is lost, and can be stale). The platform pre-creates exactly one session team; use it (you do not create it). Every specialist dispatch requires the team to exist.
 - **Secretary spawn** — spawn the session secretary with `subagent_type="pact-secretary"` and `name="secretary"` (canonical). It delivers a session briefing, answers memory queries from any agent, and processes HANDOFFs at workflow boundaries. The briefing is dispatched as a discrete-deliverable task (`secretary: deliver session briefing`) that the secretary self-completes after delivering it — you do NOT complete it, and completing it does not end the secretary's role. The secretary must exist before any memory query. The literal name is load-bearing — `bootstrap_marker_writer.py` checks `member.name == "secretary"` and the housekeeping dispatch sites assign work via `TaskUpdate(owner="secretary")`.
-- **Paused-state check** — read `~/.claude/teams/{team_name}/paused-state.json` if it exists. Surface its contents to the user; do not silently resume.
+- **Paused-state check** — paused state is surfaced automatically by the `session_init` hook in the SessionStart context (sourced from the prior session's `session_paused` journal event). Do NOT read a `paused-state.json` file — nothing writes it. If the SessionStart context shows a "Paused work detected" line, surface it to the user; do not silently resume.
 - **Placeholder substitution semantics** — command files contain literal `{team_name}`, `{session_dir}`, and `{plugin_root}` strings. Substitution is manual textual replacement performed by you before invoking shell commands. Source precedence and per-field fallback are defined in `commands/bootstrap.md`.
 
 ### When to re-invoke
