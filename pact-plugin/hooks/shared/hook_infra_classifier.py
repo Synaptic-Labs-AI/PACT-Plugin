@@ -170,13 +170,25 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "tool_response", "variety_scorer",
     }),
     "bootstrap_gate": frozenset({
-        "constants", "marker_schema", "pact_context", "paths",
-        "session_journal", "session_registry", "session_state",
-    }),
+        "claude_md_manager", "constants", "marker_schema", "pact_context",
+        "paths", "pin_caps", "session_journal", "session_registry",
+        "session_resume", "session_state", "staleness",
+    }),  # claude_md_manager / session_resume / staleness / pin_caps reached
+         # here via bootstrap_gate -> bootstrap_marker_writer -> session_resume
+         # (update_session_info) + claude_md_manager (resolve_project_claude_md_path),
+         # and session_resume -> staleness -> pin_caps. Added when #989's
+         # write-back self-heal pulled session_resume + claude_md_manager into
+         # bootstrap_marker_writer's imports.
     "bootstrap_marker_writer": frozenset({
-        "constants", "marker_schema", "pact_context", "paths",
-        "session_journal", "session_registry", "session_state",
-    }),
+        "claude_md_manager", "constants", "marker_schema", "pact_context",
+        "paths", "pin_caps", "session_journal", "session_registry",
+        "session_resume", "session_state", "staleness",
+    }),  # claude_md_manager / session_resume / staleness / pin_caps reached
+         # here because #989's write-back self-heal added
+         # resolve_project_claude_md_path (claude_md_manager) + update_session_info
+         # (session_resume) imports; session_resume -> staleness -> pin_caps. This
+         # is the SOURCE edge that also grows bootstrap_gate's closure (which
+         # imports bootstrap_marker_writer).
     "file_tracker": frozenset({
         "constants", "pact_context", "paths", "session_journal",
         "session_registry", "session_state",

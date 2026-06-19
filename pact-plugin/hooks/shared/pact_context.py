@@ -51,6 +51,21 @@ _context_path: Path | None = None
 # is a fresh Python process (new module state = clean cache).
 _cache: dict | None = None
 
+# Per-process cache for the IDENTITY-MATCHED team name (get_team_name's
+# detect-and-align result). Populated lazily on the first get_team_name()
+# call and reused for the life of the process.
+#
+# COLD-START TRAP — this MUST stay a plain in-memory module global and MUST
+# NEVER be persisted to disk or an env var. The platform team dir is born
+# ~38s AFTER SessionStart, so a SessionStart-time resolution MISSES the real
+# dir and resolves to the persisted-context default. If that early (wrong)
+# value were memoized to disk, a later process would read it back BEFORE
+# re-probing the now-present dir and re-introduce the bootstrap deadlock this
+# whole change fixes. The born-and-die-per-process lifecycle IS the safety:
+# each fresh hook process re-probes the live filesystem. None is the
+# "not-yet-resolved" sentinel; "" is a legitimate resolved-empty value.
+_aligned_cache: str | None = None
+
 # Default context dict returned on any error
 _EMPTY_CONTEXT = {
     "team_name": "",
@@ -82,28 +97,29 @@ def reset_for_tests() -> None:
     """Reset this module's mutable session-context state to its import-time
     default. Public test-isolation hook.
 
-    ``pact_context`` memoizes the resolved session context in two
-    module-level globals — ``_cache`` (the parsed context dict) and
-    ``_context_path`` (the resolved context-file path). Both are populated
-    lazily on first read and persist for the life of the process. That is
-    correct in production (one session per process) but leaks across tests,
-    which reuse a single process: a test that populates the cache with a
-    session bleeds it into every later test. The pytest autouse fixture in
-    ``tests/conftest.py`` calls this before AND after every test to guarantee
-    cross-test isolation.
+    ``pact_context`` memoizes the resolved session context in three
+    module-level globals — ``_cache`` (the parsed context dict),
+    ``_context_path`` (the resolved context-file path), and ``_aligned_cache``
+    (the identity-matched team name). All are populated lazily on first read
+    and persist for the life of the process. That is correct in production
+    (one session per process) but leaks across tests, which reuse a single
+    process: a test that populates the cache with a session bleeds it into
+    every later test. The pytest autouse fixture in ``tests/conftest.py``
+    calls this before AND after every test to guarantee cross-test isolation.
 
     Co-located with the state it resets ON PURPOSE: a future rename of
-    ``_cache`` / ``_context_path`` must update THIS function in the same
-    module, instead of silently turning an external direct-assignment reset
-    into a no-op. Pure, no args, idempotent. Resets ONLY the mutable
-    cache/path globals — ``_EMPTY_CONTEXT`` and the ``TOKEN_*`` / config
-    constants are immutable defaults and are not touched. ADDITIVE: production
-    caching behavior and all existing callers are unchanged; this is invoked
-    only by tests.
+    ``_cache`` / ``_context_path`` / ``_aligned_cache`` must update THIS
+    function in the same module, instead of silently turning an external
+    direct-assignment reset into a no-op. Pure, no args, idempotent. Resets
+    ONLY the mutable cache/path globals — ``_EMPTY_CONTEXT`` and the
+    ``TOKEN_*`` / config constants are immutable defaults and are not touched.
+    ADDITIVE: production caching behavior and all existing callers are
+    unchanged; this is invoked only by tests.
     """
-    global _cache, _context_path
+    global _cache, _context_path, _aligned_cache
     _cache = None
     _context_path = None
+    _aligned_cache = None
 
 
 def _build_session_path(slug: str, session_id: str) -> Path:
@@ -191,7 +207,7 @@ def init(input_data: dict) -> None:
     Args:
         input_data: Parsed stdin JSON from the hook
     """
-    global _context_path, _cache
+    global _context_path, _cache, _aligned_cache
 
     # Skip if already initialized (test fixtures pre-set _context_path)
     if _context_path is not None:
@@ -221,8 +237,13 @@ def init(input_data: dict) -> None:
         _context_path = (
             _build_session_path(slug, session_id) / "pact-session-context.json"
         )
-        # Clear cache so subsequent reads use the new path
+        # Clear caches so subsequent reads use the new path. _aligned_cache is
+        # DERIVED from the context (#989), so it must be invalidated whenever
+        # the context path changes — otherwise a get_team_name() called before
+        # init() (which resolves to "" with no path) would poison the cache and
+        # be returned stale after init().
         _cache = None
+        _aligned_cache = None
     # else: leave _context_path as None — readers return _EMPTY_CONTEXT
 
 
@@ -288,9 +309,185 @@ def get_pact_context() -> dict:
         return _cache
 
 
+def _resolve_aligned_team_name(
+    session_id: str,
+    teams_dir: str | None = None,
+    default: str | None = None,
+) -> str:
+    """Resolve the REAL platform team name for ``session_id`` by IDENTITY MATCH.
+
+    Detect-and-align (#989). ``session_init`` persists the COMPUTED team name
+    (``generate_team_name`` -> ``session-<id8>``) at SessionStart, but in
+    divergent launch contexts (Desktop child / print / rename-skip) the
+    platform names the real team dir with the FULL session UUID instead. This
+    resolver finds the dir that ACTUALLY belongs to this session so
+    ``get_team_name`` returns the namespace the tasks really live under.
+
+    IDENTITY-MATCH predicate (launcher-agnostic + collision-proof): a team dir
+    is THIS session's team iff ``teams/<dir>/config.json`` exists and its
+    ``leadSessionId`` field equals ``session_id``. This matches whether the
+    platform named the dir ``session-<id8>`` (2.1.178+ CLI) or the full UUID
+    (Desktop 2.1.177 child) — there is deliberately NO dir-name-prefix
+    shortcut; full-UUID, ``session-<id8>``, and ``pact-<id8>`` are all
+    first-class. A stale/foreign dir from another session carries a DIFFERENT
+    ``leadSessionId`` and is rejected, so an ``id8`` collision cannot
+    mis-resolve.
+
+    FAIL-SAFE DEFAULT: on no identity match (the team dir is half-formed —
+    ``inboxes/`` present but ``config.json`` not yet written — or simply
+    absent at a cold-start probe, or anything raises), return ``default``.
+    ``default`` falls back to the PERSISTED CONTEXT team_name
+    (``get_pact_context()['team_name']``) when not supplied — that is exactly
+    today's behavior, so a no-match is zero-regression. Detection can only
+    UPGRADE (resolve a fresher identity-matched dir); it never degrades below
+    the persisted value. ``session_init`` threads the freshly-computed name as
+    an explicit ``default`` at its call site so a first-ever cold SessionStart
+    (empty persisted context) resolves to the computed name, NOT "".
+
+    PURE / FS-read-only / NEVER raises. The whole scan is wrapped in a TRUE
+    ``except Exception`` (NOT the typed-tuple ``_iter_members`` precedent at
+    the ``members[]`` reader). The genuine raise sources the bare except must
+    catch are:
+      * ``get_claude_config_dir()`` -> ``Path.home()`` can raise
+        ``RuntimeError`` when HOME is unresolvable (the ``teams_dir is None``
+        branch composes the teams root via home).
+      * ``Path(teams_dir)`` raises ``TypeError`` when ``teams_dir`` is a
+        non-``None`` non-str (e.g. an int) — a path cannot be composed from it.
+      * the per-entry ``config.json`` read (``read_text`` / ``json.loads`` /
+        ``is_dir``) can raise ``OSError`` / ``json.JSONDecodeError`` /
+        ``ValueError`` — but those are caught by the INNER typed
+        ``except`` (skip the bad sibling, keep scanning), so they normally do
+        NOT reach the outer except; the outer except is the backstop for an
+        unexpected error in the loop scaffolding itself.
+    A typed outer tuple would LEAK the RuntimeError/TypeError above and break
+    never-raises, which is why the outer guard is a bare ``except Exception``.
+
+    NOTE — ``session_id`` is NOT a raise source here. It is used ONLY as a
+    string compared against ``config.json['leadSessionId']`` (and an empty
+    check); it is NEVER composed into a ``Path``. So a path-unsafe raw
+    ``session_id`` (embedded ``/`` or NUL) does NOT raise in this function —
+    it simply never equals any stored ``leadSessionId`` -> NO MATCH ->
+    ``default``. The path-safety gate is applied instead to the matched DIR
+    NAME (``is_safe_path_component`` below), which IS used as a path segment.
+    The bare-except precedents in this module are ``persist_context`` and
+    ``heal_context_if_missing``.
+
+    PERF (SessionStart hot-path scan cost): on a MATCH the scan stops at the
+    first matching dir; on NO MATCH it iterates EVERY team dir under
+    ``teams/``, doing a ``stat``/``is_dir`` plus a small-JSON ``read_text`` +
+    ``json.loads`` per entry. Acceptable: the directory holds a handful of
+    entries in practice (worst case observed ~0.45ms over ~21 dirs), the
+    no-match path is hit only in the cold-start window (the real team dir is
+    born ~38s after SessionStart), and each fresh hook process pays it at most
+    once because ``get_team_name`` memoizes the result via ``_aligned_cache``.
+
+    Args:
+        session_id: The current session id to identity-match against
+            ``config.json['leadSessionId']``. Empty -> no match -> default.
+        teams_dir: Override the teams directory (for testing). Defaults to
+            ``<claude-config-dir>/teams``.
+        default: Fail-safe return on no match / error. Defaults to the
+            persisted-context team_name when None.
+
+    Returns:
+        The identity-matched team dir name, else ``default`` (or the
+        persisted-context team_name when ``default`` is None).
+    """
+    try:
+        # Resolve the default first (inside the try): get_pact_context() is a
+        # safe read, but compute the fallback before the scan so every exit
+        # path — match, no-match, raise — returns a defined value.
+        fallback = default if default is not None else get_pact_context().get(
+            "team_name", ""
+        )
+        if not session_id:
+            return fallback
+        if teams_dir is not None:
+            teams_root = Path(teams_dir)
+        else:
+            teams_root = get_claude_config_dir() / "teams"
+        # Sorted iteration -> deterministic resolution if (pathologically)
+        # two dirs claimed the same leadSessionId.
+        for entry in sorted(teams_root.iterdir()):
+            try:
+                if not entry.is_dir():
+                    continue
+                config_path = entry / "config.json"
+                data = json.loads(config_path.read_text(encoding="utf-8"))
+                if data.get("leadSessionId") != session_id:
+                    continue
+                # Path-safety the matched dir name BEFORE returning it — a
+                # tampered config could name a path-unsafe dir. On failure,
+                # skip this entry and keep scanning (do not abort the search).
+                name = entry.name
+                if not is_safe_path_component(name):
+                    continue
+                return name
+            except (OSError, json.JSONDecodeError, ValueError, TypeError, AttributeError):
+                # This dir is unreadable / malformed — skip it, keep scanning
+                # the rest. A single bad sibling must not abort detection.
+                continue
+        return fallback
+    except Exception:
+        # TOTAL fail-safe: home-resolution RuntimeError (get_claude_config_dir
+        # -> Path.home, the teams_dir=None branch), a non-str teams_dir
+        # TypeError (Path(teams_dir)), or any other unexpected error -> the
+        # persisted/computed default. (session_id is NOT a raise source here —
+        # it is only string-compared to leadSessionId, never composed into a
+        # Path; see the NOTE in the docstring above.) NEVER raises —
+        # get_team_name and the heal path depend on this contract.
+        if default is not None:
+            return default
+        try:
+            return get_pact_context().get("team_name", "")
+        except Exception:
+            return ""
+
+
 def get_team_name() -> str:
-    """Convenience: return team_name from context, lowercased. Empty string on error."""
-    return get_pact_context().get("team_name", "").lower()
+    """Convenience: return the identity-matched team name, lowercased.
+
+    Detect-and-align (#989): resolves the REAL platform team for this session
+    via ``_resolve_aligned_team_name`` (identity match on
+    ``config.json['leadSessionId']``) when the persisted SSOT team_name is
+    NON-EMPTY, using the persisted value as the fail-safe default. Stays a
+    PURE READ — never writes.
+
+    EMPTY-SSOT SHORT-CIRCUIT — DELIBERATE SECURITY FAIL-CLOSED GATE (do not
+    remove). When the persisted context team_name is EMPTY, return "" WITHOUT
+    running identity-match. An empty SSOT is the existing "team unknown →
+    refuse" signal: every downstream consumer (the dispatch gate, etc.)
+    DENYs fail-closed on an empty team_name rather than guessing a path
+    segment. Identity-match must NOT recover a team from an EMPTY SSOT — that
+    would over-reach the fail-closed guard pinned by
+    test_empty_ssot_team_fails_closed_both_modes. #989's real targets
+    (resume-revert, Desktop full-UUID divergence) all have a NON-EMPTY but
+    WRONG persisted value, so the gate still aligns them; only the
+    empty/"unknown" case is short-circuited. The tmux leg already
+    fails-closed (no identity match), but the empty-SSOT case must fail-closed
+    in BOTH topologies — including the in-process leg where a real dir would
+    otherwise identity-match.
+
+    Per-process cached in ``_aligned_cache`` (born-and-die per process; see
+    the module-global's cold-start-trap comment). The ``.lower()``
+    normalization is preserved exactly as before — applied HERE, on the
+    resolver's return, AFTER the resolver has path-safety-checked the raw
+    matched-dir name. Empty string on error.
+    """
+    global _aligned_cache
+    if _aligned_cache is not None:
+        return _aligned_cache
+    # Read the persisted SSOT first. An empty value is the fail-closed signal
+    # (see the security-gate note above) — short-circuit BEFORE identity-match.
+    ctx_team = get_pact_context().get("team_name", "")
+    if not ctx_team:
+        _aligned_cache = ""
+        return _aligned_cache
+    # Non-empty SSOT: identity-match can UPGRADE it to the real platform dir
+    # (or no-op back to ctx_team on a cold-start / no-match).
+    resolved = _resolve_aligned_team_name(get_session_id(), default=ctx_team)
+    _aligned_cache = resolved.lower()
+    return _aligned_cache
 
 
 def get_session_id() -> str:
@@ -733,7 +930,7 @@ def build_context_cache(
     Returns:
         ``(target, context)`` on success, or ``None`` if the path is uncomputable.
     """
-    global _context_path, _cache
+    global _context_path, _cache, _aligned_cache
 
     context = {
         "team_name": team_name,
@@ -763,8 +960,14 @@ def build_context_cache(
 
     # Populate the in-process cache UNCONDITIONALLY (Option A). The cache is the
     # process's own working truth; disk persistence is an independent side-effect.
+    # Invalidate _aligned_cache (#989): it is DERIVED from the context team_name,
+    # so a context (re)write must drop the memoized aligned value — the next
+    # get_team_name() then re-resolves against the freshly-written context (whose
+    # team_name is already the aligned name on the session_init / write-back
+    # paths). Keeps the aligned cache coherent with _cache.
     _context_path = target
     _cache = context
+    _aligned_cache = None
     return target, context
 
 
@@ -915,11 +1118,21 @@ def heal_context_if_missing(input_data: dict) -> bool:
          (fabricated team name) and create an unreapable session dir;
          mirrors session_init's session_id_was_missing persist gate
 
-    Heal = write_context(generate_team_name(input_data), str(raw_id),
-    CLAUDE_PROJECT_DIR, CLAUDE_PLUGIN_ROOT) — the existing
-    build+cache+persist seam: atomic write (mkstemp+rename), 0o600, and
-    build_context_cache resets _cache so THIS process's subsequent
-    get_team_name()/get_session_dir() calls see the healed values.
+    Heal = write_context(_resolve_aligned_team_name(str(raw_id),
+    default=generate_team_name(input_data)), str(raw_id), CLAUDE_PROJECT_DIR,
+    CLAUDE_PLUGIN_ROOT) — the existing build+cache+persist seam: atomic write
+    (mkstemp+rename), 0o600, and build_context_cache resets _cache so THIS
+    process's subsequent get_team_name()/get_session_dir() calls see the
+    healed values.
+
+    Detect-and-align on the crash-recovery path (#989): this is a 3rd
+    context-writer, so it MUST persist the IDENTITY-MATCHED name (not the
+    raw computed name) — otherwise a heal could re-write the wrong
+    ``session-<id8>`` name into the context, undoing the alignment. The
+    computed name is threaded as the resolver's ``default`` so a cold heal
+    (real team dir not yet present) still writes a valid computed name
+    rather than "". When the real dir IS present (the gate-time heal), the
+    resolver returns the aligned name -> the context converges in one prompt.
 
     Content parity with session_init: session_id is persisted as
     str(raw_id) — RAW, exactly as session_init's main() persists it
@@ -954,8 +1167,16 @@ def heal_context_if_missing(input_data: dict) -> bool:
         raw_id = input_data.get("session_id")
         if _is_unknown_or_missing_session(raw_id):
             return False
+        # Detect-and-align (#989): persist the IDENTITY-MATCHED team name on
+        # the heal path. Thread the computed name as the resolver default so a
+        # cold heal (real dir not yet present) still writes a valid computed
+        # name, while a gate-time heal (real dir present) writes the aligned
+        # name and converges the context in one prompt.
+        aligned_team = _resolve_aligned_team_name(
+            str(raw_id), default=generate_team_name(input_data)
+        )
         write_context(
-            generate_team_name(input_data),
+            aligned_team,
             str(raw_id),
             os.environ.get("CLAUDE_PROJECT_DIR", ""),
             os.environ.get("CLAUDE_PLUGIN_ROOT", ""),

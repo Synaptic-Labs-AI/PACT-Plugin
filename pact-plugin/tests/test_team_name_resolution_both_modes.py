@@ -326,3 +326,71 @@ def test_empty_ssot_team_fails_closed_both_modes(tmp_path, monkeypatch, capsys):
         assert code == 2, f"empty SSOT must fail-closed (frame_sid={frame_sid})"
         reason = out["hookSpecificOutput"]["permissionDecisionReason"]
         assert "session team_name is unavailable" in reason
+
+
+# ─── 3. DETECT-AND-ALIGN end-to-end through the gate (#989), both modes ────────
+
+
+# The divergent platform dir is named with the FULL session UUID (Desktop
+# 2.1.177 child / rename-skip), NOT the computed `session-<id8>`.
+LEAD_FULL_UUID_DIR = LEAD_SID
+
+
+def test_divergent_full_uuid_resolves_through_gate_both_modes(
+    tmp_path, monkeypatch, capsys
+):
+    """DETECT-AND-ALIGN end-to-end: the persisted SSOT is the WRONG computed
+    `session-<id8>`, but the platform provisioned the real team dir under the
+    FULL 36-char UUID. The gate's get_team_name() identity-matches
+    (config.json['leadSessionId'] == LEAD_SID) and UPGRADES to the full-UUID
+    store, so the member/task reads land on the REAL dir and the gate ALLOWs —
+    in BOTH topologies. This is the divergent-resolution complement to the
+    no-op CLI legs above; it exercises the #989 identity-match through the real
+    dispatch path, not just the resolver unit.
+
+    NON-VACUITY: tasks are seeded ONLY under the full-UUID dir; the wrong
+    `session-<id8>` store does NOT exist, so an ALLOW is only possible if the
+    gate resolved the full-UUID dir via identity match (a gate that used the
+    persisted `session-<id8>` would MISS the store and DENY).
+
+    BOTH-MODES NOTE: the resolver keys identity-match on the PERSISTED context
+    session_id (always the LEAD's — session_init persists it), NOT the acting
+    frame's session_id. So the persisted session_id is LEAD_SID in BOTH legs;
+    the topology axis is the acting dispatch FRAME's own session_id (the spawn
+    frame), which here is a fixed synthetic id independent of the lead. The
+    upgrade is therefore mode-INDEPENDENT by construction — we assert it holds
+    under BOTH a spawn frame whose id == the lead (in-process) and != the lead
+    (tmux), confirming the resolver never recomputes from the acting frame."""
+    import shared.pact_context as ctx_module
+
+    for frame_sid, mode in ((LEAD_SID, "in-process"), (TMUX_SID, "tmux")):
+        plugin_root = tmp_path / "plugin"
+        _seed_plugin(plugin_root)
+        # Persist the WRONG computed short name as the SSOT, with the LEAD's
+        # session id (session_init always persists the lead's id).
+        _write_context(
+            monkeypatch, tmp_path, plugin_root,
+            team_name=LEAD_TEAM, session_id=LEAD_SID,
+        )
+        # Reset the per-process identity-match cache between legs (same-process
+        # test harness — the cache would otherwise bleed the first leg's result).
+        monkeypatch.setattr(ctx_module, "_aligned_cache", None)
+        # Seed the REAL store under the FULL-UUID dir, keyed on the LEAD's
+        # session id so identity-match finds it. The wrong `session-<id8>` store
+        # is deliberately ABSENT.
+        _seed_team_store(
+            tmp_path, team_name=LEAD_FULL_UUID_DIR, lead_session_id=LEAD_SID,
+            members=(), tasks=((_NAME, "pending"),),
+        )
+        # Model the topology via the acting dispatch FRAME's own session_id.
+        spawn = _make_spawn(team_name_arg="wrong-team")
+        spawn["session_id"] = frame_sid
+        code, out = _run_dispatch(spawn, capsys)
+        assert code == 0, (
+            f"detect-align must resolve the full-UUID store ({mode})"
+        )
+        assert out == _SUPPRESS_EXPECTED
+        # Load-bearing: the wrong `session-<id8>` store does NOT exist — only the
+        # identity-matched full-UUID dir does.
+        assert not (tmp_path / ".claude" / "tasks" / LEAD_TEAM).exists()
+        assert (tmp_path / ".claude" / "tasks" / LEAD_FULL_UUID_DIR).exists()
