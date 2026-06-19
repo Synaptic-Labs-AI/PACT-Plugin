@@ -81,6 +81,7 @@ from shared import BOOTSTRAP_MARKER_NAME, SESSION_ID_CONTROL_CHARS_RE, build_ses
 from shared.constants import get_compact_summary_path
 from shared.pact_context import (
     _is_unknown_or_missing_session,
+    _resolve_aligned_team_name,
     build_context_cache,
     classify_session_role,
     generate_team_name,
@@ -1025,6 +1026,27 @@ def main():
                 file=sys.stderr,
             )
         plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+
+        # Oscillation convergence (#989 detect-and-align). session_init writes
+        # team_name to BOTH the context cache (below) and CLAUDE.md (step 5b)
+        # on EVERY SessionStart, including compact/clear re-fires. The
+        # bootstrap_marker_writer self-heals to the IDENTITY-MATCHED name per
+        # prompt. If session_init kept writing the raw COMPUTED name while the
+        # marker writer wrote the aligned name, the two would flip-flop forever
+        # whenever they differ (the divergent full-UUID launch case). FIX:
+        # resolve the aligned name HERE and persist THAT, so both writers
+        # converge on one value. The freshly-computed `team_name` is threaded
+        # as the resolver's explicit `default` — critical for cold start: at
+        # SessionStart the real team dir is ~38s unborn, so the identity match
+        # MISSES and the resolver returns the default; on a first-ever cold
+        # start the persisted context is empty, so the computed name (not "")
+        # must be the default. Gated on a valid session_id (the sentinel path
+        # skips all persistence anyway). Once the dir is born, a later
+        # SessionStart (or the marker writer) resolves the aligned name and
+        # both writers agree → the per-prompt write-back becomes a true no-op.
+        if not session_id_was_missing:
+            team_name = _resolve_aligned_team_name(session_id, default=team_name)
+
         # Lead-role gate (#877). is_lead is total (never raises) and reads only
         # the harness-set agent_type. Computed once and reused for both Class-A
         # writes below so the disk-write split and the journal-anchor gate share
@@ -1159,9 +1181,11 @@ def main():
         # the spawn prompt already owns the role and session_init lacks agent_name
         # under tmux. This is a CONDITIONAL EMISSION, not a new numbered step.
         if frame_role == "teammate":  # m3: reuse the role captured at the early seam (was a recompute)
-            # O1 fix + Finding-1. team_name above is generate_team_name(input_data)
-            # = pact-{this teammate's OWN session hash}, NOT the lead's team — so
-            # resolve the lead's team + this teammate's own member name from the
+            # O1 fix + Finding-1. team_name above is the #989-aligned name
+            # (identity-matched on this teammate's OWN session_id, defaulting to
+            # generate_team_name) — for a tmux teammate this is derived from the
+            # teammate's OWN session, NOT the lead's team — so resolve the lead's
+            # team + this teammate's own member name from the
             # self-registration registry: the teammate wrote {own session_id →
             # name@team} at its first action, so a self-lookup by our OWN
             # session_id recovers both the @team (the lead's team — the datum a

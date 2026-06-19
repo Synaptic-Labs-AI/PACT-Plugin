@@ -168,11 +168,13 @@ try:
     import shared.pact_context as pact_context
     from bootstrap_gate import is_marker_set
     from shared import BOOTSTRAP_MARKER_NAME
+    from shared.claude_md_manager import resolve_project_claude_md_path
     from shared.marker_schema import (
         MARKER_MAX_BYTES,
         MARKER_SCHEMA_VERSION,
         expected_marker_signature,
     )
+    from shared.session_resume import update_session_info
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_advisory("module imports", _module_load_error)
 
@@ -331,6 +333,79 @@ def _write_marker(session_dir: Path, session_id: str, plugin_root: str,
         raise
 
 
+def _write_back_aligned_team_name() -> None:
+    """Self-heal the PERSISTED team name to the IDENTITY-MATCHED one (#989).
+
+    Per-prompt, lead-gated write-back. ``get_team_name()`` resolves the REAL
+    platform team via identity match (``config.json['leadSessionId']``);
+    ``get_pact_context()['team_name']`` is what session_init PERSISTED at
+    SessionStart. In a divergent launch context these DIFFER — session_init
+    wrote the computed ``session-<id8>`` while the platform named the dir with
+    the full UUID. This function reconciles the persisted record (and the
+    human-readable CLAUDE.md ``- Team:`` line) to the aligned value, so the
+    persisted file stops being stale and the two SessionStart writers converge.
+
+    Fires ONLY when the aligned name is non-empty AND differs from the
+    persisted name (the normal no-divergence CLI case is a clean no-op — they
+    match, so this returns immediately). Caller has already lead-gated.
+
+    NEVER raises — every error is swallowed. The marker write is the load-
+    bearing action; a write-back failure must not abort it or crash the hook.
+
+    CLAUDE.md guard (HARD requirement): the target is resolved via
+    ``resolve_project_claude_md_path`` and ``exists()``-guarded BEFORE calling
+    ``update_session_info``. That function's Case-0 branch CREATES a brand-new
+    PACT-managed CLAUDE.md when the file is absent — which in a gitignored/
+    absent worktree would MATERIALIZE a file we must never create. So when the
+    CLAUDE.md is absent we SKIP the CLAUDE.md write entirely (the context-file
+    write-back still happens). When present, we pass the FULL correct tuple
+    (session_id / aligned team_name / session_dir / plugin_root) because
+    ``update_session_info`` rewrites the WHOLE managed session block.
+    """
+    try:
+        aligned = pact_context.get_team_name()
+        if not aligned:
+            return
+        persisted = pact_context.get_pact_context().get("team_name", "").lower()
+        if aligned == persisted:
+            # Clean no-op: persisted record already matches the real team
+            # (the normal in-scope CLI case, and the steady state after the
+            # first reconciliation).
+            return
+
+        session_id = pact_context.get_session_id()
+        session_dir = pact_context.get_session_dir()
+        plugin_root = pact_context.get_plugin_root()
+
+        # Context-file write-back: rewrite the persisted team_name to the
+        # aligned value (full build+cache+persist seam; atomic, 0o600). This
+        # ALWAYS runs on a divergence, independent of the CLAUDE.md branch.
+        pact_context.write_context(
+            aligned, session_id, pact_context.get_project_dir(), plugin_root
+        )
+
+        # CLAUDE.md write-back: exists()-guard BEFORE update_session_info so we
+        # never trip its Case-0 create-on-absent branch in a worktree. Resolve
+        # the project CLAUDE.md path the same way update_session_info does.
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+        if not project_dir:
+            return
+        target_file, _source = resolve_project_claude_md_path(project_dir)
+        if not target_file.exists():
+            # Absent (e.g. gitignored worktree CLAUDE.md): SKIP the CLAUDE.md
+            # write. The context-file write-back above already happened; the
+            # human-readable line just stays absent, which is correct here.
+            return
+        # Present: rewrite the whole managed session block with the aligned
+        # team name + the full correct tuple.
+        update_session_info(session_id, aligned, session_dir, plugin_root)
+    except Exception as e:
+        print(
+            f"bootstrap_marker_writer: team-name write-back failed: {e}",
+            file=sys.stderr,
+        )
+
+
 def _try_write_marker(input_data: dict) -> None:
     """Verify pre-conditions and write marker if all are met.
 
@@ -376,6 +451,12 @@ def _try_write_marker(input_data: dict) -> None:
     # agent_type.
     if not pact_context.is_lead(input_data):
         return
+
+    # Self-heal the persisted team name to the identity-matched one (#989),
+    # lead-gated like the marker write below. No-op when they already match
+    # (the normal CLI case). Never raises. Done BEFORE the secretary check so
+    # the check (and the marker's session_id) read the aligned team.
+    _write_back_aligned_team_name()
 
     # Pre-condition: team config + secretary member exist on disk.
     team_name = pact_context.get_team_name()
