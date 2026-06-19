@@ -589,3 +589,228 @@ class TestEmitWarnSurfacingShape:
         _, out, _ = self._run_emit(capsys, version="")
         ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
         assert "<unknown>" in ctx
+
+    def test_advisory_prose_is_byte_unchanged_by_the_channel_swap(self, capsys):
+        # Finding B moved the advisory from stderr to additionalContext WITHOUT
+        # altering a single character of the prose. Pin the EXACT surfaced text
+        # against the canonical template so a future channel/format change cannot
+        # silently mangle the operator-facing wording. The expected string is the
+        # pre-fix f-string verbatim (extracted from 402c5e3f^); if it drifts, the
+        # fix changed more than the channel — which #932 explicitly forbids.
+        _, out, _ = self._run_emit(
+            capsys, version="4.4.13", seam=frozenset({"session_init.py"}))
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        expected = (
+            "[live-probe-gate] This branch touches the hooks/ tree but no fresh "
+            "both-modes live-probe row exists in RUNBOOK_RUN_DATES.md for version "
+            "4.4.13. Per the hook-infra gate, log a live-probe "
+            "(tmux mandatory; in-process real-or-faithful-synthetic) — or an "
+            "auditable WAIVED row for a non-seam (hooks/-only) change — before "
+            "closing the originating issue. Seam hooks touched: session_init.py. "
+            "(Advisory — WARN only.)"
+        )
+        assert ctx == expected, (
+            "the additionalContext prose must be BYTE-IDENTICAL to the pre-swap "
+            "stderr advisory (Finding B moved only the channel, never the text); "
+            f"got {ctx!r}"
+        )
+
+    def test_multiple_seam_hooks_are_sorted_and_joined(self, capsys):
+        # The seam list is `", ".join(sorted(...))` — verify the deterministic
+        # sorted rendering (not set-iteration order) so the advisory is stable.
+        _, out, _ = self._run_emit(
+            capsys, seam=frozenset({"session_init.py", "task_claim_gate.py"}))
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        assert "Seam hooks touched: session_init.py, task_claim_gate.py." in ctx, (
+            "seam hooks must render sorted + comma-joined (deterministic order)"
+        )
+
+    def test_primary_only_renders_none_placeholder(self, capsys):
+        # An empty seam set (PRIMARY-only change, no seam hook touched) renders
+        # the "(none — PRIMARY only)" placeholder, not an empty fragment.
+        _, out, _ = self._run_emit(capsys, seam=frozenset())
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        assert "Seam hooks touched: (none — PRIMARY only)." in ctx
+
+
+class TestSilentPathSuppressOutputNegativeControl:
+    """NEGATIVE CONTROL for Finding B: the WARN path drops suppressOutput so its
+    additionalContext surfaces — but the SILENT path (the fail-safe / satisfied
+    exit) MUST still emit `{"suppressOutput": true}`. If a future edit dropped
+    suppressOutput from the silent path too, the gate would leak an empty
+    {} stdout on every non-firing command (the dominant case) — noise the
+    suppressOutput contract exists to prevent. This asserts the asymmetry that
+    Finding B deliberately introduced: suppressOutput on silent, NOT on WARN."""
+
+    def test_silent_allow_emits_suppressoutput_true(self, capsys):
+        code = 0
+        try:
+            g._silent_allow()
+        except SystemExit as e:
+            code = int(e.code or 0)
+        out = capsys.readouterr().out
+        assert code == 0, "silent-allow must exit 0"
+        payload = json.loads(out)
+        assert payload == {"suppressOutput": True}, (
+            "the silent path must emit exactly {'suppressOutput': true} (the "
+            f"non-firing-command contract); got {payload!r}"
+        )
+
+    def test_warn_and_silent_suppressoutput_asymmetry(self, capsys):
+        # The load-bearing asymmetry in ONE assertion: WARN must NOT carry
+        # suppressOutput (it would hide additionalContext); SILENT MUST carry it.
+        try:
+            g._silent_allow()
+        except SystemExit:
+            pass
+        silent = json.loads(capsys.readouterr().out)
+        try:
+            g._emit_warn("4.4.13", frozenset({"session_init.py"}))
+        except SystemExit:
+            pass
+        warn = json.loads(capsys.readouterr().out)
+        assert silent.get("suppressOutput") is True and "suppressOutput" not in warn, (
+            "asymmetry violated: silent must suppress stdout, WARN must NOT "
+            f"(silent={silent!r}, warn-keys={list(warn)!r})"
+        )
+
+
+# ── FINDING A: resolver-matrix EDGE cases (beyond the devops 3-case matrix) ──
+
+class TestResolveRepoRootMatrixEdges:
+    """Edge cases on the _resolve_repo_root marker-guard matrix that the devops
+    verification set (subdir-falls-through / repo-root-trusted / unset) does NOT
+    cover: (1) a SUBDIR whose marker IS present must be TRUSTED (the guard must
+    not over-trigger and reject a legitimately-marker-bearing CLAUDE_PROJECT_DIR);
+    (2) the THIRD-tier cwd fallback when CLAUDE_PROJECT_DIR's marker is absent AND
+    git-common-dir is also unresolvable. Together with the devops 3 these pin all
+    four reachable resolver outcomes."""
+
+    def test_marker_bearing_project_dir_is_trusted_even_if_named_like_a_subdir(
+            self, tmp_path, monkeypatch):
+        # The guard trusts CLAUDE_PROJECT_DIR IFF the marker resolves there — it
+        # keys on marker PRESENCE, not on the path's name. A directory that
+        # happens to sit one level down but DOES carry the plugin marker must be
+        # returned as-is (no spurious fall-through). Builds the marker AT a nested
+        # dir and points CLAUDE_PROJECT_DIR at it.
+        nested = tmp_path / "checkouts" / "a"
+        _make_root(nested, "| h |\n")  # plants the marker AT `nested`
+        assert g._plugin_marker(nested) is not None, (
+            "precondition: the marker must resolve at the nested dir — else this "
+            "test does not exercise the trust-when-present branch"
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(nested))
+        # cwd is elsewhere (no git): if the guard wrongly fell through, it would
+        # NOT land on `nested`. Trusting the marker-bearing CPD is the assertion.
+        monkeypatch.chdir(tmp_path)
+        resolved = g._resolve_repo_root()
+        assert resolved == Path(str(nested)), (
+            "a marker-bearing CLAUDE_PROJECT_DIR must be trusted as-is regardless "
+            f"of its path depth; got {resolved!r}"
+        )
+
+    def test_cwd_fallback_when_marker_absent_and_git_unresolvable(
+            self, tmp_path, monkeypatch):
+        # THIRD-TIER fallback: CLAUDE_PROJECT_DIR set to a marker-LESS subdir
+        # (guard skips it) AND git-common-dir unresolvable -> Path.cwd(). Force
+        # the git failure DETERMINISTICALLY by monkeypatching subprocess.run to
+        # raise FileNotFoundError (git-not-found), rather than relying on ambient
+        # filesystem git state (a no-.git tmp dir can still discover an ambient
+        # parent .git and is flaky across environments). The cwd is a marker-less
+        # temp dir, so the resolver returns it (the documented last-resort tier).
+        subdir = tmp_path / "pact-plugin"  # marker would double here -> absent
+        subdir.mkdir(parents=True, exist_ok=True)
+        assert g._plugin_marker(subdir) is None, (
+            "precondition: marker absent at the subdir -> guard must skip it"
+        )
+
+        def _git_unavailable(*args, **kwargs):
+            raise FileNotFoundError("git not found (simulated)")
+
+        monkeypatch.setattr(g.subprocess, "run", _git_unavailable)
+        cwd = tmp_path / "elsewhere"
+        cwd.mkdir(parents=True, exist_ok=True)
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(subdir))
+        resolved = g._resolve_repo_root()
+        assert resolved == Path(cwd), (
+            "marker-absent CPD + git unresolvable must fall to Path.cwd() (the "
+            f"third resolver tier); got {resolved!r}"
+        )
+        # And the gate fail-safes silent at this cwd (no marker there) — the
+        # resolver's last tier feeds main()'s marker check, which silent-allows.
+        assert g._plugin_marker(resolved) is None, (
+            "the cwd fallback lands on a marker-less dir here, so main() will "
+            "silent-allow — the documented fail-safe, not a WARN"
+        )
+
+
+# ── FINDING A: END-TO-END — main() reconnects under a SUBDIR CLAUDE_PROJECT_DIR ──
+
+class TestFindingASubdirEndToEnd:
+    """The HIGHEST-VALUE Finding-A test: drive main() END-TO-END with
+    CLAUDE_PROJECT_DIR = the `pact-plugin` SUBDIR (the exact teammate topology
+    #932 documents) and assert the gate FIRES (WARNs) instead of silently
+    self-disabling. The resolver unit tests prove the address math; THIS proves
+    the gate actually reconnects to the live RUNBOOK/diff seam through the fixed
+    resolver — the regression #932 reported was a SILENT self-disable visible
+    only at the main() level, not at the resolver in isolation.
+
+    NON-VACUITY: under the pre-fix unconditional `return Path(project_dir)`, the
+    subdir CPD resolves to the (marker-less) subdir, main()'s marker check is
+    None -> silent-allow -> NO WARN. So these tests FLIP red on the pre-fix tree
+    (counter-test-by-revert of 402c5e3f confirms the cardinality)."""
+
+    def _run_main_with_project_dir(self, root, project_dir, command,
+                                   monkeypatch, capsys):
+        """Like _run_main but pins CLAUDE_PROJECT_DIR to an ARBITRARY dir (here
+        the subdir) rather than the repo root, so we exercise the Finding-A
+        fall-through. cwd is the repo root so git-common-dir resolves to it."""
+        import io
+        monkeypatch.chdir(root)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+        monkeypatch.setattr(sys, "stdin", io.StringIO(
+            json.dumps({"tool_input": {"command": command}})))
+        code = 0
+        try:
+            g.main()
+        except SystemExit as e:
+            code = int(e.code or 0)
+        return code, capsys.readouterr().out
+
+    def test_subdir_project_dir_main_still_warns(
+            self, tmp_path, monkeypatch, capsys):
+        # The Finding-A regression repro: a hooks/-touching merge from a process
+        # whose CLAUDE_PROJECT_DIR is the pact-plugin subdir, with NO satisfied
+        # row, MUST still WARN (the gate must reconnect via git-common-dir).
+        root = _make_git_repo(tmp_path, "| h |\n", touch_hooks=True)  # no row
+        subdir = root / "pact-plugin"
+        assert g._plugin_marker(subdir) is None, (
+            "precondition: marker absent at the subdir CPD — else the fall-"
+            "through that THIS test exercises never engages (vacuous)"
+        )
+        code, out = self._run_main_with_project_dir(
+            root, subdir, "gh pr merge 999 --squash", monkeypatch, capsys)
+        assert code == 0, "advisory must always exit 0 (WARN-not-BLOCK)"
+        assert "live-probe-gate" in out and VERSION in out, (
+            "a hooks/-touching merge under a SUBDIR CLAUDE_PROJECT_DIR must WARN "
+            "(Finding A: the gate reconnects via git-common-dir instead of "
+            f"silently self-disabling); got stdout={out!r}"
+        )
+
+    def test_subdir_project_dir_silent_when_satisfied_row_exists(
+            self, tmp_path, monkeypatch, capsys):
+        # Control: the reconnection does NOT over-fire — under the same subdir
+        # CPD, a GENUINE satisfied row correctly silences the gate. This proves
+        # the subdir fall-through reaches the REAL repo-root RUNBOOK (where the
+        # satisfied row lives), not merely that it always WARNs.
+        root = _make_git_repo(
+            tmp_path, "| h |\n" + GENUINE_PASS_ROW, touch_hooks=True)
+        subdir = root / "pact-plugin"
+        code, out = self._run_main_with_project_dir(
+            root, subdir, "gh pr merge 999 --squash", monkeypatch, capsys)
+        assert code == 0
+        assert "live-probe-gate" not in out, (
+            "under a subdir CPD, a fresh both-mode PASS row at the resolved repo "
+            f"root must silence the gate (fall-through reaches it); got {out!r}"
+        )
