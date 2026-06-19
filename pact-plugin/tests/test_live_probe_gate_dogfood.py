@@ -7,7 +7,8 @@ locus-b advisory). The gate is its OWN first probe subject. Two layers here:
   touches hooks/ with NO satisfied RUNBOOK row for the current plugin version
   emits the non-blocking WARN; a satisfied both-mode PASS row -> silent. Drives
   main() end-to-end through the REAL git diff + REAL plugin.json + REAL RUNBOOK
-  reads (the freshness seam), asserting stderr WARN + exit 0.
+  reads (the freshness seam), asserting the WARN surfaces via the stdout
+  hookSpecificOutput.additionalContext channel + exit 0.
 
   FRESHNESS-SPEC (real temp files): _has_satisfied_row must accept a GENUINE
   both-mode PASS row and REJECT (a) a substring-`pass`-but-not-genuine token
@@ -388,45 +389,50 @@ def _run_main(root: Path, command: str, monkeypatch, capsys) -> tuple[int, str]:
         g.main()
     except SystemExit as e:
         code = int(e.code or 0)
-    err = capsys.readouterr().err
-    return code, err
+    # The WARN advisory surfaces via STDOUT hookSpecificOutput.additionalContext
+    # (not stderr — a PreToolUse exit-0 stderr line is not fed to the agent). The
+    # silent path prints only {"suppressOutput": true} to stdout, which carries
+    # no "live-probe-gate" marker, so a marker-substring check stays correct in
+    # both directions.
+    out = capsys.readouterr().out
+    return code, out
 
 
 class TestDogfoodWarnPath:
     def test_warns_on_hooks_diff_with_no_satisfied_row(self, tmp_path, monkeypatch, capsys):
         root = _make_git_repo(tmp_path, "| h |\n", touch_hooks=True)  # no row
-        code, err = _run_main(root, "gh pr merge 999 --squash", monkeypatch, capsys)
+        code, out = _run_main(root, "gh pr merge 999 --squash", monkeypatch, capsys)
         assert code == 0, "advisory must always exit 0 (WARN-not-BLOCK)"
-        assert "live-probe-gate" in err and VERSION in err, (
+        assert "live-probe-gate" in out and VERSION in out, (
             "a hooks/-touching merge with no satisfied row must WARN; got "
-            f"stderr={err!r}"
+            f"stdout={out!r}"
         )
 
     def test_silent_when_genuine_pass_row_exists(self, tmp_path, monkeypatch, capsys):
         root = _make_git_repo(tmp_path, "| h |\n" + GENUINE_PASS_ROW, touch_hooks=True)
-        code, err = _run_main(root, "gh pr merge 999 --squash", monkeypatch, capsys)
+        code, out = _run_main(root, "gh pr merge 999 --squash", monkeypatch, capsys)
         assert code == 0
-        assert "live-probe-gate" not in err, "a fresh both-mode PASS row -> silent"
+        assert "live-probe-gate" not in out, "a fresh both-mode PASS row -> silent"
 
     def test_silent_on_non_hook_diff(self, tmp_path, monkeypatch, capsys):
         root = _make_git_repo(tmp_path, "| h |\n", touch_hooks=False)  # docs only
-        code, err = _run_main(root, "gh pr merge 999 --squash", monkeypatch, capsys)
+        code, out = _run_main(root, "gh pr merge 999 --squash", monkeypatch, capsys)
         assert code == 0
-        assert "live-probe-gate" not in err, "a non-hooks PR must not WARN"
+        assert "live-probe-gate" not in out, "a non-hooks PR must not WARN"
 
     def test_silent_on_non_merge_command(self, tmp_path, monkeypatch, capsys):
         root = _make_git_repo(tmp_path, "| h |\n", touch_hooks=True)
-        code, err = _run_main(root, "git status", monkeypatch, capsys)
+        code, out = _run_main(root, "git status", monkeypatch, capsys)
         assert code == 0
-        assert "live-probe-gate" not in err, "non merge/close command -> not our concern"
+        assert "live-probe-gate" not in out, "non merge/close command -> not our concern"
 
     def test_checks_actual_not_claimed_coverage(self, tmp_path, monkeypatch, capsys):
         # The dogfood gate keys on the ACTUAL hooks/ diff + ACTUAL RUNBOOK row,
         # never a claimed/asserted coverage flag: a real hooks/ change with no
         # row WARNs even though the suite is green. (Green tests != probed.)
         root = _make_git_repo(tmp_path, "| h |\n", touch_hooks=True)
-        _, err = _run_main(root, "gh pr close 999", monkeypatch, capsys)
-        assert "live-probe-gate" in err
+        _, out = _run_main(root, "gh pr close 999", monkeypatch, capsys)
+        assert "live-probe-gate" in out
 
     def test_config_dir_independence_forged_runbook_does_not_false_satisfy(
             self, tmp_path, monkeypatch, capsys):
@@ -453,10 +459,133 @@ class TestDogfoodWarnPath:
         # assertion — not the forged row happening to be empty/unsatisfied.
         assert g._has_satisfied_row(forged, VERSION, waiver_ok=False) is True
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(forged))
-        code, err = _run_main(root, "gh pr merge 1 --squash", monkeypatch, capsys)
+        code, out = _run_main(root, "gh pr merge 1 --squash", monkeypatch, capsys)
         assert code == 0, "advisory must always exit 0 (WARN-not-BLOCK)"
-        assert "live-probe-gate" in err, (
+        assert "live-probe-gate" in out, (
             "the gate must key off CLAUDE_PROJECT_DIR (repo root) and IGNORE "
             "CLAUDE_CONFIG_DIR — a forged satisfied RUNBOOK under a non-default "
             "CLAUDE_CONFIG_DIR must NOT false-satisfy the gate (security #55 regression)"
         )
+
+
+# ── FINDING A: _resolve_repo_root must validate the marker at CLAUDE_PROJECT_DIR ──
+
+class TestResolveRepoRootMarkerGuard:
+    """The CLAUDE_PROJECT_DIR resolver matrix. A teammate's CLAUDE_PROJECT_DIR is
+    its cwd = the `pact-plugin` SUBDIR, where the marker would double to
+    `.../pact-plugin/pact-plugin/.claude-plugin/plugin.json` and be absent. The
+    resolver must trust CLAUDE_PROJECT_DIR ONLY when the marker resolves at that
+    root, else fall through to the git-common-dir-parent path (the true root)."""
+
+    def _git_repo_root(self, tmp: Path) -> Path:
+        """A real git repo whose root carries the plugin marker, so the
+        git-common-dir-parent fallback resolves to it."""
+        root = _make_root(tmp, "| h |\n")
+        _git(root, "init", "-q")
+        _git(root, "config", "user.email", "t@t.t")
+        _git(root, "config", "user.name", "t")
+        _git(root, "add", "-A")
+        _git(root, "commit", "-q", "-m", "base")
+        return root
+
+    def test_subdir_project_dir_falls_through_to_repo_root(
+            self, tmp_path, monkeypatch):
+        # CLAUDE_PROJECT_DIR = the pact-plugin SUBDIR (marker absent there) ->
+        # the resolver must NOT trust it; it falls through to the git-common-dir
+        # parent = the repo root (marker FOUND). This is the Finding-A regression.
+        root = self._git_repo_root(tmp_path)
+        subdir = root / "pact-plugin"
+        assert g._plugin_marker(subdir) is None, (
+            "precondition: the marker must NOT resolve at the subdir (the bug's "
+            "double-pact-plugin path) — else this test is vacuous"
+        )
+        monkeypatch.chdir(root)  # so git-common-dir resolves to this repo
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(subdir))
+        resolved = g._resolve_repo_root()
+        assert resolved is not None and g._plugin_marker(resolved) is not None, (
+            "a subdir CLAUDE_PROJECT_DIR must fall through to a root where the "
+            f"marker resolves; got {resolved!r} (marker "
+            f"{g._plugin_marker(resolved) if resolved else None!r})"
+        )
+        assert resolved.resolve() == root.resolve(), (
+            "the fall-through must land on the true repo root"
+        )
+
+    def test_repo_root_project_dir_is_trusted_unchanged(
+            self, tmp_path, monkeypatch):
+        # CLAUDE_PROJECT_DIR = the repo root (marker FOUND) -> trusted unchanged
+        # (the canonical lead-driven-merge case must NOT regress).
+        root = _make_root(tmp_path, "| h |\n")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(root))
+        resolved = g._resolve_repo_root()
+        assert resolved == Path(str(root)), (
+            "a repo-root CLAUDE_PROJECT_DIR (marker FOUND) must be returned as-is"
+        )
+
+    def test_unset_project_dir_uses_git_common_dir_parent(
+            self, tmp_path, monkeypatch):
+        # CLAUDE_PROJECT_DIR unset -> the guarded branch is skipped, behavior
+        # unchanged: git-common-dir parent = the repo root.
+        root = self._git_repo_root(tmp_path)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.chdir(root)
+        resolved = g._resolve_repo_root()
+        assert resolved is not None and resolved.resolve() == root.resolve(), (
+            "unset CLAUDE_PROJECT_DIR must resolve to the git-common-dir parent "
+            f"(repo root); got {resolved!r}"
+        )
+
+
+# ── FINDING B: _emit_warn surfaces via stdout hookSpecificOutput.additionalContext ──
+
+class TestEmitWarnSurfacingShape:
+    """The advisory must surface on the channel an agent operator actually sees:
+    a PreToolUse exit-0 stdout `hookSpecificOutput.additionalContext` (mirrors
+    the verified sibling task_claim_gate.py). exit-0 stderr is NOT fed to the
+    agent, so the prior stderr advisory was invisible (#924 dogfood Finding B)."""
+
+    def _run_emit(self, capsys, version="4.4.13",
+                  seam=frozenset({"session_init.py"})):
+        code = 0
+        try:
+            g._emit_warn(version, seam)
+        except SystemExit as e:
+            code = int(e.code or 0)
+        captured = capsys.readouterr()
+        return code, captured.out, captured.err
+
+    def test_emits_hookspecificoutput_additionalcontext_on_stdout(self, capsys):
+        code, out, err = self._run_emit(capsys)
+        assert code == 0, "advisory must exit 0 (WARN-not-BLOCK)"
+        payload = json.loads(out)  # must be valid JSON on stdout
+        hso = payload["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse", (
+            "hookEventName MUST be the literal 'PreToolUse' (platform invariant)"
+        )
+        ctx = hso["additionalContext"]
+        assert "live-probe-gate" in ctx and "4.4.13" in ctx, (
+            "the advisory prose (marker + version) must ride additionalContext"
+        )
+        assert "session_init.py" in ctx, "seam-hooks must appear in the advisory"
+
+    def test_no_suppressoutput_and_nothing_on_stderr(self, capsys):
+        # suppressOutput would hide stdout and defeat additionalContext surfacing;
+        # it must NOT be co-emitted. And the advisory must no longer go to stderr
+        # (the channel that is invisible to the agent on exit 0).
+        _, out, err = self._run_emit(capsys)
+        payload = json.loads(out)
+        assert "suppressOutput" not in payload, (
+            "suppressOutput must NOT be co-emitted — it suppresses the stdout "
+            "additionalContext the agent needs to see"
+        )
+        assert "live-probe-gate" not in err, (
+            "the advisory must surface via stdout, not stderr (exit-0 stderr is "
+            "not fed to the agent)"
+        )
+
+    def test_unknown_version_renders_placeholder(self, capsys):
+        # Defensive: an empty version must not crash and must render the
+        # '<unknown>' placeholder in the surfaced advisory.
+        _, out, _ = self._run_emit(capsys, version="")
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        assert "<unknown>" in ctx

@@ -34,8 +34,10 @@ Posture (the two load-bearing invariants):
 Used by: hooks.json PreToolUse hook (matcher: Bash), registered after
 merge_guard_pre.py.
 Input: JSON from stdin with tool_input.command.
-Output: {"suppressOutput": true} + exit 0 (silent), or a stderr WARN advisory
-        + {"suppressOutput": true} + exit 0.
+Output: {"suppressOutput": true} + exit 0 (silent), or a WARN advisory via
+        {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+        "additionalContext": ...}} on stdout + exit 0 (the channel that
+        surfaces to an agent operator; exit-0 stderr does not).
 """
 
 from __future__ import annotations
@@ -194,7 +196,14 @@ def _resolve_repo_root() -> Optional[Path]:
     checkout) -> cwd. Distinct from the diff, which is computed in the current
     worktree (Component C)."""
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-    if project_dir:
+    if project_dir and _plugin_marker(Path(project_dir)) is not None:
+        # Trust CLAUDE_PROJECT_DIR only when the git-TRACKED plugin marker
+        # actually resolves AT that root. A teammate's CLAUDE_PROJECT_DIR is its
+        # cwd = the `pact-plugin` SUBDIR, where the marker would resolve to
+        # `.../pact-plugin/pact-plugin/.claude-plugin/plugin.json` (doubled) and
+        # be absent -> fall THROUGH to the git-common-dir-parent path (the true
+        # repo root), then cwd. Preserves the repo-root case (marker found ->
+        # trust it) and the unset case (this branch is skipped).
         return Path(project_dir)
     try:
         result = subprocess.run(
@@ -322,27 +331,39 @@ def _has_satisfied_row(root: Path, version: str, waiver_ok: bool) -> bool:
 
 
 def _emit_warn(version: str, seam_hooks: frozenset[str]) -> NoReturn:
-    """Emit a NON-BLOCKING advisory (exit 0) via the merge_guard `[security]`
-    stderr precedent, then silent-allow on stdout.
+    """Emit a NON-BLOCKING advisory (exit 0) via a PreToolUse
+    `hookSpecificOutput.additionalContext` field on stdout, which DOES surface
+    to an agent operator.
 
-    The exact platform surfacing of a PreToolUse stderr-on-exit-0 line is
-    verified at runtime in the TEST-phase dogfood live-probe (this hook is its
-    own first probe subject). If stderr-on-exit-0 proves not surfaced, the
-    fallback is a non-deny `hookSpecificOutput` informational field — isolated
-    in THIS function so the swap is a one-function change, not a main() rewrite.
+    Surfacing channel (the load-bearing decision): a PreToolUse stderr line on
+    exit 0 is NOT fed to the agent (only an exit-2 deny's stderr is) — proven by
+    the #924 tmux dogfood, where the prior stderr advisory was invisible across
+    two EMIT_WARN triggers. The fix mirrors the verified sibling
+    `task_claim_gate.py`'s exact informational shape: print
+    `{"hookSpecificOutput": {"hookEventName": "PreToolUse",
+    "additionalContext": <text>}}` to stdout and exit 0. `hookEventName` MUST be
+    the literal "PreToolUse" (the platform invariant). `suppressOutput` is
+    deliberately NOT co-emitted: it suppresses stdout and would defeat the
+    additionalContext surfacing. Posture is unchanged — advisory only, exit 0,
+    never a permissionDecision=deny. Isolated to THIS function so the channel
+    swap is a one-function change, not a main() rewrite.
     """
     seam = ", ".join(sorted(seam_hooks)) if seam_hooks else "(none — PRIMARY only)"
-    print(
+    advisory = (
         f"[live-probe-gate] This branch touches the hooks/ tree but no fresh "
         f"both-modes live-probe row exists in RUNBOOK_RUN_DATES.md for version "
         f"{version or '<unknown>'}. Per the hook-infra gate, log a live-probe "
         f"(tmux mandatory; in-process real-or-faithful-synthetic) — or an "
         f"auditable WAIVED row for a non-seam (hooks/-only) change — before "
         f"closing the originating issue. Seam hooks touched: {seam}. "
-        f"(Advisory — WARN only.)",
-        file=sys.stderr,
+        f"(Advisory — WARN only.)"
     )
-    print(_SUPPRESS_OUTPUT)
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",  # MUST be the literal event name
+            "additionalContext": advisory,  # informational — NOT permissionDecision
+        }
+    }))
     sys.exit(0)
 
 

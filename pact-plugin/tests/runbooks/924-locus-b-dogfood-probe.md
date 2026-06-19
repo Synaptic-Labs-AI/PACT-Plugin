@@ -38,15 +38,19 @@ gh pr merge <N> --squash    # PreToolUse(Bash) fires live_probe_gate.py
 ```
 
 **VERIFY** (the gate):
-- **(a) SURFACE:** the operator sees the `[live-probe-gate]` advisory on stderr
-  naming version `4.4.13`, the touched seam hooks, and the "log a live-probe …
-  before closing the originating issue" instruction.
-- **(b) NON-BLOCKING:** the command still runs (exit 0; `suppressOutput` on
-  stdout) — the advisory NEVER blocks the merge (WARN-not-BLOCK).
+- **(a) SURFACE:** the operator (agent) sees the `[live-probe-gate]` advisory
+  via the PreToolUse `hookSpecificOutput.additionalContext` field (surfaced on
+  stdout, exit 0) naming the version, the touched seam hooks, and the "log a
+  live-probe … before closing the originating issue" instruction. (The prior
+  stderr-on-exit-0 channel was confirmed NOT surfaced to the agent — the
+  Finding-B fix moved the advisory to additionalContext, the channel that does.)
+- **(b) NON-BLOCKING:** the command still runs (exit 0) — the advisory NEVER
+  blocks the merge (WARN-not-BLOCK). The WARN path emits only the
+  `hookSpecificOutput` field (no `suppressOutput`, which would hide it); the
+  silent path still emits `{"suppressOutput": true}`.
 - **(c) FALLBACK CHECK (the gate's own first-probe finding):** confirm the
-  stderr line is actually surfaced by the platform for a PreToolUse exit-0 hook.
-  **If stderr-on-exit-0 is NOT surfaced**, switch `_emit_warn` to the isolated
-  `hookSpecificOutput` informational fallback (a one-function change) and re-probe.
+  `additionalContext` line is actually surfaced by the platform for a PreToolUse
+  exit-0 hook (the agent-visible reminder is the whole point of the gate).
 - **(d) SILENCE-AFTER-PROBE:** run the REAL both-mode live-probe for the seam
   hooks this PR touches (per `live-probe-template.md`), log the `4.4.13`
   both-mode PASS row in `RUNBOOK_RUN_DATES.md`, then re-run `gh pr merge` /
