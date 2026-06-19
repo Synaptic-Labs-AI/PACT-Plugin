@@ -233,28 +233,57 @@ class TestHalfFormedWindow:
 
 
 class TestFailSafeTotality:
-    """The resolver is wrapped in a TRUE bare `except Exception` — a path-unsafe
-    raw session_id (ValueError), a non-str teams_dir (TypeError), a HOME-
-    unresolvable home (RuntimeError), and a config.json that is-a-dir/unreadable
-    must ALL be caught and resolve to the default. NO exception escapes."""
+    """The resolver NEVER raises. Two distinct mechanisms guarantee this:
 
-    def test_nul_in_session_id_does_not_raise(self, ctx):
-        """A NUL byte in the raw session_id raises ValueError when composed as a
-        path — caught -> default. (get_session_id returns the RAW unsanitized id.)"""
+      * A poisoned (path-unsafe) raw session_id — NUL byte or '/' — is NOT a
+        raise source at all: session_id is only STRING-COMPARED against each
+        config.json's leadSessionId, never composed into a Path, so a poisoned
+        id simply never matches -> NO-MATCH -> default (the two
+        ``..._poisoned_session_id_no_match...`` tests below).
+      * The genuine raise sources — a non-str teams_dir (TypeError), a
+        HOME-unresolvable home (RuntimeError), and a per-entry config.json
+        that is-a-dir/unreadable (OSError/JSONDecodeError) — ARE caught (by the
+        outer bare `except Exception` for the first two, by the inner typed
+        except for the per-entry read). NO exception escapes."""
+
+    def test_nul_poisoned_session_id_no_match_returns_default(self, ctx):
+        """A NUL byte in the raw session_id does NOT raise — session_id is only
+        string-compared to leadSessionId, never composed into a Path. So the
+        poisoned id cannot match the seeded (different-leadSessionId) dir ->
+        NO-MATCH -> default. NON-VACUITY: a real matchable dir is seeded under a
+        DIFFERENT leadSessionId, so the default is returned because the
+        string-compare ran and missed, not because the store is empty."""
         ctx_module, teams_root = ctx
-        # The NUL itself never matches a dir; the danger is a RAISE escaping.
+        # Seed a real, well-formed dir whose leadSessionId is NOT the poisoned id.
+        _seed_team_dir(teams_root, SESSION_ID8_DIR, lead_session_id=LEAD_SID)
         resolved = ctx_module._resolve_aligned_team_name(
             "bad\x00id", teams_dir=str(teams_root), default="safe-default"
         )
+        # The poisoned id never equals LEAD_SID -> no match -> default. The
+        # well-formed dir IS scanned (the assertion bites: a resolver that
+        # path-composed the session_id and raised would ALSO return the default,
+        # so we additionally pin that the SAME dir DOES match its OWN id below.)
         assert resolved == "safe-default"
+        # Counter-proof the dir is genuinely matchable (so the no-match above is
+        # attributable to the poisoned id, not an unscannable store):
+        assert ctx_module._resolve_aligned_team_name(
+            LEAD_SID, teams_dir=str(teams_root), default="safe-default"
+        ) == SESSION_ID8_DIR
 
-    def test_slash_in_session_id_does_not_raise(self, ctx):
-        """A '/' in the raw session_id must not traverse or raise -> default."""
+    def test_slash_poisoned_session_id_no_match_returns_default(self, ctx):
+        """A '/' (traversal) in the raw session_id must not traverse OR raise: it
+        is string-compared, never pathed, so it never matches -> default.
+        NON-VACUITY: same as above — a real matchable dir under a DIFFERENT
+        leadSessionId is seeded, so the default is the string-compare missing."""
         ctx_module, teams_root = ctx
+        _seed_team_dir(teams_root, SESSION_ID8_DIR, lead_session_id=LEAD_SID)
         resolved = ctx_module._resolve_aligned_team_name(
             "../../etc", teams_dir=str(teams_root), default="safe-default"
         )
         assert resolved == "safe-default"
+        assert ctx_module._resolve_aligned_team_name(
+            LEAD_SID, teams_dir=str(teams_root), default="safe-default"
+        ) == SESSION_ID8_DIR
 
     def test_non_str_teams_dir_does_not_raise(self, ctx):
         """teams_dir of a non-str type (e.g. an int) raises TypeError when
@@ -384,6 +413,30 @@ class TestGetTeamNameOptionB:
         _seed_team_dir(teams_root, FULL_UUID_DIR, lead_session_id=LEAD_SID)
         _write_context_file(monkeypatch, ctx_module, tmp_path,
                             team_name="", session_id=LEAD_SID)
+        assert ctx_module.get_team_name() == ""
+
+    def test_empty_ssot_short_circuit_memoizes_empty(self, ctx, monkeypatch,
+                                                      tmp_path):
+        """The empty-SSOT short-circuit MEMOIZES '' in _aligned_cache (None is the
+        'unresolved' sentinel; '' is a legitimate resolved-empty). A second
+        get_team_name() must serve the cached '' WITHOUT re-reading the context.
+        NON-VACUITY: after the first call we neuter get_pact_context to RAISE on
+        any further call — if the second get_team_name() did NOT use the cache it
+        would re-read and blow up; serving '' proves the memoization is real."""
+        import shared.pact_context as pc
+        ctx_module, _teams_root = ctx
+        _write_context_file(monkeypatch, ctx_module, tmp_path,
+                            team_name="", session_id=LEAD_SID)
+        # First call: empty SSOT -> short-circuit -> '' cached.
+        assert ctx_module.get_team_name() == ""
+        assert ctx_module._aligned_cache == ""  # '' memoized, not None
+
+        # Neuter the context reader: a cache MISS would now re-read and raise.
+        def _boom():
+            raise AssertionError("get_pact_context re-read despite cached ''")
+
+        monkeypatch.setattr(pc, "get_pact_context", _boom)
+        # Second call served from the cached '' -> no re-read, no raise.
         assert ctx_module.get_team_name() == ""
 
     def test_nonempty_wrong_ssot_upgrades_to_full_uuid(self, ctx, monkeypatch,

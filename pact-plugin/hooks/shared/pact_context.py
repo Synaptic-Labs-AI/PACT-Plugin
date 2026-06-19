@@ -346,20 +346,40 @@ def _resolve_aligned_team_name(
 
     PURE / FS-read-only / NEVER raises. The whole scan is wrapped in a TRUE
     ``except Exception`` (NOT the typed-tuple ``_iter_members`` precedent at
-    the ``members[]`` reader): ``get_claude_config_dir()`` -> ``Path.home()``
-    can raise ``RuntimeError`` and ``session_id`` is the RAW unsanitized
-    persisted value (``get_session_id`` applies no path-safety gate), so an
-    embedded ``/`` / NUL raises ``ValueError`` and a non-str ``teams_dir``
-    raises ``TypeError`` when composed as a path — a typed tuple would LEAK
-    all three and break never-raises. The bare-except precedents in this
-    module are ``persist_context`` and ``heal_context_if_missing``.
+    the ``members[]`` reader). The genuine raise sources the bare except must
+    catch are:
+      * ``get_claude_config_dir()`` -> ``Path.home()`` can raise
+        ``RuntimeError`` when HOME is unresolvable (the ``teams_dir is None``
+        branch composes the teams root via home).
+      * ``Path(teams_dir)`` raises ``TypeError`` when ``teams_dir`` is a
+        non-``None`` non-str (e.g. an int) — a path cannot be composed from it.
+      * the per-entry ``config.json`` read (``read_text`` / ``json.loads`` /
+        ``is_dir``) can raise ``OSError`` / ``json.JSONDecodeError`` /
+        ``ValueError`` — but those are caught by the INNER typed
+        ``except`` (skip the bad sibling, keep scanning), so they normally do
+        NOT reach the outer except; the outer except is the backstop for an
+        unexpected error in the loop scaffolding itself.
+    A typed outer tuple would LEAK the RuntimeError/TypeError above and break
+    never-raises, which is why the outer guard is a bare ``except Exception``.
+
+    NOTE — ``session_id`` is NOT a raise source here. It is used ONLY as a
+    string compared against ``config.json['leadSessionId']`` (and an empty
+    check); it is NEVER composed into a ``Path``. So a path-unsafe raw
+    ``session_id`` (embedded ``/`` or NUL) does NOT raise in this function —
+    it simply never equals any stored ``leadSessionId`` -> NO MATCH ->
+    ``default``. The path-safety gate is applied instead to the matched DIR
+    NAME (``is_safe_path_component`` below), which IS used as a path segment.
+    The bare-except precedents in this module are ``persist_context`` and
+    ``heal_context_if_missing``.
 
     PERF (SessionStart hot-path scan cost): on a MATCH the scan stops at the
     first matching dir; on NO MATCH it iterates EVERY team dir under
-    ``teams/`` (a stat + small-JSON read each). Acceptable: the directory is
-    a handful of entries in practice, the no-match path is the cold-start
-    window only, and each fresh hook process pays it at most once
-    (``get_team_name`` memoizes via ``_aligned_cache``).
+    ``teams/``, doing a ``stat``/``is_dir`` plus a small-JSON ``read_text`` +
+    ``json.loads`` per entry. Acceptable: the directory holds a handful of
+    entries in practice (worst case observed ~0.45ms over ~21 dirs), the
+    no-match path is hit only in the cold-start window (the real team dir is
+    born ~38s after SessionStart), and each fresh hook process pays it at most
+    once because ``get_team_name`` memoizes the result via ``_aligned_cache``.
 
     Args:
         session_id: The current session id to identity-match against

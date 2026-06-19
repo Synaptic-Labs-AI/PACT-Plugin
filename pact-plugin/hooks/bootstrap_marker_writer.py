@@ -380,6 +380,15 @@ def _write_back_aligned_team_name() -> None:
         # Context-file write-back: rewrite the persisted team_name to the
         # aligned value (full build+cache+persist seam; atomic, 0o600). This
         # ALWAYS runs on a divergence, independent of the CLAUDE.md branch.
+        #
+        # ORDERING IS INTENTIONAL — context FIRST, CLAUDE.md SECOND. The context
+        # file is the SSOT every team-scoped hook reads; the CLAUDE.md '- Team:'
+        # line is cosmetic (human-readable) and NO reader cross-checks it against
+        # the context. The two writes are not transactional, but each is a
+        # whole-file atomic op, so a crash BETWEEN them leaves the load-bearing
+        # record (the context file) already correct — the worst residual is a
+        # stale cosmetic CLAUDE.md line, self-healed on the next prompt. So the
+        # non-atomicity is safe by construction, not an accepted risk.
         pact_context.write_context(
             aligned, session_id, pact_context.get_project_dir(), plugin_root
         )
@@ -387,6 +396,16 @@ def _write_back_aligned_team_name() -> None:
         # CLAUDE.md write-back: exists()-guard BEFORE update_session_info so we
         # never trip its Case-0 create-on-absent branch in a worktree. Resolve
         # the project CLAUDE.md path the same way update_session_info does.
+        #
+        # TOCTOU NOTE (security, mitigated / out-of-scope): there is a window
+        # between this exists() check and update_session_info's write. To exploit
+        # it an attacker would need write access to the project dir AS THE SAME OS
+        # USER running the hook — at which point the box is already compromised
+        # (they could edit CLAUDE.md, the context file, or the hook itself
+        # directly). update_session_info itself re-resolves + rewrites the whole
+        # managed block atomically under its own logic, so the only residual is a
+        # benign cosmetic write. No cross-user privilege boundary is crossed here,
+        # so this is out-of-scope by the same-user trust model.
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
         if not project_dir:
             return
