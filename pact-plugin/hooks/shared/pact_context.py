@@ -429,10 +429,13 @@ def _resolve_aligned_team_name(
                 continue
         return fallback
     except Exception:
-        # TOTAL fail-safe: home-resolution RuntimeError, a path-unsafe raw
-        # session_id (ValueError), a non-str teams_dir (TypeError), or any
-        # other unexpected error -> the persisted/computed default. NEVER
-        # raises — get_team_name and the heal path depend on this contract.
+        # TOTAL fail-safe: home-resolution RuntimeError (get_claude_config_dir
+        # -> Path.home, the teams_dir=None branch), a non-str teams_dir
+        # TypeError (Path(teams_dir)), or any other unexpected error -> the
+        # persisted/computed default. (session_id is NOT a raise source here —
+        # it is only string-compared to leadSessionId, never composed into a
+        # Path; see the NOTE in the docstring above.) NEVER raises —
+        # get_team_name and the heal path depend on this contract.
         if default is not None:
             return default
         try:
