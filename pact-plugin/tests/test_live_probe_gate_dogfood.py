@@ -467,6 +467,57 @@ class TestDogfoodWarnPath:
             "CLAUDE_CONFIG_DIR must NOT false-satisfy the gate (security #55 regression)"
         )
 
+    def test_waiver_row_silences_end_to_end_on_non_seam_hooks_diff(
+            self, tmp_path, monkeypatch, capsys):
+        # WAIVER PATH end-to-end through main(): a hooks/-only diff that touches
+        # NO seam hook classifies waiver_required=True, so main() calls
+        # _has_satisfied_row(..., waiver_ok=True) and an auditable WAIVED row
+        # satisfies -> silent. Previously the waiver_ok=True branch was covered
+        # only at the _has_satisfied_row UNIT level (TestFreshnessRowSpec /
+        # TestPerModePassParsing), never driven through main(). `some_hook.py`
+        # (what _make_git_repo touches) is NOT a seam hook -> waiver_required=True.
+        waived = f"| 2026-06-08 | op | {VERSION} | WAIVED | n/a | hooks/-only, no seam change |\n"
+        root = _make_git_repo(tmp_path, "| h |\n" + waived, touch_hooks=True)
+
+        # Sanity-pin the precondition this test depends on: the touched diff is a
+        # non-seam hooks/ change (waiver_required=True). If a future fixture makes
+        # some_hook.py a seam hook, waiver_ok would be False and this test would
+        # silently change meaning -> assert it explicitly.
+        from shared.hook_infra_classifier import classify_diff  # noqa: E402
+        assert classify_diff(["pact-plugin/hooks/some_hook.py"]).waiver_required is True, (
+            "precondition: the touched hooks/ file must be a NON-seam change "
+            "(waiver_required=True) — else this does not exercise the waiver path"
+        )
+
+        # NON-VACUITY: spy that main() reached the freshness check AND passed
+        # waiver_ok=True (the waiver branch), not waiver_ok=False. A silent exit
+        # alone would not prove the WAIVED row is what silenced the gate.
+        real = g._has_satisfied_row
+        seen: list[bool] = []
+
+        def _spy(root_arg, version, waiver_ok):
+            seen.append(waiver_ok)
+            return real(root_arg, version, waiver_ok=waiver_ok)
+
+        monkeypatch.setattr(g, "_has_satisfied_row", _spy)
+        code, out = _run_main(root, "gh pr merge 999 --squash", monkeypatch, capsys)
+        assert code == 0
+        assert seen == [True], (
+            "main() must reach _has_satisfied_row with waiver_ok=True for a "
+            f"non-seam hooks/ diff (the waiver branch); got calls={seen!r}"
+        )
+        assert "live-probe-gate" not in out, (
+            "an auditable WAIVED row must satisfy the gate on a non-seam hooks/ "
+            f"diff (waiver_ok=True) -> silent; got {out!r}"
+        )
+        # CONTRAST (attributes the silence to the waiver branch): the SAME WAIVED
+        # row does NOT satisfy when waiver_ok=False — so the end-to-end silence
+        # above is the waiver path, not a row that would satisfy regardless.
+        assert real(root, VERSION, waiver_ok=False) is False, (
+            "the WAIVED row must NOT satisfy under waiver_ok=False — proving the "
+            "e2e silence is specifically the waiver_required=True branch"
+        )
+
 
 # ── FINDING A: _resolve_repo_root must validate the marker at CLAUDE_PROJECT_DIR ──
 
@@ -591,12 +642,19 @@ class TestEmitWarnSurfacingShape:
         assert "<unknown>" in ctx
 
     def test_advisory_prose_is_byte_unchanged_by_the_channel_swap(self, capsys):
-        # Finding B moved the advisory from stderr to additionalContext WITHOUT
-        # altering a single character of the prose. Pin the EXACT surfaced text
-        # against the canonical template so a future channel/format change cannot
-        # silently mangle the operator-facing wording. The expected string is the
-        # pre-fix f-string verbatim (extracted from 402c5e3f^); if it drifts, the
-        # fix changed more than the channel — which #932 explicitly forbids.
+        # GREEN-TREE DRIFT-DETECTOR (not a correctness-derivation, and not a
+        # counter-test-by-revert assertion): on the fixed tree this pins the EXACT
+        # surfaced additionalContext text against a hand-typed literal of the
+        # pre-swap f-string, so a FUTURE edit that mangles the operator-facing
+        # wording (while keeping the channel) fails here. NOTE on its revert
+        # behavior: under a source-only revert of the fix the advisory goes to
+        # stderr and stdout carries no hookSpecificOutput, so this test flips RED
+        # at the `json.loads(out)["hookSpecificOutput"]` EXTRACTION (KeyError) —
+        # BEFORE the `ctx == expected` byte-compare ever runs. So its non-vacuity-
+        # under-revert proves only that the CHANNEL moved; the byte-equality check
+        # itself is a standing guard exercised on the green tree, where it catches
+        # prose drift. The expected string is hand-typed (NOT re-derived from the
+        # SUT's f-string at runtime), so it is not tautological.
         _, out, _ = self._run_emit(
             capsys, version="4.4.13", seam=frozenset({"session_init.py"}))
         ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
@@ -798,19 +856,52 @@ class TestFindingASubdirEndToEnd:
             f"silently self-disabling); got stdout={out!r}"
         )
 
-    def test_subdir_project_dir_silent_when_satisfied_row_exists(
+    def test_subdir_project_dir_silent_via_satisfied_row_at_resolved_root(
             self, tmp_path, monkeypatch, capsys):
-        # Control: the reconnection does NOT over-fire — under the same subdir
-        # CPD, a GENUINE satisfied row correctly silences the gate. This proves
-        # the subdir fall-through reaches the REAL repo-root RUNBOOK (where the
-        # satisfied row lives), not merely that it always WARNs.
+        # ISOLATES the fall-through (not merely the no-WARN output): under a
+        # subdir CPD with a GENUINE satisfied row, the gate must be silenced
+        # BECAUSE the fall-through reached the REAL repo-root RUNBOOK and read
+        # the row there — NOT because the gate fail-safed silent at the marker
+        # check. A bare "live-probe-gate not in out" assertion CANNOT tell those
+        # apart (both produce no WARN); pre-fix the subdir CPD resolves to the
+        # marker-less subdir, main() silent-allows at the marker==None check, and
+        # _has_satisfied_row is NEVER reached. So we SPY _has_satisfied_row and
+        # assert (a) it WAS called (the gate reached the freshness branch = the
+        # fall-through resolved a marker-bearing root and passed marker/diff/
+        # primary) and (b) it was called with the resolved REPO ROOT, not the
+        # subdir. The spy makes this NON-VACUOUS: pre-fix the call never happens,
+        # so assertion (a) flips RED on the unfixed tree.
         root = _make_git_repo(
             tmp_path, "| h |\n" + GENUINE_PASS_ROW, touch_hooks=True)
         subdir = root / "pact-plugin"
+
+        real_has_satisfied_row = g._has_satisfied_row
+        seen_roots: list[Path] = []
+
+        def _spy(root_arg, version, waiver_ok):
+            seen_roots.append(root_arg)
+            return real_has_satisfied_row(root_arg, version, waiver_ok=waiver_ok)
+
+        monkeypatch.setattr(g, "_has_satisfied_row", _spy)
         code, out = self._run_main_with_project_dir(
             root, subdir, "gh pr merge 999 --squash", monkeypatch, capsys)
         assert code == 0
+        # (a) the freshness check was actually reached (fall-through engaged) —
+        # this is the non-vacuous part: pre-fix the gate silent-allows before it.
+        assert seen_roots, (
+            "the fall-through must reach _has_satisfied_row (pre-fix it never "
+            "does — the subdir resolves marker-less and the gate silent-allows "
+            "at the marker check); an empty call list means the gate self-"
+            "disabled, not that the row silenced it"
+        )
+        # (b) it was called with the resolved REPO ROOT (where the RUNBOOK lives),
+        # not the subdir CPD — proving the fall-through landed on the true root.
+        assert seen_roots[0].resolve() == root.resolve(), (
+            "_has_satisfied_row must be called with the resolved repo ROOT, not "
+            f"the subdir; got {seen_roots[0]!r} (subdir was {subdir!r})"
+        )
+        # and the genuine row at that root silences the gate (no over-fire).
         assert "live-probe-gate" not in out, (
-            "under a subdir CPD, a fresh both-mode PASS row at the resolved repo "
-            f"root must silence the gate (fall-through reaches it); got {out!r}"
+            "a fresh both-mode PASS row at the resolved repo root must silence "
+            f"the gate; got {out!r}"
         )
