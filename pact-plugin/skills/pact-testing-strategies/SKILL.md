@@ -194,6 +194,15 @@ the component over the **unstubbed** read, and assert the observable outcome. Th
 test passes only if the component resolves the real seam — so a regression in
 seam resolution turns it red, where a mocked test would stay green.
 
+**Canonical reference example.** `pact-plugin/tests/test_missed_wake_scan_integration.py`
+is the worked exemplar to copy from. Its non-vacuity-gate case — the one that would
+have caught the inert surfacer — redirects `Path.home` to a temp home, writes a real
+on-disk team task, and drives the arg-less `get_task_list()` over the **real**
+`get_team_name` → team-dir → glob resolution with no stub of that seam, asserting the
+surfacer fires (and pre-regression would have been silent). It also documents the
+companion discipline: the test must *fail* if the seam is stubbed, so a future edit
+that re-introduces a `get_task_list` mock is caught.
+
 **The authoritative seam-dependent set** is `SEAM_DEPENDENT_HOOKS` in
 `hooks/shared/hook_infra_classifier.py` — a pure-data SSOT (no I/O, not a runtime
 hook) whose companion meta-test re-derives each hook's transitive helper closure
