@@ -237,25 +237,45 @@ def _has_pipe_to_shell(command: str) -> bool:
     )
 
 
+# Path-qualified shell token — ReDoS-free (disjoint-segment; STOPS at space/`)`).
+# Trailing (?![\w/]) anchors the shell name as a whole PATH-LEAF token: excludes
+# prefix-of-name (`>(basht)`/`>(teehee)`) AND `>(bash/foo)` (bash is a DIRECTORY,
+# foo the executable) while KEEPING metachar-separated real vectors
+# `>(bash;ls)`/`>(bash&&x)`/`>(bash|cat)` (bash still executes).
+_PROCSUB_SHELL = r"(?:[^\s)/]*/)*(?:bash|sh|zsh)(?![\w/])"
+
+
 def _has_process_substitution_to_shell(command: str) -> bool:
     """Check if a command uses process substitution fed to a shell interpreter.
 
-    Detects BOTH:
-      - input-side  `bash <(echo "...")`  — shell consumes the substitution as
-        its input script (the original guard);
-      - output-side `echo "..." > >(bash)` — a stdout-routing redirect feeds the
-        command's stdout into a shell (#1002). Restricted to stdout-routing
-        redirect operators (`>`, `>>`, `1>`, `1>>`, `&>`, `&>>`) and to the same
-        shell-interpreter target set, so non-shell consumers (`> >(tee ...)`,
-        `> >(cat ...)`) and stderr-only routing (`2> >(bash)`) are NOT matched.
-    Both arms are used only as a strip-SKIP condition: a True result PRESERVES
-    content for the dangerous-pattern scan, so widening this guard is
-    monotonically detection-increasing (INV-D2-safe; cannot create a
-    false-negative).
+    Detects:
+      - input-side  ``bash <(echo "...")``  — the shell consumes the substitution
+        as its input script (the original guard, UNCHANGED);
+      - output-side ``echo "..." > >(bash)`` — the command's stdout is routed into
+        a shell via process substitution. Caught in two forms (#1002):
+          * Arm A — ``>(shell)`` as a stdout-routing REDIRECT TARGET. The operator
+            set is stdout-only (``>``, ``>>``, ``1>``, ``1>>``, ``&>``, ``&>>``,
+            the csh ``>&`` excluding the fd-duplication ``>&N``, and the clobber
+            ``>|``); stderr-only routing (``2>``/``3>``) is excluded by omission.
+          * Arm B — ``>(shell)`` as a command ARGUMENT (tee-fanout & general, e.g.
+            ``... | tee >(bash)``). Keyed on a preceding NON-redirect token (word
+            char, quote, or close-bracket), so ``2> >(bash)`` (preceded by ``>``)
+            is NOT matched — the stderr exclusion holds on this arm too.
+    Both output-side arms accept an optional path prefix (``>(/bin/bash)``,
+    ``>(./sh)``) and require the shell name as a whole path-leaf token: non-shell
+    targets (``> >(tee ...)``, ``> >(cat ...)``), prefix-of-name (``>(teehee)``,
+    ``>(basht)``), and ``>(bash/foo)`` (bash a directory) are NOT matched.
+
+    The guard is consumed ONLY as a strip-SKIP condition: a True result PRESERVES
+    content for the dangerous-pattern scan, so widening it is monotonically
+    detection-increasing (INV-D2-safe; cannot create a false-negative).
     """
     return bool(
-        re.search(r"\b(?:bash|sh|zsh)\s+<\(", command)                                 # input-side (unchanged)
-        or re.search(r"(?:&>>?|1>>?|(?<![0-9])>>?)\s*>\(\s*(?:bash|sh|zsh)\b", command)  # output-side (#1002)
+        re.search(r"\b(?:bash|sh|zsh)\s+<\(", command)                       # input-side (unchanged)
+        # Arm A — redirect TARGET, stdout-routing operators only (stderr excluded by construction):
+        or re.search(r"(?:&>>?|>&(?![0-9])|>\||1>>?|(?<![0-9])>>?)\s*>\(\s*" + _PROCSUB_SHELL, command)
+        # Arm B — procsub as a command ARGUMENT (tee-fanout & general): preceded by a NON-redirect token:
+        or re.search(r"[\w\"')\]}]\s+>\(\s*" + _PROCSUB_SHELL, command)
     )
 
 
