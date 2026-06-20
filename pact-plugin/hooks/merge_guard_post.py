@@ -249,8 +249,8 @@ def extract_context(question: str) -> dict:
             # `push\b` anchor is mandatory so this does NOT fire on a bare
             # "main" mention (e.g. "merge PR 42 into main" → merge, not
             # force-push).
-            r"push\b(?:.*\bto\b)?.*\b(?:main|master)\b|"
-            r"direct\s+push.*\b(?:main|master)\b",
+            r"push\b.*?\b(?:main|master)\b|"
+            r"direct\s+push.*?\b(?:main|master)\b",
             question_lower,
         ):
             context["operation_type"] = "force-push"

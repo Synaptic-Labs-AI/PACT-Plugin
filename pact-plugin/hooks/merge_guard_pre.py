@@ -476,20 +476,31 @@ def _strip_non_executable_content(command: str) -> str:
     #    `--body-file`/`-F` is NOT a carrier: it names a FILE whose content
     #    is not on the command line, so there is nothing on the line to strip.
     if not piped_to_shell and not process_sub_to_shell:
-        # Match the carrier COMMAND span first (verb + its arguments up to a
-        # shell separator), then strip EVERY --title/--body/-t/-b value
-        # within that span. Spanning to a `&`/`|`/`;` boundary is load-bearing
-        # for INV-D2: the executing tail of a compound (e.g.
-        # `... && git branch -D real`) falls OUTSIDE the carrier span, so it
-        # is NEVER stripped and stays caught. A single re.sub on the whole
-        # command would strip only the FIRST flag-value (the verb prefix is
-        # consumed by the first match and cannot re-anchor on a bare second
-        # flag), so the per-span inner-strip is required to strip both a
-        # `--title` and a `--body` on one command.
+        # Match the carrier COMMAND span first (verb + its arguments), then
+        # strip EVERY --title/--body/-t/-b value within that span. A single
+        # re.sub on the whole command would strip only the FIRST flag-value
+        # (the verb prefix is consumed by the first match and cannot re-anchor
+        # on a bare second flag), so the per-span inner-strip is required to
+        # strip both a `--title` and a `--body` on one command.
+        #
+        # The span body is QUOTE-AWARE: it consumes balanced quoted regions
+        # atomically (so `;`/`&`/`|`/newline INSIDE a quoted value are not
+        # separators) and stops at the first UNQUOTED `&`/`|`/`;`/newline; an
+        # unbalanced quote stops the span early (under-consume = over-block,
+        # never under-block). This is load-bearing for INV-D2: an unquoted
+        # executing op always terminates the span (none of the three body
+        # alternatives can begin at an unquoted separator), so a compound's
+        # executing tail (e.g. `... && git branch -D real`) falls OUTSIDE the
+        # span and is NEVER stripped — it stays caught. The three alternatives
+        # have DISJOINT first chars (non-sep-non-quote / `"` / `'`), so the
+        # nested `*` has no backtracking ambiguity (linear; no ReDoS). The
+        # double-quoted alternative honors `\"` escapes, matching bash's
+        # escaped-quote semantics so the regex cannot desync from the shell.
         # Verb alternation: issue create|edit, pr create. NOT pr close —
         # `close` is absent by construction so a close command never matches.
         _gh_carrier_span = (
-            r"gh\s+(?:issue\s+(?:create|edit)|pr\s+create)\b[^&|;]*"
+            r"gh\s+(?:issue\s+(?:create|edit)|pr\s+create)\b"
+            r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
         )
 
         def _strip_gh_carrier_span(span_match: re.Match) -> str:
