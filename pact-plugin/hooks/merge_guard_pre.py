@@ -182,9 +182,13 @@ try:
     re.compile(_GIT_PREFIX + r"push\s+\S+\s+HEAD:main\b"),
     re.compile(_GIT_PREFIX + r"push\s+\S+\s+HEAD:master\b"),
     # Regular push to main/master (e.g., local merge then push)
-    # Negative lookahead (?!:) prevents matching refspecs like main:feature-branch
-    re.compile(_GIT_PREFIX + r"push\s+(?:-\S+\s+)*\S+\s+main(?!:)\b"),
-    re.compile(_GIT_PREFIX + r"push\s+(?:-\S+\s+)*\S+\s+master(?!:)\b"),
+    # Negative lookahead (?!:) prevents matching refspecs like main:feature-branch.
+    # The dash-flag walk is BOUNDED {0,K} — defense-in-depth that removes the last
+    # unbounded `*` prefix walk in the push patterns so their linearity is
+    # structural/intrinsic rather than contingent on the global-flag prefix bound
+    # (#1001 family); already linear at HEAD, not a hang-fix.
+    re.compile(_GIT_PREFIX + r"push\s+(?:-\S+\s+){0,%d}\S+\s+main(?!:)\b"   % _MAX_GLOBAL_FLAG_TOKENS),
+    re.compile(_GIT_PREFIX + r"push\s+(?:-\S+\s+){0,%d}\S+\s+master(?!:)\b" % _MAX_GLOBAL_FLAG_TOKENS),
 ]
 
     # _GH_PR_MERGE_RE and _GH_PR_CLOSE_RE relocated to shared.merge_guard_common

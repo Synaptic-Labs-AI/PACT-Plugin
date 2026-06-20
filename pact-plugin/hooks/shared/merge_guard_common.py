@@ -121,31 +121,36 @@ LAYER1_SUCCESS_STDOUT_PATTERNS: dict[str, str | None] = {
 # pattern bank without duplicating regex source.
 # -----------------------------------------------------------------------------
 
-# Upper bound on global-flag tokens between a CLI tool and its subcommand.
+# Upper bound on flag tokens in a CLI flag region. Governs BOTH the global-flag
+# prefix between a tool and its subcommand (e.g. `git -c k=v ... push`) AND the
+# push-dash-flag walk between `push` and its refspec (e.g. `git push -u -f main`).
 # Eliminates the O(n^2) multi-anchor backtracking of the unbounded `*` form
 # (#1001) while preserving the "matches any token" semantics EXACTLY for any
-# command with <= _MAX_GLOBAL_FLAG_TOKENS global tokens — i.e. every realistic
-# command (the heaviest realistic git global-flag count, e.g.
-# `git -c a=1 -c b=2 -C /p --git-dir=/g --work-tree=/w push ...`, is ~10
-# tokens; gh is ~2). 32 is ~3x that headroom, and is a fixed modest constant so
-# per-anchor work is O(32)=O(1) regardless of input length.
+# command with <= _MAX_GLOBAL_FLAG_TOKENS flag tokens in that region — i.e. every
+# realistic command (the heaviest realistic git global-flag count, e.g.
+# `git -c a=1 -c b=2 -C /p --git-dir=/g --work-tree=/w push ...`, is ~10 tokens;
+# gh is ~2; push dash-flags ~2-3). 64 is generous headroom over that, and is a
+# fixed modest constant so per-anchor work is O(64)=O(1) regardless of input length.
 #
-# ACCEPTED RESIDUAL (honest INV-D2 accounting): a command with >32 *valid*
-# global tokens before its verb is NOT impossible — `git -c k=v` is a
-# legitimate, repeatable pair, so e.g. `git -c a=1 -c b=2 ...(17 pairs=34
+# ACCEPTED RESIDUAL (honest INV-D2 accounting): a command with >64 *valid* flag
+# tokens before its verb/refspec is NOT impossible — `git -c k=v` is a
+# legitimate, repeatable pair, so e.g. `git -c a=1 -c b=2 ...(33 pairs=66
 # tokens)... push --force` DOES execute yet exceeds the bound, so the bounded
 # form misses a real destructive op the unbounded form caught. This is a
 # NARROW residual under-block, accepted as a documented tradeoff against the
 # O(n^2) DoS, justified by the THREAT MODEL: #1001's input is operator/LLM-
 # authored command text (defense-in-depth, NOT adversarial network input), and
-# padding 17+ `-c` pairs to evade one's OWN merge guard is self-defeating (the
-# author would simply write the command directly). It is a relaxation of
-# INV-D2, not a no-op — stated plainly rather than papered over.
-# DO NOT raise this to a value comparable to realistic input lengths (that
-# reintroduces per-anchor O(N) cost). It MAY be raised modestly (e.g. 64) as
-# zero-cost defense-in-depth if security review deems the residual material —
-# 64 is still a fixed modest constant, still O(1)/linear.
-_MAX_GLOBAL_FLAG_TOKENS = 32
+# padding 33+ `-c` pairs to evade one's OWN merge guard is self-defeating (the
+# author would simply write the command directly). The push-dash-flag walk
+# carries the SAME residual class but is even less reachable (push dash-flags are
+# not meaningfully infinitely-repeatable; a flag with a non-dash value, e.g.
+# `-o <opt>`, already breaks the walk). It is a relaxation of INV-D2, not a
+# no-op — stated plainly rather than papered over.
+# This was raised 32 -> 64 as zero-cost defense-in-depth (doubles the >K-residual
+# headroom; still a fixed modest constant, still O(1)/linear). DO NOT raise it to
+# a value comparable to realistic input lengths (that reintroduces per-anchor
+# O(N) cost).
+_MAX_GLOBAL_FLAG_TOKENS = 64
 
 # Optional global flags between CLI tool and subcommand — BOUNDED (was `*`).
 _GH_GLOBAL_FLAGS  = r"(?:\S+\s+){0,%d}" % _MAX_GLOBAL_FLAG_TOKENS
@@ -213,7 +218,7 @@ def detect_command_operation_type(command: str) -> str | None:
     if re.search(_GIT_PREFIX + r"push\s+\S+\s+HEAD:(?:main|master)\b", command):
         return "force-push"
     if re.search(
-        _GIT_PREFIX + r"push\s+(?:-(?!-force-with-lease\b)\S+\s+)*\S+\s+(?:main|master)(?!:)\b",
+        _GIT_PREFIX + r"push\s+(?:-(?!-force-with-lease\b)\S+\s+){0,%d}\S+\s+(?:main|master)(?!:)\b" % _MAX_GLOBAL_FLAG_TOKENS,
         command,
     ):
         return "force-push"
