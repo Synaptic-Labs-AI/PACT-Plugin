@@ -90,71 +90,20 @@ closed — record tmux as `pending` and close only after the real tmux probe
 lands. A PRIMARY-but-not-SECONDARY change is the only path that closes WITHOUT a
 both-modes PASS, and only via an explicit WAIVED row.
 
-**Parser-coupling note (keep these tokens, single row).** The locus-b freshness
-advisory (`live_probe_gate.py`) decides WARN-vs-silent by scanning these rows for
-a *satisfied* row at the current plugin version. Its match keys on tokens that
-MUST stay in ONE `|`-delimited row:
+**Row schema (human-readable run-log convention).** Each probe section records,
+per run: the plugin **version** (3rd column), a **per-mode verdict** (4th column)
+written `tmux PASS|FAIL N/N · in-process PASS|FAIL N/N` (both modes in ONE row;
+`WAIVED` for a PRIMARY-not-SECONDARY change; `n/a` + a `_deferred — <mode> …`
+label for a mode that genuinely cannot run), and discriminator evidence. A
+both-modes PASS with complete `N/N` counts is what certifies a probe; the older
+single-mode sections (923-missed-wake `tmux 6/6 — PASS` + `in-process 6/6 — PASS`;
+926-config-dir `in-process 4/4 — PASS` + a deferred tmux row) certify across
+their two rows. This is now a documentation convention for human reviewers — the
+live_probe_gate row-parser that formerly consumed it was removed per #997.
 
-- the plugin **version** in the **"Plugin version" column** — COLUMN-ANCHORED to
-  the 3rd cell, NOT matched anywhere-in-line. So a *different*-version row that
-  merely mentions this version in its Notes prose does NOT satisfy the gate.
-  Keep `Plugin version` as the 3rd column.
-- a **PER-MODE** verdict in the **"Per-mode verdict" column** (the 4th cell):
-  the parser reads `tmux <verdict>` AND `in-process <verdict>` SEPARATELY and
-  requires BOTH to be a genuine `PASS`/`PASSED` **immediately followed by the
-  trailing count** (`tmux PASS 2/2`). A row that mixes a real FAIL with a real
-  PASS — `tmux FAIL N/N · in-process PASS N/N` — does **NOT** satisfy (per-mode
-  parsing closes that dangerous false-satisfy).
-  OR `WAIVED` → satisfied iff the change is PRIMARY-not-SECONDARY.
+## locus-b live-probe — RETIRED
 
-The per-mode verdict is matched case-sensitively and accepts either **`PASS`** or
-**`PASSED`** per mode — but a **COMPLETE COUNT IS REQUIRED**: the verdict must be
-written `PASS N/N` where the count is non-zero and numerator==denominator (ALL
-sections passed), e.g. `PASS 2/2` or `PASS 4/4`. This rejects: EVERY
-unfilled-placeholder form (`PASS/FAIL`, `PASS|FAIL`, `PASS, FAIL`, `PASS FAIL`,
-bare `PASS`) which lacks the `N/N` shape; an INCOMPLETE or vacuous count
-(`PASS 0/2` zero, `PASS 1/2` partial, `PASS 0/0` vacuous); and
-`bypass`/`BYPASSED`/lowercase. That is what stops a pending/template/partial row
-from silently satisfying the gate. So: keep both modes in a SINGLE row with the
-per-mode `tmux PASS|FAIL N/N · in-process PASS|FAIL N/N` shape (do not split
-tmux/in-process across rows), keep `Plugin version` as the 3rd column and the
-per-mode verdict as the 4th, and **always write each mode's verdict WITH a
-complete count** — `PASS 2/2` (or `FAIL 0/2` / `WAIVED`); a count-less or
-partial `PASS` will NOT satisfy.
-
-**CROSS-ROW AGGREGATION + the older single-mode sections.** Satisfaction is
-decided ACROSS all of a version's rows, not per-row: the parser builds a per-mode
-status (PASS / FAIL / DEFERRED / absent) for tmux AND in-process from the verdict
-cells, and a version satisfies iff BOTH modes are {PASS or DEFERRED}, ≥1 is PASS,
-and neither is FAIL. This is what lets the older single-mode sections
-(923-missed-wake: separate `tmux 6/6 — PASS` + `in-process 6/6 — PASS` rows;
-926-config-dir: `in-process 4/4 — PASS` + a deferred tmux row) certify across
-their two rows — while a LONE single-mode PASS with the other mode neither PASSed
-nor deferred does NOT satisfy (you cannot certify a two-mode probe with one
-mode). The verdict cell is matched position-independently for both shapes
-(`tmux PASS 2/2` per-mode template AND `tmux 6/6 — PASS` legacy), still requiring
-a complete `N/N` count and rejecting PASS-only-in-Notes.
-
-**To defer a mode** (a mode that genuinely cannot run — e.g. tmux under a custom
-`CLAUDE_CONFIG_DIR`): the row's **verdict cell must be `n/a`** AND the **row label
-(1st column) must name the deferred mode** as `_deferred — <mode> …` (e.g.
-`_deferred — tmux mode under non-default CLAUDE_CONFIG_DIR`). The parser counts
-that mode as DEFERRED (covered) ONLY from that explicit label+`n/a` pairing — a
-FAIL is never deferred, and an unmentioned mode is never deferred. A `_deferred`
-row whose PASS appears only in Notes does NOT by itself satisfy (the other mode
-must still be a real PASS).
-
-If a future layout moves the version column, changes the per-mode verdict cell,
-the deferral label, or renames the verdict tokens, update `live_probe_gate.py`'s
-row parser to match.
-
-## 924-locus-b-dogfood-probe.md
-
-Per-mode schema per `live-probe-template.md` (§Live-probe-template instances above); denominator = 2 (tmux dogfood; in-process dogfood) per the 924 runbook §4.
-
-| Run date (UTC) | Operator | Plugin version | Per-mode verdict (tmux PASS\|FAIL N/N · in-process PASS\|FAIL N/N) | Mode-discriminator evidence (session_ids observed) | Notes (findings; tracking) |
-| -------------- | -------- | -------------- | ----------------------------------------------------------------- | -------------------------------------------------- | -------------------------- |
-| 2026-06-10 | michael-wojcik | 4.4.14 | tmux n/a (BLOCKED — #932) · in-process n/a | lead `54ad4a1d…`; secretary `ee689856…`; devops `e9edfc32…` (3 distinct ⇒ separate-process / iterm2) | PROBE BLOCKED — gate stays armed (no satisfied row). (A) gate self-disables from a teammate whose `CLAUDE_PROJECT_DIR` is the `pact-plugin` SUBDIR → `_plugin_marker` None → `silent:no_marker` (git-common-dir fallback shadowed). (B) §2c surfacing NEGATIVE — via a temp/reverted git-fallback patch the gate reached EMIT_WARN but the stderr-on-exit-0 advisory did not reach the agent (`merge_guard` exit-2 deny did — positive control). WARN→SILENT mechanism confirmed via a synthetic satisfied row (reverted). Tracked in #932 (fix `_resolve_repo_root` marker-validation + `_emit_warn`→`hookSpecificOutput`, then re-probe). #924 stays OPEN. |
+The locus-b live-probe (`924-locus-b-dogfood-probe.md`) is retired: the `live_probe_gate` advisory hook was removed from the shipped plugin per #997 (maintainer-internal tooling, zero consumer value); its runbook + acceptance rows go with it.
 
 ## 926-config-dir-live-probe.md
 
