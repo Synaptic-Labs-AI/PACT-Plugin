@@ -1,23 +1,22 @@
 """
-Hook-Infra Classifier (live-probe gate SSOT)
+Hook-Infra Seam Classifier (seam-test requirement SSOT)
 
 Location: pact-plugin/hooks/shared/hook_infra_classifier.py
 
-Summary: Single source of truth for classifying a changed-file set as a
-"hook-infra" change for the live-probe gate. Exposes the PRIMARY path signal
-(touches the hooks/ tree), the SECONDARY seam signal (touches a seam-dependent
-hook or a helper module it TRANSITIVELY imports), the L2/L3 hook tiers, and
-classify_diff() returning a Classification. The classifier is pure and
-side-effect free (no filesystem I/O, no subprocess) so it can be imported on
-the PreToolUse hook path without cost.
+Summary: Single source of truth for the seam-dependent-hook enumeration that the
+non-mocked seam-integration-test requirement references. Exposes the PRIMARY
+path signal (touches the hooks/ tree), the SECONDARY seam signal (touches a
+seam-dependent hook or a helper module it TRANSITIVELY imports), the L2/L3 hook
+tiers, and classify_diff() returning a Classification. The classifier is pure
+and side-effect free (no filesystem I/O, no subprocess) — a plugin-internal
+data/CI module, NOT a registered runtime hook, so it imposes no consumer cost.
 
 Used by:
-- live_probe_gate.py — the locus-b PreToolUse advisory; calls classify_diff to
-  decide whether to WARN.
-- tests/test_live_probe_gate_structure.py — the CI meta-tests; import the seam
+- tests/test_hook_infra_classifier.py — the CI meta-tests; import the seam
   sets + the per-hook helper closure to (a) assert the seam<->test-presence
   mapping and (b) re-derive the closure from the live import graph and pin it
-  against this module so the precomputed literal cannot drift.
+  against this module so the precomputed literal cannot drift, and exercise
+  classify_diff()'s PRIMARY/SECONDARY signals.
 - the reviewer-facing live-probe template — QUOTES this module as the source of
   truth, never a restated list.
 
@@ -100,17 +99,6 @@ L3_CANDIDATE_HOOKS: frozenset[str] = frozenset({
 # uncertainty path is exit(2) DENY, and they make no get_task_list call) -> they
 # fail LOUD, never silent-inert -> L2-only, never L3. (CODE-confirmed: their
 # exit(0) paths are input-side fail-open + legitimate ALLOW, not seam-error.)
-#
-# live_probe_gate (the locus-b advisory itself) is DELIBERATELY excluded from
-# SEAM_DEPENDENT_HOOKS even though it meets the seam predicate (its WARN depends
-# on a runtime-resolved git root / marker / RUNBOOK_RUN_DATES path, and it
-# silent-allows on any resolution failure). The exclusion is intentional, not an
-# oversight: its silent-failure is BENIGN -- it merely stops warning and the gate
-# degrades to pin-only enforcement (never a false "checked & clear"), so it needs
-# no inert-alarm L2/L3 treatment (parallel to file_tracker's benign-degrade
-# L2-only reasoning above). It is covered this cycle by
-# test_live_probe_gate_structure.py + the dogfood probe; a maintainer editing it
-# should preserve this rationale.
 
 
 # ─── Transitive helper import closure (authoritative SSOT data) ─────────────
@@ -303,7 +291,8 @@ class Classification:
 
 
 def classify_diff(changed_paths: list[str]) -> Classification:
-    """Classify a list of repo-relative changed paths for the live-probe gate."""
+    """Classify a list of repo-relative changed paths: PRIMARY (touches the
+    hooks/ tree) + the implicated seam-dependent hooks (SECONDARY)."""
     primary = any(is_hook_infra_path(p) for p in changed_paths)
     seam_hooks: set[str] = set()
     for path in changed_paths:

@@ -1,7 +1,9 @@
 """
-Location: pact-plugin/tests/test_live_probe_gate_structure.py
-Summary: CI meta-tests (hard teeth) for the hook-infra live-probe gate. Three
-families:
+Location: pact-plugin/tests/test_hook_infra_classifier.py
+Summary: CI meta-tests (hard teeth) for the hook-infra seam classifier SSOT
+(shared/hook_infra_classifier.py) — the seam-dependent-hook enumeration + the
+per-hook transitive helper closure that the non-mocked seam-test requirement
+references. Three families:
   C6-A (LOAD-BEARING) — CLOSURE NON-VACUITY: re-derive the per-hook transitive
         helper-import closure from the LIVE hooks/ import graph (an independent
         AST walk) and assert the classifier's precomputed _SEAM_HOOK_HELPER_CLOSURE

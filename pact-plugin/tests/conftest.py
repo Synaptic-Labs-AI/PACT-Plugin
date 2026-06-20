@@ -221,9 +221,9 @@ def _restore_claude_project_dir_env():
     Some concurrency tests (test_working_memory_concurrency*.py) set
     ``os.environ['CLAUDE_PROJECT_DIR']`` via DIRECT assignment (NOT
     ``monkeypatch.setenv``), so it is never restored and LEAKS into later tests
-    — an order-dependent pollution vector. The #924 dogfood hit it: a leaked
-    ``CLAUDE_PROJECT_DIR`` redirects ``live_probe_gate._resolve_repo_root`` /
-    ``staleness.get_project_claude_md_path`` away from the test's intended root,
+    — an order-dependent pollution vector. A leaked ``CLAUDE_PROJECT_DIR``
+    redirects ``CLAUDE_PROJECT_DIR``-keyed resolvers (e.g.
+    ``staleness.get_project_claude_md_path``) away from the test's intended root,
     so a later test silently resolves the wrong project dir. ``monkeypatch``-
     based env tests are immune (auto-revert); the leak is the direct-assignment
     ones specifically.

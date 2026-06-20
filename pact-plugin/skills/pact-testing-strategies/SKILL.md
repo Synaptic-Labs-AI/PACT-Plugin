@@ -170,6 +170,54 @@ describe('validateEmail', () => {
 
 ## Integration Testing Patterns
 
+### Non-mocked seam-integration tests (the mock-hid-the-seam trap)
+
+Any hook (or component) whose observable value depends on an **integration seam** —
+task-directory resolution, the real session journal/inbox, an env-keyed path
+(`CLAUDE_*`), or the real platform task store — MUST have at least one test that
+exercises that seam **for real** (a temp git repo, a real on-disk task JSON, a
+real journal write), not a mock or monkeypatch of the seam itself.
+
+**Why a fully-mocked suite is not enough.** A hook can pass its entire mocked unit
+suite while never firing in live operation, because the one broken seam is the one
+every mocked test stubs. The canonical failure: an inert hook shipped green — its
+suite mocked the task-list read, so the exact seam that was broken in production
+was the seam every test replaced with a stub. Mocking is still correct for
+*external* dependencies you don't own (third-party APIs, the network — see
+[Mocking External Dependencies](#mocking-external-dependencies)); the rule here is
+narrower: do not mock the *integration seam whose correct resolution IS the thing
+under test*.
+
+**What a non-mocked seam test looks like.** Build the real seam state on disk (e.g.
+a real `~/.claude/tasks/<team>/<id>.json`, or a tmp-redirected equivalent), invoke
+the component over the **unstubbed** read, and assert the observable outcome. The
+test passes only if the component resolves the real seam — so a regression in
+seam resolution turns it red, where a mocked test would stay green.
+
+**Canonical reference example.** `pact-plugin/tests/test_missed_wake_scan_integration.py`
+is the worked exemplar to copy from. Its non-vacuity-gate case — the one that would
+have caught the inert surfacer — redirects `Path.home` to a temp home, writes a real
+on-disk team task, and drives the arg-less `get_task_list()` over the **real**
+`get_team_name` → team-dir → glob resolution with no stub of that seam, asserting the
+surfacer fires (and pre-regression would have been silent). It also documents the
+companion discipline: the test must *fail* if the seam is stubbed, so a future edit
+that re-introduces a `get_task_list` mock is caught.
+
+**The authoritative seam-dependent set** is `SEAM_DEPENDENT_HOOKS` in
+`hooks/shared/hook_infra_classifier.py` — a pure-data SSOT (no I/O, not a runtime
+hook) whose companion meta-test re-derives each hook's transitive helper closure
+from the live import graph and pins it, so the enumeration cannot silently drift.
+The skill is the *why/how*; that module is the machine-checkable *which-hooks*.
+
+**Honest residual (not every gap is testable in pytest).** A small class of
+behaviors is genuinely **platform-runtime-only** and cannot be pytest-verified —
+e.g. whether the platform actually delivers a PreToolUse `additionalContext` field
+to the model, or whether a `UserPromptSubmit` hook fires at turn start. These get
+a **lightweight, documented manual smoke-note** (the reusable live-probe procedure
+template), NOT a shipped runtime hook — baking such a check into consumer runtime
+is how maintainer process-discipline leaks into the product. Name the residual
+explicitly so it is not mistaken for a testable gap that was skipped.
+
 ### API Contract Testing
 
 ```javascript

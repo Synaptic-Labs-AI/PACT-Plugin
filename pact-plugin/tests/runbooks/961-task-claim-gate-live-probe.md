@@ -144,7 +144,7 @@ Minor, non-blocking observations for the lead:
 2. **Stale convention reference (doc):** the dispatch said to follow
    `tests/runbooks/960-backstop-seal.md`, which does not exist in this tree. This
    runbook follows the actual live-probe convention
-   (`live-probe-template.md`, `923/924/926-*.md`). Also the dispatch's target path
+   (`live-probe-template.md`, `923/926-*.md`). Also the dispatch's target path
    `.worktrees/.../tests/runbooks/` is missing the `pact-plugin/` segment; the
    real runbooks dir is `pact-plugin/tests/runbooks/` (where this file lives).
 3. **TOCTOU (out of scope):** the lock-free read→`os.replace` window in

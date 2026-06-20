@@ -394,7 +394,7 @@ JSON
 
 4. State merge readiness (only after ALL blocking fixes complete AND minor/future item handling is done): "Ready to merge" or "Changes requested: [specifics]"
 
-   > **Hook live-probe gate (projects with runtime hooks).** If this PR modifies a runtime hook and the project defines a live-probe procedure, that procedure MUST pass and be logged before the originating issue is closed. Not applicable to projects without runtime hooks.
+   > **Non-mocked seam-integration-test gate (projects with runtime hooks).** If this PR adds or changes a runtime hook whose observable value depends on an integration seam (task-dir resolution, the real session journal/inbox, an env-keyed path, or the platform task store), it MUST include at least one test that exercises that *real* seam rather than mocking it — a mocked-only suite can stay green while the one broken seam is the one every test stubs. See the non-mocked seam-test pattern in the pact-testing-strategies skill; the seam-dependent hook set is the SSOT in `hooks/shared/hook_infra_classifier.py`. Not applicable to projects without runtime hooks.
 
    **Journal event**: When merge-ready, write a `pr_ready` event:
    ```bash
