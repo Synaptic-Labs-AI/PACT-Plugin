@@ -238,12 +238,25 @@ def _has_pipe_to_shell(command: str) -> bool:
 
 
 def _has_process_substitution_to_shell(command: str) -> bool:
-    """Check if command uses process substitution fed to a shell interpreter.
+    """Check if a command uses process substitution fed to a shell interpreter.
 
-    Detects patterns like ``bash <(echo "...")`` where the output of echo/printf
-    inside ``<(...)`` is executed by the shell interpreter.
+    Detects BOTH:
+      - input-side  `bash <(echo "...")`  — shell consumes the substitution as
+        its input script (the original guard);
+      - output-side `echo "..." > >(bash)` — a stdout-routing redirect feeds the
+        command's stdout into a shell (#1002). Restricted to stdout-routing
+        redirect operators (`>`, `>>`, `1>`, `1>>`, `&>`, `&>>`) and to the same
+        shell-interpreter target set, so non-shell consumers (`> >(tee ...)`,
+        `> >(cat ...)`) and stderr-only routing (`2> >(bash)`) are NOT matched.
+    Both arms are used only as a strip-SKIP condition: a True result PRESERVES
+    content for the dangerous-pattern scan, so widening this guard is
+    monotonically detection-increasing (INV-D2-safe; cannot create a
+    false-negative).
     """
-    return bool(re.search(r"\b(?:bash|sh|zsh)\s+<\(", command))
+    return bool(
+        re.search(r"\b(?:bash|sh|zsh)\s+<\(", command)                                 # input-side (unchanged)
+        or re.search(r"(?:&>>?|1>>?|(?<![0-9])>>?)\s*>\(\s*(?:bash|sh|zsh)\b", command)  # output-side (#1002)
+    )
 
 
 def _has_eval_or_source(command: str) -> bool:
