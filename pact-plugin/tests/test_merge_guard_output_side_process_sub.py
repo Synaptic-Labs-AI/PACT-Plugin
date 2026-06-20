@@ -180,3 +180,119 @@ def test_input_side_functional_parity_unchanged():
     `bash <(echo '<danger>')` is dangerous; `cat <(...)` is not."""
     assert is_dangerous_command('bash <(echo "gh pr merge 42")') is True
     assert is_dangerous_command('cat <(echo "gh pr merge 42")') is False
+
+
+# ===========================================================================
+# Remediation (PR #1003, commit E 98bf4f4e) — F2 output-side COMPLETENESS.
+#
+# The single output-side arm was replaced by TWO arms + a shared path-qualified
+# shell token ``_PROCSUB_SHELL = (?:[^\s)/]*/)*(?:bash|sh|zsh)(?![\w/])``:
+#   * Arm A — redirect TARGET; operator set adds the csh ``>&`` (excl. fd-dup
+#     ``>&N``) and the clobber ``>|`` (closes the test-engineer `>&`/`>|` finding);
+#   * Arm B — procsub as a command ARGUMENT (``| tee >(bash)`` / general fanout),
+#     keyed on a preceding NON-redirect token so ``2> >(bash)`` is still excluded.
+#   * path prefix ``(?:[^\s)/]*/)*`` accepts ``>(/bin/bash)`` / ``>(./sh)``;
+#   * trailing ``(?![\w/])`` anchors the shell name as a whole PATH-LEAF token:
+#     KEEPS metachar-separated real vectors ``>(bash;ls)`` / ``>(bash&&x)`` /
+#     ``>(bash|cat)`` (bash still executes — empirically confirmed), while
+#     DROPPING suffix-of-name ``>(basht)`` / ``>(mysh)`` and ``>(bash/foo)``
+#     (bash a directory). `(?![\w/])` was chosen over `\b` (over-blocks bash/foo)
+#     and over `(?=[\s)])` (UNDER-blocks the metachar vectors — fix-introduced
+#     INV-D2 holes); design §12.1.
+#
+# Counter-test-by-revert (non-vacuity, ephemeral — see remediation HANDOFF):
+#   * positives — removal-revert the relevant arm/piece (e.g. drop the `>&`/`>|`
+#     operators, or the path prefix, or Arm B) → the corresponding positive RED;
+#   * exclusions — DISTINCT broaden-mutation (a removal-revert can't falsify an
+#     exclusion): widen `(?![\w/])`->`\b` re-introduces the `>(bash/foo)`/suffix
+#     over-blocks → those negatives flip RED.
+# ===========================================================================
+
+# Guard-unit positives (payload irrelevant — the guard keys on redirect/arg syntax).
+_REMEDIATION_POSITIVES_GUARD = [
+    'echo "x" >& >(bash)',        # csh stdout+stderr synonym of `&>` (Arm A)
+    'echo "x" >| >(bash)',        # clobber-override redirect (Arm A)
+    'echo "x" > >(/bin/bash)',    # absolute path-qualified target
+    'echo "x" > >(./sh)',         # relative path-qualified target
+    'echo "x" > >(/usr/bin/zsh)', # abs-path zsh
+    'echo "x" | tee >(bash)',     # tee-fanout — procsub as command arg (Arm B)
+    'echo "x" | tee -a >(bash)',  # tee -a fanout (Arm B)
+    'echo "x" > >(bash;ls)',      # metachar `;` — bash executes before the sep
+    'echo "x" > >(bash&&y)',      # metachar `&&`
+    'echo "x" > >(bash|cat)',     # metachar `|`
+]
+
+# Guard-unit NEW exclusions (over-block bound — must stay False).
+_REMEDIATION_NEGATIVES_GUARD = [
+    'echo "x" > >(/usr/bin/tee)',  # path-qualified NON-shell target
+    'echo "x" > >(teehee)',        # shell name is not a whole leaf (prefix-of-name)
+    'echo "x" > >(basht)',         # `bash` + trailing word char (suffix-of-name)
+    'echo "x" > >(mysh)',          # `sh` as a name suffix
+    'echo "x" > >(bash/foo)',      # `bash` is a DIRECTORY, `foo` the executable
+]
+
+# Functional positives — DANGEROUS payload so the strip-skip is OBSERVABLE
+# through is_dangerous_command (anti-phantom-green).
+_REMEDIATION_FUNCTIONAL_POSITIVES = [
+    'echo "gh pr merge 42" >& >(bash)',
+    'echo "gh pr merge 42" >| >(bash)',
+    'echo "gh pr merge 42" > >(/bin/bash)',
+    'echo "gh pr merge 42" > >(./sh)',
+    'echo "gh pr merge 42" | tee >(bash)',
+    'echo "gh pr merge 42" | tee -a >(bash)',
+    'echo "gh pr merge 42" > >(bash;ls)',
+    'echo "gh pr merge 42" > >(bash&&y)',
+    'echo "gh pr merge 42" > >(bash|cat)',
+    "echo 'git branch -D real' > >(/bin/bash)",  # branch-delete payload, path-qualified
+]
+
+# Functional NEW exclusions — dangerous payload routed where it never reaches a
+# shell (non-shell target / non-leaf shell name), so it stays stripped/benign.
+_REMEDIATION_FUNCTIONAL_NEGATIVES = [
+    'echo "gh pr merge 42" > >(/usr/bin/tee)',
+    'echo "gh pr merge 42" > >(teehee)',
+    'echo "gh pr merge 42" > >(basht)',
+    'echo "gh pr merge 42" > >(mysh)',
+    'echo "gh pr merge 42" > >(bash/foo)',
+]
+
+
+@pytest.mark.parametrize("command", _REMEDIATION_POSITIVES_GUARD)
+def test_remediation_guard_detects_new_output_side_forms(command):
+    """`>&`/`>|`/path-qualified/tee-fanout/metachar-separated procsub-to-shell
+    forms are now detected by the two-arm guard."""
+    assert _has_process_substitution_to_shell(command) is True
+
+
+@pytest.mark.parametrize("command", _REMEDIATION_NEGATIVES_GUARD)
+def test_remediation_guard_excludes_nonleaf_and_nonshell(command):
+    """Path-qualified non-shell, prefix/suffix-of-name, and path-dir targets are
+    NOT matched (the `(?![\\w/])` path-leaf over-block bound)."""
+    assert _has_process_substitution_to_shell(command) is False
+
+
+@pytest.mark.parametrize("command", _REMEDIATION_FUNCTIONAL_POSITIVES)
+def test_remediation_new_forms_are_dangerous(command):
+    """A dangerous literal echo'd into a newly-covered output-side shell
+    process-sub is now caught (previously under-blocked)."""
+    assert is_dangerous_command(command) is True
+
+
+@pytest.mark.parametrize("command", _REMEDIATION_FUNCTIONAL_NEGATIVES)
+def test_remediation_new_exclusions_stay_stripped(command):
+    """A dangerous literal routed to a non-shell or non-leaf-shell target never
+    reaches a shell, so the carrier strips it and it stays non-dangerous."""
+    assert is_dangerous_command(command) is False
+
+
+def test_carrier7_gh_create_output_side_now_over_blocks():
+    """DOCUMENTING test (review f-1): with the output-side guard widened, the
+    carrier-7 gh-create form ``gh issue create --title "<danger>" > >(bash)`` now
+    OVER-blocks — the procsub makes the guard skip the strip, so the title literal
+    is scanned and matched. This is INV-D2-ACCEPTABLE (over-block, never an
+    under-block) and monotonic-safe. In reality the danger does NOT reach bash
+    (gh's stdout is the issue URL, not the title), so this is a benign-but-
+    suspicious form being conservatively flagged. Pinned so the over-block is
+    intentional and visible, not a future surprise."""
+    cmd = 'gh issue create --title "gh pr merge 42" > >(bash)'
+    assert is_dangerous_command(cmd) is True
