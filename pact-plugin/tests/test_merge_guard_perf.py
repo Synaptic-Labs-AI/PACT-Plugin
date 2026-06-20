@@ -104,45 +104,119 @@ def _best_time(fn, arg, k=_K):
     return best
 
 
-def _measure_scaling(fn, token):
-    """Return (t_small, t_large) best-of-K times on the witness ``token * N``."""
+# gh multi-anchor witness (review m-3 — the `_GH_GLOBAL_FLAGS` bound had no direct
+# perf witness). Measured quadratic counter-factual (revert `_GH_GLOBAL_FLAGS`
+# `{0,K}`->`*`): is_dangerous ~7.3 s at N=4000 (2.0 s ceiling fine), but
+# detect_command_operation_type only ~1.8 s (two gh-prefix classifier patterns,
+# not the ~21-pattern read bank) — so detect/gh gets a TIGHTER 1.0 s ceiling, the
+# same per-surface calibration as httpie. Bounded: ~0.08 s / ~0.02 s.
+_CEIL_GH_READ = 2.0
+_CEIL_GH_DETECT = 1.0
+
+# Push-flag-walk witness (`git push ` + `-x ` * N). The push-dash-flag walk is a
+# SINGLE-anchor walk (one `git`/`push`), so even unbounded it is O(N) LINEAR, not
+# quadratic — it was already linear at HEAD (the F1 outer `_GIT_PREFIX` bound caps
+# the multi-anchor interaction; design §12.2). This case PINS structural linearity
+# (ratio < 3.0): a future nested-quantifier regression in the push patterns would
+# trip it. It is GREEN-stays-GREEN — reverting the `{0,64}` push bound keeps it
+# linear, so there is NO perf counter-test-RED for it; the bound's non-vacuity is
+# the >K-RESIDUAL FLIP in TestFlagTokenBoundary, not a perf revert. Bounded ~6 ms.
+_CEIL_PUSHWALK = 1.0
+
+
+def _measure_scaling(fn, build):
+    """Return (t_small, t_large) best-of-K times on the witness ``build(N)``."""
     # Warm up once (regex objects are compiled at import; this primes caches).
-    fn(token * 100)
-    t_small = _best_time(fn, token * N_SMALL)
-    t_large = _best_time(fn, token * N_LARGE)
+    fn(build(100))
+    t_small = _best_time(fn, build(N_SMALL))
+    t_large = _best_time(fn, build(N_LARGE))
     return t_small, t_large
 
 
-# (id, function, witness token, absolute-ceiling-seconds)
+# (id, function, witness builder build(N)->str, absolute-ceiling-seconds)
 _CASES = [
-    ("is_dangerous_command/git", is_dangerous_command, "git x ", _CEIL_GIT),
-    ("detect_command_operation_type/git", detect_command_operation_type, "git x ", _CEIL_GIT),
-    ("is_dangerous_command/httpie", is_dangerous_command, "http x ", _CEIL_HTTPIE),
+    ("is_dangerous_command/git", is_dangerous_command, lambda n: "git x " * n, _CEIL_GIT),
+    ("detect_command_operation_type/git", detect_command_operation_type, lambda n: "git x " * n, _CEIL_GIT),
+    ("is_dangerous_command/httpie", is_dangerous_command, lambda n: "http x " * n, _CEIL_HTTPIE),
+    # --- remediation additions (PR #1003) ---
+    ("is_dangerous_command/gh", is_dangerous_command, lambda n: "gh x " * n, _CEIL_GH_READ),
+    ("detect_command_operation_type/gh", detect_command_operation_type, lambda n: "gh x " * n, _CEIL_GH_DETECT),
+    ("is_dangerous_command/push-flag-walk", is_dangerous_command, lambda n: "git push " + "-x " * n, _CEIL_PUSHWALK),
+    ("detect_command_operation_type/push-flag-walk", detect_command_operation_type, lambda n: "git push " + "-x " * n, _CEIL_PUSHWALK),
 ]
 
 
 @pytest.mark.parametrize(
-    "fn,token,abs_ceiling",
-    [(fn, token, ceil) for (_id, fn, token, ceil) in _CASES],
+    "fn,build,abs_ceiling",
+    [(fn, build, ceil) for (_id, fn, build, ceil) in _CASES],
     ids=[c[0] for c in _CASES],
 )
-def test_global_flag_prefix_scaling_is_subquadratic(fn, token, abs_ceiling):
-    """The bounded global-flag prefixes must scale sub-quadratically on the
-    many-anchor witness through both detection paths and the inline httpie
-    copies. Restoring the unbounded ``*`` form makes the ratio ~4x and the
-    N=4000 wall-clock exceed the ceiling => RED."""
-    t_small, t_large = _measure_scaling(fn, token)
+def test_global_flag_prefix_scaling_is_subquadratic(fn, build, abs_ceiling):
+    """The bounded global-flag prefixes / push-flag walk must scale
+    sub-quadratically on the worst-case witness through both detection paths, the
+    inline httpie copies, the gh prefix (review m-3), and the push-flag walk
+    (structural-linearity pin, §12.2). Restoring an unbounded `*` form on a
+    MULTI-anchor witness (git/gh/httpie) makes the ratio ~4x and the N=4000
+    wall-clock exceed the ceiling => RED. The push-flag-walk witness is
+    single-anchor (already linear, defense-in-depth) so it stays GREEN under
+    revert — its non-vacuity lives in TestFlagTokenBoundary's >K-residual flip."""
+    t_small, t_large = _measure_scaling(fn, build)
     ratio = (t_large / t_small) if t_small > 0 else float("inf")
+    witness = build(1)
 
     # PRIMARY: generous absolute wall-clock ceiling (flake-resistant).
     assert t_large < abs_ceiling, (
-        f"{fn.__name__} on {token!r}*{N_LARGE}: {t_large * 1000:.1f} ms exceeds "
+        f"{fn.__name__} on {witness!r}*{N_LARGE}: {t_large * 1000:.1f} ms exceeds "
         f"{abs_ceiling * 1000:.0f} ms ceiling — unbounded O(n^2) backtracking regression?"
     )
 
     # REINFORCING: scaling ratio across one doubling (linear ~2.0, quadratic ~4.0).
     assert ratio < RATIO_CEILING, (
-        f"{fn.__name__} on {token!r}: t({N_LARGE})/t({N_SMALL}) = {ratio:.2f} "
+        f"{fn.__name__} on {witness!r}: t({N_LARGE})/t({N_SMALL}) = {ratio:.2f} "
         f">= {RATIO_CEILING} — quadratic scaling regression "
         f"(t_small={t_small * 1000:.1f} ms, t_large={t_large * 1000:.1f} ms)?"
     )
+
+
+# ---------------------------------------------------------------------------
+# Flag-token bound — FUNCTIONAL boundary + the accepted >K residual (#1001 /
+# remediation §12.2-12.3). The same `_MAX_GLOBAL_FLAG_TOKENS` (=64) that bounds
+# the scaling above also bounds the push-dash-flag walk between `push` and its
+# refspec. These tests pin the K=64 boundary and the accepted >K residual
+# under-block, and document why the push-walk bound's non-vacuity is the
+# >K-residual FLIP (not a perf revert).
+# ---------------------------------------------------------------------------
+
+from shared.merge_guard_common import _MAX_GLOBAL_FLAG_TOKENS  # noqa: E402
+
+
+class TestFlagTokenBoundary:
+    """K=64 push-flag-walk boundary + accepted >K residual under-block."""
+
+    def test_within_bound_push_to_main_is_detected(self):
+        """A push-to-main with EXACTLY _MAX_GLOBAL_FLAG_TOKENS (64) dash-flags is
+        still within the bound, so the refspec is reachable and it IS detected
+        (force-push class) on both the read bank and the classifier."""
+        cmd = "git push " + "-x " * _MAX_GLOBAL_FLAG_TOKENS + "origin main"
+        assert is_dangerous_command(cmd) is True
+        assert detect_command_operation_type(cmd) == "force-push"
+
+    def test_past_bound_push_to_main_is_the_accepted_residual(self):
+        """ACCEPTED >K RESIDUAL (documented, INV-D2 relaxation — §12.3): a
+        push-to-main padded with MORE than _MAX_GLOBAL_FLAG_TOKENS dash-flags
+        exceeds the bound, the refspec becomes unreachable, and it is NOT detected.
+        This is the deliberate, threat-model-justified tradeoff vs the O(n^2) DoS
+        (an operator padding 65+ no-op flags to evade their OWN guard is
+        self-defeating). Pinning it makes the residual VISIBLE: un-bounding the
+        walk (`{0,K}`->`*`) flips this to detected — which is the push-walk bound's
+        non-vacuity witness (see this test's counter-test in the remediation HANDOFF)."""
+        cmd = "git push " + "-x " * (_MAX_GLOBAL_FLAG_TOKENS + 1) + "origin main"
+        assert is_dangerous_command(cmd) is False
+        assert detect_command_operation_type(cmd) is None
+
+    def test_realistic_flag_count_push_to_main_is_detected(self):
+        """A realistic push-to-main with a handful of dash-flags (well within K)
+        is detected — the bound does not perturb any realistic command."""
+        cmd = "git push -u -v --no-verify origin main"
+        assert is_dangerous_command(cmd) is True
+        assert detect_command_operation_type(cmd) == "force-push"
