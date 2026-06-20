@@ -204,8 +204,19 @@ def _resolve_repo_root() -> Optional[Path]:
         # be absent -> fall THROUGH to the git-common-dir-parent path (the true
         # repo root), then cwd. Preserves the repo-root case (marker found ->
         # trust it) and the unset case (this branch is skipped).
+        #
+        # The marker read here is repeated by main()'s own _plugin_marker(root)
+        # call after resolution — an intentional, accepted second read: two tiny
+        # file reads on a once-per-merge advisory hook, not worth refactoring the
+        # resolver's signature (e.g. returning the parsed marker) and taking any
+        # regression risk on this load-bearing identity resolver.
         return Path(project_dir)
     try:
+        # git-common-dir parent intentionally resolves to the MAIN checkout (not
+        # the worktree): the plugin marker is git-TRACKED, so it lives at the main
+        # root in every checkout, making it the stable IDENTITY anchor. The diff
+        # (Component C) is computed separately in the process CWD, so the current
+        # worktree's branch changes are still seen correctly.
         result = subprocess.run(
             ["git", "rev-parse", "--git-common-dir"],
             capture_output=True, text=True, timeout=5,
@@ -358,6 +369,13 @@ def _emit_warn(version: str, seam_hooks: frozenset[str]) -> NoReturn:
         f"closing the originating issue. Seam hooks touched: {seam}. "
         f"(Advisory — WARN only.)"
     )
+    # The WARN now rests SOLELY on this additionalContext channel — there is no
+    # secondary backstop (no stderr echo, no journal write). That is acceptable-
+    # by-design: this is a NON-BLOCKING advisory, so a missed reminder degrades
+    # to the (pre-existing) procedural CLAUDE.md pin, never to a blocked merge or
+    # a false "checked & clear" signal. The channel's runtime delivery is the
+    # subject of the post-merge tmux re-probe (924-locus-b-dogfood-probe.md),
+    # which confirms additionalContext actually surfaces before #924 closes.
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",  # MUST be the literal event name
