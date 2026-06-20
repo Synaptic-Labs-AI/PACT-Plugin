@@ -67,6 +67,8 @@ try:
         _GH_API_PREFIX,
         _GH_PR_MERGE_RE,
         _GH_PR_CLOSE_RE,
+        # Bound for the inline httpie global-flag walks below (#1001).
+        _MAX_GLOBAL_FLAG_TOKENS,
     )
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     # Hand-built deny output using only stdlib (json, sys). Cannot rely on any
@@ -90,6 +92,7 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
 # Note: _GH_GLOBAL_FLAGS, _GH_FLAG_TOKENS, _GIT_GLOBAL_FLAGS, _GH_PREFIX,
 # _GIT_PREFIX, _GH_API_PREFIX, _GH_PR_MERGE_RE, _GH_PR_CLOSE_RE are imported
 # from shared.merge_guard_common above (#720 Bug B relocation).
+# _MAX_GLOBAL_FLAG_TOKENS is also imported (bounds the inline httpie walks, #1001).
 
 # Pre-serialized JSON for allow-path output: tells Claude Code UI to suppress
 # the hook display instead of showing "hook error (No output)".
@@ -167,9 +170,11 @@ try:
     re.compile(r"\bwget\b(?=.*--method=(?:DELETE|PATCH|POST|PUT)\b).*merge", re.IGNORECASE),
     # Alternative HTTP clients: httpie (method is positional arg after 'http'/'https')
     # \bhttps?\s+ ensures word boundary + whitespace (won't match URLs like https://).
-    # (?:\S+\s+)* allows optional flags (e.g., -a user:pass) between command and method.
-    re.compile(r"\bhttps?\s+(?:\S+\s+)*(?:DELETE|PATCH|POST|PUT)\s.*git/refs", re.IGNORECASE),
-    re.compile(r"\bhttps?\s+(?:\S+\s+)*(?:DELETE|PATCH|POST|PUT)\s.*merge", re.IGNORECASE),
+    # (?:\S+\s+){0,K} allows optional flags (e.g., -a user:pass) between command and
+    # method — BOUNDED by _MAX_GLOBAL_FLAG_TOKENS to avoid the O(n^2) multi-anchor
+    # backtracking of the unbounded `*` form (#1001), matching the shared-prefix fix.
+    re.compile(r"\bhttps?\s+(?:\S+\s+){0,%d}(?:DELETE|PATCH|POST|PUT)\s.*git/refs" % _MAX_GLOBAL_FLAG_TOKENS, re.IGNORECASE),
+    re.compile(r"\bhttps?\s+(?:\S+\s+){0,%d}(?:DELETE|PATCH|POST|PUT)\s.*merge"    % _MAX_GLOBAL_FLAG_TOKENS, re.IGNORECASE),
     # Known API detection gaps (defense-in-depth, not a security boundary):
     # - GraphQL mutations: gh api graphql -f query='mutation { ... }' bypasses REST-path matching
     # - gh alias: aliases can hide API calls (tracked in #270)

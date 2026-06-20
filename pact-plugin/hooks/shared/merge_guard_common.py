@@ -121,15 +121,38 @@ LAYER1_SUCCESS_STDOUT_PATTERNS: dict[str, str | None] = {
 # pattern bank without duplicating regex source.
 # -----------------------------------------------------------------------------
 
-# Optional global flags between CLI tool and subcommand.
-# (?:\S+\s+)* matches zero or more flag+value tokens (e.g., --repo owner/repo).
-_GH_GLOBAL_FLAGS = r"(?:\S+\s+)*"  # broad — keep for DANGEROUS_PATTERNS (matches any token)
-# Tight variant for PR-number extraction: only flag-shaped tokens
-# (`-x`, `--long`, optionally `--flag value`). Prevents the capture group
-# from greedily walking past the PR positional into heredoc body content,
-# 2>&1 redirects, or trailing positional-digit tokens.
-_GH_FLAG_TOKENS = r"(?:-\S*(?:\s+\S+)?\s+)*"
-_GIT_GLOBAL_FLAGS = r"(?:\S+\s+)*"
+# Upper bound on global-flag tokens between a CLI tool and its subcommand.
+# Eliminates the O(n^2) multi-anchor backtracking of the unbounded `*` form
+# (#1001) while preserving the "matches any token" semantics EXACTLY for any
+# command with <= _MAX_GLOBAL_FLAG_TOKENS global tokens — i.e. every realistic
+# command (the heaviest realistic git global-flag count, e.g.
+# `git -c a=1 -c b=2 -C /p --git-dir=/g --work-tree=/w push ...`, is ~10
+# tokens; gh is ~2). 32 is ~3x that headroom, and is a fixed modest constant so
+# per-anchor work is O(32)=O(1) regardless of input length.
+#
+# ACCEPTED RESIDUAL (honest INV-D2 accounting): a command with >32 *valid*
+# global tokens before its verb is NOT impossible — `git -c k=v` is a
+# legitimate, repeatable pair, so e.g. `git -c a=1 -c b=2 ...(17 pairs=34
+# tokens)... push --force` DOES execute yet exceeds the bound, so the bounded
+# form misses a real destructive op the unbounded form caught. This is a
+# NARROW residual under-block, accepted as a documented tradeoff against the
+# O(n^2) DoS, justified by the THREAT MODEL: #1001's input is operator/LLM-
+# authored command text (defense-in-depth, NOT adversarial network input), and
+# padding 17+ `-c` pairs to evade one's OWN merge guard is self-defeating (the
+# author would simply write the command directly). It is a relaxation of
+# INV-D2, not a no-op — stated plainly rather than papered over.
+# DO NOT raise this to a value comparable to realistic input lengths (that
+# reintroduces per-anchor O(N) cost). It MAY be raised modestly (e.g. 64) as
+# zero-cost defense-in-depth if security review deems the residual material —
+# 64 is still a fixed modest constant, still O(1)/linear.
+_MAX_GLOBAL_FLAG_TOKENS = 32
+
+# Optional global flags between CLI tool and subcommand — BOUNDED (was `*`).
+_GH_GLOBAL_FLAGS  = r"(?:\S+\s+){0,%d}" % _MAX_GLOBAL_FLAG_TOKENS
+# Tight variant for PR-number extraction — UNCHANGED (already linear; requires
+# a leading `-` per token so it fails fast; used only by _GH_PR_NUMBER_RE).
+_GH_FLAG_TOKENS   = r"(?:-\S*(?:\s+\S+)?\s+)*"
+_GIT_GLOBAL_FLAGS = r"(?:\S+\s+){0,%d}" % _MAX_GLOBAL_FLAG_TOKENS
 
 # Composed prefixes for DRY usage across all patterns.
 _GH_PREFIX = r"\bgh\s+" + _GH_GLOBAL_FLAGS
