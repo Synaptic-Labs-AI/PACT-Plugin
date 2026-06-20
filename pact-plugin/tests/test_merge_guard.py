@@ -12505,3 +12505,914 @@ class TestTokenLifecycleExtensions:
             "LAYER1_SUCCESS_STDOUT_PATTERNS mutated without atomic update "
             "to this pin"
         )
+
+
+# =============================================================================
+# #933 — merge_guard auth-token + dangerous-pattern defect fixes.
+#
+# Adversarial TEST CONTRACT (the architecture doc's §8) for the four fix
+# surfaces:
+#   D1-writer   — extract_context branch regex is flag-agnostic (the captured
+#                 group is the branch NAME, never the delete FLAG).
+#   D1-matcher  — _token_matches_command normalizes surrounding quotes at
+#                 compare time, without widening the regex (no false-negative).
+#   D2          — a 7th strip carrier exempts the non-executing quoted argument
+#                 of a gh issue/pr CREATION verb; the carve-out and the
+#                 compound pairing keep every real destructive op caught.
+#   D3          — the post-hook keyword ladder recognizes a direct push to a
+#                 default branch (main/master) as force-push.
+#
+# CARDINAL INVARIANT: never weaken detection of a real destructive op — over-
+# block (false-positive) is acceptable; under-block (false-negative) is a
+# security hole. Every fix carries a NEGATIVE that fails if the fix is mutated
+# toward the forbidden behavior it guards. The mutation that proves each
+# security negative non-vacuous is named per-test in a `# non-vacuity:` line.
+#
+# Dangerous literals live INSIDE these test-file string literals (never on a
+# Bash command line), so this source file never trips merge_guard_pre.
+# =============================================================================
+
+
+class TestD1WriterBranchExtraction:
+    """D1-writer (#933): extract_context captures the branch NAME, never the
+    delete FLAG, across every force-delete flag form.
+
+    Before the fix the branch char-class included '-', so `git branch -D x`
+    captured `-D` (the flag) as the branch — an approved force-delete then
+    minted a token for branch `-D` that could never match the real command,
+    permanently rejecting the authorized op.
+    """
+
+    def test_branch_d_flag_extracts_name(self):
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Confirm `git branch -D feat/x`?")
+        assert ctx["branch"] == "feat/x"
+
+    def test_branch_long_delete_extracts_name(self):
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Confirm git branch --delete feat/x?")
+        assert ctx["branch"] == "feat/x"
+
+    def test_branch_d_single_quoted_extracts_name(self):
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Confirm git branch -D 'feat/x'?")
+        assert ctx["branch"] == "feat/x"
+
+    def test_branch_d_double_quoted_extracts_name(self):
+        from merge_guard_post import extract_context
+
+        ctx = extract_context('Confirm git branch -D "feat/x"?')
+        assert ctx["branch"] == "feat/x"
+
+    def test_branch_force_delete_extracts_name(self):
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Confirm git branch --force --delete feat/x?")
+        assert ctx["branch"] == "feat/x"
+
+    def test_branch_delete_force_extracts_name(self):
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Confirm git branch --delete --force feat/x?")
+        assert ctx["branch"] == "feat/x"
+
+    def test_uppercase_flag_extracted_on_raw_question(self):
+        """The branch regex runs on the RAW question (re.IGNORECASE), so an
+        uppercase -D in the original prose is matched by the flag-skip group
+        and the NAME (not `-D`) is captured. Pins the casing contract."""
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Approve GIT BRANCH -D feat/x on origin?")
+        assert ctx["branch"] == "feat/x"
+
+    def test_plain_delete_branch_prose_unchanged(self):
+        """REGRESSION GUARD (existing behavior): prose with no flag between
+        'branch' and the name still extracts the name (flag-skip matches zero
+        times). Mirrors the existing test_extracts_branch_name."""
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Delete branch feat/my-feature?")
+        assert ctx["branch"] == "feat/my-feature"
+
+    # ---- NEGATIVE / revert-proving ----
+
+    def test_branch_is_never_a_flag_literal(self):
+        """SECURITY NEGATIVE: the captured branch is NEVER a flag token.
+
+        This is the assertion that flips red the instant the flag-skip group
+        is reverted (or the name char-class re-admits a leading '-').
+
+        # non-vacuity: revert merge_guard_post.py branch regex to the buggy
+        #   char-class `[a-zA-Z0-9/_.-]+` (re-include '-' as a valid first
+        #   char, drop the flag-skip group) → `-D` is captured → this
+        #   assertion FAILS. Expected RED cardinality: {1} (this test).
+        """
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Confirm `git branch -D feat/x`?")
+        assert ctx.get("branch") not in ("-D", "--delete", "--force", "-d")
+
+    def test_pr_close_form_mints_no_branch_token(self):
+        """The PR-axis form `gh pr close 42 --delete-branch` carries no
+        `branch <name>` token, so the writer must NOT fabricate a branch
+        token onto it (it is authorized on the pr_number axis).
+
+        # non-vacuity: if the branch regex were widened to match the bare
+        #   word 'branch' inside '--delete-branch' and capture a following
+        #   token, a spurious branch key would appear → this assertion FAILS.
+        """
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Approve `gh pr close 42 --delete-branch`?")
+        assert "branch" not in ctx
+
+
+class TestD1MatcherQuoteNormalization:
+    """D1-matcher (#933): _token_matches_command normalizes surrounding quotes
+    on the captured branch name at compare time, so a token branch `feat/x`
+    matches a command that quotes the branch argument — WITHOUT widening the
+    regex (the capture stays `(\\S+)`; only the comparison normalizes), so no
+    mismatched branch is newly accepted.
+    """
+
+    @staticmethod
+    def _tok(branch):
+        return {"context": {"branch": branch, "operation_type": "branch-delete"}}
+
+    def test_matches_single_quoted_branch(self):
+        from merge_guard_pre import _token_matches_command
+
+        assert _token_matches_command(self._tok("feat/x"), "git branch -D 'feat/x'")
+
+    def test_matches_double_quoted_branch(self):
+        from merge_guard_pre import _token_matches_command
+
+        assert _token_matches_command(self._tok("feat/x"), 'git branch -D "feat/x"')
+
+    def test_matches_force_delete_quoted_branch(self):
+        from merge_guard_pre import _token_matches_command
+
+        assert _token_matches_command(
+            self._tok("feat/x"), "git branch --force --delete 'feat/x'"
+        )
+
+    def test_matches_unquoted_branch_unchanged(self):
+        """REGRESSION GUARD: the unquoted form still matches (quote-strip is a
+        no-op on an unquoted token). Mirrors test_token_with_matching_branch."""
+        from merge_guard_pre import _token_matches_command
+
+        assert _token_matches_command(self._tok("feat/x"), "git branch -D feat/x")
+
+    # ---- NEGATIVE / revert-proving ----
+
+    def test_mismatched_quoted_branch_rejected(self):
+        """SECURITY NEGATIVE: a DIFFERENT branch, quoted, is still rejected —
+        proving the quote-strip normalized the value without widening which
+        branches match.
+
+        # non-vacuity: replace the buggy/un-widened behavior by mutating the
+        #   matcher to compare AFTER stripping BOTH operands' quotes-and-more
+        #   (or to substring-match) — any widening makes this pass-through.
+        #   The committed guard against widening: this asserts a real
+        #   non-match survives the quote-strip. A regex/compare that widened
+        #   to accept any quoted token would FAIL this.
+        """
+        from merge_guard_pre import _token_matches_command
+
+        assert not _token_matches_command(self._tok("feat/x"), "git branch -D 'other'")
+
+    def test_substring_quoted_branch_rejected(self):
+        """SECURITY NEGATIVE: a SUPERSTRING branch (`feat/x-extra`), quoted,
+        is rejected — the quote-strip yields `feat/x-extra` which is != the
+        token `feat/x` under exact comparison. Proves no substring widening.
+
+        # non-vacuity: a matcher that did `branch in stripped` (substring)
+        #   instead of `stripped == branch` would ACCEPT `feat/x-extra` for a
+        #   `feat/x` token → this assertion FAILS. Pins exact-equality.
+        """
+        from merge_guard_pre import _token_matches_command
+
+        assert not _token_matches_command(
+            self._tok("feat/x"), "git branch -D 'feat/x-extra'"
+        )
+
+
+class TestD2GhCarrierStrip:
+    """D2 (#933): the 7th strip carrier exempts the non-executing quoted
+    argument of a gh issue/pr CREATION verb (`gh issue create|edit`,
+    `gh pr create`) — so a dangerous-op literal named inside a `--title`/
+    `--body`/`-t`/`-b` value no longer trips DANGEROUS_PATTERNS.
+
+    Positive cases pin the false-positive FIX. The deviation pins (two-value
+    strip) lock the AS-BUILT carrier-span behavior, which differs from the
+    architecture doc's single-re.sub literal (the per-span inner-strip strips
+    BOTH a --title and a --body on one command).
+    """
+
+    # ---- POSITIVE: benign carrier no longer over-blocks ----
+
+    def test_issue_create_title_with_danger_literal_not_dangerous(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'gh issue create --title "repro: git branch -D feat/x" --body "ctx"'
+        )
+
+    def test_issue_edit_body_with_push_literal_not_dangerous(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'gh issue edit 5 --body "see git push --force origin main"'
+        )
+
+    def test_pr_create_title_with_danger_literal_not_dangerous(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'gh pr create --title "fix: git branch -D cleanup"'
+        )
+
+    def test_issue_create_single_quoted_title_not_dangerous(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "gh issue create --title 'repro: git branch -D feat/x'"
+        )
+
+    # ---- DEVIATION PIN: two-value strip (the as-built carrier-span shape) ----
+
+    def test_two_value_strip_both_aliases(self):
+        """As-built deviation pin: `-t "..." -b "..."` (two carriers on one
+        command) strips BOTH values. A single global re.sub would consume the
+        verb prefix on the first match and leave the SECOND value un-stripped
+        (a false-positive over-block); the carrier-span inner-strip fixes that.
+
+        # non-vacuity: revert the 7th carrier to a single-re.sub-per-quote-
+        #   style form (strip only the first --title/--body) → the second
+        #   value's `git push --force` survives → is_dangerous returns True →
+        #   this assertion FAILS.
+        """
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'gh issue create -t "git branch -D a" -b "git push --force b"'
+        )
+
+    def test_two_value_strip_long_flags(self):
+        """Two-value strip with the long --title/--body flags (general, not
+        alias-specific)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'gh issue create --title "git branch -D a" --body "git push --force b"'
+        )
+
+    # ---- SECURITY NEGATIVES / revert-proving (the highest-value tests) ----
+
+    def test_compound_real_op_after_carrier_still_dangerous(self):
+        """SECURITY NEGATIVE: a real destructive op after `&&` survives the
+        strip and stays caught. TWO independent layers protect the tail —
+        the carrier span stops at the `&` separator (so the tail is OUTSIDE
+        the span), AND the inner strip only removes QUOTED flag-VALUES (so an
+        unquoted op is never stripped even if it sits inside the span). The
+        fix is defense-in-depth: each layer blocks the over-strip alone.
+
+        # non-vacuity: a single-layer mutation does NOT flip this (verified:
+        #   broadening the span `[^&|;]*`→`.*` leaves the tail un-stripped
+        #   because the inner strip touches only quoted flag-values; a greedy
+        #   inner-strip leaves it un-stripped because the span still stops at
+        #   `&&`). The faithful regression is the whole-span OVER-STRIP
+        #   ("carrier over-strips and hides a real op", arch §10 risk row 1):
+        #   broaden the span to `.*` AND blank the entire matched span →
+        #   `git branch -D real-branch` is consumed → is_dangerous returns
+        #   False → this assertion FAILS (verified RED). The two compound
+        #   tests + the backgrounded-& test + the unquoted-token test all
+        #   flip together under this over-strip. Expected RED cardinality: {4}.
+        """
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "notes" && git branch -D real-branch'
+        )
+
+    def test_compound_real_op_after_carrier_still_compound(self):
+        """SECURITY NEGATIVE (compound pairing preserved): the same command is
+        still flagged by is_compound_destructive_command — the strip runs
+        before BOTH the dangerous scan and the compound scan, and the
+        executing tail survives both.
+
+        # non-vacuity: the whole-span over-strip (broaden span to `.*` AND
+        #   blank the matched span) consumes the tail before the compound
+        #   scan → is_compound returns False → this assertion FAILS (verified
+        #   RED, part of the {4}-test cluster above). A span-boundary-only
+        #   broadening does NOT flip it (inner strip is quoted-value-scoped).
+        """
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            'gh issue create --title "notes" && git branch -D real-branch'
+        )
+
+    def test_backgrounded_carrier_real_op_after_amp_still_dangerous(self):
+        """SECURITY NEGATIVE (CODE-HANDOFF flagged: the single-`&` background
+        case): a single `&` (backgrounding) also terminates the carrier span,
+        so a real op after `gh issue create ... &` is OUTSIDE the span and
+        stays caught. (`[^&|;]*` stops at the first `&`, logical or not.)
+
+        # non-vacuity: the whole-span over-strip (broaden span to `.*` AND
+        #   blank the matched span) consumes the backgrounded tail →
+        #   is_dangerous returns False → this assertion FAILS (verified RED,
+        #   part of the {4}-test cluster). A span-boundary-only broadening
+        #   does NOT flip it (inner strip is quoted-value-scoped). Pins that
+        #   backgrounding does not smuggle a real op past the scan.
+        """
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "bg" & git branch -D real-branch'
+        )
+
+    def test_pr_close_delete_branch_still_dangerous_carveout(self):
+        """SECURITY NEGATIVE (the carve-out): `gh pr close --delete-branch` is
+        NEVER exempted — `close` is absent from the carrier verb alternation,
+        so the command is not stripped and DANGEROUS_PATTERNS still fires.
+
+        Two assertions, because the carve-out has two independent protective
+        layers and the behavioral one alone is VACUOUS w.r.t. the carrier:
+
+        1. Behavioral: the command stays dangerous. NOTE this is robust even
+           if `close` were wrongly added to the carrier verbs — the deny
+           trigger is the bare `--delete-branch` flag (DANGEROUS_PATTERNS
+           `pr close (?=.*--delete-branch)`), NOT a quoted value, so the
+           quoted-value-only inner strip can never neutralize it. So this
+           line does NOT, by itself, prove the verb exclusion is load-bearing.
+        2. Mechanism-level: on a `gh pr close` command that ALSO carries a
+           quoted value, the value SURVIVES the strip (close is not a carrier).
+           THIS is the assertion that isolates the verb exclusion.
+
+        # non-vacuity: a removal-revert of the 7th carrier does NOT prove the
+        #   carve-out (close was never a carrier verb → both lines stay GREEN
+        #   == phantom-green). Prove it via the EXCLUSION-GUARD pattern:
+        #   BROADEN the verb alternation to include `close`
+        #   (`pr\\s+(?:create|close)`) in an isolated edit → the quoted value
+        #   is stripped → assertion (2) FAILS (verified RED). Assertion (1)
+        #   correctly stays green under that mutation (the `--delete-branch`
+        #   deny trigger is not a quoted value) — which is exactly why (2) is
+        #   the load-bearing pin, not (1). Restore after.
+        """
+        from merge_guard_pre import (
+            _strip_non_executable_content,
+            is_dangerous_command,
+        )
+
+        # (1) Behavioral — stays dangerous (robust, but vacuous w.r.t. carrier).
+        assert is_dangerous_command("gh pr close 42 --delete-branch")
+
+        # (2) Mechanism-level — the quoted value on a close command is NOT
+        #     stripped, because `close` is excluded from the carrier verbs.
+        close_cmd = 'gh pr close 42 --delete-branch --body "git branch -D x"'
+        assert '"git branch -D x"' in _strip_non_executable_content(close_cmd)
+
+    def test_command_substitution_in_title_preserved_dangerous(self):
+        """SECURITY NEGATIVE (command-substitution guard): a `$(...)` inside a
+        double-quoted --body EXECUTES, so it is preserved (not stripped) and
+        the command stays dangerous.
+
+        # non-vacuity: remove the `_has_command_substitution` guard in the
+        #   double-quoted arm (always strip) → the `$(git branch -D x)`
+        #   value is stripped → is_dangerous returns False → this assertion
+        #   FAILS. Pins the executes-inside-double-quotes guard.
+        """
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --body "$(git branch -D x)"'
+        )
+
+    def test_piped_to_shell_carrier_preserved_dangerous(self):
+        """SECURITY NEGATIVE (piped-to-shell guard): when the whole command
+        pipes to a shell, the strip is skipped entirely (the carrier text
+        could be re-fed to a shell), so the command stays dangerous.
+
+        # non-vacuity: remove the outer `if not piped_to_shell and not
+        #   process_sub_to_shell:` guard (always run the carrier strip) →
+        #   `gh issue create --title "git branch -D x" | bash` is stripped
+        #   before the scan → is_dangerous returns False → this assertion
+        #   FAILS. Pins the pipe-to-shell skip.
+        """
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "git branch -D x" | bash'
+        )
+
+    # ---- NEGATIVE: non-carrier gh verbs are NOT exempted ----
+
+    def test_gh_pr_edit_is_not_a_carrier(self):
+        """SECURITY NEGATIVE: `gh pr edit` is NOT in the carrier alternation
+        (only `gh issue edit` + `gh pr create`/`gh issue create` are), so a
+        dangerous literal in its --title is NOT stripped.
+
+        # non-vacuity: a verb alternation widened to `pr\\s+(?:create|edit)`
+        #   would strip this → is_dangerous returns False → FAILS. Pins the
+        #   pr-edit exclusion (the asymmetry: issue edit IS a carrier, pr edit
+        #   is NOT).
+        """
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('gh pr edit 5 --title "git branch -D x"')
+
+    def test_gh_pr_merge_is_not_a_carrier(self):
+        """SECURITY NEGATIVE: `gh pr merge` (a real destructive op) is not a
+        carrier verb; a dangerous literal alongside it is not stripped and the
+        command stays dangerous.
+        """
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('gh pr merge 42 --subject "git branch -D x"')
+
+    # ---- NEGATIVE: an unquoted dangerous token inside the span survives ----
+
+    def test_unquoted_danger_token_in_span_survives(self):
+        """SECURITY NEGATIVE: the inner strip touches only QUOTED flag-values.
+        An unquoted dangerous op sitting inside the carrier span (not a flag
+        value) is NOT stripped and stays caught.
+
+        # non-vacuity: an inner strip that removed unquoted tokens (not just
+        #   quoted flag-values) would strip this → is_dangerous returns False
+        #   → FAILS. Pins the quoted-value-only scope of the inner strip.
+        """
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('gh issue create --title "safe" git push --force')
+
+    # ---- REGRESSION GUARD: existing carrier 5 unchanged ----
+
+    def test_git_commit_message_carrier_still_strips(self):
+        """REGRESSION GUARD: the pre-existing `git commit -m` carrier (carrier
+        5) is unchanged by the additive 7th carrier."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('git commit -m "msg about git branch -D x"')
+
+
+class TestD3LadderPushToMain:
+    """D3 (#933): the post-hook keyword-ladder fallback recognizes a direct
+    push to a default branch (main/master) as force-push, matching the
+    read-side shared classifier — so a prose-only AskUserQuestion that omits a
+    backtick command still mints a token. The new arm sits INSIDE the existing
+    force-push elif (ladder ORDER unchanged) and runs on question_lower with a
+    mandatory `push\\b` anchor.
+    """
+
+    def test_direct_push_to_main_classifies_force_push(self):
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Approve a direct push to main on origin?")
+        assert ctx["operation_type"] == "force-push"
+
+    def test_push_local_main_classifies_force_push(self):
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Confirm push of local main to origin?")
+        assert ctx["operation_type"] == "force-push"
+
+    def test_push_to_master_classifies_force_push(self):
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Confirm push to master?")
+        assert ctx["operation_type"] == "force-push"
+
+    # ---- NEGATIVE / revert-proving (over-reach closed) ----
+
+    def test_merge_into_main_stays_merge(self):
+        """SECURITY/CORRECTNESS NEGATIVE: `merge PR 42 into main` mentions
+        'main' but carries NO push verb, so the new arm must NOT fire — it
+        stays `merge`. Proves the new arm requires a `push` token and does not
+        over-reach onto any 'main' mention.
+
+        # non-vacuity: drop the mandatory `push\\b` anchor from the new arm
+        #   (e.g. `.*\\b(?:main|master)\\b`) → 'merge ... into main' matches
+        #   the force-push arm → operation_type becomes 'force-push' → this
+        #   assertion FAILS. Expected RED cardinality: {1}.
+        """
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Should I merge PR 42 into main?")
+        assert ctx["operation_type"] == "merge"
+
+    def test_force_push_keyword_still_precedes_merge(self):
+        """REGRESSION GUARD: the ladder precedence is unchanged — a force-push
+        keyword still wins over a bare 'merge' mention. Mirrors the existing
+        test_fallback_ladder_force_push_precedes_merge."""
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Force-push the merge-base override to origin?")
+        assert ctx["operation_type"] == "force-push"
+
+    def test_force_push_token_does_not_authorize_non_force_push_command(self):
+        """SYMMETRY SANITY: an over-matched force-push token (minted from
+        direct-push prose) must NOT authorize a non-force-push command — the
+        op_type guard at the PRE side blocks it. Proves the deliberately-broad
+        D3 prose arm is harmless (over-match → over-block, never under-block).
+        """
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"operation_type": "force-push"}}
+        assert not _token_matches_command(token, "gh pr merge 42")
+
+
+class TestD3PushToMainAuthorizationEndToEnd:
+    """D3 (#933) §8.5: the original Defect-3 symptom — a direct-push-to-main
+    AskUserQuestion now mints a token end-to-end (op_type=force-push satisfies
+    the sparse-context guard), where before the fix the prose classified as
+    None and the write was refused.
+    """
+
+    def test_direct_push_to_main_prose_mints_a_token(self, tmp_path):
+        """The classify → mint path: extract_context yields force-push, and
+        write_token (op_type alone is one sparse-context anchor) creates a
+        token file.
+
+        # non-vacuity: revert the D3 ladder arm → extract_context yields no
+        #   operation_type for this prose → write_token's sparse-context guard
+        #   refuses (returns None, no file) → this assertion FAILS.
+        """
+        from merge_guard_post import extract_context, write_token
+
+        ctx = extract_context("Approve a direct push to main on origin?")
+        assert ctx["operation_type"] == "force-push"
+        result = write_token(ctx, token_dir=tmp_path)
+        assert result is not None
+        assert Path(result).exists()
+
+    def test_push_to_main_token_does_not_authorize_cross_op(self):
+        """Paired negative: a force-push token minted from direct-push-to-main
+        prose does NOT authorize a cross-op `git branch -D x` command (the
+        op_type axis does not match the branch-delete axis)."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"operation_type": "force-push"}}
+        assert not _token_matches_command(token, "git branch -D some-branch")
+
+
+# =============================================================================
+# #933 REMEDIATION (PR #1000 review findings) — M2/M3 quote-aware D2 span.
+#
+# The D2 carrier span body `[^&|;]*` was replaced with a quote-region-aware
+# scanner:
+#     gh<verb>  (?:[^&|;\n"']+ | "(?:[^"\\]|\\.)*" | '[^']*')*
+# Three alternatives with DISJOINT first-character sets (bare run / balanced
+# double-quote honoring \" / balanced single-quote, no escape). Effects:
+#   M3 — a quoted value containing an internal ;/&/| is consumed ATOMICALLY
+#        (the separator is inside the quote, not a span boundary) → the inner
+#        strip sees the FULL value and strips it → benign title with internal
+#        separators is no longer over-blocked.
+#   M2 — a multi-line quoted title is consumed atomically (newline inside the
+#        quote), while an UNQUOTED newline still terminates the span — fixing
+#        the over-block a naive `[^&|;\n]*` body would have caused.
+# The inner strip, the carve-out (close NOT a carrier verb), and the
+# _has_command_substitution guard are UNCHANGED — INV-D2 (no real executing op
+# is ever neutralized) is preserved: an unquoted separator/newline always
+# terminates the span, and an UNBALANCED quote makes the span UNDER-consume
+# (stop early) = over-block = safe, never under-block.
+#
+# NON-VACUITY uses OPPOSITE mutations for the two halves (the crux):
+#   - 7.A multi-line/internal-sep POSITIVES are proven by an UNDER-CONSUME
+#     mutation (span body → `[^&|;]*`): the value is truncated at its internal
+#     separator → the inner strip misses it → is_dangerous flips True → FAIL.
+#   - 7.B/7.C under-block + desync NEGATIVES are proven by an OVER-CONSUME
+#     mutation (span body → `.*`): the span swallows past the unquoted
+#     separator / unbalanced quote → the inner strip reaches the real op →
+#     is_dangerous flips False → FAIL. (The old `[^&|;]*` body would NOT flip
+#     these — it under-consumes too, so it keeps them dangerous == phantom-
+#     green; that is why the negatives need the over-consume mutation, not the
+#     `[^&|;]*` revert.)
+# Each mutation + the RED set it produces is recorded per the `# non-vacuity:`
+# convention; all mutations are restored byte-exact (git checkout HEAD --).
+# =============================================================================
+
+
+class TestD2QuoteAwareSpanRemediation:
+    """#933 M2/M3 — the quote-aware carrier span (design §7.A-E).
+
+    Dangerous literals live inside test-file string literals (never on a Bash
+    line). The original 40-test suite's carve-out / compound negatives remain
+    in TestD2GhCarrierStrip; this class adds the quote-aware-span pins.
+    """
+
+    # ---- 7.A — M3 / multi-line POSITIVES (a title whose quoted value contains
+    #            an internal separator AND a dangerous literal AFTER that
+    #            separator strips fully → NOT dangerous). ----
+    #
+    # NON-VACUITY DESIGN (load-bearing): each positive embeds a DANGEROUS
+    # LITERAL positioned AFTER the internal `;`/`&`/`|`/newline. This is what
+    # makes the test non-vacuous against the UNDER-CONSUME mutation: with the
+    # `[^&|;]*` body the span TRUNCATES at the internal separator, leaving the
+    # post-separator dangerous literal OUTSIDE the (now-unterminated) quoted
+    # value → the inner strip cannot match it → the literal survives →
+    # is_dangerous flips True → FAIL. A benign title (no dangerous literal,
+    # e.g. "a; b") would stay `safe` under BOTH spans == phantom-green, so it
+    # is NOT used here.
+    #
+    # non-vacuity (7.A — verified per-test, TWO under-consume mutations):
+    #   - internal-`;`, internal-`&|`, danger-before-`;`, two-value: revert the
+    #     span body to `[^&|;]*` → the value truncates at its internal
+    #     separator → the post-separator dangerous literal is exposed → flips
+    #     RED. (This is the SAME `[^&|;]*` that keeps the 7.B/7.C negatives
+    #     green — the opposite-mutation crux.)
+    #   - multiline: `[^&|;]*` consumes ACROSS newlines (it excludes only
+    #     `&|;`), so it does NOT truncate a multi-line value → that test STAYS
+    #     GREEN under `[^&|;]*` (would be phantom-green there). Its faithful
+    #     mutation is the NAIVE FIX `[^&|;\n]*` (adds `\n` to the exclusion —
+    #     the exact regression the architect's §7.A calls out): the span stops
+    #     at the first newline → the later-line dangerous literal is exposed →
+    #     flips RED. Verified: `[^&|;]*` → 3 of the 4 non-multiline strip-tests
+    #     RED (multiline green); `[^&|;\n]*` → all 4 RED.
+
+    def test_internal_semicolon_with_post_sep_danger_strips(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'gh issue create --title "ok; git branch -D real"'
+        )
+
+    def test_internal_amp_pipe_with_post_sep_danger_strips(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'gh issue create --title "fix & note | git push --force origin x"'
+        )
+
+    def test_multiline_with_post_newline_danger_strips(self):
+        """The case a naive `[^&|;\\n]*` body would have REGRESSED (over-block):
+        a multi-line title with a dangerous literal on a later line is consumed
+        atomically and strips fully."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'gh issue create --title "line1\nrepro: git branch -D real\nline3"'
+        )
+
+    def test_danger_literal_before_internal_separator_strips(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'gh issue create --title "repro: git branch -D x; then run"'
+        )
+
+    def test_two_value_internal_separators_with_danger_strip(self):
+        """Two values, each with an internal separator AND a post-separator
+        dangerous literal — BOTH strip fully (the two-value atomic-span case)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'gh issue create -t "ok; git branch -D a" -b "ok | git push --force b"'
+        )
+
+    # ---- 7.B — UNDER-BLOCK NEGATIVES (INV-D2: a real op after an UNQUOTED
+    #            separator MUST stay caught). ----
+    #
+    # non-vacuity (whole 7.B block): OVER-CONSUME whole-span over-strip —
+    #   broaden the span body to `.*` AND blank the matched span → the span
+    #   swallows the unquoted separator + the trailing op → is_dangerous flips
+    #   False → FAIL. Verified RED. The `[^&|;]*` revert does NOT flip these
+    #   (it also stops at the unquoted separator == phantom-green) — over-
+    #   consume is required.
+    #   NEWLINE caveat: `.*` does NOT cross a newline (no re.DOTALL), so the
+    #   newline-tail case (test_under_block_newline_tail) needs the
+    #   newline-crossing over-consume `[\s\S]*` to flip — verified RED under
+    #   that mutation. (Plain `.*` leaves it green because the span still stops
+    #   at the unquoted `\n`.)
+
+    def test_under_block_amp_amp_tail(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "x" && git branch -D real'
+        )
+
+    def test_under_block_semicolon_tail(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "x" ; git branch -D real'
+        )
+
+    def test_under_block_pipe_tail(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "x" | git branch -D real'
+        )
+
+    def test_under_block_newline_tail(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "x"\ngit branch -D real'
+        )
+
+    def test_under_block_background_amp_tail(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "x" & git branch -D real'
+        )
+
+    def test_under_block_unquoted_op_in_span(self):
+        """An UNQUOTED dangerous op inside the span (not a flag value) is never
+        touched by the inner strip (quoted-value-scoped) → stays caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "safe" git push --force origin x'
+        )
+
+    def test_under_block_compound_pairing_preserved(self):
+        """The compound check still fires for the `&&` case (the strip runs
+        before both is_dangerous and is_compound)."""
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            'gh issue create --title "x" && git branch -D real'
+        )
+
+    # ---- 7.C — DESYNC NEGATIVES (escaped/unbalanced/mismatched quotes MUST
+    #            NOT smuggle an op past the span). ----
+    #
+    # non-vacuity (whole 7.C block): OVER-CONSUME-PAST-UNBALANCED-QUOTE
+    #   whole-span over-strip — broaden the span body so it consumes past an
+    #   unbalanced quote (body → `.*` AND blank the matched span) → the span
+    #   swallows the trailing op → is_dangerous flips False → these FAIL.
+    #   Verified RED. The as-built body stops at the unbalanced quote (under-
+    #   consume = over-block = safe), so a real op after it always survives.
+    #   NEWLINE caveat: the unbalanced-DQ-then-NEWLINE case
+    #   (test_desync_unbalanced_dq_then_newline_op) needs the newline-crossing
+    #   `[\s\S]*` over-consume to flip (plain `.*` stops at the `\n`) —
+    #   verified RED under that mutation.
+
+    def test_desync_unbalanced_dq_then_amp_op(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "open && git branch -D real'
+        )
+
+    def test_desync_unbalanced_dq_then_newline_op(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "open\ngit branch -D real'
+        )
+
+    def test_desync_escaped_quote_then_semicolon_op(self):
+        r"""An escaped `\"` keeps the string open in BOTH the regex
+        (`(?:[^"\\]|\\.)`) and bash, so the `;`-separated op is outside any
+        closed quote and survives."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "a\\" ; git branch -D real'
+        )
+
+    def test_desync_unbalanced_sq_then_amp_op(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh issue create --title 'open && git branch -D real"
+        )
+
+    def test_desync_mixed_quote_then_amp_op(self):
+        """A single quote inside a BALANCED double-quoted value (`"a'b"`) is
+        ordinary content; the following `&&` op is unquoted → caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "a\'b" && git branch -D real'
+        )
+
+    def test_desync_genuinely_quoted_op_is_neutralized(self):
+        """CORRECTNESS pin: an op GENUINELY inside a balanced quoted value (no
+        internal separator) IS neutralized — bash also treats it as inert
+        title text. (NOT a hole.)
+
+        # non-vacuity: this value has NO internal separator, so the UNDER-
+        #   CONSUME `[^&|;]*` span mutation does NOT flip it (it consumes the
+        #   whole value either way) — it stays green there. Its non-vacuity is
+        #   the CARRIER-PRESENCE proof shared with the original suite
+        #   (TestD2GhCarrierStrip.test_issue_create_title_with_danger_literal_
+        #   not_dangerous): revert the entire 7th carrier (remove the strip
+        #   step) → the literal is no longer stripped → is_dangerous flips True
+        #   → FAILS. This pin documents the M2/M3 span did not REGRESS the
+        #   baseline single-value strip; the span-mutation tests above carry
+        #   the M2/M3-specific non-vacuity.
+        """
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'gh issue create --title "git branch -D x"'
+        )
+
+    # ---- 7.D — Carve-out REGRESSION GUARD (unchanged by the span change). ----
+
+    def test_carveout_pr_close_still_dangerous(self):
+        """Behavioral (robust, but vacuous w.r.t. the carrier — see the
+        mechanism-level pin below)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh pr close 42 --delete-branch")
+
+    def test_carveout_pr_close_value_survives_strip(self):
+        """Mechanism-level: a quoted value on a `gh pr close` command is NOT
+        stripped (close is excluded from the carrier verbs), even under the
+        new quote-aware span.
+
+        # non-vacuity: broaden the carrier verb alternation to include `close`
+        #   (`pr\\s+(?:create|close)`) → the value is stripped → this assertion
+        #   FAILS. (Exclusion-guard non-vacuity, carried over from the original
+        #   carve-out pin.)
+        """
+        from merge_guard_pre import _strip_non_executable_content
+
+        cmd = 'gh pr close 42 --delete-branch --body "git branch -D x"'
+        assert '"git branch -D x"' in _strip_non_executable_content(cmd)
+
+    def test_carveout_pr_edit_not_a_carrier(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('gh pr edit 5 --title "git branch -D x"')
+
+    # ---- 7.E — ReDoS guard for the span ITSELF (the quote-aware body's own
+    #            linear profile; distinct from the M1 D3 ladder ReDoS). ----
+
+    def test_span_redos_linear_profile(self):
+        """The quote-aware span `(?:[^&|;\\n"']+|"(?:...)*"|'[^']*')*` has three
+        DISJOINT-first-char alternatives, so the nested `*` cannot backtrack
+        ambiguously — the match is LINEAR. A 40 KB unterminated-double-quote
+        input (the classic `(a+)*` catastrophic trigger) completes well under
+        a generous bound.
+
+        # non-vacuity: pins that the span does not REGRESS into catastrophic
+        #   backtracking. The generous bound (100 ms vs the measured sub-ms)
+        #   is revert-proving without timing flakiness.
+        """
+        import time
+
+        from merge_guard_pre import _strip_non_executable_content
+
+        worst = 'gh issue create --title "' + "a" * 40000
+        start = time.perf_counter()
+        _strip_non_executable_content(worst)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 0.1, f"span strip took {elapsed*1000:.1f}ms (ReDoS?)"
+
+
+# =============================================================================
+# #933 REMEDIATION (PR #1000 finding M1) — D3 ladder ReDoS perf bound.
+#
+# The force-push ladder arm in extract_context (merge_guard_post.py) carried a
+# nested-greedy shape `push\b(?:.*\bto\b)?.*\b(?:main|master)\b` — two `.*`
+# runs separated by an optional `\bto\b` group — which catastrophically
+# backtracks on an input full of "to" tokens that never reaches main/master.
+# The fix replaces it with a single lazy `push\b.*?\b(?:main|master)\b` (and
+# the sibling `direct\s+push.*?...`), eliminating the ambiguous nested
+# quantifier so the match is linear.
+# =============================================================================
+
+
+class TestD3LadderReDoSPerfBound:
+    """#933 M1 — the D3 force-push ladder arm completes in linear time on a
+    worst-case `push ... to ...`-heavy input that never reaches main/master.
+    """
+
+    def test_d3_ladder_no_catastrophic_backtracking(self):
+        """Feed the ~35 KB worst case (`"push " + "to xyz " * 5000`, no
+        main/master so the old nested-greedy arm backtracks maximally) to
+        extract_context and assert it completes well under a generous bound.
+
+        Measured on this machine: fixed (lazy) arm ~2-3 ms; greedy-revert arm
+        ~625-637 ms. The 100 ms bound clears the fixed arm by >30x and sits
+        >6x below the greedy arm — revert-proving without timing flakiness.
+
+        # non-vacuity: revert the D3 arm to the greedy
+        #   `push\\b(?:.*\\bto\\b)?.*\\b(?:main|master)\\b` (+ the sibling
+        #   `direct\\s+push.*\\b...`) → extract_context on this input takes
+        #   ~630 ms → exceeds the 100 ms bound → this test FAILS. Verified RED
+        #   with >6x margin. Restore byte-exact (git checkout HEAD --).
+        """
+        import time
+
+        from merge_guard_post import extract_context
+
+        worst = "push " + "to xyz " * 5000  # ~35 KB, no main/master
+        start = time.perf_counter()
+        extract_context(worst)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 0.1, (
+            f"D3 ladder took {elapsed*1000:.1f}ms on the worst case "
+            f"(ReDoS regression? expected <100ms; greedy arm is ~630ms)"
+        )

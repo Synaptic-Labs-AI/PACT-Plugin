@@ -205,10 +205,18 @@ def extract_context(question: str) -> dict:
     if pr_match:
         context["pr_number"] = pr_match.group(1) or pr_match.group(2) or pr_match.group(3)
 
-    # Try to extract branch name
+    # Try to extract branch name. Skip any leading option flags (-D,
+    # --delete, --force, -d) that sit between the keyword and the branch
+    # name, so the captured group is the NAME, never a flag token. The
+    # flag-skip group `(?:--?[a-zA-Z][\w-]*\s+)*` consumes zero or more flag
+    # tokens; the name char-class deliberately EXCLUDES a leading '-' by
+    # requiring the first char to be a name char, so a flag can never be
+    # captured as a name. Runs on the RAW question (re.IGNORECASE handles an
+    # uppercase -D) — NOT lowercased; the keyword ladder below is the part
+    # that runs on question_lower.
     branch_match = re.search(
-        r"branch\s+['\"]?([a-zA-Z0-9/_.-]+)['\"]?|"
-        r"merge\s+['\"]?([a-zA-Z0-9/_.-]+)['\"]?",
+        r"branch\s+(?:--?[a-zA-Z][\w-]*\s+)*['\"]?([a-zA-Z0-9/_.][a-zA-Z0-9/_.-]*)['\"]?|"
+        r"merge\s+(?:--?[a-zA-Z][\w-]*\s+)*['\"]?([a-zA-Z0-9/_.][a-zA-Z0-9/_.-]*)['\"]?",
         question,
         re.IGNORECASE,
     )
@@ -232,7 +240,19 @@ def extract_context(question: str) -> dict:
         question_lower = question.lower()
         if re.search(r"\bclose\b.*(?:pr|pull\s*request)|(?:pr|pull\s*request).*\bclose\b|gh\s+pr\s+close", question_lower):
             context["operation_type"] = "close"
-        elif re.search(r"force[\s-]?push|push\s+--force|push\s+-f\b|push\s+-[a-z]*f", question_lower):
+        elif re.search(
+            r"force[\s-]?push|push\s+--force|push\s+-f\b|push\s+-[a-z]*f|"
+            # Direct push to a default branch (main/master) is force-push-class:
+            # it bypasses PR review. Mirrors the read-side
+            # detect_command_operation_type push-to-(main|master) classification
+            # so the prose-only ladder agrees with the command classifier. The
+            # `push\b` anchor is mandatory so this does NOT fire on a bare
+            # "main" mention (e.g. "merge PR 42 into main" → merge, not
+            # force-push).
+            r"push\b.*?\b(?:main|master)\b|"
+            r"direct\s+push.*?\b(?:main|master)\b",
+            question_lower,
+        ):
             context["operation_type"] = "force-push"
         elif re.search(r"delete[\s-]?branch|branch\s+(?:-d|--delete)\b", question_lower):
             context["operation_type"] = "branch-delete"
