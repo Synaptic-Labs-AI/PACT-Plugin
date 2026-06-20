@@ -13057,3 +13057,362 @@ class TestD3PushToMainAuthorizationEndToEnd:
 
         token = {"context": {"operation_type": "force-push"}}
         assert not _token_matches_command(token, "git branch -D some-branch")
+
+
+# =============================================================================
+# #933 REMEDIATION (PR #1000 review findings) — M2/M3 quote-aware D2 span.
+#
+# The D2 carrier span body `[^&|;]*` was replaced with a quote-region-aware
+# scanner:
+#     gh<verb>  (?:[^&|;\n"']+ | "(?:[^"\\]|\\.)*" | '[^']*')*
+# Three alternatives with DISJOINT first-character sets (bare run / balanced
+# double-quote honoring \" / balanced single-quote, no escape). Effects:
+#   M3 — a quoted value containing an internal ;/&/| is consumed ATOMICALLY
+#        (the separator is inside the quote, not a span boundary) → the inner
+#        strip sees the FULL value and strips it → benign title with internal
+#        separators is no longer over-blocked.
+#   M2 — a multi-line quoted title is consumed atomically (newline inside the
+#        quote), while an UNQUOTED newline still terminates the span — fixing
+#        the over-block a naive `[^&|;\n]*` body would have caused.
+# The inner strip, the carve-out (close NOT a carrier verb), and the
+# _has_command_substitution guard are UNCHANGED — INV-D2 (no real executing op
+# is ever neutralized) is preserved: an unquoted separator/newline always
+# terminates the span, and an UNBALANCED quote makes the span UNDER-consume
+# (stop early) = over-block = safe, never under-block.
+#
+# NON-VACUITY uses OPPOSITE mutations for the two halves (the crux):
+#   - 7.A multi-line/internal-sep POSITIVES are proven by an UNDER-CONSUME
+#     mutation (span body → `[^&|;]*`): the value is truncated at its internal
+#     separator → the inner strip misses it → is_dangerous flips True → FAIL.
+#   - 7.B/7.C under-block + desync NEGATIVES are proven by an OVER-CONSUME
+#     mutation (span body → `.*`): the span swallows past the unquoted
+#     separator / unbalanced quote → the inner strip reaches the real op →
+#     is_dangerous flips False → FAIL. (The old `[^&|;]*` body would NOT flip
+#     these — it under-consumes too, so it keeps them dangerous == phantom-
+#     green; that is why the negatives need the over-consume mutation, not the
+#     `[^&|;]*` revert.)
+# Each mutation + the RED set it produces is recorded per the `# non-vacuity:`
+# convention; all mutations are restored byte-exact (git checkout HEAD --).
+# =============================================================================
+
+
+class TestD2QuoteAwareSpanRemediation:
+    """#933 M2/M3 — the quote-aware carrier span (design §7.A-E).
+
+    Dangerous literals live inside test-file string literals (never on a Bash
+    line). The original 40-test suite's carve-out / compound negatives remain
+    in TestD2GhCarrierStrip; this class adds the quote-aware-span pins.
+    """
+
+    # ---- 7.A — M3 / multi-line POSITIVES (a title whose quoted value contains
+    #            an internal separator AND a dangerous literal AFTER that
+    #            separator strips fully → NOT dangerous). ----
+    #
+    # NON-VACUITY DESIGN (load-bearing): each positive embeds a DANGEROUS
+    # LITERAL positioned AFTER the internal `;`/`&`/`|`/newline. This is what
+    # makes the test non-vacuous against the UNDER-CONSUME mutation: with the
+    # `[^&|;]*` body the span TRUNCATES at the internal separator, leaving the
+    # post-separator dangerous literal OUTSIDE the (now-unterminated) quoted
+    # value → the inner strip cannot match it → the literal survives →
+    # is_dangerous flips True → FAIL. A benign title (no dangerous literal,
+    # e.g. "a; b") would stay `safe` under BOTH spans == phantom-green, so it
+    # is NOT used here.
+    #
+    # non-vacuity (7.A — verified per-test, TWO under-consume mutations):
+    #   - internal-`;`, internal-`&|`, danger-before-`;`, two-value: revert the
+    #     span body to `[^&|;]*` → the value truncates at its internal
+    #     separator → the post-separator dangerous literal is exposed → flips
+    #     RED. (This is the SAME `[^&|;]*` that keeps the 7.B/7.C negatives
+    #     green — the opposite-mutation crux.)
+    #   - multiline: `[^&|;]*` consumes ACROSS newlines (it excludes only
+    #     `&|;`), so it does NOT truncate a multi-line value → that test STAYS
+    #     GREEN under `[^&|;]*` (would be phantom-green there). Its faithful
+    #     mutation is the NAIVE FIX `[^&|;\n]*` (adds `\n` to the exclusion —
+    #     the exact regression the architect's §7.A calls out): the span stops
+    #     at the first newline → the later-line dangerous literal is exposed →
+    #     flips RED. Verified: `[^&|;]*` → 3 of the 4 non-multiline strip-tests
+    #     RED (multiline green); `[^&|;\n]*` → all 4 RED.
+
+    def test_internal_semicolon_with_post_sep_danger_strips(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'gh issue create --title "ok; git branch -D real"'
+        )
+
+    def test_internal_amp_pipe_with_post_sep_danger_strips(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'gh issue create --title "fix & note | git push --force origin x"'
+        )
+
+    def test_multiline_with_post_newline_danger_strips(self):
+        """The case a naive `[^&|;\\n]*` body would have REGRESSED (over-block):
+        a multi-line title with a dangerous literal on a later line is consumed
+        atomically and strips fully."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'gh issue create --title "line1\nrepro: git branch -D real\nline3"'
+        )
+
+    def test_danger_literal_before_internal_separator_strips(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'gh issue create --title "repro: git branch -D x; then run"'
+        )
+
+    def test_two_value_internal_separators_with_danger_strip(self):
+        """Two values, each with an internal separator AND a post-separator
+        dangerous literal — BOTH strip fully (the two-value atomic-span case)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'gh issue create -t "ok; git branch -D a" -b "ok | git push --force b"'
+        )
+
+    # ---- 7.B — UNDER-BLOCK NEGATIVES (INV-D2: a real op after an UNQUOTED
+    #            separator MUST stay caught). ----
+    #
+    # non-vacuity (whole 7.B block): OVER-CONSUME whole-span over-strip —
+    #   broaden the span body to `.*` AND blank the matched span → the span
+    #   swallows the unquoted separator + the trailing op → is_dangerous flips
+    #   False → FAIL. Verified RED. The `[^&|;]*` revert does NOT flip these
+    #   (it also stops at the unquoted separator == phantom-green) — over-
+    #   consume is required.
+    #   NEWLINE caveat: `.*` does NOT cross a newline (no re.DOTALL), so the
+    #   newline-tail case (test_under_block_newline_tail) needs the
+    #   newline-crossing over-consume `[\s\S]*` to flip — verified RED under
+    #   that mutation. (Plain `.*` leaves it green because the span still stops
+    #   at the unquoted `\n`.)
+
+    def test_under_block_amp_amp_tail(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "x" && git branch -D real'
+        )
+
+    def test_under_block_semicolon_tail(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "x" ; git branch -D real'
+        )
+
+    def test_under_block_pipe_tail(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "x" | git branch -D real'
+        )
+
+    def test_under_block_newline_tail(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "x"\ngit branch -D real'
+        )
+
+    def test_under_block_background_amp_tail(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "x" & git branch -D real'
+        )
+
+    def test_under_block_unquoted_op_in_span(self):
+        """An UNQUOTED dangerous op inside the span (not a flag value) is never
+        touched by the inner strip (quoted-value-scoped) → stays caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "safe" git push --force origin x'
+        )
+
+    def test_under_block_compound_pairing_preserved(self):
+        """The compound check still fires for the `&&` case (the strip runs
+        before both is_dangerous and is_compound)."""
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            'gh issue create --title "x" && git branch -D real'
+        )
+
+    # ---- 7.C — DESYNC NEGATIVES (escaped/unbalanced/mismatched quotes MUST
+    #            NOT smuggle an op past the span). ----
+    #
+    # non-vacuity (whole 7.C block): OVER-CONSUME-PAST-UNBALANCED-QUOTE
+    #   whole-span over-strip — broaden the span body so it consumes past an
+    #   unbalanced quote (body → `.*` AND blank the matched span) → the span
+    #   swallows the trailing op → is_dangerous flips False → these FAIL.
+    #   Verified RED. The as-built body stops at the unbalanced quote (under-
+    #   consume = over-block = safe), so a real op after it always survives.
+    #   NEWLINE caveat: the unbalanced-DQ-then-NEWLINE case
+    #   (test_desync_unbalanced_dq_then_newline_op) needs the newline-crossing
+    #   `[\s\S]*` over-consume to flip (plain `.*` stops at the `\n`) —
+    #   verified RED under that mutation.
+
+    def test_desync_unbalanced_dq_then_amp_op(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "open && git branch -D real'
+        )
+
+    def test_desync_unbalanced_dq_then_newline_op(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "open\ngit branch -D real'
+        )
+
+    def test_desync_escaped_quote_then_semicolon_op(self):
+        r"""An escaped `\"` keeps the string open in BOTH the regex
+        (`(?:[^"\\]|\\.)`) and bash, so the `;`-separated op is outside any
+        closed quote and survives."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "a\\" ; git branch -D real'
+        )
+
+    def test_desync_unbalanced_sq_then_amp_op(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh issue create --title 'open && git branch -D real"
+        )
+
+    def test_desync_mixed_quote_then_amp_op(self):
+        """A single quote inside a BALANCED double-quoted value (`"a'b"`) is
+        ordinary content; the following `&&` op is unquoted → caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'gh issue create --title "a\'b" && git branch -D real'
+        )
+
+    def test_desync_genuinely_quoted_op_is_neutralized(self):
+        """CORRECTNESS pin: an op GENUINELY inside a balanced quoted value (no
+        internal separator) IS neutralized — bash also treats it as inert
+        title text. (NOT a hole.)
+
+        # non-vacuity: this value has NO internal separator, so the UNDER-
+        #   CONSUME `[^&|;]*` span mutation does NOT flip it (it consumes the
+        #   whole value either way) — it stays green there. Its non-vacuity is
+        #   the CARRIER-PRESENCE proof shared with the original suite
+        #   (TestD2GhCarrierStrip.test_issue_create_title_with_danger_literal_
+        #   not_dangerous): revert the entire 7th carrier (remove the strip
+        #   step) → the literal is no longer stripped → is_dangerous flips True
+        #   → FAILS. This pin documents the M2/M3 span did not REGRESS the
+        #   baseline single-value strip; the span-mutation tests above carry
+        #   the M2/M3-specific non-vacuity.
+        """
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'gh issue create --title "git branch -D x"'
+        )
+
+    # ---- 7.D — Carve-out REGRESSION GUARD (unchanged by the span change). ----
+
+    def test_carveout_pr_close_still_dangerous(self):
+        """Behavioral (robust, but vacuous w.r.t. the carrier — see the
+        mechanism-level pin below)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh pr close 42 --delete-branch")
+
+    def test_carveout_pr_close_value_survives_strip(self):
+        """Mechanism-level: a quoted value on a `gh pr close` command is NOT
+        stripped (close is excluded from the carrier verbs), even under the
+        new quote-aware span.
+
+        # non-vacuity: broaden the carrier verb alternation to include `close`
+        #   (`pr\\s+(?:create|close)`) → the value is stripped → this assertion
+        #   FAILS. (Exclusion-guard non-vacuity, carried over from the original
+        #   carve-out pin.)
+        """
+        from merge_guard_pre import _strip_non_executable_content
+
+        cmd = 'gh pr close 42 --delete-branch --body "git branch -D x"'
+        assert '"git branch -D x"' in _strip_non_executable_content(cmd)
+
+    def test_carveout_pr_edit_not_a_carrier(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('gh pr edit 5 --title "git branch -D x"')
+
+    # ---- 7.E — ReDoS guard for the span ITSELF (the quote-aware body's own
+    #            linear profile; distinct from the M1 D3 ladder ReDoS). ----
+
+    def test_span_redos_linear_profile(self):
+        """The quote-aware span `(?:[^&|;\\n"']+|"(?:...)*"|'[^']*')*` has three
+        DISJOINT-first-char alternatives, so the nested `*` cannot backtrack
+        ambiguously — the match is LINEAR. A 40 KB unterminated-double-quote
+        input (the classic `(a+)*` catastrophic trigger) completes well under
+        a generous bound.
+
+        # non-vacuity: pins that the span does not REGRESS into catastrophic
+        #   backtracking. The generous bound (100 ms vs the measured sub-ms)
+        #   is revert-proving without timing flakiness.
+        """
+        import time
+
+        from merge_guard_pre import _strip_non_executable_content
+
+        worst = 'gh issue create --title "' + "a" * 40000
+        start = time.perf_counter()
+        _strip_non_executable_content(worst)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 0.1, f"span strip took {elapsed*1000:.1f}ms (ReDoS?)"
+
+
+# =============================================================================
+# #933 REMEDIATION (PR #1000 finding M1) — D3 ladder ReDoS perf bound.
+#
+# The force-push ladder arm in extract_context (merge_guard_post.py) carried a
+# nested-greedy shape `push\b(?:.*\bto\b)?.*\b(?:main|master)\b` — two `.*`
+# runs separated by an optional `\bto\b` group — which catastrophically
+# backtracks on an input full of "to" tokens that never reaches main/master.
+# The fix replaces it with a single lazy `push\b.*?\b(?:main|master)\b` (and
+# the sibling `direct\s+push.*?...`), eliminating the ambiguous nested
+# quantifier so the match is linear.
+# =============================================================================
+
+
+class TestD3LadderReDoSPerfBound:
+    """#933 M1 — the D3 force-push ladder arm completes in linear time on a
+    worst-case `push ... to ...`-heavy input that never reaches main/master.
+    """
+
+    def test_d3_ladder_no_catastrophic_backtracking(self):
+        """Feed the ~35 KB worst case (`"push " + "to xyz " * 5000`, no
+        main/master so the old nested-greedy arm backtracks maximally) to
+        extract_context and assert it completes well under a generous bound.
+
+        Measured on this machine: fixed (lazy) arm ~2-3 ms; greedy-revert arm
+        ~625-637 ms. The 100 ms bound clears the fixed arm by >30x and sits
+        >6x below the greedy arm — revert-proving without timing flakiness.
+
+        # non-vacuity: revert the D3 arm to the greedy
+        #   `push\\b(?:.*\\bto\\b)?.*\\b(?:main|master)\\b` (+ the sibling
+        #   `direct\\s+push.*\\b...`) → extract_context on this input takes
+        #   ~630 ms → exceeds the 100 ms bound → this test FAILS. Verified RED
+        #   with >6x margin. Restore byte-exact (git checkout HEAD --).
+        """
+        import time
+
+        from merge_guard_post import extract_context
+
+        worst = "push " + "to xyz " * 5000  # ~35 KB, no main/master
+        start = time.perf_counter()
+        extract_context(worst)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 0.1, (
+            f"D3 ladder took {elapsed*1000:.1f}ms on the worst case "
+            f"(ReDoS regression? expected <100ms; greedy arm is ~630ms)"
+        )
