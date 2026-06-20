@@ -270,6 +270,20 @@ def _has_command_substitution(quoted_content: str) -> bool:
     return "$(" in quoted_content or "`" in quoted_content
 
 
+def _strip_surrounding_quotes(token: str) -> str:
+    """Strip one layer of matching surrounding quotes from a captured CLI
+    token. ``'feat/x'`` -> ``feat/x``, ``"feat/x"`` -> ``feat/x``. Leaves an
+    unquoted or mismatched-quote token unchanged. Used so a branch token
+    minted from unquoted question prose matches a command that quotes the
+    branch argument (and vice versa). Comparison-side normalization only —
+    it does NOT widen what the matcher regex captures, so it cannot
+    introduce a false-negative.
+    """
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in ("'", '"'):
+        return token[1:-1]
+    return token
+
+
 def _strip_non_executable_content(command: str) -> str:
     """Strip shell content that is clearly non-executable before pattern matching.
 
@@ -437,6 +451,71 @@ def _strip_non_executable_content(command: str) -> str:
         _strip_herestring_sq,
         result,
     )
+
+    # 7. Strip gh issue/pr CREATION-carrier quoted arguments.
+    #    `gh issue create/edit` and `gh pr create` accept --title/--body
+    #    (and the -t/-b aliases) whose VALUE is prose sent to the GitHub API
+    #    — never executed by a shell. A dangerous-op literal named inside
+    #    that prose (e.g. `gh issue create --title "...git branch -D x..."`)
+    #    must not trip DANGEROUS_PATTERNS. Strip the quoted value; keep the
+    #    verb + flag tokens visible.
+    #
+    #    SCOPE (INV-D2) — exempts ONLY the non-executing ARGUMENT text of a
+    #    CREATION carrier. Does NOT match `gh pr close` (a real close-class
+    #    destructive verb; `--delete-branch` is the deny trigger) — `close`
+    #    is absent from the verb alternation by construction, so a
+    #    `gh pr close ... --delete-branch` command is NOT stripped and
+    #    DANGEROUS_PATTERNS still fires.
+    #
+    #    GUARD: same indirection guards as the echo/printf carrier — the
+    #    outer `piped_to_shell` / `process_sub_to_shell` skip (set at step 3)
+    #    covers pipe-to-shell / process-sub-to-shell; the double-quoted arm
+    #    additionally preserves a value containing command substitution
+    #    `$(`/backtick (it would execute). Single-quoted values never expand,
+    #    so they need only the outer skip (mirroring carriers 3 and 5).
+    #    `--body-file`/`-F` is NOT a carrier: it names a FILE whose content
+    #    is not on the command line, so there is nothing on the line to strip.
+    if not piped_to_shell and not process_sub_to_shell:
+        # Match the carrier COMMAND span first (verb + its arguments up to a
+        # shell separator), then strip EVERY --title/--body/-t/-b value
+        # within that span. Spanning to a `&`/`|`/`;` boundary is load-bearing
+        # for INV-D2: the executing tail of a compound (e.g.
+        # `... && git branch -D real`) falls OUTSIDE the carrier span, so it
+        # is NEVER stripped and stays caught. A single re.sub on the whole
+        # command would strip only the FIRST flag-value (the verb prefix is
+        # consumed by the first match and cannot re-anchor on a bare second
+        # flag), so the per-span inner-strip is required to strip both a
+        # `--title` and a `--body` on one command.
+        # Verb alternation: issue create|edit, pr create. NOT pr close —
+        # `close` is absent by construction so a close command never matches.
+        _gh_carrier_span = (
+            r"gh\s+(?:issue\s+(?:create|edit)|pr\s+create)\b[^&|;]*"
+        )
+
+        def _strip_gh_carrier_span(span_match: re.Match) -> str:
+            span = span_match.group(0)
+
+            # Double-quoted value: preserve if it contains command
+            # substitution ($()/backtick executes inside double quotes).
+            def _strip_dq(m: re.Match) -> str:
+                if _has_command_substitution(m.group(0)):
+                    return m.group(0)
+                return m.group(1) + "STRIPPED"
+
+            span = re.sub(
+                r"((?:--title|--body|-t|-b)\s+)\"(?:[^\"\\]|\\.)*\"",
+                _strip_dq,
+                span,
+            )
+            # Single-quoted value: never expands, no substitution guard.
+            span = re.sub(
+                r"((?:--title|--body|-t|-b)\s+)'[^']*'",
+                r"\1STRIPPED",
+                span,
+            )
+            return span
+
+        result = re.sub(_gh_carrier_span, _strip_gh_carrier_span, result)
 
     return result
 
@@ -984,16 +1063,20 @@ def _token_matches_command(token: dict, command: str) -> bool:
         if cmd_pr is not None:
             return cmd_pr == str(pr_number)
 
-    # If token has a branch, check branch deletion commands match
+    # If token has a branch, check branch deletion commands match.
+    # Normalize surrounding quotes on the captured name so a token branch
+    # `feat/x` matches a command written `git branch -D 'feat/x'`. The
+    # capture stays `(\S+)`; only the comparison is normalized (no
+    # regex-widening = no false-negative risk).
     if branch:
         branch_d_match = re.search(_GIT_PREFIX + r"branch\s+.*-D\s+(\S+)", command)
         if branch_d_match:
-            return branch_d_match.group(1) == branch
+            return _strip_surrounding_quotes(branch_d_match.group(1)) == branch
         branch_delete_match = re.search(
             _GIT_PREFIX + r"branch\s+.*--delete\s+(?:--force\s+)?(\S+)", command
         )
         if branch_delete_match:
-            return branch_delete_match.group(1) == branch
+            return _strip_surrounding_quotes(branch_delete_match.group(1)) == branch
 
     # No specific context to validate against, or command type doesn't match
     # context type — allow through (ambiguous is permissive)
