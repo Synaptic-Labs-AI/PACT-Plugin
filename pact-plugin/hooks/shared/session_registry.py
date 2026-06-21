@@ -178,6 +178,23 @@ def register(name_at_team: str) -> None:
         name, _, team = name_at_team.partition("@")
         if not name or not team:
             return
+
+        # IN-PROCESS SELF-GUARD (the runtime structural topology signal).
+        # In in-process teammateMode every teammate shares the lead's process and
+        # thus the lead's $CLAUDE_CODE_SESSION_ID, so own ``sid == leadSessionId``
+        # and the registry key {session_id -> name@team} collapses many-to-one
+        # (last-wins) — the write cannot recover the actor and is pure churn. In
+        # tmux mode each teammate is a distinct process with a distinct sid, so
+        # ``sid != leadSessionId`` and the write is meaningful. Skip ONLY on a
+        # positive confirmed match; this is a liftable guard, not a removal of
+        # registration logic. FAIL-OPEN: ``_read_lead_session_id`` returns "" on
+        # any unknown/unreadable/malformed/unsafe-team topology, so we WRITE in
+        # every uncertain case — over-writing in-process is a harmless collided
+        # entry, but under-writing in tmux would blind name-recovery. Silent
+        # no-op, matching register's other skip-paths (labeling-only; no notice).
+        if sid == _read_lead_session_id(team):
+            return  # confirmed in-process → skip the un-recoverable write
+
         value = _sanitize_agent_name(name) + "@" + team
 
         registry_path = get_registry_path()
@@ -330,6 +347,37 @@ def _name_is_team_member(name: str, team: str) -> bool:
         return _sanitize_agent_name(name) in member_names
     except (OSError, ValueError, KeyError, TypeError):
         return False
+
+
+def _read_lead_session_id(team: str) -> str:
+    """Return the top-level ``leadSessionId`` from ``teams/<team>/config.json``,
+    or ``""`` on any miss/error.
+
+    Used by ``register()``'s in-process self-guard to compute the runtime
+    structural topology signal ``own session_id == leadSessionId`` (in-process)
+    vs ``!=`` (tmux). LOGIC-PARITY with ``task_claim_gate._read_lead_session_id``,
+    INLINED here (not imported) to preserve this module's self-contained-leaf
+    invariant (no ``shared.*`` imports — see module docstring). Reuses the exact
+    ``_is_safe_team_segment`` guard + ``_config_root()`` config-read idiom that
+    ``_name_is_team_member`` above already uses, so the read adds no new I/O
+    machinery.
+
+    Fail-safe: returns ``""`` on an unsafe @team segment, missing/unreadable
+    config, malformed JSON, non-object top-level, or a missing/non-string key.
+    An empty return routes ``register()`` to the fail-OPEN default (WRITE) — an
+    unknown topology must never suppress a tmux registration. Never raises.
+    """
+    if not _is_safe_team_segment(team):
+        return ""
+    try:
+        config_path = _config_root() / "teams" / team / "config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        if not isinstance(config, dict):
+            return ""
+        lead_session_id = config.get("leadSessionId")
+        return lead_session_id if isinstance(lead_session_id, str) else ""
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
 
 
 if __name__ == "__main__":
