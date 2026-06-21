@@ -118,7 +118,7 @@ _CEIL_GH_DETECT = 1.0
 # quadratic — it was already linear at HEAD (the F1 outer `_GIT_PREFIX` bound caps
 # the multi-anchor interaction; design §12.2). This case PINS structural linearity
 # (ratio < 3.0): a future nested-quantifier regression in the push patterns would
-# trip it. It is GREEN-stays-GREEN — reverting the `{0,64}` push bound keeps it
+# trip it. It is GREEN-stays-GREEN — reverting the `{0,32}` push bound keeps it
 # linear, so there is NO perf counter-test-RED for it; the bound's non-vacuity is
 # the >K-RESIDUAL FLIP in TestFlagTokenBoundary, not a perf revert. Bounded ~6 ms.
 _CEIL_PUSHWALK = 1.0
@@ -180,9 +180,9 @@ def test_global_flag_prefix_scaling_is_subquadratic(fn, build, abs_ceiling):
 
 # ---------------------------------------------------------------------------
 # Flag-token bound — FUNCTIONAL boundary + the accepted >K residual (#1001 /
-# remediation §12.2-12.3). The same `_MAX_GLOBAL_FLAG_TOKENS` (=64) that bounds
+# remediation §12.2-12.3). The same `_MAX_GLOBAL_FLAG_TOKENS` (=32) that bounds
 # the scaling above also bounds the push-dash-flag walk between `push` and its
-# refspec. These tests pin the K=64 boundary and the accepted >K residual
+# refspec. These tests pin the K=32 boundary and the accepted >K residual
 # under-block, and document why the push-walk bound's non-vacuity is the
 # >K-residual FLIP (not a perf revert).
 # ---------------------------------------------------------------------------
@@ -191,12 +191,13 @@ from shared.merge_guard_common import _MAX_GLOBAL_FLAG_TOKENS  # noqa: E402
 
 
 class TestFlagTokenBoundary:
-    """K=64 push-flag-walk boundary + accepted >K residual under-block."""
+    """K=32 push-flag-walk boundary + accepted >K residual under-block."""
 
     def test_within_bound_push_to_main_is_detected(self):
-        """A push-to-main with EXACTLY _MAX_GLOBAL_FLAG_TOKENS (64) dash-flags is
+        """A push-to-main with EXACTLY _MAX_GLOBAL_FLAG_TOKENS (32) dash-flags is
         still within the bound, so the refspec is reachable and it IS detected
-        (force-push class) on both the read bank and the classifier."""
+        (force-push class) on both the read bank and the classifier. (Empirical
+        boundary: -x*32 detected; -x*33 the first missed — the residual below.)"""
         cmd = "git push " + "-x " * _MAX_GLOBAL_FLAG_TOKENS + "origin main"
         assert is_dangerous_command(cmd) is True
         assert detect_command_operation_type(cmd) == "force-push"
@@ -206,7 +207,7 @@ class TestFlagTokenBoundary:
         push-to-main padded with MORE than _MAX_GLOBAL_FLAG_TOKENS dash-flags
         exceeds the bound, the refspec becomes unreachable, and it is NOT detected.
         This is the deliberate, threat-model-justified tradeoff vs the O(n^2) DoS
-        (an operator padding 65+ no-op flags to evade their OWN guard is
+        (an operator padding 33+ no-op flags to evade their OWN guard is
         self-defeating). Pinning it makes the residual VISIBLE: un-bounding the
         walk (`{0,K}`->`*`) flips this to detected — which is the push-walk bound's
         non-vacuity witness (see this test's counter-test in the remediation HANDOFF)."""
