@@ -241,11 +241,22 @@ def _has_pipe_to_shell(command: str) -> bool:
     )
 
 
-# Path-qualified shell token — ReDoS-free (disjoint-segment; STOPS at space/`)`).
-# Trailing (?![\w/]) anchors the shell name as a whole PATH-LEAF token: excludes
-# prefix-of-name (`>(basht)`/`>(teehee)`) AND `>(bash/foo)` (bash is a DIRECTORY,
-# foo the executable) while KEEPING metachar-separated real vectors
-# `>(bash;ls)`/`>(bash&&x)`/`>(bash|cat)` (bash still executes).
+# Path-qualified shell token. Trailing (?![\w/]) anchors the shell name as a
+# whole PATH-LEAF token: excludes prefix-of-name (`>(basht)`/`>(teehee)`) AND
+# `>(bash/foo)` (bash is a DIRECTORY, foo the executable) while KEEPING
+# metachar-separated real vectors `>(bash;ls)`/`>(bash&&x)`/`>(bash|cat)`
+# (bash still executes).
+#
+# ReDoS — ReDoS-free AS USED, NOT standalone. Both arms anchor this token behind
+# `>\(`, so re.search only attempts it at the handful of `>(` offsets in a real
+# command. STANDALONE the nested `(?:[^\s)/]*/)*` is O(N^2): re.search retries at
+# EVERY start position (multi-offset retry) with an O(N) per-offset forward scan
+# — measured ~4x per input-doubling on pathological no-slash / all-slash input.
+# This is NOT within-match catastrophic backtracking (an anchored re.match is
+# linear, ~2x/double), so an atomic group `(?>...)` would NOT fix it (and atomic
+# groups are unavailable anyway — requires-python >=3.7). DO NOT reuse this token
+# UNGATED; if it is ever needed ungated, bound the path segments
+# `(?:[^\s)/]*/){0,K}` (the F1 mechanism), which caps the per-offset scan.
 _PROCSUB_SHELL = r"(?:[^\s)/]*/)*(?:bash|sh|zsh)(?![\w/])"
 
 
@@ -348,26 +359,40 @@ def _strip_non_executable_content(command: str) -> str:
     """
     result = command
 
+    # Output-side execution-routing flags — computed ONCE for ALL stdout-
+    # producing content carriers (heredoc/echo/commit-msg/here-string/gh-
+    # creation). When the command pipes its output to a shell or feeds a shell
+    # via OUTPUT-side process substitution (`> >(bash)`), a stripped dangerous
+    # literal would still EXECUTE downstream, so those carriers must SKIP
+    # stripping (preserve content → detect). Hoisted above carrier 1 so the
+    # heredoc carrier can consult them too. MONOTONIC: a True flag only ADDS
+    # detection (skip strip → more content scanned); never removes it.
+    piped_to_shell = _has_pipe_to_shell(command)
+    process_sub_to_shell = _has_process_substitution_to_shell(command)
+
     # 1. Strip heredoc bodies: << 'EOF' ... EOF, << EOF ... EOF, << "EOF" ... EOF
     #    Match the heredoc marker, then everything up to and including the
     #    closing marker on its own line.
-    #    GUARD: Skip stripping if the heredoc is fed to a shell interpreter
-    #    (e.g., bash << EOF ... EOF), because the body would execute.
-    def _strip_heredoc(match: re.Match) -> str:
-        # Check what command precedes the heredoc operator
-        start = match.start()
-        preceding = command[:start].rstrip()
-        # If the preceding command is a shell interpreter, preserve content
-        if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
-            return match.group(0)  # Preserve — content executes
-        return "<<HEREDOC_STRIPPED"
+    #    GUARD (input-side): the inner check preserves the body if the heredoc
+    #    is fed to a shell interpreter (e.g. bash << EOF ... EOF — body executes).
+    #    GUARD (output-side): the outer piped/process-sub skip preserves the body
+    #    when it is routed to a shell via `| bash` / `> >(bash)`. The two COMPOSE.
+    if not piped_to_shell and not process_sub_to_shell:
+        def _strip_heredoc(match: re.Match) -> str:
+            # Check what command precedes the heredoc operator
+            start = match.start()
+            preceding = command[:start].rstrip()
+            # If the preceding command is a shell interpreter, preserve content
+            if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+                return match.group(0)  # Preserve — content executes
+            return "<<HEREDOC_STRIPPED"
 
-    result = re.sub(
-        r"<<-?\s*['\"]?(\w+)['\"]?.*?\n.*?\n\t*\1\b",
-        _strip_heredoc,
-        result,
-        flags=re.DOTALL,
-    )
+        result = re.sub(
+            r"<<-?\s*['\"]?(\w+)['\"]?.*?\n.*?\n\t*\1\b",
+            _strip_heredoc,
+            result,
+            flags=re.DOTALL,
+        )
 
     # 2. Strip comments: # to end of line
     #    Only strip when # appears at start of line or after whitespace/semicolon
@@ -383,8 +408,7 @@ def _strip_non_executable_content(command: str) -> str:
     #    NOTE: ``bash -c 'dangerous'`` is NOT affected by this stripping —
     #    the echo/printf regex only matches echo/printf commands, so
     #    ``bash -c`` content is implicitly preserved and correctly detected.
-    piped_to_shell = _has_pipe_to_shell(command)
-    process_sub_to_shell = _has_process_substitution_to_shell(command)
+    #    (piped_to_shell / process_sub_to_shell are hoisted to the top.)
     if not piped_to_shell and not process_sub_to_shell:
         # Double-quoted: also guard against command substitution inside
         def _strip_echo_dq(match: re.Match) -> str:
@@ -441,58 +465,65 @@ def _strip_non_executable_content(command: str) -> str:
         )
 
     # 5. Strip git commit -m quoted arguments
-    #    The -m argument to git commit is a message, never executed.
-    #    GUARD: Check for command substitution in double-quoted messages.
-    def _strip_commit_msg_dq(match: re.Match) -> str:
-        if _has_command_substitution(match.group(0)):
-            return match.group(0)  # Preserve — $() executes
-        return match.group(1) + ' -m STRIPPED'
+    #    The -m argument to git commit is a message, never executed directly.
+    #    GUARD (cmd-subst): preserve a double-quoted message containing $()/backtick.
+    #    GUARD (output-side): a commit SUBJECT is echoed to git's stdout, so
+    #    `git commit -m "..." > >(bash)` (or `| bash`) routes it to a shell — the
+    #    outer piped/process-sub skip preserves it for detection (#1002).
+    if not piped_to_shell and not process_sub_to_shell:
+        def _strip_commit_msg_dq(match: re.Match) -> str:
+            if _has_command_substitution(match.group(0)):
+                return match.group(0)  # Preserve — $() executes
+            return match.group(1) + ' -m STRIPPED'
 
-    result = re.sub(
-        r'\b(git\s+commit)\s+-m\s+"(?:[^"\\]|\\.)*"',
-        _strip_commit_msg_dq,
-        result,
-    )
-    result = re.sub(
-        r"\b(git\s+commit)\s+-m\s+'[^']*'",
-        r"\1 -m STRIPPED",
-        result,
-    )
+        result = re.sub(
+            r'\b(git\s+commit)\s+-m\s+"(?:[^"\\]|\\.)*"',
+            _strip_commit_msg_dq,
+            result,
+        )
+        result = re.sub(
+            r"\b(git\s+commit)\s+-m\s+'[^']*'",
+            r"\1 -m STRIPPED",
+            result,
+        )
 
     # 6. Strip here-string quoted arguments: <<< "..." or <<< '...'
     #    Here-strings pass text as stdin, not as a command.
-    #    GUARD: Skip stripping if a shell interpreter precedes the <<<
-    #    (e.g., bash <<< "dangerous"), because the content would execute.
-    #    GUARD: Check for command substitution in double-quoted content.
-    def _strip_herestring_dq(match: re.Match) -> str:
-        # Check what command precedes the <<<
-        start = match.start()
-        preceding = command[:start].rstrip()
-        if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
-            return match.group(0)  # Preserve — content executes
-        if _has_command_substitution(match.group(0)):
-            return match.group(0)  # Preserve — $() executes
-        return "<<<STRIPPED"
+    #    GUARD (input-side): the inner check preserves content if a shell
+    #    interpreter precedes the <<< (e.g. bash <<< "dangerous" — executes).
+    #    GUARD (cmd-subst): preserve double-quoted content containing $()/backtick.
+    #    GUARD (output-side): the outer piped/process-sub skip preserves content
+    #    routed to a shell via `| bash` / `> >(bash)`. The guards COMPOSE.
+    if not piped_to_shell and not process_sub_to_shell:
+        def _strip_herestring_dq(match: re.Match) -> str:
+            # Check what command precedes the <<<
+            start = match.start()
+            preceding = command[:start].rstrip()
+            if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+                return match.group(0)  # Preserve — content executes
+            if _has_command_substitution(match.group(0)):
+                return match.group(0)  # Preserve — $() executes
+            return "<<<STRIPPED"
 
-    result = re.sub(
-        r'<<<\s*"(?:[^"\\]|\\.)*"',
-        _strip_herestring_dq,
-        result,
-    )
+        result = re.sub(
+            r'<<<\s*"(?:[^"\\]|\\.)*"',
+            _strip_herestring_dq,
+            result,
+        )
 
-    def _strip_herestring_sq(match: re.Match) -> str:
-        # Check what command precedes the <<<
-        start = match.start()
-        preceding = command[:start].rstrip()
-        if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
-            return match.group(0)  # Preserve — content executes
-        return "<<<STRIPPED"
+        def _strip_herestring_sq(match: re.Match) -> str:
+            # Check what command precedes the <<<
+            start = match.start()
+            preceding = command[:start].rstrip()
+            if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+                return match.group(0)  # Preserve — content executes
+            return "<<<STRIPPED"
 
-    result = re.sub(
-        r"<<<\s*'[^']*'",
-        _strip_herestring_sq,
-        result,
-    )
+        result = re.sub(
+            r"<<<\s*'[^']*'",
+            _strip_herestring_sq,
+            result,
+        )
 
     # 7. Strip gh issue/pr CREATION-carrier quoted arguments.
     #    `gh issue create/edit` and `gh pr create` accept --title/--body
