@@ -296,3 +296,75 @@ def test_carrier7_gh_create_output_side_now_over_blocks():
     intentional and visible, not a future surprise."""
     cmd = 'gh issue create --title "gh pr merge 42" > >(bash)'
     assert is_dangerous_command(cmd) is True
+
+
+# ===========================================================================
+# Carrier-gating completeness (PR #1003, commit 5623c938) — security #41
+# MEDIUM-1. F2's output-side detection must be wired into EVERY stdout-producing
+# content-stripping carrier, not just echo (#3) and gh-creation (#7). Carriers
+# #1 (heredoc), #5 (commit-msg), #6 (here-string) are now gated on
+# `not piped_to_shell and not process_sub_to_shell` (the two flags are hoisted
+# once to the top of _strip_non_executable_content and compose with each
+# carrier's existing input-side/cmd-subst guards). A dangerous literal carried by
+# #1/#5/#6 and routed to a shell via OUTPUT-side procsub (`> >(bash)`) OR a pipe
+# (`| bash`) is now PRESERVED (strip skipped) → detected, where it was previously
+# stripped → under-blocked. Empirically confirmed the routing is real: a benign
+# `cat <<< "echo PWN" > >(bash)` and `cat <<EOF ... echo PWN ... EOF > >(bash)`
+# both EXECUTE in live bash (the carrier's stdout reaches the shell). Carriers #2
+# (comments — bash no-op) and #4 (var-assign — emits no stdout) are deliberately
+# NOT gated and stay benign.
+#
+# The gate keys on BOTH flags, so each carrier is covered with a procsub form AND
+# a pipe form. Counter-test-by-revert (per-carrier non-vacuity — see HANDOFF):
+# ungating ONE carrier (its `if not piped... and not procsub:` → `if True:`,
+# always-strip = the pre-fix bug) flips ONLY that carrier's positives RED, proving
+# each carrier's gate is INDEPENDENTLY load-bearing (not "some shared gate catches
+# it").
+# ===========================================================================
+
+# Heredoc witnesses are multi-line (marker / body / closing) with the dangerous
+# literal in the BODY and the shell routing on the `cat` line.
+_HEREDOC_PROCSUB = 'cat <<EOF > >(bash)\n; gh pr merge 42\nEOF'
+_HEREDOC_PIPE = 'cat <<EOF | bash\n; gh pr merge 42\nEOF'
+_HEREDOC_BARE = 'cat <<EOF\n; gh pr merge 42\nEOF'
+
+# Positives — dangerous payload routed to a shell; the gate preserves it for the
+# scan. Leading `;` chains the op after whatever prefix the carrier prepends to
+# stdout (e.g. git's commit-summary line). DANGEROUS payload = anti-phantom-green.
+_CARRIER_GATING_POSITIVES = [
+    'git commit -m "; gh pr merge 42" > >(bash)',   # #5 commit-msg, output-side procsub
+    'git commit -m "; gh pr merge 42" | bash',      # #5 commit-msg, pipe-to-shell
+    'cat <<< "; gh pr merge 42" > >(bash)',         # #6 here-string, procsub
+    'cat <<< "; gh pr merge 42" | bash',            # #6 here-string, pipe
+    _HEREDOC_PROCSUB,                                # #1 heredoc, procsub
+    _HEREDOC_PIPE,                                   # #1 heredoc, pipe
+]
+
+# Negatives — no-regression (bare carriers still stripped), over-block control
+# (benign payload → no spurious block even with procsub), and the two UNGATED
+# carriers (#2 comment, #4 var-assign) staying benign.
+_CARRIER_GATING_NEGATIVES = [
+    'git commit -m "; gh pr merge 42"',          # #5 bare — stripped as before (no regression)
+    'cat <<< "; gh pr merge 42"',                # #6 bare — stripped
+    _HEREDOC_BARE,                               # #1 bare — stripped
+    'git commit -m "safe message" > >(bash)',    # over-block control — benign payload, no block
+    'X="; gh pr merge 42" > >(bash)',            # #4 var-assign UNGATED — emits no stdout → benign
+    'echo "hi" > >(bash)  # ; gh pr merge 42',   # #2 comment UNGATED — bash no-op → benign
+]
+
+
+@pytest.mark.parametrize("command", _CARRIER_GATING_POSITIVES)
+def test_gated_carrier_routed_to_shell_is_dangerous(command):
+    """A dangerous literal carried by heredoc/commit-msg/here-string and routed to
+    a shell (output-side procsub OR pipe) is now PRESERVED by the carrier gate and
+    detected (previously stripped → under-blocked; security #41 MEDIUM-1)."""
+    assert is_dangerous_command(command) is True
+
+
+@pytest.mark.parametrize("command", _CARRIER_GATING_NEGATIVES)
+def test_gated_carrier_no_regression_and_ungated_stay_benign(command):
+    """No-regression: the same carriers WITHOUT shell-routing still strip → benign.
+    Over-block control: a benign commit message with procsub is not spuriously
+    flagged. Ungated carriers #2 (comment) and #4 (var-assign) stay benign because
+    a comment is a bash no-op and a var-assign emits no stdout."""
+    assert is_dangerous_command(command) is False
