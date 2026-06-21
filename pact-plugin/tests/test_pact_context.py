@@ -1093,6 +1093,100 @@ class TestResolveAgentNameStep35RegistryPrecedence:
         assert result == "architect"
 
 
+class TestResolveAgentNameStep35NonMockedSeam:
+    """NON-MOCKED seam regression for Step 3.5 (mock-hid-the-seam guard).
+
+    The TestResolveAgentNameStep35RegistryPrecedence class above monkeypatches
+    pact_context._registry_resolve, so it proves the PRECEDENCE wiring but stubs
+    the very seam (real register() write -> real on-disk .teammate-registry.jsonl
+    -> real resolve() -> members[]-validation) whose correct resolution IS the
+    point. This class drives that seam UNSTUBBED: a real teammate registers via
+    register() to a real registry file under a temp home, and resolve_agent_name
+    recovers the friendly name with NO mock of the registry read.
+
+    This is the #962-relevant regression: register()'s new in-process self-guard
+    sits on the WRITE side of this seam. A tmux-frame teammate (sid !=
+    leadSessionId) must still register AND be recoverable here; an in-process
+    frame (sid == leadSessionId) must NOT pollute the registry, so Step 3.5 falls
+    through cleanly. If the guard ever over-suppressed (false-in-process on a real
+    tmux sid), THIS test goes red where the mocked tests stay green.
+    """
+
+    @staticmethod
+    def _home(monkeypatch, tmp_path):
+        """Point Path.home() at tmp_path so both register()'s write and
+        resolve()'s read (via _config_root) land in the same isolated tree."""
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+    @staticmethod
+    def _write_team_config(tmp_path, team, members, lead_session_id):
+        team_dir = tmp_path / ".claude" / "teams" / team
+        team_dir.mkdir(parents=True, exist_ok=True)
+        (team_dir / "config.json").write_text(
+            json.dumps({
+                "members": [{"name": m} for m in members],
+                "leadSessionId": lead_session_id,
+            }),
+            encoding="utf-8",
+        )
+
+    def test_tmux_frame_recovered_through_real_registry(self, monkeypatch, tmp_path):
+        """End-to-end, UNSTUBBED: a tmux teammate (sid != leadSessionId) registers
+        via the real register() -> resolve_agent_name recovers its name from the
+        real on-disk registry. Proves the write/read seam resolves for real."""
+        import shared.pact_context as pact_context
+        from shared.session_registry import register
+        from shared.pact_context import resolve_agent_name
+
+        self._home(monkeypatch, tmp_path)
+        self._write_team_config(tmp_path, "pact-leadteam", ["regname"],
+                                lead_session_id="lead-sid-AAAA")
+
+        # tmux teammate: its own sid differs from the lead's -> guard WRITES.
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "tmux-sid-BBBB")
+        register("regname@pact-leadteam")
+
+        # resolve_agent_name Step 3.5 reads the REAL registry (team_name passed
+        # explicitly so resolution does not depend on persisted context).
+        result = resolve_agent_name(
+            {"session_id": "tmux-sid-BBBB"}, team_name="pact-leadteam"
+        )
+        assert result == "regname", (
+            "Step 3.5 must recover the tmux teammate's name from the real registry"
+        )
+
+    def test_in_process_frame_not_polluted_so_step35_falls_through(self, monkeypatch, tmp_path):
+        """End-to-end, UNSTUBBED: an in-process teammate (sid == leadSessionId)
+        is SKIPPED by the guard, so the registry never gets its line; Step 3.5
+        finds no entry for that sid and falls through to Step 4 (agent_type
+        strip). Confirms the guard's WRITE-side suppression keeps the READ-side
+        seam clean rather than returning a colliding/wrong name."""
+        import shared.pact_context as pact_context
+        from shared.session_registry import register
+        from shared.pact_context import resolve_agent_name
+
+        self._home(monkeypatch, tmp_path)
+        self._write_team_config(tmp_path, "pact-leadteam", ["regname"],
+                                lead_session_id="lead-sid-AAAA")
+
+        # in-process teammate shares the lead's sid -> guard SKIPS the write.
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "lead-sid-AAAA")
+        register("regname@pact-leadteam")
+
+        # No registry line for lead-sid-AAAA -> Step 3.5 misses -> Step 4 strips
+        # the agent_type. (If the guard had wrongly written, Step 3.5 would have
+        # returned "regname" and this would fail.)
+        result = resolve_agent_name(
+            {"session_id": "lead-sid-AAAA", "agent_type": "pact-architect"},
+            team_name="pact-leadteam",
+        )
+        assert result == "architect", (
+            "in-process sid must NOT be in the registry; Step 3.5 falls through to Step 4"
+        )
+
+
 class TestWriteContextEdgeCases:
     """Additional edge case tests for write_context()."""
 

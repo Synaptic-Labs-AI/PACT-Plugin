@@ -59,11 +59,16 @@ def registry_env(tmp_path, monkeypatch):
             monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sid)
 
         @staticmethod
-        def write_team(team, member_names):
+        def write_team(team, member_names, lead_session_id=None):
             d = fake_home / ".claude" / "teams" / team
             d.mkdir(parents=True, exist_ok=True)
+            config = {"members": [{"name": n} for n in member_names]}
+            if lead_session_id is not None:
+                # The field register()'s in-process self-guard reads; omitted by
+                # default so existing callers stay byte-identical (and fail-OPEN).
+                config["leadSessionId"] = lead_session_id
             (d / "config.json").write_text(
-                json.dumps({"members": [{"name": n} for n in member_names]}),
+                json.dumps(config),
                 encoding="utf-8",
             )
 
@@ -342,3 +347,49 @@ class TestRegisterCliRoundTrip:
         )
         assert proc.returncode == 0, f"stderr=\n{proc.stderr}"
         assert not registry_env.registry_path.exists()
+
+    # --- in-process self-guard, exercised through the REAL script-mode CLI ----
+    # The guard calls the new ``_read_lead_session_id`` helper. In-process tests
+    # can't catch a script-mode-only regression in that helper (e.g. a stray
+    # ``shared.*`` import that would ImportError as a subprocess but resolve fine
+    # in-process). These two run the actual ``python session_registry.py register``
+    # subprocess under both topologies, so the guard is proven from the same entry
+    # point production uses.
+
+    def test_cli_in_process_sid_equals_lead_session_id_skips_write(self, registry_env, tmp_path):
+        """Real CLI, IN-PROCESS topology: the subprocess's $CLAUDE_CODE_SESSION_ID
+        == config.leadSessionId -> the guard skips the write -> nothing on disk,
+        clean exit 0 (script-mode fidelity: a shared.* import regression in
+        _read_lead_session_id would surface here as a non-zero exit / traceback,
+        not silently)."""
+        registry_env.write_team("pact-cli", ["devops"], lead_session_id="lead-sid-xyz")
+        foreign_cwd = tmp_path / "deep" / "unrelated"
+        foreign_cwd.mkdir(parents=True)
+
+        proc = self._run_cli(
+            "devops@pact-cli", home=registry_env.home,
+            session_id="lead-sid-xyz", cwd=foreign_cwd,  # == leadSessionId
+        )
+        assert proc.returncode == 0, f"stderr=\n{proc.stderr}"
+        assert "Traceback" not in proc.stderr
+        assert "ModuleNotFoundError" not in proc.stderr
+        assert not registry_env.registry_path.exists(), (
+            "in-process CLI register (sid==leadSessionId) must SKIP the write"
+        )
+
+    def test_cli_tmux_sid_differs_from_lead_session_id_writes(self, registry_env, tmp_path):
+        """Real CLI, TMUX topology: the subprocess's $CLAUDE_CODE_SESSION_ID !=
+        config.leadSessionId -> the guard fails the match -> the write proceeds
+        and resolves. Positive control for the CLI in-process skip above."""
+        registry_env.write_team("pact-cli", ["devops"], lead_session_id="lead-sid-xyz")
+        foreign_cwd = tmp_path / "deep" / "elsewhere"
+        foreign_cwd.mkdir(parents=True)
+
+        proc = self._run_cli(
+            "devops@pact-cli", home=registry_env.home,
+            session_id="tmux-sid-distinct", cwd=foreign_cwd,  # != leadSessionId
+        )
+        assert proc.returncode == 0, f"stderr=\n{proc.stderr}"
+        assert resolve("tmux-sid-distinct") == "devops@pact-cli", (
+            "tmux CLI register (sid!=leadSessionId) must WRITE and resolve"
+        )

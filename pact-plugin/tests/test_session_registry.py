@@ -43,11 +43,21 @@ def registry_env(tmp_path, monkeypatch):
             monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sid)
 
         @staticmethod
-        def write_team(team, member_names):
+        def write_team(team, member_names, lead_session_id=None):
+            """Write teams/<team>/config.json with a members[] list, and
+            OPTIONALLY a top-level leadSessionId (the field register()'s
+            in-process self-guard reads). Default lead_session_id=None omits the
+            key — byte-identical to the pre-guard config shape, so every existing
+            caller is unchanged AND its register() write fails-OPEN through the
+            guard (no leadSessionId -> _read_lead_session_id == "" -> never an
+            in-process match -> WRITE), preserving prior behavior exactly."""
             team_dir = fake_home / ".claude" / "teams" / team
             team_dir.mkdir(parents=True, exist_ok=True)
+            config = {"members": [{"name": n} for n in member_names]}
+            if lead_session_id is not None:
+                config["leadSessionId"] = lead_session_id
             (team_dir / "config.json").write_text(
-                json.dumps({"members": [{"name": n} for n in member_names]}),
+                json.dumps(config),
                 encoding="utf-8",
             )
 
