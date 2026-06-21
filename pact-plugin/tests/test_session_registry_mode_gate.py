@@ -47,7 +47,7 @@ from pathlib import Path
 import pytest
 
 from shared import session_registry
-from shared.session_registry import register, resolve
+from shared.session_registry import register, resolve, _read_lead_session_id
 
 
 # A canonical in-process session id: in in-process teammateMode every teammate
@@ -291,6 +291,97 @@ class TestFailOpenWrites:
         registry_env.set_session(_LEAD_SID)
         register("alice@pact/evil")  # "/" -> unsafe segment
         assert registry_env.registry_path.exists(), "unsafe @team must fail-OPEN to WRITE"
+
+
+# ---------------------------------------------------------------------------
+# DIRECT helper unit tests for _read_lead_session_id — covers EVERY branch in
+# isolation, including the ones NOT reachable through register() (so the
+# fail-open suite above does not vacuously claim register() exercises them).
+# _read_lead_session_id is the signal source the guard reads; testing it
+# directly localizes a regression to the helper vs the register() wiring.
+#
+# Branch map (return "" on every miss; the team's leadSessionId string on a hit):
+#   1. EMPTY team           -> _is_safe_team_segment False -> "" (UNREACHABLE via
+#                              register(): pre-filtered at the name/team partition;
+#                              ONLY a direct helper test can cover it)
+#   2. UNSAFE team segment  -> _is_safe_team_segment False -> "" (reachable via
+#                              register() too — pinned there AND here)
+#   3. missing config       -> OSError -> ""
+#   4. malformed JSON       -> ValueError -> ""
+#   5. non-dict top-level   -> "" (isinstance guard)
+#   6. missing leadSessionId-> config.get None -> ""
+#   7. non-string lead..    -> isinstance guard -> ""
+#   8. VALID                -> returns the leadSessionId STRING (the only non-""
+#                              return — the positive control that makes 1-7
+#                              non-vacuous: "" must mean a real miss, not that the
+#                              helper can never return anything)
+# ---------------------------------------------------------------------------
+
+class TestReadLeadSessionIdHelper:
+    """Direct unit coverage of the in-process self-guard's signal source."""
+
+    @staticmethod
+    def _write_config(home, team, config_obj):
+        d = home / ".claude" / "teams" / team
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "config.json").write_text(
+            config_obj if isinstance(config_obj, str) else json.dumps(config_obj),
+            encoding="utf-8",
+        )
+
+    def test_empty_team_returns_empty(self):
+        """Branch 1 — EMPTY team is rejected by _is_safe_team_segment BEFORE any
+        FS access. UNREACHABLE through register() (the L179 partition short-
+        circuits it), so this direct helper test is the ONLY coverage for it.
+        Per the lead's reachability guidance: cover the unreachable branch here,
+        not vacuously through register()."""
+        assert _read_lead_session_id("") == ""
+
+    def test_unsafe_team_segment_returns_empty(self):
+        """Branch 2 — a non-empty but unsafe @team (path separator / traversal /
+        control char) is rejected BEFORE building the FS path."""
+        assert _read_lead_session_id("../escape") == ""
+        assert _read_lead_session_id("a/b") == ""
+        assert _read_lead_session_id("..") == ""
+
+    def test_missing_config_returns_empty(self, registry_env, tmp_path):
+        """Branch 3 — no teams/<team>/config.json -> OSError -> ""."""
+        # registry_env redirects Path.home() into tmp_path; no config written.
+        assert _read_lead_session_id("pact-noconfig") == ""
+
+    def test_malformed_json_returns_empty(self, registry_env, tmp_path):
+        """Branch 4 — config.json is not valid JSON -> ValueError -> ""."""
+        self._write_config(tmp_path, "pact-bad", "{ not json ]")
+        assert _read_lead_session_id("pact-bad") == ""
+
+    def test_non_dict_top_level_returns_empty(self, registry_env, tmp_path):
+        """Branch 5 — top-level is a JSON list, not an object -> ""."""
+        self._write_config(tmp_path, "pact-list", ["a", "b"])
+        assert _read_lead_session_id("pact-list") == ""
+
+    def test_missing_lead_session_id_key_returns_empty(self, registry_env, tmp_path):
+        """Branch 6 — a valid object with members[] but NO leadSessionId key
+        (the pre-#962 config shape) -> config.get None -> ""."""
+        self._write_config(tmp_path, "pact-nokey", {"members": [{"name": "alice"}]})
+        assert _read_lead_session_id("pact-nokey") == ""
+
+    def test_non_string_lead_session_id_returns_empty(self, registry_env, tmp_path):
+        """Branch 7 — leadSessionId present but not a string -> isinstance guard
+        -> ""."""
+        self._write_config(tmp_path, "pact-int", {"leadSessionId": 12345})
+        assert _read_lead_session_id("pact-int") == ""
+
+    def test_valid_config_returns_lead_session_id_string(self, registry_env, tmp_path):
+        """Branch 8 (POSITIVE CONTROL) — a well-formed config returns the
+        leadSessionId STRING. Without this, every "" assertion above is vacuous
+        (a helper that ALWAYS returned "" would pass them all). This proves ""
+        means a genuine miss, and the in-process guard's `sid == helper(team)`
+        comparison can actually be TRUE."""
+        self._write_config(
+            tmp_path, "pact-good",
+            {"members": [{"name": "alice"}], "leadSessionId": _LEAD_SID},
+        )
+        assert _read_lead_session_id("pact-good") == _LEAD_SID
 
 
 # ---------------------------------------------------------------------------
