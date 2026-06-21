@@ -32,13 +32,20 @@ in CI): revert ONLY the two guard lines in register() ::
     if sid == _read_lead_session_id(team):
         return  # confirmed in-process -> skip the un-recoverable write
 
-(source-only: ``git stash push -- pact-plugin/hooks/shared/session_registry.py``
-or ``git checkout 6c7b91fa^ -- <that file>``), then run this file. The
-in-process no-op assertions flip RED because register() now writes a line where
-the guard would have skipped it; the tmux + fail-open assertions stay GREEN
-(they already expect a WRITE). Restore with ``git checkout 6c7b91fa -- <file>``
-/ ``git stash pop`` and confirm ``git diff --quiet`` on the source. The measured
-RED-case cardinality is recorded in TestCounterTestCardinalityDoc below.
+The ONLY correct method is a SOURCE-ONLY revert that removes just those two
+lines while leaving the ``_read_lead_session_id`` helper (and this test's import
+of it) intact — either an in-place delete of the two lines, or
+``git stash push -- pact-plugin/hooks/shared/session_registry.py`` (which stashes
+the whole working-tree file but is then re-applied wholesale). Do NOT use a
+whole-file checkout of a commit that PREDATES ``_read_lead_session_id``: that
+removes the helper symbol this file imports at module load, so the run ERRORS at
+COLLECTION (ImportError) instead of producing the clean in-process-flip the
+counter-test needs. After running this file, the in-process no-op assertions flip
+RED (register() now writes a line where the guard would have skipped it) while the
+tmux + fail-open assertions stay GREEN (they already expect a WRITE). Restore the
+two lines (``git stash pop`` / re-add the deleted lines) and confirm
+``git diff --quiet`` on the source. The measured RED-case cardinality is recorded
+in TestCounterTestCardinalityDoc below.
 """
 
 import json
