@@ -368,3 +368,51 @@ def test_gated_carrier_no_regression_and_ungated_stay_benign(command):
     flagged. Ungated carriers #2 (comment) and #4 (var-assign) stay benign because
     a comment is a bash no-op and a var-assign emits no stdout."""
     assert is_dangerous_command(command) is False
+
+
+# ===========================================================================
+# MINOR form-pins (PR #1003, review m-1 + m-2) — append-fd + tab output-side
+# forms. Each was EMPIRICALLY classified in real bash (does the payload reach a
+# shell = a genuine vector?) BEFORE pinning, so a non-vector is never asserted as
+# a false positive:
+#
+#   GENUINE VECTORS (bash routes the payload to the shell — `echo PWN` executes):
+#     `1>> >(bash)`, `&>> >(bash)` (append-fd, space), `>\t>(bash)` (tab between
+#     `>` and `>(`). Pinned below with a dangerous payload.
+#
+#   NON-VECTORS — bash SYNTAX ERRORS (NOT pinned): the NO-SPACE forms
+#     `>>(bash)`, `1>>(bash)`, `&>>(bash)` raise `bash: syntax error near
+#     unexpected token '('` (rc=2) — the `>>`/`1>>`/`&>>` append operator requires
+#     a filename, and `(bash)` (a subshell) is not a valid redirect target, so the
+#     command never runs. The merge-guard regex over-detects them (is_dangerous
+#     True, because `>>?\s*>\(` matches `>>(` as `>`+`>(`), which is INV-D2-
+#     ACCEPTABLE (a conservative over-block of a non-executable form) but NOT a
+#     required behavior — so they are deliberately NOT pinned as vectors.
+#
+# Non-vacuity (counter-test-by-revert, ephemeral — see HANDOFF):
+#   * tab form — CLEAN isolated counter-test: tightening Arm A's first `\s*`
+#     (operator->`>(`) to a literal space ` *` flips ONLY the tab positive RED
+#     (proves the `\s*` tab-handling is load-bearing).
+#   * append forms (`1>> >(bash)`/`&>> >(bash)`) — OVER-DETERMINED: they are caught
+#     by the GENERIC embedded `> >(bash)` shape (the bare `(?<![0-9])>>?` op + the
+#     procsub), NOT uniquely by the `1>>?`/`&>>?` operators — EMPIRICALLY, dropping
+#     `1>>?`/`&>>?` flips NOTHING. So there is no per-operator counter-test for
+#     them; their non-vacuity is the shared whole-Arm-A removal (which flips every
+#     output-side redirect positive, incl. the basic `> >(bash)`).
+# ===========================================================================
+
+# Genuine-vector output-side form variants — dangerous payload (anti-phantom-green).
+_MINOR_FORM_POSITIVES = [
+    'echo "; gh pr merge 42" 1>> >(bash)',   # m-1 append fd-1 (space)
+    'echo "; gh pr merge 42" &>> >(bash)',   # m-1 append stdout+stderr (space)
+    'echo "; gh pr merge 42" >\t>(bash)',    # m-2 tab whitespace between > and >(
+]
+
+
+@pytest.mark.parametrize("command", _MINOR_FORM_POSITIVES)
+def test_append_fd_and_tab_output_side_forms_are_dangerous(command):
+    """Append-fd (`1>>`/`&>>`) and tab-whitespace output-side procsub-to-shell
+    forms are genuine vectors (empirically: the payload reaches bash and executes)
+    and are detected. The no-space `>>(bash)`/`1>>(bash)`/`&>>(bash)` forms are
+    bash SYNTAX ERRORS (non-vectors) and are deliberately NOT pinned here."""
+    assert is_dangerous_command(command) is True
