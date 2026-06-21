@@ -121,15 +121,46 @@ LAYER1_SUCCESS_STDOUT_PATTERNS: dict[str, str | None] = {
 # pattern bank without duplicating regex source.
 # -----------------------------------------------------------------------------
 
-# Optional global flags between CLI tool and subcommand.
-# (?:\S+\s+)* matches zero or more flag+value tokens (e.g., --repo owner/repo).
-_GH_GLOBAL_FLAGS = r"(?:\S+\s+)*"  # broad — keep for DANGEROUS_PATTERNS (matches any token)
-# Tight variant for PR-number extraction: only flag-shaped tokens
-# (`-x`, `--long`, optionally `--flag value`). Prevents the capture group
-# from greedily walking past the PR positional into heredoc body content,
-# 2>&1 redirects, or trailing positional-digit tokens.
-_GH_FLAG_TOKENS = r"(?:-\S*(?:\s+\S+)?\s+)*"
-_GIT_GLOBAL_FLAGS = r"(?:\S+\s+)*"
+# Upper bound on flag tokens in a CLI flag region. Governs BOTH the global-flag
+# prefix between a tool and its subcommand (e.g. `git -c k=v ... push`) AND the
+# push-dash-flag walk between `push` and its refspec (e.g. `git push -u -f main`).
+# The global-flag prefix bound eliminates the O(n^2) multi-anchor backtracking of
+# the unbounded `*` form (#1001); the push-dash-flag walk bound is defense-in-
+# depth structural-linearity (that walk was already linear once the prefix is
+# bounded — bounding the inner walk makes its linearity intrinsic rather than
+# contingent). Both preserve the "matches any token" semantics EXACTLY for any
+# command with <= _MAX_GLOBAL_FLAG_TOKENS flag tokens in that region — i.e. every
+# realistic command (the heaviest realistic git global-flag count, e.g.
+# `git -c a=1 -c b=2 -C /p --git-dir=/g --work-tree=/w push ...`, is ~10 tokens;
+# gh is ~2; push dash-flags ~2-3). 32 is ~3x that headroom, and is a fixed modest
+# constant so per-anchor work is O(32)=O(1) regardless of input length.
+#
+# ACCEPTED RESIDUAL (honest INV-D2 accounting): a command with >32 *valid* flag
+# tokens before its verb/refspec is NOT impossible — `git -c k=v` is a
+# legitimate, repeatable pair, so e.g. `git -c a=1 -c b=2 ...(17 pairs=34
+# tokens)... push --force` DOES execute yet exceeds the bound, so the bounded
+# form misses a real destructive op the unbounded form caught. This is a
+# NARROW residual under-block, accepted as a documented tradeoff against the
+# O(n^2) DoS, justified by the THREAT MODEL: #1001's input is operator/LLM-
+# authored command text (defense-in-depth, NOT adversarial network input), and
+# padding 17+ `-c` pairs to evade one's OWN merge guard is self-defeating (the
+# author would simply write the command directly). The push-dash-flag walk
+# carries the SAME residual class but is even less reachable (push dash-flags are
+# not meaningfully infinitely-repeatable; a flag with a non-dash value, e.g.
+# `-o <opt>`, already breaks the walk). It is a relaxation of INV-D2, not a
+# no-op — stated plainly rather than papered over.
+# DO NOT raise this constant casually: a larger cap scales the per-anchor work,
+# and on a pathological multi-anchor input the constant factor grows measurably
+# (a larger value carries a real, if modest, cost — it is not free). Keep it a
+# small fixed value so per-anchor work stays O(1)/linear.
+_MAX_GLOBAL_FLAG_TOKENS = 32
+
+# Optional global flags between CLI tool and subcommand — BOUNDED (was `*`).
+_GH_GLOBAL_FLAGS  = r"(?:\S+\s+){0,%d}" % _MAX_GLOBAL_FLAG_TOKENS
+# Tight variant for PR-number extraction — UNCHANGED (already linear; requires
+# a leading `-` per token so it fails fast; used only by _GH_PR_NUMBER_RE).
+_GH_FLAG_TOKENS   = r"(?:-\S*(?:\s+\S+)?\s+)*"
+_GIT_GLOBAL_FLAGS = r"(?:\S+\s+){0,%d}" % _MAX_GLOBAL_FLAG_TOKENS
 
 # Composed prefixes for DRY usage across all patterns.
 _GH_PREFIX = r"\bgh\s+" + _GH_GLOBAL_FLAGS
@@ -190,7 +221,7 @@ def detect_command_operation_type(command: str) -> str | None:
     if re.search(_GIT_PREFIX + r"push\s+\S+\s+HEAD:(?:main|master)\b", command):
         return "force-push"
     if re.search(
-        _GIT_PREFIX + r"push\s+(?:-(?!-force-with-lease\b)\S+\s+)*\S+\s+(?:main|master)(?!:)\b",
+        _GIT_PREFIX + r"push\s+(?:-(?!-force-with-lease\b)\S+\s+){0,%d}\S+\s+(?:main|master)(?!:)\b" % _MAX_GLOBAL_FLAG_TOKENS,
         command,
     ):
         return "force-push"
