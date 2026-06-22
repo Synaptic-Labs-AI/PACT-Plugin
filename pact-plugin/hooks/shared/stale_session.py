@@ -6,8 +6,11 @@ Summary: Shared detector for a stale 'Current Session' block in the project
          CLAUDE.md Resume-line id and returns a diagnostic warning on mismatch.
 Used by: bootstrap_prompt_gate.py (UserPromptSubmit injection) and
          dispatch_gate.py (deny-message self-diagnosis at the two team/task
-         deny sites). Single SSOT for the live-vs-recorded session_id mismatch
-         signal so both consumers read one implementation.
+         deny sites). Single SSOT for THIS specific signal — the
+         CLAUDE.md-Resume-line-recorded vs live-stdin session_id mismatch — so
+         both consumers read one implementation. (Scoped deliberately: this is
+         NOT the only restart-detection signal; a context-SSOT-keyed sibling is
+         planned — see the breadcrumb below the constants.)
 
 The detector is the reuse seam for the restart/persistence reliability work:
 after a full Claude Code restart/fork the platform mints a new session-<id8>
@@ -40,6 +43,15 @@ _STALENESS_WARNING_TEMPLATE = (
     "Session dir/Resume lines for THIS session; completing bootstrap "
     "will rewrite them."
 )
+
+# FORWARD NOTE — a SIBLING restart-detection signal is planned for this leaf:
+# an `is_session_restarted`-style check keyed on the PERSISTED CONTEXT SSOT
+# (pact-session-context.json session_id vs the live stdin id), as opposed to
+# THIS detector which keys on the CLAUDE.md Resume-line. The two read different
+# sources (context-file vs CLAUDE.md) and can disagree, so when that sibling
+# lands here the keep-them-SEPARATE vs share-a-common-accessor decision should
+# be made CONSCIOUSLY at that time (not pre-judged now). They are siblings in
+# the same leaf, not a generalization of this function.
 
 
 def detect_stale_session_block(input_data: dict) -> str | None:
@@ -112,7 +124,18 @@ def detect_stale_session_block(input_data: dict) -> str | None:
     recorded = match.group(1)
     actual = str(raw_id)
     if recorded != actual:
+        # Render-bound length cap (defense-in-depth, message-only). The
+        # Resume-line capture is `[0-9a-f-]+` (UNBOUNDED), so a tampered
+        # CLAUDE.md with a 200k-hex id would interpolate a 200k-char warning
+        # into the consumer's surface (a dispatch deny's permissionDecisionReason
+        # / a UserPromptSubmit additionalContext). Cap BOTH AFTER the mismatch
+        # comparison (comparing the FULL values, so two long-but-distinct ids
+        # cannot collide on a shared 64-char prefix and wrongly suppress a real
+        # mismatch). 64 is non-lossy for a 36-char session UUID and needs no
+        # extra import (this leaf is deliberately stdlib-only); both fields are
+        # already control-char-free (recorded is hex-only; actual passed
+        # _is_unknown_or_missing_session), so the length bound is the only need.
         return _STALENESS_WARNING_TEMPLATE.format(
-            recorded=recorded, actual=actual
+            recorded=recorded[:64], actual=actual[:64]
         )
     return None
