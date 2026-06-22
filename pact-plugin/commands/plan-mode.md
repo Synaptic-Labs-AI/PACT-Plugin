@@ -197,6 +197,7 @@ Each consultant dispatch creates **two tasks**, not one:
 Both are created BEFORE the `Agent(...)` spawn call. The consultant claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair: `SendMessage(to=consultant, ...)` FIRST, then `TaskUpdate(A, status="completed")` — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review) for the rationale. On accept, the consultant wakes to claim B and produce the consultation HANDOFF.
 
 ```
+# A-FIRST ORDERING (required): create Task A (the teachback gate) BEFORE Task B so the gate gets the LOWER id. Creating Task B first — giving the gate the HIGHER id — is WRONG: it inverts the intuitive "lower id = earlier" reading. The blocking wiring below legitimately names both ids because it runs AFTER both tasks exist.
 A_id = TaskCreate(
     subject="{specialist}: TEACHBACK for plan consultation on {feature}",
     description="DOGFOOD TEACHBACK GATE.\n\n"
@@ -204,7 +205,7 @@ A_id = TaskCreate(
                 "SET intentional_wait{reason=awaiting_lead_completion}. Idle. "
                 "DO NOT mark this task completed — team-lead-only completion.\n\n"
                 "When Task B unblocks, claim it (TaskUpdate status=in_progress) BEFORE any implementation tool-use — it is pre-assigned to you but still pending; you flip it, not the lead.\n\n"
-                "Mission for Task B: see Task #{B_id}."
+                "Mission for Task B: the primary-work task assigned to you in your TaskList, identified by its subject (the '{role}: {mission}' pattern). Claim it after this teachback is accepted."
 )
 TaskUpdate(A_id, owner="{specialist-name}")
 B_id = TaskCreate(subject="{specialist}: plan consultation for {feature}", description="<consultation mission>")

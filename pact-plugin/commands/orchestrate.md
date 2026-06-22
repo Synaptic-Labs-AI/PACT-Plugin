@@ -69,6 +69,7 @@ Both are created BEFORE the `Agent(...)` spawn call so the teammate sees them on
 **Dispatch sequence (replaces single-task dispatch)**:
 
 ```
+# A-FIRST ORDERING (required): create Task A (the teachback gate) BEFORE Task B so the gate gets the LOWER id. Creating Task B first — giving the gate the HIGHER id — is WRONG: it inverts the intuitive "lower id = earlier" reading. The blocking wiring below legitimately names both ids because it runs AFTER both tasks exist.
 # 1. Create Task A (teachback gate)
 A_id = TaskCreate(
     subject="{role}: TEACHBACK for {feature}",
@@ -80,7 +81,7 @@ A_id = TaskCreate(
                 "If TEACHBACK is rejected, team-lead writes metadata.teachback_rejection and sends a "
                 "wake-SendMessage with corrections; revise on this same task.\n\n"
                 "When Task B unblocks, claim it (TaskUpdate status=in_progress) BEFORE any implementation tool-use — it is pre-assigned to you but still pending; you flip it, not the lead.\n\n"
-                "Mission for Task B: see Task #{B_id}."
+                "Mission for Task B: the primary-work task assigned to you in your TaskList, identified by its subject (the '{role}: {mission}' pattern). Claim it after this teachback is accepted."
 )
 TaskUpdate(A_id, owner="{teammate-name}")
 
