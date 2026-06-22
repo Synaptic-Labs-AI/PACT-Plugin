@@ -796,6 +796,27 @@ FORBIDDEN_ID_FORWARD_REFERENCES = (
     "Mission for Task B: see Task #",
 )
 
+# Paraphrase-tolerant form of the same anti-pattern. The two literals above catch
+# the historical phrasings, but a re-introduction could paraphrase the pointer —
+# e.g. "Mission for Task B: refer to Task #{B_id}." or "...look at #{B_id}." — and
+# slip past an exact-literal match. This regex generalises: the Task-B mission
+# pointer ("Mission for Task B" ...) followed, within the same logical line and a
+# short window, by an id-form token ("#" then an optional "{" then a word char).
+#
+# Precision boundaries (must NOT match — verified against the live surfaces):
+#   - the fixed role-based pointer ("...identified by its subject...") has no "#";
+#   - the upstream backref "TEACHBACK Task #{A_id}" names A (not the Task-B
+#     pointer) and is not preceded by "Mission for Task B";
+#   - downstream phase refs ("Preparer task: #{taskId}", "Coder tasks: #{id1}")
+#     point at already-created earlier-phase tasks, not the forward Task B, and
+#     are likewise not introduced by the "Mission for Task B" carrier.
+# The 80-char window keeps the match local to the pointer so it cannot span into
+# unrelated later prose. Anchoring on the "Mission for Task B" carrier is what
+# scopes the regex to the forward-reference site specifically.
+FORBIDDEN_ID_FORWARD_REFERENCE_RE = re.compile(
+    r"Mission for Task B[^\n]{0,80}?#\s*\{?\s*[A-Za-z0-9_]"
+)
+
 
 class TestNoIdForwardReferenceInTaskADescription:
     """Negative invariant: no dispatch surface forward-references Task B by id.
@@ -804,6 +825,12 @@ class TestNoIdForwardReferenceInTaskADescription:
     (Task B), so Task A's description cannot name Task B by an id that does not
     yet exist. This guards against re-introducing the "see Task #{B_id}"
     forward-reference into any Task-A description across all dispatch surfaces.
+
+    Two layers, defence-in-depth:
+      - test_no_id_forward_reference: exact-literal match of the historical forms;
+      - test_no_paraphrased_id_forward_reference: a paraphrase-tolerant regex over
+        the same Task-B mission-pointer carrier, so a reworded re-introduction
+        ("refer to Task #{B_id}", "look at #{B_id}", ...) cannot slip past.
     """
 
     @pytest.mark.parametrize(
@@ -823,6 +850,27 @@ class TestNoIdForwardReferenceInTaskADescription:
             f"teammate at Task B by its subject pattern instead. (Note: the "
             f"block-edge wiring vars addBlocks=[B_id] / addBlockedBy=[A_id] are "
             f"legitimate and are NOT what this guard targets.)"
+        )
+
+    @pytest.mark.parametrize(
+        "label,path",
+        DISPATCH_ORDERING_SURFACES,
+        ids=[label for label, _ in DISPATCH_ORDERING_SURFACES],
+    )
+    def test_no_paraphrased_id_forward_reference(self, label, path):
+        assert path.is_file(), f"Dispatch-ordering surface missing: {label} ({path})"
+        text = path.read_text(encoding="utf-8")
+        match = FORBIDDEN_ID_FORWARD_REFERENCE_RE.search(text)
+        assert match is None, (
+            f"{label}: Task-A description contains a paraphrased id-forward-"
+            f"reference to Task B: {match.group(0)!r}. The Task-B mission pointer "
+            f"must NOT name Task B by a task id (in any phrasing) — that forces "
+            f"B-first creation, giving the teachback gate the HIGHER id and "
+            f"inverting the 'lower id = earlier' reading. Point the teammate at "
+            f"Task B by its subject pattern instead. (Note: the block-edge wiring "
+            f"vars addBlocks=[B_id] / addBlockedBy=[A_id], the upstream "
+            f"'TEACHBACK Task #{{A_id}}' backref, and downstream phase task refs "
+            f"are legitimate and are NOT matched by this guard.)"
         )
 
 
