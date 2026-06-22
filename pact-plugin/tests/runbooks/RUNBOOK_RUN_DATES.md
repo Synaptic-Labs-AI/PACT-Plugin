@@ -114,6 +114,14 @@ The locus-b live-probe (`924-locus-b-dogfood-probe.md`) is retired: the `live_pr
 
 Sections-passed denominator is 4 per mode per runbook §3 (criteria a/b/c/d). This is the **POST-merge runtime-confirmation gate** (#861 class) — a green CI suite (L1+L2, 8246 passed) does NOT close #926; the live run under a non-default `CLAUDE_CONFIG_DIR` is mandatory. The resolver is mode-independent (keys on the env var, not session topology — proven by the L2 both-modes pair), so a divergence between in-process and tmux is itself a finding. On any FAIL, capture resolved-vs-expected path and route back to the resolver / call-site.
 
+## 994-fork-session-context-fate.md
+
+| Run date (UTC) | Operator | Plugin version | Verdict | Raw evidence (NEW/OLD field values) |
+| -------------- | -------- | -------------- | ------- | ----------------------------------- |
+| 2026-06-22 | self-run (disposable) | 4.4.36 | **CASE 1 (FRESH)** — case 3 refuted; durable write-back has no scenario | SEED-OLD ctx FIELD = OLD; fork WITHOUT `--agent` ctx FIELD = own/NEW, OLD-in-journal=0; fork WITH `--agent` ctx FIELD = own/NEW, OLD-in-journal=0. NON-VACUITY control (`cp -R OLD->SIMNEW`) ctx FIELD = OLD, OLD-in-journal=3 → fired CASE 3 (detector non-vacuous). `--resume` INHERITS agent_type (the no-`--agent` fork persisted a fresh context as a lead). Leadness-robust: verdict keys on un-overwritten OLD journal events, not the overwritable context field. Safety: live CLAUDE.md byte-unchanged (sha matched baseline), registry intact, zero leftovers. |
+
+This is a single-verdict empirical probe (not a per-mode live-probe), so the denominator is the one VERDICT line; tmux-vs-in-process does not apply (the context write is a lead-frame property, mode-independent). The verdict drives the #994 PR-2 re-scope decision: CASE 1/2 → the durable write-back has no scenario (re-diagnose); CASE 3 → unblock + run the §4 timing probe. A wrong verdict mis-directs the decision, so the row records the raw field/journal evidence + the non-vacuity result, not just the label.
+
 ## v4.0.0-launch-and-isolation.md
 
 | Run date (UTC) | Operator | Plugin version | Sections passed | Notes / fallback-ladder signals |
