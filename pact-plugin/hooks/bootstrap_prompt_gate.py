@@ -31,8 +31,6 @@ from __future__ import annotations
 
 # ─── stdlib first (used by _emit_load_failure_advisory BEFORE wrapped imports) ─
 import json
-import os
-import re
 import sys
 from typing import NoReturn
 
@@ -97,6 +95,14 @@ try:
     import shared.pact_context as pact_context
     from bootstrap_gate import is_marker_set
     from shared import BOOTSTRAP_MARKER_NAME
+    # Stale-session detector moved to the shared/ leaf (single SSOT, also
+    # consumed by dispatch_gate's deny-message self-diagnosis). Re-bound to the
+    # historical module-private name so this module's existing call site and
+    # the test suite that imports/monkeypatches
+    # `bootstrap_prompt_gate._detect_stale_session_block` stay behavior-identical.
+    from shared.stale_session import (
+        detect_stale_session_block as _detect_stale_session_block,
+    )
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_advisory("module imports", _module_load_error)
 
@@ -119,99 +125,11 @@ _SESSION_DIR_HINT = (
     "\n\nPACT_SESSION_DIR={session_dir}"
 )
 
-# Mirrors the Resume-line fallback regex in session_init's
-# _extract_prev_session_dir — the established defensive parse for the
-# session_resume.update_session_info managed block. Parity with
-# claude_md_manager.resolve_project_claude_md_path's existing-file
-# precedence is pinned by test (NOT by a runtime import — every new
-# top-level import here widens the import-failure blast radius the
-# bootstrap-resilience work exists to shrink).
-_RESUME_LINE_RE = re.compile(r"- Resume:\s*`claude --resume\s+([0-9a-f-]+)`")
-
-_STALENESS_WARNING_TEMPLATE = (
-    "\n\nWARNING — stale session block: the project CLAUDE.md 'Current "
-    "Session' block records session {recorded} but this session is "
-    "{actual}. session_init likely failed at SessionStart this session "
-    "(or the CLAUDE.md write failed). Do NOT trust the recorded Team/"
-    "Session dir/Resume lines for THIS session; completing bootstrap "
-    "will rewrite them."
-)
-
-
-def _detect_stale_session_block(input_data: dict) -> str | None:
-    """Detect a stale 'Current Session' block in the project CLAUDE.md.
-
-    When session_init crashes at SessionStart, the previous session's
-    Resume/Team/Session-dir lines survive in CLAUDE.md and misdirect
-    recovery. Compare the recorded Resume-line session_id against this
-    frame's raw stdin session_id; on mismatch, return an advisory warning
-    string for additionalContext composition. Returns None (no warning)
-    when:
-
-      1. stdin session_id is missing or invalid per the canonical
-         _is_unknown_or_missing_session predicate (None/non-string/empty/
-         whitespace-only/`unknown-*` sentinel/C0-control chars) — nothing
-         trustworthy to compare, and an unvalidated stdin id must never be
-         interpolated into the warning text
-      2. CLAUDE_PROJECT_DIR is unset (cannot locate CLAUDE.md)
-      3. neither CLAUDE.md location exists, or reading raises OSError or
-         UnicodeDecodeError (worktrees: CLAUDE.md is gitignored/absent →
-         silent skip; a non-UTF-8/corrupted CLAUDE.md → silent skip — this
-         helper is ADVISORY, so its failure budget is "no warning", never
-         "no bootstrap instruction": an uncaught raise here would propagate
-         to main()'s fail-open and suppress the ENTIRE injection, primary
-         instruction included)
-      4. no Resume line matches the regex (tampered/garbage → no claim)
-      5. recorded session_id equals this session's (healthy resume)
-
-    Stdlib-only two-path read: .claude/CLAUDE.md preferred, legacy
-    ./CLAUDE.md fallback — same existing-file precedence as
-    resolve_project_claude_md_path (parity pinned by test). False
-    positives: none in healthy flows — session_init rewrites the block
-    before the first prompt on startup/clear, and resume keeps the same
-    session_id.
-    """
-    raw_id = input_data.get("session_id")
-    # Canonical validity predicate (shared with the heal gate and
-    # session_init's persist/CLAUDE.md-write gates) — subsumes the plain
-    # truthiness check and additionally rejects non-string, whitespace-only,
-    # `unknown-*` sentinel, and C0-control-char ids, so `actual` below is
-    # never an attacker-shaped or sentinel value interpolated into the
-    # warning. The predicate is total for any input.
-    if pact_context._is_unknown_or_missing_session(raw_id):
-        return None
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    if not project_dir:
-        return None
-    try:
-        content = None
-        for candidate in (
-            Path(project_dir) / ".claude" / "CLAUDE.md",
-            Path(project_dir) / "CLAUDE.md",
-        ):
-            if candidate.exists():
-                content = candidate.read_text(encoding="utf-8")
-                break
-        if content is None:
-            return None
-    except (OSError, UnicodeDecodeError):
-        # UnicodeDecodeError (a ValueError, NOT an OSError) from read_text
-        # on a non-UTF-8 CLAUDE.md — e.g. a latin-1 byte from a wrong-editor
-        # save, or the partial/corrupted session_init write this detector
-        # exists to flag. Must be swallowed HERE: this helper composes into
-        # the load-bearing bootstrap instruction by concatenation, and an
-        # escape to main()'s fail-open suppresses the whole injection.
-        return None
-    match = _RESUME_LINE_RE.search(content)
-    if not match:
-        return None
-    recorded = match.group(1)
-    actual = str(raw_id)
-    if recorded != actual:
-        return _STALENESS_WARNING_TEMPLATE.format(
-            recorded=recorded, actual=actual
-        )
-    return None
+# `_detect_stale_session_block` (and its `_RESUME_LINE_RE` /
+# `_STALENESS_WARNING_TEMPLATE` constants) moved to shared/stale_session.py —
+# the single SSOT now also consumed by dispatch_gate. The historical
+# module-private name is re-bound at import time above so this module's call
+# site and tests are behavior-identical.
 
 
 def _check_bootstrap_needed(input_data: dict) -> str | None:

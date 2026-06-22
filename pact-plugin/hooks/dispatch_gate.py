@@ -100,6 +100,7 @@ try:
     )
     from shared.session_journal import append_event, make_event
     from shared.paths import get_claude_config_dir
+    from shared.stale_session import detect_stale_session_block
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_deny("module imports", _module_load_error)
 
@@ -493,6 +494,77 @@ def _journal_decision(decision: str, reason: str | None, rule: str | None,
         pass
 
 
+# Deny rules whose root cause can be a stale-team/store mismatch after a
+# Claude Code restart/fork (the persisted team_name/session_id diverge from
+# the live platform team, so this gate resolves an orphaned task store while
+# Task* tools write the live one). Both surface as misleading denials —
+# ``team_name_unavailable`` (rule ⑥) and ``no_task_assigned`` (rule ⑧) — that
+# never name the real cause. Other deny rules (name validation, plugin-install,
+# registry) are NOT restart-symptoms, so they are deliberately excluded: a
+# stale-session note on them would misdirect recovery.
+_STALE_DIAGNOSABLE_RULES = frozenset({"team_name_unavailable", "no_task_assigned"})
+
+# Actionable re-align guidance appended after the shared detector's stale-block
+# warning. The detector names the live-vs-recorded session_id mismatch; this
+# adds the dispatch-specific recovery (the gate read a different task store
+# than the live session's).
+_STALE_REALIGN_HINT = (
+    " This dispatch denial is likely a STALE-TEAM/STORE MISMATCH, not a "
+    "genuinely missing task: after a Claude Code restart/fork the platform "
+    "minted a new team for the live session while PACT's persisted team_name "
+    "went stale, so this gate read an orphaned task store. To re-align: update "
+    "the `team_name` in this session's pact-session-context.json (and the "
+    "project CLAUDE.md '- Team:' line) to the LIVE platform team, then "
+    "re-dispatch. Completing /PACT:bootstrap also rewrites those records."
+)
+
+
+def _augment_deny_with_stale_diagnosis(
+    rule: str | None, message: str, input_data: dict,
+) -> str:
+    """Return ``message`` augmented with a stale-team/store self-diagnosis when
+    a restart-induced session mismatch is detected, else ``message`` UNCHANGED.
+
+    MESSAGE-ONLY: this never alters the gate DECISION — it is called only after
+    ``evaluate_dispatch`` has already returned DENY, and only rewrites the
+    user-facing ``permissionDecisionReason`` text. The deny still fires on
+    exactly the same inputs.
+
+    NEVER RAISES (the single named place the detection call is wrapped — this
+    is NEW code on a path that runs in EVERY consumer session). Any exception
+    from the detector (unreadable/absent CLAUDE.md, missing keys, a tmux frame
+    with no recorded block, an import-time surprise) falls back to the ORIGINAL
+    ``message``. A thrown exception must NEVER break dispatch; a self-diagnosis
+    is strictly a nicety on top of the already-correct deny.
+
+    Gating:
+      * Only the restart-symptom rules in ``_STALE_DIAGNOSABLE_RULES`` are
+        augmented; other deny rules are returned verbatim (a stale-session note
+        on a name-validation deny would misdirect recovery).
+      * UN-GATED from the bootstrap-marker fast path: detection runs regardless
+        of marker presence. On a restart the marker can be present but stamped
+        for the STALE team, so a marker-gated check would miss exactly the case
+        this diagnoses.
+      * When the shared detector returns None (no mismatch — the healthy case,
+        or CLAUDE.md absent as in worktrees), the ORIGINAL message is preserved
+        verbatim. The augmentation is purely additive on a detected mismatch.
+    """
+    try:
+        if rule not in _STALE_DIAGNOSABLE_RULES:
+            return message
+        if not isinstance(input_data, dict):
+            return message
+        stale_block = detect_stale_session_block(input_data)
+        if not stale_block:
+            return message
+        return message + stale_block + _STALE_REALIGN_HINT
+    except Exception:
+        # Fail-safe: any error in the diagnosis path → original deny message.
+        # The deny itself is unaffected; only the optional self-diagnosis is
+        # dropped. NEVER re-raise out of the dispatch path.
+        return message
+
+
 def main() -> None:
     try:
         input_data = json.load(sys.stdin)
@@ -531,11 +603,17 @@ def main() -> None:
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
     if decision == "DENY":
+        # MESSAGE-ONLY self-diagnosis: on a restart-symptom deny rule, append a
+        # stale-team/store mismatch explanation + re-align steps when detected.
+        # Journaling above recorded the canonical (un-augmented) reason; this
+        # augments ONLY the user-facing message and never the decision. The
+        # helper is never-raises — on any error the original reason stands.
+        deny_message = _augment_deny_with_stale_diagnosis(rule, reason, input_data)
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
+                "permissionDecisionReason": deny_message,
             }
         }))
         sys.exit(2)
