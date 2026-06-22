@@ -44,14 +44,20 @@ _STALENESS_WARNING_TEMPLATE = (
     "will rewrite them."
 )
 
-# FORWARD NOTE — a SIBLING restart-detection signal is planned for this leaf:
-# an `is_session_restarted`-style check keyed on the PERSISTED CONTEXT SSOT
-# (pact-session-context.json session_id vs the live stdin id), as opposed to
-# THIS detector which keys on the CLAUDE.md Resume-line. The two read different
-# sources (context-file vs CLAUDE.md) and can disagree, so when that sibling
-# lands here the keep-them-SEPARATE vs share-a-common-accessor decision should
-# be made CONSCIOUSLY at that time (not pre-judged now). They are siblings in
-# the same leaf, not a generalization of this function.
+# DECIDED — `is_session_restarted` (below) is a SEPARATE SIBLING of
+# `detect_stale_session_block`, NOT a shared/generalized accessor. The two
+# read DIFFERENT trust sources that can legitimately disagree after a restart:
+# `detect_stale_session_block` keys on the CLAUDE.md Resume-line id, while
+# `is_session_restarted` keys on the PERSISTED CONTEXT SSOT
+# (pact-session-context.json session_id) vs the live stdin id. After a restart
+# these can diverge (e.g. session_init wrote a fresh context but the CLAUDE.md
+# write failed, or vice versa), and each consumer needs the signal from ITS
+# OWN trust source: the dispatch-deny diagnosis is about the CLAUDE.md-recorded
+# vs live mismatch (what the user is told to fix); the reconciliation trigger
+# is about the context-SSOT vs live mismatch (what the write-back repairs).
+# Forcing them through a shared accessor would couple two independent signals
+# and require picking one source as canonical, defeating the point that they
+# legitimately differ. Kept as siblings in the same leaf by design.
 
 
 def detect_stale_session_block(input_data: dict) -> str | None:
@@ -139,3 +145,50 @@ def detect_stale_session_block(input_data: dict) -> str | None:
             recorded=recorded[:64], actual=actual[:64]
         )
     return None
+
+
+def is_session_restarted(input_data: dict) -> bool:
+    """Return True iff the live stdin session_id differs from the PERSISTED
+    CONTEXT session_id (both present and valid) — the restart/fork structural
+    signal, keyed on the context SSOT (the sibling of
+    detect_stale_session_block, which keys on the CLAUDE.md Resume-line; see
+    the DECIDED note above the constants).
+
+    PURE: reads input_data + get_pact_context(); no writes, NEVER raises.
+
+    The structural discriminator is ``S_live != S_persisted``:
+
+      S_live      = input_data['session_id']            (this running process)
+      S_persisted = get_pact_context()['session_id']    (the persisted SSOT)
+
+    Returns False (NOT a restart) when:
+
+      1. S_live is missing or invalid per the canonical
+         _is_unknown_or_missing_session predicate (None / non-string / blank /
+         `unknown-*` sentinel / C0-control) — nothing trustworthy to compare,
+         so a malformed stdin id must never spuriously trip reconciliation.
+      2. S_persisted is empty — a fresh first-ever session (empty persisted
+         context) has no prior identity to reconcile from. This dovetails with
+         the empty-SSOT fail-closed gate (#989/#992): no reconciliation is
+         attempted when there is nothing to reconcile.
+      3. S_live == S_persisted — the healthy steady state (plain --resume
+         preserves the id; a compact/clear re-fires with the same id).
+
+    Mode-agnostic structural discriminator: the signal compares live-vs-
+    persisted, NEVER ``leadSessionId == session_id`` (which is True in BOTH the
+    in-process and tmux topologies and so is not a restart discriminator). It
+    is therefore True on a genuine restart in either topology.
+
+    Path-safety is irrelevant to this predicate: S_live and S_persisted are
+    string-compared only, never composed into a Path. Path-safety applies
+    downstream, to the matched DIR NAME at _resolve_aligned_team_name's join.
+    """
+    raw_id = input_data.get("session_id")
+    # Validity gate via the single canonical malformed-stdin predicate so an
+    # untrustworthy live id can never spuriously trip reconciliation.
+    if pact_context._is_unknown_or_missing_session(raw_id):
+        return False
+    s_persisted = pact_context.get_pact_context().get("session_id", "")
+    if not s_persisted:
+        return False
+    return str(raw_id) != s_persisted
