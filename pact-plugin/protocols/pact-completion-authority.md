@@ -56,7 +56,7 @@ The Task A + Task B dispatch shape gates implementation work behind teachback ap
 - **Task A**: `subject="<role>: TEACHBACK for <feature>"`, owner = teammate. Description states: "Submit TEACHBACK via `metadata.teachback_submit`. SET `intentional_wait{reason=awaiting_lead_completion}`. Do NOT begin Task B."
 - **Task B**: `subject="<role>: <primary mission>"`, owner = teammate, `blockedBy=[<Task A id>]`.
 
-Both tasks are created at dispatch time; the teammate receives both in their initial TaskList view, with B greyed out by `blockedBy`.
+Both tasks are created at dispatch time; the teammate receives both in their initial TaskList view, with B greyed out by `blockedBy`. **Create Task A FIRST**, before Task B, so the teachback gate gets the LOWER id (creating B first inverts the intuitive "lower id = earlier" reading). Task A's description must NOT name Task B by id — point the teammate at Task B by its subject pattern so A is creatable before B exists. Canonical create sequence: `agents/pact-orchestrator.md` §11 + the command dispatch templates' [Teachback-Gated Dispatch](../commands/orchestrate.md#teachback-gated-dispatch).
 
 **Reviewing the TEACHBACK**:
 

@@ -668,15 +668,15 @@ class TestPerLoopDispatchSites:
     # 9 per-loop dispatch sites. Each entry is
     # (relative_command_path, lead_in_line_number_1based, role_or_phase_label).
     SITES = [
-        ("orchestrate.md", 462, "PREPARE"),
-        ("orchestrate.md", 557, "ARCHITECT"),
-        ("orchestrate.md", 680, "CODE"),
-        ("orchestrate.md", 815, "TEST"),
-        ("comPACT.md", 226, "MultipleSpecialists"),
-        ("comPACT.md", 286, "SingleSpecialist"),
-        ("peer-review.md", 191, "Reviewers"),
-        ("plan-mode.md", 219, "Consultants"),
-        ("rePACT.md", 245, "SubScopeSpecialists"),
+        ("orchestrate.md", 463, "PREPARE"),
+        ("orchestrate.md", 558, "ARCHITECT"),
+        ("orchestrate.md", 681, "CODE"),
+        ("orchestrate.md", 816, "TEST"),
+        ("comPACT.md", 227, "MultipleSpecialists"),
+        ("comPACT.md", 287, "SingleSpecialist"),
+        ("peer-review.md", 192, "Reviewers"),
+        ("plan-mode.md", 220, "Consultants"),
+        ("rePACT.md", 246, "SubScopeSpecialists"),
     ]
 
     @staticmethod
@@ -743,5 +743,221 @@ class TestPerLoopDispatchSites:
             f"missing canonical Teachback-Gated Dispatch shape:\n  - "
             + "\n  - ".join(problems)
             + f"\n\nBlock under test:\n{block}"
+        )
+
+
+# --- Teachback-gated dispatch ordering (A-before-B) invariants ---------------
+#
+# Design intent (do NOT delete this guard as "brittle"):
+#   The teachback-gated dispatch templates pair a teachback gate (Task A) with a
+#   primary-work task (Task B, blockedBy=[A]). Task A's free-text description must
+#   NOT forward-reference Task B by task id. The forward-reference form
+#   "Mission for Task B: see Task #{B_id}." forced the orchestrator to create
+#   Task B FIRST (so its id is known before Task A's description is written),
+#   which gave the teachback gate the HIGHER task id — inverting the intuitive
+#   "lower id = earlier" reading of the task list.
+#
+#   The fixed form points the teammate at Task B by its SUBJECT pattern
+#   ("the '{role}: {mission}' work task in your TaskList"), a role-neutral
+#   cross-reference that needs no pre-known id, so Task A can be created first.
+#   Each dispatch block also carries an explicit "A-FIRST ORDERING (required)"
+#   note marking B-first creation as wrong.
+#
+#   These guards FAIL if the id-forward-reference anti-pattern is re-introduced
+#   into any Task-A description, and confirm the A-first ordering discipline is
+#   present. They are content-based drift detectors, not line/anchor coupled.
+#
+# CRITICAL PRECISION — anti-pattern vs legitimate wiring:
+#   The id forward-reference inside a Task-A *description* is the anti-pattern.
+#   The block-edge WIRING variables `B_id = TaskCreate(...)`, `addBlocks=[B_id]`,
+#   and `addBlockedBy=[A_id]` are LEGITIMATE — they run AFTER both tasks exist and
+#   MUST remain. The negative guard therefore targets the description-forward-
+#   reference LITERAL ("see Task #{B_id}" / "Mission for Task B: see Task #")
+#   specifically, never a bare "{B_id}" substring. A guard that tripped on the
+#   wiring variables would be a false-positive defect.
+
+AGENTS_DIR = COMMANDS_DIR.parent / "agents"
+PERSONA_PATH = AGENTS_DIR / "pact-orchestrator.md"
+
+# Every LLM-loaded surface that carries the Teachback-Gated Dispatch sequence:
+# the 5 consumer-command templates plus the orchestrator persona's canonical
+# §Agent Teams Dispatch sequence. CONSUMER_COMMANDS (defined above) enumerates
+# the command surfaces; the persona is the authoritative source form.
+DISPATCH_ORDERING_SURFACES = [
+    (name, COMMANDS_DIR / f"{name}.md") for name in CONSUMER_COMMANDS
+] + [("pact-orchestrator", PERSONA_PATH)]
+
+# The id-forward-reference anti-pattern, in the two stable forms it took. Both
+# name Task B by a (yet-unassigned) task id inside a Task-A description; either
+# one forces B-first creation. Matching these literals — and NOT a bare "{B_id}"
+# — is what distinguishes the anti-pattern from the legitimate wiring variables.
+FORBIDDEN_ID_FORWARD_REFERENCES = (
+    "see Task #{B_id}",
+    "Mission for Task B: see Task #",
+)
+
+# Paraphrase-tolerant form of the same anti-pattern. The two literals above catch
+# the historical phrasings, but a re-introduction could paraphrase the pointer —
+# e.g. "Mission for Task B: refer to Task #{B_id}." or "...look at #{B_id}." — and
+# slip past an exact-literal match. This regex generalises: the Task-B mission
+# pointer ("Mission for Task B" ...) followed, within the same logical line and a
+# short window, by an id-form token ("#" then an optional "{" then a word char).
+#
+# Precision boundaries (must NOT match — verified against the live surfaces):
+#   - the fixed role-based pointer ("...identified by its subject...") has no "#";
+#   - the upstream backref "TEACHBACK Task #{A_id}" names A (not the Task-B
+#     pointer) and is not preceded by "Mission for Task B";
+#   - downstream phase refs ("Preparer task: #{taskId}", "Coder tasks: #{id1}")
+#     point at already-created earlier-phase tasks, not the forward Task B, and
+#     are likewise not introduced by the "Mission for Task B" carrier.
+# The 80-char window keeps the match local to the pointer so it cannot span into
+# unrelated later prose. Anchoring on the "Mission for Task B" carrier is what
+# scopes the regex to the forward-reference site specifically.
+FORBIDDEN_ID_FORWARD_REFERENCE_RE = re.compile(
+    r"Mission for Task B[^\n]{0,80}?#\s*\{?\s*[A-Za-z0-9_]"
+)
+
+
+class TestNoIdForwardReferenceInTaskADescription:
+    """Negative invariant: no dispatch surface forward-references Task B by id.
+
+    The teachback gate (Task A) must be creatable BEFORE the primary-work task
+    (Task B), so Task A's description cannot name Task B by an id that does not
+    yet exist. This guards against re-introducing the "see Task #{B_id}"
+    forward-reference into any Task-A description across all dispatch surfaces.
+
+    Two layers, defence-in-depth:
+      - test_no_id_forward_reference: exact-literal match of the historical forms;
+      - test_no_paraphrased_id_forward_reference: a paraphrase-tolerant regex over
+        the same Task-B mission-pointer carrier, so a reworded re-introduction
+        ("refer to Task #{B_id}", "look at #{B_id}", ...) cannot slip past.
+    """
+
+    @pytest.mark.parametrize(
+        "label,path",
+        DISPATCH_ORDERING_SURFACES,
+        ids=[label for label, _ in DISPATCH_ORDERING_SURFACES],
+    )
+    def test_no_id_forward_reference(self, label, path):
+        assert path.is_file(), f"Dispatch-ordering surface missing: {label} ({path})"
+        text = path.read_text(encoding="utf-8")
+        offenders = [f for f in FORBIDDEN_ID_FORWARD_REFERENCES if f in text]
+        assert not offenders, (
+            f"{label}: Task-A description contains id-forward-reference "
+            f"anti-pattern(s): {offenders}. Naming Task B by its id in Task A's "
+            f"description forces B-first creation, giving the teachback gate the "
+            f"HIGHER id and inverting the 'lower id = earlier' reading. Point the "
+            f"teammate at Task B by its subject pattern instead. (Note: the "
+            f"block-edge wiring vars addBlocks=[B_id] / addBlockedBy=[A_id] are "
+            f"legitimate and are NOT what this guard targets.)"
+        )
+
+    @pytest.mark.parametrize(
+        "label,path",
+        DISPATCH_ORDERING_SURFACES,
+        ids=[label for label, _ in DISPATCH_ORDERING_SURFACES],
+    )
+    def test_no_paraphrased_id_forward_reference(self, label, path):
+        assert path.is_file(), f"Dispatch-ordering surface missing: {label} ({path})"
+        text = path.read_text(encoding="utf-8")
+        match = FORBIDDEN_ID_FORWARD_REFERENCE_RE.search(text)
+        assert match is None, (
+            f"{label}: Task-A description contains a paraphrased id-forward-"
+            f"reference to Task B: {match.group(0)!r}. The Task-B mission pointer "
+            f"must NOT name Task B by a task id (in any phrasing) — that forces "
+            f"B-first creation, giving the teachback gate the HIGHER id and "
+            f"inverting the 'lower id = earlier' reading. Point the teammate at "
+            f"Task B by its subject pattern instead. (Note: the block-edge wiring "
+            f"vars addBlocks=[B_id] / addBlockedBy=[A_id], the upstream "
+            f"'TEACHBACK Task #{{A_id}}' backref, and downstream phase task refs "
+            f"are legitimate and are NOT matched by this guard.)"
+        )
+
+
+class TestLegitimateBlockWiringSurvives:
+    """Precision pin: the legitimate block-edge wiring variables must REMAIN.
+
+    The fix removed only the id forward-reference from Task-A descriptions; the
+    `addBlocks=[B_id]` / `addBlockedBy=[A_id]` wiring (which runs after both
+    tasks exist) is correct and load-bearing. This pin documents and protects
+    the anti-pattern/legitimate boundary: it asserts the wiring is still present
+    so that a future over-correction (stripping the wiring along with the
+    forward-reference) is caught, and so the negative guard above is understood
+    to target the description literal, not the wiring.
+    """
+
+    @pytest.mark.parametrize("name", CONSUMER_COMMANDS)
+    def test_block_edge_wiring_present(self, name):
+        text = (COMMANDS_DIR / f"{name}.md").read_text(encoding="utf-8")
+        for wiring in ("addBlocks=[B_id]", "addBlockedBy=[A_id]"):
+            assert wiring in text, (
+                f"{name}.md is missing legitimate block-edge wiring {wiring!r}. "
+                f"This wiring runs AFTER both tasks exist and is correct — the "
+                f"A-before-B fix removed only the id forward-reference from "
+                f"Task-A descriptions, never the wiring."
+            )
+
+
+class TestAFirstOrderingDisciplinePresentInCommands:
+    """Positive invariant: each command template carries the A-first discipline.
+
+    Two stable anchors per command file:
+      - the explicit "A-FIRST ORDERING" note marking B-first creation as wrong;
+      - the role-based subject-pattern cross-reference ("identified by its
+        subject") that replaced the id forward-reference.
+    Substring anchors (not whole-sentence) keep the guard robust to benign
+    rewording while still detecting deletion of either discipline element.
+    """
+
+    A_FIRST_NOTE_ANCHOR = "A-FIRST ORDERING"
+    ROLE_BASED_XREF_ANCHOR = "identified by its subject"
+
+    @pytest.mark.parametrize("name", CONSUMER_COMMANDS)
+    def test_a_first_note_present(self, name):
+        text = (COMMANDS_DIR / f"{name}.md").read_text(encoding="utf-8")
+        assert self.A_FIRST_NOTE_ANCHOR in text, (
+            f"{name}.md is missing the {self.A_FIRST_NOTE_ANCHOR!r} dispatch note. "
+            f"Each teachback-gated dispatch block must explicitly state that "
+            f"creating Task A (the gate) before Task B is required and that "
+            f"B-first creation is wrong."
+        )
+
+    @pytest.mark.parametrize("name", CONSUMER_COMMANDS)
+    def test_role_based_cross_reference_present(self, name):
+        text = (COMMANDS_DIR / f"{name}.md").read_text(encoding="utf-8")
+        assert self.ROLE_BASED_XREF_ANCHOR in text, (
+            f"{name}.md is missing the role-based subject-pattern cross-reference "
+            f"({self.ROLE_BASED_XREF_ANCHOR!r}). Task A's description must point "
+            f"the teammate at Task B by its subject pattern, not by a task id."
+        )
+
+
+class TestAFirstOrderingDisciplinePresentInPersona:
+    """Positive invariant: the orchestrator persona carries the A-first discipline.
+
+    The persona expresses the discipline in PROSE (not the command files' code
+    comment), so it has its own stable anchors:
+      - "Create Task A FIRST" — the ordering directive;
+      - "NOT by a forward task id" — the explicit prohibition that replaced the
+        id forward-reference with a subject-pattern cross-reference.
+    """
+
+    CREATE_A_FIRST_ANCHOR = "Create Task A FIRST"
+    NO_FORWARD_ID_ANCHOR = "NOT by a forward task id"
+
+    def test_persona_states_create_a_first(self):
+        text = PERSONA_PATH.read_text(encoding="utf-8")
+        assert self.CREATE_A_FIRST_ANCHOR in text, (
+            f"pact-orchestrator.md is missing the {self.CREATE_A_FIRST_ANCHOR!r} "
+            f"dispatch directive. The persona §Agent Teams Dispatch sequence must "
+            f"reinforce creating the teachback gate (Task A) before Task B."
+        )
+
+    def test_persona_prohibits_forward_id_reference(self):
+        text = PERSONA_PATH.read_text(encoding="utf-8")
+        assert self.NO_FORWARD_ID_ANCHOR in text, (
+            f"pact-orchestrator.md is missing the {self.NO_FORWARD_ID_ANCHOR!r} "
+            f"prohibition. The persona must direct the orchestrator to point the "
+            f"teammate at Task B by its subject pattern, not by a forward task id."
         )
 
