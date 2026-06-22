@@ -149,8 +149,11 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     }),
     "dispatch_gate": frozenset({
         "constants", "dispatch_helpers", "pact_context", "paths",
-        "session_journal", "session_registry", "session_state", "task_utils",
-    }),
+        "session_journal", "session_registry", "session_state",
+        "stale_session", "task_utils",
+    }),  # stale_session reached here via the deny-message self-diagnosis
+         # (dispatch_gate -> shared.stale_session.detect_stale_session_block);
+         # its own transitive pact_context edge was already in this closure.
     "task_lifecycle_gate": frozenset({
         "agent_handoff_marker", "constants", "dispatch_helpers",
         "intentional_wait", "pact_context", "paths", "session_journal",
