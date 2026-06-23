@@ -32,6 +32,7 @@ the "drain" (removing *.json) is a real filesystem mutation.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -201,12 +202,53 @@ class TestPR4Gap1VarietyReadPairedPresentAbsent:
     variety_assessed event when present; human-ask fallback (no event) when
     absent. Paired present/absent for the new read predicate."""
 
-    def test_variety_assessed_present_resolves_score_from_journal(self, live_env):
+    def test_variety_assessed_present_resolves_feature_score_by_task_id_latest_ts(
+            self, live_env):
+        """Gap 1 Step 10 resolves initial_variety_score by SELECTING THE FEATURE'S
+        event: filter variety_assessed to the feature task_id, take the latest-ts
+        match (resolve_arc_start semantics), then resolve the scalar via
+        resolve_variety_total — NOT "first event", NOT a direct variety['total'].
+
+        DISCRIMINATING multi-event fixture (gives the Step 10 fix teeth): the
+        journal holds three variety_assessed events constructed so the OLD
+        "first event" read yields a WRONG score, exercising both facets the fix
+        addresses:
+          (a) task_id filter — a DIFFERENT feature's event (task_id "99",
+              total 16) is appended FIRST, so a first-event read returns 16; the
+              task_id filter must exclude it.
+          (b) latest-ts       — a SAME-task_id ("2") PRIOR-arc event (total 4,
+              OLDER ts) shares the feature's id (the platform reuses ids across
+              arcs); the latest-ts match must beat it.
+        The feature's correct event is task_id "2", total 7, with the NEWEST ts
+        among the task_id-"2" events. Timestamps are stamped explicitly so
+        append-order and ts-order DIVERGE — a first-event read (16) and a
+        ts-blind same-id read (4) both differ from the correct 7.
+        """
         tmp_path, tasks_dir = live_env
+        feature_task_id = "2"
+
+        # (a) Different feature, appended FIRST — the first-event trap. Must be
+        #     excluded by the task_id filter.
         assert append_event(make_event(
-            "variety_assessed", task_id="2",
+            "variety_assessed", task_id="99",
+            variety={"novelty": 4, "scope": 4, "uncertainty": 4,
+                     "risk": 4, "total": 16},
+            ts="2026-06-22T10:00:00Z",
+        ))
+        # (b) Same task_id as the feature but a PRIOR arc (OLDER ts) — must lose
+        #     to the latest-ts match.
+        assert append_event(make_event(
+            "variety_assessed", task_id=feature_task_id,
+            variety={"novelty": 1, "scope": 1, "uncertainty": 1,
+                     "risk": 1, "total": 4},
+            ts="2026-06-22T09:00:00Z",
+        ))
+        # The feature's CURRENT-arc event: same task_id, NEWEST ts → the answer.
+        assert append_event(make_event(
+            "variety_assessed", task_id=feature_task_id,
             variety={"novelty": 1, "scope": 2, "uncertainty": 2,
                      "risk": 2, "total": 7},
+            ts="2026-06-22T11:00:00Z",
         ))
 
         # The drain has no bearing on the journal — but assert no task *.json is
@@ -216,12 +258,27 @@ class TestPR4Gap1VarietyReadPairedPresentAbsent:
         )
 
         events = read_events("variety_assessed")
-        # Mirror the skill's documented resolution: first event's variety.total.
-        first = next((e["variety"] for e in events if e.get("variety")), None)
-        total = first.get("total") if isinstance(first, dict) else None
+
+        # Replicate the skill's documented resolution over the UNSTUBBED read:
+        #   resolve_arc_start: filter to the feature task_id, take the latest ts
+        #   (ts PARSED, never lexically compared — make_event stamps '...Z'),
+        #   then resolve_variety_total: prefer the canonical 'total'.
+        matches = [e for e in events if e.get("task_id") == feature_task_id]
+        selected = max(
+            matches,
+            key=lambda e: datetime.fromisoformat(e["ts"].replace("Z", "+00:00")),
+            default=None,
+        )
+        total = (
+            selected["variety"].get("total")
+            if selected and isinstance(selected.get("variety"), dict)
+            else None
+        )
         assert total == 7, (
-            "Gap 1: initial_variety_score resolves to variety['total'] from the "
-            "first variety_assessed journal event"
+            "Gap 1: initial_variety_score must resolve to the FEATURE's score (7) "
+            "by filtering variety_assessed to the feature task_id and taking the "
+            "latest-ts match (resolve_arc_start), NOT the first event (16, a "
+            "different feature) and NOT a same-id prior-arc event (4); got %r" % total
         )
 
     def test_variety_assessed_absent_triggers_human_fallback(self, live_env):
