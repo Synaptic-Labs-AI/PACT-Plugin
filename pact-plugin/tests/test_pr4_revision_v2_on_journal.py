@@ -13,7 +13,9 @@ Mechanism under guard (architect's "lead-only-completion TIMING" framing):
   - The emitter's transition signal is PRIMARY `hook_event_name=="TaskCompleted"`
     (agent_handoff_emitter.py:198), with a disk-status fallback (`status==
     "completed"`) used ONLY when stdin omits hook_event_name (:199). PLUS
-    metadata.handoff truthy AND the O_EXCL marker absent.
+    metadata.handoff truthy AND the O_EXCL marker absent. (This primary/fallback
+    split is independently pinned in tests/test_emitter_happy_and_gates.py by
+    TestStatusFallbackGate + TestProductionShapeMetadataOnly.)
   - In production the PLATFORM sends a TaskCompleted frame ONLY at an actual
     completion. Rejection is PRE-completion: the teammate stores HANDOFF +
     remains in_progress and never self-completes (pact-agent-teams SKILL.md;

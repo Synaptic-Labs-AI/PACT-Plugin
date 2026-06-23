@@ -227,7 +227,12 @@ class TestPR4Gap1VarietyReadPairedPresentAbsent:
     def test_variety_assessed_absent_triggers_human_fallback(self, live_env):
         """Paired ABSENT arm: with NO variety_assessed event, the journal read
         yields no score, so the skill falls back to asking the team-lead. The
-        observable seam-level fact the fallback keys on is an empty read."""
+        observable seam-level fact the fallback keys on is an empty read.
+
+        The empty-read proxy is DELIBERATE: the actual "ask the team-lead" step is
+        skill-prose the LLM executes at harvest time, not a pytest-testable code
+        path. Asserting the empty read (its trigger) is the faithful, in-scope way
+        to pin that the absent-case fallback is preserved."""
         tmp_path, tasks_dir = live_env
         # Write an UNRELATED event so the journal exists but has no variety_assessed.
         assert append_event(make_event(
