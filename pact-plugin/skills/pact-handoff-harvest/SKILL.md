@@ -41,26 +41,22 @@ Read your processed task list from your team's section in agent memory (`~/.clau
 
 ### Step 3: Read All HANDOFFs
 
-For each discovered task, read the HANDOFF using this revision-aware fallback:
+For each discovered task, read the HANDOFF using this journal-first fallback:
 
-1. **Revision-aware metadata read**: Read the task's `metadata` (raw JSON; `TaskGet` is metadata-blind for `handoff` content). If `metadata.revision_number` is set and `> 1`, prefer `metadata.handoff` over the journal event. The journal `agent_handoff` event captured the FIRST (rejected) submission only — `agent_handoff_emitter.py` writes one journal event per task lifetime via an O_EXCL marker. On revision, the team-lead-completion of the revised task does NOT emit a second journal event, so the revised content lives in `metadata.handoff` only.
-2. **Session journal** (preferred for revision_number == 1 or unset, GC-proof): If the task was discovered via `agent_handoff` journal events and `revision_number` is unset or 1, the journal event's `handoff` field contains the full HANDOFF content inline — use it directly. This is the most reliable source for first-pass acceptance flows.
-3. **`TaskGet` fallback**: If both above fail (no journal event AND no `metadata.handoff`), fall back to `TaskGet(taskId).metadata.handoff`. May fail for garbage-collected tasks.
-4. **Report gap**: If all sources fail, report the gap to lead — note the task_id, agent name, and timestamp so the team-lead has context.
+1. **Session journal** (preferred, GC-proof): If the task was discovered via `agent_handoff` journal events, the journal event's `handoff` field contains the full HANDOFF content inline — use it directly. The journal carries the **accepted** HANDOFF for every completed task: the team-lead's single completion (acceptance) emits whatever `metadata.handoff` holds at that moment, so on a reject→revise→accept flow the journal event holds the revised content the lead accepted. This is the most reliable source for all completed tasks, first-pass and revised alike.
+2. **`TaskGet` fallback**: If there is no journal event for the task, fall back to `TaskGet(taskId).metadata.handoff` (read the raw `metadata` JSON; `TaskGet` is metadata-blind for `handoff` content). May fail for garbage-collected tasks.
+3. **Report gap**: If all sources fail, report the gap to lead — note the task_id, agent name, and timestamp so the team-lead has context.
 
-Pseudocode for the revision-aware branch:
+Pseudocode for the journal-first read:
 
 ```python
 for task_id in unprocessed:
     journal_event = next((e for e in journal_events if e.task_id == task_id), None)
-    task_meta = read_task_metadata(task_id) or {}  # raw JSON read; TaskGet is metadata-blind
-    revision_n = task_meta.get("revision_number", 1)
-    if revision_n > 1:
-        # Revised HANDOFF; journal event captured only the first (rejected) submission.
-        handoff = task_meta.get("handoff")
-    elif journal_event:
-        handoff = journal_event.handoff
+    if journal_event:
+        handoff = journal_event.handoff  # accepted content, GC-proof
     else:
+        # No journal event — last-resort metadata read (may be GC'd).
+        task_meta = read_task_metadata(task_id) or {}  # raw JSON; TaskGet is metadata-blind
         handoff = task_meta.get("handoff")
     # ...process handoff...
 ```
@@ -160,7 +156,7 @@ Gaps: {any HANDOFFs that were thin or missing}",
 ### Step 10: Gather Calibration Data
 
 After processing HANDOFFs, gather calibration metrics for the orchestrator's variety scoring feedback loop:
-- Read the feature task metadata for `initial_variety_score` (stored during variety assessment). If `TaskGet` fails (garbage-collected), ask the team-lead for the variety score instead.
+- Read `initial_variety_score` from the journal's `variety_assessed` event (GC-proof, survives the task-store drain): `python3 -c "import sys; sys.path.insert(0, '{hooks_dir}'); from shared.session_journal import read_events; import json; [print(json.dumps(e)) for e in read_events('variety_assessed')]"`. Take the first event's `variety` dict and resolve the scalar total from `variety['total']`. If no `variety_assessed` event exists (e.g., a feature dispatched without a variety emit), ask the team-lead for the variety score instead.
 - Scan `TaskList` for blocker count (tasks with "BLOCKER:" in subject). Note: `TaskList` may be incomplete in long sessions due to garbage collection — report what's available.
 - Scan `TaskList` for phase rerun count (retry/redo phase tasks)
 - Note domain from feature task description

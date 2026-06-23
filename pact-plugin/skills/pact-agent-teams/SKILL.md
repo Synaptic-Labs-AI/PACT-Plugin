@@ -194,12 +194,12 @@ If the team-lead rejects your teachback or HANDOFF, you wake on the inbound Send
 3. **Revise**. For teachback rejection: rewrite `metadata.teachback_submit` per the corrections. For HANDOFF rejection: revise the deliverable (re-edit files, re-run tests, etc.) and rewrite `metadata.handoff`.
 
 4. **Re-submit on the SAME task** (do NOT create a new task):
-   - Increment `metadata.revision_number`. The team-lead writes `revision_number=1` in the rejection record. On your first revision, increment to `2`. On each subsequent revision, increment again. The harvest path reads `metadata.handoff` directly when `revision_number > 1` to surface revised content; setting `revision_number=1` would route harvest to the rejected journal event and silently lose the revised content.
+   - Increment `metadata.revision_number`. The team-lead writes `revision_number=1` in the rejection record. On your first revision, increment to `2`. On each subsequent revision, increment again. This count is the rejection-cycle audit trail — it feeds the imPACT META-BLOCK 3-cycle signal, not harvest routing. It does NOT gate whether your revised content is preserved: the team-lead's acceptance (the single completion) emits whatever `metadata.handoff` holds at that moment, so the revised content reaches the journal regardless of the count.
    - SendMessage the team-lead: `"[{sender}→team-lead] Revised teachback/HANDOFF on Task #{id}. See metadata.{teachback_submit|handoff} (revision {N})."`
    - Re-SET `intentional_wait{reason=awaiting_lead_completion, since=<fresh canonical_since() output>}`.
    - Idle.
 
-> **Revision visibility**: on revision (`revision_number > 1`), the journal `agent_handoff` event from your *first* completion is preserved (one event per task lifetime). The secretary's harvest path reads `metadata.handoff` directly when `revision_number > 1`, so your revised content reaches institutional memory. The metadata write is sufficient.
+> **Revision visibility**: your revised content reaches institutional memory because of *when* the journal event is emitted, not because of `revision_number`. A rejection keeps your task `in_progress` and emits nothing; the only `agent_handoff` journal event fires at the team-lead's single completion — their acceptance — and captures whatever `metadata.handoff` holds at that moment, i.e. your revised content. So the journal carries the accepted, revised HANDOFF, and harvest reads it from there (drain-proof). Your job on revision is simply to rewrite `metadata.handoff` before the lead accepts.
 
 ### HANDOFF Format
 
