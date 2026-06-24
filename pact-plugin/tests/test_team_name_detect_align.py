@@ -235,10 +235,14 @@ class TestHalfFormedWindow:
 class TestFailSafeTotality:
     """The resolver NEVER raises. Two distinct mechanisms guarantee this:
 
-      * A poisoned (path-unsafe) raw session_id — NUL byte or '/' — is NOT a
-        raise source at all: session_id is only STRING-COMPARED against each
-        config.json's leadSessionId, never composed into a Path, so a poisoned
-        id simply never matches -> NO-MATCH -> default (the two
+      * A poisoned (path-unsafe) raw session_id — NUL byte or '/' — is NOT an
+        uncaught raise source. In the identity-match loop it is only
+        STRING-COMPARED against each config.json's leadSessionId. In the
+        branch-2 fallthrough it WOULD be composed into a Path
+        (``teams_root / session_id``), but ``is_safe_path_component(session_id)``
+        is the FIRST conjunct there and rejects the poisoned id BEFORE any Path
+        composition — so the poisoned id never matches an identity dir and is
+        gated out of branch-2 -> default (the two
         ``..._poisoned_session_id_no_match...`` tests below).
       * The genuine raise sources — a non-str teams_dir (TypeError), a
         HOME-unresolvable home (RuntimeError), and a per-entry config.json
@@ -247,9 +251,11 @@ class TestFailSafeTotality:
         except for the per-entry read). NO exception escapes."""
 
     def test_nul_poisoned_session_id_no_match_returns_default(self, ctx):
-        """A NUL byte in the raw session_id does NOT raise — session_id is only
-        string-compared to leadSessionId, never composed into a Path. So the
-        poisoned id cannot match the seeded (different-leadSessionId) dir ->
+        """A NUL byte in the raw session_id does NOT raise. In the identity
+        loop it is only string-compared to leadSessionId; in the branch-2
+        fallthrough is_safe_path_component(session_id) rejects it BEFORE the
+        teams_root / session_id composition. So the poisoned id cannot match the
+        seeded (different-leadSessionId) dir AND is gated out of branch-2 ->
         NO-MATCH -> default. NON-VACUITY: a real matchable dir is seeded under a
         DIFFERENT leadSessionId, so the default is returned because the
         string-compare ran and missed, not because the store is empty."""
@@ -259,8 +265,9 @@ class TestFailSafeTotality:
         resolved = ctx_module._resolve_aligned_team_name(
             "bad\x00id", teams_dir=str(teams_root), default="safe-default"
         )
-        # The poisoned id never equals LEAD_SID -> no match -> default. The
-        # well-formed dir IS scanned (the assertion bites: a resolver that
+        # The poisoned id never equals LEAD_SID -> no match; branch-2 then gates
+        # it out via is_safe_path_component before any path compose -> default.
+        # The well-formed dir IS scanned (the assertion bites: a resolver that
         # path-composed the session_id and raised would ALSO return the default,
         # so we additionally pin that the SAME dir DOES match its OWN id below.)
         assert resolved == "safe-default"
@@ -272,9 +279,11 @@ class TestFailSafeTotality:
 
     def test_slash_poisoned_session_id_no_match_returns_default(self, ctx):
         """A '/' (traversal) in the raw session_id must not traverse OR raise: it
-        is string-compared, never pathed, so it never matches -> default.
-        NON-VACUITY: same as above — a real matchable dir under a DIFFERENT
-        leadSessionId is seeded, so the default is the string-compare missing."""
+        is string-compared in the identity loop and rejected by
+        is_safe_path_component (the FIRST branch-2 conjunct) before the
+        teams_root / session_id compose, so it never matches AND never traverses
+        -> default. NON-VACUITY: same as above — a real matchable dir under a
+        DIFFERENT leadSessionId is seeded, so the default is the gated miss."""
         ctx_module, teams_root = ctx
         _seed_team_dir(teams_root, SESSION_ID8_DIR, lead_session_id=LEAD_SID)
         resolved = ctx_module._resolve_aligned_team_name(
