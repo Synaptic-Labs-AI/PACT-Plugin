@@ -394,3 +394,97 @@ def test_divergent_full_uuid_resolves_through_gate_both_modes(
         # identity-matched full-UUID dir does.
         assert not (tmp_path / ".claude" / "tasks" / LEAD_TEAM).exists()
         assert (tmp_path / ".claude" / "tasks" / LEAD_FULL_UUID_DIR).exists()
+
+
+# ─── 4. HARNESS-SUBSTRATE axis — config-less Desktop/SDK, both modes ───
+#
+# The detect-and-align cell above resolves the divergent full-UUID dir via the
+# config.json identity-match (branch-1). The Desktop/SDK harness provides a
+# substrate with NO config.json at all, so identity-match CANNOT fire — only the
+# session-id-anchored branch-2 (inboxes/ | file-edits.json witness) can resolve
+# it. This section adds the harness substrate as a THIRD axis ORTHOGONAL to the
+# in-process/tmux topology: under a config-less full-UUID team, the dispatch gate
+# must STILL resolve the team (via branch-2) and ALLOW the secretary, in BOTH
+# topologies. The non-misfire of branch-2 under CLI lives in
+# test_harness_aware_bootstrap.py (FIXTURE C); this file owns the end-to-end
+# both-modes×harness dispatch resolution.
+
+
+def _seed_config_less_team_store(tmp_path, *, team_name, tasks=()):
+    """Platform-shaped CONFIG-LESS team store (Desktop/SDK): teams/<team>/ with
+    inboxes/ + file-edits.json but NO config.json, plus tasks/<team>/. The
+    counterpart of _seed_team_store for the harness axis — identity-match cannot
+    resolve it (no leadSessionId), so only branch-2 can."""
+    team_dir = tmp_path / ".claude" / "teams" / team_name
+    (team_dir / "inboxes").mkdir(parents=True, exist_ok=True)
+    (team_dir / "inboxes" / "secretary.json").write_text("[]", encoding="utf-8")
+    (team_dir / "file-edits.json").write_text("{}", encoding="utf-8")
+    assert not (team_dir / "config.json").exists()  # the harness invariant
+    tasks_dir = tmp_path / ".claude" / "tasks" / team_name
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    for i, (owner, status) in enumerate(tasks):
+        (tasks_dir / f"task_{i}.json").write_text(
+            json.dumps({"id": str(i), "owner": owner, "status": status}),
+            encoding="utf-8",
+        )
+
+
+def test_config_less_full_uuid_resolves_through_gate_both_modes(
+    tmp_path, monkeypatch, capsys
+):
+    """HARNESS AXIS — config-less Desktop/SDK substrate, end-to-end through the
+    dispatch gate, BOTH topologies. The persisted SSOT is the WRONG computed
+    `session-<id8>`; the platform provisioned teams/<full-uuid>/ with inboxes/ +
+    file-edits.json but NO config.json. identity-match (branch-1) CANNOT resolve
+    it (there is no config.json carrying leadSessionId); branch-2 resolves the
+    full-UUID dir from the persisted session_id, so the member/task reads land on
+    the REAL config-less dir and the gate ALLOWs — in BOTH topologies.
+
+    NON-VACUITY: tasks are seeded ONLY under the config-less full-UUID dir AND
+    that dir has NO config.json, so an ALLOW is reachable ONLY via branch-2 — the
+    detect-align identity-match path is structurally unavailable here (proven by
+    the config.json-absence assertion), and the wrong `session-<id8>` store does
+    not exist. # COUNTER-TEST (source-only revert of pact_context.py): without
+    branch-2 the gate falls back to `session-<id8>`, misses the store, and DENYs
+    -> RED in both legs.
+
+    BOTH-MODES: branch-2 keys on the resolver's session_id arg, which the gate
+    passes as get_session_id() (the PERSISTED context id — always the LEAD's).
+    The topology axis is the acting dispatch FRAME's own session_id (the spawn
+    frame). We assert the resolution holds under a spawn frame whose id == the
+    lead (in-process) and != the lead (tmux), confirming branch-2 never recomputes
+    from the acting frame and the harness axis composes cleanly with the topology
+    axis."""
+    import shared.pact_context as ctx_module
+
+    for frame_sid, mode in ((LEAD_SID, "in-process"), (TMUX_SID, "tmux")):
+        plugin_root = tmp_path / "plugin"
+        _seed_plugin(plugin_root)
+        # Persist the WRONG computed short name as the SSOT; the persisted
+        # session_id is the LEAD's full UUID (session_init persists the lead id),
+        # which is what branch-2 anchors on.
+        _write_context(
+            monkeypatch, tmp_path, plugin_root,
+            team_name=LEAD_TEAM, session_id=LEAD_SID,
+        )
+        monkeypatch.setattr(ctx_module, "_aligned_cache", None)
+        # The CONFIG-LESS full-UUID store, keyed on no leadSessionId. The wrong
+        # `session-<id8>` store is deliberately ABSENT.
+        _seed_config_less_team_store(
+            tmp_path, team_name=LEAD_FULL_UUID_DIR, tasks=((_NAME, "pending"),),
+        )
+        # The harness invariant — identity-match is structurally unavailable.
+        assert not (
+            tmp_path / ".claude" / "teams" / LEAD_FULL_UUID_DIR / "config.json"
+        ).exists()
+        spawn = _make_spawn(team_name_arg="wrong-team")
+        spawn["session_id"] = frame_sid
+        code, out = _run_dispatch(spawn, capsys)
+        assert code == 0, (
+            f"branch-2 must resolve the config-less full-UUID store ({mode})"
+        )
+        assert out == _SUPPRESS_EXPECTED
+        # Load-bearing: only the config-less full-UUID store exists; the wrong
+        # `session-<id8>` store does not.
+        assert not (tmp_path / ".claude" / "tasks" / LEAD_TEAM).exists()
+        assert (tmp_path / ".claude" / "tasks" / LEAD_FULL_UUID_DIR).exists()

@@ -200,24 +200,59 @@ _SECRETARY_NAME = "secretary"
 
 
 def _team_has_secretary(team_name: str) -> bool:
-    """Return True iff the team config contains a member with
-    ``name == "secretary"``.
+    """Return True iff the secretary has joined the team — proven by EITHER the
+    config.json members[] roster OR (config-less fallback) the secretary's
+    inbox file.
 
     Pre-condition for marker write. Returns False silently on any I/O
     error, malformed JSON, or missing-secretary case — the sibling
     bootstrap_prompt_gate owns the user-visible advisory.
 
-    Built on the shared ``pact_context._iter_members`` helper, so the
-    JSON-shape adversarial-input semantics (missing config, malformed
-    JSON, non-list members, non-dict member entries, missing keys)
-    match those of the id-keyed
-    ``pact_context._lookup_agent_in_team_config`` consumer
-    byte-for-byte. The predicate stays distinct: this one filters on
-    the member ``name`` field; the lookup filters on member ``id``.
+    PRIMARY (CLI byte-identical): the members[] check via the shared
+    ``pact_context._iter_members`` helper, so the JSON-shape adversarial-input
+    semantics (missing config, malformed JSON, non-list members, non-dict
+    member entries, missing keys) match those of the id-keyed
+    ``pact_context._lookup_agent_in_team_config`` consumer byte-for-byte. The
+    predicate stays distinct: this one filters on the member ``name`` field;
+    the lookup filters on member ``id``. Tried FIRST, so under CLI (config
+    present) the inbox arm is never reached.
+
+    CONFIG-LESS FALLBACK: under the Desktop / older-CLI / print
+    substrate the platform creates ``teams/<full-uuid>/`` with ``inboxes/`` but
+    no ``config.json`` — so members[] is empty and the marker would deadlock.
+    Accept ``teams/<team_name>/inboxes/secretary.json`` as the witness.
+
+    The inbox witnesses the secretary was DISPATCHED, not that it has joined a
+    members[] roster — and that is the right signal here. PACT's bootstrap is
+    ``TaskCreate -> TaskUpdate(owner) -> Agent(secretary)`` with NO pre-spawn
+    ``SendMessage`` to the secretary, so the platform writes the secretary's
+    inbox file only on delivery of a message to an already-dispatched
+    secretary; it cannot predate the spawn within PACT's choreography. And the
+    gated tools (Edit/Write/Agent) do not hard-require a LIVE secretary at
+    unblock time — the one liveness contract (memory queries) is enforced by
+    awaiting a ``SendMessage`` reply, not by this marker. So a dispatch-level
+    witness is sufficient and correct for the marker precondition.
+
+    Fail-safe ``False`` on any error in either arm (the inbox ``is_file`` probe
+    is wrapped so an unexpected FS error degrades to the existing silent-False
+    semantic).
     """
     for member in pact_context._iter_members(team_name):
         if member.get("name") == _SECRETARY_NAME:
             return True
+    # Config-less fallback: the secretary's inbox file is the witness
+    # when no config.json members[] roster exists. team_name is get_team_name()
+    # output (path-safe by construction); the read is wrapped so any FS error
+    # preserves the fail-safe False.
+    try:
+        teams_dir = pact_context.get_claude_config_dir() / "teams"
+        secretary_inbox = (
+            teams_dir / team_name / "inboxes" / f"{_SECRETARY_NAME}.json"
+        )
+        if secretary_inbox.is_file():
+            return True
+    except Exception:
+        return False
     return False
 
 

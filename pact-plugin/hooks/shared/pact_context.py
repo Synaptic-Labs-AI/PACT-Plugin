@@ -362,15 +362,18 @@ def _resolve_aligned_team_name(
     A typed outer tuple would LEAK the RuntimeError/TypeError above and break
     never-raises, which is why the outer guard is a bare ``except Exception``.
 
-    NOTE — ``session_id`` is NOT a raise source here. It is used ONLY as a
-    string compared against ``config.json['leadSessionId']`` (and an empty
-    check); it is NEVER composed into a ``Path``. So a path-unsafe raw
-    ``session_id`` (embedded ``/`` or NUL) does NOT raise in this function —
-    it simply never equals any stored ``leadSessionId`` -> NO MATCH ->
-    ``default``. The path-safety gate is applied instead to the matched DIR
-    NAME (``is_safe_path_component`` below), which IS used as a path segment.
-    The bare-except precedents in this module are ``persist_context`` and
-    ``heal_context_if_missing``.
+    NOTE — ``session_id`` is NOT an uncaught raise source here. In the
+    identity-match loop it is used ONLY as a string compared against
+    ``config.json['leadSessionId']`` (and an empty check). In the branch-2
+    fallthrough below it IS composed into a ``Path`` (``teams_root /
+    session_id``), but ONLY after ``is_safe_path_component(session_id)`` gates
+    it as the FIRST conjunct — so a path-unsafe raw ``session_id`` (embedded
+    ``/`` or NUL) is rejected by that gate and falls through to ``default``,
+    never reaching the composition. The subsequent ``is_dir()`` / ``exists()``
+    probes raise at most an ``OSError``-family error, which the outer bare
+    ``except`` catches. The path-safety gate also guards the matched DIR NAME
+    in the loop (``is_safe_path_component`` there). The bare-except precedents
+    in this module are ``persist_context`` and ``heal_context_if_missing``.
 
     PERF (SessionStart hot-path scan cost): on a MATCH the scan stops at the
     first matching dir; on NO MATCH it iterates EVERY team dir under
@@ -427,15 +430,40 @@ def _resolve_aligned_team_name(
                 # This dir is unreadable / malformed — skip it, keep scanning
                 # the rest. A single bad sibling must not abort detection.
                 continue
+        # Branch-2: config-less full-UUID divergence (Desktop child / older-CLI
+        # / print). The identity-match loop above missed because no team dir
+        # carries a config.json with this leadSessionId — but the platform may
+        # still have created teams/<session_id>/ (full UUID) with inboxes/ and
+        # no config.json. Anchor on the harness-invariant session_id directly:
+        # if a real own-session substrate exists, resolve to it. is_safe_path_
+        # component(session_id) is the FIRST conjunct (guard-order — short-
+        # circuit before any FS probe; a path-unsafe session_id never reaches a
+        # Path composition). The inboxes/ | file-edits.json witness proves the
+        # platform built a genuine team substrate for this session (not a bare
+        # dir). Unreachable under new-CLI: the platform names the dir
+        # session-<id8>, so teams/<full-uuid>/ never exists (steady-state AND
+        # the ~38s cold-start) -> CLI byte-identical.
+        if (
+            is_safe_path_component(session_id)
+            and (teams_root / session_id).is_dir()
+            and (
+                (teams_root / session_id / "inboxes").is_dir()
+                or (teams_root / session_id / "file-edits.json").exists()
+            )
+        ):
+            return session_id
         return fallback
     except Exception:
         # TOTAL fail-safe: home-resolution RuntimeError (get_claude_config_dir
         # -> Path.home, the teams_dir=None branch), a non-str teams_dir
         # TypeError (Path(teams_dir)), or any other unexpected error -> the
-        # persisted/computed default. (session_id is NOT a raise source here —
-        # it is only string-compared to leadSessionId, never composed into a
-        # Path; see the NOTE in the docstring above.) NEVER raises —
-        # get_team_name and the heal path depend on this contract.
+        # persisted/computed default. (In the identity-match loop session_id is
+        # only string-compared to leadSessionId; the branch-2 fallthrough DOES
+        # compose teams_root / session_id, but only AFTER is_safe_path_component
+        # gates it, and the is_dir()/exists() probes raise at most an
+        # OSError-family error that THIS except catches — so session_id is still
+        # not an uncaught raise source; see the NOTE in the docstring above.)
+        # NEVER raises — get_team_name and the heal path depend on this contract.
         if default is not None:
             return default
         try:
@@ -479,12 +507,30 @@ def get_team_name() -> str:
         return _aligned_cache
     # Read the persisted SSOT first. An empty value is the fail-closed signal
     # (see the security-gate note above) — short-circuit BEFORE identity-match.
+    #
+    # LATENT COUPLING (the config-less fix depends on this): the
+    # _resolve_aligned_team_name BRANCH-2 config-less fallback (session-id-
+    # anchored teams/<uuid>/ resolution) is reached ONLY through the non-empty
+    # path below. So branch-2's config-less reachability DEPENDS on the
+    # persisted team_name being non-empty here. That holds today because
+    # session_init persists a non-empty computed default (generate_team_name ->
+    # session-<id8>, threaded as the resolver default at session_init main()).
+    # If a future change ever persisted an EMPTY team_name, this short-circuit
+    # would return '' BEFORE branch-2 ran and the config-less Desktop/SDK fix
+    # would SILENTLY stop firing (the deadlock would return) — with no error,
+    # because '' is the legitimate fail-closed "team unknown -> refuse" signal.
+    # Do NOT "fix" that by recovering a team from an empty SSOT here: that would
+    # break the deliberate fail-closed gate (test_empty_ssot_team_fails_closed_
+    # both_modes). The correct invariant to preserve is upstream: keep the
+    # persisted SSOT non-empty for a real session.
     ctx_team = get_pact_context().get("team_name", "")
     if not ctx_team:
         _aligned_cache = ""
         return _aligned_cache
     # Non-empty SSOT: identity-match can UPGRADE it to the real platform dir
-    # (or no-op back to ctx_team on a cold-start / no-match).
+    # (or no-op back to ctx_team on a cold-start / no-match). This is also the
+    # ONLY path that reaches the branch-2 config-less fallback (see the LATENT
+    # COUPLING note above).
     resolved = _resolve_aligned_team_name(get_session_id(), default=ctx_team)
     _aligned_cache = resolved.lower()
     return _aligned_cache

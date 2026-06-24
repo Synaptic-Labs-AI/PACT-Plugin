@@ -263,6 +263,13 @@ def _team_member_names(team_name: str) -> set[str]:
     architect §5 contract intentionally did NOT include this in
     dispatch_helpers.py because task_lifecycle_gate has no need for the
     member roster.
+
+    ACCEPTED CONFIG-LESS GAP: under the config-less Desktop/SDK
+    substrate there is no ``config.json``, so this returns ``set()`` and the
+    name-uniqueness rule degrades to "no collision detected". This is an
+    ACCEPTED degradation, not a deadlock: the rule fails OPEN (permits), so
+    dispatch is not blocked; only the (advisory) duplicate-name check is
+    silently inactive in that substrate.
     """
     cfg_path = get_claude_config_dir() / "teams" / team_name / "config.json"
     try:
