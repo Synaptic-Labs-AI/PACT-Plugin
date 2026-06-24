@@ -196,21 +196,39 @@ class TestBranch2ResolvesConfigLess:
         )
         assert resolved == "bare-default"
 
-    def test_identity_match_still_wins_over_branch2(self, ctx):
-        """Desktop-WITH-config outlier (e.g. f1d72df4): a config.json carrying
-        leadSessionId == session_id is present on the <uuid> dir. Branch-1
-        identity-match handles it; branch-2 is never reached. The returned dir is
-        the same <uuid>, but via the FIRST branch (order matters — identity-match
-        precedes branch-2)."""
+    def test_identity_match_wins_first_over_branch2_distinguishable(self, ctx):
+        """Desktop-WITH-config outlier (e.g. f1d72df4): branch-1 identity-match
+        MUST run BEFORE branch-2, and this cell PROVES the ORDER by making the
+        two branches resolve to DISTINGUISHABLE dirs.
+
+        Setup: the config.json (carrying leadSessionId == session_id) lives on a
+        DIFFERENT dir name (LEAD_ID8) than the running-frame session_id
+        (LEAD_UUID). So:
+          - branch-1 (identity-match scans for config['leadSessionId'] == sid)
+            resolves to LEAD_ID8 (the dir whose config matches).
+          - branch-2 (anchors on teams/<session_id>/) would resolve to LEAD_UUID
+            (the running-frame sid dir, which we ALSO seed with a witness so
+            branch-2 COULD fire if it were reached first).
+        Correct ordering (identity-match first) -> LEAD_ID8. If branch-2 wrongly
+        won, the result would be LEAD_UUID. Asserting == LEAD_ID8 therefore proves
+        identity-match fired FIRST — the order the prior fixture (config + witness
+        on the SAME dir, both branches -> the same value) could NOT discriminate.
+
+        # COUNTER-TEST: reordering the resolver so branch-2 precedes the
+        # identity-match loop would return LEAD_UUID here -> RED.
+        """
         ctx_module, teams_root = ctx
-        _seed_cli_with_config(teams_root, LEAD_UUID, lead_session_id=LEAD_UUID,
+        # branch-1's match dir: config.json on LEAD_ID8, leadSessionId == the sid.
+        _seed_cli_with_config(teams_root, LEAD_ID8, lead_session_id=LEAD_UUID,
                               members=("secretary",))
-        # Also a witness, so branch-2 COULD fire — but identity-match wins first.
-        (teams_root / LEAD_UUID / "inboxes").mkdir(exist_ok=True)
+        # branch-2's would-be dir: teams/<session_id>/ with a witness, so branch-2
+        # COULD fire — the discriminator is which branch the resolver consults.
+        (teams_root / LEAD_UUID / "inboxes").mkdir(parents=True, exist_ok=True)
         resolved = ctx_module._resolve_aligned_team_name(
             LEAD_UUID, teams_dir=str(teams_root), default="fallback"
         )
-        assert resolved == LEAD_UUID
+        # LEAD_ID8 (identity-match) NOT LEAD_UUID (branch-2) -> order proven.
+        assert resolved == LEAD_ID8
 
 
 class TestBranch2NoMisfireUnderCLI:
@@ -392,6 +410,35 @@ class TestInboxWitnessGate2:
                               members=("backend-coder",))  # no secretary member
         assert self._has_secretary(monkeypatch, tmp_path) is False
 
+    def test_inbox_isfile_raises_fails_safe_false(self, monkeypatch, tmp_path):
+        """GATE-2 fail-safe arm (review FUTURE-1): an UNEXPECTED FS error from the
+        inbox is_file() probe is swallowed by the `except Exception: return False`
+        wrap, so _team_has_secretary degrades to the silent fail-safe False rather
+        than propagating. Exercises the except arm that no other cell reached.
+
+        Non-vacuity: the fixture seeds the secretary inbox so WITHOUT the raise the
+        inbox arm would return True (proven by test_inbox_witness_passes_config_less
+        on the identical fixture). With is_file monkeypatched to raise OSError, the
+        result flips to False — attributable to the except arm specifically.
+
+        # COUNTER-TEST: removing the try/except wrap would let the OSError
+        # PROPAGATE out of _team_has_secretary -> this call would raise instead of
+        # returning False -> RED (pytest.raises would be needed), proving the arm
+        # is load-bearing.
+        """
+        teams_root = tmp_path / ".claude" / "teams"
+        _seed_config_less_desktop(teams_root, self._TEAM)  # secretary.json present
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        # Force the inbox probe to raise an FS-family error (e.g. a stat failure
+        # on a pathological filesystem). The members[] arm finds nothing first
+        # (no config.json), so control reaches the inbox try-block.
+        def _raise(self):
+            raise OSError("simulated FS failure on is_file()")
+        monkeypatch.setattr(Path, "is_file", _raise)
+        from bootstrap_marker_writer import _team_has_secretary
+        # Must NOT raise; must degrade to the fail-safe False.
+        assert _team_has_secretary(self._TEAM) is False
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Writability invariant (TS12) — non-lead frame cannot poison the marker
@@ -473,6 +520,35 @@ class TestWritabilityInvariant:
                   capsys)
         assert not (session_dir / BOOTSTRAP_MARKER_NAME).exists()
 
+    @pytest.mark.parametrize(
+        "agent_type, marker_expected",
+        [
+            ("pact-orchestrator", True),    # lead -> is_lead True -> marker writes
+            ("pact-backend-coder", False),  # teammate -> is_lead False -> no marker
+        ],
+    )
+    def test_is_lead_is_sole_cause_of_marker_write(self, monkeypatch, tmp_path,
+                                                   capsys, agent_type,
+                                                   marker_expected):
+        """SAME-FIXTURE A/B isolating agent_type as the SOLE differing cause
+        (review remediation of the GATE-2 attribution question). Both arms use
+        the IDENTICAL _setup_config_less_session and the IDENTICAL input EXCEPT
+        agent_type. The marker presence flips exactly with is_lead-ness, so the
+        non-lead marker-ABSENCE is attributable to the is_lead gate SPECIFICALLY
+        — not to any unrelated precondition (plugin_version, session_dir,
+        witness), which are held identical across both arms and which the
+        lead arm's PASS proves are satisfied.
+
+        # COUNTER-TEST: removing the is_lead gate makes the False arm write the
+        # marker -> RED. Source-only revert of either GATE breaks the True arm.
+        """
+        session_dir = self._setup_config_less_session(monkeypatch, tmp_path)
+        self._run({"hook_event_name": "UserPromptSubmit",
+                   "session_id": self._SESSION_ID, "prompt": "hi",
+                   "source": "startup", "agent_type": agent_type},
+                  capsys)
+        assert (session_dir / BOOTSTRAP_MARKER_NAME).exists() is marker_expected
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SDK harness coverage (TS15) — by-construction note + cheap parametrization
@@ -506,10 +582,16 @@ class TestSdkHarnessByConstruction:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+@pytest.mark.skip(
+    reason="POST-MERGE deferred manual Desktop validation — documentation only; "
+    "this CLI/CI substrate cannot exercise the real Desktop harness. Skipped "
+    "(not passed) so a doc carrier never inflates the green coverage count."
+)
 def test_deferred_desktop_validation_protocol():
     """POST-MERGE DEFERRED VALIDATION (documentation cell — asserts nothing
     runtime; it carries the protocol the user runs in a REAL Desktop session,
-    which this CLI/CI substrate cannot exercise).
+    which this CLI/CI substrate cannot exercise). SKIPPED, not passed, so this
+    documentation carrier does not count toward the green total (review MINOR-2).
 
     Fixtures here CAN prove: branch-2 resolves the config-less <uuid>; it does
     NOT misfire under CLI cold-start (FIXTURE C) or tmux (TS4); identity-match
@@ -560,4 +642,4 @@ def test_deferred_desktop_validation_protocol():
     STEP 6  run the NEGATIVE LIVE-PROBE above once.
     CRUX gates: STEP 2 + STEP 3 + STEP 4. Report each PASS/FAIL.
     """
-    assert True  # documentation-only; the protocol above is the deliverable
+    pytest.fail("unreachable — this cell is @pytest.mark.skip (documentation only)")
