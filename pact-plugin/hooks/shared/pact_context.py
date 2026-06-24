@@ -507,12 +507,30 @@ def get_team_name() -> str:
         return _aligned_cache
     # Read the persisted SSOT first. An empty value is the fail-closed signal
     # (see the security-gate note above) — short-circuit BEFORE identity-match.
+    #
+    # LATENT COUPLING (#1019 config-less fix depends on this): the
+    # _resolve_aligned_team_name BRANCH-2 config-less fallback (session-id-
+    # anchored teams/<uuid>/ resolution) is reached ONLY through the non-empty
+    # path below. So branch-2's config-less reachability DEPENDS on the
+    # persisted team_name being non-empty here. That holds today because
+    # session_init persists a non-empty computed default (generate_team_name ->
+    # session-<id8>, threaded as the resolver default at session_init main()).
+    # If a future change ever persisted an EMPTY team_name, this short-circuit
+    # would return '' BEFORE branch-2 ran and the config-less Desktop/SDK fix
+    # would SILENTLY stop firing (the deadlock would return) — with no error,
+    # because '' is the legitimate fail-closed "team unknown -> refuse" signal.
+    # Do NOT "fix" that by recovering a team from an empty SSOT here: that would
+    # break the deliberate fail-closed gate (test_empty_ssot_team_fails_closed_
+    # both_modes). The correct invariant to preserve is upstream: keep the
+    # persisted SSOT non-empty for a real session.
     ctx_team = get_pact_context().get("team_name", "")
     if not ctx_team:
         _aligned_cache = ""
         return _aligned_cache
     # Non-empty SSOT: identity-match can UPGRADE it to the real platform dir
-    # (or no-op back to ctx_team on a cold-start / no-match).
+    # (or no-op back to ctx_team on a cold-start / no-match). This is also the
+    # ONLY path that reaches the branch-2 config-less fallback (see the LATENT
+    # COUPLING note above).
     resolved = _resolve_aligned_team_name(get_session_id(), default=ctx_team)
     _aligned_cache = resolved.lower()
     return _aligned_cache
