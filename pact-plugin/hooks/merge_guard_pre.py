@@ -802,9 +802,9 @@ def find_valid_token(token_dir: Path | None = None) -> tuple[dict, str] | tuple[
                 # Cycle-1 fail-OPEN-on-either-empty AND-short-circuit WAS
                 # itself the attack surface — populated current_session +
                 # empty token_session let attacker-written tokens through.
-                # See test_merge_guard.py:5068 (test_no_session_id_accepts_any_token)
-                # for the preserved invariant; :5086 inversion is the SEC-S1
-                # fix landing.
+                # See test_no_session_id_accepts_any_token (in test_merge_guard.py)
+                # for the preserved invariant; its SEC-S1 inversion counterpart
+                # is the fix landing.
                 if not token_session or current_session != token_session:
                     continue
 
