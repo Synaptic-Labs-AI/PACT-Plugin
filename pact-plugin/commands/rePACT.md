@@ -236,7 +236,23 @@ A_id = TaskCreate(
                 "Mission for Task B: the primary-work task assigned to you in your TaskList (the work task, NOT this TEACHBACK gate task), identified by its subject (the '{role}: {mission}' pattern). Claim it after this teachback is accepted."
 )
 TaskUpdate(A_id, owner="{scope-prefixed-name}")
-B_id = TaskCreate(subject="{scope-prefixed-name}: implement {sub-task}", description="<full mission>\n\nFIRST claim this task (TaskUpdate status=in_progress) before any implementation tool-use — it is pre-assigned to you but still pending; you flip it, not the lead.")
+B_id = TaskCreate(
+    subject="{scope-prefixed-name}: implement {sub-task}",
+    description="<full mission>\n\nFIRST claim this task (TaskUpdate status=in_progress) before any implementation tool-use — it is pre-assigned to you but still pending; you flip it, not the lead.",
+    metadata={
+        "variety": {
+            "novelty":               N,
+            "novelty_rationale":     "<1-sentence: why this score for THIS dispatch's novelty>",
+            "scope":                 N,
+            "scope_rationale":       "<1-sentence: why this score for THIS dispatch's scope>",
+            "uncertainty":           N,
+            "uncertainty_rationale": "<1-sentence: why this score for THIS dispatch's uncertainty>",
+            "risk":                  N,
+            "risk_rationale":        "<1-sentence: why this score for THIS dispatch's risk>",
+            "total":                 N
+        }
+    }
+)
 TaskUpdate(B_id, owner="{scope-prefixed-name}", addBlockedBy=[A_id])
 TaskUpdate(A_id, addBlocks=[B_id])
 ```
