@@ -361,10 +361,10 @@ _BLOCKED_TOOLS = frozenset({
 # carve-out below; any drift silently re-introduces the bootstrap-deadlock
 # these constants are here to prevent.
 #
-# _SECRETARY_NAME mirrors bootstrap_marker_writer._SECRETARY_NAME (the
-# producer-side constant at marker_writer.py:103) and the literal at
-# commands/bootstrap.md Step 2. Cross-file atomic edits required across
-# this file, bootstrap_marker_writer.py, AND commands/bootstrap.md.
+# _SECRETARY_NAME mirrors the producer-side bootstrap_marker_writer._SECRETARY_NAME
+# constant and the literal at commands/bootstrap.md Step 2. Cross-file atomic
+# edits required across this file, bootstrap_marker_writer.py, AND
+# commands/bootstrap.md.
 #
 # _SECRETARY_AGENT_TYPE is the canonical agentType from
 # commands/bootstrap.md Step 2 — no producer-side mirror in
@@ -415,9 +415,8 @@ def _secretary_in_members(team_name: str) -> bool:
     fail direction). A False return makes the carve-out FIRE (the safe
     direction — it only ever permits the canonical secretary spawn, never a
     non-secretary tool, which bindings 1/2/3 already exclude). This mirrors the
-    bare-except seam precedent at shared.pact_context._resolve_aligned_team_name
-    (pact_context.py:347), which uses a broad except for the same Path.home
-    RuntimeError reason.
+    bare-except seam precedent at shared.pact_context._resolve_aligned_team_name,
+    which uses a broad except for the same Path.home RuntimeError reason.
     """
     try:
         return any(
@@ -480,8 +479,9 @@ def _is_canonical_secretary_spawn(input_data: dict) -> bool:
     (no config.json), so binding 5 can no longer self-close — _secretary_in_members
     is always False there and the carve-out always fires pre-marker. The durable
     one-shot is now MARKER-PRESENCE: the is_marker_set fast-path in
-    _check_tool_allowed (bootstrap_gate.py:591) returns None (allow-all) BEFORE
-    the carve-out is ever reached (bootstrap_gate.py:615), so once the marker is
+    _check_tool_allowed returns None (allow-all) BEFORE the carve-out
+    (this _is_canonical_secretary_spawn check) is ever reached in
+    _check_tool_allowed, so once the marker is
     written the carve-out is moot. Documented so no future reader restores a
     binding-5 one-shot and re-deadlocks Desktop. The Desktop always-fire window
     is contained by bindings 1/2/3 (exact Agent + pact-secretary + secretary,
