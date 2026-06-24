@@ -616,9 +616,11 @@ def _setup_pact_session_with_team(monkeypatch, tmp_path, team_name="t1",
     """Set up a PACT session whose context carries a non-empty team_name and
     a matching team config at ~/.claude/teams/{team_name}/config.json.
 
-    Mirrors _setup_pact_session but adds the team-config sidecar that
-    _team_has_secretary reads via shared.pact_context._iter_members. The
-    monkeypatched Path.home means the team config lands under tmp_path.
+    Mirrors _setup_pact_session but adds the team-config sidecar that the
+    members[] readers consume via shared.pact_context._iter_members — the gate
+    carve-out's _secretary_in_members JOIN witness (#1023) and the marker
+    writer's _team_has_secretary DISPATCH witness alike. The monkeypatched
+    Path.home means the team config lands under tmp_path.
 
     members: list of member dicts to embed at config.members[]. Defaults
     to a fresh-team shape (no secretary entry) which is the precondition
@@ -697,10 +699,14 @@ class TestCanonicalSecretarySpawnCarveOut:
     writer requires before writing the marker).
 
     Four conjunctive bindings (tool_name, subagent_type, name,
-    NOT _team_has_secretary). (#979: binding-4 — the tool_input.team_name
-    equality — was dropped; the Agent(team_name=) arg is platform-ignored.)
-    Each test below mentally reverts ONE binding and confirms the carve-out
-    closes (predicate returns False → caller returns _DENY_REASON).
+    NOT _secretary_in_members). (#979: binding-4 — the tool_input.team_name
+    equality — was dropped; the Agent(team_name=) arg is platform-ignored.
+    #1023: binding 5 now reads the gate-local members[]-only JOIN witness
+    _secretary_in_members, NOT bootstrap_marker_writer._team_has_secretary —
+    the latter's inbox DISPATCH fallback is created pre-spawn and re-deadlocked
+    the carve-out.) Each test below mentally reverts ONE binding and confirms
+    the carve-out closes (predicate returns False → caller returns
+    _DENY_REASON).
     """
 
     # --- Positive case: all bindings match → allow ---
@@ -779,12 +785,15 @@ class TestCanonicalSecretarySpawnCarveOut:
     def test_carve_out_closes_after_secretary_in_members(
         self, monkeypatch, tmp_path,
     ):
-        """_team_has_secretary(team_name) == True → predicate False → deny.
+        """_secretary_in_members(team_name) == True → predicate False → deny.
 
-        The one-shot semantic: once the canonical spawn has landed and
-        the secretary entry is in members[], the carve-out cannot fire a
-        second time in the same session. The marker writer's
-        UserPromptSubmit hook handles the next turn from there.
+        The one-shot semantic (CLI): once the canonical spawn has landed and
+        the secretary entry is in members[], the JOIN witness returns True so
+        the carve-out cannot fire a second time in the same session. The marker
+        writer's UserPromptSubmit hook handles the next turn from there.
+        (#1023 D-record: under config-less Desktop members[] is structurally
+        empty, so this self-closure does not apply there — marker-presence is
+        the durable one-shot instead.)
         """
         from bootstrap_gate import _check_tool_allowed, _DENY_REASON
 
@@ -824,32 +833,543 @@ class TestCanonicalSecretarySpawnCarveOut:
 
     # --- Fail-closed posture on team-config read error ---
 
-    def test_predicate_fail_closed_on_team_has_secretary_oserror(
+    def test_witness_read_error_fires_carve_out_allow(
         self, monkeypatch, tmp_path,
     ):
-        """_team_has_secretary raising OSError → predicate False → deny.
+        """A members[] read error in the JOIN witness → carve-out FIRES (allow).
 
-        The predicate catches (OSError, ValueError, KeyError, TypeError,
-        AttributeError) and returns False. Caller falls through to the
-        existing _BLOCKED_TOOLS deny path, so the user sees the canonical
-        _DENY_REASON rather than the load-failure variant.
+        #1023: the join witness is the gate-local _secretary_in_members, which
+        reads pact_context._iter_members and wraps its body in a broad
+        ``except Exception: return False``. A read error therefore makes the
+        witness return False → binding 5 (`not False`) is True → the carve-out
+        fires → the canonical secretary spawn is ALLOWED (result is None).
+
+        This is the deliberate SAFE fail direction (architect D-record): a
+        witness-read error only ever PERMITS the canonical secretary spawn —
+        bindings 1/2/3 (exact Agent + pact-secretary + secretary literals)
+        still exclude every non-secretary tool — and it specifically avoids
+        the re-deadlock that the pre-#1023 typed-except-DENY direction caused
+        on the Path.home() RuntimeError seam.
+
+        We monkeypatch pact_context._iter_members (the witness's data source)
+        to RAISE, exercising _secretary_in_members's broad-except arm
+        end-to-end — NOT stubbing _secretary_in_members itself, which would
+        bypass the very except clause this test must prove.
         """
-        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
-        import bootstrap_marker_writer
+        from bootstrap_gate import _check_tool_allowed
+        import shared.pact_context as ctx_module
 
         _setup_pact_session_with_team(
             monkeypatch, tmp_path, team_name="t1", members=[],
         )
 
-        def _boom(team_name):
+        def _boom(team_name, teams_dir=None):
             raise OSError("simulated disk error")
 
-        monkeypatch.setattr(
-            bootstrap_marker_writer, "_team_has_secretary", _boom,
-        )
+        monkeypatch.setattr(ctx_module, "_iter_members", _boom)
 
         result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
-        assert result == _DENY_REASON
+        assert result is None
+
+
+# =============================================================================
+# Premature-inbox carve-out regression (#1023)
+# =============================================================================
+
+
+def _create_secretary_inbox(tmp_path, team_name="t1"):
+    """Reproduce the platform's PRE-SPAWN secretary-inbox write.
+
+    The bootstrap choreography is::
+
+        Step 1  TaskCreate(secretary briefing)
+        Step 2  TaskUpdate(taskId, owner="secretary")   # platform delivers a
+                                                         # task_assignment ->
+                                                         # CREATES inboxes/secretary.json
+        Step 3  Agent(name="secretary", ...)            # the carve-out must fire HERE
+
+    So by Step 3 ``teams/<team>/inboxes/secretary.json`` ALREADY exists, written
+    by the Step-2 ``TaskUpdate(owner)`` task-assignment delivery — BEFORE the
+    ``Agent(secretary)`` spawn the carve-out exists to permit. This helper writes
+    that file FAITHFULLY: the SAME path the marker writer's inbox witness reads
+    (``get_claude_config_dir()/teams/<team>/inboxes/secretary.json`` ==
+    ``Path.home()/.claude/...`` under the fixture's Path.home monkeypatch), the
+    SAME filename, and a ``task_assignment``-shaped body matching the issue's
+    ground-truth evidence (an assigned task with ``assignedBy="team-lead"``).
+
+    This is NOT a synthetic pre-placed file divorced from the choreography — it
+    is the exact artifact ``TaskUpdate(owner="secretary")`` produces, present at
+    gate-eval time. The synthetic shortcut (an empty touch, or a file written in
+    a shape the platform never produces) is precisely what let #1021 slip through
+    #1019's verification, so the regression test must use the real shape.
+
+    Returns the inbox file path.
+    """
+    inbox_dir = tmp_path / ".claude" / "teams" / team_name / "inboxes"
+    inbox_dir.mkdir(parents=True, exist_ok=True)
+    inbox_path = inbox_dir / "secretary.json"
+    # task_assignment-shaped body (issue #1023 evidence: a task_assignment for the
+    # secretary task, assignedBy team-lead). The marker writer's inbox witness
+    # only checks .is_file() — it never parses the body — but a faithful body
+    # keeps the fixture honest about what the platform actually writes.
+    inbox_path.write_text(json.dumps([
+        {
+            "type": "task_assignment",
+            "taskId": "1",
+            "subject": "secretary briefing",
+            "assignedBy": "team-lead",
+            "timestamp": "2026-01-01T00:00:00Z",
+        }
+    ]), encoding="utf-8")
+    return inbox_path
+
+
+def _setup_carveout_team_with_lead_session(
+    monkeypatch, tmp_path, *, team_name="t1", lead_session_id,
+    frame_session_id, members=None, seed_team_dir_name=None,
+):
+    """Both-modes carve-out fixture: like _setup_pact_session_with_team but the
+    on-disk config.json carries a ``leadSessionId`` field and the context's
+    ``session_id`` is set independently, so get_team_name's identity-match
+    (_resolve_aligned_team_name) sees a genuine in-process (frame==lead) vs tmux
+    (frame!=lead) topology.
+
+    ``team_name`` is the PERSISTED context team_name (use "" to exercise the
+    empty-SSOT fail-closed short-circuit). ``seed_team_dir_name`` is the dir name
+    the team config/inbox are seeded under (defaults to ``team_name``); pass it
+    explicitly when team_name is "" so the team dir still exists on disk but the
+    SSOT is empty.
+
+    Resets _aligned_cache (NOT reset by init(), which is a no-op once
+    _context_path is pre-set) so each leg / loop iteration resolves freshly.
+    """
+    import shared.pact_context as ctx_module
+
+    dir_name = seed_team_dir_name if seed_team_dir_name is not None else team_name
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    session_dir = tmp_path / ".claude" / "pact-sessions" / _SLUG / _SESSION_ID
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    plugin_root = tmp_path / "plugin"
+    (plugin_root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"version": "9.9.9"}), encoding="utf-8"
+    )
+
+    context_file = session_dir / "pact-session-context.json"
+    context_file.write_text(json.dumps({
+        "team_name": team_name,
+        "session_id": frame_session_id,
+        "project_dir": _PROJECT_DIR,
+        "plugin_root": str(plugin_root),
+        "started_at": "2026-01-01T00:00:00Z",
+    }), encoding="utf-8")
+
+    if dir_name:
+        teams_dir = tmp_path / ".claude" / "teams" / dir_name
+        teams_dir.mkdir(parents=True, exist_ok=True)
+        (teams_dir / "config.json").write_text(json.dumps({
+            "name": dir_name,
+            "leadSessionId": lead_session_id,
+            "members": members if members is not None else [],
+        }), encoding="utf-8")
+
+    monkeypatch.setattr(ctx_module, "_context_path", context_file)
+    monkeypatch.setattr(ctx_module, "_cache", None)
+    monkeypatch.setattr(ctx_module, "_aligned_cache", None)
+    return session_dir
+
+
+def _setup_carveout_session_config_less(monkeypatch, tmp_path, *, team_name="t1"):
+    """Config-less Desktop carve-out fixture: a PACT session context whose
+    team_name resolves, but with NO config.json on disk for the team (the
+    config-less Desktop/SDK substrate). members[] is therefore structurally
+    empty (no roster file to read), so the members-only join witness returns
+    False and the carve-out fires.
+
+    The team dir exists (so get_team_name's resolution lands on it) but holds
+    NO config.json — only the inbox the caller seeds via _create_secretary_inbox.
+    """
+    import shared.pact_context as ctx_module
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    session_dir = tmp_path / ".claude" / "pact-sessions" / _SLUG / _SESSION_ID
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    plugin_root = tmp_path / "plugin"
+    (plugin_root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"version": "9.9.9"}), encoding="utf-8"
+    )
+
+    context_file = session_dir / "pact-session-context.json"
+    context_file.write_text(json.dumps({
+        "team_name": team_name,
+        "session_id": _SESSION_ID,
+        "project_dir": _PROJECT_DIR,
+        "plugin_root": str(plugin_root),
+        "started_at": "2026-01-01T00:00:00Z",
+    }), encoding="utf-8")
+
+    # Team dir exists but deliberately has NO config.json (config-less Desktop).
+    teams_dir = tmp_path / ".claude" / "teams" / team_name
+    teams_dir.mkdir(parents=True, exist_ok=True)
+    assert not (teams_dir / "config.json").exists()
+
+    monkeypatch.setattr(ctx_module, "_context_path", context_file)
+    monkeypatch.setattr(ctx_module, "_cache", None)
+    monkeypatch.setattr(ctx_module, "_aligned_cache", None)
+    return session_dir
+
+
+class TestPrematureInboxCarveOutRegression:
+    """#1023: the canonical secretary spawn must STILL be allowed when the
+    secretary's inbox file already exists (written pre-spawn by
+    ``TaskUpdate(owner="secretary")``) but the secretary is NOT yet in
+    ``members[]``.
+
+    ROOT CAUSE this guards: #1021 widened the SHARED
+    ``bootstrap_marker_writer._team_has_secretary`` predicate with a config-less
+    inbox-witness fallback (``members[]`` roster OR
+    ``teams/<team>/inboxes/secretary.json`` exists). That predicate had a SECOND
+    consumer — ``bootstrap_gate`` binding 5 — never re-examined by #1021. Because
+    the platform creates the inbox at bootstrap Step 2 (``TaskUpdate(owner)``)
+    BEFORE Step 3 (``Agent(secretary)``), the inbox arm returned True
+    prematurely, ``not True`` made binding 5 False, the carve-out did NOT fire,
+    and the gate DENIED the very spawn the carve-out exists to permit — a
+    bootstrap deadlock on the first turn of every fresh CLI session under 4.4.39.
+
+    The fix decouples by consumer: binding 5 now reads the gate-local
+    ``members[]``-only JOIN witness ``_secretary_in_members`` (dispatch-witness
+    via the inbox != join-witness via members[]), leaving
+    ``_team_has_secretary``'s inbox DISPATCH fallback for the marker writer.
+
+    WHY THE EXISTING CARVE-OUT TESTS DID NOT CATCH THIS: every carve-out test
+    seeds the team via ``_setup_pact_session_with_team``, which writes
+    ``config.json`` + ``members[]`` but NEVER creates an ``inboxes/`` dir — so
+    binding 5 was only ever exercised against the ``members[]`` arm, and the
+    cross-product (gate carve-out × premature inbox witness) — the exact
+    regression path — was untested. These tests add the inbox witness via the
+    REAL ``TaskUpdate(owner)`` write shape (``_create_secretary_inbox``) and
+    assert the carve-out STILL fires.
+
+    NON-VACUITY — VERIFICATION MATRIX (counter-test-by-revert, SOURCE-ONLY)
+    ----------------------------------------------------------------------
+    Binding 5 is the load-bearing source. The pre-fix shape
+    (``return not _team_has_secretary(expected_team)``) reads the inbox arm, so
+    a premature inbox flips it to a DENY; the post-fix shape
+    (``return not _secretary_in_members(expected_team)``) reads members[] only,
+    so a premature inbox is ignored and the carve-out fires.
+
+    Measure via SOURCE-ONLY revert of the gate alone (the fix commit bundles
+    these new tests with the source — a whole-commit ``git revert`` would mask
+    the cardinality)::
+
+        git checkout <fix>^ -- pact-plugin/hooks/bootstrap_gate.py
+        python -m pytest tests/test_bootstrap_gate.py::TestPrematureInboxCarveOutRegression \
+                         tests/test_bootstrap_gate.py::TestSecretaryInMembersUnit -q
+        git checkout <fix>  -- pact-plugin/hooks/bootstrap_gate.py
+        git diff --quiet -- pact-plugin/hooks/bootstrap_gate.py   # exits 0
+
+    EMPIRICAL RED set (MEASURED against the pre-fix gate, not assumed) over
+    {TestPrematureInboxCarveOutRegression + TestSecretaryInMembersUnit} =
+    {7 failed, 2 passed}, decomposing as:
+
+      BEHAVIORAL RED (4) — coupled to the inbox-arm regression, the load-bearing
+      non-vacuity proof. Each asserts ``result is None`` over a present premature
+      inbox, and each flips to ``_DENY_REASON`` under the pre-fix inbox-reading
+      binding 5 (``not _team_has_secretary``):
+        - R1 test_premature_inbox_does_not_defeat_carve_out      (THE headline)
+        - R2 test_premature_inbox_carve_out_fires_in_process
+        - R3 test_premature_inbox_carve_out_fires_tmux
+        - C2 test_carve_out_fires_config_less_desktop_no_config
+
+      NET-NEW-SYMBOL RED (3) — the U1 unit cells fail by ``ImportError`` because
+      ``_secretary_in_members`` does not exist in the pre-fix gate (it is the
+      fix's net-new symbol). This is a WEAKER non-vacuity form than a behavioral
+      RED (an ImportError proves the symbol is new, not that the assertion is
+      coupled to the bug); the U1 cells' OWN per-test ``# COUNTER-TEST`` notes
+      describe the finer behavioral revert (typed-tuple swap / members-vs-inbox)
+      that would flip them RED in isolation:
+        - U1 test_true_when_secretary_in_members
+        - U1 test_false_when_members_empty
+        - U1 test_false_on_iter_members_raising
+
+      GREEN (2) — FIX-INDEPENDENT by construction (they assert a DENY, not an
+      allow over a present inbox), so they correctly stay GREEN under the revert;
+      documented so a verifier does not expect them in the RED set:
+        - E1 test_empty_ssot_fails_closed_even_with_premature_inbox_both_modes
+        - CONTAINMENT test_non_canonical_input_still_blocked_with_pending_witness_error
+
+    The existing ``test_carve_out_closes_after_secretary_in_members`` (one-shot
+    closure, in TestCanonicalSecretarySpawnCarveOut) is likewise fix-independent.
+    """
+
+    # --- R1: THE headline regression (premature inbox must NOT defeat carve-out) ---
+
+    def test_premature_inbox_does_not_defeat_carve_out(self, monkeypatch, tmp_path):
+        """members=[] + a pre-spawn task-assignment-shaped inbox present →
+        Agent(secretary) ALLOWED (result is None).
+
+        Exercises the REAL inbox-witness seam UNMOCKED: the inbox file is on
+        disk at the path the predicate reads, and neither _team_has_secretary
+        nor _secretary_in_members is stubbed. Keyed on the OBSERVABLE outcome
+        (result is None vs _DENY_REASON), not the internal helper name, so it
+        stays valid across helper-shape changes.
+
+        # COUNTER-TEST (source-only revert of bootstrap_gate.py): the pre-fix
+        # binding 5 (`not _team_has_secretary`) reads the inbox arm → the
+        # premature inbox makes it True → `not True` → carve-out denies → this
+        # assertion (result is None) goes RED. THE headline non-vacuity cell.
+        """
+        from bootstrap_gate import _check_tool_allowed
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+        _create_secretary_inbox(tmp_path, team_name="t1")  # real pre-spawn write
+
+        result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        assert result is None
+
+    # --- R2 / R3: both-modes legs (standing merge gate) ---
+
+    def test_premature_inbox_carve_out_fires_in_process(self, monkeypatch, tmp_path):
+        """Both-modes leg — IN-PROCESS topology (frame session_id ==
+        config.leadSessionId). The carve-out resolves the team via get_team_name
+        (the SSOT context), so the identity-match in _resolve_aligned_team_name
+        succeeds; the premature inbox is still present and the carve-out STILL
+        fires (result is None).
+
+        The carve-out is topology-agnostic by design (it never branches on the
+        in-process/tmux mode flag — DUAL-MODE PERMANENT CONTRACT item 2), so both
+        legs assert the SAME outcome; they are provided as the standing merge-gate
+        formality, with the leadSessionId seeded so the two topologies are
+        genuinely distinct (not a duplicated assertion).
+
+        # COUNTER-TEST (source-only revert): same as R1 — the premature inbox
+        # flips the pre-fix inbox-reading binding 5 to a DENY → RED.
+        """
+        from bootstrap_gate import _check_tool_allowed
+
+        _setup_carveout_team_with_lead_session(
+            monkeypatch, tmp_path, team_name="t1",
+            lead_session_id=_SESSION_ID, frame_session_id=_SESSION_ID,
+        )
+        _create_secretary_inbox(tmp_path, team_name="t1")
+
+        result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        assert result is None
+
+    def test_premature_inbox_carve_out_fires_tmux(self, monkeypatch, tmp_path):
+        """Both-modes leg — TMUX topology (frame session_id !=
+        config.leadSessionId). The running frame's own session id differs from
+        the lead's, so _resolve_aligned_team_name finds no identity match and
+        falls back to the persisted ctx team_name — which still resolves the same
+        team dir, so get_team_name returns the same team and the carve-out STILL
+        fires over the premature inbox (result is None).
+
+        # COUNTER-TEST (source-only revert): same as R1 → RED.
+        """
+        from bootstrap_gate import _check_tool_allowed
+
+        _setup_carveout_team_with_lead_session(
+            monkeypatch, tmp_path, team_name="t1",
+            lead_session_id="a-different-lead-session-id",
+            frame_session_id=_SESSION_ID,
+        )
+        _create_secretary_inbox(tmp_path, team_name="t1")
+
+        result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        assert result is None
+
+    # --- C2: config-less Desktop always-fire ---
+
+    def test_carve_out_fires_config_less_desktop_no_config(self, monkeypatch, tmp_path):
+        """Config-less Desktop: NO config.json at all + a premature inbox →
+        carve-out FIRES (result is None). Under config-less Desktop members[] is
+        STRUCTURALLY empty (there is no config.json to read members from), so the
+        members-only join witness returns False → `not False` → the carve-out
+        fires. This is the agreed always-fire behavior (architect + security
+        firm): a witness-read over a missing config returns False, which only
+        ever PERMITS the canonical secretary spawn (bindings 1/2/3 still exclude
+        every non-secretary tool), and the is_marker_set fast-path closes the
+        one-shot window once the marker lands.
+
+        # COUNTER-TEST (source-only revert): the pre-fix binding 5 reads
+        # _team_has_secretary, whose inbox fallback fires on the present
+        # config-less inbox → True → `not True` → DENY → this assertion
+        # (result is None) goes RED. Couples to the inbox-arm regression exactly
+        # like R1.
+        """
+        from bootstrap_gate import _check_tool_allowed
+
+        _setup_carveout_session_config_less(monkeypatch, tmp_path, team_name="t1")
+        _create_secretary_inbox(tmp_path, team_name="t1")  # inbox witness, NO config.json
+
+        result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        assert result is None
+
+    # --- E1: empty-SSOT fail-closed preserved, both modes ---
+
+    def test_empty_ssot_fails_closed_even_with_premature_inbox_both_modes(
+        self, monkeypatch, tmp_path,
+    ):
+        """Empty-SSOT fail-closed guard PRESERVED — in BOTH topologies — even
+        with a premature inbox present. When the persisted SSOT team_name is
+        empty, get_team_name short-circuits to "" (the deliberate fail-closed
+        "team unknown → refuse" gate), the carve-out's `if not expected_team:
+        return False` guard runs AHEAD of the witness, binding 5 returns False →
+        the carve-out does NOT fire → the canonical secretary spawn is DENIED.
+        The members-only witness change must not collide with this short-circuit.
+
+        # COUNTER-TEST: this cell is FIX-INDEPENDENT — it asserts a DENY (not an
+        # allow over a present inbox), so it stays GREEN under the source-only
+        # revert. It pins that the members-only witness did not weaken the
+        # empty-SSOT gate (a hypothetical regression where the witness recovered
+        # a team from an empty SSOT would flip this to allow → RED).
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        for frame_sid, lead_sid in (
+            (_SESSION_ID, _SESSION_ID),          # in-process (== leadSessionId)
+            (_SESSION_ID, "other-lead-sid"),     # tmux (!= leadSessionId)
+        ):
+            _setup_carveout_team_with_lead_session(
+                monkeypatch, tmp_path, team_name="",   # EMPTY SSOT
+                lead_session_id=lead_sid, frame_session_id=frame_sid,
+                seed_team_dir_name="t1",
+            )
+            # A premature inbox exists under the real team dir, but the empty SSOT
+            # means get_team_name never resolves to it.
+            _create_secretary_inbox(tmp_path, team_name="t1")
+
+            result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+            assert result == _DENY_REASON, (
+                f"empty SSOT must fail-closed even with a premature inbox "
+                f"(frame_sid={frame_sid!r}, lead_sid={lead_sid!r})"
+            )
+
+    # --- CONTAINMENT (security-suggested): non-canonical input still blocked ---
+
+    def test_non_canonical_input_still_blocked_with_pending_witness_error(
+        self, monkeypatch, tmp_path,
+    ):
+        """CONTAINMENT: a NON-canonical tool call is STILL blocked even when a
+        witness-read error is pending — proving bindings 1/2/3 (and the
+        empty-SSOT guard) run BEFORE the join witness, so the broad-except
+        error→ALLOW inversion is CONTAINED to the canonical secretary spawn and
+        cannot leak into a blanket allow.
+
+        The fix's _secretary_in_members returns False on a read error (the safe
+        direction — it makes the carve-out FIRE). If that error→False were
+        reached for a NON-canonical input, it would wrongly ALLOW it. This test
+        proves it is not: bindings 1/2/3 short-circuit the predicate to False
+        for any non-secretary tool BEFORE _secretary_in_members is ever called,
+        so a pending witness error is irrelevant and the deny stands.
+
+        Covers two non-canonical shapes while the witness data source is rigged
+        to raise: (a) a plain Edit (fails binding 1 tool_name != Agent), and
+        (b) an Agent with the wrong subagent_type/name (fails bindings 2/3).
+        Both must DENY.
+
+        # COUNTER-TEST: this cell is FIX-INDEPENDENT (asserts DENY, not an allow
+        # over a present inbox) → GREEN under the source-only revert. It pins the
+        # binding-ordering containment invariant, not the inbox-arm regression.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+        import shared.pact_context as ctx_module
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        # Rig the witness data source to RAISE — a pending witness error.
+        def _boom(team_name, teams_dir=None):
+            raise OSError("simulated witness read error")
+
+        monkeypatch.setattr(ctx_module, "_iter_members", _boom)
+
+        # (a) plain Edit — fails binding 1 (tool_name != Agent) → DENY,
+        # the witness is never consulted.
+        assert _check_tool_allowed(_make_input("Edit")) == _DENY_REASON
+
+        # (b) Agent with wrong subagent_type → fails binding 2 → DENY.
+        assert _check_tool_allowed(_canonical_secretary_input(
+            team_name="t1", overrides={"subagent_type": "pact-architect"},
+        )) == _DENY_REASON
+
+        # (c) Agent with wrong name → fails binding 3 → DENY.
+        assert _check_tool_allowed(_canonical_secretary_input(
+            team_name="t1", overrides={"name": "secretari"},
+        )) == _DENY_REASON
+
+
+class TestSecretaryInMembersUnit:
+    """U1: direct unit tests of the gate-local _secretary_in_members JOIN witness
+    (#1023). The carve-out integration tests above key on the observable gate
+    outcome; these pin the helper's own contract directly so a future refactor of
+    the helper is caught at the unit level (closes the shared-helper-direct-unit-
+    test gap)."""
+
+    def test_true_when_secretary_in_members(self, monkeypatch, tmp_path):
+        """members[] contains a 'secretary' name entry → True (join witness)."""
+        from bootstrap_gate import _secretary_in_members
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1",
+            members=[{"id": "sec-1", "name": "secretary", "type": "pact-secretary"}],
+        )
+        assert _secretary_in_members("t1") is True
+
+    def test_false_when_members_empty(self, monkeypatch, tmp_path):
+        """Empty members[] → False (the fresh-team precondition the carve-out
+        handles). A premature inbox is IGNORED — this is a members-ONLY witness,
+        the whole point of the #1023 decoupling.
+
+        # COUNTER-TEST (source-only revert): the pre-fix carve-out called
+        # _team_has_secretary (members[] OR inbox), so the equivalent member-only
+        # query did not exist as a gate-local symbol; the import of
+        # _secretary_in_members itself is the post-fix artifact. We additionally
+        # seed a premature inbox to make explicit that the members-only witness
+        # ignores it (it would return True if it read the inbox).
+        """
+        from bootstrap_gate import _secretary_in_members
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+        _create_secretary_inbox(tmp_path, team_name="t1")  # ignored by a members-only witness
+        assert _secretary_in_members("t1") is False
+
+    def test_false_on_iter_members_raising(self, monkeypatch, tmp_path):
+        """A raising _iter_members → broad-except returns False (totality /
+        never-raises). This is the load-bearing safe direction: a False return
+        makes binding 5's `not False` fire the carve-out (architect D-record:
+        the Path.home() RuntimeError seam must not propagate to main()'s
+        degraded-DENY and re-deadlock the spawn).
+
+        # COUNTER-TEST: replacing the broad `except Exception` with the caller's
+        # typed tuple (OSError, ValueError, KeyError, TypeError, AttributeError)
+        # would let a RuntimeError (the Path.home seam) PROPAGATE → this call
+        # would raise instead of returning False → RED. Pins the broad-except.
+        """
+        from bootstrap_gate import _secretary_in_members
+        import shared.pact_context as ctx_module
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        def _boom(team_name, teams_dir=None):
+            raise RuntimeError("unresolvable HOME seam")
+
+        monkeypatch.setattr(ctx_module, "_iter_members", _boom)
+        # Must NOT raise; must return False.
+        assert _secretary_in_members("t1") is False
 
 
 # =============================================================================
@@ -2640,39 +3160,38 @@ class TestMarkerVerifyEnvFallback:
 
 
 class TestImportDiscipline:
-    """Structural pin: bootstrap_gate.py MUST NOT import
-    _team_has_secretary from bootstrap_marker_writer at module-load
-    time. bootstrap_marker_writer imports is_marker_set from this module
-    at its OWN top-level; a reciprocal top-level import here would
-    deadlock module load and route every tool call through the
-    fail-closed deny path.
+    """Structural pin (#1023): bootstrap_gate.py MUST NOT import
+    bootstrap_marker_writer in ANY scope — module-load OR function-local.
 
-    The carve-out predicate (_is_canonical_secretary_spawn) uses a
-    LOCAL import (inside the function body) to break the cycle —
-    enforced here as a source-level invariant so a future refactor
-    can't silently re-introduce the deadlock.
+    Pre-#1023 the carve-out's binding 5 called
+    bootstrap_marker_writer._team_has_secretary via a LOCAL import (inside
+    _is_canonical_secretary_spawn) to break a reciprocal cycle:
+    bootstrap_marker_writer imports is_marker_set from THIS module at its
+    own top level, so a reciprocal top-level import here would deadlock
+    module load. #1023 decoupled the carve-out onto a gate-local
+    members[]-only JOIN witness (_secretary_in_members, reading
+    shared.pact_context._iter_members), so the gate no longer references
+    bootstrap_marker_writer AT ALL. That is a STRICTLY STRONGER invariant
+    than the old local-import-only rule: with zero gate→marker_writer edges
+    the cycle cannot exist in any form. This pin enforces the stronger
+    invariant so a future refactor can't re-introduce ANY gate→marker_writer
+    import (local OR module-scope) and re-open the cycle / re-couple the
+    carve-out to the DISPATCH witness that caused the #1023 deadlock.
     """
 
-    def test_team_has_secretary_imported_locally_not_at_module_load(self):
-        """No module-scope reference to ``bootstrap_marker_writer`` in
-        bootstrap_gate.py — neither as an Import / ImportFrom statement
-        nor as a dynamic ``__import__`` / ``importlib.import_module``
-        call. The local import inside ``_is_canonical_secretary_spawn``
-        is the only legal form.
+    def test_no_bootstrap_marker_writer_import_in_any_scope(self):
+        """No reference to ``bootstrap_marker_writer`` ANYWHERE in
+        bootstrap_gate.py — not an Import / ImportFrom statement (module or
+        function scope), nor a dynamic ``__import__`` /
+        ``importlib.import_module`` call. The whole AST is walked (no
+        function/class boundary stop) because, post-#1023, even a LOCAL
+        import is forbidden: the carve-out's JOIN witness reads
+        pact_context._iter_members directly and never crosses into
+        bootstrap_marker_writer.
 
-        AST-based walk closes the source-grep gap empirically
-        demonstrated during review: a top-level
-        ``_bmw = __import__('bootstrap_marker_writer')`` bypasses the
-        old string-prefix grep yet still triggers the exact deadlock
-        (ImportError: cannot import 'is_marker_set' from
-        'bootstrap_gate') the discipline is meant to prevent. The AST
-        walk catches every module-scope reference regardless of the
-        import idiom used.
-
-        Module scope means the statement runs at import time. Indented
-        statements inside function / class bodies are NOT module-scope
-        because they only execute when the function / class body is
-        invoked, which happens after module load completes.
+        AST-based (not a source grep) so it catches every import idiom,
+        including a dynamic ``_bmw = __import__('bootstrap_marker_writer')``
+        that a string-prefix grep would miss.
         """
         import ast
 
@@ -2684,39 +3203,32 @@ class TestImportDiscipline:
 
         target = "bootstrap_marker_writer"
 
-        def _check_node(node, context_description):
-            # `import bootstrap_marker_writer` or `import bootstrap_marker_writer as bm`
+        for node in ast.walk(tree):
+            # `import bootstrap_marker_writer` / `... as bm`
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     if alias.name == target or alias.name.endswith(f".{target}"):
                         pytest.fail(
-                            f"bootstrap_gate.py {context_description} "
-                            f"`import {alias.name}` at line {node.lineno}. "
-                            f"This would deadlock module load with "
-                            f"bootstrap_marker_writer's top-level "
-                            f"`from bootstrap_gate import is_marker_set`. "
-                            f"Use a LOCAL import inside "
-                            f"_is_canonical_secretary_spawn."
+                            f"bootstrap_gate.py has `import {alias.name}` at "
+                            f"line {node.lineno}. Post-#1023 the gate must NOT "
+                            f"import bootstrap_marker_writer in ANY scope — the "
+                            f"carve-out reads pact_context._iter_members "
+                            f"directly via the gate-local _secretary_in_members "
+                            f"JOIN witness."
                         )
-            # `from bootstrap_marker_writer import ...` or
-            # `from .bootstrap_marker_writer import ...`
+            # `from bootstrap_marker_writer import ...` / relative form
             elif isinstance(node, ast.ImportFrom):
                 module = node.module or ""
-                # node.module is None for `from . import X`; module is the
-                # dotted name otherwise. Check the leaf segment to catch
-                # both absolute and relative forms.
                 leaf = module.split(".")[-1] if module else ""
                 if module == target or leaf == target:
                     pytest.fail(
-                        f"bootstrap_gate.py {context_description} "
-                        f"`from {module} import ...` at line {node.lineno}. "
-                        f"This would deadlock module load with "
-                        f"bootstrap_marker_writer's top-level "
-                        f"`from bootstrap_gate import is_marker_set`. "
-                        f"Use a LOCAL import inside "
-                        f"_is_canonical_secretary_spawn."
+                        f"bootstrap_gate.py has `from {module} import ...` at "
+                        f"line {node.lineno}. Post-#1023 the gate must NOT "
+                        f"import bootstrap_marker_writer in ANY scope — the "
+                        f"carve-out reads pact_context._iter_members directly "
+                        f"via the gate-local _secretary_in_members JOIN witness."
                     )
-            # `__import__('bootstrap_marker_writer')` or
+            # `__import__('bootstrap_marker_writer')` /
             # `importlib.import_module('bootstrap_marker_writer')`
             elif isinstance(node, ast.Call):
                 func = node.func
@@ -2743,43 +3255,11 @@ class TestImportDiscipline:
                             else "importlib.import_module"
                         )
                         pytest.fail(
-                            f"bootstrap_gate.py {context_description} "
+                            f"bootstrap_gate.py has "
                             f"`{call_name}({first_arg.value!r})` at line "
-                            f"{node.lineno}. Dynamic import at module "
-                            f"scope deadlocks the same way as a static "
-                            f"top-level import. Use a LOCAL import "
-                            f"inside _is_canonical_secretary_spawn."
+                            f"{node.lineno}. Post-#1023 the gate must NOT "
+                            f"import bootstrap_marker_writer in ANY scope."
                         )
-
-        # Walk only module-scope statements + the body of any module-scope
-        # try/except wrapper (the existing fail-closed import block is one).
-        # We deliberately do NOT recurse into FunctionDef / ClassDef bodies
-        # because those run after module load completes — the local import
-        # inside _is_canonical_secretary_spawn lives there and is legal.
-        def _walk_module_scope(body):
-            for stmt in body:
-                for sub in ast.walk(stmt):
-                    if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                        # Stop descent at function / class boundaries.
-                        continue
-                if isinstance(stmt, (ast.Import, ast.ImportFrom)):
-                    _check_node(stmt, "contains module-scope")
-                elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
-                    _check_node(stmt.value, "contains module-scope call")
-                elif isinstance(stmt, ast.Assign):
-                    # `_bmw = __import__('bootstrap_marker_writer')`
-                    if isinstance(stmt.value, ast.Call):
-                        _check_node(stmt.value, "contains module-scope assignment with call")
-                elif isinstance(stmt, ast.Try):
-                    # The existing fail-closed wrapper at module top is a
-                    # try block — its body executes at module load time.
-                    _walk_module_scope(stmt.body)
-                    for handler in stmt.handlers:
-                        _walk_module_scope(handler.body)
-                    _walk_module_scope(stmt.orelse)
-                    _walk_module_scope(stmt.finalbody)
-
-        _walk_module_scope(tree.body)
 
 
 class TestCanonicalSecretaryConstantPin:
@@ -2789,14 +3269,17 @@ class TestCanonicalSecretaryConstantPin:
     `_SECRETARY_NAME`, and the canonical `name="secretary"` literal in
     commands/bootstrap.md Step 2).
 
-    Drift between any pair silently breaks the carve-out's one-shot
-    binding (5): `NOT _team_has_secretary(team_name)`. If marker_writer's
-    `_SECRETARY_NAME` diverged from gate's, marker_writer would compare
-    `member.get("name")` to a different literal than the one the
-    orchestrator-emitted spawn would actually write into members[], so
-    `_team_has_secretary` would return False forever — the carve-out would
-    stay open and re-fire on every subsequent canonical spawn,
-    re-introducing the brittleness BE-F1 flagged in PR #790 review.
+    Drift between any pair silently breaks the carve-out's binding (5):
+    `NOT _secretary_in_members(team_name)` (#1023). The gate's JOIN witness
+    compares `member.get("name")` to the gate's `_SECRETARY_NAME`; if that
+    literal diverged from the one the orchestrator-emitted spawn actually
+    writes into members[] (mirrored from marker_writer's `_SECRETARY_NAME` and
+    the canonical `name="secretary"` in bootstrap.md), `_secretary_in_members`
+    would return False forever — the carve-out would stay open and re-fire on
+    every subsequent canonical spawn, re-introducing the brittleness BE-F1
+    flagged in PR #790 review. (The 3-way mirror still binds all three
+    surfaces; #1023 only moved the gate-side consumer from _team_has_secretary
+    to _secretary_in_members, both reading the same _SECRETARY_NAME constant.)
     """
 
     def _read_constant(self, py_path, name):
@@ -2846,8 +3329,8 @@ class TestCanonicalSecretaryConstantPin:
             f"Canonical-secretary name literal drift between bootstrap_gate.py "
             f"(`_SECRETARY_NAME={gate_value!r}`) and bootstrap_marker_writer.py "
             f"(`_SECRETARY_NAME={writer_value!r}`); bootstrap_gate carve-out's "
-            f"one-shot semantic will break in production if these diverge — "
-            f"_team_has_secretary returns False forever, carve-out stays open."
+            f"binding-5 semantic will break in production if these diverge — "
+            f"_secretary_in_members returns False forever, carve-out stays open."
         )
 
         # Markdown leg: canonical spawn literal in bootstrap.md Step 2.
@@ -3157,115 +3640,118 @@ class TestCanonicalSecretarySpawnAdversarial:
         ))
         assert result == _DENY_REASON
 
-    # --- Exception envelope tightness --------------------------------------
+    # --- Witness exception totality (#1023) --------------------------------
+    # Post-#1023 the JOIN witness _secretary_in_members wraps its body in a
+    # BROAD `except Exception: return False`, so EVERY exception type raised
+    # while reading members[] is absorbed at the witness → binding 5
+    # (`not False`) → carve-out FIRES (allow). This replaces the pre-#1023
+    # typed-except design, where the 5 "listed" types denied and "unlisted"
+    # types (RuntimeError etc.) propagated to main()'s load-failure deny. The
+    # broad except is LOAD-BEARING: a Path.home() RuntimeError seam in the
+    # members[] read would otherwise escape and re-deadlock the spawn.
 
     @pytest.mark.parametrize(
         "exc_type",
-        [OSError, ValueError, KeyError, TypeError, AttributeError],
+        # Spans BOTH the old "listed" set AND the old "unlisted" set — all are
+        # now uniformly caught by the witness's broad except.
+        [OSError, ValueError, KeyError, TypeError, AttributeError,
+         RuntimeError, MemoryError, NotImplementedError, AssertionError],
         ids=lambda e: e.__name__,
     )
-    def test_listed_exception_types_caught_and_deny(
+    def test_witness_exception_caught_and_carve_out_fires(
         self, monkeypatch, tmp_path, exc_type,
     ):
-        """Each of the 5 listed exception types raised by
-        _team_has_secretary is CAUGHT by the predicate's broad except
-        → predicate returns False → _check_tool_allowed returns
-        _DENY_REASON. Pins the catch-set width exactly.
+        """ANY exception raised while reading members[] is CAUGHT by
+        _secretary_in_members's broad except → witness False → binding 5
+        (`not False`) → carve-out fires → ALLOW (result is None).
+
+        We monkeypatch pact_context._iter_members (the witness's data source)
+        to raise, exercising the witness's broad-except arm end-to-end — not
+        stubbing the witness, which would bypass the except being proven. The
+        broad except is uniform: there is no longer a "listed vs unlisted"
+        split, and no exception propagates to main()'s load-failure deny path.
         """
-        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
-        import bootstrap_marker_writer
+        from bootstrap_gate import _check_tool_allowed
+        import shared.pact_context as ctx_module
 
         _setup_pact_session_with_team(
             monkeypatch, tmp_path, team_name="t1", members=[],
         )
 
-        def _raiser(team_name):
+        def _raiser(team_name, teams_dir=None):
             raise exc_type("simulated")
 
-        monkeypatch.setattr(
-            bootstrap_marker_writer, "_team_has_secretary", _raiser,
-        )
+        monkeypatch.setattr(ctx_module, "_iter_members", _raiser)
         result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
-        assert result == _DENY_REASON
+        assert result is None
 
-    @pytest.mark.parametrize(
-        "exc_type",
-        [RuntimeError, MemoryError, NotImplementedError, AssertionError],
-        ids=lambda e: e.__name__,
-    )
-    def test_unlisted_exception_propagates_out_of_predicate(
-        self, monkeypatch, tmp_path, exc_type,
+    def test_witness_never_propagates_out_of_predicate(
+        self, monkeypatch, tmp_path,
     ):
-        """Exception types NOT in the predicate's catch tuple PROPAGATE
-        out of `_is_canonical_secretary_spawn` and reach the caller.
-        This is the spec's deliberate fail-closed-scope-tightness: the
-        5 catch-types cover benign disk-read failures; wider catches
-        would mask genuine bugs (RuntimeError, AssertionError).
+        """_is_canonical_secretary_spawn NEVER raises on a witness read
+        error — totality (#989). The witness's broad except absorbs the
+        exception and returns False, so the predicate returns True (carve-out
+        fires) without propagating. Pinned via a direct predicate call (no
+        pytest.raises) to prove non-propagation at the predicate boundary.
 
-        Mental revert: widening the except clause to
-        `except Exception` would absorb these and silently mask defects
-        that should propagate to main()'s _emit_load_failure_deny path.
-
-        Pin via direct predicate call (not _check_tool_allowed), because
-        _check_tool_allowed itself has no exception handler — exceptions
-        propagate to main()'s outer try/except where they're routed to
-        the load-failure deny path. We assert the EXCEPTION ESCAPES the
-        predicate here; main()-level deny is covered by
-        TestFailClosedGateLogic.
+        Mental revert: narrowing _secretary_in_members' except to a typed
+        tuple would let a Path.home() RuntimeError (absent from the tuple)
+        escape here, propagate to main(), and re-deadlock the secretary spawn
+        — the exact #1023 failure mode the broad except prevents.
         """
         from bootstrap_gate import _is_canonical_secretary_spawn
-        import bootstrap_marker_writer
+        import shared.pact_context as ctx_module
 
         _setup_pact_session_with_team(
             monkeypatch, tmp_path, team_name="t1", members=[],
         )
 
-        def _raiser(team_name):
-            raise exc_type("simulated")
+        def _raiser(team_name, teams_dir=None):
+            raise RuntimeError("Path.home() seam — unresolvable HOME")
 
-        monkeypatch.setattr(
-            bootstrap_marker_writer, "_team_has_secretary", _raiser,
-        )
+        monkeypatch.setattr(ctx_module, "_iter_members", _raiser)
 
-        # Build the canonical input that gets us PAST bindings 1-4 so
-        # the predicate reaches the local-import + call site where the
-        # raise happens.
+        # No pytest.raises: the predicate must NOT raise. The witness swallows
+        # the RuntimeError → False → binding 5 (`not False`) → True.
         input_data = _canonical_secretary_input(team_name="t1")
-        with pytest.raises(exc_type):
-            _is_canonical_secretary_spawn(input_data)
+        assert _is_canonical_secretary_spawn(input_data) is True
 
-    def test_unlisted_exception_in_main_routes_to_load_failure_deny(
+    def test_witness_error_does_not_route_to_main_load_failure_deny(
         self, monkeypatch, tmp_path, capsys,
     ):
-        """End-to-end: an unlisted exception propagating from the
-        predicate through _check_tool_allowed lands at main()'s outer
-        try/except (line 391-396), which routes to
-        _emit_load_failure_deny. User sees the LOAD-FAILURE deny text
-        ("PACT bootstrap_gate runtime failure — blocking for safety...")
-        NOT the canonical _DENY_REASON. Confirms the fail-closed routing
-        for genuine-bug exceptions while preserving deny semantics.
+        """End-to-end (#1023): a witness read error on the canonical-secretary
+        path does NOT reach main()'s fail-closed deny. Pre-#1023 an unlisted
+        exception from the predicate propagated through _check_tool_allowed to
+        main()'s _emit_load_failure_deny (exit 2). Post-#1023 the witness's
+        broad except swallows it → carve-out fires → _check_tool_allowed
+        returns None → main() suppresses at exit 0 (ALLOW). The carve-out path
+        is now total, so it never triggers the load-failure deny.
+
+        The main()-level fail-closed safety net for GENUINE non-carve-out
+        runtime bugs is UNCHANGED and still covered (see
+        TestFailClosedGateLogic.test_runtime_exception_with_mutating_tool_still_denies,
+        which patches _check_tool_allowed itself to raise and asserts exit 2) —
+        only the carve-out-path expectation inverts here.
         """
-        import bootstrap_marker_writer
+        import shared.pact_context as ctx_module
 
         _setup_pact_session_with_team(
             monkeypatch, tmp_path, team_name="t1", members=[],
         )
 
-        def _raiser(team_name):
-            raise RuntimeError("genuine bug")
+        def _raiser(team_name, teams_dir=None):
+            raise RuntimeError("genuine bug in the members[] read")
 
-        monkeypatch.setattr(
-            bootstrap_marker_writer, "_team_has_secretary", _raiser,
+        monkeypatch.setattr(ctx_module, "_iter_members", _raiser)
+
+        exit_code, output = _run_main(
+            _canonical_secretary_input(team_name="t1"), capsys
         )
-
-        exit_code, output = _run_main(_canonical_secretary_input(team_name="t1"), capsys)
-        assert exit_code == 2
-        hso = output["hookSpecificOutput"]
-        assert hso["permissionDecision"] == "deny"
-        # Load-failure deny text differs from the canonical _DENY_REASON.
-        # Pin both invariants:
-        assert "runtime failure" in hso["permissionDecisionReason"]
-        assert "PACT bootstrap required" not in hso["permissionDecisionReason"]
+        # Carve-out fired → allow → suppressOutput at exit 0, NOT the exit-2
+        # load-failure deny the pre-#1023 typed-except design produced.
+        assert exit_code == 0
+        assert output.get("suppressOutput") is True
+        assert "permissionDecision" not in output.get("hookSpecificOutput", {})
 
     # --- Predicate state edge values ---------------------------------------
 
@@ -3304,15 +3790,22 @@ class TestCanonicalSecretarySpawnAdversarial:
         ))
         assert result == _DENY_REASON
 
-    def test_get_team_name_returning_dict_denies_safely(
+    def test_get_team_name_returning_dict_handled_safely(
         self, monkeypatch, tmp_path,
     ):
-        """get_team_name returning non-string (dict) → comparison
-        operates on the wrong type → != is True → predicate returns
-        False → deny. Confirms no AttributeError on `not expected_team`
-        for non-string truthy values.
+        """get_team_name returning a non-string (dict) is handled WITHOUT
+        raising. The dict is truthy so it passes the empty-SSOT guard, then
+        _secretary_in_members(dict) → _iter_members(dict) raises TypeError
+        (cannot build a path from a dict) → the witness's broad except → False
+        → binding 5 (`not False`) → carve-out fires → ALLOW (result is None).
+
+        #1023: confirms no crash on a non-string truthy team value. The
+        outcome is ALLOW (not deny) under the new SAFE fail direction — the
+        carve-out only ever permits the canonical secretary spawn (bindings
+        1/2/3 still exclude every non-secretary tool), and the predicate never
+        raises (totality).
         """
-        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+        from bootstrap_gate import _check_tool_allowed
         import shared.pact_context as ctx_module
 
         _setup_pact_session_with_team(
@@ -3323,7 +3816,7 @@ class TestCanonicalSecretarySpawnAdversarial:
         )
 
         result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
-        assert result == _DENY_REASON
+        assert result is None
 
     def test_carve_out_can_fire_then_close_within_session(
         self, monkeypatch, tmp_path,
@@ -3411,18 +3904,19 @@ class TestCanonicalSecretarySpawnAdversarial:
             # (#979: "wrong_team" scenario removed — binding-4 dropped, so a
             # mismatched team_name no longer denies the carve-out.)
             ("missing_subagent_type", None, "missing_subagent_type"),
-            ("oserror_in_team_has_secretary", None, "oserror"),
-            ("valueerror_in_team_has_secretary", None, "valueerror"),
-            ("keyerror_in_team_has_secretary", None, "keyerror"),
+            # (#1023: the three *_in_team_has_secretary exception scenarios were
+            # removed — a witness-read error now FIRES the carve-out (ALLOW),
+            # not deny, so they are no longer deny-path failure modes. Witness
+            # exception totality is covered by
+            # test_witness_exception_caught_and_carve_out_fires.)
         ],
     )
     def test_deny_reason_is_byte_identical_across_failure_modes(
         self, monkeypatch, tmp_path, scenario, overrides, exc_setup,
     ):
-        """Across every failure mode (wrong binding, missing key,
-        every caught exception type), the user-visible
-        permissionDecisionReason is BYTE-IDENTICAL to the canonical
-        deny-reason literal pinned independently in
+        """Across every DENY failure mode (wrong binding, missing key), the
+        user-visible permissionDecisionReason is BYTE-IDENTICAL to the
+        canonical deny-reason literal pinned independently in
         ``_CANONICAL_DENY_REASON_LITERAL``.
 
         Two-sided assertion: the result MUST equal the independent
@@ -3439,31 +3933,12 @@ class TestCanonicalSecretarySpawnAdversarial:
         user-visible string for the carve-out's deny path.
         """
         from bootstrap_gate import _check_tool_allowed, _DENY_REASON
-        import bootstrap_marker_writer
 
         _setup_pact_session_with_team(
             monkeypatch, tmp_path, team_name="t1", members=[],
         )
 
-        if exc_setup == "oserror":
-            monkeypatch.setattr(
-                bootstrap_marker_writer, "_team_has_secretary",
-                lambda team_name: (_ for _ in ()).throw(OSError("x")),
-            )
-            input_data = _canonical_secretary_input(team_name="t1")
-        elif exc_setup == "valueerror":
-            monkeypatch.setattr(
-                bootstrap_marker_writer, "_team_has_secretary",
-                lambda team_name: (_ for _ in ()).throw(ValueError("x")),
-            )
-            input_data = _canonical_secretary_input(team_name="t1")
-        elif exc_setup == "keyerror":
-            monkeypatch.setattr(
-                bootstrap_marker_writer, "_team_has_secretary",
-                lambda team_name: (_ for _ in ()).throw(KeyError("x")),
-            )
-            input_data = _canonical_secretary_input(team_name="t1")
-        elif exc_setup == "missing_subagent_type":
+        if exc_setup == "missing_subagent_type":
             input_data = {
                 "hook_event_name": "PreToolUse",
                 "session_id": _SESSION_ID,
@@ -3508,17 +3983,23 @@ class TestCanonicalSecretarySpawnAdversarial:
 
         assert _DENY_REASON == _CANONICAL_DENY_REASON_LITERAL
 
-    def test_deny_reason_excludes_exception_detail(
+    def test_witness_read_error_leaks_no_exception_detail(
         self, monkeypatch, tmp_path,
     ):
-        """When _team_has_secretary raises with a sensitive-looking
-        message, the user-visible deny reason MUST NOT leak the
-        exception text. Pins that the carve-out's catch returns False
-        and the caller's _DENY_REASON path is used — no formatted
-        error string ever reaches the user.
+        """When the members[] read raises with a sensitive-looking message,
+        NO formatted exception text reaches the user (#1023 security pin).
+
+        Post-#1023 the JOIN witness's broad except swallows the exception and
+        returns False → carve-out fires → ALLOW (result is None). Because the
+        carve-out path emits NO user-visible string at all on a witness error,
+        the no-leak guarantee holds trivially AND more strongly than the
+        pre-#1023 deny path (which had to scrub the deny reason): there is
+        simply no string in which the sensitive token could appear. We assert
+        the witness error neither raises nor surfaces ANY string carrying the
+        sensitive content.
         """
-        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
-        import bootstrap_marker_writer
+        from bootstrap_gate import _check_tool_allowed
+        import shared.pact_context as ctx_module
 
         _setup_pact_session_with_team(
             monkeypatch, tmp_path, team_name="t1", members=[],
@@ -3526,15 +4007,17 @@ class TestCanonicalSecretarySpawnAdversarial:
 
         sensitive = "secret-token-deadbeef /Users/victim/.ssh/id_rsa"
 
-        def _raiser(team_name):
+        def _raiser(team_name, teams_dir=None):
             raise OSError(sensitive)
 
-        monkeypatch.setattr(
-            bootstrap_marker_writer, "_team_has_secretary", _raiser,
-        )
+        monkeypatch.setattr(ctx_module, "_iter_members", _raiser)
 
         result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
-        assert result == _DENY_REASON
-        assert sensitive not in result
-        assert "deadbeef" not in result
-        assert "/Users/" not in result
+        # Carve-out fires (allow) → no deny string emitted → no leak surface.
+        assert result is None
+        # Defensive: if a future change ever returns a string here, it must not
+        # carry the sensitive exception text.
+        if result is not None:
+            assert sensitive not in result
+            assert "deadbeef" not in result
+            assert "/Users/" not in result

@@ -361,10 +361,10 @@ _BLOCKED_TOOLS = frozenset({
 # carve-out below; any drift silently re-introduces the bootstrap-deadlock
 # these constants are here to prevent.
 #
-# _SECRETARY_NAME mirrors bootstrap_marker_writer._SECRETARY_NAME (the
-# producer-side constant at marker_writer.py:103) and the literal at
-# commands/bootstrap.md Step 2. Cross-file atomic edits required across
-# this file, bootstrap_marker_writer.py, AND commands/bootstrap.md.
+# _SECRETARY_NAME mirrors the producer-side bootstrap_marker_writer._SECRETARY_NAME
+# constant and the literal at commands/bootstrap.md Step 2. Cross-file atomic
+# edits required across this file, bootstrap_marker_writer.py, AND
+# commands/bootstrap.md.
 #
 # _SECRETARY_AGENT_TYPE is the canonical agentType from
 # commands/bootstrap.md Step 2 — no producer-side mirror in
@@ -386,6 +386,47 @@ _DENY_REASON = (
 )
 
 
+def _secretary_in_members(team_name: str) -> bool:
+    """Members[]-only JOIN witness: has the secretary actually joined the team
+    roster? Sole consumer is _is_canonical_secretary_spawn binding 5.
+
+    Reads the team config members[] via the shared pact_context._iter_members
+    helper (already imported at this module's top level) and returns True iff a
+    member's ``name`` equals _SECRETARY_NAME. This is a JOIN witness — distinct
+    from bootstrap_marker_writer._team_has_secretary, which is a DISPATCH
+    witness (members[] OR the secretary's inbox file). The two predicates
+    answer DIFFERENT questions on purpose (#1023): the marker writer needs
+    "was the secretary DISPATCHED?" (the inbox is created by
+    TaskUpdate(owner=secretary) BEFORE the spawn, so a dispatch witness is
+    correct there); the carve-out needs "has the secretary JOINED members[]?"
+    (only an actual Agent() spawn-return populates members[]). Reading the
+    inbox arm here is what re-deadlocked the canonical secretary spawn in
+    #1021 — the inbox predates the spawn, so binding 5 (`not True`) denied the
+    very spawn the carve-out exists to permit.
+
+    NEVER raises (totality, #989). The body is wrapped in a BROAD
+    ``except Exception: return False`` rather than a typed tuple because the
+    members[] read transitively calls pact_context.get_claude_config_dir() ->
+    Path.home(), which raises RuntimeError when HOME is unresolvable. That
+    RuntimeError is composed BEFORE _iter_members' own typed try-block, so it
+    escapes _iter_members uncaught, and it is ALSO absent from binding 5's
+    outer typed except — without a broad wrap here it would propagate to
+    main()'s degraded-DENY path and re-deadlock the secretary spawn (the wrong
+    fail direction). A False return makes the carve-out FIRE (the safe
+    direction — it only ever permits the canonical secretary spawn, never a
+    non-secretary tool, which bindings 1/2/3 already exclude). This mirrors the
+    bare-except seam precedent at shared.pact_context._resolve_aligned_team_name,
+    which uses a broad except for the same Path.home RuntimeError reason.
+    """
+    try:
+        return any(
+            member.get("name") == _SECRETARY_NAME
+            for member in pact_context._iter_members(team_name)
+        )
+    except Exception:  # noqa: BLE001 — broad by design: Path.home() RuntimeError seam (see docstring)
+        return False
+
+
 def _is_canonical_secretary_spawn(input_data: dict) -> bool:
     """Audit anchor: canonical secretary spawn carve-out for #789.
 
@@ -404,30 +445,62 @@ def _is_canonical_secretary_spawn(input_data: dict) -> bool:
          (the orchestrator may still pass a stale arg the platform discards).
          The carve-out stays tight via bindings 2/3 (exact subagent_type +
          name literals) and binding 5 (one-shot, gated on the REAL team dir).
-      5. NOT _team_has_secretary(get_team_name()) — one-shot semantic; flips
-         to False the moment the spawned secretary lands in members[]. Reads
-         the REAL session team dir (expected_team), which the empty-team
-         fail-closed below guarantees is a non-empty path segment.
+      5. NOT _secretary_in_members(get_team_name()) — members[]-only JOIN
+         witness (#1023). Reads the REAL session team dir (expected_team),
+         which the empty-team fail-closed below guarantees is a non-empty path
+         segment. Uses the gate-local _secretary_in_members helper (a JOIN
+         witness), NOT bootstrap_marker_writer._team_has_secretary (a DISPATCH
+         witness that also accepts the secretary's inbox file). See the
+         join-vs-dispatch note below.
 
     Binding (1) is a hardcoded literal. Bindings (2) and (3) compare against
     module constants, not tool_input-derived values. Binding (5) is a disk
-    read of the team config members[]; True after first successful dispatch,
-    so the carve-out fires at most once per session. With binding 4 dropped,
-    the carve-out reads no tool_input-derived team value — the
-    secretary-presence check resolves against the SSOT team dir only.
+    read of the team config members[]. With binding 4 dropped, the carve-out
+    reads no tool_input-derived team value — the secretary-presence check
+    resolves against the SSOT team dir only.
+
+    JOIN witness vs DISPATCH witness (#1023): binding 5 calls the gate-local
+    _secretary_in_members (members[]-ONLY) and deliberately does NOT call
+    bootstrap_marker_writer._team_has_secretary. The two answer DIFFERENT
+    questions. The marker writer needs "was the secretary DISPATCHED?" and so
+    accepts the inbox file as a fallback witness — correct for it, because the
+    inbox is the config-less Desktop signal (#1019). But the inbox is created
+    by TaskUpdate(owner=secretary) (bootstrap Step 2) BEFORE the Agent spawn
+    (Step 3), so reading the inbox here made binding 5 (`not True`) DENY the
+    very spawn the carve-out exists to permit — the #1021 regression. The
+    carve-out needs "has the secretary JOINED members[]?", which only an actual
+    Agent() spawn-return populates. Hence the split: members[]-only here, inbox
+    fallback left to the marker writer alone.
+
+    ONE-SHOT GUARANTEE (D3 decision-record, #1023) — the carve-out's one-shot
+    semantic MIGRATES from binding-5-self-closure to MARKER-PRESENCE. Under CLI
+    the old members[] check flipped True once the secretary joined, self-closing
+    the carve-out. But under config-less Desktop members[] is STRUCTURALLY empty
+    (no config.json), so binding 5 can no longer self-close — _secretary_in_members
+    is always False there and the carve-out always fires pre-marker. The durable
+    one-shot is now MARKER-PRESENCE: the is_marker_set fast-path in
+    _check_tool_allowed returns None (allow-all) BEFORE the carve-out
+    (this _is_canonical_secretary_spawn check) is ever reached in
+    _check_tool_allowed, so once the marker is
+    written the carve-out is moot. Documented so no future reader restores a
+    binding-5 one-shot and re-deadlocks Desktop. The Desktop always-fire window
+    is contained by bindings 1/2/3 (exact Agent + pact-secretary + secretary,
+    all module constants) plus the marker fast-path that closes it.
 
     On ANY disk-read exception, returns False — caller falls through to
     the existing _BLOCKED_TOOLS deny path so the user sees the canonical
     _DENY_REASON ("PACT bootstrap required...") rather than the
     load-failure variant. Mirrors is_marker_set's silent-on-exception
-    style.
+    style. (_secretary_in_members has its own broad-except totality guard for
+    the Path.home() RuntimeError seam — see its docstring.)
 
-    SACROSANCT — local-import discipline: _team_has_secretary is imported
-    LOCALLY (function-call time, not module-load time) to break the
-    reciprocal cycle with bootstrap_marker_writer, which imports
-    is_marker_set from this module at its own top-level. Reciprocal
-    top-level import here would deadlock module load and route every
-    tool call through the fail-closed deny path.
+    (The former SACROSANCT local-import discipline note is now OBSOLETE: binding
+    5 no longer imports _team_has_secretary from bootstrap_marker_writer, so the
+    reciprocal-cycle local-import is gone. The members[] read goes through the
+    top-level-imported shared.pact_context, which bootstrap_marker_writer also
+    imports at top level — no cycle. The one remaining cross-module edge is
+    unchanged: bootstrap_marker_writer imports is_marker_set from THIS module at
+    its own top level.)
     """
     try:
         if input_data.get("tool_name") != "Agent":
@@ -445,13 +518,14 @@ def _is_canonical_secretary_spawn(input_data: dict) -> bool:
         expected_team = pact_context.get_team_name()
         if not expected_team:
             return False
-        # Local-import: reciprocal-cycle prevention. bootstrap_marker_writer
-        # imports is_marker_set from this module at its OWN top-level; a
-        # reciprocal top-level import here would deadlock module load and
-        # silently route every tool call through the fail-closed deny path.
-        # See SACROSANCT block in this docstring.
-        from bootstrap_marker_writer import _team_has_secretary
-        return not _team_has_secretary(expected_team)
+        # Binding 5: members[]-only JOIN witness (#1023). _secretary_in_members
+        # is a gate-local helper reading shared.pact_context._iter_members (the
+        # top-level-imported module) — NOT a cross-module import of
+        # bootstrap_marker_writer._team_has_secretary (the DISPATCH witness,
+        # which also accepts the inbox file and so re-deadlocked the spawn in
+        # #1021). The former reciprocal-cycle local-import is gone. See the
+        # join-vs-dispatch + D3 one-shot notes in this docstring.
+        return not _secretary_in_members(expected_team)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, ImportError):
         return False
 

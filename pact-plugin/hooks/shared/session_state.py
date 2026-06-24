@@ -142,7 +142,7 @@ def is_safe_path_component(value: str) -> bool:
 
     Defense-in-depth against path-traversal via tampered session
     context (see security review Finding 2). The upstream allowlist
-    lives at `session_init.py:401` — `re.sub(r"[^a-f0-9-]", "",
+    lives in session_init's team-name generation — `re.sub(r"[^a-f0-9-]", "",
     session_id[:8])` — which already filters path separators, `..`,
     nulls, and controls at team-name generation time. This guard is a
     second line of defense at the I/O boundary.
