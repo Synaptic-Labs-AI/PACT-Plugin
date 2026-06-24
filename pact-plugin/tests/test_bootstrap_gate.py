@@ -873,6 +873,506 @@ class TestCanonicalSecretarySpawnCarveOut:
 
 
 # =============================================================================
+# Premature-inbox carve-out regression (#1023)
+# =============================================================================
+
+
+def _create_secretary_inbox(tmp_path, team_name="t1"):
+    """Reproduce the platform's PRE-SPAWN secretary-inbox write.
+
+    The bootstrap choreography is::
+
+        Step 1  TaskCreate(secretary briefing)
+        Step 2  TaskUpdate(taskId, owner="secretary")   # platform delivers a
+                                                         # task_assignment ->
+                                                         # CREATES inboxes/secretary.json
+        Step 3  Agent(name="secretary", ...)            # the carve-out must fire HERE
+
+    So by Step 3 ``teams/<team>/inboxes/secretary.json`` ALREADY exists, written
+    by the Step-2 ``TaskUpdate(owner)`` task-assignment delivery — BEFORE the
+    ``Agent(secretary)`` spawn the carve-out exists to permit. This helper writes
+    that file FAITHFULLY: the SAME path the marker writer's inbox witness reads
+    (``get_claude_config_dir()/teams/<team>/inboxes/secretary.json`` ==
+    ``Path.home()/.claude/...`` under the fixture's Path.home monkeypatch), the
+    SAME filename, and a ``task_assignment``-shaped body matching the issue's
+    ground-truth evidence (an assigned task with ``assignedBy="team-lead"``).
+
+    This is NOT a synthetic pre-placed file divorced from the choreography — it
+    is the exact artifact ``TaskUpdate(owner="secretary")`` produces, present at
+    gate-eval time. The synthetic shortcut (an empty touch, or a file written in
+    a shape the platform never produces) is precisely what let #1021 slip through
+    #1019's verification, so the regression test must use the real shape.
+
+    Returns the inbox file path.
+    """
+    inbox_dir = tmp_path / ".claude" / "teams" / team_name / "inboxes"
+    inbox_dir.mkdir(parents=True, exist_ok=True)
+    inbox_path = inbox_dir / "secretary.json"
+    # task_assignment-shaped body (issue #1023 evidence: a task_assignment for the
+    # secretary task, assignedBy team-lead). The marker writer's inbox witness
+    # only checks .is_file() — it never parses the body — but a faithful body
+    # keeps the fixture honest about what the platform actually writes.
+    inbox_path.write_text(json.dumps([
+        {
+            "type": "task_assignment",
+            "taskId": "1",
+            "subject": "secretary briefing",
+            "assignedBy": "team-lead",
+            "timestamp": "2026-01-01T00:00:00Z",
+        }
+    ]), encoding="utf-8")
+    return inbox_path
+
+
+def _setup_carveout_team_with_lead_session(
+    monkeypatch, tmp_path, *, team_name="t1", lead_session_id,
+    frame_session_id, members=None, seed_team_dir_name=None,
+):
+    """Both-modes carve-out fixture: like _setup_pact_session_with_team but the
+    on-disk config.json carries a ``leadSessionId`` field and the context's
+    ``session_id`` is set independently, so get_team_name's identity-match
+    (_resolve_aligned_team_name) sees a genuine in-process (frame==lead) vs tmux
+    (frame!=lead) topology.
+
+    ``team_name`` is the PERSISTED context team_name (use "" to exercise the
+    empty-SSOT fail-closed short-circuit). ``seed_team_dir_name`` is the dir name
+    the team config/inbox are seeded under (defaults to ``team_name``); pass it
+    explicitly when team_name is "" so the team dir still exists on disk but the
+    SSOT is empty.
+
+    Resets _aligned_cache (NOT reset by init(), which is a no-op once
+    _context_path is pre-set) so each leg / loop iteration resolves freshly.
+    """
+    import shared.pact_context as ctx_module
+
+    dir_name = seed_team_dir_name if seed_team_dir_name is not None else team_name
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    session_dir = tmp_path / ".claude" / "pact-sessions" / _SLUG / _SESSION_ID
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    plugin_root = tmp_path / "plugin"
+    (plugin_root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"version": "9.9.9"}), encoding="utf-8"
+    )
+
+    context_file = session_dir / "pact-session-context.json"
+    context_file.write_text(json.dumps({
+        "team_name": team_name,
+        "session_id": frame_session_id,
+        "project_dir": _PROJECT_DIR,
+        "plugin_root": str(plugin_root),
+        "started_at": "2026-01-01T00:00:00Z",
+    }), encoding="utf-8")
+
+    if dir_name:
+        teams_dir = tmp_path / ".claude" / "teams" / dir_name
+        teams_dir.mkdir(parents=True, exist_ok=True)
+        (teams_dir / "config.json").write_text(json.dumps({
+            "name": dir_name,
+            "leadSessionId": lead_session_id,
+            "members": members if members is not None else [],
+        }), encoding="utf-8")
+
+    monkeypatch.setattr(ctx_module, "_context_path", context_file)
+    monkeypatch.setattr(ctx_module, "_cache", None)
+    monkeypatch.setattr(ctx_module, "_aligned_cache", None)
+    return session_dir
+
+
+def _setup_carveout_session_config_less(monkeypatch, tmp_path, *, team_name="t1"):
+    """Config-less Desktop carve-out fixture: a PACT session context whose
+    team_name resolves, but with NO config.json on disk for the team (the
+    config-less Desktop/SDK substrate). members[] is therefore structurally
+    empty (no roster file to read), so the members-only join witness returns
+    False and the carve-out fires.
+
+    The team dir exists (so get_team_name's resolution lands on it) but holds
+    NO config.json — only the inbox the caller seeds via _create_secretary_inbox.
+    """
+    import shared.pact_context as ctx_module
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    session_dir = tmp_path / ".claude" / "pact-sessions" / _SLUG / _SESSION_ID
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    plugin_root = tmp_path / "plugin"
+    (plugin_root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"version": "9.9.9"}), encoding="utf-8"
+    )
+
+    context_file = session_dir / "pact-session-context.json"
+    context_file.write_text(json.dumps({
+        "team_name": team_name,
+        "session_id": _SESSION_ID,
+        "project_dir": _PROJECT_DIR,
+        "plugin_root": str(plugin_root),
+        "started_at": "2026-01-01T00:00:00Z",
+    }), encoding="utf-8")
+
+    # Team dir exists but deliberately has NO config.json (config-less Desktop).
+    teams_dir = tmp_path / ".claude" / "teams" / team_name
+    teams_dir.mkdir(parents=True, exist_ok=True)
+    assert not (teams_dir / "config.json").exists()
+
+    monkeypatch.setattr(ctx_module, "_context_path", context_file)
+    monkeypatch.setattr(ctx_module, "_cache", None)
+    monkeypatch.setattr(ctx_module, "_aligned_cache", None)
+    return session_dir
+
+
+class TestPrematureInboxCarveOutRegression:
+    """#1023: the canonical secretary spawn must STILL be allowed when the
+    secretary's inbox file already exists (written pre-spawn by
+    ``TaskUpdate(owner="secretary")``) but the secretary is NOT yet in
+    ``members[]``.
+
+    ROOT CAUSE this guards: #1021 widened the SHARED
+    ``bootstrap_marker_writer._team_has_secretary`` predicate with a config-less
+    inbox-witness fallback (``members[]`` roster OR
+    ``teams/<team>/inboxes/secretary.json`` exists). That predicate had a SECOND
+    consumer — ``bootstrap_gate`` binding 5 — never re-examined by #1021. Because
+    the platform creates the inbox at bootstrap Step 2 (``TaskUpdate(owner)``)
+    BEFORE Step 3 (``Agent(secretary)``), the inbox arm returned True
+    prematurely, ``not True`` made binding 5 False, the carve-out did NOT fire,
+    and the gate DENIED the very spawn the carve-out exists to permit — a
+    bootstrap deadlock on the first turn of every fresh CLI session under 4.4.39.
+
+    The fix decouples by consumer: binding 5 now reads the gate-local
+    ``members[]``-only JOIN witness ``_secretary_in_members`` (dispatch-witness
+    via the inbox != join-witness via members[]), leaving
+    ``_team_has_secretary``'s inbox DISPATCH fallback for the marker writer.
+
+    WHY THE EXISTING CARVE-OUT TESTS DID NOT CATCH THIS: every carve-out test
+    seeds the team via ``_setup_pact_session_with_team``, which writes
+    ``config.json`` + ``members[]`` but NEVER creates an ``inboxes/`` dir — so
+    binding 5 was only ever exercised against the ``members[]`` arm, and the
+    cross-product (gate carve-out × premature inbox witness) — the exact
+    regression path — was untested. These tests add the inbox witness via the
+    REAL ``TaskUpdate(owner)`` write shape (``_create_secretary_inbox``) and
+    assert the carve-out STILL fires.
+
+    NON-VACUITY — VERIFICATION MATRIX (counter-test-by-revert, SOURCE-ONLY)
+    ----------------------------------------------------------------------
+    Binding 5 is the load-bearing source. The pre-fix shape
+    (``return not _team_has_secretary(expected_team)``) reads the inbox arm, so
+    a premature inbox flips it to a DENY; the post-fix shape
+    (``return not _secretary_in_members(expected_team)``) reads members[] only,
+    so a premature inbox is ignored and the carve-out fires.
+
+    Measure via SOURCE-ONLY revert of the gate alone (the fix commit bundles
+    these new tests with the source — a whole-commit ``git revert`` would mask
+    the cardinality)::
+
+        git checkout <fix>^ -- pact-plugin/hooks/bootstrap_gate.py
+        python -m pytest tests/test_bootstrap_gate.py::TestPrematureInboxCarveOutRegression \
+                         tests/test_bootstrap_gate.py::TestSecretaryInMembersUnit -q
+        git checkout <fix>  -- pact-plugin/hooks/bootstrap_gate.py
+        git diff --quiet -- pact-plugin/hooks/bootstrap_gate.py   # exits 0
+
+    EMPIRICAL RED set (MEASURED against the pre-fix gate, not assumed) over
+    {TestPrematureInboxCarveOutRegression + TestSecretaryInMembersUnit} =
+    {7 failed, 2 passed}, decomposing as:
+
+      BEHAVIORAL RED (4) — coupled to the inbox-arm regression, the load-bearing
+      non-vacuity proof. Each asserts ``result is None`` over a present premature
+      inbox, and each flips to ``_DENY_REASON`` under the pre-fix inbox-reading
+      binding 5 (``not _team_has_secretary``):
+        - R1 test_premature_inbox_does_not_defeat_carve_out      (THE headline)
+        - R2 test_premature_inbox_carve_out_fires_in_process
+        - R3 test_premature_inbox_carve_out_fires_tmux
+        - C2 test_carve_out_fires_config_less_desktop_no_config
+
+      NET-NEW-SYMBOL RED (3) — the U1 unit cells fail by ``ImportError`` because
+      ``_secretary_in_members`` does not exist in the pre-fix gate (it is the
+      fix's net-new symbol). This is a WEAKER non-vacuity form than a behavioral
+      RED (an ImportError proves the symbol is new, not that the assertion is
+      coupled to the bug); the U1 cells' OWN per-test ``# COUNTER-TEST`` notes
+      describe the finer behavioral revert (typed-tuple swap / members-vs-inbox)
+      that would flip them RED in isolation:
+        - U1 test_true_when_secretary_in_members
+        - U1 test_false_when_members_empty
+        - U1 test_false_on_iter_members_raising
+
+      GREEN (2) — FIX-INDEPENDENT by construction (they assert a DENY, not an
+      allow over a present inbox), so they correctly stay GREEN under the revert;
+      documented so a verifier does not expect them in the RED set:
+        - E1 test_empty_ssot_fails_closed_even_with_premature_inbox_both_modes
+        - CONTAINMENT test_non_canonical_input_still_blocked_with_pending_witness_error
+
+    The existing ``test_carve_out_closes_after_secretary_in_members`` (one-shot
+    closure, in TestCanonicalSecretarySpawnCarveOut) is likewise fix-independent.
+    """
+
+    # --- R1: THE headline regression (premature inbox must NOT defeat carve-out) ---
+
+    def test_premature_inbox_does_not_defeat_carve_out(self, monkeypatch, tmp_path):
+        """members=[] + a pre-spawn task-assignment-shaped inbox present →
+        Agent(secretary) ALLOWED (result is None).
+
+        Exercises the REAL inbox-witness seam UNMOCKED: the inbox file is on
+        disk at the path the predicate reads, and neither _team_has_secretary
+        nor _secretary_in_members is stubbed. Keyed on the OBSERVABLE outcome
+        (result is None vs _DENY_REASON), not the internal helper name, so it
+        stays valid across helper-shape changes.
+
+        # COUNTER-TEST (source-only revert of bootstrap_gate.py): the pre-fix
+        # binding 5 (`not _team_has_secretary`) reads the inbox arm → the
+        # premature inbox makes it True → `not True` → carve-out denies → this
+        # assertion (result is None) goes RED. THE headline non-vacuity cell.
+        """
+        from bootstrap_gate import _check_tool_allowed
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+        _create_secretary_inbox(tmp_path, team_name="t1")  # real pre-spawn write
+
+        result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        assert result is None
+
+    # --- R2 / R3: both-modes legs (standing merge gate) ---
+
+    def test_premature_inbox_carve_out_fires_in_process(self, monkeypatch, tmp_path):
+        """Both-modes leg — IN-PROCESS topology (frame session_id ==
+        config.leadSessionId). The carve-out resolves the team via get_team_name
+        (the SSOT context), so the identity-match in _resolve_aligned_team_name
+        succeeds; the premature inbox is still present and the carve-out STILL
+        fires (result is None).
+
+        The carve-out is topology-agnostic by design (it never branches on the
+        in-process/tmux mode flag — DUAL-MODE PERMANENT CONTRACT item 2), so both
+        legs assert the SAME outcome; they are provided as the standing merge-gate
+        formality, with the leadSessionId seeded so the two topologies are
+        genuinely distinct (not a duplicated assertion).
+
+        # COUNTER-TEST (source-only revert): same as R1 — the premature inbox
+        # flips the pre-fix inbox-reading binding 5 to a DENY → RED.
+        """
+        from bootstrap_gate import _check_tool_allowed
+
+        _setup_carveout_team_with_lead_session(
+            monkeypatch, tmp_path, team_name="t1",
+            lead_session_id=_SESSION_ID, frame_session_id=_SESSION_ID,
+        )
+        _create_secretary_inbox(tmp_path, team_name="t1")
+
+        result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        assert result is None
+
+    def test_premature_inbox_carve_out_fires_tmux(self, monkeypatch, tmp_path):
+        """Both-modes leg — TMUX topology (frame session_id !=
+        config.leadSessionId). The running frame's own session id differs from
+        the lead's, so _resolve_aligned_team_name finds no identity match and
+        falls back to the persisted ctx team_name — which still resolves the same
+        team dir, so get_team_name returns the same team and the carve-out STILL
+        fires over the premature inbox (result is None).
+
+        # COUNTER-TEST (source-only revert): same as R1 → RED.
+        """
+        from bootstrap_gate import _check_tool_allowed
+
+        _setup_carveout_team_with_lead_session(
+            monkeypatch, tmp_path, team_name="t1",
+            lead_session_id="a-different-lead-session-id",
+            frame_session_id=_SESSION_ID,
+        )
+        _create_secretary_inbox(tmp_path, team_name="t1")
+
+        result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        assert result is None
+
+    # --- C2: config-less Desktop always-fire ---
+
+    def test_carve_out_fires_config_less_desktop_no_config(self, monkeypatch, tmp_path):
+        """Config-less Desktop: NO config.json at all + a premature inbox →
+        carve-out FIRES (result is None). Under config-less Desktop members[] is
+        STRUCTURALLY empty (there is no config.json to read members from), so the
+        members-only join witness returns False → `not False` → the carve-out
+        fires. This is the agreed always-fire behavior (architect + security
+        firm): a witness-read over a missing config returns False, which only
+        ever PERMITS the canonical secretary spawn (bindings 1/2/3 still exclude
+        every non-secretary tool), and the is_marker_set fast-path closes the
+        one-shot window once the marker lands.
+
+        # COUNTER-TEST (source-only revert): the pre-fix binding 5 reads
+        # _team_has_secretary, whose inbox fallback fires on the present
+        # config-less inbox → True → `not True` → DENY → this assertion
+        # (result is None) goes RED. Couples to the inbox-arm regression exactly
+        # like R1.
+        """
+        from bootstrap_gate import _check_tool_allowed
+
+        _setup_carveout_session_config_less(monkeypatch, tmp_path, team_name="t1")
+        _create_secretary_inbox(tmp_path, team_name="t1")  # inbox witness, NO config.json
+
+        result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+        assert result is None
+
+    # --- E1: empty-SSOT fail-closed preserved, both modes ---
+
+    def test_empty_ssot_fails_closed_even_with_premature_inbox_both_modes(
+        self, monkeypatch, tmp_path,
+    ):
+        """Empty-SSOT fail-closed guard PRESERVED — in BOTH topologies — even
+        with a premature inbox present. When the persisted SSOT team_name is
+        empty, get_team_name short-circuits to "" (the deliberate fail-closed
+        "team unknown → refuse" gate), the carve-out's `if not expected_team:
+        return False` guard runs AHEAD of the witness, binding 5 returns False →
+        the carve-out does NOT fire → the canonical secretary spawn is DENIED.
+        The members-only witness change must not collide with this short-circuit.
+
+        # COUNTER-TEST: this cell is FIX-INDEPENDENT — it asserts a DENY (not an
+        # allow over a present inbox), so it stays GREEN under the source-only
+        # revert. It pins that the members-only witness did not weaken the
+        # empty-SSOT gate (a hypothetical regression where the witness recovered
+        # a team from an empty SSOT would flip this to allow → RED).
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        for frame_sid, lead_sid in (
+            (_SESSION_ID, _SESSION_ID),          # in-process (== leadSessionId)
+            (_SESSION_ID, "other-lead-sid"),     # tmux (!= leadSessionId)
+        ):
+            _setup_carveout_team_with_lead_session(
+                monkeypatch, tmp_path, team_name="",   # EMPTY SSOT
+                lead_session_id=lead_sid, frame_session_id=frame_sid,
+                seed_team_dir_name="t1",
+            )
+            # A premature inbox exists under the real team dir, but the empty SSOT
+            # means get_team_name never resolves to it.
+            _create_secretary_inbox(tmp_path, team_name="t1")
+
+            result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
+            assert result == _DENY_REASON, (
+                f"empty SSOT must fail-closed even with a premature inbox "
+                f"(frame_sid={frame_sid!r}, lead_sid={lead_sid!r})"
+            )
+
+    # --- CONTAINMENT (security-suggested): non-canonical input still blocked ---
+
+    def test_non_canonical_input_still_blocked_with_pending_witness_error(
+        self, monkeypatch, tmp_path,
+    ):
+        """CONTAINMENT: a NON-canonical tool call is STILL blocked even when a
+        witness-read error is pending — proving bindings 1/2/3 (and the
+        empty-SSOT guard) run BEFORE the join witness, so the broad-except
+        error→ALLOW inversion is CONTAINED to the canonical secretary spawn and
+        cannot leak into a blanket allow.
+
+        The fix's _secretary_in_members returns False on a read error (the safe
+        direction — it makes the carve-out FIRE). If that error→False were
+        reached for a NON-canonical input, it would wrongly ALLOW it. This test
+        proves it is not: bindings 1/2/3 short-circuit the predicate to False
+        for any non-secretary tool BEFORE _secretary_in_members is ever called,
+        so a pending witness error is irrelevant and the deny stands.
+
+        Covers two non-canonical shapes while the witness data source is rigged
+        to raise: (a) a plain Edit (fails binding 1 tool_name != Agent), and
+        (b) an Agent with the wrong subagent_type/name (fails bindings 2/3).
+        Both must DENY.
+
+        # COUNTER-TEST: this cell is FIX-INDEPENDENT (asserts DENY, not an allow
+        # over a present inbox) → GREEN under the source-only revert. It pins the
+        # binding-ordering containment invariant, not the inbox-arm regression.
+        """
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+        import shared.pact_context as ctx_module
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        # Rig the witness data source to RAISE — a pending witness error.
+        def _boom(team_name, teams_dir=None):
+            raise OSError("simulated witness read error")
+
+        monkeypatch.setattr(ctx_module, "_iter_members", _boom)
+
+        # (a) plain Edit — fails binding 1 (tool_name != Agent) → DENY,
+        # the witness is never consulted.
+        assert _check_tool_allowed(_make_input("Edit")) == _DENY_REASON
+
+        # (b) Agent with wrong subagent_type → fails binding 2 → DENY.
+        assert _check_tool_allowed(_canonical_secretary_input(
+            team_name="t1", overrides={"subagent_type": "pact-architect"},
+        )) == _DENY_REASON
+
+        # (c) Agent with wrong name → fails binding 3 → DENY.
+        assert _check_tool_allowed(_canonical_secretary_input(
+            team_name="t1", overrides={"name": "secretari"},
+        )) == _DENY_REASON
+
+
+class TestSecretaryInMembersUnit:
+    """U1: direct unit tests of the gate-local _secretary_in_members JOIN witness
+    (#1023). The carve-out integration tests above key on the observable gate
+    outcome; these pin the helper's own contract directly so a future refactor of
+    the helper is caught at the unit level (closes the shared-helper-direct-unit-
+    test gap)."""
+
+    def test_true_when_secretary_in_members(self, monkeypatch, tmp_path):
+        """members[] contains a 'secretary' name entry → True (join witness)."""
+        from bootstrap_gate import _secretary_in_members
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1",
+            members=[{"id": "sec-1", "name": "secretary", "type": "pact-secretary"}],
+        )
+        assert _secretary_in_members("t1") is True
+
+    def test_false_when_members_empty(self, monkeypatch, tmp_path):
+        """Empty members[] → False (the fresh-team precondition the carve-out
+        handles). A premature inbox is IGNORED — this is a members-ONLY witness,
+        the whole point of the #1023 decoupling.
+
+        # COUNTER-TEST (source-only revert): the pre-fix carve-out called
+        # _team_has_secretary (members[] OR inbox), so the equivalent member-only
+        # query did not exist as a gate-local symbol; the import of
+        # _secretary_in_members itself is the post-fix artifact. We additionally
+        # seed a premature inbox to make explicit that the members-only witness
+        # ignores it (it would return True if it read the inbox).
+        """
+        from bootstrap_gate import _secretary_in_members
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+        _create_secretary_inbox(tmp_path, team_name="t1")  # ignored by a members-only witness
+        assert _secretary_in_members("t1") is False
+
+    def test_false_on_iter_members_raising(self, monkeypatch, tmp_path):
+        """A raising _iter_members → broad-except returns False (totality /
+        never-raises). This is the load-bearing safe direction: a False return
+        makes binding 5's `not False` fire the carve-out (architect D-record:
+        the Path.home() RuntimeError seam must not propagate to main()'s
+        degraded-DENY and re-deadlock the spawn).
+
+        # COUNTER-TEST: replacing the broad `except Exception` with the caller's
+        # typed tuple (OSError, ValueError, KeyError, TypeError, AttributeError)
+        # would let a RuntimeError (the Path.home seam) PROPAGATE → this call
+        # would raise instead of returning False → RED. Pins the broad-except.
+        """
+        from bootstrap_gate import _secretary_in_members
+        import shared.pact_context as ctx_module
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        def _boom(team_name, teams_dir=None):
+            raise RuntimeError("unresolvable HOME seam")
+
+        monkeypatch.setattr(ctx_module, "_iter_members", _boom)
+        # Must NOT raise; must return False.
+        assert _secretary_in_members("t1") is False
+
+
+# =============================================================================
 # Deny reason content — P2 priority
 # =============================================================================
 
