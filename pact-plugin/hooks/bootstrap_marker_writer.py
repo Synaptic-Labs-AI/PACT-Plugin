@@ -217,7 +217,7 @@ def _team_has_secretary(team_name: str) -> bool:
     the lookup filters on member ``id``. Tried FIRST, so under CLI (config
     present) the inbox arm is never reached.
 
-    CONFIG-LESS FALLBACK (#1019): under the Desktop / older-CLI / print
+    CONFIG-LESS FALLBACK: under the Desktop / older-CLI / print
     substrate the platform creates ``teams/<full-uuid>/`` with ``inboxes/`` but
     no ``config.json`` — so members[] is empty and the marker would deadlock.
     Accept ``teams/<team_name>/inboxes/secretary.json`` as the witness.
@@ -240,7 +240,7 @@ def _team_has_secretary(team_name: str) -> bool:
     for member in pact_context._iter_members(team_name):
         if member.get("name") == _SECRETARY_NAME:
             return True
-    # Config-less fallback (#1019): the secretary's inbox file is the witness
+    # Config-less fallback: the secretary's inbox file is the witness
     # when no config.json members[] roster exists. team_name is get_team_name()
     # output (path-safe by construction); the read is wrapped so any FS error
     # preserves the fail-safe False.

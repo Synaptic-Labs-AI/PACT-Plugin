@@ -264,7 +264,7 @@ def _team_member_names(team_name: str) -> set[str]:
     dispatch_helpers.py because task_lifecycle_gate has no need for the
     member roster.
 
-    ACCEPTED CONFIG-LESS GAP (#1019): under the config-less Desktop/SDK
+    ACCEPTED CONFIG-LESS GAP: under the config-less Desktop/SDK
     substrate there is no ``config.json``, so this returns ``set()`` and the
     name-uniqueness rule degrades to "no collision detected". This is an
     ACCEPTED degradation, not a deadlock: the rule fails OPEN (permits), so

@@ -508,7 +508,7 @@ def get_team_name() -> str:
     # Read the persisted SSOT first. An empty value is the fail-closed signal
     # (see the security-gate note above) — short-circuit BEFORE identity-match.
     #
-    # LATENT COUPLING (#1019 config-less fix depends on this): the
+    # LATENT COUPLING (the config-less fix depends on this): the
     # _resolve_aligned_team_name BRANCH-2 config-less fallback (session-id-
     # anchored teams/<uuid>/ resolution) is reached ONLY through the non-empty
     # path below. So branch-2's config-less reachability DEPENDS on the

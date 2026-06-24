@@ -1,4 +1,4 @@
-"""Harness-aware bootstrap: config-less Desktop/SDK substrate (#1019).
+"""Harness-aware bootstrap: config-less Desktop/SDK substrate.
 
 The PACT plugin is built on the interactive-CLI team model (home-dir registry,
 ``session-<id8>`` naming, an eagerly platform-written ``config.json``). Under the

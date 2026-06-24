@@ -396,7 +396,7 @@ def test_divergent_full_uuid_resolves_through_gate_both_modes(
         assert (tmp_path / ".claude" / "tasks" / LEAD_FULL_UUID_DIR).exists()
 
 
-# ─── 4. HARNESS-SUBSTRATE axis — config-less Desktop/SDK, both modes (#1019) ───
+# ─── 4. HARNESS-SUBSTRATE axis — config-less Desktop/SDK, both modes ───
 #
 # The detect-and-align cell above resolves the divergent full-UUID dir via the
 # config.json identity-match (branch-1). The Desktop/SDK harness provides a
