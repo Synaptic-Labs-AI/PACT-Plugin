@@ -72,8 +72,14 @@ _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 #            a TaskUpdate-matcher deny IS honored — empirically un-exercised, so
 #            warn ships as the default and deny is opt-in.
 #   shadow → journal-only calibration; no additionalContext, no deny.
+# The read is normalized with .strip().lower() BEFORE the membership check so a
+# forgiving opt-in: "DENY" / " deny " / "Deny" → deny; "" / bogus / unknown →
+# warn (the safe default). Strictly more forgiving — normalization can never
+# enable an unintended mode (anything not in the set still falls back to warn).
 _ALLOWED_VARIETY_MODES = frozenset({"warn", "deny", "shadow"})
-DISPATCH_VARIETY_MODE = os.environ.get("PACT_DISPATCH_VARIETY_MODE", "warn")
+DISPATCH_VARIETY_MODE = os.environ.get(
+    "PACT_DISPATCH_VARIETY_MODE", "warn"
+).strip().lower()
 if DISPATCH_VARIETY_MODE not in _ALLOWED_VARIETY_MODES:
     DISPATCH_VARIETY_MODE = "warn"
 

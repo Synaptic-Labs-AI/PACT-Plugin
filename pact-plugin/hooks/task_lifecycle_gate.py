@@ -887,6 +887,11 @@ def _resolve_required_band_via_blocks(
     if not task_b:
         return "unresolvable"
     metadata = task_b.get("metadata")
+    # Opt2 broadened the inherit trigger: a metadata-not-dict OR variety-not-dict
+    # Task B (not only an absent variety) now resolves total=None and flows to
+    # the parent-inherit fallback below, rather than returning "unresolvable"
+    # immediately as the pre-Opt2 code did. The floor is preserved (an
+    # unresolvable parent still yields "unresolvable").
     variety = metadata.get("variety") if isinstance(metadata, dict) else None
     total = (
         resolve_variety_total(variety, metadata)

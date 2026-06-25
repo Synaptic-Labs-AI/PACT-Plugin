@@ -716,10 +716,36 @@ class TestDispatchVarietyEnvKnobModes:
         assert code == 0
         assert json.loads(out) == {"suppressOutput": True}
 
-    def test_unknown_mode_falls_back_to_warn(self):
-        """Module-load knob hygiene: an unknown env value resolves to warn
-        (never silently disables, never silently denies)."""
-        assert gate.DISPATCH_VARIETY_MODE in gate._ALLOWED_VARIETY_MODES
+    @pytest.mark.parametrize("env_value, expected", [
+        ("deny", "deny"),
+        ("DENY", "deny"),       # case-folded
+        (" deny ", "deny"),     # whitespace-stripped
+        ("Deny", "deny"),
+        (" shadow\t", "shadow"),
+        ("warn", "warn"),
+        ("", "warn"),           # empty → safe default
+        ("bogus", "warn"),      # unknown → safe default
+        ("denY ", "deny"),
+    ])
+    def test_env_knob_strip_lower_normalization(
+        self, monkeypatch, env_value, expected,
+    ):
+        """The PACT_DISPATCH_VARIETY_MODE read normalizes with .strip().lower()
+        BEFORE the membership check, then falls back to warn for anything not in
+        the allowed set. NON-TAUTOLOGICAL: reloads the module under the real env
+        value so it exercises the actual os.environ read + normalize + fallback
+        (not the already-resolved constant). Asserts case/whitespace variants of
+        'deny' arm deny, and unknown/empty values stay warn — proving the
+        normalization can never accidentally enable an unintended mode."""
+        import importlib
+        monkeypatch.setenv("PACT_DISPATCH_VARIETY_MODE", env_value)
+        reloaded = importlib.reload(gate)
+        try:
+            assert reloaded.DISPATCH_VARIETY_MODE == expected
+        finally:
+            # Restore the module's default-env resolution for sibling tests.
+            monkeypatch.delenv("PACT_DISPATCH_VARIETY_MODE", raising=False)
+            importlib.reload(gate)
 
     def test_deny_mode_fails_open_when_evaluation_raises(
         self, tmp_path, monkeypatch, pact_context, capsys,
