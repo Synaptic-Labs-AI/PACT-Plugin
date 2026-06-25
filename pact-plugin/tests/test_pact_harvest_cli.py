@@ -1,0 +1,355 @@
+"""
+Durable test suite for the pact_harvest CLI extraction (#1034/#927).
+
+Covers the harvest-domain CLI (hooks/shared/pact_harvest.py) + the pure
+resolve_latest_artifacts helper (hooks/shared/session_journal.py), which replace
+the previously-untestable inline-Python glue the pact-handoff-harvest skill ran.
+(This closes the #927 review's MINOR-2: the supersede was prose only.)
+
+THREAT MODEL → TEST MAPPING (why each block exists):
+  - The secretary runs the harvest OFF-LEAD, where pact_context.get_session_dir()
+    / read_events() false-return '' → 0 events silently. The CLI exists to give
+    the skill explicit-path, masked-read-safe entry points. So the load-bearing
+    tests are: (a) the B1-CLASS DRIFT PARITY — resolve-session-dir on a
+    special-char project_dir/session_id reconstructs the SANITIZED path the
+    writer actually wrote to (NO drift); this is the exact bug class clean-
+    basename masking hid in #927 and only cross-lane review caught. (b) The
+    EXIT-CODE contract (0=proceed-incl-empty, 2=stop, never 1) — the skill keys
+    its "report the gap and STOP, do not fall back to a path-less read" branch on
+    the exit code, never on parsing stdout. (c) The IMPORT-SEAM — the direct-
+    script sys.path bootstrap that makes `from shared.pact_context` resolve;
+    without it the CLI is dead in script mode (pact_context has package-relative
+    imports). (d) The ARRAY-PARSE contract the rewritten skill Steps 1/10 rely on.
+
+FIDELITY SPLIT (lead-confirmed): TRUE direct-script subprocess for the CLI
+contract / exit-code / empty-stdout / import-seam tests (those properties only
+exist in script mode); in-process direct calls for the pure helper units.
+
+B1-ORACLE DISCIPLINE (lead-confirmed, avoids the #927 wrong-oracle near-miss):
+the expected sanitized path is DERIVED from the SSOT — reconstruct_session_dir
+called directly — NOT hand-built. A hand-built path that under-sanitizes would
+agree with a buggy CLI (vacuous green). A companion assertion proves a raw
+un-sanitized join DIFFERS, so the special-char input actually triggers
+sanitization (defeating clean-basename masking).
+
+NON-VACUITY: documented per-test in the HANDOFF; spot-proven via source mutation
+(flip an exit code / break supersede / remove the bootstrap → the matching test
+goes RED). The B1 parity test's raw-join-differs companion is its in-suite
+non-vacuity guard.
+
+Run on the 3.13.7 interpreter (default python3 has no pytest):
+    /Users/mj/.pyenv/versions/3.13.7/bin/python3 -m pytest \
+        pact-plugin/tests/test_pact_harvest_cli.py -rA
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+_HOOKS_DIR = Path(__file__).parent.parent / "hooks"
+sys.path.insert(0, str(_HOOKS_DIR))
+
+import shared.pact_context as pact_context  # noqa: E402
+from shared.session_journal import (  # noqa: E402
+    append_event,
+    make_event,
+    resolve_latest_artifacts,
+)
+
+_CLI = _HOOKS_DIR / "shared" / "pact_harvest.py"
+_PY = "/Users/mj/.pyenv/versions/3.13.7/bin/python3"
+
+# Exit-code contract (must match pact_harvest.py).
+_EXIT_OK = 0
+_EXIT_INTERNAL_ERROR = 1
+_EXIT_UNRESOLVED = 2
+
+
+def _run_cli(*args: str) -> subprocess.CompletedProcess:
+    """Invoke the CLI as a TRUE direct-script subprocess (script mode — the
+    only mode where the sys.path bootstrap, exit codes, and stdout contract
+    actually exist). Uses the same interpreter the suite runs under."""
+    return subprocess.run(
+        [sys.executable, str(_CLI), *args],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _art_event(workflow, feature, paths, ts, task_id=None):
+    fields = {"workflow": workflow, "feature": feature, "paths": paths}
+    if task_id is not None:
+        fields["task_id"] = task_id
+    ev = make_event("artifact_paths", **fields)
+    ev["ts"] = ts
+    return ev
+
+
+# =============================================================================
+# (1) PURE UNIT — resolve_latest_artifacts (in-process; no subprocess needed).
+# =============================================================================
+class TestResolveLatestArtifacts:
+    FEATURE = "feat-x"
+
+    def test_supersede_latest_ts_wins_per_workflow(self):
+        events = [
+            _art_event("prepare", self.FEATURE, ["/OLD.md"], "2026-06-25T01:00:00Z"),
+            _art_event("prepare", self.FEATURE, ["/NEW.md"], "2026-06-25T03:00:00Z"),
+            _art_event("prepare", self.FEATURE, ["/MID.md"], "2026-06-25T02:00:00Z"),
+        ]
+        assert resolve_latest_artifacts(events, self.FEATURE) == {"prepare": ["/NEW.md"]}
+
+    def test_complete_path_list_never_merged_across_events(self):
+        """Each event carries the COMPLETE list; supersede REPLACES, never
+        unions. The latest event's 1-path list wins whole over a prior 2-path
+        list — a merge bug would yield 3 paths."""
+        events = [
+            _art_event("prepare", self.FEATURE, ["/a.md", "/b.md"], "2026-06-25T01:00:00Z"),
+            _art_event("prepare", self.FEATURE, ["/c.md"], "2026-06-25T02:00:00Z"),
+        ]
+        assert resolve_latest_artifacts(events, self.FEATURE) == {"prepare": ["/c.md"]}
+
+    def test_distinct_workflows_both_kept(self):
+        events = [
+            _art_event("prepare", self.FEATURE, ["/p.md"], "2026-06-25T01:00:00Z"),
+            _art_event("architect", self.FEATURE, ["/a.md"], "2026-06-25T01:00:00Z"),
+        ]
+        assert resolve_latest_artifacts(events, self.FEATURE) == {
+            "prepare": ["/p.md"], "architect": ["/a.md"]}
+
+    def test_wrong_feature_excluded(self):
+        events = [
+            _art_event("prepare", self.FEATURE, ["/mine.md"], "2026-06-25T01:00:00Z"),
+            _art_event("prepare", "other-feat", ["/other.md"], "2026-06-25T02:00:00Z"),
+        ]
+        assert resolve_latest_artifacts(events, self.FEATURE) == {"prepare": ["/mine.md"]}
+
+    def test_empty_events_returns_empty_dict(self):
+        assert resolve_latest_artifacts([], self.FEATURE) == {}
+
+    @pytest.mark.parametrize("bad", [
+        [1, 2, 3], "a string", None, 42,
+        {"feature": FEATURE, "paths": ["/x.md"], "ts": "2026-06-25T01:00:00Z"},  # no workflow
+        {"workflow": "prepare", "feature": FEATURE, "ts": "2026-06-25T01:00:00Z"},  # no paths
+        {"workflow": "prepare", "feature": FEATURE, "paths": "/x.md", "ts": "2026-06-25T01:00:00Z"},  # paths not list
+    ])
+    def test_malformed_events_skipped_defensively(self, bad):
+        """Non-dict entries and dicts missing workflow/paths (or paths-not-list)
+        are skipped — parity with the _read_events_at isinstance(dict) guard."""
+        good = _art_event("prepare", self.FEATURE, ["/good.md"], "2026-06-25T05:00:00Z")
+        assert resolve_latest_artifacts([bad, good], self.FEATURE) == {"prepare": ["/good.md"]}
+
+    def test_bad_ts_never_supersedes_good(self):
+        """A missing/unparseable ts is treated as older than any parseable ts,
+        so a malformed later event cannot mask a well-formed one — regardless of
+        insertion order (both orderings asserted)."""
+        good = _art_event("prepare", self.FEATURE, ["/good.md"], "2026-06-25T02:00:00Z")
+        bad = {"type": "artifact_paths", "workflow": "prepare",
+               "feature": self.FEATURE, "paths": ["/bad.md"], "ts": "not-a-ts"}
+        assert resolve_latest_artifacts([good, bad], self.FEATURE) == {"prepare": ["/good.md"]}
+        assert resolve_latest_artifacts([bad, good], self.FEATURE) == {"prepare": ["/good.md"]}
+
+    def test_missing_ts_never_supersedes_good(self):
+        good = _art_event("prepare", self.FEATURE, ["/good.md"], "2026-06-25T02:00:00Z")
+        no_ts = {"type": "artifact_paths", "workflow": "prepare",
+                 "feature": self.FEATURE, "paths": ["/nots.md"]}
+        assert resolve_latest_artifacts([good, no_ts], self.FEATURE) == {"prepare": ["/good.md"]}
+        assert resolve_latest_artifacts([no_ts, good], self.FEATURE) == {"prepare": ["/good.md"]}
+
+
+# =============================================================================
+# (2) SUBPROCESS — resolve-session-dir contract + THE B1-CLASS DRIFT PARITY.
+# =============================================================================
+class TestResolveSessionDirSubprocess:
+    def _write_ctx(self, tmp_path, project_dir, session_id):
+        ctx = tmp_path / "pact-session-context.json"
+        ctx.write_text(json.dumps(
+            {"project_dir": project_dir, "session_id": session_id}), encoding="utf-8")
+        return ctx
+
+    def test_valid_context_exit0_absolute_dir(self, tmp_path):
+        ctx = self._write_ctx(tmp_path, "/clean/project", "sess-abcd")
+        r = _run_cli("resolve-session-dir", "--context-file", str(ctx))
+        assert r.returncode == _EXIT_OK
+        out = r.stdout.strip()
+        assert Path(out).is_absolute()
+        # Oracle = the SSOT helper itself (NOT a hand-built path).
+        assert out == pact_context.reconstruct_session_dir("/clean/project", "sess-abcd")
+
+    def test_b1_class_drift_both_axes_sanitized_no_drift(self, tmp_path):
+        """THE critical durability test (the exact bug class cross-lane review
+        caught in #927). A project basename with a DOT and a session_id with a
+        non-[A-Za-z0-9_-] char must reconstruct the SANITIZED path the WRITER
+        wrote to — NO drift.
+
+        ORACLE = reconstruct_session_dir called directly (the SSOT). Non-vacuity
+        companion: a RAW un-sanitized join DIFFERS — proving the special-char
+        input actually triggers sanitization on BOTH axes (slug + session_id),
+        which is what clean-basename masking hid."""
+        project_dir = "/Users/x/my.project dir"   # dot AND space in the basename
+        session_id = "abc.def 123"                  # dot AND space (non-allowlist)
+        ctx = self._write_ctx(tmp_path, project_dir, session_id)
+        r = _run_cli("resolve-session-dir", "--context-file", str(ctx))
+        assert r.returncode == _EXIT_OK
+        out = r.stdout.strip()
+
+        # (a) parity with the SSOT writer-derivation (the load-bearing assertion).
+        expected = pact_context.reconstruct_session_dir(project_dir, session_id)
+        assert out == expected, f"CLI {out!r} drifted from SSOT {expected!r}"
+
+        # (b) NON-VACUITY: a raw un-sanitized join would land elsewhere — so the
+        # special-char input genuinely exercises sanitization (not a no-op).
+        from shared.paths import get_claude_config_dir
+        raw = str(get_claude_config_dir() / "pact-sessions"
+                  / Path(project_dir).name / session_id)
+        assert out != raw, (
+            "special-char input must be sanitized away from the raw join — if "
+            "equal, the drift case is vacuous (no sanitization exercised)"
+        )
+        # And concretely: the dot/space are gone from BOTH path segments.
+        assert "my_project_dir" in out and "abc_def_123" in out
+
+    @pytest.mark.parametrize("scenario", ["missing_file", "bad_json", "not_object",
+                                          "falsy_project", "falsy_session"])
+    def test_unresolvable_exit2_empty_stdout(self, tmp_path, scenario):
+        """Every bad-input path → exit 2 + EMPTY stdout (the skill's stop gate
+        keys on the exit code; stdout must carry no data to mis-parse)."""
+        if scenario == "missing_file":
+            target = str(tmp_path / "does-not-exist.json")
+        elif scenario == "bad_json":
+            f = tmp_path / "bad.json"; f.write_text("{not json", encoding="utf-8")
+            target = str(f)
+        elif scenario == "not_object":
+            f = tmp_path / "arr.json"; f.write_text("[1,2,3]", encoding="utf-8")
+            target = str(f)
+        elif scenario == "falsy_project":
+            target = str(self._write_ctx(tmp_path, "", "sess-abcd"))
+        else:  # falsy_session
+            target = str(self._write_ctx(tmp_path, "/clean/project", ""))
+        r = _run_cli("resolve-session-dir", "--context-file", target)
+        assert r.returncode == _EXIT_UNRESOLVED, f"{scenario}: expected exit 2"
+        assert r.stdout == "", f"{scenario}: stdout must be EMPTY on exit 2"
+
+    def test_exit_code_is_2_never_1_on_bad_input(self, tmp_path):
+        """Bad input is EXACTLY 2, never 1 (1 is reserved for internal errors).
+        Pins the documented divergence from session_journal's exit-1 CLI."""
+        r = _run_cli("resolve-session-dir", "--context-file",
+                     str(tmp_path / "nope.json"))
+        assert r.returncode == _EXIT_UNRESOLVED
+        assert r.returncode != _EXIT_INTERNAL_ERROR
+
+
+# =============================================================================
+# (3) SUBPROCESS — resolve-artifacts contract.
+# =============================================================================
+class TestResolveArtifactsSubprocess:
+    FEATURE = "feat-y"
+
+    @pytest.fixture
+    def session_with_events(self, tmp_path, monkeypatch, pact_context):
+        """Build a REAL on-disk journal at a resolvable session dir so the CLI's
+        read_events_from resolves it (non-mocked seam)."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        pact_context(team_name="t", session_id="sid-harvest", project_dir="/proj")
+        slug = Path("/proj").name
+        session_dir = tmp_path / ".claude" / "pact-sessions" / slug / "sid-harvest"
+        return str(session_dir)
+
+    def test_supersede_and_shape_one_line_json(self, session_with_events):
+        sd = session_with_events
+        append_event(_art_event("prepare", self.FEATURE, ["/OLD.md"], "2026-06-25T01:00:00Z"))
+        append_event(_art_event("prepare", self.FEATURE, ["/NEW.md"], "2026-06-25T02:00:00Z"))
+        append_event(_art_event("architect", self.FEATURE, ["/arch.md"], "2026-06-25T01:00:00Z"))
+        r = _run_cli("resolve-artifacts", "--session-dir", sd, "--feature", self.FEATURE)
+        assert r.returncode == _EXIT_OK
+        # One-line compact JSON object.
+        assert "\n" not in r.stdout.strip()
+        assert json.loads(r.stdout) == {"prepare": ["/NEW.md"], "architect": ["/arch.md"]}
+
+    def test_wrong_feature_excluded(self, session_with_events):
+        sd = session_with_events
+        append_event(_art_event("prepare", self.FEATURE, ["/mine.md"], "2026-06-25T01:00:00Z"))
+        append_event(_art_event("prepare", "other", ["/other.md"], "2026-06-25T02:00:00Z"))
+        r = _run_cli("resolve-artifacts", "--session-dir", sd, "--feature", self.FEATURE)
+        assert r.returncode == _EXIT_OK
+        assert json.loads(r.stdout) == {"prepare": ["/mine.md"]}
+
+    def test_empty_result_is_empty_object_exit0(self, session_with_events):
+        """A legitimately-empty result is {} at exit 0 (NOT a stop trigger)."""
+        sd = session_with_events
+        r = _run_cli("resolve-artifacts", "--session-dir", sd, "--feature", "no-such-feat")
+        assert r.returncode == _EXIT_OK
+        assert json.loads(r.stdout) == {}
+
+    @pytest.mark.parametrize("bad_dir", ["", "relative/dir"])
+    def test_bad_session_dir_exit2_empty_stdout(self, bad_dir):
+        r = _run_cli("resolve-artifacts", "--session-dir", bad_dir, "--feature", self.FEATURE)
+        assert r.returncode == _EXIT_UNRESOLVED
+        assert r.stdout == ""
+
+
+# =============================================================================
+# (4) IMPORT-SEAM — the direct-script sys.path bootstrap resolves
+#     shared.pact_context (the non-vacuous seam the bootstrap fix addresses).
+# =============================================================================
+class TestImportSeamBootstrap:
+    def test_direct_script_resolves_pact_context_package_chain(self, tmp_path):
+        """The CLI run as a direct script (cwd OUTSIDE the repo) must resolve
+        `from shared.pact_context import reconstruct_session_dir` AND
+        pact_context's own package-relative imports (from .session_state, etc).
+        Proven end-to-end: resolve-session-dir produces a correct abs path, which
+        is only possible if the bootstrap made `shared` a real package. If a
+        future edit removes the sys.path bootstrap, this goes RED (ModuleNotFound
+        or a non-zero exit), failing loudly."""
+        ctx = tmp_path / "pact-session-context.json"
+        ctx.write_text(json.dumps(
+            {"project_dir": "/p", "session_id": "s"}), encoding="utf-8")
+        # Run from an arbitrary cwd (tmp_path) to exercise script-mode sys.path.
+        r = subprocess.run(
+            [sys.executable, str(_CLI), "resolve-session-dir",
+             "--context-file", str(ctx)],
+            capture_output=True, text=True, cwd=str(tmp_path),
+        )
+        assert r.returncode == _EXIT_OK, (
+            f"direct-script import seam broke (rc={r.returncode}); "
+            f"stderr={r.stderr!r}"
+        )
+        assert r.stdout.strip() == pact_context.reconstruct_session_dir("/p", "s")
+        assert "ModuleNotFoundError" not in r.stderr
+        assert "ImportError" not in r.stderr
+
+
+# =============================================================================
+# (5) ARRAY-PARSE CONTRACT — session_journal's `read` CLI emits a JSON ARRAY
+#     (the contract SKILL.md Steps 1/10 now parse). A future switch back to
+#     JSONL would break the skill's reused read — this guards it.
+# =============================================================================
+class TestReadEmitsJsonArrayContract:
+    def test_session_journal_read_cli_emits_json_array(self, tmp_path, monkeypatch, pact_context):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        pact_context(team_name="t", session_id="sid-arr", project_dir="/proj")
+        slug = Path("/proj").name
+        session_dir = str(tmp_path / ".claude" / "pact-sessions" / slug / "sid-arr")
+        append_event(make_event(
+            "agent_handoff", agent="devops-engineer", task_id="1",
+            task_subject="x", handoff={"produced": "p", "decisions": "d",
+            "uncertainty": "n", "integration": "n", "reasoning_chain": "r",
+            "open_questions": "n"}))
+        sj = str(_HOOKS_DIR / "shared" / "session_journal.py")
+        r = subprocess.run(
+            [sys.executable, sj, "read", "--session-dir", session_dir,
+             "--type", "agent_handoff"],
+            capture_output=True, text=True,
+        )
+        assert r.returncode == 0, f"read failed: {r.stderr!r}"
+        parsed = json.loads(r.stdout)
+        assert isinstance(parsed, list), (
+            "session_journal read MUST emit a JSON ARRAY (the contract Steps "
+            "1/10 parse); a regression to JSONL would break the reused read"
+        )
+        assert len(parsed) == 1 and parsed[0]["type"] == "agent_handoff"
