@@ -646,6 +646,150 @@ class TestDispatchVarietyCarveOuts:
         ) is None
 
 
+class TestDispatchVarietyPerfGuard:
+    """F1 — the extra per-dispatch task-read is BOUNDED: read_task_json must
+    NOT be called when the cheap in-memory guards (is_lead / owner-present /
+    addBlockedBy-present / taskId-present) fail. Pins the cost-order so a future
+    refactor cannot move the disk read ahead of the guards (which would add a
+    disk hit to EVERY TaskUpdate in EVERY consumer session, not just genuine
+    dispatch-wiring writes)."""
+
+    def _spy_read_task_json(self, monkeypatch):
+        """Replace gate.read_task_json with a call-counting spy. Patches the
+        name in the GATE module namespace (where it is looked up via the
+        module-level `from shared.task_utils import read_task_json`), NOT
+        shared.task_utils (where it is defined) — patch-where-looked-up."""
+        calls = []
+        real = gate.read_task_json
+
+        def _spy(task_id, team_name, *a, **k):
+            calls.append((task_id, team_name))
+            return real(task_id, team_name, *a, **k)
+
+        monkeypatch.setattr(gate, "read_task_json", _spy)
+        return calls
+
+    @pytest.mark.parametrize(
+        "frame_desc, frame_factory",
+        [
+            # is_lead guard: a teammate frame short-circuits first.
+            ("teammate_frame",
+             lambda: _wiring_update("42", agent_type=TEAMMATE)),
+            # owner-absent guard (partial wiring).
+            ("owner_absent",
+             lambda: _wiring_update("42", owner=None)),
+            # addBlockedBy-absent guard (partial wiring).
+            ("addblockedby_absent",
+             lambda: _wiring_update("42", add_blocked_by=None)),
+            # taskId-absent guard.
+            ("taskid_absent",
+             lambda: {"tool_name": "TaskUpdate", "agent_type": LEAD,
+                      "tool_input": {"owner": "backend-coder",
+                                     "addBlockedBy": ["A"]}}),
+        ],
+    )
+    def test_no_disk_read_when_cheap_guards_fail(
+        self, tmp_path, monkeypatch, pact_context, frame_desc, frame_factory,
+    ):
+        """Each guard-failing frame must bypass read_task_json entirely."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_team_config(tmp_path, monkeypatch, TEAM)
+        _seed_task(tmp_path, TEAM, "42", subject="impl foo",
+                   owner="backend-coder", metadata={})
+        calls = self._spy_read_task_json(monkeypatch)
+        gate._evaluate_dispatch_variety(frame_factory())
+        assert calls == [], (
+            f"read_task_json must NOT be called on {frame_desc} "
+            f"(cheap guards short-circuit first); got {calls}"
+        )
+
+    def test_disk_read_happens_on_a_real_dispatch_wiring_write(
+        self, tmp_path, monkeypatch, pact_context,
+    ):
+        """Counter-case (proves the spy is wired): a genuine wiring write that
+        passes every cheap guard DOES read the task — so the test above asserts
+        a real short-circuit, not a dead spy."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_team_config(tmp_path, monkeypatch, TEAM)
+        _seed_task(tmp_path, TEAM, "42", subject="impl foo",
+                   owner="backend-coder", metadata={})
+        calls = self._spy_read_task_json(monkeypatch)
+        gate._evaluate_dispatch_variety(_wiring_update("42"))
+        assert calls == [("42", TEAM)], (
+            f"a real dispatch wiring write must read the linked task once; "
+            f"got {calls}"
+        )
+
+
+class TestDispatchVarietyBothModesMatrix:
+    """F2 — the is_lead dual-mode discriminator as a single explicit matrix:
+    a lead frame FIRES (advisory present); a teammate frame SUPPRESSES (None).
+    Consolidates the previously-paired lead-fire / teammate-silent coverage
+    into one parametrized case so the both-directions contract reads as a unit.
+    """
+
+    @pytest.mark.parametrize(
+        "mode, agent_type, expect_fires",
+        [
+            ("in_process_lead", LEAD, True),
+            ("tmux_teammate", TEAMMATE, False),
+        ],
+    )
+    def test_is_lead_matrix(
+        self, tmp_path, monkeypatch, pact_context, mode, agent_type,
+        expect_fires,
+    ):
+        """Same unstamped bare-owner wiring write under each frame role:
+        lead → advisory; teammate → silent (is_lead structural branch)."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_team_config(tmp_path, monkeypatch, TEAM)
+        _seed_task(tmp_path, TEAM, "42", subject="impl foo",
+                   owner="backend-coder", metadata={})
+        adv = gate._evaluate_dispatch_variety(
+            _wiring_update("42", agent_type=agent_type)
+        )
+        if expect_fires:
+            assert adv is not None and "metadata.variety" in adv, (
+                f"{mode}: lead frame must fire the advisory; got {adv!r}"
+            )
+        else:
+            assert adv is None, (
+                f"{mode}: teammate frame must suppress (is_lead False); "
+                f"got {adv!r}"
+            )
+
+
+class TestDispatchVarietyMalformedType:
+    """F3 — a variety value of the WRONG TYPE (list / string, not a dict) at
+    the gate: resolve_variety_total returns None for it, so the gate treats it
+    as the missing-stamp gap and FIRES. Closes the one un-probed malformed
+    shape (the dict-shaped malformed cases are covered by the R4 split tests)."""
+
+    @pytest.mark.parametrize(
+        "bad_variety",
+        [
+            pytest.param(["not", "a", "dict"], id="variety_is_list"),
+            pytest.param("twelve", id="variety_is_string"),
+            pytest.param(12, id="variety_is_bare_int"),
+        ],
+    )
+    def test_fires_on_non_dict_variety(
+        self, tmp_path, monkeypatch, pact_context, bad_variety,
+    ):
+        """A non-dict metadata.variety does not resolve to a total → the gate
+        fires the missing-stamp advisory (never crashes, never silently
+        passes)."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_team_config(tmp_path, monkeypatch, TEAM)
+        _seed_task(tmp_path, TEAM, "42", subject="impl foo",
+                   owner="backend-coder", metadata={"variety": bad_variety})
+        adv = gate._evaluate_dispatch_variety(_wiring_update("42"))
+        assert adv is not None and "metadata.variety" in adv, (
+            f"a non-dict variety ({bad_variety!r}) must fire the missing-stamp "
+            f"advisory; got {adv!r}"
+        )
+
+
 class TestDispatchVarietyEnvKnobModes:
     """main()-level: PACT_DISPATCH_VARIETY_MODE selects warn / deny / shadow.
     The module reads the knob at import; monkeypatch the resolved constant."""
