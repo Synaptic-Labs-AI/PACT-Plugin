@@ -15,7 +15,7 @@ Dispatch concurrent specialists for this self-contained task: $ARGUMENTS
 Create a simpler Task hierarchy than full orchestrate:
 
 ```
-1. `TaskCreate`: Feature task "{verb} {feature}" (self-contained task)
+1. `TaskCreate`: Feature task "{verb} {feature}" (self-contained task) — stamp metadata.variety.total (see below)
 2. `TaskUpdate`: Feature task status = "in_progress"
 3. Analyze: How many agents needed?
 4. `TaskCreate`: Agent task(s) — direct children of feature
@@ -28,6 +28,12 @@ Create a simpler Task hierarchy than full orchestrate:
 ```
 
 > Steps 8-10 are detailed in the [After Specialist Completes](#after-specialist-completes) section below (includes test verification and commit steps).
+
+> **Feature-task variety stamp (step 1).** Stamp the feature-level variety total on the feature `TaskCreate`, so the wrap-up Orchestration Retrospective can compute feature-vs-dispatch divergence instead of `feature_variety_missing`:
+> ```python
+> TaskCreate(subject="{verb} {feature}", metadata={"variety": {"total": N}})  # N = feature-level total, 4-16
+> ```
+> Advisory, not enforced — the feature task has no teachback-gated sibling, so the dispatch-boundary gate cannot apply. The `.total` field is the load-bearing input `compute_variety_divergence` reads (the full D11 4-rationale block is fine too, but `.total` is the minimum). Mirrors what `orchestrate.md` already persists for its feature task.
 
 **Example structure:**
 ```

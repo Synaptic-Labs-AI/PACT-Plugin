@@ -852,3 +852,51 @@ class TestVarietyDivergence:
             result = compute_variety_divergence(feature, dispatches)
             assert result["surfaced"] is False
             assert result["direction"] is None
+
+
+# =============================================================================
+# #873: feature-task variety stamp → computable divergence (integration)
+# =============================================================================
+#
+# C4 stamps metadata.variety.total on the comPACT feature task at creation, so
+# the wrap-up Orchestration Retrospective's divergence computation has the
+# feature_variety half. These tests pin the OBSERVABLE the #873 stamp unlocks:
+# a STAMPED feature total drives a real numeric delta and a reason that is NOT
+# "feature_variety_missing" — the exact gap #873 closes. The complement (an
+# UNstamped feature → feature_variety_missing) is the contrast case the stamp
+# eliminates.
+# =============================================================================
+
+
+class TestFeatureStampUnlocksDivergence:
+    """#873: a stamped feature total makes divergence computable."""
+
+    def test_stamped_feature_yields_real_delta_not_missing(self):
+        """A feature total (the #873 stamp's metadata.variety.total) drives a
+        real numeric delta and a reason != feature_variety_missing — the #873
+        fix observable. Feature 9 vs dispatches [5,5,5] → delta 4 surfaced."""
+        result = compute_variety_divergence(9, [5, 5, 5])
+        assert result["delta"] == 4
+        assert result["reason"] != "feature_variety_missing"
+        assert result["surfaced"] is True
+        assert result["direction"] == "overshot"
+
+    def test_unstamped_feature_is_the_gap_873_closes(self):
+        """Contrast/counter-pin: WITHOUT the feature stamp (feature_variety
+        None) the computation degrades to feature_variety_missing with a null
+        delta — exactly the wrap-up Q5 gap #873's comPACT stamp eliminates.
+        Dispatch stats are still computed over the stamped dispatches."""
+        result = compute_variety_divergence(None, [5, 5, 5])
+        assert result["reason"] == "feature_variety_missing"
+        assert result["delta"] is None
+        assert result["mean"] == 5  # dispatch stats still computed
+
+    def test_stamped_feature_within_threshold_is_computable_not_missing(self):
+        """Even when the delta is within threshold (not surfaced), a stamped
+        feature is COMPUTABLE — reason is within_threshold, NOT
+        feature_variety_missing. The stamp's value is computability, distinct
+        from whether a divergence is surfaced."""
+        result = compute_variety_divergence(8, [7, 8, 9])
+        assert result["reason"] == "within_threshold"
+        assert result["reason"] != "feature_variety_missing"
+        assert result["delta"] == 0
