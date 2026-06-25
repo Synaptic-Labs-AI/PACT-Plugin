@@ -56,6 +56,7 @@ from shared.session_journal import (  # noqa: E402
     make_event,
     read_events,
     read_events_from,
+    read_last_event_from,
 )
 
 # --- agent_type axis constants (the both-modes discriminator for this surface) ---
@@ -673,6 +674,48 @@ class TestF1NonDictLineDoesNotPoisonWholeFile:
             f"a non-dict line ({bad_line!r}) must not poison the whole file; "
             f"got {events!r}"
         )
+
+
+class TestF1SiblingScanPathLastEventSurvivesNonDictLine:
+    """F1 sibling (the SECOND read path devops hardened in the same fix): the
+    REVERSE-scan path `_scan_lines_for_event` — reached via `read_last_event_from`
+    — must ALSO survive a non-dict line. F1 above covers the FORWARD read
+    (`read_events_from` → `_read_events_at`); this covers the reverse read.
+
+    PRE-FIX: the reverse scan calls `event.get(...)` on each parsed line; a
+    non-dict line raises AttributeError, escapes the per-line
+    (JSONDecodeError, ValueError) catch, propagates to the outer except, and the
+    scan returns None — so `read_last_event_from` reports the target event as
+    'not found' even though it is present. Distinct, concrete consequence (per
+    the production docstring): `session_end` would conclude the session was
+    NEVER paused.
+
+    POST-FIX (devops `isinstance(event, dict)` guard in `_scan_lines_for_event`,
+    parity with `_read_events_at`): the non-dict line is skipped and the target
+    event is found.
+
+    Non-vacuous: FAILS pre-fix (None), PASSES post-fix. Counter-test: revert
+    session_journal.py → 4 RED (same fix file as the forward-read F1).
+    """
+
+    @pytest.mark.parametrize("bad_line", ["[1,2,3]", '"a string"', "null", "42"])
+    def test_nondict_line_does_not_hide_last_event(self, live_env, bad_line):
+        tmp_path, session_dir = live_env
+        # A target artifact_paths event, then a non-dict line AFTER it on disk —
+        # so the REVERSE scan hits the bad line BEFORE reaching the target.
+        append_event(_artifact_event("prepare", paths=["/abs/p.md"]))
+        journal = _journal_file(tmp_path)
+        lines = journal.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        journal.write_text(lines[0] + "\n" + bad_line + "\n", encoding="utf-8")
+        # The reverse scan must skip the trailing non-dict line and find the
+        # target — not return None.
+        ev = read_last_event_from(session_dir, "artifact_paths")
+        assert ev is not None, (
+            f"a trailing non-dict line ({bad_line!r}) must not hide the last "
+            f"event in the reverse scan (read_last_event_from returned None)"
+        )
+        assert ev.get("paths") == ["/abs/p.md"]
 
 
 class TestB1SessionDirReconstructSanitizationParity:
