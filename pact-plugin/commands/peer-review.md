@@ -279,7 +279,16 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
 ---
 
 **After all reviews complete**:
-1. Synthesize findings into a unified review summary with consolidated recommendations
+1. Synthesize findings into a unified review summary with consolidated recommendations, written to `docs/review/`. After writing it, confirm the review doc exists on disk and is non-empty before continuing.
+   - **Emit `artifact_paths`**: write a path-only `artifact_paths` journal event pointing at the review doc(s) so the consolidated review is recoverable after garbage-collection independently of any HANDOFF. The review doc is the lead's own product — enumerate its absolute path(s) here, not from any HANDOFF.
+     ```bash
+     set -e
+     trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
+     python3 "{plugin_root}/hooks/shared/session_journal.py" write \
+       --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON'
+     {"workflow": "peer-review", "feature": "{feature}", "paths": ["{absolute_review_doc_path}"]}
+JSON
+     ```
 2. **Journal events**: Write a `review_finding` event for each synthesized finding:
    ```bash
    set -e

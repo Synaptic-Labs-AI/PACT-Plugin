@@ -669,9 +669,9 @@ class TestPerLoopDispatchSites:
     # (relative_command_path, lead_in_line_number_1based, role_or_phase_label).
     SITES = [
         ("orchestrate.md", 463, "PREPARE"),
-        ("orchestrate.md", 558, "ARCHITECT"),
-        ("orchestrate.md", 681, "CODE"),
-        ("orchestrate.md", 816, "TEST"),
+        ("orchestrate.md", 569, "ARCHITECT"),
+        ("orchestrate.md", 703, "CODE"),
+        ("orchestrate.md", 848, "TEST"),
         ("comPACT.md", 233, "MultipleSpecialists"),
         ("comPACT.md", 293, "SingleSpecialist"),
         ("peer-review.md", 192, "Reviewers"),

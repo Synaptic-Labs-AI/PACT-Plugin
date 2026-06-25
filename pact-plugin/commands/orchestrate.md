@@ -494,7 +494,18 @@ Agent(
 Completed-phase teammates remain as consultants. Do not shutdown during this workflow.
 
 **Before next phase**:
-- [ ] Outputs exist in `docs/preparation/`
+- [ ] **Artifact exists and is non-empty** — for a PREPARE phase that **ran** (not skipped), the expected per-feature artifact at `docs/preparation/{feature}.md` (and any additional produced files, e.g. `environment-model-{feature}.md`) MUST exist on disk and be non-empty before you complete the phase task or emit below. A missing or empty artifact is a **failure to investigate**, not an absence of work: do **NOT** complete the phase, do **NOT** emit, and INVESTIGATE first (specialist wrote to the wrong location, produced nothing, or used a different slug), then resolve it. A **skipped** PREPARE phase is exempt — it legitimately produces no artifact, so neither the check nor the emit applies.
+- [ ] **Emit `artifact_paths`** — before marking the PREPARE phase task completed, glob the worktree's `docs/preparation/` directory and write a path-only `artifact_paths` journal event so the artifact is recoverable after garbage-collection independently of any HANDOFF. Enumerate the full absolute path list yourself (do NOT read paths from a HANDOFF — a recovery pointer must not depend on the thing it recovers). If the glob finds nothing, do NOT emit an empty event (the missing-artifact case above already covers that anomaly).
+  ```bash
+  set -e
+  trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
+  SJ="{plugin_root}/hooks/shared/session_journal.py"
+  # Enumerate this feature's PREPARE artifacts (worktree-isolated → this feature only).
+  # Emit only when ≥1 non-empty path is found; an empty result is the missing-artifact anomaly, not an event.
+  python3 "$SJ" write --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON'
+  {"workflow": "prepare", "feature": "{feature}", "paths": ["{absolute_path_1}", "{absolute_path_2}"], "task_id": "{prepare_task_id}"}
+JSON
+  ```
 - [ ] Specialist HANDOFF received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable? Optionally query secretary for S4 pattern check (variety 7+). See [pact-orchestrator §Memory Management](../agents/pact-orchestrator.md#memory-management).
@@ -589,7 +600,18 @@ Agent(
 Completed-phase teammates remain as consultants. Do not shutdown during this workflow.
 
 **Before next phase**:
-- [ ] Outputs exist in `docs/architecture/`
+- [ ] **Artifact exists and is non-empty** — for an ARCHITECT phase that **ran** (not skipped), the expected per-feature artifact at `docs/architecture/{feature}.md` (and any additional produced files) MUST exist on disk and be non-empty before you complete the phase task or emit below. A missing or empty artifact is a **failure to investigate**, not an absence of work: do **NOT** complete the phase, do **NOT** emit, and INVESTIGATE first (specialist wrote to the wrong location, produced nothing, or used a different slug), then resolve it. A **skipped** ARCHITECT phase is exempt — it legitimately produces no artifact, so neither the check nor the emit applies.
+- [ ] **Emit `artifact_paths`** — before marking the ARCHITECT phase task completed, glob the worktree's `docs/architecture/` directory and write a path-only `artifact_paths` journal event so the artifact is recoverable after garbage-collection independently of any HANDOFF. Enumerate the full absolute path list yourself (do NOT read paths from a HANDOFF). If the glob finds nothing, do NOT emit an empty event (the missing-artifact case above covers that anomaly).
+  ```bash
+  set -e
+  trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
+  SJ="{plugin_root}/hooks/shared/session_journal.py"
+  # Enumerate this feature's ARCHITECT artifacts (worktree-isolated → this feature only).
+  # Emit only when ≥1 non-empty path is found; an empty result is the missing-artifact anomaly, not an event.
+  python3 "$SJ" write --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON'
+  {"workflow": "architect", "feature": "{feature}", "paths": ["{absolute_path_1}", "{absolute_path_2}"], "task_id": "{architect_task_id}"}
+JSON
+  ```
 - [ ] Specialist HANDOFF received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
@@ -755,6 +777,16 @@ The auditor stores its final signal as `metadata.audit_summary` via `TaskUpdate`
   python3 "{plugin_root}/hooks/shared/session_journal.py" write \
     --type commit --session-dir '{session_dir}' --stdin <<'JSON'
   {"sha": "{short_sha}", "message": "{first_line}", "phase": "CODE"}
+JSON
+  ```
+- [ ] **Emit `artifact_paths` for auditor decision-logs (conditional, capture-if-present)** — if a concurrent auditor produced decision-log artifacts, glob `docs/decision-logs/{feature}-*.md`; when ≥1 is present, write a path-only `artifact_paths` event (`workflow=code-auditor`) so they harvest. Unlike PREPARE/ARCHITECT, this is **capture-if-present, not flag-if-missing**: the auditor is optional, so absence is normal — emit nothing and do NOT flag a missing artifact.
+  ```bash
+  set -e
+  trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
+  SJ="{plugin_root}/hooks/shared/session_journal.py"
+  # Best-effort: only when the glob found ≥1 decision-log; if none, skip this emit entirely (auditor is optional).
+  python3 "$SJ" write --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON'
+  {"workflow": "code-auditor", "feature": "{feature}", "paths": ["{absolute_decision_log_path}"]}
 JSON
   ```
 - [ ] **Process coder HANDOFFs** (non-blocking):
