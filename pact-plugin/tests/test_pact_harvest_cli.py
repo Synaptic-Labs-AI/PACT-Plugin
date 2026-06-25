@@ -161,6 +161,35 @@ class TestResolveLatestArtifacts:
         assert resolve_latest_artifacts([good, no_ts], self.FEATURE) == {"prepare": ["/good.md"]}
         assert resolve_latest_artifacts([no_ts, good], self.FEATURE) == {"prepare": ["/good.md"]}
 
+    def test_equal_ts_tie_break_is_last_wins(self):
+        """Same-second double-emit: on a byte-IDENTICAL ts in the same
+        (workflow, feature) group, the LAST-written event (iterated later in
+        journal order) supersedes — `make_event` stamps ts at second
+        granularity, so two emits of the same phase doc can collide and the
+        authoritative one is the later complete snapshot. Both orderings are
+        asserted so the result tracks journal order, not insertion luck: a
+        first-wins (`>` instead of `>=`) regression flips BOTH and goes RED."""
+        first = _art_event("prepare", self.FEATURE, ["/first.md"], "2026-06-25T01:00:00Z")
+        second = _art_event("prepare", self.FEATURE, ["/second.md"], "2026-06-25T01:00:00Z")
+        assert resolve_latest_artifacts([first, second], self.FEATURE) == {"prepare": ["/second.md"]}
+        assert resolve_latest_artifacts([second, first], self.FEATURE) == {"prepare": ["/first.md"]}
+
+    def test_parseable_naive_vs_aware_ts_does_not_crash(self):
+        """A parseable-but-tz-NAIVE ts (date-only) alongside the normal aware
+        ...Z ts must NOT crash the resolution. Both parse via _parse_ts but are
+        incomparable (offset-naive vs offset-aware), which a strict
+        `candidate > incumbent` OUTSIDE the parse-guard would let raise
+        TypeError, escaping resolve_latest_artifacts. The fail-open guard keeps
+        the incumbent instead. Regression-proof: reverting the comparison-guard
+        makes this raise TypeError -> RED. Trigger requires a corrupted journal
+        (make_event always stamps aware-Z); this pins graceful degradation."""
+        aware = _art_event("prepare", self.FEATURE, ["/aware.md"], "2026-06-25T03:00:00Z")
+        naive = {"type": "artifact_paths", "workflow": "prepare",
+                 "feature": self.FEATURE, "paths": ["/naive.md"], "ts": "2026-06-25"}
+        # Must not raise in either order; result is fail-open (incumbent kept).
+        assert resolve_latest_artifacts([aware, naive], self.FEATURE) == {"prepare": ["/aware.md"]}
+        assert resolve_latest_artifacts([naive, aware], self.FEATURE) == {"prepare": ["/naive.md"]}
+
 
 # =============================================================================
 # (2) SUBPROCESS — resolve-session-dir contract + THE B1-CLASS DRIFT PARITY.
@@ -353,3 +382,90 @@ class TestReadEmitsJsonArrayContract:
             "1/10 parse); a regression to JSONL would break the reused read"
         )
         assert len(parsed) == 1 and parsed[0]["type"] == "agent_handoff"
+
+
+# =============================================================================
+# (6) ARGPARSE CONTRACT — a missing or unknown subcommand must exit NON-ZERO
+#     (argparse's 2), so the skill's `if ! out=$(...); then stop; fi` gate
+#     still STOPS rather than falling through to a path-less read. `sub.required
+#     = True` is what enforces this; a regression to required=False would let a
+#     no-arg invocation exit 0 (return _EXIT_INTERNAL_ERROR is unreachable today
+#     but a silent contract change) — this pins the stop-gate-compatible code.
+# =============================================================================
+class TestSubcommandArgparseContract:
+    def test_no_subcommand_exits_nonzero_stop_gate(self):
+        """No subcommand -> argparse error -> exit 2 (non-zero). The skill keys
+        its stop branch on the exit code, so any non-zero is a stop; assert it
+        is NOT 0 and concretely the argparse 2."""
+        r = _run_cli()
+        assert r.returncode != _EXIT_OK, "no-subcommand must not exit 0"
+        assert r.returncode == 2, f"expected argparse exit 2, got {r.returncode}"
+
+    def test_unknown_subcommand_exits_nonzero_stop_gate(self):
+        """An invalid subcommand choice -> argparse error -> exit 2."""
+        r = _run_cli("definitely-not-a-subcommand")
+        assert r.returncode != _EXIT_OK, "unknown-subcommand must not exit 0"
+        assert r.returncode == 2, f"expected argparse exit 2, got {r.returncode}"
+
+
+# =============================================================================
+# (7) TRAVERSAL DEFENSE + GRACEFUL-TS — through the real CLI.
+#     (a) A traversal session_id ('../../etc/passwd') must be SANITIZED away,
+#         leaving no '..' segment that could escape the pact-sessions tree.
+#     (b) A corrupted journal with a parseable-but-naive ts must NOT crash
+#         resolve-artifacts (exit 1 + traceback); it degrades gracefully.
+# =============================================================================
+class TestTraversalAndGracefulTs:
+    def test_traversal_session_id_is_sanitized_no_escape(self, tmp_path):
+        """A '../../etc/passwd' session_id reconstructs INSIDE pact-sessions
+        with the traversal characters collapsed (no '..' segment, stays under
+        the sessions root). Oracle = the SSOT reconstruct_session_dir; the
+        independent non-vacuity check is the structural 'no ..' / 'under root'
+        assertion (a sanitization regression would leave a '..' segment)."""
+        ctx = tmp_path / "pact-session-context.json"
+        ctx.write_text(json.dumps(
+            {"project_dir": "/clean/project", "session_id": "../../etc/passwd"}),
+            encoding="utf-8")
+        r = _run_cli("resolve-session-dir", "--context-file", str(ctx))
+        assert r.returncode == _EXIT_OK
+        out = r.stdout.strip()
+        # Parity with the SSOT writer-derivation (load-bearing).
+        assert out == pact_context.reconstruct_session_dir(
+            "/clean/project", "../../etc/passwd")
+        # Non-vacuity: the traversal is neutralized — no '..' path segment, and
+        # the resolved dir stays under the pact-sessions tree.
+        parts = Path(out).parts
+        assert ".." not in parts, f"traversal not sanitized: {out!r}"
+        assert "pact-sessions" in parts
+        sessions_idx = parts.index("pact-sessions")
+        # Everything after pact-sessions is the sanitized slug + session_id —
+        # no segment escapes upward.
+        assert all(p != ".." for p in parts[sessions_idx:])
+
+    def test_resolve_artifacts_naive_ts_does_not_crash_via_cli(
+        self, tmp_path, monkeypatch, pact_context):
+        """End-to-end: a corrupted journal carrying one aware-Z and one
+        parseable-but-naive ts for the same (workflow, feature) must NOT crash
+        the CLI. Before the comparison-guard fix this exited 1 with a TypeError
+        traceback; now it exits 0 and emits a valid JSON object (the incumbent
+        survives, fail-open). Regression-proof: reverting the guard makes this
+        exit 1 -> RED."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        pact_context(team_name="t", session_id="sid-naive", project_dir="/proj")
+        slug = Path("/proj").name
+        session_dir = tmp_path / ".claude" / "pact-sessions" / slug / "sid-naive"
+        feature = "feat-naive"
+        append_event(_art_event("prepare", feature, ["/aware.md"], "2026-06-25T03:00:00Z"))
+        # A hand-corrupted naive (date-only) ts — only reachable via a mangled
+        # journal, since make_event always stamps aware-Z.
+        append_event({"v": 1, "type": "artifact_paths", "workflow": "prepare",
+                      "feature": feature, "paths": ["/naive.md"], "ts": "2026-06-25"})
+        r = _run_cli("resolve-artifacts", "--session-dir", str(session_dir),
+                     "--feature", feature)
+        assert r.returncode == _EXIT_OK, (
+            f"naive-vs-aware ts must degrade gracefully, not crash; "
+            f"rc={r.returncode} stderr={r.stderr!r}"
+        )
+        assert "TypeError" not in r.stderr
+        # A valid JSON object is emitted; the well-formed aware event survives.
+        assert json.loads(r.stdout) == {"prepare": ["/aware.md"]}

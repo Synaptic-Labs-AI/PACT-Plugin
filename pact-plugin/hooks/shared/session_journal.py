@@ -685,11 +685,21 @@ def resolve_latest_artifacts(
     merged across events. A phase re-run that regenerates its doc in place
     therefore supersedes the prior emit instead of duplicating it.
 
+    Tie-break = LAST-wins: when two events for the same `(workflow, feature)`
+    carry an equal `ts`, the one iterated later (the more-recently-written in
+    journal order) wins — see `_ts_supersedes`. `make_event` stamps `ts` at
+    second granularity, so a same-second double-emit is resolved to the last
+    write, which is the authoritative complete snapshot.
+
     Defensive: non-dict entries and events missing `workflow`/`feature`/
     `paths` are skipped (parity with the `_read_events_at` `isinstance(...,
-    dict)` guard). A missing/unparseable `ts` never wins a supersede — it is
-    treated as older than any parseable timestamp — so a malformed event
-    cannot mask a well-formed later one.
+    dict)` guard). Timestamp handling is FAIL-OPEN (see `_ts_supersedes`): a
+    missing/unparseable `ts` on a candidate does not let it supersede a
+    well-formed incumbent, and an unresolved incumbent ts is replaced by any
+    well-formed candidate. A pair of parseable-but-incomparable timestamps
+    (e.g. one tz-aware, one tz-naive) is caught at the comparison and keeps
+    the incumbent rather than raising — the resolution never crashes on a
+    malformed `ts`.
 
     Args:
         events: Candidate journal events (typically all `artifact_paths`
@@ -699,8 +709,8 @@ def resolve_latest_artifacts(
 
     Returns:
         `{workflow: paths}` — one key per workflow with a surviving event,
-        valued by that workflow's superseded (latest-`ts`) complete path-list.
-        Empty dict if no event matches.
+        valued by that workflow's superseded (latest-`ts`, last-wins on a
+        tie) complete path-list. Empty dict if no event matches.
     """
     latest_by_workflow: dict[str, dict[str, Any]] = {}
     for event in events:
@@ -713,7 +723,7 @@ def resolve_latest_artifacts(
         if not isinstance(workflow, str) or not isinstance(paths, list):
             continue
         prior = latest_by_workflow.get(workflow)
-        if prior is None or _ts_is_newer(event.get("ts"), prior.get("ts")):
+        if prior is None or _ts_supersedes(event.get("ts"), prior.get("ts")):
             latest_by_workflow[workflow] = event
     return {
         workflow: event["paths"]
@@ -721,18 +731,30 @@ def resolve_latest_artifacts(
     }
 
 
-def _ts_is_newer(candidate_ts: Any, incumbent_ts: Any) -> bool:
-    """Return True if `candidate_ts` is strictly newer than `incumbent_ts`.
+def _ts_supersedes(candidate_ts: Any, incumbent_ts: Any) -> bool:
+    """Return True if a later-iterated `candidate_ts` should supersede the
+    incumbent — i.e. the candidate is newer than OR EQUAL TO the incumbent.
 
-    Used by `resolve_latest_artifacts` to pick the latest-`ts` event per
+    Used by `resolve_latest_artifacts` to pick the surviving event per
     workflow. Timestamps are PARSED (via `_parse_ts`), never lexically
     string-compared — see `_parse_ts` for the `Z` vs `+00:00` rationale.
 
-    Fail-safe tie-breaking: an unparseable/missing `candidate_ts` is treated
-    as NOT newer (returns False), so a malformed timestamp never supersedes a
-    well-formed event. An unparseable `incumbent_ts` loses to any parseable
-    candidate (returns True), so a malformed earlier event is replaced by a
-    well-formed later one.
+    Tie-break = LAST-wins (`>=`, not `>`): on an equal `ts`, the candidate
+    (iterated later, hence the more-recently-written event in journal order)
+    supersedes. Each `artifact_paths` emit is a COMPLETE snapshot, so the
+    last write for a `(workflow, feature)` is the authoritative one even when
+    two emits collide in the same wall-clock second (`make_event` stamps `ts`
+    at second granularity).
+
+    Fail-open comparison (matches the in-house `_ts_ge` pattern): the parse
+    AND the comparison are guarded. A missing/unparseable `candidate_ts`
+    returns False, so a malformed candidate never supersedes a well-formed
+    incumbent. A missing/unparseable `incumbent_ts` returns True, so a
+    well-formed candidate replaces a malformed incumbent. If the parsed
+    values are themselves incomparable (e.g. one tz-aware `...Z` ts and one
+    tz-naive ts both parse but raise `TypeError` on `>=`), the comparison is
+    caught and the candidate does NOT supersede (returns False) — fail-open
+    keeps the incumbent rather than crashing the whole resolution.
     """
     try:
         candidate = _parse_ts(candidate_ts)
@@ -742,7 +764,10 @@ def _ts_is_newer(candidate_ts: Any, incumbent_ts: Any) -> bool:
         incumbent = _parse_ts(incumbent_ts)
     except (ValueError, TypeError):
         return True
-    return candidate > incumbent
+    try:
+        return candidate >= incumbent
+    except TypeError:
+        return False
 
 
 def _parse_ts(value: Any) -> datetime:
