@@ -491,6 +491,167 @@ class TestMultiBlockTraversal:
 
 
 # =============================================================================
+# #891 Opt2: parent-inheritance fallback (_inherit_band_from_parent)
+# =============================================================================
+#
+# When Task B carries no resolvable variety, the band is inherited from the
+# PARENT (Plan/feature/umbrella) task that Task B blocks. These tests pin both
+# halves of the C2 contract:
+#   - RESOLVE: an unstamped Task B whose singleton blocks[0] points at a
+#     STAMPED parent inherits the parent's REAL band (the #891 fix — a
+#     consultation Task B that would mis-resolve as "skipped" now resolves to
+#     the parent's 11-13 reality).
+#   - FAIL-OPEN GUARDRAIL: never inherit a WRONG parent's band. Ambiguous
+#     blocks (>1 entry, empty, non-list) or a parent that is not itself
+#     stamped → "unresolvable" (the preserved floor), NOT a guess.
+# =============================================================================
+
+
+def _seed_task(
+    tmp_path, monkeypatch, team_name, task_id, *, metadata=None, blocks=None,
+):
+    """Seed an arbitrary task on disk with optional `blocks` + `metadata`.
+    Used to build the Task B → parent chain the inheritance fallback walks."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    tasks_dir = tmp_path / ".claude" / "tasks" / team_name
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    task = {"id": task_id, "subject": "x", "owner": "pact-backend-coder"}
+    if blocks is not None:
+        task["blocks"] = blocks
+    if metadata is not None:
+        task["metadata"] = metadata
+    (tasks_dir / f"{task_id}.json").write_text(
+        json.dumps(task), encoding="utf-8"
+    )
+
+
+class TestParentInheritanceFallback:
+    """#891 Opt2: an unstamped Task B inherits its parent's band."""
+
+    # ----- RESOLVE: parent inheritance maps to the parent's real band ----
+
+    def test_inherits_required_band_from_parent(self, tmp_path, monkeypatch):
+        """Task B has no variety but blocks a stamped parent (total=12) →
+        the band resolves to the parent's REQUIRED band instead of
+        unresolvable. The #891 consultation-Task-B fix."""
+        _seed_task(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={}, blocks=["100"],
+        )
+        _seed_task(
+            tmp_path, monkeypatch, "test-team", "100",
+            metadata={"variety": _well_formed_variety(total=12)},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "required"
+
+    def test_inherits_recommended_band_from_parent(self, tmp_path, monkeypatch):
+        """Parent total=9 → inherited band is recommended."""
+        _seed_task(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={}, blocks=["100"],
+        )
+        _seed_task(
+            tmp_path, monkeypatch, "test-team", "100",
+            metadata={"variety": _well_formed_variety(total=9)},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "recommended"
+
+    def test_inherits_skipped_band_from_parent(self, tmp_path, monkeypatch):
+        """Parent total=5 → inherited band is skipped (the parent's REAL
+        low band; inheritance is not biased toward required)."""
+        _seed_task(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={}, blocks=["100"],
+        )
+        _seed_task(
+            tmp_path, monkeypatch, "test-team", "100",
+            metadata={"variety": _well_formed_variety(total=5)},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "skipped"
+
+    def test_stamped_task_b_does_not_inherit(self, tmp_path, monkeypatch):
+        """When Task B IS stamped, its OWN band wins — the parent is never
+        consulted (inheritance is a fallback, not an override). Task B
+        total=7 (recommended); parent total=16 (required) is ignored."""
+        _seed_task(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={"variety": _well_formed_variety(total=7)},
+            blocks=["100"],
+        )
+        _seed_task(
+            tmp_path, monkeypatch, "test-team", "100",
+            metadata={"variety": _well_formed_variety(total=16)},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "recommended"
+
+    # ----- FAIL-OPEN GUARDRAILS: never inherit a WRONG parent ------------
+
+    def test_unstamped_b_no_blocks_is_unresolvable(self, tmp_path, monkeypatch):
+        """Unstamped Task B with NO blocks pointer → no parent to inherit
+        from → unresolvable (floor preserved). This is the legacy shape;
+        pins that inheritance does not regress it."""
+        _seed_task(
+            tmp_path, monkeypatch, "test-team", "2", metadata={},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "unresolvable"
+
+    def test_unstamped_b_multi_block_fails_open(self, tmp_path, monkeypatch):
+        """Task B.blocks has >1 entry → AMBIGUOUS parent → fail-open to
+        unresolvable rather than guess blocks[0]. The lead's
+        don't-blindly-trust-blocks[0] guardrail: a wrong-parent inherit
+        mis-resolves the band, the exact bug being fixed."""
+        _seed_task(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={}, blocks=["100", "200"],
+        )
+        _seed_task(
+            tmp_path, monkeypatch, "test-team", "100",
+            metadata={"variety": _well_formed_variety(total=12)},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "unresolvable"
+
+    def test_unstamped_b_unstamped_parent_fails_open(self, tmp_path, monkeypatch):
+        """Singleton blocks[0] points at a parent that is NOT itself stamped
+        → fail-open to unresolvable. The structural 'looks like a
+        Plan/feature task' guardrail: only a stamped task is an inheritable
+        parent, so a mis-pointed blocks[0] (e.g. at a phase/teachback task)
+        cannot inherit a wrong band."""
+        _seed_task(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={}, blocks=["100"],
+        )
+        _seed_task(
+            tmp_path, monkeypatch, "test-team", "100", metadata={},
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "unresolvable"
+
+    def test_unstamped_b_missing_parent_file_fails_open(self, tmp_path, monkeypatch):
+        """blocks[0] points at a parent id with no file on disk → fail-open
+        to unresolvable (read_task_json returns {})."""
+        _seed_task(
+            tmp_path, monkeypatch, "test-team", "2",
+            metadata={}, blocks=["999"],
+        )
+        assert tlg._resolve_required_band_via_blocks(
+            {"blocks": ["2"]}, "test-team"
+        ) == "unresolvable"
+
+
+# =============================================================================
 # Divergence-computation helper (shared/variety_divergence.py)
 # =============================================================================
 #
