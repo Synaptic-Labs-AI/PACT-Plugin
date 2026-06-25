@@ -206,6 +206,28 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # activates the _OPTIONAL_FIELDS_BY_TYPE enforcement below (same pattern
     # as session_end and cleanup_summary).
     "session_consolidated": {},
+    # The lead-frame command emit sites (plan-mode.md, peer-review.md, and
+    # orchestrate.md's PREPARE/ARCHITECT/CODE phase-output validation) write
+    # artifact_paths via the CLI write path — a path-only, GC-durable pointer
+    # to each phase's on-disk artifact(s). It outlives `git worktree remove`
+    # because the journal lives under ~/.claude/pact-sessions/, outside the
+    # worktree; only the pointed-at file is worktree-ephemeral. The secretary
+    # resolves these events at harvest and distills the artifact substance into
+    # pact-memory. `workflow` is the lowercase phase/workflow tag (one of
+    # plan-mode / prepare / architect / peer-review / code-auditor) and the
+    # dedup/precedence axis; `feature` is the slug scoping the event to one arc;
+    # `paths` is the PLURAL full-enumeration list of worktree-absolute artifact
+    # paths (a phase may write >1 file).
+    #
+    # Validator-depth caveat: `paths` is typed `list`, so the schema check
+    # enforces only isinstance(value, list) — it does NOT descend into the list
+    # to require each element be a non-empty str (the per-field empty-string
+    # guard applies to `str` fields only). Per-element path validity is the
+    # WRITER's responsibility: the emit sites drop empty/invalid entries and
+    # drop the whole emit when the glob found nothing (an empty paths list
+    # passes isinstance but is meaningless — that "missing artifact" case is the
+    # task_lifecycle_gate backstop's job, NOT a zero-length event).
+    "artifact_paths": {"workflow": str, "feature": str, "paths": list},
 }
 
 
@@ -301,6 +323,17 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # denominator). The required-fields registration above
     # ("remediation": {...}) activates this optional check.
     "remediation": {
+        "task_id": str,
+    },
+    # The lead-frame emit sites write artifact_paths with an optional `task_id`
+    # — the phase task id the lead completed when emitting (provenance /
+    # cross-link). Absent for plan-mode/peer-review syntheses that have no phase
+    # task; present (and a non-empty str) for the PREPARE/ARCHITECT/CODE phase
+    # emits. The required-fields registration above ("artifact_paths": {...})
+    # is what ACTIVATES this optional check — _validate_event_schema
+    # short-circuits on unknown types and would otherwise skip the optional loop
+    # (same activation pattern as session_end / missed_wake / teachback_ack).
+    "artifact_paths": {
         "task_id": str,
     },
 }
