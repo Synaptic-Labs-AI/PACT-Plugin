@@ -7,7 +7,8 @@ Summary: PreToolUse hook (matcher="TaskUpdate") with TWO independent branches:
          metadata.handoff is not yet present on disk. Advisory only; NEVER
          denies.
          (2) #865 dispatch-variety gate — fires when a terminal dispatch-wiring
-         TaskUpdate (owner pact-* AND addBlockedBy in the SAME tool_input) links
+         TaskUpdate (owner resolves to a pact-specialist agentType AND
+         addBlockedBy in the SAME tool_input) links
          a Task B that carries no resolvable metadata.variety. Deterministic
          STRONG-WARN by default; env-gated DENY opt-in via
          PACT_DISPATCH_VARIETY_MODE. The deny path is the file's ONLY
@@ -91,6 +92,7 @@ _STDIN_READ_MAX = 8 * 1024 * 1024  # 8 MB
 # clean (0) and the output well-formed.
 try:
     import shared.pact_context as pact_context
+    from shared.dispatch_helpers import is_pact_specialist_owner
     from shared.intentional_wait import is_self_complete_exempt
     from shared.task_utils import is_teachback_subject, read_task_json
     from shared.teachback_schema import resolve_variety_total
@@ -199,7 +201,9 @@ def _evaluate_dispatch_variety(input_data: dict) -> str | None:
     COMPOSITE-SIGNATURE TRIGGER (the FIRST-OBSERVABLE-WRITE / no-misfire
     invariant): fire ONLY on the terminal dispatch-wiring write — a single
     TaskUpdate whose tool_input carries BOTH:
-      - owner matching pact-* (a PACT specialist), AND
+      - an owner that resolves (via team config) to a pact-specialist
+        agentType — owners are BARE names, so this is a team-config
+        resolution, NOT an owner.startswith("pact-") prefix check, AND
       - addBlockedBy present and non-empty (the teachback-gate link),
     in the SAME tool_input. This composite co-occurrence is uniquely the
     dispatch-wiring shape (orchestrate/comPACT/plan-mode/rePACT all wire B
@@ -231,11 +235,14 @@ def _evaluate_dispatch_variety(input_data: dict) -> str | None:
     if not isinstance(tool_input, dict):
         return None
 
-    # COMPOSITE signature — owner pact-* AND addBlockedBy non-empty in the
-    # SAME tool_input. Either half alone is a non-terminal/partial write.
+    # COMPOSITE signature — a pact-specialist owner AND addBlockedBy non-empty
+    # in the SAME tool_input. Either half alone is a non-terminal/partial write.
+    # Cheap in-memory guards FIRST (owner-present, addBlockedBy, taskId); the
+    # owner→agentType resolution is a disk read, deferred until after the
+    # team_name resolve below (cost-order).
     owner = tool_input.get("owner")
-    if not isinstance(owner, str) or not owner.startswith("pact-"):
-        return None  # non-pact owner (incl. SOLO_EXEMPT agents) → never fires
+    if not isinstance(owner, str) or not owner.strip():
+        return None  # no owner → TaskCreate(B) / not a wiring write
     add_blocked_by = tool_input.get("addBlockedBy")
     if not isinstance(add_blocked_by, list) or not add_blocked_by:
         return None  # partial wiring (owner-only) → not yet terminal
@@ -249,16 +256,30 @@ def _evaluate_dispatch_variety(input_data: dict) -> str | None:
     except Exception:
         team_name = ""
     if not team_name:
-        return None  # no team context → cannot resolve Task B → bypass
+        return None  # no team context → cannot resolve owner/Task B → bypass
+
+    # CORRECTED PREDICATE (#865 cycle-1): identify a pact-specialist teammate by
+    # resolving the BARE owner → team-member → agentType (the same resolution
+    # the carve-out helpers use), NOT by an owner.startswith("pact-") prefix —
+    # real owners are bare names, so the old prefix check was always False (the
+    # gate was dead-on-arrival). is_pact_specialist_owner fail-CLOSES to False on
+    # any unresolvable path → this gate fail-OPENS (return None), never strands.
+    # SOLO_EXEMPT agents (general-purpose/Explore/Plan) have non-pact agentTypes
+    # → excluded here naturally; the secretary (pact-secretary) PASSES this check
+    # and is suppressed by the is_self_complete_exempt carve-out below.
+    if not is_pact_specialist_owner(owner, team_name):
+        return None  # owner does not resolve to a pact specialist → not a dispatch
 
     task = read_task_json(task_id, team_name)
     if not isinstance(task, dict) or not task:
         return None  # no task data → bypass (fail-open)
 
     # CARVE-OUTS (preserve R4's silence guarantees verbatim; the helpers are
-    # already imported). owner pact-* is enforced above; the exempt arms
-    # cover secretary + signal tasks (is_self_complete_exempt) and the Task-A
-    # teachback gate (is_teachback_subject).
+    # already imported). The pact-specialist resolution above admits the
+    # secretary (pact-secretary IS a registered specialist), so the
+    # is_self_complete_exempt carve-out is LOAD-BEARING here — it suppresses
+    # the secretary + signal tasks. is_teachback_subject suppresses the Task-A
+    # teachback gate by subject.
     subject = task.get("subject") or ""
     if is_self_complete_exempt(task, team_name) or is_teachback_subject(subject):
         return None

@@ -39,6 +39,54 @@ def _seed_task(tmp_path, team, task_id, **fields):
     (tasks_dir / f"{task_id}.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
+# Default team member set the dispatch-variety predicate resolves against.
+# REAL owners are BARE names; the team config maps each bare name to its
+# pact-* agentType — the resolution the corrected gate predicate performs.
+_DEFAULT_MEMBERS = [
+    {"name": "backend-coder", "agentType": "pact-backend-coder"},
+    {"name": "test-engineer", "agentType": "pact-test-engineer"},
+    {"name": "secretary", "agentType": "pact-secretary"},
+    {"name": "explorer", "agentType": "general-purpose"},  # SOLO_EXEMPT (non-pact)
+]
+
+
+def _seed_team_config(tmp_path, monkeypatch, team, members=None):
+    """Make the corrected gate predicate resolvable in-test:
+      (a) write ~/.claude/teams/{team}/config.json so pact_context._iter_members
+          resolves bare owners → agentType, and
+      (b) seed a plugin root with agents/pact-*.md for each member's pact-*
+          agentType + point the context's plugin_root at it + clear the
+          registry cache so is_registered_pact_specialist resolves (in
+          production the live agents/ dir is found; in-test the glob needs a
+          seeded plugin root, mirroring test_dispatch_gate._seed_plugin).
+    Forces HOME/.claude resolution by clearing CLAUDE_CONFIG_DIR."""
+    import shared.dispatch_helpers as dh
+    import shared.pact_context as ctx_module
+
+    members = _DEFAULT_MEMBERS if members is None else members
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+    team_dir = tmp_path / ".claude" / "teams" / team
+    team_dir.mkdir(parents=True, exist_ok=True)
+    (team_dir / "config.json").write_text(
+        json.dumps({"members": members}), encoding="utf-8",
+    )
+
+    # Seed the specialist registry: one agents/pact-*.md per pact-* agentType.
+    plugin_root = tmp_path / "plugin"
+    agents_dir = plugin_root / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    for m in members:
+        at = m.get("agentType", "")
+        if isinstance(at, str) and at.startswith("pact-"):
+            (agents_dir / f"{at}.md").write_text(
+                f"---\nname: {at}\n---\n", encoding="utf-8",
+            )
+    monkeypatch.setattr(ctx_module, "get_plugin_root", lambda: str(plugin_root))
+    dh._specialist_registry.cache_clear()
+
+
 def _complete_update(task_id, *, agent_type=LEAD, metadata=None):
     """A TaskUpdate(status=completed). `metadata` (if given) is the INCOMING
     update metadata (e.g. a bundled handoff)."""
@@ -360,10 +408,12 @@ def _variety(total):
     }
 
 
-def _wiring_update(task_id, *, owner="pact-backend-coder",
+def _wiring_update(task_id, *, owner="backend-coder",
                    add_blocked_by=("A",), agent_type=LEAD):
     """A terminal dispatch-wiring TaskUpdate: owner + addBlockedBy in the SAME
-    tool_input. add_blocked_by=None / [] omits it (partial-wiring case)."""
+    tool_input. owner is a BARE specialist name (the real shape) resolving via
+    team config to a pact agentType. add_blocked_by=None / [] omits it
+    (partial-wiring case)."""
     tool_input = {"taskId": task_id}
     if owner is not None:
         tool_input["owner"] = owner
@@ -382,12 +432,37 @@ class TestDispatchVarietyTrigger:
     def test_fires_on_wiring_write_unstamped_task_b(
         self, tmp_path, monkeypatch, pact_context,
     ):
-        """Terminal wiring write linking an unstamped Task B → advisory."""
+        """Terminal wiring write linking an unstamped Task B → advisory. The
+        BARE-NAME-FIRES case: owner 'backend-coder' resolves via team config to
+        agentType pact-backend-coder. This is the case that was DEAD under the
+        old owner.startswith('pact-') predicate."""
         _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_team_config(tmp_path, monkeypatch, TEAM)
         _seed_task(tmp_path, TEAM, "42", subject="impl foo",
-                   owner="pact-backend-coder", metadata={})
+                   owner="backend-coder", metadata={})
         adv = gate._evaluate_dispatch_variety(_wiring_update("42"))
         assert adv is not None and "metadata.variety" in adv
+
+    def test_fires_reds_if_predicate_reverted_to_prefix(
+        self, tmp_path, monkeypatch, pact_context,
+    ):
+        """NON-VACUITY: the bare-name-fires case proves the gate is ALIVE only
+        if it REDs under the reverted (dead) predicate. Simulate the revert by
+        monkeypatching the predicate back to owner.startswith('pact-'): with a
+        BARE owner that check is False → gate silent → adv is None. So the test
+        above genuinely depends on the corrected resolution, not on the
+        composite signature alone."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_team_config(tmp_path, monkeypatch, TEAM)
+        _seed_task(tmp_path, TEAM, "42", subject="impl foo",
+                   owner="backend-coder", metadata={})
+        # Revert: the dead prefix predicate on the BARE owner.
+        monkeypatch.setattr(
+            gate, "is_pact_specialist_owner",
+            lambda owner, team_name: isinstance(owner, str)
+            and owner.startswith("pact-"),
+        )
+        assert gate._evaluate_dispatch_variety(_wiring_update("42")) is None
 
     def test_silent_when_task_b_is_stamped(
         self, tmp_path, monkeypatch, pact_context,
@@ -396,8 +471,9 @@ class TestDispatchVarietyTrigger:
         what makes the gate precise; it does NOT fire on the composite
         signature alone)."""
         _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_team_config(tmp_path, monkeypatch, TEAM)
         _seed_task(tmp_path, TEAM, "42", subject="impl foo",
-                   owner="pact-backend-coder",
+                   owner="backend-coder",
                    metadata={"variety": _variety(12)})
         assert gate._evaluate_dispatch_variety(_wiring_update("42")) is None
 
@@ -408,11 +484,39 @@ class TestDispatchVarietyTrigger:
         The gate uses the shared resolve_variety_total, so any shape that
         resolves at write/read time also satisfies the gate."""
         _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_team_config(tmp_path, monkeypatch, TEAM)
         v = _variety(0)
         v.pop("total")
         v["score"] = 9
         _seed_task(tmp_path, TEAM, "42", subject="impl foo",
-                   owner="pact-backend-coder", metadata={"variety": v})
+                   owner="backend-coder", metadata={"variety": v})
+        assert gate._evaluate_dispatch_variety(_wiring_update("42")) is None
+
+    def test_silent_when_owner_not_in_team_config(
+        self, tmp_path, monkeypatch, pact_context,
+    ):
+        """FAIL-OPEN: a bare owner that is NOT a known team member resolves to
+        False → gate silent (never strands). The corrected predicate's
+        unresolvable-owner floor."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_team_config(tmp_path, monkeypatch, TEAM)
+        _seed_task(tmp_path, TEAM, "42", subject="impl foo",
+                   owner="ghost-coder", metadata={})
+        assert gate._evaluate_dispatch_variety(
+            _wiring_update("42", owner="ghost-coder")
+        ) is None
+
+    def test_silent_when_team_config_missing(
+        self, tmp_path, monkeypatch, pact_context,
+    ):
+        """FAIL-OPEN: no team config on disk → _iter_members returns [] →
+        is_pact_specialist_owner False → gate silent. Consumer-wide-safe: an
+        unresolvable config never strands a dispatch."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        # Deliberately do NOT seed team config.
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        _seed_task(tmp_path, TEAM, "42", subject="impl foo",
+                   owner="backend-coder", metadata={})
         assert gate._evaluate_dispatch_variety(_wiring_update("42")) is None
 
 
@@ -468,25 +572,29 @@ class TestDispatchVarietyCarveOuts:
     def test_silent_non_pact_owner(
         self, tmp_path, monkeypatch, pact_context,
     ):
-        """A non-pact owner (e.g. a SOLO_EXEMPT general-purpose agent, or a
-        bare teammate name) never fires — the trigger requires owner pact-*
-        (scenario 9: SOLO_EXEMPT agents are non-pact owners, already
-        excluded)."""
+        """A SOLO_EXEMPT owner resolves to a NON-pact agentType
+        (explorer→general-purpose) → is_pact_specialist_owner False → never
+        fires (scenario 9: SOLO_EXEMPT agents have non-pact agentTypes, so the
+        corrected predicate excludes them naturally — no explicit check)."""
         _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_team_config(tmp_path, monkeypatch, TEAM)
         _seed_task(tmp_path, TEAM, "42", subject="impl foo",
-                   owner="general-purpose", metadata={})
+                   owner="explorer", metadata={})
         assert gate._evaluate_dispatch_variety(
-            _wiring_update("42", owner="general-purpose")
+            _wiring_update("42", owner="explorer")
         ) is None
 
     def test_silent_teachback_subject(
         self, tmp_path, monkeypatch, pact_context,
     ):
-        """A Task-A teachback gate subject is exempt (is_teachback_subject)."""
+        """A Task-A teachback gate subject is exempt (is_teachback_subject).
+        The bare owner RESOLVES (passes the trigger), so the subject carve-out
+        is what suppresses it."""
         _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_team_config(tmp_path, monkeypatch, TEAM)
         _seed_task(tmp_path, TEAM, "42",
                    subject="backend: TEACHBACK for the thing",
-                   owner="pact-backend-coder", metadata={})
+                   owner="backend-coder", metadata={})
         assert gate._evaluate_dispatch_variety(_wiring_update("42")) is None
 
     @pytest.mark.parametrize("signal_type", ["blocker", "algedonic"])
@@ -495,22 +603,44 @@ class TestDispatchVarietyCarveOuts:
     ):
         """A signal task (completion_type=signal) is exempt via
         is_self_complete_exempt — auditor/blocker signal tasks carry no
-        variety obligation."""
+        variety obligation. The bare 'auditor' owner RESOLVES to pact-auditor
+        (passes the trigger), so the signal carve-out is what suppresses it."""
         _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_team_config(tmp_path, monkeypatch, TEAM, members=[
+            {"name": "auditor", "agentType": "pact-auditor"},
+        ])
         _seed_task(tmp_path, TEAM, "42", subject="impl foo",
-                   owner="pact-auditor",
+                   owner="auditor",
                    metadata={"completion_type": "signal", "type": signal_type})
         assert gate._evaluate_dispatch_variety(_wiring_update(
-            "42", owner="pact-auditor")) is None
+            "42", owner="auditor")) is None
+
+    def test_silent_secretary_owner(
+        self, tmp_path, monkeypatch, pact_context,
+    ):
+        """LOAD-BEARING carve-out: the secretary (pact-secretary) IS a
+        registered specialist, so the bare 'secretary' owner PASSES the
+        corrected trigger — meaning is_self_complete_exempt MUST suppress it.
+        A secretary-owned wiring write with no variety → SILENT, NOT warn/deny.
+        If the carve-out regressed, this would wrongly warn/deny a legit
+        secretary dispatch."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_team_config(tmp_path, monkeypatch, TEAM)
+        _seed_task(tmp_path, TEAM, "42", subject="impl foo",
+                   owner="secretary", metadata={})
+        assert gate._evaluate_dispatch_variety(
+            _wiring_update("42", owner="secretary")
+        ) is None
 
     def test_silent_teammate_frame(
         self, tmp_path, monkeypatch, pact_context,
     ):
         """DUAL-MODE: a teammate frame emits nothing (is_lead structural
-        discriminator)."""
+        discriminator). Short-circuits before owner resolution."""
         _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_team_config(tmp_path, monkeypatch, TEAM)
         _seed_task(tmp_path, TEAM, "42", subject="impl foo",
-                   owner="pact-backend-coder", metadata={})
+                   owner="backend-coder", metadata={})
         assert gate._evaluate_dispatch_variety(
             _wiring_update("42", agent_type=TEAMMATE)
         ) is None
@@ -526,16 +656,17 @@ class TestDispatchVarietyEnvKnobModes:
             gate.main()
         return exc.value.code, capsys.readouterr().out
 
-    def _seed_unstamped(self, tmp_path):
+    def _seed_unstamped(self, tmp_path, monkeypatch):
+        _seed_team_config(tmp_path, monkeypatch, TEAM)
         _seed_task(tmp_path, TEAM, "42", subject="impl foo",
-                   owner="pact-backend-coder", metadata={})
+                   owner="backend-coder", metadata={})
 
     def test_warn_mode_additional_context_exit_zero(
         self, tmp_path, monkeypatch, pact_context, capsys,
     ):
         _ctx(pact_context, monkeypatch, tmp_path)
         monkeypatch.setattr(gate, "DISPATCH_VARIETY_MODE", "warn")
-        self._seed_unstamped(tmp_path)
+        self._seed_unstamped(tmp_path, monkeypatch)
         code, out = self._run_main(monkeypatch, capsys, _wiring_update("42"))
         assert code == 0
         hso = json.loads(out)["hookSpecificOutput"]
@@ -550,7 +681,7 @@ class TestDispatchVarietyEnvKnobModes:
         fail-CLOSED path). Source-proven honor; opt-in only."""
         _ctx(pact_context, monkeypatch, tmp_path)
         monkeypatch.setattr(gate, "DISPATCH_VARIETY_MODE", "deny")
-        self._seed_unstamped(tmp_path)
+        self._seed_unstamped(tmp_path, monkeypatch)
         code, out = self._run_main(monkeypatch, capsys, _wiring_update("42"))
         assert code == 2
         hso = json.loads(out)["hookSpecificOutput"]
@@ -564,7 +695,7 @@ class TestDispatchVarietyEnvKnobModes:
         telemetry; here it suppresses)."""
         _ctx(pact_context, monkeypatch, tmp_path)
         monkeypatch.setattr(gate, "DISPATCH_VARIETY_MODE", "shadow")
-        self._seed_unstamped(tmp_path)
+        self._seed_unstamped(tmp_path, monkeypatch)
         code, out = self._run_main(monkeypatch, capsys, _wiring_update("42"))
         assert code == 0
         assert json.loads(out) == {"suppressOutput": True}
@@ -577,8 +708,9 @@ class TestDispatchVarietyEnvKnobModes:
         wiring-write regression."""
         _ctx(pact_context, monkeypatch, tmp_path)
         monkeypatch.setattr(gate, "DISPATCH_VARIETY_MODE", "deny")
+        _seed_team_config(tmp_path, monkeypatch, TEAM)
         _seed_task(tmp_path, TEAM, "42", subject="impl foo",
-                   owner="pact-backend-coder",
+                   owner="backend-coder",
                    metadata={"variety": _variety(12)})
         code, out = self._run_main(monkeypatch, capsys, _wiring_update("42"))
         assert code == 0
@@ -602,7 +734,7 @@ class TestDispatchVarietyEnvKnobModes:
         frame — strictly worse than the gap it guards."""
         _ctx(pact_context, monkeypatch, tmp_path)
         monkeypatch.setattr(gate, "DISPATCH_VARIETY_MODE", "deny")
-        self._seed_unstamped(tmp_path)
+        self._seed_unstamped(tmp_path, monkeypatch)
 
         def _boom(_input_data):
             raise RuntimeError("simulated evaluator crash")
@@ -614,3 +746,60 @@ class TestDispatchVarietyEnvKnobModes:
         assert "permissionDecision" not in parsed.get(
             "hookSpecificOutput", {}
         ), "a crash must never produce a deny verdict"
+
+
+# =============================================================================
+# is_pact_specialist_owner — the corrected-predicate resolution helper.
+# Direct unit coverage of the bare owner → agentType → registry resolution +
+# the fail-CLOSED-to-False contract (which composes to gate fail-OPEN).
+# =============================================================================
+class TestIsPactSpecialistOwner:
+    def test_true_for_bare_specialist_owner(self, tmp_path, monkeypatch):
+        _seed_team_config(tmp_path, monkeypatch, TEAM)
+        from shared.dispatch_helpers import is_pact_specialist_owner
+        assert is_pact_specialist_owner("backend-coder", TEAM) is True
+
+    def test_true_for_secretary_owner(self, tmp_path, monkeypatch):
+        """pact-secretary IS a registered specialist → True. (The gate's
+        is_self_complete_exempt carve-out, NOT this helper, suppresses it.)"""
+        _seed_team_config(tmp_path, monkeypatch, TEAM)
+        from shared.dispatch_helpers import is_pact_specialist_owner
+        assert is_pact_specialist_owner("secretary", TEAM) is True
+
+    def test_false_for_solo_exempt_owner(self, tmp_path, monkeypatch):
+        """explorer→general-purpose is a NON-pact agentType (no
+        agents/general-purpose.md) → False."""
+        _seed_team_config(tmp_path, monkeypatch, TEAM)
+        from shared.dispatch_helpers import is_pact_specialist_owner
+        assert is_pact_specialist_owner("explorer", TEAM) is False
+
+    def test_false_for_unknown_owner(self, tmp_path, monkeypatch):
+        _seed_team_config(tmp_path, monkeypatch, TEAM)
+        from shared.dispatch_helpers import is_pact_specialist_owner
+        assert is_pact_specialist_owner("ghost", TEAM) is False
+
+    def test_false_for_missing_team_config(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        from shared.dispatch_helpers import is_pact_specialist_owner
+        assert is_pact_specialist_owner("backend-coder", TEAM) is False
+
+    def test_false_for_empty_inputs(self):
+        from shared.dispatch_helpers import is_pact_specialist_owner
+        assert is_pact_specialist_owner("", TEAM) is False
+        assert is_pact_specialist_owner("backend-coder", "") is False
+        assert is_pact_specialist_owner(None, TEAM) is False
+
+    def test_false_and_never_raises_on_iter_members_exception(self, monkeypatch):
+        """The bare-except fail-closed wrap: if _iter_members raises (e.g. the
+        get_claude_config_dir→Path.home RuntimeError seam that ESCAPES
+        _iter_members' own typed except), the helper returns False and never
+        propagates — so the gate fail-OPENS rather than crashing."""
+        import shared.pact_context as ctx_module
+        from shared.dispatch_helpers import is_pact_specialist_owner
+
+        def _raise(team_name, teams_dir=None):
+            raise RuntimeError("simulated config-dir resolution failure")
+
+        monkeypatch.setattr(ctx_module, "_iter_members", _raise)
+        assert is_pact_specialist_owner("backend-coder", TEAM) is False

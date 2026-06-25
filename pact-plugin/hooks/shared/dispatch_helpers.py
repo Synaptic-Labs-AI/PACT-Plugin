@@ -140,6 +140,51 @@ def is_registered_pact_specialist(
     return subagent_type in registry
 
 
+def is_pact_specialist_owner(
+    owner: str, team_name: str, teams_dir: str | None = None
+) -> bool:
+    """True iff ``owner`` names a team member whose agentType is a registered
+    pact specialist (``agents/pact-*.md``).
+
+    Real task owners are BARE specialist names (``backend-coder``,
+    ``test-engineer``), NOT ``pact-``-prefixed — ``pact-*`` is the team-config
+    agentType, never the owner. So identifying "this owner is a pact specialist
+    teammate" requires resolving the bare owner through team config to its
+    agentType (the SAME owner→member→agentType resolution
+    ``intentional_wait._is_exempt_agent_type`` uses), then checking registry
+    membership. Composes the two existing primitives — ``_iter_members`` (the
+    resolution SSOT) + ``is_registered_pact_specialist`` (the registry check) —
+    rather than duplicating either.
+
+    Fail-CLOSED to ``False`` on every unresolvable path (empty owner/team_name,
+    missing/malformed config, member-not-found, missing/non-str agentType, OR
+    any unexpected exception). For the dispatch-variety gate this composes to
+    FAIL-OPEN: "not positively a pact specialist" → the gate returns None →
+    does not fire, so an unresolvable owner never strands a dispatch.
+
+    The outer bare-except is load-bearing: ``_iter_members`` resolves the
+    config dir via ``get_claude_config_dir()`` (→ ``Path.home()``), which can
+    raise ``RuntimeError`` that ESCAPES ``_iter_members``'s own typed except —
+    so a totally fail-closed helper must catch it here, not rely on a caller's
+    outer guard.
+    """
+    if not isinstance(owner, str) or not owner:
+        return False
+    if not isinstance(team_name, str) or not team_name:
+        return False
+    try:
+        for member in pact_context._iter_members(team_name, teams_dir):
+            if member.get("name") == owner:
+                agent_type = member.get("agentType")
+                return (
+                    isinstance(agent_type, str)
+                    and is_registered_pact_specialist(agent_type)
+                )
+        return False
+    except Exception:
+        return False  # fail-closed → gate fail-OPEN (never strands a dispatch)
+
+
 # ─── task-assigned check ───────────────────────────────────────────────────
 
 def has_task_assigned(team_name: str, name: str) -> bool:
