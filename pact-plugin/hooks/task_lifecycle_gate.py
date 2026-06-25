@@ -1328,7 +1328,11 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
         #   - CODE:/TEST:/ATOMIZE:/CONSOLIDATE:/other subjects → not in the
         #     phase→workflow map → _phase_artifact_requirement returns None →
         #     silent (their artifacts are git-tracked or non-existent).
-        #   - skipped phases (metadata.skipped is true) → no artifact produced.
+        #   - skipped phases (metadata.skipped is exactly True) → no artifact
+        #     produced. The guard uses a strict `is not True` identity check, so
+        #     ONLY the boolean True exempts; a truthy-but-non-True value
+        #     (1, "yes", etc.) does NOT count as skipped and the backstop still
+        #     fires — fail-safe toward nudging on an ambiguous skip marker.
         # Emit ordering is satisfied by construction: the emit site fires at
         # phase-output validation BEFORE the lead completes the phase task, so by
         # this PostToolUse(completed) the event is already on disk (a synchronous

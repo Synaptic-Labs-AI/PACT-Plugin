@@ -462,6 +462,25 @@ def _validate_event_schema(event: dict[str, Any]) -> tuple[bool, str]:
                 f"field '{field}' for type '{event_type}' must be "
                 f"non-empty string",
             )
+    # artifact_paths element-level guard (belt-and-suspenders): the generic
+    # per-field check above is SHALLOW — it confirms `paths` is a `list` but
+    # does not descend into its elements. The locked design makes per-element
+    # validity the writer's responsibility (the emit sites drop empty/invalid
+    # paths and skip an empty glob); this schema-layer check augments that with
+    # a defensive backstop so a writer that bypasses the emit-site discipline
+    # cannot land a `paths` list holding a non-str or empty/whitespace-only
+    # element on disk, where a downstream reader would treat it as a real path.
+    # Scoped to artifact_paths ONLY — other list-typed required fields
+    # (s2_state_seeded.agents, review_dispatch.reviewers, remediation.items)
+    # keep their existing shallow contract and are untouched.
+    if event_type == "artifact_paths":
+        for element in event["paths"]:
+            if not isinstance(element, str) or not element.strip():
+                return (
+                    False,
+                    "field 'paths' for type 'artifact_paths' must contain "
+                    "only non-empty strings",
+                )
     # Per-type optional field checks. Absent fields pass (that's what
     # "optional" means); present fields must match the declared type.
     # Symmetric with required-field checks: rejects bool in int fields,
@@ -690,11 +709,16 @@ def _read_events_at(
     Reads with `errors="replace"` so a single invalid byte sequence
     (e.g., from a botched write or a truncated multibyte character)
     substitutes U+FFFD for the bad bytes instead of raising
-    UnicodeDecodeError. A malformed byte range corrupts at most its
-    own line; the per-line `json.loads` then drops that line and every
-    other event in the file is still returned. Without this, one bad
-    byte would cause the outer `except Exception` to drop the whole
-    file and hide all of its otherwise-valid events.
+    UnicodeDecodeError. A bad line corrupts at most its own line; every
+    other event in the file is still returned. Two per-line hazards are
+    isolated: (1) a line that fails to parse as JSON is dropped by the
+    `except (json.JSONDecodeError, ValueError)` below; (2) a line that
+    parses as valid JSON but is NOT a dict (e.g. `[1,2,3]`, `"str"`,
+    `42`, `null`) is dropped by the `isinstance(event, dict)` guard —
+    without that guard, `.get()` on a non-dict value raises
+    AttributeError (not in the except tuple), which would propagate to
+    the outer `except Exception` and drop the WHOLE file, hiding every
+    otherwise-valid event behind one bad line.
 
     `since`: when set, only events whose `ts` is >= `since` (inclusive,
     parsed via `_ts_ge`) are returned — the arc-scope filter. None/empty
@@ -713,6 +737,16 @@ def _read_events_at(
                 continue
             try:
                 event = json.loads(line)
+                # A line can be valid JSON yet NOT a dict (e.g. `[1,2,3]`,
+                # `"str"`, `42`, `null`). `.get()` on such a value raises
+                # AttributeError — which is NOT in the except tuple below, so it
+                # would propagate to the outer `except Exception` and drop the
+                # WHOLE file's events (every event hidden behind one bad line).
+                # Skip a non-dict line exactly like a malformed one so it
+                # corrupts at most itself, preserving the per-line isolation the
+                # docstring promises.
+                if not isinstance(event, dict):
+                    continue
                 if event_type and event.get("type") != event_type:
                     continue
                 if not _ts_ge(event.get("ts"), since):
@@ -805,7 +839,14 @@ def _scan_lines_for_event(
 
     Shared by tail-window and full-slurp scan paths. Skips blank lines and
     silently drops malformed JSON (symmetric with the pre-optimization
-    contract: corrupted lines never poison the scan).
+    contract: corrupted lines never poison the scan). A line that parses as
+    valid JSON but is NOT a dict (e.g. `[1,2,3]`, `"str"`, `42`, `null`) is
+    skipped by the `isinstance(event, dict)` guard — parity with
+    `_read_events_at`: without it, `.get()` on a non-dict value raises
+    AttributeError (not in the except tuple), which would propagate to the
+    caller's outer `except Exception` and abort the whole reverse scan,
+    making `read_last_event*` return None (e.g. `session_end` would conclude
+    the session was never paused).
 
     `since`: when set, an event matching `event_type` whose `ts` is < `since`
     (parsed via `_ts_ge`) is skipped — the reverse scan then returns the
@@ -817,6 +858,8 @@ def _scan_lines_for_event(
             continue
         try:
             event = json.loads(line)
+            if not isinstance(event, dict):
+                continue
             if event.get("type") == event_type and _ts_ge(
                 event.get("ts"), since
             ):
