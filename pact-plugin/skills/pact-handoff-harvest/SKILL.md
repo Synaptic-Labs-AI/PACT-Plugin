@@ -32,23 +32,22 @@ Resolve the absolute session directory **before any journal read**, and reuse th
 
 **Why this is load-bearing (not optional):** you run **off-lead** (a `pact-secretary` teammate). `read_events(...)` derives its path implicitly via `pact_context.get_session_dir()`, which **false-returns `''` in a teammate frame** (no persisted lead session context) → the read silently returns **0 events**. Off-lead, that would make the entire harvest — HANDOFF discovery, artifact recovery, and calibration — a silent no-op. `read_events_from(session_dir, ...)` takes the directory **explicitly** and is frame-independent (the same form the Orphaned-Recovery path below already uses).
 
-Reconstruct the directory from the per-session context file (the same construction `get_session_dir()` uses, but driven off the on-disk context file rather than the lead-gated helper that false-returns off-lead):
+Reconstruct the directory from the per-session context file by calling the shared SSOT helper `reconstruct_session_dir(project_dir, session_id)` (in `shared.pact_context`) — the off-lead, frame-independent counterpart to `get_session_dir()`. **Do NOT hand-build the path** (no manual `Path(project_dir).name` + `get_claude_config_dir()/pact-sessions/...` join): the writer sanitizes both the slug and the `session_id` (via `_UNSAFE_SLUG_CHARS_RE` and the shared `_build_session_path`), so a raw join would land on a DIFFERENT directory than the one the journal was written to whenever the project basename or `session_id` contains a non-`[A-Za-z0-9_-]` character (e.g. a dot or space) → the off-lead read silently returns 0 events. The helper routes both axes through the writer's derivation, so the reconstruction is SSOT-by-construction and cannot drift.
 
 1. Read `pact-session-context.json` from the session dir your dispatch placed you in (the same file the Orphaned-Recovery path references). It carries `session_id` and `project_dir`.
-2. Reconstruct: `slug = Path(project_dir).name`; then join `get_claude_config_dir() / "pact-sessions" / slug / session_id`. Use `get_claude_config_dir()` (from `shared.paths`) — do NOT hardcode `~/.claude`.
+2. Call `reconstruct_session_dir(ctx["project_dir"], ctx["session_id"])` to get the absolute session dir.
 
 ```python
 import json, sys
 from pathlib import Path
 sys.path.insert(0, "{hooks_dir}")
-from shared.paths import get_claude_config_dir
+from shared.pact_context import reconstruct_session_dir
 
 ctx = json.loads(Path("{context_file}").read_text())  # pact-session-context.json
-slug = Path(ctx["project_dir"]).name
-session_dir = str(get_claude_config_dir() / "pact-sessions" / slug / ctx["session_id"])
+session_dir = reconstruct_session_dir(ctx["project_dir"], ctx["session_id"])
 ```
 
-If the context file is missing or unreadable, **report the gap to the team-lead and stop** — do NOT fall back to the path-less `read_events(...)` (that silently re-introduces the off-lead false-empty bug). An unresolved `session_dir` is a reportable gap, not a degrade-to-implicit case.
+If the context file is missing/unreadable, or `reconstruct_session_dir` returns `''` (a falsy `project_dir`/`session_id`), **report the gap to the team-lead and stop** — do NOT fall back to the path-less `read_events(...)` (that silently re-introduces the off-lead false-empty bug). An unresolved `session_dir` is a reportable gap, not a degrade-to-implicit case.
 
 ### Step 1: Task Discovery
 
