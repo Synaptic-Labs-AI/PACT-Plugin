@@ -506,6 +506,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
   {"workflow": "prepare", "feature": "{feature}", "paths": ["{absolute_path_1}", "{absolute_path_2}"], "task_id": "{prepare_task_id}"}
 JSON
   ```
+- [ ] **Complete the PREPARE phase task** — ONLY after the artifact check and the `artifact_paths` emit above: `TaskUpdate(prepareTaskId, status="completed")`. This ordering is load-bearing: the emit MUST land before the phase-task completion so the durability pointer is on disk by the time completion is observed. (A skipped PREPARE phase completes earlier with `metadata.skipped=true` and runs neither the check nor the emit.)
 - [ ] Specialist HANDOFF received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable? Optionally query secretary for S4 pattern check (variety 7+). See [pact-orchestrator §Memory Management](../agents/pact-orchestrator.md#memory-management).
@@ -612,6 +613,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
   {"workflow": "architect", "feature": "{feature}", "paths": ["{absolute_path_1}", "{absolute_path_2}"], "task_id": "{architect_task_id}"}
 JSON
   ```
+- [ ] **Complete the ARCHITECT phase task** — ONLY after the artifact check and the `artifact_paths` emit above: `TaskUpdate(architectTaskId, status="completed")`. This ordering is load-bearing: the emit MUST land before the phase-task completion so the durability pointer is on disk by the time completion is observed. (A skipped ARCHITECT phase completes earlier with `metadata.skipped=true` and runs neither the check nor the emit.)
 - [ ] Specialist HANDOFF received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
