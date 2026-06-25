@@ -80,7 +80,11 @@ def _resolve_session_dir(context_file: str) -> int:
 
     try:
         raw = Path(context_file).read_text()
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError covers an embedded NUL byte in the path (Path/open raises
+        # "embedded null byte"). Unreachable via the CLI (execve strips NUL
+        # from argv) but guarded so a NUL/bad path is bad-input (exit 2), never
+        # an uncaught exit-1 crash — same handling as the missing-file case.
         print(
             f"pact_harvest: cannot read context file {context_file!r}: {exc}",
             file=sys.stderr,

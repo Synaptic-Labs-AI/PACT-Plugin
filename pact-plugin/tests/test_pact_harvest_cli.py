@@ -55,6 +55,7 @@ _HOOKS_DIR = Path(__file__).parent.parent / "hooks"
 sys.path.insert(0, str(_HOOKS_DIR))
 
 import shared.pact_context as pact_context  # noqa: E402
+from shared.pact_harvest import _resolve_session_dir  # noqa: E402
 from shared.session_journal import (  # noqa: E402
     append_event,
     make_event,
@@ -242,6 +243,22 @@ class TestResolveSessionDirSubprocess:
         )
         # And concretely: the dot/space are gone from BOTH path segments.
         assert "my_project_dir" in out and "abc_def_123" in out
+
+    def test_nul_byte_path_is_bad_input_not_crash(self, capsys):
+        """A context-file path with an embedded NUL byte raises ValueError from
+        Path.read_text ('embedded null byte') — it must be handled as bad-input
+        (exit 2 + empty stdout + stderr diagnostic), NOT an uncaught exit-1
+        crash. Exercised IN-PROCESS by calling the handler directly: the CLI
+        subprocess can't carry a NUL in argv (execve strips it), so the guard is
+        unreachable via _run_cli; this is the only way to drive the path.
+        Regression-proof: dropping ValueError from the read's except clause lets
+        the ValueError escape the handler -> this raises instead of returning 2,
+        going RED."""
+        rc = _resolve_session_dir("/tmp/ctx\x00.json")
+        assert rc == _EXIT_UNRESOLVED, "NUL path must be bad-input (exit 2), not a crash"
+        captured = capsys.readouterr()
+        assert captured.out == "", "exit-2 path must emit EMPTY stdout"
+        assert "embedded null byte" in captured.err
 
     @pytest.mark.parametrize("scenario", ["missing_file", "bad_json", "not_object",
                                           "falsy_project", "falsy_session"])
