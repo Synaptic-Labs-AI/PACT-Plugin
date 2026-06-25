@@ -334,3 +334,257 @@ class TestMainRealContextResolution:
         )
         assert "42" in hso["additionalContext"] and "devops" in hso["additionalContext"]
         assert "permissionDecision" not in hso, "a WARN gate must NEVER emit a deny"
+
+
+# =============================================================================
+# #865 dispatch-variety gate — the NEW branch (_evaluate_dispatch_variety),
+# parallel to and independent of the #956 completion-ordering _evaluate.
+# =============================================================================
+#
+# Composite-signature trigger: a TaskUpdate whose tool_input carries BOTH
+# owner=pact-* AND a non-empty addBlockedBy in the SAME call (the terminal
+# dispatch-wiring write). Fires (warn/deny/shadow per env-knob) ONLY when the
+# linked Task B carries no resolvable metadata.variety. No misfire at
+# TaskCreate(B) or partial-wiring; carve-outs preserved.
+# =============================================================================
+
+
+def _variety(total):
+    """A resolvable D11 variety stamp at the given total."""
+    return {
+        "novelty": 2, "novelty_rationale": "x",
+        "scope": 2, "scope_rationale": "x",
+        "uncertainty": 2, "uncertainty_rationale": "x",
+        "risk": 2, "risk_rationale": "x",
+        "total": total,
+    }
+
+
+def _wiring_update(task_id, *, owner="pact-backend-coder",
+                   add_blocked_by=("A",), agent_type=LEAD):
+    """A terminal dispatch-wiring TaskUpdate: owner + addBlockedBy in the SAME
+    tool_input. add_blocked_by=None / [] omits it (partial-wiring case)."""
+    tool_input = {"taskId": task_id}
+    if owner is not None:
+        tool_input["owner"] = owner
+    if add_blocked_by:
+        tool_input["addBlockedBy"] = list(add_blocked_by)
+    payload = {"tool_name": "TaskUpdate", "tool_input": tool_input}
+    if agent_type is not None:
+        payload["agent_type"] = agent_type
+    return payload
+
+
+class TestDispatchVarietyTrigger:
+    """The composite signature fires iff owner pact-* AND addBlockedBy are in
+    the SAME tool_input AND the linked Task B has no resolvable variety."""
+
+    def test_fires_on_wiring_write_unstamped_task_b(
+        self, tmp_path, monkeypatch, pact_context,
+    ):
+        """Terminal wiring write linking an unstamped Task B → advisory."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_task(tmp_path, TEAM, "42", subject="impl foo",
+                   owner="pact-backend-coder", metadata={})
+        adv = gate._evaluate_dispatch_variety(_wiring_update("42"))
+        assert adv is not None and "metadata.variety" in adv
+
+    def test_silent_when_task_b_is_stamped(
+        self, tmp_path, monkeypatch, pact_context,
+    ):
+        """READ+VALIDATE: a stamped Task B → silent (the structural read is
+        what makes the gate precise; it does NOT fire on the composite
+        signature alone)."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_task(tmp_path, TEAM, "42", subject="impl foo",
+                   owner="pact-backend-coder",
+                   metadata={"variety": _variety(12)})
+        assert gate._evaluate_dispatch_variety(_wiring_update("42")) is None
+
+    def test_silent_when_task_b_stamped_via_fallback(
+        self, tmp_path, monkeypatch, pact_context,
+    ):
+        """A non-canonical but resolvable stamp (score, no total) → silent.
+        The gate uses the shared resolve_variety_total, so any shape that
+        resolves at write/read time also satisfies the gate."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        v = _variety(0)
+        v.pop("total")
+        v["score"] = 9
+        _seed_task(tmp_path, TEAM, "42", subject="impl foo",
+                   owner="pact-backend-coder", metadata={"variety": v})
+        assert gate._evaluate_dispatch_variety(_wiring_update("42")) is None
+
+
+class TestDispatchVarietyNoMisfire:
+    """The FIRST-OBSERVABLE-WRITE / no-misfire invariant: never fire at
+    TaskCreate(B) or on a partial-wiring TaskUpdate."""
+
+    def test_no_fire_on_taskcreate(
+        self, tmp_path, monkeypatch, pact_context,
+    ):
+        """A TaskCreate (different tool) never reaches the branch."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_task(tmp_path, TEAM, "42", subject="impl foo",
+                   owner="pact-backend-coder", metadata={})
+        payload = {
+            "tool_name": "TaskCreate",
+            "tool_input": {"subject": "impl foo", "owner": "pact-backend-coder",
+                           "addBlockedBy": ["A"]},
+            "agent_type": LEAD,
+        }
+        assert gate._evaluate_dispatch_variety(payload) is None
+
+    def test_no_fire_on_owner_only_partial_wiring(
+        self, tmp_path, monkeypatch, pact_context,
+    ):
+        """owner set but NO addBlockedBy in the same call → not yet terminal
+        → silent."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_task(tmp_path, TEAM, "42", subject="impl foo",
+                   owner="pact-backend-coder", metadata={})
+        assert gate._evaluate_dispatch_variety(
+            _wiring_update("42", add_blocked_by=None)
+        ) is None
+
+    def test_no_fire_on_addblockedby_only_partial_wiring(
+        self, tmp_path, monkeypatch, pact_context,
+    ):
+        """addBlockedBy set but NO owner in the same call → silent. This is
+        the imPACT blocker-reassign / phase-task-blocking shape (scenario 12):
+        every NON-dispatch addBlockedBy use is addBlockedBy-ONLY, so the
+        composite never false-positives on it."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_task(tmp_path, TEAM, "42", subject="impl foo",
+                   owner="pact-backend-coder", metadata={})
+        assert gate._evaluate_dispatch_variety(
+            _wiring_update("42", owner=None)
+        ) is None
+
+
+class TestDispatchVarietyCarveOuts:
+    """Carve-outs preserve R4's silence guarantees verbatim."""
+
+    def test_silent_non_pact_owner(
+        self, tmp_path, monkeypatch, pact_context,
+    ):
+        """A non-pact owner (e.g. a SOLO_EXEMPT general-purpose agent, or a
+        bare teammate name) never fires — the trigger requires owner pact-*
+        (scenario 9: SOLO_EXEMPT agents are non-pact owners, already
+        excluded)."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_task(tmp_path, TEAM, "42", subject="impl foo",
+                   owner="general-purpose", metadata={})
+        assert gate._evaluate_dispatch_variety(
+            _wiring_update("42", owner="general-purpose")
+        ) is None
+
+    def test_silent_teachback_subject(
+        self, tmp_path, monkeypatch, pact_context,
+    ):
+        """A Task-A teachback gate subject is exempt (is_teachback_subject)."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_task(tmp_path, TEAM, "42",
+                   subject="backend: TEACHBACK for the thing",
+                   owner="pact-backend-coder", metadata={})
+        assert gate._evaluate_dispatch_variety(_wiring_update("42")) is None
+
+    @pytest.mark.parametrize("signal_type", ["blocker", "algedonic"])
+    def test_silent_signal_task(
+        self, tmp_path, monkeypatch, pact_context, signal_type,
+    ):
+        """A signal task (completion_type=signal) is exempt via
+        is_self_complete_exempt — auditor/blocker signal tasks carry no
+        variety obligation."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_task(tmp_path, TEAM, "42", subject="impl foo",
+                   owner="pact-auditor",
+                   metadata={"completion_type": "signal", "type": signal_type})
+        assert gate._evaluate_dispatch_variety(_wiring_update(
+            "42", owner="pact-auditor")) is None
+
+    def test_silent_teammate_frame(
+        self, tmp_path, monkeypatch, pact_context,
+    ):
+        """DUAL-MODE: a teammate frame emits nothing (is_lead structural
+        discriminator)."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        _seed_task(tmp_path, TEAM, "42", subject="impl foo",
+                   owner="pact-backend-coder", metadata={})
+        assert gate._evaluate_dispatch_variety(
+            _wiring_update("42", agent_type=TEAMMATE)
+        ) is None
+
+
+class TestDispatchVarietyEnvKnobModes:
+    """main()-level: PACT_DISPATCH_VARIETY_MODE selects warn / deny / shadow.
+    The module reads the knob at import; monkeypatch the resolved constant."""
+
+    def _run_main(self, monkeypatch, capsys, stdin_obj):
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(stdin_obj)))
+        with pytest.raises(SystemExit) as exc:
+            gate.main()
+        return exc.value.code, capsys.readouterr().out
+
+    def _seed_unstamped(self, tmp_path):
+        _seed_task(tmp_path, TEAM, "42", subject="impl foo",
+                   owner="pact-backend-coder", metadata={})
+
+    def test_warn_mode_additional_context_exit_zero(
+        self, tmp_path, monkeypatch, pact_context, capsys,
+    ):
+        _ctx(pact_context, monkeypatch, tmp_path)
+        monkeypatch.setattr(gate, "DISPATCH_VARIETY_MODE", "warn")
+        self._seed_unstamped(tmp_path)
+        code, out = self._run_main(monkeypatch, capsys, _wiring_update("42"))
+        assert code == 0
+        hso = json.loads(out)["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert "additionalContext" in hso
+        assert "permissionDecision" not in hso
+
+    def test_deny_mode_permission_decision_exit_two(
+        self, tmp_path, monkeypatch, pact_context, capsys,
+    ):
+        """deny mode → permissionDecision:"deny" + exit 2 (the sole
+        fail-CLOSED path). Source-proven honor; opt-in only."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        monkeypatch.setattr(gate, "DISPATCH_VARIETY_MODE", "deny")
+        self._seed_unstamped(tmp_path)
+        code, out = self._run_main(monkeypatch, capsys, _wiring_update("42"))
+        assert code == 2
+        hso = json.loads(out)["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "deny"
+        assert hso["hookEventName"] == "PreToolUse"
+
+    def test_shadow_mode_suppresses(
+        self, tmp_path, monkeypatch, pact_context, capsys,
+    ):
+        """shadow mode → no additionalContext, no deny (journal-only
+        telemetry; here it suppresses)."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        monkeypatch.setattr(gate, "DISPATCH_VARIETY_MODE", "shadow")
+        self._seed_unstamped(tmp_path)
+        code, out = self._run_main(monkeypatch, capsys, _wiring_update("42"))
+        assert code == 0
+        assert json.loads(out) == {"suppressOutput": True}
+
+    def test_deny_mode_does_not_deny_stamped_task_b(
+        self, tmp_path, monkeypatch, pact_context, capsys,
+    ):
+        """Even in deny mode, a STAMPED Task B is never denied — the
+        structural read gates the deny. Counter-pin against a deny-on-every-
+        wiring-write regression."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        monkeypatch.setattr(gate, "DISPATCH_VARIETY_MODE", "deny")
+        _seed_task(tmp_path, TEAM, "42", subject="impl foo",
+                   owner="pact-backend-coder",
+                   metadata={"variety": _variety(12)})
+        code, out = self._run_main(monkeypatch, capsys, _wiring_update("42"))
+        assert code == 0
+        assert json.loads(out) == {"suppressOutput": True}
+
+    def test_unknown_mode_falls_back_to_warn(self):
+        """Module-load knob hygiene: an unknown env value resolves to warn
+        (never silently disables, never silently denies)."""
+        assert gate.DISPATCH_VARIETY_MODE in gate._ALLOWED_VARIETY_MODES

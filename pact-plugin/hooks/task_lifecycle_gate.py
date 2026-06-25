@@ -47,9 +47,11 @@ Rule coverage:
     (missing blocks, missing Task B, missing variety, or variety present
     but no resolvable total); fail-open advisory documents the gap without
     blocking lifecycle
-  - variety_missing_on_dispatch_task — pact-* work Task created without
-    metadata.variety, with malformed per-dimension rationales, OR with no
-    resolvable variety total
+  - variety_missing_on_dispatch_task — pact-* work Task created with
+    metadata.variety present but malformed per-dimension rationales OR no
+    resolvable variety total. (The ABSENT-stamp arm was moved to the
+    dispatch-boundary gate in handoff_ordering_gate.py per the #865 surgical
+    split — this PostToolUse rule keeps only the present-but-malformed checks.)
   - variety_acknowledgment_missing — Teachback submitted without
     variety_acknowledgment field (D10 teammate verification)
   - variety_acknowledgment_schema_invalid_at_write_time — Teachback
@@ -1059,15 +1061,19 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
             ))
 
         # R4: variety_missing_on_dispatch_task (D11-refined).
-        # Same discriminator pattern as work_addblockedby_missing
-        # (not-teachback + pact-* owner + not exempt). Single rule with
-        # three trigger paths (absent variety OR malformed per-dimension
-        # rationales OR no resolvable total); distinct message text per
-        # path, same rule name — the lead-side correction is the same
-        # (re-stamp variety) in every case. Clause order mirrors L575-580:
-        # cheap dict-lookups first, disk-touching exempt-check last
-        # (cached via `_exempt()` so the second invocation reuses the
-        # first call's result).
+        # SURGICAL SPLIT (#865 enforce-vs-advise re-scope): the ABSENT-stamp
+        # arm (variety entirely missing on a dispatched Task B) was MOVED to
+        # the dispatch-boundary gate in handoff_ordering_gate.py — that is the
+        # FIRST-OBSERVABLE-WRITE concern with a timing constraint (catch it at
+        # the terminal owner+addBlockedBy wiring write, deterministically). R4
+        # KEEPS the present-but-malformed arm: a variety that IS stamped but
+        # carries malformed per-dimension rationales OR no resolvable total.
+        # These are post-write QUALITY checks with no dispatch-boundary timing
+        # constraint, so they stay a PostToolUse advisory here. The rule name
+        # is retained for the malformed-present paths; the bare-absent path no
+        # longer fires here (it fires at the wiring write). Clause order
+        # mirrors L575-580: cheap dict-lookups first, disk-touching
+        # exempt-check last (cached via `_exempt()`).
         if (
             not is_teachback
             and owner.startswith("pact-")
@@ -1075,16 +1081,9 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
         ):
             incoming_metadata = tool_input.get("metadata") or {}
             incoming_variety = incoming_metadata.get("variety")
-            if not incoming_variety:
-                advisories.append((
-                    "variety_missing_on_dispatch_task",
-                    f"PACT task_lifecycle_gate: pact-* Task created "
-                    f"(owner={owner!r}) without metadata.variety. "
-                    "Per-dispatch variety stamping is required for hook "
-                    "band-resolution. See orchestrate / comPACT / "
-                    "peer-review dispatch surfaces.",
-                ))
-            else:
+            # ABSENT variety is no longer enforced here (moved to the wiring
+            # write). Only validate a variety that IS present.
+            if incoming_variety:
                 # The validator forwards the surrounding metadata so the
                 # non-canonical top-level variety_score sibling is reachable
                 # by the shared resolver. It returns the rationale problem

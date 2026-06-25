@@ -675,8 +675,8 @@ class TestPerLoopDispatchSites:
         ("comPACT.md", 227, "MultipleSpecialists"),
         ("comPACT.md", 287, "SingleSpecialist"),
         ("peer-review.md", 192, "Reviewers"),
-        ("plan-mode.md", 220, "Consultants"),
-        ("rePACT.md", 246, "SubScopeSpecialists"),
+        ("plan-mode.md", 236, "Consultants"),
+        ("rePACT.md", 262, "SubScopeSpecialists"),
     ]
 
     @staticmethod

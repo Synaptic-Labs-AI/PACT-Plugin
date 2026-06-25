@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/handoff_ordering_gate.py
-Summary: PreToolUse hook (matcher="TaskUpdate") that WARNS the lead when a
+Summary: PreToolUse hook (matcher="TaskUpdate") with TWO independent branches:
+         (1) #956 completion-ordering nudge — WARNS the lead when a
          TaskUpdate(status="completed") lands on a HANDOFF-expecting task whose
-         metadata.handoff is not yet present on disk — the #956 write-after-
-         completion ordering mistake. Advisory only (additionalContext); NEVER
+         metadata.handoff is not yet present on disk. Advisory only; NEVER
          denies.
+         (2) #865 dispatch-variety gate — fires when a terminal dispatch-wiring
+         TaskUpdate (owner pact-* AND addBlockedBy in the SAME tool_input) links
+         a Task B that carries no resolvable metadata.variety. Deterministic
+         STRONG-WARN by default; env-gated DENY opt-in via
+         PACT_DISPATCH_VARIETY_MODE. The deny path is the file's ONLY
+         fail-CLOSED exception — every other path fails OPEN.
 Used by: hooks.json PreToolUse hook (matcher="TaskUpdate")
 
 This is the NUDGE half of the #956 fix (defense-in-depth). The load-bearing
@@ -47,9 +53,28 @@ from __future__ import annotations
 
 # ─── stdlib first (used on the input-side fail-open BEFORE wrapped imports) ─
 import json
+import os
 import sys
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
+# ─── #865 dispatch-variety enforcement mode (env-knob) ─────────────────────
+# Models dispatch_gate.py's PACT_DISPATCH_INLINE_MISSION_MODE: read once at
+# import; an unknown value falls back to "warn" so a typo never silently
+# disables (or, worse, silently DENIES on) the gate. Default "warn" is the
+# non-negotiable consumer-blast-radius posture (#997): the gate ships
+# deterministic-WARN; "deny" is an explicit per-consumer opt-in.
+#   warn   → additionalContext advisory (the existing WARN mechanism) + exit 0
+#   deny   → permissionDecision:"deny" + exit 2 (the ONLY fail-CLOSED path in
+#            this file). SOURCE-PROVEN honor: the platform's PreToolUse deny
+#            branch returns before tool.call() with no tool_name carve-out, so
+#            a TaskUpdate-matcher deny IS honored — empirically un-exercised, so
+#            warn ships as the default and deny is opt-in.
+#   shadow → journal-only calibration; no additionalContext, no deny.
+_ALLOWED_VARIETY_MODES = frozenset({"warn", "deny", "shadow"})
+DISPATCH_VARIETY_MODE = os.environ.get("PACT_DISPATCH_VARIETY_MODE", "warn")
+if DISPATCH_VARIETY_MODE not in _ALLOWED_VARIETY_MODES:
+    DISPATCH_VARIETY_MODE = "warn"
 
 # Cap on the stdin read. Real PreToolUse TaskUpdate frames carry a tool_input
 # (taskId + small metadata) and stay well under this; an over-cap frame
@@ -68,6 +93,7 @@ try:
     import shared.pact_context as pact_context
     from shared.intentional_wait import is_self_complete_exempt
     from shared.task_utils import is_teachback_subject, read_task_json
+    from shared.teachback_schema import resolve_variety_total
     _IMPORTS_OK = True
 except BaseException:  # noqa: BLE001 — fail-OPEN catch-all (warn gate never denies)
     _IMPORTS_OK = False
@@ -161,6 +187,116 @@ def _evaluate(input_data: dict) -> str | None:
     )
 
 
+def _evaluate_dispatch_variety(input_data: dict) -> str | None:
+    """#865: return an actionable advisory string when a terminal
+    dispatch-wiring TaskUpdate links a Task B that carries no resolvable
+    metadata.variety, else None. The caller decides warn-vs-deny-vs-shadow
+    from DISPATCH_VARIETY_MODE; this function only detects the gap.
+
+    This is a NEW branch, parallel to and independent of the #956
+    completion-ordering _evaluate — neither calls the other.
+
+    COMPOSITE-SIGNATURE TRIGGER (the FIRST-OBSERVABLE-WRITE / no-misfire
+    invariant): fire ONLY on the terminal dispatch-wiring write — a single
+    TaskUpdate whose tool_input carries BOTH:
+      - owner matching pact-* (a PACT specialist), AND
+      - addBlockedBy present and non-empty (the teachback-gate link),
+    in the SAME tool_input. This composite co-occurrence is uniquely the
+    dispatch-wiring shape (orchestrate/comPACT/plan-mode/rePACT all wire B
+    via `TaskUpdate(B, owner=..., addBlockedBy=[A])`). No fire at
+    TaskCreate(B) (owner empty there — wired by this later TaskUpdate) or on
+    a partial-wiring TaskUpdate (owner-only OR addBlockedBy-only). All other
+    addBlockedBy uses across the templates (phase/imPACT blocker blocking)
+    are addBlockedBy-ONLY with no owner in the same call → already excluded.
+
+    STRUCTURAL DECISION (not actor-based): the gate READS the linked Task B's
+    metadata.variety from disk and fires ONLY when there is no resolvable
+    total (absent / non-dict / untotaled). Firing on the composite signature
+    alone would warn on every dispatch including correctly-stamped ones; the
+    read is what makes the decision detection-precise (and the deny safe).
+    The "present-but-malformed-rationale" case stays a PostToolUse advisory
+    in task_lifecycle_gate R4 (the surgical split) — this gate keys solely on
+    resolve_variety_total being None, the missing-stamp concern.
+    """
+    tool_name = input_data.get("tool_name", "")
+    if tool_name != "TaskUpdate":
+        return None  # matcher already scopes this, but be defensive
+
+    # DUAL-MODE: lead frame only (same structural is_lead discriminator the
+    # #956 branch uses). A teammate frame emits nothing.
+    if not pact_context.is_lead(input_data):
+        return None
+
+    tool_input = input_data.get("tool_input") or {}
+    if not isinstance(tool_input, dict):
+        return None
+
+    # COMPOSITE signature — owner pact-* AND addBlockedBy non-empty in the
+    # SAME tool_input. Either half alone is a non-terminal/partial write.
+    owner = tool_input.get("owner")
+    if not isinstance(owner, str) or not owner.startswith("pact-"):
+        return None  # non-pact owner (incl. SOLO_EXEMPT agents) → never fires
+    add_blocked_by = tool_input.get("addBlockedBy")
+    if not isinstance(add_blocked_by, list) or not add_blocked_by:
+        return None  # partial wiring (owner-only) → not yet terminal
+
+    task_id = tool_input.get("taskId", "") or ""
+    if not task_id:
+        return None
+    try:
+        pact_context.init(input_data)
+        team_name = pact_context.get_pact_context().get("team_name", "")
+    except Exception:
+        team_name = ""
+    if not team_name:
+        return None  # no team context → cannot resolve Task B → bypass
+
+    task = read_task_json(task_id, team_name)
+    if not isinstance(task, dict) or not task:
+        return None  # no task data → bypass (fail-open)
+
+    # CARVE-OUTS (preserve R4's silence guarantees verbatim; the helpers are
+    # already imported). owner pact-* is enforced above; the exempt arms
+    # cover secretary + signal tasks (is_self_complete_exempt) and the Task-A
+    # teachback gate (is_teachback_subject).
+    subject = task.get("subject") or ""
+    if is_self_complete_exempt(task, team_name) or is_teachback_subject(subject):
+        return None
+
+    # STRUCTURAL READ: does the linked Task B carry a resolvable variety total?
+    # resolve_variety_total is the shared SSOT (also used by the read-time band
+    # resolver and write-time validator). None ⇒ absent / non-dict / untotaled
+    # ⇒ the missing-stamp gap this gate enforces. A resolvable total ⇒ silent
+    # (a present-but-malformed-rationale stamp is R4's PostToolUse concern).
+    metadata = task.get("metadata")
+    variety = metadata.get("variety") if isinstance(metadata, dict) else None
+    if resolve_variety_total(variety, metadata) is not None:
+        return None  # stamp resolves → not a missing-stamp dispatch
+
+    return (
+        f"PACT dispatch-variety gate: Task {task_id} ({subject!r}) is being "
+        f"wired into a teachback-gated dispatch (owner {owner!r}) without a "
+        "resolvable metadata.variety. Per-dispatch variety stamping is "
+        "required so the hook can resolve the reasoning_reconstruction band "
+        "and the concurrent-auditor trigger. Stamp the D11 4-rationale block "
+        "(novelty/scope/uncertainty/risk + total 4-16) on this Task B BEFORE "
+        "wiring it — mirror the block in orchestrate.md / comPACT.md / "
+        "peer-review.md / plan-mode.md / rePACT.md."
+    )
+
+
+def _emit_warn(advisory: str) -> None:
+    """WARN output path: additionalContext advisory + exit 0 (never denies).
+    Shared by the #956 nudge and the dispatch-variety warn mode."""
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": advisory,  # advisory — NOT permissionDecision
+        }
+    }))
+    sys.exit(0)  # exit 0 — advisory, never deny / exit-2
+
+
 def main() -> None:
     # Input-side fail-open: an unreadable / oversized / malformed stdin frame
     # suppresses + exits 0 (never blocks the TaskUpdate).
@@ -174,6 +310,36 @@ def main() -> None:
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
+    # #865 dispatch-variety branch FIRST: it is the only branch that can DENY
+    # (deny mode), and a denied wiring write should be blocked before the #956
+    # completion nudge is even considered. Both branches fail-OPEN on any logic
+    # error — a gate that bricks legitimate writes is worse than the gap it
+    # guards. The deny path (deny mode + confirmed missing stamp) is the sole
+    # deliberate fail-CLOSED exception.
+    try:
+        variety_gap = _evaluate_dispatch_variety(input_data)
+    except Exception:
+        variety_gap = None  # fail-OPEN on any logic error
+    if variety_gap:
+        if DISPATCH_VARIETY_MODE == "deny":
+            # The ONLY fail-CLOSED path in this file. Source-proven honor:
+            # the platform PreToolUse deny branch returns before tool.call()
+            # with no tool_name carve-out, so a TaskUpdate-matcher deny IS
+            # honored (empirically un-exercised → warn is the default).
+            print(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": variety_gap,
+                }
+            }))
+            sys.exit(2)
+        if DISPATCH_VARIETY_MODE == "warn":
+            _emit_warn(variety_gap)
+        # shadow → fall through to suppress (journal-only telemetry is the
+        # PostToolUse R4/journal surface; here shadow simply does not surface).
+
+    # #956 completion-ordering nudge: WARN-only, never denies.
     try:
         advisory = _evaluate(input_data)
     except Exception:
@@ -183,13 +349,7 @@ def main() -> None:
         sys.exit(0)
 
     if advisory:
-        print(json.dumps({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "additionalContext": advisory,  # advisory — NOT permissionDecision
-            }
-        }))
-        sys.exit(0)  # exit 0 — advisory, never deny / exit-2
+        _emit_warn(advisory)
 
     print(_SUPPRESS_OUTPUT)
     sys.exit(0)
