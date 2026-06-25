@@ -588,3 +588,29 @@ class TestDispatchVarietyEnvKnobModes:
         """Module-load knob hygiene: an unknown env value resolves to warn
         (never silently disables, never silently denies)."""
         assert gate.DISPATCH_VARIETY_MODE in gate._ALLOWED_VARIETY_MODES
+
+    def test_deny_mode_fails_open_when_evaluation_raises(
+        self, tmp_path, monkeypatch, pact_context, capsys,
+    ):
+        """ADVERSARIAL fail-OPEN invariant: in DENY mode, an exception inside
+        _evaluate_dispatch_variety must NOT brick the TaskUpdate — main()
+        catches it, sets variety_gap=None, and falls through to suppress
+        (exit 0), NEVER exit-2/deny. The deny is fail-CLOSED only on a
+        CONFIRMED missing stamp, never on evaluation uncertainty. A consumer-
+        wide deny gate that denied on its own crash would strand every
+        legitimate dispatch wiring write whenever the evaluator hit a malformed
+        frame — strictly worse than the gap it guards."""
+        _ctx(pact_context, monkeypatch, tmp_path)
+        monkeypatch.setattr(gate, "DISPATCH_VARIETY_MODE", "deny")
+        self._seed_unstamped(tmp_path)
+
+        def _boom(_input_data):
+            raise RuntimeError("simulated evaluator crash")
+
+        monkeypatch.setattr(gate, "_evaluate_dispatch_variety", _boom)
+        code, out = self._run_main(monkeypatch, capsys, _wiring_update("42"))
+        assert code == 0, "deny mode must fail-OPEN (exit 0) on evaluator crash"
+        parsed = json.loads(out)
+        assert "permissionDecision" not in parsed.get(
+            "hookSpecificOutput", {}
+        ), "a crash must never produce a deny verdict"
