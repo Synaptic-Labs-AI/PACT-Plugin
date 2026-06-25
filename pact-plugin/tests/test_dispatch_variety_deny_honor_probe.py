@@ -66,18 +66,29 @@ _SID = "deadbeef-4242-4242-4242-deadbeef4242"
 _TEAM = "scratch-deny-probe-team"
 _TASK_ID = "42"
 
+# The production-real owner shape: a BARE specialist name that the team config
+# maps to a registered pact agentType. The corrected gate predicate
+# (is_pact_specialist_owner) resolves _OWNER → member → _AGENT_TYPE →
+# registry(agents/pact-*.md). Real task owners are bare names; `pact-*` is the
+# team-config agentType, NEVER the owner — feeding `pact-backend-coder` as the
+# owner (the pre-fix probe shape) is a production-impossible frame that the
+# corrected predicate (correctly) no longer matches.
+_OWNER = "backend-coder"
+_AGENT_TYPE = "pact-backend-coder"
+
 
 def _wiring_frame(*, agent_type=_LEAD, task_id=_TASK_ID):
-    """A terminal dispatch-wiring PreToolUse(TaskUpdate) frame: owner pact-*
-    AND addBlockedBy non-empty in the SAME tool_input (the composite
-    signature). agent_type selects the lead/teammate (is_lead) branch."""
+    """A terminal dispatch-wiring PreToolUse(TaskUpdate) frame: a BARE
+    specialist owner (resolving to a pact agentType via team config) AND
+    addBlockedBy non-empty in the SAME tool_input (the composite signature).
+    agent_type selects the lead/teammate (is_lead) branch."""
     return json.dumps({
         "tool_name": "TaskUpdate",
         "session_id": _SID,
         "agent_type": agent_type,
         "tool_input": {
             "taskId": task_id,
-            "owner": "pact-backend-coder",
+            "owner": _OWNER,
             "addBlockedBy": ["A"],
         },
     })
@@ -87,16 +98,36 @@ def _wiring_frame(*, agent_type=_LEAD, task_id=_TASK_ID):
 def isolated_session(tmp_path):
     """A fully isolated on-disk session: real HOME with session-context.json,
     team config.json (leadSessionId == _SID → in-process / is-lead topology),
-    and an UNSTAMPED Task-B JSON. Returns (env, home, task_path).
+    a seeded specialist registry (plugin_root/agents/pact-*.md), and an
+    UNSTAMPED Task-B JSON owned by the BARE specialist name. Returns
+    (env, home, task_path).
 
     No monkeypatch — every value is read by the subprocess from real env +
-    real disk, exactly as a live hook process would.
+    real disk, exactly as a live hook process would. The seeding mirrors the
+    corrected predicate's resolution chain: the gate's is_pact_specialist_owner
+    resolves the bare owner → team-config member → agentType → registry. So the
+    fixture MUST register (a) the member name→agentType mapping in the team
+    config AND (b) an agents/pact-*.md file for that agentType, with the
+    session-context plugin_root pointing at the seeded plugin root (the
+    subprocess resolves the registry via get_plugin_root() → the context-file
+    plugin_root field, with a CLAUDE_PLUGIN_ROOT env fallback). plugin_root=""
+    (the pre-fix value) yields an EMPTY registry → is_pact_specialist_owner
+    returns False → the gate never fires (the vacuity this de-fossilize closes).
     """
     home = tmp_path / "home"
     home.mkdir()
     project = tmp_path / "proj"
     project.mkdir()
     slug = "proj"  # CLAUDE_PROJECT_DIR basename
+
+    # Seed the specialist registry: one agents/pact-*.md for the agentType the
+    # bare owner resolves to. Without this, is_registered_pact_specialist sees
+    # an empty registry and the corrected gate cannot identify the dispatch.
+    plugin_root = tmp_path / "plugin"
+    (plugin_root / "agents").mkdir(parents=True)
+    (plugin_root / "agents" / f"{_AGENT_TYPE}.md").write_text(
+        f"# {_AGENT_TYPE}\n", encoding="utf-8",
+    )
 
     ctx_dir = home / ".claude" / "pact-sessions" / slug / _SID
     ctx_dir.mkdir(parents=True)
@@ -105,7 +136,7 @@ def isolated_session(tmp_path):
             "team_name": _TEAM,
             "session_id": _SID,
             "project_dir": str(project),
-            "plugin_root": "",
+            "plugin_root": str(plugin_root),  # registry resolves against this
             "started_at": "2026-01-01T00:00:00Z",
         }),
         encoding="utf-8",
@@ -118,7 +149,8 @@ def isolated_session(tmp_path):
             "team_name": _TEAM,
             "leadSessionId": _SID,  # == session_id → in-process topology
             "members": [
-                {"name": "backend-coder", "agentType": "pact-backend-coder"},
+                # BARE name → pact agentType: the resolution the gate performs.
+                {"name": _OWNER, "agentType": _AGENT_TYPE},
             ],
         }),
         encoding="utf-8",
@@ -131,7 +163,7 @@ def isolated_session(tmp_path):
         json.dumps({
             "id": _TASK_ID,
             "subject": "impl foo",
-            "owner": "pact-backend-coder",
+            "owner": _OWNER,  # BARE name (matches the team-config member)
             "metadata": {},  # UNSTAMPED — the missing-stamp gap
         }),
         encoding="utf-8",
@@ -141,6 +173,9 @@ def isolated_session(tmp_path):
     env["HOME"] = str(home)
     env.pop("CLAUDE_CONFIG_DIR", None)  # force the HOME/.claude resolution
     env["CLAUDE_PROJECT_DIR"] = str(project)
+    # Belt-and-suspenders: the context-file plugin_root wins, but the env
+    # fallback keeps the registry resolvable if that read ever regresses.
+    env["CLAUDE_PLUGIN_ROOT"] = str(plugin_root)
     return env, home, task_path
 
 
@@ -257,7 +292,9 @@ def test_deny_does_not_fire_when_task_b_is_stamped(isolated_session):
         json.dumps({
             "id": _TASK_ID,
             "subject": "impl foo",
-            "owner": "pact-backend-coder",
+            "owner": _OWNER,  # SAME bare owner as the deny case — so the
+            # silence is attributable to the stamp resolving, NOT to the owner
+            # failing to resolve (which would be a wrong-reason green).
             "metadata": {"variety": {"total": 12}},
         }),
         encoding="utf-8",
@@ -286,7 +323,7 @@ def test_deny_does_not_fire_at_taskcreate_no_misfire(isolated_session):
         "agent_type": _LEAD,
         "tool_input": {
             "subject": "impl foo",
-            "owner": "pact-backend-coder",
+            "owner": _OWNER,
             # NO addBlockedBy → not the terminal wiring write
         },
     })
