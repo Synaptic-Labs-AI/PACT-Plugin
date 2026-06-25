@@ -1,6 +1,6 @@
 {
   "name": "PACT",
-  "version": "4.4.40",
+  "version": "4.4.41",
   "description": "Orchestration harness that turns Claude Code into a coordinated team of specialist AI agents",
   "author": {
     "name": "Synaptic-Labs-AI",
