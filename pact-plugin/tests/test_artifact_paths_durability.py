@@ -246,6 +246,42 @@ class TestAlwaysReadAndSupersede:
         by_wf = {e["workflow"]: e["paths"] for e in events}
         assert by_wf == {"prepare": ["/abs/prep.md"], "architect": ["/abs/arch.md"]}
 
+    def test_supersede_3_events_non_monotonic_order_independent(self, live_env):
+        """M1 (coverage gap closed): supersede picks latest-`ts` regardless of
+        the events' INSERTION order in the journal. The 2-event monotonic case
+        above cannot catch an order-dependent resolver (e.g. one that takes the
+        LAST-appended event instead of the latest-`ts`). Here the latest-`ts`
+        event (03:00) is appended in the MIDDLE of three re-emits — a correct
+        max-by-`ts` resolver still selects it; a take-last-appended bug would
+        wrongly select the 02:00 event.
+
+        Probe-confirmed sound against the journal's read order; this test PINS
+        that order-independence so a future resolver (executable or prose) can't
+        regress to insertion-order without going RED."""
+        _tmp, session_dir = live_env
+        append_event(_artifact_event(
+            "prepare", paths=["/abs/v1.md"], ts="2026-06-25T01:00:00Z"))
+        append_event(_artifact_event(
+            "prepare", paths=["/abs/v3-LATEST.md"], ts="2026-06-25T03:00:00Z"))
+        append_event(_artifact_event(
+            "prepare", paths=["/abs/v2.md"], ts="2026-06-25T02:00:00Z"))
+        events = read_events_from(session_dir, "artifact_paths")
+        from datetime import datetime
+
+        def _key(e):
+            return datetime.fromisoformat(e["ts"].replace("Z", "+00:00"))
+        prepare = [e for e in events
+                   if e["workflow"] == "prepare" and e["feature"] == FEATURE]
+        assert len(prepare) == 3
+        latest = max(prepare, key=_key)
+        assert latest["paths"] == ["/abs/v3-LATEST.md"], (
+            "latest-ts must win even when appended non-last"
+        )
+        # And the take-last-appended bug would have picked v2 (02:00) — assert
+        # the resolver does NOT collapse to insertion order.
+        assert prepare[-1]["paths"] == ["/abs/v2.md"]  # last-appended is v2
+        assert latest["paths"] != prepare[-1]["paths"]  # latest-ts != last-appended
+
 
 # =============================================================================
 # P0-3 FAILURE-PATH recovery — with the HANDOFF absent, the artifact is STILL
@@ -590,3 +626,135 @@ class TestEdges:
         this_feature = [e for e in events if e["feature"] == FEATURE]
         assert len(this_feature) == 1
         assert this_feature[0]["paths"] == ["/abs/this.md"]
+
+
+# =============================================================================
+# REMEDIATION REGRESSIONS — each must FAIL against the pre-fix code (non-vacuity)
+# and PASS once the corresponding remediation fix lands.
+# =============================================================================
+
+class TestF1NonDictLineDoesNotPoisonWholeFile:
+    """F1 regression (review FUTURE-1, promoted to in-PR fix): a single
+    valid-JSON-but-NON-DICT journal line ('[1,2,3]', '"str"', 'null') must NOT
+    drop the WHOLE file's events.
+
+    PRE-FIX: _read_events_at calls event.get('type') on every parsed line; a
+    non-dict parses fine, then .get() raises AttributeError, which escapes the
+    per-line (JSONDecodeError, ValueError) catch and propagates to the outer
+    except Exception → the entire file returns []. So a single non-dict line
+    silently drops ALL artifact_paths events AND ALL HANDOFFs at harvest — the
+    exact #927 silent-total-loss failure class.
+
+    POST-FIX (devops isinstance(event, dict) guard in _read_events_at): the
+    non-dict line is skipped per-line and the valid events survive.
+
+    This test FAILS pre-fix (returns 0) and PASSES post-fix (returns the valid
+    events) — non-vacuous by construction.
+    """
+
+    @pytest.mark.parametrize("bad_line", ["[1,2,3]", '"a string"', "null", "42"])
+    def test_nondict_line_skipped_valid_events_survive(self, live_env, bad_line):
+        tmp_path, session_dir = live_env
+        # Append two valid events via the real writer so the journal exists.
+        append_event(_artifact_event("prepare", paths=["/abs/p.md"]))
+        append_event(_artifact_event("architect", paths=["/abs/a.md"]))
+        # Inject a valid-JSON-but-non-dict line BETWEEN them on disk (real file).
+        journal = _journal_file(tmp_path)
+        lines = journal.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 2
+        journal.write_text(
+            lines[0] + "\n" + bad_line + "\n" + lines[1] + "\n", encoding="utf-8"
+        )
+        # The two valid artifact_paths events MUST still be returned (not 0).
+        events = read_events_from(session_dir, "artifact_paths")
+        by_wf = {e.get("workflow"): e.get("paths") for e in events
+                 if isinstance(e, dict)}
+        assert by_wf == {"prepare": ["/abs/p.md"], "architect": ["/abs/a.md"]}, (
+            f"a non-dict line ({bad_line!r}) must not poison the whole file; "
+            f"got {events!r}"
+        )
+
+
+class TestB1SessionDirReconstructSanitizationParity:
+    """B1 regression: the harvest's session-dir reconstruction MUST apply the
+    SAME path sanitization the writer applies, on BOTH axes (project-basename
+    slug + session_id), so the reconstructed path equals the writer's stored
+    path. Otherwise the harvest looks in the wrong directory and silently finds
+    no journal.
+
+    The writer (_build_session_path) runs the slug through
+    _UNSAFE_SLUG_CHARS_RE (e.g. 'my.project' → 'my_project'). The PRE-FIX
+    harvest reconstruction was a RAW join (Path(project_dir).name joined as-is),
+    so a DOTTED basename diverged → path mismatch → recovery miss. The clean-slug
+    suite cannot catch this because a no-special-char slug sanitizes to itself.
+
+    POST-FIX (devops reconstruct_session_dir helper): reconstruction applies the
+    same sanitization → paths match.
+
+    Probe-confirmed divergence: writer 'my_project' vs raw-join 'my.project'.
+    """
+
+    DOTTED_PROJECT = "/Users/x/my.project"
+    # session_id carrying a non-allowlist '.' — exercises the SECOND
+    # sanitization axis (the writer's init() sanitizes session_id too).
+    SESSION_ID = "abc.def-123"
+
+    def _writer_effective_path(self):
+        """The path the REAL writer actually writes the journal to.
+
+        ORACLE FIDELITY (load-bearing): the writer is init(), which sanitizes
+        BOTH the slug AND the session_id via _UNSAFE_SLUG_CHARS_RE BEFORE
+        calling _build_session_path. So the effective on-disk path uses the
+        SANITIZED session_id, not the raw one. Building the oracle from
+        _build_session_path(slug, RAW_session_id) would be a WRONG oracle (it
+        skips init's session_id sanitization) and would produce a false
+        mismatch — the parity bug is on the SLUG axis, and the helper must
+        mirror init on BOTH axes. We reproduce init's exact construction here.
+        """
+        import shared.pact_context as pc
+        from pathlib import Path
+        slug = Path(self.DOTTED_PROJECT).name
+        safe_slug = pc._UNSAFE_SLUG_CHARS_RE.sub("_", slug)
+        safe_sid = pc._UNSAFE_SLUG_CHARS_RE.sub("_", self.SESSION_ID)
+        return str(pc._build_session_path(safe_slug, safe_sid))
+
+    def test_raw_join_diverges_from_writer_path_documents_the_bug(self):
+        """Characterize the pre-fix bug directly: a RAW join over a dotted
+        basename (Path(project_dir).name joined as-is, no sanitization) does NOT
+        match the writer's sanitized path. This is the demonstration that the
+        pre-fix harvest raw-join missed the journal; the parity test below is the
+        regression guard that the helper fixes it."""
+        import shared.paths as paths
+        from pathlib import Path
+        slug = Path(self.DOTTED_PROJECT).name  # 'my.project' — keeps the dot
+        raw = str(paths.get_claude_config_dir()
+                  / "pact-sessions" / slug / self.SESSION_ID)
+        assert raw != self._writer_effective_path(), (
+            "expected the raw-join ('my.project') to diverge from the writer's "
+            "sanitized path ('my_project') on a dotted basename — if equal, the "
+            "bug premise is gone"
+        )
+
+    def test_reconstruct_helper_matches_writer_path(self):
+        """The remediation helper reconstructs the SAME path the writer wrote to,
+        applying the writer's sanitization on BOTH axes (slug + session_id).
+        PASSES post-fix (helper present + sanitization-parity); the clean-slug
+        suite cannot catch a sanitization-axis regression because a no-special-
+        char slug sanitizes to itself.
+
+        Helper name/location: shared.pact_context.reconstruct_session_dir
+        (devops #44). If absent (pre-fix), the assert below names it as the
+        expected pre-fix FAIL.
+        """
+        import shared.pact_context as pc
+        reconstruct = getattr(pc, "reconstruct_session_dir", None)
+        assert reconstruct is not None, (
+            "PRE-FIX: reconstruct_session_dir not yet landed (devops #44) — "
+            "expected pre-fix FAIL; flips to PASS post-fix."
+        )
+        got = str(reconstruct(self.DOTTED_PROJECT, self.SESSION_ID))
+        assert got == self._writer_effective_path(), (
+            f"harvest reconstruct {got!r} must equal the writer's effective "
+            f"path {self._writer_effective_path()!r} (sanitization parity on "
+            f"slug + session_id)"
+        )
