@@ -198,10 +198,13 @@ TASK_REFERENCE_PHRASES = (
 #                  heuristic is muted.
 # Unknown values fall back to ``"warn"`` so a typo never disables the
 # gate's other rules. Default ``"warn"`` preserves Commit 2 behavior.
+# The read is normalized with .strip().lower() BEFORE the membership check
+# (``"DENY"`` / ``" deny "`` → deny; ``""`` / bogus → warn), parsing
+# identically to handoff_ordering_gate.py's PACT_DISPATCH_VARIETY_MODE knob.
 _ALLOWED_INLINE_MISSION_MODES = frozenset({"warn", "deny", "shadow"})
 INLINE_MISSION_MODE = os.environ.get(
     "PACT_DISPATCH_INLINE_MISSION_MODE", "warn",
-)
+).strip().lower()
 if INLINE_MISSION_MODE not in _ALLOWED_INLINE_MISSION_MODES:
     INLINE_MISSION_MODE = "warn"
 

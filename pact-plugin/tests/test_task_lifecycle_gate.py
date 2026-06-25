@@ -1888,12 +1888,15 @@ def test_silent_when_extra_reasoning_reconstruction_present(
 # =============================================================================
 
 
-def test_advisory_when_pact_work_task_created_without_variety(
+def test_no_r4_advisory_when_pact_work_task_created_without_variety(
     pact_context,
 ):
-    """TaskCreate pact-* work task without metadata.variety → R4 advisory.
-    Mirrors work_addblockedby_missing trigger shape (same discriminators)
-    but checks the variety field instead of addBlockedBy."""
+    """#865 surgical R4 split: TaskCreate pact-* work task WITHOUT
+    metadata.variety NO LONGER fires R4 here. The absent-stamp enforcement
+    moved to the dispatch-boundary gate (handoff_ordering_gate.py), which
+    catches it at the terminal owner+addBlockedBy wiring write. R4 keeps only
+    the present-but-malformed arm, so a bare-absent stamp is SILENT at this
+    PostToolUse surface."""
     pact_context(team_name="test-team", session_id="test-session")
     payload = {
         "tool_name": "TaskCreate",
@@ -1906,9 +1909,9 @@ def test_advisory_when_pact_work_task_created_without_variety(
         "tool_response": {},
     }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert any(
+    assert not any(
         rule == "variety_missing_on_dispatch_task" for rule, _ in advisories
-    )
+    ), f"absent variety must NOT fire R4 post-split, got: {advisories}"
 
 
 @pytest.mark.parametrize(
@@ -2197,9 +2200,12 @@ def test_r4_unresolvable_total_message_distinct_from_rationale_path(pact_context
     assert "no resolvable total" not in malformed
 
 
-def test_r4_unresolvable_total_message_distinct_from_absent_path(pact_context):
-    """The unresolvable-total message differs from the absent-variety
-    message — three distinct paths under one rule name."""
+def test_r4_unresolvable_fires_but_absent_path_is_silent(pact_context):
+    """#865 surgical R4 split: the unresolvable-total path (variety PRESENT
+    but no resolvable total) STILL fires R4 here; the absent-variety path
+    (variety entirely missing) is now SILENT — its enforcement moved to the
+    dispatch-boundary gate. Two of the original three paths remain under one
+    rule; the bare-absent path no longer fires at this PostToolUse surface."""
     pact_context(team_name="test-team", session_id="test-session")
     unresolvable = _r4_message(
         tlg.evaluate_lifecycle(_r4_create_payload(_rationales_only_variety(total=99)))
@@ -2214,8 +2220,9 @@ def test_r4_unresolvable_total_message_distinct_from_absent_path(pact_context):
         "tool_response": {},
     }
     absent = _r4_message(tlg.evaluate_lifecycle(absent_payload))
-    assert unresolvable is not None and absent is not None
-    assert unresolvable != absent
+    assert unresolvable is not None, "present-but-untotaled must still fire R4"
+    assert "no resolvable total" in unresolvable
+    assert absent is None, "absent variety must be silent at R4 post-split"
 
 
 def test_r4_rationale_problem_reported_before_total_problem(pact_context):
@@ -4077,13 +4084,20 @@ def test_advisory_output_carries_no_health_marker(
     sibling module.)"""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
     pact_context(team_name="test-team", session_id="test-session")
+    # A present-but-malformed variety (missing a per-dimension rationale) is
+    # the R4 arm retained after the #865 surgical split — it still fires a
+    # real advisory through main(), which is all this health-marker-shape test
+    # needs. (A bare-absent variety no longer fires R4 here; its enforcement
+    # moved to the dispatch-boundary gate.)
+    malformed_variety = _well_formed_variety()
+    malformed_variety.pop("novelty_rationale")
     payload = {
         "tool_name": "TaskCreate",
         "tool_input": {
             "subject": "implement foo",
             "owner": "pact-backend-coder",
             "addBlockedBy": ["41"],
-            "metadata": {"variety": None},
+            "metadata": {"variety": malformed_variety},
         },
         "tool_response": {},
     }

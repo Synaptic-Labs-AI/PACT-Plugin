@@ -558,6 +558,38 @@ def test_deny_when_task_completed_only(tmp_path, monkeypatch, capsys):
 # =============================================================================
 
 
+@pytest.mark.parametrize("env_value, expected", [
+    ("deny", "deny"),
+    ("DENY", "deny"),       # case-folded
+    (" deny ", "deny"),     # whitespace-stripped
+    ("Deny", "deny"),
+    (" shadow\t", "shadow"),
+    ("warn", "warn"),
+    ("", "warn"),           # empty → safe default
+    ("bogus", "warn"),      # unknown → safe default
+])
+def test_inline_mission_mode_strip_lower_normalization(
+    monkeypatch, env_value, expected,
+):
+    """PACT_DISPATCH_INLINE_MISSION_MODE normalizes with .strip().lower() before
+    the membership check, parsing IDENTICALLY to handoff_ordering_gate.py's
+    PACT_DISPATCH_VARIETY_MODE knob. NON-TAUTOLOGICAL: reloads the module under
+    the real env value to exercise the actual os.environ read + normalize +
+    fallback. Case/whitespace variants of 'deny' arm deny; unknown/empty stay
+    warn — normalization can never accidentally enable an unintended mode."""
+    import importlib
+
+    import dispatch_gate
+
+    monkeypatch.setenv("PACT_DISPATCH_INLINE_MISSION_MODE", env_value)
+    reloaded = importlib.reload(dispatch_gate)
+    try:
+        assert reloaded.INLINE_MISSION_MODE == expected
+    finally:
+        monkeypatch.delenv("PACT_DISPATCH_INLINE_MISSION_MODE", raising=False)
+        importlib.reload(dispatch_gate)
+
+
 def test_warn_when_prompt_lacks_task_reference(tmp_path, monkeypatch, capsys):
     """Default mode is 'warn' → ALLOW with additionalContext advisory.
     INLINE_MISSION_MODE was read at module-load BEFORE this test — we don't

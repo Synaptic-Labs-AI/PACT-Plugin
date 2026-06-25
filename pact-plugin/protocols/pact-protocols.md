@@ -940,6 +940,10 @@ The feature-level CalibrationRecord above coexists with per-dispatch variety sta
 
 > The canonical total key is `total`. The lifecycle hook's band resolver additionally tolerates non-canonical `score` / top-level `variety_score`, or the sum of the four dimension scores, as fallbacks for stamps seen in the field — but orchestrators MUST stamp `total`.
 
+> **Inheritance fallback (resolver-side, not stamp-side).** If a Task B is dispatched WITHOUT a resolvable `metadata.variety` despite the requirement above, the band resolver inherits the band from the PARENT (Plan/feature/umbrella) task that Task B blocks — so `reasoning_reconstruction` stays resolvable rather than silently mis-resolving as `skipped` (consultation Task Bs are frequently 11-13). This is a read-time SAFETY NET for an omission, NOT a license to skip stamping: orchestrators still stamp each Task B afresh per the directive above. Inheritance fires only when the parent pointer is unambiguous (Task B blocks exactly one task) and that parent is itself stamped; otherwise the resolver fails open to `unresolvable`.
+
+> **Enforcement split (dispatch-boundary vs advisory).** A MISSING stamp on a dispatched Task B is caught at the terminal dispatch-wiring write (the `TaskUpdate` setting `owner`+`addBlockedBy`) as a deterministic warning (env-gated deny opt-in); a stamp that IS present but malformed/untotaled stays a post-write advisory. The wiring-write gate reads the linked Task B's variety structurally — it never keys on actor identity.
+
 **Why per-dimension rationales (not a single rationale)**: A single rationale field tolerates cargo-cult ("matches feature complexity" satisfies it). Four distinct rationale fields, one per dimension, force the orchestrator to articulate four independent judgments — cargo-culting all four with one phrase is mechanically incoherent (cannot coherently explain why novelty AND scope AND uncertainty AND risk are simultaneously "the same as feature" without exposing the copy-paste).
 
 #### Q5 Coverage Denominator (Wrap-Up Aggregation)

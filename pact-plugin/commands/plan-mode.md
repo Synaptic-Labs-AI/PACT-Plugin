@@ -208,7 +208,23 @@ A_id = TaskCreate(
                 "Mission for Task B: the primary-work task assigned to you in your TaskList (the work task, NOT this TEACHBACK gate task), identified by its subject (the '{role}: {mission}' pattern). Claim it after this teachback is accepted."
 )
 TaskUpdate(A_id, owner="{specialist-name}")
-B_id = TaskCreate(subject="{specialist}: plan consultation for {feature}", description="<consultation mission>")
+B_id = TaskCreate(
+    subject="{specialist}: plan consultation for {feature}",
+    description="<consultation mission>",
+    metadata={
+        "variety": {
+            "novelty":               N,
+            "novelty_rationale":     "<1-sentence: why this score for THIS dispatch's novelty>",
+            "scope":                 N,
+            "scope_rationale":       "<1-sentence: why this score for THIS dispatch's scope>",
+            "uncertainty":           N,
+            "uncertainty_rationale": "<1-sentence: why this score for THIS dispatch's uncertainty>",
+            "risk":                  N,
+            "risk_rationale":        "<1-sentence: why this score for THIS dispatch's risk>",
+            "total":                 N
+        }
+    }
+)
 TaskUpdate(B_id, owner="{specialist-name}", addBlockedBy=[A_id])
 TaskUpdate(A_id, addBlocks=[B_id])
 ```

@@ -240,13 +240,26 @@ class TestStdinCaps:
     # additionalContext) — a distinct observable from the bare suppress the
     # capped read produces. Used by the tlg primary-read test so the
     # disposition discriminates capped-vs-uncapped, not merely "exit 0".
+    # NOTE: the variety is PRESENT-but-malformed (missing novelty_rationale),
+    # which is the R4 arm RETAINED after the #865 surgical split — a bare-absent
+    # variety no longer fires R4 (its enforcement moved to the wiring-write
+    # gate), so the advisory-bearing frame must carry a malformed-present stamp.
     _ADVISORY_BEARING_BASE = {
         "tool_name": "TaskCreate",
         "tool_input": {
             "subject": "implement foo",
             "owner": "pact-backend-coder",
             "addBlockedBy": ["41"],
-            "metadata": {},
+            "metadata": {
+                "variety": {
+                    "novelty": 3,
+                    # novelty_rationale intentionally omitted → malformed-present
+                    "scope": 3, "scope_rationale": "x",
+                    "uncertainty": 3, "uncertainty_rationale": "x",
+                    "risk": 3, "risk_rationale": "x",
+                    "total": 12,
+                },
+            },
         },
         "tool_response": {},
         "session_id": "s",

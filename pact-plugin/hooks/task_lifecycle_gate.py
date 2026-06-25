@@ -47,9 +47,11 @@ Rule coverage:
     (missing blocks, missing Task B, missing variety, or variety present
     but no resolvable total); fail-open advisory documents the gap without
     blocking lifecycle
-  - variety_missing_on_dispatch_task — pact-* work Task created without
-    metadata.variety, with malformed per-dimension rationales, OR with no
-    resolvable variety total
+  - variety_missing_on_dispatch_task — pact-* work Task created with
+    metadata.variety present but malformed per-dimension rationales OR no
+    resolvable variety total. (The ABSENT-stamp arm was moved to the
+    dispatch-boundary gate in handoff_ordering_gate.py per the #865 surgical
+    split — this PostToolUse rule keeps only the present-but-malformed checks.)
   - variety_acknowledgment_missing — Teachback submitted without
     variety_acknowledgment field (D10 teammate verification)
   - variety_acknowledgment_schema_invalid_at_write_time — Teachback
@@ -787,6 +789,63 @@ def _validate_variety_schema(
     return None
 
 
+def _band_from_total(total: int) -> str:
+    """Map a resolved variety total to a reasoning_reconstruction band
+    string ("required" / "recommended" / "skipped"). Shared by the direct
+    Task-B resolution path and the C2 parent-inheritance fallback so both
+    apply the identical threshold logic (one band-cut SSOT)."""
+    if total >= TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN:
+        return "required"
+    if total >= TEACHBACK_RECOMMENDED_BAND_MIN:
+        return "recommended"
+    return "skipped"
+
+
+def _inherit_band_from_parent(task_b: dict, team_name: str) -> str | None:
+    """#891 Opt2 parent-inheritance fallback: when Task B carries no
+    resolvable variety, inherit the band from its PARENT task's variety
+    total. Returns a band string when the parent resolves, else None
+    (caller treats None as "unresolvable" — the preserved floor).
+
+    Modular/separable: this is the entire Opt2 surface. Deleting this
+    function + its two call sites reverts to Opt1-alone behavior.
+
+    Parent resolution + guardrail (don't inherit a WRONG parent's band —
+    a wrong inherit mis-resolves the band, the exact bug being fixed):
+      - Task B blocks the parent (Plan/feature/umbrella) task. The parent
+        pointer is task_b.blocks[0], but only when blocks is UNAMBIGUOUS:
+        a singleton list. Empty, multi-entry, or non-list blocks → fail
+        open (None) rather than guess among candidates.
+      - The parent must itself carry a resolvable variety total (via the
+        shared resolve_variety_total, reused unchanged). A non-parent task
+        (phase / teachback gate) does not carry variety, so a mis-pointed
+        blocks[0] fails open here rather than inheriting a wrong band. This
+        is the structural "looks like a Plan/feature task" guardrail: the
+        defining property of an inheritable parent is that it is stamped.
+    """
+    blocks = task_b.get("blocks")
+    # Singleton-only: >1 entry is ambiguous (which is the parent?); 0/None
+    # has no parent pointer. Either way fail open.
+    if not isinstance(blocks, list) or len(blocks) != 1:
+        return None
+    parent_id = blocks[0]
+    if not isinstance(parent_id, str) or not parent_id:
+        return None
+    parent = read_task_json(parent_id, team_name)
+    if not parent:
+        return None
+    parent_metadata = parent.get("metadata")
+    if not isinstance(parent_metadata, dict):
+        return None
+    parent_variety = parent_metadata.get("variety")
+    if not isinstance(parent_variety, dict):
+        return None
+    parent_total = resolve_variety_total(parent_variety, parent_metadata)
+    if parent_total is None:
+        return None
+    return _band_from_total(parent_total)
+
+
 def _resolve_required_band_via_blocks(
     task_a: dict, team_name: str
 ) -> str:
@@ -798,13 +857,20 @@ def _resolve_required_band_via_blocks(
       - "recommended": TEACHBACK_RECOMMENDED_BAND_MIN <= total < required-min
       - "skipped": total < TEACHBACK_RECOMMENDED_BAND_MIN
       - "unresolvable": blocks link missing, Task B file missing, or
-        variety absent/malformed/untotaled on Task B (fail-open: caller
-        emits a separate band_unresolvable advisory documenting the gap)
+        variety absent/malformed/untotaled on Task B AND the parent
+        inheritance fallback also failed (fail-open: caller emits a separate
+        band_unresolvable advisory documenting the gap)
 
     The total is resolved via the shared resolve_variety_total helper, so a
     non-canonical stamp (score / top-level variety_score / dimension-sum)
     resolves rather than reading as "unresolvable" — the same resolver the
     write-time validator consults (the cross-rule consistency property).
+
+    #891 Opt2: when Task B has no resolvable variety, the band is inherited
+    from the parent (Plan/feature/umbrella) task before returning
+    "unresolvable" — see _inherit_band_from_parent. This keeps an unstamped
+    Task B's band resolvable (consultations are frequently 11-13) instead of
+    silently mis-resolving as "skipped".
     """
     blocks = task_a.get("blocks")
     if not isinstance(blocks, list) or not blocks:
@@ -821,19 +887,23 @@ def _resolve_required_band_via_blocks(
     if not task_b:
         return "unresolvable"
     metadata = task_b.get("metadata")
-    if not isinstance(metadata, dict):
-        return "unresolvable"
-    variety = metadata.get("variety")
-    if not isinstance(variety, dict):
-        return "unresolvable"
-    total = resolve_variety_total(variety, metadata)
+    # Opt2 broadened the inherit trigger: a metadata-not-dict OR variety-not-dict
+    # Task B (not only an absent variety) now resolves total=None and flows to
+    # the parent-inherit fallback below, rather than returning "unresolvable"
+    # immediately as the pre-Opt2 code did. The floor is preserved (an
+    # unresolvable parent still yields "unresolvable").
+    variety = metadata.get("variety") if isinstance(metadata, dict) else None
+    total = (
+        resolve_variety_total(variety, metadata)
+        if isinstance(variety, dict)
+        else None
+    )
     if total is None:
-        return "unresolvable"
-    if total >= TEACHBACK_REASONING_RECONSTRUCTION_REQUIRED_MIN:
-        return "required"
-    if total >= TEACHBACK_RECOMMENDED_BAND_MIN:
-        return "recommended"
-    return "skipped"
+        # Task B variety absent/malformed/untotaled → try parent inheritance
+        # (Opt2) before conceding "unresolvable". Floor preserved: a parent
+        # that also fails to resolve returns None → "unresolvable".
+        return _inherit_band_from_parent(task_b, team_name) or "unresolvable"
+    return _band_from_total(total)
 
 
 def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
@@ -996,15 +1066,19 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
             ))
 
         # R4: variety_missing_on_dispatch_task (D11-refined).
-        # Same discriminator pattern as work_addblockedby_missing
-        # (not-teachback + pact-* owner + not exempt). Single rule with
-        # three trigger paths (absent variety OR malformed per-dimension
-        # rationales OR no resolvable total); distinct message text per
-        # path, same rule name — the lead-side correction is the same
-        # (re-stamp variety) in every case. Clause order mirrors L575-580:
-        # cheap dict-lookups first, disk-touching exempt-check last
-        # (cached via `_exempt()` so the second invocation reuses the
-        # first call's result).
+        # SURGICAL SPLIT (#865 enforce-vs-advise re-scope): the ABSENT-stamp
+        # arm (variety entirely missing on a dispatched Task B) was MOVED to
+        # the dispatch-boundary gate in handoff_ordering_gate.py — that is the
+        # FIRST-OBSERVABLE-WRITE concern with a timing constraint (catch it at
+        # the terminal owner+addBlockedBy wiring write, deterministically). R4
+        # KEEPS the present-but-malformed arm: a variety that IS stamped but
+        # carries malformed per-dimension rationales OR no resolvable total.
+        # These are post-write QUALITY checks with no dispatch-boundary timing
+        # constraint, so they stay a PostToolUse advisory here. The rule name
+        # is retained for the malformed-present paths; the bare-absent path no
+        # longer fires here (it fires at the wiring write). Clause order
+        # mirrors L575-580: cheap dict-lookups first, disk-touching
+        # exempt-check last (cached via `_exempt()`).
         if (
             not is_teachback
             and owner.startswith("pact-")
@@ -1012,16 +1086,9 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
         ):
             incoming_metadata = tool_input.get("metadata") or {}
             incoming_variety = incoming_metadata.get("variety")
-            if not incoming_variety:
-                advisories.append((
-                    "variety_missing_on_dispatch_task",
-                    f"PACT task_lifecycle_gate: pact-* Task created "
-                    f"(owner={owner!r}) without metadata.variety. "
-                    "Per-dispatch variety stamping is required for hook "
-                    "band-resolution. See orchestrate / comPACT / "
-                    "peer-review dispatch surfaces.",
-                ))
-            else:
+            # ABSENT variety is no longer enforced here (moved to the wiring
+            # write). Only validate a variety that IS present.
+            if incoming_variety:
                 # The validator forwards the surrounding metadata so the
                 # non-canonical top-level variety_score sibling is reachable
                 # by the shared resolver. It returns the rationale problem
