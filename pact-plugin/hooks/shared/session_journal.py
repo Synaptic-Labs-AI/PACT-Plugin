@@ -666,6 +666,85 @@ def read_events_from(
     return _read_events_at(journal, event_type, since)
 
 
+def resolve_latest_artifacts(
+    events: list[dict[str, Any]],
+    feature: str,
+) -> dict[str, list[str]]:
+    """Resolve the superseded artifact path-list per workflow for one feature.
+
+    Pure (no I/O): the caller supplies already-read `artifact_paths` events
+    (e.g. `read_events_from(session_dir, "artifact_paths")`) and the feature
+    slug; this returns one entry per workflow that emitted artifacts for that
+    feature, valued by that workflow's latest path-list.
+
+    Supersede semantics: filter to `e["feature"] ==
+    feature`; group by `e["workflow"]`; within each group keep the
+    latest-`ts` event. Each `artifact_paths` event carries the COMPLETE
+    path-list for its `(workflow, feature)` (a full enumeration per emit,
+    not a delta), so the latest event is self-sufficient — paths are NEVER
+    merged across events. A phase re-run that regenerates its doc in place
+    therefore supersedes the prior emit instead of duplicating it.
+
+    Defensive: non-dict entries and events missing `workflow`/`feature`/
+    `paths` are skipped (parity with the `_read_events_at` `isinstance(...,
+    dict)` guard). A missing/unparseable `ts` never wins a supersede — it is
+    treated as older than any parseable timestamp — so a malformed event
+    cannot mask a well-formed later one.
+
+    Args:
+        events: Candidate journal events (typically all `artifact_paths`
+            events for the session). Any list of dicts is accepted; the
+            feature/type filtering happens here.
+        feature: The feature slug to resolve (matched against `e["feature"]`).
+
+    Returns:
+        `{workflow: paths}` — one key per workflow with a surviving event,
+        valued by that workflow's superseded (latest-`ts`) complete path-list.
+        Empty dict if no event matches.
+    """
+    latest_by_workflow: dict[str, dict[str, Any]] = {}
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("feature") != feature:
+            continue
+        workflow = event.get("workflow")
+        paths = event.get("paths")
+        if not isinstance(workflow, str) or not isinstance(paths, list):
+            continue
+        prior = latest_by_workflow.get(workflow)
+        if prior is None or _ts_is_newer(event.get("ts"), prior.get("ts")):
+            latest_by_workflow[workflow] = event
+    return {
+        workflow: event["paths"]
+        for workflow, event in latest_by_workflow.items()
+    }
+
+
+def _ts_is_newer(candidate_ts: Any, incumbent_ts: Any) -> bool:
+    """Return True if `candidate_ts` is strictly newer than `incumbent_ts`.
+
+    Used by `resolve_latest_artifacts` to pick the latest-`ts` event per
+    workflow. Timestamps are PARSED (via `_parse_ts`), never lexically
+    string-compared — see `_parse_ts` for the `Z` vs `+00:00` rationale.
+
+    Fail-safe tie-breaking: an unparseable/missing `candidate_ts` is treated
+    as NOT newer (returns False), so a malformed timestamp never supersedes a
+    well-formed event. An unparseable `incumbent_ts` loses to any parseable
+    candidate (returns True), so a malformed earlier event is replaced by a
+    well-formed later one.
+    """
+    try:
+        candidate = _parse_ts(candidate_ts)
+    except (ValueError, TypeError):
+        return False
+    try:
+        incumbent = _parse_ts(incumbent_ts)
+    except (ValueError, TypeError):
+        return True
+    return candidate > incumbent
+
+
 def _parse_ts(value: Any) -> datetime:
     """Parse an ISO-8601 timestamp, normalizing a trailing `Z` to `+00:00`.
 

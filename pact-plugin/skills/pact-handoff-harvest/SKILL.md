@@ -28,32 +28,37 @@ When reviewing multiple HANDOFFs, read ALL of them before saving any memories. T
 
 ### Step 0: Resolve the Session Directory (do this once)
 
-Resolve the absolute session directory **before any journal read**, and reuse that one value for every journal read below (Step 1 `agent_handoff`, Step 3.5 `artifact_paths`, and Step 10 `variety_assessed`). **Every journal read in this skill MUST pass this explicit `session_dir`** via `read_events_from(session_dir, ...)` — never the path-less `read_events(...)`.
+Resolve the absolute session directory **before any journal read**, and reuse that one value (`$SESSION_DIR`) for every journal read below (Step 1 `agent_handoff`, Step 3.5 `artifact_paths`, and Step 10 `variety_assessed`). **Every journal read in this skill MUST pass this explicit `--session-dir`** — never a path-less read.
 
-**Why this is load-bearing (not optional):** you run **off-lead** (a `pact-secretary` teammate). `read_events(...)` derives its path implicitly via `pact_context.get_session_dir()`, which **false-returns `''` in a teammate frame** (no persisted lead session context) → the read silently returns **0 events**. Off-lead, that would make the entire harvest — HANDOFF discovery, artifact recovery, and calibration — a silent no-op. `read_events_from(session_dir, ...)` takes the directory **explicitly** and is frame-independent (the same form the Orphaned-Recovery path below already uses).
+**Why this is load-bearing (not optional):** you run **off-lead** (a `pact-secretary` teammate). The implicit-path read (`read_events(...)` with no `--session-dir`) derives its path via `pact_context.get_session_dir()`, which **false-returns `''` in a teammate frame** (no persisted lead session context) → the read silently returns **0 events**. Off-lead, that would make the entire harvest — HANDOFF discovery, artifact recovery, and calibration — a silent no-op. Passing an explicit `--session-dir` is frame-independent and masked-read-safe.
 
-Reconstruct the directory from the per-session context file by calling the shared SSOT helper `reconstruct_session_dir(project_dir, session_id)` (in `shared.pact_context`) — the off-lead, frame-independent counterpart to `get_session_dir()`. **Do NOT hand-build the path** (no manual `Path(project_dir).name` + `get_claude_config_dir()/pact-sessions/...` join): the writer sanitizes both the slug and the `session_id` (via `_UNSAFE_SLUG_CHARS_RE` and the shared `_build_session_path`), so a raw join would land on a DIFFERENT directory than the one the journal was written to whenever the project basename or `session_id` contains a non-`[A-Za-z0-9_-]` character (e.g. a dot or space) → the off-lead read silently returns 0 events. The helper routes both axes through the writer's derivation, so the reconstruction is SSOT-by-construction and cannot drift.
+Resolve the directory with the `pact_harvest.py resolve-session-dir` subcommand, which reads `pact-session-context.json` and routes the reconstruction through the SSOT helper `reconstruct_session_dir` (it sanitizes both the slug and the `session_id` the same way the writer did, so the reconstructed path cannot drift from where the journal was actually written — a hand-built `{slug}/{session_id}` join would land on a DIFFERENT directory whenever the project basename or `session_id` contains a non-`[A-Za-z0-9_-]` character):
 
-1. Read `pact-session-context.json` from the session dir your dispatch placed you in (the same file the Orphaned-Recovery path references). It carries `session_id` and `project_dir`.
-2. Call `reconstruct_session_dir(ctx["project_dir"], ctx["session_id"])` to get the absolute session dir.
-
-```python
-import json, sys
-from pathlib import Path
-sys.path.insert(0, "{hooks_dir}")
-from shared.pact_context import reconstruct_session_dir
-
-ctx = json.loads(Path("{context_file}").read_text())  # pact-session-context.json
-session_dir = reconstruct_session_dir(ctx["project_dir"], ctx["session_id"])
+```bash
+if ! SESSION_DIR=$(python3 "{plugin_root}/hooks/shared/pact_harvest.py" \
+       resolve-session-dir --context-file "{context_file}"); then
+  # Nonzero exit (2) = unresolvable: context file missing/unreadable/invalid,
+  # or reconstruct_session_dir returned ''. Report the gap to the team-lead
+  # and STOP — do NOT proceed to any journal read.
+  echo "HARVEST GAP: could not resolve session_dir; reporting and stopping." >&2
+fi
+# On success $SESSION_DIR holds the absolute session dir; reuse it for every read below.
 ```
 
-If the context file is missing/unreadable, or `reconstruct_session_dir` returns `''` (a falsy `project_dir`/`session_id`), **report the gap to the team-lead and stop** — do NOT fall back to the path-less `read_events(...)` (that silently re-introduces the off-lead false-empty bug). An unresolved `session_dir` is a reportable gap, not a degrade-to-implicit case.
+**Key the report-gap-and-stop branch on the subcommand's EXIT CODE**, never on parsing stdout for emptiness — a nonzero exit is unambiguous and cannot be defeated by a stray byte. On a nonzero exit, **report the gap to the team-lead and stop** — do NOT fall back to a path-less read (that silently re-introduces the off-lead false-empty bug). An unresolved `session_dir` is a reportable gap, not a degrade-to-implicit case.
 
 ### Step 1: Task Discovery
 
 You have two sources for finding completed agent tasks, in priority order:
 
-1. **Session journal** (primary, GC-proof): `{session_dir}/session-journal.jsonl` (the `session_dir` resolved in Step 0) — read `agent_handoff` events via `python3 -c "import sys; sys.path.insert(0, '{hooks_dir}'); from shared.session_journal import read_events_from; import json; [print(json.dumps(e)) for e in read_events_from('{session_dir}', 'agent_handoff')]"`. Each event contains `{"type": "agent_handoff", "agent": "...", "task_id": "...", "task_subject": "...", "handoff": {...}, "ts": "..."}` — full HANDOFF content inline, garbage-collection-proof. **Deduplicate**: extract unique task_ids only.
+1. **Session journal** (primary, GC-proof): `$SESSION_DIR/session-journal.jsonl` (the `$SESSION_DIR` resolved in Step 0) — read `agent_handoff` events via the existing `session_journal.py read` subcommand (explicit `--session-dir`, masked-read-safe):
+
+   ```bash
+   EVENTS=$(python3 "{plugin_root}/hooks/shared/session_journal.py" read \
+              --session-dir "$SESSION_DIR" --type agent_handoff)
+   ```
+
+   `read` prints a **JSON ARRAY** to stdout (`[ {...}, {...} ]`), NOT one JSON object per line. So parse the whole stdout once — `json.loads(EVENTS)` → a list of event dicts — then iterate the list (do **not** iterate line-by-line). Each event is `{"type": "agent_handoff", "agent": "...", "task_id": "...", "task_subject": "...", "handoff": {...}, "ts": "..."}` — full HANDOFF content inline, garbage-collection-proof. **Deduplicate**: extract unique task_ids only.
 2. **`TaskList`** (supplementary): Read `TaskList` for completed tasks owned by agents. Useful as a cross-reference and for catching tasks where the completion hook didn't fire. Note: the platform garbage-collects older task files during long sessions, so `TaskList` may be incomplete.
 
 If none of these sources have completed agent tasks, report "No pending HANDOFFs to review" and complete — this is normal when HANDOFFs were already processed by an earlier trigger (idempotent).
@@ -90,7 +95,17 @@ Read all HANDOFFs before proceeding to extraction.
 
 Each phase's HANDOFF is the **distilled frame**; the phase's disk artifact (e.g. `docs/preparation/{feature}.md`, `docs/architecture/{feature}.md`, `docs/plans/{slug}-plan.md`, `docs/review/…`) is the **fuller substance**. The lead writes a path-only `artifact_paths` journal event pointing at each phase's artifact(s); that event lives in the journal (outside any worktree), so it survives `git worktree remove` even though the pointed-at file is worktree-ephemeral. **Always** resolve these events and fold the artifact substance into the same synthesis the HANDOFF drives.
 
-1. **Resolve** (masked-read-safe — uses the Step 0 `session_dir`): `events = read_events_from(session_dir, "artifact_paths")`. Filter to `event["feature"] == <this feature>`. Group the survivors by `event["workflow"]`; within each `workflow` group take the **latest-`ts`** event (supersede-by-`(workflow, feature)`). Each event carries the **COMPLETE** path-list for that `(workflow, feature)` (a full enumeration per emit, not a delta), so the latest event is self-sufficient — never merge across events. Result: one path-list per `(workflow, feature)`.
+1. **Resolve** (masked-read-safe — uses the Step 0 `$SESSION_DIR`): call the `pact_harvest.py resolve-artifacts` subcommand, which reads the `artifact_paths` events and applies the supersede-by-`(workflow, feature)`-latest-`ts` dedup for you:
+
+   ```bash
+   ARTIFACTS=$(python3 "{plugin_root}/hooks/shared/pact_harvest.py" resolve-artifacts \
+                 --session-dir "$SESSION_DIR" --feature "{feature}")
+   # stdout is a single-line JSON object {workflow: [abs_path, ...]}, e.g.:
+   # {"prepare":["/abs/docs/preparation/{feature}.md"],"architect":["/abs/docs/architecture/{feature}.md"]}
+   # Empty (no artifacts for this feature) -> {}. Parse with json.loads, iterate keys.
+   ```
+
+   The subcommand already filters to this feature, groups by `workflow`, takes the **latest-`ts`** event per `(workflow, feature)`, and returns only the resolved set. Each `artifact_paths` event carries the **COMPLETE** path-list for its `(workflow, feature)` (a full enumeration per emit, not a delta), so the latest event is self-sufficient — the supersede never merges across events. Result (the JSON object): one path-list per `(workflow, feature)`.
 2. **Read** each path in the surviving events' `paths` lists off disk. Paths are full-absolute; read them **while the worktree is live** (the `worktree-cleanup` harvest-before-teardown guard guarantees this ordering at the single teardown chokepoint). If a path no longer resolves (file already gone — the accepted abnormal-teardown edge), skip it, note the gap, and degrade to HANDOFF-only for that artifact.
 3. **Synthesize ONE entry from BOTH sources together** (NOT verbatim, NOT a second entry). For each work unit, produce a SINGLE pact-memory entry synthesized from the HANDOFF **and** its artifact: the artifact is the fuller substance, the HANDOFF is the distilled frame. A ~19 KB artifact becomes a **richer-but-bounded** entry (a few hundred tokens of decisions/lessons informed by the full substance) — do NOT store the raw artifact. Substance flows into the entry's `context`/`decisions`; put the artifact's path in an entity `notes` field (NOT a `files` field — that field is rejected on save).
 4. **Dedup** — reuse the existing mechanism; do NOT invent a content-diff. Against existing memory: the Step 6 save-vs-update entity+topic protocol, unchanged — the synthesized HANDOFF+artifact entry enriches an existing entry exactly as a HANDOFF-only entry does. Against the HANDOFF's own content: the only new rule is **sequencing** — because step 3 synthesizes the HANDOFF and artifact into ONE entry, there is no separate artifact-entry to dedup; the single synthesis IS the dedup. (Idempotency: the existing processed-task ledger of Step 2/Step 8 extends to mark a `(workflow, feature)` artifact as read, so an incremental or consolidation re-harvest does not re-read and re-distill the same artifact.)
@@ -188,7 +203,7 @@ Gaps: {any HANDOFFs that were thin or missing}",
 ### Step 10: Gather Calibration Data
 
 After processing HANDOFFs, gather calibration metrics for the orchestrator's variety scoring feedback loop:
-- Read `initial_variety_score` from the journal's `variety_assessed` event (GC-proof, survives the task-store drain), using the Step 0 `session_dir`: `python3 -c "import sys; sys.path.insert(0, '{hooks_dir}'); from shared.session_journal import read_events_from; import json; [print(json.dumps(e)) for e in read_events_from('{session_dir}', 'variety_assessed')]"`. **Select the event for THIS feature** — `variety_assessed` events carry a `task_id`, and a resumed/multi-feature session holds one per feature (plus, because the platform reuses task_ids across arcs, the current feature's id can match a PRIOR arc too). So do NOT take the first event: filter to events whose `task_id` matches the feature task being harvested and take the **latest-`ts`** match — the `resolve_arc_start(events, feature_task_id)` semantics the wrap-up retrospective uses (`shared/variety_divergence.resolve_arc_start` is the canonical implementation). Then resolve the scalar total from that event's `variety` dict via the pure `resolve_variety_total(variety)` helper (`shared/teachback_schema.py`) rather than indexing `variety['total']` directly — it prefers the canonical `total` key, falls through a documented fallback chain, and returns `None` instead of raising `KeyError` if the dict is malformed or `total` is missing. If no `variety_assessed` event matches this feature (e.g., a feature dispatched without a variety emit), or `resolve_variety_total` returns `None`, ask the team-lead for the variety score instead.
+- Read `initial_variety_score` from the journal's `variety_assessed` event (GC-proof, survives the task-store drain), using the Step 0 `$SESSION_DIR` via the existing `session_journal.py read` subcommand: `python3 "{plugin_root}/hooks/shared/session_journal.py" read --session-dir "$SESSION_DIR" --type variety_assessed`. As in Step 1, `read` prints a **JSON ARRAY** — `json.loads` the whole stdout into a list, then iterate (not line-by-line). **Select the event for THIS feature** — `variety_assessed` events carry a `task_id`, and a resumed/multi-feature session holds one per feature (plus, because the platform reuses task_ids across arcs, the current feature's id can match a PRIOR arc too). So do NOT take the first event: filter to events whose `task_id` matches the feature task being harvested and take the **latest-`ts`** match — the `resolve_arc_start(events, feature_task_id)` semantics the wrap-up retrospective uses (`shared/variety_divergence.resolve_arc_start` is the canonical implementation). Then resolve the scalar total from that event's `variety` dict via the pure `resolve_variety_total(variety)` helper (`shared/teachback_schema.py`) rather than indexing `variety['total']` directly — it prefers the canonical `total` key, falls through a documented fallback chain, and returns `None` instead of raising `KeyError` if the dict is malformed or `total` is missing. If no `variety_assessed` event matches this feature (e.g., a feature dispatched without a variety emit), or `resolve_variety_total` returns `None`, ask the team-lead for the variety score instead.
 - Scan `TaskList` for blocker count (tasks with "BLOCKER:" in subject). Note: `TaskList` may be incomplete in long sessions due to garbage collection — report what's available.
 - Scan `TaskList` for phase rerun count (retry/redo phase tasks)
 - Note domain from feature task description
