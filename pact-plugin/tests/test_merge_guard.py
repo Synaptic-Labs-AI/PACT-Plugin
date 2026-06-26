@@ -4877,6 +4877,43 @@ class TestOperationScoping:
         token = {"context": {"branch": "old"}}
         assert not _token_matches_command(token, "gh pr merge 42")
 
+    # ── HALT #29 branch-delete multi-target: deny + single-target no-regression
+    #    controls (architect addendum). The #30 fix refuses a multi-target
+    #    `git branch -D a b` (extra unapproved branch); these controls guard
+    #    against it over-correcting into a #1031 over-block on the legit single
+    #    case. Mirrors the force-push target-axis pair. ──
+    def test_branch_delete_multi_target_denied(self):
+        """A single-branch token must NOT authorize a MULTI-target delete (the
+        command also removes an UNAPPROVED branch). Revert-coupled to the #30
+        _extract_branch_name multi-target fix (revert #30 -> RED)."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"operation_type": "branch-delete", "branch": "a"}}
+        assert not _token_matches_command(token, "git branch -D a b")
+        assert not _token_matches_command(token, "git branch --delete --force a b")
+
+    def test_branch_delete_single_target_still_authorizes(self):
+        """NO-REGRESSION control: the #30 multi-target fix must NOT over-block the
+        legit SINGLE-target delete — a token for 'a' still authorizes both the
+        `-D` and the `--delete --force` single-branch forms."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"operation_type": "branch-delete", "branch": "a"}}
+        assert _token_matches_command(token, "git branch -D a")
+        assert _token_matches_command(token, "git branch --delete --force a")
+
+    def test_branch_delete_api_ref_single_target_still_authorizes(self):
+        """NO-REGRESSION control (API-ref-DELETE single form): a branch-delete
+        token still authorizes the single-ref `gh api -X DELETE .../git/refs/
+        heads/<ref>` form (the API-ref parser is unaffected by the CLI
+        multi-target positional count)."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"operation_type": "branch-delete", "branch": "a"}}
+        assert _token_matches_command(
+            token, "gh api -X DELETE repos/o/r/git/refs/heads/a"
+        )
+
     def test_mismatched_token_blocks_in_check_merge_authorization(self, tmp_path):
         """check_merge_authorization blocks when a typed token's target doesn't
         match the command (and does NOT consume the non-matching token)."""
