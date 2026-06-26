@@ -55,7 +55,7 @@ try:
         USE_MARKER_SUFFIX,
         cleanup_consumed_tokens as _cleanup_consumed_tokens,
         cleanup_orphan_tokens as _cleanup_orphan_tokens,
-        detect_command_operation_type,
+        extract_command_context,
         # Regex prefix constants relocated to shared so the read-side
         # DANGEROUS_PATTERNS bank and the shared classifier compose against
         # identical prefix semantics (#720 Bug B).
@@ -67,12 +67,11 @@ try:
         _GH_API_PREFIX,
         _GH_PR_MERGE_RE,
         _GH_PR_CLOSE_RE,
-        # PR-number + branch-token extraction relocated to shared so the SSOT
-        # extract_command_context owns command-context derivation; imported
-        # back here for this module's direct callers (and the test imports).
+        # PR-number extraction relocated to shared (the SSOT extract_command_context
+        # owns command-context derivation). _GH_PR_NUMBER_RE and _extract_pr_number
+        # are re-exported here for the existing test imports.
         _GH_PR_NUMBER_RE,
         _extract_pr_number,
-        _strip_surrounding_quotes,
         # Bound for the inline httpie global-flag walks below (#1001).
         _MAX_GLOBAL_FLAG_TOKENS,
     )
@@ -299,11 +298,6 @@ def _has_command_substitution(quoted_content: str) -> bool:
     Single-quoted strings never have substitution (handled separately).
     """
     return "$(" in quoted_content or "`" in quoted_content
-
-
-# _strip_surrounding_quotes relocated to shared.merge_guard_common (imported
-# above) so extract_command_context's branch logic and this module share one
-# quote-normalization implementation.
 
 
 def _strip_non_executable_content(command: str) -> str:
@@ -1007,74 +1001,76 @@ def _consume_token(token_path: str, max_uses_default: int = 1) -> bool:
 # extraction); _extract_pr_number is imported back at the top of this module.
 
 
-def _token_matches_command(token: dict, command: str) -> bool:
-    """Check if a token's context is consistent with the command being executed.
+def _both_present_equal(token_val: object, cmd_val: object) -> bool:
+    """True iff BOTH values are present (not None) and string-equal.
 
-    If the token has specific context (PR number, branch name, operation type),
-    verify the command matches. If parsing is ambiguous or no context is
-    available, allow through to avoid false negatives.
+    The positive-match primitive for the fail-closed read predicate: either
+    side absent -> False, so an unextractable target REFUSES rather than falls
+    through permissively. String comparison normalizes a numeric pr_number
+    stored as int/str on either side.
+    """
+    if token_val is None or cmd_val is None:
+        return False
+    return str(token_val) == str(cmd_val)
+
+
+def _token_matches_command(token: dict, command: str) -> bool:
+    """Check that a token's context POSITIVELY matches the command being executed.
+
+    Fail-closed (the #1031/#1032 mint-vs-read symmetry fix): the read side
+    authorizes ONLY when the token and the command-derived context agree on
+    BOTH the operation type AND that operation's target. Any axis that is
+    unextractable, absent, or mismatched -> REFUSE. There is NO terminal allow:
+    a malformed context, an untyped token, an unrecognized command shape, or a
+    missing target all deny (the operator re-approves via AskUserQuestion). This
+    closes the prior fall-through that let an untyped or target-less token
+    authorize an unrelated destructive command (e.g. token{op=None} authorizing
+    `git push --force origin main`).
+
+    The command is classified via the shared `extract_command_context` SSOT, so
+    the read side derives (op, target) the SAME way the mint side does — the two
+    arms cannot drift.
 
     Args:
         token: Token data dict with optional context fields
         command: The bash command being authorized
 
     Returns:
-        True if the command is consistent with the token's context (or ambiguous)
+        True ONLY when the operation type and the op's target both positively
+        match; False otherwise.
     """
     context = token.get("context", {})
     if not isinstance(context, dict):
-        return True  # Malformed context — allow through
+        return False  # F-READ-1: a non-dict context proves nothing — REFUSE
 
-    pr_number = context.get("pr_number")
-    branch = context.get("branch")
-    token_op_type = context.get("operation_type")
+    token_op = context.get("operation_type")
+    cmd = extract_command_context(command)
+    cmd_op = cmd.get("operation_type")
 
-    # Cross-operation authorization guard: a typed token (one with a known
-    # operation_type) MUST match the command's detected operation type, OR
-    # the command shape is unrecognized. Symmetric coverage —
-    # `detect_command_operation_type` recognizes all four classes
-    # (merge / close / force-push / branch-delete) so a missing cmd_op_type
-    # means the destructive shape is outside the recognized set, not a
-    # legitimate "untyped" path. Refuse the cross-op authorization rather
-    # than fall through permissively (the prior fall-through let
-    # token{op=merge} authorize `git push --force` because cmd_op_type was
-    # None — closed by extending the detector + tightening this check).
-    #
-    # Untyped tokens (no operation_type — only shipped pre-cycle-2; should
-    # not occur post-#700 sparse-context guard at write time) still fall
-    # through to the pr_number/branch checks for backward compatibility.
-    if token_op_type:
-        cmd_op_type = detect_command_operation_type(command)
-        if cmd_op_type is None or token_op_type != cmd_op_type:
-            return False
+    # (a) Operation-type axis — both present AND equal, else REFUSE. A token with
+    # operation_type=None (or a command whose destructive shape is unrecognized)
+    # can NEVER authorize: this denies the untyped-token fall-through (the A1/A2
+    # hole) on the read axis rather than skipping the guard for it.
+    if token_op is None or cmd_op is None or token_op != cmd_op:
+        return False
 
-    # If token has a PR number, check gh pr merge/close commands match.
-    # Use _extract_pr_number for the defensive long-flag-value check so a
-    # token's pr_number is not compared against a flag-value digit
-    # (e.g., the `5` in `gh pr merge --max-retries 5 --auto`).
-    if pr_number:
-        cmd_pr = _extract_pr_number(command)
-        if cmd_pr is not None:
-            return cmd_pr == str(pr_number)
+    # (b) Target axis, per op-class — require a POSITIVE, command-anchored target
+    # match. Unextractable or mismatched target -> REFUSE (over-block is the safe
+    # #1031 direction; the read side never under-blocks #1032).
+    if token_op in ("merge", "close"):
+        return _both_present_equal(context.get("pr_number"), cmd.get("pr_number"))
+    if token_op == "branch-delete":
+        return _both_present_equal(context.get("branch"), cmd.get("branch"))
+    if token_op == "force-push":
+        # KD-6 (SECURITY-RATIFICATION-PENDING): the destination ref must match
+        # explicitly — an op-type-only floor would let a 'force-push feature'
+        # approval authorize 'force-push main'. An implicit/multi-ref/unparseable
+        # ref is ABSENT in extract_command_context, so this REFUSES it.
+        return _both_present_equal(context.get("target_ref"), cmd.get("target_ref"))
 
-    # If token has a branch, check branch deletion commands match.
-    # Normalize surrounding quotes on the captured name so a token branch
-    # `feat/x` matches a command written `git branch -D 'feat/x'`. The
-    # capture stays `(\S+)`; only the comparison is normalized (no
-    # regex-widening = no false-negative risk).
-    if branch:
-        branch_d_match = re.search(_GIT_PREFIX + r"branch\s+.*-D\s+(\S+)", command)
-        if branch_d_match:
-            return _strip_surrounding_quotes(branch_d_match.group(1)) == branch
-        branch_delete_match = re.search(
-            _GIT_PREFIX + r"branch\s+.*--delete\s+(?:--force\s+)?(\S+)", command
-        )
-        if branch_delete_match:
-            return _strip_surrounding_quotes(branch_delete_match.group(1)) == branch
-
-    # No specific context to validate against, or command type doesn't match
-    # context type — allow through (ambiguous is permissive)
-    return True
+    # Unknown op-class (a typed token whose op is not one of the four handled
+    # classes) — REFUSE. No terminal allow exists on the read path.
+    return False
 
 
 def check_merge_authorization(command: str, token_dir: Path | None = None) -> str | None:
