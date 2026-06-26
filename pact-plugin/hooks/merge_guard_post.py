@@ -240,6 +240,21 @@ def _target_value(cmd_ctx: dict) -> str | None:
     )
 
 
+def _collect_pairs(texts: list) -> dict:
+    """Map every COMPLETE (op_type, target) pair found across `texts` to the
+    command region that produced it (locate_command_regions + extract_command_context
+    + _target_value). A region with an op but no target contributes no pair."""
+    pairs: dict = {}
+    for text in texts:
+        for region in locate_command_regions(text):
+            cmd_ctx = extract_command_context(region)
+            op_type = cmd_ctx.get("operation_type")
+            target = _target_value(cmd_ctx)
+            if op_type is not None and target is not None:
+                pairs.setdefault((op_type, target), region)
+    return pairs
+
+
 def _mint_context_from_bundle(questions: list, answers: dict) -> dict | None:
     """Decide whether an AskUserQuestion bundle authorizes exactly ONE destructive
     command; return the context dict to mint, or None to refuse.
@@ -253,23 +268,38 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> dict | None:
          (option mode), the free-text answer (free-text arm), or (multiSelect)
          every option's text raw. ANY decline/defer in ANY bundled question
          refuses the whole mint.
-      2. POPULATED SELECTION (bimodal, fail-closed) — option mode requires a
-         populated answer EXACTLY matching a non-decline option's label; no exact
-         match REFUSES (never falls back to the free-text arm). Free-text arm (no
-         options) requires an affirmative, non-declined answer. multiSelect is
+      0. NO-OPTIONS GUARD — a bundle with no options anywhere has no clicked
+         option to anchor on → return None (free-text / zero-options never mints).
+      2. CLICKED OPTION (option mode, fail-closed) — the mint source is the
+         SELECTED option (exact non-decline label match; no match for a populated
+         answer REFUSES, never falls back to free-text — B-NEW-2). multiSelect is
          refused as a mint source (still globally decline-scanned).
-      3. MULTIPLICITY [SACROSANCT] — collect command regions across every
-         question's text AND every selected option's text; count DISTINCT
-         (op_type, target) pairs (NOT raw region occurrences): ==1 mints, >1
-         refuses, ==0 yields no token.
+      3. MULTIPLICITY [SACROSANCT] — count DISTINCT (op_type, target) pairs across
+         question text ∪ selected options (NOT raw region occurrences): ==1 mints
+         that pair, >1 refuses (divergence), ==0 yields no token.
+      3b. OPTION ANCHORING (#1032 F-REVIEW-1) — the minted (op,target) MUST be
+         carried by a CLICKED option, NOT by question prose alone. Question prose
+         is a divergence signal only, never a sole mint source.
       4. LABEL<->DESCRIPTION op-consistency (refuse-only) — a selected option
          whose label names a DIFFERENT op than the minted command vetoes the mint.
       5. extract_command_context(the single distinct command) → the mint context.
     """
     question_texts: list[str] = []
-    selected_option_texts: list[str] = []
-    selected_labels: list[str] = []
-    has_valid_approval = False
+    selected_option_texts: list[str] = []  # the operator's ACTION SURFACE = the
+    selected_labels: list[str] = []        # CLICKED option(s); free-text never mints
+
+    # EXPLICIT (shape b): a bundle with NO options anywhere has no clicked option
+    # to anchor on → it can NEVER mint. Minting from question prose or a typed
+    # free-text answer would make auth depend on un-clicked text — a forbidden
+    # under-block class (security B-NEW-4 / KD-11(6)). AUQ structurally carries
+    # 2-4 options per question (peer-review.md), so this is fail-closed defense
+    # for a theoretical/replayed no-options payload. The per-question decline/
+    # defer veto still runs below for mixed bundles.
+    if not any(
+        isinstance(q, dict) and isinstance(q.get("options"), list) and q.get("options")
+        for q in questions
+    ):
+        return None
 
     for q in questions:
         if not isinstance(q, dict):
@@ -283,7 +313,7 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> dict | None:
         # KD-12: key the answer to its SPECIFIC question (no iter-fallback).
         answer = answers.get(qtext)
 
-        # ── Step 1: decline/defer GLOBAL veto (first, precedence). ──
+        # ── Step 1: decline/defer GLOBAL veto (FIRST, precedence, both arms). ──
         if options:
             if multi:
                 # multiSelect: raw-scan every option's text (no comma-split) for a
@@ -301,39 +331,39 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> dict | None:
         elif _has_decline_defer(answer):
             return None
 
-        # ── Step 2: populated selection (bimodal, fail-closed). ──
+        # ── Step 2: resolve the operator's CLICKED option (option mode only). ──
         if options:
+            # The mint source is the SELECTED option (exact label match). No exact
+            # match for a populated answer → REFUSE; NEVER fall back to free-text
+            # (B-NEW-2). An "Other" freeform answer to an options question matches
+            # no label → also refused here.
             selected_text = _selected_option_text(options, answer)
             if selected_text is None:
-                # Options present but the populated answer matched no label
-                # exactly → REFUSE; NEVER fall back to the free-text arm
-                # (B-NEW-2). An empty/missing answer is not an approval for this
-                # question (its prose still counts toward multiplicity below).
                 if isinstance(answer, str) and answer:
                     return None
-                continue
+                continue  # empty/missing answer → no clicked option for this q
             selected_option_texts.append(selected_text)
             selected_labels.append(answer)
-            has_valid_approval = True
-        elif isinstance(answer, str) and answer and is_affirmative(answer):
-            # Free-text arm: affirmative + not declined (the veto ran above).
-            has_valid_approval = True
+        # else: a no-options (free-text) question contributes NO mint source; its
+        # answer was already decline/defer veto-scanned in Step 1 (and a pure
+        # free-text bundle already returned None at the no-options guard above).
 
-    if not has_valid_approval:
+    # ── Step 3: distinct-(op,target) multiplicity over question ∪ selected
+    # options — DIVERGENCE refusal [SACROSANCT]: ==1 mints, >1 refuses, ==0 no
+    # token. ──
+    bundle_pairs = _collect_pairs(question_texts + selected_option_texts)
+    if len(bundle_pairs) != 1:
         return None
+    (the_op, the_target), the_command = next(iter(bundle_pairs.items()))
 
-    # ── Step 3: distinct-(op,target) multiplicity gate [SACROSANCT]. ──
-    distinct_pairs: dict[tuple, str] = {}
-    for text in question_texts + selected_option_texts:
-        for region in locate_command_regions(text):
-            cmd_ctx = extract_command_context(region)
-            op_type = cmd_ctx.get("operation_type")
-            target = _target_value(cmd_ctx)
-            if op_type is not None and target is not None:
-                distinct_pairs.setdefault((op_type, target), region)
-    if len(distinct_pairs) != 1:
+    # ── Step 3b: OPTION anchoring (#1032 F-REVIEW-1). The minted (op,target) MUST
+    # be carried by a CLICKED option — NOT by question prose alone. A command found
+    # only in (possibly padded) question text, with a generic clicked option that
+    # carries no command, is REFUSED; an empty option surface (no valid selection)
+    # yields no pair → refuse. Question prose is a divergence signal only, never a
+    # sole mint source. ──
+    if (the_op, the_target) not in _collect_pairs(selected_option_texts):
         return None
-    (the_op, _target), the_command = next(iter(distinct_pairs.items()))
 
     # ── Step 4: label<->description op-consistency (refuse-only). ──
     for label in selected_labels:
