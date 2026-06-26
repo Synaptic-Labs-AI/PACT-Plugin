@@ -474,9 +474,7 @@ class TestMergeGuardPostErrorOutput:
         from merge_guard_post import main
 
         with patch("sys.stdin", io.StringIO(self._make_merge_input())), \
-             patch("merge_guard_post.is_merge_question", return_value=True), \
-             patch("merge_guard_post.is_affirmative", return_value=True), \
-             patch("merge_guard_post.extract_context",
+             patch("merge_guard_post._mint_context_from_bundle",
                    side_effect=RuntimeError("test error")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -493,9 +491,7 @@ class TestMergeGuardPostErrorOutput:
         from merge_guard_post import main
 
         with patch("sys.stdin", io.StringIO(self._make_merge_input())), \
-             patch("merge_guard_post.is_merge_question", return_value=True), \
-             patch("merge_guard_post.is_affirmative", return_value=True), \
-             patch("merge_guard_post.extract_context",
+             patch("merge_guard_post._mint_context_from_bundle",
                    side_effect=RuntimeError("boom")):
             with pytest.raises(SystemExit):
                 main()
