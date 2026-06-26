@@ -67,6 +67,12 @@ try:
         _GH_API_PREFIX,
         _GH_PR_MERGE_RE,
         _GH_PR_CLOSE_RE,
+        # PR-number + branch-token extraction relocated to shared so the SSOT
+        # extract_command_context owns command-context derivation; imported
+        # back here for this module's direct callers (and the test imports).
+        _GH_PR_NUMBER_RE,
+        _extract_pr_number,
+        _strip_surrounding_quotes,
         # Bound for the inline httpie global-flag walks below (#1001).
         _MAX_GLOBAL_FLAG_TOKENS,
     )
@@ -191,39 +197,11 @@ try:
     re.compile(_GIT_PREFIX + r"push\s+(?:-\S+\s+){0,%d}\S+\s+master(?!:)\b" % _MAX_GLOBAL_FLAG_TOKENS),
 ]
 
-    # _GH_PR_MERGE_RE and _GH_PR_CLOSE_RE relocated to shared.merge_guard_common
-    # (used only by the operation-type classifier, now also relocated). They
-    # are imported back into this module at the top so any direct callers in
-    # this file continue to resolve them.
-
-    # PR number extraction: allows optional subcommand flags (e.g., --admin, --squash)
-    # between merge/close and the PR number.
-    #
-    # Both flag-walks (between `gh` and `pr`, AND between subcommand and PR
-    # number) use the tight `_GH_FLAG_TOKENS` form. The earlier broad
-    # `_GH_GLOBAL_FLAGS` form on the pre-subcommand walk allowed greedy
-    # consumption past a `gh pr <subcmd> <PR>` substring inside `--body
-    # "..."` text, then re-anchoring at a SECOND `gh pr <subcmd>` occurrence
-    # embedded in the body. That re-anchor permitted an authorization-bypass
-    # attack where the body text contained `gh pr merge <fake_PR>` and the
-    # token-context check matched against the embedded fake PR number rather
-    # than the real positional. Restricting both walks to flag-shaped tokens
-    # only prevents the engine from walking past the real positional into
-    # quoted body content.
-    #
-    # The trailing `(?![\w-])` rejects BOTH alphanumeric-suffix tokens
-    # (e.g., `7352abc`) AND hyphen-suffix tokens (e.g., `7352-tests`).
-    # Python `\b` is a word-boundary that DOES match at digit-to-hyphen
-    # (because `-` is a non-word character), so a plain `\b` would
-    # incorrectly capture `7352` from `7352-tests` (a branch-name argument
-    # to `gh pr merge`). The negative-lookahead form `(?![\w-])` is
-    # strictly stronger: it rejects any continuation that is a word char
-    # OR a hyphen, which closes the branch-name suffix-match case while
-    # preserving rejection of the alphanumeric-suffix case.
-    _GH_PR_NUMBER_RE = re.compile(
-        r"\bgh\s+" + _GH_FLAG_TOKENS + r"pr\s+(?:merge|close)\s+"
-        + _GH_FLAG_TOKENS + r"(\d+)(?![\w-])"
-    )
+    # _GH_PR_MERGE_RE, _GH_PR_CLOSE_RE, and _GH_PR_NUMBER_RE relocated to
+    # shared.merge_guard_common (the operation-type classifier + PR-number
+    # extraction that the shared extract_command_context owns). All are
+    # imported back into this module at the top so direct callers here — and
+    # the test imports — continue to resolve them.
 except BaseException as _pattern_compile_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_deny("pattern compilation", _pattern_compile_error)
 
@@ -323,18 +301,9 @@ def _has_command_substitution(quoted_content: str) -> bool:
     return "$(" in quoted_content or "`" in quoted_content
 
 
-def _strip_surrounding_quotes(token: str) -> str:
-    """Strip one layer of matching surrounding quotes from a captured CLI
-    token. ``'feat/x'`` -> ``feat/x``, ``"feat/x"`` -> ``feat/x``. Leaves an
-    unquoted or mismatched-quote token unchanged. Used so a branch token
-    minted from unquoted question prose matches a command that quotes the
-    branch argument (and vice versa). Comparison-side normalization only —
-    it does NOT widen what the matcher regex captures, so it cannot
-    introduce a false-negative.
-    """
-    if len(token) >= 2 and token[0] == token[-1] and token[0] in ("'", '"'):
-        return token[1:-1]
-    return token
+# _strip_surrounding_quotes relocated to shared.merge_guard_common (imported
+# above) so extract_command_context's branch logic and this module share one
+# quote-normalization implementation.
 
 
 def _strip_non_executable_content(command: str) -> str:
@@ -1033,68 +1002,9 @@ def _consume_token(token_path: str, max_uses_default: int = 1) -> bool:
     return False
 
 
-# Allowlist of `gh pr merge|close` long-form flags KNOWN to take a value.
-# The F3 defensive check only rejects digits preceded by one of these
-# value-taking flags (avoiding false-positives on value-less flags like
-# `--admin`, `--auto`, `--squash` whose positional digit IS the PR).
-#
-# As of `gh` v2 (2026-04 baseline), no real `gh pr merge|close` flag
-# takes a digit value; this allowlist is a forward-compatible defense
-# for hypothetical future flags. `--max-retries` is the canonical
-# example cited in the F3 review (test-engineer-2). Extend this list
-# when `gh` ships a flag that takes a numeric value.
-_GH_PR_VALUE_TAKING_FLAGS = frozenset({
-    # Known string/path-value flags from `gh pr merge --help` /
-    # `gh pr close --help`. Listed here for forward-compat: if any of
-    # these were given a digit value (e.g. `--subject 123`), the
-    # defensive check correctly rejects the digit-as-flag-value capture.
-    "--body",
-    "--body-file",
-    "--subject",
-    "--author-email",
-    "--match-head-commit",
-    "--comment",
-    # Hypothetical future flags. Add here when gh ships one.
-    "--max-retries",
-    "--retry-count",
-    "--timeout",
-})
-
-
-def _extract_pr_number(command: str) -> str | None:
-    """Extract the PR number positional from a `gh pr merge|close` command.
-
-    Wraps `_GH_PR_NUMBER_RE.search()` with a defensive post-extract check
-    that rejects digits which are actually the VALUE of an immediately-
-    preceding value-taking long-form flag (e.g., `--max-retries 5`).
-
-    The defensive check is narrowly scoped to flags in
-    `_GH_PR_VALUE_TAKING_FLAGS`. Value-less flags like `--admin`,
-    `--auto`, `--squash` do NOT trigger the check — a digit immediately
-    after one of them IS the PR positional. This avoids the false-
-    negative class where a real PR positional after a value-less flag
-    would be incorrectly rejected.
-
-    No current `gh pr merge|close` flag takes a digit value, so the
-    realistic risk is theoretical — but this is defense-in-depth post
-    the cycle-3 strict-match enforcement: a typed token would otherwise
-    compare against the wrong digit and emit a confusing
-    "does-not-match" deny. Returning None here lets the comparison fall
-    through to the ambiguous-permissive path on the pr_number axis
-    (op_type strict-match still applies).
-    """
-    match = _GH_PR_NUMBER_RE.search(command)
-    if not match:
-        return None
-    pr_pos = match.start(1)
-    # Inspect the immediately-preceding token for a known value-taking
-    # long-form flag. Match captures the flag name (without trailing
-    # whitespace) so we can look it up in the allowlist.
-    preceding = command[:pr_pos].rstrip()
-    flag_match = re.search(r"(--[\w-]+)$", preceding)
-    if flag_match and flag_match.group(1) in _GH_PR_VALUE_TAKING_FLAGS:
-        return None
-    return match.group(1)
+# _GH_PR_VALUE_TAKING_FLAGS and _extract_pr_number relocated to
+# shared.merge_guard_common (the shared extract_command_context owns PR-number
+# extraction); _extract_pr_number is imported back at the top of this module.
 
 
 def _token_matches_command(token: dict, command: str) -> bool:

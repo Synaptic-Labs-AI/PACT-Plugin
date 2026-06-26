@@ -248,6 +248,266 @@ def detect_command_operation_type(command: str) -> str | None:
     return None
 
 
+# -----------------------------------------------------------------------------
+# Command-context extraction — the shared SSOT both hooks call on a COMMAND
+# STRING (never prose). The mint side (merge_guard_post) and the read side
+# (merge_guard_pre) both derive a command's (operation_type, target) from
+# extract_command_context, so the two arms can never classify the SAME command
+# differently again (the #720 / asymmetric-classifier bug class). A context key
+# is PRESENT only when positively extracted; ABSENT otherwise — absence, NOT a
+# None value, is the fail-closed signal a downstream gate keys on.
+# -----------------------------------------------------------------------------
+
+# PR-number positional extraction regex.
+#
+# Both flag-walks (between `gh` and `pr`, AND between the subcommand and the PR
+# number) use the tight `_GH_FLAG_TOKENS` form. A broad `_GH_GLOBAL_FLAGS` form
+# on the pre-subcommand walk would allow greedy consumption past a `gh pr
+# <subcmd> <PR>` substring inside `--body "..."` text, then re-anchor at a
+# SECOND `gh pr <subcmd>` occurrence embedded in the body — an authorization
+# bypass where the context check matched an embedded fake PR rather than the
+# real positional. Restricting both walks to flag-shaped tokens prevents walking
+# past the real positional into quoted body content.
+#
+# The trailing `(?![\w-])` rejects BOTH alphanumeric-suffix tokens (`7352abc`)
+# AND hyphen-suffix tokens (`7352-tests`). Python `\b` matches at a digit-to-
+# hyphen boundary (`-` is a non-word char), so a plain `\b` would incorrectly
+# capture `7352` from `7352-tests` (a branch-name argument). `(?![\w-])` is
+# strictly stronger: it rejects any continuation that is a word char OR a hyphen.
+_GH_PR_NUMBER_RE = re.compile(
+    r"\bgh\s+" + _GH_FLAG_TOKENS + r"pr\s+(?:merge|close)\s+"
+    + _GH_FLAG_TOKENS + r"(\d+)(?![\w-])"
+)
+
+# A quoted-command region inside prose: backticks (most common), then single
+# quotes, then double quotes; captures the content. When AskUserQuestion text
+# embeds the literal command in a quoted region (e.g. `gh pr merge 42`), the
+# SAME classifier the read side uses is applied to the embedded command,
+# guaranteeing bidirectional write/read agreement on the SAME input.
+_QUOTED_COMMAND_RE = re.compile(
+    r"`([^`]+)`"        # backticks
+    r"|'([^']+)'"       # single quotes
+    r'|"([^"]+)"'       # double quotes
+)
+
+# A bare (unquoted) `gh ...` / `git ...` command span: from the tool name up to
+# a shell separator (`;` `|` `&`), a quote, or end-of-line. The conservative
+# extractors below filter prose-polluted spans (a span that yields an op but no
+# target contributes no (op,target) pair), so over-capturing trailing prose is
+# harmless — it never invents a target.
+_BARE_COMMAND_RE = re.compile(r"\b(?:gh|git)\s+[^`'\";|&\n]+")
+
+# Allowlist of `gh pr merge|close` long-form flags KNOWN to take a value. The
+# defensive check in _extract_pr_number only rejects digits preceded by one of
+# these value-taking flags (avoiding false-positives on value-less flags like
+# `--admin`, `--auto`, `--squash` whose positional digit IS the PR). As of `gh`
+# v2 no real flag takes a digit value; this is a forward-compatible defense.
+# Extend this list when `gh` ships a flag that takes a numeric value.
+_GH_PR_VALUE_TAKING_FLAGS = frozenset({
+    "--body",
+    "--body-file",
+    "--subject",
+    "--author-email",
+    "--match-head-commit",
+    "--comment",
+    "--max-retries",
+    "--retry-count",
+    "--timeout",
+})
+
+
+def _strip_surrounding_quotes(token: str) -> str:
+    """Strip one layer of matching surrounding quotes from a captured CLI token.
+
+    ``'feat/x'`` -> ``feat/x``, ``"feat/x"`` -> ``feat/x``. Leaves an unquoted or
+    mismatched-quote token unchanged. Comparison-side normalization only — it
+    does NOT widen what a matcher regex captures, so it cannot introduce a
+    false-negative.
+    """
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in ("'", '"'):
+        return token[1:-1]
+    return token
+
+
+def _extract_pr_number(command: str) -> str | None:
+    """Extract the PR number positional from a `gh pr merge|close` command.
+
+    Wraps `_GH_PR_NUMBER_RE.search()` with a defensive post-extract check that
+    rejects digits which are actually the VALUE of an immediately-preceding
+    value-taking long-form flag (e.g. `--max-retries 5`). Value-less flags
+    (`--admin`, `--auto`, `--squash`) do NOT trigger the check — a digit after
+    one of them IS the PR positional. Returns None when no positional is found.
+    """
+    match = _GH_PR_NUMBER_RE.search(command)
+    if not match:
+        return None
+    pr_pos = match.start(1)
+    # Inspect the immediately-preceding token for a known value-taking
+    # long-form flag; if present, the captured digit is its value, not the PR.
+    preceding = command[:pr_pos].rstrip()
+    flag_match = re.search(r"(--[\w-]+)$", preceding)
+    if flag_match and flag_match.group(1) in _GH_PR_VALUE_TAKING_FLAGS:
+        return None
+    return match.group(1)
+
+
+def _extract_api_ref(command: str) -> str | None:
+    """Parse the ref from an API ref-mutation command's `git/refs/<ref>` path.
+
+    `detect_command_operation_type` classifies `gh api|curl|wget` calls on a
+    `git/refs/...` path by HTTP method (DELETE -> branch-delete, PATCH/POST/PUT
+    -> force-push). For both classes the affected ref is the path component, so
+    a single parser supplies the target. Returns the ref (a leading `heads/`
+    stripped), or None when the command is not a recognized API ref form.
+    """
+    if not (
+        re.search(r"\b(?:gh\s+api|curl|wget)\b", command, re.IGNORECASE)
+        and "git/refs/" in command
+    ):
+        return None
+    api_match = re.search(
+        r"git/refs/(?:heads/)?([A-Za-z0-9][A-Za-z0-9._/-]*)", command
+    )
+    return api_match.group(1) if api_match else None
+
+
+def _extract_branch_name(command: str) -> str | None:
+    """Extract the branch name targeted by a branch-delete command.
+
+    Owns the branch-delete target for extract_command_context. Handles the CLI
+    `git branch -D|--delete <name>` forms and the API ref-DELETE form (the ref
+    in a `git/refs/<ref>` path). Returns the (quote-normalized) name, or None
+    when no branch target is positively extractable.
+    """
+    api_ref = _extract_api_ref(command)
+    if api_ref is not None:
+        return api_ref
+    branch_d_match = re.search(_GIT_PREFIX + r"branch\s+.*-D\s+(\S+)", command)
+    if branch_d_match:
+        return _strip_surrounding_quotes(branch_d_match.group(1))
+    branch_delete_match = re.search(
+        _GIT_PREFIX + r"branch\s+.*--delete\s+(?:--force\s+)?(\S+)", command
+    )
+    if branch_delete_match:
+        return _strip_surrounding_quotes(branch_delete_match.group(1))
+    return None
+
+
+def _extract_force_push_target_ref(command: str) -> str | None:
+    """Conservative force-push destination-ref parse (KD-6) — refuse on ambiguity.
+
+    Returns the ref a force-push would rewrite, or None when the target is
+    implicit / multi-ref / unparseable (the caller treats None as ABSENT ->
+    REFUSE, the safe over-block direction). The accepted ref-form set is
+    SECURITY-RATIFICATION-PENDING (ratified at peer-review); this is the
+    architect's conservative default.
+
+    Recognized:
+        gh api|curl|wget .../git/refs/<ref>   -> <ref>    (API ref-mutation)
+        git push <remote> <src>:<dst>         -> <dst>
+        git push <remote> HEAD:<dst>          -> <dst>
+        git push <remote> <branch>            -> <branch> (incl. direct-to-main)
+    Refused (-> None):
+        git push --force            (implicit current-branch target)
+        git push <remote>           (remote-only, implicit branch)
+        any multi-ref / chained / value-flag-ambiguous / unparseable form
+    """
+    # API ref-mutation: the destination ref is in the git/refs/<ref> path.
+    api_ref = _extract_api_ref(command)
+    if api_ref is not None:
+        return api_ref
+
+    # CLI push: isolate the token sequence after `push`, drop dash-flags, and
+    # require EXACTLY remote + refspec (2 positionals). 0 = implicit push; 1 =
+    # remote-only (implicit branch); >2 = multi-ref/chained -> all ambiguous,
+    # REFUSE. A value-taking dash-flag (e.g. `-o opt`) shifts the positional
+    # count off 2 -> also refused (conservative over-block).
+    push_match = re.search(_GIT_PREFIX + r"push\b(.*)$", command)
+    if not push_match:
+        return None
+    positionals = [t for t in push_match.group(1).split() if not t.startswith("-")]
+    if len(positionals) != 2:
+        return None
+    refspec = _strip_surrounding_quotes(positionals[1])
+    if ":" in refspec:
+        return refspec.rsplit(":", 1)[1] or None
+    return refspec or None
+
+
+def extract_command_context(command: str) -> dict:
+    """Extract operation context FROM A COMMAND STRING (never prose).
+
+    The shared SSOT both merge-guard hooks call. A key is PRESENT only when
+    positively extracted; ABSENT otherwise (absence — NOT a None value — is the
+    fail-closed signal). Possible keys:
+        operation_type: "merge" | "close" | "force-push" | "branch-delete"
+        pr_number:  str  (merge / close)
+        branch:     str  (branch-delete)
+        target_ref: str  (force-push, KD-6)
+    """
+    context: dict = {}
+    op_type = detect_command_operation_type(command)
+    if op_type is None:
+        return context
+    context["operation_type"] = op_type
+    if op_type in ("merge", "close"):
+        pr_number = _extract_pr_number(command)
+        if pr_number is not None:
+            context["pr_number"] = pr_number
+    elif op_type == "branch-delete":
+        branch = _extract_branch_name(command)
+        if branch is not None:
+            context["branch"] = branch
+    elif op_type == "force-push":
+        target_ref = _extract_force_push_target_ref(command)
+        if target_ref is not None:
+            context["target_ref"] = target_ref
+    return context
+
+
+def locate_command_regions(text: str) -> list[str]:
+    """Return ALL gh/git destructive-command regions in ONE string, in document
+    order.
+
+    A region is a candidate command substring — a quoted region (via
+    `_QUOTED_COMMAND_RE`) OR a bare `gh ...`/`git ...` span (via
+    `_BARE_COMMAND_RE`) — that `detect_command_operation_type` classifies
+    non-None.
+
+    Takes a SINGLE string, NEVER an options array (D3 structural invariant: the
+    function can never receive non-selected options, so it CANNOT over-scan —
+    'make illegal states unrepresentable' on a security boundary). The caller
+    passes ONE question's text or ONE selected option's text at a time.
+    """
+    regions: list[str] = []
+    covered: list[tuple[int, int]] = []
+    # Quoted regions first — an explicit command literal is the canonical form.
+    for match in _QUOTED_COMMAND_RE.finditer(text):
+        covered.append((match.start(), match.end()))
+        candidate = match.group(1) or match.group(2) or match.group(3)
+        if candidate and detect_command_operation_type(candidate) is not None:
+            regions.append(candidate)
+    # Bare gh/git spans that do not overlap an already-captured quoted region,
+    # so a quoted command is not double-counted as a separate region.
+    for match in _BARE_COMMAND_RE.finditer(text):
+        if any(
+            match.start() < c_end and c_start < match.end()
+            for c_start, c_end in covered
+        ):
+            continue
+        span = match.group(0).strip()
+        if detect_command_operation_type(span) is not None:
+            regions.append(span)
+    return regions
+
+
+def locate_command_region(text: str) -> str | None:
+    """Convenience: the first command region in `text`, else None. SINGLE
+    string arg (same D3 invariant as locate_command_regions)."""
+    regions = locate_command_regions(text)
+    return regions[0] if regions else None
+
+
 def cleanup_consumed_tokens(token_dir: Path) -> None:
     """Remove stale .consumed token files and .use-N markers older than TOKEN_TTL.
 
