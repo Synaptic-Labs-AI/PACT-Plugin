@@ -57,6 +57,8 @@ sys.path.insert(0, str(_HOOKS_DIR))
 import shared.pact_context as pact_context  # noqa: E402
 from shared.pact_harvest import _resolve_session_dir  # noqa: E402
 from shared.session_journal import (  # noqa: E402
+    _normalize_trailing_z,
+    _parse_ts,
     append_event,
     make_event,
     resolve_latest_artifacts,
@@ -191,6 +193,41 @@ class TestResolveLatestArtifacts:
         assert resolve_latest_artifacts([aware, naive], self.FEATURE) == {"prepare": ["/aware.md"]}
         assert resolve_latest_artifacts([naive, aware], self.FEATURE) == {"prepare": ["/naive.md"]}
 
+    def test_mixed_z_and_offset_ts_compare_by_instant_last_wins(self):
+        """Belt-and-suspenders: a `...Z` ts and an equal-instant `...+00:00` ts
+        for the same (workflow, feature) must be compared as the SAME instant —
+        so the tie resolves LAST-wins (the later-iterated event survives),
+        regardless of which spelling came first. A LEXICAL string compare would
+        be WRONG here ('+' 0x2B sorts before 'Z' 0x5A), so reverting
+        _ts_supersedes/_parse_ts to compare the raw strings flips the
+        Z-then-offset ordering RED — that is this test's non-vacuity hook (on
+        3.13 fromisoformat parses a bare 'Z' natively, so the Z->+00:00
+        normalization itself is not the discriminator; the parsed-not-lexical
+        comparison is)."""
+        z_ts = "2026-06-25T01:00:00Z"
+        offset_ts = "2026-06-25T01:00:00+00:00"
+        z_first = _art_event("prepare", self.FEATURE, ["/z.md"], z_ts)
+        offset_first = _art_event("prepare", self.FEATURE, ["/offset.md"], offset_ts)
+        # Same instant -> last-wins; the discriminating ordering is z-then-offset
+        # (a lexical compare would keep /z.md instead of the later /offset.md).
+        assert resolve_latest_artifacts(
+            [z_first, offset_first], self.FEATURE) == {"prepare": ["/offset.md"]}
+        assert resolve_latest_artifacts(
+            [offset_first, z_first], self.FEATURE) == {"prepare": ["/z.md"]}
+
+    def test_non_string_path_elements_filtered_from_output(self):
+        """A surviving event whose `paths` list carries non-string elements
+        (int, None, dict) emits ONLY its string entries — the element-level
+        isinstance guard, parity with the event-level non-dict skip. Reverting
+        the filter (emitting `event["paths"]` raw) leaks the non-string entries
+        -> RED."""
+        ev = {"type": "artifact_paths", "workflow": "prepare",
+              "feature": self.FEATURE,
+              "paths": ["/good.md", 123, None, {"x": 1}, "/also.md"],
+              "ts": "2026-06-25T01:00:00Z"}
+        assert resolve_latest_artifacts([ev], self.FEATURE) == {
+            "prepare": ["/good.md", "/also.md"]}
+
 
 # =============================================================================
 # (2) SUBPROCESS — resolve-session-dir contract + THE B1-CLASS DRIFT PARITY.
@@ -299,8 +336,16 @@ class TestResolveArtifactsSubprocess:
     @pytest.fixture
     def session_with_events(self, tmp_path, monkeypatch, pact_context):
         """Build a REAL on-disk journal at a resolvable session dir so the CLI's
-        read_events_from resolves it (non-mocked seam)."""
+        read_events_from resolves it (non-mocked seam).
+
+        CLAUDE_CONFIG_DIR is set (not just Path.home) because the CLI runs as a
+        SUBPROCESS: `monkeypatch.setattr(Path, "home", ...)` patches only this
+        test process, NOT the child, so the subprocess's --session-dir
+        containment check would resolve the REAL home and falsely reject this
+        tmp session dir. The env var IS inherited by the subprocess, making the
+        child's get_claude_config_dir() agree with this fixture's root."""
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
         pact_context(team_name="t", session_id="sid-harvest", project_dir="/proj")
         slug = Path("/proj").name
         session_dir = tmp_path / ".claude" / "pact-sessions" / slug / "sid-harvest"
@@ -402,12 +447,13 @@ class TestReadEmitsJsonArrayContract:
 
 
 # =============================================================================
-# (6) ARGPARSE CONTRACT — a missing or unknown subcommand must exit NON-ZERO
-#     (argparse's 2), so the skill's `if ! out=$(...); then stop; fi` gate
-#     still STOPS rather than falling through to a path-less read. `sub.required
-#     = True` is what enforces this; a regression to required=False would let a
-#     no-arg invocation exit 0 (return _EXIT_INTERNAL_ERROR is unreachable today
-#     but a silent contract change) — this pins the stop-gate-compatible code.
+# (6) ARGPARSE CONTRACT — a missing/unknown subcommand OR a missing required
+#     argument must exit NON-ZERO (argparse's 2), so the skill's
+#     `if ! out=$(...); then stop; fi` gate still STOPS rather than falling
+#     through to a path-less read. `sub.required = True` (plus each subcommand's
+#     `required=True` arguments) is what enforces this; a regression to
+#     required=False would let an under-specified invocation exit 0 — this pins
+#     the stop-gate-compatible contract.
 # =============================================================================
 class TestSubcommandArgparseContract:
     def test_no_subcommand_exits_nonzero_stop_gate(self):
@@ -424,6 +470,21 @@ class TestSubcommandArgparseContract:
         assert r.returncode != _EXIT_OK, "unknown-subcommand must not exit 0"
         assert r.returncode == 2, f"expected argparse exit 2, got {r.returncode}"
 
+    @pytest.mark.parametrize("argv", [
+        ["resolve-session-dir"],                       # missing --context-file
+        ["resolve-artifacts", "--feature", "f"],       # missing --session-dir
+        ["resolve-artifacts", "--session-dir", "/x"],  # missing --feature
+    ])
+    def test_missing_required_arg_exits_2_empty_stdout(self, argv):
+        """A subcommand invoked WITHOUT a required argument -> argparse error ->
+        exit 2 with EMPTY stdout (the stop gate keys on the non-zero code, and
+        no data may leak to stdout for the skill to mis-parse). A regression
+        that dropped `required=True` on any of these would let the invocation
+        reach a handler with a None arg -> RED here."""
+        r = _run_cli(*argv)
+        assert r.returncode == 2, f"{argv}: expected argparse exit 2, got {r.returncode}"
+        assert r.stdout == "", f"{argv}: stdout must be EMPTY on exit 2"
+
 
 # =============================================================================
 # (7) TRAVERSAL DEFENSE + GRACEFUL-TS — through the real CLI.
@@ -435,10 +496,18 @@ class TestSubcommandArgparseContract:
 class TestTraversalAndGracefulTs:
     def test_traversal_session_id_is_sanitized_no_escape(self, tmp_path):
         """A '../../etc/passwd' session_id reconstructs INSIDE pact-sessions
-        with the traversal characters collapsed (no '..' segment, stays under
-        the sessions root). Oracle = the SSOT reconstruct_session_dir; the
-        independent non-vacuity check is the structural 'no ..' / 'under root'
-        assertion (a sanitization regression would leave a '..' segment)."""
+        with the traversal characters neutralized (no '..' segment, stays under
+        the sessions root). Oracle = the SSOT reconstruct_session_dir.
+
+        What this verifies is the OUTCOME — the resolved dir provably stays
+        under the pact-sessions root with no upward-escaping '..' segment — NOT
+        which layer enforces it. Two defense-in-depth layers cooperate: the
+        session_id regex sanitization in reconstruct_session_dir AND
+        _build_session_path's own resolve()/containment/basename-fallback
+        traversal guard. Because that second layer alone already neutralizes the
+        traversal, a session_id-regex-only revert does NOT leave a '..' segment
+        (this test stays green under it) — so the structural assertion pins the
+        no-escape OUTCOME, not the regex mechanism in isolation."""
         ctx = tmp_path / "pact-session-context.json"
         ctx.write_text(json.dumps(
             {"project_dir": "/clean/project", "session_id": "../../etc/passwd"}),
@@ -449,8 +518,10 @@ class TestTraversalAndGracefulTs:
         # Parity with the SSOT writer-derivation (load-bearing).
         assert out == pact_context.reconstruct_session_dir(
             "/clean/project", "../../etc/passwd")
-        # Non-vacuity: the traversal is neutralized — no '..' path segment, and
-        # the resolved dir stays under the pact-sessions tree.
+        # Structural outcome: the traversal is neutralized — no '..' path
+        # segment survives, and the resolved dir stays under the pact-sessions
+        # tree (guaranteed jointly by the sanitization + _build_session_path
+        # traversal guard).
         parts = Path(out).parts
         assert ".." not in parts, f"traversal not sanitized: {out!r}"
         assert "pact-sessions" in parts
@@ -467,7 +538,11 @@ class TestTraversalAndGracefulTs:
         traceback; now it exits 0 and emits a valid JSON object (the incumbent
         survives, fail-open). Regression-proof: reverting the guard makes this
         exit 1 -> RED."""
+        # CLAUDE_CONFIG_DIR (not just Path.home) so the SUBPROCESS's --session-dir
+        # containment check resolves the same tmp root — the home monkeypatch is
+        # not inherited by the child; the env var is.
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
         pact_context(team_name="t", session_id="sid-naive", project_dir="/proj")
         slug = Path("/proj").name
         session_dir = tmp_path / ".claude" / "pact-sessions" / slug / "sid-naive"
@@ -486,3 +561,85 @@ class TestTraversalAndGracefulTs:
         assert "TypeError" not in r.stderr
         # A valid JSON object is emitted; the well-formed aware event survives.
         assert json.loads(r.stdout) == {"prepare": ["/aware.md"]}
+
+
+# =============================================================================
+# (8) SESSION-DIR CONTAINMENT — resolve-artifacts rejects a --session-dir
+#     OUTSIDE the pact-sessions root (defense-in-depth) but NEVER a legit one.
+#     The root derives from get_claude_config_dir() (driven by CLAUDE_CONFIG_DIR
+#     here, which the subprocess inherits) so the child agrees with the test's
+#     configured root — NOT the real home.
+# =============================================================================
+class TestSessionDirContainment:
+    def _configure_root(self, tmp_path, monkeypatch):
+        """Point both this process and the CLI subprocess at a tmp config root.
+        Path.home for the in-process journal write; CLAUDE_CONFIG_DIR (inherited
+        by the subprocess) for the child's containment-root derivation."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+
+    def test_legit_contained_session_dir_passes(
+        self, tmp_path, monkeypatch, pact_context):
+        """A session dir UNDER <config>/pact-sessions/ resolves normally
+        (exit 0) — containment must NOT over-reject the canonical layout. Guards
+        the false-rejection direction: a too-strict predicate would flip this to
+        exit 2."""
+        self._configure_root(tmp_path, monkeypatch)
+        pact_context(team_name="t", session_id="sid-contained", project_dir="/proj")
+        slug = Path("/proj").name
+        session_dir = tmp_path / ".claude" / "pact-sessions" / slug / "sid-contained"
+        append_event(_art_event("prepare", "feat-c", ["/c.md"], "2026-06-25T01:00:00Z"))
+        r = _run_cli("resolve-artifacts", "--session-dir", str(session_dir),
+                     "--feature", "feat-c")
+        assert r.returncode == _EXIT_OK, (
+            f"legit contained session-dir must pass; rc={r.returncode} "
+            f"stderr={r.stderr!r}")
+        assert json.loads(r.stdout) == {"prepare": ["/c.md"]}
+
+    def test_out_of_tree_session_dir_rejected_exit2_empty_stdout(
+        self, tmp_path, monkeypatch):
+        """An ABSOLUTE --session-dir OUTSIDE the pact-sessions root is bad input
+        -> exit 2 + EMPTY stdout + stderr diagnostic, so a stray journal under
+        an unrelated directory is never read. Non-vacuity: with the containment
+        check reverted, read_events_from would simply return [] -> '{}' at exit
+        0, so asserting exit 2 here goes RED on revert."""
+        self._configure_root(tmp_path, monkeypatch)
+        # Absolute (clears the non-empty + absolute checks) but NOT under
+        # <tmp>/.claude/pact-sessions — must be rejected by containment.
+        outside = tmp_path / "outside-tree" / "sid-x"
+        r = _run_cli("resolve-artifacts", "--session-dir", str(outside),
+                     "--feature", "feat-c")
+        assert r.returncode == _EXIT_UNRESOLVED, (
+            f"out-of-tree session-dir must be exit 2; rc={r.returncode} "
+            f"stderr={r.stderr!r}")
+        assert r.stdout == "", "exit-2 path must emit EMPTY stdout"
+        assert "pact-sessions root" in r.stderr
+
+
+# =============================================================================
+# (9) _parse_ts TRAILING-Z ANCHOR — only a SINGLE trailing `Z` is rewritten to
+#     `+00:00`; an interior `Z` is left intact (a blanket replace-all would
+#     mangle it mid-string). The string-level normalization is isolated in
+#     _normalize_trailing_z so the trailing-only anchor is directly testable —
+#     at the _parse_ts return/raise layer the two forms are observationally
+#     identical (any interior Z is unparseable either way).
+# =============================================================================
+class TestParseTsTrailingZAnchor:
+    def test_trailing_z_parses_as_utc_no_regression(self):
+        """A legit trailing-Z ts parses to the SAME UTC-aware instant as its
+        explicit `+00:00` spelling — the anchor preserves the normal-path
+        behavior (and the pre-3.11 trailing-Z support fromisoformat lacked)."""
+        assert _parse_ts("2026-06-25T01:00:00Z") == _parse_ts(
+            "2026-06-25T01:00:00+00:00")
+        assert _parse_ts("2026-06-25T01:00:00Z").utcoffset().total_seconds() == 0
+
+    def test_only_trailing_z_normalized_interior_preserved(self):
+        """The anchor rewrites ONLY the final `Z`; interior `Z`s are left
+        intact. A multi-`Z` string is the discriminator: trailing-only touches
+        just the last one. RED-on-revert: the old blanket `.replace("Z",
+        "+00:00")` rewrites EVERY `Z` -> '2026+00:0006+00:0001+00:00', so this
+        equality flips RED under the revert."""
+        assert _normalize_trailing_z("2026Z06Z01Z") == "2026Z06Z01+00:00"
+        # A string with NO trailing Z is returned byte-for-byte unchanged.
+        assert _normalize_trailing_z(
+            "2026-06-25T00:00:00+00:00") == "2026-06-25T00:00:00+00:00"

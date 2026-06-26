@@ -130,13 +130,23 @@ def _resolve_artifacts(session_dir: str, feature: str) -> int:
     safe) and applies the supersede-by-(workflow, feature)-latest-ts dedup via
     resolve_latest_artifacts. Prints a single-line JSON object
     `{workflow: [abs_path, ...]}` (empty -> `{}`) to stdout and returns 0.
-    Returns 2 on an empty or non-absolute --session-dir (a bad-input stop
-    trigger), mirroring session_journal's read checks but remapped to this
-    CLI's exit-2 contract.
+    Returns 2 on an empty, non-absolute, or out-of-tree --session-dir (a
+    bad-input stop trigger): the empty/non-absolute checks mirror
+    session_journal's read checks (remapped to this CLI's exit-2 contract),
+    and the containment check (see `_session_dir_is_contained`) rejects any
+    path outside the pact-sessions root so a stray journal under an unrelated
+    directory cannot be read.
     """
     rc = _validate_session_dir_arg(session_dir)
     if rc != _EXIT_OK:
         return rc
+
+    if not _session_dir_is_contained(session_dir):
+        print(
+            "pact_harvest: --session-dir is outside the pact-sessions root",
+            file=sys.stderr,
+        )
+        return _EXIT_UNRESOLVED
 
     # Lazy dual-import (package path for hooks/tests, bare for direct-script).
     try:
@@ -178,6 +188,40 @@ def _validate_session_dir_arg(session_dir: str) -> int:
         )
         return _EXIT_UNRESOLVED
     return _EXIT_OK
+
+
+def _session_dir_is_contained(session_dir: str) -> bool:
+    """Return True iff `session_dir` resolves UNDER the pact-sessions root.
+
+    Defense-in-depth on top of `_validate_session_dir_arg`: a --session-dir
+    outside `<config>/pact-sessions/` has no legitimate journal, so reading one
+    there would surface an unrelated `session-journal.jsonl`. The root derives
+    from `get_claude_config_dir()` — the env-or-home SSOT in shared/paths.py,
+    never a hardcoded `~/.claude` — so it tracks $CLAUDE_CONFIG_DIR. Both the
+    root and the candidate are `.resolve()`d (symlink-normalized) and compared
+    via `Path.parents` containment, mirroring `_build_session_path`'s own
+    traversal guard: a legit `<config>/pact-sessions/<slug>/<id>` (two levels
+    under the root) always passes; only an out-of-tree path is rejected.
+
+    Fail-CLOSED (return False -> the caller's exit-2 bad-input path) when the
+    root cannot be derived (`get_claude_config_dir()` -> `Path.home()` can
+    raise RuntimeError) or either `.resolve()` raises (OSError on a symlink
+    loop, ValueError on an embedded NUL): an unverifiable path is treated as
+    bad input rather than read blindly. This is theoretical on the live path —
+    Step 0 already resolved the same root to PRODUCE the session_dir.
+    """
+    # Lazy dual-import (package path for hooks/tests, bare for direct-script).
+    try:
+        from shared.paths import get_claude_config_dir
+    except ImportError:  # pragma: no cover - exercised via direct-script run
+        from paths import get_claude_config_dir  # type: ignore[no-redef]
+
+    try:
+        root = (get_claude_config_dir() / "pact-sessions").resolve()
+        candidate = Path(session_dir).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return candidate == root or root in candidate.parents
 
 
 def main() -> int:
@@ -231,9 +275,12 @@ def main() -> int:
 
     if args.command == "resolve-session-dir":
         return _resolve_session_dir(args.context_file)
-    if args.command == "resolve-artifacts":
-        return _resolve_artifacts(args.session_dir, args.feature)
-    return _EXIT_INTERNAL_ERROR
+    # `sub.required = True` guarantees the only remaining choice is
+    # resolve-artifacts; argparse exits 2 before main() runs for any missing or
+    # unknown subcommand, so this fall-through is exhaustive. An uncaught
+    # exception inside a handler is what yields the `_EXIT_INTERNAL_ERROR` (1)
+    # contract — Python's default exit on an unhandled exception.
+    return _resolve_artifacts(args.session_dir, args.feature)
 
 
 if __name__ == "__main__":

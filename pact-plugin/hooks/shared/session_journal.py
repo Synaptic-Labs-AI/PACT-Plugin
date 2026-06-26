@@ -693,7 +693,11 @@ def resolve_latest_artifacts(
 
     Defensive: non-dict entries and events missing `workflow`/`feature`/
     `paths` are skipped (parity with the `_read_events_at` `isinstance(...,
-    dict)` guard). Timestamp handling is FAIL-OPEN (see `_ts_supersedes`): a
+    dict)` guard), and any non-string element inside a surviving event's
+    `paths` list is dropped from the emitted list (the same isinstance-guard
+    discipline applied at element granularity, so a malformed path entry can
+    never flow through to the JSON output). Timestamp handling is FAIL-OPEN
+    (see `_ts_supersedes`): a
     missing/unparseable `ts` on a candidate does not let it supersede a
     well-formed incumbent, and an unresolved incumbent ts is replaced by any
     well-formed candidate. A pair of parseable-but-incomparable timestamps
@@ -710,7 +714,8 @@ def resolve_latest_artifacts(
     Returns:
         `{workflow: paths}` — one key per workflow with a surviving event,
         valued by that workflow's superseded (latest-`ts`, last-wins on a
-        tie) complete path-list. Empty dict if no event matches.
+        tie) complete path-list, with any non-string element filtered out.
+        Empty dict if no event matches.
     """
     latest_by_workflow: dict[str, dict[str, Any]] = {}
     for event in events:
@@ -726,7 +731,7 @@ def resolve_latest_artifacts(
         if prior is None or _ts_supersedes(event.get("ts"), prior.get("ts")):
             latest_by_workflow[workflow] = event
     return {
-        workflow: event["paths"]
+        workflow: [p for p in event["paths"] if isinstance(p, str)]
         for workflow, event in latest_by_workflow.items()
     }
 
@@ -770,8 +775,25 @@ def _ts_supersedes(candidate_ts: Any, incumbent_ts: Any) -> bool:
         return False
 
 
+def _normalize_trailing_z(value: Any) -> str:
+    """Rewrite a SINGLE trailing `Z` UTC designator to `+00:00`, leaving any
+    interior `Z` intact.
+
+    The anchor is TRAILING-ONLY (`str.endswith`, no `re` dependency): an
+    interior `Z` is not a valid ISO-8601 field, so leaving it intact lets the
+    downstream `fromisoformat` reject the whole string rather than a blanket
+    `.replace("Z", "+00:00")` rewriting it mid-string. On `_parse_ts`'s
+    return/raise the trailing-only and replace-all forms are observationally
+    identical (any interior `Z` is unparseable either way); the anchor matters
+    at the STRING layer, which this helper isolates and makes testable.
+    """
+    s = str(value)
+    return s[:-1] + "+00:00" if s.endswith("Z") else s
+
+
 def _parse_ts(value: Any) -> datetime:
-    """Parse an ISO-8601 timestamp, normalizing a trailing `Z` to `+00:00`.
+    """Parse an ISO-8601 timestamp, normalizing a trailing `Z` to `+00:00`
+    (via `_normalize_trailing_z`).
 
     `make_event` stamps `ts` as `...Z` while `canonical_since()` emits
     `...+00:00`; normalizing lets the two compare as equal-instant
@@ -780,7 +802,7 @@ def _parse_ts(value: Any) -> datetime:
     `Z` ts. Raises ValueError/TypeError on missing/malformed input; callers
     decide the fail-open policy.
     """
-    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return datetime.fromisoformat(_normalize_trailing_z(value))
 
 
 def _ts_ge(event_ts: Any, since: str | None) -> bool:
