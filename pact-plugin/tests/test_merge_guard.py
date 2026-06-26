@@ -4857,20 +4857,24 @@ class TestOperationScoping:
         token = {}
         assert not _token_matches_command(token, "gh pr merge 42")
 
-    def test_merge_token_does_not_authorize_force_push(self):
-        """#1032 CLOSURE (was allow-through): a merge token must NOT authorize a
-        cross-op force-push (operation-type axis mismatch -> REFUSE)."""
+    def test_untyped_pr_context_token_denies_any_command(self):
+        """#1032 CLOSURE (was allow-through, A1/A2 read-floor): an UNTYPED token
+        (pr_number present but NO operation_type) authorizes NOTHING. The old
+        read fell open for op_type=None (skipped the typed cross-op guard, then
+        terminal-allowed); the fix denies on the op-type axis. Op-LESS so it is
+        genuinely C2-coupled (revert C2 -> the untyped token authorizes -> RED)."""
         from merge_guard_pre import _token_matches_command
 
-        token = {"context": {"operation_type": "merge", "pr_number": "42"}}
+        token = {"context": {"pr_number": "42"}}
         assert not _token_matches_command(token, "git push --force origin main")
 
-    def test_branch_token_does_not_authorize_merge(self):
-        """#1032 CLOSURE (was allow-through): a branch-delete token must NOT
-        authorize a cross-op gh pr merge (operation-type axis mismatch)."""
+    def test_untyped_branch_context_token_denies_any_command(self):
+        """#1032 CLOSURE (was allow-through, A1/A2 read-floor): an UNTYPED token
+        (branch present but NO operation_type) authorizes NOTHING. Op-LESS so it
+        is C2-coupled (revert C2 -> the untyped token authorizes -> RED)."""
         from merge_guard_pre import _token_matches_command
 
-        token = {"context": {"operation_type": "branch-delete", "branch": "old"}}
+        token = {"context": {"branch": "old"}}
         assert not _token_matches_command(token, "gh pr merge 42")
 
     def test_mismatched_token_blocks_in_check_merge_authorization(self, tmp_path):
