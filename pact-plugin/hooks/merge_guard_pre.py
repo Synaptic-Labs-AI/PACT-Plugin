@@ -55,7 +55,7 @@ try:
         USE_MARKER_SUFFIX,
         cleanup_consumed_tokens as _cleanup_consumed_tokens,
         cleanup_orphan_tokens as _cleanup_orphan_tokens,
-        detect_command_operation_type,
+        extract_command_context,
         # Regex prefix constants relocated to shared so the read-side
         # DANGEROUS_PATTERNS bank and the shared classifier compose against
         # identical prefix semantics (#720 Bug B).
@@ -67,6 +67,11 @@ try:
         _GH_API_PREFIX,
         _GH_PR_MERGE_RE,
         _GH_PR_CLOSE_RE,
+        # PR-number extraction relocated to shared (the SSOT extract_command_context
+        # owns command-context derivation). _GH_PR_NUMBER_RE and _extract_pr_number
+        # are re-exported here for the existing test imports.
+        _GH_PR_NUMBER_RE,
+        _extract_pr_number,
         # Bound for the inline httpie global-flag walks below (#1001).
         _MAX_GLOBAL_FLAG_TOKENS,
     )
@@ -191,39 +196,11 @@ try:
     re.compile(_GIT_PREFIX + r"push\s+(?:-\S+\s+){0,%d}\S+\s+master(?!:)\b" % _MAX_GLOBAL_FLAG_TOKENS),
 ]
 
-    # _GH_PR_MERGE_RE and _GH_PR_CLOSE_RE relocated to shared.merge_guard_common
-    # (used only by the operation-type classifier, now also relocated). They
-    # are imported back into this module at the top so any direct callers in
-    # this file continue to resolve them.
-
-    # PR number extraction: allows optional subcommand flags (e.g., --admin, --squash)
-    # between merge/close and the PR number.
-    #
-    # Both flag-walks (between `gh` and `pr`, AND between subcommand and PR
-    # number) use the tight `_GH_FLAG_TOKENS` form. The earlier broad
-    # `_GH_GLOBAL_FLAGS` form on the pre-subcommand walk allowed greedy
-    # consumption past a `gh pr <subcmd> <PR>` substring inside `--body
-    # "..."` text, then re-anchoring at a SECOND `gh pr <subcmd>` occurrence
-    # embedded in the body. That re-anchor permitted an authorization-bypass
-    # attack where the body text contained `gh pr merge <fake_PR>` and the
-    # token-context check matched against the embedded fake PR number rather
-    # than the real positional. Restricting both walks to flag-shaped tokens
-    # only prevents the engine from walking past the real positional into
-    # quoted body content.
-    #
-    # The trailing `(?![\w-])` rejects BOTH alphanumeric-suffix tokens
-    # (e.g., `7352abc`) AND hyphen-suffix tokens (e.g., `7352-tests`).
-    # Python `\b` is a word-boundary that DOES match at digit-to-hyphen
-    # (because `-` is a non-word character), so a plain `\b` would
-    # incorrectly capture `7352` from `7352-tests` (a branch-name argument
-    # to `gh pr merge`). The negative-lookahead form `(?![\w-])` is
-    # strictly stronger: it rejects any continuation that is a word char
-    # OR a hyphen, which closes the branch-name suffix-match case while
-    # preserving rejection of the alphanumeric-suffix case.
-    _GH_PR_NUMBER_RE = re.compile(
-        r"\bgh\s+" + _GH_FLAG_TOKENS + r"pr\s+(?:merge|close)\s+"
-        + _GH_FLAG_TOKENS + r"(\d+)(?![\w-])"
-    )
+    # _GH_PR_MERGE_RE, _GH_PR_CLOSE_RE, and _GH_PR_NUMBER_RE relocated to
+    # shared.merge_guard_common (the operation-type classifier + PR-number
+    # extraction that the shared extract_command_context owns). All are
+    # imported back into this module at the top so direct callers here — and
+    # the test imports — continue to resolve them.
 except BaseException as _pattern_compile_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_deny("pattern compilation", _pattern_compile_error)
 
@@ -321,20 +298,6 @@ def _has_command_substitution(quoted_content: str) -> bool:
     Single-quoted strings never have substitution (handled separately).
     """
     return "$(" in quoted_content or "`" in quoted_content
-
-
-def _strip_surrounding_quotes(token: str) -> str:
-    """Strip one layer of matching surrounding quotes from a captured CLI
-    token. ``'feat/x'`` -> ``feat/x``, ``"feat/x"`` -> ``feat/x``. Leaves an
-    unquoted or mismatched-quote token unchanged. Used so a branch token
-    minted from unquoted question prose matches a command that quotes the
-    branch argument (and vice versa). Comparison-side normalization only —
-    it does NOT widen what the matcher regex captures, so it cannot
-    introduce a false-negative.
-    """
-    if len(token) >= 2 and token[0] == token[-1] and token[0] in ("'", '"'):
-        return token[1:-1]
-    return token
 
 
 def _strip_non_executable_content(command: str) -> str:
@@ -1033,138 +996,81 @@ def _consume_token(token_path: str, max_uses_default: int = 1) -> bool:
     return False
 
 
-# Allowlist of `gh pr merge|close` long-form flags KNOWN to take a value.
-# The F3 defensive check only rejects digits preceded by one of these
-# value-taking flags (avoiding false-positives on value-less flags like
-# `--admin`, `--auto`, `--squash` whose positional digit IS the PR).
-#
-# As of `gh` v2 (2026-04 baseline), no real `gh pr merge|close` flag
-# takes a digit value; this allowlist is a forward-compatible defense
-# for hypothetical future flags. `--max-retries` is the canonical
-# example cited in the F3 review (test-engineer-2). Extend this list
-# when `gh` ships a flag that takes a numeric value.
-_GH_PR_VALUE_TAKING_FLAGS = frozenset({
-    # Known string/path-value flags from `gh pr merge --help` /
-    # `gh pr close --help`. Listed here for forward-compat: if any of
-    # these were given a digit value (e.g. `--subject 123`), the
-    # defensive check correctly rejects the digit-as-flag-value capture.
-    "--body",
-    "--body-file",
-    "--subject",
-    "--author-email",
-    "--match-head-commit",
-    "--comment",
-    # Hypothetical future flags. Add here when gh ships one.
-    "--max-retries",
-    "--retry-count",
-    "--timeout",
-})
+# _GH_PR_VALUE_TAKING_FLAGS and _extract_pr_number relocated to
+# shared.merge_guard_common (the shared extract_command_context owns PR-number
+# extraction); _extract_pr_number is imported back at the top of this module.
 
 
-def _extract_pr_number(command: str) -> str | None:
-    """Extract the PR number positional from a `gh pr merge|close` command.
+def _both_present_equal(token_val: object, cmd_val: object) -> bool:
+    """True iff BOTH values are present (not None) and string-equal.
 
-    Wraps `_GH_PR_NUMBER_RE.search()` with a defensive post-extract check
-    that rejects digits which are actually the VALUE of an immediately-
-    preceding value-taking long-form flag (e.g., `--max-retries 5`).
-
-    The defensive check is narrowly scoped to flags in
-    `_GH_PR_VALUE_TAKING_FLAGS`. Value-less flags like `--admin`,
-    `--auto`, `--squash` do NOT trigger the check — a digit immediately
-    after one of them IS the PR positional. This avoids the false-
-    negative class where a real PR positional after a value-less flag
-    would be incorrectly rejected.
-
-    No current `gh pr merge|close` flag takes a digit value, so the
-    realistic risk is theoretical — but this is defense-in-depth post
-    the cycle-3 strict-match enforcement: a typed token would otherwise
-    compare against the wrong digit and emit a confusing
-    "does-not-match" deny. Returning None here lets the comparison fall
-    through to the ambiguous-permissive path on the pr_number axis
-    (op_type strict-match still applies).
+    The positive-match primitive for the fail-closed read predicate: either
+    side absent -> False, so an unextractable target REFUSES rather than falls
+    through permissively. String comparison normalizes a numeric pr_number
+    stored as int/str on either side.
     """
-    match = _GH_PR_NUMBER_RE.search(command)
-    if not match:
-        return None
-    pr_pos = match.start(1)
-    # Inspect the immediately-preceding token for a known value-taking
-    # long-form flag. Match captures the flag name (without trailing
-    # whitespace) so we can look it up in the allowlist.
-    preceding = command[:pr_pos].rstrip()
-    flag_match = re.search(r"(--[\w-]+)$", preceding)
-    if flag_match and flag_match.group(1) in _GH_PR_VALUE_TAKING_FLAGS:
-        return None
-    return match.group(1)
+    if token_val is None or cmd_val is None:
+        return False
+    return str(token_val) == str(cmd_val)
 
 
 def _token_matches_command(token: dict, command: str) -> bool:
-    """Check if a token's context is consistent with the command being executed.
+    """Check that a token's context POSITIVELY matches the command being executed.
 
-    If the token has specific context (PR number, branch name, operation type),
-    verify the command matches. If parsing is ambiguous or no context is
-    available, allow through to avoid false negatives.
+    Fail-closed (the #1031/#1032 mint-vs-read symmetry fix): the read side
+    authorizes ONLY when the token and the command-derived context agree on
+    BOTH the operation type AND that operation's target. Any axis that is
+    unextractable, absent, or mismatched -> REFUSE. There is NO terminal allow:
+    a malformed context, an untyped token, an unrecognized command shape, or a
+    missing target all deny (the operator re-approves via AskUserQuestion). This
+    closes the prior fall-through that let an untyped or target-less token
+    authorize an unrelated destructive command (e.g. token{op=None} authorizing
+    `git push --force origin main`).
+
+    The command is classified via the shared `extract_command_context` SSOT, so
+    the read side derives (op, target) the SAME way the mint side does — the two
+    arms cannot drift.
 
     Args:
         token: Token data dict with optional context fields
         command: The bash command being authorized
 
     Returns:
-        True if the command is consistent with the token's context (or ambiguous)
+        True ONLY when the operation type and the op's target both positively
+        match; False otherwise.
     """
     context = token.get("context", {})
     if not isinstance(context, dict):
-        return True  # Malformed context — allow through
+        return False  # F-READ-1: a non-dict context proves nothing — REFUSE
 
-    pr_number = context.get("pr_number")
-    branch = context.get("branch")
-    token_op_type = context.get("operation_type")
+    token_op = context.get("operation_type")
+    cmd = extract_command_context(command)
+    cmd_op = cmd.get("operation_type")
 
-    # Cross-operation authorization guard: a typed token (one with a known
-    # operation_type) MUST match the command's detected operation type, OR
-    # the command shape is unrecognized. Symmetric coverage —
-    # `detect_command_operation_type` recognizes all four classes
-    # (merge / close / force-push / branch-delete) so a missing cmd_op_type
-    # means the destructive shape is outside the recognized set, not a
-    # legitimate "untyped" path. Refuse the cross-op authorization rather
-    # than fall through permissively (the prior fall-through let
-    # token{op=merge} authorize `git push --force` because cmd_op_type was
-    # None — closed by extending the detector + tightening this check).
-    #
-    # Untyped tokens (no operation_type — only shipped pre-cycle-2; should
-    # not occur post-#700 sparse-context guard at write time) still fall
-    # through to the pr_number/branch checks for backward compatibility.
-    if token_op_type:
-        cmd_op_type = detect_command_operation_type(command)
-        if cmd_op_type is None or token_op_type != cmd_op_type:
-            return False
+    # (a) Operation-type axis — both present AND equal, else REFUSE. A token with
+    # operation_type=None (or a command whose destructive shape is unrecognized)
+    # can NEVER authorize: this denies the untyped-token fall-through (the A1/A2
+    # hole) on the read axis rather than skipping the guard for it.
+    if token_op is None or cmd_op is None or token_op != cmd_op:
+        return False
 
-    # If token has a PR number, check gh pr merge/close commands match.
-    # Use _extract_pr_number for the defensive long-flag-value check so a
-    # token's pr_number is not compared against a flag-value digit
-    # (e.g., the `5` in `gh pr merge --max-retries 5 --auto`).
-    if pr_number:
-        cmd_pr = _extract_pr_number(command)
-        if cmd_pr is not None:
-            return cmd_pr == str(pr_number)
+    # (b) Target axis, per op-class — require a POSITIVE, command-anchored target
+    # match. Unextractable or mismatched target -> REFUSE (over-block is the safe
+    # #1031 direction; the read side never under-blocks #1032).
+    if token_op in ("merge", "close"):
+        return _both_present_equal(context.get("pr_number"), cmd.get("pr_number"))
+    if token_op == "branch-delete":
+        return _both_present_equal(context.get("branch"), cmd.get("branch"))
+    if token_op == "force-push":
+        # KD-6 (SECURITY-RATIFICATION-PENDING): the destination ref must match
+        # explicitly — an op-type-only floor would let a 'force-push feature'
+        # approval authorize 'force-push main'. An implicit/multi-ref/unparseable
+        # ref is ABSENT in extract_command_context, so this REFUSES it.
+        return _both_present_equal(context.get("target_ref"), cmd.get("target_ref"))
 
-    # If token has a branch, check branch deletion commands match.
-    # Normalize surrounding quotes on the captured name so a token branch
-    # `feat/x` matches a command written `git branch -D 'feat/x'`. The
-    # capture stays `(\S+)`; only the comparison is normalized (no
-    # regex-widening = no false-negative risk).
-    if branch:
-        branch_d_match = re.search(_GIT_PREFIX + r"branch\s+.*-D\s+(\S+)", command)
-        if branch_d_match:
-            return _strip_surrounding_quotes(branch_d_match.group(1)) == branch
-        branch_delete_match = re.search(
-            _GIT_PREFIX + r"branch\s+.*--delete\s+(?:--force\s+)?(\S+)", command
-        )
-        if branch_delete_match:
-            return _strip_surrounding_quotes(branch_delete_match.group(1)) == branch
-
-    # No specific context to validate against, or command type doesn't match
-    # context type — allow through (ambiguous is permissive)
-    return True
+    # Unknown op-class (a typed token whose op is not one of the four handled
+    # classes) — REFUSE. No terminal allow exists on the read path.
+    return False
 
 
 def check_merge_authorization(command: str, token_dir: Path | None = None) -> str | None:
@@ -1215,16 +1121,32 @@ def check_merge_authorization(command: str, token_dir: Path | None = None) -> st
                 "Use AskUserQuestion to get approval again."
             )
         else:
-            # Token exists but doesn't match this command — don't consume it,
-            # block the mismatched command
+            # Token exists but its approved operation does not match this
+            # command — don't consume it; block the mismatched command. Guide
+            # the operator to re-approve with the literal command embedded so
+            # the approved and executed commands are identical. NEVER suggest
+            # running the bare command or simplifying the question (that would
+            # teach guard evasion).
             return (
-                "Authorization token exists but does not match this operation. "
-                "Use AskUserQuestion to get approval for this specific operation."
+                "An authorization token exists but its approved operation does "
+                "not match this command. The approved command and the executed "
+                "command must be identical. Re-approve via AskUserQuestion with "
+                "the literal command embedded in the selected option (e.g. "
+                "`gh pr merge <N>`, the real PR number) so the guard binds the "
+                "approval to this exact command."
             )
 
+    # No token at all — require a fresh approval. Same guidance: embed the
+    # literal command in the approval; never instruct running the bare command
+    # or reducing the question. A channel/headless session has no
+    # AskUserQuestion, so the operator approves the operation interactively
+    # (a correct, expected over-block — documented here so it is not confusing).
     return (
-        "Merge/close/force-push/branch-delete requires user approval via AskUserQuestion. "
-        "Use AskUserQuestion to confirm with the user before proceeding."
+        "Merge/close/force-push/branch-delete requires user approval. Re-approve "
+        "via AskUserQuestion with the literal command embedded in the selected "
+        "option (e.g. `gh pr merge <N>`, the real PR number) so the guard can "
+        "bind the approval to this exact command. In a channel/headless session "
+        "where AskUserQuestion is unavailable, approve the operation interactively."
     )
 
 

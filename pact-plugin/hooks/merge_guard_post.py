@@ -92,66 +92,60 @@ try:
         cleanup_consumed_tokens as _cleanup_consumed_tokens,
         cleanup_unused_tokens as _cleanup_unused_tokens,
         detect_command_operation_type,
+        extract_command_context,
+        locate_command_region,
+        locate_command_regions,
     )
     from shared.tool_response import extract_tool_response
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-loud catch-all
     _emit_load_failure_alert("module imports", _module_load_error)
 
 
-# Regex for a quoted-command region inside question prose. Tries
-# backticks first (most common), then single quotes, then double quotes.
-# Captures the content. The question prose is short and single-line in
-# practice; no DOTALL needed.
-#
-# When the AskUserQuestion text embeds the literal command in a quoted
-# region (e.g., `gh pr merge 42` or 'git branch -D feat/x'), the
-# read-side classifier shared.detect_command_operation_type is applied
-# to the embedded command — guaranteeing the write-side and read-side
-# classifications agree on the SAME input. This is the canonical
-# operation-type path; the keyword-ladder fallback in extract_context()
-# only fires when no quoted region matched (#720 Bug B).
-_QUOTED_COMMAND_RE = re.compile(
-    r"`([^`]+)`"        # backticks: `git push origin main`
-    r"|'([^']+)'"       # single quotes: 'git push origin main'
-    r'|"([^"]+)"'       # double quotes: "git push origin main"
-)
-
-
-def _classify_from_quoted_command(question: str) -> str | None:
-    """Find a quoted command region in question prose and classify it
-    via shared.detect_command_operation_type.
-
-    Returns the op_type literal (merge/close/force-push/branch-delete)
-    or None if no quoted region matched a destructive shape.
-
-    Tries each quoted region in document order; returns the first
-    non-None classification. This makes embedding the command-literal in
-    the question prose the AUTHORITATIVE classifier path. The keyword
-    ladder in extract_context() is the fallback for questions that omit
-    the embedded command (legacy or non-conforming orchestrator prose).
-    """
-    for match in _QUOTED_COMMAND_RE.finditer(question):
-        candidate = match.group(1) or match.group(2) or match.group(3)
-        if not candidate:
-            continue
-        op_type = detect_command_operation_type(candidate)
-        if op_type is not None:
-            return op_type
-    return None
+# Command-region finding is owned by the shared SSOT (locate_command_regions /
+# locate_command_region in merge_guard_common): both arms locate + classify the
+# SAME command string, so the mint and read sides cannot drift. The former
+# post-local _QUOTED_COMMAND_RE / _classify_from_quoted_command are subsumed.
 
 # When the hook allows a command (exits 0), output this JSON so the Claude Code
 # UI suppresses the hook display instead of showing "hook error (No output)".
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
-# Keywords that indicate a merge-related question
-MERGE_KEYWORDS = re.compile(
-    r"merge|close\s+(?:pr|pull\s*request)|(?:pr|pull\s*request)\s+close|"
-    r"gh\s+pr\s+close|force[\s-]?push|delete[\s-]?branch|branch[\s-]?-[dD]|"
-    r"branch\s+--delete|--force|git\s+push\s+-f",
+# Conservative decline/defer recognizer — the SACROSANCT mint veto wordset.
+# Whole-word, case-insensitive; phrases allow flexible internal whitespace. BROAD
+# by design (#933 over-block-not-under-block): a false veto refuses a legitimate
+# approval (#1031 direction — the operator simply re-approves), whereas a MISSED
+# veto would mint a token the operator declined or deferred (#1032 — an
+# irreversible destructive op authorized against their intent). Catches the
+# convention's own decline-option labels ("Continue reviewing", "Pause work for
+# now") and the deferral free-text answers ("approve later", "review first",
+# "once tests pass", "after I check CI"). The C4-template author keeps the
+# affirmative option's command literal clear of every token below.
+_DECLINE_DEFER_RE = re.compile(
+    r"\b(?:"
+    r"cancel|abort|reject|decline|deny|stop|no|nope|never|skip|don'?t|"      # decline
+    r"later|wait|hold|pause|reviewing|review|postpone|defer|pending|once|after|"  # defer
+    r"not\s+yet|review\s+first|hold\s+off|for\s+now"                          # phrases
+    r")\b",
     re.IGNORECASE,
 )
 
-# Patterns that indicate an affirmative user answer
+# Op-keyword patterns for the label<->description CONSISTENCY check (D / 1c).
+# Derives ONLY the operation type from an option LABEL's prose — never a target (a
+# loose label-derive re-imports the #1031 distractor trap). Order mirrors
+# detect_command_operation_type precedence (close before merge; force-push and
+# branch-delete keyed on their syntactic words).
+_LABEL_OP_PATTERNS = (
+    ("close", re.compile(r"\bclose\b", re.IGNORECASE)),
+    ("force-push", re.compile(r"\bforce[\s-]?push\b", re.IGNORECASE)),
+    ("branch-delete", re.compile(r"\b(?:delete[\s-]?branch|branch[\s-]?delete)\b", re.IGNORECASE)),
+    ("merge", re.compile(r"\bmerge\b", re.IGNORECASE)),
+)
+
+# Patterns that indicate an affirmative FREE-TEXT answer. Used ONLY by the
+# free-text arm (an AskUserQuestion with no options); OPTION-mode approval is an
+# exact label match against a non-decline option, never a word allowlist — so a
+# descriptive selected label like "Merge now" is honored (the old allowlist
+# wrongly rejected it). The decline/defer veto runs first and takes precedence.
 AFFIRMATIVE_PATTERNS = re.compile(
     r"^(y|yes|yeah|yep|sure|ok|okay|confirm|approved?|go\s*ahead|do\s*it|proceed)\b",
     re.IGNORECASE,
@@ -159,15 +153,22 @@ AFFIRMATIVE_PATTERNS = re.compile(
 
 
 def is_merge_question(question: str) -> bool:
-    """Check if the question text is about a merge-related operation.
+    """Command-driven COARSE HINT (KD-9): True iff the text embeds a recognized
+    destructive command (gh/git merge / close / force-push / branch-delete) that
+    the shared classifier identifies via locate_command_region.
+
+    This is NOT a keyword matcher and NOT the security gate — terse prose with no
+    embedded command no longer false-fires, and an over-fire is harmless (no
+    located command → no mint). The boundary is the option-command + decline veto
+    + read-side fail-closed predicate, not question prose.
 
     Args:
         question: The question text from AskUserQuestion
 
     Returns:
-        True if the question contains merge-related keywords
+        True if the text contains a recognized destructive command region.
     """
-    return bool(MERGE_KEYWORDS.search(question))
+    return locate_command_region(question) is not None
 
 
 def is_affirmative(answer: str) -> bool:
@@ -182,84 +183,203 @@ def is_affirmative(answer: str) -> bool:
     return bool(AFFIRMATIVE_PATTERNS.search(answer.strip()))
 
 
-def extract_context(question: str) -> dict:
-    """Extract operation context from the question text.
+def _has_decline_defer(text: object) -> bool:
+    """True if the text contains any decline/defer token (the SACROSANCT veto).
 
-    Symmetry with shared.detect_command_operation_type: if the question
-    embeds a literal command in a quoted region (backticks, single
-    quotes, or double quotes), the SAME classifier the read-side uses is
-    applied — guaranteeing bidirectional agreement when the convention
-    is honored. Falls back to a keyword-ladder classification for
-    legacy/non-conforming prose (#720 Bug B).
+    Scans the SELECTED option's label+description (option mode) or the free-text
+    answer (free-text arm) — never the unselected options, and (for the veto)
+    never the question prose. Non-str / empty text → False (nothing to veto)."""
+    if not isinstance(text, str) or not text:
+        return False
+    return bool(_DECLINE_DEFER_RE.search(text))
 
-    Args:
-        question: The question text
 
-    Returns:
-        Dict with extracted context fields including operation_type
-    """
-    context = {"question_snippet": question[:200]}
+def _derive_op_from_label(label: object) -> str | None:
+    """Derive ONLY the operation type from an option LABEL's prose (op-only — no
+    target). Returns the op literal, or None if the label names no op. Feeds the
+    label<->description consistency check ONLY; never feeds write_token's context
+    (anti-leak boundary: label prose can REFUSE a mint, never AUTHORIZE one)."""
+    if not isinstance(label, str) or not label:
+        return None
+    for op_type, pattern in _LABEL_OP_PATTERNS:
+        if pattern.search(label):
+            return op_type
+    return None
 
-    # Try to extract PR number
-    pr_match = re.search(r"#(\d+)|PR\s*(\d+)|pull\s*request\s*(\d+)", question, re.IGNORECASE)
-    if pr_match:
-        context["pr_number"] = pr_match.group(1) or pr_match.group(2) or pr_match.group(3)
 
-    # Try to extract branch name. Skip any leading option flags (-D,
-    # --delete, --force, -d) that sit between the keyword and the branch
-    # name, so the captured group is the NAME, never a flag token. The
-    # flag-skip group `(?:--?[a-zA-Z][\w-]*\s+)*` consumes zero or more flag
-    # tokens; the name char-class deliberately EXCLUDES a leading '-' by
-    # requiring the first char to be a name char, so a flag can never be
-    # captured as a name. Runs on the RAW question (re.IGNORECASE handles an
-    # uppercase -D) — NOT lowercased; the keyword ladder below is the part
-    # that runs on question_lower.
-    branch_match = re.search(
-        r"branch\s+(?:--?[a-zA-Z][\w-]*\s+)*['\"]?([a-zA-Z0-9/_.][a-zA-Z0-9/_.-]*)['\"]?|"
-        r"merge\s+(?:--?[a-zA-Z][\w-]*\s+)*['\"]?([a-zA-Z0-9/_.][a-zA-Z0-9/_.-]*)['\"]?",
-        question,
-        re.IGNORECASE,
+def _selected_option_text(options: object, answer: object) -> str | None:
+    """Return "<label> <description>" of the option whose label EXACTLY matches
+    the answer (option mode), or None when there are no options, no exact-label
+    match, or the inputs are malformed. Labels are unique within a question (AUQ
+    contract); the byte-equal match is the D3 source-guarantee (no fuzzy match)."""
+    if not isinstance(options, list) or not options:
+        return None
+    if not isinstance(answer, str):
+        return None
+    for opt in options:
+        if not isinstance(opt, dict):
+            continue
+        label = opt.get("label")
+        if not isinstance(label, str) or label != answer:
+            continue
+        description = opt.get("description")
+        description = description if isinstance(description, str) else ""
+        return (label + " " + description).strip()
+    return None
+
+
+def _target_value(cmd_ctx: dict) -> str | None:
+    """The op-class target value (pr_number / branch / target_ref) from an
+    extracted command context, or None. A located region is a COMPLETE
+    (op, target) pair only when this is non-None — an op without a target
+    contributes NO pair to the multiplicity gate."""
+    return (
+        cmd_ctx.get("pr_number")
+        or cmd_ctx.get("branch")
+        or cmd_ctx.get("target_ref")
     )
-    if branch_match:
-        context["branch"] = branch_match.group(1) or branch_match.group(2)
 
-    # Operation type — canonical path: try a quoted-command region first
-    # and delegate to the shared read-side classifier. When this returns
-    # non-None, bidirectional write/read symmetry is guaranteed by
-    # construction (both sides classify the SAME literal command).
-    op_from_quoted = _classify_from_quoted_command(question)
-    if op_from_quoted is not None:
-        context["operation_type"] = op_from_quoted
-    else:
-        # Fallback keyword ladder for prose that omits the quoted command.
-        # Order: close → force-push → branch-delete → merge.
-        # Unambiguous syntactic features (`branch -D`, `--force`, `-f`)
-        # precede the fuzzy bare-word `\bmerge\b`, so prose mentioning
-        # both (e.g., "force-delete the merged feature branch") classifies
-        # by the syntactic feature, not by the appearance of "merged".
-        question_lower = question.lower()
-        if re.search(r"\bclose\b.*(?:pr|pull\s*request)|(?:pr|pull\s*request).*\bclose\b|gh\s+pr\s+close", question_lower):
-            context["operation_type"] = "close"
-        elif re.search(
-            r"force[\s-]?push|push\s+--force|push\s+-f\b|push\s+-[a-z]*f|"
-            # Direct push to a default branch (main/master) is force-push-class:
-            # it bypasses PR review. Mirrors the read-side
-            # detect_command_operation_type push-to-(main|master) classification
-            # so the prose-only ladder agrees with the command classifier. The
-            # `push\b` anchor is mandatory so this does NOT fire on a bare
-            # "main" mention (e.g. "merge PR 42 into main" → merge, not
-            # force-push).
-            r"push\b.*?\b(?:main|master)\b|"
-            r"direct\s+push.*?\b(?:main|master)\b",
-            question_lower,
-        ):
-            context["operation_type"] = "force-push"
-        elif re.search(r"delete[\s-]?branch|branch\s+(?:-d|--delete)\b", question_lower):
-            context["operation_type"] = "branch-delete"
-        elif re.search(r"\bmerge\b", question_lower):
-            context["operation_type"] = "merge"
 
-    return context
+def _collect_pairs(texts: list) -> dict:
+    """Map every COMPLETE (op_type, target) pair found across `texts` to the
+    command region that produced it (locate_command_regions + extract_command_context
+    + _target_value). A region with an op but no target contributes no pair."""
+    pairs: dict = {}
+    for text in texts:
+        for region in locate_command_regions(text):
+            cmd_ctx = extract_command_context(region)
+            op_type = cmd_ctx.get("operation_type")
+            target = _target_value(cmd_ctx)
+            if op_type is not None and target is not None:
+                pairs.setdefault((op_type, target), region)
+    return pairs
+
+
+def _mint_context_from_bundle(questions: list, answers: dict) -> dict | None:
+    """Decide whether an AskUserQuestion bundle authorizes exactly ONE destructive
+    command; return the context dict to mint, or None to refuse.
+
+    Implements the ordered mint flow (blueprint §5.2). The mint runs
+    locate+extract+fail-closed identically on EVERY approval — there is no
+    "matches-template → skip-validation" shortcut.
+
+      1. DECLINE/DEFER GLOBAL VETO — runs FIRST and takes precedence over command
+         presence. Per question: scan the SELECTED option's label+description
+         (option mode), the free-text answer (free-text arm), or (multiSelect)
+         every option's text raw. ANY decline/defer in ANY bundled question
+         refuses the whole mint.
+      0. NO-OPTIONS GUARD — a bundle with no options anywhere has no clicked
+         option to anchor on → return None (free-text / zero-options never mints).
+      2. CLICKED OPTION (option mode, fail-closed) — the mint source is the
+         SELECTED option (exact non-decline label match; no match for a populated
+         answer REFUSES, never falls back to free-text — B-NEW-2). multiSelect is
+         refused as a mint source (still globally decline-scanned).
+      3. MULTIPLICITY [SACROSANCT] — count DISTINCT (op_type, target) pairs across
+         question text ∪ selected options (NOT raw region occurrences): ==1 mints
+         that pair, >1 refuses (divergence), ==0 yields no token.
+      3b. OPTION ANCHORING (#1032 F-REVIEW-1) — the minted (op,target) MUST be
+         carried by a CLICKED option, NOT by question prose alone. Question prose
+         is a divergence signal only, never a sole mint source.
+      4. LABEL<->DESCRIPTION op-consistency (refuse-only) — a selected option
+         whose label names a DIFFERENT op than the minted command vetoes the mint.
+      5. extract_command_context(the single distinct command) → the mint context.
+    """
+    question_texts: list[str] = []
+    selected_option_texts: list[str] = []  # the operator's ACTION SURFACE = the
+    selected_labels: list[str] = []        # CLICKED option(s); free-text never mints
+
+    # EXPLICIT (shape b): a bundle with NO options anywhere has no clicked option
+    # to anchor on → it can NEVER mint. Minting from question prose or a typed
+    # free-text answer would make auth depend on un-clicked text — a forbidden
+    # under-block class (security B-NEW-4 / KD-11(6)). AUQ structurally carries
+    # 2-4 options per question (peer-review.md), so this is fail-closed defense
+    # for a theoretical/replayed no-options payload. The per-question decline/
+    # defer veto still runs below for mixed bundles.
+    #
+    # BACKSTOP — DO NOT remove as "dead code". The step-3b option-anchoring below
+    # already refuses a no-options bundle (an empty option surface yields no pair,
+    # so the minted (op,target) is never ∈ it → None), making this early return
+    # functionally redundant TODAY. It is kept DELIBERATELY so the "free-text /
+    # no-options never mints" rule is STATED here at the top, not left emergent
+    # from a downstream gate that a future edit could weaken without noticing.
+    if not any(
+        isinstance(q, dict) and isinstance(q.get("options"), list) and q.get("options")
+        for q in questions
+    ):
+        return None
+
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+        qtext = q.get("question", "")
+        qtext = qtext if isinstance(qtext, str) else ""
+        question_texts.append(qtext)
+        options = q.get("options", [])
+        options = options if isinstance(options, list) else []
+        multi = bool(q.get("multiSelect", False))
+        # KD-12: key the answer to its SPECIFIC question (no iter-fallback).
+        answer = answers.get(qtext)
+
+        # ── Step 1: decline/defer GLOBAL veto (FIRST, precedence, both arms). ──
+        if options:
+            if multi:
+                # multiSelect: raw-scan every option's text (no comma-split) for a
+                # decline/defer; refused as a mint SOURCE in v1 (over-block-safe).
+                for opt in options:
+                    if isinstance(opt, dict):
+                        if _has_decline_defer(
+                            str(opt.get("label", "")) + " " + str(opt.get("description", ""))
+                        ):
+                            return None
+                continue
+            selected_text = _selected_option_text(options, answer)
+            if _has_decline_defer(selected_text):
+                return None
+        elif _has_decline_defer(answer):
+            return None
+
+        # ── Step 2: resolve the operator's CLICKED option (option mode only). ──
+        if options:
+            # The mint source is the SELECTED option (exact label match). No exact
+            # match for a populated answer → REFUSE; NEVER fall back to free-text
+            # (B-NEW-2). An "Other" freeform answer to an options question matches
+            # no label → also refused here.
+            selected_text = _selected_option_text(options, answer)
+            if selected_text is None:
+                if isinstance(answer, str) and answer:
+                    return None
+                continue  # empty/missing answer → no clicked option for this q
+            selected_option_texts.append(selected_text)
+            selected_labels.append(answer)
+        # else: a no-options (free-text) question contributes NO mint source; its
+        # answer was already decline/defer veto-scanned in Step 1 (and a pure
+        # free-text bundle already returned None at the no-options guard above).
+
+    # ── Step 3: distinct-(op,target) multiplicity over question ∪ selected
+    # options — DIVERGENCE refusal [SACROSANCT]: ==1 mints, >1 refuses, ==0 no
+    # token. ──
+    bundle_pairs = _collect_pairs(question_texts + selected_option_texts)
+    if len(bundle_pairs) != 1:
+        return None
+    (the_op, the_target), the_command = next(iter(bundle_pairs.items()))
+
+    # ── Step 3b: OPTION anchoring (#1032 F-REVIEW-1). The minted (op,target) MUST
+    # be carried by a CLICKED option — NOT by question prose alone. A command found
+    # only in (possibly padded) question text, with a generic clicked option that
+    # carries no command, is REFUSED; an empty option surface (no valid selection)
+    # yields no pair → refuse. Question prose is a divergence signal only, never a
+    # sole mint source. ──
+    if (the_op, the_target) not in _collect_pairs(selected_option_texts):
+        return None
+
+    # ── Step 4: label<->description op-consistency (refuse-only). ──
+    for label in selected_labels:
+        label_op = _derive_op_from_label(label)
+        if label_op is not None and label_op != the_op:
+            return None
+
+    # ── Step 5: extract the single distinct command's context to mint. ──
+    return extract_command_context(the_command)
 
 
 def write_token(context: dict, token_dir: Path | None = None) -> str | None:
@@ -296,6 +416,21 @@ def write_token(context: dict, token_dir: Path | None = None) -> str | None:
             "extractable pr_number, branch, or operation_type — refusing "
             "token write to avoid wildcard-allow against subsequent "
             "destructive commands.",
+            file=sys.stderr,
+        )
+        return None
+
+    # Never mint a token without an operation_type. The read side
+    # (merge_guard_pre._token_matches_command) is fail-closed on op_type and
+    # denies any token whose op_type is absent — so an untyped token could never
+    # authorize a command anyway. Refusing to write it keeps the on-disk token
+    # set free of un-authorizable wildcards (defense-in-depth with the read-side
+    # floor; placed AFTER the #700 sparse-context guard).
+    if not has_op:
+        print(
+            "[security] refusing token write: no operation_type — an untyped "
+            "token cannot positively match any command on the fail-closed read "
+            "side.",
             file=sys.stderr,
         )
         return None
@@ -585,32 +720,31 @@ def main():
             _retire_token_for_command(command, op_type)
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
-        # Fall through to existing AskUserQuestion path.
+        # Fall through to the AskUserQuestion mint path.
 
-        # Extract question from AskUserQuestion schema:
-        # tool_input: {"questions": [{"question": "...", ...}]}
+        # tool_input: {"questions": [{"question": "...", "options": [...], ...}]}
         if not isinstance(tool_input, dict):
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
         questions = tool_input.get("questions", [])
-        if isinstance(questions, list) and len(questions) > 0:
-            first_q = questions[0]
-            question = first_q.get("question", "") if isinstance(first_q, dict) else ""
-        else:
-            question = ""
+        if not isinstance(questions, list) or not questions:
+            print(_SUPPRESS_OUTPUT)
+            sys.exit(0)
 
-        # Extract answer from AskUserQuestion schema:
-        # tool_response: {"answers": {"question_text": "answer_text"}, ...}
-        answers = tool_response.get("answers", {})
-        if isinstance(answers, dict) and answers:
-            # Look up answer by exact question text; fall back to first value
-            answer = str(answers.get(question, next(iter(answers.values()), "")))
-        else:
-            answer = ""
+        # tool_response: {"answers": {"<question text>": "<selected label>"}, ...}
+        answers = tool_response.get("answers", {}) if isinstance(tool_response, dict) else {}
+        if not isinstance(answers, dict):
+            answers = {}
 
-        # Only act on merge-related questions with affirmative answers
-        if question and is_merge_question(question) and answer and is_affirmative(answer):
-            context = extract_context(question)
+        # Mint ONLY when the bundle authorizes exactly one destructive command:
+        # decline/defer veto-first (precedence over command presence), bimodal
+        # fail-closed selection, the SACROSANCT distinct-(op,target)==1
+        # multiplicity gate, and label<->description op-consistency.
+        # _mint_context_from_bundle returns None to refuse (the over-block-safe
+        # #1031 direction); the resulting context is op-typed + target-anchored,
+        # so write_token's fail-closed guards always pass for a real approval.
+        context = _mint_context_from_bundle(questions, answers)
+        if context is not None:
             token_path = write_token(context)
             if token_path:
                 # Defense-in-depth parity with merge_guard_pre.py M-sec-2:
