@@ -545,13 +545,15 @@ class TestMintReadParity:
 
 
 class TestShellRedirectIsolation:
-    """A trailing shell redirect (`2>&1`) is tolerated by the merge/close and
-    branch-delete target extractors (their regexes anchor on the positional and
-    ignore later tokens), but it DEFEATS the conservative force-push ref parser
-    (which counts positionals: `origin main 2>&1` = 3 → unparseable → REFUSE).
-    The over-block is force-push-ISOLATED and is the SAFE #1031 direction (NOT a
-    #1032 under-block). Candidate follow-up (KD-6, security-owned): strip
-    recognized shell redirections before the force-push positional split."""
+    """A trailing shell redirect (`2>&1`) is tolerated by the merge/close target
+    extractor (the pr-number regex anchors on the digit positional and ignores
+    later tokens), but it DEFEATS the positional-counting ref parsers for BOTH
+    force-push (`origin main 2>&1` = 3 positionals → unparseable → REFUSE) AND —
+    post-#30 multi-target hardening — branch-delete (`-D x 2>&1` = 2 positionals
+    → multi-target → REFUSE). Both over-blocks are the SAFE #1031 direction (NOT
+    a #1032 under-block). Candidate follow-up (KD-6, security-owned): strip
+    recognized shell redirections before the positional split — now covering
+    force-push AND branch-delete."""
 
     def _seed_typed(self, tmp_path, context):
         from merge_guard_post import write_token
@@ -561,9 +563,17 @@ class TestShellRedirectIsolation:
         self._seed_typed(tmp_path, {"operation_type": "merge", "pr_number": "5"})
         assert _authorize("gh pr merge 5 2>&1", tmp_path) is None
 
-    def test_branch_delete_with_redirect_still_authorizes(self, tmp_path):
+    def test_branch_delete_with_redirect_over_blocks(self, tmp_path):
+        """Post-#30: the `2>&1` redirect is counted as a second positional, so
+        even a single-branch delete with a redirect conservatively OVER-BLOCKS
+        (the branch ref is unparseable → REFUSE). SAFE #1031 direction, NOT a
+        #1032 under-block. Same KD-6 redirect-strip follow-up class as force-push
+        (the follow-up now covers branch-delete too)."""
         self._seed_typed(tmp_path, {"operation_type": "branch-delete", "branch": "x"})
-        assert _authorize("git branch -D x 2>&1", tmp_path) is None
+        assert _authorize("git branch -D x 2>&1", tmp_path) is not None
+        # Sanity: WITHOUT the redirect the same token authorizes (isolates the
+        # over-block to the redirect-induced positional miscount).
+        assert _authorize("git branch -D x", tmp_path) is None
 
     def test_force_push_with_redirect_over_blocks(self, tmp_path):
         """Even WITH a matching force-push token, the `2>&1` redirect makes the
@@ -612,3 +622,33 @@ class TestMintGuardBranches:
         code = _invoke_post([_q(q, opts)], {q: "Merge the PR"}, tmp_path)
         assert code == 0
         assert _authorize("gh pr merge 42", tmp_path) is None
+
+
+class TestMultiTargetBranchDeleteUnderBlock:
+    """HALT #29 (#1032-class under-block): a branch-delete token approved for ONE
+    branch must NOT authorize a MULTI-target `git branch -D <approved> <other>` —
+    the command also deletes the UNAPPROVED <other>. The pre-fix
+    _extract_branch_name captured only the FIRST positional, so a single-branch
+    token matched and authorized the multi-delete (the fossilized gap).
+
+    CLASS-I, REVERT-COUPLED to the #30 _extract_branch_name multi-target fix:
+    reverting #30 re-opens the gap → these two deny tests flip RED (RESTORE_CLEAN).
+    RED-on-pre-#30-HEAD is the intended non-vacuity posture; they go GREEN once
+    #30 lands."""
+
+    @pytest.mark.parametrize("command", [
+        "git branch -D feature other-important-branch",
+        "git branch --delete --force feature other-important-branch",
+    ])
+    def test_single_branch_token_denies_multi_target_delete(self, tmp_path, command):
+        """A token for 'feature' alone must NOT authorize a delete that ALSO
+        removes 'other-important-branch'."""
+        _seed_token(tmp_path, {"operation_type": "branch-delete", "branch": "feature"})
+        assert _authorize(command, tmp_path) is not None
+
+    def test_single_branch_token_still_authorizes_its_exact_single_target(self, tmp_path):
+        """Positive control: the #30 fix must NOT over-block the legitimate
+        single-target case — a token for 'feature' still authorizes the exact
+        single-branch delete it approved."""
+        _seed_token(tmp_path, {"operation_type": "branch-delete", "branch": "feature"})
+        assert _authorize("git branch -D feature", tmp_path) is None
