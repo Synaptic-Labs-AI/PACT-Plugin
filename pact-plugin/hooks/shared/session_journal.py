@@ -755,11 +755,15 @@ def _ts_supersedes(candidate_ts: Any, incumbent_ts: Any) -> bool:
     AND the comparison are guarded. A missing/unparseable `candidate_ts`
     returns False, so a malformed candidate never supersedes a well-formed
     incumbent. A missing/unparseable `incumbent_ts` returns True, so a
-    well-formed candidate replaces a malformed incumbent. If the parsed
-    values are themselves incomparable (e.g. one tz-aware `...Z` ts and one
-    tz-naive ts both parse but raise `TypeError` on `>=`), the comparison is
-    caught and the candidate does NOT supersede (returns False) — fail-open
-    keeps the incumbent rather than crashing the whole resolution.
+    well-formed candidate replaces a malformed incumbent.
+
+    Naive/aware coercion: if a parsed value is tz-NAIVE (only possible from a
+    corrupted/externally-merged journal — `make_event` always stamps aware
+    `...Z`), it is assumed UTC and coerced to tz-aware before the comparison,
+    so a naive-vs-aware pair compares by actual INSTANT (the later instant
+    wins) instead of raising `TypeError`. The comparison stays wrapped in a
+    `try/except TypeError` that fail-opens (returns False, keeps the incumbent)
+    for any residual uncomparable pair, so the resolution never crashes.
     """
     try:
         candidate = _parse_ts(candidate_ts)
@@ -769,6 +773,12 @@ def _ts_supersedes(candidate_ts: Any, incumbent_ts: Any) -> bool:
         incumbent = _parse_ts(incumbent_ts)
     except (ValueError, TypeError):
         return True
+    # Coerce a tz-naive value to tz-aware UTC so a naive-vs-aware pair compares
+    # by instant rather than raising TypeError (which the outer guard would turn
+    # into a fail-open keep-stale). Assuming UTC is the safe interpretation; a
+    # naive ts only arises from a corrupted journal (make_event always stamps Z).
+    candidate = candidate if candidate.tzinfo is not None else candidate.replace(tzinfo=timezone.utc)
+    incumbent = incumbent if incumbent.tzinfo is not None else incumbent.replace(tzinfo=timezone.utc)
     try:
         return candidate >= incumbent
     except TypeError:

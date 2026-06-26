@@ -177,21 +177,33 @@ class TestResolveLatestArtifacts:
         assert resolve_latest_artifacts([first, second], self.FEATURE) == {"prepare": ["/second.md"]}
         assert resolve_latest_artifacts([second, first], self.FEATURE) == {"prepare": ["/first.md"]}
 
-    def test_parseable_naive_vs_aware_ts_does_not_crash(self):
-        """A parseable-but-tz-NAIVE ts (date-only) alongside the normal aware
-        ...Z ts must NOT crash the resolution. Both parse via _parse_ts but are
-        incomparable (offset-naive vs offset-aware), which a strict
-        `candidate > incumbent` OUTSIDE the parse-guard would let raise
-        TypeError, escaping resolve_latest_artifacts. The fail-open guard keeps
-        the incumbent instead. Regression-proof: reverting the comparison-guard
-        makes this raise TypeError -> RED. Trigger requires a corrupted journal
-        (make_event always stamps aware-Z); this pins graceful degradation."""
-        aware = _art_event("prepare", self.FEATURE, ["/aware.md"], "2026-06-25T03:00:00Z")
-        naive = {"type": "artifact_paths", "workflow": "prepare",
-                 "feature": self.FEATURE, "paths": ["/naive.md"], "ts": "2026-06-25"}
-        # Must not raise in either order; result is fail-open (incumbent kept).
-        assert resolve_latest_artifacts([aware, naive], self.FEATURE) == {"prepare": ["/aware.md"]}
-        assert resolve_latest_artifacts([naive, aware], self.FEATURE) == {"prepare": ["/naive.md"]}
+    def test_naive_vs_aware_ts_compares_by_utc_assumed_instant(self):
+        """A parseable-but-tz-NAIVE ts is assumed UTC and compared by actual
+        INSTANT against an aware `...Z` ts — instead of raising TypeError and
+        fail-open keeping the (possibly stale) incumbent. No crash either way.
+        Trigger requires a corrupted journal (make_event always stamps aware-Z).
+
+        Key case (the LOW fix): when the NAIVE value is the LATER instant it now
+        SUPERSEDES the earlier aware incumbent. RED-on-revert: dropping the
+        coerce-to-aware makes `candidate >= incumbent` raise TypeError -> the
+        kept outer try/except returns False -> the stale aware incumbent is kept
+        -> the first assertion flips RED."""
+        aware_early = _art_event(
+            "prepare", self.FEATURE, ["/aware.md"], "2026-06-25T01:00:00Z")
+        naive_late = {"type": "artifact_paths", "workflow": "prepare",
+                      "feature": self.FEATURE, "paths": ["/naive.md"],
+                      "ts": "2026-06-25T05:00:00"}  # naive -> 05:00 UTC > 01:00
+        # Naive value is the later instant -> supersedes the aware incumbent.
+        assert resolve_latest_artifacts(
+            [aware_early, naive_late], self.FEATURE) == {"prepare": ["/naive.md"]}
+        # Symmetric: an aware value later than a naive one still wins (no crash).
+        aware_late = _art_event(
+            "prepare", self.FEATURE, ["/aware2.md"], "2026-06-25T09:00:00Z")
+        naive_early = {"type": "artifact_paths", "workflow": "prepare",
+                       "feature": self.FEATURE, "paths": ["/naive2.md"],
+                       "ts": "2026-06-25T02:00:00"}
+        assert resolve_latest_artifacts(
+            [naive_early, aware_late], self.FEATURE) == {"prepare": ["/aware2.md"]}
 
     def test_mixed_z_and_offset_ts_compare_by_instant_last_wins(self):
         """Belt-and-suspenders: a `...Z` ts and an equal-instant `...+00:00` ts
@@ -534,10 +546,11 @@ class TestTraversalAndGracefulTs:
         self, tmp_path, monkeypatch, pact_context):
         """End-to-end: a corrupted journal carrying one aware-Z and one
         parseable-but-naive ts for the same (workflow, feature) must NOT crash
-        the CLI. Before the comparison-guard fix this exited 1 with a TypeError
-        traceback; now it exits 0 and emits a valid JSON object (the incumbent
-        survives, fail-open). Regression-proof: reverting the guard makes this
-        exit 1 -> RED."""
+        the CLI. The naive ts is assumed UTC and compared by instant: here the
+        aware 03:00Z event is the LATER instant, so it survives over the 00:00
+        (UTC-assumed) naive event. Exits 0 with valid JSON and no TypeError
+        traceback. (Before any naive/aware handling this raised TypeError ->
+        exit 1.)"""
         # CLAUDE_CONFIG_DIR (not just Path.home) so the SUBPROCESS's --session-dir
         # containment check resolves the same tmp root — the home monkeypatch is
         # not inherited by the child; the env var is.
@@ -559,7 +572,7 @@ class TestTraversalAndGracefulTs:
             f"rc={r.returncode} stderr={r.stderr!r}"
         )
         assert "TypeError" not in r.stderr
-        # A valid JSON object is emitted; the well-formed aware event survives.
+        # A valid JSON object is emitted; the later-instant aware event survives.
         assert json.loads(r.stdout) == {"prepare": ["/aware.md"]}
 
 
