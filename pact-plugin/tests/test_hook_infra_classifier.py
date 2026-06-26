@@ -267,6 +267,12 @@ COVERED_L2 = {
     "agent_handoff_emitter": "test_agent_handoff_emitter_integration.py",
     "session_init": "test_session_init_integration.py",
     "dispatch_gate": "test_dispatch_gate_integration.py",
+    # The on-disk authorization token is the post(mint)→pre(read) integration
+    # seam for the merge guards; the non-mocked S1 seam test exercises it for
+    # real (real mint → real read over a temp token_dir). Guards DENY via
+    # exit(2) (fail-LOUD), so they are L2-only / never-L3 (no live-probe).
+    "merge_guard_pre": "test_merge_guard_seam_integration.py",
+    "merge_guard_post": "test_merge_guard_seam_integration.py",
 }
 
 # Documented forward-only BACKLOG: seam hooks whose non-mocked L2 test is a named
