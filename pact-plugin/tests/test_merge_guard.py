@@ -313,8 +313,14 @@ class TestPostMainEntryPoint:
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"questions": [{"question": "Should I run `gh pr merge 42`?"}]},
-            "tool_response": {"answers": {"Should I run `gh pr merge 42`?": "yes"}},
+            "tool_input": {"questions": [{
+                "question": "Merge the PR?",
+                "options": [
+                    {"label": "Yes, merge", "description": "Run `gh pr merge 42`"},
+                    {"label": "Cancel", "description": "Abort"},
+                ],
+            }]},
+            "tool_response": {"answers": {"Merge the PR?": "Yes, merge"}},
         })
 
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
@@ -799,10 +805,16 @@ class TestIntegration:
         from merge_guard_post import main as post_main
         from merge_guard_pre import main as pre_main
 
-        # Step 1: Post hook processes merge approval
+        # Step 1: Post hook processes merge approval (option-anchored #32)
         post_input = json.dumps({
-            "tool_input": {"questions": [{"question": "Should I run `gh pr merge 99`?"}]},
-            "tool_response": {"answers": {"Should I run `gh pr merge 99`?": "yes"}},
+            "tool_input": {"questions": [{
+                "question": "Merge the PR?",
+                "options": [
+                    {"label": "Yes, merge", "description": "Run `gh pr merge 99`"},
+                    {"label": "Cancel", "description": "Abort"},
+                ],
+            }]},
+            "tool_response": {"answers": {"Merge the PR?": "Yes, merge"}},
         })
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
              patch("sys.stdin", io.StringIO(post_input)):
@@ -2390,8 +2402,14 @@ class TestPostMainEdgeCases:
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"questions": [{"question": "Run `gh pr merge 10`?"}]},
-            "tool_response": {"answers": {"Run `gh pr merge 10`?": "yes"}},
+            "tool_input": {"questions": [{
+                "question": "Merge the PR?",
+                "options": [
+                    {"label": "Yes, merge", "description": "Run `gh pr merge 10`"},
+                    {"label": "Cancel", "description": "Abort"},
+                ],
+            }]},
+            "tool_response": {"answers": {"Merge the PR?": "Yes, merge"}},
         })
 
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
@@ -5749,12 +5767,16 @@ class TestSchemaFixEndToEnd:
         post_input = json.dumps({
             "tool_input": {
                 "questions": [{
-                    "question": "Force push via `git push --force origin main`? This will overwrite remote history.",
+                    "question": "Force push to main? This will overwrite remote history.",
+                    "options": [
+                        {"label": "Yes, force-push", "description": "Run `git push --force origin main`"},
+                        {"label": "Cancel", "description": "Abort"},
+                    ],
                 }]
             },
             "tool_response": {
                 "answers": {
-                    "Force push via `git push --force origin main`? This will overwrite remote history.": "yes",
+                    "Force push to main? This will overwrite remote history.": "Yes, force-push",
                 },
             },
         })
@@ -5783,12 +5805,16 @@ class TestSchemaFixEndToEnd:
         post_input = json.dumps({
             "tool_input": {
                 "questions": [{
-                    "question": "Delete branch via `git branch -D feat/old-feature`?",
+                    "question": "Delete the old feature branch?",
+                    "options": [
+                        {"label": "Yes, delete", "description": "Run `git branch -D feat/old-feature`"},
+                        {"label": "Cancel", "description": "Abort"},
+                    ],
                 }]
             },
             "tool_response": {
                 "answers": {
-                    "Delete branch via `git branch -D feat/old-feature`?": "go ahead",
+                    "Delete the old feature branch?": "Yes, delete",
                 },
             },
         })
@@ -5855,10 +5881,16 @@ class TestSchemaFixEndToEnd:
 
         post_input = json.dumps({
             "tool_input": {
-                "questions": [{"question": "Should I run `gh pr merge 42`?"}]
+                "questions": [{
+                    "question": "Merge the PR?",
+                    "options": [
+                        {"label": "Yes, merge", "description": "Run `gh pr merge 42`"},
+                        {"label": "Cancel", "description": "Abort"},
+                    ],
+                }]
             },
             "tool_response": {
-                "answers": {"Should I run `gh pr merge 42`?": "yes"}
+                "answers": {"Merge the PR?": "Yes, merge"}
             },
         })
 
@@ -5873,24 +5905,30 @@ class TestSchemaFixEndToEnd:
         token_data = json.loads(tokens[0].read_text())
         assert token_data["session_id"] == "test-session-123"
 
-    def test_multi_question_mints_from_command_bearing_question(self, tmp_path):
-        """KD-12: with multiple questions, the mint scans every question and its
-        selected option, keying each answer to its SPECIFIC question. The
-        command-bearing question mints; the unrelated affirmative does not add a
-        second pair (no command). A single distinct (op,target) → one token."""
+    def test_multi_question_mints_from_clicked_option(self, tmp_path):
+        """KD-12 + #32 option-anchoring: with multiple questions, the mint keys
+        each answer to its SPECIFIC question and mints from the CLICKED option's
+        command. The command-bearing option mints; the unrelated affirmative adds
+        no second pair. A single distinct (op,target) → one token."""
         from merge_guard_post import main
 
         input_data = json.dumps({
             "tool_input": {
                 "questions": [
-                    {"question": "Should I run `gh pr merge 42`?"},
-                    {"question": "Also update the changelog?"},
+                    {"question": "Merge the PR?", "options": [
+                        {"label": "Yes, merge", "description": "Run `gh pr merge 42`"},
+                        {"label": "Cancel", "description": "Abort"},
+                    ]},
+                    {"question": "Also update the changelog?", "options": [
+                        {"label": "Yes", "description": "Update it"},
+                        {"label": "No", "description": "Skip"},
+                    ]},
                 ]
             },
             "tool_response": {
                 "answers": {
-                    "Should I run `gh pr merge 42`?": "yes",
-                    "Also update the changelog?": "yes",
+                    "Merge the PR?": "Yes, merge",
+                    "Also update the changelog?": "Yes",
                 },
             },
         })
@@ -5903,6 +5941,40 @@ class TestSchemaFixEndToEnd:
         tokens = list(tmp_path.glob("merge-authorized-*"))
         assert len(tokens) == 1
         assert json.loads(tokens[0].read_text())["context"]["pr_number"] == "42"
+
+    def test_multi_question_command_in_question_prose_only_refuses(self, tmp_path):
+        """#32 F-REVIEW-1: when the command is in QUESTION PROSE only (the clicked
+        option carries NO command), the mint REFUSES — the operator clicked a
+        generic option, never the command. This is the option-anchoring closure
+        (sibling of the mints-from-clicked-option case above)."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {
+                "questions": [
+                    {"question": "Should I run `gh pr merge 42`?", "options": [
+                        {"label": "Yes, proceed", "description": "go ahead"},
+                        {"label": "Cancel", "description": "Abort"},
+                    ]},
+                    {"question": "Also update the changelog?", "options": [
+                        {"label": "Yes", "description": "Update it"},
+                    ]},
+                ]
+            },
+            "tool_response": {
+                "answers": {
+                    "Should I run `gh pr merge 42`?": "Yes, proceed",
+                    "Also update the changelog?": "Yes",
+                },
+            },
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit):
+                main()
+
+        assert list(tmp_path.glob("merge-authorized-*")) == []
 
     def test_multi_question_first_not_merge(self, tmp_path):
         """When first question is not merge-related, no token even if second is."""
@@ -7700,10 +7772,16 @@ class TestGhPrClosePostHookE2E:
 
         input_data = {
             "tool_input": {
-                "questions": [{"question": "Should I run `gh pr close 42 --delete-branch`?"}]
+                "questions": [{
+                    "question": "Close the PR?",
+                    "options": [
+                        {"label": "Yes, close", "description": "Run `gh pr close 42 --delete-branch`"},
+                        {"label": "Cancel", "description": "Abort"},
+                    ],
+                }]
             },
             "tool_response": {
-                "answers": {"Should I run `gh pr close 42 --delete-branch`?": "yes"}
+                "answers": {"Close the PR?": "Yes, close"}
             },
         }
         stdin = io.StringIO(json.dumps(input_data))
@@ -7731,10 +7809,16 @@ class TestGhPrClosePostHookE2E:
 
         input_data = {
             "tool_input": {
-                "questions": [{"question": "Run gh pr close 99?"}]
+                "questions": [{
+                    "question": "Close the PR?",
+                    "options": [
+                        {"label": "Yes, close", "description": "Run `gh pr close 99`"},
+                        {"label": "Cancel", "description": "Abort"},
+                    ],
+                }]
             },
             "tool_response": {
-                "answers": {"Run gh pr close 99?": "yes"}
+                "answers": {"Close the PR?": "Yes, close"}
             },
         }
         stdin = io.StringIO(json.dumps(input_data))
@@ -10361,11 +10445,18 @@ class TestEnvelopeIntegration:
             "session_id": "test-envelope-session",
         })
 
-    def _post_envelope(self, question: str, answer: str = "yes") -> str:
-        """Build a PostToolUse stdin envelope (AskUserQuestion matcher)."""
+    def _post_envelope(self, question: str, answer: str = "yes",
+                       options: list | None = None) -> str:
+        """Build a PostToolUse stdin envelope (AskUserQuestion matcher). Post-#32
+        the mint is OPTION-ANCHORED, so callers pass an `options` list with the
+        command in the clicked option's description + an `answer` matching that
+        option's label."""
+        q: dict = {"question": question}
+        if options is not None:
+            q["options"] = options
         return json.dumps({
             "tool_name": "AskUserQuestion",
-            "tool_input": {"questions": [{"question": question}]},
+            "tool_input": {"questions": [q]},
             "tool_response": {"answers": {question: answer}},
             "session_id": "test-envelope-session",
         })
@@ -10384,11 +10475,12 @@ class TestEnvelopeIntegration:
                 pre_main()
         return exc_info.value.code, stdout_buf.getvalue()
 
-    def _invoke_post(self, question: str, tmp_path, answer: str = "yes"):
+    def _invoke_post(self, question: str, tmp_path, answer: str = "yes",
+                     options: list | None = None):
         """Invoke merge_guard_post.main() with a built envelope."""
         from merge_guard_post import main as post_main
 
-        envelope = self._post_envelope(question, answer)
+        envelope = self._post_envelope(question, answer, options)
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
              patch("sys.stdin", io.StringIO(envelope)):
             with pytest.raises(SystemExit) as exc_info:
@@ -10404,9 +10496,14 @@ class TestEnvelopeIntegration:
         over-block, NOT a #1032 under-block). Candidate KD-6 follow-up: strip
         shell redirections before the force-push positional count.
         """
-        # Step 1: approve via post hook — the question embeds the quoted command.
+        # Step 1: approve via post hook — option-anchored (#32): the command
+        # lives in the CLICKED option's description.
         post_code = self._invoke_post(
-            "Should I force-push via `git push origin main`?", tmp_path
+            "Authorize the force-push?", tmp_path, answer="Yes, force-push",
+            options=[
+                {"label": "Yes, force-push", "description": "Run `git push origin main`"},
+                {"label": "Cancel", "description": "Abort"},
+            ],
         )
         assert post_code == 0
         tokens = list(tmp_path.glob("merge-authorized-*"))
@@ -10426,7 +10523,11 @@ class TestEnvelopeIntegration:
         force-push op_type; pre hook recognizes bare `git push origin main`
         as force-push and authorizes."""
         post_code = self._invoke_post(
-            "Confirm force-push: `git push origin main`?", tmp_path
+            "Confirm the force-push?", tmp_path, answer="Yes, force-push",
+            options=[
+                {"label": "Yes, force-push", "description": "Run `git push origin main`"},
+                {"label": "Cancel", "description": "Abort"},
+            ],
         )
         assert post_code == 0
 
@@ -10448,7 +10549,11 @@ class TestEnvelopeIntegration:
         pre-main(), assert third consume is denied at the JSON envelope
         layer with the AskUserQuestion deny reason."""
         post_code = self._invoke_post(
-            "Should I merge via `gh pr merge 42`?", tmp_path
+            "Confirm the merge?", tmp_path, answer="Yes, merge",
+            options=[
+                {"label": "Yes, merge", "description": "Run `gh pr merge 42`"},
+                {"label": "Cancel", "description": "Abort"},
+            ],
         )
         assert post_code == 0
 
@@ -10468,19 +10573,17 @@ class TestEnvelopeIntegration:
         )
 
     def test_envelope_ladder_reorder_branch_d_mjs_case(self, tmp_path):
-        """Full envelope: mj's case. AskUserQuestion prose embeds the
-        quoted `git branch -D feat/x` plus the word 'merged' in the
-        surrounding prose; symmetric classifier picks branch-delete;
-        pre hook authorizes the matching command.
-
-        Prose carefully shaped so extract_context's pre-existing branch
-        regex captures the actual branch name (feat/old), not a flag (-D).
-        This is orthogonal to the Bug B fix — that regex was unchanged in
-        this PR and uses pattern `branch\\s+['\"]?([a-zA-Z0-9/_.-]+)`.
-        """
+        """Full envelope: mj's case, option-anchored (#32). The clicked option
+        carries `git branch -D feat/old`; the question prose still contains the
+        distractor word 'merged' — the command-anchored classifier picks
+        branch-delete from the OPTION's command (not the 'merged' prose), so the
+        old ladder-reorder ambiguity cannot mis-mint a merge."""
         post_code = self._invoke_post(
-            "Should I delete branch feat/old via `git branch -D feat/old`? (merged)",
-            tmp_path,
+            "Delete the merged feature branch?", tmp_path, answer="Yes, delete",
+            options=[
+                {"label": "Yes, delete", "description": "Run `git branch -D feat/old`"},
+                {"label": "Cancel", "description": "Abort"},
+            ],
         )
         assert post_code == 0
 

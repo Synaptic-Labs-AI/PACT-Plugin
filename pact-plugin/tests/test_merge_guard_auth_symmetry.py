@@ -652,3 +652,80 @@ class TestMultiTargetBranchDeleteUnderBlock:
         single-branch delete it approved."""
         _seed_token(tmp_path, {"operation_type": "branch-delete", "branch": "feature"})
         assert _authorize("git branch -D feature", tmp_path) is None
+
+
+class TestOptionAnchoringMint:
+    """#1032 F-REVIEW-1 (#32): the mint is ANCHORED to the operator's CLICKED
+    option. A command in question PROSE alone (with a generic no-command clicked
+    option), or any NO-OPTIONS / free-text bundle, NEVER mints — the operator
+    only clicked a generic option, never the command.
+
+    Revert-coupling (verified against #32 = 1771fd35):
+      • padded-question counter-test → coupled to step-3b option-anchoring
+        (revert step-3b → mints the question's command → flips RED).
+      • no-options counter-tests → DEFENSE-IN-DEPTH: closed by BOTH step-0
+        (no-options guard) AND step-3b (empty selected-option set → no pair in
+        it). Reverting step-0 alone leaves step-3b as a backstop, so the
+        no-options cases flip RED only under the WHOLE #32 revert (or step-0 +
+        step-3b together) — documented in the HANDOFF.
+    The CONTROLS stay GREEN under any #32 revert (they verify the fix does not
+    over-block a legitimately option-carried approval)."""
+
+    # ── COUNTER-TESTS (refuse the F-REVIEW-1 vulnerability) ──
+    def test_padded_question_with_generic_option_refuses(self, tmp_path):
+        """OPTION-MODE F-REVIEW-1 repro: a command padded into QUESTION prose +
+        a GENERIC clicked option carrying NO command → NO mint. Revert #32's
+        step-3b → the question's command mints → flips RED."""
+        q = "Approve the change? (context: gh pr merge 9999 will run)"
+        opts = [_opt("Yes, proceed", "go ahead"), _opt("Cancel", "Abort")]
+        code = _invoke_post([_q(q, opts)], {q: "Yes, proceed"}, tmp_path)
+        assert code == 0
+        assert _minted_tokens(tmp_path) == []
+        assert _authorize("gh pr merge 9999", tmp_path) is not None
+
+    def test_no_options_bundle_with_command_in_question_refuses(self, tmp_path):
+        """NO-OPTIONS guard: a bundle with no options anywhere + bare 'yes' to a
+        command-bearing question → NO mint (no clicked option to anchor on).
+        Defense-in-depth (step-0 + step-3b)."""
+        q = "Should I run `gh pr merge 42`?"
+        code = _invoke_post([_q(q)], {q: "yes"}, tmp_path)  # no options
+        assert code == 0
+        assert _minted_tokens(tmp_path) == []
+        assert _authorize("gh pr merge 42", tmp_path) is not None
+
+    def test_command_typed_in_free_text_answer_refuses(self, tmp_path):
+        """A command typed into the FREE-TEXT answer (no options) is NOT a mint
+        source → NO mint (the free-text arm is retired)."""
+        q = "What should I run?"
+        code = _invoke_post([_q(q)], {q: "yes, gh pr merge 42"}, tmp_path)
+        assert code == 0
+        assert _minted_tokens(tmp_path) == []
+        assert _authorize("gh pr merge 42", tmp_path) is not None
+
+    # ── CONTROLS (no over-block — stay GREEN under any #32 revert) ──
+    def test_command_in_clicked_option_mints(self, tmp_path):
+        """Control: the conforming shape — command in the CLICKED option → mints."""
+        q = "Approve?"
+        opts = [_opt("Yes, merge", "Run `gh pr merge 42`"), _opt("Cancel", "Abort")]
+        code = _invoke_post([_q(q, opts)], {q: "Yes, merge"}, tmp_path)
+        assert code == 0
+        assert _authorize("gh pr merge 42", tmp_path) is None
+
+    def test_echo_in_question_and_option_mints(self, tmp_path):
+        """Control: command echoed in BOTH question AND the clicked option (same
+        (op,target)) → ONE distinct pair, option-anchored → mints."""
+        q = "Merge via `gh pr merge 42`?"
+        opts = [_opt("Yes, merge", "Run `gh pr merge 42`"), _opt("Cancel", "Abort")]
+        code = _invoke_post([_q(q, opts)], {q: "Yes, merge"}, tmp_path)
+        assert code == 0
+        assert _authorize("gh pr merge 42", tmp_path) is None
+
+    def test_divergent_question_vs_option_refuses(self, tmp_path):
+        """Control: question op/target ≠ the clicked option's (two distinct
+        pairs) → the multiplicity gate REFUSES (the #32 fix did not weaken
+        divergence detection)."""
+        q = "Force-push via `git push --force origin main`?"
+        opts = [_opt("Yes, merge", "Run `gh pr merge 42`"), _opt("Cancel", "Abort")]
+        code = _invoke_post([_q(q, opts)], {q: "Yes, merge"}, tmp_path)
+        assert code == 0
+        assert _minted_tokens(tmp_path) == []
