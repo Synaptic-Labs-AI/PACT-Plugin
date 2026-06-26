@@ -1121,16 +1121,32 @@ def check_merge_authorization(command: str, token_dir: Path | None = None) -> st
                 "Use AskUserQuestion to get approval again."
             )
         else:
-            # Token exists but doesn't match this command — don't consume it,
-            # block the mismatched command
+            # Token exists but its approved operation does not match this
+            # command — don't consume it; block the mismatched command. Guide
+            # the operator to re-approve with the literal command embedded so
+            # the approved and executed commands are identical. NEVER suggest
+            # running the bare command or simplifying the question (that would
+            # teach guard evasion).
             return (
-                "Authorization token exists but does not match this operation. "
-                "Use AskUserQuestion to get approval for this specific operation."
+                "An authorization token exists but its approved operation does "
+                "not match this command. The approved command and the executed "
+                "command must be identical. Re-approve via AskUserQuestion with "
+                "the literal command embedded in the selected option (e.g. "
+                "`gh pr merge <N>`, the real PR number) so the guard binds the "
+                "approval to this exact command."
             )
 
+    # No token at all — require a fresh approval. Same guidance: embed the
+    # literal command in the approval; never instruct running the bare command
+    # or reducing the question. A channel/headless session has no
+    # AskUserQuestion, so the operator approves the operation interactively
+    # (a correct, expected over-block — documented here so it is not confusing).
     return (
-        "Merge/close/force-push/branch-delete requires user approval via AskUserQuestion. "
-        "Use AskUserQuestion to confirm with the user before proceeding."
+        "Merge/close/force-push/branch-delete requires user approval. Re-approve "
+        "via AskUserQuestion with the literal command embedded in the selected "
+        "option (e.g. `gh pr merge <N>`, the real PR number) so the guard can "
+        "bind the approval to this exact command. In a channel/headless session "
+        "where AskUserQuestion is unavailable, approve the operation interactively."
     )
 
 
