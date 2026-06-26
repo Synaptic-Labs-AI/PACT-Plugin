@@ -60,7 +60,13 @@ SEAM_DEPENDENT_HOOKS: frozenset[str] = frozenset({
     "session_init", "session_end", "dispatch_gate", "task_lifecycle_gate",
     "bootstrap_gate", "bootstrap_marker_writer", "file_tracker",
     "peer_inject", "validate_handoff",
-})  # 12
+    # merge_guard_pre/post: the on-disk authorization token is the canonical
+    # post(mint)->pre(read) integration seam this classifier exists to catch; a
+    # guard-specific seam regression must not ship inert. They DENY via exit(2)
+    # (fail-LOUD) -> L2-only, never L3 (no mode-divergent signal -> no both-modes
+    # matrix). KD-10.
+    "merge_guard_pre", "merge_guard_post",
+})  # 14
 
 # Hooks confirmed to FAIL SILENTLY on a broken seam (a consequential effect that
 # should fire simply does not, with no error) -> they additionally require an L3
@@ -194,6 +200,18 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "session_journal", "session_registry", "session_state",
     }),
     "validate_handoff": frozenset({"error_output"}),
+    "merge_guard_pre": frozenset({
+        "constants", "merge_guard_common", "pact_context", "paths",
+        "session_journal", "session_registry", "session_state",
+    }),  # both merge guards reach merge_guard_common (the shared token SSOT)
+         # + the path/session helper spine; regenerated from the live AST
+         # derivation (test_hook_infra_classifier oracle), KD-10.
+    "merge_guard_post": frozenset({
+        "constants", "error_output", "merge_guard_common", "pact_context",
+        "paths", "session_journal", "session_registry", "session_state",
+        "tool_response",
+    }),  # post additionally reaches error_output (fail-loud alert) and
+         # tool_response (the canonical-envelope extractor).
 }
 
 # Every helper module (top-level OR shared) transitively reachable from at least
