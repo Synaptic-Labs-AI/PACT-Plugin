@@ -372,25 +372,34 @@ def _extract_api_ref(command: str) -> str | None:
 
 
 def _extract_branch_name(command: str) -> str | None:
-    """Extract the branch name targeted by a branch-delete command.
+    """Extract the SINGLE branch name targeted by a branch-delete command.
 
     Owns the branch-delete target for extract_command_context. Handles the CLI
-    `git branch -D|--delete <name>` forms and the API ref-DELETE form (the ref
-    in a `git/refs/<ref>` path). Returns the (quote-normalized) name, or None
-    when no branch target is positively extractable.
+    `git branch -D|--delete <name>` form (exactly ONE branch — a MULTI-target
+    delete like `git branch -D a b` is REFUSED, returning None) and the API
+    ref-DELETE form (the ref in a `git/refs/<ref>` path). Returns the
+    (quote-normalized) name, or None when no single branch target is positively
+    extractable.
     """
     api_ref = _extract_api_ref(command)
     if api_ref is not None:
         return api_ref
-    branch_d_match = re.search(_GIT_PREFIX + r"branch\s+.*-D\s+(\S+)", command)
-    if branch_d_match:
-        return _strip_surrounding_quotes(branch_d_match.group(1))
-    branch_delete_match = re.search(
-        _GIT_PREFIX + r"branch\s+.*--delete\s+(?:--force\s+)?(\S+)", command
-    )
-    if branch_delete_match:
-        return _strip_surrounding_quotes(branch_delete_match.group(1))
-    return None
+    # CLI `git branch -D|--delete <name>`: isolate the tokens after `branch`,
+    # drop dash-flags, and require EXACTLY ONE positional branch name. A
+    # multi-target delete (`git branch -D a b`) has >1 positional -> REFUSE, so
+    # a token approved for ONE branch can never authorize deleting several (the
+    # #1032 multi-target under-block); 0 positionals -> REFUSE. Mirrors
+    # _extract_force_push_target_ref's multi-ref conservatism. The caller only
+    # reaches here when detect_command_operation_type already classified the
+    # command branch-delete, so a -D/--delete flag is present and is dropped
+    # with the other dash-flags.
+    branch_match = re.search(_GIT_PREFIX + r"branch\b(.*)$", command)
+    if not branch_match:
+        return None
+    positionals = [t for t in branch_match.group(1).split() if not t.startswith("-")]
+    if len(positionals) != 1:
+        return None
+    return _strip_surrounding_quotes(positionals[0])
 
 
 def _extract_force_push_target_ref(command: str) -> str | None:
