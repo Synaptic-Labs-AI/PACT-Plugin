@@ -3272,6 +3272,11 @@ class TestValidateEventSchemaPerType:
         "session_end": {},  # No required fields; baseline-only.
         "cleanup_summary": {},  # No required fields; optional-only (#412 Fix B).
         "session_consolidated": {},  # No required fields; optional-only (#453 Fix B).
+        "artifact_paths": {
+            "workflow": "prepare",
+            "feature": "handoff-artifact-durability",
+            "paths": ["/tmp/wt/docs/preparation/handoff-artifact-durability.md"],
+        },
     }
 
     def test_samples_mirror_required_fields_dict(self):

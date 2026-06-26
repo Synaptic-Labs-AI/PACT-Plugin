@@ -565,6 +565,47 @@ def get_session_dir() -> str:
     return str(_build_session_path(slug, session_id))
 
 
+def reconstruct_session_dir(project_dir: str, session_id: str) -> str:
+    """Reconstruct the absolute session directory from explicit context-file
+    fields — the off-lead, frame-independent counterpart to get_session_dir().
+
+    An off-lead reader (notably the `pact-secretary` harvest, which runs in a
+    teammate frame where get_session_dir() false-returns '') resolves the dir by
+    reading `pact-session-context.json` and passing its `project_dir` +
+    `session_id` fields here. Both fields are persisted RAW (write_context stores
+    the caller-supplied values; init() sanitizes only the PATH segment it builds,
+    not the stored field — see build_context_cache / the write_context contract),
+    so this helper MUST reproduce the writer's path-sanitization to land on the
+    SAME on-disk directory init() wrote to:
+
+      - session_id: sanitized via _UNSAFE_SLUG_CHARS_RE (mirrors the substitution
+        init() applies to the id before building the context path).
+      - slug: derived as Path(project_dir).name and sanitized + traversal-guarded
+        inside _build_session_path (the single source of truth for the slug leg).
+
+    Routing BOTH axes through the writer's derivation (the regex for the id, the
+    shared path-builder for the slug) makes this SSOT-by-construction: an off-lead
+    reconstruction cannot drift from the writer, and a future change to either
+    guard updates both the writer and this reader at once. Without this, a
+    project basename or session_id containing a non-`[A-Za-z0-9_-]` character
+    (e.g. a dot or space) would reconstruct a DIFFERENT directory than the one the
+    journal was written to → the off-lead read silently returns 0 events.
+
+    Args:
+        project_dir: The `project_dir` field from pact-session-context.json.
+        session_id: The `session_id` field from pact-session-context.json (raw).
+
+    Returns:
+        The absolute session directory path, or '' if either input is falsy
+        (matching get_session_dir()'s empty-on-unavailable contract).
+    """
+    if not project_dir or not session_id:
+        return ""
+    safe_id = _UNSAFE_SLUG_CHARS_RE.sub("_", str(session_id))
+    slug = Path(project_dir).name
+    return str(_build_session_path(slug, safe_id))
+
+
 def get_plugin_root() -> str:
     """Convenience: return plugin_root from context. Falls back to the
     CLAUDE_PLUGIN_ROOT env var (exported into every hook process by the

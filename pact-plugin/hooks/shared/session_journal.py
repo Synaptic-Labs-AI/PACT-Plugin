@@ -206,6 +206,28 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # activates the _OPTIONAL_FIELDS_BY_TYPE enforcement below (same pattern
     # as session_end and cleanup_summary).
     "session_consolidated": {},
+    # The lead-frame command emit sites (plan-mode.md, peer-review.md, and
+    # orchestrate.md's PREPARE/ARCHITECT/CODE phase-output validation) write
+    # artifact_paths via the CLI write path — a path-only, GC-durable pointer
+    # to each phase's on-disk artifact(s). It outlives `git worktree remove`
+    # because the journal lives under ~/.claude/pact-sessions/, outside the
+    # worktree; only the pointed-at file is worktree-ephemeral. The secretary
+    # resolves these events at harvest and distills the artifact substance into
+    # pact-memory. `workflow` is the lowercase phase/workflow tag (one of
+    # plan-mode / prepare / architect / peer-review / code-auditor) and the
+    # dedup/precedence axis; `feature` is the slug scoping the event to one arc;
+    # `paths` is the PLURAL full-enumeration list of worktree-absolute artifact
+    # paths (a phase may write >1 file).
+    #
+    # Validator-depth caveat: `paths` is typed `list`, so the schema check
+    # enforces only isinstance(value, list) — it does NOT descend into the list
+    # to require each element be a non-empty str (the per-field empty-string
+    # guard applies to `str` fields only). Per-element path validity is the
+    # WRITER's responsibility: the emit sites drop empty/invalid entries and
+    # drop the whole emit when the glob found nothing (an empty paths list
+    # passes isinstance but is meaningless — that "missing artifact" case is the
+    # task_lifecycle_gate backstop's job, NOT a zero-length event).
+    "artifact_paths": {"workflow": str, "feature": str, "paths": list},
 }
 
 
@@ -301,6 +323,17 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # denominator). The required-fields registration above
     # ("remediation": {...}) activates this optional check.
     "remediation": {
+        "task_id": str,
+    },
+    # The lead-frame emit sites write artifact_paths with an optional `task_id`
+    # — the phase task id the lead completed when emitting (provenance /
+    # cross-link). Absent for plan-mode/peer-review syntheses that have no phase
+    # task; present (and a non-empty str) for the PREPARE/ARCHITECT/CODE phase
+    # emits. The required-fields registration above ("artifact_paths": {...})
+    # is what ACTIVATES this optional check — _validate_event_schema
+    # short-circuits on unknown types and would otherwise skip the optional loop
+    # (same activation pattern as session_end / missed_wake / teachback_ack).
+    "artifact_paths": {
         "task_id": str,
     },
 }
@@ -429,6 +462,25 @@ def _validate_event_schema(event: dict[str, Any]) -> tuple[bool, str]:
                 f"field '{field}' for type '{event_type}' must be "
                 f"non-empty string",
             )
+    # artifact_paths element-level guard (belt-and-suspenders): the generic
+    # per-field check above is SHALLOW — it confirms `paths` is a `list` but
+    # does not descend into its elements. The locked design makes per-element
+    # validity the writer's responsibility (the emit sites drop empty/invalid
+    # paths and skip an empty glob); this schema-layer check augments that with
+    # a defensive backstop so a writer that bypasses the emit-site discipline
+    # cannot land a `paths` list holding a non-str or empty/whitespace-only
+    # element on disk, where a downstream reader would treat it as a real path.
+    # Scoped to artifact_paths ONLY — other list-typed required fields
+    # (s2_state_seeded.agents, review_dispatch.reviewers, remediation.items)
+    # keep their existing shallow contract and are untouched.
+    if event_type == "artifact_paths":
+        for element in event["paths"]:
+            if not isinstance(element, str) or not element.strip():
+                return (
+                    False,
+                    "field 'paths' for type 'artifact_paths' must contain "
+                    "only non-empty strings",
+                )
     # Per-type optional field checks. Absent fields pass (that's what
     # "optional" means); present fields must match the declared type.
     # Symmetric with required-field checks: rejects bool in int fields,
@@ -614,8 +666,144 @@ def read_events_from(
     return _read_events_at(journal, event_type, since)
 
 
+def resolve_latest_artifacts(
+    events: list[dict[str, Any]],
+    feature: str,
+) -> dict[str, list[str]]:
+    """Resolve the superseded artifact path-list per workflow for one feature.
+
+    Pure (no I/O): the caller supplies already-read `artifact_paths` events
+    (e.g. `read_events_from(session_dir, "artifact_paths")`) and the feature
+    slug; this returns one entry per workflow that emitted artifacts for that
+    feature, valued by that workflow's latest path-list.
+
+    Supersede semantics: filter to `e["feature"] ==
+    feature`; group by `e["workflow"]`; within each group keep the
+    latest-`ts` event. Each `artifact_paths` event carries the COMPLETE
+    path-list for its `(workflow, feature)` (a full enumeration per emit,
+    not a delta), so the latest event is self-sufficient — paths are NEVER
+    merged across events. A phase re-run that regenerates its doc in place
+    therefore supersedes the prior emit instead of duplicating it.
+
+    Tie-break = LAST-wins: when two events for the same `(workflow, feature)`
+    carry an equal `ts`, the one iterated later (the more-recently-written in
+    journal order) wins — see `_ts_supersedes`. `make_event` stamps `ts` at
+    second granularity, so a same-second double-emit is resolved to the last
+    write, which is the authoritative complete snapshot.
+
+    Defensive: non-dict entries and events missing `workflow`/`feature`/
+    `paths` are skipped (parity with the `_read_events_at` `isinstance(...,
+    dict)` guard), and any non-string element inside a surviving event's
+    `paths` list is dropped from the emitted list (the same isinstance-guard
+    discipline applied at element granularity, so a malformed path entry can
+    never flow through to the JSON output). Timestamp handling is FAIL-OPEN
+    (see `_ts_supersedes`): a
+    missing/unparseable `ts` on a candidate does not let it supersede a
+    well-formed incumbent, and an unresolved incumbent ts is replaced by any
+    well-formed candidate. A pair of parseable-but-incomparable timestamps
+    (e.g. one tz-aware, one tz-naive) is caught at the comparison and keeps
+    the incumbent rather than raising — the resolution never crashes on a
+    malformed `ts`.
+
+    Args:
+        events: Candidate journal events (typically all `artifact_paths`
+            events for the session). Any list of dicts is accepted; the
+            feature/type filtering happens here.
+        feature: The feature slug to resolve (matched against `e["feature"]`).
+
+    Returns:
+        `{workflow: paths}` — one key per workflow with a surviving event,
+        valued by that workflow's superseded (latest-`ts`, last-wins on a
+        tie) complete path-list, with any non-string element filtered out.
+        Empty dict if no event matches.
+    """
+    latest_by_workflow: dict[str, dict[str, Any]] = {}
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("feature") != feature:
+            continue
+        workflow = event.get("workflow")
+        paths = event.get("paths")
+        if not isinstance(workflow, str) or not isinstance(paths, list):
+            continue
+        prior = latest_by_workflow.get(workflow)
+        if prior is None or _ts_supersedes(event.get("ts"), prior.get("ts")):
+            latest_by_workflow[workflow] = event
+    return {
+        workflow: [p for p in event["paths"] if isinstance(p, str)]
+        for workflow, event in latest_by_workflow.items()
+    }
+
+
+def _ts_supersedes(candidate_ts: Any, incumbent_ts: Any) -> bool:
+    """Return True if a later-iterated `candidate_ts` should supersede the
+    incumbent — i.e. the candidate is newer than OR EQUAL TO the incumbent.
+
+    Used by `resolve_latest_artifacts` to pick the surviving event per
+    workflow. Timestamps are PARSED (via `_parse_ts`), never lexically
+    string-compared — see `_parse_ts` for the `Z` vs `+00:00` rationale.
+
+    Tie-break = LAST-wins (`>=`, not `>`): on an equal `ts`, the candidate
+    (iterated later, hence the more-recently-written event in journal order)
+    supersedes. Each `artifact_paths` emit is a COMPLETE snapshot, so the
+    last write for a `(workflow, feature)` is the authoritative one even when
+    two emits collide in the same wall-clock second (`make_event` stamps `ts`
+    at second granularity).
+
+    Fail-open comparison (matches the in-house `_ts_ge` pattern): the parse
+    AND the comparison are guarded. A missing/unparseable `candidate_ts`
+    returns False, so a malformed candidate never supersedes a well-formed
+    incumbent. A missing/unparseable `incumbent_ts` returns True, so a
+    well-formed candidate replaces a malformed incumbent.
+
+    Naive/aware coercion: if a parsed value is tz-NAIVE (only possible from a
+    corrupted/externally-merged journal — `make_event` always stamps aware
+    `...Z`), it is assumed UTC and coerced to tz-aware before the comparison,
+    so a naive-vs-aware pair compares by actual INSTANT (the later instant
+    wins) instead of raising `TypeError`. The comparison stays wrapped in a
+    `try/except TypeError` that fail-opens (returns False, keeps the incumbent)
+    for any residual uncomparable pair, so the resolution never crashes.
+    """
+    try:
+        candidate = _parse_ts(candidate_ts)
+    except (ValueError, TypeError):
+        return False
+    try:
+        incumbent = _parse_ts(incumbent_ts)
+    except (ValueError, TypeError):
+        return True
+    # Coerce a tz-naive value to tz-aware UTC so a naive-vs-aware pair compares
+    # by instant rather than raising TypeError (which the outer guard would turn
+    # into a fail-open keep-stale). Assuming UTC is the safe interpretation; a
+    # naive ts only arises from a corrupted journal (make_event always stamps Z).
+    candidate = candidate if candidate.tzinfo is not None else candidate.replace(tzinfo=timezone.utc)
+    incumbent = incumbent if incumbent.tzinfo is not None else incumbent.replace(tzinfo=timezone.utc)
+    try:
+        return candidate >= incumbent
+    except TypeError:
+        return False
+
+
+def _normalize_trailing_z(value: Any) -> str:
+    """Rewrite a SINGLE trailing `Z` UTC designator to `+00:00`, leaving any
+    interior `Z` intact.
+
+    The anchor is TRAILING-ONLY (`str.endswith`, no `re` dependency): an
+    interior `Z` is not a valid ISO-8601 field, so leaving it intact lets the
+    downstream `fromisoformat` reject the whole string rather than a blanket
+    `.replace("Z", "+00:00")` rewriting it mid-string. On `_parse_ts`'s
+    return/raise the trailing-only and replace-all forms are observationally
+    identical (any interior `Z` is unparseable either way); the anchor matters
+    at the STRING layer, which this helper isolates and makes testable.
+    """
+    s = str(value)
+    return s[:-1] + "+00:00" if s.endswith("Z") else s
+
+
 def _parse_ts(value: Any) -> datetime:
-    """Parse an ISO-8601 timestamp, normalizing a trailing `Z` to `+00:00`.
+    """Parse an ISO-8601 timestamp, normalizing a trailing `Z` to `+00:00`
+    (via `_normalize_trailing_z`).
 
     `make_event` stamps `ts` as `...Z` while `canonical_since()` emits
     `...+00:00`; normalizing lets the two compare as equal-instant
@@ -624,7 +812,7 @@ def _parse_ts(value: Any) -> datetime:
     `Z` ts. Raises ValueError/TypeError on missing/malformed input; callers
     decide the fail-open policy.
     """
-    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return datetime.fromisoformat(_normalize_trailing_z(value))
 
 
 def _ts_ge(event_ts: Any, since: str | None) -> bool:
@@ -657,11 +845,16 @@ def _read_events_at(
     Reads with `errors="replace"` so a single invalid byte sequence
     (e.g., from a botched write or a truncated multibyte character)
     substitutes U+FFFD for the bad bytes instead of raising
-    UnicodeDecodeError. A malformed byte range corrupts at most its
-    own line; the per-line `json.loads` then drops that line and every
-    other event in the file is still returned. Without this, one bad
-    byte would cause the outer `except Exception` to drop the whole
-    file and hide all of its otherwise-valid events.
+    UnicodeDecodeError. A bad line corrupts at most its own line; every
+    other event in the file is still returned. Two per-line hazards are
+    isolated: (1) a line that fails to parse as JSON is dropped by the
+    `except (json.JSONDecodeError, ValueError)` below; (2) a line that
+    parses as valid JSON but is NOT a dict (e.g. `[1,2,3]`, `"str"`,
+    `42`, `null`) is dropped by the `isinstance(event, dict)` guard —
+    without that guard, `.get()` on a non-dict value raises
+    AttributeError (not in the except tuple), which would propagate to
+    the outer `except Exception` and drop the WHOLE file, hiding every
+    otherwise-valid event behind one bad line.
 
     `since`: when set, only events whose `ts` is >= `since` (inclusive,
     parsed via `_ts_ge`) are returned — the arc-scope filter. None/empty
@@ -680,6 +873,16 @@ def _read_events_at(
                 continue
             try:
                 event = json.loads(line)
+                # A line can be valid JSON yet NOT a dict (e.g. `[1,2,3]`,
+                # `"str"`, `42`, `null`). `.get()` on such a value raises
+                # AttributeError — which is NOT in the except tuple below, so it
+                # would propagate to the outer `except Exception` and drop the
+                # WHOLE file's events (every event hidden behind one bad line).
+                # Skip a non-dict line exactly like a malformed one so it
+                # corrupts at most itself, preserving the per-line isolation the
+                # docstring promises.
+                if not isinstance(event, dict):
+                    continue
                 if event_type and event.get("type") != event_type:
                     continue
                 if not _ts_ge(event.get("ts"), since):
@@ -772,7 +975,14 @@ def _scan_lines_for_event(
 
     Shared by tail-window and full-slurp scan paths. Skips blank lines and
     silently drops malformed JSON (symmetric with the pre-optimization
-    contract: corrupted lines never poison the scan).
+    contract: corrupted lines never poison the scan). A line that parses as
+    valid JSON but is NOT a dict (e.g. `[1,2,3]`, `"str"`, `42`, `null`) is
+    skipped by the `isinstance(event, dict)` guard — parity with
+    `_read_events_at`: without it, `.get()` on a non-dict value raises
+    AttributeError (not in the except tuple), which would propagate to the
+    caller's outer `except Exception` and abort the whole reverse scan,
+    making `read_last_event*` return None (e.g. `session_end` would conclude
+    the session was never paused).
 
     `since`: when set, an event matching `event_type` whose `ts` is < `since`
     (parsed via `_ts_ge`) is skipped — the reverse scan then returns the
@@ -784,6 +994,8 @@ def _scan_lines_for_event(
             continue
         try:
             event = json.loads(line)
+            if not isinstance(event, dict):
+                continue
             if event.get("type") == event_type and _ts_ge(
                 event.get("ts"), since
             ):

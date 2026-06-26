@@ -293,7 +293,12 @@ try:
     )
     from shared.dispatch_helpers import trustworthy_actor_name
     from shared.intentional_wait import is_self_complete_exempt, is_teachback_exempt
-    from shared.session_journal import append_event, get_journal_path, make_event
+    from shared.session_journal import (
+        append_event,
+        get_journal_path,
+        make_event,
+        read_events,
+    )
     from shared.task_utils import is_teachback_subject as _is_teachback_subject
     from shared.task_utils import read_task_json
     from shared.teachback_schema import (
@@ -369,6 +374,86 @@ _NO_RESOLVABLE_TOTAL = (
     "no resolvable total (need an integer 4-16 under key 'total', "
     "or a recoverable fallback)"
 )
+
+
+# ─── artifact_paths emit backstop (durability nudge) ─────────────────────────
+#
+# Maps a phase-task subject PREFIX to its artifact_paths `workflow` tag, but
+# ONLY for the phases that MUST emit a durable artifact pointer — PREPARE and
+# ARCHITECT, which write recoverable disk artifacts (docs/preparation/,
+# docs/architecture/) that the git-immune, GC-durable journal event protects.
+# CODE:/TEST:/ATOMIZE:/CONSOLIDATE: phases are DELIBERATELY ABSENT: their output
+# is git-tracked (CODE/TEST) or non-artifact (ATOMIZE/CONSOLIDATE), so a missing
+# artifact_paths event is expected, not an anomaly — leaving them out makes the
+# backstop silently skip them. The `workflow` values mirror the lowercase enum
+# in session_journal's artifact_paths registration (plan-mode / prepare /
+# architect / peer-review / code-auditor); only the two phase-task-backed
+# workflows appear here (plan-mode / peer-review are command syntheses with no
+# phase-completion TaskUpdate for this PostToolUse hook to observe).
+_ARTIFACT_EMIT_PHASE_WORKFLOWS = {
+    "PREPARE:": "prepare",
+    "ARCHITECT:": "architect",
+}
+
+
+def _phase_artifact_requirement(subject: str) -> "tuple[str, str] | None":
+    """Map a phase-task subject to its (workflow, feature) artifact key, or
+    None when this subject does not require an artifact_paths emit.
+
+    Returns None (skip the backstop nudge) for:
+      - a non-PREPARE/ARCHITECT subject (CODE/TEST/ATOMIZE/CONSOLIDATE/other →
+        exempt by design — their artifacts are git-tracked or absent), and
+      - a malformed phase subject with no ": " feature separator (rare; the
+        orchestrate command creates phase tasks as exactly "PREPARE: {feature}"
+        / "ARCHITECT: {feature}", so a missing separator is degenerate — fail
+        open as a no-op rather than nudging on an unresolvable feature slug).
+
+    The feature slug is the subject suffix after the "{PHASE}: " prefix; it must
+    equal the orchestrate {feature-slug} that the lead-frame emit site writes as
+    the event's `feature` field, so the (workflow, feature) presence check
+    aligns with the dedup SSOT key. Pure; never raises.
+    """
+    if not isinstance(subject, str):
+        return None
+    for prefix, workflow in _ARTIFACT_EMIT_PHASE_WORKFLOWS.items():
+        if subject.startswith(prefix):
+            # Split on the canonical "{PHASE}: " separator; the suffix is the
+            # feature slug. A subject that startswith the bare prefix but has no
+            # ": " (e.g. "PREPAREthing") cannot match prefix anyway; one that is
+            # exactly the prefix with nothing after yields an empty slug → skip.
+            _, sep, suffix = subject.partition(": ")
+            feature = suffix.strip()
+            if not sep or not feature:
+                return None
+            return workflow, feature
+    return None
+
+
+def _artifact_paths_event_present(workflow: str, feature: str) -> bool:
+    """Return True iff an artifact_paths journal event exists for this
+    (workflow, feature) in the CURRENT session's journal.
+
+    Uses the IMPLICIT read_events() (lead-frame): this backstop is is_lead-gated
+    at its single call site, so get_session_dir() resolves the canonical journal
+    in the lead's process. The off-lead masked-read hazard (read_events()
+    false-returning [] for a teammate frame) is strictly the SECRETARY HARVEST
+    reader's concern — that reader runs off-lead and MUST use
+    read_events_from(session_dir); this backstop does not, because it never runs
+    off-lead. The hook frame carries no worktree/session_dir to pass anyway.
+
+    Fail-OPEN by construction: read_events swallows its own errors and returns []
+    (treated as "absent" → the nudge fires). A false nudge is non-blocking and
+    self-corrects; a false-silence (missing the forgotten emit) is the dangerous
+    error this presence check exists to prevent, so absent-on-error is safe-side.
+    Pure read; never raises (read_events is internally fail-open).
+    """
+    events = read_events("artifact_paths")
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("workflow") == workflow and event.get("feature") == feature:
+            return True
+    return False
 
 
 # `_is_teachback_subject` (the canonical Teachback Task subject predicate) was
@@ -1223,6 +1308,53 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
             _emit_lead_side_agent_handoff(
                 team_name, task_id, owner, subject, metadata
             )
+
+        # artifact_paths emit BACKSTOP (#927 durability nudge). A FAIL-OPEN
+        # advisory: when a PREPARE/ARCHITECT phase task completes but the
+        # lead-frame emit site forgot to write the durable artifact_paths
+        # pointer, nudge so the GC-immune recovery pointer isn't silently
+        # missed. The pointer is what survives `git worktree remove` and lets
+        # the secretary distill the disk artifact at harvest; without it, that
+        # phase degrades to HANDOFF-only recovery (the #927 failure path).
+        #
+        # is_lead-gated, mirroring the lead-side emit above: only the lead's
+        # process resolves the canonical journal via the implicit read, and only
+        # the lead is the writer the nudge is aimed at. A teammate self-
+        # completion has no populated context and is correctly skipped.
+        #
+        # This hook canNOT glob (no worktree path in the PostToolUse frame) — it
+        # only DETECTS the missing emit (the journal read is path-independent in
+        # the lead frame) and nudges; it never blocks the TaskUpdate. EXEMPT:
+        #   - CODE:/TEST:/ATOMIZE:/CONSOLIDATE:/other subjects → not in the
+        #     phase→workflow map → _phase_artifact_requirement returns None →
+        #     silent (their artifacts are git-tracked or non-existent).
+        #   - skipped phases (metadata.skipped is exactly True) → no artifact
+        #     produced. The guard uses a strict `is not True` identity check, so
+        #     ONLY the boolean True exempts; a truthy-but-non-True value
+        #     (1, "yes", etc.) does NOT count as skipped and the backstop still
+        #     fires — fail-safe toward nudging on an ambiguous skip marker.
+        # Emit ordering is satisfied by construction: the emit site fires at
+        # phase-output validation BEFORE the lead completes the phase task, so by
+        # this PostToolUse(completed) the event is already on disk (a synchronous
+        # journal append). Fail-open covers any residual race.
+        if pact_context.is_lead(input_data) and metadata.get("skipped") is not True:
+            requirement = _phase_artifact_requirement(subject)
+            if requirement is not None:
+                workflow, feature = requirement
+                if not _artifact_paths_event_present(workflow, feature):
+                    advisories.append((
+                        "artifact_paths_emit_missing",
+                        f"PACT task_lifecycle_gate: phase Task {task_id} "
+                        f"({subject!r}) completed without an artifact_paths "
+                        f"journal event for (workflow={workflow!r}, "
+                        f"feature={feature!r}). The lead-frame emit (glob the "
+                        f"phase's docs/ output + write --type artifact_paths) "
+                        "appears to have been skipped — the GC-durable recovery "
+                        "pointer is missing, so this phase's disk artifact will "
+                        "degrade to HANDOFF-only at harvest. Emit the "
+                        "artifact_paths event for this phase before the worktree "
+                        "is torn down. Advisory only — not blocking.",
+                    ))
 
         # Teachback-subject completion-time checks: teachback_submit presence
         # + schema. R1/R2 are disjoint on the missing-vs-malformed split:

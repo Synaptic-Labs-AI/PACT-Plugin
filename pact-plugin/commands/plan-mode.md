@@ -194,7 +194,7 @@ Each consultant dispatch creates **two tasks**, not one:
 - **Task A** — TEACHBACK gate. `subject = "{specialist}: TEACHBACK for plan consultation on {feature}"`, owner = consultant. Description: lightweight understanding-confirm of the consultation scope.
 - **Task B** — primary consultation. `subject = "{specialist}: plan consultation for {feature}"`, owner = consultant, `blockedBy = [<Task A id>]`.
 
-Both are created BEFORE the `Agent(...)` spawn call. The consultant claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair: `SendMessage(to=consultant, ...)` FIRST, then `TaskUpdate(A, status="completed")` — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review) for the rationale. On accept, the consultant wakes to claim B and produce the consultation HANDOFF.
+Both are created BEFORE the `Agent(...)` spawn call. The consultant claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair: `SendMessage(to=consultant, ...)` FIRST, then `TaskUpdate(A, status="completed")` — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review) for the rationale. On accept, the consultant wakes to claim B and produce the consultation HANDOFF. The consultant writes the HANDOFF and signals stage-ready, then idles — **you (the lead) complete Task B**, not the consultant. Lead-side completion is what reliably journals the consultation HANDOFF; a consultant self-completing their own Task B can leave the HANDOFF unrecorded.
 
 ```
 # A-FIRST ORDERING (required): create Task A (the teachback gate) BEFORE Task B so the gate gets the LOWER id. Creating Task B first — giving the gate the HIGHER id — is WRONG: it inverts the intuitive "lower id = earlier" reading. The blocking wiring below legitimately names both ids because it runs AFTER both tasks exist.
@@ -353,6 +353,27 @@ TaskUpdate(
 ```
 
 Save the synthesized plan to `docs/plans/{feature-slug}-plan.md`.
+
+**Plan-doc self-check**: after writing the plan, confirm `docs/plans/{feature-slug}-plan.md` exists on disk and is non-empty before continuing. An empty or missing plan doc is a failure to investigate (the synthesis did not land), not a no-op — resolve it before completing the planning task.
+
+**Emit `artifact_paths`**: write a path-only `artifact_paths` journal event pointing at the plan doc so it (and the consultation work it synthesizes) is recoverable after garbage-collection independently of any HANDOFF. The plan doc is the lead's own product, so the lead knows its absolute path directly — enumerate it here, not from any HANDOFF.
+
+```bash
+set -e
+trap 'rc=$?; echo "[JOURNAL WRITE FAILED] plan-mode.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
+SJ="{plugin_root}/hooks/shared/session_journal.py"
+python3 "$SJ" write --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON'
+{"workflow": "plan-mode", "feature": "{feature-slug}", "paths": ["{absolute_plan_doc_path}"]}
+JSON
+```
+
+**Trigger a harvest** (consult-only durability): plan-mode is a consultation-only flow with no later CODE/peer-review boundary to trigger memory harvest, so the plan doc and the consultation HANDOFFs would otherwise never reach pact-memory. Create a secretary harvest task after writing the plan so the `artifact_paths` event resolves and the consultation HANDOFFs distill into institutional memory:
+
+```
+TaskCreate(subject="secretary: harvest plan-mode consultation",
+  description="Harvest HANDOFFs and artifact_paths for team {team_name}. Follow the Standard Harvest workflow in your pact-handoff-harvest skill, resolving artifact_paths events to read the plan doc and any consultation artifacts off disk. Report summary when done.")
+TaskUpdate(taskId, owner="secretary")
+```
 
 **Handling existing plans**:
 
