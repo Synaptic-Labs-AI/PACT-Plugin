@@ -295,6 +295,13 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> dict | None:
     # 2-4 options per question (peer-review.md), so this is fail-closed defense
     # for a theoretical/replayed no-options payload. The per-question decline/
     # defer veto still runs below for mixed bundles.
+    #
+    # BACKSTOP — DO NOT remove as "dead code". The step-3b option-anchoring below
+    # already refuses a no-options bundle (an empty option surface yields no pair,
+    # so the minted (op,target) is never ∈ it → None), making this early return
+    # functionally redundant TODAY. It is kept DELIBERATELY so the "free-text /
+    # no-options never mints" rule is STATED here at the top, not left emergent
+    # from a downstream gate that a future edit could weaken without noticing.
     if not any(
         isinstance(q, dict) and isinstance(q.get("options"), list) and q.get("options")
         for q in questions
