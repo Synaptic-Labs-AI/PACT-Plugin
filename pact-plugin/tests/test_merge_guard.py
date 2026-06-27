@@ -13252,3 +13252,382 @@ class TestD2QuoteAwareSpanRemediation:
 # (removed class TestD3LadderReDoSPerfBound — superseded by the command-anchored
 #  bidirectional suite in test_merge_guard_auth_symmetry.py;
 #  it exercised the dropped prose classifier extract_context.)
+
+
+# =============================================================================
+# #1037 — HYBRID benign-arg-literal suppressor: comprehensive coverage
+#
+# The suppressor (_suppress_benign_arg_literals, the FINAL step of
+# _strip_non_executable_content) blanks-with-space a dangerous-looking QUOTED
+# literal ONLY when it is a provably-inert argument of a WHITELISTED non-executor
+# segment (echo / grep / pact_memory search / gh issue|pr comment / git commit)
+# with NO indirection guard firing. DANGEROUS_PATTERNS + .search() remain the
+# AUTHORITY; a suppressor bug reverts to OVER-block (an acceptable false positive
+# per INV-D2), never UNDER-block. Both is_dangerous_command and
+# is_compound_destructive_command inherit the suppressor through _strip, so the
+# canaries below exercise both call sites.
+#
+# Every non-vacuity mutation + cardinality in this section was MEASURED against
+# the committed suppressor (empirical, not asserted). Two proof classes:
+#   * proof-class P (ALLOW-positives, NEGATIVE assertions `assert not blocked`):
+#     a whole-suppressor revert (-> identity) flips the #1037 ALLOW set back to
+#     BLOCK while the paired controls stay BLOCK — a cardinality SPLIT that
+#     defeats negative-test phantom-green — PLUS an exclusion-guard MECHANISM
+#     assertion (the literal is neutralized in _strip output, not merely
+#     is_dangerous->False).
+#   * proof-class C (under-block canaries, POSITIVE assertions): a revert leaves
+#     a canary trivially green (blocked before AND after), so non-vacuity needs a
+#     BROADEN/WEAKEN mutation. Sub-class A (suppressor-restraint) flips under a
+#     TARGETED single-guard neuter (isolated cardinality, defense-in-depth-clean).
+#     Sub-class B (pre-existing-guard regression, suppressor-NEUTRAL: the danger
+#     is a BARE command the suppressor never touches) flips ONLY under a COMBINED
+#     over-strip (blank bare dangerous tokens) — named as such, never
+#     mis-attributed to a #1037 gate.
+#
+# All mutation tests use pytest `monkeypatch`, which auto-restores the patched
+# module attribute after each test — so no module-level state leaks across the
+# full-suite run (the order-dependent module-cache hazard, #845).
+# =============================================================================
+
+
+class Test1037BenignArgSuppressorAllowPositives:
+    """#1037 false-positive CLOSURE: a whitelisted non-executor segment quoting a
+    dangerous-looking literal is now ALLOWED. NEGATIVE assertions (phantom-green
+    risk) guarded by pair-revert controls + an exclusion-guard mechanism assertion."""
+
+    # #1037-suppressor-DEPENDENT FP closures only. `echo "..."` and
+    # `git commit -m "..."` are EXCLUDED: they are allowed by the PRE-EXISTING
+    # echo carrier-strip / commit-msg strip (a whole-suppressor revert leaves
+    # them allowed — MEASURED), so they are not #1037 ALLOW-positives.
+    ALLOW = [
+        'gh pr comment 5 --body "see gh pr merge 5 for context"',
+        'gh issue comment 12 --body "do not git push --force origin main"',
+        'grep -n "gh pr merge" notes.md',
+        'pact_memory search "gh pr merge approval flow"',
+        'git commit -am "wire up gh pr merge 5 handler"',
+        # quote-aware boundary: a shell separator INSIDE the quoted arg must NOT
+        # split the segment (the boundary mask consumes balanced quotes atomically).
+        'grep "a ; gh pr merge 5" file',
+        'gh pr comment 5 --body "do it; gh pr merge 9 then ship"',
+        # cross-segment clearing: a REAL separator between TWO whitelisted
+        # segments clears the inert literal in EACH, per-segment (the placeholder-
+        # gated per-segment suppressor preserves cross-segment FP clearing).
+        'echo "note" ; grep "gh pr merge 5" file',
+    ]
+
+    # PAIR-REVERT controls: structurally-adjacent lines that MUST stay BLOCK no
+    # matter what the suppressor does, so a mutation that flips ALLOW keeps these
+    # blocked (cardinality split) — the ALLOW assertions cannot be vacuously green.
+    SHOULD_BLOCK = [
+        'gh pr merge 5',                                    # the bare destructive op
+        'grep "x" file ; gh pr merge 5',                   # real (unquoted) separator splits
+        'gh pr comment 5 --body "ok" && gh pr merge 999',  # chained second op
+    ]
+
+    @pytest.mark.parametrize("command", ALLOW)
+    def test_benign_arg_literal_now_allowed(self, command):
+        from merge_guard_pre import (
+            is_dangerous_command,
+            is_compound_destructive_command,
+        )
+
+        assert not is_dangerous_command(command)
+        assert not is_compound_destructive_command(command)
+
+    @pytest.mark.parametrize("command", SHOULD_BLOCK)
+    def test_paired_control_still_blocked(self, command):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(command)
+
+    def test_suppressor_neutralizes_literal_in_strip_output(self):
+        # exclusion-guard MECHANISM assertion (#933): prove the suppressor REMOVES
+        # the dangerous literal from the _strip output — not merely that
+        # is_dangerous->False (a different guard could satisfy that). The carrier
+        # shell stays intact; only the inert literal is blanked.
+        from merge_guard_pre import _strip_non_executable_content
+
+        stripped = _strip_non_executable_content('grep -n "gh pr merge" notes.md')
+        assert "gh pr merge" not in stripped
+        assert stripped.startswith("grep -n")
+        assert "notes.md" in stripped
+
+    def test_allow_positives_nonvacuity_revert_reblocks(self, monkeypatch):
+        # non-vacuity (proof-class P): a source-only revert of the suppressor
+        # (-> identity) flips EVERY #1037 ALLOW-positive back to BLOCK.
+        # MEASURED {7 of 7 flip RED}; the SHOULD_BLOCK controls stay blocked
+        # (cardinality split) — so the ALLOW assertions are coupled to the
+        # suppressor, not vacuous.
+        from merge_guard_pre import (
+            is_dangerous_command,
+            is_compound_destructive_command,
+        )
+
+        monkeypatch.setattr(
+            "merge_guard_pre._suppress_benign_arg_literals",
+            lambda text, command: text,
+        )
+        reblocked = [
+            c for c in self.ALLOW
+            if is_dangerous_command(c) or is_compound_destructive_command(c)
+        ]
+        assert len(reblocked) == len(self.ALLOW)  # all 7 flip RED under revert
+        still = [c for c in self.SHOULD_BLOCK if is_dangerous_command(c)]
+        assert len(still) == len(self.SHOULD_BLOCK)  # controls unaffected
+
+
+class Test1037SuppressorRestraintCanaries:
+    """Sub-class A under-block canaries: a dangerous QUOTED literal inside a
+    WHITELISTED carrier segment that STAYS BLOCK because a SPECIFIC #1037 gate
+    fires. Each gate has a TARGETED single-guard neuter that flips ONLY its
+    target group (defense-in-depth-clean cardinality, MEASURED). proof-class C —
+    a revert leaves these trivially green, so the neuter is the non-vacuity proof."""
+
+    CMD_SUBST = [
+        'grep "$(gh pr merge 9)"',
+        'gh pr comment 5 --body "$(gh pr merge 9)"',
+    ]
+
+    @pytest.mark.parametrize("command", CMD_SUBST)
+    def test_cmd_subst_in_whitelisted_dq_stays_blocked(self, command):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(command)
+
+    def test_cmd_subst_compound_form_caught_by_compound_call_site(self):
+        # both call sites: a compound form is also caught by is_compound.
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command('echo "$(gh pr merge 9)" && ls')
+
+    def test_cmd_subst_canary_nonvacuity(self, monkeypatch):
+        # non-vacuity: neuter the per-literal cmd-subst preservation
+        # (_has_command_substitution -> False) -> the dq literal is blanked and
+        # the scan no longer matches. MEASURED {2 of 2 flip}; isolated (no other
+        # canary group flips under this neuter).
+        from merge_guard_pre import is_dangerous_command
+
+        monkeypatch.setattr(
+            "merge_guard_pre._has_command_substitution",
+            lambda quoted_content: False,
+        )
+        flipped = [c for c in self.CMD_SUBST if not is_dangerous_command(c)]
+        assert len(flipped) == len(self.CMD_SUBST)
+
+    PIPE_TO_SHELL = [
+        'grep "gh pr merge 5" file | bash',
+        'echo "gh pr merge 5" | sh',
+    ]
+
+    @pytest.mark.parametrize("command", PIPE_TO_SHELL)
+    def test_pipe_to_shell_with_whitelisted_carrier_stays_blocked(self, command):
+        from merge_guard_pre import (
+            is_dangerous_command,
+            is_compound_destructive_command,
+        )
+
+        assert is_dangerous_command(command)
+        assert is_compound_destructive_command(command)  # compound `|` shape
+
+    def test_pipe_to_shell_canary_nonvacuity(self, monkeypatch):
+        # non-vacuity: neuter the whole-command pipe-to-shell guard -> the
+        # whitelisted segment's literal is blanked, so the downstream shell would
+        # execute it unprotected. MEASURED {2 of 2 flip}; isolated.
+        from merge_guard_pre import is_dangerous_command
+
+        monkeypatch.setattr(
+            "merge_guard_pre._has_pipe_to_shell", lambda command: False
+        )
+        flipped = [c for c in self.PIPE_TO_SHELL if not is_dangerous_command(c)]
+        assert len(flipped) == len(self.PIPE_TO_SHELL)
+
+    def test_proc_sub_to_shell_with_whitelisted_carrier_stays_blocked(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('echo "gh pr merge 5" > >(bash)')
+
+    def test_proc_sub_canary_nonvacuity(self, monkeypatch):
+        # non-vacuity: neuter the whole-command process-substitution-to-shell
+        # guard -> the echo literal is blanked. MEASURED {1}; isolated.
+        from merge_guard_pre import is_dangerous_command
+
+        monkeypatch.setattr(
+            "merge_guard_pre._has_process_substitution_to_shell",
+            lambda command: False,
+        )
+        assert not is_dangerous_command('echo "gh pr merge 5" > >(bash)')
+
+    def test_unbalanced_quote_in_whitelisted_segment_stays_blocked(self):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('grep "gh pr merge 5')
+
+    def test_unbalanced_quote_canary_nonvacuity(self, monkeypatch):
+        # non-vacuity: the balanced-span blank regexes do NOT match an unbalanced
+        # quote (fail-closed by omission). A broaden that also blanks a trailing
+        # unbalanced double-quote flips it. MEASURED {1}; isolated (the tight
+        # unbalanced-only broaden leaves the cmd-subst / pipe canaries unchanged).
+        import re as _re
+
+        import merge_guard_pre as _mg
+
+        original = _mg._blank_inert_quoted_literals
+
+        def broadened(segment):
+            s = original(segment)
+            return _re.sub(r'"[^"]*$', lambda m: '"' + " " * (len(m.group(0)) - 1), s)
+
+        monkeypatch.setattr("merge_guard_pre._blank_inert_quoted_literals", broadened)
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('grep "gh pr merge 5')
+
+    # python -c / bash -c / sh -c EXECUTE their argument, so they are absent from
+    # the positive whitelist by construction — the single most load-bearing
+    # under-block-safety property (suppressing their literal == a #1042 binding
+    # bypass on the is_dangerous path).
+    EXECUTOR_VERBS = [
+        "python3 -c \"import os; os.system('gh pr merge 5')\"",
+        'bash -c "gh pr merge 42"',
+        "sh -c 'gh pr merge 5'",
+    ]
+
+    @pytest.mark.parametrize("command", EXECUTOR_VERBS)
+    def test_executor_verb_not_whitelisted_stays_blocked(self, command):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(command)
+
+    def test_executor_exclusion_nonvacuity(self, monkeypatch):
+        # non-vacuity: the executor verbs stay BLOCK ONLY because they are ABSENT
+        # from the positive whitelist. Adding them flips ALL of them.
+        # MEASURED {3 of 3 flip}; isolated.
+        import re as _re
+
+        broadened = _re.compile(
+            r"""\s*(?:
+                echo(?![\w-])
+              | grep(?![\w-])
+              | pact_memory\s+search(?![\w-])
+              | gh\s+(?:issue|pr)\s+comment(?![\w-])
+              | git\s+commit(?![\w-])
+              | python3?\s+-c(?![\w-])
+              | bash\s+-c(?![\w-])
+              | sh\s+-c(?![\w-])
+            )""",
+            _re.VERBOSE,
+        )
+        monkeypatch.setattr("merge_guard_pre._BENIGN_ARG_CARRIER_RE", broadened)
+        from merge_guard_pre import is_dangerous_command
+
+        flipped = [c for c in self.EXECUTOR_VERBS if not is_dangerous_command(c)]
+        assert len(flipped) == len(self.EXECUTOR_VERBS)
+
+
+class Test1037RegressionCanaries:
+    """Sub-class B under-block canaries: the dangerous op is a BARE command the
+    suppressor NEVER touches (it only blanks quoted literals in whitelisted
+    segments). These prove the suppressor did not REGRESS the pre-existing
+    substring-scan / segment-split detection. They are suppressor-NEUTRAL: a
+    whole-suppressor revert leaves them BLOCK (trivially green), so their
+    non-vacuity is a COMBINED over-strip (a hypothetical suppressor rewritten to
+    blank BARE dangerous tokens) — NOT a single-guard neuter."""
+
+    REGRESSION = [
+        'echo safe && gh pr merge 999',                    # compound, bare 2nd op
+        'gh pr comment 5 --body "ok" && gh pr merge 999',  # whitelisted seg1 + bare 2nd op
+        'sudo grep "gh pr merge 5" file',                  # wrapper/runner prefix (sudo)
+        'GH_TOKEN=abc gh pr merge 5',                      # env-var assignment prefix
+        'CMD="gh pr merge 5"; $CMD',                       # variable expansion
+        'grep "x" file ; gh pr merge 5',                   # real (unquoted) separator
+    ]
+
+    @pytest.mark.parametrize("command", REGRESSION)
+    def test_bare_destructive_op_stays_blocked(self, command):
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(command)
+
+    COMPOUND_REGRESSION = [
+        'echo safe && gh pr merge 999',
+        'gh pr comment 5 --body "ok" && gh pr merge 999',
+        'CMD="gh pr merge 5"; $CMD',
+        'grep "x" file ; gh pr merge 5',
+    ]
+
+    @pytest.mark.parametrize("command", COMPOUND_REGRESSION)
+    def test_compound_regression_caught_by_compound_call_site(self, command):
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(command)
+
+    def test_regression_canaries_are_suppressor_neutral(self, monkeypatch):
+        # discrimination: a whole-suppressor revert leaves ALL of these BLOCK
+        # (they do not depend on the suppressor). MEASURED {0 of 6 flip} — this is
+        # WHY a revert cannot prove them and the combined over-strip is required.
+        from merge_guard_pre import is_dangerous_command
+
+        monkeypatch.setattr(
+            "merge_guard_pre._suppress_benign_arg_literals",
+            lambda text, command: text,
+        )
+        flipped = [c for c in self.REGRESSION if not is_dangerous_command(c)]
+        assert flipped == []  # suppressor-neutral
+
+    def test_regression_canaries_nonvacuity_combined_overstrip(self, monkeypatch):
+        # non-vacuity (proof-class C, COMBINED over-strip): a hypothetical
+        # suppressor rewritten to blank BARE dangerous tokens (not just quoted
+        # literals in whitelisted segments) WOULD open an under-block on every one
+        # of these. MEASURED {6 of 6 flip} — proves the canaries would CATCH such
+        # an over-broad rewrite.
+        import re as _re
+
+        def overstrip(text, command):
+            for pat in (
+                r"gh\s+pr\s+merge\s+\d+",
+                r"git\s+push\s+.*--force",
+                r"git\s+branch\s+-D\s+\S+",
+            ):
+                text = _re.sub(pat, lambda m: " " * len(m.group(0)), text)
+            return text
+
+        monkeypatch.setattr("merge_guard_pre._suppress_benign_arg_literals", overstrip)
+        from merge_guard_pre import is_dangerous_command
+
+        flipped = [c for c in self.REGRESSION if not is_dangerous_command(c)]
+        assert len(flipped) == len(self.REGRESSION)
+
+
+class Test1037FpFnSymmetry:
+    """#1037 opened NO under-block (security #1 / #720): the suppressor is a
+    strip-stage addition, so it must not regress the compound-shape detection
+    that closes the spaceless FD-redirect|pipe adjacency bypass."""
+
+    def test_spaceless_fd_pipe_bypass_still_closed(self):
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert is_compound_destructive_command(
+            "gh pr merge 100 2>&1|gh pr merge 999 --admin"
+        )
+
+    def test_symmetric_benign_spaceless_not_flagged(self):
+        # symmetric counter-test: the SAME spaceless FD|pipe shape with
+        # NON-destructive ops is NOT flagged -> the closure detects the
+        # destructive payload, it does not over-block the shape.
+        from merge_guard_pre import is_compound_destructive_command
+
+        assert not is_compound_destructive_command("echo hi 2>&1|grep x")
+
+    def test_spaceless_bypass_survives_suppressor_revert(self, monkeypatch):
+        # the suppressor does NOT touch this line (no whitelisted-segment quoted
+        # literal); under a whole-suppressor revert it stays is_compound=True ->
+        # the closure is suppressor-independent (no regression possible).
+        from merge_guard_pre import is_compound_destructive_command
+
+        monkeypatch.setattr(
+            "merge_guard_pre._suppress_benign_arg_literals",
+            lambda text, command: text,
+        )
+        assert is_compound_destructive_command(
+            "gh pr merge 100 2>&1|gh pr merge 999 --admin"
+        )
