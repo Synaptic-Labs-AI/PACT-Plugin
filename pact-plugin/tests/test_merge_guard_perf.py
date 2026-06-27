@@ -221,3 +221,49 @@ class TestFlagTokenBoundary:
         cmd = "git push -u -v --no-verify origin main"
         assert is_dangerous_command(cmd) is True
         assert detect_command_operation_type(cmd) == "force-push"
+
+
+# ---------------------------------------------------------------------------
+# Privileged-flag scanner linearity (#1042 INV-D2). extract_privileged_flags is
+# a single str.split() token-walk with constant per-token work (the op-class
+# denylist has <=3 entries; the git-surface abbreviation scan compares a token
+# against a <=1-entry long-name list) — O(n) LINEAR, no regex / no backtracking.
+# Like the push-flag-walk case above it is structurally linear with NO quadratic
+# predecessor to revert to (GREEN-stays-GREEN — no perf counter-test-RED); its
+# guard is the ratio/ceiling, which a future nested-quantifier or per-token
+# rescan regression would trip.
+# ---------------------------------------------------------------------------
+
+from shared.merge_guard_common import extract_privileged_flags  # noqa: E402
+
+
+class TestPrivilegedFlagScannerLinearity:
+    """The #1042 bound-flag scanner scales sub-quadratically on a worst-case
+    many-token witness, through both the short-cluster walk (merge surface) and
+    the git-surface prefix-abbreviation scan (force-push surface)."""
+
+    @pytest.mark.parametrize("op,build", [
+        # merge surface: single-dash cluster walk over unbound shorts (per-token
+        # constant work; no value-consumption short-circuit to confound the shape).
+        ("merge", lambda n: "-x " * n),
+        # force-push surface: every token enters the unambiguous-prefix expansion
+        # scan against the <=1-entry long-name list (the abbreviation branch).
+        ("force-push", lambda n: "--n " * n),
+    ], ids=["merge_short_cluster_walk", "force_push_abbreviation_scan"])
+    def test_scanner_scales_linearly(self, op, build):
+        fn = lambda cmd: extract_privileged_flags(cmd, op)  # noqa: E731
+        t_small, t_large = _measure_scaling(fn, build)
+        ratio = (t_large / t_small) if t_small > 0 else float("inf")
+
+        # PRIMARY: generous absolute ceiling (linear is sub-ms here even at N=4000).
+        assert t_large < 1.0, (
+            f"extract_privileged_flags({op}) on {build(1)!r}*{N_LARGE}: "
+            f"{t_large * 1000:.1f} ms exceeds 1000 ms ceiling — backtracking regression?"
+        )
+        # REINFORCING: scaling ratio across one doubling (linear ~2.0, quadratic ~4.0).
+        assert ratio < RATIO_CEILING, (
+            f"extract_privileged_flags({op}) on {build(1)!r}: "
+            f"t({N_LARGE})/t({N_SMALL}) = {ratio:.2f} >= {RATIO_CEILING} — "
+            f"quadratic scaling regression (t_small={t_small * 1000:.1f} ms, "
+            f"t_large={t_large * 1000:.1f} ms)?"
+        )
