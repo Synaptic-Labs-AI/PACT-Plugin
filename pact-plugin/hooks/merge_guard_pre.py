@@ -564,6 +564,15 @@ def _strip_non_executable_content(command: str) -> str:
 
         result = re.sub(_gh_carrier_span, _strip_gh_carrier_span, result)
 
+    # 8. Suppress dangerous literals that are provably inert quoted arguments of
+    #    a WHITELISTED non-executor segment (#1037 HYBRID). FINAL strip step, so
+    #    both is_dangerous_command AND is_compound_destructive_command inherit it
+    #    by construction (§5.8). Fail-closed: blanks ONLY on positive proof; any
+    #    ambiguity preserves content for the DANGEROUS_PATTERNS scan (the
+    #    authority). Guards/segment-split SSOT are defined just below the
+    #    compound-operator regexes.
+    result = _suppress_benign_arg_literals(result, command)
+
     return result
 
 
@@ -639,6 +648,139 @@ _COMPOUND_OPS_RE = re.compile(r"&&|\|\||;|\||\n")
 # merge_guard hooks run under bash (Claude Code's default shell), so `|&` is
 # out of scope. If the shell ever changes, add an arm for `|\s*&` here.
 _FD_REDIRECT_RE = re.compile(r"\d*[<>]&\d+|>\|")
+
+
+# Positive whitelist of SHELL-INERT-arg leading verbs (#1037 HYBRID). A command
+# segment led by one of these sends its quoted arguments to an API, prints them,
+# or searches them — it NEVER executes them as a command, so a dangerous-looking
+# quoted literal in such a segment is provably inert. EVERY arg-executing verb is
+# ABSENT BY CONSTRUCTION: python/python3 -c, perl -e, ruby -e, node -e, awk,
+# eval, sh -c, bash -c, source/dot, xargs — an unrecognized leading verb (incl.
+# any wrapper/runner like sudo/env/timeout) is the FAIL-CLOSED default (no
+# suppression → the substring scan still blocks). python -c is DELIBERATELY
+# excluded though it looks benign in `python3 -c "x='gh pr merge 5'"`: it
+# executes its argument, so `python3 -c "import os; os.system('gh pr merge 5')"`
+# would run the merge — suppressing its literal would be an UNDER-BLOCK (== a
+# #1042 binding bypass on the is_dangerous_command path). Each verb requires a
+# complete-token boundary (?![\w-]) so `git commit-tree` / `grepfoo` do NOT
+# match. Case-sensitive (shell verbs are): a case variant fails closed.
+# gh-comment mirrors the step-7 carrier convention (no global-flag prefix walk).
+_BENIGN_ARG_CARRIER_RE = re.compile(
+    r"""\s*(?:
+        echo(?![\w-])
+      | grep(?![\w-])
+      | pact_memory\s+search(?![\w-])
+      | gh\s+(?:issue|pr)\s+comment(?![\w-])
+      | git\s+commit(?![\w-])
+    )""",
+    re.VERBOSE,
+)
+
+# Balanced quoted-literal idiom shared with step-7 `_gh_carrier_span` (#1000): a
+# double-quoted region (honoring \" escapes) OR a single-quoted region (bash
+# single quotes have no escapes). Used to mask quoted regions in the boundary-
+# detection copy so a shell separator INSIDE a quoted argument is never read as a
+# segment split; mirrors the per-quote patterns in _blank_inert_quoted_literals.
+_QUOTED_LITERAL_RE = re.compile(r"""["](?:[^"\\]|\\.)*["]|'[^']*'""")
+
+
+def _blank_inert_quoted_literals(segment: str) -> str:
+    """Blank-with-space the single- and double-quoted literals in a segment whose
+    leading verb is a proven non-executor of its arguments.
+
+    A double-quoted literal containing command substitution ($()/backtick) is
+    PRESERVED — it executes regardless of the outer verb — mirroring the carrier
+    strips (steps 3/5/7). Single-quoted literals never expand. Blank-with-space
+    (quotes kept, inner content replaced by spaces) neutralizes any
+    DANGEROUS_PATTERNS match while preserving length and word boundaries. An
+    unbalanced quote is simply not matched by these balanced-span regexes, so its
+    content is left intact for the scan (fail-closed by omission).
+    """
+    def _blank_dq(match: re.Match) -> str:
+        if _has_command_substitution(match.group(0)):
+            return match.group(0)  # $()/backtick executes inside double quotes
+        return '"' + " " * (len(match.group(0)) - 2) + '"'
+
+    segment = re.sub(r'"(?:[^"\\]|\\.)*"', _blank_dq, segment)
+    segment = re.sub(
+        r"'[^']*'",
+        lambda match: "'" + " " * (len(match.group(0)) - 2) + "'",
+        segment,
+    )
+    return segment
+
+
+def _suppress_benign_arg_literals(text: str, command: str) -> str:
+    """#1037 HYBRID benign-arg-literal suppressor — the FINAL step of
+    _strip_non_executable_content, so BOTH is_dangerous_command and
+    is_compound_destructive_command inherit it by construction (§5.8).
+
+    Removes a dangerous-looking literal ONLY on POSITIVE proof it is an inert
+    quoted argument of a WHITELISTED non-executor segment with NO indirection
+    guard firing. DANGEROUS_PATTERNS + .search() remain the AUTHORITY: this only
+    blanks provably-inert literals BEFORE the scan; it never weakens the scan, so
+    a suppressor bug reverts to over-block (an acceptable false positive per
+    INV-D2), never under-block.
+
+    FAIL-CLOSED on every ambiguity:
+      - any whole-command indirection guard True (pipe / process-sub to a shell,
+        eval/source, eval+heredoc) → suppress NOTHING (a blanked literal could
+        still execute downstream);
+      - a segment whose leading verb is unknown / an executor / wrapper-prefixed
+        → left UNCHANGED (the substring scan still blocks it);
+      - an unbalanced quote → not matched by the balanced-span regexes, so the
+        literal stays and is scanned.
+
+    Segment boundaries come from the ONE segment-split SSOT (_COMPOUND_OPS_RE)
+    over a boundary-detection copy in which FD-redirect tokens AND balanced
+    quoted regions are masked to spaces (length-preserving). The quoted-region
+    mask is QUOTE-AWARENESS modeled on step-7 `_gh_carrier_span` (#1000):
+    balanced quotes are consumed atomically, so a separator INSIDE a quoted
+    argument (`grep "a ; gh pr merge 5"`) does NOT split the segment, and a
+    clobber `>|` or FD redirect `2>&1` is never mistaken for a separator either.
+    Boundaries are applied to the ORIGINAL text by span, so a non-whitelisted
+    segment's dangerous literal is never touched. An UNBALANCED quote is not
+    matched by the mask, so its separators still split — fail-closed (the
+    leading verb's literal then stays un-blanked and the scan blocks it).
+    """
+    # Whole-command indirection guards computed on the ORIGINAL command: if it
+    # routes output to a shell or contains eval/source, even a whitelisted
+    # segment's literal could execute downstream. Fail closed: suppress nothing.
+    if (
+        _has_pipe_to_shell(command)
+        or _has_process_substitution_to_shell(command)
+        or _has_eval_or_source(command)
+        or _has_eval_with_heredoc(command)
+    ):
+        return text
+
+    # Boundary-detection copy (length-preserving; positions map 1:1 to `text`):
+    # mask FD-redirect tokens AND balanced quoted regions to spaces so neither a
+    # redirect (`>|` / `2>&1`) NOR a separator INSIDE a quoted argument is read
+    # as a segment boundary. The quoted-region mask reuses the step-7
+    # `_gh_carrier_span` balanced-quote idiom (#1000) — quotes consumed
+    # atomically — so `grep "a ; gh pr merge 5"` stays ONE segment.
+    masked = _FD_REDIRECT_RE.sub(lambda m: " " * len(m.group(0)), text)
+    masked = _QUOTED_LITERAL_RE.sub(lambda m: " " * len(m.group(0)), masked)
+
+    out = []
+    pos = 0
+    for separator in _COMPOUND_OPS_RE.finditer(masked):
+        segment = text[pos:separator.start()]
+        out.append(
+            _blank_inert_quoted_literals(segment)
+            if _BENIGN_ARG_CARRIER_RE.match(segment)
+            else segment
+        )
+        out.append(text[separator.start():separator.end()])  # separator verbatim
+        pos = separator.end()
+    last_segment = text[pos:]
+    out.append(
+        _blank_inert_quoted_literals(last_segment)
+        if _BENIGN_ARG_CARRIER_RE.match(last_segment)
+        else last_segment
+    )
+    return "".join(out)
 
 
 def is_dangerous_command(command: str) -> bool:
