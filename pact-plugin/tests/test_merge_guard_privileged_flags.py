@@ -204,6 +204,68 @@ class TestReadArmDroppedConstraintRefuses:
         )
 
 
+class TestMatchHeadCommitDroppedConstraint:
+    """--match-head-commit <sha> is a value-carrying SAFETY constraint (merge only
+    if HEAD is still <sha>) — the canonical DROPPED-CONSTRAINT case set-equality
+    catches that a subset rule (executed ⊆ approved) would silently ALLOW. Bound
+    value-taking on the merge op-class (R4 denylist add).
+
+    NON-VACUITY (essential): the approval token is SCANNER-DERIVED via
+    extract_command_context, NOT hand-built. A hand-built
+    {--match-head-commit=ABC123} token would REFUSE the bare execute REGARDLESS of
+    whether --match-head-commit is in the denylist — the token/cmd asymmetry would
+    drive the refusal, not the binding (vacuous w.r.t. the R4 config add). By
+    deriving the token through the live scanner, a SOURCE-ONLY revert of the R4
+    denylist add makes the scanner bind [] for --match-head-commit → the approval
+    token's bound_flags collapse to {} → {} == {} → the dropped constraint
+    AUTHORIZES → these REFUSE tests flip RED (the dropped-constraint, added, and
+    different-value cases; the identical-match positive stays GREEN)."""
+
+    _APPROVAL = "gh pr merge 5 --match-head-commit ABC123"
+
+    @staticmethod
+    def _scanner_token(approval_command: str) -> dict:
+        """Build the approval token by SCANNING the approval command through the
+        production SSOT, so bound_flags reflect the LIVE denylist (couples the
+        dropped-constraint refusal to the --match-head-commit binding)."""
+        from shared.merge_guard_common import extract_command_context
+
+        return {"context": extract_command_context(approval_command)}
+
+    def test_dropped_constraint_refuses(self):
+        """Approve WITH the safety constraint, execute WITHOUT it → REFUSE — the
+        dropped-constraint direction a subset rule would silently allow."""
+        from merge_guard_pre import _token_matches_command
+
+        assert not _token_matches_command(self._scanner_token(self._APPROVAL), "gh pr merge 5")
+
+    def test_added_constraint_refuses(self):
+        """Approve bare, execute WITH --match-head-commit → REFUSE (added direction;
+        the executed side is scanned live)."""
+        from merge_guard_pre import _token_matches_command
+
+        assert not _token_matches_command(
+            self._scanner_token("gh pr merge 5"), self._APPROVAL
+        )
+
+    def test_different_constraint_value_refuses(self):
+        """Approve --match-head-commit ABC123, execute --match-head-commit DEF456 →
+        REFUSE — a DIFFERENT head-sha is a different binding (the VALUE is bound,
+        not merely the flag's presence)."""
+        from merge_guard_pre import _token_matches_command
+
+        assert not _token_matches_command(
+            self._scanner_token(self._APPROVAL), "gh pr merge 5 --match-head-commit DEF456"
+        )
+
+    def test_identical_constraint_authorizes(self):
+        """Approve and execute with the SAME constraint → AUTHORIZE — a faithful
+        re-execution is not over-blocked."""
+        from merge_guard_pre import _token_matches_command
+
+        assert _token_matches_command(self._scanner_token(self._APPROVAL), self._APPROVAL)
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # READ ARM — bounded over-block: an EXACT (form-invariant) match AUTHORIZES
 # ════════════════════════════════════════════════════════════════════════════
@@ -305,6 +367,9 @@ class TestScannerCanonicalForms:
         # cluster with an UNBOUND short (-s ignored), bound -d kept
         ("gh pr merge 5 -sd", "merge", ["--delete-branch"]),
         ("gh pr merge 5 -d", "merge", ["--delete-branch"]),
+        # --match-head-commit (value-taking SAFETY constraint, R4): spaced + =-joined
+        ("gh pr merge 5 --match-head-commit ABC123", "merge", ["--match-head-commit=ABC123"]),
+        ("gh pr merge 5 --match-head-commit=ABC123", "merge", ["--match-head-commit=ABC123"]),
         # benign: no bound flag → empty set
         ("gh pr merge 5", "merge", []),
         # close op-class: -R bound; --delete-branch is the op-trigger (NOT bound)
