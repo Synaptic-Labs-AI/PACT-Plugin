@@ -443,7 +443,186 @@ def _extract_force_push_target_ref(command: str) -> str | None:
     return refspec or None
 
 
-def extract_command_context(command: str) -> dict:
+# -----------------------------------------------------------------------------
+# Privileged-flag binding (#1042). The (operation_type, target) binding above
+# DROPS every dash-flag, so an approved `gh pr merge 5` and an executed
+# `gh pr merge 5 --admin` (branch-protection bypass) reduce to the SAME context
+# and authorize — the flag rides past the checkpoint undetected. The fix adds
+# ONE more binding dimension — `bound_flags` — computed by the SINGLE scanner
+# below, called from the SINGLE site in extract_command_context, so BOTH hook
+# arms inherit it and can never classify a command's flags differently (the same
+# anti-drift property that the shared (op,target) SSOT already guarantees).
+#
+# PRIVILEGED_FLAGS is the op-class-scoped denylist: { op_type -> { canonical_long
+# -> (aliases, value_taking) } }. Membership is PURE DATA — adding or removing a
+# flag is a one-line edit with ZERO scanner/predicate changes, so the security
+# review owns membership without touching logic. A flag's PRESENCE binds it; the
+# read-side set-equality gate then enforces never-escalate.
+#
+# EXCLUDES op-trigger flags that already change op_type (and are therefore
+# already bound through it): --force/-f (force-push), -D (branch-delete), and
+# gh pr close's --delete-branch (the close-danger trigger). Listing them here
+# would double-bind and needlessly over-block. NB the asymmetry: --delete-branch
+# /-d on gh pr MERGE is a post-merge SIDE-EFFECT (deletes the source branch), not
+# a merge op-trigger, so it IS bound on the `merge` class — and -d (merge
+# delete-branch) is a DIFFERENT op from -D (branch force-delete); op-class scoping
+# keeps them from being conflated.
+PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
+    "merge": {
+        "--admin":         (("--admin",), False),               # bypass branch protection
+        "--delete-branch": (("-d", "--delete-branch"), False),  # side-effect: deletes source branch
+        "--repo":          (("-R", "--repo"), True),            # cross-repo redirect (value-carrying target)
+    },
+    "close": {
+        "--repo":          (("-R", "--repo"), True),            # cross-repo redirect (value-carrying target)
+        # --delete-branch is the close-danger op-trigger (bound via op_type) — NOT listed.
+    },
+    "force-push": {
+        "--no-verify":     (("--no-verify",), False),           # bypass pre-push hook
+    },
+    "branch-delete": {
+        # No bound flags today: branch-delete's privileged effect is its op-trigger
+        # (-D / --delete --force), already bound via op_type. Kept as an explicit
+        # extension point so a future bound flag is a one-line data edit here.
+    },
+}
+
+
+def extract_privileged_flags(command: str, op_type: str | None) -> list[str]:
+    """Scan a command for the privileged dash-flags bound on its op-class (#1042).
+
+    Returns a SORTED list of canonical flag tokens (boolean flags as their
+    canonical long form, e.g. ``--admin``; value-taking flags as
+    ``--repo=<value>``). The read side compares these as SETS for exact equality,
+    so any added privilege OR dropped constraint mismatches and REFUSES.
+
+    The scan is a SINGLE linear ``str.split()`` token-walk against the op-class
+    denylist (``PRIVILEGED_FLAGS``) — constant per-token work, NO regex, no
+    backtracking — so it preserves the bounded/linear extraction invariant
+    (INV-D2) the rest of this module is careful about.
+
+    Normalizes every CLI form to one canonical token: exact long (``--admin``),
+    short alias (``-R`` -> ``--repo``), ``=``-joined (``--repo=x`` / ``-R=x``),
+    attached short value (``-Rx`` -> ``--repo=x``), and combined-short clusters
+    via a general per-character walk (``-sd`` -> ``--delete-branch``;
+    ``-dR owner/repo`` -> ``--delete-branch`` + ``--repo=owner/repo``) so NO bound
+    short is ever dropped regardless of cluster ordering. On the GIT surface
+    ONLY, an unambiguous long-prefix abbreviation is EXPANDED to its canonical
+    flag (``--no-verif`` -> ``--no-verify``) — this is SECURITY-LOAD-BEARING:
+    git's parser accepts abbreviation, so a missed match would be a silent
+    UNDER-block; gh rejects abbreviation, so its surface needs no expansion.
+
+    Args:
+        command: The command (read arm) or full approval surface (mint arm) to
+            scan. The caller decides which; the scanner treats it as one string.
+        op_type: The classified operation type, or None. Selects the denylist;
+            an op_type with no denylist entry (incl. None and the API/un-flagged
+            classes) yields ``[]``.
+
+    Returns:
+        Sorted list of canonical bound-flag tokens; ``[]`` when none are present.
+    """
+    denylist = PRIVILEGED_FLAGS.get(op_type) if op_type is not None else None
+    if not denylist:
+        # op_type is None, unknown, or carries no bound flags (e.g. branch-delete
+        # today). An empty result binds the empty set — over-block-safe and the
+        # correct outcome for the API/un-flagged classes.
+        return []
+
+    # Derive the lookup tables from the denylist ONCE per call. All small,
+    # constant-size structures (the denylist has <=3 entries per op-class), so
+    # the per-token work below stays O(1).
+    alias_to_canonical: dict[str, str] = {}
+    value_taking: set[str] = set()
+    canonical_long_names: list[str] = []
+    for canonical, (aliases, takes_value) in denylist.items():
+        canonical_long_names.append(canonical)
+        if takes_value:
+            value_taking.add(canonical)
+        for alias in aliases:
+            alias_to_canonical[alias] = canonical
+    # git's parse-options expands unambiguous long-prefix abbreviations; gh's
+    # pflag rejects them. Only the git surface needs abbreviation expansion.
+    is_git_surface = op_type in ("force-push", "branch-delete")
+
+    tokens = command.split()
+    found: set[str] = set()
+    i = 0
+    n = len(tokens)
+    while i < n:
+        token = tokens[i]
+        # Non-flag tokens, the bare `-` (stdin) and `--` (end-of-options) marker
+        # never bind. Skipping `--` is load-bearing: it must NOT prefix-match a
+        # sole long flag in the abbreviation branch below.
+        if not token.startswith("-") or token in ("-", "--"):
+            i += 1
+            continue
+
+        if token.startswith("--"):
+            # Long flag: exact denylist hit, or — git surface only — an
+            # unambiguous prefix abbreviation. An inline `=value` is split off.
+            flag_part, has_eq, inline_value = token.partition("=")
+            canonical = alias_to_canonical.get(flag_part)
+            if canonical is None and is_git_surface:
+                prefix_matches = [
+                    name for name in canonical_long_names if name.startswith(flag_part)
+                ]
+                # Exactly one match = unambiguous; >1 is ambiguous (git itself
+                # rejects it, so the command never runs) and binds nothing.
+                if len(prefix_matches) == 1:
+                    canonical = prefix_matches[0]
+            if canonical is None:
+                i += 1
+                continue
+            if canonical in value_taking:
+                if has_eq:                       # --repo=value
+                    found.add(f"{canonical}={inline_value}")
+                    i += 1
+                elif i + 1 < n:                  # --repo value
+                    found.add(f"{canonical}={tokens[i + 1]}")
+                    i += 2
+                else:                            # --repo (value missing; degenerate)
+                    found.add(canonical)
+                    i += 1
+            else:
+                found.add(canonical)             # boolean (ignore any spurious =value)
+                i += 1
+            continue
+
+        # Short cluster (single dash): a general per-character walk that subsumes
+        # the lone short (`-R`), the combined boolean cluster (`-sd`), the
+        # attached short value (`-Rx`), and any mixed ordering (`-dR`, `-Rd`). A
+        # value-taking short consumes the REST of the cluster (or the next token)
+        # as its value and stops the walk — pflag semantics — so no bound short
+        # is ever dropped from a cluster.
+        cluster = token[1:]
+        consumed_next = False
+        j = 0
+        while j < len(cluster):
+            canonical = alias_to_canonical.get("-" + cluster[j])
+            if canonical is None:
+                j += 1
+                continue
+            if canonical in value_taking:
+                remainder = cluster[j + 1:]
+                if remainder.startswith("="):    # `-R=value`
+                    remainder = remainder[1:]
+                if remainder:                    # `-Rvalue`
+                    found.add(f"{canonical}={remainder}")
+                elif i + 1 < n:                  # `-R value`
+                    found.add(f"{canonical}={tokens[i + 1]}")
+                    consumed_next = True
+                else:                            # `-R` (value missing; degenerate)
+                    found.add(canonical)
+                break
+            found.add(canonical)                 # boolean short; keep walking
+            j += 1
+        i += 2 if consumed_next else 1
+
+    return sorted(found)
+
+
+def extract_command_context(command: str, flag_scan_text: str | None = None) -> dict:
     """Extract operation context FROM A COMMAND STRING (never prose).
 
     The shared SSOT both merge-guard hooks call. A key is PRESENT only when
@@ -453,12 +632,28 @@ def extract_command_context(command: str) -> dict:
         pr_number:  str  (merge / close)
         branch:     str  (branch-delete)
         target_ref: str  (force-push, KD-6)
+        bound_flags: list[str]  (#1042) — sorted normalized privileged flags;
+                     ALWAYS present when operation_type is (empty list when none).
+
+    `flag_scan_text` (#1042) widens ONLY the privileged-flag scan to a fuller
+    surface than `command` — the mint arm passes the full selected-option text so
+    a flag positioned after a quoted argument is not lost to region truncation
+    (the read arm passes nothing, scanning the raw command). Op/target are ALWAYS
+    derived from `command` (region-anchored — preserves the anti-distractor
+    multiplicity gate); only the flag scan honors `flag_scan_text`.
     """
     context: dict = {}
     op_type = detect_command_operation_type(command)
     if op_type is None:
         return context
     context["operation_type"] = op_type
+    # bound_flags is computed HERE (the single call site) so both arms inherit it
+    # un-driftably. It is an ATTRIBUTE of the (op,target) pair, never part of pair
+    # identity (_target_value / _collect_pairs ignore it), so flag variation can
+    # never inflate the distinct-pair count and trip the multiplicity refusal.
+    context["bound_flags"] = extract_privileged_flags(
+        flag_scan_text if flag_scan_text is not None else command, op_type
+    )
     if op_type in ("merge", "close"):
         pr_number = _extract_pr_number(command)
         if pr_number is not None:
