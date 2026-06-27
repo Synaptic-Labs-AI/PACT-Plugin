@@ -147,3 +147,9 @@ This is a single-verdict empirical probe (not a per-mode live-probe), so the den
 This file is required infrastructure for the fallback-ladder evaluation;
 do not delete or rename. Contents are append-only — historical runs are
 the calibration record.
+
+## merge-guard-auth-symmetry-live-probe (#1031 false-REJECT + #1032 false-AUTHORIZE)
+
+| Run date (UTC) | Operator | Plugin version | Verdict | Harness-independence evidence | Notes (real cases; deny paths; stub gate) |
+| -------------- | -------- | -------------- | ------- | ----------------------------- | ----------------------------------------- |
+| 2026-06-26 | michael-wojcik | 4.4.43 | #1031 PASS · #1032 PASS · stub PASS | DUAL independent harnesses — security-engineer (primary) + test-engineer (clean-room: re-derived envelopes from source, did NOT read peer); verdicts CONVERGE; test-engineer subprocess==in-process 10/10 + R-B positive control proves mint capability | Post-install probe of the INSTALLED v4.4.43 hooks (not pytest). Mode-independent (file-on-disk token store; session scoping intentionally INERT → every deny on the (op,target) axis alone). #1031: R-A minted pr 1029 not prose distractor 1028; R-B minted pr 1034 from clicked-option command only (padded question ignored); R-C kept full colon-bearing branch origin:feature → all PRE allow exit0 + consume. #1032: A1/A1b/A2/A3/A4/A5 NO-MINT (step-3b option-anchoring / no-options fail-closed) → DENY-NOTOKEN exit2; A6 token-exists-mismatch (valid {merge,1029} token vs force-push exec, _token_matches_command False) → DENY-MISMATCH exit2, token unchanged. Stub gate AST-confirmed + full-source-read: NO unconditional always-allow in check_merge_authorization. No HALT. Gated closure (#924 discipline) satisfied → #1031/#1032 closed. |
