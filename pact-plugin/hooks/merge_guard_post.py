@@ -379,7 +379,16 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> dict | None:
             return None
 
     # ── Step 5: extract the single distinct command's context to mint. ──
-    return extract_command_context(the_command)
+    # Op/target are derived from `the_command` (region-anchored — preserves the
+    # anti-distractor multiplicity gate above). The privileged-flag scan (#1042)
+    # is widened to the FULL selected-option text so a flag positioned after a
+    # quoted argument (e.g. `gh pr merge 5 --subject "msg" --admin`, written bare)
+    # is not lost to the bare-command region truncation — the read arm scans the
+    # full raw command, so the mint must scan a full surface too for symmetry.
+    return extract_command_context(
+        the_command,
+        flag_scan_text=" ".join(selected_option_texts),
+    )
 
 
 def write_token(context: dict, token_dir: Path | None = None) -> str | None:

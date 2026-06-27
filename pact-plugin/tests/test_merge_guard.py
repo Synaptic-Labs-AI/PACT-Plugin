@@ -5740,8 +5740,11 @@ class TestSchemaFixEndToEnd:
         from shared.merge_guard_common import MAX_USES, USE_MARKER_SUFFIX
 
         for _ in range(MAX_USES):
+            # #1042: execution flags must match the approval (`gh pr merge 252`,
+            # no privileged flags). --squash is unbound; --delete-branch (a bound
+            # merge side-effect) would now correctly mismatch an unflagged approval.
             pre_input = json.dumps({
-                "tool_input": {"command": "gh pr merge 252 --squash --delete-branch"}
+                "tool_input": {"command": "gh pr merge 252 --squash"}
             })
             with patch("merge_guard_pre.TOKEN_DIR", tmp_path), \
                  patch("sys.stdin", io.StringIO(pre_input)):
@@ -8358,21 +8361,46 @@ class TestGhGlobalFlagBypass:
         (the load-bearing anti-bypass PR extraction is preserved)."""
         from merge_guard_pre import _token_matches_command
 
-        token = {"context": {"operation_type": "merge", "pr_number": 42}}
+        token = {
+            "context": {
+                "operation_type": "merge",
+                "pr_number": 42,
+                "bound_flags": ["--repo=owner/repo"],  # #1042: -R/--repo now bound
+            }
+        }
         assert _token_matches_command(token, "gh --repo owner/repo pr merge 42")
 
     def test_token_pr_mismatch_with_repo_flag(self):
-        """Typed merge token PR-number mismatch detected past a --repo flag."""
+        """Typed merge token PR-number mismatch detected past a --repo flag.
+
+        The token carries the SAME bound flags the command mints (--repo=owner/repo)
+        so the #1042 set-equality flag axis MATCHES — leaving the PR-number axis
+        (42 vs 99) as the sole load-bearing REFUSE reason. Without the matching
+        bound_flags the refusal would ride the flag axis (token []) and this test
+        would stay green even if PR-mismatch detection regressed (vacuous).
+        """
         from merge_guard_pre import _token_matches_command
 
-        token = {"context": {"operation_type": "merge", "pr_number": 42}}
+        token = {
+            "context": {
+                "operation_type": "merge",
+                "pr_number": 42,
+                "bound_flags": ["--repo=owner/repo"],
+            }
+        }
         assert not _token_matches_command(token, "gh --repo owner/repo pr merge 99")
 
     def test_token_op_type_with_repo_flag(self):
         """Typed merge token (op + pr) matching works past a --repo global flag."""
         from merge_guard_pre import _token_matches_command
 
-        token = {"context": {"operation_type": "merge", "pr_number": "42"}}
+        token = {
+            "context": {
+                "operation_type": "merge",
+                "pr_number": "42",
+                "bound_flags": ["--repo=owner/repo"],  # #1042: -R/--repo now bound
+            }
+        }
         assert _token_matches_command(token, "gh --repo owner/repo pr merge 42")
 
     def test_token_op_type_mismatch_with_repo_flag(self):
@@ -8817,7 +8845,13 @@ class TestGhGlobalFlagBypassEdgeCases:
         """PR number extracted correctly past two global flags (typed token)."""
         from merge_guard_pre import _token_matches_command
 
-        token = {"context": {"operation_type": "merge", "pr_number": 42}}
+        token = {
+            "context": {
+                "operation_type": "merge",
+                "pr_number": 42,
+                "bound_flags": ["--repo=owner/repo"],  # #1042: --hostname unbound
+            }
+        }
         assert _token_matches_command(
             token, "gh --repo owner/repo --hostname host.com pr merge 42"
         )
@@ -8826,16 +8860,33 @@ class TestGhGlobalFlagBypassEdgeCases:
         """PR number extracted correctly with --repo=value syntax (typed token)."""
         from merge_guard_pre import _token_matches_command
 
-        token = {"context": {"operation_type": "merge", "pr_number": 42}}
+        token = {
+            "context": {
+                "operation_type": "merge",
+                "pr_number": 42,
+                "bound_flags": ["--repo=owner/repo"],  # #1042: --repo=value form
+            }
+        }
         assert _token_matches_command(
             token, "gh --repo=owner/repo pr merge 42"
         )
 
     def test_token_pr_mismatch_with_multiple_flags(self):
-        """PR number mismatch detected past multiple global flags (typed token)."""
+        """PR number mismatch detected past multiple global flags (typed token).
+
+        --repo is bound (#1042); --hostname is not. The token carries the bound
+        --repo so the flag axis matches and the PR-number axis (42 vs 99) is the
+        sole load-bearing mismatch — keeping the test non-vacuous on PR detection.
+        """
         from merge_guard_pre import _token_matches_command
 
-        token = {"context": {"operation_type": "merge", "pr_number": 42}}
+        token = {
+            "context": {
+                "operation_type": "merge",
+                "pr_number": 42,
+                "bound_flags": ["--repo=owner/repo"],
+            }
+        }
         assert not _token_matches_command(
             token, "gh --repo owner/repo --hostname host.com pr merge 99"
         )
@@ -8844,16 +8895,35 @@ class TestGhGlobalFlagBypassEdgeCases:
         """PR number extracted from a close command past global flags (typed)."""
         from merge_guard_pre import _token_matches_command
 
-        token = {"context": {"operation_type": "close", "pr_number": 100}}
+        token = {
+            "context": {
+                "operation_type": "close",
+                "pr_number": 100,
+                "bound_flags": ["--repo=owner/repo"],  # #1042: -R bound; close's
+                # --delete-branch is the op-trigger (bound via op_type), unbound here
+            }
+        }
         assert _token_matches_command(
             token, "gh -R owner/repo pr close 100 --delete-branch"
         )
 
     def test_token_pr_mismatch_close_with_flags(self):
-        """PR number mismatch in a close command past global flags (typed)."""
+        """PR number mismatch in a close command past global flags (typed).
+
+        On the close op-class -R/--repo is bound; --delete-branch is the close
+        op-trigger (bound via op_type, NOT in the denylist). The token carries the
+        bound --repo so the flag axis matches and the PR-number axis (100 vs 200)
+        is the sole load-bearing mismatch — keeping the test non-vacuous.
+        """
         from merge_guard_pre import _token_matches_command
 
-        token = {"context": {"operation_type": "close", "pr_number": 100}}
+        token = {
+            "context": {
+                "operation_type": "close",
+                "pr_number": 100,
+                "bound_flags": ["--repo=owner/repo"],
+            }
+        }
         assert not _token_matches_command(
             token, "gh -R owner/repo pr close 200 --delete-branch"
         )
@@ -8883,7 +8953,11 @@ class TestGhGlobalFlagBypassEdgeCases:
 
         token_data = {
             "expires_at": time.time() + 300,
-            "context": {"operation_type": "merge", "pr_number": 42},
+            "context": {
+                "operation_type": "merge",
+                "pr_number": 42,
+                "bound_flags": ["--repo=owner/repo"],  # #1042: -R/--repo now bound
+            },
         }
         token_path = tmp_path / f"{TOKEN_PREFIX}test"
         token_path.write_text(json.dumps(token_data))
@@ -9013,7 +9087,13 @@ class TestSubcommandFlagsBeforePrNumber:
         """'gh pr merge --admin 42' — PR number extracted past the subcommand flag."""
         from merge_guard_pre import _token_matches_command
 
-        token = {"context": {"operation_type": "merge", "pr_number": 42}}
+        token = {
+            "context": {
+                "operation_type": "merge",
+                "pr_number": 42,
+                "bound_flags": ["--admin"],  # #1042: --admin now bound
+            }
+        }
         assert _token_matches_command(token, "gh pr merge --admin 42")
 
     def test_merge_squash_flag_before_pr_number(self):
@@ -9027,7 +9107,15 @@ class TestSubcommandFlagsBeforePrNumber:
         """'gh pr merge --squash --delete-branch 42' — PR number extracted."""
         from merge_guard_pre import _token_matches_command
 
-        token = {"context": {"operation_type": "merge", "pr_number": 42}}
+        token = {
+            "context": {
+                "operation_type": "merge",
+                "pr_number": 42,
+                # #1042: --delete-branch on MERGE is a bound side-effect; --squash
+                # is a merge-method flag (unbound).
+                "bound_flags": ["--delete-branch"],
+            }
+        }
         assert _token_matches_command(
             token, "gh pr merge --squash --delete-branch 42"
         )
@@ -9040,26 +9128,55 @@ class TestSubcommandFlagsBeforePrNumber:
         assert _token_matches_command(token, "gh pr close --comment done 42")
 
     def test_merge_admin_flag_pr_number_mismatch(self):
-        """'gh pr merge --admin 99' — mismatch with token for PR 42."""
+        """'gh pr merge --admin 99' — mismatch with token for PR 42.
+
+        The token carries the bound --admin so the #1042 flag axis matches and the
+        PR-number axis (42 vs 99) is the sole load-bearing mismatch — non-vacuous
+        on PR detection (without the matching flag the refusal would ride the flag
+        axis and mask a PR-detection regression).
+        """
         from merge_guard_pre import _token_matches_command
 
-        token = {"context": {"operation_type": "merge", "pr_number": 42}}
+        token = {
+            "context": {
+                "operation_type": "merge",
+                "pr_number": 42,
+                "bound_flags": ["--admin"],
+            }
+        }
         assert not _token_matches_command(token, "gh pr merge --admin 99")
 
     def test_merge_admin_flag_with_global_flags(self):
         """'gh --repo X pr merge --admin 42' — global + subcommand flags."""
         from merge_guard_pre import _token_matches_command
 
-        token = {"context": {"operation_type": "merge", "pr_number": 42}}
+        token = {
+            "context": {
+                "operation_type": "merge",
+                "pr_number": 42,
+                "bound_flags": ["--admin", "--repo=owner/repo"],  # #1042: both bound
+            }
+        }
         assert _token_matches_command(
             token, "gh --repo owner/repo pr merge --admin 42"
         )
 
     def test_merge_admin_flag_with_global_flags_mismatch(self):
-        """'gh --repo X pr merge --admin 99' — mismatch with combined flags."""
+        """'gh --repo X pr merge --admin 99' — mismatch with combined flags.
+
+        The token carries BOTH bound flags the command mints (--admin and
+        --repo=owner/repo) so the #1042 flag axis matches and the PR-number axis
+        (42 vs 99) is the sole load-bearing mismatch — keeping the test non-vacuous.
+        """
         from merge_guard_pre import _token_matches_command
 
-        token = {"context": {"operation_type": "merge", "pr_number": 42}}
+        token = {
+            "context": {
+                "operation_type": "merge",
+                "pr_number": 42,
+                "bound_flags": ["--admin", "--repo=owner/repo"],
+            }
+        }
         assert not _token_matches_command(
             token, "gh --repo owner/repo pr merge --admin 99"
         )

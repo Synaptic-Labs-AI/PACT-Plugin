@@ -729,3 +729,164 @@ class TestOptionAnchoringMint:
         code = _invoke_post([_q(q, opts)], {q: "Yes, merge"}, tmp_path)
         assert code == 0
         assert _minted_tokens(tmp_path) == []
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# #1042 — PRIVILEGED-FLAG BINDING over the real mint→read seam
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestPrivilegedFlagMintSymmetry:
+    """A1 — the MINT must scan the FULL selected-option surface for bound flags,
+    NOT the quote-truncated bare-command region. A privileged flag positioned
+    AFTER a quoted argument in a BARE command falls outside
+    locate_command_regions' truncated region (it stops at the first quote); the
+    mint's flag_scan_text widening recovers it so the approved set carries the
+    flag and a faithful re-execution AUTHORIZES while an added flag REFUSES.
+
+    These drive the REAL mint (post.main → write_token → check_merge_authorization)
+    — a hand-built token would bypass the mint widening and be vacuous for the A1
+    claim. Revert-coupling: the AUTHORIZE round-trip is coupled to the C3 mint
+    widening (merge_guard_post.py). A SOURCE-ONLY revert re-mints a flagless token
+    (the truncated region drops the flag) while the read side still scans the full
+    command → {} != {--admin} → REFUSE → the round-trip flips RED (measured
+    cardinality in the TEST HANDOFF)."""
+
+    _CMD_ADMIN_AFTER_QUOTE = 'gh pr merge 5 --subject "ship it" --admin'
+
+    def test_admin_after_quoted_arg_round_trips_via_full_mint_scan(self, tmp_path):
+        """Approve a BARE command with --admin after a quoted --subject; the mint
+        scans the full option text to bind --admin, so the faithful re-execution
+        AUTHORIZES. (Without the C3 full-surface scan the mint binds {} and this
+        flips to REFUSE.)"""
+        q = "Merge this pull request now? The reviewers have signed off."
+        opts = [
+            _opt("Yes, merge", "On approval run: " + self._CMD_ADMIN_AFTER_QUOTE),
+            _opt("Cancel", "Abort"),
+        ]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, merge"}, tmp_path) == 0
+        assert len(_minted_tokens(tmp_path)) == 1
+        assert _authorize(self._CMD_ADMIN_AFTER_QUOTE, tmp_path) is None
+
+    def test_admin_added_after_quote_at_exec_is_blocked(self, tmp_path):
+        """Bypass direction through the real seam: approve the command WITHOUT
+        --admin (subject only); execute WITH --admin appended after the quote. The
+        read side scans the full command and catches the added --admin the approval
+        never carried → REFUSE (coupled to the C2 read gate)."""
+        approved = 'gh pr merge 5 --subject "ship it"'
+        q = "Merge this pull request now?"
+        opts = [_opt("Yes, merge", "On approval run: " + approved), _opt("Cancel", "Abort")]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, merge"}, tmp_path) == 0
+        assert len(_minted_tokens(tmp_path)) == 1
+        assert _authorize(self._CMD_ADMIN_AFTER_QUOTE, tmp_path) is not None
+
+    def test_cross_repo_redirect_blocked_end_to_end(self, tmp_path):
+        """Headline bug end-to-end: approve a bare merge (no -R) through the real
+        mint; an execution that adds -R victim/repo REFUSES (the cross-repo
+        redirect can no longer ride the checkpoint undetected)."""
+        q = "Merge this pull request now?"
+        opts = [_opt("Yes, merge", "On approval run: gh pr merge 5"), _opt("Cancel", "Abort")]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, merge"}, tmp_path) == 0
+        assert len(_minted_tokens(tmp_path)) == 1
+        assert _authorize("gh --repo victim/repo pr merge 5", tmp_path) is not None
+
+    # ── non-merge op-class real-mint witness (removes the op-agnostic-transfer
+    # dependency for a 2nd op + the value-carrying -R flag): the mint flag-scan is
+    # ONE SSOT call site, but witnessing CLOSE end-to-end through the REAL mint
+    # removes the need to ARGUE that merge coverage transfers. The _seed_token
+    # read-floor cases below FORGE the token and bypass the mint; these drive the
+    # real close mint.
+    #
+    # NB force-push has NO real-mint witness BY STRUCTURAL NECESSITY: its only
+    # bound flag is --no-verify, whose substring "no" trips the pre-existing
+    # decline/defer veto (_DECLINE_DEFER_RE) in _mint_context_from_bundle Step 1,
+    # so a --no-verify approval never mints (over-block-safe — it HOLDS the
+    # force-push, never authorizes an unapproved one). The force-push --no-verify
+    # READ path is therefore covered via _seed_token in TestPrivilegedFlagReadFloorSeam,
+    # which forges the token the real mint cannot produce. ──
+    # NB the close commands carry --delete-branch: that is the close-danger
+    # op-TRIGGER (a bare `gh pr close` is NOT a governed/held op), so a governed
+    # close that the read arm holds must carry it. --delete-branch is bound via
+    # op_type (NOT in the denylist), so it does NOT appear in bound_flags; -R does.
+    def test_close_repo_round_trips_via_real_mint(self, tmp_path):
+        """Approve a governed CLOSE bundle carrying -R through the REAL mint → the
+        minted token binds --repo → the faithful re-execution AUTHORIZES. Witnesses
+        the mint flag-scan on a non-merge op-class with a value-carrying flag."""
+        cmd = "gh pr close 5 --delete-branch -R owner/repo"
+        q = "Close PR 5 and delete its branch now?"
+        opts = [_opt("Yes, close", "On approval run: " + cmd), _opt("Cancel", "Abort")]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
+        assert len(_minted_tokens(tmp_path)) == 1
+        assert _authorize(cmd, tmp_path) is None
+
+    def test_close_repo_redirect_added_at_exec_blocked_via_real_mint(self, tmp_path):
+        """Bypass direction through the real close mint: approve a governed close
+        WITHOUT -R; an execution that ADDS -R victim/repo REFUSES (coupled to the
+        C2 read gate)."""
+        q = "Close PR 5 and delete its branch now?"
+        opts = [
+            _opt("Yes, close", "On approval run: gh pr close 5 --delete-branch"),
+            _opt("Cancel", "Abort"),
+        ]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
+        assert len(_minted_tokens(tmp_path)) == 1
+        assert _authorize(
+            "gh pr close 5 --delete-branch -R victim/repo", tmp_path
+        ) is not None
+
+
+class TestPrivilegedFlagReadFloorSeam:
+    """The read floor over the REAL on-disk token seam: a forged/seeded approval
+    token with a given bound_flags set is read back by check_merge_authorization
+    and must REFUSE any privileged-flag escalation while AUTHORIZing the exact
+    match. _seed_token writes the token directly (bypassing the write gate) —
+    exactly the hand-crafted-token threat the read floor must withstand.
+
+    Revert-coupling: every REFUSE here is coupled to the C2 set-equality gate
+    (merge_guard_pre.py); a source-only revert flips each to AUTHORIZE → RED. The
+    AUTHORIZE controls confirm the refusal is the FLAG axis (op+target already
+    match), not an unrelated mismatch."""
+
+    def test_flagless_token_denies_admin_execution(self, tmp_path):
+        _seed_token(tmp_path, {"operation_type": "merge", "pr_number": "5", "bound_flags": []})
+        assert _authorize("gh pr merge 5 --admin", tmp_path) is not None
+
+    def test_flagless_token_denies_cross_repo_redirect(self, tmp_path):
+        _seed_token(tmp_path, {"operation_type": "merge", "pr_number": "5", "bound_flags": []})
+        assert _authorize("gh --repo victim/repo pr merge 5", tmp_path) is not None
+
+    def test_admin_token_authorizes_matching_admin(self, tmp_path):
+        """Positive control over the seam: the matching --admin execution AUTHORIZES
+        — so the refusals above are the flag axis, not a target/op mismatch."""
+        _seed_token(
+            tmp_path,
+            {"operation_type": "merge", "pr_number": "5", "bound_flags": ["--admin"]},
+        )
+        assert _authorize("gh pr merge 5 --admin", tmp_path) is None
+
+    def test_flagless_token_denies_no_verify_force_push(self, tmp_path):
+        _seed_token(
+            tmp_path,
+            {"operation_type": "force-push", "target_ref": "main", "bound_flags": []},
+        )
+        assert _authorize("git push --no-verify origin main --force", tmp_path) is not None
+
+    def test_flagless_token_denies_git_no_verif_abbreviation(self, tmp_path):
+        """SECURITY-LOAD-BEARING end-to-end: git accepts the `--no-verif`
+        abbreviation (really disabling the pre-push hook); the read floor expands
+        it on the git surface so a flagless approval REFUSES it (a missed
+        abbreviation would be a silent UNDER-block)."""
+        _seed_token(
+            tmp_path,
+            {"operation_type": "force-push", "target_ref": "main", "bound_flags": []},
+        )
+        assert _authorize("git push --no-verif origin main --force", tmp_path) is not None
+
+    def test_no_verify_token_authorizes_matching_force_push(self, tmp_path):
+        """Positive control: the matching --no-verify execution AUTHORIZES."""
+        _seed_token(
+            tmp_path,
+            {"operation_type": "force-push", "target_ref": "main",
+             "bound_flags": ["--no-verify"]},
+        )
+        assert _authorize("git push --no-verify origin main --force", tmp_path) is None

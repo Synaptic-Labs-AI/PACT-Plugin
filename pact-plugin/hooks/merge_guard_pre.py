@@ -1054,6 +1054,18 @@ def _token_matches_command(token: dict, command: str) -> bool:
     if token_op is None or cmd_op is None or token_op != cmd_op:
         return False
 
+    # (a2) NEVER-ESCALATE FLAG AXIS (#1042) — the executed command's binding-
+    # relevant flags must EXACTLY equal the approved set. ANY difference (an added
+    # privilege like --admin/-R, OR a dropped constraint) REFUSES. Both sides are
+    # computed by the shared extract_command_context SSOT, so they cannot drift.
+    # Checked AFTER op-type identity and BEFORE the per-op target returns so it
+    # applies uniformly to all four op-classes. A pre-fix token without the key
+    # defaults to the empty set, so any privileged execution mismatches -> REFUSE
+    # (over-block-safe; tokens expire in 5 min, so no backward-compat is needed).
+    # bound_flags is an attribute checked here, never part of pair identity.
+    if set(context.get("bound_flags", [])) != set(cmd.get("bound_flags", [])):
+        return False
+
     # (b) Target axis, per op-class — require a POSITIVE, command-anchored target
     # match. Unextractable or mismatched target -> REFUSE (over-block is the safe
     # #1031 direction; the read side never under-blocks #1032).
