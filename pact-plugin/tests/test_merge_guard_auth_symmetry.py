@@ -790,6 +790,50 @@ class TestPrivilegedFlagMintSymmetry:
         assert len(_minted_tokens(tmp_path)) == 1
         assert _authorize("gh --repo victim/repo pr merge 5", tmp_path) is not None
 
+    # ── non-merge op-class real-mint witness (removes the op-agnostic-transfer
+    # dependency for a 2nd op + the value-carrying -R flag): the mint flag-scan is
+    # ONE SSOT call site, but witnessing CLOSE end-to-end through the REAL mint
+    # removes the need to ARGUE that merge coverage transfers. The _seed_token
+    # read-floor cases below FORGE the token and bypass the mint; these drive the
+    # real close mint.
+    #
+    # NB force-push has NO real-mint witness BY STRUCTURAL NECESSITY: its only
+    # bound flag is --no-verify, whose substring "no" trips the pre-existing
+    # decline/defer veto (_DECLINE_DEFER_RE) in _mint_context_from_bundle Step 1,
+    # so a --no-verify approval never mints (over-block-safe — it HOLDS the
+    # force-push, never authorizes an unapproved one). The force-push --no-verify
+    # READ path is therefore covered via _seed_token in TestPrivilegedFlagReadFloorSeam,
+    # which forges the token the real mint cannot produce. ──
+    # NB the close commands carry --delete-branch: that is the close-danger
+    # op-TRIGGER (a bare `gh pr close` is NOT a governed/held op), so a governed
+    # close that the read arm holds must carry it. --delete-branch is bound via
+    # op_type (NOT in the denylist), so it does NOT appear in bound_flags; -R does.
+    def test_close_repo_round_trips_via_real_mint(self, tmp_path):
+        """Approve a governed CLOSE bundle carrying -R through the REAL mint → the
+        minted token binds --repo → the faithful re-execution AUTHORIZES. Witnesses
+        the mint flag-scan on a non-merge op-class with a value-carrying flag."""
+        cmd = "gh pr close 5 --delete-branch -R owner/repo"
+        q = "Close PR 5 and delete its branch now?"
+        opts = [_opt("Yes, close", "On approval run: " + cmd), _opt("Cancel", "Abort")]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
+        assert len(_minted_tokens(tmp_path)) == 1
+        assert _authorize(cmd, tmp_path) is None
+
+    def test_close_repo_redirect_added_at_exec_blocked_via_real_mint(self, tmp_path):
+        """Bypass direction through the real close mint: approve a governed close
+        WITHOUT -R; an execution that ADDS -R victim/repo REFUSES (coupled to the
+        C2 read gate)."""
+        q = "Close PR 5 and delete its branch now?"
+        opts = [
+            _opt("Yes, close", "On approval run: gh pr close 5 --delete-branch"),
+            _opt("Cancel", "Abort"),
+        ]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
+        assert len(_minted_tokens(tmp_path)) == 1
+        assert _authorize(
+            "gh pr close 5 --delete-branch -R victim/repo", tmp_path
+        ) is not None
+
 
 class TestPrivilegedFlagReadFloorSeam:
     """The read floor over the REAL on-disk token seam: a forged/seeded approval

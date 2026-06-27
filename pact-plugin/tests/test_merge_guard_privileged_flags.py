@@ -95,6 +95,12 @@ class TestReadArmBypassRefuses:
         ("repo_redirect_equals_joined",
          {"operation_type": "merge", "pr_number": "5", "bound_flags": []},
          "gh pr merge 5 --repo=victim/repo"),
+        # SHORT =-joined (-R=value) — a DISTINCT scanner branch from the long
+        # =-joined form: the short-cluster value path strips a leading `=` off the
+        # cluster remainder. Exercises that `=`-strip (otherwise uncovered).
+        ("repo_redirect_short_equals_joined",
+         {"operation_type": "merge", "pr_number": "5", "bound_flags": []},
+         "gh pr merge 5 -R=victim/repo"),
         # Approved one repo, executed a DIFFERENT repo → still REFUSE.
         ("repo_redirect_different_repo",
          {"operation_type": "merge", "pr_number": "5", "bound_flags": ["--repo=a/x"]},
@@ -225,7 +231,9 @@ class TestReadArmExactMatchAuthorizes:
         "gh pr merge 5 --repo=owner/repo",
         "gh pr merge 5 -R owner/repo",
         "gh pr merge 5 -Rowner/repo",
-    ], ids=["global_long", "equals_joined", "short_spaced", "short_attached"])
+        "gh pr merge 5 -R=owner/repo",
+    ], ids=["global_long", "equals_joined", "short_spaced", "short_attached",
+            "short_equals_joined"])
     def test_repo_form_invariant_match_authorizes(self, command):
         """Approve the canonical --repo=owner/repo; every equivalent -R/--repo form
         of the same repo AUTHORIZES (all normalize to one token)."""
@@ -285,6 +293,9 @@ class TestScannerCanonicalForms:
         ("gh --repo owner/repo pr merge 5", "merge", ["--repo=owner/repo"]),
         ("gh pr merge 5 --repo=owner/repo", "merge", ["--repo=owner/repo"]),
         ("gh pr merge 5 -Rowner/repo", "merge", ["--repo=owner/repo"]),
+        # short =-joined (-R=value): exercises the cluster-path `=`-strip, a
+        # DISTINCT branch from the long --repo=value form above.
+        ("gh pr merge 5 -R=owner/repo", "merge", ["--repo=owner/repo"]),
         # combined-short cluster: -d boolean kept, -R consumes the next token
         ("gh pr merge 5 -dR owner/repo", "merge", ["--delete-branch", "--repo=owner/repo"]),
         # combined-short cluster, attached value: -d boolean, -R consumes "owner/repo"
@@ -298,6 +309,7 @@ class TestScannerCanonicalForms:
         ("gh pr merge 5", "merge", []),
         # close op-class: -R bound; --delete-branch is the op-trigger (NOT bound)
         ("gh pr close 5 -R x/y", "close", ["--repo=x/y"]),
+        ("gh pr close 5 -R=x/y", "close", ["--repo=x/y"]),  # short =-joined on close
         ("gh pr close 5 --delete-branch", "close", []),
         # force-push: --no-verify (exact)
         ("git push --no-verify origin main --force", "force-push", ["--no-verify"]),
