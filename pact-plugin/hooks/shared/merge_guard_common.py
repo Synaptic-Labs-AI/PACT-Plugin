@@ -472,6 +472,10 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
         "--admin":         (("--admin",), False),               # bypass branch protection
         "--delete-branch": (("-d", "--delete-branch"), False),  # side-effect: deletes source branch
         "--repo":          (("-R", "--repo"), True),            # cross-repo redirect (value-carrying target)
+        # value-carrying SAFETY constraint (pins the merge to a head SHA); binding
+        # it closes the dropped-constraint case — approve with --match-head-commit,
+        # execute without it -> set-equality REFUSES (#1042).
+        "--match-head-commit": (("--match-head-commit",), True),
     },
     "close": {
         "--repo":          (("-R", "--repo"), True),            # cross-repo redirect (value-carrying target)
