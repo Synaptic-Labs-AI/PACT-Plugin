@@ -710,6 +710,31 @@ def _blank_inert_quoted_literals(segment: str) -> str:
     return segment
 
 
+# Steps 1-7 replace every non-executable carrier they strip with a placeholder
+# token that always contains "STRIPPED" (echo/printf -> "STRIPPED"; git commit
+# -m -> "-m STRIPPED"; var assignment -> "VAR=STRIPPED"; heredoc ->
+# "<<HEREDOC_STRIPPED"; here-string -> "<<<STRIPPED"; gh-create carrier ->
+# "STRIPPED"). A segment carrying such a placeholder was already transformed by
+# an earlier step; reasoning about the residue's post-strip shape is ambiguous,
+# so step 8 treats it as fail-closed and does NOT suppress it (the substring
+# scan still sees it). Conservative defense-in-depth: it is behaviorally inert on
+# realistic inputs (the whitelisted non-executor verbs grep / gh-comment /
+# pact_memory are NOT carriers, so they never acquire this marker) while removing
+# the placeholder-interaction class entirely.
+_STRIP_PLACEHOLDER_MARKER = "STRIPPED"
+
+
+def _segment_is_suppressible(segment: str) -> bool:
+    """True iff `segment` is a placeholder-free segment led by a whitelisted
+    non-executor verb — the ONLY shape whose quoted literals step 8 may blank.
+    Any steps-1-7 placeholder token in the segment fails closed (no suppression).
+    """
+    return (
+        _STRIP_PLACEHOLDER_MARKER not in segment
+        and _BENIGN_ARG_CARRIER_RE.match(segment) is not None
+    )
+
+
 def _suppress_benign_arg_literals(text: str, command: str) -> str:
     """#1037 HYBRID benign-arg-literal suppressor — the FINAL step of
     _strip_non_executable_content, so BOTH is_dangerous_command and
@@ -728,6 +753,8 @@ def _suppress_benign_arg_literals(text: str, command: str) -> str:
         still execute downstream);
       - a segment whose leading verb is unknown / an executor / wrapper-prefixed
         → left UNCHANGED (the substring scan still blocks it);
+      - a segment carrying ANY steps-1-7 placeholder token ("STRIPPED" et al.)
+        → left UNCHANGED (its post-strip shape is ambiguous — fail closed);
       - an unbalanced quote → not matched by the balanced-span regexes, so the
         literal stays and is scanned.
 
@@ -769,7 +796,7 @@ def _suppress_benign_arg_literals(text: str, command: str) -> str:
         segment = text[pos:separator.start()]
         out.append(
             _blank_inert_quoted_literals(segment)
-            if _BENIGN_ARG_CARRIER_RE.match(segment)
+            if _segment_is_suppressible(segment)
             else segment
         )
         out.append(text[separator.start():separator.end()])  # separator verbatim
@@ -777,7 +804,7 @@ def _suppress_benign_arg_literals(text: str, command: str) -> str:
     last_segment = text[pos:]
     out.append(
         _blank_inert_quoted_literals(last_segment)
-        if _BENIGN_ARG_CARRIER_RE.match(last_segment)
+        if _segment_is_suppressible(last_segment)
         else last_segment
     )
     return "".join(out)

@@ -32,6 +32,10 @@ ALLOWED_FALSE_POSITIVES = [
     'grep "a ; gh pr merge 5" file',
     'gh pr comment 5 --body "do it; gh pr merge 9 then ship"',
     "git commit -am 'fix: gh pr merge 7 | follow-up'",
+    # Placeholder fail-closed is PER-SEGMENT: an earlier-step placeholder in one
+    # segment (echo -> "echo STRIPPED") must not block a clean sibling segment's
+    # suppression. The grep segment still clears.
+    'echo "note" ; grep "gh pr merge 5" file',
 ]
 
 # Must STILL be blocked — the suppressor must never open an under-block. Each
