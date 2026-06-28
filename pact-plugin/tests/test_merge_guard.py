@@ -13523,6 +13523,31 @@ class Test1037SuppressorRestraintCanaries:
         flipped = [c for c in self.EXECUTOR_VERBS if not is_dangerous_command(c)]
         assert len(flipped) == len(self.EXECUTOR_VERBS)
 
+    def test_known_accepted_over_block_b_guard_marker_collision(self, monkeypatch):
+        # (b)-guard marker-collision over-block; non-vacuous via _segment_is_suppressible
+        # revert (flips BLOCK->ALLOW); intentional INV-D2-acceptable over-block, do NOT
+        # "fix". The (b) placeholder guard skips suppression for any segment whose
+        # literal contains the steps-1-7 marker "STRIPPED" — it is the quoted ARG, not
+        # the verb, that carries it — so a whitelisted carrier whose literal merely
+        # CONTAINS "STRIPPED" is over-blocked: WITHOUT (b) the suppressor blanks grep's
+        # literal -> ALLOW; WITH (b) the literal survives the scan -> BLOCK.
+        from merge_guard_pre import is_dangerous_command
+
+        over_blocked = 'grep "STRIPPED gh pr merge 5" file'
+        assert is_dangerous_command(over_blocked)  # over-block (the (b) guard fires)
+        # discrimination: the SAME line WITHOUT the marker is ALLOWED.
+        assert not is_dangerous_command('grep "gh pr merge 5" file')
+        # non-vacuity (proof-class P): revert the (b) placeholder check (restore the
+        # pre-refinement whitelist-only _segment_is_suppressible) -> the over-block
+        # flips BLOCK->ALLOW, proving the placeholder check is the load-bearing cause.
+        import merge_guard_pre as _mg
+
+        monkeypatch.setattr(
+            "merge_guard_pre._segment_is_suppressible",
+            lambda segment: _mg._BENIGN_ARG_CARRIER_RE.match(segment) is not None,
+        )
+        assert not is_dangerous_command(over_blocked)  # flips BLOCK->ALLOW
+
 
 class Test1037RegressionCanaries:
     """Sub-class B under-block canaries: the dangerous op is a BARE command the
