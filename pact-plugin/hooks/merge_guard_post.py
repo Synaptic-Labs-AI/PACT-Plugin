@@ -89,7 +89,7 @@ try:
         MAX_USES,
         USE_MARKER_SUFFIX,
         LAYER1_SUCCESS_STDOUT_PATTERNS,
-        _QUOTED_COMMAND_RE,
+        PRIVILEGED_FLAGS,
         cleanup_consumed_tokens as _cleanup_consumed_tokens,
         cleanup_unused_tokens as _cleanup_unused_tokens,
         detect_command_operation_type,
@@ -195,40 +195,88 @@ def _has_decline_defer(text: object) -> bool:
     return bool(_DECLINE_DEFER_RE.search(text))
 
 
+# ─── _veto_text recognized-command-token model (#1049 under-block remediation) ──
+# Excise ONLY the recognized command TOKENS inside a BACKTICK literal — never a
+# quote-delimited span, never trailing/bracketing prose. Two prior under-blocks
+# are closed by construction (see _veto_text).
+_BACKTICK_COMMAND_RE = re.compile(r"`([^`]+)`")
+
+# Op/subcommand keywords — structural command words, NONE of which is a
+# decline/defer veto word, so excising them can never suppress a decline.
+_OP_KEYWORDS = frozenset({"gh", "git", "pr", "merge", "close", "branch", "push", "api"})
+
+# Real gh/git flags KNOWN to the merge guard: every alias across every op-class in
+# the #1042 privileged-flag SSOT. A flag in this set is a genuine command token, so
+# a veto-word SUBSTRING inside it (`no` in `--no-verify`) is excised. A dash-token
+# NOT in this set (a contrived `--hold-off`) is LEFT IN the veto scan — the
+# never-under-block bias: only POSITIVELY-recognized command tokens are excised.
+_RECOGNIZED_COMMAND_FLAGS = frozenset(
+    alias
+    for op_flags in PRIVILEGED_FLAGS.values()
+    for aliases, _value_taking in op_flags.values()
+    for alias in aliases
+)
+
+
+def _is_recognized_command_token(token: str) -> bool:
+    """True iff `token` is POSITIVELY a component of the recognized command — an
+    op/subcommand keyword, an all-digit positional (PR number / count), a
+    path/ref/repo/branch argument (contains `/`), or a known privileged flag
+    (`--repo=x` / `-R` normalize to the flag head). Everything else returns False
+    and is LEFT IN the veto scan (never-under-block bias: excise only what is
+    provably a command token; on ambiguity, under-excise → over-block-safe)."""
+    if token.lower() in _OP_KEYWORDS:
+        return True
+    if token.isdigit():
+        return True
+    if "/" in token:                       # owner/repo, feature/x, release/y, HEAD:dst
+        return True
+    flag = token.split("=", 1)[0]          # --repo=owner/x / -R=x → flag head
+    return flag in _RECOGNIZED_COMMAND_FLAGS
+
+
+def _excise_recognized_command(inner: str) -> str:
+    """Return the backtick-literal `inner` with its recognized command TOKENS
+    dropped, KEEPING every other whitespace-delimited token so the veto still
+    scans it. Kept tokens are re-joined by single spaces (the veto is
+    whitespace-insensitive; word boundaries are preserved)."""
+    return " ".join(t for t in inner.split() if not _is_recognized_command_token(t))
+
+
 def _veto_text(selected_text: object) -> str:
-    """Return the SELECTED option text with QUOTED COMMAND-LITERAL spans excised
-    (blanked to a single space) so a decline/defer veto-word *substring* INSIDE
-    the approval command literal — `no` in `--no-verify`, a `release/pending-qa`
-    branch name — no longer falsely trips the SACROSANCT veto (#1049). The result
-    feeds ONLY `_has_decline_defer`; the mint's selection / multiplicity /
-    label-op steps all see the UNMODIFIED text (scan-local).
+    """Return the SELECTED option text with the recognized COMMAND TOKEN-SEQUENCE
+    excised from each BACKTICK command literal, so a decline/defer veto-word
+    *substring* INSIDE the approval command (`no` in `--no-verify`, a
+    `release/pending-qa` branch) no longer falsely trips the SACROSANCT veto
+    (#1049). The result feeds ONLY `_has_decline_defer`; the mint's selection /
+    multiplicity / label-op steps all see the UNMODIFIED text (scan-local).
 
-    CLASSIFY-GATED, FAIL-CLOSED: a quoted span is excised ONLY when its inner
-    content classifies as a real command (`detect_command_operation_type` is
-    non-None). A quoted span that does NOT classify — e.g. a backticked decline
-    phrase in a description ("…but `please skip` if CI fails") — is LEFT IN the
-    veto scan, so the veto still catches it. Blanking every quoted span
-    unconditionally would strip such a phrase out of the scan → UNDER-BLOCK, the
-    dangerous direction under INV-D2; the gate biases to OVER-BLOCK on ambiguity.
-
-    NEVER excises a bare (un-backticked) `gh`/`git` span: that span over-captures
-    trailing decline prose, so a bare command literal keeps its full text in the
-    scan — an un-backticked literal simply re-trips the false-positive (over-block)
-    and the #1052 advisory nudges the operator to backtick it. Blank-with-space
-    preserves the `\\b` word boundaries the veto regex relies on. Non-str input
-    (no clicked option) yields "" → `_has_decline_defer` finds nothing to veto."""
+    SACROSANCT never-under-block (INV-D2). Two prior under-blocks are closed by
+    construction:
+      F1 (apostrophe/quote-span engulfment) — matching is BACKTICK-ONLY, so
+         English contractions (don't/it's/I'd/that's) can never delimit an
+         excision span; decline prose outside the backticks always stays in scan.
+      F2 (defer word inside the literal) — only the recognized command TOKENS are
+         excised, never the whole span, so a trailing/bracketing defer word
+         (`gh pr merge 5 once CI passes` → `once CI passes`) stays in the scan.
+    Only a token POSITIVELY recognized as a command component is excised; a bare
+    prose word or an unrecognized dash-token is LEFT IN — at worst a #1049
+    false-positive persists (over-block; the operator simply re-approves), the
+    SAFE failure direction. A backtick span whose inner does NOT classify as a
+    command is left wholly in the scan. Non-str input yields ""."""
     if not isinstance(selected_text, str):
         return ""
     out: list[str] = []
     last = 0
-    for match in _QUOTED_COMMAND_RE.finditer(selected_text):
-        # One of the three alternation groups (backtick / single / double quote)
-        # carries the inner content; the others are None for this match.
-        inner = match.group(1) or match.group(2) or match.group(3) or ""
+    for match in _BACKTICK_COMMAND_RE.finditer(selected_text):
+        inner = match.group(1)
+        # Keep everything up to and including the opening backtick.
+        out.append(selected_text[last:match.start(1)])
         if detect_command_operation_type(inner) is not None:
-            out.append(selected_text[last:match.start()])
-            out.append(" ")
-            last = match.end()
+            out.append(_excise_recognized_command(inner))
+        else:
+            out.append(inner)              # non-command backtick span: scan unchanged
+        last = match.end(1)                # resume at the closing backtick
     out.append(selected_text[last:])
     return "".join(out)
 
