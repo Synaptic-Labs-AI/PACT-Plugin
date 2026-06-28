@@ -208,3 +208,91 @@ class TestNarrowGhCarrierCreateEditUnchanged:
         from merge_guard_pre import is_dangerous_command
 
         assert not is_dangerous_command(command)
+
+
+class TestNarrowGhCommentSecurityAnchoringCanaries:
+    """Security re-probe (#36 SAFE 42-case differential) anchoring canaries directed
+    at the COMMENT carrier — the two classes that bit the ABANDONED general
+    suppressor and that the narrow's FLAG-ANCHORED inner strip (blanks ONLY the
+    value DIRECTLY after --title/--body/-t/-b) neutralizes. Highest-value guards:
+    they flip RED if the inner strip were ever loosened from FLAG-ANCHORED to
+    WHOLE-SEGMENT (blank any quoted region in the span) — the precise mutation that
+    distinguishes the SAFE narrow carrier-strip from the abandoned general
+    suppressor (which blanked ALL quoted literals in a segment, so it under-blocked).
+
+    Non-vacuity: each canary asserts BLOCK + the op LITERAL SURVIVES the strip
+    (present in _strip output, so DANGEROUS_PATTERNS catches it — proving the
+    flag-anchoring did NOT blank it). The distinguishing mutation is MEASURED at
+    build time: loosening the inner-strip flag-anchor
+    (`(?:--title|--body|-t|-b)\\s+` -> `\\s*`, i.e. blank ANY quoted region) flips
+    {4 of 4} flag-anchoring canaries (2 CLASS-1 non-carrier-flag + 2 CLASS-2
+    `<(...)`) BLOCK->ALLOW = under-block, while the `>(...)` output-procsub stays
+    BLOCK (defense-in-depth: the whole-command process-sub-to-shell guard skips the
+    strip entirely). The inner strip is FUNCTION-LOCAL to
+    _strip_non_executable_content, so the loosen is a documented measurement and
+    op-survives-the-strip is the runnable equivalent.
+    """
+
+    # CLASS-1: a dangerous op in a QUOTED value NOT directly after a carrier flag
+    # (flag-anchored strip leaves it; a whole-segment strip would blank it).
+    CLASS1_FLAG_ANCHORED = [
+        'gh pr comment 5 --foo "gh pr merge 5"',
+        'gh pr comment 5 --body "ok" --foo "gh pr merge 9"',
+    ]
+    # CLASS-2: process-substitution running its OWN command (incl --admin / the
+    # #1042 bypass and git push --force); the `<(...)` op survives the strip.
+    CLASS2_PROCSUB = [
+        'gh pr comment 5 --body "x" <(bash -c "gh pr merge 5 --admin")',
+        'gh pr comment 5 --body "x" <(bash -c "git push --force origin main")',
+    ]
+
+    @pytest.mark.parametrize("command", CLASS1_FLAG_ANCHORED + CLASS2_PROCSUB)
+    def test_flag_anchoring_canary_blocks_and_op_survives(self, command):
+        # BLOCK + the op SURVIVES the strip (flag-anchoring did NOT blank it). The
+        # whole-segment-loosen mutation flips these {4 of 4} -> ALLOW (measured).
+        from merge_guard_pre import (
+            is_dangerous_command,
+            is_compound_destructive_command,
+            _strip_non_executable_content,
+        )
+
+        assert is_dangerous_command(command) or is_compound_destructive_command(command)
+        stripped = _strip_non_executable_content(command)
+        assert ("gh pr merge" in stripped) or ("git push" in stripped)  # op survives
+
+    def test_escaped_quote_then_real_op_blocks(self):
+        # CLASS-1 escaped-quote-then-real-op (span-stop): a `\'` desync ends the sq
+        # (bash sq has no escapes), so the op after the real `;` is BARE and OUTSIDE
+        # the carrier span -> survives -> BLOCK. (Flips under a different mutation,
+        # span-consume-past-separator, not the whole-segment-loosen.)
+        from merge_guard_pre import (
+            is_dangerous_command,
+            is_compound_destructive_command,
+            _strip_non_executable_content,
+        )
+
+        cmd = "gh pr comment 5 --body " + _SQ + "a" + _BS + _SQ + " ; gh pr merge 5"
+        assert is_dangerous_command(cmd) or is_compound_destructive_command(cmd)
+        assert "gh pr merge 5" in _strip_non_executable_content(cmd)
+
+    def test_op_after_body_with_admin_blocks(self):
+        # #1042 bypass shape (--admin) chained after the comment body -> BLOCK.
+        from merge_guard_pre import (
+            is_compound_destructive_command,
+            _strip_non_executable_content,
+        )
+
+        cmd = 'gh pr comment 5 --body "ok" ; gh pr merge 5 --admin'
+        assert is_compound_destructive_command(cmd)
+        assert "gh pr merge 5 --admin" in _strip_non_executable_content(cmd)
+
+    def test_output_procsub_blocks_defense_in_depth(self):
+        # `>(bash -c ...)` output process-sub: BLOCK via DEFENSE-IN-DEPTH — the
+        # whole-command process-sub-to-shell guard skips the carrier-strip entirely
+        # AND the op is outside any flag-anchored value. Stays BLOCK under the
+        # whole-segment-loosen alone (a combined procsub-guard-neuter is needed too).
+        from merge_guard_pre import is_dangerous_command, _strip_non_executable_content
+
+        cmd = 'gh pr comment 5 --body "x" >(bash -c "gh pr merge 9")'
+        assert is_dangerous_command(cmd)
+        assert "gh pr merge 9" in _strip_non_executable_content(cmd)
