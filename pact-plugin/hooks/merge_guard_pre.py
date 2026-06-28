@@ -488,10 +488,10 @@ def _strip_non_executable_content(command: str) -> str:
             result,
         )
 
-    # 7. Strip gh issue/pr CREATION-carrier quoted arguments.
-    #    `gh issue create/edit` and `gh pr create` accept --title/--body
-    #    (and the -t/-b aliases) whose VALUE is prose sent to the GitHub API
-    #    — never executed by a shell. A dangerous-op literal named inside
+    # 7. Strip gh issue/pr CREATION/COMMENT-carrier quoted arguments.
+    #    `gh issue create/edit/comment` and `gh pr create/comment` accept
+    #    --title/--body (and the -t/-b aliases) whose VALUE is prose sent to the
+    #    GitHub API — never executed by a shell. A dangerous-op literal named inside
     #    that prose (e.g. `gh issue create --title "...git branch -D x..."`)
     #    must not trip DANGEROUS_PATTERNS. Strip the quoted value; keep the
     #    verb + flag tokens visible.
@@ -532,10 +532,18 @@ def _strip_non_executable_content(command: str) -> str:
         # nested `*` has no backtracking ambiguity (linear; no ReDoS). The
         # double-quoted alternative honors `\"` escapes, matching bash's
         # escaped-quote semantics so the regex cannot desync from the shell.
-        # Verb alternation: issue create|edit, pr create. NOT pr close —
-        # `close` is absent by construction so a close command never matches.
+        # Verb alternation: issue create|edit|comment, pr create|comment. NOT pr
+        # close — `close` is absent by construction so a close command never
+        # matches. `comment` is a non-executing carrier exactly like create/edit:
+        # its --body/-b value is API prose, and the SAME doubly-anchored strip
+        # (carrier verb + value DIRECTLY after --body/-t/-b) + quote-aware span +
+        # $()/backtick-preserve guard apply, so it inherits the create/edit
+        # safety — empirically verified: escaped-quote/escaped-dq/metachar bodies
+        # are handled correctly (op inside a dq/sq body is inert and stripped; an
+        # op OUTSIDE the body, after an unquoted separator OR a bare escaped quote
+        # not following a carrier flag, is NEVER stripped and stays caught).
         _gh_carrier_span = (
-            r"gh\s+(?:issue\s+(?:create|edit)|pr\s+create)\b"
+            r"gh\s+(?:issue\s+(?:create|edit|comment)|pr\s+(?:create|comment))\b"
             r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
         )
 
