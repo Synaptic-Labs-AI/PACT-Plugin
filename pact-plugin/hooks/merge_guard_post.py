@@ -89,6 +89,7 @@ try:
         MAX_USES,
         USE_MARKER_SUFFIX,
         LAYER1_SUCCESS_STDOUT_PATTERNS,
+        _QUOTED_COMMAND_RE,
         cleanup_consumed_tokens as _cleanup_consumed_tokens,
         cleanup_unused_tokens as _cleanup_unused_tokens,
         detect_command_operation_type,
@@ -192,6 +193,44 @@ def _has_decline_defer(text: object) -> bool:
     if not isinstance(text, str) or not text:
         return False
     return bool(_DECLINE_DEFER_RE.search(text))
+
+
+def _veto_text(selected_text: object) -> str:
+    """Return the SELECTED option text with QUOTED COMMAND-LITERAL spans excised
+    (blanked to a single space) so a decline/defer veto-word *substring* INSIDE
+    the approval command literal — `no` in `--no-verify`, a `release/pending-qa`
+    branch name — no longer falsely trips the SACROSANCT veto (#1049). The result
+    feeds ONLY `_has_decline_defer`; the mint's selection / multiplicity /
+    label-op steps all see the UNMODIFIED text (scan-local).
+
+    CLASSIFY-GATED, FAIL-CLOSED: a quoted span is excised ONLY when its inner
+    content classifies as a real command (`detect_command_operation_type` is
+    non-None). A quoted span that does NOT classify — e.g. a backticked decline
+    phrase in a description ("…but `please skip` if CI fails") — is LEFT IN the
+    veto scan, so the veto still catches it. Blanking every quoted span
+    unconditionally would strip such a phrase out of the scan → UNDER-BLOCK, the
+    dangerous direction under INV-D2; the gate biases to OVER-BLOCK on ambiguity.
+
+    NEVER excises a bare (un-backticked) `gh`/`git` span: that span over-captures
+    trailing decline prose, so a bare command literal keeps its full text in the
+    scan — an un-backticked literal simply re-trips the false-positive (over-block)
+    and the #1052 advisory nudges the operator to backtick it. Blank-with-space
+    preserves the `\\b` word boundaries the veto regex relies on. Non-str input
+    (no clicked option) yields "" → `_has_decline_defer` finds nothing to veto."""
+    if not isinstance(selected_text, str):
+        return ""
+    out: list[str] = []
+    last = 0
+    for match in _QUOTED_COMMAND_RE.finditer(selected_text):
+        # One of the three alternation groups (backtick / single / double quote)
+        # carries the inner content; the others are None for this match.
+        inner = match.group(1) or match.group(2) or match.group(3) or ""
+        if detect_command_operation_type(inner) is not None:
+            out.append(selected_text[last:match.start()])
+            out.append(" ")
+            last = match.end()
+    out.append(selected_text[last:])
+    return "".join(out)
 
 
 def _derive_op_from_label(label: object) -> str | None:
@@ -333,7 +372,13 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> dict | None:
                             return None
                 continue
             selected_text = _selected_option_text(options, answer)
-            if _has_decline_defer(selected_text):
+            # B1 (#1049): veto-scan the selected text with quoted COMMAND-LITERAL
+            # spans excised, so a veto-word substring INSIDE the approval command
+            # (`--no-verify`, a `release/pending-qa` branch) no longer self-vetoes.
+            # _veto_text is classify-gated + scan-local — Step 2's selected_text
+            # below is the UNMODIFIED mint source; the free-text/multiSelect arms
+            # are untouched.
+            if _has_decline_defer(_veto_text(selected_text)):
                 return None
         elif _has_decline_defer(answer):
             return None
