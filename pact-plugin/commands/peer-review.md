@@ -430,11 +430,11 @@ JSON
 
 6. ⚠️ **Merge Authorization Checkpoint**
 
-   Merge is irreversible. MANDATORY: always use `AskUserQuestion` to request merge authorization.
+   Merge is irreversible. MANDATORY: always use `AskUserQuestion` to request merge authorization. Issue exactly ONE single-select `AskUserQuestion`: this single prompt is BOTH the merge decision AND the authorization — the "Yes, merge" option IS the decision. Do NOT precede it with a separate "should we merge?" question, and do NOT follow it with a second approval prompt; a normal merge is one prompt, not a re-prompt loop.
 
    Phrase the question so it names the exact command — what you approve is what executes. For example: `Merge this PR now? On approval the team runs gh pr merge <N>` (where `<N>` is the PR number and the only number in the prompt).
 
-   Use `AskUserQuestion` with these exact options:
+   Use that single `AskUserQuestion` (single-select) with these exact options:
    - **"Yes, merge"** (description: "Run `gh pr merge <N>` to merge this PR") → On selection: run `gh pr merge <N>`, then invoke `/PACT:wrap-up`
    - **"Continue reviewing"** (description: "Keep reviewing — no action needed yet") → On selection: do nothing — let the user continue their review
    - **"Pause work for now"** (description: "Save session knowledge and pause — resume later") → On selection: invoke `/PACT:pause`
