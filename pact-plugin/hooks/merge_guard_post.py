@@ -89,7 +89,6 @@ try:
         MAX_USES,
         USE_MARKER_SUFFIX,
         LAYER1_SUCCESS_STDOUT_PATTERNS,
-        PRIVILEGED_FLAGS,
         cleanup_consumed_tokens as _cleanup_consumed_tokens,
         cleanup_unused_tokens as _cleanup_unused_tokens,
         detect_command_operation_type,
@@ -110,37 +109,6 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-loud catch-
 # When the hook allows a command (exits 0), output this JSON so the Claude Code
 # UI suppresses the hook display instead of showing "hook error (No output)".
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
-
-# Conservative decline/defer recognizer — the SACROSANCT mint veto wordset.
-# Whole-word, case-insensitive; phrases allow flexible internal whitespace. BROAD
-# by design (#933 over-block-not-under-block): a false veto refuses a legitimate
-# approval (#1031 direction — the operator simply re-approves), whereas a MISSED
-# veto would mint a token the operator declined or deferred (#1032 — an
-# irreversible destructive op authorized against their intent). Catches the
-# convention's own decline-option labels ("Continue reviewing", "Pause work for
-# now") and the deferral free-text answers ("approve later", "review first",
-# "once tests pass", "after I check CI"). The C4-template author keeps the
-# affirmative option's command literal clear of every token below.
-_DECLINE_DEFER_RE = re.compile(
-    r"\b(?:"
-    r"cancel|abort|reject|decline|deny|stop|no|nope|never|skip|don'?t|"      # decline
-    r"later|wait|hold|pause|reviewing|review|postpone|defer|pending|once|after|"  # defer
-    r"not\s+yet|review\s+first|hold\s+off|for\s+now"                          # phrases
-    r")\b",
-    re.IGNORECASE,
-)
-
-# Op-keyword patterns for the label<->description CONSISTENCY check (D / 1c).
-# Derives ONLY the operation type from an option LABEL's prose — never a target (a
-# loose label-derive re-imports the #1031 distractor trap). Order mirrors
-# detect_command_operation_type precedence (close before merge; force-push and
-# branch-delete keyed on their syntactic words).
-_LABEL_OP_PATTERNS = (
-    ("close", re.compile(r"\bclose\b", re.IGNORECASE)),
-    ("force-push", re.compile(r"\bforce[\s-]?push\b", re.IGNORECASE)),
-    ("branch-delete", re.compile(r"\b(?:delete[\s-]?branch|branch[\s-]?delete)\b", re.IGNORECASE)),
-    ("merge", re.compile(r"\bmerge\b", re.IGNORECASE)),
-)
 
 # Patterns that indicate an affirmative FREE-TEXT answer. Used ONLY by the
 # free-text arm (an AskUserQuestion with no options); OPTION-mode approval is an
@@ -182,116 +150,6 @@ def is_affirmative(answer: str) -> bool:
         True if the answer indicates approval
     """
     return bool(AFFIRMATIVE_PATTERNS.search(answer.strip()))
-
-
-def _has_decline_defer(text: object) -> bool:
-    """True if the text contains any decline/defer token (the SACROSANCT veto).
-
-    Scans the SELECTED option's label+description (option mode) or the free-text
-    answer (free-text arm) — never the unselected options, and (for the veto)
-    never the question prose. Non-str / empty text → False (nothing to veto)."""
-    if not isinstance(text, str) or not text:
-        return False
-    return bool(_DECLINE_DEFER_RE.search(text))
-
-
-# ─── _veto_text recognized-command-token model (#1049 under-block remediation) ──
-# Excise ONLY the recognized command TOKENS inside a BACKTICK literal — never a
-# quote-delimited span, never trailing/bracketing prose. Two prior under-blocks
-# are closed by construction (see _veto_text).
-_BACKTICK_COMMAND_RE = re.compile(r"`([^`]+)`")
-
-# Op/subcommand keywords — structural command words, NONE of which is a
-# decline/defer veto word, so excising them can never suppress a decline.
-_OP_KEYWORDS = frozenset({"gh", "git", "pr", "merge", "close", "branch", "push", "api"})
-
-# Real gh/git flags KNOWN to the merge guard: every alias across every op-class in
-# the #1042 privileged-flag SSOT. A flag in this set is a genuine command token, so
-# a veto-word SUBSTRING inside it (`no` in `--no-verify`) is excised. A dash-token
-# NOT in this set (a contrived `--hold-off`) is LEFT IN the veto scan — the
-# never-under-block bias: only POSITIVELY-recognized command tokens are excised.
-_RECOGNIZED_COMMAND_FLAGS = frozenset(
-    alias
-    for op_flags in PRIVILEGED_FLAGS.values()
-    for aliases, _value_taking in op_flags.values()
-    for alias in aliases
-)
-
-
-def _is_recognized_command_token(token: str) -> bool:
-    """True iff `token` is POSITIVELY a component of the recognized command — an
-    op/subcommand keyword, an all-digit positional (PR number / count), a
-    path/ref/repo/branch argument (contains `/`), or a known privileged flag
-    (`--repo=x` / `-R` normalize to the flag head). Everything else returns False
-    and is LEFT IN the veto scan (never-under-block bias: excise only what is
-    provably a command token; on ambiguity, under-excise → over-block-safe)."""
-    if token.lower() in _OP_KEYWORDS:
-        return True
-    if token.isdigit():
-        return True
-    if "/" in token:                       # owner/repo, feature/x, release/y, HEAD:dst
-        return True
-    flag = token.split("=", 1)[0]          # --repo=owner/x / -R=x → flag head
-    return flag in _RECOGNIZED_COMMAND_FLAGS
-
-
-def _excise_recognized_command(inner: str) -> str:
-    """Return the backtick-literal `inner` with its recognized command TOKENS
-    dropped, KEEPING every other whitespace-delimited token so the veto still
-    scans it. Kept tokens are re-joined by single spaces (the veto is
-    whitespace-insensitive; word boundaries are preserved)."""
-    return " ".join(t for t in inner.split() if not _is_recognized_command_token(t))
-
-
-def _veto_text(selected_text: object) -> str:
-    """Return the SELECTED option text with the recognized COMMAND TOKEN-SEQUENCE
-    excised from each BACKTICK command literal, so a decline/defer veto-word
-    *substring* INSIDE the approval command (`no` in `--no-verify`, a
-    `release/pending-qa` branch) no longer falsely trips the SACROSANCT veto
-    (#1049). The result feeds ONLY `_has_decline_defer`; the mint's selection /
-    multiplicity / label-op steps all see the UNMODIFIED text (scan-local).
-
-    SACROSANCT never-under-block (INV-D2). Two prior under-blocks are closed by
-    construction:
-      F1 (apostrophe/quote-span engulfment) — matching is BACKTICK-ONLY, so
-         English contractions (don't/it's/I'd/that's) can never delimit an
-         excision span; decline prose outside the backticks always stays in scan.
-      F2 (defer word inside the literal) — only the recognized command TOKENS are
-         excised, never the whole span, so a trailing/bracketing defer word
-         (`gh pr merge 5 once CI passes` → `once CI passes`) stays in the scan.
-    Only a token POSITIVELY recognized as a command component is excised; a bare
-    prose word or an unrecognized dash-token is LEFT IN — at worst a #1049
-    false-positive persists (over-block; the operator simply re-approves), the
-    SAFE failure direction. A backtick span whose inner does NOT classify as a
-    command is left wholly in the scan. Non-str input yields ""."""
-    if not isinstance(selected_text, str):
-        return ""
-    out: list[str] = []
-    last = 0
-    for match in _BACKTICK_COMMAND_RE.finditer(selected_text):
-        inner = match.group(1)
-        # Keep everything up to and including the opening backtick.
-        out.append(selected_text[last:match.start(1)])
-        if detect_command_operation_type(inner) is not None:
-            out.append(_excise_recognized_command(inner))
-        else:
-            out.append(inner)              # non-command backtick span: scan unchanged
-        last = match.end(1)                # resume at the closing backtick
-    out.append(selected_text[last:])
-    return "".join(out)
-
-
-def _derive_op_from_label(label: object) -> str | None:
-    """Derive ONLY the operation type from an option LABEL's prose (op-only — no
-    target). Returns the op literal, or None if the label names no op. Feeds the
-    label<->description consistency check ONLY; never feeds write_token's context
-    (anti-leak boundary: label prose can REFUSE a mint, never AUTHORIZE one)."""
-    if not isinstance(label, str) or not label:
-        return None
-    for op_type, pattern in _LABEL_OP_PATTERNS:
-        if pattern.search(label):
-            return op_type
-    return None
 
 
 def _selected_option_text(options: object, answer: object) -> str | None:
@@ -359,7 +217,6 @@ class MintResult(NamedTuple):
 # bundles). These NAME the failing gate; they never authorize.
 _REFUSAL_DIAGNOSTICS = {
     "no_options": "the approval carried no clickable options (a free-text answer never mints)",
-    "decline_veto": "the selected option contained a decline/defer word (the merge veto)",
     "label_mismatch": (
         "the answer did not exactly match an option label — if the command was "
         "in the option LABEL, move it into the option DESCRIPTION (a long "
@@ -368,8 +225,31 @@ _REFUSAL_DIAGNOSTICS = {
     "no_command": "no recognized merge/close/force-push/branch-delete command was found in the selected option",
     "multiple_commands": "more than one distinct (operation, target) was present — the approval was ambiguous",
     "option_not_anchored": "the command appeared only in the question text, not in the selected option",
-    "label_op_mismatch": "the selected option's label named a different operation than its command",
 }
+
+
+# #1059 (mint-side): the #1042 privileged-flag scan runs over the WIDER selected-
+# option text (markdown-wrapped), so a command-WRAPPING backtick/curly-quote can be
+# captured into a flag VALUE (e.g. `--repo owner/x` → owner/x with a trailing
+# backtick), desyncing from the read side which scans the bare executed command →
+# set-equality REFUSES a faithful approval. Space-REPLACE (never delete — preserves
+# token boundaries: "owner/x`--admin" → "owner/x --admin", revealing --admin rather
+# than gluing it) the wrapper delimiters so the mint scans the same surface the read
+# side does → mint bound_flags == read bound_flags for a faithful command. Backtick
+# is the canonical wrapper (peer-review.md); curly quotes are prose-only. Straight
+# quotes are LEFT to shared `_strip_surrounding_quotes` (symmetric both sides; moot —
+# a --repo value is never quoted). This NORMALIZES the scan surface ONLY; it can only
+# remove a wrapper char from the mint surface (never add a flag, never touch the read
+# side) → an under-block is structurally impossible, and the #1042 comparator stays
+# EXACT set-equality (an exec-time EXTRA privileged flag still REFUSES).
+_FLAG_SCAN_WRAPPER_TABLE = {ord(c): " " for c in "`‘’“”"}
+
+
+def _strip_command_wrapper(flag_scan_text: str) -> str:
+    """#1059: space-replace markdown command-wrapper delimiters (backtick + curly
+    quotes) on the mint's flag-scan surface so its #1042 privileged-flag set matches
+    the read side's on the bare command. See `_FLAG_SCAN_WRAPPER_TABLE` rationale."""
+    return flag_scan_text.translate(_FLAG_SCAN_WRAPPER_TABLE)
 
 
 def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
@@ -377,34 +257,46 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
     command; return a `MintResult(context, refusal_reason)` — `context` is the dict
     to mint, or None (with a `refusal_reason` code) to refuse.
 
-    Implements the ordered mint flow (blueprint §5.2). The mint runs
-    locate+extract+fail-closed identically on EVERY approval — there is no
-    "matches-template → skip-validation" shortcut.
+    PURE-FLOOR MINIMAL gate — the operator's CONSENT is the CLICK on a command-
+    bearing option; the surrounding prose (the option's label/description, the
+    question text) is NEVER read to second-guess that click. Two check classes
+    differ: (1) intent-GUESSING (does prose look like a decline/affirmation?) can
+    false-block a genuine approval → REMOVED entirely; (2) the binding floor (does a
+    clicked option carry exactly one command, and does the token bind to THAT
+    command?) is FP-free → it stays. The flow:
 
-      1. DECLINE/DEFER GLOBAL VETO — runs FIRST and takes precedence over command
-         presence. Per question: scan the SELECTED option's label+description
-         (option mode), the free-text answer (free-text arm), or (multiSelect)
-         every option's text raw. ANY decline/defer in ANY bundled question
-         refuses the whole mint.
-      0. NO-OPTIONS GUARD — a bundle with no options anywhere has no clicked
-         option to anchor on → refuse, no token (free-text / zero-options never mints).
+      0. NO-OPTIONS GUARD — a bundle with no options has no clicked option to
+         anchor on → refuse (free-text / zero-options never mints).
       2. CLICKED OPTION (option mode, fail-closed) — the mint source is the
-         SELECTED option (exact non-decline label match; no match for a populated
-         answer REFUSES, never falls back to free-text — B-NEW-2). multiSelect is
-         refused as a mint source (still globally decline-scanned).
-      3. MULTIPLICITY [SACROSANCT] — count DISTINCT (op_type, target) pairs across
-         question text ∪ selected options (NOT raw region occurrences): ==1 mints
-         that pair, >1 refuses (divergence), ==0 yields no token.
-      3b. OPTION ANCHORING (#1032 F-REVIEW-1) — the minted (op,target) MUST be
-         carried by a CLICKED option, NOT by question prose alone. Question prose
-         is a divergence signal only, never a sole mint source.
-      4. LABEL<->DESCRIPTION op-consistency (refuse-only) — a selected option
-         whose label names a DIFFERENT op than the minted command vetoes the mint.
-      5. extract_command_context(the single distinct command) → the mint context.
+         SELECTED option (exact label match; no match for a populated answer
+         REFUSES, never falls back to free-text). multiSelect never mints.
+      3. MULTIPLICITY — count DISTINCT (op_type, target) pairs across the CLICKED
+         options only: ==1 mints, >1 refuses (a single click carrying 2 commands),
+         ==0 yields no token. The question prose is NOT scanned.
+      3b. OPTION ANCHORING — the minted (op,target) MUST be carried by a CLICKED
+         option (true by construction, since Step 3 scans only the clicked options).
+      5. extract_command_context(the single distinct command) → the mint context,
+         binding op/target (#1031/#1032) + privileged flags (#1042 set-equality).
+
+    ACCEPTED RESIDUALS (the user explicitly chose the most-minimal gate, eyes-open
+    on these — they are a ratified S5 scope decision, NOT under-block bugs): the
+    gate trusts the CLICKED option's command and does not cross-check the
+    surrounding prose, so a malformed-authoring option mints —
+      • #21 decline-LABELED option that nonetheless CARRIES the command (label
+        "Don't merge"/"Cancel", description carries `gh pr merge 5`) → MINTS;
+      • wrong-OP (label "Yes, close" on a merge command) → MINTS the merge;
+      • wrong-TARGET (question shows "merge 5", clicked option carries "merge 7")
+        → MINTS 7 (the clicked command);
+      • sarcasm ("Yes, merge" meant ironically) → MINTS.
+    The no-operator-decline-under-block property rests on a USER-ACCEPTED THREAT-
+    MODEL ASSUMPTION (not a proof): the agent places the destructive command ONLY
+    in affirmative options, never a decline-labeled one — so a genuine decline
+    option carries no command → fails anchoring → no mint. NOT a residual:
+    post-click escalation/substitution — the #1042 set-equality bind still REFUSES
+    an execution-time EXTRA privileged flag or a changed (op,target).
     """
-    question_texts: list[str] = []
-    selected_option_texts: list[str] = []  # the operator's ACTION SURFACE = the
-    selected_labels: list[str] = []        # CLICKED option(s); free-text never mints
+    # The operator's ACTION SURFACE = the CLICKED option(s); free-text never mints.
+    selected_option_texts: list[str] = []
 
     # EXPLICIT (shape b): a bundle with NO options anywhere has no clicked option
     # to anchor on → it can NEVER mint. Minting from question prose or a typed
@@ -431,36 +323,20 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
             continue
         qtext = q.get("question", "")
         qtext = qtext if isinstance(qtext, str) else ""
-        question_texts.append(qtext)
         options = q.get("options", [])
         options = options if isinstance(options, list) else []
         multi = bool(q.get("multiSelect", False))
         # KD-12: key the answer to its SPECIFIC question (no iter-fallback).
         answer = answers.get(qtext)
 
-        # ── Step 1: decline/defer GLOBAL veto (FIRST, precedence, both arms). ──
-        if options:
-            if multi:
-                # multiSelect: raw-scan every option's text (no comma-split) for a
-                # decline/defer; refused as a mint SOURCE in v1 (over-block-safe).
-                for opt in options:
-                    if isinstance(opt, dict):
-                        if _has_decline_defer(
-                            str(opt.get("label", "")) + " " + str(opt.get("description", ""))
-                        ):
-                            return MintResult(None, "decline_veto")
-                continue
-            selected_text = _selected_option_text(options, answer)
-            # B1 (#1049): veto-scan the selected text with quoted COMMAND-LITERAL
-            # spans excised, so a veto-word substring INSIDE the approval command
-            # (`--no-verify`, a `release/pending-qa` branch) no longer self-vetoes.
-            # _veto_text is classify-gated + scan-local — Step 2's selected_text
-            # below is the UNMODIFIED mint source; the free-text/multiSelect arms
-            # are untouched.
-            if _has_decline_defer(_veto_text(selected_text)):
-                return MintResult(None, "decline_veto")
-        elif _has_decline_defer(answer):
-            return MintResult(None, "decline_veto")
+        # ── multiSelect never mints — refused as a mint SOURCE (over-block-safe
+        # structural guard). PURE-FLOOR MINIMAL: NO decline-intent / label-prose
+        # parsing of any kind. The operator's CONSENT is the CLICK on a command-
+        # bearing option, validated ONLY by anchoring + multiplicity + the
+        # #1042/#1031/#1032 binding below — never by reading the option's or the
+        # question's prose for decline/affirmation intent. ──
+        if multi:
+            continue
 
         # ── Step 2: resolve the operator's CLICKED option (option mode only). ──
         if options:
@@ -474,47 +350,39 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
                     return MintResult(None, "label_mismatch")
                 continue  # empty/missing answer → no clicked option for this q
             selected_option_texts.append(selected_text)
-            selected_labels.append(answer)
         # else: a no-options (free-text) question contributes NO mint source; its
         # answer was already decline/defer veto-scanned in Step 1 (and a pure
         # free-text bundle already refused at the no-options guard above).
 
-    # ── Step 3: distinct-(op,target) multiplicity over question ∪ selected
-    # options — DIVERGENCE refusal [SACROSANCT]: ==1 mints, >1 refuses, ==0 no
-    # token. ──
-    bundle_pairs = _collect_pairs(question_texts + selected_option_texts)
+    # ── Step 3: distinct-(op,target) multiplicity over the CLICKED options ONLY
+    # (pure-floor scope — the question prose is NOT cross-checked): ==1 mints, >1
+    # refuses (a single click carrying 2 commands), ==0 yields no token. ──
+    bundle_pairs = _collect_pairs(selected_option_texts)
     if len(bundle_pairs) != 1:
         return MintResult(
             None, "no_command" if len(bundle_pairs) == 0 else "multiple_commands"
         )
     (the_op, the_target), the_command = next(iter(bundle_pairs.items()))
 
-    # ── Step 3b: OPTION anchoring (#1032 F-REVIEW-1). The minted (op,target) MUST
-    # be carried by a CLICKED option — NOT by question prose alone. A command found
-    # only in (possibly padded) question text, with a generic clicked option that
-    # carries no command, is REFUSED; an empty option surface (no valid selection)
-    # yields no pair → refuse. Question prose is a divergence signal only, never a
-    # sole mint source. ──
+    # ── Step 3b: OPTION ANCHORING (#1032) — the minted (op,target) MUST be carried
+    # by a CLICKED option. Under the pure-floor scope (Step 3 scans ONLY the clicked
+    # options) this holds BY CONSTRUCTION; kept as an explicit invariant so a future
+    # edit that re-widens the multiplicity scan can never authorize a command carried
+    # by question prose alone. ──
     if (the_op, the_target) not in _collect_pairs(selected_option_texts):
         return MintResult(None, "option_not_anchored")
 
-    # ── Step 4: label<->description op-consistency (refuse-only). ──
-    for label in selected_labels:
-        label_op = _derive_op_from_label(label)
-        if label_op is not None and label_op != the_op:
-            return MintResult(None, "label_op_mismatch")
-
-    # ── Step 5: extract the single distinct command's context to mint. ──
-    # Op/target are derived from `the_command` (region-anchored — preserves the
-    # anti-distractor multiplicity gate above). The privileged-flag scan (#1042)
-    # is widened to the FULL selected-option text so a flag positioned after a
-    # quoted argument (e.g. `gh pr merge 5 --subject "msg" --admin`, written bare)
-    # is not lost to the bare-command region truncation — the read arm scans the
-    # full raw command, so the mint must scan a full surface too for symmetry.
+    # ── Step 5: extract the single distinct command's context to mint. Op/target
+    # are derived from `the_command` (region-anchored). The privileged-flag scan
+    # (#1042) is widened to the FULL selected-option text so a flag after a quoted
+    # argument is not lost to bare-command truncation; #1059: the wrapping backtick/
+    # curly delimiters are space-stripped first (_strip_command_wrapper) so the
+    # mint's flag set matches the read side's on the bare command — the #1042
+    # set-equality stays EXACT, so an exec-time EXTRA flag still REFUSES. ──
     return MintResult(
         extract_command_context(
             the_command,
-            flag_scan_text=" ".join(selected_option_texts),
+            flag_scan_text=_strip_command_wrapper(" ".join(selected_option_texts)),
         ),
         None,
     )
