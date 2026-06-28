@@ -34,7 +34,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import NoReturn
+from typing import NamedTuple, NoReturn
 
 
 def _emit_load_failure_alert(stage: str, error: BaseException) -> NoReturn:
@@ -294,9 +294,40 @@ def _collect_pairs(texts: list) -> dict:
     return pairs
 
 
-def _mint_context_from_bundle(questions: list, answers: dict) -> dict | None:
+class MintResult(NamedTuple):
+    """Outcome of `_mint_context_from_bundle` (B2 / #1052) — exactly one field is
+    non-None. `context` is the dict to mint when the bundle authorizes exactly ONE
+    destructive command; `refusal_reason` is a `_REFUSAL_DIAGNOSTICS` key naming
+    WHY a command-bearing approval did not mint. The refusal_reason is consumed
+    ONLY by the observer-style no-mint advisory in `main` — it NEVER feeds the
+    authorization path (no token derives from it)."""
+
+    context: dict | None
+    refusal_reason: str | None
+
+
+# B2 (#1052): self-teaching diagnostic per refusal reason code, surfaced ONLY by
+# the observer-style no-mint advisory in `main` (gated to command-bearing
+# bundles). These NAME the failing gate; they never authorize.
+_REFUSAL_DIAGNOSTICS = {
+    "no_options": "the approval carried no clickable options (a free-text answer never mints)",
+    "decline_veto": "the selected option contained a decline/defer word (the merge veto)",
+    "label_mismatch": (
+        "the answer did not exactly match an option label — if the command was "
+        "in the option LABEL, move it into the option DESCRIPTION (a long "
+        "command-as-label can fail to round-trip)"
+    ),
+    "no_command": "no recognized merge/close/force-push/branch-delete command was found in the selected option",
+    "multiple_commands": "more than one distinct (operation, target) was present — the approval was ambiguous",
+    "option_not_anchored": "the command appeared only in the question text, not in the selected option",
+    "label_op_mismatch": "the selected option's label named a different operation than its command",
+}
+
+
+def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
     """Decide whether an AskUserQuestion bundle authorizes exactly ONE destructive
-    command; return the context dict to mint, or None to refuse.
+    command; return a `MintResult(context, refusal_reason)` — `context` is the dict
+    to mint, or None (with a `refusal_reason` code) to refuse.
 
     Implements the ordered mint flow (blueprint §5.2). The mint runs
     locate+extract+fail-closed identically on EVERY approval — there is no
@@ -308,7 +339,7 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> dict | None:
          every option's text raw. ANY decline/defer in ANY bundled question
          refuses the whole mint.
       0. NO-OPTIONS GUARD — a bundle with no options anywhere has no clicked
-         option to anchor on → return None (free-text / zero-options never mints).
+         option to anchor on → refuse, no token (free-text / zero-options never mints).
       2. CLICKED OPTION (option mode, fail-closed) — the mint source is the
          SELECTED option (exact non-decline label match; no match for a populated
          answer REFUSES, never falls back to free-text — B-NEW-2). multiSelect is
@@ -345,7 +376,7 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> dict | None:
         isinstance(q, dict) and isinstance(q.get("options"), list) and q.get("options")
         for q in questions
     ):
-        return None
+        return MintResult(None, "no_options")
 
     for q in questions:
         if not isinstance(q, dict):
@@ -369,7 +400,7 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> dict | None:
                         if _has_decline_defer(
                             str(opt.get("label", "")) + " " + str(opt.get("description", ""))
                         ):
-                            return None
+                            return MintResult(None, "decline_veto")
                 continue
             selected_text = _selected_option_text(options, answer)
             # B1 (#1049): veto-scan the selected text with quoted COMMAND-LITERAL
@@ -379,9 +410,9 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> dict | None:
             # below is the UNMODIFIED mint source; the free-text/multiSelect arms
             # are untouched.
             if _has_decline_defer(_veto_text(selected_text)):
-                return None
+                return MintResult(None, "decline_veto")
         elif _has_decline_defer(answer):
-            return None
+            return MintResult(None, "decline_veto")
 
         # ── Step 2: resolve the operator's CLICKED option (option mode only). ──
         if options:
@@ -392,20 +423,22 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> dict | None:
             selected_text = _selected_option_text(options, answer)
             if selected_text is None:
                 if isinstance(answer, str) and answer:
-                    return None
+                    return MintResult(None, "label_mismatch")
                 continue  # empty/missing answer → no clicked option for this q
             selected_option_texts.append(selected_text)
             selected_labels.append(answer)
         # else: a no-options (free-text) question contributes NO mint source; its
         # answer was already decline/defer veto-scanned in Step 1 (and a pure
-        # free-text bundle already returned None at the no-options guard above).
+        # free-text bundle already refused at the no-options guard above).
 
     # ── Step 3: distinct-(op,target) multiplicity over question ∪ selected
     # options — DIVERGENCE refusal [SACROSANCT]: ==1 mints, >1 refuses, ==0 no
     # token. ──
     bundle_pairs = _collect_pairs(question_texts + selected_option_texts)
     if len(bundle_pairs) != 1:
-        return None
+        return MintResult(
+            None, "no_command" if len(bundle_pairs) == 0 else "multiple_commands"
+        )
     (the_op, the_target), the_command = next(iter(bundle_pairs.items()))
 
     # ── Step 3b: OPTION anchoring (#1032 F-REVIEW-1). The minted (op,target) MUST
@@ -415,13 +448,13 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> dict | None:
     # yields no pair → refuse. Question prose is a divergence signal only, never a
     # sole mint source. ──
     if (the_op, the_target) not in _collect_pairs(selected_option_texts):
-        return None
+        return MintResult(None, "option_not_anchored")
 
     # ── Step 4: label<->description op-consistency (refuse-only). ──
     for label in selected_labels:
         label_op = _derive_op_from_label(label)
         if label_op is not None and label_op != the_op:
-            return None
+            return MintResult(None, "label_op_mismatch")
 
     # ── Step 5: extract the single distinct command's context to mint. ──
     # Op/target are derived from `the_command` (region-anchored — preserves the
@@ -430,9 +463,57 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> dict | None:
     # quoted argument (e.g. `gh pr merge 5 --subject "msg" --admin`, written bare)
     # is not lost to the bare-command region truncation — the read arm scans the
     # full raw command, so the mint must scan a full surface too for symmetry.
-    return extract_command_context(
-        the_command,
-        flag_scan_text=" ".join(selected_option_texts),
+    return MintResult(
+        extract_command_context(
+            the_command,
+            flag_scan_text=" ".join(selected_option_texts),
+        ),
+        None,
+    )
+
+
+def _bundle_has_command(questions: list) -> bool:
+    """True if a recognized destructive command appears ANYWHERE in the bundle —
+    question prose OR any option's label/description. Gates the B2 (#1052) no-mint
+    advisory so it fires ONLY on a plausible merge-approval attempt and stays
+    SILENT on benign, non-destructive AskUserQuestions (this hook matches EVERY
+    AskUserQuestion, so an ungated advisory would spam ordinary questions). Uses
+    the same shared `locate_command_region` classifier as the mint/read sides, so
+    the gate cannot drift from the mint's own command detection."""
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+        qtext = q.get("question", "")
+        if isinstance(qtext, str) and locate_command_region(qtext) is not None:
+            return True
+        options = q.get("options", [])
+        if not isinstance(options, list):
+            continue
+        for opt in options:
+            if not isinstance(opt, dict):
+                continue
+            blob = str(opt.get("label", "")) + " " + str(opt.get("description", ""))
+            if locate_command_region(blob) is not None:
+                return True
+    return False
+
+
+def _no_mint_advisory(refusal_reason: str) -> str:
+    """Build the observer-style self-teaching no-mint advisory text (B2 / #1052):
+    NAME the specific failing gate, then point at the canonical peer-review.md
+    approval template. Pure string builder — emitted as `additionalContext` with
+    exit 0; it NEVER writes a token or authorizes anything."""
+    why = _REFUSAL_DIAGNOSTICS.get(
+        refusal_reason, "the approval did not match the canonical form"
+    )
+    return (
+        "PACT merge-guard: an AskUserQuestion approval was issued but NO "
+        "authorization token was minted — " + why + ". The merge is HELD until a "
+        "matching approval is given. Re-approve via the canonical template in "
+        "pact-plugin/commands/peer-review.md: a SINGLE-select question, a short "
+        '"Yes, merge" affirmative label, and the command in THAT option\'s '
+        "DESCRIPTION in backticks (e.g. Run `gh pr merge <N>` to merge this PR), "
+        "with <N> the only number anywhere in the prompt."
     )
 
 
@@ -794,10 +875,11 @@ def main():
         # decline/defer veto-first (precedence over command presence), bimodal
         # fail-closed selection, the SACROSANCT distinct-(op,target)==1
         # multiplicity gate, and label<->description op-consistency.
-        # _mint_context_from_bundle returns None to refuse (the over-block-safe
-        # #1031 direction); the resulting context is op-typed + target-anchored,
-        # so write_token's fail-closed guards always pass for a real approval.
-        context = _mint_context_from_bundle(questions, answers)
+        # _mint_context_from_bundle returns MintResult(context, refusal_reason):
+        # context is None to refuse (the over-block-safe #1031 direction) with a
+        # refusal_reason code; a non-None context is op-typed + target-anchored, so
+        # write_token's fail-closed guards always pass for a real approval.
+        context, refusal_reason = _mint_context_from_bundle(questions, answers)
         if context is not None:
             token_path = write_token(context)
             if token_path:
@@ -816,6 +898,21 @@ def main():
                     f"Merge authorization token written: {safe_token_path}",
                     file=sys.stderr,
                 )
+        elif refusal_reason is not None and _bundle_has_command(questions):
+            # B2 (#1052): an approval was issued for a command-bearing bundle but
+            # minted NO token. Emit a self-teaching, OBSERVER-STYLE advisory that
+            # NAMES the failing gate + points to the canonical peer-review.md
+            # template. additionalContext + exit 0 — it NEVER writes a token or
+            # authorizes; the pre-hook still denies, so a genuine merge stays HELD
+            # (authorization isolation). Gated by _bundle_has_command so a benign,
+            # non-destructive AskUserQuestion stays silent (suppressOutput below).
+            print(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": _no_mint_advisory(refusal_reason),
+                }
+            }))
+            sys.exit(0)
 
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
