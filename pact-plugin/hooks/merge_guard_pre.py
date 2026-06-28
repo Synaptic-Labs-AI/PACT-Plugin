@@ -676,12 +676,23 @@ _BENIGN_ARG_CARRIER_RE = re.compile(
     re.VERBOSE,
 )
 
-# Balanced quoted-literal idiom shared with step-7 `_gh_carrier_span` (#1000): a
-# double-quoted region (honoring \" escapes) OR a single-quoted region (bash
-# single quotes have no escapes). Used to mask quoted regions in the boundary-
-# detection copy so a shell separator INSIDE a quoted argument is never read as a
-# segment split; mirrors the per-quote patterns in _blank_inert_quoted_literals.
-_QUOTED_LITERAL_RE = re.compile(r"""["](?:[^"\\]|\\.)*["]|'[^']*'""")
+# Balanced quoted-literal idiom (#1000) — the SINGLE SOURCE for the two grammars
+# this module reuses: a double-quoted region (honoring \" escapes) and a
+# single-quoted region (bash single quotes have no escapes). The same two
+# sub-patterns are composed TWO different ways for TWO DISTINCT purposes, so the
+# shared element is the PATTERN STRING, not the usage:
+#   - _QUOTED_LITERAL_RE (combined) masks quoted regions in the boundary-
+#     detection copy so a shell separator INSIDE a quoted argument never splits a
+#     segment;
+#   - _blank_inert_quoted_literals applies the two SEPARATELY (the double-quoted
+#     arm gets the cmd-sub-aware _blank_dq callback; the single-quoted arm always
+#     blanks).
+# (Step-7 `_gh_carrier_span` embeds the same idiom inside a larger VERBOSE
+# alternation; folding that in too is out of scope here — it would restructure
+# that pattern with non-zero behavior/clarity risk.)
+_DQ_LITERAL = r'"(?:[^"\\]|\\.)*"'
+_SQ_LITERAL = r"'[^']*'"
+_QUOTED_LITERAL_RE = re.compile(_DQ_LITERAL + "|" + _SQ_LITERAL)
 
 
 def _blank_inert_quoted_literals(segment: str) -> str:
@@ -701,9 +712,9 @@ def _blank_inert_quoted_literals(segment: str) -> str:
             return match.group(0)  # $()/backtick executes inside double quotes
         return '"' + " " * (len(match.group(0)) - 2) + '"'
 
-    segment = re.sub(r'"(?:[^"\\]|\\.)*"', _blank_dq, segment)
+    segment = re.sub(_DQ_LITERAL, _blank_dq, segment)
     segment = re.sub(
-        r"'[^']*'",
+        _SQ_LITERAL,
         lambda match: "'" + " " * (len(match.group(0)) - 2) + "'",
         segment,
     )
