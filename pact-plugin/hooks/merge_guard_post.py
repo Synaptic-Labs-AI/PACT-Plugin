@@ -95,6 +95,12 @@ try:
         extract_command_context,
         locate_command_region,
         locate_command_regions,
+        # GAP1/GAP5 read-floor predicates (promoted to shared): the mint gates its
+        # token-write on is_dangerous_command (mint⊆read by construction) and refuses
+        # any compound via is_compound_destructive_command — the SAME predicates the
+        # read hook uses, so mint and read can never disagree on danger/compound.
+        is_dangerous_command,
+        is_compound_destructive_command,
     )
     from shared.tool_response import extract_tool_response
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-loud catch-all
@@ -225,6 +231,8 @@ _REFUSAL_DIAGNOSTICS = {
     "no_command": "no recognized merge/close/force-push/branch-delete command was found in the selected option",
     "multiple_commands": "more than one distinct (operation, target) was present — the approval was ambiguous",
     "option_not_anchored": "the command appeared only in the question text, not in the selected option",
+    "not_dangerous": "the selected command is not one the merge guard gates — it runs without a token, so no authorization is needed",
+    "compound_command": "the selected option chained multiple commands with a shell separator (&&, ||, ;, |) — approve one command at a time",
 }
 
 
@@ -291,9 +299,18 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
     The no-operator-decline-under-block property rests on a USER-ACCEPTED THREAT-
     MODEL ASSUMPTION (not a proof): the agent places the destructive command ONLY
     in affirmative options, never a decline-labeled one — so a genuine decline
-    option carries no command → fails anchoring → no mint. NOT a residual:
-    post-click escalation/substitution — the #1042 set-equality bind still REFUSES
-    an execution-time EXTRA privileged flag or a changed (op,target).
+    option carries no command → fails anchoring → no mint. NOT a residual —
+    post-click escalation/substitution is bound by TWO structural guarantees:
+    (1) is_dangerous WRITE-GATE — the mint writes a token ONLY for a command the READ
+    floor gates (is_dangerous_command, the shared SSOT), so mint ⊆ read BY
+    CONSTRUCTION: a token is never minted for a command the read side would run
+    WITHOUT one (a bare reversible close, a non-mutating API call), and a compound
+    option mints nothing (is_compound_destructive_command, mirroring the read's
+    compound rejection exactly). (2) the #1042 set-equality bind REFUSES an exec-time
+    changed (op,target) OR an exec-time extra privileged flag in the op-class
+    PRIVILEGED_FLAGS denylist — push→force and close→delete-branch escalations are
+    covered (a plain push and a force push mint DISTINCT ops; close binds
+    --delete-branch). The denylist is the security-owned membership surface.
     """
     # The operator's ACTION SURFACE = the CLICKED option(s); free-text never mints.
     selected_option_texts: list[str] = []
@@ -354,6 +371,21 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
         # answer was already decline/defer veto-scanned in Step 1 (and a pure
         # free-text bundle already refused at the no-options guard above).
 
+    # ── GAP5: compound-REFUSE (PRE-extract). Run is_compound_destructive_command on
+    # the EXTRACTED command REGIONS (the doc's "command surface"), NOT the raw option
+    # text — so a faithful single command whose surrounding PROSE / multi-line
+    # description happens to contain a separator (a newline, `;`, `|`, `&&`) is NOT
+    # falsely refused (scanning the raw text re-created the #1049/#1052 FP class). A
+    # genuine compound comes back from locate_command_regions as ONE region with the
+    # separator intact (`gh pr merge 5 && rm -rf /`) → is_compound=True → REFUSE, so the
+    # chimeric/ride-along under-block STAYS closed (it has ONE recognized pair but must
+    # not mint — split+multiplicity would still mint it; this explicit refuse does not).
+    # Mirrors the read side's is_compound rejection EXACTLY (shared SSOT). ──
+    for _option_text in selected_option_texts:
+        for _region in locate_command_regions(_option_text):
+            if is_compound_destructive_command(_region):
+                return MintResult(None, "compound_command")
+
     # ── Step 3: distinct-(op,target) multiplicity over the CLICKED options ONLY
     # (pure-floor scope — the question prose is NOT cross-checked): ==1 mints, >1
     # refuses (a single click carrying 2 commands), ==0 yields no token. ──
@@ -371,6 +403,16 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
     # by question prose alone. ──
     if (the_op, the_target) not in _collect_pairs(selected_option_texts):
         return MintResult(None, "option_not_anchored")
+
+    # ── GAP1: is_dangerous WRITE-GATE. Mint a token ONLY for a command the READ floor
+    # would gate (is_dangerous_command — the SAME shared predicate, so mint⊆read by
+    # construction). A detected-but-NOT-dangerous command — a bare reversible
+    # `gh pr close 5`, a non-mutating API call, or prose the classifier loosely typed
+    # — mints NO token: the read side ALLOWS it without a token, so withholding one is
+    # not an over-block (the command runs regardless). Closes the bare-close
+    # escalation + the prose-API mint + every detected-but-not-dangerous case. ──
+    if not is_dangerous_command(the_command):
+        return MintResult(None, "not_dangerous")
 
     # ── Step 5: extract the single distinct command's context to mint. Op/target
     # are derived from `the_command` (region-anchored). The privileged-flag scan

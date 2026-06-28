@@ -112,6 +112,10 @@ LAYER1_SUCCESS_STDOUT_PATTERNS: dict[str, str | None] = {
     "close": "Closed pull request",
     "branch-delete": "Deleted branch",
     "force-push": None,
+    # push-to-main (GAP3): a plain `git push` to main/master — emits to STDERR like
+    # force-push, so None (Block 3 skipped; Block 2 platform-success is load-bearing,
+    # fail-closed-on-no-signal → TTL/MAX_USES safety net, not bypass).
+    "push-to-main": None,
 }
 
 # -----------------------------------------------------------------------------
@@ -173,6 +177,7 @@ _GH_PR_MERGE_RE = re.compile(_GH_PREFIX + r"pr\s+merge\b")
 _GH_PR_CLOSE_RE = re.compile(_GH_PREFIX + r"pr\s+close\b")
 
 
+
 def detect_command_operation_type(command: str) -> str | None:
     """Detect the operation type of a destructive command.
 
@@ -186,8 +191,13 @@ def detect_command_operation_type(command: str) -> str | None:
     Returns:
         "merge"         - gh pr merge
         "close"         - gh pr close (any variant)
-        "force-push"    - git push --force / git push -f (excludes --force-with-lease)
-        "branch-delete" - git branch -D / git branch --delete --force / gh pr close --delete-branch
+        "force-push"    - git push --force / git push -f (excludes --force-with-lease);
+                          API PATCH/POST/PUT to git/refs (ref rewrite)
+        "push-to-main"  - git push <remote> main/master WITHOUT --force (review-bypass,
+                          distinct from force-push so a plain-push token can't authorize
+                          a force-push)
+        "branch-delete" - git branch -D / git branch --delete --force / gh pr close --delete-branch;
+                          API DELETE to git/refs (ref removal)
         None            - destructive shape not in the recognized set
                           (read-side caller treats None as "untyped command",
                           which the tightened token-match semantic treats as
@@ -213,18 +223,21 @@ def detect_command_operation_type(command: str) -> str | None:
         return "force-push"
     if re.search(_GIT_PREFIX + r"push\s+-[a-zA-Z]*f", command):
         return "force-push"
-    # Direct push to default branch is force-push-class (bypasses PR
-    # review). Match the existing DANGEROUS_PATTERNS forms but require
-    # the dangerous shape to actually fire — the negative-lookahead-free
-    # pattern `git push X main` would over-match safer flows. Use the
-    # same `(?!:)` refspec exclusion as DANGEROUS_PATTERNS push-to-main.
+    # Direct push to a default branch (main/master) WITHOUT --force is a review-
+    # bypass but does NOT rewrite history — a DISTINCT op from force-push. Returning
+    # its own `push-to-main` op (rather than folding into force-push) closes the
+    # token-collapse where a plain-push approval authorized a force-push (the two
+    # now mint DIFFERENT tokens). The --force/-f checks ABOVE run FIRST, so a forced
+    # push to main returns force-push and never reaches here; ordering is load-
+    # bearing. The READ floor gates BOTH forms (DANGEROUS_PATTERNS unchanged). Uses
+    # the same `(?!:)` refspec exclusion as DANGEROUS_PATTERNS push-to-main.
     if re.search(_GIT_PREFIX + r"push\s+\S+\s+HEAD:(?:main|master)\b", command):
-        return "force-push"
+        return "push-to-main"
     if re.search(
         _GIT_PREFIX + r"push\s+(?:-(?!-force-with-lease\b)\S+\s+){0,%d}\S+\s+(?:main|master)(?!:)\b" % _MAX_GLOBAL_FLAG_TOKENS,
         command,
     ):
-        return "force-push"
+        return "push-to-main"
     # API-based ref-mutation forms (gh api / curl / wget targeting
     # /git/refs with mutating HTTP methods) classify by HTTP semantic:
     # DELETE → branch-delete class (removes a ref)
@@ -479,10 +492,23 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
     },
     "close": {
         "--repo":          (("-R", "--repo"), True),            # cross-repo redirect (value-carrying target)
-        # --delete-branch is the close-danger op-trigger (bound via op_type) — NOT listed.
+        # --delete-branch/-d: the IRREVERSIBLE branch-deleting variant of close. Bound
+        # here (symmetry with merge above) so a bare-close token's flag-set can never
+        # set-equal the --delete-branch variant → the bare→delete-variant escalation
+        # REFUSES. NB it is ALSO a close op-trigger, but op_type folds bare-close and
+        # close --delete-branch into the SAME 'close' op (close precedence), so the
+        # trigger alone does NOT distinguish the two commands at the bind layer — this
+        # flag binding is what separates them. No double-bind: op-trigger sets the OP
+        # dimension, this sets the orthogonal FLAG-SET dimension.
+        "--delete-branch": (("-d", "--delete-branch"), False),
     },
     "force-push": {
         "--no-verify":     (("--no-verify",), False),           # bypass pre-push hook
+    },
+    "push-to-main": {
+        # No bound flags: push-to-main's privileged effect (direct-to-default-branch
+        # review bypass) IS its op-trigger (the main/master refspec), already bound via
+        # op_type. Explicit extension point — a future bound flag is a one-line edit.
     },
     "branch-delete": {
         # No bound flags today: branch-delete's privileged effect is its op-trigger
@@ -666,11 +692,36 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
         branch = _extract_branch_name(command)
         if branch is not None:
             context["branch"] = branch
-    elif op_type == "force-push":
+    elif op_type in ("force-push", "push-to-main"):
+        # push-to-main reuses the force-push target parser: its target IS the
+        # main/master ref that parser already returns for a plain push.
         target_ref = _extract_force_push_target_ref(command)
         if target_ref is not None:
             context["target_ref"] = target_ref
     return context
+
+
+# Shell compound + FD-redirect regexes — the SSOT for BOTH the read side
+# (merge_guard_pre.is_compound_destructive_command re-imports these) AND the mint
+# side (which runs is_compound_destructive_command on each locate_command_regions
+# region). Centralized here so both sides scan on IDENTICAL separators (the #720
+# anti-drift class).
+#
+# `_COMPOUND_OPS_RE` matches the five true compound shapes: `&&`, `||`, `;`, a bare
+# `|` shell pipe, and newline. FD-redirect tokens (`2>&1`, `1>&2`, `3<&0`) and
+# clobber redirects (`>|`) are NEUTRALIZED by `_FD_REDIRECT_RE` BEFORE the compound
+# scan/split — NOT via lookaround on the bare-pipe arm. An earlier lookbehind form
+# `(?<![0-9>])\|(?![<&])` had a spaceless-adjacency bypass: `... 2>&1|gh pr merge
+# 999` slipped past because the lookbehind rejected the real pipe whenever it
+# followed the `1` of `2>&1`. The structural pre-strip eliminates that class.
+# `_FD_REDIRECT_RE`: `\d*[<>]&\d+` (fd-to-fd: `2>&1`,`1>&2`,`3<&0`,`>&2`) | `>\|`
+# (clobber). Audit: loosening `_COMPOUND_OPS_RE` must preserve the five shapes;
+# tightening must not re-introduce the FD-redirect FP class via lookaround — the
+# pre-strip is the single source of truth. zsh `|&` is deliberately out of scope
+# (the hooks run under bash; if the shell ever changes, add a `|\s*&` arm).
+_COMPOUND_OPS_RE = re.compile(r"&&|\|\||;|\||\n")
+_FD_REDIRECT_RE = re.compile(r"\d*[<>]&\d+|>\|")
+
 
 
 def locate_command_regions(text: str) -> list[str]:
@@ -828,3 +879,536 @@ def cleanup_orphan_tokens(
             except OSError:
                 # Race vs concurrent cleanup or permission flake — swallow.
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Read-floor danger predicates (GAP1/GAP5) — PROMOTED from merge_guard_pre.py so
+# BOTH the read hook AND the mint hook (merge_guard_post) call the SAME predicate:
+# the mint gates its token-write on is_dangerous_command (mint⊆read by construction)
+# and refuses any compound via is_compound_destructive_command. pre.py re-imports
+# these. _COMPOUND_OPS_RE/_FD_REDIRECT_RE already live above (GAP5 elevation).
+# ---------------------------------------------------------------------------
+
+DANGEROUS_PATTERNS = [
+# PR merge via gh CLI
+re.compile(_GH_PREFIX + r"pr\s+merge\b"),
+# PR close with --delete-branch via gh CLI (bare close is reversible)
+re.compile(_GH_PREFIX + r"pr\s+close\b(?=.*--delete-branch)"),
+re.compile(r"--delete-branch.*" + _GH_PREFIX + r"pr\s+close\b"),
+# Force push (excludes --force-with-lease which is a safer alternative)
+re.compile(_GIT_PREFIX + r"push\s+.*--force(?!-with-lease)\b"),
+re.compile(_GIT_PREFIX + r"push\s+.*-f\b"),
+re.compile(_GIT_PREFIX + r"push\s+-[a-zA-Z]*f"),
+# Force branch deletion
+re.compile(_GIT_PREFIX + r"branch\s+.*-D\b"),
+re.compile(_GIT_PREFIX + r"branch\s+.*--delete\s+--force\b"),
+re.compile(_GIT_PREFIX + r"branch\s+--force\s+--delete\b"),
+# API-based merge bypasses (require mutating HTTP method to avoid blocking reads)
+re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b).*merge", re.IGNORECASE),
+re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PUT|PATCH|POST)\b).*api.*merge", re.IGNORECASE),
+# API-based branch deletion via DELETE to git/refs endpoint
+re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+DELETE\b).*git/refs", re.IGNORECASE),
+re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+DELETE\b).*api.*git/refs", re.IGNORECASE),
+# API-based ref mutation / force push via mutating method to git/refs endpoint
+# (any mutating operation on git refs via API is inherently dangerous)
+re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PATCH|POST|PUT)\b).*git/refs", re.IGNORECASE),
+re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PATCH|POST|PUT)\b).*api.*git/refs", re.IGNORECASE),
+# gh api implicit POST: body param flags (-f, -F, --field, --raw-field, --input)
+# cause gh api to default to POST. Dangerous when targeting git/refs or merge.
+# Negative lookahead excludes explicit GET (which overrides implicit POST).
+re.compile(_GH_API_PREFIX + r"(?!.*(?:-X|--method)\s+GET\b)(?=.*(?:-f|-F|--field|--raw-field|--input)\s).*git/refs", re.IGNORECASE),
+re.compile(_GH_API_PREFIX + r"(?!.*(?:-X|--method)\s+GET\b)(?=.*(?:-f|-F|--field|--raw-field|--input)\s).*merge", re.IGNORECASE),
+# curl implicit POST: --data/-d/--data-raw/--data-binary flags cause curl to
+# default to POST. Dangerous when targeting git/refs or merge API endpoints.
+# Negative lookahead excludes explicit GET (which overrides implicit POST).
+re.compile(r"\bcurl\b(?!.*(?:-X|--request)\s+GET\b)(?=.*(?:--data(?:-(?:raw|binary))?|-d)\s).*api.*git/refs", re.IGNORECASE),
+re.compile(r"\bcurl\b(?!.*(?:-X|--request)\s+GET\b)(?=.*(?:--data(?:-(?:raw|binary))?|-d)\s).*api.*merge", re.IGNORECASE),
+# Contents API: write operations (PUT/PATCH/POST) to /contents/ endpoint
+# targeting main or master branch. Flags any mutating /contents/ call that
+# mentions main or master anywhere in the command (acceptable false positive).
+re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b).*contents/.*(?:main|master)", re.IGNORECASE),
+re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PUT|PATCH|POST)\b).*api.*contents/.*(?:main|master)", re.IGNORECASE),
+# Alternative HTTP clients: wget with --method flag
+re.compile(r"\bwget\b(?=.*--method=(?:DELETE|PATCH|POST|PUT)\b).*git/refs", re.IGNORECASE),
+re.compile(r"\bwget\b(?=.*--method=(?:DELETE|PATCH|POST|PUT)\b).*merge", re.IGNORECASE),
+# Alternative HTTP clients: httpie (method is positional arg after 'http'/'https')
+# \bhttps?\s+ ensures word boundary + whitespace (won't match URLs like https://).
+# (?:\S+\s+){0,K} allows optional flags (e.g., -a user:pass) between command and
+# method — BOUNDED by _MAX_GLOBAL_FLAG_TOKENS to avoid the O(n^2) multi-anchor
+# backtracking of the unbounded `*` form (#1001), matching the shared-prefix fix.
+re.compile(r"\bhttps?\s+(?:\S+\s+){0,%d}(?:DELETE|PATCH|POST|PUT)\s.*git/refs" % _MAX_GLOBAL_FLAG_TOKENS, re.IGNORECASE),
+re.compile(r"\bhttps?\s+(?:\S+\s+){0,%d}(?:DELETE|PATCH|POST|PUT)\s.*merge"    % _MAX_GLOBAL_FLAG_TOKENS, re.IGNORECASE),
+# Known API detection gaps (defense-in-depth, not a security boundary):
+# - GraphQL mutations: gh api graphql -f query='mutation { ... }' bypasses REST-path matching
+# - gh alias: aliases can hide API calls (tracked in #270)
+# Direct push to default branch (bypasses PR merge)
+re.compile(_GIT_PREFIX + r"push\s+\S+\s+HEAD:main\b"),
+re.compile(_GIT_PREFIX + r"push\s+\S+\s+HEAD:master\b"),
+# Regular push to main/master (e.g., local merge then push)
+# Negative lookahead (?!:) prevents matching refspecs like main:feature-branch.
+# The dash-flag walk is BOUNDED {0,K} — defense-in-depth that removes the last
+# unbounded `*` prefix walk in the push patterns so their linearity is
+# structural/intrinsic rather than contingent on the global-flag prefix bound
+# (#1001 family); already linear at HEAD, not a hang-fix.
+re.compile(_GIT_PREFIX + r"push\s+(?:-\S+\s+){0,%d}\S+\s+main(?!:)\b"   % _MAX_GLOBAL_FLAG_TOKENS),
+re.compile(_GIT_PREFIX + r"push\s+(?:-\S+\s+){0,%d}\S+\s+master(?!:)\b" % _MAX_GLOBAL_FLAG_TOKENS),
+]
+
+
+def _has_pipe_to_shell(command: str) -> bool:
+    """Check if command pipes output to a shell interpreter.
+
+    Detects patterns like ``echo "..." | bash``, ``printf "..." | sh``,
+    and ``echo "..." | xargs bash`` where echo/printf content would be
+    executed by the receiving shell.
+    """
+    return bool(
+        re.search(r"\|\s*(?:bash|sh|zsh)\b", command)
+        or re.search(r"\|\s*xargs\s+(?:.*\s+)?(?:bash|sh|zsh)\b", command)
+    )
+
+
+# Path-qualified shell token. Trailing (?![\w/]) anchors the shell name as a
+# whole PATH-LEAF token: excludes prefix-of-name (`>(basht)`/`>(teehee)`) AND
+# `>(bash/foo)` (bash is a DIRECTORY, foo the executable) while KEEPING
+# metachar-separated real vectors `>(bash;ls)`/`>(bash&&x)`/`>(bash|cat)`
+# (bash still executes).
+#
+# ReDoS — ReDoS-free AS USED, NOT standalone. Both arms anchor this token behind
+# `>\(`, so re.search only attempts it at the handful of `>(` offsets in a real
+# command. STANDALONE the nested `(?:[^\s)/]*/)*` is O(N^2): re.search retries at
+# EVERY start position (multi-offset retry) with an O(N) per-offset forward scan
+# — measured ~4x per input-doubling on pathological no-slash / all-slash input.
+# This is NOT within-match catastrophic backtracking (an anchored re.match is
+# linear, ~2x/double), so an atomic group `(?>...)` would NOT fix it (and atomic
+# groups are unavailable anyway — requires-python >=3.7). DO NOT reuse this token
+# UNGATED; if it is ever needed ungated, bound the path segments
+# `(?:[^\s)/]*/){0,K}` (the F1 mechanism), which caps the per-offset scan.
+_PROCSUB_SHELL = r"(?:[^\s)/]*/)*(?:bash|sh|zsh)(?![\w/])"
+
+
+def _has_process_substitution_to_shell(command: str) -> bool:
+    """Check if a command uses process substitution fed to a shell interpreter.
+
+    Detects:
+      - input-side  ``bash <(echo "...")``  — the shell consumes the substitution
+        as its input script (the original guard, UNCHANGED);
+      - output-side ``echo "..." > >(bash)`` — the command's stdout is routed into
+        a shell via process substitution. Caught in two forms (#1002):
+          * Arm A — ``>(shell)`` as a stdout-routing REDIRECT TARGET. The operator
+            set is stdout-only (``>``, ``>>``, ``1>``, ``1>>``, ``&>``, ``&>>``,
+            the csh ``>&`` excluding the fd-duplication ``>&N``, and the clobber
+            ``>|``); stderr-only routing (``2>``/``3>``) is excluded by omission.
+          * Arm B — ``>(shell)`` as a command ARGUMENT (tee-fanout & general, e.g.
+            ``... | tee >(bash)``). Keyed on a preceding NON-redirect token (word
+            char, quote, or close-bracket), so ``2> >(bash)`` (preceded by ``>``)
+            is NOT matched — the stderr exclusion holds on this arm too.
+    Both output-side arms accept an optional path prefix (``>(/bin/bash)``,
+    ``>(./sh)``) and require the shell name as a whole path-leaf token: non-shell
+    targets (``> >(tee ...)``, ``> >(cat ...)``), prefix-of-name (``>(teehee)``,
+    ``>(basht)``), and ``>(bash/foo)`` (bash a directory) are NOT matched.
+
+    The guard is consumed ONLY as a strip-SKIP condition: a True result PRESERVES
+    content for the dangerous-pattern scan, so widening it is monotonically
+    detection-increasing (INV-D2-safe; cannot create a false-negative).
+    """
+    return bool(
+        re.search(r"\b(?:bash|sh|zsh)\s+<\(", command)                       # input-side (unchanged)
+        # Arm A — redirect TARGET, stdout-routing operators only (stderr excluded by construction):
+        or re.search(r"(?:&>>?|>&(?![0-9])|>\||1>>?|(?<![0-9])>>?)\s*>\(\s*" + _PROCSUB_SHELL, command)
+        # Arm B — procsub as a command ARGUMENT (tee-fanout & general): preceded by a NON-redirect token:
+        or re.search(r"[\w\"')\]}]\s+>\(\s*" + _PROCSUB_SHELL, command)
+    )
+
+
+def _has_eval_or_source(command: str) -> bool:
+    """Check if command contains eval or source that could execute variable values.
+
+    Detects patterns like ``CMD="..." && eval $CMD`` where a variable
+    assignment value would be executed via eval or source.
+    """
+    return bool(re.search(r"\b(?:eval|source)\b", command))
+
+
+def _var_is_expanded(var_name: str, command: str) -> bool:
+    """Check if a variable is expanded (used) elsewhere in the command.
+
+    Detects patterns like ``$VAR`` or ``${VAR}`` that would execute
+    the variable's value as a command when used bare (e.g., ``CMD="gh pr merge 42" && $CMD``).
+    """
+    # Match $VAR (word boundary) or ${VAR}
+    return bool(re.search(r"\$\{?" + re.escape(var_name) + r"\b", command))
+
+
+def _has_command_substitution(quoted_content: str) -> bool:
+    """Check if double-quoted content contains command substitution.
+
+    ``$(...)`` and backticks inside double quotes are executed by the shell,
+    so double-quoted strings containing them must not be stripped.
+    Single-quoted strings never have substitution (handled separately).
+    """
+    return "$(" in quoted_content or "`" in quoted_content
+
+
+def _strip_non_executable_content(command: str) -> str:
+    """Strip shell content that is clearly non-executable before pattern matching.
+
+    Removes text from contexts where dangerous-pattern text would not actually
+    execute as a command: heredocs, comments, echo/printf arguments, and
+    variable assignments. This prevents false positives without removing content
+    from genuinely dangerous contexts like ``bash -c '...'``.
+
+    Guards against execution-via-indirection: skips stripping when content
+    would actually execute (piped to shell, eval'd, command substitution,
+    heredoc fed to shell interpreter).
+
+    Conservative: when in doubt, preserves text (false positive > missed threat).
+
+    Args:
+        command: The raw bash command string
+
+    Returns:
+        The command with non-executable content replaced by placeholders
+    """
+    result = command
+
+    # Output-side execution-routing flags — computed ONCE for ALL stdout-
+    # producing content carriers (heredoc/echo/commit-msg/here-string/gh-
+    # creation). When the command pipes its output to a shell or feeds a shell
+    # via OUTPUT-side process substitution (`> >(bash)`), a stripped dangerous
+    # literal would still EXECUTE downstream, so those carriers must SKIP
+    # stripping (preserve content → detect). Hoisted above carrier 1 so the
+    # heredoc carrier can consult them too. MONOTONIC: a True flag only ADDS
+    # detection (skip strip → more content scanned); never removes it.
+    piped_to_shell = _has_pipe_to_shell(command)
+    process_sub_to_shell = _has_process_substitution_to_shell(command)
+
+    # 1. Strip heredoc bodies: << 'EOF' ... EOF, << EOF ... EOF, << "EOF" ... EOF
+    #    Match the heredoc marker, then everything up to and including the
+    #    closing marker on its own line.
+    #    GUARD (input-side): the inner check preserves the body if the heredoc
+    #    is fed to a shell interpreter (e.g. bash << EOF ... EOF — body executes).
+    #    GUARD (output-side): the outer piped/process-sub skip preserves the body
+    #    when it is routed to a shell via `| bash` / `> >(bash)`. The two COMPOSE.
+    if not piped_to_shell and not process_sub_to_shell:
+        def _strip_heredoc(match: re.Match) -> str:
+            # Check what command precedes the heredoc operator
+            start = match.start()
+            preceding = command[:start].rstrip()
+            # If the preceding command is a shell interpreter, preserve content
+            if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+                return match.group(0)  # Preserve — content executes
+            return "<<HEREDOC_STRIPPED"
+
+        result = re.sub(
+            r"<<-?\s*['\"]?(\w+)['\"]?.*?\n.*?\n\t*\1\b",
+            _strip_heredoc,
+            result,
+            flags=re.DOTALL,
+        )
+
+    # 2. Strip comments: # to end of line
+    #    Only strip when # appears at start of line or after whitespace/semicolon
+    #    (not inside words like issue#42 or URLs with #fragment).
+    result = re.sub(r"(?:^|(?<=\s)|(?<=;))\#.*$", "", result, flags=re.MULTILINE)
+
+    # 3. Strip echo/printf quoted arguments
+    #    Match echo/printf followed by flags then quoted strings.
+    #    Replace the quoted content but keep the echo command visible.
+    #    GUARD: Skip stripping if output is piped to a shell interpreter
+    #    (including via xargs), or fed via process substitution to a shell,
+    #    because the echo/printf content would be executed by the shell.
+    #    NOTE: ``bash -c 'dangerous'`` is NOT affected by this stripping —
+    #    the echo/printf regex only matches echo/printf commands, so
+    #    ``bash -c`` content is implicitly preserved and correctly detected.
+    #    (piped_to_shell / process_sub_to_shell are hoisted to the top.)
+    if not piped_to_shell and not process_sub_to_shell:
+        # Double-quoted: also guard against command substitution inside
+        def _strip_echo_dq(match: re.Match) -> str:
+            if _has_command_substitution(match.group(0)):
+                return match.group(0)  # Preserve — $() executes
+            return match.group(1) + " STRIPPED"
+
+        result = re.sub(
+            r'\b(echo|printf)\s+(?:-[neE]+\s+)*"(?:[^"\\]|\\.)*"',
+            _strip_echo_dq,
+            result,
+        )
+        result = re.sub(
+            r"\b(echo|printf)\s+(?:-[neE]+\s+)*'[^']*'",
+            r"\1 STRIPPED",
+            result,
+        )
+
+    # 4. Strip variable assignment values: VAR="..." or VAR='...'
+    #    Only match simple assignments (NAME=VALUE), not command arguments.
+    #    GUARD: Skip stripping if eval/source appears in the command,
+    #    because the variable value could be executed.
+    #    GUARD: Skip stripping if $VAR or ${VAR} appears elsewhere in the
+    #    command, because bare expansion executes the value as a command
+    #    (e.g., CMD="gh pr merge 42" && $CMD).
+    has_eval = _has_eval_or_source(command)
+    if not has_eval:
+        # Double-quoted: guard against command substitution and bare expansion
+        def _strip_var_dq(match: re.Match) -> str:
+            if _has_command_substitution(match.group(0)):
+                return match.group(0)  # Preserve — $() executes
+            var_name = match.group(1)
+            if _var_is_expanded(var_name, command):
+                return match.group(0)  # Preserve — $VAR executes
+            return var_name + "=STRIPPED"
+
+        result = re.sub(
+            r'\b([A-Za-z_][A-Za-z0-9_]*)="(?:[^"\\]|\\.)*"',
+            _strip_var_dq,
+            result,
+        )
+
+        # Single-quoted: guard against bare expansion
+        def _strip_var_sq(match: re.Match) -> str:
+            var_name = match.group(1)
+            if _var_is_expanded(var_name, command):
+                return match.group(0)  # Preserve — $VAR executes
+            return var_name + "=STRIPPED"
+
+        result = re.sub(
+            r"\b([A-Za-z_][A-Za-z0-9_]*)='[^']*'",
+            _strip_var_sq,
+            result,
+        )
+
+    # 5. Strip git commit -m quoted arguments
+    #    The -m argument to git commit is a message, never executed directly.
+    #    GUARD (cmd-subst): preserve a double-quoted message containing $()/backtick.
+    #    GUARD (output-side): a commit SUBJECT is echoed to git's stdout, so
+    #    `git commit -m "..." > >(bash)` (or `| bash`) routes it to a shell — the
+    #    outer piped/process-sub skip preserves it for detection (#1002).
+    if not piped_to_shell and not process_sub_to_shell:
+        def _strip_commit_msg_dq(match: re.Match) -> str:
+            if _has_command_substitution(match.group(0)):
+                return match.group(0)  # Preserve — $() executes
+            return match.group(1) + ' -m STRIPPED'
+
+        result = re.sub(
+            r'\b(git\s+commit)\s+-m\s+"(?:[^"\\]|\\.)*"',
+            _strip_commit_msg_dq,
+            result,
+        )
+        result = re.sub(
+            r"\b(git\s+commit)\s+-m\s+'[^']*'",
+            r"\1 -m STRIPPED",
+            result,
+        )
+
+    # 6. Strip here-string quoted arguments: <<< "..." or <<< '...'
+    #    Here-strings pass text as stdin, not as a command.
+    #    GUARD (input-side): the inner check preserves content if a shell
+    #    interpreter precedes the <<< (e.g. bash <<< "dangerous" — executes).
+    #    GUARD (cmd-subst): preserve double-quoted content containing $()/backtick.
+    #    GUARD (output-side): the outer piped/process-sub skip preserves content
+    #    routed to a shell via `| bash` / `> >(bash)`. The guards COMPOSE.
+    if not piped_to_shell and not process_sub_to_shell:
+        def _strip_herestring_dq(match: re.Match) -> str:
+            # Check what command precedes the <<<
+            start = match.start()
+            preceding = command[:start].rstrip()
+            if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+                return match.group(0)  # Preserve — content executes
+            if _has_command_substitution(match.group(0)):
+                return match.group(0)  # Preserve — $() executes
+            return "<<<STRIPPED"
+
+        result = re.sub(
+            r'<<<\s*"(?:[^"\\]|\\.)*"',
+            _strip_herestring_dq,
+            result,
+        )
+
+        def _strip_herestring_sq(match: re.Match) -> str:
+            # Check what command precedes the <<<
+            start = match.start()
+            preceding = command[:start].rstrip()
+            if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+                return match.group(0)  # Preserve — content executes
+            return "<<<STRIPPED"
+
+        result = re.sub(
+            r"<<<\s*'[^']*'",
+            _strip_herestring_sq,
+            result,
+        )
+
+    # 7. Strip gh issue/pr CREATION/COMMENT-carrier quoted arguments.
+    #    `gh issue create/edit/comment` and `gh pr create/comment` accept
+    #    --title/--body (and the -t/-b aliases) whose VALUE is prose sent to the
+    #    GitHub API — never executed by a shell. A dangerous-op literal named inside
+    #    that prose (e.g. `gh issue create --title "...git branch -D x..."`)
+    #    must not trip DANGEROUS_PATTERNS. Strip the quoted value; keep the
+    #    verb + flag tokens visible.
+    #
+    #    SCOPE (INV-D2) — exempts ONLY the non-executing ARGUMENT text of a
+    #    CREATION carrier. Does NOT match `gh pr close` (a real close-class
+    #    destructive verb; `--delete-branch` is the deny trigger) — `close`
+    #    is absent from the verb alternation by construction, so a
+    #    `gh pr close ... --delete-branch` command is NOT stripped and
+    #    DANGEROUS_PATTERNS still fires.
+    #
+    #    GUARD: same indirection guards as the echo/printf carrier — the
+    #    outer `piped_to_shell` / `process_sub_to_shell` skip (set at step 3)
+    #    covers pipe-to-shell / process-sub-to-shell; the double-quoted arm
+    #    additionally preserves a value containing command substitution
+    #    `$(`/backtick (it would execute). Single-quoted values never expand,
+    #    so they need only the outer skip (mirroring carriers 3 and 5).
+    #    `--body-file`/`-F` is NOT a carrier: it names a FILE whose content
+    #    is not on the command line, so there is nothing on the line to strip.
+    if not piped_to_shell and not process_sub_to_shell:
+        # Match the carrier COMMAND span first (verb + its arguments), then
+        # strip EVERY --title/--body/-t/-b value within that span. A single
+        # re.sub on the whole command would strip only the FIRST flag-value
+        # (the verb prefix is consumed by the first match and cannot re-anchor
+        # on a bare second flag), so the per-span inner-strip is required to
+        # strip both a `--title` and a `--body` on one command.
+        #
+        # The span body is QUOTE-AWARE: it consumes balanced quoted regions
+        # atomically (so `;`/`&`/`|`/newline INSIDE a quoted value are not
+        # separators) and stops at the first UNQUOTED `&`/`|`/`;`/newline; an
+        # unbalanced quote stops the span early (under-consume = over-block,
+        # never under-block). This is load-bearing for INV-D2: an unquoted
+        # executing op always terminates the span (none of the three body
+        # alternatives can begin at an unquoted separator), so a compound's
+        # executing tail (e.g. `... && git branch -D real`) falls OUTSIDE the
+        # span and is NEVER stripped — it stays caught. The three alternatives
+        # have DISJOINT first chars (non-sep-non-quote / `"` / `'`), so the
+        # nested `*` has no backtracking ambiguity (linear; no ReDoS). The
+        # double-quoted alternative honors `\"` escapes, matching bash's
+        # escaped-quote semantics so the regex cannot desync from the shell.
+        # Verb alternation: issue create|edit|comment, pr create|comment. NOT pr
+        # close — `close` is absent by construction so a close command never
+        # matches. `comment` is a non-executing carrier exactly like create/edit:
+        # its --body/-b value is API prose, and the SAME doubly-anchored strip
+        # (carrier verb + value DIRECTLY after --body/-t/-b) + quote-aware span +
+        # $()/backtick-preserve guard apply, so it inherits the create/edit
+        # safety — empirically verified: escaped-quote/escaped-dq/metachar bodies
+        # are handled correctly (op inside a dq/sq body is inert and stripped; an
+        # op OUTSIDE the body, after an unquoted separator OR a bare escaped quote
+        # not following a carrier flag, is NEVER stripped and stays caught).
+        _gh_carrier_span = (
+            r"gh\s+(?:issue\s+(?:create|edit|comment)|pr\s+(?:create|comment))\b"
+            r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+        )
+
+        def _strip_gh_carrier_span(span_match: re.Match) -> str:
+            span = span_match.group(0)
+
+            # Double-quoted value: preserve if it contains command
+            # substitution ($()/backtick executes inside double quotes).
+            def _strip_dq(m: re.Match) -> str:
+                if _has_command_substitution(m.group(0)):
+                    return m.group(0)
+                return m.group(1) + "STRIPPED"
+
+            span = re.sub(
+                r"((?:--title|--body|-t|-b)\s+)\"(?:[^\"\\]|\\.)*\"",
+                _strip_dq,
+                span,
+            )
+            # Single-quoted value: never expands, no substitution guard.
+            span = re.sub(
+                r"((?:--title|--body|-t|-b)\s+)'[^']*'",
+                r"\1STRIPPED",
+                span,
+            )
+            return span
+
+        result = re.sub(_gh_carrier_span, _strip_gh_carrier_span, result)
+
+    return result
+
+
+def _has_eval_with_heredoc(command: str) -> bool:
+    """Detect eval (or backtick) command-substitution that wraps a heredoc.
+
+    The strip pipeline removes heredoc bodies BEFORE the regex-match phase.
+    An eval-wrapped destructive command inside a heredoc body is therefore
+    invisible to DANGEROUS_PATTERNS by the time matching runs:
+
+        eval $(cat <<HEREDOC
+        gh pr merge 999 --admin
+        HEREDOC
+        )
+
+    After ``_strip_non_executable_content``, the inner ``gh pr merge 999``
+    is gone. The outer eval invokes the heredoc body as a command, which
+    is exactly the destructive operation the merge guard is supposed to
+    intercept. Treat the eval+heredoc shape as categorically dangerous —
+    legitimate operator command flows do not use eval-wrapped heredoc as
+    a delivery mechanism, so the false-positive risk is low.
+
+    Detects both the modern ``$(...)`` substitution form and the legacy
+    backtick form.
+    """
+    # eval $(...) with a heredoc anywhere within the substitution
+    if re.search(r"\beval\s+\$\(", command) and "<<" in command:
+        return True
+    # eval `...` (backtick) wrapping a heredoc
+    if re.search(r"\beval\s+`[^`]*<<", command):
+        return True
+    return False
+
+
+def is_dangerous_command(command: str) -> bool:
+    """Check if a bash command is a dangerous git operation.
+
+    Strips non-executable content (heredocs, comments, echo arguments, variable
+    assignments) before matching, to avoid false positives when dangerous-pattern
+    text appears in non-command contexts.
+
+    Args:
+        command: The bash command string
+
+    Returns:
+        True if the command matches a dangerous pattern
+    """
+    # Pre-strip detection: eval+heredoc shape obscures destructive ops via
+    # the heredoc-strip pipeline. Treat as dangerous before the strip runs.
+    if _has_eval_with_heredoc(command):
+        return True
+
+    # Normalize bash line continuations (\<newline>) before any matching.
+    # Without this, patterns split across lines bypass all regex detection.
+    command = command.replace("\\\n", " ")
+    stripped = _strip_non_executable_content(command)
+    for pattern in DANGEROUS_PATTERNS:
+        if pattern.search(stripped):
+            return True
+    return False
+
+
+def is_compound_destructive_command(command: str) -> bool:
+    """Detect destructive operations chained inside a shell compound shape.
+
+    Returns True iff the stripped command contains BOTH (a) a compound-shape
+    character (``&&``, ``||``, ``;``, ``|``, newline) AND (b) a
+    DANGEROUS_PATTERNS match. Safe compounds (``ls && pwd``) are NOT flagged.
+
+    Operator-side review of AskUserQuestion text typically focuses on the
+    headline command and may miss a chained second destructive op, e.g.:
+
+        gh pr merge 100 && gh pr merge 999 --admin
+
+    Single-token authorization for the headline command would otherwise
+    let the second op execute unauthorized. Reject compound destructive
+    shapes outright; force one-op-at-a-time with one checkpoint each.
+    """
+    normalized = command.replace("\\\n", " ")
+    stripped = _strip_non_executable_content(normalized)
+    # Neutralize FD-redirect tokens before compound-shape scanning. The
+    # strip operates on a LOCAL copy so DANGEROUS_PATTERNS still sees the
+    # full stripped command on the line below.
+    compound_view = _FD_REDIRECT_RE.sub(" ", stripped)
+    if not _COMPOUND_OPS_RE.search(compound_view):
+        return False
+    for pattern in DANGEROUS_PATTERNS:
+        if pattern.search(stripped):
+            return True
+    return False

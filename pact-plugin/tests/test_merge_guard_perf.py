@@ -196,11 +196,11 @@ class TestFlagTokenBoundary:
     def test_within_bound_push_to_main_is_detected(self):
         """A push-to-main with EXACTLY _MAX_GLOBAL_FLAG_TOKENS (32) dash-flags is
         still within the bound, so the refspec is reachable and it IS detected
-        (force-push class) on both the read bank and the classifier. (Empirical
+        (push-to-main class) on both the read bank and the classifier. (Empirical
         boundary: -x*32 detected; -x*33 the first missed — the residual below.)"""
         cmd = "git push " + "-x " * _MAX_GLOBAL_FLAG_TOKENS + "origin main"
         assert is_dangerous_command(cmd) is True
-        assert detect_command_operation_type(cmd) == "force-push"
+        assert detect_command_operation_type(cmd) == "push-to-main"
 
     def test_past_bound_push_to_main_is_the_accepted_residual(self):
         """ACCEPTED >K RESIDUAL (documented, INV-D2 relaxation — §12.3): a
@@ -220,7 +220,7 @@ class TestFlagTokenBoundary:
         is detected — the bound does not perturb any realistic command."""
         cmd = "git push -u -v --no-verify origin main"
         assert is_dangerous_command(cmd) is True
-        assert detect_command_operation_type(cmd) == "force-push"
+        assert detect_command_operation_type(cmd) == "push-to-main"
 
 
 # ---------------------------------------------------------------------------

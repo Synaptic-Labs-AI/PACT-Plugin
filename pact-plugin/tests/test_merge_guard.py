@@ -4778,7 +4778,7 @@ class TestDirectPushToDefaultBranch:
         from merge_guard_post import write_token
         from merge_guard_pre import check_merge_authorization
 
-        write_token({"operation_type": "force-push", "target_ref": "main"},
+        write_token({"operation_type": "push-to-main", "target_ref": "main"},
                     token_dir=tmp_path)
 
         result = check_merge_authorization("git push origin main", token_dir=tmp_path)
@@ -7182,7 +7182,10 @@ class TestGhPrCloseTokenMatching:
         """Token with PR number matches gh pr close for same PR."""
         from merge_guard_pre import _token_matches_command
 
-        token = {"context": {"pr_number": "42", "operation_type": "close"}}
+        # GAP2: a faithful close --delete-branch token binds --delete-branch, so it
+        # set-matches the --delete-branch exec (bare-close→delete escalation is the
+        # NEW escalation-denied counter-test below).
+        token = {"context": {"pr_number": "42", "operation_type": "close", "bound_flags": ["--delete-branch"]}}
         assert _token_matches_command(token, "gh pr close 42 --delete-branch")
 
     def test_token_rejects_gh_pr_close_different_pr(self):
@@ -7266,11 +7269,35 @@ class TestGhPrCloseAuthorization:
         token_file.write_text(json.dumps({
             "created_at": now,
             "expires_at": now + 300,
-            "context": {"pr_number": "42", "operation_type": "close"},
+            # GAP2: a FAITHFUL close --delete-branch mint binds --delete-branch, so it
+            # set-matches the --delete-branch exec → authorizes.
+            "context": {"pr_number": "42", "operation_type": "close", "bound_flags": ["--delete-branch"]},
         }))
 
         result = check_merge_authorization("gh pr close 42 --delete-branch", token_dir=tmp_path)
         assert result is None
+
+    def test_bare_close_token_does_not_authorize_delete_branch_escalation(self, tmp_path):
+        """GAP2 escalation-denied: a bare-close token (bound_flags=[]) does NOT
+        authorize `gh pr close N --delete-branch`. PR + op MATCH, so the deny is
+        attributable SOLELY to the unbound --delete-branch (not a PR/op mismatch).
+        Non-vacuity: revert the GAP2 bind (drop --delete-branch from
+        PRIVILEGED_FLAGS['close']) → both bound_flags become [] → match → flips to allow."""
+        import time
+
+        from merge_guard_pre import check_merge_authorization
+
+        now = time.time()
+        token_file = tmp_path / "merge-authorized-99999"
+        token_file.write_text(json.dumps({
+            "created_at": now,
+            "expires_at": now + 300,
+            # MATCHING pr+op, NO --delete-branch bound → the bare-close token.
+            "context": {"pr_number": "42", "operation_type": "close", "bound_flags": []},
+        }))
+
+        result = check_merge_authorization("gh pr close 42 --delete-branch", token_dir=tmp_path)
+        assert result is not None  # DENIED — a bare-close token cannot authorize the --delete-branch escalation
 
     def test_gh_pr_close_delete_branch_blocked_with_mismatched_pr(self, tmp_path):
         """gh pr close --delete-branch blocked with different PR number."""
@@ -7318,7 +7345,7 @@ class TestGhPrCloseAuthorization:
         token_file.write_text(json.dumps({
             "created_at": now,
             "expires_at": now + 300,
-            "context": {"operation_type": "close", "pr_number": "42"},
+            "context": {"operation_type": "close", "pr_number": "42", "bound_flags": ["--delete-branch"]},
         }))
 
         # First call — allowed and consumes token
@@ -7741,7 +7768,7 @@ class TestGhPrClosePreHookE2E:
         token_file.write_text(json.dumps({
             "created_at": now,
             "expires_at": now + 300,
-            "context": {"pr_number": "42", "operation_type": "close"},
+            "context": {"pr_number": "42", "operation_type": "close", "bound_flags": ["--delete-branch"]},
         }))
 
         input_data = {
@@ -7807,7 +7834,9 @@ class TestGhPrClosePostHookE2E:
         assert token_data["context"]["operation_type"] == "close"
 
     def test_post_hook_writes_token_for_gh_pr_close_question(self, tmp_path, capsys):
-        """Post-hook main() creates token for 'gh pr close' phrased question."""
+        """Post-hook main() creates token for a DANGEROUS 'gh pr close' question.
+        (Under the GAP1 is_dangerous-gate a BARE `gh pr close 99` is reversible →
+        mints NO token; the close must carry --delete-branch to be gated + mint.)"""
         from merge_guard_post import main
 
         input_data = {
@@ -7815,7 +7844,7 @@ class TestGhPrClosePostHookE2E:
                 "questions": [{
                     "question": "Close the PR?",
                     "options": [
-                        {"label": "Yes, close", "description": "Run `gh pr close 99`"},
+                        {"label": "Yes, close", "description": "Run `gh pr close 99 --delete-branch`"},
                         {"label": "Cancel", "description": "Abort"},
                     ],
                 }]
@@ -8899,8 +8928,9 @@ class TestGhGlobalFlagBypassEdgeCases:
             "context": {
                 "operation_type": "close",
                 "pr_number": 100,
-                "bound_flags": ["--repo=owner/repo"],  # #1042: -R bound; close's
-                # --delete-branch is the op-trigger (bound via op_type), unbound here
+                # #1042: -R bound; GAP2 — --delete-branch is now BOUND on close too, so
+                # a faithful close --delete-branch token carries BOTH.
+                "bound_flags": ["--delete-branch", "--repo=owner/repo"],
             }
         }
         assert _token_matches_command(
@@ -9418,21 +9448,31 @@ class TestModuleLoadFailClosed:
         assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
 
     def test_pattern_compile_failure_emits_deny(self, monkeypatch, capsys):
-        """If a regex compilation fails at module load, the pattern-compile
-        wrapper emits a fail-closed deny with hookEventName.
+        """If a regex compilation fails at module load, the merge-guard fails CLOSED
+        with a deny (hookEventName + permissionDecision deny). DANGEROUS_PATTERNS + the
+        strip closure now compile in shared.merge_guard_common (GAP1 relocation), so a
+        compile failure there propagates through merge_guard_pre's `from shared...
+        import` into its fail-closed except → deny.
 
-        Simulates a malformed regex by patching ``re.compile`` to raise
-        ``re.error`` during reload.
+        Simulates a malformed regex by patching ``re.compile`` to raise ``re.error``
+        while shared.merge_guard_common rebuilds its pattern bank.
         """
         import importlib
         import re as _re
 
         _missing = object()
         original_mgp = sys.modules.get("merge_guard_pre", _missing)
+        original_smc = sys.modules.get("shared.merge_guard_common", _missing)
+        # Pop BOTH so shared.merge_guard_common rebuilds its pattern bank (where
+        # DANGEROUS_PATTERNS now compiles) during the merge_guard_pre re-import.
         sys.modules.pop("merge_guard_pre", None)
+        sys.modules.pop("shared.merge_guard_common", None)
 
         def _restore_modules():
             sys.modules.pop("merge_guard_pre", None)
+            sys.modules.pop("shared.merge_guard_common", None)
+            if original_smc is not _missing:
+                sys.modules["shared.merge_guard_common"] = original_smc
             if original_mgp is not _missing:
                 sys.modules["merge_guard_pre"] = original_mgp
 
@@ -9440,11 +9480,9 @@ class TestModuleLoadFailClosed:
         compile_calls = {"n": 0}
 
         def fake_compile(pattern, flags=0):
-            # Allow imports of shared.* modules to succeed (they call re.compile
-            # internally). Only fail compiles invoked from merge_guard_pre's
-            # module body — those happen after shared imports complete and
-            # build up DANGEROUS_PATTERNS. We trip the second batch of compiles
-            # by failing all calls once shared modules are loaded.
+            # Fail compiles invoked while shared.merge_guard_common rebuilds its
+            # pattern bank (it is in sys.modules from import-start, so this trips
+            # inside its body — after shared.pact_context has loaded).
             if "shared.merge_guard_common" in sys.modules and "shared.pact_context" in sys.modules:
                 compile_calls["n"] += 1
                 if compile_calls["n"] >= 1:
@@ -9465,6 +9503,9 @@ class TestModuleLoadFailClosed:
             assert "merge_guard_pre" in captured.err
         finally:
             _restore_modules()
+            # Ensure a clean shared module for subsequent tests (the failed rebuild
+            # above left it absent from sys.modules).
+            importlib.import_module("shared.merge_guard_common")
 
     def test_load_failure_audit_anchor_comment_present(self):
         """The fail-closed emit site carries the Issue #658 audit anchor.
@@ -10635,24 +10676,24 @@ class TestEnvelopeIntegration:
         assert '"permissionDecision": "deny"' in pre_stdout
 
     def test_bug_b_envelope_joes_bare_push_authorizes(self, tmp_path):
-        """Full envelope: Bug B surface. AskUserQuestion question with
-        quoted-command `git push origin main` (Joe's case) → token writes
-        force-push op_type; pre hook recognizes bare `git push origin main`
-        as force-push and authorizes."""
+        """Full envelope: Bug B surface. AskUserQuestion question with quoted-command
+        `git push origin main` (Joe's case) → token writes push-to-main op_type (GAP3:
+        a PLAIN push to main is a DISTINCT op from --force force-push); pre hook
+        recognizes bare `git push origin main` as push-to-main and authorizes."""
         post_code = self._invoke_post(
-            "Confirm the force-push?", tmp_path, answer="Yes, force-push",
+            "Confirm the push to main?", tmp_path, answer="Yes, push",
             options=[
-                {"label": "Yes, force-push", "description": "Run `git push origin main`"},
+                {"label": "Yes, push", "description": "Run `git push origin main`"},
                 {"label": "Cancel", "description": "Abort"},
             ],
         )
         assert post_code == 0
 
-        # Verify token has force-push op_type (symmetric classifier worked)
+        # Verify token has push-to-main op_type (symmetric classifier worked)
         token_files = list(tmp_path.glob("merge-authorized-*"))
         assert len(token_files) == 1
         token_data = json.loads(token_files[0].read_text())
-        assert token_data["context"]["operation_type"] == "force-push"
+        assert token_data["context"]["operation_type"] == "push-to-main"
 
         # Run the matching command — should be authorized
         pre_code, pre_stdout = self._invoke_pre(
@@ -12511,6 +12552,7 @@ class TestTokenLifecycleExtensions:
             "close": "Closed pull request",
             "branch-delete": "Deleted branch",
             "force-push": None,
+            "push-to-main": None,
         }, (
             "SEC-S2 lookup-table SSOT drift: "
             "LAYER1_SUCCESS_STDOUT_PATTERNS mutated without atomic update "
