@@ -734,6 +734,34 @@ def _blank_inert_quoted_literals(segment: str) -> str:
 # the placeholder-interaction class entirely.
 _STRIP_PLACEHOLDER_MARKER = "STRIPPED"
 
+# WHOLE-COMMAND fail-closed guard: bash constructs whose grammar the single-line
+# balanced-quote mask + _COMPOUND_OPS_RE segment split CANNOT model. If the
+# ORIGINAL command contains ANY of these, the suppressor runs NOT AT ALL
+# (suppress nothing) — over-block is INV-D2-safe; an under-block is never. Two
+# were VERIFIED PR-introduced under-blocks; the rest are the same regex-vs-bash-
+# grammar class, cast wide because guard-list COMPLETENESS is the residual risk:
+#   \' \"  — a BACKSLASH-ESCAPED quote is a LITERAL char in bash, NOT a string
+#            opener; the mask mis-pairs it with a later real quote and masks a
+#            real `;`/`|` separator + the executing op into ONE pseudo-quoted span
+#            → the segment under-splits and the op is blanked (CLASS 1). The
+#            pattern also matches `\\'` (escaped-backslash-then-real-opener) →
+#            over-block, which is safe; we do NOT try to count backslashes (that
+#            grammar-modelling is exactly what caused the bug).
+#   <( >(  — PROCESS SUBSTITUTION hosts its OWN command (`grep x <(bash -c "OP")`),
+#            so a whitelisted leading verb is not the only executor (CLASS 2).
+#   $'     — ANSI-C quoting has its own escape grammar (`$'\''` is an escaped
+#            quote) that the single-quote regex mis-handles.
+#   <<     — heredoc / here-string bodies are multi-line; the single-line regexes
+#            cannot bound them (also matches `<<<`).
+# DELIBERATELY NOT listed: `$(` / backtick are already handled (the per-literal
+# _blank_dq guard preserves any double-quoted literal containing them, and an
+# UNQUOTED substitution is never blanked), so listing them would only over-block
+# benign unrelated uses such as a path `"$(dir)/f"`; other backslash escapes
+# (`\;` `\&` `\|`) affect only SPLITTING (lean over-block, never under-block);
+# a bare `(` would over-block `grep "(foo)"`; backslash line-continuation is
+# normalized away before _strip runs. Add to this set when in doubt — fail-closed.
+_SUPPRESS_UNSAFE_RE = re.compile(r"""\\['"]|<\(|>\(|\$'|<<""")
+
 
 def _segment_is_suppressible(segment: str) -> bool:
     """True iff `segment` is a placeholder-free segment led by a whitelisted
@@ -762,6 +790,10 @@ def _suppress_benign_arg_literals(text: str, command: str) -> str:
       - any whole-command indirection guard True (pipe / process-sub to a shell,
         eval/source, eval+heredoc) → suppress NOTHING (a blanked literal could
         still execute downstream);
+      - the whole command contains a regex-unmodellable construct
+        (`_SUPPRESS_UNSAFE_RE`: backslash-escaped quote, process substitution,
+        ANSI-C `$'`, heredoc/here-string) → suppress NOTHING (the mask/split
+        cannot be trusted; over-block, never under-block);
       - a segment whose leading verb is unknown / an executor / wrapper-prefixed
         → left UNCHANGED (the substring scan still blocks it);
       - a segment carrying ANY steps-1-7 placeholder token ("STRIPPED" et al.)
@@ -790,6 +822,17 @@ def _suppress_benign_arg_literals(text: str, command: str) -> str:
         or _has_eval_or_source(command)
         or _has_eval_with_heredoc(command)
     ):
+        return text
+
+    # WHOLE-COMMAND fail-closed on regex-vs-bash-grammar mismatches: if the
+    # ORIGINAL command contains a construct the single-line mask/split regexes
+    # cannot model (backslash-escaped quote, process substitution, ANSI-C quoting,
+    # heredoc/here-string — see _SUPPRESS_UNSAFE_RE), do NOT suppress at all. This
+    # is checked WHOLE-COMMAND (not per-segment) on purpose: it removes the
+    # segment-attribution reasoning entirely, so a mis-parse can never blank an
+    # executing op. Over-block only (the benign #1037 carriers contain none of
+    # these); under-block impossible.
+    if _SUPPRESS_UNSAFE_RE.search(command):
         return text
 
     # Boundary-detection copy (length-preserving; positions map 1:1 to `text`):

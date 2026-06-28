@@ -13355,7 +13355,7 @@ class Test1037BenignArgSuppressorAllowPositives:
     def test_allow_positives_nonvacuity_revert_reblocks(self, monkeypatch):
         # non-vacuity (proof-class P): a source-only revert of the suppressor
         # (-> identity) flips EVERY #1037 ALLOW-positive back to BLOCK.
-        # MEASURED {7 of 7 flip RED}; the SHOULD_BLOCK controls stay blocked
+        # MEASURED {8 of 8 flip RED}; the SHOULD_BLOCK controls stay blocked
         # (cardinality split) — so the ALLOW assertions are coupled to the
         # suppressor, not vacuous.
         from merge_guard_pre import (
@@ -13371,7 +13371,7 @@ class Test1037BenignArgSuppressorAllowPositives:
             c for c in self.ALLOW
             if is_dangerous_command(c) or is_compound_destructive_command(c)
         ]
-        assert len(reblocked) == len(self.ALLOW)  # all 7 flip RED under revert
+        assert len(reblocked) == len(self.ALLOW)  # all 8 flip RED under revert
         still = [c for c in self.SHOULD_BLOCK if is_dangerous_command(c)]
         assert len(still) == len(self.SHOULD_BLOCK)  # controls unaffected
 

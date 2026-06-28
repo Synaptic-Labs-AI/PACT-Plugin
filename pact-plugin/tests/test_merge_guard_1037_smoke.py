@@ -49,6 +49,20 @@ STILL_BLOCKED = [
     'gh pr comment 5 --body "ok" && gh pr merge 999',         # chained destructive op
     'gh pr merge 5',                                          # bare destructive op
     'grep "x" file ; gh pr merge 5',                          # REAL unquoted sep still splits
+    # CLASS 1 (escaped-quote grammar): \' / \" is a LITERAL char in bash, not a
+    # string opener — the regex mis-pairs it and masks the ; + op into one span.
+    # Whole-command fail-closed on \'/\" blocks these (op survives for the scan).
+    "grep a\\' ; gh pr merge 5 \\'b",                         # sq escaped-quote under-block
+    'grep a\\" ; gh pr merge 5 \\"b',                         # dq escaped-quote under-block
+    # CLASS 2 (process substitution hosts an executor): <(...) runs its own
+    # command, so a whitelisted leading verb is not the only executor. Whole-
+    # command fail-closed on <( / >( blocks these (incl --admin #1042 bypass).
+    'grep x <(bash -c "gh pr merge 5")',                      # procsub-hosted merge
+    'grep x <(bash -c "gh pr merge 5 --admin")',             # procsub + #1042-bypass flag
+    'grep x <(bash -c "git push --force origin main")',      # procsub-hosted force-push
+    # Broader regex-vs-grammar fail-closed (over-block, defense-in-depth): ANSI-C
+    # quoting $'...' has its own escape grammar the sq regex mis-handles.
+    "grep $'gh pr merge 5'",                                  # ANSI-C quoting fail-closed
 ]
 
 
