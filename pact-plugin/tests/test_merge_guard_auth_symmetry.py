@@ -890,3 +890,171 @@ class TestPrivilegedFlagReadFloorSeam:
              "bound_flags": ["--no-verify"]},
         )
         assert _authorize("git push --no-verify origin main --force", tmp_path) is None
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# #1049 — decline-veto SCOPING false-positive. The option-mode veto now scans the
+# SELECTED option text with QUOTED COMMAND-LITERAL spans excised (classify-gated,
+# fail-closed: a span is blanked ONLY when detect_command_operation_type(inner) is
+# non-None). So a decline/defer veto-word SUBSTRING that lives INSIDE the approval
+# command literal — `no` in `--no-verify`, `review` in a `feature/review-ui`
+# branch, `pending` in `release/pending-qa` — no longer self-vetoes a genuine
+# approval. A genuine DECLINE (prose OUTSIDE any command literal, or a backticked
+# NON-command phrase) STILL vetoes. INV-D2 never-under-block is the headline: the
+# excision is scan-local (feeds ONLY _has_decline_defer; selection/pairs/label-op
+# see UNMODIFIED text) and biases to OVER-block on ambiguity.
+#
+# ADVERSARIAL PROBE RESULT (instruction #5, classify-gate falsification of "decline
+# intent never classifies as a command"): NO genuine-decline under-block exists.
+# Every input that loses its veto via excision and then mints is a CORRECT mint of
+# an APPROVAL where the veto substring is a flag / branch name / repo value / shell
+# comment INSIDE the approved command literal. A genuine decline is authored as
+# prose OUTSIDE the literal ("No", "Don't", "Skip the", "Cancel", a trailing
+# "# never mind") and that prose survives the inside-span-only excision → veto
+# fires. The only lost-veto-that-mints inputs are self-contradictory (a decline
+# token embedded inside a valid destructive command the operator is approving),
+# reachability class (b) — pinned by TestDeclineVetoScopingPreservesVeto1049.
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestDeclineVetoScopingPositive1049:
+    """(P) POSITIVE-FIX teeth: a backticked command-literal approval whose command
+    carries a decline-word SUBSTRING now MINTS end-to-end (pre-#1049 the substring
+    self-vetoed → silent no-mint FP). NON-VACUITY — source-only revert of the
+    `_veto_text` commit (B1, 5d95fe76):
+        git checkout 5d95fe76^ -- pact-plugin/hooks/merge_guard_post.py
+    restores the pre-#1049 substring self-veto → the option-mode veto re-fires →
+    these bundles mint NO token → every case RED. Verified {≥1 fail per param}.
+    (The mint is the direct #1049 property; end-to-end authorize is the stronger
+    seam claim for the clean round-trippers.)"""
+
+    @pytest.mark.parametrize("question, label, description, command, veto_word", [
+        # `no` in --no-verify; valueless flag → binds cleanly → authorizes.
+        ("Merge this PR now? Reviewers signed off.", "Yes, merge",
+         "Run `gh pr merge 42 --no-verify`", "gh pr merge 42 --no-verify", "no"),
+        # `review` in a branch name; force-push target_ref round-trips cleanly.
+        ("Force-push the rebased branch?", "Approve force-push",
+         "Run `git push --force origin feature/review-ui`",
+         "git push --force origin feature/review-ui", "review"),
+        # `pending` in a branch name; force-push target_ref round-trips cleanly.
+        ("Force-push the staging branch?", "Approve force-push",
+         "Run `git push --force origin release/pending-qa`",
+         "git push --force origin release/pending-qa", "pending"),
+    ])
+    def test_substring_in_command_literal_mints_and_authorizes(
+        self, tmp_path, question, label, description, command, veto_word
+    ):
+        """The veto-word substring sits INSIDE the backticked command literal, which
+        classifies as a real command → _veto_text excises the span before the veto
+        scan → no false veto → the bundle MINTS and the command AUTHORIZES end-to-end
+        over the real token seam."""
+        code = _invoke_post(
+            [_q(question, [_opt(label, description), _opt("Cancel", "Abort")])],
+            {question: label}, tmp_path,
+        )
+        assert code == 0
+        assert len(_minted_tokens(tmp_path)) == 1, (
+            f"#1049: '{veto_word}' substring in the approval command self-vetoed"
+        )
+        assert _authorize(command, tmp_path) is None
+
+    def test_repo_flag_value_substring_mints(self, tmp_path):
+        """`review` in a `--repo owner/review-repo` value no longer self-vetoes →
+        the bundle MINTS (the direct #1049 property). End-to-end authorize is NOT
+        asserted here: the #1042 flag-scan binds `--repo=owner/review-repo` with the
+        option's trailing backtick captured into the value, so the bare command's
+        flag set does not match → it fails CLOSED (deny). That backtick-capture is a
+        pre-existing #1042 flag-binding over-block (untouched by B1/B2, fails closed,
+        NOT an under-block) — out of #1049 scope. NON-VACUITY: source-only revert of
+        B1 → `review` self-vetoes → 0 tokens → RED."""
+        q = "Merge this PR on the review fork now?"
+        desc = "Run `gh pr merge 99 --repo owner/review-repo`"
+        code = _invoke_post(
+            [_q(q, [_opt("Yes, merge", desc), _opt("Cancel", "Abort")])],
+            {q: "Yes, merge"}, tmp_path,
+        )
+        assert code == 0
+        assert len(_minted_tokens(tmp_path)) == 1
+
+
+class TestDeclineVetoScopingPreservesVeto1049:
+    """(C) PRESERVED-BLOCK / UNDER-BLOCK canaries — the SACROSANCT never-under-block
+    teeth. A source revert leaves these trivially green (the pre-#1049 code vetoes
+    even harder), so the ONLY valid proof is a BROADEN/WEAKEN mutation of _veto_text
+    that flips them RED. Each docstring names its exact mutation."""
+
+    def test_backticked_noncommand_decline_still_refuses(self, tmp_path):
+        """A backticked NON-command decline phrase (`please skip`) sitting alongside
+        a real command in the SELECTED option STILL vetoes → no mint. `please skip`
+        does NOT classify (detect_command_operation_type is None) → it is NOT excised
+        → the `skip` decline word survives the veto scan → REFUSE.
+
+        BROADEN-MUTATION proof (the mandated under-block proof): in _veto_text, drop
+        the `if detect_command_operation_type(inner) is not None:` guard and excise
+        EVERY quoted span unconditionally. Then `please skip` is also excised → the
+        veto is lost → the bundle's `gh pr merge 42` mints a token → this no-mint
+        assertion flips RED. Verified {1 fail}. That unconditional-excise variant is
+        exactly the under-block the classify gate exists to prevent."""
+        q = "Merge this PR now?"
+        desc = "Run `gh pr merge 42` but `please skip` if CI fails"
+        code = _invoke_post(
+            [_q(q, [_opt("Yes, merge", desc), _opt("Cancel", "Abort")])],
+            {q: "Yes, merge"}, tmp_path,
+        )
+        assert code == 0
+        assert _minted_tokens(tmp_path) == [], (
+            "#1049 UNDER-BLOCK: a backticked non-command decline phrase was excised "
+            "and the genuine decline minted"
+        )
+
+    def test_decline_prose_outside_literal_still_refuses(self, tmp_path):
+        """A genuine decline authored as prose OUTSIDE the command literal (`Skip the`
+        before a backticked `gh pr merge 42`) STILL vetoes → no mint. The excision is
+        span-local: it blanks only the INSIDE of the classifying backtick span, so
+        the outside `Skip` decline word survives → REFUSE.
+
+        BROADEN-MUTATION proof: make _veto_text excise the ENTIRE selected_text (e.g.
+        `return ""` / `return " "`) instead of just the classifying spans. Then `Skip`
+        is removed → veto lost → `gh pr merge 42` mints → RED. Verified {1 fail}.
+        This pins the excision as SPAN-scoped, never whole-text."""
+        q = "Proceed with the merge?"
+        # The decline word is in the LABEL (outside any backticked literal); the
+        # mintable command is in the description literal.
+        desc = "was going to run `gh pr merge 42`"
+        code = _invoke_post(
+            [_q(q, [_opt("Skip the merge for now", desc), _opt("Cancel", "Abort")])],
+            {q: "Skip the merge for now"}, tmp_path,
+        )
+        assert code == 0
+        assert _minted_tokens(tmp_path) == [], (
+            "#1049 UNDER-BLOCK: a decline word outside the command literal was lost"
+        )
+
+
+class TestDeclineVetoScopingOverBlock1049:
+    """(Q4) OVER-BLOCK boundary: a veto-word substring inside a BARE (un-backticked)
+    command literal is NOT excised, so the substring still vetoes → no mint. This is
+    an accepted OVER-block (the #1052 advisory nudges the operator to backtick the
+    command); the deliberate choice is to NEVER excise a bare `_BARE_COMMAND_RE` span
+    because it over-captures trailing decline prose (an under-block risk)."""
+
+    def test_bare_unbacticked_literal_overblocks(self, tmp_path):
+        """`gh pr merge 42 --no-verify` with NO backticks → no quoted span → _veto_text
+        returns the text unchanged → `no` in `--no-verify` still vetoes → REFUSE
+        (over-block, acceptable).
+
+        BROADEN-MUTATION proof: point _veto_text's span scan at `_BARE_COMMAND_RE`
+        (import it from shared + `inner = match.group(0)`) — modelling the rejected
+        bare-span-excision design. Then the bare literal is excised → `no` removed →
+        veto lost → mints → this no-mint assertion flips RED. Verified {1 fail}. (The
+        import is required: without it the swap NameErrors and main's except swallows
+        it into a spurious no-mint pass.) The mutation demonstrates why bare-span
+        excision was rejected as under-block-prone."""
+        q = "Merge this PR now?"
+        desc = "Run gh pr merge 42 --no-verify"  # intentionally NOT backticked
+        code = _invoke_post(
+            [_q(q, [_opt("Yes, merge", desc), _opt("Cancel", "Abort")])],
+            {q: "Yes, merge"}, tmp_path,
+        )
+        assert code == 0
+        assert _minted_tokens(tmp_path) == []
