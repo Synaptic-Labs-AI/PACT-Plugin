@@ -37,7 +37,11 @@ A metachar/quote SUPPRESSOR for the above (the removed shell-semantic over-block
 layer) re-blocks faithful clicks — e.g. it over-blocked
 `gh pr close 7 --comment "(done)" --delete-branch` — which is why it was removed.
 Keep detection LITERAL and faithful-click-safe; do not re-introduce an
-adversarial parser.
+adversarial parser or a fail-closed metachar/quote SUPPRESSOR. This is distinct from
+the KEPT additive flag-normalization arm (_flag_condition_danger_op), which only ADDS
+recognition of canonical flag spellings via a quote-aware tokenize and ABSTAINS on a
+parse failure — it can only OVER-block, never suppress, so do NOT strip it as
+"non-literal."
 
 What the guard DOES recognize (the honest-command surface only): the literal
 destructive patterns (DANGEROUS_PATTERNS); canonical flag SPELLINGS an honest
@@ -642,8 +646,9 @@ def extract_privileged_flags(command: str, op_type: str | None) -> list[str]:
     # kept the quotes → `startswith('-')` skipped it → the escalation rode along).
     # BOTH arms call this shared function so the bind stays symmetric. On an
     # unbalanced quote shlex returns None; fall back to `split()` so the bind never
-    # regresses below today's coverage (the unparseable command is independently
-    # fail-closed upstream by P-FC / the mint-refuse, so this is defense-in-depth).
+    # regresses below today's coverage. The bind is defense-in-depth on top of the
+    # literal floor (is_dangerous_command), which is the fail-closed default — there is
+    # no metachar suppressor in the honest-mistake model.
     tokens = _shell_tokenize(command)
     if tokens is None:
         tokens = command.split()
@@ -1459,11 +1464,13 @@ def _shell_tokenize(command: str) -> list[str] | None:
     """P1: quote-aware shell-word tokenizer (shlex.split posix=True, comments=False) —
     strips single/double quotes, processes escapes, keeps a quoted-value span as ONE
     token. Returns the token list on success, or None on ValueError (unbalanced /
-    unterminated quote). None is the FAIL-CLOSED signal — callers treat an untokenizable
-    command as DANGEROUS (read) / NON-MINTABLE (mint), never safe. shlex leaves
-    $ / $() / backtick LITERAL (no expansion) — we DETECT those in P-FC, never resolve
-    them, so shlex SUCCESS != SAFE (the post-tokenize metachar check in P-FC is the
-    load-bearing other half)."""
+    unterminated quote). On None the callers ABSTAIN (extract_privileged_flags falls back
+    to `split()`; _flag_condition_danger_op returns None) and let the literal floor
+    (DANGEROUS_PATTERNS) decide — so an untokenizable command is dangerous only if the
+    floor matches, never dangerous merely because it failed to tokenize. shlex leaves
+    $ / $() / backtick LITERAL (no expansion); under the honest-mistake model that is
+    acceptable — runtime $-expansion is explicitly out of scope (the hook only ever sees
+    the pre-expansion literal an honest agent typed)."""
     try:
         return shlex.split(command, posix=True, comments=False)
     except ValueError:
@@ -1475,8 +1482,9 @@ def _mask_shell_quotes(command: str, mask_double: bool = True) -> str:
     (delimiters + contents) replaced by spaces, preserving out-of-quote structure at
     identical offsets. `mask_double=True` masks BOTH '...' and "..." (P3 operator
     detection — a separator inside EITHER quote is not a real separator).
-    `mask_double=False` masks SINGLE '...' ONLY (P-FC — a $()/backtick/$ inside "..."
-    is ACTIVE in bash, so it must stay VISIBLE to the metachar check). FAILS TOWARD
+    `mask_double=False` masks SINGLE '...' ONLY, leaving "..." spans visible (a general
+    utility mode with no current caller — the sole caller, the compound operator scan,
+    uses mask_double=True; retained as harmless general utility). FAILS TOWARD
     UNMASKED: a `\\`-escaped quote (outside quotes) never opens a span, and a mis-paired
     / unterminated quote leaves the REST unmasked (visible) — so an operator/metachar
     can only OVER-block, never under-block (the #1037-CLASS-1 closure: ambiguity never
@@ -1646,13 +1654,13 @@ def _flag_condition_danger_op(command: str) -> str | None:
     op-shape (which subcommand) is matched with the SAME shared prefixes the literal
     floor uses; the danger test is then a boolean condition over `_normalized_flags`.
     ADDITIVE over the literal floor (INV-AU): an unparseable command / mis-parse can
-    only FAIL to return an op here (the literal floor still fail-closes it — and the
-    pending P-FC catch-all will too), never re-open an under-block. The coarse shape
+    only FAIL to return an op here (this arm ABSTAINS; the literal floor still decides),
+    never re-open an under-block. The coarse shape
     only SCOPES which condition runs — a false coarse-match whose condition does not
     hold returns None (over-block-safe)."""
     tokens = _shell_tokenize(command)
     if tokens is None:
-        return None  # unparseable → literal floor fail-closes (P-FC catch-all pending); this arm abstains
+        return None  # unparseable → this arm abstains; the literal floor decides (honest-mistake: no metachar catch-all)
     # close --delete-branch — covers `-d`, clustered `-cd`, `--delete-branch`; the
     # literal floor matches ONLY the spelled-out `--delete-branch` (the #2 gap).
     if _GH_PR_CLOSE_RE.search(command):
