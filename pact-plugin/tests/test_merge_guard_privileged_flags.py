@@ -372,10 +372,11 @@ class TestScannerCanonicalForms:
         ("gh pr merge 5 --match-head-commit=ABC123", "merge", ["--match-head-commit=ABC123"]),
         # benign: no bound flag → empty set
         ("gh pr merge 5", "merge", []),
-        # close op-class: -R bound; --delete-branch is the op-trigger (NOT bound)
+        # close op-class: -R bound; --delete-branch/-d now BOUND (GAP2 — bare close
+        # would otherwise set-equal the delete variant → escalation).
         ("gh pr close 5 -R x/y", "close", ["--repo=x/y"]),
         ("gh pr close 5 -R=x/y", "close", ["--repo=x/y"]),  # short =-joined on close
-        ("gh pr close 5 --delete-branch", "close", []),
+        ("gh pr close 5 --delete-branch", "close", ["--delete-branch"]),
         # force-push: --no-verify (exact)
         ("git push --no-verify origin main --force", "force-push", ["--no-verify"]),
     ]

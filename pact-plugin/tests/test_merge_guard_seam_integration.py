@@ -229,11 +229,16 @@ class TestSeamMainEntryPoints:
         assert code == 0
         assert '"permissionDecision": "deny"' not in out
 
-    def test_main_to_main_divergent_pr_blocks(self, tmp_path):
-        """SACROSANCT >1-distinct-pair refusal through the documented template:
-        the option names PR 252 but the question names PR 253 → TWO distinct
-        (op,target) pairs → the multiplicity gate refuses → no token → the merge
-        is held. (The template's same-`<N>` rule exists precisely to avoid this.)"""
+    def test_main_to_main_divergent_question_mints_clicked_residual(self, tmp_path):
+        """RESIDUAL-CANARY (floor): the clicked option names PR 252, the QUESTION
+        names a divergent PR 253. The minimal floor scans ONLY the clicked option for
+        multiplicity (the question prose is never cross-checked), so it MINTS the
+        clicked 252 and IGNORES the question's 253 — a documented wrong-TARGET
+        ACCEPTED RESIDUAL. Through the full main()→main() seam: a token mints,
+        `gh pr merge 252` authorizes, and the divergent `gh pr merge 253` is NOT
+        authorized (only the clicked command binds).
+        NON-VACUITY: re-widen the Step-3 multiplicity scan to include the question
+        text → two distinct pairs → refuse → 0 tokens → RED."""
         description = _concrete(_DESC_TEMPLATE, "252")
         question = f"Merge this PR now? On approval the team runs {_concrete(_CMD_TEMPLATE, '253')}"
         options = [{"label": _LABEL, "description": description}]
@@ -241,10 +246,15 @@ class TestSeamMainEntryPoints:
             [{"question": question, "options": options, "multiSelect": False}],
             {question: _LABEL}, tmp_path,
         ) == 0
-        assert list(tmp_path.glob("merge-authorized-*")) == []
-        code, out = self._run_pre("gh pr merge 252", tmp_path)
-        assert code == 2
-        assert '"permissionDecision": "deny"' in out
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 1
+        # the divergent QUESTION pr is not authorized (never minted — only the click)
+        code253, out253 = self._run_pre("gh pr merge 253", tmp_path)
+        assert code253 == 2
+        assert '"permissionDecision": "deny"' in out253
+        # the clicked option's pr authorizes
+        code252, out252 = self._run_pre("gh pr merge 252", tmp_path)
+        assert code252 == 0
+        assert '"permissionDecision": "deny"' not in out252
 
     def test_main_to_main_non_conforming_blocks(self, tmp_path):
         """A non-conforming approval through main() (no command in question or
@@ -260,3 +270,202 @@ class TestSeamMainEntryPoints:
         code, out = self._run_pre("gh pr merge 252", tmp_path)
         assert code == 2
         assert '"permissionDecision": "deny"' in out
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# #1052 — self-teaching OBSERVER-STYLE no-mint advisory. When an AskUserQuestion
+# approval is issued for a COMMAND-BEARING bundle but mints NO token, main emits a
+# `hookSpecificOutput.additionalContext` advisory (exit 0) that NAMES the failing
+# gate and points to the canonical peer-review.md template. It is OBSERVER-ONLY:
+# it never writes a token, so the pre-hook still DENIES — authorization isolation.
+# Benign, non-destructive AskUserQuestions stay SILENT (suppressOutput), because
+# the advisory is gated by _bundle_has_command (this hook matches EVERY
+# AskUserQuestion). Driven over the real main() stdin→stdout seam, no token mock.
+# ════════════════════════════════════════════════════════════════════════════
+
+class TestNoMintAdvisory1052:
+    def _post_envelope(self, questions, answers) -> str:
+        return json.dumps({
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": questions},
+            "tool_response": {"answers": answers},
+            "session_id": "test-advisory",
+        })
+
+    def _run_post_capture(self, questions, answers, tmp) -> tuple[int, str]:
+        """Drive merge_guard_post.main() over a real stdin envelope, capturing
+        STDOUT (the advisory / suppressOutput payload). TOKEN_DIR redirected to a
+        real temp dir; nothing else stubbed."""
+        out = io.StringIO()
+        with patch("merge_guard_post.TOKEN_DIR", tmp), \
+             patch("sys.stdin", io.StringIO(self._post_envelope(questions, answers))), \
+             patch("sys.stdout", out):
+            with pytest.raises(SystemExit) as exc:
+                _post_main()
+        return exc.value.code, out.getvalue()
+
+    def _pre_envelope(self, command) -> str:
+        return json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "session_id": "test-advisory",
+        })
+
+    def _run_pre(self, command, tmp) -> tuple[int, str]:
+        out = io.StringIO()
+        with patch("merge_guard_pre.TOKEN_DIR", tmp), \
+             patch("sys.stdin", io.StringIO(self._pre_envelope(command))), \
+             patch("sys.stdout", out):
+            with pytest.raises(SystemExit) as exc:
+                _pre_main()
+        return exc.value.code, out.getvalue()
+
+    @staticmethod
+    def _additional_context(stdout: str) -> str | None:
+        """Extract hookSpecificOutput.additionalContext from a captured stdout
+        payload, or None when the payload is a plain suppressOutput (silent)."""
+        payload = json.loads(stdout)
+        return payload.get("hookSpecificOutput", {}).get("additionalContext")
+
+    # (reason_code, bundle, answers, distinctive_diagnostic_substring). Each bundle
+    # is COMMAND-BEARING and refuses for exactly the named gate; the substring is an
+    # INDEPENDENT literal (NOT derived from _REFUSAL_DIAGNOSTICS) so the oracle does
+    # not share the implementation's wording source — a wording regression on that
+    # specific reason flips only its own row.
+    # The floor's LIVE refusal reasons (post-#22). The removed decline-veto +
+    # label-op-consistency reasons (decline_veto / label_op_mismatch) are gone — those
+    # are now ACCEPTED RESIDUALS that MINT (see the auth_symmetry residual-canaries),
+    # so there is no no-mint advisory for them. option_not_anchored is UNREACHABLE
+    # under the floor (Step 3 scans only the clicked options, so anchoring holds by
+    # construction — a command in the question with a generic clicked option yields
+    # `no_command`, not option_not_anchored). Two NEW floor reasons are added:
+    # not_dangerous (GAP1 is_dangerous write-gate) and compound_command (GAP5).
+    _REASON_CASES = [
+        ("no_options",
+         [{"question": "Run `gh pr merge 42`?"}],
+         {"Run `gh pr merge 42`?": "yes please"},
+         "no clickable options"),
+        ("label_mismatch",
+         [{"question": "Merge now?",
+           "options": [{"label": "Yes, merge", "description": "Run `gh pr merge 42`"}],
+           "multiSelect": False}],
+         {"Merge now?": "Some answer matching no label"},
+         "did not exactly match an option label"),
+        ("no_command",
+         [{"question": "Merge `gh pr merge 42`?",
+           "options": [{"label": "Yes", "description": "Confirmed, proceed"}],
+           "multiSelect": False}],
+         {"Merge `gh pr merge 42`?": "Yes"},
+         "no recognized merge/close/force-push/branch-delete command"),
+        ("multiple_commands",
+         [{"question": "Do these?",
+           "options": [{"label": "Yes", "description": "Run `gh pr merge 42` and `gh pr merge 99`"}],
+           "multiSelect": False}],
+         {"Do these?": "Yes"},
+         "more than one distinct"),
+        ("not_dangerous",
+         [{"question": "Close it?",
+           "options": [{"label": "Yes", "description": "Run `gh pr close 7`"}],
+           "multiSelect": False}],
+         {"Close it?": "Yes"},
+         "is not one that the merge guard gates"),
+        # Honest-mistake ≥2 model: compound_command fires only for >=2 DESTRUCTIVE
+        # legs. This exemplar uses TWO gh/git-destructive legs (merge 42 + close 7
+        # --delete-branch). (Under the ratified rm-leg=YES model, `gh pr merge 42 &&
+        # rm -rf /` ALSO counts as compound — a gh/git op + a plain-`rm` head leg = two
+        # destructive legs; either exemplar exercises the compound_command reason.)
+        ("compound_command",
+         [{"question": "Run it?",
+           "options": [{"label": "Yes", "description": "Run `gh pr merge 42 && gh pr close 7 --delete-branch`"}],
+           "multiSelect": False}],
+         {"Run it?": "Yes"},
+         "chained multiple commands with a shell command separator"),
+    ]
+
+    @pytest.mark.parametrize(
+        "reason, questions, answers, diagnostic",
+        _REASON_CASES, ids=[c[0] for c in _REASON_CASES],
+    )
+    def test_advisory_fires_with_reason_diagnostic(
+        self, tmp_path, reason, questions, answers, diagnostic
+    ):
+        """A command-bearing bundle that refuses for `reason` → main emits the
+        observer advisory naming THAT gate + pointing at peer-review.md, mints NO
+        token, exits 0.
+
+        NON-VACUITY (broaden/remove-mutation): delete the no-mint advisory else-branch
+        in `main` (the `elif refusal_reason is not None and _bundle_has_command(...)`
+        block) → stdout becomes a plain suppressOutput → additionalContext is None →
+        every row RED. Verified {6 failed} (one per live floor reason)."""
+        code, out = self._run_post_capture(questions, answers, tmp_path)
+        assert code == 0
+        # No token minted on any refusal path.
+        assert list(tmp_path.glob("merge-authorized-*")) == []
+        ctx = self._additional_context(out)
+        assert ctx is not None, f"advisory did not fire for {reason}"
+        # Names the specific failing gate (independent literal, not SSOT-derived).
+        assert diagnostic in ctx, f"advisory for {reason} missing its diagnostic"
+        # Points at the canonical approval template.
+        assert "peer-review.md" in ctx
+
+    def test_benign_nondestructive_question_stays_silent(self, tmp_path):
+        """A benign, NON-destructive AskUserQuestion (no command anywhere) that does
+        not mint stays SILENT — plain suppressOutput, no additionalContext, no token.
+        The advisory is gated by _bundle_has_command so this hook (which matches
+        EVERY AskUserQuestion) does not spam ordinary questions.
+
+        BROADEN-MUTATION proof: drop the `and _bundle_has_command(questions)` guard on
+        main's advisory else-branch (fire on any refusal). Then this benign question
+        emits an advisory → additionalContext becomes non-None → this silence
+        assertion flips RED. Verified {1 fail}."""
+        questions = [{
+            "question": "Which environment should we deploy to?",
+            "options": [{"label": "Staging", "description": "Deploy to staging"},
+                        {"label": "Production", "description": "Deploy to production"}],
+            "multiSelect": False,
+        }]
+        code, out = self._run_post_capture(questions, {"Which environment should we deploy to?": "Staging"}, tmp_path)
+        assert code == 0
+        assert list(tmp_path.glob("merge-authorized-*")) == []
+        assert self._additional_context(out) is None, (
+            "benign non-destructive question wrongly emitted the no-mint advisory"
+        )
+
+    def test_authorization_isolation_advisory_never_authorizes(self, tmp_path):
+        """AUTHORIZATION ISOLATION — the headline #1052 safety property, RE-POINTED to
+        a genuine FLOOR no-mint scenario. A command-bearing bundle whose CLICKED option
+        carries NO command (the destructive `gh pr merge 42` is only in the QUESTION
+        prose, never the clicked option) refuses with `no_command` → it emits the
+        advisory AND writes NO token AND the pre-hook STILL DENIES the merge. The
+        observer advisory is structurally incapable of authorizing. (The old scenario —
+        a decline-LABELED option CARRYING the command — now MINTS as an accepted
+        residual under the floor, so it is no longer a no-mint case; this re-points to
+        the clicked-option-with-no-command no-mint, which the floor still refuses.)
+
+        Three conjuncts asserted separately:
+          (a) the advisory fired (operator gets the self-teaching nudge),
+          (b) NO token on disk (additionalContext is not a token), and
+          (c) the pre-hook denies `gh pr merge 42` (exit 2 + deny JSON) over the real
+              token seam — the merge stays HELD.
+
+        MAKE-ADVISORY-MINT mutation proof: have the advisory else-branch call
+        write_token(...) before emitting (or fall through into the mint). Then a token
+        appears → conjunct (b) flips RED (and (c) would authorize). That mutation is the
+        exact authorization leak the observer-only design forbids."""
+        questions = [{
+            "question": "Approve the merge `gh pr merge 42`?",
+            "options": [{"label": "Yes", "description": "Confirmed, proceed"},
+                        {"label": "Cancel", "description": "Abort"}],
+            "multiSelect": False,
+        }]
+        code, out = self._run_post_capture(questions, {"Approve the merge `gh pr merge 42`?": "Yes"}, tmp_path)
+        assert code == 0
+        # (a) advisory fired
+        ctx = self._additional_context(out)
+        assert ctx is not None and "peer-review.md" in ctx
+        # (b) no token minted by the advisory path
+        assert list(tmp_path.glob("merge-authorized-*")) == []
+        # (c) the pre-hook still denies the merge over the real seam
+        pre_code, pre_out = self._run_pre("gh pr merge 42", tmp_path)
+        assert pre_code == 2
+        assert '"permissionDecision": "deny"' in pre_out

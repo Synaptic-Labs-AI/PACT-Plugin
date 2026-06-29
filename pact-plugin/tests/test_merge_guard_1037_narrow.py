@@ -106,6 +106,10 @@ class TestNarrowGhCommentCarrierStripBlock:
         # non-vacuity (proof-class C, span-stop discrimination): the op INSIDE the
         # body ALLOWs; the SAME op after an UNQUOTED `;` BLOCKs (the span stops at
         # the separator, the op falls OUTSIDE the stripped value and survives).
+        # Honest-mistake ≥2-narrowing: the post-separator `gh pr merge 5` is ONE
+        # destructive leg (the carrier `gh pr comment` is benign), so it is NOT
+        # >=2-compound — but it is STILL is_dangerous-gated (the carrier strip
+        # preserves the op, the single-op gate catches it), so it STILL BLOCKS.
         from merge_guard_pre import (
             is_dangerous_command,
             is_compound_destructive_command,
@@ -115,13 +119,20 @@ class TestNarrowGhCommentCarrierStripBlock:
         inside = 'gh pr comment 5 --body "x gh pr merge 5"'
         outside = 'gh pr comment 5 --body "x" ; gh pr merge 5'
         assert not is_dangerous_command(inside)  # op inside the body -> ALLOW
-        assert is_compound_destructive_command(outside)  # op after `;` -> BLOCK
+        assert is_dangerous_command(outside)  # op after `;` survives the strip -> BLOCK (single-op gate)
+        assert not is_compound_destructive_command(outside)  # one destructive leg -> not >=2-compound
         assert "gh pr merge 5" in _strip_non_executable_content(outside)  # op survives
 
     def test_op_after_body_andand_blocks(self):
-        from merge_guard_pre import is_compound_destructive_command
+        # Honest-mistake ≥2: `gh pr comment 5 --body "x" && gh pr merge 9` is ONE
+        # destructive leg (merge 9; the comment carrier is benign) → NOT >=2-compound,
+        # but the merge survives the carrier strip and STILL BLOCKS via the single-op
+        # is_dangerous gate.
+        from merge_guard_pre import is_dangerous_command, is_compound_destructive_command
 
-        assert is_compound_destructive_command('gh pr comment 5 --body "x" && gh pr merge 9')
+        cmd = 'gh pr comment 5 --body "x" && gh pr merge 9'
+        assert is_dangerous_command(cmd)  # op after && -> BLOCK (single-op gate)
+        assert not is_compound_destructive_command(cmd)  # one destructive leg
 
     def test_command_substitution_in_body_blocks(self, monkeypatch):
         # non-vacuity (proof-class C): the dq inner-strip PRESERVES a $()/backtick
@@ -132,7 +143,9 @@ class TestNarrowGhCommentCarrierStripBlock:
 
         cmd = 'gh pr comment 5 --body "$(gh pr merge 5)"'
         assert is_dangerous_command(cmd)
-        monkeypatch.setattr("merge_guard_pre._has_command_substitution", lambda q: False)
+        # is_dangerous_command + its _has_command_substitution helper are promoted to
+        # shared (GAP1); neuter the SHARED definition (pre re-exports the same object).
+        monkeypatch.setattr("shared.merge_guard_common._has_command_substitution", lambda q: False)
         assert not is_dangerous_command(cmd)  # flips ALLOW under the neuter
 
     def test_escaped_quote_outside_carrier_flag_blocks(self):
@@ -277,13 +290,18 @@ class TestNarrowGhCommentSecurityAnchoringCanaries:
 
     def test_op_after_body_with_admin_blocks(self):
         # #1042 bypass shape (--admin) chained after the comment body -> BLOCK.
+        # Honest-mistake ≥2: ONE destructive leg (merge 5 --admin; the comment carrier
+        # is benign) → NOT >=2-compound, but the privileged merge survives the carrier
+        # strip and STILL BLOCKS via the single-op is_dangerous gate.
         from merge_guard_pre import (
+            is_dangerous_command,
             is_compound_destructive_command,
             _strip_non_executable_content,
         )
 
         cmd = 'gh pr comment 5 --body "ok" ; gh pr merge 5 --admin'
-        assert is_compound_destructive_command(cmd)
+        assert is_dangerous_command(cmd)  # op after `;` -> BLOCK (single-op gate)
+        assert not is_compound_destructive_command(cmd)  # one destructive leg
         assert "gh pr merge 5 --admin" in _strip_non_executable_content(cmd)
 
     def test_output_procsub_blocks_defense_in_depth(self):

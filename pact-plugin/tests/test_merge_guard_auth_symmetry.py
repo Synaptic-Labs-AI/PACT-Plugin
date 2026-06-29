@@ -388,27 +388,13 @@ class TestRegressionMustAuthorize:
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestWriteGateEvasion:
-    def test_wge1_decline_option_embedding_command_vetoes(self, tmp_path):
-        """WGE-1: a DECLINE option ('Continue reviewing') whose description
-        embeds the command, when SELECTED, vetoes the mint (veto precedence over
-        command presence)."""
-        q = "Ready to merge?"
-        opts = [_opt("Yes, merge", "Run `gh pr merge 42`"),
-                _opt("Continue reviewing", "Run `gh pr merge 42` after review")]
-        code = _invoke_post([_q(q, opts)], {q: "Continue reviewing"}, tmp_path)
-        assert code == 0
-        assert _minted_tokens(tmp_path) == []
-        assert _authorize("gh pr merge 42", tmp_path) is not None
-
-    def test_wge2_deferred_selection_carrying_command_vetoes(self, tmp_path):
-        """WGE-2: a deferred selection ('Approve after CI') carrying the command
-        is vetoed by the defer recognizer ('after')."""
-        q = "Merge now or after CI?"
-        opts = [_opt("Approve after CI", "Run `gh pr merge 42` once CI is green"),
-                _opt("Cancel", "Abort")]
-        code = _invoke_post([_q(q, opts)], {q: "Approve after CI"}, tmp_path)
-        assert code == 0
-        assert _minted_tokens(tmp_path) == []
+    # (Floor reconcile) WGE-1 (decline-label 'Continue reviewing' carrying the
+    # command) and WGE-2 (defer-label 'Approve after CI' carrying the command)
+    # asserted the now-REMOVED decline/defer veto. Under the minimal floor those
+    # selections MINT (the operator clicked a command-bearing option) — a documented
+    # ACCEPTED RESIDUAL (#21). Their residual coverage moved to
+    # TestDeclineLabelCarryingCommandResidualMints below; deleted here because the
+    # veto mechanism they exercised no longer exists.
 
     def test_wge3_answer_matching_no_label_no_iter_fallback(self, tmp_path):
         """WGE-3: an answer matching NO option label refuses (the KD-12 fix kills
@@ -486,28 +472,39 @@ class TestClassIINonSelectedOptionSmuggle:
         assert _authorize("gh pr merge 99", tmp_path) is not None
 
 
-class TestClassIIDeclineLabelGuardrail:
-    """The decline-label guardrail: selecting a decline option NEVER mints, even
-    when a valid affirmative option carrying a command is also present. CLASS-II:
-    selecting the decline label was non-affirmative at baseline too, so it is
-    already-true and revert-immune.
+class TestDeclineLabelCarryingCommandResidualMints:
+    """RESIDUAL-CANARY (post-#22 minimal floor). The floor does NO decline/defer
+    intent-parsing — the operator's CONSENT is the CLICK on a command-bearing
+    option, and the surrounding label/description prose is never read to second-
+    guess it. So clicking a DECLINE- or DEFER-labelled option whose description
+    nonetheless CARRIES the destructive command MINTS — a documented, user-ratified
+    ACCEPTED RESIDUAL (#21 threat-model: the agent places the command ONLY in
+    affirmative options, so a genuine decline option carries no command). These were
+    previously WGE-1/WGE-2 (decline/defer veto) + the decline-label guardrail; they
+    are reframed as residual-canaries that ASSERT the mint, so any re-introduction
+    of a prose decline/defer cross-check is caught.
 
-    ADD-MUTATION PROOF: remove the Step-1 decline/defer veto from
-    _mint_context_from_bundle. Then selecting 'Pause work for now' (whose
-    description carries the command) lets the multiplicity gate see
-    `gh pr merge 42` from the selected option → a token mints → the no-token
-    assert flips RED. Verified manually via git-stash of the veto block."""
+    NON-VACUITY (broaden-mutation, the ONLY valid proof for an accepted-residual
+    canary — a source revert leaves it green): re-add a decline/defer prose veto to
+    `_mint_context_from_bundle` (scan the selected option's label+description for a
+    decline word and refuse) → these selections refuse → 0 tokens → every row RED.
+    That mutation is exactly the #17/#21 under-block/FP class the floor removed."""
 
-    def test_selecting_decline_label_mints_nothing(self, tmp_path):
-        q = "Merge or pause?"
-        opts = [
-            _opt("Yes, merge", "Run `gh pr merge 42`"),
-            _opt("Pause work for now", "Run `gh pr merge 42` later, not now"),
-        ]
-        code = _invoke_post([_q(q, opts)], {q: "Pause work for now"}, tmp_path)
+    @pytest.mark.parametrize("label, description", [
+        ("Pause work for now", "Run `gh pr merge 42` later, not now"),   # decline label
+        ("Continue reviewing", "Run `gh pr merge 42` after review"),     # decline label (was WGE-1)
+        ("Approve after CI", "Run `gh pr merge 42` once CI is green"),   # defer label (was WGE-2)
+    ])
+    def test_decline_or_defer_label_carrying_command_mints(self, tmp_path, label, description):
+        q = "Merge or hold?"
+        opts = [_opt(label, description), _opt("Cancel", "Abort")]
+        code = _invoke_post([_q(q, opts)], {q: label}, tmp_path)
         assert code == 0
-        assert _minted_tokens(tmp_path) == []
-        assert _authorize("gh pr merge 42", tmp_path) is not None
+        assert len(_minted_tokens(tmp_path)) == 1, (
+            f"floor residual: clicking decline/defer label {label!r} carrying the "
+            "command must MINT (no prose intent-parsing)"
+        )
+        assert _authorize("gh pr merge 42", tmp_path) is None
 
 
 class TestA5NoTokenNonCase:
@@ -586,14 +583,16 @@ class TestShellRedirectIsolation:
 
 
 class TestMintGuardBranches:
-    """Two additional MINT guard branches (architect §5.2 steps 1 & 4): the
-    multiSelect decline veto and the label<->description op-consistency refuse.
-    Both are REFUSE-only #1031-direction guards (over-block, never authorize)."""
+    """MINT guard branches under the minimal floor. The multiSelect refusal is a
+    structural over-block guard (multiSelect never mints) that survives. The old
+    label<->description op-consistency refuse (Step 4) was prose intent-parsing and
+    was REMOVED — a wrong-OP label is now an ACCEPTED RESIDUAL (mints the command in
+    the description); see test_label_op_inconsistent_with_command_mints_residual."""
 
-    def test_multiselect_with_decline_option_refuses(self, tmp_path):
-        """Step 1 veto: a multiSelect question containing a decline option is
-        refused as a mint source (the decline word vetoes the whole bundle),
-        even though the selected option carries a command."""
+    def test_multiselect_refused_as_mint_source(self, tmp_path):
+        """multiSelect is refused as a mint SOURCE (structural over-block guard) — a
+        multiSelect question never mints, regardless of its options' prose. Floor:
+        this is the `if multi: continue` guard, NOT a decline-word veto."""
         q = "Select actions:"
         opts = [_opt("Merge it", "Run `gh pr merge 42`"), _opt("Cancel", "Abort")]
         code = _invoke_post([_q(q, opts, multiSelect=True)], {q: "Merge it, Cancel"}, tmp_path)
@@ -601,18 +600,21 @@ class TestMintGuardBranches:
         assert _minted_tokens(tmp_path) == []
         assert _authorize("gh pr merge 42", tmp_path) is not None
 
-    def test_label_op_inconsistent_with_command_refuses(self, tmp_path):
-        """Step 4 (D/1c): when the selected option's LABEL names a DIFFERENT
-        operation than the command in its description, the mint REFUSES
-        (prose-divergence-refuse-only — a loose label must never re-import the
-        #1031 distractor by authorizing a mismatched command)."""
+    def test_label_op_inconsistent_with_command_mints_residual(self, tmp_path):
+        """RESIDUAL-CANARY (floor): when the clicked option's LABEL names a DIFFERENT
+        operation than the command in its description (label 'Close the PR', command
+        `gh pr merge 42`), the mint MINTS the command — the floor trusts the clicked
+        command and does NOT cross-check the label prose (a documented wrong-OP
+        ACCEPTED RESIDUAL). NON-VACUITY (broaden-mutation): re-add a Step-4
+        label<->command op-consistency refuse to `_mint_context_from_bundle` → this
+        selection refuses → 0 tokens → RED."""
         q = "Proceed?"
         # Label says 'close', description carries a MERGE command — divergent op.
         opts = [_opt("Close the PR", "Run `gh pr merge 42`"), _opt("Cancel", "Abort")]
         code = _invoke_post([_q(q, opts)], {q: "Close the PR"}, tmp_path)
         assert code == 0
-        assert _minted_tokens(tmp_path) == []
-        assert _authorize("gh pr merge 42", tmp_path) is not None
+        assert len(_minted_tokens(tmp_path)) == 1
+        assert _authorize("gh pr merge 42", tmp_path) is None
 
     def test_label_op_consistent_with_command_mints(self, tmp_path):
         """Positive control: a label whose op AGREES with the command's op mints
@@ -720,15 +722,70 @@ class TestOptionAnchoringMint:
         assert code == 0
         assert _authorize("gh pr merge 42", tmp_path) is None
 
-    def test_divergent_question_vs_option_refuses(self, tmp_path):
-        """Control: question op/target ≠ the clicked option's (two distinct
-        pairs) → the multiplicity gate REFUSES (the #32 fix did not weaken
-        divergence detection)."""
+    def test_divergent_question_vs_option_mints_clicked_residual(self, tmp_path):
+        """RESIDUAL-CANARY (floor): the question names a DIFFERENT command
+        (`git push --force origin main`) than the clicked option (`gh pr merge 42`).
+        The minimal floor scans ONLY the CLICKED options for multiplicity (the
+        question prose is never cross-checked), so it MINTS the clicked merge 42 and
+        IGNORES the question's force-push — a documented wrong-TARGET ACCEPTED
+        RESIDUAL, and the exact anchoring property this class guards (the mint binds
+        to the clicked command, never question prose). The minted token authorizes
+        merge 42; the divergent force-push is NOT authorized.
+        NON-VACUITY (broaden-mutation): re-widen the Step-3 multiplicity scan to
+        include the question text → two distinct pairs → refuse → 0 tokens → RED."""
         q = "Force-push via `git push --force origin main`?"
         opts = [_opt("Yes, merge", "Run `gh pr merge 42`"), _opt("Cancel", "Abort")]
         code = _invoke_post([_q(q, opts)], {q: "Yes, merge"}, tmp_path)
         assert code == 0
-        assert _minted_tokens(tmp_path) == []
+        assert len(_minted_tokens(tmp_path)) == 1
+        assert _authorize("gh pr merge 42", tmp_path) is None
+        # the divergent question command is NOT authorized (only the clicked option)
+        assert _authorize("git push --force origin main", tmp_path) is not None
+
+
+class TestBenignChainFaithfulClickMints:
+    """FUT-3 — the POST(mint) round-trip the read-side cannot see: a faithful single
+    destructive op carrying a BENIGN continuation (`&& echo`, `| tee`, a trailing
+    background `&`) is a faithful click, so the mint MINTS exactly one token AND the
+    read side then AUTHORIZES the exact command end-to-end. The read-side suite already
+    proves these benign chains are not-refused at read time (is_compound=False,
+    is_dangerous=True); this closes the mint-side leg of the invariant — a faithful
+    single-command click always mints and executes — through the real post.main() seam.
+
+    NON-VACUITY (concrete, no source mutation): the SAME mint helper REFUSES a genuine
+    >=2-destructive chain (0 tokens) — test_two_destructive_chain_does_not_mint below —
+    so the positive 'mints' assertion is not a mint-everything tautology. A re-introduced
+    compound/metachar over-block on the mint would drop the benign-chain token count to 0
+    (RED); a read-side over-block would flip the authorize to DENIED (RED).
+    """
+
+    @pytest.mark.parametrize("benign_cmd", [
+        "gh pr merge 42 && echo done",      # `&&` benign continuation
+        "gh pr merge 42 | tee /tmp/log",    # pipe into a benign sink
+        "gh pr merge 42 &",                 # trailing background operator
+    ])
+    def test_benign_continuation_mints_and_authorizes(self, tmp_path, benign_cmd):
+        """A faithful click whose command carries a benign continuation mints exactly one
+        token (single destructive leg) and the read side authorizes the matching command."""
+        q = "Approve?"
+        opts = [_opt("Yes, merge", f"Run `{benign_cmd}`"), _opt("Cancel", "Abort")]
+        code = _invoke_post([_q(q, opts)], {q: "Yes, merge"}, tmp_path)
+        assert code == 0
+        assert len(_minted_tokens(tmp_path)) == 1          # the mint MINTED the faithful click
+        assert _authorize(benign_cmd, tmp_path) is None    # read AUTHORIZES end-to-end
+
+    def test_two_destructive_chain_does_not_mint(self, tmp_path):
+        """Discriminating negative (the non-vacuity anchor for the positive above): a
+        genuine TWO-destructive chain is refused by the mint (>=2 destructive legs) → 0
+        tokens, and the read side denies it too. Proves the benign-chain 'mints' assertion
+        is coupled to single-op faithfulness, not a mint-everything no-op."""
+        q = "Approve?"
+        cmd = "gh pr merge 42 && gh pr close 7 --delete-branch"
+        opts = [_opt("Yes, merge", f"Run `{cmd}`"), _opt("Cancel", "Abort")]
+        code = _invoke_post([_q(q, opts)], {q: "Yes, merge"}, tmp_path)
+        assert code == 0
+        assert _minted_tokens(tmp_path) == []              # >=2 destructive → mint REFUSES
+        assert _authorize(cmd, tmp_path) is not None       # read denies too
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -890,3 +947,179 @@ class TestPrivilegedFlagReadFloorSeam:
              "bound_flags": ["--no-verify"]},
         )
         assert _authorize("git push --no-verify origin main --force", tmp_path) is None
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Bash line-continuation parity over the real mint→read seam.
+# A `\<newline>` in the SELECTED option text must be JOINED identically on the
+# mint arm (locate_command_regions + extract_command_context) and the read arm,
+# so the #1042 op/target/flag bind is continuation-INVARIANT. Without the shared
+# normalization a `\<newline>`-split danger trigger / privileged flag drifts the
+# two arms apart in BOTH directions: a faithful click is OVER-blocked, and a
+# split privileged flag UNDER-slips a flagless approval.
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestLineContinuationMintReadSymmetry:
+    """Bash line-continuation (`\\<newline>`) in the SELECTED option text, driven
+    through the REAL mint→read seam (post.main → write_token →
+    check_merge_authorization) — never a hand-built token that would bypass the
+    mint decision. The shared SSOT now joins `\\<newline>` → space on BOTH
+    locate_command_regions (the op/target region) and extract_command_context (the
+    flag scan) BEFORE detection, so mint and read normalize identically.
+
+    Both directions are coupled to the common.py line-continuation normalization:
+    a SOURCE-ONLY revert of that fix (leave this test file in place, restore
+    merge_guard_common.py to its pre-fix shape) flips every test in this class RED
+    — expected cardinality {3 failed} — and each row's docstring names the precise
+    pre-fix drift that breaks it.
+
+      OVER-BLOCK FIX (faithful click authorizes): a faithful close/merge whose
+      option text carries a `\\<newline>`-split danger trigger / privileged flag
+      mints a token binding the JOINED command, and the clean executed command
+      AUTHORIZES end-to-end (mint==read round-trip closes).
+
+      UNDER-BLOCK GUARD (escalation refused): a plain `merge 5` token (no --admin)
+      does NOT authorize a `\\<newline>`-split `--admin` execution — the read side
+      now joins the continuation, binds {--admin}, and the set-inequality
+      {} != {--admin} REFUSES, STRENGTHENING the #1042 bind (a split privileged
+      flag no longer slips)."""
+
+    # Bash `\<newline>` line continuation embedded in the option text. The shell
+    # joins this to a single clean command on execution; the guard must bind the
+    # JOINED command so a faithful click round-trips and a split flag cannot drift.
+    _CLOSE_SPLIT = "gh pr close 5 \\\n--delete-branch"
+    _MERGE_ADMIN_SPLIT = "gh pr merge 5 \\\n--admin"
+
+    def test_close_split_continuation_round_trips_via_real_mint(self, tmp_path):
+        """OVER-BLOCK FIX (op/target region axis): a faithful
+        `gh pr close 5 \\<newline>--delete-branch` click mints exactly one token
+        binding the joined close+--delete-branch, and the clean executed
+        `gh pr close 5 --delete-branch` AUTHORIZES.
+
+        NON-VACUITY (source-only revert of the common.py fix): pre-fix
+        locate_command_regions truncates the region at the newline to the
+        NON-governed `gh pr close 5 \\` (a bare close without --delete-branch is not
+        a held op) → the mint withholds the token → len(tokens) == 0 → this row
+        RED (an OVER-block the read side then denies the full command for)."""
+        q = "Close PR 5 and delete its branch now?"
+        opts = [_opt("Yes, close", "On approval run: " + self._CLOSE_SPLIT),
+                _opt("Cancel", "Abort")]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
+        assert len(_minted_tokens(tmp_path)) == 1
+        assert _authorize("gh pr close 5 --delete-branch", tmp_path) is None
+
+    def test_merge_admin_split_continuation_binds_and_round_trips(self, tmp_path):
+        """OVER-BLOCK FIX (privileged-flag bind axis): a faithful
+        `gh pr merge 5 \\<newline>--admin` click mints a token binding {--admin} (the
+        fix joins the split flag into extract_command_context's flag scan), and the
+        clean executed `gh pr merge 5 --admin` AUTHORIZES.
+
+        NON-VACUITY (source-only revert): pre-fix extract_command_context truncates
+        the flag scan at the newline → binds {} → the read side scans the clean
+        command and binds {--admin} → {} != {--admin} → the authorize flips to
+        REFUSE → this row RED."""
+        q = "Merge PR 5 now? The reviewers have signed off."
+        opts = [_opt("Yes, merge", "On approval run: " + self._MERGE_ADMIN_SPLIT),
+                _opt("Cancel", "Abort")]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, merge"}, tmp_path) == 0
+        assert len(_minted_tokens(tmp_path)) == 1
+        assert _authorize("gh pr merge 5 --admin", tmp_path) is None
+
+    def test_plain_token_denies_split_admin_execution(self, tmp_path):
+        """UNDER-BLOCK GUARD: approve a plain `gh pr merge 5` (no --admin) through
+        the REAL mint, then execute the `\\<newline>`-split
+        `gh pr merge 5 \\<newline>--admin`. The read side joins the continuation,
+        binds {--admin}, and the plain token's {} != {--admin} → REFUSE — proving
+        the SSOT fix STRENGTHENS the #1042 bind: a split privileged flag no longer
+        slips a flagless approval.
+
+        NON-VACUITY (source-only revert): pre-fix extract_command_context truncates
+        the EXECUTED command at the newline → binds {} → {} == {} → AUTHORIZES the
+        split --admin escalation (the latent under-block) → this assertion
+        (`is not None`) flips RED. The clean-form refusal is the pre-existing #1042
+        bind (asserted in TestPrivilegedFlagReadFloorSeam); the SPLIT form is the
+        line-continuation-specific leg this test owns."""
+        q = "Merge PR 5 now?"
+        opts = [_opt("Yes, merge", "On approval run: gh pr merge 5"),
+                _opt("Cancel", "Abort")]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, merge"}, tmp_path) == 0
+        # The plain `merge 5` faithfully mints (binds {} — no privileged flag).
+        assert len(_minted_tokens(tmp_path)) == 1
+        # The split-admin execution must NOT ride that flagless token.
+        assert _authorize(self._MERGE_ADMIN_SPLIT, tmp_path) is not None
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# #1049 — veto-word SUBSTRING in the approval command literal (floor reconcile).
+# The post-#22 minimal floor does NO decline/defer intent-parsing at all, so a
+# command literal whose text contains a decline-word SUBSTRING — `no` in
+# `--no-verify`, `review` in a `feature/review-ui` branch, `pending` in
+# `release/pending-qa` — simply MINTS via plain anchoring (#1042 binding). There is
+# no veto to false-trip and nothing to "scope": the whole _veto_text / decline-veto
+# mechanism the original #1049 tests exercised was REMOVED (#21→#22). What remains
+# worth pinning is that these specific FLAG / BRANCH-NAME forms still mint+bind
+# correctly — the positive teeth below. The decline/defer-label, wrong-op and
+# wrong-target scenarios are now ACCEPTED RESIDUALS, asserted as residual-canaries
+# in TestDeclineLabelCarryingCommandResidualMints / TestMintGuardBranches /
+# TestOptionAnchoringMint above.
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestVetoWordSubstringFormsMint1049:
+    """POSITIVE teeth (floor): a backticked command literal whose command text
+    contains a decline-word SUBSTRING — `no` in `--no-verify`, `review` in a
+    `feature/review-ui` branch, `pending` in `release/pending-qa` — MINTS and
+    authorizes end-to-end. Under the minimal floor there is NO decline-detection, so
+    there is nothing to false-trip: these mint by plain anchoring + #1042 binding
+    like any command. (The original #1049 FP — a decline-veto self-tripping on the
+    substring — and its `_veto_text` fix no longer exist; these forms are kept as
+    binding positives.) NON-VACUITY: a regression in anchoring or the #1042
+    flag/branch binding flips the authorize assertion (the --no-verify bound flag /
+    the force-push target_ref must round-trip exactly)."""
+
+    @pytest.mark.parametrize("question, label, description, command, veto_word", [
+        # `no` in --no-verify; valueless flag → binds cleanly → authorizes.
+        ("Merge this PR now? Reviewers signed off.", "Yes, merge",
+         "Run `gh pr merge 42 --no-verify`", "gh pr merge 42 --no-verify", "no"),
+        # `review` in a branch name; force-push target_ref round-trips cleanly.
+        ("Force-push the rebased branch?", "Approve force-push",
+         "Run `git push --force origin feature/review-ui`",
+         "git push --force origin feature/review-ui", "review"),
+        # `pending` in a branch name; force-push target_ref round-trips cleanly.
+        ("Force-push the staging branch?", "Approve force-push",
+         "Run `git push --force origin release/pending-qa`",
+         "git push --force origin release/pending-qa", "pending"),
+    ])
+    def test_substring_in_command_literal_mints_and_authorizes(
+        self, tmp_path, question, label, description, command, veto_word
+    ):
+        """The veto-word substring sits INSIDE the backticked command literal; the
+        floor does no decline-detection, so the bundle MINTS by plain anchoring and
+        the command AUTHORIZES end-to-end over the real token seam (the flag/branch
+        binds exactly)."""
+        code = _invoke_post(
+            [_q(question, [_opt(label, description), _opt("Cancel", "Abort")])],
+            {question: label}, tmp_path,
+        )
+        assert code == 0
+        assert len(_minted_tokens(tmp_path)) == 1, (
+            f"#1049: '{veto_word}' substring in the approval command self-vetoed"
+        )
+        assert _authorize(command, tmp_path) is None
+
+    def test_repo_flag_value_substring_mints(self, tmp_path):
+        """`review` in a `--repo owner/review-repo` value MINTS via plain anchoring
+        (the floor does no decline-detection). Asserts the MINT; #1059 (folded into
+        the floor) space-strips the wrapping backtick from the mint's flag-scan
+        surface (_strip_command_wrapper) so the bound `--repo` value matches the read
+        side's bare-command scan. NON-VACUITY: a regression in anchoring or the
+        GAP1 is_dangerous write-gate flips the mint to 0 tokens → RED."""
+        q = "Merge this PR on the review fork now?"
+        desc = "Run `gh pr merge 99 --repo owner/review-repo`"
+        code = _invoke_post(
+            [_q(q, [_opt("Yes, merge", desc), _opt("Cancel", "Abort")])],
+            {q: "Yes, merge"}, tmp_path,
+        )
+        assert code == 0
+        assert len(_minted_tokens(tmp_path)) == 1
