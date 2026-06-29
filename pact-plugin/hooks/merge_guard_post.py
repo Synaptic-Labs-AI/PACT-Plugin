@@ -231,8 +231,8 @@ _REFUSAL_DIAGNOSTICS = {
     "no_command": "no recognized merge/close/force-push/branch-delete command was found in the selected option",
     "multiple_commands": "more than one distinct (operation, target) was present — the approval was ambiguous",
     "option_not_anchored": "the command appeared only in the question text, not in the selected option",
-    "not_dangerous": "the selected command is not one the merge guard gates — it runs without a token, so no authorization is needed",
-    "compound_command": "the selected option chained multiple commands with a shell separator (&&, ||, ;, |) — approve one command at a time",
+    "not_dangerous": "the selected command is not one that the merge guard gates — it runs without a token, so no authorization is needed",
+    "compound_command": "the selected option chained multiple commands with a shell command separator — approve one command at a time",
 }
 
 
@@ -376,10 +376,16 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
     # text — so a faithful single command whose surrounding PROSE / multi-line
     # description happens to contain a separator (a newline, `;`, `|`, `&&`) is NOT
     # falsely refused (scanning the raw text re-created the #1049/#1052 FP class). A
-    # genuine compound comes back from locate_command_regions as ONE region with the
-    # separator intact (`gh pr merge 5 && rm -rf /`) → is_compound=True → REFUSE, so the
-    # chimeric/ride-along under-block STAYS closed (it has ONE recognized pair but must
-    # not mint — split+multiplicity would still mint it; this explicit refuse does not).
+    # QUOTED/backtick compound comes back from locate_command_regions as ONE region with
+    # the separator INTACT (`"gh pr merge 5 && rm -rf /"`) → is_compound=True → REFUSE
+    # here. A BARE compound is different: _BARE_COMMAND_RE stops at the first separator,
+    # so an unquoted `gh pr merge 5 && rm -rf /` TRUNCATES to the region `gh pr merge 5`
+    # and GAP5 does NOT fire on it — the load-bearing backstop for the bare case is the
+    # read side's is_compound_destructive_command refuse (merge_guard_pre.py, checked
+    # BEFORE the token lookup), which denies the full command regardless. Either way the
+    # chimeric/ride-along compound STAYS closed (it has ONE recognized pair but must not
+    # mint — split+multiplicity would still mint it; this explicit refuse does not, and
+    # the read side independently refuses the bare form).
     # Mirrors the read side's is_compound rejection EXACTLY (shared SSOT). ──
     for _option_text in selected_option_texts:
         for _region in locate_command_regions(_option_text):
