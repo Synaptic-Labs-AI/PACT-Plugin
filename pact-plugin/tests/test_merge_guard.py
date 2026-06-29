@@ -6911,6 +6911,39 @@ class TestGhPrCloseDetection:
 
         assert is_dangerous_command("gh pr close 42 --delete-branch --comment 'done'")
 
+    def test_gh_pr_close_delete_branch_parenthesized_comment_not_overblocked(self, tmp_path):
+        """REGRESSION GUARD — the marquee faithful-click over-block: a close carrying a
+        PARENTHESIZED comment value, `gh pr close 7 --comment "(done)" --delete-branch`,
+        must be GATED (is_dangerous) yet classified as a SINGLE op (not >=2-compound) and
+        AUTHORIZE end-to-end on a faithful click. The `(`/`)` inside the quoted comment
+        are exactly what the now-removed metachar fail-closed suppressor / read
+        deny-outright over-blocked; this pins the invariant that a faithful
+        single-command click always mints and executes.
+
+        NON-VACUITY: the end-to-end authorize is the load-bearing assertion — a
+        re-introduced metachar suppressor / deny-outright would refuse this faithful
+        click despite a valid token, flipping the final assert RED. The metachar-free
+        sibling test_gh_pr_close_delete_branch_with_comment ('done') does NOT exercise
+        the metachar path, so this guard is not redundant with it.
+        """
+        from merge_guard_pre import (
+            is_dangerous_command,
+            is_compound_destructive_command,
+            check_merge_authorization,
+        )
+        from merge_guard_post import write_token
+        from shared.merge_guard_common import extract_command_context
+
+        cmd = 'gh pr close 7 --comment "(done)" --delete-branch'
+        # Gated as a single destructive op — NOT refused-outright as >=2-compound.
+        assert is_dangerous_command(cmd) is True
+        assert is_compound_destructive_command(cmd) is False
+        # Faithful click: the clicked option mints a token for this exact command and
+        # the read side AUTHORIZES it (returns None) — no metachar over-block.
+        ctx = extract_command_context(cmd)
+        assert write_token(ctx, token_dir=tmp_path) is not None
+        assert check_merge_authorization(cmd, token_dir=tmp_path) is None
+
     def test_gh_pr_close_delete_branch_with_repo(self):
         """'gh pr close --delete-branch --repo' is dangerous."""
         from merge_guard_pre import is_dangerous_command

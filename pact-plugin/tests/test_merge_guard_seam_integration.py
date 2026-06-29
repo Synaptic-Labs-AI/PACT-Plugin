@@ -370,10 +370,10 @@ class TestNoMintAdvisory1052:
          {"Close it?": "Yes"},
          "is not one the merge guard gates"),
         # Honest-mistake ≥2 model: compound_command fires only for >=2 DESTRUCTIVE
-        # legs. (Was `gh pr merge 42 && rm -rf /` — now ONE destructive leg, `rm` is
-        # outside the gh/git surface, so no longer compound; that gh-op-&&-rm case is
-        # the lead's held accept-vs-catch decision. Use a genuine TWO-destructive
-        # compound here so the advisory's compound_command reason is still exercised.)
+        # legs. This exemplar uses TWO gh/git-destructive legs (merge 42 + close 7
+        # --delete-branch). (Under the ratified rm-leg=YES model, `gh pr merge 42 &&
+        # rm -rf /` ALSO counts as compound — a gh/git op + a plain-`rm` head leg = two
+        # destructive legs; either exemplar exercises the compound_command reason.)
         ("compound_command",
          [{"question": "Run it?",
            "options": [{"label": "Yes", "description": "Run `gh pr merge 42 && gh pr close 7 --delete-branch`"}],
