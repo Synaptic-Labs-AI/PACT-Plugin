@@ -950,6 +950,107 @@ class TestPrivilegedFlagReadFloorSeam:
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# Bash line-continuation parity over the real mint→read seam.
+# A `\<newline>` in the SELECTED option text must be JOINED identically on the
+# mint arm (locate_command_regions + extract_command_context) and the read arm,
+# so the #1042 op/target/flag bind is continuation-INVARIANT. Without the shared
+# normalization a `\<newline>`-split danger trigger / privileged flag drifts the
+# two arms apart in BOTH directions: a faithful click is OVER-blocked, and a
+# split privileged flag UNDER-slips a flagless approval.
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestLineContinuationMintReadSymmetry:
+    """Bash line-continuation (`\\<newline>`) in the SELECTED option text, driven
+    through the REAL mint→read seam (post.main → write_token →
+    check_merge_authorization) — never a hand-built token that would bypass the
+    mint decision. The shared SSOT now joins `\\<newline>` → space on BOTH
+    locate_command_regions (the op/target region) and extract_command_context (the
+    flag scan) BEFORE detection, so mint and read normalize identically.
+
+    Both directions are coupled to the common.py line-continuation normalization:
+    a SOURCE-ONLY revert of that fix (leave this test file in place, restore
+    merge_guard_common.py to its pre-fix shape) flips every test in this class RED
+    — expected cardinality {3 failed} — and each row's docstring names the precise
+    pre-fix drift that breaks it.
+
+      OVER-BLOCK FIX (faithful click authorizes): a faithful close/merge whose
+      option text carries a `\\<newline>`-split danger trigger / privileged flag
+      mints a token binding the JOINED command, and the clean executed command
+      AUTHORIZES end-to-end (mint==read round-trip closes).
+
+      UNDER-BLOCK GUARD (escalation refused): a plain `merge 5` token (no --admin)
+      does NOT authorize a `\\<newline>`-split `--admin` execution — the read side
+      now joins the continuation, binds {--admin}, and the set-inequality
+      {} != {--admin} REFUSES, STRENGTHENING the #1042 bind (a split privileged
+      flag no longer slips)."""
+
+    # Bash `\<newline>` line continuation embedded in the option text. The shell
+    # joins this to a single clean command on execution; the guard must bind the
+    # JOINED command so a faithful click round-trips and a split flag cannot drift.
+    _CLOSE_SPLIT = "gh pr close 5 \\\n--delete-branch"
+    _MERGE_ADMIN_SPLIT = "gh pr merge 5 \\\n--admin"
+
+    def test_close_split_continuation_round_trips_via_real_mint(self, tmp_path):
+        """OVER-BLOCK FIX (op/target region axis): a faithful
+        `gh pr close 5 \\<newline>--delete-branch` click mints exactly one token
+        binding the joined close+--delete-branch, and the clean executed
+        `gh pr close 5 --delete-branch` AUTHORIZES.
+
+        NON-VACUITY (source-only revert of the common.py fix): pre-fix
+        locate_command_regions truncates the region at the newline to the
+        NON-governed `gh pr close 5 \\` (a bare close without --delete-branch is not
+        a held op) → the mint withholds the token → len(tokens) == 0 → this row
+        RED (an OVER-block the read side then denies the full command for)."""
+        q = "Close PR 5 and delete its branch now?"
+        opts = [_opt("Yes, close", "On approval run: " + self._CLOSE_SPLIT),
+                _opt("Cancel", "Abort")]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
+        assert len(_minted_tokens(tmp_path)) == 1
+        assert _authorize("gh pr close 5 --delete-branch", tmp_path) is None
+
+    def test_merge_admin_split_continuation_binds_and_round_trips(self, tmp_path):
+        """OVER-BLOCK FIX (privileged-flag bind axis): a faithful
+        `gh pr merge 5 \\<newline>--admin` click mints a token binding {--admin} (the
+        fix joins the split flag into extract_command_context's flag scan), and the
+        clean executed `gh pr merge 5 --admin` AUTHORIZES.
+
+        NON-VACUITY (source-only revert): pre-fix extract_command_context truncates
+        the flag scan at the newline → binds {} → the read side scans the clean
+        command and binds {--admin} → {} != {--admin} → the authorize flips to
+        REFUSE → this row RED."""
+        q = "Merge PR 5 now? The reviewers have signed off."
+        opts = [_opt("Yes, merge", "On approval run: " + self._MERGE_ADMIN_SPLIT),
+                _opt("Cancel", "Abort")]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, merge"}, tmp_path) == 0
+        assert len(_minted_tokens(tmp_path)) == 1
+        assert _authorize("gh pr merge 5 --admin", tmp_path) is None
+
+    def test_plain_token_denies_split_admin_execution(self, tmp_path):
+        """UNDER-BLOCK GUARD: approve a plain `gh pr merge 5` (no --admin) through
+        the REAL mint, then execute the `\\<newline>`-split
+        `gh pr merge 5 \\<newline>--admin`. The read side joins the continuation,
+        binds {--admin}, and the plain token's {} != {--admin} → REFUSE — proving
+        the SSOT fix STRENGTHENS the #1042 bind: a split privileged flag no longer
+        slips a flagless approval.
+
+        NON-VACUITY (source-only revert): pre-fix extract_command_context truncates
+        the EXECUTED command at the newline → binds {} → {} == {} → AUTHORIZES the
+        split --admin escalation (the latent under-block) → this assertion
+        (`is not None`) flips RED. The clean-form refusal is the pre-existing #1042
+        bind (asserted in TestPrivilegedFlagReadFloorSeam); the SPLIT form is the
+        line-continuation-specific leg this test owns."""
+        q = "Merge PR 5 now?"
+        opts = [_opt("Yes, merge", "On approval run: gh pr merge 5"),
+                _opt("Cancel", "Abort")]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, merge"}, tmp_path) == 0
+        # The plain `merge 5` faithfully mints (binds {} — no privileged flag).
+        assert len(_minted_tokens(tmp_path)) == 1
+        # The split-admin execution must NOT ride that flagless token.
+        assert _authorize(self._MERGE_ADMIN_SPLIT, tmp_path) is not None
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # #1049 — veto-word SUBSTRING in the approval command literal (floor reconcile).
 # The post-#22 minimal floor does NO decline/defer intent-parsing at all, so a
 # command literal whose text contains a decline-word SUBSTRING — `no` in

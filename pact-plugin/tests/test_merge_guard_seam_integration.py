@@ -368,7 +368,7 @@ class TestNoMintAdvisory1052:
            "options": [{"label": "Yes", "description": "Run `gh pr close 7`"}],
            "multiSelect": False}],
          {"Close it?": "Yes"},
-         "is not one the merge guard gates"),
+         "is not one that the merge guard gates"),
         # Honest-mistake ≥2 model: compound_command fires only for >=2 DESTRUCTIVE
         # legs. This exemplar uses TWO gh/git-destructive legs (merge 42 + close 7
         # --delete-branch). (Under the ratified rm-leg=YES model, `gh pr merge 42 &&
@@ -379,7 +379,7 @@ class TestNoMintAdvisory1052:
            "options": [{"label": "Yes", "description": "Run `gh pr merge 42 && gh pr close 7 --delete-branch`"}],
            "multiSelect": False}],
          {"Run it?": "Yes"},
-         "chained multiple commands with a shell separator"),
+         "chained multiple commands with a shell command separator"),
     ]
 
     @pytest.mark.parametrize(
