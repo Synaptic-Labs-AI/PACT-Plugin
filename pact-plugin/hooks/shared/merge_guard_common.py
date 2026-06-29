@@ -1477,18 +1477,15 @@ def _shell_tokenize(command: str) -> list[str] | None:
         return None
 
 
-def _mask_shell_quotes(command: str, mask_double: bool = True) -> str:
+def _mask_shell_quotes(command: str) -> str:
     """P2: bounded same-length quote-state scanner. Returns a copy with quoted spans
-    (delimiters + contents) replaced by spaces, preserving out-of-quote structure at
-    identical offsets. `mask_double=True` masks BOTH '...' and "..." (P3 operator
-    detection — a separator inside EITHER quote is not a real separator).
-    `mask_double=False` masks SINGLE '...' ONLY, leaving "..." spans visible (a general
-    utility mode with no current caller — the sole caller, the compound operator scan,
-    uses mask_double=True; retained as harmless general utility). FAILS TOWARD
-    UNMASKED: a `\\`-escaped quote (outside quotes) never opens a span, and a mis-paired
-    / unterminated quote leaves the REST unmasked (visible) — so an operator/metachar
-    can only OVER-block, never under-block (the #1037-CLASS-1 closure: ambiguity never
-    HIDES danger). Identity on an unquoted command (constraint a)."""
+    (delimiters + contents) — BOTH '...' and "..." — replaced by spaces, preserving
+    out-of-quote structure at identical offsets (P3 operator detection: a separator
+    inside EITHER quote is not a real separator). FAILS TOWARD UNMASKED: a `\\`-escaped
+    quote (outside quotes) never opens a span, and a mis-paired / unterminated quote
+    leaves the REST unmasked (visible) — so an operator/metachar can only OVER-block,
+    never under-block (the #1037-CLASS-1 closure: ambiguity never HIDES danger).
+    Identity on an unquoted command (constraint a)."""
     out = list(command)
     i, n = 0, len(command)
     while i < n:
@@ -1496,7 +1493,7 @@ def _mask_shell_quotes(command: str, mask_double: bool = True) -> str:
         if c == "\\":
             i += 2  # escaped char (outside a quote) — next char is literal, not a delim
             continue
-        if c == "'" or (c == '"' and mask_double):
+        if c == "'" or c == '"':
             j = i + 1
             closed = False
             while j < n:
