@@ -743,6 +743,51 @@ class TestOptionAnchoringMint:
         assert _authorize("git push --force origin main", tmp_path) is not None
 
 
+class TestBenignChainFaithfulClickMints:
+    """FUT-3 — the POST(mint) round-trip the read-side cannot see: a faithful single
+    destructive op carrying a BENIGN continuation (`&& echo`, `| tee`, a trailing
+    background `&`) is a faithful click, so the mint MINTS exactly one token AND the
+    read side then AUTHORIZES the exact command end-to-end. The read-side suite already
+    proves these benign chains are not-refused at read time (is_compound=False,
+    is_dangerous=True); this closes the mint-side leg of the invariant — a faithful
+    single-command click always mints and executes — through the real post.main() seam.
+
+    NON-VACUITY (concrete, no source mutation): the SAME mint helper REFUSES a genuine
+    >=2-destructive chain (0 tokens) — test_two_destructive_chain_does_not_mint below —
+    so the positive 'mints' assertion is not a mint-everything tautology. A re-introduced
+    compound/metachar over-block on the mint would drop the benign-chain token count to 0
+    (RED); a read-side over-block would flip the authorize to DENIED (RED).
+    """
+
+    @pytest.mark.parametrize("benign_cmd", [
+        "gh pr merge 42 && echo done",      # `&&` benign continuation
+        "gh pr merge 42 | tee /tmp/log",    # pipe into a benign sink
+        "gh pr merge 42 &",                 # trailing background operator
+    ])
+    def test_benign_continuation_mints_and_authorizes(self, tmp_path, benign_cmd):
+        """A faithful click whose command carries a benign continuation mints exactly one
+        token (single destructive leg) and the read side authorizes the matching command."""
+        q = "Approve?"
+        opts = [_opt("Yes, merge", f"Run `{benign_cmd}`"), _opt("Cancel", "Abort")]
+        code = _invoke_post([_q(q, opts)], {q: "Yes, merge"}, tmp_path)
+        assert code == 0
+        assert len(_minted_tokens(tmp_path)) == 1          # the mint MINTED the faithful click
+        assert _authorize(benign_cmd, tmp_path) is None    # read AUTHORIZES end-to-end
+
+    def test_two_destructive_chain_does_not_mint(self, tmp_path):
+        """Discriminating negative (the non-vacuity anchor for the positive above): a
+        genuine TWO-destructive chain is refused by the mint (>=2 destructive legs) → 0
+        tokens, and the read side denies it too. Proves the benign-chain 'mints' assertion
+        is coupled to single-op faithfulness, not a mint-everything no-op."""
+        q = "Approve?"
+        cmd = "gh pr merge 42 && gh pr close 7 --delete-branch"
+        opts = [_opt("Yes, merge", f"Run `{cmd}`"), _opt("Cancel", "Abort")]
+        code = _invoke_post([_q(q, opts)], {q: "Yes, merge"}, tmp_path)
+        assert code == 0
+        assert _minted_tokens(tmp_path) == []              # >=2 destructive → mint REFUSES
+        assert _authorize(cmd, tmp_path) is not None       # read denies too
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # #1042 — PRIVILEGED-FLAG BINDING over the real mint→read seam
 # ════════════════════════════════════════════════════════════════════════════
