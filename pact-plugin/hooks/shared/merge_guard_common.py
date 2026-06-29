@@ -754,6 +754,20 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
     multiplicity gate); only the flag scan honors `flag_scan_text`.
     """
     context: dict = {}
+    # Line-continuation parity (mint==read by construction): join bash `\<newline>` on
+    # BOTH the op/target-anchoring `command` AND the wider `flag_scan_text` BEFORE
+    # detection, so the #1042 flag bind and the op/target derivation are continuation-
+    # INVARIANT and identical on both arms. Without this, a faithful
+    # `gh pr close 5 \<newline>--delete-branch` (whose region locate_command_regions now
+    # joins upstream) still bound NO flag on the MINT arm — its flag scan reads the raw
+    # option text whose `\<newline>` split `--delete-branch` off — while the READ arm,
+    # scanning the clean executed command, bound {--delete-branch}; the set-equality
+    # bind then REFUSED the faithful click (an over-block). Idempotent on already-
+    # normalized input, a strict no-op without a literal `\<newline>`, and join-only —
+    # it can only COMPLETE a split flag, never drop one.
+    command = _normalize_line_continuations(command)
+    if flag_scan_text is not None:
+        flag_scan_text = _normalize_line_continuations(flag_scan_text)
     op_type = detect_command_operation_type(command)
     if op_type is None:
         return context
@@ -828,6 +842,19 @@ def locate_command_regions(text: str) -> list[str]:
     'make illegal states unrepresentable' on a security boundary). The caller
     passes ONE question's text or ONE selected option's text at a time.
     """
+    # Mint==read parity: join bash line-continuations (`\<newline>` -> space) BEFORE
+    # the region scans, so the mint joins continuations IDENTICALLY to the read side
+    # (is_dangerous_command + is_compound_destructive_command both normalize first).
+    # Without this, `gh pr close 5 \<newline>--delete-branch` truncated at the newline
+    # to a non-dangerous region (`gh pr close 5 \`) -> mint withheld a token while the
+    # read side (normalized) DENIED the full command -> a faithful click was OVER-blocked.
+    # Offset/length note: the join SHORTENS text (2 chars -> 1), but every offset below
+    # (the `covered` quoted spans, the masked-view bare-span slices) indexes into THIS
+    # SAME normalized `text`, and the function returns region STRINGS (never offsets into
+    # the caller's original), so the length change is internally consistent and invisible
+    # to every caller. Join-only + no-op without a literal `\<newline>` -> detection can
+    # only INCREASE (never drop), so no new under-block.
+    text = _normalize_line_continuations(text)
     regions: list[str] = []
     covered: list[tuple[int, int]] = []
     # Quoted regions first — an explicit command literal is the canonical form.
