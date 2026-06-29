@@ -3,6 +3,61 @@ Location: pact-plugin/hooks/shared/merge_guard_common.py
 Summary: Shared constants and utilities for the merge guard hook pair.
 Used by: merge_guard_pre.py (PreToolUse) and merge_guard_post.py (PostToolUse)
 
+================================ THREAT MODEL ================================
+HONEST-MISTAKE PREVENTION — read this BEFORE "hardening" the guard.
+
+The merge guard exists to route an HONEST destructive command through the
+operator's AskUserQuestion approval click: it catches an agent about to run a
+real destructive git/gh operation BY MISTAKE and asks the operator to confirm.
+It is NOT an adversarial sandbox and makes NO attempt to stop a determined
+evader.
+
+INVARIANT (supersedes everything): a faithful single-command click ALWAYS mints
+a token and executes. A faithful operator clicks the option carrying the command
+(`gh pr merge 5`, `gh pr close 5 --delete-branch`, even `gh pr merge 5 --admin`)
+→ it mints → the command runs. ANYTHING that can block a faithful single-command
+click is WRONG BY DEFINITION — over-blocking a faithful click is a worse failure
+than not catching an obfuscated one.
+
+EXPLICITLY OUT OF SCOPE (these are NOT bugs; do NOT "fix" them — a blind
+adversarial sweep that "finds" them must NOT re-trigger hardening, because the
+hardening that catches them also blocks faithful clicks):
+  - quote-concat / quote-elision in the op keyword: `gh pr ''merge`,
+    `gh pr "merge"`, `g'h' pr merge`, `gh pr m'erge'` — an honest agent does not
+    obfuscate the command it intends to run.
+  - command-as-data via an interpreter pipe / substitution / eval:
+    `echo '...' | sh`, `$(echo '...')`, `eval "$CMD"` — deliberate evasion, not a
+    mistake.
+  - runtime $-expansion hiding the op or a flag: `gh pr $VERB 5`,
+    `gh pr merge 5 $FLAGS` — the hook only sees the pre-expansion literal an
+    honest agent typed.
+  - attached / equals API flag-spelling evading the literal pattern:
+    `gh api -XDELETE`, `--method=DELETE`.
+A metachar/quote SUPPRESSOR for the above (the removed shell-semantic over-block
+layer) re-blocks faithful clicks — e.g. it over-blocked
+`gh pr close 7 --comment "(done)" --delete-branch` — which is why it was removed.
+Keep detection LITERAL and faithful-click-safe; do not re-introduce an
+adversarial parser.
+
+What the guard DOES recognize (the honest-command surface only): the literal
+destructive patterns (DANGEROUS_PATTERNS); canonical flag SPELLINGS an honest
+agent actually types (close `-d`/`-cd`, branch `-Df`/`-fD`); the privileged-flag
+bind (set-equality of approved vs executed flags, so an honest re-run that ADDS a
+privilege re-prompts rather than silently escalating); and faithful-click region/
+quote handling so a quoted argument never truncates the approved command.
+
+rm-EXCEPTION (deliberate, documented so a future sweep does NOT "discover" a gap):
+the compound-destructive count (is_compound_destructive_command) treats a plain-`rm`
+head leg as destructive, so a recognized git/gh op chained with an `rm`
+(`gh pr merge 5 && rm -rf /`) is refused as a 2-destructive-leg mistake. This is
+rm-SPECIFIC by design — NOT a general filesystem-destroyer detector: `dd`, `mkfs`,
+`shred`, `truncate`, etc. are OUT OF SCOPE (do NOT add them — honest-mistake posture,
+no obfuscation-chasing: plain `rm` head only, not `/bin/rm`, `r''m`, `$(echo rm)`).
+And rm is deliberately ABSENT from is_dangerous_command, so a BARE `rm -rf /` and a
+PURE-rm chain (`rm -rf a && rm -rf b`) stay is_dangerous=False and are NEVER gated —
+the guard stays out of pure-filesystem commands.
+=============================================================================
+
 Centralizes TOKEN_TTL, TOKEN_DIR, TOKEN_PREFIX, consumed-token cleanup,
 the regex-prefix constants (_GH_PREFIX, _GIT_PREFIX, etc.) and the
 canonical destructive-command operation-type classifier
@@ -52,6 +107,7 @@ from __future__ import annotations
 import glob
 import os
 import re
+import shlex
 import time
 from pathlib import Path
 
@@ -258,7 +314,13 @@ def detect_command_operation_type(command: str) -> str | None:
         return "branch-delete"
     if re.search(_GIT_PREFIX + r"branch\s+--force\s+--delete\b", command):
         return "branch-delete"
-    return None
+    # Quote-aware normalized-flag FALLBACK (ADDITIVE, INV-AU): catches the
+    # clustered/split flag spellings the literal regexes above miss — chiefly
+    # `git branch -Df`/`-fD`/`--delete -f` (force-delete), which `-D\b` and the
+    # spelled-out `--delete --force` cannot see. Only reached when every literal
+    # check above has missed, so it can never override an established op-class
+    # precedence; it returns None when no flag-condition fires.
+    return _flag_condition_danger_op(command)
 
 
 # -----------------------------------------------------------------------------
@@ -575,7 +637,16 @@ def extract_privileged_flags(command: str, op_type: str | None) -> list[str]:
     # pflag rejects them. Only the git surface needs abbreviation expansion.
     is_git_surface = op_type in ("force-push", "branch-delete")
 
-    tokens = command.split()
+    # P1 quote-aware tokenization (closes the quoted-flag bind bypass #3: a
+    # `"--admin"` is shlex-stripped to `--admin` → bound; the old `command.split()`
+    # kept the quotes → `startswith('-')` skipped it → the escalation rode along).
+    # BOTH arms call this shared function so the bind stays symmetric. On an
+    # unbalanced quote shlex returns None; fall back to `split()` so the bind never
+    # regresses below today's coverage (the unparseable command is independently
+    # fail-closed upstream by P-FC / the mint-refuse, so this is defense-in-depth).
+    tokens = _shell_tokenize(command)
+    if tokens is None:
+        tokens = command.split()
     found: set[str] = set()
     i = 0
     n = len(tokens)
@@ -615,7 +686,12 @@ def extract_privileged_flags(command: str, op_type: str | None) -> list[str]:
                     found.add(canonical)
                     i += 1
             else:
-                found.add(canonical)             # boolean (ignore any spurious =value)
+                # boolean: an explicit `=false`/`=0`/`=no` DISABLES the flag (the SAFE
+                # form), so it must NOT bind — else an approval of `--admin=false`
+                # would set-equal an execution of `--admin=true` (both → {--admin}) and
+                # AUTHORIZE the escalation. Any other (or no) value binds.
+                if not (has_eq and inline_value.lower() in _NEGATED_FLAG_VALUES):
+                    found.add(canonical)
                 i += 1
             continue
 
@@ -707,20 +783,29 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
 # region). Centralized here so both sides scan on IDENTICAL separators (the #720
 # anti-drift class).
 #
-# `_COMPOUND_OPS_RE` matches the five true compound shapes: `&&`, `||`, `;`, a bare
-# `|` shell pipe, and newline. FD-redirect tokens (`2>&1`, `1>&2`, `3<&0`) and
-# clobber redirects (`>|`) are NEUTRALIZED by `_FD_REDIRECT_RE` BEFORE the compound
-# scan/split — NOT via lookaround on the bare-pipe arm. An earlier lookbehind form
-# `(?<![0-9>])\|(?![<&])` had a spaceless-adjacency bypass: `... 2>&1|gh pr merge
-# 999` slipped past because the lookbehind rejected the real pipe whenever it
-# followed the `1` of `2>&1`. The structural pre-strip eliminates that class.
-# `_FD_REDIRECT_RE`: `\d*[<>]&\d+` (fd-to-fd: `2>&1`,`1>&2`,`3<&0`,`>&2`) | `>\|`
-# (clobber). Audit: loosening `_COMPOUND_OPS_RE` must preserve the five shapes;
-# tightening must not re-introduce the FD-redirect FP class via lookaround — the
-# pre-strip is the single source of truth. zsh `|&` is deliberately out of scope
-# (the hooks run under bash; if the shell ever changes, add a `|\s*&` arm).
-_COMPOUND_OPS_RE = re.compile(r"&&|\|\||;|\||\n")
-_FD_REDIRECT_RE = re.compile(r"\d*[<>]&\d+|>\|")
+# `_COMPOUND_OPS_RE` matches the COMPLETE bash command-separator/backgrounding set
+# (P3): `&&`, `||`, `|&`, `;`, a bare `&` (background — the finding-#1 ride-along), a
+# bare `|` shell pipe, and newline. Multi-char ops precede their single-char prefixes
+# in the alternation so a match never mis-segments (`&&` before `&`; `||`/`|&` before
+# `|`). Scanned on the P2 QUOTE-MASKED view so an operator inside a quoted argument is
+# NOT a separator. FD-redirect / and-redirect / clobber tokens (`2>&1`, `1>&2`, `3<&0`,
+# `&>`, `&>>`, `>|`) are NEUTRALIZED by `_FD_REDIRECT_RE` BEFORE the scan so the new
+# bare-`&` arm does NOT false-positive on the bash redirect-both operator
+# (`gh pr merge 5 &>out.log` is NOT a compound) — NOT via lookaround on the bare-pipe
+# arm (an earlier lookbehind `(?<![0-9>])\|(?![<&])` had a spaceless-adjacency bypass:
+# `... 2>&1|gh pr merge 999` slipped past; the structural pre-strip eliminates that
+# class). `_FD_REDIRECT_RE`: `\d*[<>]&` (any `[<>]&` redirect prefix — fd-dup `2>&1`,
+# fd-close `0<&-`, csh `>&out.log`) | `>\|` (clobber) | `&>>?` (and-redirect `&>`/`&>>`;
+# the leading-`&` form). Audit: loosening
+# `_COMPOUND_OPS_RE` must preserve the seven shapes; the `&>`/`&>>` neutralization must
+# stay coupled to the bare-`&` arm; the pre-strip is the single source of truth.
+_COMPOUND_OPS_RE = re.compile(r"&&|\|\||\|&|;|&|\||\n")
+# `\d*[<>]&` neutralizes EVERY `[<>]&` redirect prefix — fd-dup (`2>&1`,`1>&2`),
+# fd-close (`0<&-`,`1>&-`), and csh and-redirect-to-file (`>&out.log`) — so the bare-`&`
+# arm cannot FP on any of them. A REAL background `&` is whitespace-preceded (` & `),
+# never `[<>]`-preceded, so it still detects. `&>>?` covers the leading-`&` and-redirect
+# (`&>`/`&>>`); `>\|` the clobber.
+_FD_REDIRECT_RE = re.compile(r"\d*[<>]&|>\||&>>?")
 
 
 
@@ -741,20 +826,34 @@ def locate_command_regions(text: str) -> list[str]:
     regions: list[str] = []
     covered: list[tuple[int, int]] = []
     # Quoted regions first — an explicit command literal is the canonical form.
+    # COVER only quoted regions that ARE commands: a non-command quoted ARGUMENT
+    # (`--comment "x"`) must NOT be covered, else the masked-view bare span below
+    # (which now extends THROUGH it) would be wrongly skipped and drop #5's trailing
+    # flag. An embedded quoted COMMAND, by contrast, IS covered + captured separately
+    # so the multiplicity gate still refuses a distractor.
     for match in _QUOTED_COMMAND_RE.finditer(text):
-        covered.append((match.start(), match.end()))
         candidate = match.group(1) or match.group(2) or match.group(3)
         if candidate and detect_command_operation_type(candidate) is not None:
+            covered.append((match.start(), match.end()))
             regions.append(candidate)
-    # Bare gh/git spans that do not overlap an already-captured quoted region,
-    # so a quoted command is not double-counted as a separate region.
-    for match in _BARE_COMMAND_RE.finditer(text):
+    # Bare gh/git spans located on the P2 QUOTE-MASKED view so a quoted ARGUMENT in
+    # the MIDDLE of a command (`--comment "x"`) no longer truncates the span and
+    # drops a trailing flag (#5). Single/double-quoted spans mask to spaces (the bare
+    # span extends through them); real separators (`;` `|` `&` newline) and backticks
+    # are NOT masked, so they still bound the span. Region text is sliced from the
+    # ORIGINAL so the real quoted value is preserved. The skip is CONTAINMENT (the
+    # bare span lies ENTIRELY within an already-captured quoted command, e.g. a
+    # backtick command) — NOT mere overlap: the outer command of a distractor
+    # `... "gh pr merge 999"` CONTAINS the covered inner region rather than being
+    # contained by it, so it is still added → two regions → multiplicity refuses.
+    masked = _mask_shell_quotes(text)
+    for match in _BARE_COMMAND_RE.finditer(masked):
         if any(
-            match.start() < c_end and c_start < match.end()
+            c_start <= match.start() and match.end() <= c_end
             for c_start, c_end in covered
         ):
             continue
-        span = match.group(0).strip()
+        span = text[match.start():match.end()].strip()
         if detect_command_operation_type(span) is not None:
             regions.append(span)
     return regions
@@ -1356,6 +1455,226 @@ def _has_eval_with_heredoc(command: str) -> bool:
     return False
 
 
+def _shell_tokenize(command: str) -> list[str] | None:
+    """P1: quote-aware shell-word tokenizer (shlex.split posix=True, comments=False) —
+    strips single/double quotes, processes escapes, keeps a quoted-value span as ONE
+    token. Returns the token list on success, or None on ValueError (unbalanced /
+    unterminated quote). None is the FAIL-CLOSED signal — callers treat an untokenizable
+    command as DANGEROUS (read) / NON-MINTABLE (mint), never safe. shlex leaves
+    $ / $() / backtick LITERAL (no expansion) — we DETECT those in P-FC, never resolve
+    them, so shlex SUCCESS != SAFE (the post-tokenize metachar check in P-FC is the
+    load-bearing other half)."""
+    try:
+        return shlex.split(command, posix=True, comments=False)
+    except ValueError:
+        return None
+
+
+def _mask_shell_quotes(command: str, mask_double: bool = True) -> str:
+    """P2: bounded same-length quote-state scanner. Returns a copy with quoted spans
+    (delimiters + contents) replaced by spaces, preserving out-of-quote structure at
+    identical offsets. `mask_double=True` masks BOTH '...' and "..." (P3 operator
+    detection — a separator inside EITHER quote is not a real separator).
+    `mask_double=False` masks SINGLE '...' ONLY (P-FC — a $()/backtick/$ inside "..."
+    is ACTIVE in bash, so it must stay VISIBLE to the metachar check). FAILS TOWARD
+    UNMASKED: a `\\`-escaped quote (outside quotes) never opens a span, and a mis-paired
+    / unterminated quote leaves the REST unmasked (visible) — so an operator/metachar
+    can only OVER-block, never under-block (the #1037-CLASS-1 closure: ambiguity never
+    HIDES danger). Identity on an unquoted command (constraint a)."""
+    out = list(command)
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            i += 2  # escaped char (outside a quote) — next char is literal, not a delim
+            continue
+        if c == "'" or (c == '"' and mask_double):
+            j = i + 1
+            closed = False
+            while j < n:
+                if c == '"' and command[j] == "\\":
+                    j += 2  # \\-escape is honored inside "..." (not inside '...')
+                    continue
+                if command[j] == c:
+                    closed = True
+                    break
+                j += 1
+            if not closed:
+                break  # unterminated quote → FAIL TOWARD UNMASKED (leave rest visible)
+            for k in range(i, min(j + 1, n)):
+                out[k] = " "
+            i = j + 1
+            continue
+        i += 1
+    return "".join(out)
+
+
+def _normalize_line_continuations(command: str) -> str:
+    """P0 (shell-semantic substrate SSOT): join bash line-continuations
+    (`\\<newline>` → space) BEFORE tokenization, so a `\\<newline>`-split flag
+    (`gh pr close 5 \\<newline>-d`) becomes a clean separate token instead of a fused
+    `\\n-d` that the flag scan would miss (the security line-continuation under-block).
+    Routed through every floor call site + the new substrate so mint and read join
+    lines identically (mint==read by construction)."""
+    return command.replace("\\\n", " ")
+
+
+# -----------------------------------------------------------------------------
+# P4 — op-agnostic quote-aware flag normalizer + per-op danger CONDITIONS.
+#
+# Generalizes the extract_privileged_flags cluster-walk into a SURFACE-keyed
+# normalizer fed by P1 tokens (quotes already stripped, so a quoted `"--admin"`
+# normalizes the same as a bare one). The SAME short differs by tool surface
+# (gh `-d` = --delete-branch; git `-d` = --delete), so the spec is keyed by
+# SURFACE. Danger is then a boolean CONDITION over the normalized set, ADDED to
+# the literal DANGEROUS_PATTERNS floor as a UNION arm (INV-AU: additive only — a
+# normalizer mis-parse can only fail-to-ADD a detection → over-block, never
+# under-block, because the literal floor still gates underneath).
+# -----------------------------------------------------------------------------
+
+# Per-surface flag spec: alias -> (canonical token, takes_value). A superset of
+# PRIVILEGED_FLAGS that ALSO carries the danger-relevant booleans the per-op
+# conditions test (-D / --delete / --force / --force-with-lease). The value-taking
+# entries (-R / --repo) are listed so a cluster like `-Rd val` parses correctly
+# (-R consumes the rest of the cluster as its value, so the trailing `d` is NOT
+# mis-read as --delete-branch). Aliases AGREE with PRIVILEGED_FLAGS so the danger
+# arm and the #1042 bind never disagree on a spelling. Unicode look-alike dashes
+# (U+2010 / U+2212) are deliberately ABSENT: an ASCII-only `startswith('-')`
+# leaves them unbound — gh/git reject them byte-exact, so they confer no privilege
+# and folding-to-ASCII would over-block a flag the tools simply ignore.
+_FLAG_SPEC: dict[str, dict[str, tuple[str, bool]]] = {
+    "gh": {
+        "--admin": ("--admin", False),
+        "-d": ("--delete-branch", False),
+        "--delete-branch": ("--delete-branch", False),
+        "-R": ("--repo", True),
+        "--repo": ("--repo", True),
+        "--match-head-commit": ("--match-head-commit", True),
+    },
+    "git": {
+        "-D": ("-D", False),
+        "-d": ("--delete", False),
+        "--delete": ("--delete", False),
+        "-f": ("--force", False),
+        "--force": ("--force", False),
+        "--force-with-lease": ("--force-with-lease", False),
+        "--no-verify": ("--no-verify", False),
+    },
+}
+
+# Boolean-flag values that DISABLE the flag: `--admin=false` is the SAFE form, so
+# it does NOT confer the privilege / satisfy a danger condition. Any OTHER value
+# (or none) binds (fail-toward-binding on an unrecognized value = over-block-safe).
+_NEGATED_FLAG_VALUES = frozenset({"false", "0", "no"})
+
+
+def _normalized_flags(tokens: list[str], surface: str) -> set[str]:
+    """P4: canonicalize a P1 token list into the SET of flags PRESENT, across every
+    spelling (short / long / clustered / `=`-joined / attached-value), keyed by the
+    tool SURFACE ('gh' / 'git'). Booleans → bare canonical (`--delete-branch`);
+    value-takers → `--canonical=value`. An `=false`/`=0`/`=no` on a boolean NEGATES
+    it (omitted — the safe disable form). Mirrors the extract_privileged_flags
+    cluster-walk so the danger arm and the #1042 bind agree on every spelling.
+    Over-block-safe: an unrecognized token is skipped (never mis-bound)."""
+    spec = _FLAG_SPEC.get(surface, {})
+    if not spec:
+        return set()
+    found: set[str] = set()
+    i, n = 0, len(tokens)
+    while i < n:
+        token = tokens[i]
+        if not token.startswith("-") or token in ("-", "--"):
+            i += 1
+            continue
+        if token.startswith("--"):
+            flag_part, has_eq, value = token.partition("=")
+            entry = spec.get(flag_part)
+            if entry is None:
+                i += 1
+                continue
+            canonical, takes_value = entry
+            if takes_value:
+                if has_eq:                       # --repo=value
+                    found.add(f"{canonical}={value}")
+                    i += 1
+                elif i + 1 < n:                  # --repo value
+                    found.add(f"{canonical}={tokens[i + 1]}")
+                    i += 2
+                else:                            # --repo (value missing; degenerate)
+                    found.add(canonical)
+                    i += 1
+            else:
+                # boolean: an explicit `=false`/`=0`/`=no` DISABLES it → do not bind.
+                if not (has_eq and value.lower() in _NEGATED_FLAG_VALUES):
+                    found.add(canonical)
+                i += 1
+            continue
+        # short cluster (single dash): a per-character walk matching the privileged
+        # extractor's — a value-taking short consumes the REST of the cluster (or the
+        # next token) and stops, so no bound short is dropped regardless of ordering.
+        cluster = token[1:]
+        consumed_next = False
+        j = 0
+        while j < len(cluster):
+            entry = spec.get("-" + cluster[j])
+            if entry is None:
+                j += 1
+                continue
+            canonical, takes_value = entry
+            if takes_value:
+                remainder = cluster[j + 1:]
+                if remainder.startswith("="):    # `-R=value`
+                    remainder = remainder[1:]
+                if remainder:                    # `-Rvalue`
+                    found.add(f"{canonical}={remainder}")
+                elif i + 1 < n:                  # `-R value`
+                    found.add(f"{canonical}={tokens[i + 1]}")
+                    consumed_next = True
+                else:                            # `-R` (value missing; degenerate)
+                    found.add(canonical)
+                break
+            found.add(canonical)                 # boolean short; keep walking
+            j += 1
+        i += 2 if consumed_next else 1
+    return found
+
+
+def _flag_condition_danger_op(command: str) -> str | None:
+    """P4 union arm: classify `command` by a quote-aware NORMALIZED-FLAG danger
+    CONDITION across every flag spelling, returning the op-class ("close" /
+    "branch-delete" / "force-push") iff a condition fires, else None. The coarse
+    op-shape (which subcommand) is matched with the SAME shared prefixes the literal
+    floor uses; the danger test is then a boolean condition over `_normalized_flags`.
+    ADDITIVE over the literal floor (INV-AU): an unparseable command / mis-parse can
+    only FAIL to return an op here (the literal floor still fail-closes it — and the
+    pending P-FC catch-all will too), never re-open an under-block. The coarse shape
+    only SCOPES which condition runs — a false coarse-match whose condition does not
+    hold returns None (over-block-safe)."""
+    tokens = _shell_tokenize(command)
+    if tokens is None:
+        return None  # unparseable → literal floor fail-closes (P-FC catch-all pending); this arm abstains
+    # close --delete-branch — covers `-d`, clustered `-cd`, `--delete-branch`; the
+    # literal floor matches ONLY the spelled-out `--delete-branch` (the #2 gap).
+    if _GH_PR_CLOSE_RE.search(command):
+        if "--delete-branch" in _normalized_flags(tokens, "gh"):
+            return "close"
+    # git branch force-delete — covers `-D`, `-Df`, `-fD`, `--delete -f`/`--force`
+    # in any order; the literal floor matches ONLY `-D\b` / `--delete --force` /
+    # `--force --delete` (the #4 gap).
+    if re.search(_GIT_PREFIX + r"branch\b", command):
+        gf = _normalized_flags(tokens, "git")
+        if "-D" in gf or ("--delete" in gf and "--force" in gf):
+            return "branch-delete"
+    # git push --force — covers clustered short forms; `--force-with-lease` is the
+    # SAFE exclusion (a non-history-rewriting push). Redundant with the literal floor
+    # today (`-[a-zA-Z]*f` already catches the clusters) but kept for op-class parity.
+    if re.search(_GIT_PREFIX + r"push\b", command):
+        gf = _normalized_flags(tokens, "git")
+        if "--force" in gf and "--force-with-lease" not in gf:
+            return "force-push"
+    return None
+
+
 def is_dangerous_command(command: str) -> bool:
     """Check if a bash command is a dangerous git operation.
 
@@ -1374,41 +1693,94 @@ def is_dangerous_command(command: str) -> bool:
     if _has_eval_with_heredoc(command):
         return True
 
-    # Normalize bash line continuations (\<newline>) before any matching.
-    # Without this, patterns split across lines bypass all regex detection.
-    command = command.replace("\\\n", " ")
+    # Normalize bash line continuations (\<newline>) via the shared P0 SSOT before
+    # any matching (so this floor + the substrate join lines identically).
+    command = _normalize_line_continuations(command)
     stripped = _strip_non_executable_content(command)
     for pattern in DANGEROUS_PATTERNS:
         if pattern.search(stripped):
             return True
+    # ADDITIVE union arm (INV-AU): a quote-aware normalized-flag danger CONDITION across
+    # every flag spelling the literal floor misses — `-d`/`-cd` close delete, `-Df`/`-fD`/
+    # `--delete -f` branch force-delete. Runs on the STRIPPED surface (same as the floor)
+    # so a flag spelled inside a comment / heredoc / echo / var-assignment does NOT false-
+    # trigger; the shlex tokenizer keeps a quoted argument as ONE token so a flag inside a
+    # quoted value is never read as a flag. The literal floor stays the fail-closed default.
+    if _flag_condition_danger_op(stripped) is not None:
+        return True
     return False
+
+
+# A plain `rm` head token at a compound leg's start. DELIBERATELY rm-SPECIFIC and used
+# ONLY by the compound-leg count below — NOT a general dangerous-op detector (dd/mkfs/
+# shred/etc. are out of scope under the honest-mistake model) and NOT part of
+# is_dangerous_command (so a bare `rm -rf /` and a pure-rm chain stay is_dangerous=False
+# and the guard never gates them — see the rm-exception note in the module THREAT MODEL).
+# Matches a literal `rm` at the leg head only; no obfuscation-chasing — not `/bin/rm`,
+# `r''m`, `$(echo rm)`, or aliases.
+_RM_HEAD_RE = re.compile(r"\s*rm(?=\s|$)")
+
+
+def _leg_is_destructive(leg: str) -> bool:
+    """Count a compound leg as destructive if it is a recognized git/gh-destructive op
+    (``is_dangerous_command``) OR its head command is a plain ``rm`` (the rm-exception).
+
+    The rm arm is the ONE deliberate non-git/gh case: an honest agent chaining a real
+    destructive git/gh op WITH a file-removing ``rm`` (``gh pr merge 5 && rm -rf /``) is
+    exactly the multi-destructive mistake the compound refuse exists to catch. It is
+    rm-specific by design; do NOT generalize it to other filesystem-destroying tools.
+    """
+    return is_dangerous_command(leg) or _RM_HEAD_RE.match(leg) is not None
 
 
 def is_compound_destructive_command(command: str) -> bool:
-    """Detect destructive operations chained inside a shell compound shape.
+    """Detect an agent chaining MULTIPLE destructive operations into one command.
 
-    Returns True iff the stripped command contains BOTH (a) a compound-shape
-    character (``&&``, ``||``, ``;``, ``|``, newline) AND (b) a
-    DANGEROUS_PATTERNS match. Safe compounds (``ls && pwd``) are NOT flagged.
+    Returns True iff the command joins >=2 DESTRUCTIVE legs with a shell operator
+    (``&&``, ``||``, ``|&``, ``;``, ``&``, ``|``, newline), e.g.:
 
-    Operator-side review of AskUserQuestion text typically focuses on the
-    headline command and may miss a chained second destructive op, e.g.:
+        gh pr close 5 -d && git branch -Df victim
+        gh pr merge 100 && gh pr close 999 --delete-branch
+        gh pr merge 5 && rm -rf /          # git/gh op chained with a plain `rm`
 
-        gh pr merge 100 && gh pr merge 999 --admin
-
-    Single-token authorization for the headline command would otherwise
-    let the second op execute unauthorized. Reject compound destructive
-    shapes outright; force one-op-at-a-time with one checkpoint each.
+    This is the chaining analogue of the privileged-flag bind: both catch the agent
+    doing MORE than the operator clicked — here, an ADDED destructive op the single
+    approval did not cover. A leg counts as destructive if it is a recognized
+    git/gh-destructive op OR its head command is a plain ``rm`` (the rm-EXCEPTION — see
+    the module THREAT MODEL; rm is rm-specific by design and is NOT in
+    is_dangerous_command, so a bare or pure-rm command is never gated). Honest-mistake
+    model: a SINGLE destructive op plus a benign continuation / decoration /
+    backgrounding is a faithful single-command click and MUST mint + execute — so
+    `gh pr merge 5 && echo ok`, `gh pr merge 5 ; echo done`, `gh pr merge 5 &`,
+    `gh pr merge 5 | tee log`, `gh pr merge 5 > out.log` are NOT compound-destructive
+    (one destructive leg). Only >=2 destructive legs are refused (route to
+    one-op-at-a-time approval).
     """
-    normalized = command.replace("\\\n", " ")
+    normalized = _normalize_line_continuations(command)
     stripped = _strip_non_executable_content(normalized)
-    # Neutralize FD-redirect tokens before compound-shape scanning. The
-    # strip operates on a LOCAL copy so DANGEROUS_PATTERNS still sees the
-    # full stripped command on the line below.
-    compound_view = _FD_REDIRECT_RE.sub(" ", stripped)
+    # Operators are detected on the P2-masked + FD-neutralized view so an operator INSIDE
+    # a quoted arg (`--subject "a; b"`) or an FD/and-redirect (`2>&1`, `&>`, `>|`) is NOT a
+    # separator. Each FD-redirect is replaced by an EQUAL-LENGTH run of spaces (NOT a single
+    # space) so the masked view stays SAME-LENGTH as `stripped` and each operator's offsets
+    # map 1:1 back to the ORIGINAL legs (which carry the real flag spellings for the per-leg
+    # danger classification below). A single-space collapse would shrink the view and
+    # mis-slice the legs after a multi-char redirect (e.g. `2>&1 | rm -rf ~`).
+    compound_view = _FD_REDIRECT_RE.sub(
+        lambda m: " " * len(m.group()), _mask_shell_quotes(stripped)
+    )
     if not _COMPOUND_OPS_RE.search(compound_view):
         return False
-    for pattern in DANGEROUS_PATTERNS:
-        if pattern.search(stripped):
-            return True
-    return False
+    legs, last = [], 0
+    for m in _COMPOUND_OPS_RE.finditer(compound_view):
+        legs.append(stripped[last:m.start()])
+        last = m.end()
+    legs.append(stripped[last:])
+    # >=2 DESTRUCTIVE legs → refuse. A leg is destructive via _leg_is_destructive: a
+    # recognized git/gh-destructive op (so a non-canonical flag spelling like `-Df` in a
+    # leg still counts) OR a plain-`rm` head leg (the documented rm-exception). A single
+    # destructive leg + benign legs → NOT compound (the single op routes through its own
+    # one-op approval as usual). This count is only consulted once is_dangerous_command is
+    # already True (a git/gh op is present) at the read call site, so a bare `rm` or a
+    # pure-rm chain — is_dangerous=False — never reaches it (the guard stays out of
+    # pure-filesystem commands).
+    return sum(1 for leg in legs if _leg_is_destructive(leg)) >= 2

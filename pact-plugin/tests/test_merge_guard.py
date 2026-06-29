@@ -9554,28 +9554,44 @@ class TestCompoundDestructiveCommandRejection:
         assert "&&" in result or "||" in result or ";" in result
 
     def test_pipe_with_destructive_denied(self, tmp_path):
-        from merge_guard_pre import check_merge_authorization
+        """Honest-mistake ≥2-narrowing: `gh pr merge 100 | tee` is ONE destructive
+        leg + a benign pipe → NO LONGER compound. But the single merge op is STILL
+        is_dangerous-gated, so with no token it is DENIED — via the normal single-op
+        approval gate, NOT the compound gate (no under-gate; the op is still caught)."""
+        from merge_guard_pre import check_merge_authorization, is_compound_destructive_command, is_dangerous_command
 
         cmd = "gh pr merge 100 | tee /tmp/out"
+        assert not is_compound_destructive_command(cmd)   # single destructive leg
+        assert is_dangerous_command(cmd)                  # the merge op is still gated
         result = check_merge_authorization(cmd, token_dir=tmp_path)
-        assert result is not None
-        assert "Compound destructive" in result
+        assert result is not None                         # denied (single op, no token)
+        assert "Compound destructive" not in result       # NOT via the compound gate
 
     def test_semicolon_with_destructive_denied(self, tmp_path):
-        from merge_guard_pre import check_merge_authorization
+        """`echo go ; git push --force origin main` — ONE destructive leg (force-push)
+        + a benign leg → not compound, but the force-push is is_dangerous-gated →
+        still DENIED via the single-op gate (not compound)."""
+        from merge_guard_pre import check_merge_authorization, is_compound_destructive_command, is_dangerous_command
 
         cmd = "echo go ; git push --force origin main"
+        assert not is_compound_destructive_command(cmd)
+        assert is_dangerous_command(cmd)
         result = check_merge_authorization(cmd, token_dir=tmp_path)
         assert result is not None
-        assert "Compound destructive" in result
+        assert "Compound destructive" not in result
 
     def test_newline_with_destructive_denied(self, tmp_path):
-        from merge_guard_pre import check_merge_authorization
+        """`ls\\ngh pr merge 99` — ONE destructive leg (merge) + a benign leg → not
+        compound, but the merge is is_dangerous-gated → still DENIED via the single-op
+        gate (not compound)."""
+        from merge_guard_pre import check_merge_authorization, is_compound_destructive_command, is_dangerous_command
 
         cmd = "ls\ngh pr merge 99"
+        assert not is_compound_destructive_command(cmd)
+        assert is_dangerous_command(cmd)
         result = check_merge_authorization(cmd, token_dir=tmp_path)
         assert result is not None
-        assert "Compound destructive" in result
+        assert "Compound destructive" not in result
 
     def test_compound_safe_commands_allowed(self, tmp_path):
         """Safe compounds without DANGEROUS_PATTERNS are NOT rejected.
@@ -9624,12 +9640,13 @@ class TestCompoundDestructiveCommandRejection:
             "gh pr merge 100; gh pr merge 999 --admin"
         ) is True
 
-    def test_compound_bare_pipe_still_matches(self):
-        from merge_guard_pre import is_compound_destructive_command
+    def test_bare_pipe_single_destructive_not_compound(self):
+        """Honest-mistake ≥2: `gh pr merge 100 | tee logfile` is ONE destructive leg
+        + a benign pipe → NOT compound. The single merge op stays is_dangerous-gated."""
+        from merge_guard_pre import is_compound_destructive_command, is_dangerous_command
 
-        assert is_compound_destructive_command(
-            "gh pr merge 100 | tee logfile"
-        ) is True
+        assert is_compound_destructive_command("gh pr merge 100 | tee logfile") is False
+        assert is_dangerous_command("gh pr merge 100 | tee logfile") is True
 
     def test_compound_newline_still_matches(self):
         from merge_guard_pre import is_compound_destructive_command
@@ -10256,6 +10273,54 @@ class TestLegacyTokenBoundary:
         assert not Path(str(token_path) + ".consumed").exists()
 
 
+class TestRmAsDestructiveLeg:
+    """User-ratified rm-as-destructive-leg (#46): an `rm` head-token counts as a
+    destructive leg in the COMPOUND count, so a gh/git-destructive op chained with
+    `rm` is >=2-destructive → refuse. This does NOT widen the single-command gate:
+    `rm` ALONE (or a pure rm&&rm chain with no gh/git op) is is_dangerous=False — the
+    merge guard ignores arbitrary `rm` (no scope creep), and obfuscated `rm` spellings
+    are NOT chased (no obfuscation-arms-race)."""
+
+    def test_gh_op_chained_with_rm_is_compound(self):
+        """`gh pr merge 5 && rm -rf /` — gh-merge + rm = TWO destructive legs → COMPOUND
+        → refuse. NON-VACUITY: drop `rm` from the leg set → ONE leg → not compound → RED."""
+        from merge_guard_pre import is_compound_destructive_command
+        assert is_compound_destructive_command("gh pr merge 5 && rm -rf /") is True
+
+    def test_gh_op_chained_with_benign_is_not_compound(self):
+        """`gh pr merge 5 && echo ok` — ONE destructive leg (merge) + a benign `echo`
+        → NOT compound; the merge mints/gates as a single op (is_dangerous=True). The
+        rm-leg rule must not over-fire on a benign continuation."""
+        from merge_guard_pre import is_compound_destructive_command, is_dangerous_command
+        assert is_compound_destructive_command("gh pr merge 5 && echo ok") is False
+        assert is_dangerous_command("gh pr merge 5 && echo ok") is True
+
+    @pytest.mark.parametrize("cmd", ["rm -rf /", "rm -rf node_modules", "rm -rf a && rm -rf b"])
+    def test_pure_rm_is_not_gated_no_scope_creep(self, cmd):
+        """ANTI-SCOPE-CREEP: `rm` with NO gh/git op is NOT gated — bare `rm` and even a
+        pure `rm && rm` chain return is_dangerous=False, so the merge guard never blocks
+        arbitrary `rm` (rm only matters as a leg ALONGSIDE a gh/git op). The compound
+        PREDICATE may count pure-rm legs, but the gate is is_dangerous, which stays
+        False here, so the read floor allows it and no mint is ever involved."""
+        from merge_guard_pre import is_dangerous_command
+        assert is_dangerous_command(cmd) is False
+
+    @pytest.mark.parametrize("cmd", [
+        "gh pr merge 5 && /bin/rm -rf /",     # path-qualified
+        "gh pr merge 5 && r''m -rf /",        # quote-concat
+        "gh pr merge 5 && $(echo rm) -rf /",  # command-substitution
+        "gh pr merge 5 && rmdir /tmp/x",      # different binary
+    ])
+    def test_obfuscated_rm_is_not_chased(self, cmd):
+        """NO-OBFUSCATION-CHASING: only a bare `rm` head-token counts as a destructive
+        leg. Obfuscated spellings (path-qualified, quote-concat, command-sub, a
+        different binary) are NOT treated as `rm` → ONE destructive leg (the gh op)
+        → NOT compound. The gh op itself is still is_dangerous-gated as a single op."""
+        from merge_guard_pre import is_compound_destructive_command, is_dangerous_command
+        assert is_compound_destructive_command(cmd) is False
+        assert is_dangerous_command(cmd) is True  # the gh op leg is still gated
+
+
 class TestFDRedirectAdversarial:
     """Adversarial extensions to Bug A's FD-redirect negatives (#720 Bug A).
 
@@ -10274,24 +10339,24 @@ class TestFDRedirectAdversarial:
             "git push origin main > file.log 2>&1 < /dev/null"
         ) is False
 
-    def test_redirect_then_and_chain_is_compound(self):
-        """`git push origin main 2>&1 && echo done` — has `&&`, IS compound.
+    def test_redirect_then_and_chain_single_destructive_not_compound(self):
+        """`git push origin main 2>&1 && echo done` — ONE destructive leg (push-to-main)
+        + a benign `echo` → NOT compound under the honest-mistake ≥2 model. The single
+        push op stays is_dangerous-gated (the && operator does not make it compound)."""
+        from merge_guard_pre import is_compound_destructive_command, is_dangerous_command
 
-        The redirect 2>&1 is silent; the && operator drives the classification.
-        """
-        from merge_guard_pre import is_compound_destructive_command
+        cmd = "git push origin main 2>&1 && echo done"
+        assert is_compound_destructive_command(cmd) is False
+        assert is_dangerous_command(cmd) is True
 
-        assert is_compound_destructive_command(
-            "git push origin main 2>&1 && echo done"
-        ) is True
+    def test_redirect_then_or_chain_single_destructive_not_compound(self):
+        """`gh pr merge 100 2>&1 || echo failed` — ONE destructive leg (merge) + a
+        benign `echo` → NOT compound (≥2 model). The merge stays is_dangerous-gated."""
+        from merge_guard_pre import is_compound_destructive_command, is_dangerous_command
 
-    def test_redirect_then_or_chain_is_compound(self):
-        """`gh pr merge 100 2>&1 || echo failed` — IS compound via `||`."""
-        from merge_guard_pre import is_compound_destructive_command
-
-        assert is_compound_destructive_command(
-            "gh pr merge 100 2>&1 || echo failed"
-        ) is True
+        cmd = "gh pr merge 100 2>&1 || echo failed"
+        assert is_compound_destructive_command(cmd) is False
+        assert is_dangerous_command(cmd) is True
 
     def test_process_substitution_output_not_compound(self):
         """`git push origin main > >(tee push.log)` — bash process
@@ -10329,54 +10394,48 @@ class TestFDRedirectAdversarial:
             "gh pr merge 100 >> output.log 2>&1"
         ) is False
 
-    def test_redirect_then_semicolon_is_compound(self):
-        """`git push --force 2>&1 ; ls` — semicolon chains, FD redirect
-        in head does NOT preempt the compound classification."""
-        from merge_guard_pre import is_compound_destructive_command
+    def test_redirect_then_semicolon_single_destructive_not_compound(self):
+        """`git push --force 2>&1 ; ls` — ONE destructive leg (force-push) + a benign
+        `ls` → NOT compound (≥2 model). The force-push stays is_dangerous-gated."""
+        from merge_guard_pre import is_compound_destructive_command, is_dangerous_command
 
-        assert is_compound_destructive_command(
-            "git push --force 2>&1 ; ls"
-        ) is True
+        cmd = "git push --force 2>&1 ; ls"
+        assert is_compound_destructive_command(cmd) is False
+        assert is_dangerous_command(cmd) is True
 
-    def test_spaceless_fd_redirect_then_pipe_is_compound(self):
-        """`gh pr merge 100 2>&1|gh pr merge 999 --admin` — spaceless
-        adjacency between an FD-redirect tail and a real pipe MUST NOT
-        slip past compound detection.
-
-        Regression pin for the bypass class where an earlier lookbehind
-        `(?<![0-9>])` form treated the `|` immediately after the digit
-        `1` of `2>&1` as part of an FD-redirect, when it was in fact a
-        true shell pipe to a second destructive command. The structural
-        FD-redirect pre-strip neutralizes the `2>&1` token before the
-        compound-regex sees the line, so the surviving `|` correctly
-        matches the bare-pipe arm.
-        """
+    def test_spaceless_fd_redirect_then_pipe_two_destructive_is_compound(self):
+        """`gh pr merge 100 2>&1|gh pr merge 999 --admin` — TWO destructive legs
+        (merge 100 + merge 999 --admin) chained by a real pipe → STILL compound under
+        the honest-mistake ≥2 model. The spaceless `2>&1|` FD-tail-then-pipe must not
+        slip past detection (the FD pre-strip neutralizes `2>&1`, the surviving `|`
+        splits two destructive legs)."""
         from merge_guard_pre import is_compound_destructive_command
 
         assert is_compound_destructive_command(
             "gh pr merge 100 2>&1|gh pr merge 999 --admin"
         ) is True
 
-    def test_spaceless_fd_redirect_then_pipe_force_push_is_compound(self):
-        """`git push --force 2>&1|cat` — same bypass class with a
-        force-push headline rather than gh-pr-merge.
-        """
-        from merge_guard_pre import is_compound_destructive_command
+    def test_spaceless_fd_redirect_then_pipe_force_push_single_not_compound(self):
+        """`git push --force 2>&1|cat` — ONE destructive leg (force-push) + a benign
+        `cat` → NOT compound (≥2 model). The force-push stays is_dangerous-gated."""
+        from merge_guard_pre import is_compound_destructive_command, is_dangerous_command
 
-        assert is_compound_destructive_command(
-            "git push --force 2>&1|cat"
-        ) is True
+        cmd = "git push --force 2>&1|cat"
+        assert is_compound_destructive_command(cmd) is False
+        assert is_dangerous_command(cmd) is True
 
-    def test_spaceless_fd_redirect_then_pipe_branch_delete_is_compound(self):
-        """`git branch -D foo 2>&1|rm -rf ~` — same bypass class with
-        a branch-delete headline; verifies the structural strip is
-        op-type-independent.
-        """
-        from merge_guard_pre import is_compound_destructive_command
+    def test_spaceless_fd_redirect_then_pipe_branch_delete_with_rm_is_compound(self):
+        """`git branch -D foo 2>&1|rm -rf ~` — branch-delete (gh/git-destructive) piped
+        to `rm -rf` (a destructive head-token). Under the FINAL model (user-ratified
+        rm-as-destructive-leg), the FD pre-strip's length-preserving offset fix slices
+        the legs correctly and the two destructive legs (branch-delete + rm) → ≥2 →
+        COMPOUND → refuse. NON-VACUITY: drop `rm` from the destructive-leg set → ONE
+        leg → not compound → flips RED."""
+        from merge_guard_pre import is_compound_destructive_command, is_dangerous_command
 
-        assert is_compound_destructive_command(
-            "git branch -D foo 2>&1|rm -rf ~"
-        ) is True
+        cmd = "git branch -D foo 2>&1|rm -rf ~"
+        assert is_compound_destructive_command(cmd) is True
+        assert is_dangerous_command(cmd) is True
 
     # --- Class A bypass-regression pins (#723 cycle 1 remediation) ---
     #
@@ -10397,38 +10456,41 @@ class TestFDRedirectAdversarial:
             "gh pr merge 100|gh pr merge 999"
         ) is True
 
-    def test_class_a_digit_then_pipe_force_push_is_compound(self):
-        """Class A — `git push --force 100|rm -rf ~` — force-push with
-        trailing digit, then tight pipe to `rm -rf`. Pre-fix bypass."""
-        from merge_guard_pre import is_compound_destructive_command
+    def test_class_a_digit_then_pipe_force_push_with_rm_is_compound(self):
+        """Class A — `git push --force 100|rm -rf ~` — force-push (gh/git-destructive)
+        piped to `rm -rf` (a destructive head-token). Under the FINAL model (user-
+        ratified rm-as-destructive-leg), the two destructive legs (force-push + rm) →
+        ≥2 → COMPOUND → refuse. The trailing PR-number digit `100` adjacent to `|` does
+        not suppress the split. NON-VACUITY: drop `rm` from the destructive-leg set →
+        ONE leg → not compound → flips RED."""
+        from merge_guard_pre import is_compound_destructive_command, is_dangerous_command
 
-        assert is_compound_destructive_command(
-            "git push --force 100|rm -rf ~"
-        ) is True
+        cmd = "git push --force 100|rm -rf ~"
+        assert is_compound_destructive_command(cmd) is True
+        assert is_dangerous_command(cmd) is True
 
-    def test_class_a_alpha_then_pipe_branch_delete_is_compound(self):
-        """Class A variant — `git branch -D foo|cat` — alpha branch name
-        followed by bare pipe (no digit at the `|` boundary). Confirms
-        the simplified regex matches bare `|` regardless of preceding
-        character class."""
-        from merge_guard_pre import is_compound_destructive_command
+    def test_class_a_alpha_then_pipe_branch_delete_single_not_compound(self):
+        """Class A variant — `git branch -D foo|cat` — ONE destructive leg
+        (branch-delete) + a benign `cat` → NOT compound (≥2 model). The branch-delete
+        stays is_dangerous-gated."""
+        from merge_guard_pre import is_compound_destructive_command, is_dangerous_command
 
-        assert is_compound_destructive_command(
-            "git branch -D foo|cat"
-        ) is True
+        cmd = "git branch -D foo|cat"
+        assert is_compound_destructive_command(cmd) is False
+        assert is_dangerous_command(cmd) is True
 
     # --- Class B variant pins (#723 cycle 1 remediation) ---
 
-    def test_class_b_reverse_fd_redirect_then_pipe_is_compound(self):
-        """Class B variant — `git push --force 1>&2|cat` — reverse FD
-        direction (`1>&2` instead of `2>&1`). Confirms the strip pattern
-        `\\d*[<>]&\\d+` is direction-agnostic (matches both `>&` and `<&`).
-        """
-        from merge_guard_pre import is_compound_destructive_command
+    def test_class_b_reverse_fd_redirect_then_pipe_single_not_compound(self):
+        """Class B variant — `git push --force 1>&2|cat` — reverse FD direction
+        (`1>&2`). ONE destructive leg (force-push) + a benign `cat` → NOT compound
+        (≥2 model). The force-push stays is_dangerous-gated; the FD pre-strip still
+        correctly neutralizes the reverse `1>&2` so it is not mistaken for a leg."""
+        from merge_guard_pre import is_compound_destructive_command, is_dangerous_command
 
-        assert is_compound_destructive_command(
-            "git push --force 1>&2|cat"
-        ) is True
+        cmd = "git push --force 1>&2|cat"
+        assert is_compound_destructive_command(cmd) is False
+        assert is_dangerous_command(cmd) is True
 
     def test_fd_to_file_redirect_alone_not_compound(self):
         """Negative regression pin — `cat 1>file 2>&1` — has an FD-to-FD
@@ -12758,23 +12820,18 @@ class TestD2GhCarrierStrip:
             'gh issue create --title "notes" && git branch -D real-branch'
         )
 
-    def test_compound_real_op_after_carrier_still_compound(self):
-        """SECURITY NEGATIVE (compound pairing preserved): the same command is
-        still flagged by is_compound_destructive_command — the strip runs
-        before BOTH the dangerous scan and the compound scan, and the
-        executing tail survives both.
+    def test_compound_real_op_after_carrier_single_destructive_not_compound(self):
+        """Honest-mistake ≥2-narrowing: `gh issue create --title "notes" && git branch
+        -D real-branch` has ONE destructive leg (the branch-delete; `gh issue create`
+        is benign) → NOT compound. The SECURITY property is preserved at the
+        is_dangerous layer: the executing `git branch -D` tail survives the carrier
+        strip and is is_dangerous-gated (asserted by the sibling test just above) — so
+        the single destructive op is still caught, it is simply not >=2-compound."""
+        from merge_guard_pre import is_compound_destructive_command, is_dangerous_command
 
-        # non-vacuity: the whole-span over-strip (broaden span to `.*` AND
-        #   blank the matched span) consumes the tail before the compound
-        #   scan → is_compound returns False → this assertion FAILS (verified
-        #   RED, part of the {4}-test cluster above). A span-boundary-only
-        #   broadening does NOT flip it (inner strip is quoted-value-scoped).
-        """
-        from merge_guard_pre import is_compound_destructive_command
-
-        assert is_compound_destructive_command(
-            'gh issue create --title "notes" && git branch -D real-branch'
-        )
+        cmd = 'gh issue create --title "notes" && git branch -D real-branch'
+        assert is_compound_destructive_command(cmd) is False
+        assert is_dangerous_command(cmd) is True  # the branch-delete tail is still gated
 
     def test_backgrounded_carrier_real_op_after_amp_still_dangerous(self):
         """SECURITY NEGATIVE (CODE-HANDOFF flagged: the single-`&` background
@@ -13139,14 +13196,16 @@ class TestD2QuoteAwareSpanRemediation:
             'gh issue create --title "safe" git push --force origin x'
         )
 
-    def test_under_block_compound_pairing_preserved(self):
-        """The compound check still fires for the `&&` case (the strip runs
-        before both is_dangerous and is_compound)."""
-        from merge_guard_pre import is_compound_destructive_command
+    def test_under_block_single_destructive_after_carrier_not_compound(self):
+        """Honest-mistake ≥2: `gh issue create --title "x" && git branch -D real` has
+        ONE destructive leg (branch-delete) → NOT compound. The branch-delete tail
+        survives the carrier strip and stays is_dangerous-gated (the single-op gate
+        catches it), so it is not under-blocked — it is simply not >=2-compound."""
+        from merge_guard_pre import is_compound_destructive_command, is_dangerous_command
 
-        assert is_compound_destructive_command(
-            'gh issue create --title "x" && git branch -D real'
-        )
+        cmd = 'gh issue create --title "x" && git branch -D real'
+        assert is_compound_destructive_command(cmd) is False
+        assert is_dangerous_command(cmd) is True
 
     # ---- 7.C — DESYNC NEGATIVES (escaped/unbalanced/mismatched quotes MUST
     #            NOT smuggle an op past the span). ----
