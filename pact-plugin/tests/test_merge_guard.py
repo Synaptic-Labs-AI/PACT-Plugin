@@ -9741,9 +9741,9 @@ class TestCompoundDestructiveCommandRejection:
 
 
 class TestBenignContinuationGuarantee:
-    """Pin the 'single destructive op + benign read-only continuation' idiom.
+    """Pin the 'single destructive op + benign continuation' idiom.
 
-    A faithful agent appends a read-only viewer/filter/redirect/background to a
+    A faithful agent appends a benign viewer/filter/redirect/background to a
     single approved destructive op to confirm the result without a separate API
     query (e.g. ``gh pr merge 5 --squash | tail``). Under the honest-mistake
     model that is ONE destructive leg — NOT a >=2-destructive compound — so it
@@ -9787,7 +9787,7 @@ class TestBenignContinuationGuarantee:
         is still classified compound and refused even with a token.
     """
 
-    # The benign read-only continuation family: pipe-to-viewer, output redirect,
+    # The benign continuation family: pipe-to-viewer, output redirect,
     # and background / benign chain. Each is appended to a single destructive op;
     # none is a second destructive leg.
     _BENIGN_CONTINUATIONS = [
