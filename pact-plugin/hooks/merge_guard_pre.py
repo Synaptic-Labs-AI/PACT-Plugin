@@ -551,7 +551,7 @@ def _token_matches_command(token: dict, command: str) -> bool:
         return _both_present_equal(context.get("pr_number"), cmd.get("pr_number"))
     if token_op == "branch-delete":
         return _both_present_equal(context.get("branch"), cmd.get("branch"))
-    if token_op in ("force-push", "push-to-main"):
+    if token_op in ("force-push", "push-to-main", "remote-ref-delete"):
         # KD-6 (SECURITY-RATIFICATION-PENDING): the destination ref must match
         # explicitly — an op-type-only floor would let a 'force-push feature'
         # approval authorize 'force-push main'. An implicit/multi-ref/unparseable
@@ -560,10 +560,14 @@ def _token_matches_command(token: dict, command: str) -> bool:
         # ref), so a faithful plain-push token authorizes its own exec — while a
         # force-push token and a push-to-main token stay DISTINCT ops (op-type
         # identity is checked above), keeping the push→force collapse closed.
+        # #1062a: remote-ref-delete ALSO binds on target_ref (the deleted ref); the
+        # op-type identity checked above keeps a remote-ref-delete token from
+        # cross-authorizing a force-push/push-to-main sharing the same target_ref
+        # (the lead Q1 distinct-op-class guarantee).
         return _both_present_equal(context.get("target_ref"), cmd.get("target_ref"))
 
-    # Unknown op-class (a typed token whose op is not one of the four handled
-    # classes) — REFUSE. No terminal allow exists on the read path.
+    # Unknown op-class (a typed token whose op is not one of the handled classes)
+    # — REFUSE. No terminal allow exists on the read path.
     return False
 
 

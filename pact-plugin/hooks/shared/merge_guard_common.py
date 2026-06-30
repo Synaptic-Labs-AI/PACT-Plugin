@@ -280,6 +280,10 @@ def detect_command_operation_type(command: str) -> str | None:
                           a force-push)
         "branch-delete" - git branch -D / git branch --delete --force / gh pr close --delete-branch;
                           API DELETE to git/refs (ref removal)
+        "remote-ref-delete" - git push delete of a SINGLE remote ref (#1062a):
+                          push <remote> :ref / --delete ref / -d ref (incl. implicit
+                          remote). Union-arm-only; recognized IFF a single deletable
+                          ref is extractable (recognition⟺mintability by construction)
         None            - destructive shape not in the recognized set
                           (read-side caller treats None as "untyped command",
                           which the tightened token-match semantic treats as
@@ -566,6 +570,107 @@ def _extract_force_push_target_ref(command: str) -> str | None:
     return refspec or None
 
 
+# git-push value-taking OPTION flags whose VALUE token must be skipped when
+# counting refspec positionals (else a contrived `-o ':weird'` push-option leaks
+# a fake delete refspec — the #1037 brittleness class). Their `--flag=value` form
+# carries the value INLINE (one token), so no next-token skip is needed. Used by
+# the remote-ref-delete + remote-mass-delete positional builder below; distinct
+# from the OP-TRIGGER flags (`--delete`/`-d`) which are NOT value-taking (the ref
+# is a separate positional).
+_GIT_PUSH_VALUE_FLAGS = frozenset(
+    {"-o", "--push-option", "--receive-pack", "--exec", "--repo"}
+)
+
+
+def _push_positionals(after_push: list[str]) -> list[str]:
+    """Positional (non-flag) tokens after the `push` subcommand, skipping the value
+    token consumed by a git-push value-taking option flag (`-o opt`, `--repo url`,
+    …). A `--flag=value` form carries its value inline (one token), so only the
+    separate-token form skips a follow-on token. Operates on a quote-aware
+    `_shell_tokenize` view (quotes already stripped), so a quoted `':oldref'` stays
+    ONE token bound to its flag and never leaks as a positional. Shared by both
+    push-delete extractors so they agree on positional boundaries."""
+    positionals: list[str] = []
+    i, n = 0, len(after_push)
+    while i < n:
+        tok = after_push[i]
+        if tok.startswith("-") and tok != "-":
+            flag = tok.split("=", 1)[0]
+            if flag in _GIT_PUSH_VALUE_FLAGS and "=" not in tok and i + 1 < n:
+                i += 2  # consume the option flag's separate value token
+                continue
+            i += 1  # a flag (boolean, op-trigger, or inline-value) — not a positional
+            continue
+        positionals.append(tok)
+        i += 1
+    return positionals
+
+
+def _tokens_after_push(command: str) -> list[str] | None:
+    """The quote-aware token list AFTER the first `push` token, on the executable
+    prefix of `command`, or None when the command is unparseable / has no `push`
+    token. Truncates at the first benign continuation / redirect (via
+    `_executable_prefix`) and abstains (None) on ambiguous quotes / procsub —
+    fail-OPEN to the literal floor, never fail-closed."""
+    prefix = _executable_prefix(command)
+    if prefix is None:
+        return None
+    toks = _shell_tokenize(prefix)
+    if toks is None:
+        return None
+    for idx, tok in enumerate(toks):
+        if tok == "push":
+            return toks[idx + 1:]
+    return None
+
+
+def _extract_remote_ref_delete_target(command: str) -> str | None:
+    """Extract the SINGLE remote ref a `git push` delete would remove (#1062a), or
+    None when the form is implicit-current/multi-ref/ambiguous (→ the caller defers:
+    not recognized as remote-ref-delete; a mass form is picked up by
+    `_extract_mass_delete_target` instead). Reuses the force-push parser MACHINERY
+    (quote-mask + shlex view + value-flag skip) but adapts the positional rule for
+    delete semantics + the implicit-remote forms the force-push parser returns None
+    for (its conservative exactly-2-positional rule). Recognition⟺mintability by
+    construction: the `_flag_condition_danger_op` arm returns `remote-ref-delete`
+    IFF this yields a target, so the op can never reach a #1064 gated-but-unmintable
+    state.
+
+    Recognized (git grammar `git push [<repo>] <refspec>...`):
+        explicit remote, --delete/-d:  `origin --delete feature` → feature
+        implicit remote, --delete/-d:  `git push --delete feature` → feature
+        single-delete-with-repo:       `git push --delete a b` → b (repo=a, ref=b)
+        empty-source colon refspec:    `origin :feature` / `origin +:feature` → feature
+                                       `origin :refs/tags/v1` → refs/tags/v1
+    Deferred (→ None, picked up as remote-mass-delete or not destructive):
+        multi-ref delete (`origin --delete a b`, `origin :a :b`), --mirror/--prune,
+        plain push (`origin feature`), src:dst non-delete (`origin feat:feat`),
+        value-flag colon (`-o ':weird' main`), a delete literal inside a quoted arg.
+    """
+    after = _tokens_after_push(command)
+    if after is None:
+        return None
+    positionals = _push_positionals(after)
+    toks = _shell_tokenize(command)
+    if toks is None:
+        return None
+    gf = _normalized_flags(toks, "git")  # git surface maps -d → --delete
+    if "--delete" in gf:
+        # git grammar: 1 positional = the refspec (implicit remote); 2 = <repo>
+        # <refspec>; 0 or ≥3 = ambiguous/multi → defer (mass handles ≥3).
+        if len(positionals) == 1:
+            return _strip_surrounding_quotes(positionals[0]) or None
+        if len(positionals) == 2:
+            return _strip_surrounding_quotes(positionals[1]) or None
+        return None
+    # No --delete flag: an empty-source colon refspec (`:dst` / `+:dst`) is a delete.
+    # EXACTLY ONE → its dst; ≠1 → defer (0 = not a delete; ≥2 = multi → mass).
+    colon_dsts = [p for p in positionals if re.match(r"^\+?:", p)]
+    if len(colon_dsts) == 1:
+        return _strip_surrounding_quotes(colon_dsts[0]).rsplit(":", 1)[1] or None
+    return None
+
+
 # -----------------------------------------------------------------------------
 # Privileged-flag binding (#1042). The (operation_type, target) binding above
 # DROPS every dash-flag, so an approved `gh pr merge 5` and an executed
@@ -624,6 +729,13 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
         # No bound flags today: branch-delete's privileged effect is its op-trigger
         # (-D / --delete --force), already bound via op_type. Kept as an explicit
         # extension point so a future bound flag is a one-line data edit here.
+    },
+    "remote-ref-delete": {
+        # No bound flags: remote-ref-delete's privileged effect (removing a remote
+        # ref) IS its op-trigger (--delete/-d/empty-source colon), already bound via
+        # op_type. Empty entry = explicit #1042 extension point (a future bound flag
+        # is a one-line data edit); it adds NO new bound flag, so the set-equality
+        # bind is untouched.
     },
 }
 
@@ -784,9 +896,10 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
     positively extracted; ABSENT otherwise (absence — NOT a None value — is the
     fail-closed signal). Possible keys:
         operation_type: "merge" | "close" | "force-push" | "branch-delete"
+                        | "push-to-main" | "remote-ref-delete"
         pr_number:  str  (merge / close)
         branch:     str  (branch-delete)
-        target_ref: str  (force-push, KD-6)
+        target_ref: str  (force-push / push-to-main, KD-6; remote-ref-delete #1062a)
         bound_flags: list[str]  (#1042) — sorted normalized privileged flags;
                      ALWAYS present when operation_type is (empty list when none).
 
@@ -837,6 +950,15 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
         target_ref = _extract_force_push_target_ref(command)
         if target_ref is not None:
             context["target_ref"] = target_ref
+    elif op_type == "remote-ref-delete":
+        # #1062a: REUSE the `target_ref` key — the parser yields a ref, the key is
+        # semantically right, and the op-class identity (checked FIRST in the read
+        # switch) keeps a remote-ref-delete token from cross-authorizing a
+        # force-push/push-to-main with the same target_ref. Recognition⟺extractability:
+        # detect returned this op IFF the extractor yields a ref, so it is non-None here.
+        ref = _extract_remote_ref_delete_target(command)
+        if ref is not None:
+            context["target_ref"] = ref
     return context
 
 
@@ -1900,6 +2022,15 @@ def _flag_condition_danger_op(command: str) -> str | None:
         gf = _normalized_flags(tokens, "git")
         if "--force" in gf and "--force-with-lease" not in gf:
             return "force-push"
+        # remote-ref-delete (#1062a) — union-arm-only recognition (lead Q2: NO
+        # literal DANGEROUS_PATTERNS ref-delete arm). Recognize IFF a SINGLE
+        # deletable ref is extractable; recognition⟺mintability by construction
+        # (the SAME predicate feeds detect via the fallback AND the is_dangerous
+        # union), so this op can NEVER be #1064 gated-but-unmintable. A multi-ref /
+        # implicit-current / ambiguous form yields None here → not recognized → the
+        # mass arm (added with #1062b) or the literal floor decides.
+        if _extract_remote_ref_delete_target(command) is not None:
+            return "remote-ref-delete"
     return None
 
 
