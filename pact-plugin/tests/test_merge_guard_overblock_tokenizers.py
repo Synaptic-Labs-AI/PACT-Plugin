@@ -591,6 +591,8 @@ class TestFixADigitGluedRedirectUnderBlock:
         ("git push --force origin main2>>log", "main2"),    # >> append
         ("git push --force origin rel99>log", "rel99"),     # multi-digit
         ("git push --force origin HEAD:main2>log", "main2"),  # refspec dst
+        ("git push --force origin feature2>&1", "feature2"),  # glued fd-DUP (not just >redirect)
+        ("git push --force origin v1.2>log", "v1.2"),       # dotted version ref: the `.` breaks the fd-prefix
     ]
     _BRANCH_DELETE = [
         ("git branch -D feature2>log", "feature2"),
@@ -612,6 +614,8 @@ class TestFixADigitGluedRedirectUnderBlock:
         # break the legitimate spaced fd-redirect.
         assert _extract_force_push_target_ref("git push --force origin main 2>&1") == "main"
         assert _extract_force_push_target_ref("git push --force origin main 22>log") == "main"
+        assert _extract_force_push_target_ref("git push --force origin main 1>&2") == "main"
+        assert _extract_force_push_target_ref("git push --force origin main 2> err.log") == "main"
         assert _extract_branch_name("git branch -D feature 2>&1") == "feature"
 
     def test_force_push_wrong_target_token_refuses_e2e(self, tmp_path):
@@ -632,6 +636,17 @@ class TestFixADigitGluedRedirectUnderBlock:
         ) is not None
         assert check_merge_authorization(
             "git push --force origin main2>log", token_dir=tmp_path
+        ) is None  # AUTHORIZE
+
+    def test_clean_ref_redirect_authorizes_discriminator(self, tmp_path):
+        # Discriminator: a CLEAN ref + redirect (`main>log`, no glued digit) still
+        # authorizes a token-`main` — so it is the DIGIT that shifts the target
+        # (`main2>log` REFUSES, just above), not the bare `>` redirect.
+        assert write_token(
+            {"operation_type": "force-push", "target_ref": "main"}, token_dir=tmp_path
+        ) is not None
+        assert check_merge_authorization(
+            "git push --force origin main>log", token_dir=tmp_path
         ) is None  # AUTHORIZE
 
     def test_branch_delete_wrong_target_token_refuses_e2e(self, tmp_path):
@@ -669,6 +684,9 @@ class TestFixAProcessSubstitutionAbstain:
         "git push --force origin main > >(cmd)",   # redirect-to-procsub
         "git push --force origin main >(cmd)",     # argument-procsub (multi-ref)
         "git push --force origin main >( cmd )",   # one optional space form
+        "git push --force origin main <(cmd)",     # INPUT-procsub direction
+        "git push --force origin main > (x)",      # redirect then spaced procsub
+        "git push --force origin main >(tee log)",  # procsub with a real inner cmd
     ])
     def test_force_push_procsub_extractor_abstains(self, cmd):
         assert _executable_prefix(cmd) is None
