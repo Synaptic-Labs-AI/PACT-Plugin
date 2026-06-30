@@ -9878,12 +9878,10 @@ class TestBenignContinuationGuarantee:
         assert is_dangerous_command(cmd) is True
         assert is_compound_destructive_command(cmd) is False
         assert write_token(dict(ctx), token_dir=tmp_path) is not None
-        result = check_merge_authorization(cmd, token_dir=tmp_path)
-        # Refused (current over-block) — and via the target-mismatch path, NOT the
-        # compound gate (is_compound is False above). Not coupled to the exact
-        # message wording.
-        assert result is not None
-        assert "Compound destructive" not in result
+        # Refused: the current over-block. The is_compound=False assert above is
+        # the discriminator that this refusal is the target-mismatch path, NOT the
+        # compound gate.
+        assert check_merge_authorization(cmd, token_dir=tmp_path) is not None
 
     @pytest.mark.parametrize("op_label,base,ctx", _OVERBLOCK_OPS)
     def test_arm_b_clean_control_authorizes(self, tmp_path, op_label, base, ctx):
@@ -9955,6 +9953,56 @@ class TestBenignContinuationGuarantee:
         result = check_merge_authorization(cmd, token_dir=tmp_path)
         assert result is not None
         assert "Compound destructive" in result
+
+    # A few representative continuation forms (one per family: pipe-to-viewer,
+    # benign-chain, output-redirect) for the negative refuse-direction asserts
+    # below — the point is to pin the refuse UNDER a continuation, not to re-sweep
+    # the whole family.
+    _REFUSE_CONTINUATIONS = ["| tail", "&& echo done", "> out.log"]
+
+    @pytest.mark.parametrize("cont", _REFUSE_CONTINUATIONS)
+    def test_wrong_pr_under_continuation_refuses(self, tmp_path, cont):
+        """UNDER-BLOCK GUARD: arm-(a)'s authorize is target-BOUND, not a blanket
+        continuation pass. A token approved for ONE PR must NOT authorize a
+        DIFFERENT PR's merge even with a benign continuation appended — the read
+        side re-derives the PR-number target from the command and the mismatch
+        refuses.
+
+        Non-vacuity (verified by in-memory mutation, reported in the HANDOFF, not
+        encoded here): if the read side dropped the PR-number equality check, this
+        wrong-PR command would AUTHORIZE and this assert would flip RED.
+        """
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        # Approval is for PR 5; the executed command targets PR 99.
+        write_token({"operation_type": "merge", "pr_number": "5"}, token_dir=tmp_path)
+        cmd = f"gh pr merge 99 {cont}"
+        assert check_merge_authorization(cmd, token_dir=tmp_path) is not None
+
+    @pytest.mark.parametrize("cont", _REFUSE_CONTINUATIONS)
+    def test_privileged_flag_absent_from_token_under_continuation_refuses(
+        self, tmp_path, cont
+    ):
+        """UNDER-BLOCK GUARD: the privileged-flag bind survives a benign
+        continuation. A `gh pr close <N> --delete-branch` command must NOT be
+        authorized by a token whose context lacks that bound flag, even with a
+        benign continuation appended. op-type and PR number match here, so the
+        ONLY axis that differs is the bound flag — a continuation must not erode
+        the never-escalate flag bind.
+
+        Non-vacuity (verified by in-memory mutation, reported in the HANDOFF, not
+        encoded here): if the read side dropped the bound-flag set-equality check,
+        this command would AUTHORIZE on the flag-less token and this assert would
+        flip RED.
+        """
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        # Token for the close op WITHOUT the --delete-branch bound flag.
+        write_token({"operation_type": "close", "pr_number": "7"}, token_dir=tmp_path)
+        cmd = f"gh pr close 7 --delete-branch {cont}"
+        assert check_merge_authorization(cmd, token_dir=tmp_path) is not None
 
 
 class TestEvalHeredocRejection:
