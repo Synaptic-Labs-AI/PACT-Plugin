@@ -449,3 +449,119 @@ class TestMintReadParityCanary:
         mint_ctx = extract_command_context("git push --force origin main")
         assert read_ctx == mint_ctx
         assert read_ctx.get("target_ref") == "main"
+
+
+# ═══════════════ #1069 — CLOSE op-class leg-isolation (review gap) ════════════
+class TestFixBCloseOpLegIsolation:
+    """Close op-class coverage for the #1069 leg-isolation, symmetric to the merge
+    pins above (which centered merge). Close is the higher-stakes op: its danger
+    trigger ``--delete-branch`` is IRREVERSIBLE, so an isolation regression here
+    would mis-delete a branch. The closing mechanism (_single_destructive_leg +
+    _extract_pr_number) is op-AGNOSTIC and already regression-guarded by the merge
+    pins; these make the close op explicit and guard a future op-specific divergence.
+
+    The CLOSE latent exec: a bare reversible ``gh pr close 1058`` (NOT dangerous)
+    chained with an IRREVERSIBLE ``gh pr close 999 --delete-branch``. Exactly one
+    leg is dangerous (the delete-close), so is_compound does NOT catch it; pre-#1069
+    the whole-command first-match scan bled pr_number=1058 (from the reversible
+    close leg), so a token approved for closing+deleting 1058's branch would
+    AUTHORIZE deleting 999's branch."""
+
+    _CLOSE_LATENT_EXEC = "gh pr close 1058\ngh pr close 999 --delete-branch"
+
+    def test_discriminator_is_target_mismatch_not_compound(self):
+        assert is_dangerous_command(self._CLOSE_LATENT_EXEC) is True
+        assert is_compound_destructive_command(self._CLOSE_LATENT_EXEC) is False
+        assert _single_destructive_leg(self._CLOSE_LATENT_EXEC) == (
+            "gh pr close 999 --delete-branch"
+        )
+
+    def test_close_token_for_wrong_pr_refuses(self, tmp_path):
+        # UNDER-BLOCK pin: token approved to delete 1058's branch must NOT authorize
+        # deleting 999's branch. Non-vacuity (Fix-B revert): _single_destructive_leg
+        # -> whole re-opens the bleed (whole pr_number=1058) -> AUTHORIZE = RED.
+        assert write_token(
+            {"operation_type": "close", "pr_number": "1058",
+             "bound_flags": ["--delete-branch"]},
+            token_dir=tmp_path,
+        ) is not None
+        assert check_merge_authorization(
+            self._CLOSE_LATENT_EXEC, token_dir=tmp_path
+        ) is not None  # REFUSE
+
+    def test_close_token_for_real_deleted_pr_authorizes_control(self, tmp_path):
+        # Non-vacuity control: a token for the PR actually delete-closed (999)
+        # AUTHORIZES the same exec -> the mismatch refusal is target-discrimination.
+        assert write_token(
+            {"operation_type": "close", "pr_number": "999",
+             "bound_flags": ["--delete-branch"]},
+            token_dir=tmp_path,
+        ) is not None
+        assert check_merge_authorization(
+            self._CLOSE_LATENT_EXEC, token_dir=tmp_path
+        ) is None  # AUTHORIZE
+
+    def test_close_benign_neighbor_flag_does_not_overblock(self, tmp_path):
+        # OVER-BLOCK fix (close flag-pollution): a benign neighbor's --repo on a
+        # different leg is dropped from the close leg's bound_flags, so the faithful
+        # delete-close AUTHORIZES with its matching token.
+        cmd = "gh pr close 5 --delete-branch ; gh pr view 5 --repo o/x"
+        assert write_token(
+            {"operation_type": "close", "pr_number": "5",
+             "bound_flags": ["--delete-branch"]},
+            token_dir=tmp_path,
+        ) is not None
+        assert check_merge_authorization(cmd, token_dir=tmp_path) is None  # AUTHORIZE
+
+    def test_close_delete_branch_flag_on_leg_stays_bound(self, tmp_path):
+        # UNDER-BLOCK guard (close analog of merge's --admin-stays-bound): a token
+        # for a bare reversible close must NOT authorize an IRREVERSIBLE delete-close
+        # — --delete-branch on the close leg stays bound, so the no-delete-branch
+        # token is REFUSED (the bare->delete-variant escalation is closed). Non-
+        # vacuity is the flag-drop mutation (strip dash-tokens -> --delete-branch
+        # dropped -> AUTHORIZE = RED), NOT a whole-command revert (which binds MORE).
+        cmd = "gh pr close 5 --delete-branch ; gh pr view 5"
+        assert write_token(
+            {"operation_type": "close", "pr_number": "5"}, token_dir=tmp_path
+        ) is not None
+        assert check_merge_authorization(cmd, token_dir=tmp_path) is not None  # REFUSE
+
+    def test_close_faithful_delete_close_authorizes_companion(self, tmp_path):
+        # Companion to the guard: the FAITHFUL token (binding --delete-branch) for the
+        # same exec AUTHORIZES — so the refusal above is the missing-flag escalation,
+        # not a trivial no-match.
+        cmd = "gh pr close 5 --delete-branch ; gh pr view 5"
+        assert write_token(
+            {"operation_type": "close", "pr_number": "5",
+             "bound_flags": ["--delete-branch"]},
+            token_dir=tmp_path,
+        ) is not None
+        assert check_merge_authorization(cmd, token_dir=tmp_path) is None  # AUTHORIZE
+
+
+# ════════════════ destructive-leg ORDER independence (review gap) ════════════
+class TestDestructiveLegOrderIndependence:
+    """_single_destructive_leg isolates the unique dangerous leg regardless of its
+    POSITION among benign neighbors. The pins above place the destructive leg first;
+    these place it SECOND (and amid multiple neighbors), so a future change keying on
+    leg ORDER rather than leg DANGER is caught."""
+
+    def test_destructive_leg_second_admin_stays_bound(self, tmp_path):
+        # Destructive leg SECOND: --admin on the (second) merge leg still binds -> a
+        # no-flag token is REFUSED, exactly as when the merge leg is first.
+        cmd = "gh pr view 5 ; gh pr merge 5 --admin"
+        assert _single_destructive_leg(cmd) == "gh pr merge 5 --admin"
+        assert write_token(
+            {"operation_type": "merge", "pr_number": "5"}, token_dir=tmp_path
+        ) is not None
+        assert check_merge_authorization(cmd, token_dir=tmp_path) is not None  # REFUSE
+
+    def test_destructive_leg_amid_multiple_neighbors_target_isolated(self, tmp_path):
+        # One dangerous merge leg amid two benign neighbors: the target (999) is the
+        # merge leg's, so a token for a DIFFERENT pr (1) is REFUSED (no cross-leg bleed).
+        cmd = "gh pr view 5 ; gh pr merge 999 ; gh pr view 6"
+        assert _single_destructive_leg(cmd) == "gh pr merge 999"
+        assert write_token(
+            {"operation_type": "merge", "pr_number": "1"}, token_dir=tmp_path
+        ) is not None
+        assert check_merge_authorization(cmd, token_dir=tmp_path) is not None  # REFUSE
