@@ -1598,12 +1598,26 @@ def _normalize_line_continuations(command: str) -> str:
 # Benign continuation / redirect terminator for the positional target extractors
 # (_extract_force_push_target_ref / _extract_branch_name). Matches a compound
 # operator (`&&`, `||`, `|&`, `;`, `&`, `|`, newline — the _COMPOUND_OPS_RE set)
-# OR a redirect START: an optional leading fd number then `<`/`>`. The redirect
-# arm covers `>`, `>>`, `<`, `2>`, `2>&1` (its leading `2>`), and `>|` (its `>`);
-# `&>` truncates at the bare `&` (matched before the `>`). The `\d*` models bash's
-# fd-prefix redirect parse — `git push origin main2>log` is the word `main` plus a
-# `2>log` redirect — so a redirect FILENAME can never be mistaken for the ref.
-_BENIGN_TERMINATOR_RE = re.compile(r"&&|\|\||\|&|;|&|\||\n|\d*[<>]")
+# OR a redirect START. The redirect arm is `(?<!\S)\d+[<>]|[<>]`: a bare `<`/`>` is
+# ALWAYS a redirect (fd defaults), AND a leading fd-NUMBER (`2>`, `22>`) is a
+# redirect prefix ONLY when it is a standalone token — i.e. NOT preceded by a
+# non-whitespace char. This mirrors bash's IO_NUMBER rule: digits GLUED to the
+# preceding word are PART OF THE WORD, not an fd-number. So `git push origin
+# main2>log` is the bash WORD `main2` plus a `>log` redirect (the refspec is
+# `main2`, NOT `main`); only a whitespace-preceded `2>` (e.g. `main 2>&1`) is an
+# fd-redirect that truncates. The `(?<!\S)` lookbehind also keeps the scan LINEAR
+# on a long digit run — it prunes the redundant in-run start positions that a bare
+# `\d*` would re-scan (the O(n^2) catastrophic-backtracking a `\d*[<>]` exhibits).
+_BENIGN_TERMINATOR_RE = re.compile(r"&&|\|\||\|&|;|&|\||\n|(?<!\S)\d+[<>]|[<>]")
+
+# Process-substitution marker (`>(`/`<(`, allowing one optional space). An UNQUOTED
+# procsub is never an honest force-push/branch-delete form: bash treats
+# `git push --force origin main >(cmd)` as a MULTI-ref push (`>(cmd)` expands to an
+# extra `/dev/fd/N` positional), and `... > >(cmd)` redirects stdout into the
+# procsub FIFO. _executable_prefix ABSTAINS when this appears, rather than
+# truncating at the redirect and mis-deriving a single-ref target. Scanned on the
+# same _mask_shell_quotes view, so a quoted `"a>(b)"` is inert (never an over-block).
+_PROCSUB_MARKER_RE = re.compile(r"[<>] ?\(")
 
 
 def _executable_prefix(command: str) -> str | None:
@@ -1613,15 +1627,23 @@ def _executable_prefix(command: str) -> str | None:
     continuation / redirect detected on the same-length `_mask_shell_quotes` view
     — or the whole command when there is no such terminator. A quoted metachar
     (`"weird>name"`) is masked to spaces on that view, so only an UNQUOTED
-    operator / redirect bounds the prefix. Returns None iff the quote state is
-    ambiguous (an unbalanced / unterminated quote makes `_shell_tokenize` fail) —
-    the caller treats None as an ABSENT target and REFUSES (fail-OPEN to the
-    existing safe over-block; an adversarial quote-elided command is out of scope
-    and is never authorized, only ever over-blocked).
+    operator / redirect bounds the prefix. Returns None (the caller treats None as
+    an ABSENT target and REFUSES — fail-OPEN to the existing safe over-block) iff
+    EITHER the quote state is ambiguous (an unbalanced / unterminated quote makes
+    `_shell_tokenize` fail) OR an unquoted process-substitution marker (`>(`/`<(`)
+    is present (defense-in-depth — never an honest destructive form, and it makes a
+    single-ref target ambiguous). An adversarial quote-elided command is out of
+    scope and is never authorized, only ever over-blocked.
     """
     if _shell_tokenize(command) is None:  # unbalanced/unterminated quote -> abstain
         return None
     masked = _mask_shell_quotes(command)  # same-length; quoted metachars -> spaces
+    # Process-substitution defense-in-depth: an unquoted `>(`/`<(` is never an
+    # honest force-push/branch-delete form (bash makes a single-ref target ambiguous
+    # -> a multi-ref push, or redirects into a FIFO). Abstain rather than truncate
+    # at the redirect and mis-derive the target. Over-block direction only.
+    if _PROCSUB_MARKER_RE.search(masked):
+        return None
     terminator = _BENIGN_TERMINATOR_RE.search(masked)
     return command[: terminator.start()] if terminator else command
 
