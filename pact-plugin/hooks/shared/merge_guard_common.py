@@ -337,24 +337,32 @@ def detect_command_operation_type(command: str) -> str | None:
     # PATCH/POST/PUT → force-push class (rewrites a ref without PR review)
     # Symmetric with how a force-push or branch-delete token from
     # extract_context() would authorize the equivalent CLI form.
-    _is_api_form = re.search(r"\b(?:gh\s+api|curl|wget)\b", command, re.IGNORECASE)
+    # gh-api recognition uses the TOLERANT `_GH_API_PREFIX` (same as the read floor)
+    # so a `gh -R o/r api ...` global-flag spelling MINTS instead of gating-on-read-
+    # but-not-minting (#1064 over-block). The METHOD checks below are IGNORECASE to
+    # match the IGNORECASE read floor, so a lowercase `-X delete` faithful form MINTS
+    # too. Both are mint-WIDENING (the read floor already gates these forms) — never a
+    # read-floor narrowing. Still gh-api/curl/wget only (NOT httpie), so no new
+    # gated-but-unmintable httpie state.
+    _is_api_form = (
+        re.search(_GH_API_PREFIX, command, re.IGNORECASE)
+        or re.search(r"\b(?:curl|wget)\b", command, re.IGNORECASE)
+    )
     if _is_api_form and "git/refs" in command:
-        if re.search(r"\bDELETE\b", command):
+        if re.search(r"\bDELETE\b", command, re.IGNORECASE):
             return "branch-delete"
-        if re.search(r"\b(?:PATCH|POST|PUT)\b", command):
+        if re.search(r"\b(?:PATCH|POST|PUT)\b", command, re.IGNORECASE):
             return "force-push"
     # branch-protection API mutation (#1063): DELETE|PUT|PATCH on a
     # `branches/<b>/protection` endpoint WEAKENS protection (remove / replace /
     # modify) — a DISTINCT op-class from branch-delete (it changes a config, not a
     # ref). POST is EXCLUDED (it ENABLES protection sub-features = strengthening, so
     # gating it would over-block). Path-disjoint from the git/refs arm above (a
-    # protection URL has no `git/refs`), so no shadowing. Method check is loose like
-    # the git/refs arm; the GAP1 write-gate (is_dangerous + the precise method-gated
-    # DANGEROUS_PATTERNS arms) ensures mint⊆read. `_is_api_form` is gh-api/curl/wget
-    # (NOT httpie) → read==mint for the clients the classifier recognizes (no httpie
-    # arm = no #1064 gated-but-unmintable httpie state).
+    # protection URL has no `git/refs`), so no shadowing. Method check is loose +
+    # IGNORECASE like the git/refs arm; the GAP1 write-gate (is_dangerous + the precise
+    # method-gated DANGEROUS_PATTERNS arms) ensures mint⊆read.
     if _is_api_form and re.search(r"branches/.*/protection", command):
-        if re.search(r"\b(?:DELETE|PUT|PATCH)\b", command):
+        if re.search(r"\b(?:DELETE|PUT|PATCH)\b", command, re.IGNORECASE):
             return "branch-protection"
     # branch-delete: git branch -D, git branch --delete --force,
     # or git branch --force --delete (matches DANGEROUS_PATTERNS).
@@ -682,10 +690,14 @@ def _extract_remote_ref_delete_target(command: str) -> str | None:
     if after is None:
         return None
     positionals = _push_positionals(after)
-    toks = _shell_tokenize(command)
-    if toks is None:
-        return None
-    gf = _normalized_flags(toks, "git")  # git surface maps -d → --delete
+    # CROSS-LEG FIX (review FINDING 1): compute the flag set from the SAME leg as the
+    # positionals — the post-`push` tokens of the executable prefix (`after`), NOT the
+    # whole command. Else a --delete/-d/--mirror/--prune token in a benign CONTINUATION
+    # leg (`git push origin feature && git branch -d old`) leaks in and mislabels the
+    # benign push as a delete (a fail-safe but common over-block). Every delete-relevant
+    # flag is a push SUBCOMMAND option (always after `push`), so the post-push tokens are
+    # the complete + correct scope; nothing real is missed (no read-floor narrowing).
+    gf = _normalized_flags(after, "git")  # git surface maps -d → --delete
     if "--delete" in gf:
         # git grammar: 1 positional = the refspec (implicit remote); 2 = <repo>
         # <refspec>; 0 or ≥3 = ambiguous/multi → defer (mass handles ≥3).
@@ -741,10 +753,12 @@ def _extract_mass_delete_target(command: str) -> str | None:
     after = _tokens_after_push(command)
     if after is None:
         return None
-    toks = _shell_tokenize(command)
-    if toks is None:
-        return None
-    gf = _normalized_flags(toks, "git")  # needs --mirror/--prune in _FLAG_SPEC (added #1062b)
+    # CROSS-LEG FIX (review FINDING 1): flag set from the SAME leg as the positionals
+    # (the post-`push` tokens), NOT the whole command — else a --mirror/--prune/--delete
+    # in a benign continuation leg (`git push origin feature && echo --mirror`) leaks in
+    # and mislabels the benign push as a mass-delete. All mass-relevant flags are push
+    # subcommand options, so post-push is the complete + correct scope.
+    gf = _normalized_flags(after, "git")  # needs --mirror/--prune in _FLAG_SPEC (added #1062b)
     mass_flags = sorted(f for f in ("--mirror", "--prune") if f in gf)
     positionals = _push_positionals(after)
     colon_dsts = [p for p in positionals if re.match(r"^\+?:", p)]
@@ -1821,9 +1835,12 @@ def _strip_non_executable_content(command: str) -> str:
         # atomically; disjoint first chars → linear, no ReDoS) — identical shape to
         # carrier 7's span. The URL positional and the method flag live in this span
         # but are never matched by the body-flag patterns below (which require a body
-        # FLAG before the value), so they always survive.
+        # FLAG before the value), so they always survive. The gh-api head uses the
+        # TOLERANT `_GH_API_PREFIX` (same as the read floor) so a `gh -R o/r api ...`
+        # global-flag spelling's body IS stripped — else the #1037 body-mention
+        # over-block re-opens for that spelling (the strip would not run).
         _http_client_span = (
-            r"\b(?:curl|wget|gh\s+api)\b"
+            r"(?:\bcurl\b|\bwget\b|" + _GH_API_PREFIX + r")"
             r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
         )
         # Direct-value body flags (form a).
