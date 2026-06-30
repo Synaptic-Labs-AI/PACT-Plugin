@@ -9740,6 +9740,72 @@ class TestCompoundDestructiveCommandRejection:
         ) is False
 
 
+class TestSplitIntoLegsExtractionParity:
+    """Regression gate for the _split_into_legs extraction.
+
+    is_compound_destructive_command's leg split was extracted verbatim into the
+    shared _split_into_legs helper (so the compound-refuse and the read-side
+    single-destructive-leg isolation can never see divergent leg boundaries). This
+    pins that the extraction is BEHAVIOR-IDENTICAL to the prior inline split — the
+    one transcription error that would matter is slicing the legs from the masked
+    `view` instead of `stripped`, which this differential catches. The
+    is_compound_destructive_command verdict suite is the companion gate (the
+    True/False outcomes are the contract); this makes 'identical, not regress'
+    executable at the leg-boundary level.
+    """
+
+    @staticmethod
+    def _old_inline_split(command):
+        """The pre-extraction inline split, reproduced independently (sans the
+        no-operator early-return, which only short-circuited the verdict, not the
+        legs). Slices from `stripped`, offsets located on the masked + FD-
+        neutralized view — exactly as the inline body did."""
+        from shared.merge_guard_common import (
+            _COMPOUND_OPS_RE,
+            _FD_REDIRECT_RE,
+            _mask_shell_quotes,
+            _normalize_line_continuations,
+            _strip_non_executable_content,
+        )
+
+        stripped = _strip_non_executable_content(
+            _normalize_line_continuations(command)
+        )
+        view = _FD_REDIRECT_RE.sub(
+            lambda mm: " " * len(mm.group()), _mask_shell_quotes(stripped)
+        )
+        legs, last = [], 0
+        for mm in _COMPOUND_OPS_RE.finditer(view):
+            legs.append(stripped[last:mm.start()])
+            last = mm.end()
+        legs.append(stripped[last:])
+        return legs
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "gh pr merge 5",                                   # one leg, no operator
+            "gh pr close 5 -d && git branch -Df victim",       # &&
+            "gh pr merge 100 && gh pr close 999 --delete-branch",
+            "gh pr merge 5 && rm -rf /",                        # gh + rm
+            "gh pr merge 5 ; echo done",                        # ;
+            "gh pr merge 5 | tail",                             # |
+            "gh pr merge 5 > out.log",                          # redirect (one leg)
+            "gh pr merge 5 &",                                  # background
+            "git push --force origin main 2>&1 | rm -rf ~",     # multi-char redirect then |
+            'gh pr merge 5 --subject "a; b" && gh pr close 6',  # quoted ; is inert
+            "gh pr close 1058\ngh pr merge 999 --squash",       # newline operator
+            "gh pr merge 5 --admin ; gh pr view 5 --repo o/x",  # benign neighbor leg
+            'gh pr merge 5 --body "x | y > z"',                 # quoted metachars, one leg
+            "gh pr merge 5 &> out.log",                         # and-redirect (one leg)
+        ],
+    )
+    def test_split_matches_prior_inline_split(self, command):
+        from shared.merge_guard_common import _split_into_legs
+
+        assert _split_into_legs(command) == self._old_inline_split(command)
+
+
 class TestBenignContinuationGuarantee:
     """Pin the 'single destructive op + benign continuation' idiom.
 

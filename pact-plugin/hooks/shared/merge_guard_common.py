@@ -1840,6 +1840,66 @@ def _leg_is_destructive(leg: str) -> bool:
     return is_dangerous_command(leg) or _RM_HEAD_RE.match(leg) is not None
 
 
+def _split_into_legs(command: str) -> list[str]:
+    """Split a command into its shell-operator-separated legs (always >=1 leg).
+
+    The single SSOT for leg boundaries: both is_compound_destructive_command (the
+    >=2-destructive-leg refuse) AND _single_destructive_leg (the read-side
+    single-leg isolation) consume this, so the two can never see divergent leg
+    boundaries (the #720/#878 divergence class). A command with no shell operator
+    yields a one-element list (the whole stripped command).
+
+    Operators are detected on the P2-masked + FD-neutralized view so an operator
+    INSIDE a quoted arg (`--subject "a; b"`) or an FD / and-redirect (`2>&1`,
+    `&>`, `>|`) is NOT a separator. Each FD-redirect is replaced by an EQUAL-LENGTH
+    run of spaces (NOT a single space) so the masked view stays SAME-LENGTH as
+    `stripped` and each operator's offsets map 1:1 back to the ORIGINAL legs (which
+    carry the real flag spellings the callers classify). A single-space collapse
+    would shrink the view and mis-slice the legs after a multi-char redirect (e.g.
+    `2>&1 | rm -rf ~`). The leg slices are taken from `stripped`, never the masked
+    `view` — the view exists ONLY to locate the operator offsets.
+    """
+    normalized = _normalize_line_continuations(command)
+    stripped = _strip_non_executable_content(normalized)
+    view = _FD_REDIRECT_RE.sub(
+        lambda m: " " * len(m.group()), _mask_shell_quotes(stripped)
+    )
+    legs, last = [], 0
+    for m in _COMPOUND_OPS_RE.finditer(view):
+        legs.append(stripped[last : m.start()])
+        last = m.end()
+    legs.append(stripped[last:])
+    return legs
+
+
+def _single_destructive_leg(command: str) -> str | None:
+    """The UNIQUE is_dangerous_command leg of a command, or None.
+
+    Returns the single destructive gh/git leg when EXACTLY one leg is dangerous;
+    None when 0 legs are dangerous, or — at the read call site, unreachably — when
+    >=2 are (is_compound_destructive_command REFUSES that upstream, at
+    check_merge_authorization, BEFORE the read seam). The read seam treats None as
+    'abstain to the WHOLE command' (the existing over-binding whole-command scan =
+    the safe over-block direction), NEVER a silent narrowing: a fail-toward-unmasked
+    quote split or any ambiguity can only collapse to the conservative whole-command
+    context, never authorize a narrower one.
+
+    This is the substrate the read side uses to derive (op, target, bound_flags)
+    from the destructive op ALONE — so a privileged flag on a benign NEIGHBOR leg
+    cannot pollute bound_flags (the over-block) and a benign neighbor's PR number
+    cannot cross-contaminate the target via _extract_pr_number's first-match-
+    anywhere scan (the latent under-block). A privileged flag that modifies the
+    destructive op is a token of its OWN simple-command (leg), so it stays bound;
+    only a different statement's flag (past an operator boundary) is dropped.
+    """
+    dangerous = [
+        leg.strip()
+        for leg in _split_into_legs(command)
+        if is_dangerous_command(leg.strip())
+    ]
+    return dangerous[0] if len(dangerous) == 1 else None
+
+
 def is_compound_destructive_command(command: str) -> bool:
     """Detect an agent chaining MULTIPLE destructive operations into one command.
 
@@ -1863,25 +1923,12 @@ def is_compound_destructive_command(command: str) -> bool:
     (one destructive leg). Only >=2 destructive legs are refused (route to
     one-op-at-a-time approval).
     """
-    normalized = _normalize_line_continuations(command)
-    stripped = _strip_non_executable_content(normalized)
-    # Operators are detected on the P2-masked + FD-neutralized view so an operator INSIDE
-    # a quoted arg (`--subject "a; b"`) or an FD/and-redirect (`2>&1`, `&>`, `>|`) is NOT a
-    # separator. Each FD-redirect is replaced by an EQUAL-LENGTH run of spaces (NOT a single
-    # space) so the masked view stays SAME-LENGTH as `stripped` and each operator's offsets
-    # map 1:1 back to the ORIGINAL legs (which carry the real flag spellings for the per-leg
-    # danger classification below). A single-space collapse would shrink the view and
-    # mis-slice the legs after a multi-char redirect (e.g. `2>&1 | rm -rf ~`).
-    compound_view = _FD_REDIRECT_RE.sub(
-        lambda m: " " * len(m.group()), _mask_shell_quotes(stripped)
-    )
-    if not _COMPOUND_OPS_RE.search(compound_view):
-        return False
-    legs, last = [], 0
-    for m in _COMPOUND_OPS_RE.finditer(compound_view):
-        legs.append(stripped[last:m.start()])
-        last = m.end()
-    legs.append(stripped[last:])
+    # Legs come from the shared _split_into_legs SSOT (masked + FD-neutralized split
+    # on _COMPOUND_OPS_RE, slices taken from `stripped`). A command with no operator
+    # yields ONE leg, so the >=2 count below is False — identical to the prior
+    # explicit no-operator short-circuit, without a separate code path that could
+    # drift from the read-side leg isolation.
+    legs = _split_into_legs(command)
     # >=2 DESTRUCTIVE legs → refuse. A leg is destructive via _leg_is_destructive: a
     # recognized git/gh-destructive op (so a non-canonical flag spelling like `-Df` in a
     # leg still counts) OR a plain-`rm` head leg (the documented rm-exception). A single

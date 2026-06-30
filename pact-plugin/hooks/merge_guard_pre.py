@@ -70,6 +70,7 @@ try:
         cleanup_consumed_tokens as _cleanup_consumed_tokens,
         cleanup_orphan_tokens as _cleanup_orphan_tokens,
         extract_command_context,
+        _single_destructive_leg,
         # Regex prefix constants relocated to shared so the read-side
         # DANGEROUS_PATTERNS bank and the shared classifier compose against
         # identical prefix semantics (#720 Bug B).
@@ -508,7 +509,20 @@ def _token_matches_command(token: dict, command: str) -> bool:
         return False  # F-READ-1: a non-dict context proves nothing — REFUSE
 
     token_op = context.get("operation_type")
-    cmd = extract_command_context(command)
+    # Derive (op, target, bound_flags) from the SINGLE destructive leg, not the
+    # whole command (#1069). When a faithful single destructive op carries a benign
+    # neighbor leg (`gh pr close 1058 ; gh pr view 1058 --repo o/x`), the whole-
+    # command context would (a) bind the neighbor's `--repo` into bound_flags and
+    # over-block the faithful click, AND (b) let _extract_pr_number's first-match-
+    # anywhere scan cross-contaminate the target (the latent under-block: a token
+    # for `gh pr close N1` authorizing `gh pr close N1\ngh pr merge N2`). Isolating
+    # the one is_dangerous leg closes BOTH. _single_destructive_leg returns None on
+    # not-exactly-one dangerous leg (0, or — unreachably here, since is_compound
+    # REFUSES >=2 upstream — many), so we fall back to the WHOLE command: the
+    # existing over-binding scan, the SAFE over-block direction, NEVER a silent
+    # narrowing. Op/target are still derived the SAME way the mint side does (mint
+    # isolates per-region via locate_command_regions), so the two arms cannot drift.
+    cmd = extract_command_context(_single_destructive_leg(command) or command)
     cmd_op = cmd.get("operation_type")
 
     # (a) Operation-type axis — both present AND equal, else REFUSE. A token with
