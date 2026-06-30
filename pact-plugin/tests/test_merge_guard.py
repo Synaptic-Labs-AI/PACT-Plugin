@@ -102,64 +102,10 @@ class TestIsMergeQuestion:
         assert is_merge_question("Run `gh pr merge 5` now?")
 
 
-class TestIsAffirmative:
-    """Tests for merge_guard_post.is_affirmative()."""
-
-    def test_yes(self):
-        from merge_guard_post import is_affirmative
-
-        assert is_affirmative("yes")
-
-    def test_y(self):
-        from merge_guard_post import is_affirmative
-
-        assert is_affirmative("y")
-
-    def test_confirm(self):
-        from merge_guard_post import is_affirmative
-
-        assert is_affirmative("confirm")
-
-    def test_go_ahead(self):
-        from merge_guard_post import is_affirmative
-
-        assert is_affirmative("go ahead")
-
-    def test_approved(self):
-        from merge_guard_post import is_affirmative
-
-        assert is_affirmative("approved")
-
-    def test_proceed(self):
-        from merge_guard_post import is_affirmative
-
-        assert is_affirmative("proceed")
-
-    def test_negative_no(self):
-        from merge_guard_post import is_affirmative
-
-        assert not is_affirmative("no")
-
-    def test_negative_cancel(self):
-        from merge_guard_post import is_affirmative
-
-        assert not is_affirmative("cancel")
-
-    def test_negative_empty(self):
-        from merge_guard_post import is_affirmative
-
-        assert not is_affirmative("")
-
-    def test_with_leading_whitespace(self):
-        from merge_guard_post import is_affirmative
-
-        assert is_affirmative("  yes  ")
-
-    def test_case_insensitive(self):
-        from merge_guard_post import is_affirmative
-
-        assert is_affirmative("YES")
-
+# (removed class TestIsAffirmative — merge_guard_post.is_affirmative and its
+#  AFFIRMATIVE_PATTERNS regex were removed as production-orphaned dead code:
+#  OPTION-mode approval is an exact non-decline label match, never a free-text
+#  word allowlist, so the affirmative prefix matcher had no remaining call site.)
 
 # (removed class TestExtractContext — superseded by the command-anchored
 #  bidirectional suite in test_merge_guard_auth_symmetry.py;
@@ -2084,7 +2030,7 @@ class TestGitCommitMessageStripping:
 
 
 class TestMergeQuestionEdgeCases:
-    """Edge cases for merge question and affirmative detection."""
+    """Edge cases for merge question detection."""
 
     def test_merge_substring_no_longer_false_fires(self):
         """KD-9: is_merge_question is command-driven, so the old 'merge'-as-
@@ -2094,77 +2040,10 @@ class TestMergeQuestionEdgeCases:
 
         assert is_merge_question("The data emerged from the pipeline") is False
 
-    def test_affirmative_with_extra_text(self):
-        """Affirmative followed by additional text."""
-        from merge_guard_post import is_affirmative
-
-        assert is_affirmative("yes please go ahead")
-
-    def test_do_it(self):
-        """'do it' is an affirmative pattern."""
-        from merge_guard_post import is_affirmative
-
-        assert is_affirmative("do it")
-
-    def test_sure(self):
-        """'sure' is affirmative."""
-        from merge_guard_post import is_affirmative
-
-        assert is_affirmative("sure")
-
-    def test_okay(self):
-        """'okay' is affirmative."""
-        from merge_guard_post import is_affirmative
-
-        assert is_affirmative("okay")
-
-    def test_ok(self):
-        """'ok' is affirmative."""
-        from merge_guard_post import is_affirmative
-
-        assert is_affirmative("ok")
-
-    def test_yep(self):
-        """'yep' is affirmative."""
-        from merge_guard_post import is_affirmative
-
-        assert is_affirmative("yep")
-
-    def test_yeah(self):
-        """'yeah' is affirmative."""
-        from merge_guard_post import is_affirmative
-
-        assert is_affirmative("yeah")
-
-    def test_approve(self):
-        """'approve' is affirmative."""
-        from merge_guard_post import is_affirmative
-
-        assert is_affirmative("approve")
-
-    def test_not_affirmative_maybe(self):
-        """'maybe' is NOT affirmative."""
-        from merge_guard_post import is_affirmative
-
-        assert not is_affirmative("maybe")
-
-    def test_not_affirmative_let_me_think(self):
-        """'let me think' is NOT affirmative."""
-        from merge_guard_post import is_affirmative
-
-        assert not is_affirmative("let me think about it")
-
-    def test_not_affirmative_wait(self):
-        """'wait' is NOT affirmative."""
-        from merge_guard_post import is_affirmative
-
-        assert not is_affirmative("wait")
-
-    def test_not_affirmative_dont(self):
-        """'don't' is NOT affirmative."""
-        from merge_guard_post import is_affirmative
-
-        assert not is_affirmative("don't do that")
+    # (removed the is_affirmative test methods — merge_guard_post.is_affirmative
+    #  and its AFFIRMATIVE_PATTERNS regex were removed as production-orphaned dead
+    #  code; OPTION-mode approval is an exact non-decline label match, not a
+    #  free-text word allowlist. is_merge_question coverage stays above.)
 
     # (removed test_extract_pull_request_text / test_extract_branch_with_dots /
     #  test_extract_branch_with_underscores / test_extract_quoted_branch — they
