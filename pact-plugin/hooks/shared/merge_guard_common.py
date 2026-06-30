@@ -1081,13 +1081,22 @@ re.compile(_GIT_PREFIX + r"branch\s+--force\s+--delete\b"),
 # API-based merge bypasses (require mutating HTTP method to avoid blocking reads)
 re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b).*merge", re.IGNORECASE),
 re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PUT|PATCH|POST)\b).*api.*merge", re.IGNORECASE),
-# API-based branch deletion via DELETE to git/refs endpoint
+# API-based branch deletion via DELETE to git/refs endpoint.
+# HOST-AGNOSTIC (#1061): the curl arms drop the literal `.*api.*` substring so a
+# truly api-free Enterprise/proxy URL (e.g. https://git.example.com/repos/o/r/git/refs/...)
+# no longer bypasses — bringing curl to parity with the already-host-agnostic
+# gh-api/wget/httpie arms. The `api` key was an as-shipped heuristic (#268/#271), not a
+# deliberated scope ruling; this WIDENS it. The over-block this widening would introduce
+# on a quoted `-d` body mentioning git/refs is closed by carrier-8 (the HTTP-client
+# data-body strip in _strip_non_executable_content) — the body value is stripped while
+# the path-resident ref survives (PATH-vs-BODY invariant).
 re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+DELETE\b).*git/refs", re.IGNORECASE),
-re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+DELETE\b).*api.*git/refs", re.IGNORECASE),
+re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+DELETE\b).*git/refs", re.IGNORECASE),
 # API-based ref mutation / force push via mutating method to git/refs endpoint
-# (any mutating operation on git refs via API is inherently dangerous)
+# (any mutating operation on git refs via API is inherently dangerous). Curl arm is
+# host-agnostic (#1061) — see the DELETE arm note above.
 re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PATCH|POST|PUT)\b).*git/refs", re.IGNORECASE),
-re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PATCH|POST|PUT)\b).*api.*git/refs", re.IGNORECASE),
+re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PATCH|POST|PUT)\b).*git/refs", re.IGNORECASE),
 # gh api implicit POST: body param flags (-f, -F, --field, --raw-field, --input)
 # cause gh api to default to POST. Dangerous when targeting git/refs or merge.
 # Negative lookahead excludes explicit GET (which overrides implicit POST).
@@ -1096,7 +1105,7 @@ re.compile(_GH_API_PREFIX + r"(?!.*(?:-X|--method)\s+GET\b)(?=.*(?:-f|-F|--field
 # curl implicit POST: --data/-d/--data-raw/--data-binary flags cause curl to
 # default to POST. Dangerous when targeting git/refs or merge API endpoints.
 # Negative lookahead excludes explicit GET (which overrides implicit POST).
-re.compile(r"\bcurl\b(?!.*(?:-X|--request)\s+GET\b)(?=.*(?:--data(?:-(?:raw|binary))?|-d)\s).*api.*git/refs", re.IGNORECASE),
+re.compile(r"\bcurl\b(?!.*(?:-X|--request)\s+GET\b)(?=.*(?:--data(?:-(?:raw|binary))?|-d)\s).*git/refs", re.IGNORECASE),
 re.compile(r"\bcurl\b(?!.*(?:-X|--request)\s+GET\b)(?=.*(?:--data(?:-(?:raw|binary))?|-d)\s).*api.*merge", re.IGNORECASE),
 # Contents API: write operations (PUT/PATCH/POST) to /contents/ endpoint
 # targeting main or master branch. Flags any mutating /contents/ call that
@@ -1496,6 +1505,96 @@ def _strip_non_executable_content(command: str) -> str:
             return span
 
         result = re.sub(_gh_carrier_span, _strip_gh_carrier_span, result)
+
+    # 8. Strip HTTP-client request-body flag VALUES (curl / wget / gh api).
+    #    The #1061 widening (host-agnostic `.*git/refs`) and the #1063
+    #    `.*branches/.*/protection` arms would OTHERWISE fire on the destructive
+    #    path text when it merely appears inside a QUOTED data-body argument
+    #    (`curl -X POST .../log -d 'msg=touched git/refs/heads/x'`) — an over-block
+    #    of a faithful command (the #1037 hard-constraint). A faithful API ref /
+    #    protection mutation ALWAYS carries the destructive resource in the URL
+    #    PATH (REST convention — the resource IS the URL), NEVER the request body,
+    #    so stripping ONLY the data-body VALUE is zero-under-block: a path-resident
+    #    target can never be removed (the PATH-vs-BODY invariant).
+    #
+    #    Surface-scoped to a curl / wget / gh-api command SPAN so a `git push -d
+    #    <ref>` (git's `-d` = --delete, the ref is a positional we DO gate) is never
+    #    mis-stripped — the span anchors only on an HTTP-client head, and git is
+    #    absent from the anchor. TWO value-forms are handled:
+    #      (a) direct-value body flags — `FLAG <quoted-value>`: curl/wget
+    #          -d/--data[-raw|-binary|-ascii|-urlencode]/--body-data/--post-data.
+    #      (b) KEY=VALUE field flags — `FLAG <key>=<quoted-value>`: gh-api
+    #          --field/--raw-field/-f/-F (and curl -F form data). Strip the value
+    #          AFTER the `=`, keeping `flag key=`.
+    #    Surface-awareness falls out of the patterns: curl's bare boolean `-f`
+    #    (--fail) is followed by no `key=<quoted>` token, so form (b) never matches
+    #    it and a `curl -f -X DELETE .../git/refs/...` still gates.
+    #    EVERY flag token is KEPT (only the value is replaced) so the implicit-POST
+    #    lookaheads (`(?=.*(?:--data...|-f|--field|...)\s)`) still fire on a genuine
+    #    implicit-POST. Same execution-routing guards as carriers 3/5/7: skip when
+    #    piped/process-sub to a shell; the double-quoted arms preserve a value
+    #    containing command-substitution `$(`/backtick (it would execute).
+    #    (httpie body params are POSITIONALS, not flags, so they are out of scope —
+    #    a rarer, fails-safe pre-existing FP, documented in the architecture residuals.)
+    if not piped_to_shell and not process_sub_to_shell:
+        # The HTTP-client command span: from a curl/wget/gh-api head up to the first
+        # UNQUOTED shell separator. Quote-aware body (balanced quotes consumed
+        # atomically; disjoint first chars → linear, no ReDoS) — identical shape to
+        # carrier 7's span. The URL positional and the method flag live in this span
+        # but are never matched by the body-flag patterns below (which require a body
+        # FLAG before the value), so they always survive.
+        _http_client_span = (
+            r"\b(?:curl|wget|gh\s+api)\b"
+            r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+        )
+        # Direct-value body flags (form a).
+        _data_flag = r"(?:--data(?:-(?:raw|binary|ascii|urlencode))?|--body-data|--post-data|-d)"
+        # KEY=VALUE field flags (form b). The `<key>=` requirement is what makes the
+        # strip surface-aware (curl's boolean -f never has a key= after it).
+        _field_flag = r"(?:--field|--raw-field|-F|-f)"
+
+        def _strip_http_body_span(span_match: re.Match) -> str:
+            span = span_match.group(0)
+
+            # CONTENTS-API EXCEPTION (PATH-vs-BODY invariant boundary). The
+            # `.*contents/.*(?:main|master)` arm reads its destructive target — the
+            # branch being written — from the REQUEST BODY (`-d '{"branch":"master"}'`)
+            # or a `?branch=` query, NOT the URL path (the contents API path is
+            # `/contents/{filepath}`, branch-less). This is the ONE gated arm whose
+            # signal is body-resident; stripping its body would REMOVE the main/master
+            # gating signal → an UNDER-BLOCK. The architecture (§3) mandates leaving the
+            # contents arm UNCHANGED, so preserve a contents-API span verbatim. Detected
+            # per-span (a compound's `/log` span is still stripped). git/refs and
+            # branches/protection targets are path-resident, so their bodies stay strippable.
+            if re.search(r"contents/", span):
+                return span
+
+            def _keep_flag_dq(m: re.Match) -> str:
+                # group(1) = the flag (+ key= for form b) up to the opening quote.
+                if _has_command_substitution(m.group(0)):
+                    return m.group(0)  # value contains $()/backtick → executes; keep
+                return m.group(1) + "'STRIPPED'"
+
+            # (a) direct-value body flags — double- then single-quoted.
+            span = re.sub(
+                r"(" + _data_flag + r"\s+)\"(?:[^\"\\]|\\.)*\"", _keep_flag_dq, span
+            )
+            span = re.sub(
+                r"(" + _data_flag + r"\s+)'[^']*'", r"\1'STRIPPED'", span
+            )
+            # (b) KEY=VALUE field flags — double- then single-quoted. `<key>` is a
+            # bare word (letters/digits/._-); the value AFTER `=` is what is stripped.
+            span = re.sub(
+                r"(" + _field_flag + r"\s+[\w.\-]+=)\"(?:[^\"\\]|\\.)*\"",
+                _keep_flag_dq,
+                span,
+            )
+            span = re.sub(
+                r"(" + _field_flag + r"\s+[\w.\-]+=)'[^']*'", r"\1'STRIPPED'", span
+            )
+            return span
+
+        result = re.sub(_http_client_span, _strip_http_body_span, result)
 
     return result
 
