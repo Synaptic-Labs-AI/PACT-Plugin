@@ -542,15 +542,16 @@ class TestMintReadParity:
 
 
 class TestShellRedirectIsolation:
-    """A trailing shell redirect (`2>&1`) is tolerated by the merge/close target
-    extractor (the pr-number regex anchors on the digit positional and ignores
-    later tokens), but it DEFEATS the positional-counting ref parsers for BOTH
-    force-push (`origin main 2>&1` = 3 positionals → unparseable → REFUSE) AND —
-    post-#30 multi-target hardening — branch-delete (`-D x 2>&1` = 2 positionals
-    → multi-target → REFUSE). Both over-blocks are the SAFE #1031 direction (NOT
-    a #1032 under-block). Candidate follow-up (KD-6, security-owned): strip
-    recognized shell redirections before the positional split — now covering
-    force-push AND branch-delete."""
+    """A trailing shell redirect (`2>&1`) is tolerated by ALL the target
+    extractors. The merge/close pr-number regex always anchored on the digit
+    positional; the force-push and branch-delete positional parsers now truncate
+    at the first benign terminator on the quote-masked view BEFORE counting
+    positionals, so a redirect / continuation no longer inflates the count. A
+    faithful single force-push / branch-delete with a trailing redirect therefore
+    AUTHORIZES — the target is re-derived from the executable prefix, and the
+    redirect filename is structurally outside the positional window, so it can
+    never become the target (the over-block is fixed WITHOUT opening a #1032
+    under-block; a wrong/extra real positional still counts off → REFUSE)."""
 
     def _seed_typed(self, tmp_path, context):
         from merge_guard_post import write_token
@@ -560,25 +561,26 @@ class TestShellRedirectIsolation:
         self._seed_typed(tmp_path, {"operation_type": "merge", "pr_number": "5"})
         assert _authorize("gh pr merge 5 2>&1", tmp_path) is None
 
-    def test_branch_delete_with_redirect_over_blocks(self, tmp_path):
-        """Post-#30: the `2>&1` redirect is counted as a second positional, so
-        even a single-branch delete with a redirect conservatively OVER-BLOCKS
-        (the branch ref is unparseable → REFUSE). SAFE #1031 direction, NOT a
-        #1032 under-block. Same KD-6 redirect-strip follow-up class as force-push
-        (the follow-up now covers branch-delete too)."""
+    def test_branch_delete_with_redirect_authorizes(self, tmp_path):
+        """A single-branch delete with a trailing `2>&1` redirect AUTHORIZES: the
+        positional parser truncates at the redirect before counting, so the branch
+        ref re-derives to `x` and matches the token. (Previously this over-blocked
+        — the redirect was miscounted as a second positional; the over-block-
+        tokenizer fix removes it without opening a #1032 under-block.)"""
         self._seed_typed(tmp_path, {"operation_type": "branch-delete", "branch": "x"})
-        assert _authorize("git branch -D x 2>&1", tmp_path) is not None
-        # Sanity: WITHOUT the redirect the same token authorizes (isolates the
-        # over-block to the redirect-induced positional miscount).
+        assert _authorize("git branch -D x 2>&1", tmp_path) is None
+        # Companion: WITHOUT the redirect the same token also authorizes.
         assert _authorize("git branch -D x", tmp_path) is None
 
-    def test_force_push_with_redirect_over_blocks(self, tmp_path):
-        """Even WITH a matching force-push token, the `2>&1` redirect makes the
-        ref unparseable → conservative REFUSE (documented over-block)."""
+    def test_force_push_with_redirect_authorizes(self, tmp_path):
+        """A faithful force-push with a trailing `2>&1` redirect AUTHORIZES: the ref
+        parser truncates at the redirect before counting positionals, so the
+        destination re-derives to `main` and matches the token. (Previously this
+        over-blocked; the fix re-derives the target from the executable prefix and
+        the redirect filename can never become the ref — no #1032 under-block.)"""
         self._seed_typed(tmp_path, {"operation_type": "force-push", "target_ref": "main"})
-        assert _authorize("git push --force origin main 2>&1", tmp_path) is not None
-        # Sanity: WITHOUT the redirect the same token authorizes (isolates the
-        # over-block to the redirect-induced positional miscount).
+        assert _authorize("git push --force origin main 2>&1", tmp_path) is None
+        # Companion: WITHOUT the redirect the same token also authorizes.
         assert _authorize("git push --force origin main", tmp_path) is None
 
 

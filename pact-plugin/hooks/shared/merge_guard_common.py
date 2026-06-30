@@ -62,28 +62,26 @@ PURE-rm chain (`rm -rf a && rm -rf b`) stay is_dangerous=False and are NEVER gat
 the guard stays out of pure-filesystem commands.
 
 benign-CONTINUATION (the dual of the rm-EXCEPTION; documented so a future sweep does
-NOT "discover" the single-leg mint and "harden" it away): for the gh pr merge/close
-family, a SINGLE recognized destructive op + ANY benign continuation mints a token AND
-the read side authorizes the continued command. "Benign" means the remainder is NOT a
-second destructive git/gh op — it need NOT be read-only (a `tee` or an output redirect
-WRITES a file and is still benign). A benign chain (`gh pr merge 5 && echo ok`,
-`gh pr merge 5 ; echo done`), a backgrounding (`gh pr merge 5 &`), a pipe to a
-pager/filter or `tee` (`gh pr merge 5 | tail`, `gh pr merge 5 | tee log`), or an output
-redirect (`gh pr merge 5 > out.log`) is a faithful single-command click:
+NOT "discover" the single-leg mint and "harden" it away): for EVERY recognized
+destructive op — gh pr merge, gh pr close, git force-push, AND git branch-delete — a
+SINGLE such op + ANY benign continuation mints a token AND the read side authorizes the
+continued command. "Benign" means the remainder is NOT a second destructive git/gh op —
+it need NOT be read-only (a `tee` or an output redirect WRITES a file and is still
+benign). A benign chain (`gh pr merge 5 && echo ok`, `gh pr merge 5 ; echo done`), a
+backgrounding (`gh pr merge 5 &`), a pipe to a pager/filter or `tee`
+(`gh pr merge 5 | tail`, `gh pr merge 5 | tee log`), or an output / fd redirect
+(`gh pr merge 5 > out.log`, `git push --force origin main 2>&1`,
+`git branch -D feature > log`) is a faithful single-command click:
 is_compound_destructive_command refuses ONLY on >=2 destructive legs (one destructive
-leg + benign continuation is NOT compound), and the merge/close read-side target is the
-PR-NUMBER positional, recovered regardless of trailing continuation tokens — so the
-approval still binds. This is the GENERAL single-destructive-op-plus-benign-remainder
-pattern, NOT a recognition allow-list of viewers/filters — do NOT enumerate viewers in
-detection logic (an allow-list drifts and would re-block faithful clicks the count
-already mints).
-KNOWN LIMITATION (fail-safe; do NOT "fix" it here): the SAME continuation appended to a
-force-push or branch-delete currently OVER-blocks on the read side. Their target
-extractor requires an exact positional count (push: remote + refspec; branch: one name),
-so a continuation's tokens are miscounted as extra positionals → the target is
-unextractable → the approved token no longer matches → REFUSE. This refuses a faithful
-click but NEVER under-blocks (the safe direction); the fix belongs to the over-block-
-tokenizer work, not a detection change here.
+leg + benign continuation is NOT compound), and the read-side target is re-derived from
+the SINGLE destructive leg — the merge/close PR-NUMBER positional, the branch-delete
+name, OR the force-push ref — regardless of any trailing continuation / redirect tokens,
+so the approval still binds. (The positional extractors truncate at the first benign
+terminator on the quote-masked view; the read call site isolates the single destructive
+leg before deriving op/target/flags.) This is the GENERAL single-destructive-op-plus-
+benign-remainder pattern, NOT a recognition allow-list of viewers/filters — do NOT
+enumerate viewers in detection logic (an allow-list drifts and would re-block faithful
+clicks the count already mints).
 =============================================================================
 
 Centralizes TOKEN_TTL, TOKEN_DIR, TOKEN_PREFIX, consumed-token cleanup,
@@ -496,7 +494,17 @@ def _extract_branch_name(command: str) -> str | None:
     # reaches here when detect_command_operation_type already classified the
     # command branch-delete, so a -D/--delete flag is present and is dropped
     # with the other dash-flags.
-    branch_match = re.search(_GIT_PREFIX + r"branch\b(.*)$", command)
+    # Truncate at the first benign continuation / redirect on the quote-masked
+    # view BEFORE counting positionals, so a faithful single branch-delete with a
+    # trailing continuation (`git branch -D feature | tail`, `... ; echo done`,
+    # `... > log`) re-derives its one branch name instead of miscounting the
+    # continuation tokens as extra positionals (-> None -> over-block). An
+    # ambiguous quote state makes _executable_prefix return None -> abstain -> the
+    # existing safe over-block (never a silently-authorized malformed command).
+    prefix = _executable_prefix(command)
+    if prefix is None:
+        return None
+    branch_match = re.search(_GIT_PREFIX + r"branch\b(.*)$", prefix)
     if not branch_match:
         return None
     positionals = [t for t in branch_match.group(1).split() if not t.startswith("-")]
@@ -534,7 +542,19 @@ def _extract_force_push_target_ref(command: str) -> str | None:
     # remote-only (implicit branch); >2 = multi-ref/chained -> all ambiguous,
     # REFUSE. A value-taking dash-flag (e.g. `-o opt`) shifts the positional
     # count off 2 -> also refused (conservative over-block).
-    push_match = re.search(_GIT_PREFIX + r"push\b(.*)$", command)
+    # Truncate at the first benign continuation / redirect on the quote-masked
+    # view BEFORE counting positionals, so a faithful single force-push with a
+    # trailing continuation (`git push --force origin main | tail`, `... 2>&1`,
+    # `... > log`, `... && echo done`) re-derives its target instead of
+    # miscounting the continuation tokens as extra positionals (-> None ->
+    # over-block). The redirect filename is structurally outside the positional
+    # window (`... feature > main` yields `feature`, never `main`). An ambiguous
+    # quote state makes _executable_prefix return None -> abstain -> the existing
+    # safe over-block (never a silently-authorized malformed command).
+    prefix = _executable_prefix(command)
+    if prefix is None:
+        return None
+    push_match = re.search(_GIT_PREFIX + r"push\b(.*)$", prefix)
     if not push_match:
         return None
     positionals = [t for t in push_match.group(1).split() if not t.startswith("-")]
@@ -1573,6 +1593,37 @@ def _normalize_line_continuations(command: str) -> str:
     Routed through every floor call site + the new substrate so mint and read join
     lines identically (mint==read by construction)."""
     return command.replace("\\\n", " ")
+
+
+# Benign continuation / redirect terminator for the positional target extractors
+# (_extract_force_push_target_ref / _extract_branch_name). Matches a compound
+# operator (`&&`, `||`, `|&`, `;`, `&`, `|`, newline — the _COMPOUND_OPS_RE set)
+# OR a redirect START: an optional leading fd number then `<`/`>`. The redirect
+# arm covers `>`, `>>`, `<`, `2>`, `2>&1` (its leading `2>`), and `>|` (its `>`);
+# `&>` truncates at the bare `&` (matched before the `>`). The `\d*` models bash's
+# fd-prefix redirect parse — `git push origin main2>log` is the word `main` plus a
+# `2>log` redirect — so a redirect FILENAME can never be mistaken for the ref.
+_BENIGN_TERMINATOR_RE = re.compile(r"&&|\|\||\|&|;|&|\||\n|\d*[<>]")
+
+
+def _executable_prefix(command: str) -> str | None:
+    """The command truncated at the first UNQUOTED compound-op-or-redirect.
+
+    Returns the leading executable span — everything before the first benign
+    continuation / redirect detected on the same-length `_mask_shell_quotes` view
+    — or the whole command when there is no such terminator. A quoted metachar
+    (`"weird>name"`) is masked to spaces on that view, so only an UNQUOTED
+    operator / redirect bounds the prefix. Returns None iff the quote state is
+    ambiguous (an unbalanced / unterminated quote makes `_shell_tokenize` fail) —
+    the caller treats None as an ABSENT target and REFUSES (fail-OPEN to the
+    existing safe over-block; an adversarial quote-elided command is out of scope
+    and is never authorized, only ever over-blocked).
+    """
+    if _shell_tokenize(command) is None:  # unbalanced/unterminated quote -> abstain
+        return None
+    masked = _mask_shell_quotes(command)  # same-length; quoted metachars -> spaces
+    terminator = _BENIGN_TERMINATOR_RE.search(masked)
+    return command[: terminator.start()] if terminator else command
 
 
 # -----------------------------------------------------------------------------

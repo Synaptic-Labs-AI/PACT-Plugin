@@ -9751,40 +9751,23 @@ class TestBenignContinuationGuarantee:
     whole continuation family so a future hardening change cannot silently
     re-break the idiom.
 
-    Two arms over the SAME benign-continuation family, because the read side's
-    target re-derivation behaves differently per op-class:
+    The guarantee is UNIVERSAL across the recognized destructive ops — gh pr
+    merge, gh pr close, git force-push, AND git branch-delete: a single such op
+    plus any benign continuation mints a token AND the read side AUTHORIZES the
+    continued command. Each op's target parser re-derives its target from the
+    single destructive leg regardless of trailing continuation / redirect tokens
+    (the positional extractors truncate at the first benign terminator on the
+    quote-masked view), so the minted single-op token still matches.
 
-      ARM (a) — gh pr merge/close: the read side AUTHORIZES the continued
-        command. The PR-number target parser is continuation-tolerant (it
-        captures the positional directly rather than splitting the tail), so the
-        minted single-op token still matches. This is the guaranteed idiom.
-
-      ARM (b) — force-push / branch-delete: the read side currently OVER-BLOCKS
-        the continued command. Their target parsers split everything after
-        ``push`` / ``branch`` and count the continuation tokens (``|``, ``tail``,
-        ``echo`` …) as extra positionals, tripping the multi-target conservatism
-        so the target is unextractable; the minted token then no longer matches
-        and the read side refuses. This is the fail-safe over-block direction
-        (it refuses a faithful click, never authorizes anything unapproved).
-
-        These arm-(b) asserts are a FLIP-ON-FIX TRIPWIRE for the continuation-
-        tolerant target-parser fix tracked as #1043: once that lands, force-push
-        / branch-delete + continuation will start AUTHORIZING
-        (``check_merge_authorization`` returns None) and these cases must be
-        MOVED to the arm-(a) AUTHORIZED expectation. The test is intentionally
-        coupled to the present behavior so the fix has a red-on-flip target.
-
-    Non-vacuity is anchored three ways:
-      * the CLEAN no-continuation control — the bare force-push / branch-delete
-        AUTHORIZES with the SAME token context, proving arm-(b) refusals are
-        caused by the continuation, not by a wrong token shape (a harness
-        artifact);
+    Non-vacuity is anchored:
       * the ``| bash`` pipe-to-shell boundary — a benign continuation is bounded:
         ``_has_pipe_to_shell`` recognizes ``| bash`` / ``| sh`` as dangerous
         indirection while the benign viewers (``| tail`` / ``| less``) are NOT,
         so 'benign continuation' is not a blanket pipe pass;
       * the >=2-destructive compound contrast — a genuine multi-destructive chain
-        is still classified compound and refused even with a token.
+        is still classified compound and refused even with a token;
+      * the wrong-target / privileged-flag-absent negatives — a continuation can
+        never authorize a MISMATCHED target or a token missing a bound flag.
     """
 
     # The benign continuation family: pipe-to-viewer, output redirect,
@@ -9797,11 +9780,15 @@ class TestBenignContinuationGuarantee:
         "&", "&& echo done", "; echo done",
     ]
 
-    # ARM (a) ops: (label, base destructive command, mint context). The read side
-    # AUTHORIZES the continued command. ``close`` carries ``--delete-branch`` (its
-    # danger trigger), so its token context MUST bind that flag — the read-side
-    # set-equality flag gate refuses otherwise — exactly as the mint side extracts
-    # it from the approval text. ``merge`` carries no privileged flag.
+    # All recognized destructive ops: (label, base destructive command, mint
+    # context). The read side AUTHORIZES the continued command for EVERY one —
+    # the force-push / branch-delete target parsers are now continuation-tolerant
+    # (they truncate at the first benign terminator before counting positionals),
+    # so they join merge / close in this guarantee. ``close`` carries
+    # ``--delete-branch`` (its danger trigger), so its token context MUST bind
+    # that flag — the read-side set-equality flag gate refuses otherwise — exactly
+    # as the mint side extracts it from the approval text. ``merge`` /
+    # ``force-push`` / ``branch-delete`` carry no privileged flag.
     _AUTHORIZED_OPS = [
         ("merge", "gh pr merge 5", {"operation_type": "merge", "pr_number": "5"}),
         (
@@ -9810,12 +9797,6 @@ class TestBenignContinuationGuarantee:
             {"operation_type": "close", "pr_number": "7",
              "bound_flags": ["--delete-branch"]},
         ),
-    ]
-
-    # ARM (b) ops: (label, base destructive command, mint context). The read side
-    # currently OVER-BLOCKS the continued command. The CLEAN base command
-    # authorizes with the same context (test_arm_b_clean_control_authorizes).
-    _OVERBLOCK_OPS = [
         (
             "force-push",
             "git push --force origin main",
@@ -9830,13 +9811,14 @@ class TestBenignContinuationGuarantee:
 
     @pytest.mark.parametrize("cont", _BENIGN_CONTINUATIONS)
     @pytest.mark.parametrize("op_label,base,ctx", _AUTHORIZED_OPS)
-    def test_arm_a_merge_close_continuation_authorizes(
+    def test_single_destructive_op_continuation_authorizes(
         self, tmp_path, op_label, base, ctx, cont
     ):
-        """ARM (a): merge/close + a benign continuation mints AND authorizes.
+        """A single destructive op + a benign continuation mints AND authorizes.
 
         One destructive leg (dangerous, NOT compound); the single-op approval
-        token authorizes the continued command. This is the guaranteed idiom.
+        token authorizes the continued command. Holds for EVERY recognized op
+        (merge / close / force-push / branch-delete) — the guaranteed idiom.
         """
         from merge_guard_post import write_token
         from merge_guard_pre import (
@@ -9850,53 +9832,6 @@ class TestBenignContinuationGuarantee:
         assert is_compound_destructive_command(cmd) is False
         assert write_token(dict(ctx), token_dir=tmp_path) is not None
         assert check_merge_authorization(cmd, token_dir=tmp_path) is None
-
-    @pytest.mark.parametrize("cont", _BENIGN_CONTINUATIONS)
-    @pytest.mark.parametrize("op_label,base,ctx", _OVERBLOCK_OPS)
-    def test_arm_b_forcepush_branchdelete_continuation_overblocks(
-        self, tmp_path, op_label, base, ctx, cont
-    ):
-        """ARM (b): force-push/branch-delete + a benign continuation is the CURRENT
-        over-block. One destructive leg (dangerous, NOT compound) and the single-op
-        token mints, but the read side REFUSES because the continuation defeats the
-        target re-derivation.
-
-        A MATCHING token is minted so the refusal is specifically the
-        continuation-induced target-mismatch over-block — NOT the trivial
-        no-token path (which would never flip). FLIP-ON-FIX TRIPWIRE: when the
-        continuation-tolerant target-parser fix (#1043) lands, these cases will
-        AUTHORIZE (check_merge_authorization is None) and must move to arm (a).
-        """
-        from merge_guard_post import write_token
-        from merge_guard_pre import (
-            check_merge_authorization,
-            is_compound_destructive_command,
-            is_dangerous_command,
-        )
-
-        cmd = f"{base} {cont}"
-        assert is_dangerous_command(cmd) is True
-        assert is_compound_destructive_command(cmd) is False
-        assert write_token(dict(ctx), token_dir=tmp_path) is not None
-        # Refused: the current over-block. The is_compound=False assert above is
-        # the discriminator that this refusal is the target-mismatch path, NOT the
-        # compound gate.
-        assert check_merge_authorization(cmd, token_dir=tmp_path) is not None
-
-    @pytest.mark.parametrize("op_label,base,ctx", _OVERBLOCK_OPS)
-    def test_arm_b_clean_control_authorizes(self, tmp_path, op_label, base, ctx):
-        """Non-vacuity control for arm (b): the CLEAN no-continuation force-push /
-        branch-delete AUTHORIZES with the SAME token context used in arm (b).
-
-        Proves the arm-(b) refusals are caused by the appended continuation, not
-        by a wrong token shape — and that this exact token context is what should
-        authorize the continued command once the #1043 parser fix lands.
-        """
-        from merge_guard_post import write_token
-        from merge_guard_pre import check_merge_authorization
-
-        assert write_token(dict(ctx), token_dir=tmp_path) is not None
-        assert check_merge_authorization(base, token_dir=tmp_path) is None
 
     @pytest.mark.parametrize(
         "cmd",
@@ -11005,14 +10940,13 @@ class TestEnvelopeIntegration:
                 post_main()
         return exc_info.value.code
 
-    def test_bug_a_envelope_fd_redirect_conservatively_over_blocks(self, tmp_path):
-        """Full envelope: Bug A surface, post-fix. The approval mints a
-        force-push token, but `git push origin main 2>&1` now CONSERVATIVELY
-        OVER-BLOCKS: the `2>&1` redirect is counted as a third positional by
-        `_extract_force_push_target_ref`, so the destination ref is
-        unparseable → ABSENT → REFUSE. This is the SAFE #1031 direction (an
-        over-block, NOT a #1032 under-block). Candidate KD-6 follow-up: strip
-        shell redirections before the force-push positional count.
+    def test_bug_a_envelope_fd_redirect_authorizes(self, tmp_path):
+        """Full envelope: Bug A surface, post over-block-tokenizer fix. The approval
+        mints a push-to-main token, and `git push origin main 2>&1` now AUTHORIZES:
+        `_extract_force_push_target_ref` truncates at the `2>&1` redirect before the
+        positional count, so the destination re-derives to `main` and matches the
+        token. The redirect filename is structurally outside the positional window,
+        so this is a faithful-click authorize, NOT a #1032 under-block.
         """
         # Step 1: approve via post hook — option-anchored (#32): the command
         # lives in the CLICKED option's description.
@@ -11027,13 +10961,13 @@ class TestEnvelopeIntegration:
         tokens = list(tmp_path.glob("merge-authorized-*"))
         assert len(tokens) == 1
 
-        # Step 2: run the FD-redirect command through pre hook → conservatively
-        # over-blocked (the redirect defeats the 2-positional ref parse).
-        pre_code, pre_stdout = self._invoke_pre(
+        # Step 2: run the FD-redirect command through pre hook → now AUTHORIZES
+        # (the redirect is truncated before the 2-positional ref parse, so the
+        # destination re-derives to `main` and matches the minted token).
+        pre_code, _pre_stdout = self._invoke_pre(
             "git push origin main 2>&1", tmp_path
         )
-        assert pre_code == 2  # Over-blocked (safe direction)
-        assert '"permissionDecision": "deny"' in pre_stdout
+        assert pre_code == 0  # Authorized (faithful click; redirect re-derived)
 
     def test_bug_b_envelope_joes_bare_push_authorizes(self, tmp_path):
         """Full envelope: Bug B surface. AskUserQuestion question with quoted-command
