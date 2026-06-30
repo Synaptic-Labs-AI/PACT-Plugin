@@ -565,3 +565,138 @@ class TestDestructiveLegOrderIndependence:
             {"operation_type": "merge", "pr_number": "1"}, token_dir=tmp_path
         ) is not None
         assert check_merge_authorization(cmd, token_dir=tmp_path) is not None  # REFUSE
+
+
+# ════════ #1043 — IO_NUMBER-faithful digit-glued redirect (BLOCKING fix) ═════
+class TestFixADigitGluedRedirectUnderBlock:
+    """The review-BLOCKING under-block: the redirect terminator modeled bash's
+    fd-number prefix as ``\\d*``, which greedily ate the trailing digits of a ref
+    GLUED to an unquoted redirect — ``git push --force origin main2>log`` (bash word
+    ``main2`` + a ``>log`` redirect) truncated to ``main``, so a token approved for
+    ``main`` authorized a destructive op on ``main2``. The fix recognizes an
+    fd-number prefix only when whitespace-delimited (``(?<!\\S)\\d+[<>]|[<>]`` —
+    bash's IO_NUMBER rule), so the digit-glued ref is extracted FAITHFULLY.
+
+    Non-vacuity is the FINE mutation (revert ONLY the IO_NUMBER arm to ``\\d*[<>]``)
+    — a coarse ``_executable_prefix``->identity mutation does NOT pin the boundary
+    (a spaced-only suite would survive it). Verified: under ``\\d*[<>]`` the digit-
+    glued pins flip RED (fp(main2>log)->'main', token-main AUTHORIZEs the under-block);
+    the SPACED fd-redirect cases stay GREEN under both (they are not the boundary).
+    """
+
+    # (command, bash-faithful target) — the digit is PART OF THE WORD, never an fd.
+    _FORCE_PUSH = [
+        ("git push --force origin main2>log", "main2"),     # > glued
+        ("git push --force origin main2<log", "main2"),     # < direction
+        ("git push --force origin main2>>log", "main2"),    # >> append
+        ("git push --force origin rel99>log", "rel99"),     # multi-digit
+        ("git push --force origin HEAD:main2>log", "main2"),  # refspec dst
+    ]
+    _BRANCH_DELETE = [
+        ("git branch -D feature2>log", "feature2"),
+        ("git branch -D rel99<log", "rel99"),
+        ("git branch -D feature22>>log", "feature22"),
+    ]
+
+    @pytest.mark.parametrize("cmd,target", _FORCE_PUSH)
+    def test_force_push_digit_glued_target_is_bash_faithful(self, cmd, target):
+        assert _extract_force_push_target_ref(cmd) == target
+
+    @pytest.mark.parametrize("cmd,target", _BRANCH_DELETE)
+    def test_branch_delete_digit_glued_target_is_bash_faithful(self, cmd, target):
+        assert _extract_branch_name(cmd) == target
+
+    def test_whitespace_delimited_fd_redirect_still_truncates(self):
+        # Regression: a WHITESPACE-delimited fd-number IS a real fd-redirect, so the
+        # ref is the word before it (`main` / `feature`), not glued. The fix must not
+        # break the legitimate spaced fd-redirect.
+        assert _extract_force_push_target_ref("git push --force origin main 2>&1") == "main"
+        assert _extract_force_push_target_ref("git push --force origin main 22>log") == "main"
+        assert _extract_branch_name("git branch -D feature 2>&1") == "feature"
+
+    def test_force_push_wrong_target_token_refuses_e2e(self, tmp_path):
+        # SACROSANCT under-block pin (real auth path): a token for `main` must NOT
+        # authorize `git push --force origin main2>log` (which force-pushes `main2`).
+        assert write_token(
+            {"operation_type": "force-push", "target_ref": "main"}, token_dir=tmp_path
+        ) is not None
+        assert check_merge_authorization(
+            "git push --force origin main2>log", token_dir=tmp_path
+        ) is not None  # REFUSE
+
+    def test_force_push_real_target_token_authorizes_control(self, tmp_path):
+        # Non-vacuity control: a token for the ACTUAL ref (`main2`) AUTHORIZES the
+        # same exec -> the refusal above is target-discrimination, not a no-match.
+        assert write_token(
+            {"operation_type": "force-push", "target_ref": "main2"}, token_dir=tmp_path
+        ) is not None
+        assert check_merge_authorization(
+            "git push --force origin main2>log", token_dir=tmp_path
+        ) is None  # AUTHORIZE
+
+    def test_branch_delete_wrong_target_token_refuses_e2e(self, tmp_path):
+        assert write_token(
+            {"operation_type": "branch-delete", "branch": "feature"}, token_dir=tmp_path
+        ) is not None
+        assert check_merge_authorization(
+            "git branch -D feature2>log", token_dir=tmp_path
+        ) is not None  # REFUSE
+
+    def test_branch_delete_real_target_token_authorizes_control(self, tmp_path):
+        assert write_token(
+            {"operation_type": "branch-delete", "branch": "feature2"}, token_dir=tmp_path
+        ) is not None
+        assert check_merge_authorization(
+            "git branch -D feature2>log", token_dir=tmp_path
+        ) is None  # AUTHORIZE
+
+
+# ════════════ #1043 — process-substitution abstain (over-block defense) ══════
+class TestFixAProcessSubstitutionAbstain:
+    """An UNQUOTED process substitution (``>(``/``<(``) is never an honest force-push
+    / branch-delete form: bash treats ``git push --force origin main >(cmd)`` as a
+    MULTI-ref push (``>(cmd)`` expands to an extra ``/dev/fd/N`` positional) and
+    ``... > >(cmd)`` redirects stdout into the procsub FIFO. _executable_prefix
+    ABSTAINS (returns None) rather than truncating at the redirect and mis-deriving a
+    single-ref target — the over-block (fail-safe) direction.
+
+    Non-vacuity is the FINE mutation (disable _PROCSUB_MARKER_RE): without the
+    abstain, ``main > >(cmd)`` truncates at the bare ``>`` to ``main`` and a token-
+    ``main`` AUTHORIZEs -> the pins flip RED. (Distinct mutation from the IO_NUMBER
+    revert — the two mechanisms are independent.)"""
+
+    @pytest.mark.parametrize("cmd", [
+        "git push --force origin main > >(cmd)",   # redirect-to-procsub
+        "git push --force origin main >(cmd)",     # argument-procsub (multi-ref)
+        "git push --force origin main >( cmd )",   # one optional space form
+    ])
+    def test_force_push_procsub_extractor_abstains(self, cmd):
+        assert _executable_prefix(cmd) is None
+        assert _extract_force_push_target_ref(cmd) is None
+
+    @pytest.mark.parametrize("cmd", [
+        "git branch -D feature >(cmd)",
+        "git branch -D feature > >(cmd)",
+    ])
+    def test_branch_delete_procsub_extractor_abstains(self, cmd):
+        assert _executable_prefix(cmd) is None
+        assert _extract_branch_name(cmd) is None
+
+    def test_quoted_procsub_is_inert_not_overblocked(self):
+        # The marker is scanned on the _mask_shell_quotes view, so a QUOTED `>(` is
+        # masked to spaces -> NOT an abstain -> the literal refspec is preserved (no
+        # spurious over-block on a quoted value).
+        assert _extract_force_push_target_ref('git push --force origin "a>(b)"') == "a>(b)"
+
+    def test_force_push_procsub_refuses_e2e(self, tmp_path):
+        # Over-block pin (real auth path): even with a matching-looking `main` token,
+        # the procsub command REFUSES (abstain -> absent target -> no match).
+        assert write_token(
+            {"operation_type": "force-push", "target_ref": "main"}, token_dir=tmp_path
+        ) is not None
+        assert check_merge_authorization(
+            "git push --force origin main > >(cmd)", token_dir=tmp_path
+        ) is not None  # REFUSE
+        assert check_merge_authorization(
+            "git push --force origin main >(cmd)", token_dir=tmp_path
+        ) is not None  # REFUSE
