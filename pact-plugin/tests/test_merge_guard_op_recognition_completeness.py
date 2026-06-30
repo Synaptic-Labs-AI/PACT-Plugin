@@ -866,3 +866,196 @@ class TestAcceptedGrainAndAwarenessPins:
         assert D(clean) is True
         assert OP(clean) == "branch-protection"
         assert CTX(clean).get("protected_branch") == "main"
+
+
+# ===========================================================================
+# REVIEW-CYCLE-1 REMEDIATION — over-block fixes locked in (mint widened to match
+# the read floor, NO read-narrowing) + the accepted conservative-recognition
+# limitation pinned as INTENTIONAL forward-protection.
+# ===========================================================================
+
+
+class TestOverBlockGoneRegression:
+    """The review-cycle-1 over-block fixes ripped out over-blocks by WIDENING the
+    mint to match the read floor (never narrowing detection into a new under-block).
+    Each test asserts a FAITHFUL form now routes correctly (gates AND, where a mint
+    is expected, mints AND the token authorizes its own command) so a regression
+    that re-introduces the over-block turns these red. Non-vacuity is intrinsic: the
+    mint+authorize assertions only hold post-fix (pre-fix these were either
+    mislabeled-dangerous or gated-but-unmintable), plus the case-sensitive
+    counter-mutation below + the literal-arm contrast in the sibling class."""
+
+    # --- cross-leg leak: a benign first-leg push is no longer mislabeled a delete ---
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git push origin feature && git branch -d old",   # && + safe (-d, merged-only) branch delete
+            "git push origin feature ; git branch -d old",    # ; variant
+            "git push origin feature | grep done",            # pipe-to-viewer variant
+        ],
+    )
+    def test_benign_push_not_mislabeled_as_delete(self, cmd):
+        assert D(cmd) is False, f"OVER-BLOCK regressed: benign push mislabeled dangerous: {cmd!r}"
+
+    def test_single_first_leg_delete_still_gates_control(self):
+        """Non-vacuity control for the cross-leg cases: a real single first-leg
+        ref-delete STILL gates, so the D=False assertions above are discriminating,
+        not a blanket 'compound is always safe'."""
+        assert D("git push origin --delete main") is True
+        assert OP("git push origin --delete main") == "remote-ref-delete"
+
+    # --- lowercase / mixed-case HTTP methods now MINT (mint widened to IGNORECASE) ---
+
+    @pytest.mark.parametrize(
+        "cmd,expected_op,target_key,target_val",
+        [
+            ("gh api -X delete repos/o/r/git/refs/heads/y", "branch-delete", "branch", "y"),
+            ("gh api --method delete repos/o/r/git/refs/heads/y", "branch-delete", "branch", "y"),
+            ("gh api -X Delete repos/o/r/branches/main/protection", "branch-protection", "protected_branch", "main"),
+        ],
+    )
+    def test_lowercase_method_gh_api_gates_mints_and_authorizes(self, cmd, expected_op, target_key, target_val):
+        assert D(cmd) is True
+        assert OP(cmd) == expected_op
+        result = mint(cmd)
+        assert result.context is not None, f"did not mint (refusal={result.refusal_reason}) for {cmd!r}"
+        assert result.context.get("operation_type") == expected_op
+        assert result.context.get(target_key) == target_val
+        assert MATCH(token_from_ctx(result.context), cmd) is True
+        # parity equality now holds for the mint-widened lowercase form
+        assert mgc.is_dangerous_command(cmd) == (mgc.detect_command_operation_type(cmd) is not None)
+
+    def test_curl_lowercase_method_protection_mints_and_authorizes(self):
+        """curl + lowercase method + protection PATH gates+mints+authorizes (curl must
+        be backtick-wrapped in the option text to mint — the mint() helper does)."""
+        cmd = "curl -X put https://git.example.com/repos/o/r/branches/main/protection"
+        assert D(cmd) is True
+        assert OP(cmd) == "branch-protection"
+        result = mint(cmd)
+        assert result.context is not None, f"did not mint (refusal={result.refusal_reason})"
+        assert result.context.get("protected_branch") == "main"
+        assert MATCH(token_from_ctx(result.context), cmd) is True
+
+    # --- gh global flag before `api` (gh -R o/r api ...) now MINTS ---
+
+    def test_gh_global_flag_gates_mints_and_authorizes(self):
+        cmd = "gh -R o/r api -X DELETE repos/o/r/branches/main/protection"
+        assert D(cmd) is True
+        assert OP(cmd) == "branch-protection"
+        result = mint(cmd)
+        assert result.context is not None, f"did not mint (refusal={result.refusal_reason})"
+        assert result.context.get("protected_branch") == "main"
+        assert MATCH(token_from_ctx(result.context), cmd) is True
+
+    def test_gh_global_flag_body_mention_not_over_blocked(self):
+        """carrier-8 under the gh -R framing: a git/refs MENTION in a -f field body is
+        NOT over-blocked, while the faithful path-resident protection delete (same
+        gh -R framing) STILL gates — the PATH-vs-BODY invariant holds for gh -R too."""
+        body_mention = "gh -R o/r api -X POST repos/o/r/issues/5 -f note='see git/refs/heads/x'"
+        assert D(body_mention) is False, f"OVER-BLOCK (#1037): gh -R body mention gated: {body_mention!r}"
+        faithful = "gh -R o/r api -X DELETE repos/o/r/branches/main/protection"
+        assert D(faithful) is True
+
+    # --- non-vacuity: in-memory counter-mutation (NOT git-revert; the shared worktree
+    #     holds the architect's staged doc WIP, so a checkout-revert would destroy it) ---
+
+    def test_lowercase_parity_is_non_vacuous_under_case_sensitive_mutation(self, monkeypatch):
+        """Simulate the PRE-FIX case-sensitive detect (the bug) by neutering detect to
+        None for the lowercase form, and assert the mint==read parity equality BREAKS.
+        Proves the widened-form parity assertions are coupled to the mint-widening fix
+        and would go red if it were reverted. In-memory (monkeypatch) by design — a
+        git-revert here would clobber a peer's staged uncommitted edit in the shared
+        worktree."""
+        cmd = "gh api -X delete repos/o/r/git/refs/heads/y"
+        # green before mutation (fix present)
+        assert mgc.is_dangerous_command(cmd) == (mgc.detect_command_operation_type(cmd) is not None)
+        monkeypatch.setattr(mgc, "detect_command_operation_type", lambda _c: None)
+        # read floor still gates (independent path); mutated detect None -> parity breaks
+        assert mgc.is_dangerous_command(cmd) is True
+        assert (mgc.is_dangerous_command(cmd) == (mgc.detect_command_operation_type(cmd) is not None)) is False
+
+
+class TestAcceptedRecognitionLimitationPins:
+    """FORWARD-PROTECTION pins for the ACCEPTED conservative-recognition limitation
+    (the review-cycle-1 SECURITY-HALT disposition). These forms run UNGATED BY
+    DESIGN, and these tests assert that ON PURPOSE — they are the executable tripwire
+    so a future maintainer who 'hardens' recognition into a match-anywhere / per-leg
+    scan (which would re-block faithful clicks) sees these flip RED and STOPS.
+
+    THE PRINCIPLE (do NOT 'fix' these): the git-push remote-ref-delete (:ref /
+    --delete / -d) and mass-delete (--mirror / --prune / multi-ref) forms need a
+    positional, quote-aware parse, so their recognition is ANCHORED to the FIRST
+    executable leg and does NOT chase the op into NON-FIRST compound legs. Chasing it
+    requires a match-anywhere scan that fires on a quoted :ref / --mirror mention in a
+    benign leg = an over-block of a faithful click, which is WRONG BY DEFINITION
+    (worse than missing a buried op). The fix for any over-block WIDENS the mint,
+    never narrows detection into a new under-block.
+    """
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "cd /repo && git push origin --delete main",   # ref-delete in a non-first leg
+            "git fetch && git push --mirror origin",        # mass-delete in a non-first leg
+            "NOTE=x ; git push origin :main",               # colon-delete after an assignment leg
+        ],
+    )
+    def test_non_first_leg_push_delete_ungated_by_design(self, cmd):
+        """ACCEPTED LIMITATION — do NOT fix. A push-delete/mass-delete in a NON-FIRST
+        compound leg is ungated (first-leg anchoring). If this assertion FAILS, the
+        recognition was hardened into a match-anywhere scan that over-blocks faithful
+        clicks — that is the WRONG fix; re-read the conservative-recognition principle."""
+        assert D(cmd) is False, (
+            f"Recognition was hardened to chase a non-first-leg push-delete — this "
+            f"RE-INTRODUCES a faithful-click over-block. Do NOT 'fix' this form: {cmd!r}"
+        )
+
+    def test_httpie_protection_ungated_by_design(self):
+        """ACCEPTED LIMITATION — do NOT fix by bolting on an httpie read arm. The mint
+        classifier covers gh-api/curl/wget only; an httpie protection READ arm would
+        gate a form the mint cannot bind = a gated-but-unmintable over-block (itself a
+        faithful-click block). Leaving it ungated keeps read == mint. Full httpie
+        gate+mint is a deferred scope expansion, not a half-measure read arm."""
+        assert D("http DELETE https://api.github.com/repos/o/r/branches/main/protection") is False
+
+    @pytest.mark.parametrize(
+        "cmd,expected_op",
+        [
+            ("cd /repo && git push origin main --force", "force-push"),
+            ("cd /repo && git branch -D feature", "branch-delete"),
+            ("cd /repo && gh pr merge 5", "merge"),
+            ("cd /repo && gh api -X DELETE repos/o/r/branches/main/protection", "branch-protection"),
+        ],
+    )
+    def test_literal_arm_contrast_still_gates_non_first_leg(self, cmd, expected_op):
+        """THE BOUND on the accepted-ungated surface (and the non-vacuity for the pins
+        above): the LITERAL DANGEROUS_PATTERNS arms (force-push, branch -D, gh pr
+        merge, the API ref/protection arms) match-anywhere and STILL gate in a
+        NON-FIRST leg. This proves the accepted-ungated set is SPECIFIC to the
+        parse-dependent union-arm push forms — NOT a general compound bypass — so the
+        accepted set cannot silently widen. If a literal arm ever stops gating in a
+        non-first leg, that is a real under-block and this turns red."""
+        assert D(cmd) is True, f"UNDER-BLOCK: literal arm stopped gating in a non-first leg: {cmd!r}"
+        assert OP(cmd) == expected_op
+
+
+class TestParityCanaryReconciledForWidenedForms:
+    """§9.A parity reconciliation (review-cycle-1). After the mint-widening, the mint
+    classifier AGREES with the read floor for the lowercase / mixed-case / global-flag
+    forms, so the mint==read EQUALITY now holds for them (pre-fix these were
+    read=True / detect=None — a gated-but-unmintable over-block). This extends the
+    §9.A canary beyond the uppercase-only forms the original suite covered."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "gh api -X delete repos/o/r/git/refs/heads/y",                 # lowercase
+            "gh api --method delete repos/o/r/git/refs/heads/y",          # lowercase --method
+            "gh api -X Delete repos/o/r/branches/main/protection",        # mixed-case
+            "gh -R o/r api -X DELETE repos/o/r/branches/main/protection", # global-flag framing
+            "curl -X put https://git.example.com/repos/o/r/branches/main/protection",  # curl lowercase
+        ],
+    )
+    def test_mint_equals_read_parity_now_holds(self, cmd):
+        assert mgc.is_dangerous_command(cmd) == (mgc.detect_command_operation_type(cmd) is not None)
