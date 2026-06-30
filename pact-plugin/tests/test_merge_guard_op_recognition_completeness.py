@@ -533,6 +533,61 @@ class TestBranchProtectionSlashedAndMintAndNonVacuity:
 
 
 # ===========================================================================
+# #1061 — host-agnostic curl ref-mutation: gate + mint + authorize + parity
+# ===========================================================================
+
+
+class TestHostAgnosticCurlRefMutationMintAndParity:
+    """#1061 — the curl ref-mutation read floor is now host-agnostic (the literal
+    `.*api.*` was dropped from the curl git/refs DANGEROUS_PATTERNS arms), so an
+    HONEST ref-mutation against a non-api Enterprise/proxy host now ROUTES THROUGH
+    APPROVAL instead of bypassing.
+
+    This class pins the FULL "routes through approval" property for the
+    host-agnostic-widened forms — not merely the read gate (covered by the
+    carrier-8 PATH-vs-BODY positives), but that each MINTS a token AND the minted
+    token AUTHORIZES its own command, with mint==read parity. That directly
+    satisfies the "every gated op must mint" hard constraint for #1061 rather than
+    relying on transitive coverage of the pre-existing API-ref op. The underlying
+    op is the pre-existing API ref-mutation (DELETE -> branch-delete; PATCH/PUT ->
+    force-push); #1061 brings the non-api-host READ floor to parity with the
+    already-host-agnostic mint classifier. (curl commands must be backtick-wrapped
+    in the AUQ option text to mint — pre-existing locate_command_regions substrate
+    behavior; the mint() helper does this.)"""
+
+    @pytest.mark.parametrize(
+        "cmd,expected_op",
+        [
+            # non-api Enterprise / proxy hosts (no `api` substring in the URL)
+            ("curl -X DELETE https://git.example.com/repos/o/r/git/refs/heads/y", "branch-delete"),
+            ("curl --request DELETE https://git.internal.corp/repos/o/r/git/refs/heads/feature", "branch-delete"),
+            ("curl -X PATCH https://git.example.com/repos/o/r/git/refs/heads/y", "force-push"),
+        ],
+    )
+    def test_non_api_host_ref_mutation_gates_classifies_mints_and_authorizes(self, cmd, expected_op):
+        # read gate (the host-agnostic widening)
+        assert D(cmd) is True, f"UNDER-BLOCK: non-api-host ref-mutation not gated: {cmd!r}"
+        assert OP(cmd) == expected_op
+        # mint==read parity
+        assert mgc.is_dangerous_command(cmd) == (mgc.detect_command_operation_type(cmd) is not None)
+        # mints + authorizes its own command (the #1064 "every gated op mints" closure)
+        result = mint(cmd)
+        assert result.context is not None, f"did not mint (refusal={result.refusal_reason}) for {cmd!r}"
+        assert result.context.get("operation_type") == expected_op
+        assert MATCH(token_from_ctx(result.context), cmd) is True
+
+    def test_widening_is_a_superset_api_host_still_gates_and_mints(self):
+        """Control: the api-host form (which gated pre-#1061 too) STILL gates +
+        mints + authorizes — proving #1061 is a strict superset (non-api host
+        ADDED), not a swap that could have dropped the api-host coverage."""
+        cmd = "curl -X DELETE https://api.github.com/repos/o/r/git/refs/heads/y"
+        assert D(cmd) is True
+        result = mint(cmd)
+        assert result.context is not None, f"did not mint (refusal={result.refusal_reason})"
+        assert MATCH(token_from_ctx(result.context), cmd) is True
+
+
+# ===========================================================================
 # CARRIER-8 — PATH-vs-BODY invariant (#1037 over-block mitigation, §9.D/E)
 # ===========================================================================
 
