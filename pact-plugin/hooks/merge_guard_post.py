@@ -30,7 +30,6 @@ from __future__ import annotations
 import glob
 import json
 import os
-import re
 import sys
 import time
 from pathlib import Path
@@ -116,16 +115,6 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-loud catch-
 # UI suppresses the hook display instead of showing "hook error (No output)".
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
-# Patterns that indicate an affirmative FREE-TEXT answer. Used ONLY by the
-# free-text arm (an AskUserQuestion with no options); OPTION-mode approval is an
-# exact label match against a non-decline option, never a word allowlist — so a
-# descriptive selected label like "Merge now" is honored (the old allowlist
-# wrongly rejected it). The decline/defer veto runs first and takes precedence.
-AFFIRMATIVE_PATTERNS = re.compile(
-    r"^(y|yes|yeah|yep|sure|ok|okay|confirm|approved?|go\s*ahead|do\s*it|proceed)\b",
-    re.IGNORECASE,
-)
-
 
 def is_merge_question(question: str) -> bool:
     """Command-driven COARSE HINT (KD-9): True iff the text embeds a recognized
@@ -144,18 +133,6 @@ def is_merge_question(question: str) -> bool:
         True if the text contains a recognized destructive command region.
     """
     return locate_command_region(question) is not None
-
-
-def is_affirmative(answer: str) -> bool:
-    """Check if the user's answer is affirmative.
-
-    Args:
-        answer: The user's response text
-
-    Returns:
-        True if the answer indicates approval
-    """
-    return bool(AFFIRMATIVE_PATTERNS.search(answer.strip()))
 
 
 def _selected_option_text(options: object, answer: object) -> str | None:
@@ -318,10 +295,9 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
     # EXPLICIT (shape b): a bundle with NO options anywhere has no clicked option
     # to anchor on → it can NEVER mint. Minting from question prose or a typed
     # free-text answer would make auth depend on un-clicked text — a forbidden
-    # under-block class (security B-NEW-4 / KD-11(6)). AUQ structurally carries
-    # 2-4 options per question (peer-review.md), so this is fail-closed defense
-    # for a theoretical/replayed no-options payload. The per-question decline/
-    # defer veto still runs below for mixed bundles.
+    # under-block class. AUQ structurally carries 2-4 options per question, so this
+    # is fail-closed defense for a theoretical/replayed no-options payload. The
+    # per-question decline/defer veto still runs below for mixed bundles.
     #
     # BACKSTOP — DO NOT remove as "dead code". The step-3b option-anchoring below
     # already refuses a no-options bundle (an empty option surface yields no pair,

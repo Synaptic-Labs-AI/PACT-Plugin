@@ -62,28 +62,26 @@ PURE-rm chain (`rm -rf a && rm -rf b`) stay is_dangerous=False and are NEVER gat
 the guard stays out of pure-filesystem commands.
 
 benign-CONTINUATION (the dual of the rm-EXCEPTION; documented so a future sweep does
-NOT "discover" the single-leg mint and "harden" it away): for the gh pr merge/close
-family, a SINGLE recognized destructive op + ANY benign continuation mints a token AND
-the read side authorizes the continued command. "Benign" means the remainder is NOT a
-second destructive git/gh op — it need NOT be read-only (a `tee` or an output redirect
-WRITES a file and is still benign). A benign chain (`gh pr merge 5 && echo ok`,
-`gh pr merge 5 ; echo done`), a backgrounding (`gh pr merge 5 &`), a pipe to a
-pager/filter or `tee` (`gh pr merge 5 | tail`, `gh pr merge 5 | tee log`), or an output
-redirect (`gh pr merge 5 > out.log`) is a faithful single-command click:
+NOT "discover" the single-leg mint and "harden" it away): for EVERY recognized
+destructive op — gh pr merge, gh pr close, git force-push, AND git branch-delete — a
+SINGLE such op + ANY benign continuation mints a token AND the read side authorizes the
+continued command. "Benign" means the remainder is NOT a second destructive git/gh op —
+it need NOT be read-only (a `tee` or an output redirect WRITES a file and is still
+benign). A benign chain (`gh pr merge 5 && echo ok`, `gh pr merge 5 ; echo done`), a
+backgrounding (`gh pr merge 5 &`), a pipe to a pager/filter or `tee`
+(`gh pr merge 5 | tail`, `gh pr merge 5 | tee log`), or an output / fd redirect
+(`gh pr merge 5 > out.log`, `git push --force origin main 2>&1`,
+`git branch -D feature > log`) is a faithful single-command click:
 is_compound_destructive_command refuses ONLY on >=2 destructive legs (one destructive
-leg + benign continuation is NOT compound), and the merge/close read-side target is the
-PR-NUMBER positional, recovered regardless of trailing continuation tokens — so the
-approval still binds. This is the GENERAL single-destructive-op-plus-benign-remainder
-pattern, NOT a recognition allow-list of viewers/filters — do NOT enumerate viewers in
-detection logic (an allow-list drifts and would re-block faithful clicks the count
-already mints).
-KNOWN LIMITATION (fail-safe; do NOT "fix" it here): the SAME continuation appended to a
-force-push or branch-delete currently OVER-blocks on the read side. Their target
-extractor requires an exact positional count (push: remote + refspec; branch: one name),
-so a continuation's tokens are miscounted as extra positionals → the target is
-unextractable → the approved token no longer matches → REFUSE. This refuses a faithful
-click but NEVER under-blocks (the safe direction); the fix belongs to the over-block-
-tokenizer work, not a detection change here.
+leg + benign continuation is NOT compound), and the read-side target is re-derived from
+the SINGLE destructive leg — the merge/close PR-NUMBER positional, the branch-delete
+name, OR the force-push ref — regardless of any trailing continuation / redirect tokens,
+so the approval still binds. (The positional extractors truncate at the first benign
+terminator on the quote-masked view; the read call site isolates the single destructive
+leg before deriving op/target/flags.) This is the GENERAL single-destructive-op-plus-
+benign-remainder pattern, NOT a recognition allow-list of viewers/filters — do NOT
+enumerate viewers in detection logic (an allow-list drifts and would re-block faithful
+clicks the count already mints).
 =============================================================================
 
 Centralizes TOKEN_TTL, TOKEN_DIR, TOKEN_PREFIX, consumed-token cleanup,
@@ -496,7 +494,17 @@ def _extract_branch_name(command: str) -> str | None:
     # reaches here when detect_command_operation_type already classified the
     # command branch-delete, so a -D/--delete flag is present and is dropped
     # with the other dash-flags.
-    branch_match = re.search(_GIT_PREFIX + r"branch\b(.*)$", command)
+    # Truncate at the first benign continuation / redirect on the quote-masked
+    # view BEFORE counting positionals, so a faithful single branch-delete with a
+    # trailing continuation (`git branch -D feature | tail`, `... ; echo done`,
+    # `... > log`) re-derives its one branch name instead of miscounting the
+    # continuation tokens as extra positionals (-> None -> over-block). An
+    # ambiguous quote state makes _executable_prefix return None -> abstain -> the
+    # existing safe over-block (never a silently-authorized malformed command).
+    prefix = _executable_prefix(command)
+    if prefix is None:
+        return None
+    branch_match = re.search(_GIT_PREFIX + r"branch\b(.*)$", prefix)
     if not branch_match:
         return None
     positionals = [t for t in branch_match.group(1).split() if not t.startswith("-")]
@@ -534,7 +542,19 @@ def _extract_force_push_target_ref(command: str) -> str | None:
     # remote-only (implicit branch); >2 = multi-ref/chained -> all ambiguous,
     # REFUSE. A value-taking dash-flag (e.g. `-o opt`) shifts the positional
     # count off 2 -> also refused (conservative over-block).
-    push_match = re.search(_GIT_PREFIX + r"push\b(.*)$", command)
+    # Truncate at the first benign continuation / redirect on the quote-masked
+    # view BEFORE counting positionals, so a faithful single force-push with a
+    # trailing continuation (`git push --force origin main | tail`, `... 2>&1`,
+    # `... > log`, `... && echo done`) re-derives its target instead of
+    # miscounting the continuation tokens as extra positionals (-> None ->
+    # over-block). The redirect filename is structurally outside the positional
+    # window (`... feature > main` yields `feature`, never `main`). An ambiguous
+    # quote state makes _executable_prefix return None -> abstain -> the existing
+    # safe over-block (never a silently-authorized malformed command).
+    prefix = _executable_prefix(command)
+    if prefix is None:
+        return None
+    push_match = re.search(_GIT_PREFIX + r"push\b(.*)$", prefix)
     if not push_match:
         return None
     positionals = [t for t in push_match.group(1).split() if not t.startswith("-")]
@@ -1575,6 +1595,59 @@ def _normalize_line_continuations(command: str) -> str:
     return command.replace("\\\n", " ")
 
 
+# Benign continuation / redirect terminator for the positional target extractors
+# (_extract_force_push_target_ref / _extract_branch_name). Matches a compound
+# operator (`&&`, `||`, `|&`, `;`, `&`, `|`, newline — the _COMPOUND_OPS_RE set)
+# OR a redirect START. The redirect arm is `(?<!\S)\d+[<>]|[<>]`: a bare `<`/`>` is
+# ALWAYS a redirect (fd defaults), AND a leading fd-NUMBER (`2>`, `22>`) is a
+# redirect prefix ONLY when it is a standalone token — i.e. NOT preceded by a
+# non-whitespace char. This mirrors bash's IO_NUMBER rule: digits GLUED to the
+# preceding word are PART OF THE WORD, not an fd-number. So `git push origin
+# main2>log` is the bash WORD `main2` plus a `>log` redirect (the refspec is
+# `main2`, NOT `main`); only a whitespace-preceded `2>` (e.g. `main 2>&1`) is an
+# fd-redirect that truncates. The `(?<!\S)` lookbehind also keeps the scan LINEAR
+# on a long digit run — it prunes the redundant in-run start positions that a bare
+# `\d*` would re-scan (the O(n^2) catastrophic-backtracking a `\d*[<>]` exhibits).
+_BENIGN_TERMINATOR_RE = re.compile(r"&&|\|\||\|&|;|&|\||\n|(?<!\S)\d+[<>]|[<>]")
+
+# Process-substitution marker (`>(`/`<(`, allowing one optional space). An UNQUOTED
+# procsub is never an honest force-push/branch-delete form: bash treats
+# `git push --force origin main >(cmd)` as a MULTI-ref push (`>(cmd)` expands to an
+# extra `/dev/fd/N` positional), and `... > >(cmd)` redirects stdout into the
+# procsub FIFO. _executable_prefix ABSTAINS when this appears, rather than
+# truncating at the redirect and mis-deriving a single-ref target. Scanned on the
+# same _mask_shell_quotes view, so a quoted `"a>(b)"` is inert (never an over-block).
+_PROCSUB_MARKER_RE = re.compile(r"[<>] ?\(")
+
+
+def _executable_prefix(command: str) -> str | None:
+    """The command truncated at the first UNQUOTED compound-op-or-redirect.
+
+    Returns the leading executable span — everything before the first benign
+    continuation / redirect detected on the same-length `_mask_shell_quotes` view
+    — or the whole command when there is no such terminator. A quoted metachar
+    (`"weird>name"`) is masked to spaces on that view, so only an UNQUOTED
+    operator / redirect bounds the prefix. Returns None (the caller treats None as
+    an ABSENT target and REFUSES — fail-OPEN to the existing safe over-block) iff
+    EITHER the quote state is ambiguous (an unbalanced / unterminated quote makes
+    `_shell_tokenize` fail) OR an unquoted process-substitution marker (`>(`/`<(`)
+    is present (defense-in-depth — never an honest destructive form, and it makes a
+    single-ref target ambiguous). An adversarial quote-elided command is out of
+    scope and is never authorized, only ever over-blocked.
+    """
+    if _shell_tokenize(command) is None:  # unbalanced/unterminated quote -> abstain
+        return None
+    masked = _mask_shell_quotes(command)  # same-length; quoted metachars -> spaces
+    # Process-substitution defense-in-depth: an unquoted `>(`/`<(` is never an
+    # honest force-push/branch-delete form (bash makes a single-ref target ambiguous
+    # -> a multi-ref push, or redirects into a FIFO). Abstain rather than truncate
+    # at the redirect and mis-derive the target. Over-block direction only.
+    if _PROCSUB_MARKER_RE.search(masked):
+        return None
+    terminator = _BENIGN_TERMINATOR_RE.search(masked)
+    return command[: terminator.start()] if terminator else command
+
+
 # -----------------------------------------------------------------------------
 # P4 — op-agnostic quote-aware flag normalizer + per-op danger CONDITIONS.
 #
@@ -1789,6 +1862,66 @@ def _leg_is_destructive(leg: str) -> bool:
     return is_dangerous_command(leg) or _RM_HEAD_RE.match(leg) is not None
 
 
+def _split_into_legs(command: str) -> list[str]:
+    """Split a command into its shell-operator-separated legs (always >=1 leg).
+
+    The single SSOT for leg boundaries: both is_compound_destructive_command (the
+    >=2-destructive-leg refuse) AND _single_destructive_leg (the read-side
+    single-leg isolation) consume this, so the two can never see divergent leg
+    boundaries (the #720/#878 divergence class). A command with no shell operator
+    yields a one-element list (the whole stripped command).
+
+    Operators are detected on the P2-masked + FD-neutralized view so an operator
+    INSIDE a quoted arg (`--subject "a; b"`) or an FD / and-redirect (`2>&1`,
+    `&>`, `>|`) is NOT a separator. Each FD-redirect is replaced by an EQUAL-LENGTH
+    run of spaces (NOT a single space) so the masked view stays SAME-LENGTH as
+    `stripped` and each operator's offsets map 1:1 back to the ORIGINAL legs (which
+    carry the real flag spellings the callers classify). A single-space collapse
+    would shrink the view and mis-slice the legs after a multi-char redirect (e.g.
+    `2>&1 | rm -rf ~`). The leg slices are taken from `stripped`, never the masked
+    `view` — the view exists ONLY to locate the operator offsets.
+    """
+    normalized = _normalize_line_continuations(command)
+    stripped = _strip_non_executable_content(normalized)
+    view = _FD_REDIRECT_RE.sub(
+        lambda m: " " * len(m.group()), _mask_shell_quotes(stripped)
+    )
+    legs, last = [], 0
+    for m in _COMPOUND_OPS_RE.finditer(view):
+        legs.append(stripped[last : m.start()])
+        last = m.end()
+    legs.append(stripped[last:])
+    return legs
+
+
+def _single_destructive_leg(command: str) -> str | None:
+    """The UNIQUE is_dangerous_command leg of a command, or None.
+
+    Returns the single destructive gh/git leg when EXACTLY one leg is dangerous;
+    None when 0 legs are dangerous, or — at the read call site, unreachably — when
+    >=2 are (is_compound_destructive_command REFUSES that upstream, at
+    check_merge_authorization, BEFORE the read seam). The read seam treats None as
+    'abstain to the WHOLE command' (the existing over-binding whole-command scan =
+    the safe over-block direction), NEVER a silent narrowing: a fail-toward-unmasked
+    quote split or any ambiguity can only collapse to the conservative whole-command
+    context, never authorize a narrower one.
+
+    This is the substrate the read side uses to derive (op, target, bound_flags)
+    from the destructive op ALONE — so a privileged flag on a benign NEIGHBOR leg
+    cannot pollute bound_flags (the over-block) and a benign neighbor's PR number
+    cannot cross-contaminate the target via _extract_pr_number's first-match-
+    anywhere scan (the latent under-block). A privileged flag that modifies the
+    destructive op is a token of its OWN simple-command (leg), so it stays bound;
+    only a different statement's flag (past an operator boundary) is dropped.
+    """
+    dangerous = [
+        leg.strip()
+        for leg in _split_into_legs(command)
+        if is_dangerous_command(leg.strip())
+    ]
+    return dangerous[0] if len(dangerous) == 1 else None
+
+
 def is_compound_destructive_command(command: str) -> bool:
     """Detect an agent chaining MULTIPLE destructive operations into one command.
 
@@ -1812,25 +1945,12 @@ def is_compound_destructive_command(command: str) -> bool:
     (one destructive leg). Only >=2 destructive legs are refused (route to
     one-op-at-a-time approval).
     """
-    normalized = _normalize_line_continuations(command)
-    stripped = _strip_non_executable_content(normalized)
-    # Operators are detected on the P2-masked + FD-neutralized view so an operator INSIDE
-    # a quoted arg (`--subject "a; b"`) or an FD/and-redirect (`2>&1`, `&>`, `>|`) is NOT a
-    # separator. Each FD-redirect is replaced by an EQUAL-LENGTH run of spaces (NOT a single
-    # space) so the masked view stays SAME-LENGTH as `stripped` and each operator's offsets
-    # map 1:1 back to the ORIGINAL legs (which carry the real flag spellings for the per-leg
-    # danger classification below). A single-space collapse would shrink the view and
-    # mis-slice the legs after a multi-char redirect (e.g. `2>&1 | rm -rf ~`).
-    compound_view = _FD_REDIRECT_RE.sub(
-        lambda m: " " * len(m.group()), _mask_shell_quotes(stripped)
-    )
-    if not _COMPOUND_OPS_RE.search(compound_view):
-        return False
-    legs, last = [], 0
-    for m in _COMPOUND_OPS_RE.finditer(compound_view):
-        legs.append(stripped[last:m.start()])
-        last = m.end()
-    legs.append(stripped[last:])
+    # Legs come from the shared _split_into_legs SSOT (masked + FD-neutralized split
+    # on _COMPOUND_OPS_RE, slices taken from `stripped`). A command with no operator
+    # yields ONE leg, so the >=2 count below is False — identical to the prior
+    # explicit no-operator short-circuit, without a separate code path that could
+    # drift from the read-side leg isolation.
+    legs = _split_into_legs(command)
     # >=2 DESTRUCTIVE legs → refuse. A leg is destructive via _leg_is_destructive: a
     # recognized git/gh-destructive op (so a non-canonical flag spelling like `-Df` in a
     # leg still counts) OR a plain-`rm` head leg (the documented rm-exception). A single
