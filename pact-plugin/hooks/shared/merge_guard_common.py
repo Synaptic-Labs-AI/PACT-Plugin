@@ -284,6 +284,10 @@ def detect_command_operation_type(command: str) -> str | None:
                           push <remote> :ref / --delete ref / -d ref (incl. implicit
                           remote). Union-arm-only; recognized IFF a single deletable
                           ref is extractable (recognition⟺mintability by construction)
+        "remote-mass-delete" - git push MASS delete (#1062b): --mirror / --prune /
+                          multi-ref delete. Union-arm-only; recognized IFF a normalized
+                          mass-target tuple is extractable (single-ref defers to
+                          remote-ref-delete — the BOUNDARY discriminator, no double-classify)
         None            - destructive shape not in the recognized set
                           (read-side caller treats None as "untyped command",
                           which the tightened token-match semantic treats as
@@ -671,6 +675,85 @@ def _extract_remote_ref_delete_target(command: str) -> str | None:
     return None
 
 
+# Sentinel marking an IMPLICIT remote (a `git push --mirror` with no positional
+# remote) in a mass-delete target tuple — keeps the implicit-remote form MINTABLE
+# (a definite, deterministic target) rather than ambiguous. A NUL byte can never
+# appear in a real remote name, so it can never collide with one.
+_IMPLICIT_REMOTE_MARKER = "\x00implicit"
+
+
+def _extract_mass_delete_target(command: str) -> str | None:
+    """Extract a READABLE normalized per-invocation tuple binding the destructive
+    IDENTITY of a `git push` MASS-delete form (#1062b — `--mirror`/`--prune`/multi-ref
+    delete), or None when the command is not such a form. Binds the destructive
+    identity (mass-flags + remote + sorted refspecs), NOT the whole command line, so a
+    benign `-o ci.skip` does not over-bind; privileged flags ride the existing #1042
+    `bound_flags` axis. Derived identically on BOTH arms via this ONE SSOT → mint==read
+    parity by construction; recognition⟺mintability (the arm returns the op IFF this is
+    non-None) → #1064-impossible. Returns a READABLE tuple, never a hash:
+
+        <sorted-mass-flags>@<remote-or-implicit-marker>[#<sorted-refspecs>]
+        git push --mirror origin               → --mirror@origin
+        git push --mirror                      → --mirror@\\x00implicit (implicit-remote MINTABLE)
+        git push --prune origin refs/heads/main → --prune@origin#refs/heads/main
+        git push origin --delete a b           → --delete@origin#a,b (binds the EXACT deleted set)
+        git push origin :a :b                  → --delete@origin#a,b
+
+    BOUNDARY (lead-mandated, no double-classification): a SINGLE-ref delete is owned by
+    `_extract_remote_ref_delete_target` (tried FIRST in the recognition arm). This
+    extractor returns None for a single-ref form, so a command is classified by EXACTLY
+    ONE op-class. Per git grammar (first positional = repository), `git push --delete a b`
+    is repo=a/ref=b = SINGLE (→ remote-ref-delete), while `git push origin --delete a b`
+    is repo=origin/refs=a,b = MASS.
+    """
+    if not re.search(_GIT_PREFIX + r"push\b", command):
+        return None
+    # Single-ref delete is the OTHER op-class — defer to it (the boundary discriminator).
+    if _extract_remote_ref_delete_target(command) is not None:
+        return None
+    after = _tokens_after_push(command)
+    if after is None:
+        return None
+    toks = _shell_tokenize(command)
+    if toks is None:
+        return None
+    gf = _normalized_flags(toks, "git")  # needs --mirror/--prune in _FLAG_SPEC (added #1062b)
+    mass_flags = sorted(f for f in ("--mirror", "--prune") if f in gf)
+    positionals = _push_positionals(after)
+    colon_dsts = [p for p in positionals if re.match(r"^\+?:", p)]
+
+    if mass_flags:
+        # --mirror/--prune: remote = first positional (git grammar) or implicit;
+        # explicit refspecs (if any) are the remaining positionals.
+        remote = _strip_surrounding_quotes(positionals[0]) if positionals else _IMPLICIT_REMOTE_MARKER
+        refspecs = sorted(_strip_surrounding_quotes(p) for p in positionals[1:])
+        flags_part = ",".join(mass_flags)
+    elif "--delete" in gf:
+        # multi-ref --delete (the single-ref case already deferred above): git grammar
+        # repo = first positional, the rest are the deleted refs. Need >=2 refs to be mass.
+        if len(positionals) < 3:
+            return None
+        remote = _strip_surrounding_quotes(positionals[0])
+        refspecs = sorted(_strip_surrounding_quotes(p) for p in positionals[1:])
+        flags_part = "--delete"
+    elif len(colon_dsts) >= 2:
+        # multi empty-source colon delete (`origin :a :b`): remote = first non-colon
+        # positional (or implicit); refs = the colon dsts.
+        non_colon = [p for p in positionals if not re.match(r"^\+?:", p)]
+        remote = _strip_surrounding_quotes(non_colon[0]) if non_colon else _IMPLICIT_REMOTE_MARKER
+        refspecs = sorted(
+            _strip_surrounding_quotes(p).rsplit(":", 1)[1] for p in colon_dsts
+        )
+        flags_part = "--delete"
+    else:
+        return None
+
+    target = f"{flags_part}@{remote}"
+    if refspecs:
+        target += "#" + ",".join(refspecs)
+    return target
+
+
 # -----------------------------------------------------------------------------
 # Privileged-flag binding (#1042). The (operation_type, target) binding above
 # DROPS every dash-flag, so an approved `gh pr merge 5` and an executed
@@ -736,6 +819,13 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
         # op_type. Empty entry = explicit #1042 extension point (a future bound flag
         # is a one-line data edit); it adds NO new bound flag, so the set-equality
         # bind is untouched.
+    },
+    "remote-mass-delete": {
+        # No bound flags: remote-mass-delete's privileged effect (the mass destructive
+        # push) IS its op-trigger (--mirror/--prune/multi-ref-delete), bound via op_type
+        # AND folded into the mass_target identity tuple. The --mirror/--prune additions
+        # go to _FLAG_SPEC (danger-condition recognition) ONLY, NOT here, so the #1042
+        # set-equality bind is untouched. Empty entry = explicit extension point.
     },
 }
 
@@ -896,10 +986,12 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
     positively extracted; ABSENT otherwise (absence — NOT a None value — is the
     fail-closed signal). Possible keys:
         operation_type: "merge" | "close" | "force-push" | "branch-delete"
-                        | "push-to-main" | "remote-ref-delete"
+                        | "push-to-main" | "remote-ref-delete" | "remote-mass-delete"
         pr_number:  str  (merge / close)
         branch:     str  (branch-delete)
         target_ref: str  (force-push / push-to-main, KD-6; remote-ref-delete #1062a)
+        mass_target: str (remote-mass-delete #1062b) — normalized identity tuple
+                     <sorted-mass-flags>@<remote-or-implicit-marker>[#<sorted-refspecs>]
         bound_flags: list[str]  (#1042) — sorted normalized privileged flags;
                      ALWAYS present when operation_type is (empty list when none).
 
@@ -959,6 +1051,14 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
         ref = _extract_remote_ref_delete_target(command)
         if ref is not None:
             context["target_ref"] = ref
+    elif op_type == "remote-mass-delete":
+        # #1062b: DISTINCT key `mass_target` (not target_ref — the value is a
+        # normalized identity tuple, a different shape from a ref). op-identity-first
+        # in the read switch already prevents cross-op match; a distinct key avoids any
+        # accidental equality with a ref-shaped target_ref. Recognition⟺extractability.
+        mass_target = _extract_mass_delete_target(command)
+        if mass_target is not None:
+            context["mass_target"] = mass_target
     return context
 
 
@@ -1909,6 +2009,12 @@ _FLAG_SPEC: dict[str, dict[str, tuple[str, bool]]] = {
         "--force": ("--force", False),
         "--force-with-lease": ("--force-with-lease", False),
         "--no-verify": ("--no-verify", False),
+        # remote-mass-delete (#1062b) danger-condition booleans — present so
+        # `_normalized_flags` can SEE them for the mass-delete recognition arm. Like
+        # -D/--force, they are op-trigger booleans in _FLAG_SPEC but EXCLUDED from
+        # PRIVILEGED_FLAGS (the #1042 set-equality bind is untouched).
+        "--mirror": ("--mirror", False),
+        "--prune": ("--prune", False),
     },
 }
 
@@ -2028,9 +2134,17 @@ def _flag_condition_danger_op(command: str) -> str | None:
         # (the SAME predicate feeds detect via the fallback AND the is_dangerous
         # union), so this op can NEVER be #1064 gated-but-unmintable. A multi-ref /
         # implicit-current / ambiguous form yields None here → not recognized → the
-        # mass arm (added with #1062b) or the literal floor decides.
+        # mass arm below or the literal floor decides. Tried FIRST = the single-ref-
+        # extractability BOUNDARY discriminator: mass only runs when this returns None.
         if _extract_remote_ref_delete_target(command) is not None:
             return "remote-ref-delete"
+        # remote-mass-delete (#1062b) — mass forms (--mirror/--prune/multi-ref delete),
+        # recognized IFF a normalized mass-target tuple is extractable (the extractor
+        # itself defers to remote-ref-delete for a single ref, so no double-classify).
+        # Recognition⟺mintability by construction → #1064-impossible (implicit-remote
+        # included via the definite \x00implicit marker).
+        if _extract_mass_delete_target(command) is not None:
+            return "remote-mass-delete"
     return None
 
 

@@ -565,6 +565,13 @@ def _token_matches_command(token: dict, command: str) -> bool:
         # cross-authorizing a force-push/push-to-main sharing the same target_ref
         # (the lead Q1 distinct-op-class guarantee).
         return _both_present_equal(context.get("target_ref"), cmd.get("target_ref"))
+    if token_op == "remote-mass-delete":
+        # #1062b: bind on the DISTINCT `mass_target` identity tuple (mass-flags +
+        # remote + sorted refspecs). Distinct invocations → distinct tuples, so a
+        # token minted for `git push --prune origin` (--prune@origin) does NOT
+        # authorize `git push --mirror origin` (--mirror@origin) — the lesser→greater
+        # / cross-form closure. An unextractable tuple is ABSENT → REFUSE.
+        return _both_present_equal(context.get("mass_target"), cmd.get("mass_target"))
 
     # Unknown op-class (a typed token whose op is not one of the handled classes)
     # — REFUSE. No terminal allow exists on the read path.
