@@ -551,7 +551,7 @@ def _token_matches_command(token: dict, command: str) -> bool:
         return _both_present_equal(context.get("pr_number"), cmd.get("pr_number"))
     if token_op == "branch-delete":
         return _both_present_equal(context.get("branch"), cmd.get("branch"))
-    if token_op in ("force-push", "push-to-main"):
+    if token_op in ("force-push", "push-to-main", "remote-ref-delete"):
         # KD-6 (SECURITY-RATIFICATION-PENDING): the destination ref must match
         # explicitly — an op-type-only floor would let a 'force-push feature'
         # approval authorize 'force-push main'. An implicit/multi-ref/unparseable
@@ -560,10 +560,27 @@ def _token_matches_command(token: dict, command: str) -> bool:
         # ref), so a faithful plain-push token authorizes its own exec — while a
         # force-push token and a push-to-main token stay DISTINCT ops (op-type
         # identity is checked above), keeping the push→force collapse closed.
+        # #1062a: remote-ref-delete ALSO binds on target_ref (the deleted ref); the
+        # op-type identity checked above keeps a remote-ref-delete token from
+        # cross-authorizing a force-push/push-to-main sharing the same target_ref
+        # (the lead Q1 distinct-op-class guarantee).
         return _both_present_equal(context.get("target_ref"), cmd.get("target_ref"))
+    if token_op == "remote-mass-delete":
+        # #1062b: bind on the DISTINCT `mass_target` identity tuple (mass-flags +
+        # remote + sorted refspecs). Distinct invocations → distinct tuples, so a
+        # token minted for `git push --prune origin` (--prune@origin) does NOT
+        # authorize `git push --mirror origin` (--mirror@origin) — the lesser→greater
+        # / cross-form closure. An unextractable tuple is ABSENT → REFUSE.
+        return _both_present_equal(context.get("mass_target"), cmd.get("mass_target"))
+    if token_op == "branch-protection":
+        # #1063: bind on the protected branch (PATH-resident, branches/<b>/protection).
+        # op-type identity above keeps a branch-protection token from authorizing a
+        # branch-delete of the same branch name (distinct op-classes). An unextractable
+        # branch is ABSENT → REFUSE.
+        return _both_present_equal(context.get("protected_branch"), cmd.get("protected_branch"))
 
-    # Unknown op-class (a typed token whose op is not one of the four handled
-    # classes) — REFUSE. No terminal allow exists on the read path.
+    # Unknown op-class (a typed token whose op is not one of the handled classes)
+    # — REFUSE. No terminal allow exists on the read path.
     return False
 
 

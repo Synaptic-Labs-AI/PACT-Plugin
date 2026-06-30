@@ -82,6 +82,31 @@ leg before deriving op/target/flags.) This is the GENERAL single-destructive-op-
 benign-remainder pattern, NOT a recognition allow-list of viewers/filters — do NOT
 enumerate viewers in detection logic (an allow-list drifts and would re-block faithful
 clicks the count already mints).
+
+conservative-RECOGNITION (the design rule behind the accepted compound under-block;
+documented so a future sweep does NOT "discover" these forms and "harden" them into
+faithful-click over-blocks): recognition targets the SINGLE destructive command an honest
+agent runs (the destructive op plus the benign viewers/filters/redirects of benign-
+CONTINUATION above) and ERRS TOWARD LETTING THROUGH — over-blocking a faithful click is
+WRONG BY DEFINITION (the INVARIANT above), worse than missing a buried op. The git-push
+remote-ref-delete (`:ref` / `--delete` / `-d`) and mass-delete (`--mirror` / `--prune` /
+multi-ref) forms need a positional, quote-aware parse, so their recognition is ANCHORED to
+the FIRST executable leg (the _executable_prefix view) — it does NOT chase those ops into
+NON-FIRST compound legs. Chasing them needs a match-anywhere / per-leg scan that fires on a
+quoted `:ref` / `--mirror` mention in a benign leg — an over-block of a faithful click. The
+ACCEPTED price is that these forms run UNGATED when the `git push` is not the first leg:
+  - `cd /repo && git push origin --delete main`
+  - `git fetch && git push --mirror origin`
+  - `NOTE=x ; git push origin :main`
+These are NOT bugs — do NOT "fix" them (the fix re-blocks faithful clicks). httpie
+(`http` / `https` CLI) protection-mutation is likewise ungated: the protection MINT
+classifier covers gh-api / curl / wget only, so an httpie read-floor arm would gate a form
+the mint cannot bind — a gated-but-unmintable over-block. Ungated keeps read == mint.
+NB this first-leg anchoring is SPECIFIC to those parse-dependent forms: the LITERAL
+DANGEROUS_PATTERNS arms (force-push, branch -D, gh pr merge/close, push-to-main, the API
+ref/protection arms) match-anywhere and STILL gate in a non-first leg
+(`cd /repo && git push --force origin main` is caught). When an over-block of a faithful
+click is found, the fix WIDENS the mint, never narrows detection into a new under-block.
 =============================================================================
 
 Centralizes TOKEN_TTL, TOKEN_DIR, TOKEN_PREFIX, consumed-token cleanup,
@@ -280,6 +305,17 @@ def detect_command_operation_type(command: str) -> str | None:
                           a force-push)
         "branch-delete" - git branch -D / git branch --delete --force / gh pr close --delete-branch;
                           API DELETE to git/refs (ref removal)
+        "remote-ref-delete" - git push delete of a SINGLE remote ref (#1062a):
+                          push <remote> :ref / --delete ref / -d ref (incl. implicit
+                          remote). Union-arm-only; recognized IFF a single deletable
+                          ref is extractable (recognition⟺mintability by construction)
+        "remote-mass-delete" - git push MASS delete (#1062b): --mirror / --prune /
+                          multi-ref delete. Union-arm-only; recognized IFF a normalized
+                          mass-target tuple is extractable (single-ref defers to
+                          remote-ref-delete — the BOUNDARY discriminator, no double-classify)
+        "branch-protection" - API mutation WEAKENING branch protection (#1063):
+                          gh-api/curl/wget DELETE|PUT|PATCH on a branches/<b>/protection
+                          endpoint (host-agnostic; POST EXCLUDED = strengthening direction)
         None            - destructive shape not in the recognized set
                           (read-side caller treats None as "untyped command",
                           which the tightened token-match semantic treats as
@@ -326,12 +362,33 @@ def detect_command_operation_type(command: str) -> str | None:
     # PATCH/POST/PUT → force-push class (rewrites a ref without PR review)
     # Symmetric with how a force-push or branch-delete token from
     # extract_context() would authorize the equivalent CLI form.
-    _is_api_form = re.search(r"\b(?:gh\s+api|curl|wget)\b", command, re.IGNORECASE)
+    # gh-api recognition uses the TOLERANT `_GH_API_PREFIX` (same as the read floor)
+    # so a `gh -R o/r api ...` global-flag spelling MINTS instead of gating-on-read-
+    # but-not-minting (#1064 over-block). The METHOD checks below are IGNORECASE to
+    # match the IGNORECASE read floor, so a lowercase `-X delete` faithful form MINTS
+    # too. Both are mint-WIDENING (the read floor already gates these forms) — never a
+    # read-floor narrowing. Still gh-api/curl/wget only (NOT httpie), so no new
+    # gated-but-unmintable httpie state.
+    _is_api_form = (
+        re.search(_GH_API_PREFIX, command, re.IGNORECASE)
+        or re.search(r"\b(?:curl|wget)\b", command, re.IGNORECASE)
+    )
     if _is_api_form and "git/refs" in command:
-        if re.search(r"\bDELETE\b", command):
+        if re.search(r"\bDELETE\b", command, re.IGNORECASE):
             return "branch-delete"
-        if re.search(r"\b(?:PATCH|POST|PUT)\b", command):
+        if re.search(r"\b(?:PATCH|POST|PUT)\b", command, re.IGNORECASE):
             return "force-push"
+    # branch-protection API mutation (#1063): DELETE|PUT|PATCH on a
+    # `branches/<b>/protection` endpoint WEAKENS protection (remove / replace /
+    # modify) — a DISTINCT op-class from branch-delete (it changes a config, not a
+    # ref). POST is EXCLUDED (it ENABLES protection sub-features = strengthening, so
+    # gating it would over-block). Path-disjoint from the git/refs arm above (a
+    # protection URL has no `git/refs`), so no shadowing. Method check is loose +
+    # IGNORECASE like the git/refs arm; the GAP1 write-gate (is_dangerous + the precise
+    # method-gated DANGEROUS_PATTERNS arms) ensures mint⊆read.
+    if _is_api_form and re.search(r"branches/.*/protection", command):
+        if re.search(r"\b(?:DELETE|PUT|PATCH)\b", command, re.IGNORECASE):
+            return "branch-protection"
     # branch-delete: git branch -D, git branch --delete --force,
     # or git branch --force --delete (matches DANGEROUS_PATTERNS).
     if re.search(_GIT_PREFIX + r"branch\s+.*-D\b", command):
@@ -472,6 +529,17 @@ def _extract_api_ref(command: str) -> str | None:
     return api_match.group(1) if api_match else None
 
 
+def _extract_protection_branch(command: str) -> str | None:
+    """Parse the protected branch from a branch-protection API command's
+    `branches/<branch>/protection` path (#1063). The branch is PATH-resident (the
+    REST resource IS the URL), so carrier-8's body strip never removes it. The
+    non-greedy `(.+?)` correctly handles a slashed branch name (`feature/x`):
+    `branches/feature/x/protection` → `feature/x`. Returns the branch, or None when
+    the command is not a recognized protection form."""
+    m = re.search(r"branches/(.+?)/protection\b", command)
+    return _strip_surrounding_quotes(m.group(1)) if m else None
+
+
 def _extract_branch_name(command: str) -> str | None:
     """Extract the SINGLE branch name targeted by a branch-delete command.
 
@@ -566,6 +634,192 @@ def _extract_force_push_target_ref(command: str) -> str | None:
     return refspec or None
 
 
+# git-push value-taking OPTION flags whose VALUE token must be skipped when
+# counting refspec positionals (else a contrived `-o ':weird'` push-option leaks
+# a fake delete refspec — the #1037 brittleness class). Their `--flag=value` form
+# carries the value INLINE (one token), so no next-token skip is needed. Used by
+# the remote-ref-delete + remote-mass-delete positional builder below; distinct
+# from the OP-TRIGGER flags (`--delete`/`-d`) which are NOT value-taking (the ref
+# is a separate positional).
+_GIT_PUSH_VALUE_FLAGS = frozenset(
+    {"-o", "--push-option", "--receive-pack", "--exec", "--repo"}
+)
+
+
+def _push_positionals(after_push: list[str]) -> list[str]:
+    """Positional (non-flag) tokens after the `push` subcommand, skipping the value
+    token consumed by a git-push value-taking option flag (`-o opt`, `--repo url`,
+    …). A `--flag=value` form carries its value inline (one token), so only the
+    separate-token form skips a follow-on token. Operates on a quote-aware
+    `_shell_tokenize` view (quotes already stripped), so a quoted `':oldref'` stays
+    ONE token bound to its flag and never leaks as a positional. Shared by both
+    push-delete extractors so they agree on positional boundaries."""
+    positionals: list[str] = []
+    i, n = 0, len(after_push)
+    while i < n:
+        tok = after_push[i]
+        if tok.startswith("-") and tok != "-":
+            flag = tok.split("=", 1)[0]
+            if flag in _GIT_PUSH_VALUE_FLAGS and "=" not in tok and i + 1 < n:
+                i += 2  # consume the option flag's separate value token
+                continue
+            i += 1  # a flag (boolean, op-trigger, or inline-value) — not a positional
+            continue
+        positionals.append(tok)
+        i += 1
+    return positionals
+
+
+def _tokens_after_push(command: str) -> list[str] | None:
+    """The quote-aware token list AFTER the first `push` token, on the executable
+    prefix of `command`, or None when the command is unparseable / has no `push`
+    token. Truncates at the first benign continuation / redirect (via
+    `_executable_prefix`) and abstains (None) on ambiguous quotes / procsub —
+    fail-OPEN to the literal floor, never fail-closed."""
+    prefix = _executable_prefix(command)
+    if prefix is None:
+        return None
+    toks = _shell_tokenize(prefix)
+    if toks is None:
+        return None
+    for idx, tok in enumerate(toks):
+        if tok == "push":
+            return toks[idx + 1:]
+    return None
+
+
+def _extract_remote_ref_delete_target(command: str) -> str | None:
+    """Extract the SINGLE remote ref a `git push` delete would remove (#1062a), or
+    None when the form is implicit-current/multi-ref/ambiguous (→ the caller defers:
+    not recognized as remote-ref-delete; a mass form is picked up by
+    `_extract_mass_delete_target` instead). Reuses the force-push parser MACHINERY
+    (quote-mask + shlex view + value-flag skip) but adapts the positional rule for
+    delete semantics + the implicit-remote forms the force-push parser returns None
+    for (its conservative exactly-2-positional rule). Recognition⟺mintability by
+    construction: the `_flag_condition_danger_op` arm returns `remote-ref-delete`
+    IFF this yields a target, so the op can never reach a #1064 gated-but-unmintable
+    state.
+
+    Recognized (git grammar `git push [<repo>] <refspec>...`):
+        explicit remote, --delete/-d:  `origin --delete feature` → feature
+        implicit remote, --delete/-d:  `git push --delete feature` → feature
+        single-delete-with-repo:       `git push --delete a b` → b (repo=a, ref=b)
+        empty-source colon refspec:    `origin :feature` / `origin +:feature` → feature
+                                       `origin :refs/tags/v1` → refs/tags/v1
+    Deferred (→ None, picked up as remote-mass-delete or not destructive):
+        multi-ref delete (`origin --delete a b`, `origin :a :b`), --mirror/--prune,
+        plain push (`origin feature`), src:dst non-delete (`origin feat:feat`),
+        value-flag colon (`-o ':weird' main`), a delete literal inside a quoted arg.
+    """
+    after = _tokens_after_push(command)
+    if after is None:
+        return None
+    positionals = _push_positionals(after)
+    # CROSS-LEG FIX (review FINDING 1): compute the flag set from the SAME leg as the
+    # positionals — the post-`push` tokens of the executable prefix (`after`), NOT the
+    # whole command. Else a --delete/-d/--mirror/--prune token in a benign CONTINUATION
+    # leg (`git push origin feature && git branch -d old`) leaks in and mislabels the
+    # benign push as a delete (a fail-safe but common over-block). Every delete-relevant
+    # flag is a push SUBCOMMAND option (always after `push`), so the post-push tokens are
+    # the complete + correct scope; nothing real is missed (no read-floor narrowing).
+    gf = _normalized_flags(after, "git")  # git surface maps -d → --delete
+    if "--delete" in gf:
+        # git grammar: 1 positional = the refspec (implicit remote); 2 = <repo>
+        # <refspec>; 0 or ≥3 = ambiguous/multi → defer (mass handles ≥3).
+        if len(positionals) == 1:
+            return _strip_surrounding_quotes(positionals[0]) or None
+        if len(positionals) == 2:
+            return _strip_surrounding_quotes(positionals[1]) or None
+        return None
+    # No --delete flag: an empty-source colon refspec (`:dst` / `+:dst`) is a delete.
+    # EXACTLY ONE → its dst; ≠1 → defer (0 = not a delete; ≥2 = multi → mass).
+    colon_dsts = [p for p in positionals if re.match(r"^\+?:", p)]
+    if len(colon_dsts) == 1:
+        return _strip_surrounding_quotes(colon_dsts[0]).rsplit(":", 1)[1] or None
+    return None
+
+
+# Sentinel marking an IMPLICIT remote (a `git push --mirror` with no positional
+# remote) in a mass-delete target tuple — keeps the implicit-remote form MINTABLE
+# (a definite, deterministic target) rather than ambiguous. A NUL byte can never
+# appear in a real remote name, so it can never collide with one.
+_IMPLICIT_REMOTE_MARKER = "\x00implicit"
+
+
+def _extract_mass_delete_target(command: str) -> str | None:
+    """Extract a READABLE normalized per-invocation tuple binding the destructive
+    IDENTITY of a `git push` MASS-delete form (#1062b — `--mirror`/`--prune`/multi-ref
+    delete), or None when the command is not such a form. Binds the destructive
+    identity (mass-flags + remote + sorted refspecs), NOT the whole command line, so a
+    benign `-o ci.skip` does not over-bind; privileged flags ride the existing #1042
+    `bound_flags` axis. Derived identically on BOTH arms via this ONE SSOT → mint==read
+    parity by construction; recognition⟺mintability (the arm returns the op IFF this is
+    non-None) → #1064-impossible. Returns a READABLE tuple, never a hash:
+
+        <sorted-mass-flags>@<remote-or-implicit-marker>[#<sorted-refspecs>]
+        git push --mirror origin               → --mirror@origin
+        git push --mirror                      → --mirror@\\x00implicit (implicit-remote MINTABLE)
+        git push --prune origin refs/heads/main → --prune@origin#refs/heads/main
+        git push origin --delete a b           → --delete@origin#a,b (binds the EXACT deleted set)
+        git push origin :a :b                  → --delete@origin#a,b
+
+    BOUNDARY (lead-mandated, no double-classification): a SINGLE-ref delete is owned by
+    `_extract_remote_ref_delete_target` (tried FIRST in the recognition arm). This
+    extractor returns None for a single-ref form, so a command is classified by EXACTLY
+    ONE op-class. Per git grammar (first positional = repository), `git push --delete a b`
+    is repo=a/ref=b = SINGLE (→ remote-ref-delete), while `git push origin --delete a b`
+    is repo=origin/refs=a,b = MASS.
+    """
+    if not re.search(_GIT_PREFIX + r"push\b", command):
+        return None
+    # Single-ref delete is the OTHER op-class — defer to it (the boundary discriminator).
+    if _extract_remote_ref_delete_target(command) is not None:
+        return None
+    after = _tokens_after_push(command)
+    if after is None:
+        return None
+    # CROSS-LEG FIX (review FINDING 1): flag set from the SAME leg as the positionals
+    # (the post-`push` tokens), NOT the whole command — else a --mirror/--prune/--delete
+    # in a benign continuation leg (`git push origin feature && echo --mirror`) leaks in
+    # and mislabels the benign push as a mass-delete. All mass-relevant flags are push
+    # subcommand options, so post-push is the complete + correct scope.
+    gf = _normalized_flags(after, "git")  # needs --mirror/--prune in _FLAG_SPEC (added #1062b)
+    mass_flags = sorted(f for f in ("--mirror", "--prune") if f in gf)
+    positionals = _push_positionals(after)
+    colon_dsts = [p for p in positionals if re.match(r"^\+?:", p)]
+
+    if mass_flags:
+        # --mirror/--prune: remote = first positional (git grammar) or implicit;
+        # explicit refspecs (if any) are the remaining positionals.
+        remote = _strip_surrounding_quotes(positionals[0]) if positionals else _IMPLICIT_REMOTE_MARKER
+        refspecs = sorted(_strip_surrounding_quotes(p) for p in positionals[1:])
+        flags_part = ",".join(mass_flags)
+    elif "--delete" in gf:
+        # multi-ref --delete (the single-ref case already deferred above): git grammar
+        # repo = first positional, the rest are the deleted refs. Need >=2 refs to be mass.
+        if len(positionals) < 3:
+            return None
+        remote = _strip_surrounding_quotes(positionals[0])
+        refspecs = sorted(_strip_surrounding_quotes(p) for p in positionals[1:])
+        flags_part = "--delete"
+    elif len(colon_dsts) >= 2:
+        # multi empty-source colon delete (`origin :a :b`): remote = first non-colon
+        # positional (or implicit); refs = the colon dsts.
+        non_colon = [p for p in positionals if not re.match(r"^\+?:", p)]
+        remote = _strip_surrounding_quotes(non_colon[0]) if non_colon else _IMPLICIT_REMOTE_MARKER
+        refspecs = sorted(
+            _strip_surrounding_quotes(p).rsplit(":", 1)[1] for p in colon_dsts
+        )
+        flags_part = "--delete"
+    else:
+        return None
+
+    target = f"{flags_part}@{remote}"
+    if refspecs:
+        target += "#" + ",".join(refspecs)
+    return target
+
+
 # -----------------------------------------------------------------------------
 # Privileged-flag binding (#1042). The (operation_type, target) binding above
 # DROPS every dash-flag, so an approved `gh pr merge 5` and an executed
@@ -624,6 +878,26 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
         # No bound flags today: branch-delete's privileged effect is its op-trigger
         # (-D / --delete --force), already bound via op_type. Kept as an explicit
         # extension point so a future bound flag is a one-line data edit here.
+    },
+    "remote-ref-delete": {
+        # No bound flags: remote-ref-delete's privileged effect (removing a remote
+        # ref) IS its op-trigger (--delete/-d/empty-source colon), already bound via
+        # op_type. Empty entry = explicit #1042 extension point (a future bound flag
+        # is a one-line data edit); it adds NO new bound flag, so the set-equality
+        # bind is untouched.
+    },
+    "remote-mass-delete": {
+        # No bound flags: remote-mass-delete's privileged effect (the mass destructive
+        # push) IS its op-trigger (--mirror/--prune/multi-ref-delete), bound via op_type
+        # AND folded into the mass_target identity tuple. The --mirror/--prune additions
+        # go to _FLAG_SPEC (danger-condition recognition) ONLY, NOT here, so the #1042
+        # set-equality bind is untouched. Empty entry = explicit extension point.
+    },
+    "branch-protection": {
+        # No bound flags: branch-protection's privileged effect (weakening protection)
+        # IS its op-trigger (the DELETE|PUT|PATCH method on the protection endpoint),
+        # bound via op_type. Empty entry = explicit #1042 extension point; adds NO new
+        # bound flag, so the set-equality bind is untouched.
     },
 }
 
@@ -784,9 +1058,15 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
     positively extracted; ABSENT otherwise (absence — NOT a None value — is the
     fail-closed signal). Possible keys:
         operation_type: "merge" | "close" | "force-push" | "branch-delete"
+                        | "push-to-main" | "remote-ref-delete" | "remote-mass-delete"
+                        | "branch-protection"
         pr_number:  str  (merge / close)
         branch:     str  (branch-delete)
-        target_ref: str  (force-push, KD-6)
+        target_ref: str  (force-push / push-to-main, KD-6; remote-ref-delete #1062a)
+        mass_target: str (remote-mass-delete #1062b) — normalized identity tuple
+                     <sorted-mass-flags>@<remote-or-implicit-marker>[#<sorted-refspecs>]
+        protected_branch: str (branch-protection #1063) — the branch from the
+                     branches/<b>/protection URL path
         bound_flags: list[str]  (#1042) — sorted normalized privileged flags;
                      ALWAYS present when operation_type is (empty list when none).
 
@@ -837,6 +1117,30 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
         target_ref = _extract_force_push_target_ref(command)
         if target_ref is not None:
             context["target_ref"] = target_ref
+    elif op_type == "remote-ref-delete":
+        # #1062a: REUSE the `target_ref` key — the parser yields a ref, the key is
+        # semantically right, and the op-class identity (checked FIRST in the read
+        # switch) keeps a remote-ref-delete token from cross-authorizing a
+        # force-push/push-to-main with the same target_ref. Recognition⟺extractability:
+        # detect returned this op IFF the extractor yields a ref, so it is non-None here.
+        ref = _extract_remote_ref_delete_target(command)
+        if ref is not None:
+            context["target_ref"] = ref
+    elif op_type == "remote-mass-delete":
+        # #1062b: DISTINCT key `mass_target` (not target_ref — the value is a
+        # normalized identity tuple, a different shape from a ref). op-identity-first
+        # in the read switch already prevents cross-op match; a distinct key avoids any
+        # accidental equality with a ref-shaped target_ref. Recognition⟺extractability.
+        mass_target = _extract_mass_delete_target(command)
+        if mass_target is not None:
+            context["mass_target"] = mass_target
+    elif op_type == "branch-protection":
+        # #1063: the protected branch is PATH-resident (branches/<b>/protection).
+        # Distinct key `protected_branch`; op-identity-first in the read switch keeps
+        # it from cross-authorizing a branch-delete of the same branch name.
+        protected_branch = _extract_protection_branch(command)
+        if protected_branch is not None:
+            context["protected_branch"] = protected_branch
     return context
 
 
@@ -1081,13 +1385,36 @@ re.compile(_GIT_PREFIX + r"branch\s+--force\s+--delete\b"),
 # API-based merge bypasses (require mutating HTTP method to avoid blocking reads)
 re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b).*merge", re.IGNORECASE),
 re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PUT|PATCH|POST)\b).*api.*merge", re.IGNORECASE),
-# API-based branch deletion via DELETE to git/refs endpoint
+# API-based branch deletion via DELETE to git/refs endpoint.
+# HOST-AGNOSTIC (#1061): the curl arms drop the literal `.*api.*` substring so a
+# truly api-free Enterprise/proxy URL (e.g. https://git.example.com/repos/o/r/git/refs/...)
+# no longer bypasses — bringing curl to parity with the already-host-agnostic
+# gh-api/wget/httpie arms. The `api` key was an as-shipped heuristic (#268/#271), not a
+# deliberated scope ruling; this WIDENS it. The over-block this widening would introduce
+# on a quoted `-d` body mentioning git/refs is closed by carrier-8 (the HTTP-client
+# data-body strip in _strip_non_executable_content) — the body value is stripped while
+# the path-resident ref survives (PATH-vs-BODY invariant).
 re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+DELETE\b).*git/refs", re.IGNORECASE),
-re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+DELETE\b).*api.*git/refs", re.IGNORECASE),
+re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+DELETE\b).*git/refs", re.IGNORECASE),
 # API-based ref mutation / force push via mutating method to git/refs endpoint
-# (any mutating operation on git refs via API is inherently dangerous)
+# (any mutating operation on git refs via API is inherently dangerous). Curl arm is
+# host-agnostic (#1061) — see the DELETE arm note above.
 re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PATCH|POST|PUT)\b).*git/refs", re.IGNORECASE),
-re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PATCH|POST|PUT)\b).*api.*git/refs", re.IGNORECASE),
+re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PATCH|POST|PUT)\b).*git/refs", re.IGNORECASE),
+# Branch-protection API mutation (#1063): DELETE|PUT|PATCH on a
+# `branches/<branch>/protection` endpoint WEAKENS protection (remove / replace /
+# modify whole config). POST is EXCLUDED — it ENABLES protection sub-features
+# (enforce_admins / required_signatures) = the STRENGTHENING direction, so gating it
+# would over-block. HOST-AGNOSTIC (the #1061 lesson — no `.*api.*`). Explicit-method
+# arms only (the protection endpoint has no implicit-POST danger like git/refs). The
+# branch is PATH-resident, so carrier-8 never strips it (no preservation guard needed,
+# unlike the body-resident contents arm). No httpie arm: the mint classifier's
+# `_is_api_form` is gh-api/curl/wget only, so adding an httpie read arm would create a
+# gated-but-unmintable httpie #1064 state — omitted by design (httpie protection is not
+# a charter form).
+re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:DELETE|PUT|PATCH)\b).*branches/.*/protection", re.IGNORECASE),
+re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:DELETE|PUT|PATCH)\b).*branches/.*/protection", re.IGNORECASE),
+re.compile(r"\bwget\b(?=.*--method=(?:DELETE|PUT|PATCH)\b).*branches/.*/protection", re.IGNORECASE),
 # gh api implicit POST: body param flags (-f, -F, --field, --raw-field, --input)
 # cause gh api to default to POST. Dangerous when targeting git/refs or merge.
 # Negative lookahead excludes explicit GET (which overrides implicit POST).
@@ -1096,7 +1423,7 @@ re.compile(_GH_API_PREFIX + r"(?!.*(?:-X|--method)\s+GET\b)(?=.*(?:-f|-F|--field
 # curl implicit POST: --data/-d/--data-raw/--data-binary flags cause curl to
 # default to POST. Dangerous when targeting git/refs or merge API endpoints.
 # Negative lookahead excludes explicit GET (which overrides implicit POST).
-re.compile(r"\bcurl\b(?!.*(?:-X|--request)\s+GET\b)(?=.*(?:--data(?:-(?:raw|binary))?|-d)\s).*api.*git/refs", re.IGNORECASE),
+re.compile(r"\bcurl\b(?!.*(?:-X|--request)\s+GET\b)(?=.*(?:--data(?:-(?:raw|binary))?|-d)\s).*git/refs", re.IGNORECASE),
 re.compile(r"\bcurl\b(?!.*(?:-X|--request)\s+GET\b)(?=.*(?:--data(?:-(?:raw|binary))?|-d)\s).*api.*merge", re.IGNORECASE),
 # Contents API: write operations (PUT/PATCH/POST) to /contents/ endpoint
 # targeting main or master branch. Flags any mutating /contents/ call that
@@ -1497,6 +1824,99 @@ def _strip_non_executable_content(command: str) -> str:
 
         result = re.sub(_gh_carrier_span, _strip_gh_carrier_span, result)
 
+    # 8. Strip HTTP-client request-body flag VALUES (curl / wget / gh api).
+    #    The #1061 widening (host-agnostic `.*git/refs`) and the #1063
+    #    `.*branches/.*/protection` arms would OTHERWISE fire on the destructive
+    #    path text when it merely appears inside a QUOTED data-body argument
+    #    (`curl -X POST .../log -d 'msg=touched git/refs/heads/x'`) — an over-block
+    #    of a faithful command (the #1037 hard-constraint). A faithful API ref /
+    #    protection mutation ALWAYS carries the destructive resource in the URL
+    #    PATH (REST convention — the resource IS the URL), NEVER the request body,
+    #    so stripping ONLY the data-body VALUE is zero-under-block: a path-resident
+    #    target can never be removed (the PATH-vs-BODY invariant).
+    #
+    #    Surface-scoped to a curl / wget / gh-api command SPAN so a `git push -d
+    #    <ref>` (git's `-d` = --delete, the ref is a positional we DO gate) is never
+    #    mis-stripped — the span anchors only on an HTTP-client head, and git is
+    #    absent from the anchor. TWO value-forms are handled:
+    #      (a) direct-value body flags — `FLAG <quoted-value>`: curl/wget
+    #          -d/--data[-raw|-binary|-ascii|-urlencode]/--body-data/--post-data.
+    #      (b) KEY=VALUE field flags — `FLAG <key>=<quoted-value>`: gh-api
+    #          --field/--raw-field/-f/-F (and curl -F form data). Strip the value
+    #          AFTER the `=`, keeping `flag key=`.
+    #    Surface-awareness falls out of the patterns: curl's bare boolean `-f`
+    #    (--fail) is followed by no `key=<quoted>` token, so form (b) never matches
+    #    it and a `curl -f -X DELETE .../git/refs/...` still gates.
+    #    EVERY flag token is KEPT (only the value is replaced) so the implicit-POST
+    #    lookaheads (`(?=.*(?:--data...|-f|--field|...)\s)`) still fire on a genuine
+    #    implicit-POST. Same execution-routing guards as carriers 3/5/7: skip when
+    #    piped/process-sub to a shell; the double-quoted arms preserve a value
+    #    containing command-substitution `$(`/backtick (it would execute).
+    #    (httpie body params are POSITIONALS, not flags, so they are out of scope —
+    #    a rarer, fails-safe pre-existing FP, documented in the architecture residuals.)
+    if not piped_to_shell and not process_sub_to_shell:
+        # The HTTP-client command span: from a curl/wget/gh-api head up to the first
+        # UNQUOTED shell separator. Quote-aware body (balanced quotes consumed
+        # atomically; disjoint first chars → linear, no ReDoS) — identical shape to
+        # carrier 7's span. The URL positional and the method flag live in this span
+        # but are never matched by the body-flag patterns below (which require a body
+        # FLAG before the value), so they always survive. The gh-api head uses the
+        # TOLERANT `_GH_API_PREFIX` (same as the read floor) so a `gh -R o/r api ...`
+        # global-flag spelling's body IS stripped — else the #1037 body-mention
+        # over-block re-opens for that spelling (the strip would not run).
+        _http_client_span = (
+            r"(?:\bcurl\b|\bwget\b|" + _GH_API_PREFIX + r")"
+            r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+        )
+        # Direct-value body flags (form a).
+        _data_flag = r"(?:--data(?:-(?:raw|binary|ascii|urlencode))?|--body-data|--post-data|-d)"
+        # KEY=VALUE field flags (form b). The `<key>=` requirement is what makes the
+        # strip surface-aware (curl's boolean -f never has a key= after it).
+        _field_flag = r"(?:--field|--raw-field|-F|-f)"
+
+        def _strip_http_body_span(span_match: re.Match) -> str:
+            span = span_match.group(0)
+
+            # CONTENTS-API EXCEPTION (PATH-vs-BODY invariant boundary). The
+            # `.*contents/.*(?:main|master)` arm reads its destructive target — the
+            # branch being written — from the REQUEST BODY (`-d '{"branch":"master"}'`)
+            # or a `?branch=` query, NOT the URL path (the contents API path is
+            # `/contents/{filepath}`, branch-less). This is the ONE gated arm whose
+            # signal is body-resident; stripping its body would REMOVE the main/master
+            # gating signal → an UNDER-BLOCK. The architecture (§3) mandates leaving the
+            # contents arm UNCHANGED, so preserve a contents-API span verbatim. Detected
+            # per-span (a compound's `/log` span is still stripped). git/refs and
+            # branches/protection targets are path-resident, so their bodies stay strippable.
+            if re.search(r"contents/", span):
+                return span
+
+            def _keep_flag_dq(m: re.Match) -> str:
+                # group(1) = the flag (+ key= for form b) up to the opening quote.
+                if _has_command_substitution(m.group(0)):
+                    return m.group(0)  # value contains $()/backtick → executes; keep
+                return m.group(1) + "'STRIPPED'"
+
+            # (a) direct-value body flags — double- then single-quoted.
+            span = re.sub(
+                r"(" + _data_flag + r"\s+)\"(?:[^\"\\]|\\.)*\"", _keep_flag_dq, span
+            )
+            span = re.sub(
+                r"(" + _data_flag + r"\s+)'[^']*'", r"\1'STRIPPED'", span
+            )
+            # (b) KEY=VALUE field flags — double- then single-quoted. `<key>` is a
+            # bare word (letters/digits/._-); the value AFTER `=` is what is stripped.
+            span = re.sub(
+                r"(" + _field_flag + r"\s+[\w.\-]+=)\"(?:[^\"\\]|\\.)*\"",
+                _keep_flag_dq,
+                span,
+            )
+            span = re.sub(
+                r"(" + _field_flag + r"\s+[\w.\-]+=)'[^']*'", r"\1'STRIPPED'", span
+            )
+            return span
+
+        result = re.sub(_http_client_span, _strip_http_body_span, result)
+
     return result
 
 
@@ -1688,6 +2108,12 @@ _FLAG_SPEC: dict[str, dict[str, tuple[str, bool]]] = {
         "--force": ("--force", False),
         "--force-with-lease": ("--force-with-lease", False),
         "--no-verify": ("--no-verify", False),
+        # remote-mass-delete (#1062b) danger-condition booleans — present so
+        # `_normalized_flags` can SEE them for the mass-delete recognition arm. Like
+        # -D/--force, they are op-trigger booleans in _FLAG_SPEC but EXCLUDED from
+        # PRIVILEGED_FLAGS (the #1042 set-equality bind is untouched).
+        "--mirror": ("--mirror", False),
+        "--prune": ("--prune", False),
     },
 }
 
@@ -1801,6 +2227,23 @@ def _flag_condition_danger_op(command: str) -> str | None:
         gf = _normalized_flags(tokens, "git")
         if "--force" in gf and "--force-with-lease" not in gf:
             return "force-push"
+        # remote-ref-delete (#1062a) — union-arm-only recognition (lead Q2: NO
+        # literal DANGEROUS_PATTERNS ref-delete arm). Recognize IFF a SINGLE
+        # deletable ref is extractable; recognition⟺mintability by construction
+        # (the SAME predicate feeds detect via the fallback AND the is_dangerous
+        # union), so this op can NEVER be #1064 gated-but-unmintable. A multi-ref /
+        # implicit-current / ambiguous form yields None here → not recognized → the
+        # mass arm below or the literal floor decides. Tried FIRST = the single-ref-
+        # extractability BOUNDARY discriminator: mass only runs when this returns None.
+        if _extract_remote_ref_delete_target(command) is not None:
+            return "remote-ref-delete"
+        # remote-mass-delete (#1062b) — mass forms (--mirror/--prune/multi-ref delete),
+        # recognized IFF a normalized mass-target tuple is extractable (the extractor
+        # itself defers to remote-ref-delete for a single ref, so no double-classify).
+        # Recognition⟺mintability by construction → #1064-impossible (implicit-remote
+        # included via the definite \x00implicit marker).
+        if _extract_mass_delete_target(command) is not None:
+            return "remote-mass-delete"
     return None
 
 
