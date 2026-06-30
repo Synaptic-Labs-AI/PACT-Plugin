@@ -60,6 +60,30 @@ no obfuscation-chasing: plain `rm` head only, not `/bin/rm`, `r''m`, `$(echo rm)
 And rm is deliberately ABSENT from is_dangerous_command, so a BARE `rm -rf /` and a
 PURE-rm chain (`rm -rf a && rm -rf b`) stay is_dangerous=False and are NEVER gated —
 the guard stays out of pure-filesystem commands.
+
+benign-CONTINUATION (the dual of the rm-EXCEPTION; documented so a future sweep does
+NOT "discover" the single-leg mint and "harden" it away): for the gh pr merge/close
+family, a SINGLE recognized destructive op + ANY benign continuation mints a token AND
+the read side authorizes the continued command. "Benign" means the remainder is NOT a
+second destructive git/gh op — it need NOT be read-only (a `tee` or an output redirect
+WRITES a file and is still benign). A benign chain (`gh pr merge 5 && echo ok`,
+`gh pr merge 5 ; echo done`), a backgrounding (`gh pr merge 5 &`), a pipe to a
+pager/filter or `tee` (`gh pr merge 5 | tail`, `gh pr merge 5 | tee log`), or an output
+redirect (`gh pr merge 5 > out.log`) is a faithful single-command click:
+is_compound_destructive_command refuses ONLY on >=2 destructive legs (one destructive
+leg + benign continuation is NOT compound), and the merge/close read-side target is the
+PR-NUMBER positional, recovered regardless of trailing continuation tokens — so the
+approval still binds. This is the GENERAL single-destructive-op-plus-benign-remainder
+pattern, NOT a recognition allow-list of viewers/filters — do NOT enumerate viewers in
+detection logic (an allow-list drifts and would re-block faithful clicks the count
+already mints).
+KNOWN LIMITATION (fail-safe; do NOT "fix" it here): the SAME continuation appended to a
+force-push or branch-delete currently OVER-blocks on the read side. Their target
+extractor requires an exact positional count (push: remote + refspec; branch: one name),
+so a continuation's tokens are miscounted as extra positionals → the target is
+unextractable → the approved token no longer matches → REFUSE. This refuses a faithful
+click but NEVER under-blocks (the safe direction); the fix belongs to the over-block-
+tokenizer work, not a detection change here.
 =============================================================================
 
 Centralizes TOKEN_TTL, TOKEN_DIR, TOKEN_PREFIX, consumed-token cleanup,

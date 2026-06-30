@@ -9740,6 +9740,271 @@ class TestCompoundDestructiveCommandRejection:
         ) is False
 
 
+class TestBenignContinuationGuarantee:
+    """Pin the 'single destructive op + benign continuation' idiom.
+
+    A faithful agent appends a benign viewer/filter/redirect/background to a
+    single approved destructive op to confirm the result without a separate API
+    query (e.g. ``gh pr merge 5 --squash | tail``). Under the honest-mistake
+    model that is ONE destructive leg — NOT a >=2-destructive compound — so it
+    must mint a token and must not be refused as compound. This class pins the
+    whole continuation family so a future hardening change cannot silently
+    re-break the idiom.
+
+    Two arms over the SAME benign-continuation family, because the read side's
+    target re-derivation behaves differently per op-class:
+
+      ARM (a) — gh pr merge/close: the read side AUTHORIZES the continued
+        command. The PR-number target parser is continuation-tolerant (it
+        captures the positional directly rather than splitting the tail), so the
+        minted single-op token still matches. This is the guaranteed idiom.
+
+      ARM (b) — force-push / branch-delete: the read side currently OVER-BLOCKS
+        the continued command. Their target parsers split everything after
+        ``push`` / ``branch`` and count the continuation tokens (``|``, ``tail``,
+        ``echo`` …) as extra positionals, tripping the multi-target conservatism
+        so the target is unextractable; the minted token then no longer matches
+        and the read side refuses. This is the fail-safe over-block direction
+        (it refuses a faithful click, never authorizes anything unapproved).
+
+        These arm-(b) asserts are a FLIP-ON-FIX TRIPWIRE for the continuation-
+        tolerant target-parser fix tracked as #1043: once that lands, force-push
+        / branch-delete + continuation will start AUTHORIZING
+        (``check_merge_authorization`` returns None) and these cases must be
+        MOVED to the arm-(a) AUTHORIZED expectation. The test is intentionally
+        coupled to the present behavior so the fix has a red-on-flip target.
+
+    Non-vacuity is anchored three ways:
+      * the CLEAN no-continuation control — the bare force-push / branch-delete
+        AUTHORIZES with the SAME token context, proving arm-(b) refusals are
+        caused by the continuation, not by a wrong token shape (a harness
+        artifact);
+      * the ``| bash`` pipe-to-shell boundary — a benign continuation is bounded:
+        ``_has_pipe_to_shell`` recognizes ``| bash`` / ``| sh`` as dangerous
+        indirection while the benign viewers (``| tail`` / ``| less``) are NOT,
+        so 'benign continuation' is not a blanket pipe pass;
+      * the >=2-destructive compound contrast — a genuine multi-destructive chain
+        is still classified compound and refused even with a token.
+    """
+
+    # The benign continuation family: pipe-to-viewer, output redirect,
+    # and background / benign chain. Each is appended to a single destructive op;
+    # none is a second destructive leg.
+    _BENIGN_CONTINUATIONS = [
+        "| tail", "| head", "| grep merged", "| cat", "| wc -l",
+        "| tee /tmp/out", "| less",
+        "> out.log", "2>&1", "&> out.log",
+        "&", "&& echo done", "; echo done",
+    ]
+
+    # ARM (a) ops: (label, base destructive command, mint context). The read side
+    # AUTHORIZES the continued command. ``close`` carries ``--delete-branch`` (its
+    # danger trigger), so its token context MUST bind that flag — the read-side
+    # set-equality flag gate refuses otherwise — exactly as the mint side extracts
+    # it from the approval text. ``merge`` carries no privileged flag.
+    _AUTHORIZED_OPS = [
+        ("merge", "gh pr merge 5", {"operation_type": "merge", "pr_number": "5"}),
+        (
+            "close",
+            "gh pr close 7 --delete-branch",
+            {"operation_type": "close", "pr_number": "7",
+             "bound_flags": ["--delete-branch"]},
+        ),
+    ]
+
+    # ARM (b) ops: (label, base destructive command, mint context). The read side
+    # currently OVER-BLOCKS the continued command. The CLEAN base command
+    # authorizes with the same context (test_arm_b_clean_control_authorizes).
+    _OVERBLOCK_OPS = [
+        (
+            "force-push",
+            "git push --force origin main",
+            {"operation_type": "force-push", "target_ref": "main"},
+        ),
+        (
+            "branch-delete",
+            "git branch -D victim",
+            {"operation_type": "branch-delete", "branch": "victim"},
+        ),
+    ]
+
+    @pytest.mark.parametrize("cont", _BENIGN_CONTINUATIONS)
+    @pytest.mark.parametrize("op_label,base,ctx", _AUTHORIZED_OPS)
+    def test_arm_a_merge_close_continuation_authorizes(
+        self, tmp_path, op_label, base, ctx, cont
+    ):
+        """ARM (a): merge/close + a benign continuation mints AND authorizes.
+
+        One destructive leg (dangerous, NOT compound); the single-op approval
+        token authorizes the continued command. This is the guaranteed idiom.
+        """
+        from merge_guard_post import write_token
+        from merge_guard_pre import (
+            check_merge_authorization,
+            is_compound_destructive_command,
+            is_dangerous_command,
+        )
+
+        cmd = f"{base} {cont}"
+        assert is_dangerous_command(cmd) is True
+        assert is_compound_destructive_command(cmd) is False
+        assert write_token(dict(ctx), token_dir=tmp_path) is not None
+        assert check_merge_authorization(cmd, token_dir=tmp_path) is None
+
+    @pytest.mark.parametrize("cont", _BENIGN_CONTINUATIONS)
+    @pytest.mark.parametrize("op_label,base,ctx", _OVERBLOCK_OPS)
+    def test_arm_b_forcepush_branchdelete_continuation_overblocks(
+        self, tmp_path, op_label, base, ctx, cont
+    ):
+        """ARM (b): force-push/branch-delete + a benign continuation is the CURRENT
+        over-block. One destructive leg (dangerous, NOT compound) and the single-op
+        token mints, but the read side REFUSES because the continuation defeats the
+        target re-derivation.
+
+        A MATCHING token is minted so the refusal is specifically the
+        continuation-induced target-mismatch over-block — NOT the trivial
+        no-token path (which would never flip). FLIP-ON-FIX TRIPWIRE: when the
+        continuation-tolerant target-parser fix (#1043) lands, these cases will
+        AUTHORIZE (check_merge_authorization is None) and must move to arm (a).
+        """
+        from merge_guard_post import write_token
+        from merge_guard_pre import (
+            check_merge_authorization,
+            is_compound_destructive_command,
+            is_dangerous_command,
+        )
+
+        cmd = f"{base} {cont}"
+        assert is_dangerous_command(cmd) is True
+        assert is_compound_destructive_command(cmd) is False
+        assert write_token(dict(ctx), token_dir=tmp_path) is not None
+        # Refused: the current over-block. The is_compound=False assert above is
+        # the discriminator that this refusal is the target-mismatch path, NOT the
+        # compound gate.
+        assert check_merge_authorization(cmd, token_dir=tmp_path) is not None
+
+    @pytest.mark.parametrize("op_label,base,ctx", _OVERBLOCK_OPS)
+    def test_arm_b_clean_control_authorizes(self, tmp_path, op_label, base, ctx):
+        """Non-vacuity control for arm (b): the CLEAN no-continuation force-push /
+        branch-delete AUTHORIZES with the SAME token context used in arm (b).
+
+        Proves the arm-(b) refusals are caused by the appended continuation, not
+        by a wrong token shape — and that this exact token context is what should
+        authorize the continued command once the #1043 parser fix lands.
+        """
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        assert write_token(dict(ctx), token_dir=tmp_path) is not None
+        assert check_merge_authorization(base, token_dir=tmp_path) is None
+
+    @pytest.mark.parametrize(
+        "cmd",
+        ["gh pr merge 5 | bash", "gh pr merge 5 | sh"],
+    )
+    def test_pipe_to_shell_is_dangerous_indirection_not_benign_viewer(self, cmd):
+        """Non-vacuity boundary: a pipe to a SHELL is dangerous indirection, NOT a
+        benign viewer. ``_has_pipe_to_shell`` recognizes ``| bash`` / ``| sh`` and
+        the command stays is_dangerous — so 'benign continuation' is bounded, not a
+        blanket pipe pass.
+        """
+        from merge_guard_pre import is_dangerous_command
+        from shared.merge_guard_common import _has_pipe_to_shell
+
+        assert _has_pipe_to_shell(cmd) is True
+        assert is_dangerous_command(cmd) is True
+
+    @pytest.mark.parametrize("viewer", ["| tail", "| less", "| grep merged"])
+    def test_benign_viewers_are_not_pipe_to_shell(self, viewer):
+        """Companion to the boundary: the benign viewers are NOT classified as
+        pipe-to-shell. Together with the prior test this proves the boundary
+        DISCRIMINATES (viewers False, shells True) rather than passing everything.
+        """
+        from shared.merge_guard_common import _has_pipe_to_shell
+
+        assert _has_pipe_to_shell(f"gh pr merge 5 {viewer}") is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "gh pr merge 5 && gh pr close 6 --delete-branch",  # two recognized gh-destructive legs
+            "gh pr merge 5 && rm -rf /tmp/x",                  # gh-destructive + rm-head leg
+        ],
+    )
+    def test_two_destructive_compound_still_refused(self, tmp_path, cmd):
+        """Non-vacuity contrast: a genuine >=2-destructive compound is still
+        is_compound_destructive_command=True and REFUSED via the compound gate even
+        with a valid token for the headline op. Proves the >=2-narrowing that lets
+        arm (a) through has NOT become a blanket pass.
+
+        (Note: ``gh pr close <N>`` WITHOUT ``--delete-branch`` is not destructive,
+        so the second leg must carry its danger trigger to be a genuine compound.)
+        """
+        from merge_guard_post import write_token
+        from merge_guard_pre import (
+            check_merge_authorization,
+            is_compound_destructive_command,
+        )
+
+        assert is_compound_destructive_command(cmd) is True
+        write_token(
+            {"operation_type": "merge", "pr_number": "5"}, token_dir=tmp_path
+        )
+        result = check_merge_authorization(cmd, token_dir=tmp_path)
+        assert result is not None
+        assert "Compound destructive" in result
+
+    # A few representative continuation forms (one per family: pipe-to-viewer,
+    # benign-chain, output-redirect) for the negative refuse-direction asserts
+    # below — the point is to pin the refuse UNDER a continuation, not to re-sweep
+    # the whole family.
+    _REFUSE_CONTINUATIONS = ["| tail", "&& echo done", "> out.log"]
+
+    @pytest.mark.parametrize("cont", _REFUSE_CONTINUATIONS)
+    def test_wrong_pr_under_continuation_refuses(self, tmp_path, cont):
+        """UNDER-BLOCK GUARD: arm-(a)'s authorize is target-BOUND, not a blanket
+        continuation pass. A token approved for ONE PR must NOT authorize a
+        DIFFERENT PR's merge even with a benign continuation appended — the read
+        side re-derives the PR-number target from the command and the mismatch
+        refuses.
+
+        Non-vacuity (verified by in-memory mutation, reported in the HANDOFF, not
+        encoded here): if the read side dropped the PR-number equality check, this
+        wrong-PR command would AUTHORIZE and this assert would flip RED.
+        """
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        # Approval is for PR 5; the executed command targets PR 99.
+        write_token({"operation_type": "merge", "pr_number": "5"}, token_dir=tmp_path)
+        cmd = f"gh pr merge 99 {cont}"
+        assert check_merge_authorization(cmd, token_dir=tmp_path) is not None
+
+    @pytest.mark.parametrize("cont", _REFUSE_CONTINUATIONS)
+    def test_privileged_flag_absent_from_token_under_continuation_refuses(
+        self, tmp_path, cont
+    ):
+        """UNDER-BLOCK GUARD: the privileged-flag bind survives a benign
+        continuation. A `gh pr close <N> --delete-branch` command must NOT be
+        authorized by a token whose context lacks that bound flag, even with a
+        benign continuation appended. op-type and PR number match here, so the
+        ONLY axis that differs is the bound flag — a continuation must not erode
+        the never-escalate flag bind.
+
+        Non-vacuity (verified by in-memory mutation, reported in the HANDOFF, not
+        encoded here): if the read side dropped the bound-flag set-equality check,
+        this command would AUTHORIZE on the flag-less token and this assert would
+        flip RED.
+        """
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        # Token for the close op WITHOUT the --delete-branch bound flag.
+        write_token({"operation_type": "close", "pr_number": "7"}, token_dir=tmp_path)
+        cmd = f"gh pr close 7 --delete-branch {cont}"
+        assert check_merge_authorization(cmd, token_dir=tmp_path) is not None
+
+
 class TestEvalHeredocRejection:
     """Pin the eval+heredoc detection that closes the strip-pipeline-bypass class.
 
