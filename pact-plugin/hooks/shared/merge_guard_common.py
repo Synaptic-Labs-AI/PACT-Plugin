@@ -82,6 +82,31 @@ leg before deriving op/target/flags.) This is the GENERAL single-destructive-op-
 benign-remainder pattern, NOT a recognition allow-list of viewers/filters — do NOT
 enumerate viewers in detection logic (an allow-list drifts and would re-block faithful
 clicks the count already mints).
+
+conservative-RECOGNITION (the design rule behind the accepted compound under-block;
+documented so a future sweep does NOT "discover" these forms and "harden" them into
+faithful-click over-blocks): recognition targets the SINGLE destructive command an honest
+agent runs (the destructive op plus the benign viewers/filters/redirects of benign-
+CONTINUATION above) and ERRS TOWARD LETTING THROUGH — over-blocking a faithful click is
+WRONG BY DEFINITION (the INVARIANT above), worse than missing a buried op. The git-push
+remote-ref-delete (`:ref` / `--delete` / `-d`) and mass-delete (`--mirror` / `--prune` /
+multi-ref) forms need a positional, quote-aware parse, so their recognition is ANCHORED to
+the FIRST executable leg (the _executable_prefix view) — it does NOT chase those ops into
+NON-FIRST compound legs. Chasing them needs a match-anywhere / per-leg scan that fires on a
+quoted `:ref` / `--mirror` mention in a benign leg — an over-block of a faithful click. The
+ACCEPTED price is that these forms run UNGATED when the `git push` is not the first leg:
+  - `cd /repo && git push origin --delete main`
+  - `git fetch && git push --mirror origin`
+  - `NOTE=x ; git push origin :main`
+These are NOT bugs — do NOT "fix" them (the fix re-blocks faithful clicks). httpie
+(`http` / `https` CLI) protection-mutation is likewise ungated: the protection MINT
+classifier covers gh-api / curl / wget only, so an httpie read-floor arm would gate a form
+the mint cannot bind — a gated-but-unmintable over-block. Ungated keeps read == mint.
+NB this first-leg anchoring is SPECIFIC to those parse-dependent forms: the LITERAL
+DANGEROUS_PATTERNS arms (force-push, branch -D, gh pr merge/close, push-to-main, the API
+ref/protection arms) match-anywhere and STILL gate in a non-first leg
+(`cd /repo && git push --force origin main` is caught). When an over-block of a faithful
+click is found, the fix WIDENS the mint, never narrows detection into a new under-block.
 =============================================================================
 
 Centralizes TOKEN_TTL, TOKEN_DIR, TOKEN_PREFIX, consumed-token cleanup,
