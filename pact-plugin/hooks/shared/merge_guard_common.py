@@ -288,6 +288,9 @@ def detect_command_operation_type(command: str) -> str | None:
                           multi-ref delete. Union-arm-only; recognized IFF a normalized
                           mass-target tuple is extractable (single-ref defers to
                           remote-ref-delete — the BOUNDARY discriminator, no double-classify)
+        "branch-protection" - API mutation WEAKENING branch protection (#1063):
+                          gh-api/curl/wget DELETE|PUT|PATCH on a branches/<b>/protection
+                          endpoint (host-agnostic; POST EXCLUDED = strengthening direction)
         None            - destructive shape not in the recognized set
                           (read-side caller treats None as "untyped command",
                           which the tightened token-match semantic treats as
@@ -340,6 +343,19 @@ def detect_command_operation_type(command: str) -> str | None:
             return "branch-delete"
         if re.search(r"\b(?:PATCH|POST|PUT)\b", command):
             return "force-push"
+    # branch-protection API mutation (#1063): DELETE|PUT|PATCH on a
+    # `branches/<b>/protection` endpoint WEAKENS protection (remove / replace /
+    # modify) — a DISTINCT op-class from branch-delete (it changes a config, not a
+    # ref). POST is EXCLUDED (it ENABLES protection sub-features = strengthening, so
+    # gating it would over-block). Path-disjoint from the git/refs arm above (a
+    # protection URL has no `git/refs`), so no shadowing. Method check is loose like
+    # the git/refs arm; the GAP1 write-gate (is_dangerous + the precise method-gated
+    # DANGEROUS_PATTERNS arms) ensures mint⊆read. `_is_api_form` is gh-api/curl/wget
+    # (NOT httpie) → read==mint for the clients the classifier recognizes (no httpie
+    # arm = no #1064 gated-but-unmintable httpie state).
+    if _is_api_form and re.search(r"branches/.*/protection", command):
+        if re.search(r"\b(?:DELETE|PUT|PATCH)\b", command):
+            return "branch-protection"
     # branch-delete: git branch -D, git branch --delete --force,
     # or git branch --force --delete (matches DANGEROUS_PATTERNS).
     if re.search(_GIT_PREFIX + r"branch\s+.*-D\b", command):
@@ -478,6 +494,17 @@ def _extract_api_ref(command: str) -> str | None:
         r"git/refs/(?:heads/)?([A-Za-z0-9][A-Za-z0-9._/-]*)", command
     )
     return api_match.group(1) if api_match else None
+
+
+def _extract_protection_branch(command: str) -> str | None:
+    """Parse the protected branch from a branch-protection API command's
+    `branches/<branch>/protection` path (#1063). The branch is PATH-resident (the
+    REST resource IS the URL), so carrier-8's body strip never removes it. The
+    non-greedy `(.+?)` correctly handles a slashed branch name (`feature/x`):
+    `branches/feature/x/protection` → `feature/x`. Returns the branch, or None when
+    the command is not a recognized protection form."""
+    m = re.search(r"branches/(.+?)/protection\b", command)
+    return _strip_surrounding_quotes(m.group(1)) if m else None
 
 
 def _extract_branch_name(command: str) -> str | None:
@@ -827,6 +854,12 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
         # go to _FLAG_SPEC (danger-condition recognition) ONLY, NOT here, so the #1042
         # set-equality bind is untouched. Empty entry = explicit extension point.
     },
+    "branch-protection": {
+        # No bound flags: branch-protection's privileged effect (weakening protection)
+        # IS its op-trigger (the DELETE|PUT|PATCH method on the protection endpoint),
+        # bound via op_type. Empty entry = explicit #1042 extension point; adds NO new
+        # bound flag, so the set-equality bind is untouched.
+    },
 }
 
 
@@ -987,11 +1020,14 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
     fail-closed signal). Possible keys:
         operation_type: "merge" | "close" | "force-push" | "branch-delete"
                         | "push-to-main" | "remote-ref-delete" | "remote-mass-delete"
+                        | "branch-protection"
         pr_number:  str  (merge / close)
         branch:     str  (branch-delete)
         target_ref: str  (force-push / push-to-main, KD-6; remote-ref-delete #1062a)
         mass_target: str (remote-mass-delete #1062b) — normalized identity tuple
                      <sorted-mass-flags>@<remote-or-implicit-marker>[#<sorted-refspecs>]
+        protected_branch: str (branch-protection #1063) — the branch from the
+                     branches/<b>/protection URL path
         bound_flags: list[str]  (#1042) — sorted normalized privileged flags;
                      ALWAYS present when operation_type is (empty list when none).
 
@@ -1059,6 +1095,13 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
         mass_target = _extract_mass_delete_target(command)
         if mass_target is not None:
             context["mass_target"] = mass_target
+    elif op_type == "branch-protection":
+        # #1063: the protected branch is PATH-resident (branches/<b>/protection).
+        # Distinct key `protected_branch`; op-identity-first in the read switch keeps
+        # it from cross-authorizing a branch-delete of the same branch name.
+        protected_branch = _extract_protection_branch(command)
+        if protected_branch is not None:
+            context["protected_branch"] = protected_branch
     return context
 
 
@@ -1319,6 +1362,20 @@ re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+DELETE\b).*git/refs", re.IGNORECASE
 # host-agnostic (#1061) — see the DELETE arm note above.
 re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PATCH|POST|PUT)\b).*git/refs", re.IGNORECASE),
 re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PATCH|POST|PUT)\b).*git/refs", re.IGNORECASE),
+# Branch-protection API mutation (#1063): DELETE|PUT|PATCH on a
+# `branches/<branch>/protection` endpoint WEAKENS protection (remove / replace /
+# modify whole config). POST is EXCLUDED — it ENABLES protection sub-features
+# (enforce_admins / required_signatures) = the STRENGTHENING direction, so gating it
+# would over-block. HOST-AGNOSTIC (the #1061 lesson — no `.*api.*`). Explicit-method
+# arms only (the protection endpoint has no implicit-POST danger like git/refs). The
+# branch is PATH-resident, so carrier-8 never strips it (no preservation guard needed,
+# unlike the body-resident contents arm). No httpie arm: the mint classifier's
+# `_is_api_form` is gh-api/curl/wget only, so adding an httpie read arm would create a
+# gated-but-unmintable httpie #1064 state — omitted by design (httpie protection is not
+# a charter form).
+re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:DELETE|PUT|PATCH)\b).*branches/.*/protection", re.IGNORECASE),
+re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:DELETE|PUT|PATCH)\b).*branches/.*/protection", re.IGNORECASE),
+re.compile(r"\bwget\b(?=.*--method=(?:DELETE|PUT|PATCH)\b).*branches/.*/protection", re.IGNORECASE),
 # gh api implicit POST: body param flags (-f, -F, --field, --raw-field, --input)
 # cause gh api to default to POST. Dangerous when targeting git/refs or merge.
 # Negative lookahead excludes explicit GET (which overrides implicit POST).

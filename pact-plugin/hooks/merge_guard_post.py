@@ -165,13 +165,14 @@ def _target_value(cmd_ctx: dict) -> str | None:
     MINT-SIDE FOUR-SITE ELEMENT (#1064): every op-class that uses a NEW context key MUST
     be enumerated here, or the mint cannot extract its target → the op gates on the read
     side but is gated-but-unmintable. remote-ref-delete reuses `target_ref` (already
-    listed); remote-mass-delete (#1062b) uses the distinct `mass_target` (added here so a
-    mass-delete MINTS a token, not just gates on read)."""
+    listed); remote-mass-delete (#1062b) uses the distinct `mass_target`; branch-protection
+    (#1063) uses `protected_branch` — both added here so those ops MINT, not just gate."""
     return (
         cmd_ctx.get("pr_number")
         or cmd_ctx.get("branch")
         or cmd_ctx.get("target_ref")
         or cmd_ctx.get("mass_target")
+        or cmd_ctx.get("protected_branch")
     )
 
 

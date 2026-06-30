@@ -572,6 +572,12 @@ def _token_matches_command(token: dict, command: str) -> bool:
         # authorize `git push --mirror origin` (--mirror@origin) — the lesser→greater
         # / cross-form closure. An unextractable tuple is ABSENT → REFUSE.
         return _both_present_equal(context.get("mass_target"), cmd.get("mass_target"))
+    if token_op == "branch-protection":
+        # #1063: bind on the protected branch (PATH-resident, branches/<b>/protection).
+        # op-type identity above keeps a branch-protection token from authorizing a
+        # branch-delete of the same branch name (distinct op-classes). An unextractable
+        # branch is ABSENT → REFUSE.
+        return _both_present_equal(context.get("protected_branch"), cmd.get("protected_branch"))
 
     # Unknown op-class (a typed token whose op is not one of the handled classes)
     # — REFUSE. No terminal allow exists on the read path.
