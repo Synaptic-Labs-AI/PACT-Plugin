@@ -9,10 +9,12 @@ This hook is part of the merge guard system. It checks for a valid token
 written by the companion hook (merge_guard_post.py) before allowing dangerous
 operations. Detected operations include:
 - CLI: git/gh merge, close with --delete-branch, force push, branch delete,
-  push to main/master
-- API: gh api, curl, wget, and httpie calls targeting merge, git/refs, or
-  contents endpoints with mutating HTTP methods (including implicit POST via
-  body parameter flags or data flags)
+  push to main/master, remote ref delete / mass delete (push :ref, --delete,
+  --mirror, --prune)
+- API: gh api, curl, and wget calls targeting merge, git/refs, contents, or
+  branch-protection endpoints with mutating HTTP methods (including implicit
+  POST via body parameter flags or data flags; protection mutations gate on
+  the weakening methods DELETE|PUT|PATCH — POST is excluded as strengthening)
 
 If no valid token exists, the command is blocked with a message directing the
 user to confirm via AskUserQuestion first.
@@ -71,6 +73,7 @@ try:
         cleanup_orphan_tokens as _cleanup_orphan_tokens,
         extract_command_context,
         _single_destructive_leg,
+        _single_detectable_leg,
         # Regex prefix constants relocated to shared so the read-side
         # DANGEROUS_PATTERNS bank and the shared classifier compose against
         # identical prefix semantics (#720 Bug B).
@@ -87,7 +90,8 @@ try:
         # are re-exported here for the existing test imports.
         _GH_PR_NUMBER_RE,
         _extract_pr_number,
-        # Bound for the inline httpie global-flag walks below (#1001).
+        # Bound for the shared-module flag walks (push read arms + mint
+        # push-to-main arm) (#1001).
         _MAX_GLOBAL_FLAG_TOKENS,
     )
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
@@ -112,7 +116,8 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
 # Note: _GH_GLOBAL_FLAGS, _GH_FLAG_TOKENS, _GIT_GLOBAL_FLAGS, _GH_PREFIX,
 # _GIT_PREFIX, _GH_API_PREFIX, _GH_PR_MERGE_RE, _GH_PR_CLOSE_RE are imported
 # from shared.merge_guard_common above (#720 Bug B relocation).
-# _MAX_GLOBAL_FLAG_TOKENS is also imported (bounds the inline httpie walks, #1001).
+# _MAX_GLOBAL_FLAG_TOKENS is also imported (bounds the shared-module flag walks:
+# push read arms + mint push-to-main arm, #1001).
 
 # Pre-serialized JSON for allow-path output: tells Claude Code UI to suppress
 # the hook display instead of showing "hook error (No output)".
@@ -516,13 +521,23 @@ def _token_matches_command(token: dict, command: str) -> bool:
     # over-block the faithful click, AND (b) let _extract_pr_number's first-match-
     # anywhere scan cross-contaminate the target (the latent under-block: a token
     # for `gh pr close N1` authorizing `gh pr close N1\ngh pr merge N2`). Isolating
-    # the one is_dangerous leg closes BOTH. _single_destructive_leg returns None on
-    # not-exactly-one dangerous leg (0, or — unreachably here, since is_compound
-    # REFUSES >=2 upstream — many), so we fall back to the WHOLE command: the
-    # existing over-binding scan, the SAFE over-block direction, NEVER a silent
-    # narrowing. Op/target are still derived the SAME way the mint side does (mint
+    # the one is_dangerous leg closes BOTH. TWO-TIER fallback (#1083):
+    # _single_destructive_leg returns None on not-exactly-one dangerous leg (0,
+    # or — unreachably here, since is_compound REFUSES >=2 upstream — many);
+    # tier 2 (_single_detectable_leg) then handles the EMERGENT-danger case —
+    # whole-command danger from a cross-leg lookahead with NO individually-
+    # dangerous leg (the close arms) — by binding from the unique detect-positive
+    # leg, keeping the read bind symmetric with the mint's leg-bounded window.
+    # Only when BOTH tiers abstain (0 or >=2 candidate legs — ambiguity) do we
+    # fall back to the WHOLE command: the existing over-binding scan, the SAFE
+    # over-block direction; ambiguity can only collapse WIDER, never narrower.
+    # Op/target are still derived the SAME way the mint side does (mint
     # isolates per-region via locate_command_regions), so the two arms cannot drift.
-    cmd = extract_command_context(_single_destructive_leg(command) or command)
+    cmd = extract_command_context(
+        _single_destructive_leg(command)
+        or _single_detectable_leg(command)
+        or command
+    )
     cmd_op = cmd.get("operation_type")
 
     # (a) Operation-type axis — both present AND equal, else REFUSE. A token with

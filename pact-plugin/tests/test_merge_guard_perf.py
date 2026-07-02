@@ -14,22 +14,20 @@ O(N) × N anchors = **O(N^2)**.
 
 The fix bounds the walk to ``(?:\\S+\\s+){0,32}`` (``_MAX_GLOBAL_FLAG_TOKENS``),
 so each anchor consumes at most 32 tokens => O(32)=O(1) per anchor => the whole
-scan is **linear**. The same unbounded shape lived in two inline httpie copies
-in ``merge_guard_pre.py`` and was bounded identically; those are pinned here too.
+scan is **linear**.
 
 Functions pinned
 ----------------
 Both detection paths embed the prefix constants and were INDEPENDENTLY quadratic
 (PREPARE probe E):
 
-* ``is_dangerous_command``            — the read-side ``DANGEROUS_PATTERNS`` bank
-  (also carries the inline httpie patterns);
+* ``is_dangerous_command``            — the read-side ``DANGEROUS_PATTERNS`` bank;
 * ``detect_command_operation_type``   — the shared classifier, called by BOTH
   the pre- and post-hooks.
 
 Witness
 -------
-``"git x " * N`` (and ``"http x " * N`` for the httpie copies): many anchors,
+``"git x " * N``: many anchors,
 **no shell separators** — the pure pathological shape that maximises the
 multi-anchor retry cost. Each ``x`` is a non-verb token, so the scan runs every
 prefix pattern to completion (no early dangerous-match short-circuit).
@@ -40,8 +38,8 @@ Two mutually reinforcing assertions per case:
 
 * **Absolute wall-clock ceiling** (PRIMARY discriminator). Bounded/linear is
   ~0.06–0.18 s at N=4000 here; a 4–5x-slower CI box stays well under the
-  ceiling. The unbounded/quadratic form is ~1.9 s (httpie) to ~6 s (git) at
-  N=4000. The ceiling sits an order of magnitude clear of linear and below
+  ceiling. The unbounded/quadratic form is ~1.8 s (gh detect) to ~7.3 s (gh
+  read) at N=4000. The ceiling sits an order of magnitude clear of linear and below
   quadratic, so it cannot flap on a slow machine yet still trips on a
   regression.
 * **Scaling ratio** ``t(2N)/t(N) < 3.0`` across one doubling. Linear ≈ 2.0,
@@ -50,11 +48,11 @@ Two mutually reinforcing assertions per case:
 
 Counter-test-by-revert (non-vacuity)
 ------------------------------------
-Restore the unbounded ``*`` form (shared constants for the git/detect cases; the
-inline httpie literals for the httpie case) and re-run: the ratio returns to
-~4x AND the N=4000 wall-clock blows past the ceiling => the targeted case goes
-RED. Expected cardinality: reverting the shared constants reds the two git/detect
-cases; reverting the httpie inline literals reds the httpie case.
+Restore the unbounded ``*`` form (the shared prefix constants) and re-run: the
+ratio returns to ~4x AND the N=4000 wall-clock blows past the ceiling => the
+targeted case goes RED. Expected cardinality: reverting the shared constants
+(``_GIT_GLOBAL_FLAGS`` / ``_GH_GLOBAL_FLAGS``) reds the corresponding git / gh
+cases.
 """
 
 import sys
@@ -77,19 +75,16 @@ N_LARGE = 4000
 # best-of-K minimum: the dominant timing noise is upward (scheduler preemption,
 # GC), and a minimum is a clean lower bound on the true cost that a slow sample
 # cannot inflate. K=5 gives five chances at a clean large-N measurement, which
-# is what keeps the small-absolute-time httpie ratio from flaking.
+# is what keeps the small-absolute-time ratios (gh detect, push-flag walk) from
+# flaking.
 _K = 5
 
 # Linear ~2.0x per doubling; quadratic ~4.0x. 3.0 is the midpoint.
 RATIO_CEILING = 3.0
 
 # Per-case absolute ceilings. The git/detect bank's quadratic is ~6 s at N=4000,
-# so 2.0 s is generous yet trips hard on regression. The httpie copies' quadratic
-# is only ~1.9 s at N=4000 (two patterns, not ~21), so it gets a tighter 1.0 s
-# ceiling — still ~15x the bounded ~0.06 s, comfortably above any slow-CI linear
-# run and below the ~1.9 s quadratic.
+# so 2.0 s is generous yet trips hard on regression.
 _CEIL_GIT = 2.0
-_CEIL_HTTPIE = 1.0
 
 
 def _best_time(fn, arg, k=_K):
@@ -108,8 +103,8 @@ def _best_time(fn, arg, k=_K):
 # perf witness). Measured quadratic counter-factual (revert `_GH_GLOBAL_FLAGS`
 # `{0,K}`->`*`): is_dangerous ~7.3 s at N=4000 (2.0 s ceiling fine), but
 # detect_command_operation_type only ~1.8 s (two gh-prefix classifier patterns,
-# not the ~21-pattern read bank) — so detect/gh gets a TIGHTER 1.0 s ceiling, the
-# same per-surface calibration as httpie. Bounded: ~0.08 s / ~0.02 s.
+# not the ~21-pattern read bank) — so detect/gh gets a TIGHTER 1.0 s ceiling
+# (per-surface ceiling calibration). Bounded: ~0.08 s / ~0.02 s.
 _CEIL_GH_READ = 2.0
 _CEIL_GH_DETECT = 1.0
 
@@ -137,7 +132,6 @@ def _measure_scaling(fn, build):
 _CASES = [
     ("is_dangerous_command/git", is_dangerous_command, lambda n: "git x " * n, _CEIL_GIT),
     ("detect_command_operation_type/git", detect_command_operation_type, lambda n: "git x " * n, _CEIL_GIT),
-    ("is_dangerous_command/httpie", is_dangerous_command, lambda n: "http x " * n, _CEIL_HTTPIE),
     # --- remediation additions (PR #1003) ---
     ("is_dangerous_command/gh", is_dangerous_command, lambda n: "gh x " * n, _CEIL_GH_READ),
     ("detect_command_operation_type/gh", detect_command_operation_type, lambda n: "gh x " * n, _CEIL_GH_DETECT),
@@ -153,10 +147,10 @@ _CASES = [
 )
 def test_global_flag_prefix_scaling_is_subquadratic(fn, build, abs_ceiling):
     """The bounded global-flag prefixes / push-flag walk must scale
-    sub-quadratically on the worst-case witness through both detection paths, the
-    inline httpie copies, the gh prefix (review m-3), and the push-flag walk
+    sub-quadratically on the worst-case witness through both detection paths,
+    the gh prefix (review m-3), and the push-flag walk
     (structural-linearity pin, §12.2). Restoring an unbounded `*` form on a
-    MULTI-anchor witness (git/gh/httpie) makes the ratio ~4x and the N=4000
+    MULTI-anchor witness (git/gh) makes the ratio ~4x and the N=4000
     wall-clock exceed the ceiling => RED. The push-flag-walk witness is
     single-anchor (already linear, defense-in-depth) so it stays GREEN under
     revert — its non-vacuity lives in TestFlagTokenBoundary's >K-residual flip."""

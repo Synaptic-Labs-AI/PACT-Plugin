@@ -26,10 +26,11 @@ Layering (which guard each test exercises):
     of (op,target) identity, so it cannot inflate the distinct-pair count and trip
     the SACROSANCT divergence-refusal.
 
-The A1 full-text MINT symmetry (the mint must scan the FULL selected-option
-surface, not the quote-truncated bare-command region) is proven through the REAL
-mint seam in test_merge_guard_auth_symmetry.py — a hand-built token would bypass
-the mint widening and be vacuous for that claim.
+The A1 MINT symmetry (the mint must scan a surface WIDER than the
+quote-truncated bare-command region — the command's own leg within the
+selected-option text, so a flag after a quoted argument still binds) is proven
+through the REAL mint seam in test_merge_guard_auth_symmetry.py — a hand-built
+token would bypass the mint widening and be vacuous for that claim.
 
 Non-vacuity (counter-test-by-revert; measured cardinality in the TEST HANDOFF):
   * The read-arm REFUSE matrix is coupled to the C2 set-equality gate in
@@ -118,6 +119,18 @@ class TestReadArmBypassRefuses:
         ("close_repo_redirect",
          {"operation_type": "close", "pr_number": "5", "bound_flags": []},
          "gh -R victim/repo pr close 5"),
+        # --force-with-lease added past a PLAIN push-to-main approval (#1064 fold:
+        # plain and lease pushes share the push-to-main op-class; this presence
+        # bind is what separates their token identities — the lease push CAN
+        # rewrite history, so a plain approval must never authorize it).
+        ("lease_add_past_plain_push",
+         {"operation_type": "push-to-main", "target_ref": "main", "bound_flags": []},
+         "git push --force-with-lease origin main"),
+        # =-joined spelling binds the SAME canonical bare token (boolean bind) —
+        # still a set mismatch against the plain approval.
+        ("lease_value_add_past_plain_push",
+         {"operation_type": "push-to-main", "target_ref": "main", "bound_flags": []},
+         "git push --force-with-lease=main:abc123 origin main"),
     ]
 
     @pytest.mark.parametrize(
@@ -201,6 +214,15 @@ class TestReadArmDroppedConstraintRefuses:
         assert _refuses(
             {"operation_type": "merge", "pr_number": "5", "bound_flags": ["--repo=owner/repo"]},
             "gh pr merge 5",
+        )
+
+    def test_approved_lease_executed_plain_refuses(self):
+        """Approve a LEASE push to main, execute a PLAIN push → REFUSE — the
+        dropped-flag direction of the plain↔lease token separation (#1064)."""
+        assert _refuses(
+            {"operation_type": "push-to-main", "target_ref": "main",
+             "bound_flags": ["--force-with-lease"]},
+            "git push origin main",
         )
 
 
@@ -336,6 +358,15 @@ class TestReadArmExactMatchAuthorizes:
             "gh --repo owner/repo pr merge 5 --admin",
         )
 
+    def test_lease_exact_match_authorizes(self):
+        """Approve and execute the SAME lease push → AUTHORIZE — the presence bind
+        must not over-block the faithful lease click the #1064 fix un-blocks."""
+        assert _authorizes(
+            {"operation_type": "push-to-main", "target_ref": "main",
+             "bound_flags": ["--force-with-lease"]},
+            "git push --force-with-lease origin main",
+        )
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # SCANNER — extract_privileged_flags: CLI-form canonicalization output pins
@@ -379,6 +410,13 @@ class TestScannerCanonicalForms:
         ("gh pr close 5 --delete-branch", "close", ["--delete-branch"]),
         # force-push: --no-verify (exact)
         ("git push --no-verify origin main --force", "force-push", ["--no-verify"]),
+        # push-to-main: --force-with-lease presence bind (#1064). BOOLEAN — the
+        # =-joined <ref>:<expect> value is dropped, so every lease spelling binds
+        # ONE canonical bare token (intra-lease value variation is an accepted
+        # residual; see TestLeaseNegationResidualTripwire).
+        ("git push --force-with-lease origin main", "push-to-main", ["--force-with-lease"]),
+        ("git push --force-with-lease=main:abc123 origin main", "push-to-main", ["--force-with-lease"]),
+        ("git push origin main", "push-to-main", []),
     ]
 
     @pytest.mark.parametrize(
@@ -427,6 +465,44 @@ class TestGitGhAbbreviationAsymmetry:
         assert extract_privileged_flags(
             "git push --no-verif origin main", "force-push"
         ) == ["--no-verify"]
+
+    def test_push_to_main_git_surface_expands_lease_abbreviation(self):
+        """push-to-main joined the git-surface set with the lease bind (#1064) as
+        DEFENSE-IN-DEPTH: given op_type=push-to-main, git's abbreviation rule says
+        a truncated `--force-with-leas` must bind the canonical token, and this
+        pins that the expansion does so. The case is NOT live-reachable today:
+        any abbreviation still containing `--force` classifies FORCE-PUSH first
+        (the force arms' lookahead excludes only the exact `-with-lease` suffix),
+        and the shorter prefixes that do classify push-to-main (`--forc`, `--fo`)
+        are git-ambiguous — git rejects the command, so no live lease push runs
+        unbound. The expansion keeps the bind correct if either neighbor shifts."""
+        from shared.merge_guard_common import extract_privileged_flags
+
+        assert extract_privileged_flags(
+            "git push --force-with-leas origin main", "push-to-main"
+        ) == ["--force-with-lease"]
+
+
+class TestLeaseNegationResidualTripwire:
+    """Documented-behavior pin for an ACCEPTED residual (#1064 design): a boolean
+    bind treats an explicit `=false|0|no` as flag-DISABLED (the safe form, shared
+    with --admin=false), so `--force-with-lease=false` binds NOTHING — yet git
+    reads `false` as a REFNAME, making the command a live lease push that a
+    plain-push token would authorize. Accepted because the negation values are
+    implausible branch names in honest use, the executed command is still
+    lease-protected (never plain-force), the guard's charter is honest mistakes
+    (not adversarial value-crafting), and the same corner exists by design for
+    EVERY boolean privileged flag. Do NOT "fix" this by marking the flag
+    value-taking — that would consume the next positional on the bare spelling
+    and import mint-side adjacency-sensitivity (an over-block risk, the cardinal
+    sin); if this pin flips, re-read the residual's disposition first."""
+
+    def test_negated_lease_value_binds_nothing(self):
+        from shared.merge_guard_common import extract_privileged_flags
+
+        assert extract_privileged_flags(
+            "git push --force-with-lease=false origin main", "push-to-main"
+        ) == []
 
 
 class TestEndOfOptionsMarkerOverBlock:
