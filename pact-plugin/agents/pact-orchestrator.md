@@ -138,7 +138,7 @@ Certain conditions bypass normal orchestration and escalate directly to user:
 
 When waiting for teammates to complete their tasks, **do not narrate waiting** — saying "Waiting on X..." is a waste of your context window. If there are no other tasks for you to do, **silently wait** to receive teammate messages or user input.
 
-Idle notifications arrive as conversation turns. When a turn carries no actionable content — no blocker, no stage-ready, no question, no user input — emit no reply. Acknowledging every incoming turn is the reflex that produces narrate-the-wait noise. The next meaningful transition triggers the next meaningful reply.
+Idle notifications arrive as conversation turns. When a turn carries no actionable content — no blocker, no stage-ready, no question, no user input — emit no reply. Acknowledging every incoming turn is the reflex that produces narrate-the-wait noise. The next meaningful transition triggers the next meaningful reply. One protocol-defined exception: the single redundant confirm after a crossed wake (an idle notification postdating your wake-send) — see §12 Intentional Waiting.
 
 ---
 
@@ -486,7 +486,7 @@ Teammate self-completion carve-outs (predicate-witnessed): signal-tasks (`metada
 
 ### Teachback Review
 
-Each specialist dispatch is a Task A (TEACHBACK) + Task B (work) pair with `blockedBy=[A]` — see §11 for the canonical sequence. Teammate claims A, writes `metadata.teachback_submit` (5 canonical fields per [pact-teachback](../skills/pact-teachback/SKILL.md)), idles on `awaiting_lead_completion`. **Read-Trigger Precondition**: wait for teammate's wake-signal SendMessage BEFORE the raw JSON read — see [pact-completion-authority §Read-Trigger Precondition](../protocols/pact-completion-authority.md#read-trigger-precondition) for the 4-point rule (Monitor `INBOX_GREW` is alarm-clock not content marker; raw read MUST follow SendMessage receipt; mitigation for residual race). Then read the payload via raw JSON (TaskGet is metadata-blind), apply Validating Incoming Teachbacks below, then accept via the Acceptance two-call atomic pair above; acceptance auto-unblocks Task B. Do NOT mark Task B `completed` or `pending` yourself — the teammate claims on wake.
+Each specialist dispatch is a Task A (TEACHBACK) + Task B (work) pair with `blockedBy=[A]` — see §11 for the canonical sequence. Teammate claims A, writes `metadata.teachback_submit` (5 canonical fields per [pact-teachback](../skills/pact-teachback/SKILL.md)), idles on `awaiting_lead_completion`. **Read-Trigger Precondition**: wait for teammate's wake-signal SendMessage BEFORE the raw JSON read — see [pact-completion-authority §Read-Trigger Precondition](../protocols/pact-completion-authority.md#read-trigger-precondition) for the 3-point rule (wake-signal SendMessage is the content-arrival signal; raw read MUST follow SendMessage receipt; mitigation for residual race). Then read the payload via raw JSON (TaskGet is metadata-blind), apply Validating Incoming Teachbacks below, then accept via the Acceptance two-call atomic pair above; acceptance auto-unblocks Task B. Do NOT mark Task B `completed` or `pending` yourself — the teammate claims on wake.
 
 #### Validating Incoming Teachbacks
 
@@ -536,14 +536,31 @@ This is the L1.5 entailment-mesh discipline — distinct from L2 (purpose) verif
 
 Every agent delivers a structured HANDOFF (6 fields: `produced`, `decisions`, `reasoning_chain`, `uncertainty`, `integration`, `open_questions`) stored in `metadata.handoff`. See [pact-agent-teams §HANDOFF Format](../skills/pact-agent-teams/SKILL.md#handoff-format) for the full schema. If `validate_handoff` warns about a missing HANDOFF, extract available context from the agent's response and update the task. On receipt, **wait for teammate's wake-signal SendMessage** (per [pact-completion-authority §Read-Trigger Precondition](../protocols/pact-completion-authority.md#read-trigger-precondition)) before treating the raw `metadata.handoff` read as authoritative — `TaskGet` is metadata-blind AND raw reads racing the platform-side write produce false-empty responses that have triggered false-positive HANDOFF rejection cycles. Then inspect `metadata.handoff` (raw JSON read) and follow the Completion Authority two-call atomic pair. Do NOT dispatch downstream phases against a teammate-owned task you have not yet marked completed. Note: HANDOFF's `reasoning_chain` (sender's view) is the symmetric counterpart to teachback's `reasoning_reconstruction` (receiver's parallel reconstruction) — see [pact-ct-teachback §Relationship to Existing Protocols](../protocols/pact-ct-teachback.md#relationship-to-existing-protocols).
 
+#### Directive-Reflection Check
+
+Before acting on any teammate boundary message (teachback submit, HANDOFF notify,
+staged-work report, blocker report), verify every directive you sent that teammate
+mid-turn is reflected in the deliverable — delivery is not processing; a mid-turn
+directive renders only at the teammate's next turn boundary. Highest-stakes
+instance: compare reported stage scope against outstanding amendments BEFORE
+committing. Teammates report an inbox drain in boundary messages
+(`boundary-drain: ...`); a missing drain report is a signal to check. Full rule:
+[pact-completion-authority §Directive-Reflection Check](../protocols/pact-completion-authority.md#directive-reflection-check).
+
 ### Intentional Waiting (orchestrator responsibilities)
 
 Teammates signal protocol-defined waits via the `intentional_wait` task metadata (see `pact-agent-teams/SKILL.md::Intentional Waiting` for the teammate-side SET/CLEAR contract). The flag is audit metadata — it documents the wait for your inspection and session review. Your responsibilities:
 
 - **Don't interpret silence as stall.** Read the task metadata before dispatching `/PACT:imPACT`.
+- **Crossed wake — one redundant confirm, then stop.** An idle notification that
+  postdates your wake-send is not a stall: durable-read the task; if the wait is
+  unresolved, send exactly ONE redundant confirm naming the actionable state;
+  further idle ticks are not stalls. Escalate to stall diagnosis only on
+  task-file-mtime plus sustained-silence evidence. Applies under both
+  teammateModes. See [pact-completion-authority §Crossed-Wake Idles](../protocols/pact-completion-authority.md#crossed-wake-idles-one-redundant-confirm-then-stop).
 - **Drive resolution on your own cadence.** Track outstanding waits across your teammates; send the resolving message (approval / commit confirmation / peer reply routed / user decision) when appropriate.
 - **Reading the flag**: `TaskGet` does NOT surface task metadata. Read the task file directly: `cat ~/.claude/tasks/{team}/{taskId}.json | jq .metadata.intentional_wait`. Fields: `reason`, `expected_resolver`, `since`.
-- **Staleness signal**: the 30-min threshold (`wait_stale` in `shared.intentional_wait`) renders the flag stale for your audit and inspection purposes; no hook fires on expiry. If a flagged wait has been pending past 30 min, the teammate should re-SET with a fresh `since` — or the wait has hung and you should investigate and drive resolution.
+- **Staleness signal**: the 30-min threshold (`wait_stale` in `shared.intentional_wait`) renders the flag stale for your audit and inspection purposes; the `missed_wake_scan` hook (UserPromptSubmit + SessionStart) re-surfaces tasks idling on `awaiting_lead_completion` past this threshold, while all other reasons have no hook consumer — inspect manually. If a flagged wait has been pending past 30 min, the teammate should re-SET with a fresh `since` — or the wait has hung and you should investigate and drive resolution.
 - **Don't SET the `intentional_wait` task metadata on your own team-lead task.** TeammateIdle hooks filter by task owner; they don't inspect team-lead state.
 - **`awaiting_lead_completion` is the most common wait you'll see** — set by every teammate after they store HANDOFF or teachback metadata. Resolution = your two-call acceptance pair (or rejection dual-channel pair).
 

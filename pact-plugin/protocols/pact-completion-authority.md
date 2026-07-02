@@ -47,6 +47,47 @@ cat ~/.claude/tasks/{team_name}/{taskId}.json | jq .metadata.handoff
 
 Inspect the HANDOFF before flipping status. If `metadata.handoff` is missing or empty, do NOT mark the task completed — request the teammate write the HANDOFF first.
 
+### Crossed-Wake Idles: One Redundant Confirm, Then Stop
+
+Your wake-signal SendMessage races the teammate's turn-end idle notification: inbox
+files are written asynchronously on delivery, so a teammate's idle notification can
+reach you AFTER your wake-send while the teammate has not yet seen the wake. This
+happens at every wait-resolution seam — teachback acceptance, HANDOFF acceptance,
+commit confirmation, rejection — and identically under in-process and tmux
+teammateMode: the race is delivery-ordering, not mode-specific. The idle
+notification alone cannot distinguish "idle because my wake has not landed yet"
+from "idle because the teammate stalled".
+
+1. **On an idle notification that postdates your wake-send**, take a durable read
+   of the teammate's task (raw JSON — `TaskGet` is metadata-blind). If the read
+   shows the wait resolved AND acted on (e.g., the follow-on task claimed), do
+   nothing: the wake landed.
+2. **If the durable read shows the wait unresolved**, send exactly ONE redundant
+   confirm naming the actionable durable state (e.g., "your teachback on Task A was
+   accepted and A is completed on disk; Task B is claimable now"). Name the state,
+   not "checking in" — the confirm must let the teammate act from it alone, because
+   it may render before your original wake.
+3. **Further idle ticks are NOT stalls.** After the one redundant confirm, send no
+   further confirms and do not read subsequent idle notifications as stall
+   evidence. Escalate to stall diagnosis (see [pact-agent-stall.md](pact-agent-stall.md))
+   only on task-file-mtime plus sustained-silence evidence: the task file unchanged
+   AND no inbound SendMessage from the teammate across multiple idle cycles well
+   past your wake-send.
+
+**Non-goal — no hook-based detection.** Do not attempt to close this race with a
+synchronous hook, and reject future proposals to reintroduce one: `SendMessage`
+fires no PreToolUse/PostToolUse event; inbox files are written asynchronously on
+delivery; TeammateIdle notifications fire at turn-end regardless of what has just
+landed in the recipient's inbox. Synchronous wake/send detection is therefore
+dead-by-construction and historically produced near-100% false positives. The
+mitigation layer is: redundant-by-design wake handling on both sides (this rule
+plus the teammate-side disk-first re-read in
+[pact-agent-teams §On Wake](../skills/pact-agent-teams/SKILL.md#on-wake-disk-first-re-read-seam-agnostic))
+plus the duration-keyed `missed_wake_scan` hook that re-surfaces stale
+`awaiting_lead_completion` waits at your next user prompt or session start. The
+two-call atomic pairs above are unchanged by this rule — SendMessage-first ordering
+stays load-bearing.
+
 ---
 
 ## Teachback Review
@@ -114,6 +155,37 @@ The status flip is the load-bearing approval action; the SendMessage is the load
 ### Validating Incoming Teachbacks
 
 When an agent sends a TEACHBACK, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase. Once decided, follow the [Acceptance or Rejection two-call atomic pair](#completion-authority).
+
+### Directive-Reflection Check
+
+Before acting on ANY teammate protocol-boundary message — a teachback submit, a
+HANDOFF notify, a staged-work report you are about to commit, a blocker report —
+verify that every directive you sent that teammate MID-TURN (scope amendments,
+corrections, re-instructions) is actually reflected in the deliverable the boundary
+message describes. Delivery is not processing: a directive delivered while the
+teammate was mid-turn does not render in their context until a later turn boundary,
+so their boundary message can faithfully describe a deliverable that silently
+predates your directive.
+
+- Track outstanding mid-turn directives per teammate (a task-metadata note
+  suffices); at each boundary message, tick them off against the reported scope.
+  This extends [Validating Incoming Teachbacks](#validating-incoming-teachbacks):
+  that check compares the teachback against the task AS DISPATCHED; this check
+  compares the deliverable against directives sent AFTER dispatch.
+- The staged-work-to-commit boundary is the highest-stakes instance: compare the
+  reported stage scope (`git diff --cached --stat`) against every outstanding
+  amendment BEFORE committing. A mismatch means hold the commit and re-instruct.
+- Teammate-side complement: teammates drain their inbox before composing boundary
+  messages and state the drain in the message (see
+  [pact-agent-teams §Boundary-Drain Rule](../skills/pact-agent-teams/SKILL.md#boundary-drain-rule)).
+  A `boundary-drain: inbox empty` report shifts the residual risk to messages still
+  in flight at drain time — your reflection check is the backstop either way, and a
+  boundary message with NO drain report is itself a signal to check more carefully.
+
+A deliverable that reflects pre-directive scope because your directive crossed it
+in flight is a no-fault ordering artifact: reject with corrections naming the
+current scope (per [Rejection Flow](#rejection-flow)) — do not treat it as the
+teammate misunderstanding the original dispatch.
 
 ---
 
