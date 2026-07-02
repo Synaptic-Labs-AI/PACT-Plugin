@@ -139,8 +139,9 @@ Drain mechanics — all four points are load-bearing:
   platform owns delivery.
 - **Use the Read tool**, not a piped Bash command — Bash permission patterns on
   `~/.claude/` paths are fragile (see §Bash Commands in ~/.claude/ Paths). The file
-  is a JSON list of pending messages (`from`, `text`, `summary`, `timestamp`); an
-  empty list means nothing is awaiting delivery to you.
+  is a JSON list of pending messages; each message carries `from`, `text`,
+  `timestamp`, and `type` (act on `from` + `text`; other fields vary by platform
+  version). An empty list means nothing is awaiting delivery to you.
 - **Best-effort, fail-safe.** The inbox write is asynchronous: an empty read is NOT
   a guarantee nothing is in flight, and a read error or missing file means "report
   the drain as unavailable and proceed", never "block". The drain narrows the miss
@@ -192,7 +193,7 @@ If ANY precondition is unmet, KEEP WORKING. Do not write `metadata.handoff` to "
 2. **Notify the team-lead**:
    ```
    SendMessage(to="team-lead",
-     message="[{sender}→team-lead] Task complete. [1-2 sentences: what was done + any HIGH uncertainties]",
+     message="[{sender}→team-lead] Task complete. [1-2 sentences: what was done + any HIGH uncertainties] boundary-drain: [inbox empty | reconciled <n> directive(s) — <one-line summary>]",
      summary="Task complete: [brief]")
    ```
 
