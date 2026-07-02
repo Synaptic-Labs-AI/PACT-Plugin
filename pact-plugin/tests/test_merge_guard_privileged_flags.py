@@ -26,10 +26,11 @@ Layering (which guard each test exercises):
     of (op,target) identity, so it cannot inflate the distinct-pair count and trip
     the SACROSANCT divergence-refusal.
 
-The A1 full-text MINT symmetry (the mint must scan the FULL selected-option
-surface, not the quote-truncated bare-command region) is proven through the REAL
-mint seam in test_merge_guard_auth_symmetry.py — a hand-built token would bypass
-the mint widening and be vacuous for that claim.
+The A1 MINT symmetry (the mint must scan a surface WIDER than the
+quote-truncated bare-command region — the command's own leg within the
+selected-option text, so a flag after a quoted argument still binds) is proven
+through the REAL mint seam in test_merge_guard_auth_symmetry.py — a hand-built
+token would bypass the mint widening and be vacuous for that claim.
 
 Non-vacuity (counter-test-by-revert; measured cardinality in the TEST HANDOFF):
   * The read-arm REFUSE matrix is coupled to the C2 set-equality gate in

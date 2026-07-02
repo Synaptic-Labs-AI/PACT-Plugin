@@ -71,6 +71,7 @@ try:
         cleanup_orphan_tokens as _cleanup_orphan_tokens,
         extract_command_context,
         _single_destructive_leg,
+        _single_detectable_leg,
         # Regex prefix constants relocated to shared so the read-side
         # DANGEROUS_PATTERNS bank and the shared classifier compose against
         # identical prefix semantics (#720 Bug B).
@@ -518,13 +519,23 @@ def _token_matches_command(token: dict, command: str) -> bool:
     # over-block the faithful click, AND (b) let _extract_pr_number's first-match-
     # anywhere scan cross-contaminate the target (the latent under-block: a token
     # for `gh pr close N1` authorizing `gh pr close N1\ngh pr merge N2`). Isolating
-    # the one is_dangerous leg closes BOTH. _single_destructive_leg returns None on
-    # not-exactly-one dangerous leg (0, or — unreachably here, since is_compound
-    # REFUSES >=2 upstream — many), so we fall back to the WHOLE command: the
-    # existing over-binding scan, the SAFE over-block direction, NEVER a silent
-    # narrowing. Op/target are still derived the SAME way the mint side does (mint
+    # the one is_dangerous leg closes BOTH. TWO-TIER fallback (#1083):
+    # _single_destructive_leg returns None on not-exactly-one dangerous leg (0,
+    # or — unreachably here, since is_compound REFUSES >=2 upstream — many);
+    # tier 2 (_single_detectable_leg) then handles the EMERGENT-danger case —
+    # whole-command danger from a cross-leg lookahead with NO individually-
+    # dangerous leg (the close arms) — by binding from the unique detect-positive
+    # leg, keeping the read bind symmetric with the mint's leg-bounded window.
+    # Only when BOTH tiers abstain (0 or >=2 candidate legs — ambiguity) do we
+    # fall back to the WHOLE command: the existing over-binding scan, the SAFE
+    # over-block direction; ambiguity can only collapse WIDER, never narrower.
+    # Op/target are still derived the SAME way the mint side does (mint
     # isolates per-region via locate_command_regions), so the two arms cannot drift.
-    cmd = extract_command_context(_single_destructive_leg(command) or command)
+    cmd = extract_command_context(
+        _single_destructive_leg(command)
+        or _single_detectable_leg(command)
+        or command
+    )
     cmd_op = cmd.get("operation_type")
 
     # (a) Operation-type axis — both present AND equal, else REFUSE. A token with

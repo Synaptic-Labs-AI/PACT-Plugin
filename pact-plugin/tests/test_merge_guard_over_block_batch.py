@@ -19,11 +19,13 @@ Every assertion here is the SAFE direction: faithful single-command clicks
 mint/authorize; benign compounds run free; first-leg-destructive forms stay
 gated. No test here pins an accepted residual as contract — pinning would
 cement it: the intra-lease value-variation residual and the =false negation
-corner are documented via the lane suites' existing tripwire pins ONLY, and the
-mint-vs-read bound_flags surface asymmetry (the mint scans the full option text
-while the read side isolates the single destructive leg, so a privileged-flag
-literal in a benign continuation leg DENYs that faithful compound) is
-accepted-and-tracked as issue #1083, deliberately unpinned.
+corner are documented via the lane suites' existing tripwire pins ONLY. The
+mint-vs-read bound_flags surface asymmetry (#1083 — the mint scanned the full
+option text while the read side isolated the single destructive leg, so a
+privileged-flag literal in a benign continuation leg DENIED that faithful
+compound) was subsequently FIXED in-batch: the mint scan is leg-bounded and the
+read bind gained a two-tier fallback, with canaries in
+test_merge_guard_auth_symmetry.py::TestLegBoundedMintWindow.
 
 Sibling per-lane suites (do not duplicate):
   * test_merge_guard.py::TestLeaseToDefaultGateAndMint (Lane 1 envelope)

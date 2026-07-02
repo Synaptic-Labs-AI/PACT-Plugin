@@ -2426,11 +2426,19 @@ def _single_destructive_leg(command: str) -> str | None:
     Returns the single destructive gh/git leg when EXACTLY one leg is dangerous;
     None when 0 legs are dangerous, or — at the read call site, unreachably — when
     >=2 are (is_compound_destructive_command REFUSES that upstream, at
-    check_merge_authorization, BEFORE the read seam). The read seam treats None as
-    'abstain to the WHOLE command' (the existing over-binding whole-command scan =
-    the safe over-block direction), NEVER a silent narrowing: a fail-toward-unmasked
-    quote split or any ambiguity can only collapse to the conservative whole-command
-    context, never authorize a narrower one.
+    check_merge_authorization, BEFORE the read seam). The read seam consumes this
+    as TIER 1 of a two-tier bind-surface fallback: None here falls through to
+    `_single_detectable_leg` (tier 2 — the EMERGENT-danger case, where whole-
+    command danger comes from a cross-leg lookahead and no leg is dangerous in
+    isolation), and only then to the WHOLE command (the existing over-binding
+    scan = the safe over-block direction). The never-silently-narrow guard is
+    about AMBIGUITY and is preserved across both tiers: a fail-toward-unmasked
+    quote split, a parse failure, or a non-unique leg can only collapse WIDER
+    (to the whole-command context); narrowing happens ONLY on a positively
+    identified unique leg — dangerous here, or detect-positive in tier 2. Do
+    NOT "fix" the tier-2 fallback back to whole-command as a regression: the
+    two-tier basis is what keeps the read bind symmetric with the leg-bounded
+    mint window for emergent-danger compounds.
 
     This is the substrate the read side uses to derive (op, target, bound_flags)
     from the destructive op ALONE — so a privileged flag on a benign NEIGHBOR leg
@@ -2446,6 +2454,27 @@ def _single_destructive_leg(command: str) -> str | None:
         if is_dangerous_command(leg.strip())
     ]
     return dangerous[0] if len(dangerous) == 1 else None
+
+
+def _single_detectable_leg(command: str) -> str | None:
+    """#1083 emergent-danger bind fallback: the UNIQUE leg that
+    detect_command_operation_type classifies non-None, or None. Consulted ONLY
+    when _single_destructive_leg found no individually-dangerous leg (the
+    emergent case: whole-command danger from a cross-leg lookahead). Narrowing
+    happens ONLY on positive unique identification — 0 or >=2 detectable legs
+    fall through to the conservative whole-command context — so the abstain
+    basis of _single_destructive_leg (ambiguity can only collapse WIDER, never
+    narrower) is preserved: ambiguity still widens; only a positively unique
+    op leg narrows. Binding from that leg is shell-faithful: a flag that
+    modifies the executed op is a token of the op's OWN leg; a flag past an
+    operator boundary belongs to a different statement.
+    """
+    detectable = [
+        leg.strip()
+        for leg in _split_into_legs(command)
+        if detect_command_operation_type(leg.strip()) is not None
+    ]
+    return detectable[0] if len(detectable) == 1 else None
 
 
 def is_compound_destructive_command(command: str) -> bool:
