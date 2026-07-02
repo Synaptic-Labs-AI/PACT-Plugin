@@ -126,7 +126,7 @@ Immediately BEFORE composing any protocol-boundary message — a teachback submi
 notify, a HANDOFF notify, a blocker report, or any report that initiates a
 lead-resolved wait (e.g., a staged-work report preceding `awaiting_lead_commit`) —
 you MUST drain your inbox: read
-`~/.claude/teams/{team-name}/inboxes/{your-name}.json` and reconcile any directives
+`~/.claude/teams/{team_name}/inboxes/{your-name}.json` and reconcile any directives
 it contains into your deliverable FIRST. A directive delivered while you are
 mid-turn does not render in your context until a later turn boundary; the boundary
 message is the team-lead's basis for acting on your work, and the drain is your
@@ -266,7 +266,7 @@ Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is recommended — incl
 ## Peer Communication
 
 Use `SendMessage(to="teammate-name")` for direct coordination.
-Discover teammates via `~/.claude/teams/{team-name}/config.json` or from peer names
+Discover teammates via `~/.claude/teams/{team_name}/config.json` or from peer names
 in your task description.
 
 **Message a peer when:**
