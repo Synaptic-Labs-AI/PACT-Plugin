@@ -2349,14 +2349,12 @@ def _leg_is_destructive(leg: str) -> bool:
     return is_dangerous_command(leg) or _RM_HEAD_RE.match(leg) is not None
 
 
-def _split_into_legs(command: str) -> list[str]:
-    """Split a command into its shell-operator-separated legs (always >=1 leg).
-
-    The single SSOT for leg boundaries: both is_compound_destructive_command (the
-    >=2-destructive-leg refuse) AND _single_destructive_leg (the read-side
-    single-leg isolation) consume this, so the two can never see divergent leg
-    boundaries (the #720/#878 divergence class). A command with no shell operator
-    yields a one-element list (the whole stripped command).
+def _slice_stripped_legs(stripped: str) -> list[str]:
+    """Slice an ALREADY-STRIPPED command into its shell-operator-separated legs
+    (always >=1 leg). The mask + FD-neutralize + slice core of the leg-boundary
+    SSOT: `_split_into_legs` wraps this with normalize + strip, and callers that
+    already hold the stripped text can slice directly, so leg boundaries are
+    computed from ONE substrate without re-stripping.
 
     Operators are detected on the P2-masked + FD-neutralized view so an operator
     INSIDE a quoted arg (`--subject "a; b"`) or an FD / and-redirect (`2>&1`,
@@ -2368,8 +2366,6 @@ def _split_into_legs(command: str) -> list[str]:
     `2>&1 | rm -rf ~`). The leg slices are taken from `stripped`, never the masked
     `view` — the view exists ONLY to locate the operator offsets.
     """
-    normalized = _normalize_line_continuations(command)
-    stripped = _strip_non_executable_content(normalized)
     view = _FD_REDIRECT_RE.sub(
         lambda m: " " * len(m.group()), _mask_shell_quotes(stripped)
     )
@@ -2379,6 +2375,22 @@ def _split_into_legs(command: str) -> list[str]:
         last = m.end()
     legs.append(stripped[last:])
     return legs
+
+
+def _split_into_legs(command: str) -> list[str]:
+    """Split a command into its shell-operator-separated legs (always >=1 leg).
+
+    The single SSOT for leg boundaries: both is_compound_destructive_command (the
+    >=2-destructive-leg refuse) AND _single_destructive_leg (the read-side
+    single-leg isolation) consume this, so the two can never see divergent leg
+    boundaries (the #720/#878 divergence class). A command with no shell operator
+    yields a one-element list (the whole stripped command). Operator-detection
+    mechanics (quote masking, equal-length FD neutralization, slicing from the
+    stripped text) live in `_slice_stripped_legs`, the shared slicing core.
+    """
+    normalized = _normalize_line_continuations(command)
+    stripped = _strip_non_executable_content(normalized)
+    return _slice_stripped_legs(stripped)
 
 
 def _single_destructive_leg(command: str) -> str | None:
