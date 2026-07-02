@@ -2258,6 +2258,9 @@ predates your directive.
   A `boundary-drain: inbox empty` report shifts the residual risk to messages still
   in flight at drain time — your reflection check is the backstop either way, and a
   boundary message with NO drain report is itself a signal to check more carefully.
+  The drain report always begins with the literal marker `boundary-drain:`, so its
+  presence is mechanically checkable — scan the boundary message text for that
+  substring rather than judging from prose whether a drain was reported.
 
 A deliverable that reflects pre-directive scope because your directive crossed it
 in flight is a no-fault ordering artifact: reject with corrections naming the
