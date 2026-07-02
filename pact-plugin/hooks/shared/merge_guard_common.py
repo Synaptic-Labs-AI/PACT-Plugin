@@ -2245,8 +2245,9 @@ def _normalized_flags(tokens: list[str], surface: str) -> set[str]:
 def _flag_condition_danger_op(command: str) -> str | None:
     """P4 union arm: classify the FIRST EXECUTABLE LEG of `command` by a quote-aware
     NORMALIZED-FLAG danger CONDITION across every flag spelling, returning the
-    op-class ("close" / "branch-delete" / "force-push") iff a condition fires, else
-    None. FIRST-LEG-ANCHORED (extending the conservative-RECOGNITION posture to this
+    op-class ("close" / "branch-delete" / "force-push" / "remote-ref-delete" /
+    "remote-mass-delete") iff a condition fires, else None. FIRST-LEG-ANCHORED
+    (extending the conservative-RECOGNITION posture to this
     arm): every surface consulted here — the token list, the coarse-shape prefixes,
     and the extractor inputs — derives from `_executable_prefix(command)`, because
     deriving FLAGS from the whole command while POSITIONALS came from the first

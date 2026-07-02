@@ -9,10 +9,12 @@ This hook is part of the merge guard system. It checks for a valid token
 written by the companion hook (merge_guard_post.py) before allowing dangerous
 operations. Detected operations include:
 - CLI: git/gh merge, close with --delete-branch, force push, branch delete,
-  push to main/master
-- API: gh api, curl, and wget calls targeting merge, git/refs, or
-  contents endpoints with mutating HTTP methods (including implicit POST via
-  body parameter flags or data flags)
+  push to main/master, remote ref delete / mass delete (push :ref, --delete,
+  --mirror, --prune)
+- API: gh api, curl, and wget calls targeting merge, git/refs, contents, or
+  branch-protection endpoints with mutating HTTP methods (including implicit
+  POST via body parameter flags or data flags; protection mutations gate on
+  the weakening methods DELETE|PUT|PATCH — POST is excluded as strengthening)
 
 If no valid token exists, the command is blocked with a message directing the
 user to confirm via AskUserQuestion first.
