@@ -976,6 +976,125 @@ class TestOverBlockGoneRegression:
         assert (mgc.is_dangerous_command(cmd) == (mgc.detect_command_operation_type(cmd) is not None)) is False
 
 
+class TestCrossLegFlagLeakOverBlockGone:
+    """#1078: the flag-condition union arm derived FLAGS from the WHOLE command
+    (`_shell_tokenize(command)`) while POSITIONALS came from the first executable
+    leg — so a force/delete flag in a benign CONTINUATION leg leaked in and
+    mislabeled a benign first-leg op (`git push origin feature && rm -rf build/`
+    gated as force-push; `git push && rm -rf build/` was PERMANENTLY blocked:
+    gated with no extractable target → unmintable). The fix anchors the ENTIRE
+    arm — tokens, coarse-shape predicates, extractor inputs — to
+    `_executable_prefix`, curing the close and branch-delete sibling arms at the
+    same shared site. Mirrors TestOverBlockGoneRegression's cross-leg-gone block;
+    the counter-mutation below proves these assertions are coupled to THIS fix."""
+
+    # --- the 5 cured forms (+ separator variants of the primary) ---
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git push origin feature && rm -rf build/",   # was mislabeled force-push
+            "git push origin feature ; rm -rf build/",    # ; variant
+            "git push origin feature | rm -rf build/",    # | variant
+            "git push && rm -rf build/",                  # was PERMANENTLY blocked (no target)
+            "git push origin && rm -rf build/",           # was PERMANENTLY blocked
+            "gh pr close 42 && git branch -d temp",       # close sibling: leaked -d
+            "git branch --delete temp && git checkout --force main",  # branch-delete sibling: leaked --force
+        ],
+    )
+    def test_cross_leg_flag_leak_gone(self, cmd):
+        assert D(cmd) is False, f"OVER-BLOCK regressed: cross-leg flag leak re-appeared: {cmd!r}"
+
+    # --- non-vacuity contrast: single-first-leg flag forms still gate, correct op ---
+
+    @pytest.mark.parametrize(
+        "cmd,expected_op",
+        [
+            ("git push --force origin main", "force-push"),
+            ("git branch -Df temp", "branch-delete"),
+            ("gh pr close 5 -d", "close"),
+        ],
+    )
+    def test_single_first_leg_flag_form_still_gates_control(self, cmd, expected_op):
+        """Non-vacuity control: the same danger flags IN the first leg still gate
+        with the correct op-class, so the D=False assertions above discriminate
+        first-leg-anchoring from a blanket 'compound is always safe'."""
+        assert D(cmd) is True
+        assert OP(cmd) == expected_op
+
+    # --- parity: no gated-but-unmintable state for any cured form ---
+
+    @pytest.mark.parametrize(
+        "cmd,expected_op",
+        [
+            # union fallback abstains -> detect None; the equality holds (False==False)
+            ("git push origin feature && rm -rf build/", None),
+            ("git push && rm -rf build/", None),
+            ("git push origin && rm -rf build/", None),
+            ("git branch --delete temp && git checkout --force main", None),
+            # close sibling: detect stays "close" (see docstring), still ungated
+            ("gh pr close 42 && git branch -d temp", "close"),
+        ],
+    )
+    def test_no_gated_but_unmintable_state_for_cured_forms(self, cmd, expected_op):
+        """No cured form can be gated-but-unmintable (that state needs D=True +
+        detect=None; every row here is D=False). For the push/branch rows the
+        stronger mint==read EQUALITY also holds (both sides reach the same fixed
+        union arm and abstain). The close row differs BY DELIBERATE PRE-EXISTING
+        DESIGN: detect's literal close arm classifies ANY `gh pr close` variant
+        ('"close" - gh pr close (any variant)' per its own docstring — the close
+        class is folded for symmetric authorization), so OP stays "close" while
+        the read floor abstains — mint-wider-than-read, the SAFE direction (an
+        ungated command never consults a token). The "close" expectation below
+        DOCUMENTS that pre-existing behavior; it is NOT a contract that the close
+        row must never become None — if a future change makes bare-close detect
+        None, that is a separate design question, not a regression this test
+        should veto."""
+        assert D(cmd) is False
+        assert OP(cmd) == expected_op
+
+    # --- residual documented-behavior pins (literal arm, out-of-batch) ---
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git push origin feature && rm -f stale.txt",
+            "git push origin feature && rm --force stale.txt",
+            "git push && rm -f x.txt",   # the residual PERMANENT block
+        ],
+    )
+    def test_literal_arm_cross_leg_span_residual_still_gates(self, cmd):
+        """DOCUMENTED RESIDUAL — NOT cured by the union-arm fix and OUT OF ITS
+        SCOPE: the LITERAL force-push arms' `.*` span still crosses leg
+        boundaries, so a benign push chained with `rm -f`/`rm --force` stays
+        gated (and the no-target form stays PERMANENTLY blocked). Tracked as a
+        follow-up issue (any fix is a literal-floor edit: full parity +
+        no-new-under-block matrix required); when that fix lands these pins FLIP
+        and must be updated in the same commit."""
+        assert D(cmd) is True
+
+    # --- non-vacuity: in-memory counter-mutation, executed in both directions ---
+
+    def test_first_leg_anchoring_is_non_vacuous_under_whole_command_mutation(self, monkeypatch):
+        """Simulate the PRE-FIX whole-command feed by monkeypatching
+        `_executable_prefix` → identity (the module-global binding
+        `_flag_condition_danger_op` resolves at call time), and assert the primary
+        cured form flips BACK to dangerous — proving the D=False assertions above
+        are coupled to the first-leg anchoring, not vacuously green. Identity is a
+        faithful pre-fix simulation because the fix routes the entire arm through
+        that one feed. In-memory (monkeypatch) by design — a git-revert mutation
+        would clobber peers' uncommitted work in the shared worktree."""
+        cmd = "git push origin feature && rm -rf build/"
+        # direction 1 — fix present: benign compound runs free
+        assert mgc.is_dangerous_command(cmd) is False
+        # direction 2 — pre-fix feed restored: the cross-leg leak returns
+        monkeypatch.setattr(mgc, "_executable_prefix", lambda c: c)
+        assert mgc.is_dangerous_command(cmd) is True, (
+            "identity-prefix mutation did not restore the pre-fix over-block — "
+            "the cured-form assertions would be vacuous"
+        )
+
+
 class TestAcceptedRecognitionLimitationPins:
     """FORWARD-PROTECTION pins for the ACCEPTED conservative-recognition limitation
     (the review-cycle-1 SECURITY-HALT disposition). These forms run UNGATED BY
@@ -1052,6 +1171,26 @@ class TestAcceptedRecognitionLimitationPins:
         non-first leg, that is a real under-block and this turns red."""
         assert D(cmd) is True, f"UNDER-BLOCK: literal arm stopped gating in a non-first leg: {cmd!r}"
         assert OP(cmd) == expected_op
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "cd /repo && git branch -Df temp",   # cluster force-delete in a non-first leg
+            "cd /repo && gh pr close 5 -d",      # short -d close in a non-first leg
+        ],
+    )
+    def test_non_first_leg_cluster_flag_forms_ungated_by_design(self, cmd):
+        """ACCEPTED LIMITATION — do NOT fix. The flag-condition union arm is
+        FIRST-LEG-ANCHORED, so a clustered/short danger flag in a NON-FIRST leg
+        loses union coverage. Re-detecting these requires whole-command or per-leg
+        flag derivation — exactly the cross-leg flag leak the anchoring removed /
+        the pinned over-block reintroduction. The idiomatic spellings (`-D`,
+        `--delete-branch`) remain caught match-anywhere by the literal floor (the
+        contrast rows in this class)."""
+        assert D(cmd) is False, (
+            f"Recognition was widened to chase a non-first-leg cluster flag — this "
+            f"RE-INTRODUCES a faithful-click over-block. Do NOT 'fix' this form: {cmd!r}"
+        )
 
 
 class TestParityCanaryReconciledForWidenedForms:

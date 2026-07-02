@@ -88,16 +88,23 @@ documented so a future sweep does NOT "discover" these forms and "harden" them i
 faithful-click over-blocks): recognition targets the SINGLE destructive command an honest
 agent runs (the destructive op plus the benign viewers/filters/redirects of benign-
 CONTINUATION above) and ERRS TOWARD LETTING THROUGH — over-blocking a faithful click is
-WRONG BY DEFINITION (the INVARIANT above), worse than missing a buried op. The git-push
-remote-ref-delete (`:ref` / `--delete` / `-d`) and mass-delete (`--mirror` / `--prune` /
-multi-ref) forms need a positional, quote-aware parse, so their recognition is ANCHORED to
-the FIRST executable leg (the _executable_prefix view) — it does NOT chase those ops into
-NON-FIRST compound legs. Chasing them needs a match-anywhere / per-leg scan that fires on a
-quoted `:ref` / `--mirror` mention in a benign leg — an over-block of a faithful click. The
-ACCEPTED price is that these forms run UNGATED when the `git push` is not the first leg:
+WRONG BY DEFINITION (the INVARIANT above), worse than missing a buried op. The ENTIRE
+flag-condition union arm (_flag_condition_danger_op) needs a positional, quote-aware
+parse — the close/branch-delete/force-push flag conditions AND the git-push
+remote-ref-delete (`:ref` / `--delete` / `-d`) / mass-delete (`--mirror` / `--prune` /
+multi-ref) extractors — so its recognition is ANCHORED to the FIRST executable leg (the
+_executable_prefix view): it does NOT chase those ops into NON-FIRST compound legs, and
+it derives FLAGS from that same leg (deriving flags from the WHOLE command while
+positionals came from the first leg let a force/delete flag in a benign continuation leg
+mislabel a benign first-leg op — the cross-leg flag leak). Chasing them needs a
+match-anywhere / per-leg scan that fires on a quoted `:ref` / `--mirror` mention in a
+benign leg — an over-block of a faithful click. The ACCEPTED price is that these forms
+run UNGATED when the destructive op is not the first leg:
   - `cd /repo && git push origin --delete main`
   - `git fetch && git push --mirror origin`
   - `NOTE=x ; git push origin :main`
+  - `cd /repo && git branch -Df temp`   (cluster force-delete; idiomatic `-D` still caught match-anywhere)
+  - `cd /repo && gh pr close 5 -d`      (short `-d` close; spelled `--delete-branch` still caught match-anywhere)
 These are NOT bugs — do NOT "fix" them (the fix re-blocks faithful clicks). httpie
 (`http` / `https` CLI) is likewise WHOLLY ungated by design — ref-mutation, merge, AND
 protection-mutation — because the MINT classifier covers gh-api / curl / wget only; ANY
@@ -2190,35 +2197,46 @@ def _normalized_flags(tokens: list[str], surface: str) -> set[str]:
 
 
 def _flag_condition_danger_op(command: str) -> str | None:
-    """P4 union arm: classify `command` by a quote-aware NORMALIZED-FLAG danger
-    CONDITION across every flag spelling, returning the op-class ("close" /
-    "branch-delete" / "force-push") iff a condition fires, else None. The coarse
-    op-shape (which subcommand) is matched with the SAME shared prefixes the literal
-    floor uses; the danger test is then a boolean condition over `_normalized_flags`.
-    ADDITIVE over the literal floor (INV-AU): an unparseable command / mis-parse can
-    only FAIL to return an op here (this arm ABSTAINS; the literal floor still decides),
-    never re-open an under-block. The coarse shape
-    only SCOPES which condition runs — a false coarse-match whose condition does not
-    hold returns None (over-block-safe)."""
-    tokens = _shell_tokenize(command)
+    """P4 union arm: classify the FIRST EXECUTABLE LEG of `command` by a quote-aware
+    NORMALIZED-FLAG danger CONDITION across every flag spelling, returning the
+    op-class ("close" / "branch-delete" / "force-push") iff a condition fires, else
+    None. FIRST-LEG-ANCHORED (extending the conservative-RECOGNITION posture to this
+    arm): every surface consulted here — the token list, the coarse-shape prefixes,
+    and the extractor inputs — derives from `_executable_prefix(command)`, because
+    deriving FLAGS from the whole command while POSITIONALS came from the first
+    executable leg let a force/delete flag in a benign CONTINUATION leg mislabel a
+    benign first-leg op (the #1078 cross-leg flag leak). The coarse op-shape (which
+    subcommand) is matched with the SAME shared prefixes the literal floor uses; the
+    danger test is then a boolean condition over `_normalized_flags`. ADDITIVE over
+    the literal floor (INV-AU): an unparseable command / mis-parse can only FAIL to
+    return an op here (this arm ABSTAINS; the literal floor still decides), never
+    re-open an under-block. The coarse shape only SCOPES which condition runs — a
+    false coarse-match whose condition does not hold returns None (over-block-safe)."""
+    prefix = _executable_prefix(command)
+    if prefix is None:
+        # Unbalanced quote OR process substitution → abstain; the literal floor
+        # decides. Procsub is never an honest destructive form (the helper's own
+        # rationale) — an exotic procsub+cluster combo is an accepted under-block.
+        return None
+    tokens = _shell_tokenize(prefix)
     if tokens is None:
         return None  # unparseable → this arm abstains; the literal floor decides (honest-mistake: no metachar catch-all)
     # close --delete-branch — covers `-d`, clustered `-cd`, `--delete-branch`; the
     # literal floor matches ONLY the spelled-out `--delete-branch` (the #2 gap).
-    if _GH_PR_CLOSE_RE.search(command):
+    if _GH_PR_CLOSE_RE.search(prefix):
         if "--delete-branch" in _normalized_flags(tokens, "gh"):
             return "close"
     # git branch force-delete — covers `-D`, `-Df`, `-fD`, `--delete -f`/`--force`
     # in any order; the literal floor matches ONLY `-D\b` / `--delete --force` /
     # `--force --delete` (the #4 gap).
-    if re.search(_GIT_PREFIX + r"branch\b", command):
+    if re.search(_GIT_PREFIX + r"branch\b", prefix):
         gf = _normalized_flags(tokens, "git")
         if "-D" in gf or ("--delete" in gf and "--force" in gf):
             return "branch-delete"
     # git push --force — covers clustered short forms; `--force-with-lease` is the
     # SAFE exclusion (a non-history-rewriting push). Redundant with the literal floor
     # today (`-[a-zA-Z]*f` already catches the clusters) but kept for op-class parity.
-    if re.search(_GIT_PREFIX + r"push\b", command):
+    if re.search(_GIT_PREFIX + r"push\b", prefix):
         gf = _normalized_flags(tokens, "git")
         if "--force" in gf and "--force-with-lease" not in gf:
             return "force-push"
@@ -2230,14 +2248,17 @@ def _flag_condition_danger_op(command: str) -> str | None:
         # implicit-current / ambiguous form yields None here → not recognized → the
         # mass arm below or the literal floor decides. Tried FIRST = the single-ref-
         # extractability BOUNDARY discriminator: mass only runs when this returns None.
-        if _extract_remote_ref_delete_target(command) is not None:
+        # Both extractors are fed `prefix` for single-surface coherence: each
+        # re-derives `_executable_prefix` internally (idempotent on a prefix), so
+        # this is behavior-identical — but the arm then has exactly ONE surface.
+        if _extract_remote_ref_delete_target(prefix) is not None:
             return "remote-ref-delete"
         # remote-mass-delete (#1062b) — mass forms (--mirror/--prune/multi-ref delete),
         # recognized IFF a normalized mass-target tuple is extractable (the extractor
         # itself defers to remote-ref-delete for a single ref, so no double-classify).
         # Recognition⟺mintability by construction → #1064-impossible (implicit-remote
         # included via the definite \x00implicit marker).
-        if _extract_mass_delete_target(command) is not None:
+        if _extract_mass_delete_target(prefix) is not None:
             return "remote-mass-delete"
     return None
 
