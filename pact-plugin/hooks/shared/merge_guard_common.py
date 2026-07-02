@@ -309,6 +309,24 @@ _FORCE_PUSH_LITERAL_ARMS = (
     re.compile(_GIT_PREFIX + r"push\s+-[a-zA-Z]*f"),
 )
 
+# leg-boundary substrate (#1087): these close arms' `.*`/lookahead previously ran
+# over the WHOLE stripped command, so a `--delete-branch` token in a benign
+# continuation leg fired the arm cross-leg. That over-reach ALSO laundered: the
+# ambiguous multi-close `gh pr close 42 && gh pr close 43 && echo --delete-branch`
+# was is_dangerous=True whole-command, so it minted a close token that AUTHORIZED an
+# escalated same-target single `gh pr close 42 --delete-branch`. Semantics now: an
+# arm fires iff `gh pr close` and `--delete-branch` co-occur within ONE leg, in ANY
+# leg position — so the ambiguous compound is is_dangerous=False per-leg (the mint
+# write-gate refuses -> no token -> laundering structurally dead) while a real
+# single-leg `gh pr close 42 --delete-branch` still gates. Quoted separators are
+# handled by the substrate (a quoted `&&` is not a leg boundary). Bodies are moved
+# VERBATIM from DANGEROUS_PATTERNS — the conversion changes WHERE they match
+# (per-leg vs whole-command), never WHAT they match.
+_CLOSE_LITERAL_ARMS = (
+    re.compile(_GH_PREFIX + r"pr\s+close\b(?=.*--delete-branch)"),   # forward
+    re.compile(r"--delete-branch.*" + _GH_PREFIX + r"pr\s+close\b"),  # reversed
+)
+
 
 
 def detect_command_operation_type(command: str) -> str | None:
@@ -1425,9 +1443,11 @@ def cleanup_orphan_tokens(
 DANGEROUS_PATTERNS = [
 # PR merge via gh CLI
 re.compile(_GH_PREFIX + r"pr\s+merge\b"),
-# PR close with --delete-branch via gh CLI (bare close is reversible)
-re.compile(_GH_PREFIX + r"pr\s+close\b(?=.*--delete-branch)"),
-re.compile(r"--delete-branch.*" + _GH_PREFIX + r"pr\s+close\b"),
+# PR close with --delete-branch: the close+--delete-branch danger arms live in
+# _CLOSE_LITERAL_ARMS (defined with the classifier patterns above) — matched
+# PER-LEG by is_dangerous_command after this list misses (#1087 leg isolation),
+# NOT whole-string here (a whole-command match fired cross-leg and laundered an
+# ambiguous multi-close into an escalated-single token). Bare close is reversible.
 # Force push arms live in _FORCE_PUSH_LITERAL_ARMS (defined with the classifier
 # patterns above) — matched PER-LEG by is_dangerous_command after this list
 # misses (#1082 leg isolation), NOT whole-string here.
@@ -2343,6 +2363,14 @@ def is_dangerous_command(command: str) -> bool:
     # position (the match-anywhere purpose, per leg).
     for _leg in _slice_stripped_legs(stripped):
         if any(arm.search(_leg) for arm in _FORCE_PUSH_LITERAL_ARMS):
+            return True
+    # Literal close arms, matched PER-LEG (#1087): same leg substrate and strip
+    # provenance as the force-push loop above. An arm fires iff `gh pr close` and
+    # `--delete-branch` co-occur within ONE leg — so the ambiguous cross-leg
+    # multi-close is is_dangerous=False here, the mint write-gate refuses (no token),
+    # and the escalated-single laundering channel is structurally closed.
+    for _leg in _slice_stripped_legs(stripped):
+        if any(arm.search(_leg) for arm in _CLOSE_LITERAL_ARMS):
             return True
     # ADDITIVE union arm (INV-AU): a quote-aware normalized-flag danger CONDITION across
     # every flag spelling the literal floor misses — `-d`/`-cd` close delete, `-Df`/`-fD`/

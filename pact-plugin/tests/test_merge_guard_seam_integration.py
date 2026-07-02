@@ -271,6 +271,31 @@ class TestSeamMainEntryPoints:
         assert code == 2
         assert '"permissionDecision": "deny"' in out
 
+    def test_main_to_main_ambiguous_close_laundering_closed(self, tmp_path):
+        """#1087 laundering closed through the REAL post→pre seam: approving the
+        ambiguous multi-close `gh pr close 42 && gh pr close 43 && echo
+        --delete-branch` mints NO token (is_dangerous=False per-leg → the mint
+        write-gate refuses), so the escalated single `gh pr close 42
+        --delete-branch` (a real, irreversible branch delete) is DENIED at the
+        pre hook (exit 2, deny). Pre-fix the approval minted a token that
+        AUTHORIZED the escalated single (exit 0) — this is the end-to-end
+        laundering-closed proof.
+        NON-VACUITY: the escalated single IS a gated command (a faithful in-leg
+        approval of it mints + authorizes), so the deny here is the MISSING token,
+        not an ungated command."""
+        ambiguous = "gh pr close 42 && gh pr close 43 && echo --delete-branch"
+        question = "Close these PRs?"
+        options = [{"label": "Yes, close", "description": f"On approval run: `{ambiguous}`"}]
+        assert self._run_post(
+            [{"question": question, "options": options, "multiSelect": False}],
+            {question: "Yes, close"}, tmp_path,
+        ) == 0
+        assert list(tmp_path.glob("merge-authorized-*")) == []
+
+        code, out = self._run_pre("gh pr close 42 --delete-branch", tmp_path)
+        assert code == 2
+        assert '"permissionDecision": "deny"' in out
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # #1052 — self-teaching OBSERVER-STYLE no-mint advisory. When an AskUserQuestion

@@ -327,15 +327,17 @@ class TestHttpieAdversarialSpellings:
 
 
 # ===========================================================================
-# Leg-isolation completion re-cert (#1082 Fix B + #1083 Fix A two-tier window)
-# — TEST-phase EXTENSION of the coder's TestLegBoundedMintWindow canaries.
-# Everything below verifies GREEN focus areas only. The close-ambiguity
-# laundering residual (approve `close N && close M && echo --delete-branch` →
-# a [--delete-branch] token that authorizes a real branch-delete) is a
-# rigorously-attributed PRE-EXISTING channel (the close literal arm's
-# cross-leg `(?=.*--delete-branch)` lookahead, the #1082 root Fix B fixed for
-# force-push arms but not for close) — it is issue-tracked / dispositioned
-# separately, NOT pinned here.
+# Leg-isolation completion re-cert (#1082 Fix B + #1083 Fix A two-tier window
+# + #1087 close per-leg conversion). TEST-phase EXTENSION of the coder's
+# TestLegBoundedMintWindow canaries. The close-ambiguity laundering residual
+# (approve `close N && close M && echo --delete-branch` → a [--delete-branch]
+# token that authorizes a real branch-delete) — the close literal arm's
+# cross-leg `(?=.*--delete-branch)` lookahead, which the #1082 root Fix B fixed
+# for force-push arms but not for close — is now FIXED by the #1087 per-leg
+# close conversion (_CLOSE_LITERAL_ARMS matched per-leg at the read floor: the
+# ambiguous form is is_dangerous=False → mints nothing → cannot launder). It is
+# no longer issue-deferred; it IS pinned here now, in
+# TestAmbiguousApprovalByteIdenticalIsSafeDirection.
 # ===========================================================================
 
 def _mint_ctx(desc: str, tmp_path, question="Proceed?", label="Yes, run it"):
@@ -459,14 +461,24 @@ class TestTwoTierNoUnderBindRideAlong:
 
 
 class TestEmergentDangerClassIsCloseOnly:
-    """#1083 §12.9 structural fact: the two-tier read fallback's tier 2
-    (_single_detectable_leg) only matters for EMERGENT-danger ops — an op that is
-    detect-POSITIVE but NOT individually dangerous, so whole-command danger comes
-    from a cross-leg lookahead. `close` is the ONLY such op; every other
-    privileged op is bare-dangerous (tier-1 handles it), which is why the
-    emergent BIND class reduces to close. If a future op becomes
-    detect-positive-but-not-dangerous, this pin flips and that op joins the
-    emergent class (the re-open trigger named in §12.9)."""
+    """#1083 §12.9 structural fact: an op that is detect-POSITIVE but NOT
+    individually dangerous is the ONLY kind that can form an emergent-danger
+    compound (whole-command danger arising from a cross-leg match). `close` is the
+    ONLY such op; every other privileged op is bare-dangerous (tier-1 handles it).
+
+    #1087 update: the close danger arms are now matched PER-LEG, so `close` no
+    longer produces an emergent-*dangerous* compound — a dangerous close is a
+    dangerous LEG (tier 1), and a bare multi-close is is_dangerous=False (no bind
+    at all). `close` KEEPS the detect-positive-but-not-dangerous PROPERTY, though
+    (bare `gh pr close` classifies as `close` yet is not dangerous), and THAT is
+    what this pin guards: it is the CLOSE HALF of the tier-2-retention tripwire
+    (OPEN-Q A/D). Tier 2 (_single_detectable_leg) is retained as defense-in-depth
+    for a FUTURE op that becomes detect-positive-but-not-dangerous; if one does,
+    this pin (and the API half, test_api_git_refs_get_leg_is_detect_negative
+    below) flips RED, catching the re-populated emergent class before it can
+    launder. The bare-form assertions below are UNCHANGED by the per-leg
+    conversion — they test bare close / bare-dangerous ops / a bare API GET leg,
+    none of which the conversion touches."""
 
     @pytest.mark.parametrize(
         "cmd,dangerous",
@@ -496,28 +508,40 @@ class TestEmergentDangerClassIsCloseOnly:
 
 
 class TestAmbiguousApprovalByteIdenticalIsSafeDirection:
-    """#1083 §12.9 ambiguity fallback (coder-disclosed, deliberately UNPINNED as
-    a residual): a ≥2-detectable / 0-dangerous approval falls back to the
-    whole-command scan on BOTH surfaces, so its BYTE-IDENTICAL re-approval
-    authorizes symmetrically. This documents ONLY the safe-direction property the
-    dispatch asked to verify — a DIFFERENT (non-byte-identical) execution that is
-    a different op/target still REFUSES. It does NOT assert the residual's
-    over-binding as a contract (that laundering corner is issue-tracked, not
-    pinned here)."""
+    """#1087 laundering closed at the source. Pre-fix, the ambiguous multi-close
+    `gh pr close 42 && gh pr close 43 && echo --delete-branch` was is_dangerous=
+    True (the close arm's cross-leg `(?=.*--delete-branch)` lookahead), so
+    approving it MINTED a token — and as an APPROVAL SOURCE that token authorized
+    an escalated same-target single `gh pr close 42 --delete-branch` (a real
+    branch delete). Post-fix the close arms match PER-LEG: no leg has `gh pr
+    close` and `--delete-branch` together, so the ambiguous form is
+    is_dangerous=False → mints NOTHING → cannot launder in any direction. This
+    class pins the approval-SOURCE direction the #1083 residual left unpinned (it
+    previously tested the form only as an execution target); it is now a fixed
+    channel, not a deferred residual."""
 
     AMBIG = "gh pr close 42 && gh pr close 43 && echo --delete-branch"
 
-    def test_byte_identical_reapproval_is_symmetric(self, tmp_path):
-        """The symmetric-authorize consequence: mint and read both fall back to
-        the whole command, so the byte-identical re-execution AUTHORIZES (the
-        pre-fix mint-[] → always-DENY asymmetry is gone)."""
+    def test_ambiguous_approval_mints_no_token(self, tmp_path):
+        """The ambiguous multi-close is not-dangerous per-leg, so the approval
+        mints NOTHING (n == 0 — was n == 1 pre-fix), and the byte-identical
+        re-execution RUNS FREE (not-dangerous → no token consulted)."""
         n, _ctx = _mint_ctx(f"On approval run: `{self.AMBIG}`", tmp_path, question="Close?", label="Yes")
-        assert n == 1
+        assert n == 0
         assert _authorize(self.AMBIG, tmp_path) is None
 
-    def test_different_target_execution_still_refuses(self, tmp_path):
-        """Safe-direction guard: an execution against a DIFFERENT pr target does
-        NOT authorize against the ambiguous token (target axis still enforced)."""
+    def test_ambiguous_approval_source_does_not_authorize_escalated_single(self, tmp_path):
+        """THE laundering-closed proof (closes the #1087 O9 gap): approving the
+        ambiguous multi-close mints no token, so the ESCALATED single
+        `gh pr close 42 --delete-branch` (a real, irreversible branch delete)
+        REFUSES for lack of any authorization. Pre-fix this AUTHORIZED (T1)."""
         n, _ctx = _mint_ctx(f"On approval run: `{self.AMBIG}`", tmp_path, question="Close?", label="Yes")
-        assert n == 1
+        assert n == 0
+        assert _authorize("gh pr close 42 --delete-branch", tmp_path) is not None
+
+    def test_ambiguous_approval_source_does_not_authorize_different_target(self, tmp_path):
+        """Target-axis guard, now trivial: with no token minted, an execution
+        against a DIFFERENT pr target also REFUSES."""
+        n, _ctx = _mint_ctx(f"On approval run: `{self.AMBIG}`", tmp_path, question="Close?", label="Yes")
+        assert n == 0
         assert _authorize("gh pr close 99 --delete-branch", tmp_path) is not None
