@@ -5,7 +5,13 @@
 - Task status in `TaskList` shows `in_progress` but no `SendMessage` activity from the teammate
 - Teammate process terminated without sending a completion message or blocker via `SendMessage`
 
-Detection is event-driven: check at signal monitoring points (after dispatch, on TeammateIdle events, on `SendMessage` receipt). If a teammate goes idle without sending a completion message or blocker, treat as stalled immediately.
+Detection is event-driven: check at signal monitoring points (after dispatch, on TeammateIdle events, on `SendMessage` receipt). If a teammate goes idle without sending a completion message or blocker, treat as
+stalled immediately — UNLESS the idle plausibly postdates a wake-signal you just
+sent or the task carries a live `intentional_wait`: those idles are
+delivery-ordering artifacts, not stalls. Apply the one-redundant-confirm rule in
+[pact-completion-authority.md](pact-completion-authority.md#crossed-wake-idles-one-redundant-confirm-then-stop)
+and escalate to stall diagnosis only on task-file-mtime plus sustained-silence
+evidence.
 
 **Relationship to agent state model**: Stall detection is the binary endpoint (active vs. stalled). For finer-grained mid-execution assessment (converging/exploring/stuck), see the agent state model in [pact-variety.md](pact-variety.md#agent-state-model). An agent assessed as "stuck" via progress signals may stall if not intervened upon.
 
