@@ -290,6 +290,25 @@ _GH_API_PREFIX = _GH_PREFIX + r"api\b"
 _GH_PR_MERGE_RE = re.compile(_GH_PREFIX + r"pr\s+merge\b")
 _GH_PR_CLOSE_RE = re.compile(_GH_PREFIX + r"pr\s+close\b")
 
+# Literal force-push arms — ONE arm-list SSOT consumed by BOTH the read floor
+# (is_dangerous_command) and the mint classifier (detect_command_operation_type),
+# so the two sides can never drift on a spelling. Matched PER-LEG over the shared
+# leg-boundary substrate (#1082): these arms' `.*` spans previously ran over the
+# WHOLE command, so a force-class flag in a benign continuation leg
+# (`git push origin feature && rm -f stale.txt`) gated the benign first-leg push —
+# one form (`git push && rm -f x.txt`) PERMANENTLY (no extractable target ->
+# unmintable). Semantics now: an arm fires iff push and the force-class flag
+# co-occur within ONE leg, in ANY leg position — `cd /repo && git push --force
+# origin main` still gates (deliberately DIFFERENT from the union arm's first-leg
+# anchoring; the literal floor keeps its match-anywhere purpose, per leg). Quoted
+# separators are handled by the substrate (a quoted `&&` is not a leg boundary) —
+# a tempered-regex span (`[^&|;]*`) would wrongly ungate that form.
+_FORCE_PUSH_LITERAL_ARMS = (
+    re.compile(_GIT_PREFIX + r"push\s+.*--force(?!-with-lease)\b"),
+    re.compile(_GIT_PREFIX + r"push\s+.*-f\b"),
+    re.compile(_GIT_PREFIX + r"push\s+-[a-zA-Z]*f"),
+)
+
 
 
 def detect_command_operation_type(command: str) -> str | None:
@@ -343,14 +362,14 @@ def detect_command_operation_type(command: str) -> str | None:
         return "close"
     # force-push: git push ... --force (excludes --force-with-lease — carved out
     # of the force-push arms ONLY; the push-to-main arm still gates lease pushes
-    # to a default branch). The negative
-    # lookahead matches the DANGEROUS_PATTERNS --force form.
-    if re.search(_GIT_PREFIX + r"push\s+.*--force(?!-with-lease)\b", command):
-        return "force-push"
-    if re.search(_GIT_PREFIX + r"push\s+.*-f\b", command):
-        return "force-push"
-    if re.search(_GIT_PREFIX + r"push\s+-[a-zA-Z]*f", command):
-        return "force-push"
+    # to a default branch). Matched PER-LEG over the shared _FORCE_PUSH_LITERAL_ARMS
+    # SSOT (#1082) — the same arm list the read floor consumes, over the same leg
+    # substrate (_split_into_legs), so a force-class flag in a benign continuation
+    # leg no longer classifies the first-leg push as force-push and read==mint
+    # holds by construction on this class.
+    for _leg in _split_into_legs(command):
+        if any(arm.search(_leg) for arm in _FORCE_PUSH_LITERAL_ARMS):
+            return "force-push"
     # Direct push to a default branch (main/master) — plain OR --force-with-lease —
     # is a review-bypass, a DISTINCT op from force-push. Returning its own
     # `push-to-main` op (rather than folding into force-push) closes the
@@ -1409,10 +1428,9 @@ re.compile(_GH_PREFIX + r"pr\s+merge\b"),
 # PR close with --delete-branch via gh CLI (bare close is reversible)
 re.compile(_GH_PREFIX + r"pr\s+close\b(?=.*--delete-branch)"),
 re.compile(r"--delete-branch.*" + _GH_PREFIX + r"pr\s+close\b"),
-# Force push (excludes --force-with-lease which is a safer alternative)
-re.compile(_GIT_PREFIX + r"push\s+.*--force(?!-with-lease)\b"),
-re.compile(_GIT_PREFIX + r"push\s+.*-f\b"),
-re.compile(_GIT_PREFIX + r"push\s+-[a-zA-Z]*f"),
+# Force push arms live in _FORCE_PUSH_LITERAL_ARMS (defined with the classifier
+# patterns above) — matched PER-LEG by is_dangerous_command after this list
+# misses (#1082 leg isolation), NOT whole-string here.
 # Force branch deletion
 re.compile(_GIT_PREFIX + r"branch\s+.*-D\b"),
 re.compile(_GIT_PREFIX + r"branch\s+.*--delete\s+--force\b"),
@@ -2315,6 +2333,15 @@ def is_dangerous_command(command: str) -> bool:
     stripped = _strip_non_executable_content(command)
     for pattern in DANGEROUS_PATTERNS:
         if pattern.search(stripped):
+            return True
+    # Literal force-push arms, matched PER-LEG (#1082): leg boundaries come from
+    # _slice_stripped_legs over this SAME `stripped` text — identical strip
+    # provenance to _split_into_legs (normalize + strip, above), so read-floor legs
+    # and substrate legs can never diverge, and the strip is not recomputed. An arm
+    # fires iff push and the force-class flag co-occur within ONE leg, in ANY leg
+    # position (the match-anywhere purpose, per leg).
+    for _leg in _slice_stripped_legs(stripped):
+        if any(arm.search(_leg) for arm in _FORCE_PUSH_LITERAL_ARMS):
             return True
     # ADDITIVE union arm (INV-AU): a quote-aware normalized-flag danger CONDITION across
     # every flag spelling the literal floor misses — `-d`/`-cd` close delete, `-Df`/`-fD`/

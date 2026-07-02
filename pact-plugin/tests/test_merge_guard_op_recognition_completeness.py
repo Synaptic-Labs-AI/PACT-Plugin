@@ -1053,25 +1053,91 @@ class TestCrossLegFlagLeakOverBlockGone:
         assert D(cmd) is False
         assert OP(cmd) == expected_op
 
-    # --- residual documented-behavior pins (literal arm, out-of-batch) ---
+    # --- literal force-push arms are leg-isolated too (#1082 — the former
+    #     residual pins FLIPPED with the fix, per their own docstring contract) ---
 
     @pytest.mark.parametrize(
         "cmd",
         [
             "git push origin feature && rm -f stale.txt",
             "git push origin feature && rm --force stale.txt",
-            "git push && rm -f x.txt",   # the residual PERMANENT block
+            "git push && rm -f x.txt",   # was the PERMANENT block (no target -> unmintable)
+            "git push origin feature ; rm -f stale.txt",   # ; variant
+            "git push origin feature | rm -f stale.txt",   # | variant
         ],
     )
-    def test_literal_arm_cross_leg_span_residual_still_gates(self, cmd):
-        """DOCUMENTED RESIDUAL — NOT cured by the union-arm fix and OUT OF ITS
-        SCOPE: the LITERAL force-push arms' `.*` span still crosses leg
-        boundaries, so a benign push chained with `rm -f`/`rm --force` stays
-        gated (and the no-target form stays PERMANENTLY blocked). Tracked as
-        follow-up issue #1082 (any fix is a literal-floor edit: full parity +
-        no-new-under-block matrix required); when that fix lands these pins FLIP
-        and must be updated in the same commit."""
-        assert D(cmd) is True
+    def test_literal_arm_cross_leg_span_cured(self, cmd):
+        """#1082 CURED: the literal force-push arms (_FORCE_PUSH_LITERAL_ARMS, one
+        SSOT feeding read floor AND detect) now match PER-LEG over the shared
+        _slice_stripped_legs substrate, so a benign push chained with `rm -f`/
+        `rm --force` no longer gates — including the formerly PERMANENT no-target
+        member. Parity: detect abstains identically (per-leg force miss; the
+        first-leg-anchored union arm returns None), so no gated-but-unmintable
+        state can arise."""
+        assert D(cmd) is False, f"literal-arm cross-leg over-block regressed: {cmd!r}"
+        assert OP(cmd) is None
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git push --force origin main",                         # single leg
+            "cd /repo && git push --force origin main",             # flag+push together in a NON-FIRST leg
+            "git push --force origin main && echo ok",              # first-leg force + benign continuation
+            "git push --force origin main 2>&1",                    # FD redirect — one leg (FD-neutralized)
+            'git push --push-option "a && b" --force origin main',  # QUOTED separator — one leg
+            'bash -c "git push --force origin main"',               # quoted single leg
+            "GIT_TRACE=1 git push --force origin main",             # env-prefix
+            "git push --force \\\norigin main",                     # line continuation
+        ],
+    )
+    def test_literal_arm_same_leg_still_gates(self, cmd):
+        """The no-new-under-block set: push + force-class flag co-occurring within
+        ONE leg still gates in ANY leg position (the literal floor keeps its
+        match-anywhere purpose, per leg). Includes the quoted-separator row — a
+        `&&` inside quotes is not a leg boundary — which a tempered-regex span
+        (`[^&|;]*`) would have wrongly ungated; that is why the fix is per-leg
+        matching over the substrate, not a regex rewrite."""
+        assert D(cmd) is True, f"NEW UNDER-BLOCK: same-leg force-push stopped gating: {cmd!r}"
+
+    def test_literal_arm_same_leg_control_detects_force_push(self):
+        """Non-vacuity control + mint parity for the preserved set: the
+        non-first-leg same-leg form classifies force-push on the mint side too."""
+        assert OP("cd /repo && git push --force origin main") == "force-push"
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git push origin feature # then rm -f stale.txt",   # comment strip
+            "git push origin feature && echo 'rm -f x'",        # echo-argument strip
+            "git push origin feature <<EOF\nrm -f x && git push --force origin main\nEOF",  # heredoc body strip
+        ],
+    )
+    def test_literal_arm_strip_pipeline_non_divergence(self, cmd):
+        """Per-leg matching runs on the SAME stripped substrate the whole-string
+        matching used, so every strip (comment / echo-argument / heredoc) acts
+        identically on both — these rows were ungated before the leg isolation
+        and stay ungated after it. The only behavioral delta of the fix is the
+        leg PARTITION of the same stripped string."""
+        assert D(cmd) is False
+
+    def test_literal_arm_leg_isolation_is_non_vacuous_under_whole_string_mutation(self, monkeypatch):
+        """Both-direction counter-mutation for the literal-arm leg isolation:
+        monkeypatch `_slice_stripped_legs` → single-whole-leg (the pre-fix
+        whole-string surface; the module-global binding both is_dangerous_command
+        and _split_into_legs resolve at call time) and assert the formerly
+        PERMANENT member flips back to dangerous — proving the cured rows above
+        are coupled to the leg partition, not vacuously green. In-memory
+        (monkeypatch) by design — no git-checkout mutation in the shared
+        worktree."""
+        cmd = "git push && rm -f x.txt"
+        # direction 1 — fix present: benign compound runs free
+        assert mgc.is_dangerous_command(cmd) is False
+        # direction 2 — pre-fix whole-string surface restored: the over-block returns
+        monkeypatch.setattr(mgc, "_slice_stripped_legs", lambda s: [s])
+        assert mgc.is_dangerous_command(cmd) is True, (
+            "whole-leg mutation did not restore the pre-fix literal-arm over-block "
+            "— the cured-row assertions would be vacuous"
+        )
 
     # --- non-vacuity: in-memory counter-mutation, executed in both directions ---
 
