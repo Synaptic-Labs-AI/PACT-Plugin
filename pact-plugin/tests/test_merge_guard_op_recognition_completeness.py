@@ -1161,6 +1161,209 @@ class TestCrossLegFlagLeakOverBlockGone:
         )
 
 
+class TestCloseLiteralArmCrossLegSweep:
+    """#1087 CLOSE cross-leg completion — the permanent bidirectional sweep for
+    the per-leg `_CLOSE_LITERAL_ARMS` conversion, modeled on the #1082 force-push
+    pair (`test_literal_arm_cross_leg_span_cured` / `_same_leg_still_gates`).
+
+    The close danger arms (`gh pr close` + `--delete-branch`) previously ran their
+    `.*`/lookahead over the WHOLE stripped command, so a `--delete-branch` token in
+    a benign continuation leg fired the arm cross-leg — an OVER-BLOCK, and the
+    substrate of the #1087 laundering (the ambiguous multi-close minted a close
+    token that authorized an escalated same-target single). The conversion matches
+    per-leg: an arm fires iff `gh pr close` and `--delete-branch` co-occur within
+    ONE leg. Per §0, the over-block-REMOVED direction is the PRIMARY/INVIOLABLE
+    gate proven first; the same-leg-STILL-gates direction is the secondary
+    no-new-under-block sweep."""
+
+    # --- PRIMARY (§0-inviolable): over-block REMOVED — benign compounds run FREE ---
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "gh pr close 42 && gh pr close 43 && echo --delete-branch",  # AMBIG (the #1087 attack)
+            "gh pr close 42 && echo --delete-branch",                    # single-member
+            "echo --delete-branch && gh pr close 42",                    # reversed
+        ],
+    )
+    def test_close_arm_cross_leg_span_cured(self, cmd):
+        """#1087 CURED: a bare `gh pr close` chained with a `--delete-branch` token
+        in a SEPARATE leg no longer gates (the token and the close verb never
+        co-occur in one leg). This is the over-block removal AND the laundering
+        substrate removal — the ambiguous form is now is_dangerous=False, so the
+        mint write-gate refuses and no token can be minted to launder."""
+        assert D(cmd) is False, f"CLOSE cross-leg over-block regressed: {cmd!r}"
+
+    # --- SECONDARY (no-new-under-block): same-leg close+flag STILL gates ---
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "gh pr close 42 --delete-branch",                              # single leg
+            "cd /repo && gh pr close 42 --delete-branch",                  # CRITICAL must-not-regress (co-occur in leg[1])
+            'git commit -m "a && b" && gh pr close 42 --delete-branch',    # quoted && is substrate, real close leg gates
+            "bash -c 'gh pr close 42 --delete-branch'",                    # quoted single leg
+            "gh --repo o/r pr close 42 --delete-branch",                   # global-flag prefix
+            "gh pr close 42 -d",                                           # first-leg flag-condition union arm
+            "gh pr close -d 42",                                           # flag before positional
+            "gh pr close 42 -cd",                                          # clustered short flag
+            "gh pr close 5 -d && echo done",                              # first-leg -d + benign continuation
+        ],
+    )
+    def test_close_arm_same_leg_still_gates(self, cmd):
+        """The no-new-under-block set: `gh pr close` + delete flag co-occurring
+        within ONE leg still gates in ANY leg position — including the CRITICAL
+        `cd /repo && gh pr close 42 --delete-branch` (True today ONLY via the
+        in-leg per-leg match the #1087 conversion re-establishes; it was True
+        pre-fix via the cross-leg lookahead the fix removes). The `-d`/`-cd`
+        short-flag forms gate via the first-leg flag-condition union arm."""
+        assert D(cmd) is True, f"NEW UNDER-BLOCK: same-leg dangerous close stopped gating: {cmd!r}"
+
+    def test_close_arm_same_leg_control_classifies_close(self):
+        """Non-vacuity control for the same-leg set: the preserved forms classify
+        as `close`, so the D=True rows discriminate a real gated close from a
+        blanket 'compound is always safe'."""
+        assert OP("cd /repo && gh pr close 42 --delete-branch") == "close"
+        assert OP("gh pr close 42 --delete-branch") == "close"
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "gh pr close 42 && gh pr close 43 && echo --delete-branch",
+            "gh pr close 42 && echo --delete-branch",
+            "echo --delete-branch && gh pr close 42",
+        ],
+    )
+    def test_close_cured_rows_non_vacuous_and_single_family(self, cmd, monkeypatch):
+        """Row-by-row non-vacuity AND identity-slice faithfulness for every cured
+        close form. Two-stage counter-mutation over the module-global bindings
+        `is_dangerous_command` resolves at call time:
+
+          direction 1 (fix present): the benign compound runs free (D is False).
+          direction 2 (`_slice_stripped_legs` -> identity, the pre-fix whole-command
+            surface): the over-block RETURNS (D is True) — coupling the assertion
+            to the per-leg partition.
+          faithfulness (identity-slice + `_CLOSE_LITERAL_ARMS` neutered): D returns
+            to False — proving the whole-command flip is caused by the CLOSE family
+            arm ALONE, with no second-family (force-push/API/flag-condition)
+            co-match. This is why the identity-slice mutation is a FAITHFUL pre-fix
+            simulation for this row (the coder flagged this for reviewer
+            confirmation; it is confirmed here per-row, not assumed single-family)."""
+        assert mgc.is_dangerous_command(cmd) is False
+        monkeypatch.setattr(mgc, "_slice_stripped_legs", lambda s: [s])
+        assert mgc.is_dangerous_command(cmd) is True, (
+            f"whole-command mutation did not restore the pre-fix close over-block "
+            f"— the cured-row assertion would be vacuous: {cmd!r}"
+        )
+        monkeypatch.setattr(mgc, "_CLOSE_LITERAL_ARMS", ())
+        assert mgc.is_dangerous_command(cmd) is False, (
+            f"whole-command flip survived close-arm neutering — a SECOND family "
+            f"co-matches, so the identity-slice mutation is NOT a faithful "
+            f"single-family pre-fix simulation for this row: {cmd!r}"
+        )
+
+
+class TestApiLiteralArmCrossLegSweep:
+    """#1086 API cross-leg completion — the permanent bidirectional sweep for the
+    per-leg `_API_LITERAL_ARMS` conversion (17 arms), modeled on the #1082
+    force-push pair. The API danger arms previously ran their `.*` over the WHOLE
+    stripped command, so a mutating method / body-flag token in a benign
+    continuation leg (`gh api .../git/refs && echo -X DELETE`) over-blocked the
+    benign compound. Per-leg now: an arm fires iff the API client, the mutating
+    method (or implicit-POST body flag), and the target endpoint co-occur within
+    ONE leg. Unlike close, the API emergent compounds are PURE over-blocks (an
+    isolated bare API leg is method-less hence detect-negative, so tier-2 abstains
+    symmetrically — no laundering asymmetry; pinned by the OPEN-Q D tripwire in
+    test_merge_guard_over_block_batch.py). §0 priority: over-block-removed first."""
+
+    # --- PRIMARY (§0-inviolable): over-block REMOVED — one row per family ---
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "gh api repos/o/r/git/refs/heads/x && echo -X DELETE",          # git/refs DELETE
+            "gh api repos/o/r/git/refs/heads/x && echo -X PATCH",           # git/refs mutate
+            "gh api repos/o/r/branches/main/protection && echo -X DELETE",  # protection
+            "gh api repos/o/r/pulls/5/merge && echo -X PUT",                # merge
+            "gh api repos/o/r/contents/f && echo -X PUT main",              # contents
+            "gh api repos/o/r/git/refs/heads/x && echo -f sha=abc",         # implicit-POST body flag
+            "curl https://api.github.com/repos/o/r/git/refs/heads/x && echo -X DELETE",     # curl git/refs
+            "wget https://api.github.com/repos/o/r/git/refs/heads/x && echo --method=DELETE",  # wget git/refs
+        ],
+    )
+    def test_api_arm_cross_leg_span_cured(self, cmd):
+        """#1086 CURED: an API read in one leg with a mutating method / body-flag
+        token in a SEPARATE (benign `echo`) leg no longer gates — the method and
+        endpoint never co-occur in one leg. One representative row per API danger
+        family (git/refs DELETE + mutate, protection, merge, contents,
+        implicit-POST, curl, wget)."""
+        assert D(cmd) is False, f"API cross-leg over-block regressed: {cmd!r}"
+
+    # --- SECONDARY (no-new-under-block): same-leg dangerous API STILL gates ---
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "gh api -X DELETE repos/o/r/git/refs/heads/x",                 # single leg
+            "cd /repo && gh api -X DELETE repos/o/r/git/refs/heads/x",     # non-first leg (method+path co-occur)
+            "gh api repos/o/r/pulls/5/merge -X PUT",                       # merge, method after path
+            "curl -X DELETE https://api.github.com/repos/o/r/git/refs/heads/x",  # curl same-leg
+            "wget --method=DELETE https://api.github.com/repos/o/r/git/refs/heads/x",  # wget same-leg
+            "gh api -X DELETE repos/o/r/branches/main/protection",        # protection (first-leg)
+            "gh api -f sha=abc repos/o/r/git/refs/heads/x",               # implicit-POST body flag same-leg
+        ],
+    )
+    def test_api_arm_same_leg_still_gates(self, cmd):
+        """The no-new-under-block set: the API client + mutating method (or
+        implicit-POST body flag) + endpoint co-occurring within ONE leg still gates
+        in ANY leg position. (The non-first-leg protection form
+        `cd /repo && gh api -X DELETE .../branches/main/protection` is separately
+        pinned at `test_literal_arm_contrast_still_gates_non_first_leg`; the
+        git/refs non-first-leg row here is its sibling, not a duplicate.)"""
+        assert D(cmd) is True, f"NEW UNDER-BLOCK: same-leg dangerous API stopped gating: {cmd!r}"
+
+    def test_api_arm_same_leg_control_detects_op(self):
+        """Non-vacuity control: the preserved same-leg API forms classify to a
+        real destructive op (detect untouched by the read-floor conversion), so
+        the D=True rows discriminate a real gated API call."""
+        assert OP("gh api -X DELETE repos/o/r/git/refs/heads/x") == "branch-delete"
+        assert OP("gh api -X DELETE repos/o/r/branches/main/protection") == "branch-protection"
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "gh api repos/o/r/git/refs/heads/x && echo -X DELETE",
+            "gh api repos/o/r/git/refs/heads/x && echo -X PATCH",
+            "gh api repos/o/r/branches/main/protection && echo -X DELETE",
+            "gh api repos/o/r/pulls/5/merge && echo -X PUT",
+            "gh api repos/o/r/contents/f && echo -X PUT main",
+            "gh api repos/o/r/git/refs/heads/x && echo -f sha=abc",
+            "curl https://api.github.com/repos/o/r/git/refs/heads/x && echo -X DELETE",
+            "wget https://api.github.com/repos/o/r/git/refs/heads/x && echo --method=DELETE",
+        ],
+    )
+    def test_api_cured_rows_non_vacuous_and_single_family(self, cmd, monkeypatch):
+        """Row-by-row non-vacuity AND identity-slice faithfulness for every cured
+        API form (same two-stage counter-mutation as the close sweep):
+
+          direction 1 (fix present): benign compound runs free (D is False).
+          direction 2 (`_slice_stripped_legs` -> identity): the over-block RETURNS
+            (D is True) — coupling the assertion to the per-leg partition.
+          faithfulness (identity-slice + `_API_LITERAL_ARMS` neutered): D returns to
+            False — proving the whole-command flip is caused by the API family arm
+            ALONE (no force-push/close/flag-condition co-match), so the
+            identity-slice mutation is a faithful single-family pre-fix simulation
+            for this row."""
+        assert mgc.is_dangerous_command(cmd) is False
+        monkeypatch.setattr(mgc, "_slice_stripped_legs", lambda s: [s])
+        assert mgc.is_dangerous_command(cmd) is True, (
+            f"whole-command mutation did not restore the pre-fix API over-block "
+            f"— the cured-row assertion would be vacuous: {cmd!r}"
+        )
+        monkeypatch.setattr(mgc, "_API_LITERAL_ARMS", ())
+        assert mgc.is_dangerous_command(cmd) is False, (
+            f"whole-command flip survived API-arm neutering — a SECOND family "
+            f"co-matches, so the identity-slice mutation is NOT a faithful "
+            f"single-family pre-fix simulation for this row: {cmd!r}"
+        )
+
+
 class TestAcceptedRecognitionLimitationPins:
     """FORWARD-PROTECTION pins for the ACCEPTED conservative-recognition limitation
     (the review-cycle-1 SECURITY-HALT disposition). These forms run UNGATED BY
