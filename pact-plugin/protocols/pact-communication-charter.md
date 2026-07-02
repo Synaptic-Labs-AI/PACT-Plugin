@@ -87,7 +87,7 @@ Before composing any outbound SendMessage (peer-to-peer or to lead), wait for yo
 
 #### Verify Before Executing
 
-On receiving a state-dependent message, check actual state before executing. If state has advanced past the message's premise, no-op and report.
+On receiving a state-dependent message, check actual state before executing. If state has advanced past the message's premise, no-op and report. Exception: when the fresh read shows exactly the state the sender themselves already resolved, the report carries zero information — suppress it entirely, per [pact-agent-teams §Counter-Confirm Suppression](../skills/pact-agent-teams/SKILL.md#counter-confirm-suppression).
 
 *Failure shape: teammate receives "fix foo.py:42" at idle; their last action already routed past that location (a refactor moved it; tests passed). Without the state-check, the teammate runs a redundant or conflicting operation, undoing prior valid work.*
 
