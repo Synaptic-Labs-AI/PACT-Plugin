@@ -498,13 +498,41 @@ class TestEmergentDangerClassIsCloseOnly:
             f"(§12.9 re-open trigger)"
         )
 
-    def test_api_git_refs_get_leg_is_detect_negative(self):
-        """The API arms are cross-leg matchers too, but an isolated GET leg is
-        detect-NEGATIVE (unlike bare close) → tier 2 abstains → both surfaces stay
-        on the whole-command scan → SYMMETRIC bind → no laundering asymmetry
-        (§12.9 follow-up). This is why the API emergent members are pure
-        over-blocks, not laundering channels."""
-        assert OP("gh api /repos/o/r/git/refs") is None
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # gh api bare (method-less) forms — one per API family the arms target
+            "gh api /repos/o/r/git/refs",
+            "gh api /repos/o/r/git/refs/heads/x",
+            "gh api /repos/o/r/branches/main/protection",
+            "gh api /repos/o/r/contents/file.txt",
+            "gh api /repos/o/r/pulls/5/merge",
+            # curl / wget bare-GET equivalents for git/refs and protection
+            "curl https://api.github.com/repos/o/r/git/refs/heads/x",
+            "curl https://api.github.com/repos/o/r/branches/main/protection",
+            "wget https://api.github.com/repos/o/r/git/refs/heads/x",
+        ],
+    )
+    def test_bare_api_form_is_detect_negative(self, cmd):
+        """OPEN-Q D tripwire — the API HALF of the tier-2-retention invariant
+        (pairs with the close-half assertion above). Every bare (method-less) API
+        form, across every family the #1086 danger arms target, is detect-NEGATIVE:
+        an isolated bare API leg classifies to NO op (unlike bare `gh pr close`,
+        which is detect-positive-but-not-dangerous). That is why API is NOT in the
+        emergent-danger class — tier 2 abstains → both surfaces stay on the
+        whole-command scan → SYMMETRIC bind → no laundering asymmetry (the API
+        emergent members are pure over-blocks, now removed by the per-leg
+        conversion, not laundering channels). If a future edit makes any bare API
+        form detect-POSITIVE (classifiable without a mutating method, i.e. isolable
+        like close), that op joins the emergent class and gains the mint/read
+        isolation asymmetry #1083 fixed for close — a laundering channel. This
+        assertion FAILS FIRST, catching the re-open before it ships; together with
+        the close half it is the invariant that justifies retaining tier 2
+        (OPEN-Q A), and it MUST remain a standing merge gate."""
+        assert OP(cmd) is None, (
+            f"bare API form became detect-positive: {cmd!r} — it would join the "
+            f"close emergent-danger class and gain a laundering asymmetry (re-open)"
+        )
 
 
 class TestAmbiguousApprovalByteIdenticalIsSafeDirection:
