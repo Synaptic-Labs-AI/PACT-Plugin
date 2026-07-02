@@ -324,3 +324,200 @@ class TestHttpieAdversarialSpellings:
         """Discriminating contrast: the idiomatic API clients stay gated, so the
         all-ungated httpie rows are a real membership fact, not a broken probe."""
         assert D(cmd) is True, f"idiomatic API client stopped gating: {cmd!r}"
+
+
+# ===========================================================================
+# Leg-isolation completion re-cert (#1082 Fix B + #1083 Fix A two-tier window)
+# — TEST-phase EXTENSION of the coder's TestLegBoundedMintWindow canaries.
+# Everything below verifies GREEN focus areas only. The close-ambiguity
+# laundering residual (approve `close N && close M && echo --delete-branch` →
+# a [--delete-branch] token that authorizes a real branch-delete) is a
+# rigorously-attributed PRE-EXISTING channel (the close literal arm's
+# cross-leg `(?=.*--delete-branch)` lookahead, the #1082 root Fix B fixed for
+# force-push arms but not for close) — it is issue-tracked / dispositioned
+# separately, NOT pinned here.
+# ===========================================================================
+
+def _mint_ctx(desc: str, tmp_path, question="Proceed?", label="Yes, run it"):
+    """Drive the REAL post hook with an option whose description = `desc`
+    (verbatim — lets a test control the exact wrapper/whitespace shape). Returns
+    (n_tokens, first_token_context_or_None)."""
+    from merge_guard_post import main as post_main
+
+    envelope = json.dumps({
+        "tool_name": "AskUserQuestion",
+        "tool_input": {"questions": [{
+            "question": question,
+            "options": [
+                {"label": label, "description": desc},
+                {"label": "Cancel", "description": "Abort"},
+            ],
+        }]},
+        "tool_response": {"answers": {question: label}},
+        "session_id": "batch-test-session",
+    })
+    with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+         patch("sys.stdin", io.StringIO(envelope)):
+        with pytest.raises(SystemExit) as exc_info:
+            post_main()
+    assert exc_info.value.code == 0
+    toks = list(tmp_path.glob("merge-authorized-*"))
+    ctx = json.loads(toks[0].read_text())["context"] if toks else None
+    return len(toks), ctx
+
+
+def _authorize(cmd: str, tmp_path):
+    """Read side over the real token seam: None = ALLOW, str = DENY reason."""
+    from merge_guard_pre import check_merge_authorization
+    return check_merge_authorization(cmd, token_dir=tmp_path)
+
+
+class TestMintWindowAnchorFaithfulShapes:
+    """#1083 CARDINAL re-cert: the mint window's `find(the_command)` fallback is
+    an accepted fail-toward-over-block ONLY IF no FAITHFUL single-command click
+    triggers a find-miss that drops a flag the command carries. The #1042
+    truncation-recovery form (region parser truncates at the quoted arg, so
+    `--admin` sits AFTER the region) is the vulnerable shape — it binds correctly
+    only if the window recovers it from the command's own leg. Driven through the
+    REAL mint seam across wrapper/whitespace/prose shapes."""
+
+    TRUNC = 'gh pr merge 42 --subject "polish the docs" --admin'
+
+    @pytest.mark.parametrize(
+        "desc",
+        [
+            "On approval run: `gh pr merge 42 --subject \"polish the docs\" --admin`",
+            "On approval run: `gh pr merge 42 --subject \"polish the docs\" --admin` now",
+            "gh pr merge 42 --subject \"polish the docs\" --admin",
+            "   `gh pr merge 42 --subject \"polish the docs\" --admin`   ",
+            "Please run `gh pr merge 42 --subject \"polish the docs\" --admin` to finish",
+            "Run\t`gh pr merge 42 --subject \"polish the docs\" --admin`\tthanks",
+        ],
+        ids=["backtick", "backtick-trailing", "bare", "ws-padded", "prose-both", "tab-prose"],
+    )
+    def test_faithful_shape_binds_truncation_recovery_flag(self, desc, tmp_path):
+        """No faithful shape triggers a find-miss under-bind: the truncation-
+        recovery `--admin` binds, and the byte-identical execution AUTHORIZES
+        (an under-bind would mint [] → the faithful re-exec would DENY)."""
+        n, ctx = _mint_ctx(desc, tmp_path)
+        assert n == 1
+        assert ctx["bound_flags"] == ["--admin"], (
+            f"faithful shape under-bound the truncation-recovery flag: {desc!r}"
+        )
+        assert _authorize(self.TRUNC, tmp_path) is None
+
+    def test_curly_brace_wrapper_is_non_faithful_safe_over_block(self, tmp_path):
+        """DOCUMENTED BOUNDARY (not a faithful-click over-block): curly BRACES are
+        NOT a stripped command wrapper (only backticks + smart-quotes are, per
+        _FLAG_SCAN_WRAPPER_TABLE), so `{... --admin}` leaves the `}` glued to the
+        flag → the window binds []. This fails in the SAFE over-block direction
+        (mint [] → set mismatch → DENY), never authorizing more than approved —
+        so it is a tolerated non-faithful shape, not a cardinal violation. Pinned
+        as the boundary of the faithful-shape guarantee above."""
+        n, ctx = _mint_ctx(f"On approval run: {{{self.TRUNC}}}", tmp_path)
+        assert n == 1
+        assert ctx["bound_flags"] == []  # safe over-block: no --admin bound
+        # over-block direction only: the faithful execution DENIES (never authorizes)
+        assert _authorize(self.TRUNC, tmp_path) is not None
+
+
+class TestTwoTierNoUnderBindRideAlong:
+    """#1083 no-under-bind for the ops whose target is FIRST-LEG-ANCHORED
+    (push-to-main/lease, force-push) — extends the coder's op-leg-flag canaries,
+    which cover close/merge (targets are match-anywhere so they mint the compound
+    directly). Push/force-push CANNOT mint a benign-PREFIX compound directly (no
+    extractable target from a non-first leg → no_command), so the faithful flow
+    is: approve the SINGLE destructive command, then execute it under a benign
+    prefix/continuation — the read side isolates the destructive leg and
+    AUTHORIZES. This is the no-gated-but-unmintable-dead-end proof for those
+    ops."""
+
+    @pytest.mark.parametrize(
+        "approve,execute,flags",
+        [
+            ("git push --force-with-lease origin main",
+             "cd /repo && git push --force-with-lease origin main", ["--force-with-lease"]),
+            ("git push --force-with-lease origin main",
+             "git push --force-with-lease origin main && echo done", ["--force-with-lease"]),
+            ("git push --no-verify origin main --force",
+             "cd /repo && git push --no-verify origin main --force", ["--no-verify"]),
+            ("git push origin main",
+             "cd /repo && git push origin main", []),
+        ],
+        ids=["lease-cd-prefix", "lease-continuation", "forcepush-noverify-cd", "plain-cd-prefix"],
+    )
+    def test_single_approval_rides_benign_prefix_or_continuation(
+            self, approve, execute, flags, tmp_path):
+        assert _mint_single(approve, tmp_path) == 1
+        # the compound IS gated on read (so a token is genuinely consulted) ...
+        assert D(execute) is True
+        # ... and the single-command token authorizes it via read-leg-isolation.
+        assert _authorize(execute, tmp_path) is None, (
+            f"benign-prefix/continuation compound over-blocked despite a faithful "
+            f"single-command approval: approve={approve!r} execute={execute!r}"
+        )
+
+
+class TestEmergentDangerClassIsCloseOnly:
+    """#1083 §12.9 structural fact: the two-tier read fallback's tier 2
+    (_single_detectable_leg) only matters for EMERGENT-danger ops — an op that is
+    detect-POSITIVE but NOT individually dangerous, so whole-command danger comes
+    from a cross-leg lookahead. `close` is the ONLY such op; every other
+    privileged op is bare-dangerous (tier-1 handles it), which is why the
+    emergent BIND class reduces to close. If a future op becomes
+    detect-positive-but-not-dangerous, this pin flips and that op joins the
+    emergent class (the re-open trigger named in §12.9)."""
+
+    @pytest.mark.parametrize(
+        "cmd,dangerous",
+        [
+            ("gh pr close 42", False),                       # EMERGENT: detect+ not-dangerous
+            ("gh pr merge 42", True),
+            ("git push --force origin main", True),
+            ("git push origin main", True),
+            ("git branch -D victim", True),
+        ],
+    )
+    def test_only_close_is_detect_positive_but_not_dangerous(self, cmd, dangerous):
+        assert OP(cmd) is not None, f"expected a classified op: {cmd!r}"
+        assert D(cmd) is dangerous, (
+            f"emergent-class membership changed for {cmd!r} — if this op became "
+            f"detect-positive-but-not-dangerous it joins the close emergent class "
+            f"(§12.9 re-open trigger)"
+        )
+
+    def test_api_git_refs_get_leg_is_detect_negative(self):
+        """The API arms are cross-leg matchers too, but an isolated GET leg is
+        detect-NEGATIVE (unlike bare close) → tier 2 abstains → both surfaces stay
+        on the whole-command scan → SYMMETRIC bind → no laundering asymmetry
+        (§12.9 follow-up). This is why the API emergent members are pure
+        over-blocks, not laundering channels."""
+        assert OP("gh api /repos/o/r/git/refs") is None
+
+
+class TestAmbiguousApprovalByteIdenticalIsSafeDirection:
+    """#1083 §12.9 ambiguity fallback (coder-disclosed, deliberately UNPINNED as
+    a residual): a ≥2-detectable / 0-dangerous approval falls back to the
+    whole-command scan on BOTH surfaces, so its BYTE-IDENTICAL re-approval
+    authorizes symmetrically. This documents ONLY the safe-direction property the
+    dispatch asked to verify — a DIFFERENT (non-byte-identical) execution that is
+    a different op/target still REFUSES. It does NOT assert the residual's
+    over-binding as a contract (that laundering corner is issue-tracked, not
+    pinned here)."""
+
+    AMBIG = "gh pr close 42 && gh pr close 43 && echo --delete-branch"
+
+    def test_byte_identical_reapproval_is_symmetric(self, tmp_path):
+        """The symmetric-authorize consequence: mint and read both fall back to
+        the whole command, so the byte-identical re-execution AUTHORIZES (the
+        pre-fix mint-[] → always-DENY asymmetry is gone)."""
+        n, _ctx = _mint_ctx(f"On approval run: `{self.AMBIG}`", tmp_path, question="Close?", label="Yes")
+        assert n == 1
+        assert _authorize(self.AMBIG, tmp_path) is None
+
+    def test_different_target_execution_still_refuses(self, tmp_path):
+        """Safe-direction guard: an execution against a DIFFERENT pr target does
+        NOT authorize against the ambiguous token (target axis still enforced)."""
+        n, _ctx = _mint_ctx(f"On approval run: `{self.AMBIG}`", tmp_path, question="Close?", label="Yes")
+        assert n == 1
+        assert _authorize("gh pr close 99 --delete-branch", tmp_path) is not None
