@@ -307,9 +307,11 @@ def detect_command_operation_type(command: str) -> str | None:
         "close"         - gh pr close (any variant)
         "force-push"    - git push --force / git push -f (excludes --force-with-lease);
                           API PATCH/POST/PUT to git/refs (ref rewrite)
-        "push-to-main"  - git push <remote> main/master WITHOUT --force (review-bypass,
-                          distinct from force-push so a plain-push token can't authorize
-                          a force-push)
+        "push-to-main"  - git push <remote> main/master WITHOUT --force, incl.
+                          --force-with-lease pushes (review-bypass, distinct from
+                          force-push so neither token authorizes a force-push; plain
+                          and lease pushes mint DIFFERENT tokens via the
+                          --force-with-lease presence bind in PRIVILEGED_FLAGS)
         "branch-delete" - git branch -D / git branch --delete --force / gh pr close --delete-branch;
                           API DELETE to git/refs (ref removal)
         "remote-ref-delete" - git push delete of a SINGLE remote ref (#1062a):
@@ -348,18 +350,25 @@ def detect_command_operation_type(command: str) -> str | None:
         return "force-push"
     if re.search(_GIT_PREFIX + r"push\s+-[a-zA-Z]*f", command):
         return "force-push"
-    # Direct push to a default branch (main/master) WITHOUT --force is a review-
-    # bypass but does NOT rewrite history — a DISTINCT op from force-push. Returning
-    # its own `push-to-main` op (rather than folding into force-push) closes the
-    # token-collapse where a plain-push approval authorized a force-push (the two
-    # now mint DIFFERENT tokens). The --force/-f checks ABOVE run FIRST, so a forced
-    # push to main returns force-push and never reaches here; ordering is load-
-    # bearing. The READ floor gates BOTH forms (DANGEROUS_PATTERNS unchanged). Uses
-    # the same `(?!:)` refspec exclusion as DANGEROUS_PATTERNS push-to-main.
+    # Direct push to a default branch (main/master) — plain OR --force-with-lease —
+    # is a review-bypass, a DISTINCT op from force-push. Returning its own
+    # `push-to-main` op (rather than folding into force-push) closes the
+    # token-collapse where a plain-push approval authorized a force-push. WITHIN the
+    # class, plain and lease pushes mint DIFFERENT tokens via the --force-with-lease
+    # presence bind (PRIVILEGED_FLAGS; the close/--delete-branch precedent), so a
+    # plain-push token can never authorize a lease push (which CAN rewrite history).
+    # The --force/-f checks ABOVE run FIRST, so a forced push to main returns
+    # force-push and never reaches here; ordering is load-bearing. The flag-walk is
+    # byte-identical to the read floor's push-to-main arm (mint==read parity at the
+    # source; the old lease-excluding lookahead here was a gated-but-unmintable
+    # over-block: the read floor gated the lease push while the mint refused it, so
+    # a faithful click was permanently blocked). The READ floor gates BOTH forms
+    # (DANGEROUS_PATTERNS unchanged). Uses the same `(?!:)` refspec exclusion as
+    # DANGEROUS_PATTERNS push-to-main.
     if re.search(_GIT_PREFIX + r"push\s+\S+\s+HEAD:(?:main|master)\b", command):
         return "push-to-main"
     if re.search(
-        _GIT_PREFIX + r"push\s+(?:-(?!-force-with-lease\b)\S+\s+){0,%d}\S+\s+(?:main|master)(?!:)\b" % _MAX_GLOBAL_FLAG_TOKENS,
+        _GIT_PREFIX + r"push\s+(?:-\S+\s+){0,%d}\S+\s+(?:main|master)(?!:)\b" % _MAX_GLOBAL_FLAG_TOKENS,
         command,
     ):
         return "push-to-main"
@@ -879,9 +888,16 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
         "--no-verify":     (("--no-verify",), False),           # bypass pre-push hook
     },
     "push-to-main": {
-        # No bound flags: push-to-main's privileged effect (direct-to-default-branch
-        # review bypass) IS its op-trigger (the main/master refspec), already bound via
-        # op_type. Explicit extension point — a future bound flag is a one-line edit.
+        # --force-with-lease: the lease push CAN rewrite history (unlike a plain push),
+        # so its PRESENCE separates plain-push and lease-push token identities inside
+        # one op-class (the close/--delete-branch precedent above). Bound as a BOOLEAN:
+        # git's value is =-joined only (never space-separated), and a value-taking
+        # marking would (i) consume the next positional (`origin`) on the bare spelling
+        # and (ii) import mint-side adjacency-sensitivity from the wide flag_scan_text
+        # surface -> an over-block risk. All =<ref>:<expect> spellings therefore bind
+        # the same canonical bare token; intra-lease value variation is an accepted
+        # residual (never authorizes plain<->lease or lease<->force escalation).
+        "--force-with-lease": (("--force-with-lease",), False),
     },
     "branch-delete": {
         # No bound flags today: branch-delete's privileged effect is its op-trigger
@@ -966,7 +982,12 @@ def extract_privileged_flags(command: str, op_type: str | None) -> list[str]:
             alias_to_canonical[alias] = canonical
     # git's parse-options expands unambiguous long-prefix abbreviations; gh's
     # pflag rejects them. Only the git surface needs abbreviation expansion.
-    is_git_surface = op_type in ("force-push", "branch-delete")
+    # push-to-main is a git surface: without expansion, `--force-with-leas` would
+    # bind [] and a plain-push token would authorize a live lease push (silent
+    # under-block). The `--force` ⊂ `--force-with-lease` prefix relation is inert
+    # here: a --force push classifies force-push FIRST and never reaches the
+    # push-to-main denylist.
+    is_git_surface = op_type in ("force-push", "branch-delete", "push-to-main")
 
     # P1 quote-aware tokenization (closes the quoted-flag bind bypass #3: a
     # `"--admin"` is shlex-stripped to `--admin` → bound; the old `command.split()`

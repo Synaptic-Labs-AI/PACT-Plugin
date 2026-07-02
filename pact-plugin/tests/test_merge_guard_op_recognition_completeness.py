@@ -1208,6 +1208,16 @@ class TestParityCanaryReconciledForWidenedForms:
             "gh api -X Delete repos/o/r/branches/main/protection",        # mixed-case
             "gh -R o/r api -X DELETE repos/o/r/branches/main/protection", # global-flag framing
             "curl -X put https://git.example.com/repos/o/r/branches/main/protection",  # curl lowercase
+            # Lease-to-default fold (#1064): parity holds POSITIVELY for the
+            # lease-to-default spellings (read gates AND mint classifies — the
+            # mint arm's lease-excluding lookahead was the gated-but-unmintable
+            # over-block this canary hunts) ...
+            "git push --force-with-lease origin main",
+            "git push --force-with-lease origin master",
+            "git push --force-with-lease=main:abc123 origin main",
+            # ... and NEGATIVELY for lease-to-feature (ungated AND unminted —
+            # the fold must not widen beyond the default-branch arm).
+            "git push --force-with-lease origin feature",
         ],
     )
     def test_mint_equals_read_parity_now_holds(self, cmd):

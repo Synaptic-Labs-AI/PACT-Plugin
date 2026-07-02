@@ -8038,14 +8038,13 @@ class TestDetectCommandOperationType:
         assert detect_command_operation_type("git push -f origin main") == "force-push"
 
     def test_force_push_with_lease_to_topic_branch_returns_none(self):
-        """git push --force-with-lease (without main/master target) is the SAFE form.
+        """git push --force-with-lease WITHOUT a main/master target stays None.
 
-        The detector classifies bare --force / -f as force-push but
-        deliberately excludes --force-with-lease (matches the safe-form
-        carve-out in DANGEROUS_PATTERNS). Direct push to main is dangerous
-        but not classified by the op-type detector — only explicit
-        --force / -f forms produce a force-push tag for token-authorization
-        purposes.
+        The push-to-main detect arm covers lease pushes to a DEFAULT branch
+        (the lease fold); a lease push to a topic branch is unrecognized
+        because no default-branch target matches — not because of a lease
+        exclusion. Force-push classification still excludes lease forms
+        entirely.
         """
         from shared.merge_guard_common import detect_command_operation_type
 
@@ -11133,6 +11132,142 @@ class TestEnvelopeIntegration:
                 pre_main()
         assert exc_info.value.code == 0
         assert '"permissionDecision": "deny"' not in stdout_buf.getvalue()
+
+
+class TestLeaseToDefaultGateAndMint:
+    """Lease-push-to-default fold + presence-bind (#1064).
+
+    `git push --force-with-lease origin main` was gated by the read floor
+    (push-to-main arm accepts any dash token) but excluded from the MINT
+    classifier's push-to-main arm by a negative lookahead -> detect=None ->
+    unmintable -> a faithful single-command click was PERMANENTLY blocked
+    (gated-but-unmintable over-block). The fix removes the mint-arm lookahead
+    (flag-walk now byte-identical to the read arm's) and separates plain-push
+    vs lease-push token identities via the --force-with-lease PRESENCE bind
+    in PRIVILEGED_FLAGS (the close/--delete-branch precedent).
+
+    These tests certify gate+mint symmetry END-TO-END through the real hook
+    mains (post mint -> pre authorize/refuse). The #1042 set-equality refusal
+    matrix (hand-built token contexts against _token_matches_command) lives in
+    test_merge_guard_privileged_flags.py — that suite owns the bind invariant;
+    the read-leg refusals here exercise the DIFFERENT envelope layer (minted
+    token -> pre main JSON deny), not the same assertion.
+    """
+
+    LEASE = "git push --force-with-lease origin main"
+    LEASE_VALUE = "git push --force-with-lease=main:abc123 origin main"
+    PLAIN = "git push origin main"
+
+    # Envelope drivers are inline (the idiom used by every class outside
+    # TestEnvelopeIntegration); the mint is option-anchored — the command
+    # lives in the CLICKED option's description.
+
+    def _mint(self, cmd: str, tmp_path) -> dict:
+        """Drive the REAL post hook main() with an approval whose clicked option
+        embeds `cmd`; assert exactly one token minted; return its context."""
+        from merge_guard_post import main as post_main
+
+        envelope = json.dumps({
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": [{
+                "question": "Push to the default branch?",
+                "options": [
+                    {"label": "Yes, push", "description": f"Run `{cmd}`"},
+                    {"label": "Cancel", "description": "Abort"},
+                ],
+            }]},
+            "tool_response": {"answers": {"Push to the default branch?": "Yes, push"}},
+            "session_id": "test-lease-session",
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(envelope)):
+            with pytest.raises(SystemExit) as exc_info:
+                post_main()
+        assert exc_info.value.code == 0
+        tokens = list(tmp_path.glob("merge-authorized-*"))
+        assert len(tokens) == 1, "approval did not mint exactly one token"
+        return json.loads(tokens[0].read_text())["context"]
+
+    def _pre(self, cmd: str, tmp_path):
+        """Run `cmd` through the REAL pre hook main(); return (exit_code, stdout)."""
+        from merge_guard_pre import main as pre_main
+
+        envelope = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": cmd},
+            "session_id": "test-lease-session",
+        })
+        stdout_buf = io.StringIO()
+        with patch("merge_guard_pre.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(envelope)), \
+             patch("sys.stdout", stdout_buf):
+            with pytest.raises(SystemExit) as exc_info:
+                pre_main()
+        return exc_info.value.code, stdout_buf.getvalue()
+
+    @pytest.mark.parametrize("cmd", [
+        "git push --force-with-lease origin main",
+        "git push --force-with-lease origin master",
+        "git push --force-with-lease=main:abc123 origin main",
+    ], ids=["bare-main", "bare-master", "equals-value-main"])
+    def test_lease_to_default_detects_as_push_to_main(self, cmd):
+        from shared.merge_guard_common import detect_command_operation_type
+
+        assert detect_command_operation_type(cmd) == "push-to-main"
+
+    def test_lease_to_feature_branch_stays_unrecognized(self):
+        """Contrast control: the fold widens ONLY the default-branch arm — a lease
+        push to a topic branch is still unrecognized AND ungated (must not widen)."""
+        from shared.merge_guard_common import (
+            detect_command_operation_type,
+            is_dangerous_command,
+        )
+
+        assert detect_command_operation_type(
+            "git push --force-with-lease origin feature/x") is None
+        assert not is_dangerous_command("git push --force-with-lease origin feature/x")
+
+    def test_lease_approval_mints_and_authorizes_byte_identical(self, tmp_path):
+        """The #1064 DENY->ALLOW flip: a faithful lease click mints a push-to-main
+        token carrying the presence bind, and the byte-identical execution
+        AUTHORIZES (this exact flow was permanently blocked pre-fix)."""
+        ctx = self._mint(self.LEASE, tmp_path)
+        assert ctx["operation_type"] == "push-to-main"
+        assert ctx["target_ref"] == "main"
+        assert ctx["bound_flags"] == ["--force-with-lease"]
+        code, _out = self._pre(self.LEASE, tmp_path)
+        assert code == 0
+
+    def test_lease_equals_value_approval_mints_and_authorizes_byte_identical(
+            self, tmp_path):
+        """The =<ref>:<expect> spelling rides the fix: same op-class, same canonical
+        bare bound flag (the boolean bind drops the inline value), byte-identical
+        approve/execute authorizes."""
+        ctx = self._mint(self.LEASE_VALUE, tmp_path)
+        assert ctx["operation_type"] == "push-to-main"
+        assert ctx["target_ref"] == "main"
+        assert ctx["bound_flags"] == ["--force-with-lease"]
+        code, _out = self._pre(self.LEASE_VALUE, tmp_path)
+        assert code == 0
+
+    def test_plain_approval_does_not_authorize_lease_execution(self, tmp_path):
+        """Approve a PLAIN push to main, execute the LEASE form -> DENY: the lease
+        push CAN rewrite history, so the minted plain token (bound_flags=[]) must
+        not set-equal the executed {--force-with-lease}."""
+        ctx = self._mint(self.PLAIN, tmp_path)
+        assert ctx["bound_flags"] == []
+        code, out = self._pre(self.LEASE, tmp_path)
+        assert code == 2
+        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_lease_approval_does_not_authorize_plain_execution(self, tmp_path):
+        """The symmetric direction: approve LEASE, execute PLAIN -> DENY (set-
+        equality refuses dropped flags too; the operator re-approves)."""
+        ctx = self._mint(self.LEASE, tmp_path)
+        assert ctx["bound_flags"] == ["--force-with-lease"]
+        code, out = self._pre(self.PLAIN, tmp_path)
+        assert code == 2
+        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 # =============================================================================
