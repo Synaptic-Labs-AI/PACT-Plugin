@@ -55,6 +55,7 @@ Monitor-signal token was present there). Restore with git checkout HEAD --
 recorded in the module-level comment at the bottom of this file.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,24 @@ def _normalized(path: Path) -> str:
     match against this so an intentional re-wrap of a rule sentence does
     not fail the pin while a re-WORD still does."""
     return " ".join(_raw(path).split())
+
+
+def _lines_outside_fences(path: Path) -> list:
+    """Stripped lines of the file, excluding fenced-code-block content and
+    the fence delimiter lines themselves. A heading-shaped line inside a
+    ``` / ~~~ fence is example text, not a real section heading, and must
+    not satisfy a heading pin (a section deletion that leaves behind a
+    fenced example of its own heading would otherwise stay green)."""
+    lines = []
+    in_fence = False
+    for line in _raw(path).splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            lines.append(stripped)
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -109,8 +128,10 @@ def test_rule_heading_present(doc_path: Path, heading: str):
     """Each new rule section must exist as an exact heading line so the
     section is discoverable and its anchor slug is a stable cross-ref
     target. Line-anchored: `#### X` must NOT satisfy a `### X` pin (and
-    vice versa) — heading LEVEL is part of the document contract."""
-    lines = [line.strip() for line in _raw(doc_path).splitlines()]
+    vice versa) — heading LEVEL is part of the document contract. Fenced
+    code blocks are excluded: a heading-shaped line inside an example
+    fence is not a real section."""
+    lines = _lines_outside_fences(doc_path)
     assert heading in lines, (
         f"{doc_path.name}: heading {heading!r} not found as an exact line. "
         f"If the section was intentionally renamed or re-leveled, update "
@@ -143,6 +164,26 @@ PHRASE_PINS = [
     # in-plugin consumers" claim was stale and contradicted the no-hook
     # non-goal note's framing).
     (SKILL, "missed_wake_scan"),
+    # Counter-confirm suppression's operative outcome: when a fresh disk
+    # read shows the situation already resolved, the clarification is
+    # suppressed entirely. Without body pins the section heading survives
+    # a rewrite that guts the rule (verified at authoring time: the whole
+    # section body deleted with every other pin staying green).
+    (SKILL, "send NOTHING"),
+    (SKILL, "Durable state IS the reply"),
+    # The read-only clause of the drain mechanics: the inbox file is
+    # platform-owned; agents must never mutate it.
+    (SKILL, "NEVER write, truncate, or delete"),
+    # The single-empty-read rule's HOME (the On Wake residual-race step).
+    # The shorter "never act on a single empty read" pin above is ALSO
+    # satisfied by the On-Rejection parenthetical cross-ref, so deleting
+    # the rule home alone would keep that pin green; this longer contiguous
+    # span exists only at the rule home.
+    (SKILL, "re-read once after a brief pause; never act on a single empty read"),
+    # The crossed mid-turn directive rule: an already-submitted deliverable
+    # that reflects pre-directive scope is revised proactively, not on
+    # request.
+    (SKILL, "revise it on the same task without waiting to be asked"),
     # --- lead-side completion-authority (+ byte-mirrored SSOT region) ---
     (COMPLETION_AUTHORITY, "exactly ONE redundant confirm"),
     # The behavioral no-hook non-goal note: the race cannot be closed with
@@ -153,11 +194,16 @@ PHRASE_PINS = [
     (COMPLETION_AUTHORITY, "boundary-drain: inbox empty"),
     # The evidence bar for escalating an idle to stall diagnosis.
     (COMPLETION_AUTHORITY, "task-file-mtime plus sustained-silence"),
+    # The directive-reflection aphorism naming the failure mode the check
+    # exists for. Matching is case-sensitive by design; this surface carries
+    # the sentence-initial capitalized form.
+    (COMPLETION_AUTHORITY, "Delivery is not processing"),
     (PROTOCOLS_SSOT, "exactly ONE redundant confirm"),
     (PROTOCOLS_SSOT, "Synchronous wake/send detection is therefore dead-by-construction"),
     (PROTOCOLS_SSOT, "in-process and tmux teammateMode"),
     (PROTOCOLS_SSOT, "boundary-drain: inbox empty"),
     (PROTOCOLS_SSOT, "task-file-mtime plus sustained-silence"),
+    (PROTOCOLS_SSOT, "Delivery is not processing"),
     # --- orchestrator persona ---
     (ORCHESTRATOR, "exactly ONE redundant confirm"),
     # The Wait-in-Silence rule's single protocol-defined exception — without
@@ -171,6 +217,10 @@ PHRASE_PINS = [
     (ORCHESTRATOR, "task-file-mtime plus sustained-silence"),
     # Staleness-signal bullet must name the hook that consumes the flag.
     (ORCHESTRATOR, "missed_wake_scan"),
+    # Same aphorism as the completion-authority pin above; this surface
+    # carries the mid-sentence lowercase form (per-surface casing is
+    # deliberate — do not normalize case to unify these pins).
+    (ORCHESTRATOR, "delivery is not processing"),
     # --- stall-detection protocol (+ byte-mirrored SSOT region) ---
     # The harmonizing exception: post-wake / live-intentional_wait idles are
     # not stall evidence.
@@ -239,8 +289,11 @@ def test_cross_ref_slug_present(doc_path: Path, slug: str):
     """Each referrer surface must carry the literal anchor slug so the
     lazy-load reference resolves. Pin the slug rather than prose link text
     — the slug is what GitHub-flavored markdown navigates to, and a heading
-    rename that forgets a referrer leaves a 404 nav target."""
-    assert slug in _raw(doc_path), (
+    rename that forgets a referrer leaves a 404 nav target. The match is
+    terminator-guarded: the slug must not continue with slug characters
+    ([a-z0-9-]), so a longer future slug that prefix-engulfs a pinned one
+    (e.g. `...-check` inside `...-checklist`) does not satisfy the pin."""
+    assert re.search(re.escape(slug) + r"(?![a-z0-9-])", _raw(doc_path)), (
         f"{doc_path.name}: anchor slug {slug!r} not found. Either the "
         f"cross-ref was removed (the lazy-load path to the full rule is "
         f"gone) or the target heading was renamed without updating this "
@@ -313,11 +366,21 @@ def test_retired_inbox_grew_token_absent(doc_path: Path):
 # ---------------------------------------------------------------------------
 # Counter-test flip-set record (measured at authoring time; see module
 # docstring). With the five surfaces reverted to their pre-hardening state
-# and this module run against them: {45 failed, 8 passed}. Heading pins
-# 8/8 RED, phrase pins 25/25 RED (no pinned phrase pre-existed on any
+# and this module run against them: {53 failed, 8 passed}. Heading pins
+# 8/8 RED, phrase pins 33/33 RED (no pinned phrase pre-existed on any
 # surface), cross-ref pins 11/11 RED, absence pin RED on
 # pact-orchestrator.md (retired token present pre-fix) and GREEN on the
 # other four surfaces (token never present there). The 8 GREEN =
 # anchor-integrity 4/4 (pure functions of module constants — intentionally
 # revert-immune) + the 4 vacuously-satisfied absence pins.
+# Section-body deletion probes (measured after the body-pin additions):
+# gutting the Counter-Confirm Suppression body while keeping its heading
+# fails exactly its 2 body pins; deleting the On Wake residual-race step
+# fails exactly the rule-home span pin while the shorter single-empty-read
+# pin stays green via the On-Rejection parenthetical.
+# Matcher-robustness probes (measured): rewriting a referrer's slug to a
+# longer slug that prefix-engulfs the pinned one flips the slug pin RED
+# (terminator guard); deleting a section heading while leaving a fenced
+# code example of the same heading line flips the heading pin RED
+# (fence exclusion). Neither hardening changes the flip-set above.
 # ---------------------------------------------------------------------------
