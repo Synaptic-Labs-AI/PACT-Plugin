@@ -17,10 +17,13 @@ they cover the composition surface the single-lane tests do not:
 
 Every assertion here is the SAFE direction: faithful single-command clicks
 mint/authorize; benign compounds run free; first-leg-destructive forms stay
-gated. No test here pins an accepted residual as contract (the intra-lease
-value-variation residual, the =false negation corner, and the whole-command
-extract_privileged_flags bind wart are documented via the lane suites' existing
-tripwire pins ONLY — pinning them here would cement them as contract).
+gated. No test here pins an accepted residual as contract — pinning would
+cement it: the intra-lease value-variation residual and the =false negation
+corner are documented via the lane suites' existing tripwire pins ONLY, and the
+mint-vs-read bound_flags surface asymmetry (the mint scans the full option text
+while the read side isolates the single destructive leg, so a privileged-flag
+literal in a benign continuation leg DENYs that faithful compound) is
+accepted-and-tracked as issue #1083, deliberately unpinned.
 
 Sibling per-lane suites (do not duplicate):
   * test_merge_guard.py::TestLeaseToDefaultGateAndMint (Lane 1 envelope)
