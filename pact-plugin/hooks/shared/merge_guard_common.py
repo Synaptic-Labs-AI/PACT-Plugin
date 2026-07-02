@@ -341,8 +341,9 @@ def detect_command_operation_type(command: str) -> str | None:
         # write-side classifier. Branch-delete-via-pr-close is folded into
         # the close class on both sides for symmetric authorization.
         return "close"
-    # force-push: git push ... --force (excludes --force-with-lease which
-    # the existing DANGEROUS_PATTERNS treats as safe). The negative
+    # force-push: git push ... --force (excludes --force-with-lease — carved out
+    # of the force-push arms ONLY; the push-to-main arm still gates lease pushes
+    # to a default branch). The negative
     # lookahead matches the DANGEROUS_PATTERNS --force form.
     if re.search(_GIT_PREFIX + r"push\s+.*--force(?!-with-lease)\b", command):
         return "force-push"
@@ -1876,7 +1877,9 @@ def _strip_non_executable_content(command: str) -> str:
     #    piped/process-sub to a shell; the double-quoted arms preserve a value
     #    containing command-substitution `$(`/backtick (it would execute).
     #    (httpie body params are POSITIONALS, not flags, so they are out of scope —
-    #    moot regardless: httpie has NO read-floor arms, so no httpie FP can arise.)
+    #    non-key=value spellings (:= JSON literals, bare quoted items) survive, so a
+    #    quoted git literal can still FP via the match-anywhere git arms: rarer,
+    #    fails-safe (gates AND mints — no permanent block), pre-existing, un-fixed.)
     if not piped_to_shell and not process_sub_to_shell:
         # The HTTP-client command span: from a curl/wget/gh-api head up to the first
         # UNQUOTED shell separator. Quote-aware body (balanced quotes consumed
