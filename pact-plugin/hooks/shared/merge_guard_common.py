@@ -99,9 +99,9 @@ ACCEPTED price is that these forms run UNGATED when the `git push` is not the fi
   - `git fetch && git push --mirror origin`
   - `NOTE=x ; git push origin :main`
 These are NOT bugs — do NOT "fix" them (the fix re-blocks faithful clicks). httpie
-(`http` / `https` CLI) protection-mutation is likewise ungated: the protection MINT
-classifier covers gh-api / curl / wget only, so an httpie read-floor arm would gate a form
-the mint cannot bind — a gated-but-unmintable over-block. Ungated keeps read == mint.
+(`http` / `https` CLI) is likewise WHOLLY ungated by design — ref-mutation, merge, AND
+protection-mutation — because the MINT classifier covers gh-api / curl / wget only; ANY
+httpie read-floor arm re-creates a gated-but-unmintable over-block. Ungated keeps read == mint.
 NB this first-leg anchoring is SPECIFIC to those parse-dependent forms: the LITERAL
 DANGEROUS_PATTERNS arms (force-push, branch -D, gh pr merge/close, push-to-main, the API
 ref/protection arms) match-anywhere and STILL gate in a non-first leg
@@ -368,7 +368,9 @@ def detect_command_operation_type(command: str) -> str | None:
     # match the IGNORECASE read floor, so a lowercase `-X delete` faithful form MINTS
     # too. Both are mint-WIDENING (the read floor already gates these forms) — never a
     # read-floor narrowing. Still gh-api/curl/wget only (NOT httpie), so no new
-    # gated-but-unmintable httpie state.
+    # gated-but-unmintable httpie state — and httpie now has NO read-floor arms at all
+    # (the read floor dropped them; httpie is wholly out of charter), so the invariant
+    # is two-sided.
     _is_api_form = (
         re.search(_GH_API_PREFIX, command, re.IGNORECASE)
         or re.search(r"\b(?:curl|wget)\b", command, re.IGNORECASE)
@@ -1389,7 +1391,7 @@ re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PUT|PATCH|POST)\b).*api.*merge",
 # HOST-AGNOSTIC (#1061): the curl arms drop the literal `.*api.*` substring so a
 # truly api-free Enterprise/proxy URL (e.g. https://git.example.com/repos/o/r/git/refs/...)
 # no longer bypasses — bringing curl to parity with the already-host-agnostic
-# gh-api/wget/httpie arms. The `api` key was an as-shipped heuristic (#268/#271), not a
+# gh-api/wget arms. The `api` key was an as-shipped heuristic (#268/#271), not a
 # deliberated scope ruling; this WIDENS it. The over-block this widening would introduce
 # on a quoted `-d` body mentioning git/refs is closed by carrier-8 (the HTTP-client
 # data-body strip in _strip_non_executable_content) — the body value is stripped while
@@ -1410,8 +1412,8 @@ re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PATCH|POST|PUT)\b).*git/refs", r
 # branch is PATH-resident, so carrier-8 never strips it (no preservation guard needed,
 # unlike the body-resident contents arm). No httpie arm: the mint classifier's
 # `_is_api_form` is gh-api/curl/wget only, so adding an httpie read arm would create a
-# gated-but-unmintable httpie #1064 state — omitted by design (httpie protection is not
-# a charter form).
+# gated-but-unmintable over-block — omitted by design (httpie is WHOLLY out of charter;
+# its ref-mutation/merge arms were removed with it).
 re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:DELETE|PUT|PATCH)\b).*branches/.*/protection", re.IGNORECASE),
 re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:DELETE|PUT|PATCH)\b).*branches/.*/protection", re.IGNORECASE),
 re.compile(r"\bwget\b(?=.*--method=(?:DELETE|PUT|PATCH)\b).*branches/.*/protection", re.IGNORECASE),
@@ -1433,13 +1435,6 @@ re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PUT|PATCH|POST)\b).*api.*content
 # Alternative HTTP clients: wget with --method flag
 re.compile(r"\bwget\b(?=.*--method=(?:DELETE|PATCH|POST|PUT)\b).*git/refs", re.IGNORECASE),
 re.compile(r"\bwget\b(?=.*--method=(?:DELETE|PATCH|POST|PUT)\b).*merge", re.IGNORECASE),
-# Alternative HTTP clients: httpie (method is positional arg after 'http'/'https')
-# \bhttps?\s+ ensures word boundary + whitespace (won't match URLs like https://).
-# (?:\S+\s+){0,K} allows optional flags (e.g., -a user:pass) between command and
-# method — BOUNDED by _MAX_GLOBAL_FLAG_TOKENS to avoid the O(n^2) multi-anchor
-# backtracking of the unbounded `*` form (#1001), matching the shared-prefix fix.
-re.compile(r"\bhttps?\s+(?:\S+\s+){0,%d}(?:DELETE|PATCH|POST|PUT)\s.*git/refs" % _MAX_GLOBAL_FLAG_TOKENS, re.IGNORECASE),
-re.compile(r"\bhttps?\s+(?:\S+\s+){0,%d}(?:DELETE|PATCH|POST|PUT)\s.*merge"    % _MAX_GLOBAL_FLAG_TOKENS, re.IGNORECASE),
 # Known API detection gaps (defense-in-depth, not a security boundary):
 # - GraphQL mutations: gh api graphql -f query='mutation { ... }' bypasses REST-path matching
 # - gh alias: aliases can hide API calls (tracked in #270)
@@ -1853,7 +1848,7 @@ def _strip_non_executable_content(command: str) -> str:
     #    piped/process-sub to a shell; the double-quoted arms preserve a value
     #    containing command-substitution `$(`/backtick (it would execute).
     #    (httpie body params are POSITIONALS, not flags, so they are out of scope —
-    #    a rarer, fails-safe pre-existing FP, documented in the architecture residuals.)
+    #    moot regardless: httpie has NO read-floor arms, so no httpie FP can arise.)
     if not piped_to_shell and not process_sub_to_shell:
         # The HTTP-client command span: from a curl/wget/gh-api head up to the first
         # UNQUOTED shell separator. Quote-aware body (balanced quotes consumed

@@ -10,7 +10,7 @@ written by the companion hook (merge_guard_post.py) before allowing dangerous
 operations. Detected operations include:
 - CLI: git/gh merge, close with --delete-branch, force push, branch delete,
   push to main/master
-- API: gh api, curl, wget, and httpie calls targeting merge, git/refs, or
+- API: gh api, curl, and wget calls targeting merge, git/refs, or
   contents endpoints with mutating HTTP methods (including implicit POST via
   body parameter flags or data flags)
 
@@ -87,7 +87,8 @@ try:
         # are re-exported here for the existing test imports.
         _GH_PR_NUMBER_RE,
         _extract_pr_number,
-        # Bound for the inline httpie global-flag walks below (#1001).
+        # Bound for the shared-module flag walks (push read arms + mint
+        # push-to-main arm) (#1001).
         _MAX_GLOBAL_FLAG_TOKENS,
     )
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
@@ -112,7 +113,8 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
 # Note: _GH_GLOBAL_FLAGS, _GH_FLAG_TOKENS, _GIT_GLOBAL_FLAGS, _GH_PREFIX,
 # _GIT_PREFIX, _GH_API_PREFIX, _GH_PR_MERGE_RE, _GH_PR_CLOSE_RE are imported
 # from shared.merge_guard_common above (#720 Bug B relocation).
-# _MAX_GLOBAL_FLAG_TOKENS is also imported (bounds the inline httpie walks, #1001).
+# _MAX_GLOBAL_FLAG_TOKENS is also imported (bounds the shared-module flag walks:
+# push read arms + mint push-to-main arm, #1001).
 
 # Pre-serialized JSON for allow-path output: tells Claude Code UI to suppress
 # the hook display instead of showing "hook error (No output)".

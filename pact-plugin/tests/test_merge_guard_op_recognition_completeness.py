@@ -1016,8 +1016,22 @@ class TestAcceptedRecognitionLimitationPins:
         classifier covers gh-api/curl/wget only; an httpie protection READ arm would
         gate a form the mint cannot bind = a gated-but-unmintable over-block (itself a
         faithful-click block). Leaving it ungated keeps read == mint. Full httpie
-        gate+mint is a deferred scope expansion, not a half-measure read arm."""
+        gate+mint was DECLINED (maintainer ruled httpie out-of-charter), not a
+        half-measure read arm."""
         assert D("http DELETE https://api.github.com/repos/o/r/branches/main/protection") is False
+
+    def test_httpie_git_refs_ungated_by_design(self):
+        """ACCEPTED LIMITATION (#1077) — sibling of the protection pin above. The
+        httpie ref-mutation read arms were REMOVED (they gated forms the
+        gh-api/curl/wget-only mint could not bind = a PERMANENT gated-but-unmintable
+        over-block). Ungated BY DESIGN, #1079-consistent; do NOT re-gate."""
+        assert D("http DELETE https://api.github.com/repos/o/r/git/refs/heads/feature") is False
+
+    def test_httpie_merge_ungated_by_design(self):
+        """ACCEPTED LIMITATION (#1077) — sibling of the protection pin above: httpie
+        merge mutation is ungated BY DESIGN (same removed-read-arm rationale as the
+        git/refs pin); do NOT re-gate."""
+        assert D("http PUT https://api.github.com/repos/o/r/pulls/42/merge") is False
 
     @pytest.mark.parametrize(
         "cmd,expected_op",
@@ -1059,3 +1073,65 @@ class TestParityCanaryReconciledForWidenedForms:
     )
     def test_mint_equals_read_parity_now_holds(self, cmd):
         assert mgc.is_dangerous_command(cmd) == (mgc.detect_command_operation_type(cmd) is not None)
+
+
+class TestHttpieMembershipCompleteness:
+    """Executable membership-completeness check for the httpie drop (#1077).
+
+    With the two httpie read-floor arms (git/refs + merge) removed, NO executable
+    gate site may see httpie: the read floor must not gate (D is False) AND the
+    mint classifier must not classify (OP is None) for the full httpie probe set,
+    in both alias spellings (`http` / `https`). Both httpie families are thereby
+    tolerated under-blocks, #1079-consistent: ref-mutation/merge (newly dropped)
+    and branch-protection (never gated).
+
+    If ANY row flips, either a second httpie gate site exists (the two removed
+    arms were NOT the complete membership) or httpie was re-gated without mint
+    coverage — both re-create the gated-but-unmintable over-block this change
+    removed. Do NOT re-gate; httpie is wholly out of charter.
+    """
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # ref-mutation family (the removed git/refs arm's probe surface)
+            "http DELETE https://api.github.com/repos/o/r/git/refs/heads/feature",
+            "http PATCH https://api.github.com/repos/o/r/git/refs/heads/feature",
+            "http POST https://api.github.com/repos/o/r/git/refs",
+            "http PUT https://api.github.com/repos/o/r/git/refs/heads/feature",
+            # merge family (the removed merge arm's probe surface)
+            "http DELETE https://api.github.com/repos/o/r/pulls/42/merge",
+            "http PATCH https://api.github.com/repos/o/r/pulls/42/merge",
+            "http PUT https://api.github.com/repos/o/r/pulls/42/merge",
+            # flag/case variants the removed arms used to catch
+            "http -a user:pass DELETE https://api.github.com/repos/o/r/git/refs/heads/feature",
+            "http delete https://api.github.com/repos/o/r/git/refs/heads/feature",
+            # `https` alias spelling of both families
+            "https DELETE https://api.github.com/repos/o/r/git/refs/heads/feature",
+            "https PUT https://api.github.com/repos/o/r/pulls/42/merge",
+            # branch-protection family (never gated — #1079)
+            "http DELETE https://api.github.com/repos/o/r/branches/main/protection",
+            "https PUT https://api.github.com/repos/o/r/branches/main/protection",
+        ],
+    )
+    def test_httpie_membership_is_empty_read_and_mint(self, cmd):
+        assert D(cmd) is False, (
+            f"httpie gate site found on the READ floor — re-creates the "
+            f"gated-but-unmintable over-block: {cmd!r}"
+        )
+        assert OP(cmd) is None, (
+            f"httpie gate site found in the MINT classifier — contradicts the "
+            f"removal-completeness certificate: {cmd!r}"
+        )
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # discriminating positives: the IDIOMATIC clients stay gated, proving the
+            # all-False httpie rows above are a real membership fact, not a broken probe
+            "wget --method=DELETE https://api.github.com/repos/o/r/git/refs/heads/feature",
+            "curl -X DELETE https://api.github.com/repos/o/r/git/refs/heads/feature",
+        ],
+    )
+    def test_idiomatic_client_contrast_still_gates(self, cmd):
+        assert D(cmd) is True, f"idiomatic API client stopped gating: {cmd!r}"

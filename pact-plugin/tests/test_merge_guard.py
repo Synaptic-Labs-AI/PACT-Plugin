@@ -4221,10 +4221,12 @@ class TestContentsAPI:
 
 
 class TestAlternativeHttpClients:
-    """Tests for wget and httpie (http/https command) detection.
+    """Tests for wget (gated) and httpie (ungated by design) handling.
 
-    These alternative HTTP clients can perform the same API operations as
-    curl/gh api. wget uses --method= flag; httpie uses positional method arg.
+    Both clients can perform the same API operations as curl/gh api. wget uses
+    the --method= flag and IS gated (it is in the mint classifier's _is_api_form).
+    httpie (positional method arg) is WHOLLY ungated — out of charter, accepted
+    under-block (#1077) — see the httpie tripwire section below.
     """
 
     # --- wget: dangerous operations ---
@@ -4303,77 +4305,96 @@ class TestAlternativeHttpClients:
             "wget https://api.github.com/repos/o/r/pulls/42/merge"
         )
 
-    # --- httpie (http command): dangerous operations ---
+    # --- httpie (http command): ungated BY DESIGN — accepted under-block tripwires ---
+    #
+    # httpie (`http`/`https` CLI) is WHOLLY out of charter (#1077, #1079-consistent):
+    # its two read-floor arms (git/refs + merge) were REMOVED because the mint
+    # classifier covers gh-api/curl/wget only — an httpie read arm gates a form the
+    # mint cannot bind = a gated-but-unmintable over-block (a PERMANENT faithful-click
+    # block). These pins assert ungated ON PURPOSE, mirroring
+    # TestAcceptedRecognitionLimitationPins: if one flips RED, httpie was re-gated
+    # without mint coverage. Do NOT re-gate.
 
     def test_http_delete_git_refs(self):
-        """http DELETE to git/refs is dangerous (httpie positional method)."""
+        """httpie DELETE to git/refs is ungated BY DESIGN — do NOT re-gate; a read
+        arm without mint coverage is a gated-but-unmintable over-block."""
         from merge_guard_pre import is_dangerous_command
 
-        assert is_dangerous_command(
+        assert not is_dangerous_command(
             "http DELETE api.github.com/repos/o/r/git/refs/heads/feature"
         )
 
     def test_http_patch_git_refs(self):
-        """http PATCH to git/refs is dangerous."""
+        """httpie PATCH to git/refs is ungated BY DESIGN — do NOT re-gate; a read
+        arm without mint coverage is a gated-but-unmintable over-block."""
         from merge_guard_pre import is_dangerous_command
 
-        assert is_dangerous_command(
+        assert not is_dangerous_command(
             "http PATCH api.github.com/repos/o/r/git/refs/heads/feature"
         )
 
     def test_http_post_git_refs(self):
-        """http POST to git/refs is dangerous."""
+        """httpie POST to git/refs is ungated BY DESIGN — do NOT re-gate; a read
+        arm without mint coverage is a gated-but-unmintable over-block."""
         from merge_guard_pre import is_dangerous_command
 
-        assert is_dangerous_command(
+        assert not is_dangerous_command(
             "http POST api.github.com/repos/o/r/git/refs"
         )
 
     def test_http_put_git_refs(self):
-        """http PUT to git/refs is dangerous."""
+        """httpie PUT to git/refs is ungated BY DESIGN — do NOT re-gate; a read
+        arm without mint coverage is a gated-but-unmintable over-block."""
         from merge_guard_pre import is_dangerous_command
 
-        assert is_dangerous_command(
+        assert not is_dangerous_command(
             "http PUT api.github.com/repos/o/r/git/refs/heads/feature"
         )
 
     def test_http_delete_merge(self):
-        """http DELETE to merge endpoint is dangerous."""
+        """httpie DELETE to a merge endpoint is ungated BY DESIGN — do NOT re-gate;
+        a read arm without mint coverage is a gated-but-unmintable over-block."""
         from merge_guard_pre import is_dangerous_command
 
-        assert is_dangerous_command(
+        assert not is_dangerous_command(
             "http DELETE api.github.com/repos/o/r/pulls/42/merge"
         )
 
     def test_http_patch_merge(self):
-        """http PATCH to merge endpoint is dangerous."""
+        """httpie PATCH to a merge endpoint is ungated BY DESIGN — do NOT re-gate;
+        a read arm without mint coverage is a gated-but-unmintable over-block."""
         from merge_guard_pre import is_dangerous_command
 
-        assert is_dangerous_command(
+        assert not is_dangerous_command(
             "http PATCH api.github.com/repos/o/r/pulls/42/merge"
         )
 
     def test_http_with_auth_flags(self):
-        """http with auth flags before method is detected."""
+        """httpie with auth flags before the method is ungated BY DESIGN — do NOT
+        re-gate; a read arm without mint coverage is a gated-but-unmintable
+        over-block."""
         from merge_guard_pre import is_dangerous_command
 
-        assert is_dangerous_command(
+        assert not is_dangerous_command(
             "http -a user:pass DELETE api.github.com/repos/o/r/git/refs/heads/feature"
         )
 
     def test_http_case_insensitive(self):
-        """http method detection is case-insensitive."""
+        """httpie with a lowercase method is ungated BY DESIGN — do NOT re-gate; a
+        read arm without mint coverage is a gated-but-unmintable over-block."""
         from merge_guard_pre import is_dangerous_command
 
-        assert is_dangerous_command(
+        assert not is_dangerous_command(
             "http delete api.github.com/repos/o/r/git/refs/heads/feature"
         )
 
     def test_https_command_delete_git_refs(self):
-        """https command (httpie alias) DELETE to git/refs is dangerous."""
+        """https (httpie alias) DELETE to git/refs is ungated BY DESIGN — do NOT
+        re-gate; a read arm without mint coverage is a gated-but-unmintable
+        over-block."""
         from merge_guard_pre import is_dangerous_command
 
-        assert is_dangerous_command(
+        assert not is_dangerous_command(
             "https DELETE api.github.com/repos/o/r/git/refs/heads/feature"
         )
 
