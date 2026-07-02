@@ -121,7 +121,8 @@ SendMessage(
     to="team-lead",
     message=(
         "[<your-agent-name>→team-lead] Teachback submitted on Task #<A_id>. "
-        "See metadata.teachback_submit. Idling on awaiting_lead_completion."
+        "See metadata.teachback_submit. Idling on awaiting_lead_completion. "
+        "boundary-drain: [inbox empty | reconciled <n> directive(s) — <one-line summary>]"
     ),
     summary="Teachback submitted: <topic>"
 )
