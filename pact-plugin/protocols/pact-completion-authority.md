@@ -62,9 +62,10 @@ from "idle because the teammate stalled".
    of the teammate's task (raw JSON — `TaskGet` is metadata-blind). If the read
    shows the wait resolved AND acted on (e.g., the follow-on task claimed), do
    nothing: the wake landed.
-2. **If the durable read shows the wait unresolved**, send exactly ONE redundant
-   confirm naming the actionable durable state (e.g., "your teachback on Task A was
-   accepted and A is completed on disk; Task B is claimable now"). Name the state,
+2. **If the durable read shows the wait resolved but not yet acted on (or
+   unresolved)**, send exactly ONE redundant confirm naming the actionable durable
+   state (e.g., "your teachback on Task A was accepted and A is completed on disk;
+   Task B is claimable now"). Name the state,
    not "checking in" — the confirm must let the teammate act from it alone, because
    it may render before your original wake.
 3. **Further idle ticks are NOT stalls.** After the one redundant confirm, send no
@@ -74,7 +75,7 @@ from "idle because the teammate stalled".
    AND no inbound SendMessage from the teammate across multiple idle cycles well
    past your wake-send.
 
-**Non-goal — no hook-based detection.** Do not attempt to close this race with a
+**Non-goal — no synchronous hook-based detection.** Do not attempt to close this race with a
 synchronous hook, and reject future proposals to reintroduce one: `SendMessage`
 fires no PreToolUse/PostToolUse event; inbox files are written asynchronously on
 delivery; TeammateIdle notifications fire at turn-end regardless of what has just
