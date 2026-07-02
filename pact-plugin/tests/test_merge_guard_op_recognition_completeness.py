@@ -1067,8 +1067,8 @@ class TestCrossLegFlagLeakOverBlockGone:
         """DOCUMENTED RESIDUAL — NOT cured by the union-arm fix and OUT OF ITS
         SCOPE: the LITERAL force-push arms' `.*` span still crosses leg
         boundaries, so a benign push chained with `rm -f`/`rm --force` stays
-        gated (and the no-target form stays PERMANENTLY blocked). Tracked as a
-        follow-up issue (any fix is a literal-floor edit: full parity +
+        gated (and the no-target form stays PERMANENTLY blocked). Tracked as
+        follow-up issue #1082 (any fix is a literal-floor edit: full parity +
         no-new-under-block matrix required); when that fix lands these pins FLIP
         and must be updated in the same commit."""
         assert D(cmd) is True

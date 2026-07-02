@@ -466,12 +466,15 @@ class TestGitGhAbbreviationAsymmetry:
         ) == ["--no-verify"]
 
     def test_push_to_main_git_surface_expands_lease_abbreviation(self):
-        """push-to-main joined the git-surface set with the lease bind (#1064):
-        git expands `--force-with-leas` to --force-with-lease, so the truncated
-        spelling binds the canonical token instead of [] (a silent under-block —
-        a plain-push token would authorize a live lease push). `--force` itself
-        never reaches this bind: force-push classification wins first, so the
-        --force ⊂ --force-with-lease prefix relation is inert on this surface."""
+        """push-to-main joined the git-surface set with the lease bind (#1064) as
+        DEFENSE-IN-DEPTH: given op_type=push-to-main, git's abbreviation rule says
+        a truncated `--force-with-leas` must bind the canonical token, and this
+        pins that the expansion does so. The case is NOT live-reachable today:
+        any abbreviation still containing `--force` classifies FORCE-PUSH first
+        (the force arms' lookahead excludes only the exact `-with-lease` suffix),
+        and the shorter prefixes that do classify push-to-main (`--forc`, `--fo`)
+        are git-ambiguous — git rejects the command, so no live lease push runs
+        unbound. The expansion keeps the bind correct if either neighbor shifts."""
         from shared.merge_guard_common import extract_privileged_flags
 
         assert extract_privileged_flags(

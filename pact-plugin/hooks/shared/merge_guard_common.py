@@ -983,11 +983,15 @@ def extract_privileged_flags(command: str, op_type: str | None) -> list[str]:
             alias_to_canonical[alias] = canonical
     # git's parse-options expands unambiguous long-prefix abbreviations; gh's
     # pflag rejects them. Only the git surface needs abbreviation expansion.
-    # push-to-main is a git surface: without expansion, `--force-with-leas` would
-    # bind [] and a plain-push token would authorize a live lease push (silent
-    # under-block). The `--force` ⊂ `--force-with-lease` prefix relation is inert
-    # here: a --force push classifies force-push FIRST and never reaches the
-    # push-to-main denylist.
+    # push-to-main is a git surface — DEFENSE-IN-DEPTH: no abbreviated lease
+    # spelling reaches this bind in the live flow today. Any prefix still
+    # containing `--force` (e.g. `--force-with-leas`) classifies FORCE-PUSH
+    # first (the force arms' lookahead excludes only the exact `-with-lease`
+    # suffix), and the shorter prefixes that DO classify push-to-main (`--forc`,
+    # `--fo`) are ambiguous to git itself — git rejects the command, so no live
+    # lease push runs unbound. The expansion keeps the bind correct if either
+    # neighbor ever shifts; a unique-in-OUR-denylist prefix binds conservatively
+    # (over-block-safe).
     is_git_surface = op_type in ("force-push", "branch-delete", "push-to-main")
 
     # P1 quote-aware tokenization (closes the quoted-flag bind bypass #3: a
