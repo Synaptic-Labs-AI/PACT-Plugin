@@ -796,12 +796,14 @@ class TestBenignChainFaithfulClickMints:
 
 
 class TestPrivilegedFlagMintSymmetry:
-    """A1 — the MINT must scan the FULL selected-option surface for bound flags,
-    NOT the quote-truncated bare-command region. A privileged flag positioned
-    AFTER a quoted argument in a BARE command falls outside
-    locate_command_regions' truncated region (it stops at the first quote); the
-    mint's flag_scan_text widening recovers it so the approved set carries the
-    flag and a faithful re-execution AUTHORIZES while an added flag REFUSES.
+    """A1 — the MINT must scan a surface WIDER than the quote-truncated
+    bare-command region for bound flags: the command's own LEG within the
+    selected-option text (the leg-bounded window; formerly the full option
+    text). A privileged flag positioned AFTER a quoted argument in a BARE
+    command falls outside locate_command_regions' truncated region (it stops at
+    the first quote) but INSIDE the command's leg; the mint's flag_scan_text
+    widening recovers it so the approved set carries the flag and a faithful
+    re-execution AUTHORIZES while an added flag REFUSES.
 
     These drive the REAL mint (post.main → write_token → check_merge_authorization)
     — a hand-built token would bypass the mint widening and be vacuous for the A1
@@ -815,9 +817,9 @@ class TestPrivilegedFlagMintSymmetry:
 
     def test_admin_after_quoted_arg_round_trips_via_full_mint_scan(self, tmp_path):
         """Approve a BARE command with --admin after a quoted --subject; the mint
-        scans the full option text to bind --admin, so the faithful re-execution
-        AUTHORIZES. (Without the C3 full-surface scan the mint binds {} and this
-        flips to REFUSE.)"""
+        scans the command's leg of the option text to bind --admin, so the
+        faithful re-execution AUTHORIZES. (Without the wider-than-region scan the
+        mint binds {} and this flips to REFUSE.)"""
         q = "Merge this pull request now? The reviewers have signed off."
         opts = [
             _opt("Yes, merge", "On approval run: " + self._CMD_ADMIN_AFTER_QUOTE),
@@ -856,13 +858,15 @@ class TestPrivilegedFlagMintSymmetry:
     # read-floor cases below FORGE the token and bypass the mint; these drive the
     # real close mint.
     #
-    # NB force-push has NO real-mint witness BY STRUCTURAL NECESSITY: its only
-    # bound flag is --no-verify, whose substring "no" trips the pre-existing
-    # decline/defer veto (_DECLINE_DEFER_RE) in _mint_context_from_bundle Step 1,
-    # so a --no-verify approval never mints (over-block-safe — it HOLDS the
-    # force-push, never authorizes an unapproved one). The force-push --no-verify
-    # READ path is therefore covered via _seed_token in TestPrivilegedFlagReadFloorSeam,
-    # which forges the token the real mint cannot produce. ──
+    # NB force-push real-mint witnesses: an earlier decline/defer prose veto once
+    # blocked --no-verify approvals from minting ("no" substring), which is why
+    # this class's force-push coverage went through _seed_token forgeries in
+    # TestPrivilegedFlagReadFloorSeam. That veto was REMOVED in the pure-floor
+    # mint redesign (no decline-intent parsing remains anywhere in
+    # _mint_context_from_bundle), and empirically TODAY a --no-verify approval
+    # MINTS through the real seam — TestLegBoundedMintWindow below carries the
+    # real-mint force-push witnesses (round-trip + escalation canaries). The
+    # seeded read-floor cases remain valid as forged-token read-path coverage. ──
     # NB the close commands carry --delete-branch: that is the close-danger
     # op-TRIGGER (a bare `gh pr close` is NOT a governed/held op), so a governed
     # close that the read arm holds must carry it. --delete-branch is bound via
@@ -892,6 +896,344 @@ class TestPrivilegedFlagMintSymmetry:
         assert _authorize(
             "gh pr close 5 --delete-branch -R victim/repo", tmp_path
         ) is not None
+
+
+def _token_bound_flags(tmp) -> list:
+    """The single minted token's bound_flags, sorted. Exactly-one-token asserted:
+    exact-set inspection is what distinguishes WHICH side of the #1042
+    set-equality moved (outcome-only assertions cannot)."""
+    toks = _minted_tokens(tmp)
+    assert len(toks) == 1, f"expected exactly one minted token, got {len(toks)}"
+    data = json.loads(toks[0].read_text())
+    ctx = data.get("context", data)
+    return sorted(ctx.get("bound_flags", []))
+
+
+class TestLegBoundedMintWindow:
+    """#1083 — the mint's privileged-flag scan is bounded to the destructive
+    command's own LEG within the option text (_leg_bounded_flag_scan_surface),
+    and the read bind seam gained a two-tier fallback (_single_destructive_leg →
+    _single_detectable_leg → whole command), restoring mint==read bind symmetry
+    for every compound shape. Pre-fix, the FULL-text mint scan bound flag
+    literals from benign continuation legs, which (a) DENIED the byte-identical
+    re-execution of a faithful benign-continuation approval — a live over-block —
+    and (b) opened an approval-laundering channel: the escalated single-command
+    execution's read-side bind matched the polluted mint set (seam-proven for
+    close, where `gh pr close 42 --delete-branch` deletes a real branch). Both
+    surfaces now run the SAME two-tier leg selection, so they converge on the
+    op's own leg BY CONSTRUCTION (the symmetry pin below guards the shared-helper
+    wiring). Every test drives the REAL mint (post.main) and the REAL read seam;
+    the counter-mutations prove the canaries are coupled to each half of the
+    single-commit fix."""
+
+    # --- cured members: byte-identical re-approval AUTHORIZES (pre-fix RED) ---
+
+    @pytest.mark.parametrize(
+        "member",
+        [
+            "git push origin main && echo --force-with-lease",   # push-to-main member
+            "gh pr merge 42 && echo --admin",                    # pre-existing merge member
+            "git push --force origin main && echo --no-verify",  # force-push member
+            "git push origin main && echo --force-with-leas",    # abbreviation x window
+        ],
+    )
+    def test_cured_member_byte_identical_reapproval_authorizes(self, member, tmp_path):
+        """The cured over-block: the read side binds from the isolated destructive
+        leg, so the full-text mint bind of the echo literal made the BYTE-IDENTICAL
+        faithful re-execution refuse. The window binds [] — EXACTLY — and the
+        faithful compound authorizes."""
+        q = "Proceed with this operation?"
+        opts = [_opt("Yes, run it", f"On approval run: `{member}`"), _opt("Cancel", "Abort")]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, run it"}, tmp_path) == 0
+        assert _token_bound_flags(tmp_path) == []
+        assert _authorize(member, tmp_path) is None
+
+    def test_next_line_flag_literal_no_longer_binds(self, tmp_path):
+        """A flag literal on a LATER LINE of the option description (newline = leg
+        boundary) no longer binds; the faithful command authorizes."""
+        cmd = "git push origin main"
+        q = "Push to main?"
+        opts = [
+            _opt("Yes, push", f"On approval run: `{cmd}`\nNote: never uses --force-with-lease"),
+            _opt("Cancel", "Abort"),
+        ]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, push"}, tmp_path) == 0
+        assert _token_bound_flags(tmp_path) == []
+        assert _authorize(cmd, tmp_path) is None
+
+    # --- the closed escalation channel, per reachable op-class ---
+
+    @pytest.mark.parametrize(
+        "member,escalated",
+        [
+            ("git push origin main && echo --force-with-lease",
+             "git push --force-with-lease origin main"),
+            ("gh pr merge 42 && echo --admin",
+             "gh pr merge 42 --admin"),
+            ("git push --force origin main && echo --no-verify",
+             "git push --force origin main --no-verify"),
+            ("git push origin main && echo --force-with-leas",
+             "git push --force-with-lease origin main"),
+        ],
+    )
+    def test_escalation_channel_closed(self, member, escalated, tmp_path):
+        """Approval-laundering closed: pre-fix, approving the plain op + a flag
+        literal in a benign continuation leg minted a FLAGGED token whose set
+        matched the escalated single-command execution's read-side bind →
+        AUTHORIZE. Post-fix the token binds [] → the escalation REFUSES."""
+        q = "Proceed?"
+        opts = [_opt("Yes, run it", f"On approval run: `{member}`"), _opt("Cancel", "Abort")]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, run it"}, tmp_path) == 0
+        assert _token_bound_flags(tmp_path) == []
+        assert _authorize(escalated, tmp_path) is not None
+
+    # --- close op-class: the emergent-danger members, BOTH shapes cured ---
+
+    @pytest.mark.parametrize(
+        "member",
+        [
+            "gh pr close 42 && echo --delete-branch",   # forward close arm
+            "echo --delete-branch && gh pr close 42",   # reversed close arm
+        ],
+    )
+    def test_close_emergent_member_round_trips_both_shapes(self, member, tmp_path):
+        """The emergent-danger close members (zero individually-dangerous legs;
+        whole-command danger from the close arms' cross-leg lookaheads): the read
+        seam's tier-2 fallback binds [] from the unique DETECTABLE close leg, and
+        the mint window's identical two-tier selection binds [] from the same leg
+        — byte-identical re-approval AUTHORIZES. The reversed shape is the row
+        that a positional leg[0] window failed (leg[0] is the echo leg there):
+        the two-tier selection is what makes BOTH shapes cure."""
+        q = "Close it?"
+        opts = [_opt("Yes, close", f"On approval run: `{member}`"), _opt("Cancel", "Abort")]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
+        assert _token_bound_flags(tmp_path) == []
+        assert _authorize(member, tmp_path) is None
+
+    def test_close_laundering_channel_closed(self, tmp_path):
+        """THE HEADLINE (co-headline with the push channel, for the sec-review):
+        pre-fix, approving `gh pr close 42 && echo --delete-branch` — which reads
+        as a reversible bare close plus an echo — minted
+        bound_flags=['--delete-branch'] from the echo literal, and the ESCALATED
+        `gh pr close 42 --delete-branch` (a REAL, irreversible branch-deleting
+        close) AUTHORIZED against it. Post-fix the token binds [] → REFUSE."""
+        member = "gh pr close 42 && echo --delete-branch"
+        q = "Close it?"
+        opts = [_opt("Yes, close", f"On approval run: `{member}`"), _opt("Cancel", "Abort")]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
+        assert _authorize("gh pr close 42 --delete-branch", tmp_path) is not None
+
+    def test_close_flag_on_op_single_leg_round_trips(self, tmp_path):
+        """No-over-isolation control + wrapper-strip-order pin: the HONEST
+        branch-deleting close puts the flag ON the op — the window binds it and
+        the faithful re-execution authorizes. The flag is the last token before
+        the closing backtick, so a window composed BEFORE the wrapper strip would
+        glue the backtick onto the flag and bind [] — flipping this RED."""
+        cmd = "gh pr close 42 --delete-branch"
+        q = "Close and delete branch?"
+        opts = [_opt("Yes, close", f"On approval run: `{cmd}` now"), _opt("Cancel", "Abort")]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
+        assert _token_bound_flags(tmp_path) == ["--delete-branch"]
+        assert _authorize(cmd, tmp_path) is None
+
+    def test_bare_close_boundary_stays_ungated(self, tmp_path):
+        """Boundary control: bare `gh pr close 42` is reversible and UNGATED —
+        the approval mints nothing (not dangerous) and the execution runs free
+        without consulting a token."""
+        cmd = "gh pr close 42"
+        q = "Close it?"
+        opts = [_opt("Yes, close", f"On approval run: `{cmd}`"), _opt("Cancel", "Abort")]
+        _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path)
+        assert len(_minted_tokens(tmp_path)) == 0
+        assert _authorize(cmd, tmp_path) is None
+
+    # --- no-under-bind: op in a NON-FIRST leg carrying its REAL flag ---
+
+    @pytest.mark.parametrize(
+        "cmd,expected_flags",
+        [
+            ("echo hi && gh pr close 42 --delete-branch", ["--delete-branch"]),
+            ("cd /repo && gh pr merge 42 --admin", ["--admin"]),
+            ("gh pr close 42 --delete-branch && echo x", ["--delete-branch"]),
+        ],
+    )
+    def test_op_leg_flag_binds_wherever_the_op_leg_sits(self, cmd, expected_flags, tmp_path):
+        """No-under-bind: when the op's OWN leg carries the privileged flag, the
+        two-tier selection binds it in ANY leg position. A positional leg[0]
+        window under-bound the op-in-non-first-leg forms (window = the benign
+        first leg → mint [] vs read [flag] → the faithful click OVER-BLOCKED);
+        the two-tier selection cures that direction too."""
+        q = "Proceed?"
+        opts = [_opt("Yes, run it", f"On approval run: `{cmd}`"), _opt("Cancel", "Abort")]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, run it"}, tmp_path) == 0
+        assert _token_bound_flags(tmp_path) == expected_flags
+        assert _authorize(cmd, tmp_path) is None
+
+    # --- ambiguity fail-safe + destructive-path precedence ---
+
+    def test_ambiguous_execution_denies_against_clean_member_token(self, tmp_path):
+        """Ambiguity fail-safe: a >=2-detectable-leg execution (no unique op leg)
+        makes the read seam fall back to the conservative WHOLE-command scan,
+        which binds the echo literal — set-mismatch vs the clean member token's
+        [] → DENY. Ambiguity can only collapse WIDER, never narrower."""
+        member = "gh pr close 42 && echo --delete-branch"
+        q = "Close it?"
+        opts = [_opt("Yes, close", f"On approval run: `{member}`"), _opt("Cancel", "Abort")]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
+        assert _token_bound_flags(tmp_path) == []
+        ambiguous = "gh pr close 42 && gh pr close 43 && echo --delete-branch"
+        assert _authorize(ambiguous, tmp_path) is not None
+
+    def test_two_tier_selection_precedence(self):
+        """Destructive-path precedence, at the tier helpers directly: a dangerous
+        leg wins (tier 1 — the merge member never consults tier 2); tier 2
+        isolates the unique detectable leg for the emergent close member; a
+        non-unique detectable set abstains to None (→ whole-command)."""
+        from shared.merge_guard_common import (
+            _single_destructive_leg,
+            _single_detectable_leg,
+        )
+        assert _single_destructive_leg("gh pr merge 42 && echo --admin") == "gh pr merge 42"
+        assert _single_destructive_leg("gh pr close 42 && echo --delete-branch") is None
+        assert _single_detectable_leg("gh pr close 42 && echo --delete-branch") == "gh pr close 42"
+        assert _single_detectable_leg(
+            "gh pr close 42 && gh pr close 43 && echo --delete-branch"
+        ) is None
+
+    # --- mint/read symmetry: shared two-tier selection (anti-rot pin) ---
+
+    def test_mint_window_and_read_seam_share_the_two_tier_selection(self):
+        """The anti-parallel-path-rot pin: the mint window must SELECT its scan
+        leg with the SAME shared helpers the read seam uses — not a positional or
+        reimplemented variant that can drift. Structural: the window's source
+        references both tier helpers. Behavioral: for every compound shape the
+        window's selected surface carries exactly the flags the read-side
+        two-tier leg carries (the set-equality substrate)."""
+        import inspect
+        from merge_guard_post import _leg_bounded_flag_scan_surface, _strip_command_wrapper
+        from shared.merge_guard_common import (
+            _single_destructive_leg,
+            _single_detectable_leg,
+            extract_command_context,
+        )
+
+        src = inspect.getsource(_leg_bounded_flag_scan_surface)
+        assert "_single_destructive_leg" in src and "_single_detectable_leg" in src, (
+            "mint window no longer routes through the shared two-tier helpers — "
+            "parallel-path rot risk on the authorize path"
+        )
+        for cmd in [
+            "gh pr close 42 && echo --delete-branch",
+            "echo --delete-branch && gh pr close 42",
+            "echo hi && gh pr close 42 --delete-branch",
+            "gh pr merge 42 && echo --admin",
+            "cd /repo && gh pr merge 42 --admin",
+            "gh pr close 42 --delete-branch",
+        ]:
+            window = _leg_bounded_flag_scan_surface(
+                _strip_command_wrapper(f"Yes Run `{cmd}` now"), cmd
+            )
+            read_leg = _single_destructive_leg(cmd) or _single_detectable_leg(cmd) or cmd
+            mint_flags = sorted(
+                extract_command_context(cmd, flag_scan_text=window).get("bound_flags", [])
+            )
+            read_flags = sorted(
+                extract_command_context(read_leg).get("bound_flags", [])
+            )
+            assert mint_flags == read_flags, (
+                f"mint/read bind diverged for {cmd!r}: {mint_flags} != {read_flags}"
+            )
+
+    # --- push-to-main window controls ---
+
+    def test_trailing_lease_flag_binds_through_window(self, tmp_path):
+        """Truncation-hazard + wrapper-strip order pin: the faithful spelling with
+        the flag AFTER the positionals must keep binding — a window truncated at
+        the target, or composed BEFORE the wrapper strip (gluing the closing
+        backtick onto the trailing flag), would bind [] and flip the round-trip
+        to REFUSE. Second direction: the lease approval must NOT authorize a
+        plain push (set-equality both ways)."""
+        cmd = "git push origin main --force-with-lease"
+        q = "Push?"
+        opts = [_opt("Yes, push", f"On approval run: `{cmd}` now"), _opt("Cancel", "Abort")]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, push"}, tmp_path) == 0
+        assert _token_bound_flags(tmp_path) == ["--force-with-lease"]
+        assert _authorize(cmd, tmp_path) is None
+        assert _authorize("git push origin main", tmp_path) is not None
+
+    def test_value_spelling_compound_preserved_allow(self, tmp_path):
+        """Preserved-ALLOW control: the =value lease spelling + an echo lease
+        literal — the op leg's =value normalizes to the same bare canonical the
+        echo literal added, so set semantics collapse it and this compound
+        authorized before AND after the window. Pins that the window does not
+        disturb an already-correct compound."""
+        member = "git push --force-with-lease=main:abc123 origin main && echo --force-with-lease"
+        q = "Push?"
+        opts = [_opt("Yes, push", f"On approval run: `{member}`"), _opt("Cancel", "Abort")]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, push"}, tmp_path) == 0
+        assert _token_bound_flags(tmp_path) == ["--force-with-lease"]
+        assert _authorize(member, tmp_path) is None
+
+    def test_compound_refuse_upstream_of_bind(self, tmp_path):
+        """Compound-refuse orthogonality: >=2 destructive legs still refuse at the
+        mint, upstream of any flag binding."""
+        member = "gh pr merge 5 && git branch -Df victim"
+        q = "Proceed?"
+        opts = [_opt("Yes", f"On approval run: `{member}`"), _opt("Cancel", "Abort")]
+        _invoke_post([_q(q, opts)], {q: "Yes"}, tmp_path)
+        assert len(_minted_tokens(tmp_path)) == 0
+
+    # --- non-vacuity: in-memory counter-mutations, both halves, both directions ---
+
+    def test_window_is_non_vacuous_under_full_text_mutation(self, tmp_path, monkeypatch):
+        """MINT-half counter-mutation: monkeypatch the window back to the PRE-FIX
+        full-text surface (identity — the module-global binding Step 5 resolves
+        at call time) and assert the laundering channel RE-OPENS: the mint binds
+        the echo literal and the escalated execution AUTHORIZES. Proves the
+        channel-closed canaries are coupled to the window."""
+        member = "git push origin main && echo --force-with-lease"
+        escalated = "git push --force-with-lease origin main"
+        q = "Push?"
+        opts = [_opt("Yes, push", f"On approval run: `{member}`"), _opt("Cancel", "Abort")]
+        # direction 1 — fix present: bind [] and the escalation refuses
+        assert _invoke_post([_q(q, opts)], {q: "Yes, push"}, tmp_path) == 0
+        assert _token_bound_flags(tmp_path) == []
+        assert _authorize(escalated, tmp_path) is not None
+        # direction 2 — pre-fix surface restored: the channel re-opens
+        import merge_guard_post as post_mod
+        monkeypatch.setattr(post_mod, "_leg_bounded_flag_scan_surface", lambda text, cmd: text)
+        tmp2 = tmp_path / "prefix-sim"
+        tmp2.mkdir()
+        assert _invoke_post([_q(q, opts)], {q: "Yes, push"}, tmp2) == 0
+        assert _token_bound_flags(tmp2) == ["--force-with-lease"], (
+            "full-text mutation did not restore the pre-fix echo-literal bind — "
+            "the channel-closed canaries would be vacuous"
+        )
+        assert _authorize(escalated, tmp2) is None, (
+            "full-text mutation did not re-open the laundering channel"
+        )
+
+    def test_read_fallback_is_non_vacuous_under_tier2_neutering(self, tmp_path, monkeypatch):
+        """READ-half counter-mutation: neuter tier 2 (_single_detectable_leg →
+        None, the binding merge_guard_pre resolves at call time) and assert the
+        emergent close member's byte-identical re-approval flips BACK to DENY
+        (read falls back to the whole-command scan and binds the echo literal
+        against the [] token). Proves the both-shapes-cure canaries are coupled
+        to the read fallback, not just the window."""
+        member = "gh pr close 42 && echo --delete-branch"
+        q = "Close it?"
+        opts = [_opt("Yes, close", f"On approval run: `{member}`"), _opt("Cancel", "Abort")]
+        # direction 1 — fix present: byte-identical authorizes
+        assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
+        assert _token_bound_flags(tmp_path) == []
+        assert _authorize(member, tmp_path) is None
+        # direction 2 — tier 2 neutered: the emergent over-block returns
+        import merge_guard_pre as pre_mod
+        monkeypatch.setattr(pre_mod, "_single_detectable_leg", lambda c: None)
+        assert _authorize(member, tmp_path) is not None, (
+            "tier-2 neutering did not restore the emergent-danger over-block — "
+            "the both-shapes-cure canaries would be vacuous"
+        )
 
 
 class TestPrivilegedFlagReadFloorSeam:

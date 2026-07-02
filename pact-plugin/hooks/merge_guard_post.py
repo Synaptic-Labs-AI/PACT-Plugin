@@ -100,6 +100,12 @@ try:
         # read hook uses, so mint and read can never disagree on danger/compound.
         is_dangerous_command,
         is_compound_destructive_command,
+        # #1083: the mint flag-scan window runs the SAME two-tier leg selection
+        # (unique dangerous leg -> unique detectable leg) the read bind seam runs,
+        # so mint and read bind over identical leg semantics BY CONSTRUCTION —
+        # not via two parallel reimplementations that can rot apart.
+        _single_destructive_leg,
+        _single_detectable_leg,
     )
     from shared.tool_response import extract_tool_response
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-loud catch-all
@@ -243,6 +249,40 @@ def _strip_command_wrapper(flag_scan_text: str) -> str:
     quotes) on the mint's flag-scan surface so its #1042 privileged-flag set matches
     the read side's on the bare command. See `_FLAG_SCAN_WRAPPER_TABLE` rationale."""
     return flag_scan_text.translate(_FLAG_SCAN_WRAPPER_TABLE)
+
+
+def _leg_bounded_flag_scan_surface(flag_scan_text: str, the_command: str) -> str:
+    """#1083: bound the #1042 privileged-flag scan to the destructive command's own
+    LEG within the option text. Anchors at the minted command's region, then runs
+    the SAME two-tier leg selection the read bind seam runs over the anchored
+    suffix — unique dangerous leg, else unique detectable leg (the emergent-danger
+    case, where the op's leg is not dangerous in isolation), else the_command.
+    Reusing _single_destructive_leg/_single_detectable_leg (not a reimplementation)
+    makes mint and read converge on the op's OWN leg BY CONSTRUCTION for every
+    compound shape — op-first (`close 42 && echo X`), op-later (`echo X && close
+    42`), and op-later-with-real-flag (`cd /repo && gh pr merge 42 --admin`, where
+    a positional leg[0] window would DROP the op's own flag and over-block the
+    faithful click). Wider than the region (keeps the #1042 truncation-recovery
+    property: a flag after a quoted argument, same leg, still binds); narrower
+    than the full text (a flag literal in a benign continuation leg or on a later
+    line no longer binds — that full-text bind both DENIED the byte-identical
+    faithful re-approval, an over-block, and could authorize an ESCALATED
+    single-command execution approved as plain, a laundering channel). Fallback on
+    a failed anchor OR an ambiguous suffix (no unique dangerous/detectable leg) is
+    the_command alone — fail-toward-over-block (mint may bind fewer flags -> set
+    mismatch -> DENY), NEVER a wider surface. The selection runs on the ANCHORED
+    suffix, never the raw option text: option text is PROSE+command, where
+    newline/semicolon carry prose meanings and prose legs are not commands —
+    anchoring AT the command scopes leg semantics to the command's own span."""
+    idx = flag_scan_text.find(the_command)
+    if idx == -1:
+        return the_command
+    suffix = flag_scan_text[idx:]
+    return (
+        _single_destructive_leg(suffix)
+        or _single_detectable_leg(suffix)
+        or the_command
+    )
 
 
 def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
@@ -406,15 +446,22 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
 
     # ── Step 5: extract the single distinct command's context to mint. Op/target
     # are derived from `the_command` (region-anchored). The privileged-flag scan
-    # (#1042) is widened to the FULL selected-option text so a flag after a quoted
-    # argument is not lost to bare-command truncation; #1059: the wrapping backtick/
-    # curly delimiters are space-stripped first (_strip_command_wrapper) so the
-    # mint's flag set matches the read side's on the bare command — the #1042
-    # set-equality stays EXACT, so an exec-time EXTRA flag still REFUSES. ──
+    # (#1042) runs over the command's LEG-BOUNDED window within the option text
+    # (#1083, _leg_bounded_flag_scan_surface): wider than the bare-command region,
+    # so a flag after a quoted argument is not lost to truncation, but bounded at
+    # the command's own leg so a flag literal in a benign continuation leg no
+    # longer binds (that full-text bind denied the faithful byte-identical
+    # re-approval AND could authorize an escalated execution approved as plain).
+    # #1059: the wrapping backtick/curly delimiters are space-stripped FIRST
+    # (_strip_command_wrapper, BEFORE the window's find-anchor, so the anchor sees
+    # the same spacing the region parser produced — order is load-bearing) — the
+    # #1042 set-equality stays EXACT, so an exec-time EXTRA flag still REFUSES. ──
     return MintResult(
         extract_command_context(
             the_command,
-            flag_scan_text=_strip_command_wrapper(" ".join(selected_option_texts)),
+            flag_scan_text=_leg_bounded_flag_scan_surface(
+                _strip_command_wrapper(" ".join(selected_option_texts)), the_command
+            ),
         ),
         None,
     )

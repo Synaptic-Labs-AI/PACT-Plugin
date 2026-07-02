@@ -976,6 +976,191 @@ class TestOverBlockGoneRegression:
         assert (mgc.is_dangerous_command(cmd) == (mgc.detect_command_operation_type(cmd) is not None)) is False
 
 
+class TestCrossLegFlagLeakOverBlockGone:
+    """#1078: the flag-condition union arm derived FLAGS from the WHOLE command
+    (`_shell_tokenize(command)`) while POSITIONALS came from the first executable
+    leg — so a force/delete flag in a benign CONTINUATION leg leaked in and
+    mislabeled a benign first-leg op (`git push origin feature && rm -rf build/`
+    gated as force-push; `git push && rm -rf build/` was PERMANENTLY blocked:
+    gated with no extractable target → unmintable). The fix anchors the ENTIRE
+    arm — tokens, coarse-shape predicates, extractor inputs — to
+    `_executable_prefix`, curing the close and branch-delete sibling arms at the
+    same shared site. Mirrors TestOverBlockGoneRegression's cross-leg-gone block;
+    the counter-mutation below proves these assertions are coupled to THIS fix."""
+
+    # --- the 5 cured forms (+ separator variants of the primary) ---
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git push origin feature && rm -rf build/",   # was mislabeled force-push
+            "git push origin feature ; rm -rf build/",    # ; variant
+            "git push origin feature | rm -rf build/",    # | variant
+            "git push && rm -rf build/",                  # was PERMANENTLY blocked (no target)
+            "git push origin && rm -rf build/",           # was PERMANENTLY blocked
+            "gh pr close 42 && git branch -d temp",       # close sibling: leaked -d
+            "git branch --delete temp && git checkout --force main",  # branch-delete sibling: leaked --force
+        ],
+    )
+    def test_cross_leg_flag_leak_gone(self, cmd):
+        assert D(cmd) is False, f"OVER-BLOCK regressed: cross-leg flag leak re-appeared: {cmd!r}"
+
+    # --- non-vacuity contrast: single-first-leg flag forms still gate, correct op ---
+
+    @pytest.mark.parametrize(
+        "cmd,expected_op",
+        [
+            ("git push --force origin main", "force-push"),
+            ("git branch -Df temp", "branch-delete"),
+            ("gh pr close 5 -d", "close"),
+        ],
+    )
+    def test_single_first_leg_flag_form_still_gates_control(self, cmd, expected_op):
+        """Non-vacuity control: the same danger flags IN the first leg still gate
+        with the correct op-class, so the D=False assertions above discriminate
+        first-leg-anchoring from a blanket 'compound is always safe'."""
+        assert D(cmd) is True
+        assert OP(cmd) == expected_op
+
+    # --- parity: no gated-but-unmintable state for any cured form ---
+
+    @pytest.mark.parametrize(
+        "cmd,expected_op",
+        [
+            # union fallback abstains -> detect None; the equality holds (False==False)
+            ("git push origin feature && rm -rf build/", None),
+            ("git push && rm -rf build/", None),
+            ("git push origin && rm -rf build/", None),
+            ("git branch --delete temp && git checkout --force main", None),
+            # close sibling: detect stays "close" (see docstring), still ungated
+            ("gh pr close 42 && git branch -d temp", "close"),
+        ],
+    )
+    def test_no_gated_but_unmintable_state_for_cured_forms(self, cmd, expected_op):
+        """No cured form can be gated-but-unmintable (that state needs D=True +
+        detect=None; every row here is D=False). For the push/branch rows the
+        stronger mint==read EQUALITY also holds (both sides reach the same fixed
+        union arm and abstain). The close row differs BY DELIBERATE PRE-EXISTING
+        DESIGN: detect's literal close arm classifies ANY `gh pr close` variant
+        ('"close" - gh pr close (any variant)' per its own docstring — the close
+        class is folded for symmetric authorization), so OP stays "close" while
+        the read floor abstains — mint-wider-than-read, the SAFE direction (an
+        ungated command never consults a token). The "close" expectation below
+        DOCUMENTS that pre-existing behavior; it is NOT a contract that the close
+        row must never become None — if a future change makes bare-close detect
+        None, that is a separate design question, not a regression this test
+        should veto."""
+        assert D(cmd) is False
+        assert OP(cmd) == expected_op
+
+    # --- literal force-push arms are leg-isolated too (#1082 — the former
+    #     residual pins FLIPPED with the fix, per their own docstring contract) ---
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git push origin feature && rm -f stale.txt",
+            "git push origin feature && rm --force stale.txt",
+            "git push && rm -f x.txt",   # was the PERMANENT block (no target -> unmintable)
+            "git push origin feature ; rm -f stale.txt",   # ; variant
+            "git push origin feature | rm -f stale.txt",   # | variant
+        ],
+    )
+    def test_literal_arm_cross_leg_span_cured(self, cmd):
+        """#1082 CURED: the literal force-push arms (_FORCE_PUSH_LITERAL_ARMS, one
+        SSOT feeding read floor AND detect) now match PER-LEG over the shared
+        _slice_stripped_legs substrate, so a benign push chained with `rm -f`/
+        `rm --force` no longer gates — including the formerly PERMANENT no-target
+        member. Parity: detect abstains identically (per-leg force miss; the
+        first-leg-anchored union arm returns None), so no gated-but-unmintable
+        state can arise."""
+        assert D(cmd) is False, f"literal-arm cross-leg over-block regressed: {cmd!r}"
+        assert OP(cmd) is None
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git push --force origin main",                         # single leg
+            "cd /repo && git push --force origin main",             # flag+push together in a NON-FIRST leg
+            "git push --force origin main && echo ok",              # first-leg force + benign continuation
+            "git push --force origin main 2>&1",                    # FD redirect — one leg (FD-neutralized)
+            'git push --push-option "a && b" --force origin main',  # QUOTED separator — one leg
+            'bash -c "git push --force origin main"',               # quoted single leg
+            "GIT_TRACE=1 git push --force origin main",             # env-prefix
+            "git push --force \\\norigin main",                     # line continuation
+        ],
+    )
+    def test_literal_arm_same_leg_still_gates(self, cmd):
+        """The no-new-under-block set: push + force-class flag co-occurring within
+        ONE leg still gates in ANY leg position (the literal floor keeps its
+        match-anywhere purpose, per leg). Includes the quoted-separator row — a
+        `&&` inside quotes is not a leg boundary — which a tempered-regex span
+        (`[^&|;]*`) would have wrongly ungated; that is why the fix is per-leg
+        matching over the substrate, not a regex rewrite."""
+        assert D(cmd) is True, f"NEW UNDER-BLOCK: same-leg force-push stopped gating: {cmd!r}"
+
+    def test_literal_arm_same_leg_control_detects_force_push(self):
+        """Non-vacuity control + mint parity for the preserved set: the
+        non-first-leg same-leg form classifies force-push on the mint side too."""
+        assert OP("cd /repo && git push --force origin main") == "force-push"
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git push origin feature # then rm -f stale.txt",   # comment strip
+            "git push origin feature && echo 'rm -f x'",        # echo-argument strip
+            "git push origin feature <<EOF\nrm -f x && git push --force origin main\nEOF",  # heredoc body strip
+        ],
+    )
+    def test_literal_arm_strip_pipeline_non_divergence(self, cmd):
+        """Per-leg matching runs on the SAME stripped substrate the whole-string
+        matching used, so every strip (comment / echo-argument / heredoc) acts
+        identically on both — these rows were ungated before the leg isolation
+        and stay ungated after it. The only behavioral delta of the fix is the
+        leg PARTITION of the same stripped string."""
+        assert D(cmd) is False
+
+    def test_literal_arm_leg_isolation_is_non_vacuous_under_whole_string_mutation(self, monkeypatch):
+        """Both-direction counter-mutation for the literal-arm leg isolation:
+        monkeypatch `_slice_stripped_legs` → single-whole-leg (the pre-fix
+        whole-string surface; the module-global binding both is_dangerous_command
+        and _split_into_legs resolve at call time) and assert the formerly
+        PERMANENT member flips back to dangerous — proving the cured rows above
+        are coupled to the leg partition, not vacuously green. In-memory
+        (monkeypatch) by design — no git-checkout mutation in the shared
+        worktree."""
+        cmd = "git push && rm -f x.txt"
+        # direction 1 — fix present: benign compound runs free
+        assert mgc.is_dangerous_command(cmd) is False
+        # direction 2 — pre-fix whole-string surface restored: the over-block returns
+        monkeypatch.setattr(mgc, "_slice_stripped_legs", lambda s: [s])
+        assert mgc.is_dangerous_command(cmd) is True, (
+            "whole-leg mutation did not restore the pre-fix literal-arm over-block "
+            "— the cured-row assertions would be vacuous"
+        )
+
+    # --- non-vacuity: in-memory counter-mutation, executed in both directions ---
+
+    def test_first_leg_anchoring_is_non_vacuous_under_whole_command_mutation(self, monkeypatch):
+        """Simulate the PRE-FIX whole-command feed by monkeypatching
+        `_executable_prefix` → identity (the module-global binding
+        `_flag_condition_danger_op` resolves at call time), and assert the primary
+        cured form flips BACK to dangerous — proving the D=False assertions above
+        are coupled to the first-leg anchoring, not vacuously green. Identity is a
+        faithful pre-fix simulation because the fix routes the entire arm through
+        that one feed. In-memory (monkeypatch) by design — a git-revert mutation
+        would clobber peers' uncommitted work in the shared worktree."""
+        cmd = "git push origin feature && rm -rf build/"
+        # direction 1 — fix present: benign compound runs free
+        assert mgc.is_dangerous_command(cmd) is False
+        # direction 2 — pre-fix feed restored: the cross-leg leak returns
+        monkeypatch.setattr(mgc, "_executable_prefix", lambda c: c)
+        assert mgc.is_dangerous_command(cmd) is True, (
+            "identity-prefix mutation did not restore the pre-fix over-block — "
+            "the cured-form assertions would be vacuous"
+        )
+
+
 class TestAcceptedRecognitionLimitationPins:
     """FORWARD-PROTECTION pins for the ACCEPTED conservative-recognition limitation
     (the review-cycle-1 SECURITY-HALT disposition). These forms run UNGATED BY
@@ -1016,8 +1201,22 @@ class TestAcceptedRecognitionLimitationPins:
         classifier covers gh-api/curl/wget only; an httpie protection READ arm would
         gate a form the mint cannot bind = a gated-but-unmintable over-block (itself a
         faithful-click block). Leaving it ungated keeps read == mint. Full httpie
-        gate+mint is a deferred scope expansion, not a half-measure read arm."""
+        gate+mint was DECLINED (maintainer ruled httpie out-of-charter), not a
+        half-measure read arm."""
         assert D("http DELETE https://api.github.com/repos/o/r/branches/main/protection") is False
+
+    def test_httpie_git_refs_ungated_by_design(self):
+        """ACCEPTED LIMITATION (#1077) — sibling of the protection pin above. The
+        httpie ref-mutation read arms were REMOVED (they gated forms the
+        gh-api/curl/wget-only mint could not bind = a PERMANENT gated-but-unmintable
+        over-block). Ungated BY DESIGN, #1079-consistent; do NOT re-gate."""
+        assert D("http DELETE https://api.github.com/repos/o/r/git/refs/heads/feature") is False
+
+    def test_httpie_merge_ungated_by_design(self):
+        """ACCEPTED LIMITATION (#1077) — sibling of the protection pin above: httpie
+        merge mutation is ungated BY DESIGN (same removed-read-arm rationale as the
+        git/refs pin); do NOT re-gate."""
+        assert D("http PUT https://api.github.com/repos/o/r/pulls/42/merge") is False
 
     @pytest.mark.parametrize(
         "cmd,expected_op",
@@ -1039,6 +1238,26 @@ class TestAcceptedRecognitionLimitationPins:
         assert D(cmd) is True, f"UNDER-BLOCK: literal arm stopped gating in a non-first leg: {cmd!r}"
         assert OP(cmd) == expected_op
 
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "cd /repo && git branch -Df temp",   # cluster force-delete in a non-first leg
+            "cd /repo && gh pr close 5 -d",      # short -d close in a non-first leg
+        ],
+    )
+    def test_non_first_leg_cluster_flag_forms_ungated_by_design(self, cmd):
+        """ACCEPTED LIMITATION — do NOT fix. The flag-condition union arm is
+        FIRST-LEG-ANCHORED, so a clustered/short danger flag in a NON-FIRST leg
+        loses union coverage. Re-detecting these requires whole-command or per-leg
+        flag derivation — exactly the cross-leg flag leak the anchoring removed /
+        the pinned over-block reintroduction. The idiomatic spellings (`-D`,
+        `--delete-branch`) remain caught match-anywhere by the literal floor (the
+        contrast rows in this class)."""
+        assert D(cmd) is False, (
+            f"Recognition was widened to chase a non-first-leg cluster flag — this "
+            f"RE-INTRODUCES a faithful-click over-block. Do NOT 'fix' this form: {cmd!r}"
+        )
+
 
 class TestParityCanaryReconciledForWidenedForms:
     """§9.A parity reconciliation (review-cycle-1). After the mint-widening, the mint
@@ -1055,7 +1274,79 @@ class TestParityCanaryReconciledForWidenedForms:
             "gh api -X Delete repos/o/r/branches/main/protection",        # mixed-case
             "gh -R o/r api -X DELETE repos/o/r/branches/main/protection", # global-flag framing
             "curl -X put https://git.example.com/repos/o/r/branches/main/protection",  # curl lowercase
+            # Lease-to-default fold (#1064): parity holds POSITIVELY for the
+            # lease-to-default spellings (read gates AND mint classifies — the
+            # mint arm's lease-excluding lookahead was the gated-but-unmintable
+            # over-block this canary hunts) ...
+            "git push --force-with-lease origin main",
+            "git push --force-with-lease origin master",
+            "git push --force-with-lease=main:abc123 origin main",
+            # ... and NEGATIVELY for lease-to-feature (ungated AND unminted —
+            # the fold must not widen beyond the default-branch arm).
+            "git push --force-with-lease origin feature",
         ],
     )
     def test_mint_equals_read_parity_now_holds(self, cmd):
         assert mgc.is_dangerous_command(cmd) == (mgc.detect_command_operation_type(cmd) is not None)
+
+
+class TestHttpieMembershipCompleteness:
+    """Executable membership-completeness check for the httpie drop (#1077).
+
+    With the two httpie read-floor arms (git/refs + merge) removed, NO executable
+    gate site may see httpie: the read floor must not gate (D is False) AND the
+    mint classifier must not classify (OP is None) for the full httpie probe set,
+    in both alias spellings (`http` / `https`). Both httpie families are thereby
+    tolerated under-blocks, #1079-consistent: ref-mutation/merge (newly dropped)
+    and branch-protection (never gated).
+
+    If ANY row flips, either a second httpie gate site exists (the two removed
+    arms were NOT the complete membership) or httpie was re-gated without mint
+    coverage — both re-create the gated-but-unmintable over-block this change
+    removed. Do NOT re-gate; httpie is wholly out of charter.
+    """
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # ref-mutation family (the removed git/refs arm's probe surface)
+            "http DELETE https://api.github.com/repos/o/r/git/refs/heads/feature",
+            "http PATCH https://api.github.com/repos/o/r/git/refs/heads/feature",
+            "http POST https://api.github.com/repos/o/r/git/refs",
+            "http PUT https://api.github.com/repos/o/r/git/refs/heads/feature",
+            # merge family (the removed merge arm's probe surface)
+            "http DELETE https://api.github.com/repos/o/r/pulls/42/merge",
+            "http PATCH https://api.github.com/repos/o/r/pulls/42/merge",
+            "http PUT https://api.github.com/repos/o/r/pulls/42/merge",
+            # flag/case variants the removed arms used to catch
+            "http -a user:pass DELETE https://api.github.com/repos/o/r/git/refs/heads/feature",
+            "http delete https://api.github.com/repos/o/r/git/refs/heads/feature",
+            # `https` alias spelling of both families
+            "https DELETE https://api.github.com/repos/o/r/git/refs/heads/feature",
+            "https PUT https://api.github.com/repos/o/r/pulls/42/merge",
+            # branch-protection family (never gated — #1079)
+            "http DELETE https://api.github.com/repos/o/r/branches/main/protection",
+            "https PUT https://api.github.com/repos/o/r/branches/main/protection",
+        ],
+    )
+    def test_httpie_membership_is_empty_read_and_mint(self, cmd):
+        assert D(cmd) is False, (
+            f"httpie gate site found on the READ floor — re-creates the "
+            f"gated-but-unmintable over-block: {cmd!r}"
+        )
+        assert OP(cmd) is None, (
+            f"httpie gate site found in the MINT classifier — contradicts the "
+            f"removal-completeness certificate: {cmd!r}"
+        )
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # discriminating positives: the IDIOMATIC clients stay gated, proving the
+            # all-False httpie rows above are a real membership fact, not a broken probe
+            "wget --method=DELETE https://api.github.com/repos/o/r/git/refs/heads/feature",
+            "curl -X DELETE https://api.github.com/repos/o/r/git/refs/heads/feature",
+        ],
+    )
+    def test_idiomatic_client_contrast_still_gates(self, cmd):
+        assert D(cmd) is True, f"idiomatic API client stopped gating: {cmd!r}"
