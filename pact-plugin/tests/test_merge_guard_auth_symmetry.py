@@ -1064,7 +1064,7 @@ class TestLegBoundedMintWindow:
         cmd = "gh pr close 42"
         q = "Close it?"
         opts = [_opt("Yes, close", f"On approval run: `{cmd}`"), _opt("Cancel", "Abort")]
-        _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path)
+        assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
         assert len(_minted_tokens(tmp_path)) == 0
         assert _authorize(cmd, tmp_path) is None
 
@@ -1206,7 +1206,7 @@ class TestLegBoundedMintWindow:
         member = "gh pr merge 5 && git branch -Df victim"
         q = "Proceed?"
         opts = [_opt("Yes", f"On approval run: `{member}`"), _opt("Cancel", "Abort")]
-        _invoke_post([_q(q, opts)], {q: "Yes"}, tmp_path)
+        assert _invoke_post([_q(q, opts)], {q: "Yes"}, tmp_path) == 0
         assert len(_minted_tokens(tmp_path)) == 0
 
     # --- non-vacuity: in-memory counter-mutations, both halves, both directions ---
@@ -1259,7 +1259,7 @@ class TestLegBoundedMintWindow:
         opts = [_opt("Yes, close", f"On approval run: `{ambiguous}`"), _opt("Cancel", "Abort")]
         # direction 1 — fix present: not-dangerous, mints nothing, escalation denies
         assert is_dangerous_command(ambiguous) is False
-        _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path)
+        assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
         assert len(_minted_tokens(tmp_path)) == 0
         assert _authorize(escalated, tmp_path) is not None
         # direction 2 — pre-fix whole-command close match restored: laundering re-opens
@@ -1271,7 +1271,7 @@ class TestLegBoundedMintWindow:
         )
         tmp2 = tmp_path / "prefix-sim"
         tmp2.mkdir()
-        _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp2)
+        assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp2) == 0
         assert len(_minted_tokens(tmp2)) == 1, (
             "whole-command close match did not restore the pre-fix mint — "
             "the close laundering-closed canary would be vacuous"
