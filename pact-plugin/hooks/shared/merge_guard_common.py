@@ -2381,8 +2381,10 @@ def is_dangerous_command(command: str) -> bool:
     # provenance to _split_into_legs (normalize + strip, above), so read-floor legs
     # and substrate legs can never diverge, and the strip is not recomputed. An arm
     # fires iff push and the force-class flag co-occur within ONE leg, in ANY leg
-    # position (the match-anywhere purpose, per leg).
-    for _leg in _slice_stripped_legs(stripped):
+    # position (the match-anywhere purpose, per leg). The legs are computed ONCE
+    # here and shared by all three literal-arm loops below (force-push, close, API).
+    legs = _slice_stripped_legs(stripped)
+    for _leg in legs:
         if any(arm.search(_leg) for arm in _FORCE_PUSH_LITERAL_ARMS):
             return True
     # Literal close arms, matched PER-LEG (#1087): same leg substrate and strip
@@ -2390,7 +2392,7 @@ def is_dangerous_command(command: str) -> bool:
     # `--delete-branch` co-occur within ONE leg — so the ambiguous cross-leg
     # multi-close is is_dangerous=False here, the mint write-gate refuses (no token),
     # and the escalated-single laundering channel is structurally closed.
-    for _leg in _slice_stripped_legs(stripped):
+    for _leg in legs:
         if any(arm.search(_leg) for arm in _CLOSE_LITERAL_ARMS):
             return True
     # Literal API danger arms, matched PER-LEG (#1086): same leg substrate and strip
@@ -2399,7 +2401,7 @@ def is_dangerous_command(command: str) -> bool:
     # leg — so a method/body-flag token in a benign continuation leg no longer
     # over-blocks the compound, while a same-leg dangerous API call still gates. The
     # negative-lookahead arms operate within-leg (correct exclusion/inclusion direction).
-    for _leg in _slice_stripped_legs(stripped):
+    for _leg in legs:
         if any(arm.search(_leg) for arm in _API_LITERAL_ARMS):
             return True
     # ADDITIVE union arm (INV-AU): a quote-aware normalized-flag danger CONDITION across

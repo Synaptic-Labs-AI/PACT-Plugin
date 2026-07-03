@@ -474,7 +474,7 @@ class TestEmergentDangerClassIsCloseOnly:
     what this pin guards: it is the CLOSE HALF of the tier-2-retention tripwire
     (OPEN-Q A/D). Tier 2 (_single_detectable_leg) is retained as defense-in-depth
     for a FUTURE op that becomes detect-positive-but-not-dangerous; if one does,
-    this pin (and the API half, test_api_git_refs_get_leg_is_detect_negative
+    this pin (and the API half, test_bare_api_form_is_detect_negative
     below) flips RED, catching the re-populated emergent class before it can
     launder. The bare-form assertions below are UNCHANGED by the per-leg
     conversion — they test bare close / bare-dangerous ops / a bare API GET leg,
@@ -525,10 +525,16 @@ class TestEmergentDangerClassIsCloseOnly:
         conversion, not laundering channels). If a future edit makes any bare API
         form detect-POSITIVE (classifiable without a mutating method, i.e. isolable
         like close), that op joins the emergent class and gains the mint/read
-        isolation asymmetry #1083 fixed for close — a laundering channel. This
-        assertion FAILS FIRST, catching the re-open before it ships; together with
-        the close half it is the invariant that justifies retaining tier 2
-        (OPEN-Q A), and it MUST remain a standing merge gate."""
+        isolation asymmetry #1083 fixed for close — a laundering channel, and this
+        assertion FAILS FIRST. Coverage is ENUMERATIVE, not universal: it pins the
+        bare forms of the API families the #1086 arms target, so it catches a
+        REGRESSION that makes one of THEM isolable — but a genuinely-new op class
+        OUTSIDE this enumeration (a new endpoint family, or a non-API op) could
+        still re-populate the emergent class WITHOUT tripping this pin. It is a
+        strong regression tripwire for the known surface, not a universal
+        guarantee; together with the close half it is the (enumerated) evidence
+        that justifies retaining tier 2 (OPEN-Q A), and it MUST remain a standing
+        merge gate."""
         assert OP(cmd) is None, (
             f"bare API form became detect-positive: {cmd!r} — it would join the "
             f"close emergent-danger class and gain a laundering asymmetry (re-open)"

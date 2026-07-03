@@ -1021,7 +1021,7 @@ class TestLegBoundedMintWindow:
         OPEN-Q A)."""
         q = "Close it?"
         opts = [_opt("Yes, close", f"On approval run: `{member}`"), _opt("Cancel", "Abort")]
-        _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path)
+        assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
         assert len(_minted_tokens(tmp_path)) == 0
         assert _authorize(member, tmp_path) is None
 
@@ -1106,7 +1106,7 @@ class TestLegBoundedMintWindow:
         ambiguous = "gh pr close 42 && gh pr close 43 && echo --delete-branch"
         q = "Close it?"
         opts = [_opt("Yes, close", f"On approval run: `{ambiguous}`"), _opt("Cancel", "Abort")]
-        _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path)
+        assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
         assert len(_minted_tokens(tmp_path)) == 0
         assert _authorize("gh pr close 42 --delete-branch", tmp_path) is not None
 
