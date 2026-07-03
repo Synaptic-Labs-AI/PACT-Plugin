@@ -1603,6 +1603,281 @@ class TestApiMergeMintParity:
         assert ctl is not None, "CLI-merge control must be unaffected"
 
 
+# The endpoint (`.../repos/o/r/pulls/N/merge`) is the target PR; a decoy
+# `pulls/M/merge` in a flag VALUE or another leg must never be the bound target.
+# These helpers build the mint→authorize seam once for the endpoint-position suite.
+def _mint_pr(cmd):
+    """Mint `cmd` and return the bound pr_number (or None if it did not mint)."""
+    ctx, _reason = mint(cmd)
+    return ctx.get("pr_number") if ctx is not None else None
+
+
+def _authorize_standalone(approve_cmd, standalone_cmd, tmp_path):
+    """Mint the approval, write the token, then run the read-side authorization
+    for a DIFFERENT standalone command. Returns 'ALLOW' | 'DENY' | 'NO-MINT'."""
+    ctx, _reason = mint(approve_cmd)
+    if ctx is None:
+        return "NO-MINT"
+    write_token(ctx, token_dir=tmp_path)
+    err = check_merge_authorization(standalone_cmd, token_dir=tmp_path)
+    return "ALLOW" if err is None else "DENY"
+
+
+class TestApiMergeEndpointPositionLaunderingClosed:
+    """#1096 endpoint-position fix (commit that added `_api_merge_leg_endpoint`) —
+    the REMEDIATION cert for the BLOCKING target-confusion laundering the prior
+    (flat first-match) extractor allowed.
+
+    ROOT: `_extract_api_merge_pr` did `re.search(r"pulls/(\\d+)/merge", command)` —
+    a FLAT whole-string first-match that bound the FIRST `pulls/<M>/merge`
+    substring, which need not be the endpoint. A decoy PR in a flag body
+    (`-f note=pulls/5/merge`), a header, the `-R` value, or an earlier leg
+    (`echo pulls/5/merge && …`) bound a token `{merge, 5}`; a standalone
+    `gh api -X PUT .../pulls/5/merge` (NEVER approved) then AUTHORIZED — a consent
+    breach (approve merge-6 → authorize merge-5).
+
+    FIX: bind the ENDPOINT-position PR (the URL positional the command actually
+    merges) via the shared per-leg helper + shlex-view positional walk. Every row
+    below approves endpoint-6 and asserts (a) the token binds 6, and (b) the
+    standalone decoy-5 merge DENIES for lack of a matching token — the laundering
+    is CLOSED. Priority: this is the laundering-closed (security) direction; the
+    no-over-block (§0 inviolable) direction is the sibling class below."""
+
+    # (name, approval command [endpoint 6, decoy 5 embedded], standalone decoy-5)
+    _DECOY = "gh api -X PUT repos/o/r/pulls/5/merge"
+    _CURL_DECOY = "curl -X PUT https://api.github.com/repos/o/r/pulls/5/merge"
+
+    @pytest.mark.parametrize(
+        "approve,standalone",
+        [
+            ("echo pulls/5/merge && gh api -X PUT repos/o/r/pulls/6/merge", _DECOY),
+            ("gh api -X PUT -f note=pulls/5/merge repos/o/r/pulls/6/merge", _DECOY),
+            ('gh api -X PUT -f "note=pulls/5/merge" repos/o/r/pulls/6/merge', _DECOY),
+            ("gh api -X PUT -f note='pulls/5/merge' repos/o/r/pulls/6/merge", _DECOY),
+            ('gh api -H "X-Ref:pulls/5/merge" -X PUT repos/o/r/pulls/6/merge', _DECOY),
+            ("gh -R pulls/5/merge api repos/o/r/pulls/6/merge -X PUT", _DECOY),
+            ("gh api -X PUT -f x=pulls/5/merge repos/o/r/pulls/6/merge", _DECOY),
+            ("curl -X PUT -d note=pulls/5/merge https://api.github.com/repos/o/r/pulls/6/merge", _CURL_DECOY),
+        ],
+    )
+    def test_decoy_binds_endpoint_and_standalone_decoy_denies(
+        self, approve, standalone, tmp_path
+    ):
+        """Every confirmed exploit: the approval binds the ENDPOINT (6), and the
+        never-approved standalone decoy-5 merge DENIES. Pre-fix the flat
+        first-match bound 5 and this standalone AUTHORIZED (the laundering)."""
+        assert _mint_pr(approve) == "6", (
+            f"endpoint-position bind regressed (bound a decoy): {approve!r}"
+        )
+        assert _authorize_standalone(approve, standalone, tmp_path) == "DENY", (
+            f"LAUNDERING OPEN: standalone decoy-5 authorized off the {approve!r} token"
+        )
+
+    def test_base_no_token_denies_standalone_decoy(self, tmp_path):
+        """Load-bearing base check: with NO token minted, the standalone decoy-5
+        merge DENIES — so the pre-fix ALLOW was caused by the mis-bound token,
+        not an ambient allow. This isolates the mis-bind as the laundering cause."""
+        err = check_merge_authorization(self._DECOY, token_dir=tmp_path)
+        assert err is not None, "standalone api-merge must DENY with no token"
+
+    def test_laundering_closed_non_vacuous_under_flat_extractor(self, monkeypatch):
+        """NON-VACUITY (in-memory): restore the pre-fix FLAT first-match extractor
+        (`re.search(pulls/(\\d+)/merge)` over the whole command — the shape at
+        commit-parent that bound a decoy) on the command-level `_extract_api_merge_pr`
+        that `extract_command_context` calls, and assert the `-f` body decoy
+        RE-BINDS the decoy 5 — proving the endpoint-position assertions above are
+        coupled to the walk, not vacuously green. The module-global binding
+        resolves at call time."""
+        approve = "gh api -X PUT -f note=pulls/5/merge repos/o/r/pulls/6/merge"
+        # direction 1 — fix present: binds the endpoint
+        assert _mint_pr(approve) == "6"
+        # direction 2 — flat first-match restored: binds the decoy again
+        def flat(command):
+            m = _real_re.search(r"pulls/(\d+)/merge\b", command)
+            return m.group(1) if m else None
+        monkeypatch.setattr(mgc, "_extract_api_merge_pr", flat)
+        assert _mint_pr(approve) == "5", (
+            "flat-extractor mutation did not re-bind the decoy — the "
+            "laundering-closed assertions would be vacuous"
+        )
+
+
+class TestApiMergeEndpointNoOverBlock:
+    """#1096 endpoint-position fix — the §0 INVIOLABLE no-over-block direction:
+    every faithful api-merge binds its CORRECT endpoint and round-trips, and the
+    fix never returns None for a recognized merge (no gated-but-unmintable)."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "gh api -X PUT repos/o/r/pulls/6/merge",
+            "gh api --method PATCH repos/o/r/pulls/6/merge",
+            "gh api repos/o/r/pulls/6/merge -X POST",          # method-after-path
+            "curl -X PUT https://api.github.com/repos/o/r/pulls/6/merge",
+            "wget --method=PUT https://api.github.com/repos/o/r/pulls/6/merge",  # attached (wget native)
+            "gh -R o/r api repos/o/r/pulls/6/merge -X PUT",     # global-flag
+            "curl --url https://api.github.com/repos/o/r/pulls/6/merge -X PUT",  # --url endpoint source
+            "gh api -X PUT -f note=pulls/5/merge repos/o/r/pulls/6/merge",  # body-COINCIDENCE faithful
+        ],
+    )
+    def test_faithful_spelling_binds_correct_endpoint(self, cmd):
+        """Every faithful spelling mints its CORRECT endpoint (6), including the
+        body-coincidence merge whose `-f note` happens to mention pulls/5 — the
+        endpoint positional (6) is bound, never the body decoy, and never None."""
+        assert _mint_pr(cmd) == "6", f"faithful api-merge bound wrong/None: {cmd!r}"
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "gh api -X PUT repos/o/r/pulls/6/merge",
+            "curl -X PUT https://api.github.com/repos/o/r/pulls/6/merge",
+            "gh api -X PUT -f note=pulls/5/merge repos/o/r/pulls/6/merge",
+        ],
+    )
+    def test_faithful_round_trip_authorizes(self, cmd, tmp_path):
+        """The faithful click round-trips: approve → mint → byte-identical
+        re-execution AUTHORIZES (the §0 inviolable guarantee)."""
+        assert _authorize_standalone(cmd, cmd, tmp_path) == "ALLOW", (
+            f"faithful api-merge round-trip over-blocked: {cmd!r}"
+        )
+
+    def test_tokenizer_failure_still_binds_endpoint(self):
+        """Over-block-safe fallback: an unbalanced-quote faithful merge (shlex
+        tokenizer returns None) still binds the endpoint from the stripped/raw
+        first-match — NEVER None for a recognized leg (a mis-parse must not gate
+        a faithful merge)."""
+        cmd = 'gh api -X PUT -f note="unbalanced repos/o/r/pulls/6/merge'
+        assert OP(cmd) == "merge"
+        assert _mint_pr(cmd) == "6", "tokenizer-failure fallback returned None (over-block)"
+
+    def test_gh_api_attached_method_is_1079_underblock_not_overblock(self):
+        """DOCUMENTED BOUNDARY (not an over-block): the gh-api ATTACHED method
+        spelling `gh api --method=PUT .../merge` is is_dangerous=False (the read
+        floor's `(?:-X|--method)\\s+` requires whitespace) yet OP=merge — the
+        pre-existing #1079 method-delimiter under-block (attached/`=` spellings
+        bypass the read floor; closed won't-fix). It is READ==MINT SYMMETRIC:
+        not gated → correctly NOT mintable, so it is NOT a gated-but-unmintable
+        over-block, and it is unchanged by the endpoint-position fix. The SPACED
+        gh-api form and wget's native `--method=` form DO gate + mint (covered
+        above). This row pins the symmetry so a future 'harden' that mints the
+        attached form without also gating it (asymmetry = over-block-shaped
+        surprise) turns red."""
+        cmd = "gh api --method=PUT repos/o/r/pulls/6/merge"
+        assert D(cmd) is False, "read floor unexpectedly gates the attached form"
+        assert _mint_pr(cmd) is None, (
+            "attached-method form minted while the read floor does NOT gate it — "
+            "read/mint asymmetry (see #1079); this is the symmetry tripwire"
+        )
+
+
+class TestApiMergeEndpointCarrierInteraction:
+    """#1096 §7 carrier-interaction (b409be63 L8 / #1074): the PATH-resident
+    endpoint survives EVERY value-stripping carrier (carrier-4 var-assign strip +
+    carrier-8 HTTP-body strip), a body decoy is removed exactly once, and the
+    §2.3 unquoted carrier-8 extension does not disturb the endpoint. Two levels:
+    (a) the mechanism (is_dangerous/extract), (b) the end-to-end mint→authorize
+    security proof."""
+
+    def test_mechanism_endpoint_survives_both_carriers_decoy_removed(self):
+        """MECHANISM: a `-f branch=pulls/5/merge` body decoy alongside the
+        endpoint pulls/6/merge — the endpoint (path-resident) survives the
+        carrier strip and the extractor binds 6; the body decoy is not bound.
+        The command still gates (is_dangerous=True — the endpoint is a real
+        mutating merge) with its target intact."""
+        cmd = "gh api -X PUT -f branch=pulls/5/merge repos/o/r/pulls/6/merge"
+        assert D(cmd) is True, "endpoint merge stopped gating after carrier strip"
+        assert mgc._api_merge_leg_endpoint(cmd) == "6", "carrier strip disturbed the endpoint"
+
+    def test_seam_body_decoy_does_not_leak_to_mintable_token(self, tmp_path):
+        """SECURITY: end-to-end, the body decoy does not leak through to a
+        mintable token — approving the endpoint-6 merge binds 6, and a standalone
+        decoy-5 merge DENIES (the decoy never became an authorizing target)."""
+        approve = "gh api -X PUT -f branch=pulls/5/merge repos/o/r/pulls/6/merge"
+        assert _mint_pr(approve) == "6"
+        assert _authorize_standalone(
+            approve, "gh api -X PUT repos/o/r/pulls/5/merge", tmp_path) == "DENY"
+
+    def test_contents_capital_c_write_to_main_still_gates(self):
+        """CONTENTS case-insensitivity under-block (independent of the coder's own
+        test_gh_api_put_contents_main_case_insensitive): the §2.3 unquoted body
+        strip exposed a latent under-block — carrier-8's `contents/` preservation
+        guard was case-SENSITIVE while its read arm is case-insensitive, so a
+        capital-`Contents/` write-to-main had its main/master gating body stripped
+        → is_dangerous=False → a dangerous contents-write ran ungated. The IGNORECASE
+        fix restores gating. This asserts the under-block is CLOSED."""
+        cmd = "gh api -X PUT repos/o/r/Contents/README.md -f branch=Main"
+        assert D(cmd) is True, (
+            "capital-C Contents write-to-main is UNGATED — the case-sensitivity "
+            "under-block reopened (the §2.3 fix regressed)"
+        )
+
+    def test_contents_case_fix_introduces_no_over_block(self):
+        """The other direction of the IGNORECASE change: a lowercase faithful
+        contents write-to-main still gates + classifies (the fix only PRESERVES
+        more spans from stripping, so it cannot introduce an over-block — this
+        pins that it did not accidentally change the lowercase behavior)."""
+        cmd = "gh api -X PUT repos/o/r/contents/README.md -f branch=main"
+        assert D(cmd) is True
+
+
+class TestApiMergeEndpointResidualBoundary:
+    """#1096 §8 accepted-residual TRIPWIRE (option-1 scope decision). D4-compliant:
+    this pins the BOUNDARY of what is CLOSED (no-widening) and the no-over-block
+    edge — it NEVER positively asserts that a decoy authorizes (a positive
+    'decoy authorizes' test would cement the laundering as contract).
+
+    KNOWN ACCEPTED RESIDUAL (tracked, option-1 scope decision): an EXOTIC
+    unenumerated curl/wget value-taking flag carrying a scheme-prefixed
+    `pulls/<M>/merge` URL decoy BEFORE the endpoint can bind the decoy (bounded
+    target-confusion laundering; deeply adversarial; NOT an over-block). gh api's
+    flag set is finite → provably clean. Per D4 this is documented here, NOT
+    positively asserted."""
+
+    # Pin A — every ENUMERATED per-client value-flag carrying a decoy URL BEFORE
+    # the endpoint is skipped, so mint binds the endpoint (6) and the standalone
+    # decoy-5 DENIES. RED if a common flag drops from the skip set (widening).
+    @pytest.mark.parametrize(
+        "approve",
+        [
+            # gh api enumerated value-flags
+            'gh api -H "X-Ref: https://x/repos/o/r/pulls/5/merge" -X PUT repos/o/r/pulls/6/merge',
+            "gh api -f note=https://x/repos/o/r/pulls/5/merge -X PUT repos/o/r/pulls/6/merge",
+            "gh api -F note=https://x/repos/o/r/pulls/5/merge -X PUT repos/o/r/pulls/6/merge",
+            "gh api -t https://x/repos/o/r/pulls/5/merge -X PUT repos/o/r/pulls/6/merge",
+            # curl/wget enumerated value-flags
+            'curl -H "X: https://x/repos/o/r/pulls/5/merge" -X PUT https://api.github.com/repos/o/r/pulls/6/merge',
+            "curl -d note=https://x/repos/o/r/pulls/5/merge -X PUT https://api.github.com/repos/o/r/pulls/6/merge",
+            "curl -u https://x/repos/o/r/pulls/5/merge -X PUT https://api.github.com/repos/o/r/pulls/6/merge",
+            "curl -e https://x/repos/o/r/pulls/5/merge -X PUT https://api.github.com/repos/o/r/pulls/6/merge",
+        ],
+    )
+    def test_pin_a_enumerated_value_flag_decoy_closed(self, approve, tmp_path):
+        """No-widening guard: an enumerated value-flag decoy binds the ENDPOINT
+        (6), and the standalone decoy-5 DENIES. If any of these common flags
+        drops from its per-client skip set, this row goes RED — catching a
+        silent widening of the accepted residual into a realistic carrier."""
+        assert _mint_pr(approve) == "6", (
+            f"an ENUMERATED value-flag decoy bound the decoy — residual widened "
+            f"to a realistic carrier: {approve!r}"
+        )
+        assert _authorize_standalone(
+            approve, "gh api -X PUT repos/o/r/pulls/5/merge", tmp_path) == "DENY"
+        assert _authorize_standalone(
+            approve, "curl -X PUT https://api.github.com/repos/o/r/pulls/5/merge",
+            tmp_path) == "DENY"
+
+    def test_pin_b_unknown_flag_non_url_value_no_over_block(self):
+        """No-over-block / never-None guard: a faithful merge with an UNKNOWN flag
+        carrying a NON-URL benign value still binds the endpoint (6), never None.
+        RED if a future 'harden' fail-closes on multi-token/exotic forms
+        (reintroducing a cardinal-sin over-block)."""
+        cmd = "curl -X PUT https://api.github.com/repos/o/r/pulls/6/merge --some-unknown-flag benign"
+        assert _mint_pr(cmd) == "6", (
+            "faithful merge with an unknown benign flag returned wrong/None — a "
+            "harden fail-closed into an over-block"
+        )
+
+
 class TestAcceptedRecognitionLimitationPins:
     """FORWARD-PROTECTION pins for the ACCEPTED conservative-recognition limitation
     (the review-cycle-1 SECURITY-HALT disposition). These forms run UNGATED BY
