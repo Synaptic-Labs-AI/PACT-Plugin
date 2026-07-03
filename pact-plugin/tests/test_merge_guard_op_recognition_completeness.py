@@ -47,9 +47,11 @@ from shared.merge_guard_common import (  # noqa: E402
     extract_command_context as CTX,
 )
 from merge_guard_pre import _token_matches_command as MATCH  # noqa: E402
+from merge_guard_pre import check_merge_authorization  # noqa: E402
 from merge_guard_post import (  # noqa: E402
     _mint_context_from_bundle,
     _target_value,
+    write_token,
 )
 
 IMPLICIT = "\x00implicit"  # the implicit-remote marker used by remote-mass-delete
@@ -1362,6 +1364,243 @@ class TestApiLiteralArmCrossLegSweep:
             f"co-matches, so the identity-slice mutation is NOT a faithful "
             f"single-family pre-fix simulation for this row: {cmd!r}"
         )
+
+
+class _ApiMergeDetectArmDisabledRe:
+    """A drop-in for merge_guard_common's `re` module that forces
+    re.search(r'pulls/\\d+/merge\\b', ...) to return None — surgically disabling
+    ONLY the API-merge detect arm's endpoint condition (the per-leg
+    `re.search(r"pulls/\\d+/merge\\b", _leg)` inside detect_command_operation_type)
+    so the pre-fix detect surface (API merge unclassified) can be measured through
+    the REAL machinery. `_extract_api_merge_pr` uses the DIFFERENT literal
+    `pulls/(\\d+)/merge\\b` (capturing group) and is unaffected; every compiled
+    DANGEROUS_PATTERNS object calls its own .search, not mgc.re. Mirrors the
+    _ContentsGuardDisabledRe seam above."""
+
+    def search(self, pattern, string, *args, **kwargs):  # noqa: A003
+        if pattern == r"pulls/\d+/merge\b":
+            return None
+        return _real_re.search(pattern, string, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(_real_re, name)
+
+
+class TestApiMergeMintParity:
+    """#1096 API-merge mint parity — the bidirectional cert for the additive
+    per-leg detect arm (gh api|curl|wget + mutating PUT/PATCH/POST + a
+    pulls/<N>/merge endpoint in ONE leg → "merge") plus the path-based
+    `_extract_api_merge_pr` wired into `extract_command_context` as the
+    pr_number fallback.
+
+    Pre-fix, a mutating API PR-merge was the gated-but-unmintable class: the
+    read floor gated it (DANGEROUS_PATTERNS API-merge arms) but detect returned
+    None, so the mint write-gate refused → a faithful API-merge click could
+    NEVER mint — a PERMANENT over-block. The cure raises recognition in the ONE
+    detect SSOT (mint + read + retirement observer all served from one site;
+    never a mint-only recognition fork).
+
+    Priority per the governing principle: over-block-CURED (mints + authorizes)
+    is the PRIMARY/inviolable direction; additive purity is co-inviolable (an
+    existing classification change could re-block a faithful click elsewhere);
+    the no-new-under-block rows are the secondary sweep. curl/wget approvals are
+    driven via the QUOTED (backtick) option form — the canonical mint path; a
+    BARE unquoted curl/wget does not mint (locate_command_regions substrate,
+    pre-existing all-API-arm residual, NOT a #1096 regression)."""
+
+    def _authorize(self, cmd, tmp_path):
+        """Mint `cmd` via the real bundle path, write the token, and run the
+        real read-side authorization. Returns (ctx, verdict)."""
+        ctx, refusal = mint(cmd)
+        if ctx is None:
+            return None, f"NO-MINT({refusal})"
+        write_token(ctx, token_dir=tmp_path)
+        err = check_merge_authorization(cmd, token_dir=tmp_path)
+        return ctx, ("ALLOW" if err is None else "DENY")
+
+    # --- PRIMARY (inviolable): every faithful spelling classifies + mints ---
+
+    @pytest.mark.parametrize(
+        "cmd,expected_flags",
+        [
+            ("gh api -X PUT /repos/o/r/pulls/42/merge", []),
+            ("gh api -X PATCH /repos/o/r/pulls/42/merge", []),
+            ("gh api -X POST /repos/o/r/pulls/42/merge", []),
+            ("curl -X PUT https://api.github.com/repos/o/r/pulls/42/merge", []),
+            ("wget --method=PUT https://api.github.com/repos/o/r/pulls/42/merge", []),
+            ("gh -R o/r api /repos/o/r/pulls/42/merge -X PUT", ["--repo=o/r"]),
+        ],
+    )
+    def test_api_merge_spelling_classifies_and_mints(self, cmd, expected_flags):
+        """#1096 CURED: every faithful API-merge spelling detects as `merge` and
+        mints a pr-targeted token. The gh-global-flag row is the Ruling-B cure
+        (tolerant _GH_API_PREFIX client match) and binds its REAL -R flag as
+        [--repo=o/r] (ruled correct: a real denylist flag, spelling-appropriate);
+        every path-resident-only spelling binds []."""
+        assert OP(cmd) == "merge", f"API-merge spelling unclassified: {cmd!r}"
+        ctx, refusal = mint(cmd)
+        assert ctx is not None, f"OVER-BLOCK regressed (no mint): {cmd!r} ({refusal})"
+        assert ctx["pr_number"] == "42"
+        assert ctx["bound_flags"] == expected_flags
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "gh api -X PUT /repos/o/r/pulls/42/merge",
+            "curl -X PUT https://api.github.com/repos/o/r/pulls/42/merge",
+            "wget --method=PUT https://api.github.com/repos/o/r/pulls/42/merge",
+            "gh -R o/r api /repos/o/r/pulls/42/merge -X PUT",
+        ],
+    )
+    def test_api_merge_faithful_round_trip_authorizes(self, cmd, tmp_path):
+        """The full faithful click: approve → mint → byte-identical re-execution
+        AUTHORIZES through the real read path (the §0 inviolable round-trip)."""
+        _ctx, verdict = self._authorize(cmd, tmp_path)
+        assert verdict == "ALLOW", (
+            f"faithful API-merge round-trip blocked ({verdict}): {cmd!r}"
+        )
+
+    def test_global_flag_repo_bind_refuses_cross_repo(self, tmp_path):
+        """The [--repo] round-trip's safe edge: the repo-scoped token REFUSES an
+        exec against a DIFFERENT repo (the escalation-discriminator direction)."""
+        ctx, refusal = mint("gh -R o/r api /repos/o/r/pulls/42/merge -X PUT")
+        assert ctx is not None and ctx["bound_flags"] == ["--repo=o/r"]
+        write_token(ctx, token_dir=tmp_path)
+        err = check_merge_authorization(
+            "gh -R other/x api /repos/other/x/pulls/42/merge -X PUT",
+            token_dir=tmp_path)
+        assert err is not None, "cross-repo exec must REFUSE against a repo-bound token"
+
+    # --- cross-spelling authorization (correct same-op + non-laundering) ---
+
+    def test_cli_approval_authorizes_api_exec_same_flags(self, tmp_path):
+        """Cross-spelling is CORRECT same-operation authorization: a plain CLI
+        approval (bound []) authorizes the plain API exec of the SAME pr (both
+        derive {merge, 42, []} from the one extract_command_context)."""
+        ctx, _ = mint("gh pr merge 42")
+        assert ctx is not None and ctx["bound_flags"] == []
+        write_token(ctx, token_dir=tmp_path)
+        assert check_merge_authorization(
+            "gh api -X PUT /repos/o/r/pulls/42/merge", token_dir=tmp_path) is None
+
+    def test_api_approval_authorizes_cli_exec_same_flags(self, tmp_path):
+        ctx, _ = mint("gh api -X PUT /repos/o/r/pulls/42/merge")
+        assert ctx is not None and ctx["bound_flags"] == []
+        write_token(ctx, token_dir=tmp_path)
+        assert check_merge_authorization("gh pr merge 42", token_dir=tmp_path) is None
+
+    def test_privileged_cli_approval_refuses_plain_api_exec(self, tmp_path):
+        """Non-laundering: a PRIVILEGED CLI approval (bound [--admin]) does NOT
+        authorize the plain API exec (flag-set mismatch) — the privileged
+        approval cannot be laundered into a differently-shaped execution."""
+        ctx, _ = mint("gh pr merge 42 --admin")
+        assert ctx is not None and ctx["bound_flags"] == ["--admin"]
+        write_token(ctx, token_dir=tmp_path)
+        assert check_merge_authorization(
+            "gh api -X PUT /repos/o/r/pulls/42/merge", token_dir=tmp_path) is not None
+
+    def test_api_approval_refuses_different_target(self, tmp_path):
+        ctx, _ = mint("gh api -X PUT /repos/o/r/pulls/42/merge")
+        assert ctx is not None
+        write_token(ctx, token_dir=tmp_path)
+        assert check_merge_authorization(
+            "gh api -X PUT /repos/o/r/pulls/43/merge", token_dir=tmp_path) is not None
+
+    # --- additive purity + no-new-under-block: negatives stay unmintable ---
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "gh api /repos/o/r/pulls/42/merge",              # bare GET (merge-status read)
+            "gh api -X GET /repos/o/r/pulls/42/merge",       # explicit GET
+            "gh api -X DELETE /repos/o/r/pulls/42/merge",    # DELETE excluded
+            "gh api -X PUT /repos/o/r/merges/xyz",           # non-pulls path (read-gated residual, unmintable)
+            "gh api -f commit_title=t /repos/o/r/pulls/42/merge",  # implicit-POST (deliberate residual)
+            "gh api repos/o/r/pulls/5/merge && echo -X PUT",       # per-leg canary
+            "gh -R o/r api repos/o/r/pulls/5/merge && echo -X PUT",  # per-leg canary, tolerant matcher
+        ],
+    )
+    def test_non_faithful_api_merge_stays_unclassified_and_unmintable(self, cmd):
+        """No-new-under-block + additive purity: every non-faithful form stays
+        detect-None and unmintable. The per-leg canaries are the rows that would
+        FAIL under a whole-command arm (a method keyword in a benign continuation
+        leg must not classify the compound) — they hold under the tolerant client
+        matcher too (Ruling-B widens only the in-leg client span, not the leg
+        isolation). The non-pulls and implicit-POST rows are read-floor-gated
+        (D=True) but deliberately unmintable — PRE-EXISTING residuals (read-floor
+        breadth / implicit-POST parity with git/refs), not #1096 regressions."""
+        assert OP(cmd) is None, f"non-faithful API-merge form classified: {cmd!r}"
+        ctx, _refusal = mint(cmd)
+        assert ctx is None, f"non-faithful API-merge form MINTED: {cmd!r}"
+
+    @pytest.mark.parametrize(
+        "cmd,expected_op",
+        [
+            ("gh api -X DELETE repos/o/r/git/refs/heads/x", "branch-delete"),
+            ("gh api -X PATCH repos/o/r/git/refs/heads/x", "force-push"),
+            ("gh api -X DELETE repos/o/r/branches/main/protection", "branch-protection"),
+            ("gh pr merge 42", "merge"),
+            ("gh pr close 42 --delete-branch", "close"),
+            ("git push --force origin main", "force-push"),
+            ("git branch -D victim", "branch-delete"),
+            ("gh api /repos/o/r/git/refs/heads/x", None),
+            ("gh api /repos/o/r/contents/file.txt", None),
+            ("echo PUT pulls and merge", None),
+        ],
+    )
+    def test_additive_purity_existing_classifications_unchanged(self, cmd, expected_op):
+        """Additive purity (inviolable): the pre-existing detect corpus is
+        untouched by the new arm — every existing op-class still classifies
+        identically and every previously-None input stays None. The ONLY input
+        class the arm changes is the formerly-None mutating pulls/<N>/merge."""
+        assert OP(cmd) == expected_op
+
+    # --- non-vacuity: two independent in-memory couplings ---
+
+    def test_mint_rows_non_vacuous_under_detect_arm_disable(self, tmp_path):
+        """Direction-2 counter-mutation #1: surgically disable ONLY the API-merge
+        detect arm (its exact endpoint literal, via the delegating re-module
+        shim) — the pre-fix surface returns: detect None → the mint write-gate
+        refuses → the faithful API click is blocked again. The CLI-merge control
+        still mints, so the flip is attributable to the NEW arm alone."""
+        cmd = "gh api -X PUT /repos/o/r/pulls/42/merge"
+        # direction 1 — fix present
+        assert OP(cmd) == "merge"
+        ctx, _ = mint(cmd)
+        assert ctx is not None
+        # direction 2 — arm disabled: pre-fix gated-but-unmintable returns
+        saved = mgc.re
+        mgc.re = _ApiMergeDetectArmDisabledRe()
+        try:
+            assert OP(cmd) is None, (
+                "arm-disable shim did not restore the pre-fix detect surface — "
+                "the cured-spelling assertions would be vacuous"
+            )
+            ctx2, _ = mint(cmd)
+            assert ctx2 is None, "mint survived the detect-arm disable"
+            ctl, _ = mint("gh pr merge 42")
+            assert ctl is not None, "CLI-merge control must be unaffected by the shim"
+        finally:
+            mgc.re = saved
+
+    def test_mint_rows_non_vacuous_under_extractor_neuter(self, monkeypatch):
+        """Direction-2 counter-mutation #2: neuter `_extract_api_merge_pr` to
+        always-None — detect still says merge, but the context loses its
+        pr_number, `_collect_pairs` admits no (op, target) pair, and the mint
+        REFUSES — proving the mint rows are coupled to the extractor wiring
+        (recognition<->extractability), not just the detect arm."""
+        cmd = "gh api -X PUT /repos/o/r/pulls/42/merge"
+        ctx, _ = mint(cmd)
+        assert ctx is not None
+        monkeypatch.setattr(mgc, "_extract_api_merge_pr", lambda c: None)
+        assert OP(cmd) == "merge"  # detect unaffected — isolates the extractor
+        ctx2, _ = mint(cmd)
+        assert ctx2 is None, (
+            "extractor neuter did not break the mint — the pr-target wiring "
+            "assertions would be vacuous"
+        )
+        ctl, _ = mint("gh pr merge 42")
+        assert ctl is not None, "CLI-merge control must be unaffected"
 
 
 class TestAcceptedRecognitionLimitationPins:
