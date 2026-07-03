@@ -515,8 +515,10 @@ def detect_command_operation_type(command: str) -> str | None:
     if _is_api_form and re.search(r"branches/.*/protection", command):
         if re.search(r"\b(?:DELETE|PUT|PATCH)\b", command, re.IGNORECASE):
             return "branch-protection"
-    # API-based PR merge (#1096): gh api|curl|wget with a mutating method (PUT/PATCH/
-    # POST) on a pulls/<N>/merge endpoint is a merge via API. Recognized AND extracted by
+    # API-based PR merge (#1096, GH-API-ONLY per Option B): gh api with a mutating method
+    # (PUT/PATCH/POST) on a pulls/<N>/merge endpoint is a merge via API. curl/wget were
+    # DROPPED (sec #71: unsound value-flag denylist over an unbounded flag space) — they
+    # classify None and stay gated-but-unmintable. Recognized AND extracted by
     # the ONE shared per-leg helper _api_merge_leg_endpoint, so recognition<->extractability
     # read the SAME surface — a leg classifies merge IFF its ENDPOINT-position PR is
     # extractable, which gives no gated-but-unmintable AND binds the URL-positional
@@ -672,31 +674,22 @@ def _extract_api_ref(command: str) -> str | None:
     return api_match.group(1) if api_match else None
 
 
-# Per-CLIENT value-taking-flag skip sets for the api-merge endpoint walk (#1096
-# endpoint-position fix). PER-CLIENT, NOT unified: a unified superset would over-skip
-# — e.g. curl `-q` is BOOLEAN (--disable) but gh-api `-q` is VALUE-taking (--jq), so a
-# unified set treating `-q` as value-taking would make `curl -q https://…/pulls/6/merge`
-# skip the endpoint URL as `-q`'s value -> None -> a cardinal-sin over-block. So the set
-# is chosen by which client the recognized leg matched. Tokens are the shlex form.
-# gh api: the FINITE, PROVABLY-COMPLETE documented value-flag set (+ the -R/--repo GLOBAL
-# flag, which is decoy-capable: `gh -R pulls/5/merge api …` would bind 5 if -R's value is
-# not skipped). Booleans (-i/--include, --paginate, --slurp, --silent, --verbose) are
-# DELIBERATELY absent — skipping their next token would swallow a positional.
+# Value-taking-flag skip set for the gh-api api-merge endpoint walk (#1096; GH-API-ONLY
+# per Option B). The api-merge mint arm is gh-api ONLY — curl/wget were DROPPED because
+# sec #71 proved a value-flag denylist over curl/wget's UNBOUNDED flag space is
+# structurally uncompletable (52 realistic-common decoy leaks), so a curl/wget mint arm
+# built on it is unsound. gh api's flags are FINITE + documented + first-positional-endpoint
+# = provably sound. Consequence: curl/wget api-merge classifies detect=None (mint=0),
+# staying in its PRE-EXISTING gated-but-unmintable state (the read arms still gate it) —
+# killing that laundering class BY CONSTRUCTION (can't mint -> can't launder). Tokens are
+# the shlex form. Includes the -R/--repo GLOBAL flag, which is decoy-capable (`gh -R
+# pulls/5/merge api …` would bind 5 if -R's value is not skipped). Booleans (-i/--include,
+# --paginate, --slurp, --silent, --verbose) are DELIBERATELY absent — skipping their next
+# token would swallow a positional.
 _API_MERGE_GH_VALUE_FLAGS = frozenset({
     "-X", "--method", "-f", "--field", "-F", "--raw-field", "--input",
     "-H", "--header", "--hostname", "-q", "--jq", "-t", "--template",
     "--cache", "-R", "--repo",
-})
-# curl/wget: the enumerated-COMMON set (an unenumerated EXOTIC value-flag carrying a
-# scheme-prefixed pulls-URL decoy is the accepted option-1 residual, tripwire-guarded —
-# NOT gated, since gating it would reintroduce an over-block). `--url` is NOT here: it is
-# an ENDPOINT SOURCE (`curl --url https://…/pulls/6/merge`), handled specially in the walk.
-_API_MERGE_CURL_WGET_VALUE_FLAGS = frozenset({
-    "-H", "--header", "-d", "--data", "--data-raw", "--data-binary",
-    "--data-ascii", "--data-urlencode", "-F", "--form", "-u", "--user",
-    "-b", "--cookie", "-e", "--referer", "-A", "--user-agent", "-o",
-    "-T", "--upload-file", "-x", "--proxy", "-E", "--cert",
-    "--method", "--body-data", "--post-data",
 })
 
 _PULLS_MERGE_PR_RE = re.compile(r"pulls/(\d+)/merge\b")
@@ -711,20 +704,24 @@ def _api_merge_leg_endpoint(leg: str) -> str | None:
     extractable -> no gated-but-unmintable BY CONSTRUCTION, and the bound PR is the URL
     POSITIONAL endpoint, never a flag-value / other-leg decoy).
 
-    Recognition (client + mutating method + pulls/<N>/merge path co-occur in this leg)
-    is the predicate moved VERBATIM from the prior detect arm (tolerant IGNORECASE
-    _GH_API_PREFIX-or-curl/wget client + IGNORECASE PUT/PATCH/POST method + case-SENSITIVE
-    pulls/<N>/merge path) so the existing detect corpus stays byte-identical.
+    GH-API-ONLY (#1096 Option B; curl/wget dropped, sec #71). Recognition (gh-api client +
+    mutating method + pulls/<N>/merge path co-occur in this leg): tolerant IGNORECASE
+    _GH_API_PREFIX client + IGNORECASE PUT/PATCH/POST method + case-SENSITIVE pulls/<N>/merge
+    path. A curl/wget merge classifies None here -> gated-but-unmintable (read arms still gate).
 
     Extraction binds the pulls/<N>/merge that is the URL POSITIONAL: strip body values
-    (carrier-8, §2.3), shlex-tokenize, then walk skipping flags + PER-CLIENT value-flag
-    values, and take the first surviving positional (or a curl `--url` value). On
-    tokenizer failure NEVER returns None for a recognized leg (falls back to the
-    stripped/raw first-match) — a mis-parse must not gate a faithful merge (over-block-safe).
+    (carrier-8, §2.3), shlex-tokenize, then walk skipping flags + the gh-api value-flag
+    values, and take the first surviving positional. On tokenizer failure NEVER returns
+    None for a recognized leg (falls back to the stripped/raw first-match) — a mis-parse
+    must not gate a faithful merge (over-block-safe).
     """
     client_gh = re.search(_GH_API_PREFIX, leg, re.IGNORECASE)
-    client_other = re.search(r"\b(?:curl|wget)\b", leg, re.IGNORECASE)
-    if not (client_gh or client_other):
+    if not client_gh:
+        # GH-API-ONLY (#1096 Option B): curl/wget api-merge legs classify None here
+        # (mint=0), staying in their PRE-EXISTING gated-but-unmintable state (the
+        # curl/wget merge READ arms still gate them) — killing the 52 curl/wget
+        # laundering vectors BY CONSTRUCTION (sec #71: their value-flag denylist over an
+        # unbounded flag space is uncompletable). No new over-block (status quo ante).
         return None
     # Recognition uses the EXACT non-capturing literal `pulls/\d+/merge\b` via re.search
     # (byte-identical to the prior detect arm), NOT the compiled capturing _PULLS_MERGE_PR_RE
@@ -744,23 +741,13 @@ def _api_merge_leg_endpoint(leg: str) -> str | None:
         # the raw leg is guaranteed to match (recognition required it).
         m = _PULLS_MERGE_PR_RE.search(stripped) or _PULLS_MERGE_PR_RE.search(leg)
         return m.group(1) if m else None
-    value_flags = _API_MERGE_GH_VALUE_FLAGS if client_gh else _API_MERGE_CURL_WGET_VALUE_FLAGS
+    value_flags = _API_MERGE_GH_VALUE_FLAGS
     i = 0
     while i < len(tokens):
         tok = tokens[i]
         if tok.startswith("-"):
             base = tok.split("=", 1)[0]
-            if client_other and base == "--url":
-                # curl/wget --url is the ENDPOINT SOURCE, not a decoy — read it.
-                val = tok.split("=", 1)[1] if "=" in tok else (
-                    tokens[i + 1] if i + 1 < len(tokens) else ""
-                )
-                mm = _PULLS_MERGE_PR_RE.search(val)
-                if mm:
-                    return mm.group(1)
-                if "=" not in tok:
-                    i += 1  # consumed the value token
-            elif "=" not in tok and base in value_flags:
+            if "=" not in tok and base in value_flags:
                 i += 1  # bare space-separated value-flag: skip its value token too
             # attached-value (`--method=PUT`, `-XPUT`) and booleans consume no extra token
             i += 1
@@ -771,19 +758,12 @@ def _api_merge_leg_endpoint(leg: str) -> str | None:
         if mm:
             return mm.group(1)
         i += 1
-    # Recognized but no endpoint positional survived (the only pulls/<N>/merge was a
-    # skipped flag VALUE, i.e. a body/decoy — the leg has no real merge endpoint). NOT a
-    # tokenizer failure, so this is a genuine "no extractable endpoint" -> None. This is
-    # correct (no wrong-target mint); such an input never faithfully merges a PR.
-    #
-    # ACCEPTED RESIDUAL (option-1, tracked follow-up (issue TBD)): a decoy carried in an
-    # EXOTIC, unenumerated curl/wget value-flag whose value is a scheme-prefixed
-    # `https://…/pulls/<M>/merge` placed before the endpoint could bind M. This is deeply
-    # adversarial (no honest merge carries a pulls-URL in an obscure curl flag; the
-    # operator sees the full command at approval; #1097 retirement + TTL bound reuse). It
-    # is NOT gated (gating it would reintroduce a cardinal-sin over-block). gh api (the
-    # named client) is provably clean; the confirmed #1096 exploits (-f body + echo/leg
-    # decoys) are fully closed.
+    # Recognized (gh-api) but no endpoint positional survived (the only pulls/<N>/merge was
+    # a skipped flag VALUE, i.e. a body/decoy — the leg has no real merge endpoint). NOT a
+    # tokenizer failure, so this is a genuine "no extractable endpoint" -> None. Correct
+    # (no wrong-target mint); such an input never faithfully merges a PR. (#1096 is
+    # gh-api-only per Option B: curl/wget never reach this walk — they classify None at
+    # the client gate above — so there is no exotic-curl residual to accept.)
     return None
 
 

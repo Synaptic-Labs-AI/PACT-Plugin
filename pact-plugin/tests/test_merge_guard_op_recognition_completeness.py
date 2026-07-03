@@ -1388,7 +1388,7 @@ class _ApiMergeDetectArmDisabledRe:
 
 class TestApiMergeMintParity:
     """#1096 API-merge mint parity — the bidirectional cert for the additive
-    per-leg detect arm (gh api|curl|wget + mutating PUT/PATCH/POST + a
+    per-leg detect arm (GH-API-ONLY per Option B + mutating PUT/PATCH/POST + a
     pulls/<N>/merge endpoint in ONE leg → "merge") plus the path-based
     `_extract_api_merge_pr` wired into `extract_command_context` as the
     pr_number fallback.
@@ -1403,10 +1403,12 @@ class TestApiMergeMintParity:
     Priority per the governing principle: over-block-CURED (mints + authorizes)
     is the PRIMARY/inviolable direction; additive purity is co-inviolable (an
     existing classification change could re-block a faithful click elsewhere);
-    the no-new-under-block rows are the secondary sweep. curl/wget approvals are
-    driven via the QUOTED (backtick) option form — the canonical mint path; a
-    BARE unquoted curl/wget does not mint (locate_command_regions substrate,
-    pre-existing all-API-arm residual, NOT a #1096 regression)."""
+    the no-new-under-block rows are the secondary sweep. GH-API-ONLY (Option B):
+    curl/wget api-merge mints NOTHING (detect=None → mint=0) — dropped because a
+    value-flag denylist over curl/wget's unbounded flag space is unsound (sec #71).
+    Curl/wget merges stay READ-gated (is_dangerous=True) = the pre-existing
+    gated-but-unmintable state; that structural fact is asserted in
+    TestApiMergeEndpointResidualBoundary::test_curl_wget_api_merge_mints_nothing_by_construction."""
 
     def _authorize(self, cmd, tmp_path):
         """Mint `cmd` via the real bundle path, write the token, and run the
@@ -1426,8 +1428,6 @@ class TestApiMergeMintParity:
             ("gh api -X PUT /repos/o/r/pulls/42/merge", []),
             ("gh api -X PATCH /repos/o/r/pulls/42/merge", []),
             ("gh api -X POST /repos/o/r/pulls/42/merge", []),
-            ("curl -X PUT https://api.github.com/repos/o/r/pulls/42/merge", []),
-            ("wget --method=PUT https://api.github.com/repos/o/r/pulls/42/merge", []),
             ("gh -R o/r api /repos/o/r/pulls/42/merge -X PUT", ["--repo=o/r"]),
         ],
     )
@@ -1447,8 +1447,6 @@ class TestApiMergeMintParity:
         "cmd",
         [
             "gh api -X PUT /repos/o/r/pulls/42/merge",
-            "curl -X PUT https://api.github.com/repos/o/r/pulls/42/merge",
-            "wget --method=PUT https://api.github.com/repos/o/r/pulls/42/merge",
             "gh -R o/r api /repos/o/r/pulls/42/merge -X PUT",
         ],
     )
@@ -1645,7 +1643,6 @@ class TestApiMergeEndpointPositionLaunderingClosed:
 
     # (name, approval command [endpoint 6, decoy 5 embedded], standalone decoy-5)
     _DECOY = "gh api -X PUT repos/o/r/pulls/5/merge"
-    _CURL_DECOY = "curl -X PUT https://api.github.com/repos/o/r/pulls/5/merge"
 
     @pytest.mark.parametrize(
         "approve,standalone",
@@ -1657,7 +1654,6 @@ class TestApiMergeEndpointPositionLaunderingClosed:
             ('gh api -H "X-Ref:pulls/5/merge" -X PUT repos/o/r/pulls/6/merge', _DECOY),
             ("gh -R pulls/5/merge api repos/o/r/pulls/6/merge -X PUT", _DECOY),
             ("gh api -X PUT -f x=pulls/5/merge repos/o/r/pulls/6/merge", _DECOY),
-            ("curl -X PUT -d note=pulls/5/merge https://api.github.com/repos/o/r/pulls/6/merge", _CURL_DECOY),
         ],
     )
     def test_decoy_binds_endpoint_and_standalone_decoy_denies(
@@ -1704,8 +1700,10 @@ class TestApiMergeEndpointPositionLaunderingClosed:
 
 class TestApiMergeEndpointNoOverBlock:
     """#1096 endpoint-position fix — the §0 INVIOLABLE no-over-block direction:
-    every faithful api-merge binds its CORRECT endpoint and round-trips, and the
-    fix never returns None for a recognized merge (no gated-but-unmintable)."""
+    every faithful GH-API api-merge binds its CORRECT endpoint and round-trips, and
+    the fix never returns None for a recognized merge (no gated-but-unmintable).
+    GH-API-ONLY (Option B): curl/wget api-merge is intentionally unmintable — see
+    TestApiMergeEndpointResidualBoundary::test_curl_wget_api_merge_mints_nothing_by_construction."""
 
     @pytest.mark.parametrize(
         "cmd",
@@ -1713,10 +1711,7 @@ class TestApiMergeEndpointNoOverBlock:
             "gh api -X PUT repos/o/r/pulls/6/merge",
             "gh api --method PATCH repos/o/r/pulls/6/merge",
             "gh api repos/o/r/pulls/6/merge -X POST",          # method-after-path
-            "curl -X PUT https://api.github.com/repos/o/r/pulls/6/merge",
-            "wget --method=PUT https://api.github.com/repos/o/r/pulls/6/merge",  # attached (wget native)
             "gh -R o/r api repos/o/r/pulls/6/merge -X PUT",     # global-flag
-            "curl --url https://api.github.com/repos/o/r/pulls/6/merge -X PUT",  # --url endpoint source
             "gh api -X PUT -f note=pulls/5/merge repos/o/r/pulls/6/merge",  # body-COINCIDENCE faithful
         ],
     )
@@ -1730,7 +1725,6 @@ class TestApiMergeEndpointNoOverBlock:
         "cmd",
         [
             "gh api -X PUT repos/o/r/pulls/6/merge",
-            "curl -X PUT https://api.github.com/repos/o/r/pulls/6/merge",
             "gh api -X PUT -f note=pulls/5/merge repos/o/r/pulls/6/merge",
         ],
     )
@@ -1821,59 +1815,71 @@ class TestApiMergeEndpointCarrierInteraction:
 
 
 class TestApiMergeEndpointResidualBoundary:
-    """#1096 §8 accepted-residual TRIPWIRE (option-1 scope decision). D4-compliant:
-    this pins the BOUNDARY of what is CLOSED (no-widening) and the no-over-block
-    edge — it NEVER positively asserts that a decoy authorizes (a positive
-    'decoy authorizes' test would cement the laundering as contract).
+    """#1096 GH-API-ONLY narrowing (Option B) TRIPWIRE. The prior option-1 exotic-curl
+    ACCEPTED-RESIDUAL is SUPERSEDED: curl/wget api-merge legs now classify detect=None
+    (mint=0), so there is NO laundering residual to accept — the whole curl/wget decoy
+    class dies BY CONSTRUCTION (can't mint -> can't launder; sec #71 proved a value-flag
+    denylist over curl/wget's unbounded flag space is uncompletable). This class pins
+    (a) the gh-api no-widening guard (the kept, provably-sound client) and (b) the
+    STRUCTURAL assertion that curl/wget mint NOTHING regardless of flags — deliberately
+    NOT re-enumerating the 52 curl vectors as a denylist (that would re-import the
+    open-endedness Option B exits)."""
 
-    KNOWN ACCEPTED RESIDUAL (tracked, option-1 scope decision): an EXOTIC
-    unenumerated curl/wget value-taking flag carrying a scheme-prefixed
-    `pulls/<M>/merge` URL decoy BEFORE the endpoint can bind the decoy (bounded
-    target-confusion laundering; deeply adversarial; NOT an over-block). gh api's
-    flag set is finite → provably clean. Per D4 this is documented here, NOT
-    positively asserted."""
-
-    # Pin A — every ENUMERATED per-client value-flag carrying a decoy URL BEFORE
-    # the endpoint is skipped, so mint binds the endpoint (6) and the standalone
-    # decoy-5 DENIES. RED if a common flag drops from the skip set (widening).
+    # (a) gh-api no-widening: an ENUMERATED gh-api value-flag carrying a decoy URL BEFORE
+    # the endpoint is skipped, so mint binds the ENDPOINT (6) and the standalone decoy-5
+    # DENIES. RED if a common gh-api flag drops from _API_MERGE_GH_VALUE_FLAGS (widening).
     @pytest.mark.parametrize(
         "approve",
         [
-            # gh api enumerated value-flags
             'gh api -H "X-Ref: https://x/repos/o/r/pulls/5/merge" -X PUT repos/o/r/pulls/6/merge',
             "gh api -f note=https://x/repos/o/r/pulls/5/merge -X PUT repos/o/r/pulls/6/merge",
             "gh api -F note=https://x/repos/o/r/pulls/5/merge -X PUT repos/o/r/pulls/6/merge",
             "gh api -t https://x/repos/o/r/pulls/5/merge -X PUT repos/o/r/pulls/6/merge",
-            # curl/wget enumerated value-flags
-            'curl -H "X: https://x/repos/o/r/pulls/5/merge" -X PUT https://api.github.com/repos/o/r/pulls/6/merge',
-            "curl -d note=https://x/repos/o/r/pulls/5/merge -X PUT https://api.github.com/repos/o/r/pulls/6/merge",
-            "curl -u https://x/repos/o/r/pulls/5/merge -X PUT https://api.github.com/repos/o/r/pulls/6/merge",
-            "curl -e https://x/repos/o/r/pulls/5/merge -X PUT https://api.github.com/repos/o/r/pulls/6/merge",
         ],
     )
-    def test_pin_a_enumerated_value_flag_decoy_closed(self, approve, tmp_path):
-        """No-widening guard: an enumerated value-flag decoy binds the ENDPOINT
-        (6), and the standalone decoy-5 DENIES. If any of these common flags
-        drops from its per-client skip set, this row goes RED — catching a
-        silent widening of the accepted residual into a realistic carrier."""
+    def test_gh_api_enumerated_value_flag_decoy_binds_endpoint(self, approve, tmp_path):
+        """gh-api no-widening: an enumerated gh-api value-flag decoy binds the ENDPOINT
+        (6), and the standalone decoy-5 DENIES. RED if a common gh-api flag drops from
+        the skip set (silent widening)."""
         assert _mint_pr(approve) == "6", (
-            f"an ENUMERATED value-flag decoy bound the decoy — residual widened "
-            f"to a realistic carrier: {approve!r}"
+            f"a gh-api enumerated value-flag decoy bound the decoy — residual widened: {approve!r}"
         )
         assert _authorize_standalone(
             approve, "gh api -X PUT repos/o/r/pulls/5/merge", tmp_path) == "DENY"
-        assert _authorize_standalone(
-            approve, "curl -X PUT https://api.github.com/repos/o/r/pulls/5/merge",
-            tmp_path) == "DENY"
 
-    def test_pin_b_unknown_flag_non_url_value_no_over_block(self):
-        """No-over-block / never-None guard: a faithful merge with an UNKNOWN flag
-        carrying a NON-URL benign value still binds the endpoint (6), never None.
-        RED if a future 'harden' fail-closes on multi-token/exotic forms
-        (reintroducing a cardinal-sin over-block)."""
-        cmd = "curl -X PUT https://api.github.com/repos/o/r/pulls/6/merge --some-unknown-flag benign"
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # canonical curl/wget merge forms
+            "curl -X PUT https://api.github.com/repos/o/r/pulls/6/merge",
+            "curl --request PUT https://api.github.com/repos/o/r/pulls/6/merge",
+            "wget --method=PUT https://api.github.com/repos/o/r/pulls/6/merge",
+            "curl --url https://api.github.com/repos/o/r/pulls/6/merge -X PUT",
+            # non-vacuity sample of the sec-#71 decoy forms — also None (NOT re-enumerating 52)
+            'curl -H "X: https://x/pulls/5/merge" -X PUT https://api.github.com/repos/o/r/pulls/6/merge',
+            "curl --request https://api.evil/pulls/5/merge -X PUT https://api.github.com/repos/o/r/pulls/6/merge",
+            "wget -O /tmp/pulls/5/merge --method=PUT https://api.github.com/repos/o/r/pulls/6/merge",
+        ],
+    )
+    def test_curl_wget_api_merge_mints_nothing_by_construction(self, cmd):
+        """(b) THE STRUCTURAL narrowing assertion (Option B): a curl/wget api-merge leg
+        classifies detect=None -> mint=0, regardless of flags — so the ENTIRE curl/wget
+        decoy class (the 52 sec-#71 vectors) is DEAD by construction (can't mint -> can't
+        launder). Still READ-gated (is_dangerous True) = the pre-existing
+        gated-but-unmintable state, NOT a new over-block/under-block. Replaces the old
+        'curl decoy closed' pins, whose real reason is now 'curl can't mint at all'."""
+        assert OP(cmd) is None, f"curl/wget api-merge classified (narrowing breached): {cmd!r}"
+        assert _mint_pr(cmd) is None, f"curl/wget api-merge minted (narrowing breached): {cmd!r}"
+        assert D(cmd) is True, f"curl/wget api-merge no longer read-gated (under-block): {cmd!r}"
+
+    def test_gh_api_unknown_flag_non_url_value_no_over_block(self):
+        """No-over-block / never-None on the KEPT client (gh-api): a faithful gh-api merge
+        with an UNKNOWN flag carrying a NON-URL benign value still binds the endpoint (6),
+        never None. RED if a future 'harden' fail-closes on multi-token/exotic forms
+        (reintroducing a cardinal-sin over-block for gh-api)."""
+        cmd = "gh api -X PUT repos/o/r/pulls/6/merge --some-unknown-flag benign"
         assert _mint_pr(cmd) == "6", (
-            "faithful merge with an unknown benign flag returned wrong/None — a "
+            "faithful gh-api merge with an unknown benign flag returned wrong/None — a "
             "harden fail-closed into an over-block"
         )
 
