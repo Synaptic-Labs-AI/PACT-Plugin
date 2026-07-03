@@ -12985,6 +12985,197 @@ class TestTokenLifecycleExtensions:
 #  bidirectional suite in test_merge_guard_auth_symmetry.py;
 #  it exercised the dropped prose classifier extract_context.)
 
+
+class TestTargetAwareRetirement:
+    """#1097 target-aware Layer-1 token retirement — the bidirectional cert.
+
+    Pre-fix, `_retire_token_for_command` matched on op-type + session only, so a
+    SUCCESSFUL unrelated same-op command (`gh pr close 43`) retired the operator's
+    approved token for a DIFFERENT target (`close/42`) — an OVER-BLOCK: the
+    faithful re-execution the operator approved then re-prompted. The fix computes
+    `cmd_target = _target_value(extract_command_context(command))` once and skips
+    any token whose own non-None target differs (`token_target is not None and
+    cmd_target != token_target -> continue`). DEFENSIVE, not strict: a target-LESS
+    token (degenerate/legacy shape) keeps the pre-fix op+session fallback, so
+    nothing becomes un-retirable and no under-block opens.
+
+    Priority per the governing principle: the over-block-cured direction
+    (survival rows) is PRIMARY/inviolable; the still-retires direction is the
+    secondary no-new-under-block sweep. ATTRIBUTION NOTE for main()-level rows:
+    these tests call `_retire_token_for_command` DIRECTLY, below Block 3's stdout
+    gate — an API-merge retiring command at main() level is Block-3-SKIPPED
+    (its JSON success output does not contain LAYER1_SUCCESS_STDOUT_PATTERNS
+    ["merge"]) and never reaches this predicate; the target predicate is
+    load-bearing for CLI merge/close retiring commands, which DO emit the
+    matching stdout. The live-probe covers the main()-level attribution split."""
+
+    def _live(self, tmp_path):
+        return [t for t in tmp_path.glob("merge-authorized-*")
+                if not t.name.endswith(".consumed") and ".use-" not in t.name]
+
+    # --- PRIMARY (inviolable): unrelated same-op does NOT retire a targeted token ---
+
+    @pytest.mark.parametrize(
+        "token_ctx,unrelated_cmd,op",
+        [
+            ({"operation_type": "close", "pr_number": "42",
+              "bound_flags": ["--delete-branch"]}, "gh pr close 43", "close"),
+            ({"operation_type": "merge", "pr_number": "42",
+              "bound_flags": []}, "gh pr merge 43", "merge"),
+        ],
+    )
+    def test_unrelated_same_op_success_does_not_retire_targeted_token(
+        self, tmp_path, token_ctx, unrelated_cmd, op
+    ):
+        """#1097 CURED (the over-block direction): a successful unrelated same-op
+        command must NOT burn the operator's approved token for a different
+        target. Pre-fix this retired (op+session match); post-fix the non-None
+        token target discriminates."""
+        from merge_guard_post import write_token, _retire_token_for_command
+
+        write_token(token_ctx, token_dir=tmp_path)
+        retired = _retire_token_for_command(unrelated_cmd, op, token_dir=tmp_path)
+        assert retired is False, (
+            f"OVER-BLOCK regressed: unrelated {unrelated_cmd!r} retired the "
+            f"{token_ctx['operation_type']}/{token_ctx['pr_number']} token"
+        )
+        assert len(self._live(tmp_path)) == 1, "the protected token must survive"
+
+    def test_no_target_command_does_not_retire_targeted_token(self, tmp_path):
+        """Safe-direction edge: a retiring command with NO extractable target
+        (bare `gh pr merge`) retires nothing against a targeted token —
+        cmd_target None != token_target '42'."""
+        from merge_guard_post import write_token, _retire_token_for_command
+
+        write_token({"operation_type": "merge", "pr_number": "42",
+                     "bound_flags": []}, token_dir=tmp_path)
+        retired = _retire_token_for_command("gh pr merge", "merge", token_dir=tmp_path)
+        assert retired is False
+        assert len(self._live(tmp_path)) == 1
+
+    def test_api_merge_target_composes_with_retirement(self, tmp_path):
+        """#1096 composition at the predicate level: the API-merge form's
+        pr_number (path-resident, `pulls/<N>/merge`) flows through the SAME
+        `_target_value` the retirement predicate uses — an unrelated API merge
+        (43) does not retire the 42 token; the same-target API form does.
+        (At main() level an API-merge retiring command is Block-3-skipped
+        entirely — see the class docstring; this row certifies the predicate's
+        target arithmetic for the API spelling, the belt-and-suspenders layer.)"""
+        from merge_guard_post import write_token, _retire_token_for_command
+
+        write_token({"operation_type": "merge", "pr_number": "42",
+                     "bound_flags": []}, token_dir=tmp_path)
+        unrelated = _retire_token_for_command(
+            "gh api -X PUT /repos/o/r/pulls/43/merge", "merge", token_dir=tmp_path)
+        assert unrelated is False
+        assert len(self._live(tmp_path)) == 1
+        same = _retire_token_for_command(
+            "gh api -X PUT /repos/o/r/pulls/42/merge", "merge", token_dir=tmp_path)
+        assert same is True
+        assert len(self._live(tmp_path)) == 0
+
+    # --- SECONDARY (no-new-under-block): genuine self-consume STILL retires ---
+
+    def test_self_consume_still_retires_own_token(self, tmp_path):
+        """A successful run of the SAME approved operation retires its own token
+        (target matches) — the one-approval-one-operation discipline is intact."""
+        from merge_guard_post import write_token, _retire_token_for_command
+
+        write_token({"operation_type": "close", "pr_number": "42",
+                     "bound_flags": ["--delete-branch"]}, token_dir=tmp_path)
+        retired = _retire_token_for_command(
+            "gh pr close 42 --delete-branch", "close", token_dir=tmp_path)
+        assert retired is True, "NEW UNDER-BLOCK: self-consume stopped retiring"
+        assert len(self._live(tmp_path)) == 0
+        second = _retire_token_for_command(
+            "gh pr close 42 --delete-branch", "close", token_dir=tmp_path)
+        assert second is False, "second retire must find no live candidate"
+
+    def test_target_less_token_keeps_op_session_fallback(self, tmp_path):
+        """The DEFENSIVE half: a target-LESS token (degenerate/legacy shape —
+        no production mint writes one, see the target-completeness test below)
+        keeps the pre-fix op+session retirement, so nothing becomes un-retirable.
+        The ~5 pre-existing target-less retirement tests in
+        TestTokenLifecycleExtensions pin the same fallback end-to-end."""
+        from merge_guard_post import write_token, _retire_token_for_command
+
+        write_token({"operation_type": "merge"}, token_dir=tmp_path)
+        retired = _retire_token_for_command("gh pr merge 99", "merge", token_dir=tmp_path)
+        assert retired is True, (
+            "defensive fallback broken: target-less token no longer retired by "
+            "an op+session match — the predicate was implemented STRICT (bug)"
+        )
+
+    # --- target-completeness (the by-construction claim, verified) ---
+
+    def test_every_production_mint_writes_a_targeted_token(self, tmp_path):
+        """The defensive fallback's coarse-retirement residual is provably EMPTY
+        in production: every op-class's canonical approval mints a context whose
+        `_target_value` is non-None. Source audit (the completeness half):
+        `write_token` has exactly ONE production call site (merge_guard_post
+        main's mint path), fed only by `_mint_context_from_bundle`, whose
+        `_collect_pairs` admits a pair ONLY when `op_type is not None and
+        target is not None` — so no mint path can write a target-less token.
+        This sweep is the per-op-class empirical corroboration."""
+        from merge_guard_post import _mint_context_from_bundle, _target_value
+
+        approvals = [
+            "gh pr merge 42",
+            "gh pr close 42 --delete-branch",
+            "git push --force origin main",
+            "git push origin main",
+            "git branch -D victim",
+            "git push origin :feature",
+            "git push --prune origin",
+            "gh api -X DELETE repos/o/r/branches/main/protection",
+            "gh api -X PUT /repos/o/r/pulls/42/merge",
+        ]
+        for cmd in approvals:
+            question = {
+                "question": "Proceed?",
+                "options": [{"label": "Yes, do it",
+                             "description": f"Run `{cmd}` now"}],
+                "multiSelect": False,
+            }
+            ctx, refusal = _mint_context_from_bundle(
+                [question], {"Proceed?": "Yes, do it"})
+            assert ctx is not None, f"canonical approval failed to mint: {cmd!r} ({refusal})"
+            assert _target_value(ctx) is not None, (
+                f"TARGET-LESS PRODUCTION MINT for {cmd!r} — the defensive "
+                f"fallback's coarse retirement is REACHABLE in production "
+                f"(separate pre-existing over-block; STOP and flag)"
+            )
+
+    # --- non-vacuity: the survival rows are coupled to the target predicate ---
+
+    def test_target_predicate_non_vacuous_under_target_value_neuter(
+        self, tmp_path, monkeypatch
+    ):
+        """Two-direction counter-mutation: with `_target_value` neutered to
+        always-None (the pre-fix surface — no target ever discriminates, every
+        token falls to the op+session fallback), the unrelated same-op command
+        RETIRES the operator's 42 token again — proving the survival rows above
+        are coupled to the #1097 target predicate, not vacuously green.
+        In-memory (monkeypatch) by design — no git mutation in the shared
+        worktree."""
+        import merge_guard_post as mgp
+
+        # direction 1 — fix present: the unrelated command does not retire
+        mgp.write_token({"operation_type": "close", "pr_number": "42",
+                         "bound_flags": ["--delete-branch"]}, token_dir=tmp_path)
+        assert mgp._retire_token_for_command(
+            "gh pr close 43", "close", token_dir=tmp_path) is False
+        assert len(self._live(tmp_path)) == 1
+        # direction 2 — pre-fix surface restored: the coarse retirement returns
+        monkeypatch.setattr(mgp, "_target_value", lambda ctx: None)
+        assert mgp._retire_token_for_command(
+            "gh pr close 43", "close", token_dir=tmp_path) is True, (
+            "target-value neuter did not restore the pre-fix coarse retirement "
+            "— the survival assertions above would be vacuous"
+        )
+        assert len(self._live(tmp_path)) == 0
+
+
 class TestD1MatcherQuoteNormalization:
     """D1-matcher (#933): _token_matches_command normalizes surrounding quotes
     on the captured branch name at compare time, so a token branch `feat/x`

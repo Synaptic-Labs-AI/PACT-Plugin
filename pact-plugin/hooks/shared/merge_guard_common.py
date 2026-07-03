@@ -309,6 +309,94 @@ _FORCE_PUSH_LITERAL_ARMS = (
     re.compile(_GIT_PREFIX + r"push\s+-[a-zA-Z]*f"),
 )
 
+# leg-boundary substrate (#1087): these close arms' `.*`/lookahead previously ran
+# over the WHOLE stripped command, so a `--delete-branch` token in a benign
+# continuation leg fired the arm cross-leg. That over-reach ALSO laundered: the
+# ambiguous multi-close `gh pr close 42 && gh pr close 43 && echo --delete-branch`
+# was is_dangerous=True whole-command, so it minted a close token that AUTHORIZED an
+# escalated same-target single `gh pr close 42 --delete-branch`. Semantics now: an
+# arm fires iff `gh pr close` and `--delete-branch` co-occur within ONE leg, in ANY
+# leg position — so the ambiguous compound is is_dangerous=False per-leg (the mint
+# write-gate refuses -> no token -> laundering structurally dead) while a real
+# single-leg `gh pr close 42 --delete-branch` still gates. Quoted separators are
+# handled by the substrate (a quoted `&&` is not a leg boundary). Bodies are moved
+# VERBATIM from DANGEROUS_PATTERNS — the conversion changes WHERE they match
+# (per-leg vs whole-command), never WHAT they match.
+_CLOSE_LITERAL_ARMS = (
+    re.compile(_GH_PREFIX + r"pr\s+close\b(?=.*--delete-branch)"),   # forward
+    re.compile(r"--delete-branch.*" + _GH_PREFIX + r"pr\s+close\b"),  # reversed
+)
+
+# leg-boundary substrate (#1086): these 17 API danger arms' `.*` previously ran
+# over the WHOLE stripped command, so a mutating method / body-flag token in a
+# benign continuation leg (`gh api .../git/refs && echo -X DELETE`) over-blocked
+# the benign compound. Matched PER-LEG now: an arm fires iff the API client, the
+# mutating method (or implicit-POST body flag), and the target endpoint co-occur
+# within ONE leg. The negative-lookahead arms operate WITHIN a leg — a same-leg
+# explicit GET correctly excludes, and a body flag in a DIFFERENT leg no longer
+# wrongly includes. Bodies are moved VERBATIM from DANGEROUS_PATTERNS (flags —
+# re.IGNORECASE — lookaheads, and _GH_API_PREFIX/curl/wget prefixes unchanged);
+# the conversion changes WHERE they match, never WHAT they match. No-laundering
+# safety is preserved BY CONSTRUCTION, not by denylist-emptiness: an isolated API
+# leg is method-less hence detect-negative, so tier 2 abstains → symmetric
+# whole-command bind (the safe direction) — see TestEmergentDangerClassIsCloseOnly.
+_API_LITERAL_ARMS = (
+    # API-based merge bypasses (require mutating HTTP method to avoid blocking reads)
+    re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b).*merge", re.IGNORECASE),
+    re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PUT|PATCH|POST)\b).*api.*merge", re.IGNORECASE),
+    # API-based branch deletion via DELETE to git/refs endpoint.
+    # HOST-AGNOSTIC (#1061): the curl arms drop the literal `.*api.*` substring so a
+    # truly api-free Enterprise/proxy URL (e.g. https://git.example.com/repos/o/r/git/refs/...)
+    # no longer bypasses — bringing curl to parity with the already-host-agnostic
+    # gh-api/wget arms. The `api` key was an as-shipped heuristic (#268/#271), not a
+    # deliberated scope ruling; this WIDENS it. The over-block this widening would introduce
+    # on a quoted `-d` body mentioning git/refs is closed by carrier-8 (the HTTP-client
+    # data-body strip in _strip_non_executable_content) — the body value is stripped while
+    # the path-resident ref survives (PATH-vs-BODY invariant).
+    re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+DELETE\b).*git/refs", re.IGNORECASE),
+    re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+DELETE\b).*git/refs", re.IGNORECASE),
+    # API-based ref mutation / force push via mutating method to git/refs endpoint
+    # (any mutating operation on git refs via API is inherently dangerous). Curl arm is
+    # host-agnostic (#1061) — see the DELETE arm note above.
+    re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PATCH|POST|PUT)\b).*git/refs", re.IGNORECASE),
+    re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PATCH|POST|PUT)\b).*git/refs", re.IGNORECASE),
+    # Branch-protection API mutation (#1063): DELETE|PUT|PATCH on a
+    # `branches/<branch>/protection` endpoint WEAKENS protection (remove / replace /
+    # modify whole config). POST is EXCLUDED — it ENABLES protection sub-features
+    # (enforce_admins / required_signatures) = the STRENGTHENING direction, so gating it
+    # would over-block. HOST-AGNOSTIC (the #1061 lesson — no `.*api.*`). Explicit-method
+    # arms only (the protection endpoint has no implicit-POST danger like git/refs). The
+    # branch is PATH-resident, so carrier-8 never strips it (no preservation guard needed,
+    # unlike the body-resident contents arm). No httpie arm: the mint classifier's
+    # `_is_api_form` is gh-api/curl/wget only, so adding an httpie read arm would create a
+    # gated-but-unmintable over-block — omitted by design (httpie is WHOLLY out of charter;
+    # its ref-mutation/merge arms were removed with it).
+    re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:DELETE|PUT|PATCH)\b).*branches/.*/protection", re.IGNORECASE),
+    re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:DELETE|PUT|PATCH)\b).*branches/.*/protection", re.IGNORECASE),
+    re.compile(r"\bwget\b(?=.*--method=(?:DELETE|PUT|PATCH)\b).*branches/.*/protection", re.IGNORECASE),
+    # gh api implicit POST: body param flags (-f, -F, --field, --raw-field, --input)
+    # cause gh api to default to POST. Dangerous when targeting git/refs or merge.
+    # Negative lookahead excludes explicit GET (which overrides implicit POST).
+    re.compile(_GH_API_PREFIX + r"(?!.*(?:-X|--method)\s+GET\b)(?=.*(?:-f|-F|--field|--raw-field|--input)\s).*git/refs", re.IGNORECASE),
+    re.compile(_GH_API_PREFIX + r"(?!.*(?:-X|--method)\s+GET\b)(?=.*(?:-f|-F|--field|--raw-field|--input)\s).*merge", re.IGNORECASE),
+    # curl implicit POST: --data/-d/--data-raw/--data-binary flags cause curl to
+    # default to POST. Dangerous when targeting git/refs or merge API endpoints.
+    # Negative lookahead excludes explicit GET (which overrides implicit POST).
+    re.compile(r"\bcurl\b(?!.*(?:-X|--request)\s+GET\b)(?=.*(?:--data(?:-(?:raw|binary))?|-d)\s).*git/refs", re.IGNORECASE),
+    re.compile(r"\bcurl\b(?!.*(?:-X|--request)\s+GET\b)(?=.*(?:--data(?:-(?:raw|binary))?|-d)\s).*api.*merge", re.IGNORECASE),
+    # Contents API: write operations (PUT/PATCH/POST) to /contents/ endpoint
+    # targeting main or master branch. Flags any mutating /contents/ call that
+    # mentions main or master anywhere in the command (acceptable false positive).
+    re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b).*contents/.*(?:main|master)", re.IGNORECASE),
+    re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PUT|PATCH|POST)\b).*api.*contents/.*(?:main|master)", re.IGNORECASE),
+    # Alternative HTTP clients: wget with --method flag
+    re.compile(r"\bwget\b(?=.*--method=(?:DELETE|PATCH|POST|PUT)\b).*git/refs", re.IGNORECASE),
+    re.compile(r"\bwget\b(?=.*--method=(?:DELETE|PATCH|POST|PUT)\b).*merge", re.IGNORECASE),
+    # Known API detection gaps (defense-in-depth, not a security boundary):
+    # - GraphQL mutations: gh api graphql -f query='mutation { ... }' bypasses REST-path matching
+    # - gh alias: aliases can hide API calls (tracked in #270)
+)
+
 
 
 def detect_command_operation_type(command: str) -> str | None:
@@ -427,6 +515,25 @@ def detect_command_operation_type(command: str) -> str | None:
     if _is_api_form and re.search(r"branches/.*/protection", command):
         if re.search(r"\b(?:DELETE|PUT|PATCH)\b", command, re.IGNORECASE):
             return "branch-protection"
+    # API-based PR merge (#1096, GH-API-ONLY per Option B): gh api with a mutating method
+    # (PUT/PATCH/POST) on a pulls/<N>/merge endpoint is a merge via API. curl/wget were
+    # DROPPED (sec #71: unsound value-flag denylist over an unbounded flag space) — they
+    # classify None and stay gated-but-unmintable. Recognized AND extracted by
+    # the ONE shared per-leg helper _api_merge_leg_endpoint, so recognition<->extractability
+    # read the SAME surface — a leg classifies merge IFF its ENDPOINT-position PR is
+    # extractable, which gives no gated-but-unmintable AND binds the URL-positional
+    # endpoint (never a flag-value / other-leg decoy — the #1096 target-confusion fix).
+    # ADDITIVE: this classifies inputs that were previously None (a genuine API merge)
+    # while leaving every EXISTING classification byte-identical. (It is NOT true that
+    # "every currently-None input stays None" — a genuine api-merge is correctly
+    # None->merge; that is the whole point of the arm. Only NON-merge inputs are
+    # unchanged.) Recognition predicate: tolerant IGNORECASE client (_GH_API_PREFIX, so a
+    # `gh -R o/r api` global-flag spelling also mints) + IGNORECASE PUT/PATCH/POST +
+    # case-SENSITIVE pulls/<N>/merge path. DELETE excluded; the implicit-POST (-f/--data,
+    # no method keyword) spelling is a deliberate residual, per the git/refs detect arm.
+    for _leg in _split_into_legs(command):
+        if _api_merge_leg_endpoint(_leg) is not None:
+            return "merge"
     # branch-delete: git branch -D, git branch --delete --force,
     # or git branch --force --delete (matches DANGEROUS_PATTERNS).
     if re.search(_GIT_PREFIX + r"branch\s+.*-D\b", command):
@@ -565,6 +672,111 @@ def _extract_api_ref(command: str) -> str | None:
         r"git/refs/(?:heads/)?([A-Za-z0-9][A-Za-z0-9._/-]*)", command
     )
     return api_match.group(1) if api_match else None
+
+
+# Value-taking-flag skip set for the gh-api api-merge endpoint walk (#1096; GH-API-ONLY
+# per Option B). The api-merge mint arm is gh-api ONLY — curl/wget were DROPPED because
+# sec #71 proved a value-flag denylist over curl/wget's UNBOUNDED flag space is
+# structurally uncompletable (52 realistic-common decoy leaks), so a curl/wget mint arm
+# built on it is unsound. gh api's flags are FINITE + documented + first-positional-endpoint
+# = provably sound. Consequence: curl/wget api-merge classifies detect=None (mint=0),
+# staying in its PRE-EXISTING gated-but-unmintable state (the read arms still gate it) —
+# killing that laundering class BY CONSTRUCTION (can't mint -> can't launder). Tokens are
+# the shlex form. Includes the -R/--repo GLOBAL flag, which is decoy-capable (`gh -R
+# pulls/5/merge api …` would bind 5 if -R's value is not skipped). Booleans (-i/--include,
+# --paginate, --slurp, --silent, --verbose) are DELIBERATELY absent — skipping their next
+# token would swallow a positional.
+_API_MERGE_GH_VALUE_FLAGS = frozenset({
+    "-X", "--method", "-f", "--field", "-F", "--raw-field", "--input",
+    "-H", "--header", "--hostname", "-q", "--jq", "-t", "--template",
+    "--cache", "-R", "--repo",
+})
+
+_PULLS_MERGE_PR_RE = re.compile(r"pulls/(\d+)/merge\b")
+
+
+def _api_merge_leg_endpoint(leg: str) -> str | None:
+    """Return the ENDPOINT PR of a genuine per-leg API merge, or None (#1096).
+
+    ONE shared helper called by BOTH detect_command_operation_type's merge arm AND
+    _extract_api_merge_pr, so recognition and extraction read the SAME surface (kills
+    the reuse-across-two-domains root: detect recognizes a leg IFF its endpoint is
+    extractable -> no gated-but-unmintable BY CONSTRUCTION, and the bound PR is the URL
+    POSITIONAL endpoint, never a flag-value / other-leg decoy).
+
+    GH-API-ONLY (#1096 Option B; curl/wget dropped, sec #71). Recognition (gh-api client +
+    mutating method + pulls/<N>/merge path co-occur in this leg): tolerant IGNORECASE
+    _GH_API_PREFIX client + IGNORECASE PUT/PATCH/POST method + case-SENSITIVE pulls/<N>/merge
+    path. A curl/wget merge classifies None here -> gated-but-unmintable (read arms still gate).
+
+    Extraction binds the pulls/<N>/merge that is the URL POSITIONAL: strip body values
+    (carrier-8, §2.3), shlex-tokenize, then walk skipping flags + the gh-api value-flag
+    values, and take the first surviving positional. On tokenizer failure NEVER returns
+    None for a recognized leg (falls back to the stripped/raw first-match) — a mis-parse
+    must not gate a faithful merge (over-block-safe).
+    """
+    client_gh = re.search(_GH_API_PREFIX, leg, re.IGNORECASE)
+    if not client_gh:
+        # GH-API-ONLY (#1096 Option B): curl/wget api-merge legs classify None here
+        # (mint=0), staying in their PRE-EXISTING gated-but-unmintable state (the
+        # curl/wget merge READ arms still gate them) — killing the 52 curl/wget
+        # laundering vectors BY CONSTRUCTION (sec #71: their value-flag denylist over an
+        # unbounded flag space is uncompletable). No new over-block (status quo ante).
+        return None
+    # Recognition uses the EXACT non-capturing literal `pulls/\d+/merge\b` via re.search
+    # (byte-identical to the prior detect arm), NOT the compiled capturing _PULLS_MERGE_PR_RE
+    # — so recognition stays byte-identical AND the non-vacuity arm-disable shim (which
+    # monkeypatches re.search of this exact literal) still surgically disables the arm.
+    # The capturing _PULLS_MERGE_PR_RE is used only for EXTRACTION (the walk + fallback).
+    if not re.search(r"pulls/\d+/merge\b", leg):
+        return None
+    if not re.search(r"\b(?:PUT|PATCH|POST)\b", leg, re.IGNORECASE):
+        return None
+    # Recognized. Extract the ENDPOINT-position PR.
+    stripped = _strip_non_executable_content(leg)
+    tokens = _shell_tokenize(stripped)
+    if tokens is None:
+        # Tokenizer failure (unbalanced quotes): NEVER None for a recognized leg
+        # (over-block-safe). Prefer the body-stripped surface (avoids body decoys);
+        # the raw leg is guaranteed to match (recognition required it).
+        m = _PULLS_MERGE_PR_RE.search(stripped) or _PULLS_MERGE_PR_RE.search(leg)
+        return m.group(1) if m else None
+    value_flags = _API_MERGE_GH_VALUE_FLAGS
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.startswith("-"):
+            base = tok.split("=", 1)[0]
+            if "=" not in tok and base in value_flags:
+                i += 1  # bare space-separated value-flag: skip its value token too
+            # attached-value (`--method=PUT`, `-XPUT`) and booleans consume no extra token
+            i += 1
+            continue
+        # A positional: the endpoint is the FIRST pulls/<N>/merge positional (the URL
+        # argument; for gh api the endpoint is the first positional by REST convention).
+        mm = _PULLS_MERGE_PR_RE.search(tok)
+        if mm:
+            return mm.group(1)
+        i += 1
+    # Recognized (gh-api) but no endpoint positional survived (the only pulls/<N>/merge was
+    # a skipped flag VALUE, i.e. a body/decoy — the leg has no real merge endpoint). NOT a
+    # tokenizer failure, so this is a genuine "no extractable endpoint" -> None. Correct
+    # (no wrong-target mint); such an input never faithfully merges a PR. (#1096 is
+    # gh-api-only per Option B: curl/wget never reach this walk — they classify None at
+    # the client gate above — so there is no exotic-curl residual to accept.)
+    return None
+
+
+def _extract_api_merge_pr(command: str) -> str | None:
+    """Command-level api-merge PR: walk the legs and return the FIRST recognized leg's
+    ENDPOINT-position PR (#1096). Leg-scoping closes the cross-leg/echo decoy; the
+    per-leg helper closes the same-leg flag-value decoy. Consumed by extract_command_context
+    (mint + read whole-fallback + #1097 retirement cmd_target all heal at this one site)."""
+    for _leg in _split_into_legs(command):
+        pr = _api_merge_leg_endpoint(_leg)
+        if pr is not None:
+            return pr
+    return None
 
 
 def _extract_protection_branch(command: str) -> str | None:
@@ -1159,6 +1371,8 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
     )
     if op_type in ("merge", "close"):
         pr_number = _extract_pr_number(command)
+        if pr_number is None and op_type == "merge":
+            pr_number = _extract_api_merge_pr(command)   # #1096 API pulls/<N>/merge
         if pr_number is not None:
             context["pr_number"] = pr_number
     elif op_type == "branch-delete":
@@ -1425,9 +1639,11 @@ def cleanup_orphan_tokens(
 DANGEROUS_PATTERNS = [
 # PR merge via gh CLI
 re.compile(_GH_PREFIX + r"pr\s+merge\b"),
-# PR close with --delete-branch via gh CLI (bare close is reversible)
-re.compile(_GH_PREFIX + r"pr\s+close\b(?=.*--delete-branch)"),
-re.compile(r"--delete-branch.*" + _GH_PREFIX + r"pr\s+close\b"),
+# PR close with --delete-branch: the close+--delete-branch danger arms live in
+# _CLOSE_LITERAL_ARMS (defined with the classifier patterns above) — matched
+# PER-LEG by is_dangerous_command after this list misses (#1087 leg isolation),
+# NOT whole-string here (a whole-command match fired cross-leg and laundered an
+# ambiguous multi-close into an escalated-single token). Bare close is reversible.
 # Force push arms live in _FORCE_PUSH_LITERAL_ARMS (defined with the classifier
 # patterns above) — matched PER-LEG by is_dangerous_command after this list
 # misses (#1082 leg isolation), NOT whole-string here.
@@ -1435,60 +1651,11 @@ re.compile(r"--delete-branch.*" + _GH_PREFIX + r"pr\s+close\b"),
 re.compile(_GIT_PREFIX + r"branch\s+.*-D\b"),
 re.compile(_GIT_PREFIX + r"branch\s+.*--delete\s+--force\b"),
 re.compile(_GIT_PREFIX + r"branch\s+--force\s+--delete\b"),
-# API-based merge bypasses (require mutating HTTP method to avoid blocking reads)
-re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b).*merge", re.IGNORECASE),
-re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PUT|PATCH|POST)\b).*api.*merge", re.IGNORECASE),
-# API-based branch deletion via DELETE to git/refs endpoint.
-# HOST-AGNOSTIC (#1061): the curl arms drop the literal `.*api.*` substring so a
-# truly api-free Enterprise/proxy URL (e.g. https://git.example.com/repos/o/r/git/refs/...)
-# no longer bypasses — bringing curl to parity with the already-host-agnostic
-# gh-api/wget arms. The `api` key was an as-shipped heuristic (#268/#271), not a
-# deliberated scope ruling; this WIDENS it. The over-block this widening would introduce
-# on a quoted `-d` body mentioning git/refs is closed by carrier-8 (the HTTP-client
-# data-body strip in _strip_non_executable_content) — the body value is stripped while
-# the path-resident ref survives (PATH-vs-BODY invariant).
-re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+DELETE\b).*git/refs", re.IGNORECASE),
-re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+DELETE\b).*git/refs", re.IGNORECASE),
-# API-based ref mutation / force push via mutating method to git/refs endpoint
-# (any mutating operation on git refs via API is inherently dangerous). Curl arm is
-# host-agnostic (#1061) — see the DELETE arm note above.
-re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PATCH|POST|PUT)\b).*git/refs", re.IGNORECASE),
-re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PATCH|POST|PUT)\b).*git/refs", re.IGNORECASE),
-# Branch-protection API mutation (#1063): DELETE|PUT|PATCH on a
-# `branches/<branch>/protection` endpoint WEAKENS protection (remove / replace /
-# modify whole config). POST is EXCLUDED — it ENABLES protection sub-features
-# (enforce_admins / required_signatures) = the STRENGTHENING direction, so gating it
-# would over-block. HOST-AGNOSTIC (the #1061 lesson — no `.*api.*`). Explicit-method
-# arms only (the protection endpoint has no implicit-POST danger like git/refs). The
-# branch is PATH-resident, so carrier-8 never strips it (no preservation guard needed,
-# unlike the body-resident contents arm). No httpie arm: the mint classifier's
-# `_is_api_form` is gh-api/curl/wget only, so adding an httpie read arm would create a
-# gated-but-unmintable over-block — omitted by design (httpie is WHOLLY out of charter;
-# its ref-mutation/merge arms were removed with it).
-re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:DELETE|PUT|PATCH)\b).*branches/.*/protection", re.IGNORECASE),
-re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:DELETE|PUT|PATCH)\b).*branches/.*/protection", re.IGNORECASE),
-re.compile(r"\bwget\b(?=.*--method=(?:DELETE|PUT|PATCH)\b).*branches/.*/protection", re.IGNORECASE),
-# gh api implicit POST: body param flags (-f, -F, --field, --raw-field, --input)
-# cause gh api to default to POST. Dangerous when targeting git/refs or merge.
-# Negative lookahead excludes explicit GET (which overrides implicit POST).
-re.compile(_GH_API_PREFIX + r"(?!.*(?:-X|--method)\s+GET\b)(?=.*(?:-f|-F|--field|--raw-field|--input)\s).*git/refs", re.IGNORECASE),
-re.compile(_GH_API_PREFIX + r"(?!.*(?:-X|--method)\s+GET\b)(?=.*(?:-f|-F|--field|--raw-field|--input)\s).*merge", re.IGNORECASE),
-# curl implicit POST: --data/-d/--data-raw/--data-binary flags cause curl to
-# default to POST. Dangerous when targeting git/refs or merge API endpoints.
-# Negative lookahead excludes explicit GET (which overrides implicit POST).
-re.compile(r"\bcurl\b(?!.*(?:-X|--request)\s+GET\b)(?=.*(?:--data(?:-(?:raw|binary))?|-d)\s).*git/refs", re.IGNORECASE),
-re.compile(r"\bcurl\b(?!.*(?:-X|--request)\s+GET\b)(?=.*(?:--data(?:-(?:raw|binary))?|-d)\s).*api.*merge", re.IGNORECASE),
-# Contents API: write operations (PUT/PATCH/POST) to /contents/ endpoint
-# targeting main or master branch. Flags any mutating /contents/ call that
-# mentions main or master anywhere in the command (acceptable false positive).
-re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b).*contents/.*(?:main|master)", re.IGNORECASE),
-re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PUT|PATCH|POST)\b).*api.*contents/.*(?:main|master)", re.IGNORECASE),
-# Alternative HTTP clients: wget with --method flag
-re.compile(r"\bwget\b(?=.*--method=(?:DELETE|PATCH|POST|PUT)\b).*git/refs", re.IGNORECASE),
-re.compile(r"\bwget\b(?=.*--method=(?:DELETE|PATCH|POST|PUT)\b).*merge", re.IGNORECASE),
-# Known API detection gaps (defense-in-depth, not a security boundary):
-# - GraphQL mutations: gh api graphql -f query='mutation { ... }' bypasses REST-path matching
-# - gh alias: aliases can hide API calls (tracked in #270)
+# API danger arms (merge / git-refs / branch-protection / contents / implicit-POST,
+# across gh api / curl / wget) live in _API_LITERAL_ARMS (defined with the classifier
+# patterns above) — matched PER-LEG by is_dangerous_command after this list misses
+# (#1086 leg isolation), NOT whole-string here (a whole-command match fired cross-leg
+# and over-blocked a benign compound carrying a method/body-flag token in a benign leg).
 # Direct push to default branch (bypasses PR merge)
 re.compile(_GIT_PREFIX + r"push\s+\S+\s+HEAD:main\b"),
 re.compile(_GIT_PREFIX + r"push\s+\S+\s+HEAD:master\b"),
@@ -1935,7 +2102,12 @@ def _strip_non_executable_content(command: str) -> str:
             # contents arm UNCHANGED, so preserve a contents-API span verbatim. Detected
             # per-span (a compound's `/log` span is still stripped). git/refs and
             # branches/protection targets are path-resident, so their bodies stay strippable.
-            if re.search(r"contents/", span):
+            # IGNORECASE to match the case-insensitive contents READ arm
+            # (`contents/.*(?:main|master)`, re.IGNORECASE): a `Contents/` (any case)
+            # span carries its main/master gating signal in the BODY, so it must be
+            # preserved from stripping in ANY case — else the #1096 §2.3 unquoted body
+            # strip removes the signal for a capital-case spelling -> under-block.
+            if re.search(r"contents/", span, re.IGNORECASE):
                 return span
 
             def _keep_flag_dq(m: re.Match) -> str:
@@ -1960,6 +2132,21 @@ def _strip_non_executable_content(command: str) -> str:
             )
             span = re.sub(
                 r"(" + _field_flag + r"\s+[\w.\-]+=)'[^']*'", r"\1'STRIPPED'", span
+            )
+            # (#1096 §2.3) UNQUOTED body/field values — closes the endpoint-decoy the
+            # quoted-only arms above miss (`-f note=pulls/5/merge`, `-d body`), and the
+            # #1037 unquoted-body read-floor over-block (carrier-8 feeds is_dangerous).
+            # Runs AFTER the quoted arms, and the value's first char is a NON-quote
+            # (`[^\s'"]`), so a quoted value already handled above is never re-touched.
+            # Anchored on the body-flag(+key=) prefix, so the URL POSITIONAL endpoint
+            # (never preceded by such a prefix) is never matched -> never stripped
+            # (over-block-safe). Reuses _keep_flag_dq: a $()/backtick value executes and
+            # is kept; otherwise the 'STRIPPED' placeholder replaces the bare value.
+            span = re.sub(
+                r"(" + _data_flag + r"\s+)[^\s'\"]\S*", _keep_flag_dq, span
+            )
+            span = re.sub(
+                r"(" + _field_flag + r"\s+[\w.\-]+=)[^\s'\"]\S*", _keep_flag_dq, span
             )
             return span
 
@@ -2340,9 +2527,28 @@ def is_dangerous_command(command: str) -> bool:
     # provenance to _split_into_legs (normalize + strip, above), so read-floor legs
     # and substrate legs can never diverge, and the strip is not recomputed. An arm
     # fires iff push and the force-class flag co-occur within ONE leg, in ANY leg
-    # position (the match-anywhere purpose, per leg).
-    for _leg in _slice_stripped_legs(stripped):
+    # position (the match-anywhere purpose, per leg). The legs are computed ONCE
+    # here and shared by all three literal-arm loops below (force-push, close, API).
+    legs = _slice_stripped_legs(stripped)
+    for _leg in legs:
         if any(arm.search(_leg) for arm in _FORCE_PUSH_LITERAL_ARMS):
+            return True
+    # Literal close arms, matched PER-LEG (#1087): same leg substrate and strip
+    # provenance as the force-push loop above. An arm fires iff `gh pr close` and
+    # `--delete-branch` co-occur within ONE leg — so the ambiguous cross-leg
+    # multi-close is is_dangerous=False here, the mint write-gate refuses (no token),
+    # and the escalated-single laundering channel is structurally closed.
+    for _leg in legs:
+        if any(arm.search(_leg) for arm in _CLOSE_LITERAL_ARMS):
+            return True
+    # Literal API danger arms, matched PER-LEG (#1086): same leg substrate and strip
+    # provenance as the loops above. An arm fires iff the API client, its mutating
+    # method (or implicit-POST body flag), and the target endpoint co-occur within ONE
+    # leg — so a method/body-flag token in a benign continuation leg no longer
+    # over-blocks the compound, while a same-leg dangerous API call still gates. The
+    # negative-lookahead arms operate within-leg (correct exclusion/inclusion direction).
+    for _leg in legs:
+        if any(arm.search(_leg) for arm in _API_LITERAL_ARMS):
             return True
     # ADDITIVE union arm (INV-AU): a quote-aware normalized-flag danger CONDITION across
     # every flag spelling the literal floor misses — `-d`/`-cd` close delete, `-Df`/`-fD`/

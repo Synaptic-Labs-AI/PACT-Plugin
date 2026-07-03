@@ -924,7 +924,18 @@ class TestLegBoundedMintWindow:
     op's own leg BY CONSTRUCTION (the symmetry pin below guards the shared-helper
     wiring). Every test drives the REAL mint (post.main) and the REAL read seam;
     the counter-mutations prove the canaries are coupled to each half of the
-    single-commit fix."""
+    single-commit fix.
+
+    #1087 update: the CLOSE channel is now closed more fundamentally at the READ
+    FLOOR — the close danger arms match PER-LEG (_CLOSE_LITERAL_ARMS), so the
+    ambiguous cross-leg close member is is_dangerous=False and mints NOTHING (the
+    two-tier bind is no longer REACHED by a dangerous close). The close-member
+    pins below therefore assert mint-nothing / run-free rather than a []-bind. The
+    two-tier bind is RETAINED for the push/merge/force channels (which still
+    produce real tokens) and as defense-in-depth for a future isolable op — the
+    tier helpers stay exercised by test_two_tier_selection_precedence, and the
+    invariant that justifies retention is pinned by the OPEN-Q D tripwire
+    (TestEmergentDangerClassIsCloseOnly)."""
 
     # --- cured members: byte-identical re-approval AUTHORIZES (pre-fix RED) ---
 
@@ -987,7 +998,7 @@ class TestLegBoundedMintWindow:
         assert _token_bound_flags(tmp_path) == []
         assert _authorize(escalated, tmp_path) is not None
 
-    # --- close op-class: the emergent-danger members, BOTH shapes cured ---
+    # --- close op-class: the emergent members are now not-dangerous per-leg ---
 
     @pytest.mark.parametrize(
         "member",
@@ -996,18 +1007,22 @@ class TestLegBoundedMintWindow:
             "echo --delete-branch && gh pr close 42",   # reversed close arm
         ],
     )
-    def test_close_emergent_member_round_trips_both_shapes(self, member, tmp_path):
-        """The emergent-danger close members (zero individually-dangerous legs;
-        whole-command danger from the close arms' cross-leg lookaheads): the read
-        seam's tier-2 fallback binds [] from the unique DETECTABLE close leg, and
-        the mint window's identical two-tier selection binds [] from the same leg
-        — byte-identical re-approval AUTHORIZES. The reversed shape is the row
-        that a positional leg[0] window failed (leg[0] is the echo leg there):
-        the two-tier selection is what makes BOTH shapes cure."""
+    def test_close_emergent_member_mints_nothing_and_runs_free(self, member, tmp_path):
+        """Post-#1087 the close danger arms match PER-LEG at the read floor, so
+        neither shape has `gh pr close` and `--delete-branch` together in ONE leg
+        — is_dangerous=False. The member is no longer an emergent-danger compound:
+        the approval mints NOTHING (write-gate: not_dangerous) and the
+        byte-identical re-execution RUNS FREE (a reversible bare close plus an
+        echo). Both shapes cure identically because the per-leg floor is
+        position-independent — the reversed shape (leg[0] is the echo) is no
+        longer a special case, it too has no in-leg close+flag. This is the #1087
+        over-block removal; the two-tier bind that formerly bound [] here is no
+        longer reached by a dangerous close (retained as defense-in-depth per
+        OPEN-Q A)."""
         q = "Close it?"
         opts = [_opt("Yes, close", f"On approval run: `{member}`"), _opt("Cancel", "Abort")]
         assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
-        assert _token_bound_flags(tmp_path) == []
+        assert len(_minted_tokens(tmp_path)) == 0
         assert _authorize(member, tmp_path) is None
 
     def test_close_laundering_channel_closed(self, tmp_path):
@@ -1016,11 +1031,17 @@ class TestLegBoundedMintWindow:
         as a reversible bare close plus an echo — minted
         bound_flags=['--delete-branch'] from the echo literal, and the ESCALATED
         `gh pr close 42 --delete-branch` (a REAL, irreversible branch-deleting
-        close) AUTHORIZED against it. Post-fix the token binds [] → REFUSE."""
+        close) AUTHORIZED against it. Post-#1087 the mechanism is more
+        fundamental: the member is is_dangerous=False per-leg, so the approval
+        mints NOTHING (not a []-token via the two-tier bind) and the escalated
+        single REFUSES for lack of any token. The explicit zero-mint assertion
+        makes this non-vacuous — a regression that re-minted the member would flip
+        it RED at the count, not silently pass on the DENY."""
         member = "gh pr close 42 && echo --delete-branch"
         q = "Close it?"
         opts = [_opt("Yes, close", f"On approval run: `{member}`"), _opt("Cancel", "Abort")]
         assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
+        assert len(_minted_tokens(tmp_path)) == 0
         assert _authorize("gh pr close 42 --delete-branch", tmp_path) is not None
 
     def test_close_flag_on_op_single_leg_round_trips(self, tmp_path):
@@ -1043,7 +1064,7 @@ class TestLegBoundedMintWindow:
         cmd = "gh pr close 42"
         q = "Close it?"
         opts = [_opt("Yes, close", f"On approval run: `{cmd}`"), _opt("Cancel", "Abort")]
-        _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path)
+        assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
         assert len(_minted_tokens(tmp_path)) == 0
         assert _authorize(cmd, tmp_path) is None
 
@@ -1069,20 +1090,25 @@ class TestLegBoundedMintWindow:
         assert _token_bound_flags(tmp_path) == expected_flags
         assert _authorize(cmd, tmp_path) is None
 
-    # --- ambiguity fail-safe + destructive-path precedence ---
+    # --- ambiguity fail-safe: the #1087 laundering-closed proof (real seam) ---
 
-    def test_ambiguous_execution_denies_against_clean_member_token(self, tmp_path):
-        """Ambiguity fail-safe: a >=2-detectable-leg execution (no unique op leg)
-        makes the read seam fall back to the conservative WHOLE-command scan,
-        which binds the echo literal — set-mismatch vs the clean member token's
-        [] → DENY. Ambiguity can only collapse WIDER, never narrower."""
-        member = "gh pr close 42 && echo --delete-branch"
-        q = "Close it?"
-        opts = [_opt("Yes, close", f"On approval run: `{member}`"), _opt("Cancel", "Abort")]
-        assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
-        assert _token_bound_flags(tmp_path) == []
+    def test_ambiguous_approval_source_mints_nothing_and_escalated_single_denies(self, tmp_path):
+        """#1087 laundering closed, end-to-end over the REAL mint + read seams:
+        pre-fix, approving the ambiguous multi-close
+        `gh pr close 42 && gh pr close 43 && echo --delete-branch` (which reads as
+        two reversible bare closes plus an echo) minted a token whose set
+        AUTHORIZED the escalated single `gh pr close 42 --delete-branch` (a real
+        branch delete). Post-fix the ambiguous source is is_dangerous=False
+        per-leg → the approval mints NOTHING, and the escalated single-command
+        REFUSES for lack of any token. This is the approval-SOURCE direction the
+        #1083 close pins never exercised (they drove the member as an execution
+        target); it is the direct laundering-closed proof."""
         ambiguous = "gh pr close 42 && gh pr close 43 && echo --delete-branch"
-        assert _authorize(ambiguous, tmp_path) is not None
+        q = "Close it?"
+        opts = [_opt("Yes, close", f"On approval run: `{ambiguous}`"), _opt("Cancel", "Abort")]
+        assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
+        assert len(_minted_tokens(tmp_path)) == 0
+        assert _authorize("gh pr close 42 --delete-branch", tmp_path) is not None
 
     def test_two_tier_selection_precedence(self):
         """Destructive-path precedence, at the tier helpers directly: a dangerous
@@ -1180,7 +1206,7 @@ class TestLegBoundedMintWindow:
         member = "gh pr merge 5 && git branch -Df victim"
         q = "Proceed?"
         opts = [_opt("Yes", f"On approval run: `{member}`"), _opt("Cancel", "Abort")]
-        _invoke_post([_q(q, opts)], {q: "Yes"}, tmp_path)
+        assert _invoke_post([_q(q, opts)], {q: "Yes"}, tmp_path) == 0
         assert len(_minted_tokens(tmp_path)) == 0
 
     # --- non-vacuity: in-memory counter-mutations, both halves, both directions ---
@@ -1213,26 +1239,45 @@ class TestLegBoundedMintWindow:
             "full-text mutation did not re-open the laundering channel"
         )
 
-    def test_read_fallback_is_non_vacuous_under_tier2_neutering(self, tmp_path, monkeypatch):
-        """READ-half counter-mutation: neuter tier 2 (_single_detectable_leg →
-        None, the binding merge_guard_pre resolves at call time) and assert the
-        emergent close member's byte-identical re-approval flips BACK to DENY
-        (read falls back to the whole-command scan and binds the echo literal
-        against the [] token). Proves the both-shapes-cure canaries are coupled
-        to the read fallback, not just the window."""
-        member = "gh pr close 42 && echo --delete-branch"
+    def test_close_laundering_closed_is_non_vacuous_under_whole_command_match(
+            self, tmp_path, monkeypatch):
+        """READ-FLOOR non-vacuity for the #1087 close per-leg conversion — replaces
+        the tier-2-neutering non-vacuity, which is void now that is_dangerous is
+        per-leg and independent of tier 2. Direction 1 — fix present: the
+        ambiguous multi-close is is_dangerous=False, mints nothing, and the
+        escalated single denies. Direction 2 — restore the PRE-FIX whole-command
+        close match by neutering the leg substrate to a single whole-command
+        "leg" (identity slice), so the per-leg close arms fire over the WHOLE
+        stripped command again: the ambiguous source becomes is_dangerous=True,
+        the approval MINTS, and the escalated single AUTHORIZES — the laundering
+        channel RE-OPENS. Proves the close-channel canaries are coupled to the
+        per-leg conversion, not vacuously green."""
+        from shared.merge_guard_common import is_dangerous_command
+        ambiguous = "gh pr close 42 && gh pr close 43 && echo --delete-branch"
+        escalated = "gh pr close 42 --delete-branch"
         q = "Close it?"
-        opts = [_opt("Yes, close", f"On approval run: `{member}`"), _opt("Cancel", "Abort")]
-        # direction 1 — fix present: byte-identical authorizes
+        opts = [_opt("Yes, close", f"On approval run: `{ambiguous}`"), _opt("Cancel", "Abort")]
+        # direction 1 — fix present: not-dangerous, mints nothing, escalation denies
+        assert is_dangerous_command(ambiguous) is False
         assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp_path) == 0
-        assert _token_bound_flags(tmp_path) == []
-        assert _authorize(member, tmp_path) is None
-        # direction 2 — tier 2 neutered: the emergent over-block returns
-        import merge_guard_pre as pre_mod
-        monkeypatch.setattr(pre_mod, "_single_detectable_leg", lambda c: None)
-        assert _authorize(member, tmp_path) is not None, (
-            "tier-2 neutering did not restore the emergent-danger over-block — "
-            "the both-shapes-cure canaries would be vacuous"
+        assert len(_minted_tokens(tmp_path)) == 0
+        assert _authorize(escalated, tmp_path) is not None
+        # direction 2 — pre-fix whole-command close match restored: laundering re-opens
+        import shared.merge_guard_common as common_mod
+        monkeypatch.setattr(common_mod, "_slice_stripped_legs", lambda s: [s])
+        assert is_dangerous_command(ambiguous) is True, (
+            "identity-slice did not restore the whole-command close match — "
+            "the close-channel canaries would be vacuous"
+        )
+        tmp2 = tmp_path / "prefix-sim"
+        tmp2.mkdir()
+        assert _invoke_post([_q(q, opts)], {q: "Yes, close"}, tmp2) == 0
+        assert len(_minted_tokens(tmp2)) == 1, (
+            "whole-command close match did not restore the pre-fix mint — "
+            "the close laundering-closed canary would be vacuous"
+        )
+        assert _authorize(escalated, tmp2) is None, (
+            "whole-command close match did not re-open the laundering channel"
         )
 
 

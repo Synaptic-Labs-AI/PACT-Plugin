@@ -682,6 +682,13 @@ def _retire_token_for_command(
         token_dir = TOKEN_DIR
     pattern = str(token_dir / f"{TOKEN_PREFIX}*")
     current_session = get_session_id()
+    # #1097: target-aware retirement. Bring the match up to the granularity the mint
+    # records — retire ONLY the token for the SPECIFIC operation (same op AND same
+    # target), not any same-op token in the session. Uses the SAME _target_value the
+    # mint/read derive, so retirement, mint, and read agree on target identity by
+    # construction. (The API-merge form reuses pr_number per #1096, so this covers it
+    # uniformly with zero extra code.)
+    cmd_target = _target_value(extract_command_context(command))
     for path in glob.glob(pattern):
         basename = os.path.basename(path)
         # Skip terminal-rename siblings and per-use markers (mirrors the
@@ -704,6 +711,18 @@ def _retire_token_for_command(
         # op_type match + session-scope is the minimum to retire (a
         # subsequent op of the same type would need a fresh token anyway).
         if ctx.get("operation_type") != op_type:
+            continue
+        # #1097: target-aware ONLY when the token carries a target (every PRODUCTION-
+        # minted token does — _collect_pairs mints no pair without a non-None
+        # _target_value). A target-LESS token (a degenerate/legacy shape) has no target
+        # to discriminate on, so it falls back to the pre-#1097 op+session match rather
+        # than becoming un-retirable. SAFE: a target-less token is never the operator's
+        # PROTECTED token (that one has a target), so the fallback cannot re-open the
+        # over-block the fix cures — a real protected {op, target:42} token is NOT
+        # retired by an unrelated {op, target:43} command (token_target=42 non-None,
+        # 43 != 42 -> continue).
+        token_target = _target_value(ctx)
+        if token_target is not None and cmd_target != token_target:
             continue
         # Session scoping (SEC-S1 cycle-2 revised asymmetric predicate).
         token_session = token_data.get("session_id", "")
