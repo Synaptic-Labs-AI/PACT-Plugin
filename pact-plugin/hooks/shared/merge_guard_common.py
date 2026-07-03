@@ -515,6 +515,32 @@ def detect_command_operation_type(command: str) -> str | None:
     if _is_api_form and re.search(r"branches/.*/protection", command):
         if re.search(r"\b(?:DELETE|PUT|PATCH)\b", command, re.IGNORECASE):
             return "branch-protection"
+    # API-based PR merge (#1096): gh api|curl|wget with a mutating method (PUT/PATCH/
+    # POST) on a pulls/<N>/merge endpoint is a merge via API. Recognized PER-LEG (the
+    # #1086 leg-isolation philosophy) so a method token in a benign continuation leg
+    # (`gh api .../pulls/5/merge && echo -X PUT`) does NOT misclassify the benign
+    # compound — additive purity is exact (only a genuine same-leg API-merge classifies;
+    # every currently-None input stays None). Recognition<->extractability: the
+    # pulls/<N>/merge path both triggers the arm AND supplies the PR number (via
+    # _extract_api_merge_pr), so no gated-but-unmintable residual and no over-mint. The
+    # PR number is PATH-resident -> the carrier-strip never removes it. The CLIENT
+    # matcher uses the tolerant _GH_API_PREFIX (the SAME idiom as the sibling git/refs +
+    # protection detect arms), so a gh-global-flag spelling (`gh -R o/r api
+    # .../pulls/N/merge -X PUT`) also mints instead of gating-on-read-but-not-minting
+    # (#1096 was a PERMANENT over-block — a faithful click that could never mint).
+    # IGNORECASE so a lowercase -x put faithful form mints too. DELETE is excluded (a
+    # DELETE on pulls/N/merge is not a merge). The implicit-POST (-f/--data, no method
+    # keyword) spelling is a deliberate residual, consistent with the git/refs detect arm.
+    for _leg in _split_into_legs(command):
+        if (
+            (
+                re.search(_GH_API_PREFIX, _leg, re.IGNORECASE)
+                or re.search(r"\b(?:curl|wget)\b", _leg, re.IGNORECASE)
+            )
+            and re.search(r"pulls/\d+/merge\b", _leg)
+            and re.search(r"\b(?:PUT|PATCH|POST)\b", _leg, re.IGNORECASE)
+        ):
+            return "merge"
     # branch-delete: git branch -D, git branch --delete --force,
     # or git branch --force --delete (matches DANGEROUS_PATTERNS).
     if re.search(_GIT_PREFIX + r"branch\s+.*-D\b", command):
@@ -653,6 +679,16 @@ def _extract_api_ref(command: str) -> str | None:
         r"git/refs/(?:heads/)?([A-Za-z0-9][A-Za-z0-9._/-]*)", command
     )
     return api_match.group(1) if api_match else None
+
+
+def _extract_api_merge_pr(command: str) -> str | None:
+    """Parse the PR number from an API PR-merge command's `pulls/<N>/merge` path
+    (#1096). detect_command_operation_type classifies gh api|curl|wget PUT/PATCH/POST
+    on a pulls/<N>/merge endpoint as a `merge`; the PR number is the path component.
+    Returns the digits, or None when the command is not a recognized API-merge form.
+    Same recognition<->extractability contract as _extract_api_ref."""
+    m = re.search(r"pulls/(\d+)/merge\b", command)
+    return m.group(1) if m else None
 
 
 def _extract_protection_branch(command: str) -> str | None:
@@ -1247,6 +1283,8 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
     )
     if op_type in ("merge", "close"):
         pr_number = _extract_pr_number(command)
+        if pr_number is None and op_type == "merge":
+            pr_number = _extract_api_merge_pr(command)   # #1096 API pulls/<N>/merge
         if pr_number is not None:
             context["pr_number"] = pr_number
     elif op_type == "branch-delete":
