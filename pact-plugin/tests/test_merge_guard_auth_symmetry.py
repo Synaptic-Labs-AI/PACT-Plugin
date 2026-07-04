@@ -1280,6 +1280,50 @@ class TestLegBoundedMintWindow:
             "whole-command close match did not re-open the laundering channel"
         )
 
+    def test_branch_delete_laundering_closed_is_non_vacuous_under_whole_command_match(
+            self, tmp_path, monkeypatch):
+        """READ-FLOOR laundering closure for the #1094 branch-delete per-leg
+        conversion — the close-twin shape, over the REAL mint + read seams.
+        Pre-fix, the ambiguous compound `git branch new-feature && echo -D`
+        (a benign branch CREATE plus an echo) was is_dangerous=True
+        whole-command AND classified branch-delete with an extractable target,
+        so approving it MINTED a branch-delete token that authorized the
+        escalated same-target single `git branch -D new-feature`. Direction 1 —
+        fix present: the ambiguous source is is_dangerous=False per-leg, the
+        approval mints NOTHING (post-hook exit==0, mint==0 — the write-gate
+        refusal), and the escalated single DENIES for lack of any token.
+        Direction 2 — identity-slice restores the pre-fix whole-command match:
+        the source gates again, the approval MINTS, and the escalated single
+        AUTHORIZES — the laundering channel RE-OPENS, proving the closure is
+        coupled to the per-leg conversion, not vacuously green."""
+        from shared.merge_guard_common import is_dangerous_command
+        ambiguous = "git branch new-feature && echo -D"
+        escalated = "git branch -D new-feature"
+        q = "Create the branch?"
+        opts = [_opt("Yes, create", f"On approval run: `{ambiguous}`"), _opt("Cancel", "Abort")]
+        # direction 1 — fix present: not-dangerous, mints nothing, escalation denies
+        assert is_dangerous_command(ambiguous) is False
+        assert _invoke_post([_q(q, opts)], {q: "Yes, create"}, tmp_path) == 0
+        assert len(_minted_tokens(tmp_path)) == 0
+        assert _authorize(escalated, tmp_path) is not None
+        # direction 2 — pre-fix whole-command match restored: laundering re-opens
+        import shared.merge_guard_common as common_mod
+        monkeypatch.setattr(common_mod, "_slice_stripped_legs", lambda s: [s])
+        assert is_dangerous_command(ambiguous) is True, (
+            "identity-slice did not restore the whole-command branch-delete match — "
+            "the branch-delete laundering-closed canary would be vacuous"
+        )
+        tmp2 = tmp_path / "prefix-sim"
+        tmp2.mkdir()
+        assert _invoke_post([_q(q, opts)], {q: "Yes, create"}, tmp2) == 0
+        assert len(_minted_tokens(tmp2)) == 1, (
+            "whole-command branch-delete match did not restore the pre-fix mint — "
+            "the branch-delete laundering-closed canary would be vacuous"
+        )
+        assert _authorize(escalated, tmp2) is None, (
+            "whole-command branch-delete match did not re-open the laundering channel"
+        )
+
 
 class TestPrivilegedFlagReadFloorSeam:
     """The read floor over the REAL on-disk token seam: a forged/seeded approval
