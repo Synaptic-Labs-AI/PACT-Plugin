@@ -1402,6 +1402,9 @@ class TestBranchDeleteLiteralArmCrossLegSweep:
             "git branch temp && grep -D skip pattern f.txt",     # arm 1, flag inside a benign leg's args
             "git branch backup ; ls -D",                         # arm 1, `;` separator
             "git checkout main && git branch temp && echo -D",   # arm 1, 3-leg member
+            "git branch new-feature || echo -D",                 # arm 1, `||` separator
+            "git branch new | grep -D x f.txt",                  # arm 1, `|` separator
+            "git branch new & echo -D",                          # arm 1, `&` separator
         ],
     )
     def test_branch_delete_arm_cross_leg_span_cured(self, cmd):
@@ -1534,6 +1537,9 @@ class TestBranchDeleteLiteralArmCrossLegSweep:
             "git branch temp && grep -D skip pattern f.txt",
             "git branch backup ; ls -D",
             "git checkout main && git branch temp && echo -D",
+            "git branch new-feature || echo -D",
+            "git branch new | grep -D x f.txt",
+            "git branch new & echo -D",
         ],
     )
     def test_branch_delete_cured_rows_non_vacuous_and_single_family(self, cmd, monkeypatch):
