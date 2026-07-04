@@ -103,15 +103,16 @@ run UNGATED when the destructive op is not the first leg:
   - `cd /repo && git push origin --delete main`
   - `git fetch && git push --mirror origin`
   - `NOTE=x ; git push origin :main`
-  - `cd /repo && git branch -Df temp`   (cluster force-delete; idiomatic `-D` still caught match-anywhere)
-  - `cd /repo && gh pr close 5 -d`      (short `-d` close; spelled `--delete-branch` still caught match-anywhere)
+  - `cd /repo && git branch -Df temp`   (cluster force-delete; idiomatic `-D` still caught per-leg, in any leg)
+  - `cd /repo && gh pr close 5 -d`      (short `-d` close; spelled `--delete-branch` still caught per-leg, in any leg)
 These are NOT bugs — do NOT "fix" them (the fix re-blocks faithful clicks). httpie
 (`http` / `https` CLI) is likewise WHOLLY ungated by design — ref-mutation, merge, AND
 protection-mutation — because the MINT classifier covers gh-api / curl / wget only; ANY
 httpie read-floor arm re-creates a gated-but-unmintable over-block. Ungated keeps read == mint.
 NB this first-leg anchoring is SPECIFIC to those parse-dependent forms: the LITERAL
-DANGEROUS_PATTERNS arms (force-push, branch -D, gh pr merge/close, push-to-main, the API
-ref/protection arms) match-anywhere and STILL gate in a non-first leg
+danger arms (the DANGEROUS_PATTERNS bank + the per-leg literal-arm tuples: force-push,
+branch-delete, close, API ref/protection) match in ANY leg position (per-leg for the
+tuple arms) and STILL gate in a non-first leg
 (`cd /repo && git push --force origin main` is caught). When an over-block of a faithful
 click is found, the fix WIDENS the mint, never narrows detection into a new under-block.
 =============================================================================
@@ -397,6 +398,28 @@ _API_LITERAL_ARMS = (
     # - gh alias: aliases can hide API calls (tracked in #270)
 )
 
+# leg-boundary substrate (#1094): these three branch-delete arms' `.*` previously
+# ran over the WHOLE stripped command, so an idiomatic `-D` / `--delete --force`
+# token in a benign continuation leg (`git branch new-feature && echo -D`) gated
+# the benign compound — and, because the whole-command classifier ALSO returned
+# branch-delete for it, the ambiguous compound was MINTABLE from a click whose
+# branch leg was benign (the close-twin laundering shape). Matched PER-LEG now:
+# an arm fires iff `git branch` and the force-delete flag co-occur within ONE
+# leg, in ANY leg position (`cd /repo && git branch -D temp` still gates —
+# match-anywhere purpose preserved, per leg). Quoted separators are handled by
+# the substrate (a quoted `&&` is not a leg boundary). Bodies are moved VERBATIM
+# from DANGEROUS_PATTERNS — the conversion changes WHERE they match (per-leg vs
+# whole-command), never WHAT they match. Per-leg scoping also bounds the arms'
+# `\s+` runs: whole-command they DID span a raw newline — the one whitespace-class
+# leg separator — so `git branch --force<newline>--delete x` (two non-destructive
+# legs) previously gated; bounding `\s+` is the same over-block-cure direction. Clustered /
+# split spellings (`-Df` / `-fD` / `--delete -f`) are NOT these arms' job: they
+# are the union arm's (first-leg-anchored, by design).
+_BRANCH_DELETE_LITERAL_ARMS = (
+    re.compile(_GIT_PREFIX + r"branch\s+.*-D\b"),
+    re.compile(_GIT_PREFIX + r"branch\s+.*--delete\s+--force\b"),
+    re.compile(_GIT_PREFIX + r"branch\s+--force\s+--delete\b"),
+)
 
 
 def detect_command_operation_type(command: str) -> str | None:
@@ -448,6 +471,10 @@ def detect_command_operation_type(command: str) -> str | None:
         # write-side classifier. Branch-delete-via-pr-close is folded into
         # the close class on both sides for symmetric authorization.
         return "close"
+    # Legs are computed ONCE here and shared by the three per-leg loops below
+    # (force-push, api-merge, branch-delete) — the same single-substrate hoist
+    # idiom as the read floor's `legs` in is_dangerous_command.
+    legs = _split_into_legs(command)
     # force-push: git push ... --force (excludes --force-with-lease — carved out
     # of the force-push arms ONLY; the push-to-main arm still gates lease pushes
     # to a default branch). Matched PER-LEG over the shared _FORCE_PUSH_LITERAL_ARMS
@@ -455,7 +482,7 @@ def detect_command_operation_type(command: str) -> str | None:
     # substrate (_split_into_legs), so a force-class flag in a benign continuation
     # leg no longer classifies the first-leg push as force-push and read==mint
     # holds by construction on this class.
-    for _leg in _split_into_legs(command):
+    for _leg in legs:
         if any(arm.search(_leg) for arm in _FORCE_PUSH_LITERAL_ARMS):
             return "force-push"
     # Direct push to a default branch (main/master) — plain OR --force-with-lease —
@@ -531,17 +558,21 @@ def detect_command_operation_type(command: str) -> str | None:
     # `gh -R o/r api` global-flag spelling also mints) + IGNORECASE PUT/PATCH/POST +
     # case-SENSITIVE pulls/<N>/merge path. DELETE excluded; the implicit-POST (-f/--data,
     # no method keyword) spelling is a deliberate residual, per the git/refs detect arm.
-    for _leg in _split_into_legs(command):
+    for _leg in legs:
         if _api_merge_leg_endpoint(_leg) is not None:
             return "merge"
-    # branch-delete: git branch -D, git branch --delete --force,
-    # or git branch --force --delete (matches DANGEROUS_PATTERNS).
-    if re.search(_GIT_PREFIX + r"branch\s+.*-D\b", command):
-        return "branch-delete"
-    if re.search(_GIT_PREFIX + r"branch\s+.*--delete\s+--force\b", command):
-        return "branch-delete"
-    if re.search(_GIT_PREFIX + r"branch\s+--force\s+--delete\b", command):
-        return "branch-delete"
+    # branch-delete: git branch -D / --delete --force / --force --delete. Matched
+    # PER-LEG over the shared _BRANCH_DELETE_LITERAL_ARMS SSOT (#1094) — the same
+    # arm tuple the read floor consumes, over the same leg substrate
+    # (_split_into_legs), so a stray force-delete token in a benign continuation
+    # leg no longer classifies the compound as branch-delete, and read==mint
+    # holds by construction on this class (a command is gated via these arms iff
+    # some stripped leg matches iff detect classifies branch-delete here).
+    # Clustered spellings (-Df / -fD / --delete -f) fall through to the union-arm
+    # fallback below, same as the read floor.
+    for _leg in legs:
+        if any(arm.search(_leg) for arm in _BRANCH_DELETE_LITERAL_ARMS):
+            return "branch-delete"
     # Quote-aware normalized-flag FALLBACK (ADDITIVE, INV-AU): catches the
     # clustered/split flag spellings the literal regexes above miss — chiefly
     # `git branch -Df`/`-fD`/`--delete -f` (force-delete), which `-D\b` and the
@@ -1647,10 +1678,10 @@ re.compile(_GH_PREFIX + r"pr\s+merge\b"),
 # Force push arms live in _FORCE_PUSH_LITERAL_ARMS (defined with the classifier
 # patterns above) — matched PER-LEG by is_dangerous_command after this list
 # misses (#1082 leg isolation), NOT whole-string here.
-# Force branch deletion
-re.compile(_GIT_PREFIX + r"branch\s+.*-D\b"),
-re.compile(_GIT_PREFIX + r"branch\s+.*--delete\s+--force\b"),
-re.compile(_GIT_PREFIX + r"branch\s+--force\s+--delete\b"),
+# Force-branch-delete arms live in _BRANCH_DELETE_LITERAL_ARMS (defined with the
+# classifier patterns above) — matched PER-LEG by is_dangerous_command after this
+# list misses (#1094 leg isolation), NOT whole-string here (a whole-command match
+# fired cross-leg on a stray -D / --delete --force token in a benign leg).
 # API danger arms (merge / git-refs / branch-protection / contents / implicit-POST,
 # across gh api / curl / wget) live in _API_LITERAL_ARMS (defined with the classifier
 # patterns above) — matched PER-LEG by is_dangerous_command after this list misses
@@ -2528,7 +2559,8 @@ def is_dangerous_command(command: str) -> bool:
     # and substrate legs can never diverge, and the strip is not recomputed. An arm
     # fires iff push and the force-class flag co-occur within ONE leg, in ANY leg
     # position (the match-anywhere purpose, per leg). The legs are computed ONCE
-    # here and shared by all three literal-arm loops below (force-push, close, API).
+    # here and shared by all four literal-arm loops below (force-push, close, API,
+    # branch-delete).
     legs = _slice_stripped_legs(stripped)
     for _leg in legs:
         if any(arm.search(_leg) for arm in _FORCE_PUSH_LITERAL_ARMS):
@@ -2549,6 +2581,17 @@ def is_dangerous_command(command: str) -> bool:
     # negative-lookahead arms operate within-leg (correct exclusion/inclusion direction).
     for _leg in legs:
         if any(arm.search(_leg) for arm in _API_LITERAL_ARMS):
+            return True
+    # Literal branch-delete arms, matched PER-LEG (#1094): same leg substrate and
+    # strip provenance as the loops above. An arm fires iff `git branch` and the
+    # force-delete flag co-occur within ONE leg — a stray `-D` / `--delete --force`
+    # token in a benign continuation leg no longer gates the compound (and the
+    # formerly-mintable ambiguous compound is is_dangerous=False, so the mint
+    # write-gate refuses → no token → the laundering substrate is structurally
+    # closed), while a same-leg force-delete still gates in ANY leg position.
+    # Clustered/split flag spellings remain the union arm's job (below).
+    for _leg in legs:
+        if any(arm.search(_leg) for arm in _BRANCH_DELETE_LITERAL_ARMS):
             return True
     # ADDITIVE union arm (INV-AU): a quote-aware normalized-flag danger CONDITION across
     # every flag spelling the literal floor misses — `-d`/`-cd` close delete, `-Df`/`-fD`/

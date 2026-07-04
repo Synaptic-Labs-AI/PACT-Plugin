@@ -1366,6 +1366,259 @@ class TestApiLiteralArmCrossLegSweep:
         )
 
 
+class TestBranchDeleteLiteralArmCrossLegSweep:
+    """#1094 BRANCH-DELETE cross-leg completion — the permanent bidirectional
+    sweep for the per-leg `_BRANCH_DELETE_LITERAL_ARMS` conversion, the 4th and
+    FINAL cross-leg twin (force-push / close / API precede it), modeled on the
+    close/API sweep classes above.
+
+    The three branch-delete danger arms previously ran their `.*` over the WHOLE
+    stripped command, so an idiomatic `-D` / `--delete --force` token in a benign
+    continuation leg (`git branch new-feature && echo -D`) gated the benign
+    compound — and, because detect ALSO classified the compound branch-delete
+    whole-command with an extractable target, the ambiguous compound was MINTABLE
+    (the close-twin laundering shape; closure canary lives with the close
+    canaries in test_merge_guard_auth_symmetry.py). Per-leg now, on BOTH
+    consumers of the one SSOT tuple (read floor AND detect): an arm fires iff
+    `git branch` and the force-delete flag co-occur within ONE leg.
+
+    The arms are FORWARD-ONLY (`branch` precedes the flag) — unlike close there
+    is no reversed arm, so there is no reversed-order cure; the reversed row
+    below is a PRE-EXISTING-False pin. The third arm (`--force --delete`,
+    whitespace-adjacent) has NO cross-leg over-block to cure (`\\s+` never spans
+    a shell operator) — it moved for SSOT symmetry only, so no "cured" row
+    exists for it and none should be added. Clustered/split spellings
+    (`-Df` / `-fD` / `--delete -f`) are the first-leg-anchored union arm's job,
+    untouched in both directions. Per §0, the over-block-REMOVED direction is
+    the PRIMARY/INVIOLABLE gate; same-leg-STILL-gates is the secondary
+    no-new-under-block sweep."""
+
+    # --- PRIMARY (§0-inviolable): over-block REMOVED — benign compounds run FREE ---
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git branch new-feature && echo -D",                 # arm 1, the issue's form
+            "git branch --list && echo --delete --force",        # arm 2
+            "git branch temp && grep -D skip pattern f.txt",     # arm 1, flag inside a benign leg's args
+            "git branch backup ; ls -D",                         # arm 1, `;` separator
+            "git checkout main && git branch temp && echo -D",   # arm 1, 3-leg member
+            "git branch new-feature || echo -D",                 # arm 1, `||` separator
+            "git branch new | grep -D x f.txt",                  # arm 1, `|` separator
+            "git branch new & echo -D",                          # arm 1, `&` separator
+            "git branch new |& grep -D x f.txt",                 # arm 1, `|&` pipe-both separator
+        ],
+    )
+    def test_branch_delete_arm_cross_leg_span_cured(self, cmd):
+        """#1094 CURED, with mint parity in the SAME breath: a benign `git branch`
+        leg chained with a stray force-delete token in a SEPARATE leg no longer
+        gates (D is False), AND detect abstains identically (OP is None) — the
+        gate⟺mint coherence that closes both the mint-scan multiplicity vector
+        (a benign compound quoted in AskUserQuestion prose no longer contributes
+        a phantom (op,target) pair that could REFUSE a faithful click's mint)
+        and the retirement Block-1 drift (an executed benign compound no longer
+        classifies branch-delete at the retirement observer)."""
+        assert D(cmd) is False, f"BRANCH-DELETE cross-leg over-block regressed: {cmd!r}"
+        assert OP(cmd) is None, (
+            f"detect still classifies the cured compound — gate/mint coherence "
+            f"broken (mint-scan multiplicity vector re-opened): {cmd!r}"
+        )
+
+    # --- SECONDARY (no-new-under-block): same-leg branch-delete STILL gates ---
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git branch -D temp",                                # arm 1, single leg
+            "cd /repo && git branch -D temp",                    # arm 1 in a NON-FIRST leg (union arm abstains — literal arm load-bearing)
+            "git branch --delete --force temp",                  # arm 2
+            "git branch --force --delete temp",                  # arm 3
+            "git branch -D temp && echo done",                   # arm 1 + benign continuation
+            'git commit -m "a && b" && git branch -D temp',      # QUOTED separator is NOT a leg boundary
+            "bash -c 'git branch -D temp'",                      # quoted single-leg carrier
+            "FOO=1 git branch -D temp",                          # env-prefix
+            "git branch \\\n-D temp",                            # line continuation (D unchanged; its raw-seam OP is pinned below, not here)
+            "git branch -Df temp",                               # union arm, clustered
+            "git branch -fD temp",                               # union arm, clustered
+            "git branch --delete -f temp",                       # union arm, split
+            "git branch -f --delete temp",                       # union arm, split
+            "cd /repo && git branch --delete --force temp",      # arm 2 in a NON-FIRST leg (union arm abstains — literal arm load-bearing)
+        ],
+    )
+    def test_branch_delete_arm_same_leg_still_gates(self, cmd):
+        """The no-new-under-block set: `git branch` + force-delete flag
+        co-occurring within ONE leg still gates in ANY leg position — including
+        the CRITICAL `cd /repo && git branch -D temp` (the union arm is
+        first-leg-anchored and abstains there, so ONLY the per-leg literal arm
+        catches it). The quoted-separator row is why this fix is per-leg
+        matching over the substrate, not a tempered-regex span (`[^&|;]*` would
+        wrongly ungate it). The clustered/split spellings gate via the
+        first-leg flag-condition union arm — untouched surface."""
+        assert D(cmd) is True, f"NEW UNDER-BLOCK: same-leg branch-delete stopped gating: {cmd!r}"
+
+    # --- mint parity on the preserved set (detect converted WITH the read floor) ---
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git branch -D temp",
+            "cd /repo && git branch -D temp",
+            "git branch --delete --force temp",
+            "git branch --force --delete temp",
+            "git branch -D temp && echo done",
+            'git commit -m "a && b" && git branch -D temp',
+            "bash -c 'git branch -D temp'",
+            "FOO=1 git branch -D temp",
+        ],
+    )
+    def test_gated_same_leg_forms_classify_branch_delete(self, cmd):
+        """Classification parity on every gated literal-arm family: the per-leg
+        detect conversion leaves each same-leg form classifying branch-delete
+        exactly as the whole-command arms did (probe-verified pre-change), so no
+        gated form became unmintable (gated-but-unmintable = an over-block). The
+        raw line-continuation form is deliberately EXCLUDED here — its raw-seam
+        classification is the ONE intended delta, pinned separately below."""
+        assert OP(cmd) == "branch-delete", (
+            f"gated same-leg form no longer classifies branch-delete — "
+            f"gated-but-unmintable over-block: {cmd!r}"
+        )
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git branch -Df temp",
+            "git branch -fD temp",
+            "git branch --delete -f temp",
+            "git branch -f --delete temp",
+        ],
+    )
+    def test_clustered_first_leg_forms_still_classify_via_union_arm(self, cmd):
+        """The union-arm fallback surface is untouched on the mint side: the
+        clustered/split first-leg spellings (which no literal arm matches)
+        still classify branch-delete via _flag_condition_danger_op."""
+        assert OP(cmd) == "branch-delete"
+
+    def test_detect_precedence_unchanged_by_conversion(self):
+        """The converted loop sits at the SAME detect position (after the
+        API-merge per-leg loop, before the union-arm fallback), so force-push
+        precedence over a trailing branch-delete leg is unchanged."""
+        assert OP("git push --force origin main && git branch -D t") == "force-push"
+
+    def test_raw_line_continuation_coherent_at_raw_seam(self):
+        """The ONE classification change on a gated command (raw seam only,
+        INTENDED): pre-fix, the raw `git branch \\<newline>-D temp` was gated
+        (D=True — the read floor normalizes line continuations before matching)
+        yet detect on the RAW string returned None (`.*` does not span the
+        un-normalized newline) — a gated-but-unclassified coherence gap at the
+        retirement observer, which calls detect on the raw executed command.
+        Post-fix, _split_into_legs normalizes before slicing, so the raw seam
+        now classifies branch-delete — enabling CORRECT retirement of a
+        genuinely executed branch-delete (the same raw-seam coherence gain the
+        force-push twin's per-leg loop delivered for its class). Every
+        authorization seam pre-normalizes, so mint/read behavior for this form
+        is byte-identical pre/post; this pin is the coherence gain, not drift."""
+        raw = "git branch \\\n-D temp"
+        assert D(raw) is True
+        assert OP(raw) == "branch-delete"
+
+    def test_reversed_order_stays_ungated_pre_existing_pin(self):
+        """PRE-EXISTING-False pin, NOT a cure: all three branch-delete arms are
+        forward-only (`branch` precedes the flag) — unlike close there is no
+        reversed arm, so `echo -D && git branch new` was already ungated before
+        the per-leg move (the identity-slice counter-mutation deliberately
+        EXCLUDES this row: it does not flip). This freezes the forward-only
+        property — a future reversed-arm addition (mirroring
+        _CLOSE_LITERAL_ARMS' reversed member) must consciously update this pin
+        and run its own cross-leg sweep."""
+        assert D("echo -D && git branch new") is False
+        assert OP("echo -D && git branch new") is None
+
+    # --- non-vacuity: row-by-row two-stage counter-mutation (in-memory) ---
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git branch new-feature && echo -D",
+            "git branch --list && echo --delete --force",
+            "git branch temp && grep -D skip pattern f.txt",
+            "git branch backup ; ls -D",
+            "git checkout main && git branch temp && echo -D",
+            "git branch new-feature || echo -D",
+            "git branch new | grep -D x f.txt",
+            "git branch new & echo -D",
+            "git branch new |& grep -D x f.txt",
+        ],
+    )
+    def test_branch_delete_cured_rows_non_vacuous_and_single_family(self, cmd, monkeypatch):
+        """Row-by-row non-vacuity AND identity-slice faithfulness for every cured
+        branch-delete form (same two-stage counter-mutation as the close/API
+        sweeps):
+
+          direction 1 (fix present): the benign compound runs free (D is False).
+          direction 2 (`_slice_stripped_legs` -> identity, the pre-fix
+            whole-command surface): the over-block RETURNS (D is True) —
+            coupling the assertion to the per-leg partition.
+          faithfulness (identity-slice + `_BRANCH_DELETE_LITERAL_ARMS`
+            neutered): D returns to False — proving the whole-command flip is
+            caused by the branch-delete family ALONE (no force-push/close/API/
+            flag-condition co-match), so the identity-slice mutation is a
+            faithful single-family pre-fix simulation for this row.
+
+        Source-revert flip set (expected RED case-count when merge_guard_common
+        is reverted to its pre-per-leg-conversion shape, runtime-verified): the
+        sweep's fix-coupled cases red as EXACTLY 22 — the 9 cured rows, these 9
+        counter-mutation rows, the raw-seam pin, the one-seam-two-consumers
+        test, the golden-row discriminator, and the branch-delete laundering
+        canary in test_merge_guard_auth_symmetry.py — while every preservation /
+        parity / pre-existing-False pin stays green. A different count means the
+        coupling map drifted: re-derive before trusting either number."""
+        assert mgc.is_dangerous_command(cmd) is False
+        monkeypatch.setattr(mgc, "_slice_stripped_legs", lambda s: [s])
+        assert mgc.is_dangerous_command(cmd) is True, (
+            f"whole-command mutation did not restore the pre-fix branch-delete "
+            f"over-block — the cured-row assertion would be vacuous: {cmd!r}"
+        )
+        monkeypatch.setattr(mgc, "_BRANCH_DELETE_LITERAL_ARMS", ())
+        assert mgc.is_dangerous_command(cmd) is False, (
+            f"whole-command flip survived branch-delete-arm neutering — a SECOND "
+            f"family co-matches, so the identity-slice mutation is NOT a faithful "
+            f"single-family pre-fix simulation for this row: {cmd!r}"
+        )
+
+    def test_identity_slice_flips_detect_too_one_seam_two_consumers(self, monkeypatch):
+        """The ONE leg seam serves BOTH consumers: `_split_into_legs` delegates
+        to `_slice_stripped_legs`, so the SAME identity-slice mutation that
+        restores the read-floor over-block also restores detect's whole-command
+        classification of the cured compound — proving read floor and detect
+        consume one substrate (per-leg parity is by construction, not by two
+        parallel implementations that could drift)."""
+        cmd = "git branch new-feature && echo -D"
+        assert mgc.detect_command_operation_type(cmd) is None
+        monkeypatch.setattr(mgc, "_slice_stripped_legs", lambda s: [s])
+        assert mgc.detect_command_operation_type(cmd) == "branch-delete", (
+            "identity-slice did not restore whole-command detect classification "
+            "— detect is not consuming the shared leg seam"
+        )
+
+    def test_literal_tuple_is_load_bearing_on_both_sides_via_golden_row(self, monkeypatch):
+        """Detect-side load-bearing discriminator, on the GOLDEN row
+        `cd /repo && git branch -D temp`: the union arm is first-leg-anchored
+        and abstains on it, so ONLY the literal tuple can catch it on either
+        side. Neutering the tuple ALONE (no identity slice) must drop BOTH the
+        gate (D False) and the classification (OP None) — proving the tuple, not
+        a neighboring family, carries this form. The single-leg `-D` /
+        `--delete --force` rows would NOT discriminate (the union arm also
+        recognizes their spellings in the first leg)."""
+        cmd = "cd /repo && git branch -D temp"
+        assert mgc.is_dangerous_command(cmd) is True
+        assert mgc.detect_command_operation_type(cmd) == "branch-delete"
+        monkeypatch.setattr(mgc, "_BRANCH_DELETE_LITERAL_ARMS", ())
+        assert mgc.is_dangerous_command(cmd) is False, (
+            "non-first-leg -D still gates with the tuple neutered — a second "
+            "family covers it and the tuple is not load-bearing on the read floor"
+        )
+        assert mgc.detect_command_operation_type(cmd) is None, (
+            "non-first-leg -D still classifies with the tuple neutered — a "
+            "second family covers it and the tuple is not load-bearing in detect"
+        )
+
+
 class _ApiMergeDetectArmDisabledRe:
     """A drop-in for merge_guard_common's `re` module that forces
     re.search(r'pulls/\\d+/merge\\b', ...) to return None — surgically disabling
@@ -1952,9 +2205,10 @@ class TestAcceptedRecognitionLimitationPins:
     )
     def test_literal_arm_contrast_still_gates_non_first_leg(self, cmd, expected_op):
         """THE BOUND on the accepted-ungated surface (and the non-vacuity for the pins
-        above): the LITERAL DANGEROUS_PATTERNS arms (force-push, branch -D, gh pr
-        merge, the API ref/protection arms) match-anywhere and STILL gate in a
-        NON-FIRST leg. This proves the accepted-ungated set is SPECIFIC to the
+        above): the LITERAL danger arms (the per-leg literal-arm tuples — force-push,
+        branch -D, the API ref/protection arms — plus the DANGEROUS_PATTERNS gh pr
+        merge arm) match in ANY leg position (per-leg for the tuple arms) and STILL
+        gate in a NON-FIRST leg. This proves the accepted-ungated set is SPECIFIC to the
         parse-dependent union-arm push forms — NOT a general compound bypass — so the
         accepted set cannot silently widen. If a literal arm ever stops gating in a
         non-first leg, that is a real under-block and this turns red."""
@@ -1974,8 +2228,8 @@ class TestAcceptedRecognitionLimitationPins:
         loses union coverage. Re-detecting these requires whole-command or per-leg
         flag derivation — exactly the cross-leg flag leak the anchoring removed /
         the pinned over-block reintroduction. The idiomatic spellings (`-D`,
-        `--delete-branch`) remain caught match-anywhere by the literal floor (the
-        contrast rows in this class)."""
+        `--delete-branch`) remain caught per-leg, in any leg, by the literal floor
+        (the contrast rows in this class)."""
         assert D(cmd) is False, (
             f"Recognition was widened to chase a non-first-leg cluster flag — this "
             f"RE-INTRODUCES a faithful-click over-block. Do NOT 'fix' this form: {cmd!r}"
