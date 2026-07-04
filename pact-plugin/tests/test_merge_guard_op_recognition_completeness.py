@@ -1405,6 +1405,7 @@ class TestBranchDeleteLiteralArmCrossLegSweep:
             "git branch new-feature || echo -D",                 # arm 1, `||` separator
             "git branch new | grep -D x f.txt",                  # arm 1, `|` separator
             "git branch new & echo -D",                          # arm 1, `&` separator
+            "git branch new |& grep -D x f.txt",                 # arm 1, `|&` pipe-both separator
         ],
     )
     def test_branch_delete_arm_cross_leg_span_cured(self, cmd):
@@ -1439,7 +1440,7 @@ class TestBranchDeleteLiteralArmCrossLegSweep:
             "git branch -fD temp",                               # union arm, clustered
             "git branch --delete -f temp",                       # union arm, split
             "git branch -f --delete temp",                       # union arm, split
-            "git branch --delete --force temp",                  # first-leg spelled-out (arm 2 + union overlap)
+            "cd /repo && git branch --delete --force temp",      # arm 2 in a NON-FIRST leg (union arm abstains — literal arm load-bearing)
         ],
     )
     def test_branch_delete_arm_same_leg_still_gates(self, cmd):
@@ -1485,6 +1486,7 @@ class TestBranchDeleteLiteralArmCrossLegSweep:
             "git branch -Df temp",
             "git branch -fD temp",
             "git branch --delete -f temp",
+            "git branch -f --delete temp",
         ],
     )
     def test_clustered_first_leg_forms_still_classify_via_union_arm(self, cmd):
@@ -1540,6 +1542,7 @@ class TestBranchDeleteLiteralArmCrossLegSweep:
             "git branch new-feature || echo -D",
             "git branch new | grep -D x f.txt",
             "git branch new & echo -D",
+            "git branch new |& grep -D x f.txt",
         ],
     )
     def test_branch_delete_cured_rows_non_vacuous_and_single_family(self, cmd, monkeypatch):
@@ -1555,7 +1558,16 @@ class TestBranchDeleteLiteralArmCrossLegSweep:
             neutered): D returns to False — proving the whole-command flip is
             caused by the branch-delete family ALONE (no force-push/close/API/
             flag-condition co-match), so the identity-slice mutation is a
-            faithful single-family pre-fix simulation for this row."""
+            faithful single-family pre-fix simulation for this row.
+
+        Source-revert flip set (expected RED case-count when merge_guard_common
+        is reverted to its pre-per-leg-conversion shape, runtime-verified): the
+        sweep's fix-coupled cases red as EXACTLY 22 — the 9 cured rows, these 9
+        counter-mutation rows, the raw-seam pin, the one-seam-two-consumers
+        test, the golden-row discriminator, and the branch-delete laundering
+        canary in test_merge_guard_auth_symmetry.py — while every preservation /
+        parity / pre-existing-False pin stays green. A different count means the
+        coupling map drifted: re-derive before trusting either number."""
         assert mgc.is_dangerous_command(cmd) is False
         monkeypatch.setattr(mgc, "_slice_stripped_legs", lambda s: [s])
         assert mgc.is_dangerous_command(cmd) is True, (
