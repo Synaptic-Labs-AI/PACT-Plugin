@@ -769,7 +769,25 @@ def _retire_token_for_command(
         # (backstopped by TTL + MAX_USES) — never an over-block (PostToolUse observer).
         # A token-has-flags guard would be WRONG: it would let a flagged command retire
         # a flagless token, breaking the symmetric identity match.
-        if set(ctx.get("bound_flags", [])) != cmd_flags:
+        token_flags = ctx.get("bound_flags", [])
+        if not isinstance(token_flags, list) or not all(isinstance(x, str) for x in token_flags):
+            # Robustness (Copilot #1110): a malformed/legacy token whose
+            # bound_flags is not a list of strings would crash the whole scan
+            # and skip retirement for every later token in the run. Two shapes:
+            # (1) NON-LIST — e.g. JSON null -> Python None, since .get's []
+            # default applies ONLY when the KEY is ABSENT, not when it is present
+            # and null — makes set(token_flags) raise TypeError; (2) a list
+            # CONTAINING an unhashable element (e.g. [{}] or [["x"]]) passes the
+            # list check but still makes set(token_flags) raise (unhashable
+            # type). The all(isinstance(x, str)) clause rejects BOTH: the mint
+            # only ever writes a list of flag STRINGS (extract_privileged_flags
+            # SSOT), so any non-str element is malformed. Skip it gracefully —
+            # mirrors the isinstance(ctx, dict) guard above; a safe under-retire,
+            # never a crash of the PostToolUse observer. A valid token's
+            # bound_flags is always a list of strings (incl. []; all() over an
+            # empty list is True), so valid-token semantics are unchanged.
+            continue
+        if set(token_flags) != cmd_flags:
             continue
         # Session scoping (SEC-S1 cycle-2 revised asymmetric predicate).
         token_session = token_data.get("session_id", "")

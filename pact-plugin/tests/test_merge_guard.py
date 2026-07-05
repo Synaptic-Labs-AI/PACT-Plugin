@@ -13432,6 +13432,132 @@ class TestFlagAwareRetirement:
         assert len(self._live(tmp_path)) == 1
 
 
+class TestMalformedTokenRetirementRobustness:
+    """#1100 follow-up (Copilot PR review): a token whose stored `bound_flags`
+    is malformed must never crash `_retire_token_for_command` — the retirement
+    observer is fail-safe (never raises, never blocks the caller). Two malformed
+    classes both made `set(token_flags)` raise: (1) a NON-list value (JSON null ->
+    None, or int/float/bool/str) -> `set(None)` TypeError; (2) a LIST containing a
+    non-string / unhashable element (`[{}]`, `[["x"]]`) -> `unhashable type`. The
+    token-side read is hardened with `isinstance(token_flags, list) and
+    all(isinstance(x, str) for x in token_flags)`; a malformed token is SKIPPED,
+    and — critically — a malformed token must not poison the rest of the
+    retirement loop, so a VALID token in the same directory still retires.
+
+    Tokens are written to disk DIRECTLY (bypassing write_token) so a malformed
+    `bound_flags` the production mint path would never emit can be injected, and
+    so two tokens can coexist (write_token's Layer-5 cleanup retires priors).
+    In-memory only; no git mutation in the shared worktree."""
+
+    def _live(self, tmp_path):
+        return [t for t in tmp_path.glob("merge-authorized-*")
+                if not t.name.endswith(".consumed") and ".use-" not in t.name]
+
+    @staticmethod
+    def _write_token_json(tmp_path, context, name="merge-authorized-1000"):
+        """Write a token file directly with an arbitrary context (so a malformed
+        `bound_flags` can be injected). Mirrors write_token's on-disk shape."""
+        now = time.time()
+        data = {"created_at": now, "expires_at": now + 300,
+                "context": context, "max_uses": 2, "uses_remaining": 2}
+        path = tmp_path / name
+        path.write_text(json.dumps(data))
+        return path
+
+    @pytest.mark.parametrize(
+        "bad_flags",
+        [
+            # non-list shapes — closed by the `isinstance(token_flags, list)` clause
+            None, 7, 1.5, True, "notalist",
+            # list WITH a non-string / unhashable element — PASSES isinstance-list
+            # but `set([{}])` / `set([["x"]])` raises `unhashable type`; closed by
+            # the `all(isinstance(x, str) for x in token_flags)` element clause.
+            # Without these rows that element clause would ship UNTESTED.
+            [{}], [["x"]],
+        ],
+        ids=["none", "int", "float", "bool", "string",
+             "list_with_dict", "list_with_list"],
+    )
+    def test_malformed_bound_flags_does_not_crash_and_is_skipped(
+        self, tmp_path, bad_flags
+    ):
+        """A token whose bound_flags is malformed — either NOT a list (None/int/
+        float/bool/string) OR a list containing a non-string/unhashable element
+        (`[{}]`, `[["x"]]`) — must NOT crash the retirement observer and must NOT
+        be retired. Driven with a NON-empty command flag-set (`--delete-branch`)
+        so the malformed token cannot match whether the guard SKIPS it or coerces
+        bound_flags to [] — robust to the guard's exact shape. Without the guard
+        the non-list crashers AND the unhashable-element lists raise `set(...)`
+        TypeError (closed by the isinstance-list clause and the
+        all(isinstance(x, str)) element clause respectively); the string case
+        never crashes (char-set) but is still skipped."""
+        from merge_guard_post import _retire_token_for_command
+
+        self._write_token_json(
+            tmp_path,
+            {"operation_type": "close", "pr_number": "5", "bound_flags": bad_flags},
+        )
+        try:
+            retired = _retire_token_for_command(
+                "gh pr close 5 --delete-branch", "close", token_dir=tmp_path)
+        except Exception as exc:  # noqa: BLE001 — the observer contract is never-raise
+            pytest.fail(
+                f"malformed bound_flags ({bad_flags!r}) crashed the retirement "
+                f"observer: {type(exc).__name__}: {exc}"
+            )
+        assert retired is False, "a malformed-flags token must not be retired"
+        assert len(self._live(tmp_path)) == 1, (
+            "the malformed token is skipped (survives), not consumed"
+        )
+
+    @pytest.mark.parametrize(
+        "bad_flags", [None, [{}]], ids=["non_list", "list_with_unhashable"]
+    )
+    def test_malformed_token_does_not_poison_valid_retirement(
+        self, tmp_path, monkeypatch, bad_flags
+    ):
+        """RESILIENCE (the core of the finding): a malformed token encountered
+        BEFORE a valid matching token must not abort the loop — the valid token
+        still retires. `_retire_token_for_command` returns on the FIRST match and
+        glob order is filesystem-arbitrary, so we FORCE the malformed token first
+        via a monkeypatched glob to make the hazard deterministic (otherwise the
+        test could pass by luck of iteration order). Covers BOTH crash surfaces
+        (non-list and unhashable-element list). RED before the guard: the
+        malformed token raises and the valid token is never reached."""
+        import merge_guard_post as mgp
+        from merge_guard_post import _retire_token_for_command
+
+        malformed = self._write_token_json(
+            tmp_path,
+            {"operation_type": "close", "pr_number": "5", "bound_flags": bad_flags},
+            name="merge-authorized-1000",
+        )
+        valid = self._write_token_json(
+            tmp_path,
+            {"operation_type": "close", "pr_number": "5",
+             "bound_flags": ["--delete-branch"]},
+            name="merge-authorized-2000",
+        )
+        # Visit the malformed token FIRST (deterministic hazard ordering).
+        monkeypatch.setattr(
+            mgp.glob, "glob", lambda pattern: [str(malformed), str(valid)])
+        try:
+            retired = _retire_token_for_command(
+                "gh pr close 5 --delete-branch", "close", token_dir=tmp_path)
+        except Exception as exc:  # noqa: BLE001 — the observer contract is never-raise
+            pytest.fail(
+                f"a malformed token poisoned the retirement loop: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        assert retired is True, (
+            "the valid token must still retire after the malformed one is skipped"
+        )
+        live = self._live(tmp_path)
+        assert len(live) == 1 and live[0].name == "merge-authorized-1000", (
+            "the malformed token is skipped (survives); the valid token is consumed"
+        )
+
+
 class TestD1MatcherQuoteNormalization:
     """D1-matcher (#933): _token_matches_command normalizes surrounding quotes
     on the captured branch name at compare time, so a token branch `feat/x`
