@@ -657,6 +657,28 @@ def _retire_token_for_command(
     token's stored `operation_type` for symmetric retirement across
     merge/close/branch-delete/force-push.
 
+    Match granularity (#1097 target-aware + #1100 flag-aware): a token is
+    retired ONLY when it agrees with the executed command on op_type AND
+    target AND bound_flags AND session. Target and flags are derived from ONE
+    leg-isolated extract_command_context call, so retirement, mint, and read
+    agree on identity BY CONSTRUCTION (the SAME _target_value + the SAME
+    extract_privileged_flags SSOT the mint/read use). This finer match cures
+    the over-retirement friction where a bare same-op/same-target command
+    burned an operator's approved ESCALATED (flag-carrying) token, forcing a
+    re-approval. Two independent, both-SAFE moves compose here, precisely:
+    the flag-inequality skip is purely SUBTRACTIVE (it only ever declines to
+    retire on a flag mismatch — fewer tokens on the flag axis); the
+    leg-isolated cmd_target derivation PURIFIES the compare toward the
+    executed op's OWN (op, target, flags) identity (mirroring the read arm,
+    merge_guard_pre.py:536-540) and so can retire a self-consume a prior
+    whole-command mis-scan would have MISSED — still the SAFE direction, since
+    over-retire only CONSUMES a token, never authorizes one. Net: laundering-
+    safe by construction — retirement only ever REMOVES tokens, never grants
+    authorization; the sole residual is a tolerated under-retire (a genuine
+    self-consume still retires; an unrelated command's leftover token is
+    backstopped by TTL + MAX_USES), and over-block stays structurally
+    IMPOSSIBLE (a PostToolUse observer renames after success, never gates).
+
     Emits a path-annotated stderr forensic log when retirement is
     observed (BC-NIT addressed: log line distinguishes "direct"
     rename-by-this-session from "race-recover" observed-by-this-session
@@ -682,13 +704,24 @@ def _retire_token_for_command(
         token_dir = TOKEN_DIR
     pattern = str(token_dir / f"{TOKEN_PREFIX}*")
     current_session = get_session_id()
-    # #1097: target-aware retirement. Bring the match up to the granularity the mint
-    # records — retire ONLY the token for the SPECIFIC operation (same op AND same
-    # target), not any same-op token in the session. Uses the SAME _target_value the
-    # mint/read derive, so retirement, mint, and read agree on target identity by
-    # construction. (The API-merge form reuses pr_number per #1096, so this covers it
-    # uniformly with zero extra code.)
-    cmd_target = _target_value(extract_command_context(command))
+    # #1097 + #1100: op+target+bound_flags retirement. Bring the match up to the
+    # granularity the mint records — retire ONLY the token for the SPECIFIC operation
+    # (same op AND same target AND same flag set), not any same-op token in the session.
+    # Both target and the flag set are derived from ONE leg-isolated
+    # extract_command_context call, mirroring the read arm (merge_guard_pre.py:536-540),
+    # so retirement, mint, and read agree on (op, target, bound_flags) identity by
+    # construction — the SAME _target_value + the SAME extract_privileged_flags SSOT.
+    # Compounds are refused at mint, so the single-leg selection collapses to the whole
+    # command for every real token; the `or command` tail preserves the pre-fix whole-
+    # command behavior when neither leg selector binds. (The API-merge form reuses
+    # pr_number per #1096, so target coverage stays uniform with zero extra code.)
+    cmd_ctx = extract_command_context(
+        _single_destructive_leg(command)
+        or _single_detectable_leg(command)
+        or command
+    )
+    cmd_target = _target_value(cmd_ctx)
+    cmd_flags = set(cmd_ctx.get("bound_flags", []))
     for path in glob.glob(pattern):
         basename = os.path.basename(path)
         # Skip terminal-rename siblings and per-use markers (mirrors the
@@ -723,6 +756,38 @@ def _retire_token_for_command(
         # 43 != 42 -> continue).
         token_target = _target_value(ctx)
         if token_target is not None and cmd_target != token_target:
+            continue
+        # #1100: bound_flags axis — retire ONLY when the executed command's binding-
+        # relevant flag set EXACTLY equals the token's approved set. Byte-mirrors the
+        # read arm's #1042 set-equality (merge_guard_pre.py:559). UNCONDITIONAL — unlike
+        # the target skip above (which falls back to op+session for a target-LESS legacy
+        # token), the empty set is a first-class flag universe here (a flagless base
+        # command), so [] == [] correctly retires a flagless self-consume while a bare
+        # `gh pr close 5` (cmd_flags == set()) no longer burns an approved ESCALATED
+        # {close,5,[--delete-branch]} token. Conjunctive + MONOTONIC: this can only
+        # retire FEWER tokens, so the sole residual is a tolerated under-retire
+        # (backstopped by TTL + MAX_USES) — never an over-block (PostToolUse observer).
+        # A token-has-flags guard would be WRONG: it would let a flagged command retire
+        # a flagless token, breaking the symmetric identity match.
+        token_flags = ctx.get("bound_flags", [])
+        if not isinstance(token_flags, list) or not all(isinstance(x, str) for x in token_flags):
+            # Robustness (Copilot #1110): a malformed/legacy token whose
+            # bound_flags is not a list of strings would crash the whole scan
+            # and skip retirement for every later token in the run. Two shapes:
+            # (1) NON-LIST — e.g. JSON null -> Python None, since .get's []
+            # default applies ONLY when the KEY is ABSENT, not when it is present
+            # and null — makes set(token_flags) raise TypeError; (2) a list
+            # CONTAINING an unhashable element (e.g. [{}] or [["x"]]) passes the
+            # list check but still makes set(token_flags) raise (unhashable
+            # type). The all(isinstance(x, str)) clause rejects BOTH: the mint
+            # only ever writes a list of flag STRINGS (extract_privileged_flags
+            # SSOT), so any non-str element is malformed. Skip it gracefully —
+            # mirrors the isinstance(ctx, dict) guard above; a safe under-retire,
+            # never a crash of the PostToolUse observer. A valid token's
+            # bound_flags is always a list of strings (incl. []; all() over an
+            # empty list is True), so valid-token semantics are unchanged.
+            continue
+        if set(token_flags) != cmd_flags:
             continue
         # Session scoping (SEC-S1 cycle-2 revised asymmetric predicate).
         token_session = token_data.get("session_id", "")
