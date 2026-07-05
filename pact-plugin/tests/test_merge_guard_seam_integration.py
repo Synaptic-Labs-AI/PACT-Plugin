@@ -53,7 +53,11 @@ from unittest.mock import patch
 
 import pytest
 
-from merge_guard_post import main as _post_main, write_token
+from merge_guard_post import (
+    main as _post_main,
+    write_token,
+    _retire_token_for_command,
+)
 from merge_guard_pre import check_merge_authorization, main as _pre_main
 from shared.merge_guard_common import extract_command_context
 
@@ -169,6 +173,32 @@ class TestSeamFunctionLevel:
         """The fail-closed default over the real seam: with no token on disk the
         merge is held."""
         assert check_merge_authorization("gh pr merge 252", token_dir=tmp_path) is not None
+
+    def test_escalated_token_survives_bare_retire_and_still_authorizes(self, tmp_path):
+        """#1100 end-to-end over the real on-disk seam: an operator's approved
+        ESCALATED close token, minted to disk, survives a successful BARE
+        `gh pr close` (a distinct, non-branch-deleting op that drives the
+        PostToolUse retirement observer but mismatches on the flag-set) and then
+        STILL authorizes the operator's approved escalated re-execution. Nothing
+        stubbed: real write_token -> real _retire_token_for_command -> real
+        check_merge_authorization on one disk token. RED before the #1100 flag
+        axis — the bare retire would have burned the token, so the escalated
+        re-execution would then be held."""
+        escalated = "gh pr close 5 --delete-branch"
+        context = extract_command_context(escalated)
+        assert context.get("bound_flags") == ["--delete-branch"]
+        write_token(context, token_dir=tmp_path)
+
+        # A successful bare close must NOT retire the differently-flagged token.
+        retired = _retire_token_for_command(
+            "gh pr close 5", "close", token_dir=tmp_path)
+        assert retired is False
+        live = [t for t in tmp_path.glob("merge-authorized-*")
+                if not t.name.endswith(".consumed") and ".use-" not in t.name]
+        assert len(live) == 1, "the escalated token must survive the bare retire"
+
+        # The surviving token still authorizes the approved escalated command.
+        assert check_merge_authorization(escalated, token_dir=tmp_path) is None
 
 
 # ───────────────────────── L-B — in-process main()→main() ─────────────────────

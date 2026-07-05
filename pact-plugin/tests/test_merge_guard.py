@@ -13160,13 +13160,21 @@ class TestTargetAwareRetirement:
         worktree."""
         import merge_guard_post as mgp
 
-        # direction 1 — fix present: the unrelated command does not retire
+        # direction 1 — fix present: the unrelated command does not retire.
+        # FLAGLESS token + bare command: with the #1100 flag axis now also live,
+        # the token and command flag-sets must be EQUAL here (both empty) so this
+        # test isolates the TARGET predicate — otherwise a flag mismatch would be
+        # a second, independent blocker and the target-neuter alone could not
+        # restore coarse retirement (the #1100/#1097 interaction). Survival in
+        # direction 1 is therefore attributable solely to the target mismatch.
         mgp.write_token({"operation_type": "close", "pr_number": "42",
-                         "bound_flags": ["--delete-branch"]}, token_dir=tmp_path)
+                         "bound_flags": []}, token_dir=tmp_path)
         assert mgp._retire_token_for_command(
             "gh pr close 43", "close", token_dir=tmp_path) is False
         assert len(self._live(tmp_path)) == 1
-        # direction 2 — pre-fix surface restored: the coarse retirement returns
+        # direction 2 — pre-fix surface restored: the coarse retirement returns.
+        # Flags stay equal ([] == []) so neutering _target_value is the ONLY
+        # change, and it flips survive -> retire.
         monkeypatch.setattr(mgp, "_target_value", lambda ctx: None)
         assert mgp._retire_token_for_command(
             "gh pr close 43", "close", token_dir=tmp_path) is True, (
@@ -13174,6 +13182,254 @@ class TestTargetAwareRetirement:
             "— the survival assertions above would be vacuous"
         )
         assert len(self._live(tmp_path)) == 0
+
+
+class TestFlagAwareRetirement:
+    """#1100 flag-aware Layer-1 token retirement — the bidirectional cert.
+
+    #1097 raised the retirement match key to op+target; #1100 raises it once
+    more to op+target+bound_flags so a successful BARE same-op/same-target
+    command no longer retires an operator's approved ESCALATED (flag-carrying)
+    token — the bounded-friction OVER-BLOCK. `_retire_token_for_command`
+    reuses the mint-stored `bound_flags` and the SAME `extract_privileged_flags`
+    SSOT the read arm (merge_guard_pre) set-compares, adding an unconditional
+    `set(ctx.bound_flags) != cmd_flags` skip AFTER the existing target check.
+
+    Governing principle (task-level SACROSANCT): retirement is a PostToolUse
+    OBSERVER — it can only fail-to-retire, never over-block a faithful click.
+    The flag axis is a pure ADDITIONAL conjunctive skip, so:
+      - PRIMARY (inviolable): an escalated token survives a bare same-target
+        command (the #1100 cure) — RED on pre-#1100 main, GREEN after.
+      - SECONDARY (no-new-under-block): a genuine self-consume (matching
+        flags, INCLUDING the flagless case) STILL retires.
+
+    Tokens are minted THROUGH `extract_command_context` (the production SSOT)
+    so their stored `bound_flags` are scanner-derived, not hand-picked
+    literals — this is what lets the row-4 neuter collapse BOTH the command-
+    side and token-side flag sets symmetrically. In-memory only (write_token /
+    _retire_token_for_command with token_dir=tmp_path); NO git mutation in the
+    shared worktree (#1097 precedent)."""
+
+    def _live(self, tmp_path):
+        return [t for t in tmp_path.glob("merge-authorized-*")
+                if not t.name.endswith(".consumed") and ".use-" not in t.name]
+
+    @staticmethod
+    def _mint_from(cmd, tmp_path):
+        """Mint a token whose context (incl. bound_flags) is derived by the
+        production SSOT extract_command_context — faithful to what a real
+        approval of `cmd` would store, so the flag set is scanner-derived
+        rather than a hand-picked literal."""
+        from merge_guard_post import write_token, extract_command_context
+
+        path = write_token(extract_command_context(cmd), token_dir=tmp_path)
+        assert path is not None, f"mint failed for {cmd!r}"
+        return path
+
+    # --- SECONDARY (no-new-under-block): matching-flag self-consume STILL retires ---
+
+    @pytest.mark.parametrize(
+        "mint_cmd,retire_cmd,op",
+        [
+            ("gh pr merge 42 --admin", "gh pr merge 42 --admin", "merge"),
+            ("gh pr close 42 --delete-branch",
+             "gh pr close 42 --delete-branch", "close"),
+            ("git push --no-verify origin main --force",
+             "git push --no-verify origin main --force", "force-push"),
+            ("git push --force-with-lease origin main",
+             "git push --force-with-lease origin main", "push-to-main"),
+            # FLAGLESS self-consume — guards an over-strict "token must have
+            # flags" implementation: a bare-approved bare-executed op MUST
+            # still retire (empty set == empty set).
+            ("gh pr close 5", "gh pr close 5", "close"),
+        ],
+        ids=["merge_admin", "close_delete_branch", "force_push_no_verify",
+             "push_to_main_lease", "flagless_close"],
+    )
+    def test_matching_flag_self_consume_still_retires(
+        self, tmp_path, mint_cmd, retire_cmd, op
+    ):
+        """No-new-under-block: an execution whose flag-set EQUALS the approved
+        token's (incl. the empty set) retires its own token — the
+        one-approval-one-operation discipline holds across every op-class."""
+        from merge_guard_post import _retire_token_for_command
+
+        self._mint_from(mint_cmd, tmp_path)
+        retired = _retire_token_for_command(retire_cmd, op, token_dir=tmp_path)
+        assert retired is True, (
+            f"NEW UNDER-BLOCK: self-consume stopped retiring for {op} ({retire_cmd!r})"
+        )
+        assert len(self._live(tmp_path)) == 0
+
+    # --- PRIMARY (inviolable): flag mismatch at same op+target SURVIVES (#1100 cure) ---
+
+    @pytest.mark.parametrize(
+        "mint_cmd,retire_cmd,op",
+        [
+            # Escalated token, bare execution — the operator's approved
+            # --delete-branch token must NOT burn on a bare `gh pr close 5`.
+            ("gh pr close 5 --delete-branch", "gh pr close 5", "close"),
+            # Reciprocal: bare token, escalated execution — the bare token
+            # is a distinct identity from the --delete-branch variant.
+            ("gh pr close 5", "gh pr close 5 --delete-branch", "close"),
+            # merge/--admin mirror, both directions.
+            ("gh pr merge 42 --admin", "gh pr merge 42", "merge"),
+            ("gh pr merge 42", "gh pr merge 42 --admin", "merge"),
+        ],
+        ids=["escalated_survives_bare_close", "bare_survives_escalated_close",
+             "escalated_survives_bare_merge", "bare_survives_escalated_merge"],
+    )
+    def test_flag_mismatch_same_target_survives(
+        self, tmp_path, mint_cmd, retire_cmd, op
+    ):
+        """#1100 CURED (RED on pre-#1100 main): same op + same target but a
+        DIFFERENT flag-set must NOT retire — the bare and escalated forms are
+        distinct token identities. Pre-#1100 retirement ignored flags, so a
+        bare command over-retired the escalated token (the bounded friction)."""
+        from merge_guard_post import _retire_token_for_command
+
+        self._mint_from(mint_cmd, tmp_path)
+        retired = _retire_token_for_command(retire_cmd, op, token_dir=tmp_path)
+        assert retired is False, (
+            f"#1100 OVER-BLOCK: {retire_cmd!r} retired the differently-flagged "
+            f"{mint_cmd!r} token"
+        )
+        assert len(self._live(tmp_path)) == 1, "the escalated/bare token must survive"
+
+    # --- flag-normalization symmetry: equal NORMALIZED sets retire (reuse of
+    #     extract_privileged_flags, not a literal-key compare) ---
+
+    @pytest.mark.parametrize(
+        "mint_cmd,retire_cmd,op",
+        [
+            # -d is the short alias of --delete-branch: same canonical set.
+            ("gh pr close 42 --delete-branch", "gh pr close 42 -d", "close"),
+            # --repo value across =-joined / space / attached-short spellings.
+            ("gh pr close 7 --repo=o/r", "gh pr close 7 --repo o/r", "close"),
+            ("gh pr close 7 --repo=o/r", "gh pr close 7 -Ro/r", "close"),
+            # Reordered multi-flag: sets are order-insensitive.
+            ("gh pr merge 9 --repo=o/r --admin",
+             "gh pr merge 9 --admin --repo=o/r", "merge"),
+            # Duplicate flag collapses to the same singleton set.
+            ("gh pr merge 9 --admin", "gh pr merge 9 --admin --admin", "merge"),
+            # A benign non-privileged flag (--json) is not part of the bound set.
+            ("gh pr merge 9 --admin", "gh pr merge 9 --admin --json number", "merge"),
+            # Value-bearing round-trip: identical --repo value retires.
+            ("gh pr close 7 --repo=o/r", "gh pr close 7 --repo=o/r", "close"),
+        ],
+        ids=["delete_branch_long_vs_short", "repo_eq_vs_space",
+             "repo_eq_vs_attached_short", "multi_flag_reordered", "duplicate_flag",
+             "benign_json_alongside", "repo_value_round_trip"],
+    )
+    def test_normalized_flag_equivalence_retires(
+        self, tmp_path, mint_cmd, retire_cmd, op
+    ):
+        """The approved and executed forms differ TEXTUALLY but normalize to the
+        SAME privileged-flag set, so the self-consume still retires. A literal
+        string compare (not reuse of extract_privileged_flags) would MISMATCH
+        `-d` vs `--delete-branch` and wrongly leave the token live."""
+        from merge_guard_post import _retire_token_for_command
+
+        self._mint_from(mint_cmd, tmp_path)
+        retired = _retire_token_for_command(retire_cmd, op, token_dir=tmp_path)
+        assert retired is True, (
+            f"normalization broke: {retire_cmd!r} did not retire the equivalent "
+            f"{mint_cmd!r} token — flags compared as literals, not normalized sets"
+        )
+        assert len(self._live(tmp_path)) == 0
+
+    def test_repo_value_mismatch_survives(self, tmp_path):
+        """The --repo VALUE is part of the bound-flag identity (a value-carrying
+        flag): approve `--repo=o/r`, execute `--repo=x/y` at the same target ->
+        distinct sets -> survives. RED on pre-#1100 main (flags ignored)."""
+        from merge_guard_post import _retire_token_for_command
+
+        self._mint_from("gh pr close 7 --repo=o/r", tmp_path)
+        retired = _retire_token_for_command(
+            "gh pr close 7 --repo=x/y", "close", token_dir=tmp_path)
+        assert retired is False, "cross-repo value redirect retired the o/r token"
+        assert len(self._live(tmp_path)) == 1
+
+    # --- non-vacuity: the survival rows are coupled to the flag predicate ---
+
+    def test_flag_value_is_load_bearing_black_box(self, tmp_path):
+        """SEAM-INDEPENDENT primary non-vacuity: holding op, target, and session
+        fixed, the retire/survive outcome flips on the flag-set ALONE — matching
+        flags retire, mismatched flags survive. Robust regardless of the hook's
+        internal extraction seam."""
+        from merge_guard_post import _retire_token_for_command
+
+        # matching flags -> retire
+        self._mint_from("gh pr close 5 --delete-branch", tmp_path)
+        assert _retire_token_for_command(
+            "gh pr close 5 --delete-branch", "close", token_dir=tmp_path) is True
+        assert len(self._live(tmp_path)) == 0
+        # same op+target, mismatched flags -> survive (RED on pre-#1100 main)
+        self._mint_from("gh pr close 5 --delete-branch", tmp_path)
+        assert _retire_token_for_command(
+            "gh pr close 5", "close", token_dir=tmp_path) is False
+        assert len(self._live(tmp_path)) == 1
+
+    def test_flag_predicate_non_vacuous_under_extract_neuter(
+        self, tmp_path, monkeypatch
+    ):
+        """Counter-mutation mirroring the #1097 target-neuter: with the shared
+        `extract_privileged_flags` SSOT neutered to always-[], BOTH the
+        command's cmd_flags AND a freshly-minted token's stored bound_flags
+        collapse to the empty set, so the escalated-vs-bare distinction
+        disappears and the coarse op+target retirement returns — proving the
+        survival rows are coupled to the flag predicate, not vacuously green.
+        In-memory (monkeypatch) by design — no git mutation in the worktree."""
+        from merge_guard_post import _retire_token_for_command
+
+        # direction 1 — predicate present: escalated token survives bare command
+        self._mint_from("gh pr close 5 --delete-branch", tmp_path)
+        assert _retire_token_for_command(
+            "gh pr close 5", "close", token_dir=tmp_path) is False
+        assert len(self._live(tmp_path)) == 1
+        # direction 2 — neuter the SSOT both arms derive flags from; re-mint so
+        # the token's stored bound_flags also collapse to [] (symmetric neuter)
+        monkeypatch.setattr(
+            "shared.merge_guard_common.extract_privileged_flags",
+            lambda *a, **k: [])
+        self._mint_from("gh pr close 5 --delete-branch", tmp_path)
+        assert _retire_token_for_command(
+            "gh pr close 5", "close", token_dir=tmp_path) is True, (
+            "flag-extraction neuter did not restore coarse retirement — the "
+            "survival assertions above would be vacuous"
+        )
+        assert len(self._live(tmp_path)) == 0
+
+    # --- both-modes: identical flag-axis behavior across session states ---
+
+    @pytest.mark.parametrize(
+        "session_id", ["", "sess-A"],
+        ids=["empty_session", "populated_matching_session"],
+    )
+    def test_flag_axis_identical_across_session_states(
+        self, tmp_path, monkeypatch, session_id
+    ):
+        """Dual-mode contract: the flag axis behaves identically whether
+        retirement runs with no PACT session (get_session_id()=='' -> the
+        session gate is skipped, graceful degradation) or a populated session
+        matching the token's own session_id. (This surface's session axis is
+        empty-vs-populated-matching — NOT leadSessionId topology, which this
+        hook does not key on.) Both the matching-flag self-consume (retire) and
+        the flag-mismatch friction (survive) are asserted under each state."""
+        import merge_guard_post as mgp
+        from merge_guard_post import _retire_token_for_command
+
+        monkeypatch.setattr(mgp, "get_session_id", lambda: session_id)
+        # matching flags -> retire, in both session states
+        self._mint_from("gh pr close 5 --delete-branch", tmp_path)
+        assert _retire_token_for_command(
+            "gh pr close 5 --delete-branch", "close", token_dir=tmp_path) is True
+        assert len(self._live(tmp_path)) == 0
+        # flag mismatch -> survive, in both session states (RED on pre-#1100 main)
+        self._mint_from("gh pr close 5 --delete-branch", tmp_path)
+        assert _retire_token_for_command(
+            "gh pr close 5", "close", token_dir=tmp_path) is False
+        assert len(self._live(tmp_path)) == 1
 
 
 class TestD1MatcherQuoteNormalization:
