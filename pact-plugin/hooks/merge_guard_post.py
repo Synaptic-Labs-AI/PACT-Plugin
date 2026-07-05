@@ -665,11 +665,19 @@ def _retire_token_for_command(
     extract_privileged_flags SSOT the mint/read use). This finer match cures
     the over-retirement friction where a bare same-op/same-target command
     burned an operator's approved ESCALATED (flag-carrying) token, forcing a
-    re-approval. The discriminator is conjunctive and MONOTONIC — it retires
-    FEWER tokens, never more — so the only residual is a tolerated under-retire
-    (a genuine self-consume still retires; an unrelated command's leftover
-    token is backstopped by TTL + MAX_USES). As a PostToolUse observer it can
-    never over-block a faithful click.
+    re-approval. Two independent, both-SAFE moves compose here, precisely:
+    the flag-inequality skip is purely SUBTRACTIVE (it only ever declines to
+    retire on a flag mismatch — fewer tokens on the flag axis); the
+    leg-isolated cmd_target derivation PURIFIES the compare toward the
+    executed op's OWN (op, target, flags) identity (mirroring the read arm,
+    merge_guard_pre.py:536-540) and so can retire a self-consume a prior
+    whole-command mis-scan would have MISSED — still the SAFE direction, since
+    over-retire only CONSUMES a token, never authorizes one. Net: laundering-
+    safe by construction — retirement only ever REMOVES tokens, never grants
+    authorization; the sole residual is a tolerated under-retire (a genuine
+    self-consume still retires; an unrelated command's leftover token is
+    backstopped by TTL + MAX_USES), and over-block stays structurally
+    IMPOSSIBLE (a PostToolUse observer renames after success, never gates).
 
     Emits a path-annotated stderr forensic log when retirement is
     observed (BC-NIT addressed: log line distinguishes "direct"
