@@ -28,7 +28,6 @@ from __future__ import annotations
 import glob
 import json
 import os
-import re
 import sys
 import time
 from pathlib import Path
@@ -49,31 +48,46 @@ try:
 
     # Shared constants and cleanup — single source of truth for both hooks
     sys.path.insert(0, str(Path(__file__).parent))
+    # Names this hook uses directly.
     from shared.merge_guard_common import (
-    # Read-floor danger predicates promoted to shared (GAP1/GAP5) — re-imported here.
-    DANGEROUS_PATTERNS,
-    is_dangerous_command,
-    is_compound_destructive_command,
-    _strip_non_executable_content,
-    _has_pipe_to_shell,
-    _has_process_substitution_to_shell,
-    _PROCSUB_SHELL,
-    _has_eval_or_source,
-    _var_is_expanded,
-    _has_command_substitution,
-    _has_eval_with_heredoc,
-    _COMPOUND_OPS_RE,
-    _FD_REDIRECT_RE,
-        TOKEN_TTL,
+        is_dangerous_command,
+        is_compound_destructive_command,
         TOKEN_DIR,
         TOKEN_PREFIX,
-        MAX_USES,
         USE_MARKER_SUFFIX,
         cleanup_consumed_tokens as _cleanup_consumed_tokens,
         cleanup_orphan_tokens as _cleanup_orphan_tokens,
         extract_command_context,
         _single_destructive_leg,
         _single_detectable_leg,
+    )
+    # Re-exports consumed by the test suite through this module's namespace
+    # (module-level seam: tests import these via merge_guard_pre).
+    # Read-floor danger predicates promoted to shared (GAP1/GAP5) — re-imported here.
+    from shared.merge_guard_common import (  # noqa: F401  # re-export: test-suite seam
+        _strip_non_executable_content,
+        _has_pipe_to_shell,
+        _has_process_substitution_to_shell,
+        _has_eval_or_source,
+        _var_is_expanded,
+        _has_command_substitution,
+        _has_eval_with_heredoc,
+        TOKEN_TTL,
+        # PR-number extraction relocated to shared (the SSOT extract_command_context
+        # owns command-context derivation). _GH_PR_NUMBER_RE and _extract_pr_number
+        # are re-exported here for the existing test imports.
+        _GH_PR_NUMBER_RE,
+        _extract_pr_number,
+    )
+    # Facade-stability re-exports: engine-API names kept on this module for
+    # parity with the shared merge-guard engine surface; no in-repo consumers
+    # today. Reversible — delete only with a facade-symmetry judgment.
+    from shared.merge_guard_common import (  # noqa: F401  # re-export: engine-API facade, no current consumers
+        DANGEROUS_PATTERNS,
+        _PROCSUB_SHELL,
+        _COMPOUND_OPS_RE,
+        _FD_REDIRECT_RE,
+        MAX_USES,
         # Regex prefix constants relocated to shared so the read-side
         # DANGEROUS_PATTERNS bank and the shared classifier compose against
         # identical prefix semantics (#720 Bug B).
@@ -85,11 +99,6 @@ try:
         _GH_API_PREFIX,
         _GH_PR_MERGE_RE,
         _GH_PR_CLOSE_RE,
-        # PR-number extraction relocated to shared (the SSOT extract_command_context
-        # owns command-context derivation). _GH_PR_NUMBER_RE and _extract_pr_number
-        # are re-exported here for the existing test imports.
-        _GH_PR_NUMBER_RE,
-        _extract_pr_number,
         # Bound for the shared-module flag walks (push read arms + mint
         # push-to-main arm) (#1001).
         _MAX_GLOBAL_FLAG_TOKENS,

@@ -56,7 +56,6 @@ from __future__ import annotations
 # ─── stdlib first (used by _emit_load_failure_deny BEFORE wrapped imports) ─
 import json
 import sys
-import os
 from typing import NoReturn
 
 

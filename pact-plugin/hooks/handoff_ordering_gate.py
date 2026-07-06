@@ -54,7 +54,6 @@ from __future__ import annotations
 
 # ─── stdlib first (used on the input-side fail-open BEFORE wrapped imports) ─
 import json
-import os
 import sys
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})

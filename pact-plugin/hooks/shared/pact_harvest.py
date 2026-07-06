@@ -41,7 +41,6 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any
 
 # Make the package-path import (`from shared.X import Y`) resolvable when this
 # file is run as a direct script. In script mode Python puts the script's OWN

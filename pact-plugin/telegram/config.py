@@ -23,7 +23,6 @@ Security controls:
 from __future__ import annotations
 
 import logging
-import os
 import stat
 import subprocess
 import uuid

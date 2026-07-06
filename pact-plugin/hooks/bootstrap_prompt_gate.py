@@ -94,7 +94,6 @@ try:
 
     import shared.pact_context as pact_context
     from bootstrap_gate import is_marker_set
-    from shared import BOOTSTRAP_MARKER_NAME
     # Stale-session detector moved to the shared/ leaf (single SSOT, also
     # consumed by dispatch_gate's deny-message self-diagnosis). Re-bound to the
     # historical module-private name so this module's existing call site and
