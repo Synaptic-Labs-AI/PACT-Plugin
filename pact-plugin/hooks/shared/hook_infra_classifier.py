@@ -142,11 +142,14 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     }),
     "session_init": frozenset({
         "claude_md_manager", "constants", "dispatch_helpers", "failure_log",
-        "merge_guard_common", "pact_context", "paths", "peer_context",
-        "pin_caps", "pin_staleness_gate", "plugin_manifest", "session_journal",
-        "session_registry", "session_resume", "session_state", "staleness",
-        "symlinks", "task_utils", "teammate_mode",
-    }),  # top-level helpers (pin_caps, staleness, pin_staleness_gate) reached
+        "merge_guard_common", "pact_config", "pact_context", "paths",
+        "peer_context", "pin_caps", "pin_staleness_gate", "plugin_manifest",
+        "session_journal", "session_registry", "session_resume",
+        "session_state", "staleness", "symlinks", "task_utils", "teammate_mode",
+    }),  # pact_config reached via the SessionStart runtime-config injection
+         # (session_init -> shared.pact_config.llm_options); stdlib-only, so it
+         # adds no further transitive shared edges.
+         # top-level helpers (pin_caps, staleness, pin_staleness_gate) reached
          # here: session_init -> staleness -> pin_caps; session_init ->
          # pin_staleness_gate -> pin_caps.
     "session_end": frozenset({

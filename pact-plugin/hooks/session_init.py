@@ -94,6 +94,7 @@ from shared.dispatch_helpers import is_registered_pact_specialist
 from shared.session_journal import append_event, make_event
 from shared.failure_log import append_failure
 from shared.plugin_manifest import format_plugin_banner
+from shared.pact_config import llm_options
 from shared.peer_context import get_peer_context
 from shared.session_registry import resolve as _registry_resolve
 from shared.paths import get_claude_config_dir
@@ -628,6 +629,74 @@ def _clear_bootstrap_marker(session_path: Path) -> None:
         pass  # Fail-open: don't block session init for marker cleanup
 
 
+# ─── PACT Runtime Config injection (SessionStart LLM bridge) ────────────────
+
+# Fixed label table for the injected "PACT Runtime Config" block. This is the
+# ONLY source of option names + human labels emitted into the block: the
+# composer never interpolates a raw env value or a raw dict key (F1
+# prompt-injection defense, mirroring the `source` canonicalization in main()
+# that keeps untrusted stdin text out of additionalContext). Tuple order is the
+# block's display order.
+_PACT_RUNTIME_CONFIG_LABELS = (
+    ("PACT_PR_GREEDY_FIX", "PR greedy-fix"),
+    ("PACT_AUTONOMOUS_SCOPE_DETECTION", "Autonomous scope detection"),
+)
+
+
+def format_pact_runtime_config(options: dict) -> str:
+    """Compose the "PACT Runtime Config" additionalContext block.
+
+    Takes the RESOLVED options dict from ``pact_config.llm_options()`` (bool
+    values) and emits a multi-line block whose ONLY variable content is a
+    per-option "ON"/"OFF" derived from ``options.get(name) is True``. Option
+    names and labels come from the fixed ``_PACT_RUNTIME_CONFIG_LABELS`` table,
+    NEVER from the dict keys or from any env string — so a poisoned resolver
+    value cannot inject text into the block (F1 canonical-value composition,
+    the prompt-injection choke-point).
+
+    The block LEADS with a newline so that, after main() joins ``context_parts``
+    with ``" | "``, the ``## `` heading still lands at line-start and renders as
+    a header rather than mid-line text.
+
+    Consumers (peer-review.md, orchestrate.md / pact-scope-detection.md)
+    pattern-match the literal heading; absence of the block == every option at
+    its default (OFF).
+    """
+    lines = ["", "## PACT Runtime Config (resolved at session start)"]
+    for env_name, label in _PACT_RUNTIME_CONFIG_LABELS:
+        state = "ON" if options.get(env_name) is True else "OFF"
+        lines.append(f"- {label}: {state} ({env_name})")
+    return "\n".join(lines)
+
+
+def check_settings_well_formed() -> Optional[str]:
+    """Return a warning if the user settings.json exists but is malformed JSON.
+
+    Claude Code silently drops a malformed settings.json WHOLESALE in headless
+    mode — taking the entire ``env`` block with it, so every PACT_* option
+    persisted there is silently NOT applied. Surfacing the malformation tells
+    the user why their env-block config had no effect. Returns None when the
+    file is absent or valid. Total: never raises (it runs on the SessionStart
+    hot path, where an uncaught exception would break bootstrap).
+    """
+    try:
+        settings_path = get_claude_config_dir() / "settings.json"
+        if not settings_path.exists():
+            return None
+        try:
+            json.loads(settings_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            return (
+                "PACT: ~/.claude/settings.json is not valid JSON — Claude Code "
+                "silently ignores a malformed settings.json (including its `env` "
+                "block), so any PACT_* options set there are NOT applied. Fix the "
+                "JSON syntax to restore them."
+            )
+        return None
+    except Exception:  # noqa: BLE001 — total contract on the SessionStart hot path
+        return None
+
+
 def main():
     """
     Main entry point for the SessionStart hook.
@@ -900,6 +969,33 @@ def main():
         # glance. Helper is total: no conditional append, no try/except
         # wrapper at the call site.
         context_parts.append(format_plugin_banner())
+
+        # 4d/4e. PACT runtime config: settings-health self-check + inject the
+        # resolved LLM-consumed options. Lead-only via the fail-safe
+        # `frame_role != "teammate"` idiom (matching the 4a/4b advisory gates):
+        # the consumers (peer-review, orchestrate/pact-scope-detection) are all
+        # lead/orchestrator flows; an unknown/solo frame still receives it
+        # (harmless if unconsumed). Not enumerated as a numbered step in the
+        # docstring — like 4a/4b/4c, it is a context surfacing within the pin/
+        # config region, so the module<->main() docstring parity is untouched.
+        if frame_role != "teammate":
+            # 4d. Warn if settings.json is malformed — Claude Code drops it
+            # WHOLESALE in headless mode, silently taking the `env` block (and
+            # every PACT_* option) with it. User-facing config-health notice →
+            # system_messages. Helper is total.
+            settings_warn = check_settings_well_formed()
+            if settings_warn:
+                system_messages.append(settings_warn)
+            # 4e. Inject the resolved "PACT Runtime Config" block so markdown
+            # flows (which cannot read env vars) can honor the LLM-consumed
+            # options. Tier-0 additionalContext, appended (a config statement,
+            # not a top-priority alert). Fail-open: any failure emits no
+            # directive — and absence of the block == every option at its
+            # default (OFF), the same safe state the consumers already assume.
+            try:
+                context_parts.append(format_pact_runtime_config(llm_options()))
+            except Exception:  # noqa: BLE001 — fail-open: no block == all OFF
+                pass
 
         # 5. Remind orchestrator to identify the session-unique PACT team (platform-provisioned)
         team_name = generate_team_name(input_data)
