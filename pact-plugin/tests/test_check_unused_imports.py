@@ -234,6 +234,21 @@ class TestCheckPathsContract:
         lines = cui.check_paths([str(f)], try_scope="strict")
         assert lines == [f"{f}:2: unused import os"]
 
+    def test_non_text_codec_cookie_reported_loudly_and_batch_continues(self, tmp_path):
+        # A coding cookie naming a NON-TEXT codec resolves during encoding
+        # detection but is refused by the text-mode open (LookupError) — the
+        # same loud per-file line, and sibling files are still checked.
+        bad = tmp_path / "nontext.py"
+        bad.write_bytes(b"# -*- coding: base64 -*-\nimport os\n")
+        dead = tmp_path / "dead.py"
+        dead.write_text("import json\n", encoding="utf-8")
+        lines = cui.check_paths([str(bad), str(dead)], try_scope="strict")
+        assert any(
+            line.startswith(f"{bad}:0:") and "unable to read file" in line
+            for line in lines
+        )
+        assert f"{dead}:1: unused import json" in lines
+
     def test_undecodable_file_reported_loudly_and_batch_continues(self, tmp_path):
         # Bytes that decode under no detected encoding are a loud per-file
         # failure line — and must not abort the rest of the batch (findings

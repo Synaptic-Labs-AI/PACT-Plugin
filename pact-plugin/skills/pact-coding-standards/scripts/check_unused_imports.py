@@ -242,10 +242,12 @@ def check_paths(paths: list[str], *, try_scope: str) -> list[str]:
             # non-UTF8 source is read per its declared encoding.
             with tokenize.open(path) as fh:
                 source = fh.read()
-        except (OSError, UnicodeDecodeError, SyntaxError) as exc:
+        except (OSError, UnicodeDecodeError, SyntaxError, LookupError) as exc:
             # OSError: unreadable path. UnicodeDecodeError: bytes that do not
             # decode under the detected encoding. SyntaxError: a bad/unknown
-            # coding cookie (raised by the encoding detection itself). All
+            # coding cookie (raised by the encoding detection itself).
+            # LookupError: a cookie naming a NON-TEXT codec (e.g. base64) —
+            # detection resolves it but the text-mode open refuses it. All
             # mean "cannot verify this file" — loud line, batch continues.
             out.append(f"{path}:0: unable to read file ({exc})")
             continue
