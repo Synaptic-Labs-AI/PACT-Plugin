@@ -26,8 +26,11 @@ supplies one.
 Suppression and carve-outs:
     * `# noqa` / `# noqa: F401` on the import statement's FIRST physical
       line suppresses findings for that whole statement (this is what makes
-      suppression work for parenthesized multi-line imports). A noqa listing
-      only other codes does not suppress.
+      suppression work for parenthesized multi-line imports). Codes are
+      matched as exact word-bounded tokens: a noqa listing only other codes
+      does not suppress, `F401x`/`F4011` are different codes, and a code
+      list with no recognizable code suppresses nothing — only a truly bare
+      `# noqa` blanket-suppresses.
     * `from __future__ import ...` is never flagged.
     * Imports inside an `if TYPE_CHECKING:` block are never flagged (they
       serve string annotations the AST usage walk cannot see). The carve-out
@@ -60,14 +63,15 @@ import sys
 import tokenize
 from typing import NamedTuple
 
-# Codes are matched as letter+digit tokens (e.g. F401) separated by commas
-# and/or whitespace, so trailing prose after the last code — `# noqa: F401
-# some reason` without a comma or second `#` — cannot bleed into the code
-# list and silently defeat the suppression.
-_NOQA_RE = re.compile(
-    r"#\s*noqa(?::\s*(?P<codes>[A-Za-z]+[0-9]+(?:[,\s]+[A-Za-z]+[0-9]+)*))?",
-    re.IGNORECASE,
-)
+# The noqa marker itself; a following colon opens a code list. Codes are
+# read from the list region only (up to any second `#`) as exact
+# word-bounded letter+digit tokens, so trailing prose (`noqa: F401 some
+# reason` — the example omits its hash so linters never parse it as a
+# real directive) cannot bleed into the code list, and a letter-suffixed
+# non-code (`F401x`) or a code mentioned in a second `#` reason comment
+# cannot suppress.
+_NOQA_RE = re.compile(r"#\s*noqa(?P<sep>:)?", re.IGNORECASE)
+_NOQA_CODE_TOKEN_RE = re.compile(r"\b[A-Za-z]+[0-9]+\b")
 
 _VALID_STRICTNESS = ("strict", "advisory")
 
@@ -82,17 +86,22 @@ class Finding(NamedTuple):
 
 def _line_has_noqa_f401(line: str) -> bool:
     """True when the physical line carries a noqa that suppresses F401:
-    either a bare `# noqa` or a code list containing F401."""
+    either a bare `# noqa` or a code list containing the exact token F401."""
     m = _NOQA_RE.search(line)
     if not m:
         return False
-    codes = m.group("codes")
-    if codes is None:
-        # Bare `# noqa` — or a code list that doesn't parse as code tokens
-        # (e.g. `# noqa: banana`) — suppresses everything on the line,
-        # matching flake8's blanket-noqa semantics.
-        return True
-    return "F401" in {c.upper() for c in re.split(r"[,\s]+", codes) if c}
+    if m.group("sep") is None:
+        return True  # bare noqa suppresses everything on the line
+    # A colon opens a code list: suppress only on an exact word-bounded
+    # F401 token inside the list region (before any second `#`, so a
+    # reason comment mentioning F401 does not count). A list with no
+    # recognizable code token (e.g. `noqa: banana` — hash omitted so
+    # linters don't parse this example) suppresses nothing.
+    codes_region = line[m.end():].split("#", 1)[0]
+    return any(
+        token.upper() == "F401"
+        for token in _NOQA_CODE_TOKEN_RE.findall(codes_region)
+    )
 
 
 def _is_type_checking_test(test: ast.expr) -> bool:
@@ -105,19 +114,29 @@ def _is_type_checking_test(test: ast.expr) -> bool:
 
 
 def _collect_all_names(tree: ast.Module) -> set[str]:
-    """Names declared in `__all__` (Assign or AugAssign of string constants)."""
+    """Names declared in `__all__`: Assign or AugAssign of string constants,
+    plus `__all__.extend([...])` calls (the other common declaration idiom)."""
     exported: set[str] = set()
     for node in ast.walk(tree):
-        targets: list[ast.expr] = []
-        if isinstance(node, ast.Assign):
-            targets = node.targets
-        elif isinstance(node, ast.AugAssign):
-            targets = [node.target]
-        if not any(isinstance(t, ast.Name) and t.id == "__all__" for t in targets):
-            continue
-        for elt in ast.walk(node.value):
-            if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                exported.add(elt.value)
+        values: list[ast.expr] = []
+        if isinstance(node, (ast.Assign, ast.AugAssign)):
+            targets = (
+                node.targets if isinstance(node, ast.Assign) else [node.target]
+            )
+            if any(isinstance(t, ast.Name) and t.id == "__all__" for t in targets):
+                values = [node.value]
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "extend"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "__all__"
+        ):
+            values = list(node.args)
+        for value in values:
+            for elt in ast.walk(value):
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                    exported.add(elt.value)
     return exported
 
 
@@ -135,6 +154,10 @@ class _ScopedImportCollector(ast.NodeVisitor):
         self._try_depth += 1
         self.generic_visit(node)
         self._try_depth -= 1
+
+    # `try/except*` (ast.TryStar, PEP 654) is try-scoped exactly like plain
+    # `try` — the alias is inert on interpreters whose ast lacks TryStar.
+    visit_TryStar = visit_Try
 
     def visit_If(self, node: ast.If) -> None:
         if _is_type_checking_test(node.test):

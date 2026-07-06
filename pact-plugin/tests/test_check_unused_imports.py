@@ -101,6 +101,21 @@ class TestNoqaSuppression:
         # Token-level (not substring) matching: F4011 is a different code.
         assert _names("import os  # noqa: F4011\n") == ["os"]
 
+    def test_noqa_letter_suffixed_code_does_not_suppress(self):
+        # Word-bounded token matching: F401x is not the F401 code.
+        assert _names("import os  # noqa: F401x\n") == ["os"]
+
+    def test_noqa_unrecognizable_code_list_does_not_suppress(self):
+        # A colon opens a code list; a list with no recognizable code token
+        # suppresses nothing — only a truly bare noqa comment (no colon)
+        # blanket-suppresses.
+        assert _names("import os  # noqa: banana\n") == ["os"]
+
+    def test_code_in_trailing_reason_comment_does_not_suppress(self):
+        # Tokens are read only from the code-list region (before any second
+        # '#'), so a reason comment mentioning F401 cannot suppress it.
+        assert _names("import os  # noqa: E501  # F401 discussed here\n") == ["os"]
+
     def test_noqa_on_first_line_of_parenthesized_import_suppresses_all(self):
         src = (
             "from json import (  # noqa: F401  # re-export: facade\n"
@@ -149,6 +164,10 @@ class TestCarveOuts:
         src = "from json import dumps\n__all__ = []\n__all__ += ['dumps']\n"
         assert _names(src) == []
 
+    def test_dunder_all_extend_reexport_not_flagged(self):
+        src = "from json import dumps\n__all__ = []\n__all__.extend(['dumps'])\n"
+        assert _names(src) == []
+
     def test_star_import_ignored(self):
         assert _names("from json import *\n") == []
 
@@ -170,6 +189,13 @@ class TestTryScopeStrictness:
     def test_module_level_import_flagged_in_both_modes(self):
         assert _names("import os\n", try_scope="strict") == ["os"]
         assert _names("import os\n", try_scope="advisory") == ["os"]
+
+    def test_try_star_scoped_import_strict_flags_advisory_skips(self):
+        # try/except* (PEP 654, ast.TryStar) is try-scoped exactly like a
+        # plain try/except — checked in strict, skipped in advisory.
+        src = "try:\n    import os\nexcept* ImportError:\n    pass\n"
+        assert _names(src, try_scope="strict") == ["os"]
+        assert _names(src, try_scope="advisory") == []
 
     def test_try_scope_is_required_no_default(self):
         # Structural no-default contract: omitting the parameter is a
