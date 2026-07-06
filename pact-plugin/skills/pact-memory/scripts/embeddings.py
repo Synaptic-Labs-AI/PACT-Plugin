@@ -98,7 +98,7 @@ class EmbeddingService:
             return self._available
 
         try:
-            from model2vec import StaticModel
+            from model2vec import StaticModel  # noqa: F401  # availability probe: import success is the signal
             self._available = True
             return True
         except ImportError:
