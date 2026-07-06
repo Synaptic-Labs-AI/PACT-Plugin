@@ -30,7 +30,10 @@ Suppression and carve-outs:
       only other codes does not suppress.
     * `from __future__ import ...` is never flagged.
     * Imports inside an `if TYPE_CHECKING:` block are never flagged (they
-      serve string annotations the AST usage walk cannot see).
+      serve string annotations the AST usage walk cannot see). The carve-out
+      spans the whole `if` statement including any `else:` arm, so a runtime
+      import there is exempted too — a known trade-off (the pattern is
+      vanishingly rare and the behavior is pinned by a suite test).
     * Names listed in `__all__` count as used (re-export convention).
     * Star imports are ignored entirely.
     * `import a.b.c` binds the root name `a`; usage of `a` marks it used.
@@ -39,8 +42,12 @@ Usage:
     python3 check_unused_imports.py --try-scope {strict,advisory} FILE [FILE ...]
 
 Output: one finding per line on stdout, `path:line: unused import X`.
-A file that cannot be parsed produces `path:line: syntax error (unable to
-check imports): <msg>` on stdout — a check failure is loud, never a skip.
+Files are read via `tokenize.open`, which honors PEP 263 coding cookies and
+BOMs — legal non-UTF8 source is decoded per its declared encoding and checked
+like any other file. A file that cannot be parsed produces `path:line: syntax
+error (unable to check imports): <msg>` on stdout, and a file that cannot be
+read or decoded produces `path:0: unable to read file (<msg>)` — a check
+failure is loud, never a skip, and never aborts the rest of the batch.
 Exit codes: 0 = no findings, 1 = findings (or unreadable/unparsable input).
 """
 
@@ -50,9 +57,17 @@ import argparse
 import ast
 import re
 import sys
+import tokenize
 from typing import NamedTuple
 
-_NOQA_RE = re.compile(r"#\s*noqa(?::\s*(?P<codes>[A-Z0-9, ]+))?", re.IGNORECASE)
+# Codes are matched as letter+digit tokens (e.g. F401) separated by commas
+# and/or whitespace, so trailing prose after the last code — `# noqa: F401
+# some reason` without a comma or second `#` — cannot bleed into the code
+# list and silently defeat the suppression.
+_NOQA_RE = re.compile(
+    r"#\s*noqa(?::\s*(?P<codes>[A-Za-z]+[0-9]+(?:[,\s]+[A-Za-z]+[0-9]+)*))?",
+    re.IGNORECASE,
+)
 
 _VALID_STRICTNESS = ("strict", "advisory")
 
@@ -73,8 +88,11 @@ def _line_has_noqa_f401(line: str) -> bool:
         return False
     codes = m.group("codes")
     if codes is None:
-        return True  # bare noqa suppresses everything on the line
-    return "F401" in {c.strip().upper() for c in codes.split(",")}
+        # Bare `# noqa` — or a code list that doesn't parse as code tokens
+        # (e.g. `# noqa: banana`) — suppresses everything on the line,
+        # matching flake8's blanket-noqa semantics.
+        return True
+    return "F401" in {c.upper() for c in re.split(r"[,\s]+", codes) if c}
 
 
 def _is_type_checking_test(test: ast.expr) -> bool:
@@ -209,10 +227,10 @@ def find_unused_imports(source: str, *, try_scope: str) -> list[Finding]:
 def check_paths(paths: list[str], *, try_scope: str) -> list[str]:
     """Run the predicate over files; return formatted finding lines.
 
-    Unreadable or unparsable files produce a loud finding-format line rather
-    than being skipped (a file the checker cannot verify is a failure, not a
-    pass). Non-`.py` paths are refused the same way — the contract is
-    Python-file paths only.
+    Unreadable, undecodable, or unparsable files produce a loud finding-format
+    line rather than being skipped (a file the checker cannot verify is a
+    failure, not a pass), and never abort the rest of the batch. Non-`.py`
+    paths are refused the same way — the contract is Python-file paths only.
     """
     out: list[str] = []
     for path in paths:
@@ -220,9 +238,15 @@ def check_paths(paths: list[str], *, try_scope: str) -> list[str]:
             out.append(f"{path}:0: not a .py file (unable to check imports)")
             continue
         try:
-            with open(path, encoding="utf-8") as fh:
+            # tokenize.open honors PEP 263 coding cookies and BOMs, so legal
+            # non-UTF8 source is read per its declared encoding.
+            with tokenize.open(path) as fh:
                 source = fh.read()
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError, SyntaxError) as exc:
+            # OSError: unreadable path. UnicodeDecodeError: bytes that do not
+            # decode under the detected encoding. SyntaxError: a bad/unknown
+            # coding cookie (raised by the encoding detection itself). All
+            # mean "cannot verify this file" — loud line, batch continues.
             out.append(f"{path}:0: unable to read file ({exc})")
             continue
         try:

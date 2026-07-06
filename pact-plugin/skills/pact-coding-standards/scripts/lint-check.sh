@@ -37,10 +37,20 @@ if [ "$1" = "--files" ]; then
     # Keep only .py arguments — the contract is Python files; anything else
     # a caller passes (e.g. every modified file regardless of type) is
     # filtered here rather than refused, so mixed file lists stay friction-free.
+    # Paths that no longer exist (deleted/renamed in the same change set) are
+    # noted on stderr and dropped so the remaining files still get checked.
+    # This pre-filter is the consumer tier's choice only — the checker itself
+    # keeps its unreadable-fails-loud contract for the strict tier.
     PY_FILES=()
     for f in "$@"; do
         case "$f" in
-            *.py) PY_FILES+=("$f") ;;
+            *.py)
+                if [ -e "$f" ]; then
+                    PY_FILES+=("$f")
+                else
+                    echo "import-hygiene: skipping missing path (deleted/renamed?): $f" >&2
+                fi
+                ;;
         esac
     done
 
@@ -64,7 +74,7 @@ if [ "$1" = "--files" ]; then
     }
 
     # Emit a rung's outcome and exit; returns 1 to the caller only when the
-    # rung itself failed (rc > 1) so the ladder can try the next rung.
+    # rung itself failed so the ladder can try the next rung.
     run_rung() {
         local rung_name="$1"
         shift
@@ -75,12 +85,20 @@ if [ "$1" = "--files" ]; then
             echo "IMPORT-HYGIENE: PASS"
             exit 0
         elif [ $rc -eq 1 ]; then
-            [ -n "$out" ] && printf '%s\n' "$out"
-            echo "IMPORT-HYGIENE: FINDINGS ($(count_findings "$out"))"
-            exit 1
+            # Exit 1 alone does not prove findings: an unhandled Python
+            # exception ALSO exits 1, so a traceback would otherwise be
+            # misread as findings (and block a tier that must fail open).
+            # Require at least one finding-format line before declaring
+            # FINDINGS; exit-1 output without one is a crash — fall through
+            # to rung failure.
+            if printf '%s\n' "$out" | grep -Eq ':[0-9]+:'; then
+                printf '%s\n' "$out"
+                echo "IMPORT-HYGIENE: FINDINGS ($(count_findings "$out"))"
+                exit 1
+            fi
         fi
-        # rc > 1: the checker itself failed (crash, bad invocation, missing
-        # module at run time). Loud on stderr, then let the ladder continue.
+        # The checker itself failed (crash, bad invocation, missing module
+        # at run time). Loud on stderr, then let the ladder continue.
         echo "import-hygiene: $rung_name failed (exit $rc); trying next checker" >&2
         [ -n "$out" ] && printf '%s\n' "$out" >&2
         return 1
@@ -93,15 +111,15 @@ if [ "$1" = "--files" ]; then
     # (unused imports / undefined names) — never a tool's full default
     # ruleset, which would bury the signal in style noise.
     if ruff --version >/dev/null 2>&1; then
-        run_rung "ruff" ruff check --quiet --select F401,F821 "${PY_FILES[@]}"
+        run_rung "ruff" ruff check --quiet --select F401,F821 -- "${PY_FILES[@]}"
     fi
     if python3 -m pyflakes --version >/dev/null 2>&1; then
         # pyflakes has no rule selection; its native scope is already the
         # import-hygiene class family (unused imports, undefined names).
-        run_rung "pyflakes" python3 -m pyflakes "${PY_FILES[@]}"
+        run_rung "pyflakes" python3 -m pyflakes -- "${PY_FILES[@]}"
     fi
     if python3 -m flake8 --version >/dev/null 2>&1; then
-        run_rung "flake8" python3 -m flake8 --select=F401,F821 "${PY_FILES[@]}"
+        run_rung "flake8" python3 -m flake8 --select=F401,F821 -- "${PY_FILES[@]}"
     fi
     if python3 -c "import ast" >/dev/null 2>&1 && [ -f "$SCRIPT_DIR/check_unused_imports.py" ]; then
         # Stdlib floor: always available wherever python3 runs. Advisory
@@ -109,7 +127,7 @@ if [ "$1" = "--files" ]; then
         # choice (try/except-scoped imports are often optional-dependency
         # probes); the strictness parameter has no default by design.
         run_rung "stdlib checker" python3 "$SCRIPT_DIR/check_unused_imports.py" \
-            --try-scope advisory "${PY_FILES[@]}"
+            --try-scope advisory -- "${PY_FILES[@]}"
     fi
 
     # Every rung unavailable or crashed: fail open, visibly.

@@ -152,6 +152,30 @@ class TestGateNonVacuity:
         assert len(findings) == 1
         assert "syntax error" in findings[0]
 
+    def test_latin1_coding_cookie_file_is_checked(self, tmp_path):
+        """PEP 263: legal non-UTF8 Python is read per its declared coding
+        cookie and checked normally — the gate neither crashes nor emits a
+        false unable-to-read line for it. The finding proves the file was
+        actually analyzed, not silently passed over."""
+        mod = tmp_path / "latin1.py"
+        mod.write_bytes("# coding: latin-1\nimport os\nx = 'é'\n".encode("latin-1"))
+        assert _gate_check([mod]) == [f"{mod}:2: unused import os"]
+
+    def test_undecodable_file_fails_loudly_without_killing_the_batch(self, tmp_path):
+        """A file whose bytes decode under no detected encoding is a loud
+        per-file failure line — and sibling files in the same invocation
+        are still checked (a crash here once discarded the whole batch)."""
+        bad = tmp_path / "bad.py"
+        bad.write_bytes(b"import os\nx = '\xff\xfe\x9c'\n")
+        dead = tmp_path / "dead.py"
+        dead.write_text("import json\n", encoding="utf-8")
+        findings = _gate_check([bad, dead])
+        assert any(
+            f.startswith(f"{bad}:0:") and "unable to read file" in f
+            for f in findings
+        )
+        assert f"{dead}:1: unused import json" in findings
+
 
 class TestGateEdgeBehavior:
     """Edge rows for the sweep's carve-outs and bindings, asserted through

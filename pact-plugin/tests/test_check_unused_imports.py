@@ -91,6 +91,16 @@ class TestNoqaSuppression:
     def test_noqa_other_code_does_not_suppress(self):
         assert _names("import os  # noqa: E501\n") == ["os"]
 
+    def test_noqa_f401_with_trailing_prose_suppresses(self):
+        # A reason written without a comma or a second `#` must not defeat
+        # the suppression — codes are parsed as letter+digit tokens, so the
+        # prose cannot bleed into the code list.
+        assert _names("import os  # noqa: F401 optional dependency probe\n") == []
+
+    def test_noqa_longer_code_sharing_f401_prefix_does_not_suppress(self):
+        # Token-level (not substring) matching: F4011 is a different code.
+        assert _names("import os  # noqa: F4011\n") == ["os"]
+
     def test_noqa_on_first_line_of_parenthesized_import_suppresses_all(self):
         src = (
             "from json import (  # noqa: F401  # re-export: facade\n"
@@ -214,6 +224,30 @@ class TestCheckPathsContract:
         lines = cui.check_paths([str(f)], try_scope="strict")
         assert len(lines) == 1
         assert "not a .py file" in lines[0]
+
+    def test_latin1_coding_cookie_file_is_checked_not_crashed(self, tmp_path):
+        # PEP 263: legal non-UTF8 Python is read per its declared encoding
+        # and checked like any other file. The emitted finding (not merely
+        # the absence of a crash) proves the file was actually analyzed.
+        f = tmp_path / "latin1.py"
+        f.write_bytes("# coding: latin-1\nimport os\nx = 'é'\n".encode("latin-1"))
+        lines = cui.check_paths([str(f)], try_scope="strict")
+        assert lines == [f"{f}:2: unused import os"]
+
+    def test_undecodable_file_reported_loudly_and_batch_continues(self, tmp_path):
+        # Bytes that decode under no detected encoding are a loud per-file
+        # failure line — and must not abort the rest of the batch (findings
+        # in sibling files still come out).
+        bad = tmp_path / "bad.py"
+        bad.write_bytes(b"import os\nx = '\xff\xfe\x9c'\n")
+        dead = tmp_path / "dead.py"
+        dead.write_text("import json\n", encoding="utf-8")
+        lines = cui.check_paths([str(bad), str(dead)], try_scope="strict")
+        assert any(
+            line.startswith(f"{bad}:0:") and "unable to read file" in line
+            for line in lines
+        )
+        assert f"{dead}:1: unused import json" in lines
 
 
 class TestCli:
