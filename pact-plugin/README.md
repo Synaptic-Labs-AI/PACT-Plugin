@@ -74,11 +74,16 @@ Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/Syna
 
 ## Configuration
 
-Environment variables that tune hook behavior:
+Environment variables that tune PACT behavior. Full detail — types, precedence, and the two `settings.json` gotchas — is in [reference/config.md](reference/config.md).
 
 | Variable | Default | Allowed values | Effect |
 |---|---|---|---|
+| `PACT_PR_GREEDY_FIX` | `0` (off) | `1` / `0` | When on, peer-review greedily auto-delegates **all** minor + future reviewer findings as reversible fixes; `merge` / `close` / `push` stay user-gated and SACROSANCT is never overridden. Off = the default per-finding review gate. |
+| `PACT_AUTONOMOUS_SCOPE_DETECTION` | `0` (off) | `1` / `0` | When on, scope detection may auto-decompose without user confirmation when all strong signals fire. Off = the Confirmed tier (proposes; user confirms). Replaces the retired `autonomous-scope-detection: enabled` CLAUDE.md marker. |
 | `PACT_DISPATCH_INLINE_MISSION_MODE` | `warn` | `warn` / `deny` / `shadow` | Disposition of the dispatch-gate inline-mission heuristic (flags dispatchers inlining mission text into `prompt=` instead of using the canonical "check TaskList" form). `warn` emits an advisory `additionalContext`; `deny` blocks the spawn (flip only after empirically confirming `additionalContext` injection is reliable under PreToolUse — see `pact-plugin/hooks/dispatch_gate.py` for the matcher-fidelity discussion); `shadow` journals only — the trigger is observable but neither WARNs nor DENYs (calibration / first-session safety net). The other dispatch-gate rules (name/team presence, name validation, specialist registry, session-team match, member uniqueness, task-assignment) are unaffected by this env-var. Unknown values fall back to `warn`. |
+| `PACT_DISPATCH_VARIETY_MODE` | `warn` | `warn` / `deny` / `shadow` | Disposition of the handoff-ordering dispatch-variety enforcement: `warn` (advisory `additionalContext`), `deny` (block), `shadow` (journal only). Unknown values fall back to `warn`. |
+
+Bool options parse `1` / `true` / `yes` / `on` → on; everything else (including `0` and unset) → off.
 
 ## Full Documentation
 
