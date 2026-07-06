@@ -229,7 +229,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
 # waiver path.
 SEAM_READING_HELPERS: frozenset[str] = frozenset().union(
     *_SEAM_HOOK_HELPER_CLOSURE.values()
-)  # 26 (23 shared helpers — incl. paths, the config-dir SSOT — + 3 top-level)
+)  # 28 (25 shared helpers — incl. paths, the config-dir SSOT — + 3 top-level)
 
 
 # ─── Path predicates ────────────────────────────────────────────────────────
