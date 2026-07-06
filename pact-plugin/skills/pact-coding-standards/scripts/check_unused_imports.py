@@ -105,12 +105,22 @@ def _line_has_noqa_f401(line: str) -> bool:
 
 
 def _is_type_checking_test(test: ast.expr) -> bool:
-    """True for `if TYPE_CHECKING:` / `if typing.TYPE_CHECKING:` tests."""
+    """True for `if TYPE_CHECKING:` / `if typing.TYPE_CHECKING:` tests.
+
+    Deliberately literal: a foreign attribute that merely ends in
+    `.TYPE_CHECKING` (e.g. `mymod.TYPE_CHECKING`) is not the typing
+    convention and gets no carve-out. (Residual: an aliased module,
+    `import typing as t` + `t.TYPE_CHECKING`, is also not recognized —
+    rare, and the noqa escape covers it.)
+    """
     if isinstance(test, ast.Name):
         return test.id == "TYPE_CHECKING"
-    if isinstance(test, ast.Attribute):
-        return test.attr == "TYPE_CHECKING"
-    return False
+    return (
+        isinstance(test, ast.Attribute)
+        and test.attr == "TYPE_CHECKING"
+        and isinstance(test.value, ast.Name)
+        and test.value.id == "typing"
+    )
 
 
 def _collect_all_names(tree: ast.Module) -> set[str]:
@@ -225,15 +235,29 @@ def find_unused_imports(source: str, *, try_scope: str) -> list[Finding]:
     used: set[str] = set()
 
     class _UsageVisitor(ast.NodeVisitor):
-        def visit_Name(self, node: ast.Name) -> None:
-            used.add(node.id)
+        """Collects names that are READ.
 
-        def visit_Attribute(self, node: ast.Attribute) -> None:
-            root: ast.expr = node
-            while isinstance(root, ast.Attribute):
-                root = root.value
-            if isinstance(root, ast.Name):
-                used.add(root.id)
+        Only Load- and Del-context Name nodes count: a pure Store binding
+        (`os = None`, `for os in ...`) shadows an import without reading
+        it, so it must not mask the finding — while any later Load of the
+        name still counts (flat analysis: Store-then-Load reads SOME
+        binding of the name, so the miss-direction trade-off stands).
+        `del os` references the binding, so Del counts as a read.
+        Attribute chains need no special casing: their root (`os` in
+        `os.path.sep`, including attribute-assignment targets like
+        `os.x = 1`) is always a Load-context Name reached by the walk.
+        """
+
+        def visit_Name(self, node: ast.Name) -> None:
+            if isinstance(node.ctx, (ast.Load, ast.Del)):
+                used.add(node.id)
+
+        def visit_AugAssign(self, node: ast.AugAssign) -> None:
+            # An augmented target reads before it rebinds (`COUNT += 1`
+            # loads the imported value), but its Name carries Store ctx —
+            # count it as a use explicitly.
+            if isinstance(node.target, ast.Name):
+                used.add(node.target.id)
             self.generic_visit(node)
 
     _UsageVisitor().visit(tree)

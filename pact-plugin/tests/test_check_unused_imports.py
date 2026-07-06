@@ -171,14 +171,47 @@ class TestCarveOuts:
     def test_star_import_ignored(self):
         assert _names("from json import *\n") == []
 
+    def test_foreign_attribute_type_checking_not_carved_out(self):
+        # Only the literal typing convention gets the carve-out — a foreign
+        # attribute merely ending in .TYPE_CHECKING does not.
+        src = (
+            "import sys\n"
+            "if sys.TYPE_CHECKING:\n"
+            "    import json\n"
+        )
+        assert _names(src) == ["json"]
+
+
+class TestUsageContext:
+    """Usage is READS only: Load/Del-context names (plus AugAssign targets,
+    which read before rebinding). Pure Store bindings shadow an import
+    without reading it and must not mask the finding."""
+
+    def test_pure_store_shadow_does_not_mask(self):
+        assert _names("import os\nos = None\n") == ["os"]
+
+    def test_store_then_load_counts_as_used(self):
+        # Flat analysis: a later Load reads SOME binding of the name, so
+        # the import stays unflagged (miss-direction trade-off, deliberate).
+        assert _names("import os\nos = None\nprint(os)\n") == []
+
+    def test_del_counts_as_use(self):
+        # `del os` references the binding — treated as a read.
+        assert _names("import os\ndel os\n") == []
+
+    def test_augassign_target_counts_as_use(self):
+        # `COUNT += 1` loads the imported value before rebinding, even
+        # though the target Name carries Store context.
+        assert _names("from json import dumps\ndumps += 1\n") == []
+
+    def test_class_attribute_shadow_does_not_mask(self):
+        # A class-body binding of the same name is a pure Store — the
+        # dead import behind it is now visible.
+        assert _names("import json\nclass C:\n    json = 1\n") == ["json"]
+
 
 class TestTryScopeStrictness:
-    _TRY_SRC = "try:\n    import os\nexcept ImportError:\n    os = None\n"
-
     def test_strict_flags_try_scoped_import(self):
-        # `os = None` in the handler binds a Name in Store context; the
-        # usage walk adds Name nodes regardless of context, so build a
-        # variant with no handler binding to isolate the try-scope rule.
         src = "try:\n    import os\nexcept ImportError:\n    pass\n"
         assert _names(src, try_scope="strict") == ["os"]
 
