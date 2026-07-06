@@ -3,9 +3,123 @@
 # PACT Coding Standards - Lint Check Script
 # ============================================================================
 # Location: pact-coding-standards/scripts/lint-check.sh
-# Purpose: Run appropriate linter based on detected project type
-# Usage: ./lint-check.sh [directory]
+# Purpose: Two modes.
+#   --files mode (import-hygiene): check EXACTLY the named .py files for
+#     unused imports / undefined names via an execution-probed linter ladder
+#     (ruff -> pyflakes -> flake8 -> stdlib check_unused_imports.py), scope
+#     pinned to the import-hygiene classes only. Fail-open: a missing or
+#     crashing checker degrades to a SKIPPED verdict, never a block.
+#     The LAST stdout line is always exactly one verdict:
+#       IMPORT-HYGIENE: PASS
+#       IMPORT-HYGIENE: FINDINGS (n)
+#       IMPORT-HYGIENE: SKIPPED (<reason>)
+#     Exit 0 = pass or gracefully degraded (PASS / SKIPPED); exit 1 = findings.
+#     This mode NEVER falls back to whole-tree checking: it checks only the
+#     files named on the command line.
+#   Legacy directory mode: run the project-type-appropriate whole-tree linter
+#     (unchanged behavior; reachable ONLY by passing a directory, never from
+#     the --files shape).
+# Usage:
+#   ./lint-check.sh --files FILE.py [FILE.py ...]   # import-hygiene mode
+#   ./lint-check.sh [directory]                     # legacy whole-tree mode
 # ============================================================================
+
+# ────────────────────────────────────────────────────────────────────────────
+# Import-hygiene mode (--files). Runs BEFORE `set -e` is enabled: this mode
+# owns its error handling explicitly so that a probe failure or checker crash
+# can never kill the process before the verdict line is printed (fail-open
+# verdict contract).
+# ────────────────────────────────────────────────────────────────────────────
+if [ "$1" = "--files" ]; then
+    shift
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+    # Keep only .py arguments — the contract is Python files; anything else
+    # a caller passes (e.g. every modified file regardless of type) is
+    # filtered here rather than refused, so mixed file lists stay friction-free.
+    PY_FILES=()
+    for f in "$@"; do
+        case "$f" in
+            *.py) PY_FILES+=("$f") ;;
+        esac
+    done
+
+    if [ ${#PY_FILES[@]} -eq 0 ]; then
+        # No Python files to check is a graceful degradation, not an error —
+        # but it is VISIBLE: the verdict says so, and the coder records it.
+        # Deliberately NOT a fallback to whole-tree checking.
+        echo "IMPORT-HYGIENE: SKIPPED (no Python files given)"
+        exit 0
+    fi
+
+    # Count lines that look like findings (path:line: ...) — a format shared
+    # by every rung of the ladder; falls back to non-empty line count.
+    count_findings() {
+        local n
+        n=$(printf '%s\n' "$1" | grep -Ec ':[0-9]+:' 2>/dev/null)
+        if [ "${n:-0}" -eq 0 ]; then
+            n=$(printf '%s\n' "$1" | grep -c . 2>/dev/null)
+        fi
+        echo "${n:-0}"
+    }
+
+    # Emit a rung's outcome and exit; returns 1 to the caller only when the
+    # rung itself failed (rc > 1) so the ladder can try the next rung.
+    run_rung() {
+        local rung_name="$1"
+        shift
+        local out rc
+        out=$("$@" 2>&1)
+        rc=$?
+        if [ $rc -eq 0 ]; then
+            echo "IMPORT-HYGIENE: PASS"
+            exit 0
+        elif [ $rc -eq 1 ]; then
+            [ -n "$out" ] && printf '%s\n' "$out"
+            echo "IMPORT-HYGIENE: FINDINGS ($(count_findings "$out"))"
+            exit 1
+        fi
+        # rc > 1: the checker itself failed (crash, bad invocation, missing
+        # module at run time). Loud on stderr, then let the ladder continue.
+        echo "import-hygiene: $rung_name failed (exit $rc); trying next checker" >&2
+        [ -n "$out" ] && printf '%s\n' "$out" >&2
+        return 1
+    }
+
+    # Detection ladder. EXECUTION probes only — running the tool proves it
+    # works. PATH-presence checks (command -v) are banned here: pyenv shims
+    # make a command "present" that dies at execution time.
+    # Every rung's finding scope is pinned to the import-hygiene classes
+    # (unused imports / undefined names) — never a tool's full default
+    # ruleset, which would bury the signal in style noise.
+    if ruff --version >/dev/null 2>&1; then
+        run_rung "ruff" ruff check --quiet --select F401,F821 "${PY_FILES[@]}"
+    fi
+    if python3 -m pyflakes --version >/dev/null 2>&1; then
+        # pyflakes has no rule selection; its native scope is already the
+        # import-hygiene class family (unused imports, undefined names).
+        run_rung "pyflakes" python3 -m pyflakes "${PY_FILES[@]}"
+    fi
+    if python3 -m flake8 --version >/dev/null 2>&1; then
+        run_rung "flake8" python3 -m flake8 --select=F401,F821 "${PY_FILES[@]}"
+    fi
+    if python3 -c "import ast" >/dev/null 2>&1 && [ -f "$SCRIPT_DIR/check_unused_imports.py" ]; then
+        # Stdlib floor: always available wherever python3 runs. Advisory
+        # try-scope strictness is this consumer-facing tier's explicit
+        # choice (try/except-scoped imports are often optional-dependency
+        # probes); the strictness parameter has no default by design.
+        run_rung "stdlib checker" python3 "$SCRIPT_DIR/check_unused_imports.py" \
+            --try-scope advisory "${PY_FILES[@]}"
+    fi
+
+    # Every rung unavailable or crashed: fail open, visibly.
+    echo "IMPORT-HYGIENE: SKIPPED (no usable import checker on this system)"
+    exit 0
+fi
+
+# ────────────────────────────────────────────────────────────────────────────
+# Legacy whole-tree mode (directory argument). Unchanged behavior.
+# ────────────────────────────────────────────────────────────────────────────
 
 set -e
 
@@ -46,22 +160,23 @@ if [ -f "$DIR/package.json" ]; then
 elif [ -f "$DIR/pyproject.toml" ] || [ -f "$DIR/setup.py" ]; then
     echo -e "${GREEN}Detected: Python project${NC}"
 
-    # Try different Python linters
-    if command -v ruff &> /dev/null; then
+    # Try different Python linters (execution probes — running the tool is
+    # the only proof it works; PATH checks false-positive under pyenv shims)
+    if ruff --version &> /dev/null; then
         echo "Running: ruff check"
         cd "$DIR" && ruff check . 2>&1 || {
             echo -e "${RED}Linting issues found${NC}"
             exit 1
         }
-    elif command -v flake8 &> /dev/null; then
+    elif python3 -m flake8 --version &> /dev/null; then
         echo "Running: flake8"
-        cd "$DIR" && python -m flake8 . 2>&1 || {
+        cd "$DIR" && python3 -m flake8 . 2>&1 || {
             echo -e "${RED}Linting issues found${NC}"
             exit 1
         }
-    elif command -v pylint &> /dev/null; then
+    elif python3 -m pylint --version &> /dev/null; then
         echo "Running: pylint"
-        cd "$DIR" && pylint **/*.py 2>&1 || {
+        cd "$DIR" && python3 -m pylint **/*.py 2>&1 || {
             echo -e "${RED}Linting issues found${NC}"
             exit 1
         }
@@ -79,7 +194,7 @@ elif [ -f "$DIR/go.mod" ]; then
         exit 1
     }
 
-    if command -v golangci-lint &> /dev/null; then
+    if golangci-lint --version &> /dev/null; then
         echo "Running: golangci-lint"
         cd "$DIR" && golangci-lint run 2>&1 || {
             echo -e "${RED}Linting issues found${NC}"
