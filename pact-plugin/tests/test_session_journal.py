@@ -2659,7 +2659,6 @@ class TestSessionEndJournalWrite:
         with patch("sys.stdin", io.StringIO(json.dumps(input_data))), \
              patch("session_end.pact_context") as mock_ctx, \
              patch("session_end.get_project_dir", return_value=str(journal_home / "project")), \
-             patch("session_end.get_session_dir", return_value=None), \
              patch("session_end.get_session_id", return_value="test-session-id"), \
              patch("session_end.get_team_name", return_value="pact-endtest12"), \
              patch("session_end.get_task_list", return_value=[]):

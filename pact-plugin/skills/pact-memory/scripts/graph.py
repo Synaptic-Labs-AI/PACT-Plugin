@@ -18,13 +18,12 @@ import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 from .database import (
     db_connection,
     ensure_initialized,
-    generate_id,
-    get_db_path
+    generate_id
 )
 
 # Configure logging

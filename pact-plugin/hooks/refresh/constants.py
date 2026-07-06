@@ -6,15 +6,9 @@ Used by: All refresh modules for consistent threshold and limit values.
 This module centralizes configuration constants that may need tuning,
 keeping regex patterns and workflow definitions in patterns.py while
 extracting tunable numeric values here for maintainability.
-
-STEP_DESCRIPTIONS and PROSE_CONTEXT_TEMPLATES are imported from
-shared_constants.py to centralize constants shared by refresh consumers.
 """
 
 from __future__ import annotations
-
-# Import shared constants for re-export
-from .shared_constants import STEP_DESCRIPTIONS, PROSE_CONTEXT_TEMPLATES
 
 # === CONFIDENCE THRESHOLDS (Item 3) ===
 
@@ -53,6 +47,3 @@ CHECKPOINT_VERSION = "1.0"
 
 # Checkpoint file expiration in days (Item 11)
 CHECKPOINT_MAX_AGE_DAYS = 7
-
-# Note: STEP_DESCRIPTIONS and PROSE_CONTEXT_TEMPLATES are imported
-# from shared_constants.py at the top of this file.

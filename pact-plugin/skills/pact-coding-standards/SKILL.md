@@ -478,9 +478,56 @@ A helper script is available at `scripts/lint-check.sh` to run project linters.
 # From within the skill directory:
 chmod +x scripts/lint-check.sh
 
-# Run
+# Run (legacy whole-tree mode — project-type detection over a directory)
 ./scripts/lint-check.sh
 ```
+
+### Import Hygiene Check (--files mode)
+
+Behavioral tests cannot see an unused import — a dead `import os` passes
+every test green. The import-hygiene check closes that blind spot
+mechanically. Run it over EXACTLY the `.py` files you modified before
+running the test suite:
+
+```bash
+bash <skill-directory>/scripts/lint-check.sh --files 'path/to/modified_a.py' 'path/to/modified_b.py'
+```
+
+Single-quote each filename — a filename is untrusted shell input.
+
+(When your dispatch names a plugin root, the script lives at
+`<plugin-root>/skills/pact-coding-standards/scripts/lint-check.sh`.)
+
+**Verdict-line contract** — the LAST stdout line is always exactly one of:
+
+| Verdict | Meaning | Exit code |
+|---------|---------|-----------|
+| `IMPORT-HYGIENE: PASS` | No findings in the checked files | 0 |
+| `IMPORT-HYGIENE: FINDINGS (n)` | n findings printed above the verdict | 1 |
+| `IMPORT-HYGIENE: SKIPPED (<reason>)` | Check could not run (no Python files given, or no usable checker) | 0 |
+
+Record the verdict line verbatim in your HANDOFF `produced` field — every
+run ends in a verdict, and a SKIPPED must be visible, never silent.
+
+**What to do with findings:**
+
+- Fix every finding in files you modified: delete the unused import, or fix
+  the undefined name.
+- Never lint-fix files you did not touch — the check's scope is your diff.
+- A deliberate side-effect import or re-export keeps a reasoned suppression
+  at the import site: `# noqa: F401  # re-export: <why>`. Never a bare
+  `# noqa` without a reason.
+- If the script is missing or errors, state that in your HANDOFF instead of
+  skipping silently.
+
+**How it checks** (internal — the coder-facing contract is just the command
+and the verdict): an execution-probed ladder tries ruff, then pyflakes, then
+flake8, each restricted to the unused-import/undefined-name classes only
+(`--select F401,F821`) so you are never asked to fix style noise; when no
+linter is installed it falls back to the stdlib AST checker
+`scripts/check_unused_imports.py` (unused imports only, try/except-scoped
+imports treated as advisory). A checker crash degrades to `SKIPPED` — the
+check fails open and never blocks you on its own breakage.
 
 ---
 

@@ -29,9 +29,8 @@ from .step_extractor import StepInfo
 from .constants import (
     CHECKPOINT_VERSION,
     CONFIDENCE_AUTO_PROCEED_THRESHOLD,
-    STEP_DESCRIPTIONS,
-    PROSE_CONTEXT_TEMPLATES,
 )
+from .shared_constants import PROSE_CONTEXT_TEMPLATES
 
 from dataclasses import dataclass, field
 
@@ -350,7 +349,6 @@ def _build_prose_context(step_name: str, context: dict[str, Any]) -> str:
             pass  # Fall through to generic
 
     # Generic fallback: describe step with available context
-    step_desc = STEP_DESCRIPTIONS.get(step_name, step_name)
     if context:
         # Build simple key=value summary for unknown steps
         context_parts = [f"{k}={v}" for k, v in context.items()]

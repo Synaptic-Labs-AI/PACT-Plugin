@@ -21,12 +21,6 @@ from typing import Any, List, Optional
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Conditional imports for database operations
-try:
-    import pysqlite3 as sqlite3
-except ImportError:
-    import sqlite3
-
 from .database import (
     db_connection,
     ensure_initialized,

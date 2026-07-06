@@ -47,7 +47,7 @@ class TestMainEntryPoint:
     def _patch_main_deps(self, **overrides):
         """Return a combined context manager mocking main()'s dependencies.
 
-        Default mocks: pact_context.init, get_project_dir, get_session_dir,
+        Default mocks: pact_context.init, get_project_dir,
         get_session_id, get_team_name, get_task_list, append_event,
         check_unpaused_pr, cleanup_old_sessions.
 
@@ -60,7 +60,6 @@ class TestMainEntryPoint:
             "pact_context_init": patch("session_end.pact_context.init"),
             "get_project_dir": patch("session_end.get_project_dir",
                                      return_value="/Users/example/Sites/my-project"),
-            "get_session_dir": patch("session_end.get_session_dir", return_value=""),
             "get_session_id": patch("session_end.get_session_id", return_value=""),
             "get_team_name": patch("session_end.get_team_name", return_value="pact-abc12345"),
             "get_task_list": patch("session_end.get_task_list", return_value=[]),
@@ -1434,8 +1433,8 @@ class TestCleanupOldSessionsBoundary:
 class TestMainIntegrationCleanup:
     """Integration tests for main() exercising cleanup functions with session context.
 
-    Verifies that main() correctly chains pact_context.init() -> get_session_dir()
-    -> cleanup_old_sessions() -> _cleanup_old_checkpoints() using the session
+    Verifies that main() correctly chains pact_context.init() ->
+    cleanup_old_sessions() -> _cleanup_old_checkpoints() using the session
     context from stdin.
     """
 
@@ -1449,7 +1448,6 @@ class TestMainIntegrationCleanup:
         with patch("sys.stdin", io.StringIO(input_data)), \
              patch("session_end.pact_context") as mock_ctx, \
              patch("session_end.get_project_dir", return_value="/test/proj"), \
-             patch("session_end.get_session_dir", return_value="/tmp/session"), \
              patch("session_end.get_session_id", return_value="test-session"), \
              patch("session_end.get_task_list", return_value=[]), \
              patch("session_end.check_unpaused_pr"), \
@@ -1480,7 +1478,6 @@ class TestMainIntegrationCleanup:
         with patch("sys.stdin", io.StringIO(input_data)), \
              patch("session_end.pact_context") as mock_ctx, \
              patch("session_end.get_project_dir", return_value="/test/proj"), \
-             patch("session_end.get_session_dir", return_value="/tmp/session"), \
              patch("session_end.get_session_id", return_value="test-session"), \
              patch("session_end.get_task_list", return_value=[]), \
              patch("session_end.check_unpaused_pr"), \
@@ -2666,7 +2663,6 @@ class TestCleanupSummaryEvent:
             patch.dict("os.environ", {"CLAUDE_CODE_TASK_LIST_ID": env_task_list_id}, clear=False),
             patch("session_end.pact_context.init"),
             patch("session_end.get_project_dir", return_value="/t/proj"),
-            patch("session_end.get_session_dir", return_value=""),
             patch("session_end.get_session_id", return_value="sess-id"),
             patch("session_end.get_team_name", return_value=team_return),
             patch("session_end.get_task_list", return_value=[]),
@@ -2712,7 +2708,6 @@ class TestCleanupSummaryEvent:
             patch("sys.stdin", _io.StringIO("{}")),
             patch("session_end.pact_context.init"),
             patch("session_end.get_project_dir", return_value="/t/proj"),
-            patch("session_end.get_session_dir", return_value=""),
             patch("session_end.get_session_id", return_value="sess-id"),
             patch("session_end.get_team_name", return_value="pact-current"),
             patch("session_end.get_task_list", return_value=[]),
@@ -2840,7 +2835,6 @@ class TestMainReaperWiring:
             patch.dict("os.environ", env, clear=False),
             patch("session_end.pact_context.init"),
             patch("session_end.get_project_dir", return_value="/t/proj"),
-            patch("session_end.get_session_dir", return_value=""),
             patch("session_end.get_session_id", return_value=session_id),
             patch("session_end.get_team_name", return_value=team_return),
             patch("session_end.get_task_list", return_value=[]),
@@ -2925,7 +2919,6 @@ class TestMainReaperWiring:
             patch("sys.stdin", _io.StringIO("{}")),
             patch("session_end.pact_context.init"),
             patch("session_end.get_project_dir", return_value="/t/proj"),
-            patch("session_end.get_session_dir", return_value=""),
             patch("session_end.get_session_id", return_value="sess-id"),
             patch("session_end.get_team_name", return_value="pact-current"),
             patch("session_end.get_task_list", return_value=[]),
@@ -3155,7 +3148,6 @@ class TestReaperBehaviorPins:
             patch("sys.stdin", _io.StringIO("{}")),
             patch("session_end.pact_context.init"),
             patch("session_end.get_project_dir", return_value="/t/proj"),
-            patch("session_end.get_session_dir", return_value=""),
             patch("session_end.get_session_id", return_value="sess-id"),
             patch("session_end.get_team_name", return_value="pact-current"),
             patch("session_end.get_task_list", return_value=[]),
@@ -3306,7 +3298,6 @@ class TestTaskListIdAllowlistRejection:
             patch("session_end.os.environ.get", side_effect=fake_env_get),
             patch("session_end.pact_context.init"),
             patch("session_end.get_project_dir", return_value="/t/proj"),
-            patch("session_end.get_session_dir", return_value=""),
             patch("session_end.get_session_id", return_value="sess-B"),
             patch("session_end.get_team_name", return_value="team-A"),
             patch("session_end.get_task_list", return_value=[]),
@@ -3357,7 +3348,6 @@ class TestTaskListIdAllowlistRejection:
             patch.dict("os.environ", {"CLAUDE_CODE_TASK_LIST_ID": ""}, clear=False),
             patch("session_end.pact_context.init"),
             patch("session_end.get_project_dir", return_value="/t/proj"),
-            patch("session_end.get_session_dir", return_value=""),
             patch("session_end.get_session_id", return_value="sess-B"),
             patch("session_end.get_team_name", return_value="team-A"),
             patch("session_end.get_task_list", return_value=[]),
@@ -3405,7 +3395,6 @@ class TestTaskListIdAllowlistRejection:
             ),
             patch("session_end.pact_context.init"),
             patch("session_end.get_project_dir", return_value="/t/proj"),
-            patch("session_end.get_session_dir", return_value=""),
             patch("session_end.get_session_id", return_value="sess-B"),
             patch("session_end.get_team_name", return_value="team-A"),
             patch("session_end.get_task_list", return_value=[]),
@@ -3773,7 +3762,6 @@ class TestCleanupSummaryReaperRan:
             patch.dict("os.environ", env, clear=False),
             patch("session_end.pact_context.init"),
             patch("session_end.get_project_dir", return_value="/t/proj"),
-            patch("session_end.get_session_dir", return_value=""),
             patch("session_end.get_session_id", return_value=session_id),
             patch("session_end.get_team_name", return_value=team_return),
             patch("session_end.get_task_list", return_value=[]),
@@ -4484,7 +4472,6 @@ class TestSessionIdAllowlist:
             patch.dict("os.environ", {"CLAUDE_CODE_TASK_LIST_ID": "task-C"}, clear=False),
             patch("session_end.pact_context.init"),
             patch("session_end.get_project_dir", return_value="/t/proj"),
-            patch("session_end.get_session_dir", return_value=""),
             patch("session_end.get_session_id", return_value=hostile_value),
             patch("session_end.get_team_name", return_value="team-A"),
             patch("session_end.get_task_list", return_value=[]),
@@ -4530,7 +4517,6 @@ class TestSessionIdAllowlist:
             patch.dict("os.environ", {"CLAUDE_CODE_TASK_LIST_ID": "task-C"}, clear=False),
             patch("session_end.pact_context.init"),
             patch("session_end.get_project_dir", return_value="/t/proj"),
-            patch("session_end.get_session_dir", return_value=""),
             patch("session_end.get_session_id", return_value=good_session),
             patch("session_end.get_team_name", return_value="team-A"),
             patch("session_end.get_task_list", return_value=[]),
@@ -4597,7 +4583,6 @@ class TestTeamNameAllowlist:
             patch.dict("os.environ", {"CLAUDE_CODE_TASK_LIST_ID": "task-C"}, clear=False),
             patch("session_end.pact_context.init"),
             patch("session_end.get_project_dir", return_value="/t/proj"),
-            patch("session_end.get_session_dir", return_value=""),
             patch("session_end.get_session_id", return_value="sess-B"),
             patch("session_end.get_team_name", return_value=hostile_value),
             patch("session_end.get_task_list", return_value=[]),
@@ -4644,7 +4629,6 @@ class TestTeamNameAllowlist:
             patch.dict("os.environ", {"CLAUDE_CODE_TASK_LIST_ID": "task-C"}, clear=False),
             patch("session_end.pact_context.init"),
             patch("session_end.get_project_dir", return_value="/t/proj"),
-            patch("session_end.get_session_dir", return_value=""),
             patch("session_end.get_session_id", return_value="sess-B"),
             patch("session_end.get_team_name", return_value=good_team),
             patch("session_end.get_task_list", return_value=[]),
