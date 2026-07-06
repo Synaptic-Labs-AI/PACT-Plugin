@@ -490,8 +490,10 @@ mechanically. Run it over EXACTLY the `.py` files you modified before
 running the test suite:
 
 ```bash
-bash <skill-directory>/scripts/lint-check.sh --files path/to/modified_a.py path/to/modified_b.py
+bash <skill-directory>/scripts/lint-check.sh --files 'path/to/modified_a.py' 'path/to/modified_b.py'
 ```
+
+Single-quote each filename — a filename is untrusted shell input.
 
 (When your dispatch names a plugin root, the script lives at
 `<plugin-root>/skills/pact-coding-standards/scripts/lint-check.sh`.)
