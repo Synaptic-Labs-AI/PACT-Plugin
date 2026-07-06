@@ -79,30 +79,6 @@ try:
         _GH_PR_NUMBER_RE,
         _extract_pr_number,
     )
-    # Facade-stability re-exports: engine-API names kept on this module for
-    # parity with the shared merge-guard engine surface; no in-repo consumers
-    # today. Reversible — delete only with a facade-symmetry judgment.
-    from shared.merge_guard_common import (  # noqa: F401  # re-export: engine-API facade, no current consumers
-        DANGEROUS_PATTERNS,
-        _PROCSUB_SHELL,
-        _COMPOUND_OPS_RE,
-        _FD_REDIRECT_RE,
-        MAX_USES,
-        # Regex prefix constants relocated to shared so the read-side
-        # DANGEROUS_PATTERNS bank and the shared classifier compose against
-        # identical prefix semantics (#720 Bug B).
-        _GH_GLOBAL_FLAGS,
-        _GH_FLAG_TOKENS,
-        _GIT_GLOBAL_FLAGS,
-        _GH_PREFIX,
-        _GIT_PREFIX,
-        _GH_API_PREFIX,
-        _GH_PR_MERGE_RE,
-        _GH_PR_CLOSE_RE,
-        # Bound for the shared-module flag walks (push read arms + mint
-        # push-to-main arm) (#1001).
-        _MAX_GLOBAL_FLAG_TOKENS,
-    )
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     # Hand-built deny output using only stdlib (json, sys). Cannot rely on any
     # constants or helpers from the failed imports.
