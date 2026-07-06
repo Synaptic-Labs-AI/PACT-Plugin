@@ -661,6 +661,8 @@ PACT-Plugin/
 
 ## Configuration
 
+Runtime options — the `PACT_*` environment variables (e.g. `PACT_PR_GREEDY_FIX`, `PACT_AUTONOMOUS_SCOPE_DETECTION`) — are documented in [`pact-plugin/reference/config.md`](pact-plugin/reference/config.md). The section below covers `CLAUDE.md` orchestrator configuration.
+
 ### CLAUDE.md
 
 The `CLAUDE.md` file configures the orchestrator. Key sections:
