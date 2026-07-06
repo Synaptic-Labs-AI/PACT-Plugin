@@ -93,6 +93,7 @@ try:
     from pathlib import Path
 
     import shared.pact_context as pact_context
+    import shared.pact_config as pact_config
     from shared.dispatch_helpers import (
         SOLO_EXEMPT,
         is_registered_pact_specialist,
@@ -198,15 +199,15 @@ TASK_REFERENCE_PHRASES = (
 #                  heuristic is muted.
 # Unknown values fall back to ``"warn"`` so a typo never disables the
 # gate's other rules. Default ``"warn"`` preserves Commit 2 behavior.
-# The read is normalized with .strip().lower() BEFORE the membership check
-# (``"DENY"`` / ``" deny "`` → deny; ``""`` / bogus → warn), parsing
-# identically to handoff_ordering_gate.py's PACT_DISPATCH_VARIETY_MODE knob.
-_ALLOWED_INLINE_MISSION_MODES = frozenset({"warn", "deny", "shadow"})
-INLINE_MISSION_MODE = os.environ.get(
-    "PACT_DISPATCH_INLINE_MISSION_MODE", "warn",
-).strip().lower()
-if INLINE_MISSION_MODE not in _ALLOWED_INLINE_MISSION_MODES:
-    INLINE_MISSION_MODE = "warn"
+# Resolution is delegated to the shared PACT_* resolver
+# (``shared.pact_config.get_enum``), which applies the same ``.strip().lower()``
+# normalization BEFORE the membership check (``"DENY"`` / ``" deny "`` → deny;
+# ``""`` / bogus → warn) and owns the allowed-value set in its registry (SSOT).
+# This replaces the read that was copy-pasted identically in
+# handoff_ordering_gate.py's PACT_DISPATCH_VARIETY_MODE knob. get_enum is total
+# (never raises) and is imported inside the fail-closed module-import block
+# above, so a resolver-load failure routes through _emit_load_failure_deny.
+INLINE_MISSION_MODE = pact_config.get_enum("PACT_DISPATCH_INLINE_MISSION_MODE")
 
 # Credential redaction patterns. Applied to the journal-written prompt
 # only; the in-memory ``permissionDecisionReason`` keeps the verbatim

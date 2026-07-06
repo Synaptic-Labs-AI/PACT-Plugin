@@ -12,7 +12,7 @@ Summary: Single source of truth for PACT_* runtime configuration options.
          os.environ LIVE, so a consumer that resolves once at its OWN module
          load (the dispatch/handoff gates) sees exactly the value a direct
          os.environ.get(...).strip().lower() would have produced, and tests can
-         monkeypatch os.environ without importlib.reload.
+         monkeypatch os.environ without reloading the module.
 Used by: dispatch_gate.py + handoff_ordering_gate.py (get_enum -- the two
          *_MODE reads); session_init.py (llm_options -- the SessionStart
          injection of LLM-consumed options). Any future PACT_* consumer reuses

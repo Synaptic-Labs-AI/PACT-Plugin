@@ -154,10 +154,14 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "session_registry", "session_state", "task_utils",
     }),
     "dispatch_gate": frozenset({
-        "constants", "dispatch_helpers", "pact_context", "paths",
+        "constants", "dispatch_helpers", "pact_config", "pact_context", "paths",
         "session_journal", "session_registry", "session_state",
         "stale_session", "task_utils",
-    }),  # stale_session reached here via the deny-message self-diagnosis
+    }),  # pact_config reached here via the *_MODE resolver edge
+         # (dispatch_gate -> shared.pact_config.get_enum for
+         # PACT_DISPATCH_INLINE_MISSION_MODE); pact_config is stdlib-only, so it
+         # adds no further transitive shared edges.
+         # stale_session reached here via the deny-message self-diagnosis
          # (dispatch_gate -> shared.stale_session.detect_stale_session_block);
          # its own transitive pact_context edge was already in this closure.
     "task_lifecycle_gate": frozenset({
