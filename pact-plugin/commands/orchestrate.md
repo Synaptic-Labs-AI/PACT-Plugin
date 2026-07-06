@@ -544,7 +544,7 @@ Evaluate whether the task warrants decomposition into sub-scopes. For heuristic 
 |--------|--------|
 | Score below threshold | Single scope — continue with today's behavior |
 | Score at/above threshold | Propose decomposition (see Evaluation Response below) |
-| All strong signals fire, no counter-signals, autonomous enabled | Auto-decompose (see Evaluation Response below) |
+| All strong signals fire, no counter-signals, injected `Autonomous scope detection: ON` (PACT Runtime Config) | Auto-decompose (see Evaluation Response below) |
 
 **Output format**: `Scope detection: Single scope (score 2/3 threshold)` or `Scope detection: Multi-scope detected (score 4/3 threshold) — proposing decomposition`
 
