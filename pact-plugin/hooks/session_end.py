@@ -36,7 +36,6 @@ from shared.error_output import hook_error_json
 from shared import check_pr_state
 import shared.pact_context as pact_context
 from shared.pact_context import get_project_dir, get_session_id, get_team_name
-from shared.pact_context import get_session_dir  # noqa: F401  # re-export: test-suite monkeypatch seam (tests patch session_end.get_session_dir)
 from shared.session_journal import (
     append_event,
     make_event,
