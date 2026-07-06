@@ -194,7 +194,12 @@ elif [ -f "$DIR/pyproject.toml" ] || [ -f "$DIR/setup.py" ]; then
         }
     elif python3 -m pylint --version &> /dev/null; then
         echo "Running: pylint"
-        cd "$DIR" && python3 -m pylint **/*.py 2>&1 || {
+        # `**/*.py` requires bash>=4 globstar (never enabled here; macOS ships
+        # bash 3.2), so the glob silently matched only one directory level.
+        # find enumerates every depth; dot-directories are pruned to keep the
+        # glob's hidden-path-skipping semantics, and `-exec {} +` runs pylint
+        # zero times when no .py files exist.
+        cd "$DIR" && find . -name '.?*' -prune -o -name '*.py' -type f -exec python3 -m pylint {} + 2>&1 || {
             echo -e "${RED}Linting issues found${NC}"
             exit 1
         }
