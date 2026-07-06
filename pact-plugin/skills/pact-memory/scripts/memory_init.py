@@ -104,7 +104,7 @@ def maybe_migrate_embeddings() -> dict:
     try:
         # Import required modules - we're inside the scripts package now
         try:
-            import pysqlite3 as sqlite3
+            import pysqlite3 as sqlite3  # noqa: F401  # availability probe: absence must route to skipped_deps
             import sqlite_vec
             from .database import get_connection
             from .embeddings import get_embedding_service, generate_embedding_text, EMBEDDING_DIM

@@ -23,7 +23,6 @@ import os
 import struct
 import subprocess
 import threading
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -42,42 +41,27 @@ from .database import (
     list_memories,
     ensure_initialized,
     get_db_path,
-    generate_id,
     resolve_memory_id_prefix,
-    AmbiguousPrefixError,
-    PrefixTooShortError,
     MEMORY_ID_LENGTH,
     SQLITE_EXTENSIONS_ENABLED
 )
 from .embeddings import (
     generate_embedding,
-    generate_embedding_text,
-    check_embedding_availability
+    generate_embedding_text
 )
 from .graph import (
-    track_file,
     link_memory_to_paths,
-    get_files_for_memory,
-    get_memories_for_files
+    get_files_for_memory
 )
 from .models import MemoryObject, memory_from_db_row
 from .search import (
     graph_enhanced_search,
-    semantic_search,
     search_by_file,
     get_search_capabilities
 )
 from .working_memory import (
     sync_to_claude_md,
     sync_retrieved_to_claude_md,
-    WORKING_MEMORY_HEADER,
-    WORKING_MEMORY_COMMENT,
-    MAX_WORKING_MEMORIES,
-    RETRIEVED_CONTEXT_HEADER,
-    RETRIEVED_CONTEXT_COMMENT,
-    MAX_RETRIEVED_MEMORIES,
-    _format_memory_entry,
-    _parse_working_memory_section,
 )
 from .memory_init import ensure_memory_ready
 # Dual import: relative (when loaded as package) vs absolute (when tests add scripts/ to sys.path)

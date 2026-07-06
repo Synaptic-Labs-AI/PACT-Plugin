@@ -13,7 +13,7 @@ Exposes:
   - SOLO_EXEMPT — research/exploration agents that bypass dispatch_gate
 
 Module-load discipline (architect §5.6):
-  Stdlib imports (json/sys/os) AND _emit_load_failure_deny defined BEFORE
+  Stdlib imports (json/sys) AND _emit_load_failure_deny defined BEFORE
   the wrapped try/except BaseException block. The wrapped block catches
   cross-package import failures (functools/re/pathlib/shared.pact_context)
   and emits a structured DENY with hookEventName=PreToolUse so any

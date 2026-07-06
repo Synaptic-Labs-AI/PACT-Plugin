@@ -44,14 +44,14 @@ def check_dependencies() -> Dict[str, Any]:
 
     # Check sqlite-vec (for vector storage)
     try:
-        import sqlite_vec
+        import sqlite_vec  # noqa: F401  # availability probe: the import IS the check
         status["sqlite_vec"] = True
     except ImportError:
         pass
 
     # Check model2vec (embedding backend)
     try:
-        from model2vec import StaticModel
+        from model2vec import StaticModel  # noqa: F401  # availability probe: the import IS the check
         status["model2vec"] = True
     except ImportError:
         pass
