@@ -11,7 +11,7 @@ Verify the scoped orchestration flow: scope detection fires after PREPARE, the o
 ## Prerequisites
 
 1. PACT plugin installed with all orchestration commands and protocols
-2. `CLAUDE.md` contains `autonomous-scope-detection: enabled` (for testing the autonomous tier) or leave it out (for testing the confirmed tier)
+2. `PACT_AUTONOMOUS_SCOPE_DETECTION=1` set (e.g. in `settings.json`'s `env` block, or a shell export) for testing the autonomous tier, or unset / `0` for testing the confirmed tier
 3. No active worktrees for the test feature branch
 4. Familiarity with `pact-plugin/protocols/pact-scope-detection.md` (scoring heuristics) and `pact-plugin/protocols/pact-scope-phases.md` (ATOMIZE/CONSOLIDATE phases)
 5. All verification scripts passing
@@ -53,7 +53,7 @@ Score 5 >= threshold 3 -- detection fires.
 
 **Expected outcome** depends on activation tier:
 
-**Confirmed tier** (default, `autonomous-scope-detection` not in CLAUDE.md):
+**Confirmed tier** (default, `PACT_AUTONOMOUS_SCOPE_DETECTION` unset or `0` — injected block shows `Autonomous scope detection: OFF`):
 ```
 Scope detection: Multi-scope detected (score 5/3 threshold) -- proposing decomposition
 
@@ -73,7 +73,7 @@ C) Adjust boundaries (specify)
 Recommendation: A -- 3 independent domains with no shared files
 ```
 
-**Autonomous tier** (if `autonomous-scope-detection: enabled` in CLAUDE.md and both strong signals fire with no counter-signals):
+**Autonomous tier** (if `PACT_AUTONOMOUS_SCOPE_DETECTION=1` — injected block shows `Autonomous scope detection: ON` — and both strong signals fire with no counter-signals):
 ```
 Scope detection: Multi-scope (autonomous) -- decomposing into [backend, frontend, database]
 ```
@@ -195,7 +195,7 @@ git worktree list  # Should show only main + feature worktree (not sub-scope wor
 |---------|---------|-----------|
 | Scope detection does not fire | "Single scope" output for multi-domain task | Check counter-signals (shared data models, small scope) reducing the score below threshold. Verify scoring math. |
 | Counter-signals incorrectly suppress | Score below threshold despite clear domain separation | Counter-signal for "shared data models" may fire incorrectly if domains share a types file. Review PREPARE output for accuracy. |
-| Autonomous tier fires unexpectedly | Decomposition without user confirmation | Both strong signals fired, no counter-signals, and `autonomous-scope-detection: enabled` is in CLAUDE.md. Remove the config to require confirmation. |
+| Autonomous tier fires unexpectedly | Decomposition without user confirmation | Both strong signals fired, no counter-signals, and `PACT_AUTONOMOUS_SCOPE_DETECTION=1` (injected `Autonomous scope detection: ON`). Unset it (or set `0`) to require confirmation. |
 | Sub-scope conflict on shared files | Merge conflict during CONSOLIDATE | Scope contracts did not properly assign file ownership. Check `shared_files` constraints in contracts. |
 | rePACT nesting violation | Error about nesting depth | rePACT sub-scopes cannot themselves trigger scope detection (bypass rule). Max nesting is 1 level. |
 | CWD invalidation during cleanup | Bash commands fail after worktree removal | CONSOLIDATE cleanup must navigate to repo root before removing each sub-scope worktree. Same CWD issue as worktree lifecycle scenario. |

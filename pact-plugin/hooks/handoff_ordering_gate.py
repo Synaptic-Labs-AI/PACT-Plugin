@@ -72,15 +72,20 @@ _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 #            a TaskUpdate-matcher deny IS honored — empirically un-exercised, so
 #            warn ships as the default and deny is opt-in.
 #   shadow → journal-only calibration; no additionalContext, no deny.
-# The read is normalized with .strip().lower() BEFORE the membership check so a
-# forgiving opt-in: "DENY" / " deny " / "Deny" → deny; "" / bogus / unknown →
-# warn (the safe default). Strictly more forgiving — normalization can never
-# enable an unintended mode (anything not in the set still falls back to warn).
-_ALLOWED_VARIETY_MODES = frozenset({"warn", "deny", "shadow"})
-DISPATCH_VARIETY_MODE = os.environ.get(
-    "PACT_DISPATCH_VARIETY_MODE", "warn"
-).strip().lower()
-if DISPATCH_VARIETY_MODE not in _ALLOWED_VARIETY_MODES:
+# Resolution is delegated to the shared PACT_* resolver
+# (shared.pact_config.get_enum): it applies the same .strip().lower()
+# normalization BEFORE the membership check ("DENY" / " deny " / "Deny" → deny;
+# "" / bogus / unknown → warn, the safe default) and owns the allowed set in its
+# registry (SSOT) — normalization can never enable an unintended mode. This read
+# sits ABOVE the fail-open shared-import block below, and a WARN gate must never
+# crash or deny, so it carries its OWN fail-open guard: if the resolver is
+# unavailable for any reason, default to "warn". (handoff_ordering_gate is NOT a
+# seam-dependent hook, so this import does NOT get a _SEAM_HOOK_HELPER_CLOSURE
+# entry — unlike dispatch_gate / session_init.)
+try:
+    import shared.pact_config as pact_config
+    DISPATCH_VARIETY_MODE = pact_config.get_enum("PACT_DISPATCH_VARIETY_MODE")
+except BaseException:  # noqa: BLE001 — fail-OPEN: resolver unavailable → safe default
     DISPATCH_VARIETY_MODE = "warn"
 
 # Cap on the stdin read. Real PreToolUse TaskUpdate frames carry a tool_input

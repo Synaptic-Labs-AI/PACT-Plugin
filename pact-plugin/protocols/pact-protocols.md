@@ -1581,13 +1581,9 @@ A score of 0 means counter-signals outweighed detection signals, not that no sig
 | **Confirmed** (default) | Score >= threshold | Orchestrator proposes decomposition via S5 decision framing; user confirms, rejects, or adjusts boundaries |
 | **Autonomous** | ALL strong signals fire (Distinct domain boundaries + Non-overlapping work areas) AND no counter-signals AND autonomous mode enabled | Orchestrator auto-decomposes without user confirmation |
 
-**Autonomous mode** is opt-in. Enable by adding to `CLAUDE.md`:
+**Autonomous mode** is opt-in. Enable it by setting the `PACT_AUTONOMOUS_SCOPE_DETECTION` environment variable (for example in `settings.json`'s `env` block, or a shell export). The resolver surfaces the result at session start in the injected **PACT Runtime Config** block as `Autonomous scope detection: ON`.
 
-```markdown
-autonomous-scope-detection: enabled
-```
-
-When autonomous mode is not enabled, all detection-triggered decomposition uses the Confirmed tier.
+When autonomous mode is not enabled — the injected **PACT Runtime Config** block shows `Autonomous scope detection: OFF`, or the block is absent — all detection-triggered decomposition uses the Confirmed tier.
 
 ### Evaluation Timing
 
@@ -1646,11 +1642,11 @@ When **all** of the following conditions are true, skip user confirmation and pr
 
 1. ALL strong signals fire (not merely meeting the threshold)
 2. NO counter-signals present
-3. CLAUDE.md contains `autonomous-scope-detection: enabled`
+3. The injected **PACT Runtime Config** block shows `Autonomous scope detection: ON` (resolved from `PACT_AUTONOMOUS_SCOPE_DETECTION`)
 
 **Output format**: `Scope detection: Multi-scope (autonomous) — decomposing into [scope list]`
 
-> **Note**: Autonomous mode is opt-in and disabled by default. Users enable it in CLAUDE.md after trusting the heuristics through repeated Confirmed-tier usage.
+> **Note**: Autonomous mode is opt-in and disabled by default. Users enable it via `PACT_AUTONOMOUS_SCOPE_DETECTION` after trusting the heuristics through repeated Confirmed-tier usage.
 
 ### Post-Detection: Scope Contract Generation
 

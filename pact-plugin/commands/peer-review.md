@@ -329,7 +329,25 @@ JSON
      - **Termination**: If blocking items persist after 2 fix-verify cycles → escalate via `/PACT:imPACT`
    - **Minor + Future**:
 
-     **Step A — Initial Gate Question** (Yes/No only):
+     **Greedy-fix mode** <!-- ANCHOR-STABLE: GREEDY-CONFIG-REF --> — consult the injected **PACT Runtime Config** block (resolved into the orchestrator's context at session start):
+       - **`PR greedy-fix: OFF`, or the block is absent** → use the default per-finding gate (**Step A → Step B → Step C** below), UNCHANGED. Absence of the block means every option is at its default (OFF) — this is the behavior for every consumer who has not opted in.
+       - **`PR greedy-fix: ON`** → follow the **Greedy remediation path** immediately below, which PREEMPTS Step A's "review minors?" gate (do not ask it).
+
+     **Greedy remediation path** <!-- ANCHOR-STABLE: GREEDY-PATH --> (only when `PR greedy-fix: ON`):
+
+       **What greedy auto-authorizes — and ONLY this** <!-- ANCHOR-STABLE: GREEDY-REVERSIBILITY -->: exactly one action class — **reversible, git-tracked auto-delegation of fixes**. Greedy batches findings into the same specialist remediation path the **Blocking** branch above already uses (`/PACT:comPACT` / `/PACT:orchestrate`); every fix lands as a revertible commit on the working branch. Greedy only changes WHO decides to dispatch a reversible fix — the orchestrator, instead of a per-finding user prompt.
+
+       **Never auto-authorized — these stay user-gated**: **merge, PR close, push, branch deletion, publish, or any other irreversible / outward-facing / destructive action**. Greedy NEVER merges, closes, or pushes on the user's behalf; reaching merge readiness (step 4) and the merge checkpoint itself are UNCHANGED — the user still approves them explicitly. Greedy scoped to reversible delegation is precisely what keeps it safe: a directive that appeared to auto-authorize an irreversible action would be correctly refused wholesale.
+
+       **Hard SACROSANCT carve-out** <!-- ANCHOR-STABLE: GREEDY-SACROSANCT -->: greedy NEVER overrides a SACROSANCT rule or an established PACT design pattern to satisfy a finding. This exclusion is ABSOLUTE — stronger than, and separate from, the "widely out of scope" soft exclusion below: a fix that is in-scope, cheap, and reversible is STILL excluded if applying it would violate SACROSANCT or an explicit design pattern.
+
+       **Behavior when `PR greedy-fix: ON`:**
+       1. Batch **all** minor findings and all future findings into the existing remediation path — the same `/PACT:comPACT`-vs-`/PACT:orchestrate` scope-selection the Blocking branch uses above — and dispatch the reversible fixes.
+       2. **Exclude** a finding from the batch when it is any of: **widely out of scope**, **extremely expansive** (would balloon the diff well beyond the PR's stated scope), or **design-pattern- or SACROSANCT-violating**.
+       3. **Surface the exclusions** as a single **end-of-run summary — one line per excluded finding with its rationale** (out-of-scope / expansive / SACROSANCT-or-pattern). Do NOT convert exclusions into per-finding `AskUserQuestion` prompts, and do NOT silently drop them — surfacing preempts the per-finding gate without losing anything. Excluded out-of-scope findings remain eligible for GitHub-issue tracking.
+       4. **Inherit existing safety, UNCHANGED**: dispatched fixes re-run the verify-only re-review, and the 2-cycle → `/PACT:imPACT` termination applies exactly as for the Blocking branch.
+
+     **Step A — Initial Gate Question** (Yes/No only) — **default path; preempted when `PR greedy-fix: ON`** (see Greedy-fix mode above):
 
      **Pre-form a gate-level recommendation BEFORE constructing the AskUserQuestion call.** The gate recommendation is BINARY (Yes or No across the entire minor+future population) — distinct from Step C's per-finding recommendations. Apply these POPULATION-LEVEL criteria:
        - **Aggregate Substance** — Are the minors/futures substantive (convention violations, latent risks, real ergonomic wins) or cosmetic-only (whitespace, naming preference, stylistic nits)? Substantive → recommend Yes. Cosmetic-only → recommend No.

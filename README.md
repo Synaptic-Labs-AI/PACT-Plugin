@@ -605,7 +605,7 @@ When installed as a plugin, PACT lives in your plugin cache:
 │   └── cache/
 │       └── pact-plugin/
 │           └── PACT/
-│               └── 4.4.55/      # Plugin version
+│               └── 4.5.0/       # Plugin version
 │                   ├── agents/
 │                   ├── commands/
 │                   ├── skills/
@@ -660,6 +660,8 @@ PACT-Plugin/
 ---
 
 ## Configuration
+
+Runtime options — the `PACT_*` environment variables (e.g. `PACT_PR_GREEDY_FIX`, `PACT_AUTONOMOUS_SCOPE_DETECTION`) — are documented in [`pact-plugin/reference/config.md`](pact-plugin/reference/config.md). The section below covers `CLAUDE.md` orchestrator configuration.
 
 ### CLAUDE.md
 
