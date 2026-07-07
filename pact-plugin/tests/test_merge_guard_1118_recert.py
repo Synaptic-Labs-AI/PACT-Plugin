@@ -86,8 +86,10 @@ _HISTORY_OK = _BASE is not None and _HEAD is not None
 # real base->PATCH behavior change), so it runs wherever the merged history is present (dev CI).
 requires_history = pytest.mark.skipif(
     not _HISTORY_OK,
-    reason=f"base ({_BASE_SHA}) / HEAD ({_HEAD_SHA}) source unavailable (shallow clone); "
-           "differential rows need the merged history. Absolute PATCH rows still run.",
+    reason=f"NON-VACUITY DIFFERENTIAL SKIPPED — base ({_BASE_SHA}) / HEAD ({_HEAD_SHA}) source "
+           "unavailable (shallow clone / missing history). Every regression SHAPE is still "
+           "guarded by an always-run absolute PATCH assertion; only the base->PATCH "
+           "behavior-change PROOF did not run this session.",
 )
 
 
@@ -106,7 +108,6 @@ def _op_triple(cmd):
 # ======================================================================================
 # §7.1 SEC-1 — embedded-quote leg-merge OVER-BLOCK cured (base=False, HEAD=True, PATCH=False)
 # ======================================================================================
-@requires_history
 class TestSEC1OverBlockCured:
     SEC1 = {
         "merge_path":   f'gh api repos/o/r/pulls/5/{M} -X GET -q p"q r" && gh api "x/y" -X POST -f a=b',
@@ -114,17 +115,24 @@ class TestSEC1OverBlockCured:
     }
 
     @pytest.mark.parametrize("cmd", SEC1.values(), ids=list(SEC1.keys()))
+    def test_sec1_allows_at_patch(self, cmd):
+        # ALWAYS-RUN absolute recurrence guard (the lesson of the arc — guard the SHAPE, not only
+        # the differential): the faithful embedded-quote compound is NOT over-blocked at the
+        # committed PATCH. Fails if the leg-merge over-block ever returns, regardless of git history.
+        assert PATCH.is_dangerous_command(cmd) is False
+
+    @requires_history
+    @pytest.mark.parametrize("cmd", SEC1.values(), ids=list(SEC1.keys()))
     def test_sec1_differential(self, cmd):
-        # base ALLOWED the faithful compound; the leg-merge NEWLY BLOCKED it at HEAD (cardinal
-        # sin); PATCH restores allow. A bare PATCH=False would be vacuous — the base=False /
-        # HEAD=True legs prove the row measures the real cure.
+        # NON-VACUITY layer: base ALLOWED the faithful compound; the leg-merge NEWLY BLOCKED it at
+        # HEAD (cardinal sin); PATCH restores allow. The base=False / HEAD=True legs prove the
+        # absolute row above measures the REAL cure, not a vacuous pass.
         assert _isd_triple(cmd) == (False, True, False)
 
 
 # ======================================================================================
 # §7.2 SEC-2 — embedded-quote leg-merge UNDER-BLOCK closed (base=True, HEAD=False, PATCH=True)
 # ======================================================================================
-@requires_history
 class TestSEC2UnderBlockClosed:
     SEC2 = {
         "input_dq":  f'gh api repos/o/r/{M}s --input b.json -q x"y z" && gh api "repos/o/r" -X GET',
@@ -133,22 +141,36 @@ class TestSEC2UnderBlockClosed:
     }
 
     @pytest.mark.parametrize("cmd", SEC2.values(), ids=list(SEC2.keys()))
+    def test_sec2_held_at_patch(self, cmd):
+        # ALWAYS-RUN absolute recurrence guard: the real /merges mutation is HELD at the committed
+        # PATCH. Fails if the leg-merge under-block (a mutation escaping to allow) ever returns.
+        assert PATCH.is_dangerous_command(cmd) is True
+
+    @requires_history
+    @pytest.mark.parametrize("cmd", SEC2.values(), ids=list(SEC2.keys()))
     def test_sec2_differential(self, cmd):
-        # A real /merges mutation ESCAPED at HEAD (the merged leg leaked leg-2's -X GET into the
-        # .*merge negative lookahead). base held it; PATCH restores the hold.
+        # NON-VACUITY layer: the mutation ESCAPED at HEAD (the merged leg leaked leg-2's -X GET
+        # into the .*merge negative lookahead). base held it; PATCH restores the hold.
         assert _isd_triple(cmd) == (True, False, True)
 
 
 # ======================================================================================
 # §7.3 Carrier-8 shared flaw — pre-existing under-block FIXED (base=False, HEAD=False, PATCH=True)
 # ======================================================================================
-@requires_history
 class TestCarrier8TwinFixed:
+    CMD = f'gh api repos/o/r/{M}s -f k=x"y z" && gh api "o/r" -X GET'
+
+    def test_carrier8_held_at_patch(self):
+        # ALWAYS-RUN absolute recurrence guard: the quote-unsafe carrier-8 body-flag escape is
+        # closed — the mutation is HELD at the committed PATCH.
+        assert PATCH.is_dangerous_command(self.CMD) is True
+
+    @requires_history
     def test_carrier8_body_flag_quote_unsafe_fixed(self):
-        # Carrier 8's body-flag arm had the SAME non-quote-aware matcher -> a real mutation
-        # escaped at BOTH base and HEAD; the shared quote-safe _VALUE_TOKEN closes it at PATCH.
-        cmd = f'gh api repos/o/r/{M}s -f k=x"y z" && gh api "o/r" -X GET'
-        assert _isd_triple(cmd) == (False, False, True)
+        # NON-VACUITY layer: carrier 8's body-flag arm had the SAME non-quote-aware matcher -> a
+        # real mutation escaped at BOTH base and HEAD; the shared quote-safe _VALUE_TOKEN closes it
+        # at PATCH (base=False, HEAD=False, PATCH=True).
+        assert _isd_triple(self.CMD) == (False, False, True)
 
 
 # ======================================================================================
@@ -189,13 +211,20 @@ class TestRED1AttachmentFormsCured:
 # ======================================================================================
 # §7.5 MINT divergence restored (op: base=None, HEAD=merge, PATCH=None)
 # ======================================================================================
-@requires_history
 class TestMintDivergenceRestored:
+    CMD = f'gh api repos/o/r/pulls/5/{M} -X GET -q p"q r" && gh api "x/y" -X POST -f a=b'
+
+    def test_sec1_compound_op_none_at_patch(self):
+        # ALWAYS-RUN absolute mint recurrence guard: the SEC-1 compound does NOT mis-bind to a
+        # merge op at the committed PATCH (no spurious mint). Fails if the leg-merge mint mis-bind
+        # returns — the mint path shares the strip pipeline, so this is a distinct regression axis.
+        assert PATCH.detect_command_operation_type(self.CMD) is None
+
+    @requires_history
     def test_sec1_compound_op_classification(self):
-        # The mint path shares the strip pipeline, so the SEC-1 leg-merge mis-bound the compound
-        # to op='merge' at HEAD (a mint mis-bind). PATCH restores op=None (no spurious mint).
-        cmd = f'gh api repos/o/r/pulls/5/{M} -X GET -q p"q r" && gh api "x/y" -X POST -f a=b'
-        assert _op_triple(cmd) == (None, "merge", None)
+        # NON-VACUITY layer: the SEC-1 leg-merge mis-bound the compound to op='merge' at HEAD (a
+        # mint mis-bind). base=None, HEAD='merge', PATCH=None.
+        assert _op_triple(self.CMD) == (None, "merge", None)
 
 
 # ======================================================================================
