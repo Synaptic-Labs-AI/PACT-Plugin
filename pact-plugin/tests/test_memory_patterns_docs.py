@@ -24,7 +24,6 @@ Mechanism:
 4. Assert no exception was raised.
 """
 import builtins
-import json
 import os
 import re
 import sys

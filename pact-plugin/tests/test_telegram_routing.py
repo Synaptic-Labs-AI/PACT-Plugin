@@ -11,7 +11,6 @@ Tests cover:
 6. Edge cases: corrupted files, concurrent access, lock contention
 """
 
-import asyncio
 import fcntl
 import json
 import os
@@ -26,15 +25,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from telegram.config import get_or_create_session_id
 from telegram.routing import (
-    COORDINATOR_DIR,
-    HEARTBEAT_INTERVAL,
-    MAX_INBOX_ENTRIES,
     MAX_ROUTING_TABLE_ENTRIES,
     READER_POLL_INTERVAL,
     STALE_SESSION_TTL,
     DirectRouter,
     FileBasedRouter,
-    UpdateRouter,
     count_active_sessions,
     register_session,
     unregister_session,

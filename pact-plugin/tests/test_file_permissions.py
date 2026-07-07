@@ -9,11 +9,10 @@ Verifies that:
 3. Permission hardening is applied consistently across creation points
 """
 
-import os
 import stat
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 

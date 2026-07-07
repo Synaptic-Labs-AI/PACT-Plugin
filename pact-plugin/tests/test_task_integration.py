@@ -13,7 +13,6 @@ build_refresh_from_tasks in #444).
 """
 
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any

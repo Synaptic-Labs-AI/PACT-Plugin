@@ -14,7 +14,6 @@ Tests cover:
 9. Security: unauthorized chat_id rejection, inbound sanitization
 """
 
-import asyncio
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -27,9 +26,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from telegram.telegram_client import (
     TelegramClient,
     TelegramAPIError,
-    API_BASE,
-    POLL_TIMEOUT,
-    MAX_RETRIES,
 )
 
 

@@ -19,7 +19,6 @@ Tests cover:
 - Concurrent multi-agent tracking independence.
 """
 import json
-import os
 import sys
 from pathlib import Path
 from unittest.mock import patch

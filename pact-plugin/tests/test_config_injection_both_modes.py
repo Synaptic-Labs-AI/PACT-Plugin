@@ -43,7 +43,6 @@ from fixtures.role_frames import (
     captured_plain_sessionstart,
     captured_teammate_sessionstart,
     lead_frame_qualified,
-    plain_frame,
     teammate_frame,
 )
 

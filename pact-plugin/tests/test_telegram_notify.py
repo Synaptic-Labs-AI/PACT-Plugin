@@ -17,7 +17,7 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
-from unittest.mock import MagicMock, patch, mock_open
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -30,8 +30,6 @@ from telegram.notify import (
     _build_session_summary,
     send_notification,
     main,
-    ENV_FILE,
-    HTTP_TIMEOUT,
 )
 
 
