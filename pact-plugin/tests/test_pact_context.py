@@ -133,7 +133,6 @@ Library module init() contract:
 
 import json
 import os
-import stat
 import sys
 from pathlib import Path
 
@@ -1136,7 +1135,6 @@ class TestResolveAgentNameStep35NonMockedSeam:
         """End-to-end, UNSTUBBED: a tmux teammate (sid != leadSessionId) registers
         via the real register() -> resolve_agent_name recovers its name from the
         real on-disk registry. Proves the write/read seam resolves for real."""
-        import shared.pact_context as pact_context
         from shared.session_registry import register
         from shared.pact_context import resolve_agent_name
 
@@ -1163,7 +1161,6 @@ class TestResolveAgentNameStep35NonMockedSeam:
         finds no entry for that sid and falls through to Step 4 (agent_type
         strip). Confirms the guard's WRITE-side suppression keeps the READ-side
         seam clean rather than returning a colliding/wrong name."""
-        import shared.pact_context as pact_context
         from shared.session_registry import register
         from shared.pact_context import resolve_agent_name
 

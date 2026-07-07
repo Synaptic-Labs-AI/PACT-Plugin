@@ -8,14 +8,12 @@ Tests cover:
 4. Edge cases - graceful degradation, already-installed dependencies
 """
 
-import os
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -666,7 +664,7 @@ class TestEdgeCases:
 
     def test_reset_during_initialization(self):
         """Test that reset during initialization is handled safely."""
-        from memory_init import ensure_memory_ready, reset_initialization, is_initialized
+        from memory_init import ensure_memory_ready, reset_initialization
 
         reset_initialization()
 

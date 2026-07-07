@@ -39,7 +39,6 @@ see tests/runbooks/926-config-dir-live-probe.md — platform @-ref resolution
 happens at real session bootstrap, which pytest cannot drive.
 """
 import json
-import os
 from pathlib import Path
 
 import pytest

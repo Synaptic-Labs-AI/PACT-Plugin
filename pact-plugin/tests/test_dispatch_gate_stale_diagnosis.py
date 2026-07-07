@@ -28,11 +28,9 @@ Reuses the in-process harness from test_dispatch_gate.py (_run_main / _full_setu
 / _seed_team) so the both-modes setup matches the rest of the gate's suite.
 """
 
-import io
 import json
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -44,7 +42,6 @@ from test_dispatch_gate import (  # noqa: E402 — sibling harness reuse
     _full_setup,
     _seed_team,
     _TEAM,
-    _NAME,
 )
 
 # A marker substring unique to the augmentation — asserting on it proves the

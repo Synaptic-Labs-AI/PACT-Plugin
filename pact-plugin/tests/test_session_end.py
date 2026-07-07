@@ -53,9 +53,6 @@ class TestMainEntryPoint:
 
         Pass keyword overrides to replace defaults (e.g., get_task_list=...).
         """
-        from contextlib import ExitStack
-        from unittest.mock import MagicMock, DEFAULT
-
         defaults = {
             "pact_context_init": patch("session_end.pact_context.init"),
             "get_project_dir": patch("session_end.get_project_dir",
@@ -1386,7 +1383,6 @@ class TestCleanupOldSessionsBoundary:
         directories. The regex explicitly requires lowercase. This test
         verifies the regex behavior by checking the pattern directly.
         """
-        import re
         from session_end import _UUID_PATTERN
 
         # Lowercase should match
@@ -2649,7 +2645,7 @@ class TestCleanupSummaryEvent:
 
         Returns list of append_event call args for inspection.
         """
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
         from contextlib import ExitStack
         import io as _io
 
@@ -3126,7 +3122,7 @@ class TestReaperBehaviorPins:
         either reaper, counts would be stale and this test catches it.
         Uses a recording mock_calls timeline to assert call ordering.
         """
-        from unittest.mock import patch, call
+        from unittest.mock import patch
         from contextlib import ExitStack
         import io as _io
 

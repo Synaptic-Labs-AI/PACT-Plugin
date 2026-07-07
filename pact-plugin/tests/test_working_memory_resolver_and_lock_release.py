@@ -32,8 +32,6 @@ Used by: pytest (the working_memory edge-path gate).
 import sys
 from pathlib import Path
 
-import pytest
-
 _SCRIPTS_DIR = str(
     Path(__file__).parent.parent / "skills" / "pact-memory" / "scripts"
 )

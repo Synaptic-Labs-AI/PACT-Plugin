@@ -8,13 +8,10 @@ Tests cover:
 4. get_optional_dependency_status: voice transcription availability
 """
 
-import importlib
 import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -24,7 +21,6 @@ from telegram.deps import (
     get_dependency_status,
     get_optional_dependency_status,
     REQUIRED_PACKAGES,
-    REQUIREMENTS_FILE,
 )
 
 

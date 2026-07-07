@@ -24,7 +24,6 @@ from refresh.transcript_parser import (
     find_task_calls_to_agent,
     find_trigger_turn_index,
 )
-from refresh.constants import LARGE_FILE_THRESHOLD_BYTES
 
 
 class TestTurnDataclass:

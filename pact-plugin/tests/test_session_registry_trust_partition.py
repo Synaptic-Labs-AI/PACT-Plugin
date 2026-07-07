@@ -30,7 +30,6 @@ synthetic import so the negative leg is not a vacuous always-pass.
 
 import ast
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -276,7 +275,6 @@ class TestSelfLookupOnly:
     """resolve() takes a session_id, never a name; no name-keyed scan API."""
 
     def test_resolve_signature_takes_session_id_not_name(self):
-        from shared import session_registry
         tree = _parse(HOOKS_DIR / "shared" / "session_registry.py")
         resolve_def = next(
             n for n in ast.walk(tree)

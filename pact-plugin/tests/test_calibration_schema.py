@@ -13,7 +13,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 from shared.variety_scorer import (
-    LEARNING_II_MIN_MATCHES,
     MAX_SCORE,
     MIN_SCORE,
 )

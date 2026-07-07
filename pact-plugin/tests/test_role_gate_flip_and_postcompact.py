@@ -37,8 +37,6 @@ from fixtures.role_frames import (
     teammate_frame,
 )
 
-import shared.pact_context as pact_context
-
 
 _SESSION_ID = "aabb1122-0000-0000-0000-000000000000"
 

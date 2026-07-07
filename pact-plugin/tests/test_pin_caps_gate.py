@@ -21,7 +21,6 @@ Minimum coverage shipped in the code-phase commit:
 import json
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
