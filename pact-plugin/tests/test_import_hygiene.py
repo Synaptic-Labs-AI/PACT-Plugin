@@ -85,7 +85,10 @@ def _gate_check(paths):
 # ─── swept Python surfaces ───────────────────────────────────────────────────
 # hooks/, scripts/, telegram/, skills-scripts ship to consumers; tests/ is
 # the dev-repo-only surface, swept so this gate and the CI ruff leg (which
-# lints all of pact-plugin/) agree on scope.
+# lints all of pact-plugin/) cannot disagree on tests/ scope. CI's tree is
+# a strict superset of these five globs (e.g. skills/*/ top-level test
+# files are CI-linted only) — the safe direction: a divergence there is a
+# loud CI red, never a silent gate pass.
 
 def _skills_script_files():
     return sorted(PLUGIN_ROOT.glob("skills/*/scripts/**/*.py"))
@@ -126,12 +129,16 @@ class TestSweptTreeIsClean:
 class TestTestsSurfaceEnforcement:
     """Counter-tests proving the tests/ surface is genuinely enforced —
     each drives the REAL sweep mechanism (the live TARGET_DIR_SETS glob
-    plus `_gate_check`), not a synthetic path list, so a reverted or
-    mis-widened glob turns these red, not silently vacuous. Probes are
-    planted in the live tests/ tree and removed in the same test (the
-    suite runs single-process, so no parallel sweep can observe them)."""
+    plus `_gate_check`), not a synthetic path list, so a reverted,
+    retargeted, or recursion-narrowed glob turns these red, not silently
+    vacuous. Probes are planted in the live tests/ tree one directory
+    level DOWN (tests/fixtures/) — the sweep only sees them through
+    recursive descent, so an rglob→glob mis-narrowing fails here instead
+    of silently dropping subdirectory files. Each probe is removed in
+    the same test (the suite runs single-process, so no parallel sweep
+    can observe it)."""
 
-    PROBE = PLUGIN_ROOT / "tests" / "_f401_planted_probe_delete_me.py"
+    PROBE = PLUGIN_ROOT / "tests" / "fixtures" / "_f401_planted_probe_delete_me.py"
 
     def test_tests_surface_includes_this_gate_file(self):
         """Reachability pin: the tests glob must resolve the LIVE tests/
