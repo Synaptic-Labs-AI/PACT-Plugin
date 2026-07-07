@@ -18,7 +18,7 @@ Scope boundary — what is swept and why:
     ship to) consumer sessions, so dead imports there are product defects.
     tests/ never ships, but is swept too: the backlog that justified its
     day-one exclusion has been cleared, and the CI ruff leg lints all of
-    pact-plugin/ — this gate sweeps the same tree so the two enforcement
+    pact-plugin/ — this gate sweeps tests/ as well, so the two enforcement
     layers cannot disagree on tests/ scope.
 
 Suppression contract:
