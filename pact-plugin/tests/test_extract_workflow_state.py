@@ -5,11 +5,8 @@ Tests the main public API from refresh/__init__.py which is used by
 the PreCompact hook to extract workflow state from transcripts.
 """
 
-import json
 from pathlib import Path
-from unittest.mock import patch
 
-import pytest
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))

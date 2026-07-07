@@ -73,7 +73,7 @@ from pathlib import Path
 import pytest
 
 from shared import session_registry
-from shared.session_registry import register, resolve
+from shared.session_registry import resolve
 
 # spawn is macOS's default and the most portable start method; pin it explicitly
 # so the suite behaves identically wherever it runs (fork would inherit the

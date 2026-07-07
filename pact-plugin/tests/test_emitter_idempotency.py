@@ -106,7 +106,7 @@ class TestMarkerFailOpen:
         monkeypatch.setenv("HOME", str(tmp_path))
         calls: list[dict] = []
 
-        import agent_handoff_emitter
+        import agent_handoff_emitter  # noqa: F401  # ensure-loaded seam: first-import must precede the Path.mkdir patch below so the injected PermissionError fires at marker-write time, not at module import inside _run_main
         original_mkdir = Path.mkdir
 
         def _mkdir_denied(self_path, *args, **kwargs):

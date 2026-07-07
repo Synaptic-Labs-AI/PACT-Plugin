@@ -12,11 +12,8 @@ Tests cover:
 8. Security: no credentials in error messages, permission enforcement
 """
 
-import os
-import stat
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -33,7 +30,6 @@ from telegram.config import (
     load_config,
     load_config_safe,
     parse_env_file,
-    VALID_MODES,
     DEFAULT_MODE,
 )
 
