@@ -1,7 +1,7 @@
 """
 Location: pact-plugin/tests/test_merge_guard_1118_output_selector.py
 Summary: Bidirectional regression matrix for the #1118 carrier-9 output-selector strip —
-         the NEW additive `_strip_non_executable_content` pass that blanks the VALUES of
+         the `_strip_non_executable_content` selector value-strip (re-modeled quote-safe) that blanks the VALUES of
          gh-api client-side non-target flags (--jq/-q, --template/-t, --header/-H,
          --input, --hostname, --preview/-p) within a gh-api-only span. Locks in:
          Direction 1 — a faithful gh-api READ whose output selector / header / body-file

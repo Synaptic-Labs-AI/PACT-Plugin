@@ -16,9 +16,9 @@ Summary: TEST-phase CERTIFICATION matrix for the #1118 carrier-9 output-selector
          NON-VACUITY: empirical red-on-revert was MEASURED at cert time by loading the HEAD~1
          (pre-carrier-9) module and confirming every Direction-1 read was is_dangerous=True
          there and False under the shipped module (9/9 flip; 0 held-write flips) — recorded
-         in the TEST HANDOFF. That measurement is a cert-time artifact, NOT shipped here: a
-         `git show HEAD~1` harness is fragile once further commits land / after squash-merge,
-         and the repo ships no such revert harness. The git-independent shipped red-on-revert
+         in the TEST HANDOFF. That cert-time-only stance is now SUPERSEDED: the base-vs-HEAD-vs-PATCH
+         differential IS shipped as a permanent suite (test_merge_guard_1118_recert.py — pinned
+         base/HEAD SHAs, self-skipping on a shallow clone). The git-independent shipped red-on-revert
          anchor is the coder file's TestCarrier9Mechanism (it asserts a read's selector value
          is blanked; reverting carrier 9 makes the substring survive -> those asserts fail —
          verified: at HEAD~1, `mergeStateStatus` DOES survive the strip). The LOAD-BEARING
