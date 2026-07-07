@@ -12,11 +12,9 @@ Tests cover:
 import os
 import re
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-import pytest
 
 # Add paths for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "pact-memory" / "scripts"))

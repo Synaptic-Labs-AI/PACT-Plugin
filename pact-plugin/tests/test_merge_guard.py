@@ -10400,7 +10400,7 @@ class TestLegacyTokenBoundary:
         """
         from shared.merge_guard_common import USE_MARKER_SUFFIX
         from merge_guard_post import write_token
-        from merge_guard_pre import _consume_token, find_valid_token
+        from merge_guard_pre import _consume_token
 
         legacy_path = self._write_legacy_token(tmp_path, "100")
         n_use_path = write_token({"operation_type": "merge", "pr_number": "200"}, token_dir=tmp_path)

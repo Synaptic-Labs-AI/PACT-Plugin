@@ -49,7 +49,6 @@ integration-seam gap (this case) = "real check, WRONG path — the mock bypassed
 the broken wiring" -> caught by UN-MOCKING the seam, not by revert alone.
 ================================================================================
 """
-import io
 import json
 import sys
 from datetime import datetime, timedelta, timezone

@@ -329,7 +329,6 @@ class TestMainRealContextResolution:
     def test_advisory_path_through_real_on_disk_context(
         self, tmp_path, monkeypatch, capsys
     ):
-        import os
         import shared.pact_context as pc
 
         sid = "real-ctx-session-001"

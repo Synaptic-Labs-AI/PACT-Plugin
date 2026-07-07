@@ -70,7 +70,6 @@ cardinality — use SOURCE-ONLY revert of ``pact_context.py`` (GATE 1) /
 measured RED cardinality is documented in this module's HANDOFF.
 """
 
-import hashlib
 import io
 import json
 import sys

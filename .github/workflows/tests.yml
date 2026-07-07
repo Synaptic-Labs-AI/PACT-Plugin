@@ -98,21 +98,23 @@ jobs:
         run: python -m pip install --upgrade pip pytest hypothesis httpx pytest-asyncio ruff
 
       # Import-hygiene lint, two legs. Leg 1: unused imports (F401) + undefined
-      # names (F821) over all consumer-shipped Python (hooks, scripts, telegram,
-      # skills). Leg 2: F821 only, repo-wide including tests/ — F821 is the
+      # names (F821) over all of pact-plugin/ — hooks, scripts, telegram,
+      # skills, AND tests/. Leg 2: F821 only, over the same tree — F821 is the
       # class the behavioral suite structurally cannot reach (undefined names
       # in cold fail-open branches execute only when the rare condition fires).
-      # tests/ is EXCLUDED from the F401 leg: it carries a known pre-existing
-      # unused-import backlog tracked for separate cleanup; widen leg 1 to
-      # pact-plugin/ once that lands. Runs before pytest so a hygiene defect
-      # fails in seconds, not after the multi-minute suite.
+      # Leg 2 is subsumed by leg 1 today; the redundancy is DELIBERATE
+      # structure: it keeps pact-plugin/-wide F821 coverage independent of
+      # leg 1's path list, so a future re-narrowing of leg 1 (e.g. a new
+      # backlog-dir exclusion) cannot silently drop F821 coverage.
+      # Runs before pytest so a hygiene defect fails in seconds, not after
+      # the multi-minute suite.
       # --target-version py39 is LOAD-BEARING: ruff's py37 default false-errors
       # on walrus operators used in the hooks — do not drop the flag.
       # Where an editing session has an LSP server, its diagnostics complement
       # this check at edit time; this step is the mechanical guarantee.
       - name: Import-hygiene lint (F401/F821)
         run: |
-          ruff check --select F401,F821 --target-version py39 pact-plugin/hooks pact-plugin/scripts pact-plugin/telegram pact-plugin/skills
+          ruff check --select F401,F821 --target-version py39 pact-plugin/
           ruff check --select F821 --target-version py39 pact-plugin/
 
       # rootdir must be pact-plugin/ (CWD-relative conftest sys.path + local

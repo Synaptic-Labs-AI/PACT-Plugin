@@ -14,12 +14,9 @@ We replicate the _detect_project_id logic here rather than fighting
 Python's import system, then validate equivalence via a source-check test.
 """
 
-import hashlib
-import inspect
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 

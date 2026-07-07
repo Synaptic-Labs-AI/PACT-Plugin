@@ -17,7 +17,6 @@ supplement: the edges that matrix does not exercise —
 
 import json
 
-import pytest
 
 
 class TestCompositeKeyBackwardCompat:

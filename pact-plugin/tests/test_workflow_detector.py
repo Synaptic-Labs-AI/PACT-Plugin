@@ -4,10 +4,8 @@ Tests for the workflow_detector module.
 Tests workflow trigger detection, termination checking, and confidence scoring.
 """
 
-import json
 from pathlib import Path
 
-import pytest
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
@@ -26,12 +24,8 @@ from refresh.workflow_detector import (
 
 from fixtures.refresh_system import (
     create_peer_review_transcript,
-    create_orchestrate_transcript,
-    create_no_workflow_transcript,
-    create_terminated_workflow_transcript,
     make_user_message,
     make_assistant_message,
-    make_task_call,
     create_transcript_lines,
 )
 

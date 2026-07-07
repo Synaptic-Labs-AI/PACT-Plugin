@@ -2,22 +2,24 @@
 Location: pact-plugin/tests/test_import_hygiene.py
 Summary: Suite-level import-hygiene gate — a strict-mode unused-import sweep
          over every consumer-shipped Python surface (hooks/, scripts/,
-         telegram/, skills/*/scripts/), plus the pins that keep the gate
-         itself honest: non-vacuity fixtures driven through the gate's own
-         entry point, a no-default signature pin on the predicate's
-         strictness parameter, and a prose pin on the canonical lint-check.sh
-         invocation in the command files.
+         telegram/, skills/*/scripts/) plus the dev-repo tests/ tree, and
+         the pins that keep the gate itself honest: non-vacuity fixtures
+         driven through the gate's own entry point, a no-default signature
+         pin on the predicate's strictness parameter, and a prose pin on the
+         canonical lint-check.sh invocation in the command files.
 Used by: pytest suite. This is the dev-repo enforcement tier of the
          import-hygiene ladder; the consumer-facing tier is
          lint-check.sh --files (advisory strictness). Both tiers call the
          SAME predicate module — one substrate, two declared strictness
          tiers. THIS file is where the suite tier's strictness is declared.
 
-Scope boundary — "ships to consumers":
+Scope boundary — what is swept and why:
     hooks/, scripts/, telegram/, and skills/*/scripts/ all execute in (or
     ship to) consumer sessions, so dead imports there are product defects.
-    tests/ is deliberately NOT swept: test-file dead imports never ship,
-    and the pre-existing backlog there is tracked as separate cleanup work.
+    tests/ never ships, but is swept too: the backlog that justified its
+    day-one exclusion has been cleared, and the CI ruff leg lints all of
+    pact-plugin/ — this gate sweeps tests/ as well, so the two enforcement
+    layers cannot disagree on tests/ scope.
 
 Suppression contract:
     An intentional unused import (re-export facade, monkeypatch seam,
@@ -80,7 +82,13 @@ def _gate_check(paths):
     return cui.check_paths([str(p) for p in paths], try_scope=L1_TRY_SCOPE)
 
 
-# ─── consumer-shipped Python surfaces ────────────────────────────────────────
+# ─── swept Python surfaces ───────────────────────────────────────────────────
+# hooks/, scripts/, telegram/, skills-scripts ship to consumers; tests/ is
+# the dev-repo-only surface, swept so this gate and the CI ruff leg (which
+# lints all of pact-plugin/) cannot disagree on tests/ scope. CI's tree is
+# a strict superset of these five globs (e.g. skills/*/ top-level test
+# files are CI-linted only) — the safe direction: a divergence there is a
+# loud CI red, never a silent gate pass.
 
 def _skills_script_files():
     return sorted(PLUGIN_ROOT.glob("skills/*/scripts/**/*.py"))
@@ -91,11 +99,13 @@ TARGET_DIR_SETS = {
     "scripts": lambda: sorted((PLUGIN_ROOT / "scripts").rglob("*.py")),
     "telegram": lambda: sorted((PLUGIN_ROOT / "telegram").rglob("*.py")),
     "skills-scripts": _skills_script_files,
+    "tests": lambda: sorted((PLUGIN_ROOT / "tests").rglob("*.py")),
 }
 
 
-class TestShippedTreeIsClean:
-    """The strict-mode sweep over every consumer-shipped Python surface."""
+class TestSweptTreeIsClean:
+    """The strict-mode sweep over every swept Python surface —
+    consumer-shipped code plus the dev-repo tests/ tree."""
 
     @pytest.mark.parametrize("label", sorted(TARGET_DIR_SETS))
     def test_surface_has_files_to_scan(self, label):
@@ -109,11 +119,82 @@ class TestShippedTreeIsClean:
         assert len(files) > 0  # inline guard: never pass on an empty sweep
         findings = _gate_check(files)
         assert findings == [], (
-            f"unused imports in consumer-shipped surface '{label}' — fix, or "
+            f"unused imports in swept surface '{label}' — fix, or "
             "mark an intentional re-export/probe with "
             "'# noqa: F401  # <category>: <reason>' on the statement's first "
             "line:\n" + "\n".join(findings)
         )
+
+
+class TestTestsSurfaceEnforcement:
+    """Counter-tests proving the tests/ surface is genuinely enforced —
+    each drives the REAL sweep mechanism (the live TARGET_DIR_SETS glob
+    plus `_gate_check`), not a synthetic path list, so a reverted,
+    retargeted, or recursion-narrowed glob turns these red, not silently
+    vacuous. Probes are planted in the live tests/ tree one directory
+    level DOWN (tests/fixtures/) — the sweep only sees them through
+    recursive descent, so an rglob→glob mis-narrowing fails here instead
+    of silently dropping subdirectory files. Each probe is removed in
+    the same test (the suite runs single-process, so no parallel sweep
+    can observe it)."""
+
+    PROBE = PLUGIN_ROOT / "tests" / "fixtures" / "_f401_planted_probe_delete_me.py"
+
+    def test_tests_surface_includes_this_gate_file(self):
+        """Reachability pin: the tests glob must resolve the LIVE tests/
+        tree — proven by the sweep seeing this very file. A glob pointing
+        at a wrong or empty directory passes >0-file guards; it cannot
+        pass this one."""
+        files = TARGET_DIR_SETS["tests"]()
+        assert Path(__file__).resolve() in [p.resolve() for p in files]
+
+    def test_planted_dead_import_fails_tests_sweep_end_to_end(self):
+        """A genuinely unused import planted in the live tests/ tree must
+        be picked up by the surface glob AND flagged by the gate — the
+        end-to-end proof that new tests/ files are enforced."""
+        assert not self.PROBE.exists(), (
+            "leftover probe from a crashed run — delete it; it poisons "
+            "the tests/ sweep"
+        )
+        self.PROBE.write_text("import os\n", encoding="utf-8")
+        try:
+            files = TARGET_DIR_SETS["tests"]()
+            assert self.PROBE in files
+            assert f"{self.PROBE}:1: unused import os" in _gate_check(files)
+        finally:
+            self.PROBE.unlink()
+        assert self.PROBE not in TARGET_DIR_SETS["tests"]()
+
+    def test_strict_flip_would_miss_try_scoped_probe(self):
+        """Strict-flip simulation for the widened surface: a try-scoped
+        dead import planted in the live tests/ tree is caught by the gate
+        under its declared strict tier, and would be MISSED under
+        advisory — proving the sweep's strictness declaration is
+        load-bearing for tests/, not incidental."""
+        assert not self.PROBE.exists()
+        self.PROBE.write_text(
+            "try:\n    import os\nexcept ImportError:\n    pass\n",
+            encoding="utf-8",
+        )
+        try:
+            files = TARGET_DIR_SETS["tests"]()
+            assert self.PROBE in files
+            assert f"{self.PROBE}:2: unused import os" in _gate_check(files)
+            # The flip direction: the same file under the advisory tier
+            # produces no finding at all.
+            assert cui.check_paths([str(self.PROBE)], try_scope="advisory") == []
+        finally:
+            self.PROBE.unlink()
+
+    def test_kept_ensure_loaded_seam_survives_widened_gate(self):
+        """The one reasoned keep in tests/ (an ensure-loaded monkeypatch
+        seam marked with a first-line noqa) passes the gate individually.
+        Localizes the failure if the predicate's noqa recognition ever
+        diverges from the marker convention the keep uses — the sweep
+        would also fail, but this row names the reconciliation."""
+        kept = PLUGIN_ROOT / "tests" / "test_emitter_idempotency.py"
+        assert kept.exists()
+        assert _gate_check([kept]) == []
 
 
 class TestGateNonVacuity:

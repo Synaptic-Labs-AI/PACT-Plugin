@@ -31,7 +31,6 @@ comprehensiveness add: teammate + plain rows for every write, plus the split.
 
 import io
 import json
-import os
 from pathlib import Path
 from unittest.mock import patch
 

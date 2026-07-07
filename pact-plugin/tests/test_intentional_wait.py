@@ -315,12 +315,12 @@ class TestModuleConstants:
         # shared package's public API. Vocabulary + format helpers stay
         # module-only to keep the shared package namespace small.
         from shared import wait_stale  # noqa: F401
-        from shared.intentional_wait import (
-            canonical_since,  # noqa: F401
-            validate_wait,  # noqa: F401
-            DEFAULT_THRESHOLD_MINUTES,
-            KNOWN_REASONS,  # noqa: F401
-            KNOWN_RESOLVERS,  # noqa: F401
+        from shared.intentional_wait import DEFAULT_THRESHOLD_MINUTES
+        from shared.intentional_wait import (  # noqa: F401  # re-export probe: import IS the test — names must stay importable module-only
+            canonical_since,
+            validate_wait,
+            KNOWN_REASONS,
+            KNOWN_RESOLVERS,
         )
         assert DEFAULT_THRESHOLD_MINUTES == 30
 

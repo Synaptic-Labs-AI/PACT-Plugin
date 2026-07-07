@@ -50,7 +50,6 @@ non-vacuous: "" must mean a genuine miss, not that both copies always return "".
 """
 
 import json
-import sys
 from pathlib import Path
 
 import pytest

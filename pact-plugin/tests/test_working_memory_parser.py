@@ -19,7 +19,6 @@ sys.path is set up by tests/conftest.py (adds hooks/ and skills/pact-memory/
 scripts/ to sys.path), so no per-file sys.path manipulation is needed here.
 """
 
-import pytest
 
 
 # ---------------------------------------------------------------------------

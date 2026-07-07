@@ -34,7 +34,6 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills", "pact-memory"))
 
 from scripts.working_memory import _resolve_display_claude_md_path, sync_to_claude_md
-from scripts import working_memory as wm
 from scripts.memory_api import PACTMemory
 
 

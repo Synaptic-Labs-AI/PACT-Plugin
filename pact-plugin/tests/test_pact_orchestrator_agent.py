@@ -16,7 +16,6 @@ commits land.
 """
 from pathlib import Path
 
-import pytest
 
 from helpers import parse_frontmatter
 

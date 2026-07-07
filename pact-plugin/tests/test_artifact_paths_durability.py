@@ -41,7 +41,6 @@ Run with the 3.13.7 interpreter (default python3 has no pytest):
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -49,7 +48,6 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
-import shared.pact_context as pact_context  # noqa: E402
 import task_lifecycle_gate as tlg  # noqa: E402
 from shared.session_journal import (  # noqa: E402
     append_event,

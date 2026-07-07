@@ -10,10 +10,7 @@ Two drive modes are exercised:
   - live-globals mode (monkeypatch.setenv + Path.home redirect): proves the
     real seam consumers depend on works without DI.
 """
-import os
 from pathlib import Path
-
-import pytest
 
 from shared.paths import get_claude_config_dir
 

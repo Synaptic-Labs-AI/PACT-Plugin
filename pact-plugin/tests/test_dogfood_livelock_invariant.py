@@ -48,13 +48,10 @@ python3 invocation) exits non-blocking, does not emit a systemMessage,
 and does not propagate a blocking exit-2. This subsumes plan R1b.
 """
 import ast
-import errno
 import io
 import json
-import os
 import subprocess
 import sys
-import threading
 from pathlib import Path
 from unittest.mock import patch
 

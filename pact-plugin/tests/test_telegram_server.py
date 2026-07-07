@@ -52,7 +52,6 @@ from telegram.server import (
     _polling_loop,
     create_server,
     lifespan,
-    POLL_INTERVAL,
     ERROR_BACKOFF,
 )
 from telegram.tools import ToolContext

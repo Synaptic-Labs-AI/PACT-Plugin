@@ -8,7 +8,6 @@ Tests cover:
 4. Auditor agent definition structure
 5. Completion lifecycle: signal-type with audit_summary
 """
-import json
 import sys
 from pathlib import Path
 

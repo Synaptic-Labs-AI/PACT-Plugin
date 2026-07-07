@@ -13,7 +13,6 @@ Tests cover:
 8. SubagentStart matcher covers all PACT agent types
 """
 import json
-import sys
 from pathlib import Path
 
 import pytest

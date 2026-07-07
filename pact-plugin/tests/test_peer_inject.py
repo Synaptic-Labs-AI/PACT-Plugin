@@ -31,7 +31,6 @@ class TestPeerInject:
     def test_injects_peer_names(self, tmp_path):
         from peer_inject import (
             get_peer_context,
-            _TEACHBACK_REMINDER,
             _COMPLETION_AUTHORITY_NOTE,
         )
 
@@ -60,7 +59,6 @@ class TestPeerInject:
     def test_excludes_spawning_agent(self, tmp_path):
         from peer_inject import (
             get_peer_context,
-            _TEACHBACK_REMINDER,
             _COMPLETION_AUTHORITY_NOTE,
         )
 
@@ -98,7 +96,6 @@ class TestPeerInject:
     def test_alone_message_when_only_member(self, tmp_path):
         from peer_inject import (
             get_peer_context,
-            _TEACHBACK_REMINDER,
             _COMPLETION_AUTHORITY_NOTE,
         )
 
@@ -190,7 +187,6 @@ class TestTeachbackReminder:
     def test_reminder_appended_when_peers_exist(self, tmp_path):
         from peer_inject import (
             get_peer_context,
-            _TEACHBACK_REMINDER,
             _COMPLETION_AUTHORITY_NOTE,
         )
 
@@ -216,7 +212,6 @@ class TestTeachbackReminder:
     def test_reminder_appended_when_alone(self, tmp_path):
         from peer_inject import (
             get_peer_context,
-            _TEACHBACK_REMINDER,
             _COMPLETION_AUTHORITY_NOTE,
         )
 
@@ -555,7 +550,6 @@ class TestBootstrapPreludeAgentName:
         from peer_inject import (
             get_peer_context,
             _TEACHBACK_REMINDER,
-            _COMPLETION_AUTHORITY_NOTE,
         )
 
         team_dir = tmp_path / "teams" / "pact-test"

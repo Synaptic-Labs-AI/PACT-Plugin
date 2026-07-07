@@ -16,14 +16,12 @@ Risk tier: STANDARD — well-understood pattern fix.
 """
 
 import json
-import logging
 import os
 import struct
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 

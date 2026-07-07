@@ -15,8 +15,6 @@ Tests cover:
 
 import inspect
 import os
-import re
-import subprocess
 import sys
 import textwrap
 from datetime import datetime, timedelta
@@ -174,7 +172,7 @@ class TestCheckPinnedStaleness:
 
     def test_over_budget_adds_warning(self, tmp_path):
         """Should add token budget warning when pinned content exceeds budget."""
-        from session_init import check_pinned_staleness, PINNED_CONTEXT_TOKEN_BUDGET
+        from session_init import check_pinned_staleness
 
         # Create a lot of pinned content that exceeds the budget
         big_content = "word " * 1500  # Should exceed 1200 token budget

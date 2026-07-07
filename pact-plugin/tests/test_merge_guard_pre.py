@@ -33,11 +33,9 @@ tests pinning the fixes; the new `test_authorization_mismatch_attack` test
 pins the end-to-end attack shape that the heredoc-side fix prevents.
 """
 
-import re
 import sys
 from pathlib import Path
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 

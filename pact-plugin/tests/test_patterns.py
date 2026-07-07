@@ -8,13 +8,11 @@ context extraction, and regex pattern validation.
 import re
 from pathlib import Path
 
-import pytest
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 from shared.constants import PACT_AGENTS
-from shared.task_utils import find_active_agents  # agent_prefixes is local; we parse source
 
 from refresh.patterns import (
     WORKFLOW_PATTERNS,

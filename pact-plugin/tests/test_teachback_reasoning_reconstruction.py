@@ -33,8 +33,6 @@ import ast
 import json
 from pathlib import Path
 
-import pytest
-
 from shared.intentional_wait import TEACHBACK_EXEMPT_AGENT_TYPES
 from shared.teachback_schema import (
     TEACHBACK_REQUIRED_SUBKEYS,

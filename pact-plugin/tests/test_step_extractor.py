@@ -4,16 +4,13 @@ Tests for the step_extractor module.
 Tests step detection, pending action extraction, and context gathering.
 """
 
-import json
 from pathlib import Path
-
-import pytest
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from refresh.transcript_parser import Turn, ToolCall, parse_transcript
+from refresh.transcript_parser import Turn, parse_transcript
 from refresh.workflow_detector import WorkflowInfo
 from refresh.step_extractor import (
     StepInfo,
@@ -29,10 +26,8 @@ from refresh.step_extractor import (
 
 from fixtures.refresh_system import (
     create_peer_review_transcript,
-    create_orchestrate_transcript,
     make_user_message,
     make_assistant_message,
-    make_task_call,
     create_transcript_lines,
 )
 

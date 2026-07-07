@@ -9,7 +9,6 @@ rewrite.
 """
 
 import json
-import os
 import stat
 from pathlib import Path
 
