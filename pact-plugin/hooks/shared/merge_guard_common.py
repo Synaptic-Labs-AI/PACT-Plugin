@@ -158,7 +158,7 @@ whose mtime exceeds ORPHAN_TOKEN_MAX_AGE_SECONDS (12x TOKEN_TTL).
 Triggered from merge_guard_pre.find_valid_token (primary, load-bearing
 on every dangerous-Bash precheck) and session_init.main (secondary,
 eager-cleanup at session start). Disk-hygiene defense — not a primary
-security check; the primary check is I-3 TTL expiry at 5 minutes.
+security check; the primary check is I-3 TTL expiry (bounded by TOKEN_TTL).
 """
 
 from __future__ import annotations
@@ -172,8 +172,8 @@ from pathlib import Path
 
 from .paths import get_claude_config_dir
 
-# Token TTL in seconds (5 minutes)
-TOKEN_TTL = 300
+# Token TTL in seconds
+TOKEN_TTL = 900
 
 # Directory for token files. B2 (import-time binding): CLAUDE_CONFIG_DIR is
 # fixed per-process before this module is imported, so an eager SSOT-derived
@@ -204,13 +204,14 @@ MAX_USES = 2
 # O_EXCL to atomically claim one use slot of an N-use token (#720 Bug C).
 USE_MARKER_SUFFIX = ".use-"
 
-# Orphan-token cleanup threshold. Tokens that survive past this window without
-# being consumed or used are reaped as disk hygiene — they cannot be legitimate
-# (TOKEN_TTL=300s already expires them for authorization). 12x TOKEN_TTL gives
-# strong margin against any legitimate in-flight token while aggressively
-# bounding accumulation. Disk-hygiene defense — not a primary security check;
-# the primary check is TOKEN_TTL expiry (invariant I-3).
-ORPHAN_TOKEN_MAX_AGE_SECONDS = 3600
+# Orphan-token cleanup threshold, derived as a fixed multiple of TOKEN_TTL so the
+# two never drift. Tokens that survive past this window without being consumed or
+# used are reaped as disk hygiene — they cannot be legitimate (TOKEN_TTL already
+# expires them for authorization). 12x TOKEN_TTL gives strong margin against any
+# legitimate in-flight token while aggressively bounding accumulation. Disk-hygiene
+# defense — not a primary security check; the primary check is TOKEN_TTL expiry
+# (invariant I-3).
+ORPHAN_TOKEN_MAX_AGE_SECONDS = 12 * TOKEN_TTL
 
 # Layer 1 Block 3 (gh CLI / git semantic signal) per op_type — SEC-S2 cycle-2.
 # Each value is a substring that MUST appear in tool_response.stdout for the
@@ -1637,7 +1638,7 @@ def cleanup_orphan_tokens(
 
     Targets tokens that escaped the normal lifecycle — e.g., when the
     consuming dangerous-Bash command was never executed after authorization,
-    leaving a token to expire silently. TOKEN_TTL (300s) already expires
+    leaving a token to expire silently. TOKEN_TTL already expires
     them for authorization purposes; this helper unlinks them from disk to
     bound accumulation.
 
