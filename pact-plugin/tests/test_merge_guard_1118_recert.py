@@ -33,6 +33,7 @@ import subprocess
 import sys
 import importlib.util
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
@@ -68,7 +69,7 @@ def _load_module_at(sha):
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
         return None
     spec = importlib.util.spec_from_loader(f"shared._mgc_{sha}", loader=None)
-    mod = importlib.util.module_from_spec(spec)
+    mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]  # spec is never None here
     mod.__package__ = "shared"
     try:
         exec(compile(src, f"<{_MGC_PATH}@{sha}>", "exec"), mod.__dict__)
@@ -77,8 +78,12 @@ def _load_module_at(sha):
     return mod
 
 
-_BASE = _load_module_at(_BASE_SHA)
-_HEAD = _load_module_at(_HEAD_SHA)
+# Annotated Any: dynamically exec'd modules have no static type; the attribute accesses
+# below (is_dangerous_command / detect_command_operation_type / _split_into_legs) are
+# guarded at runtime by _HISTORY_OK (the @requires_history skip), so silence the editor-only
+# reportOptionalMemberAccess without a runtime assert.
+_BASE: Any = _load_module_at(_BASE_SHA)
+_HEAD: Any = _load_module_at(_HEAD_SHA)
 _HISTORY_OK = _BASE is not None and _HEAD is not None
 
 # Skip the base-vs-HEAD differential rows when history is unavailable; the absolute PATCH
