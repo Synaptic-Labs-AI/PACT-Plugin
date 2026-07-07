@@ -286,6 +286,18 @@ _GH_PREFIX = r"\bgh\s+" + _GH_GLOBAL_FLAGS
 _GIT_PREFIX = r"\bgit\s+" + _GIT_GLOBAL_FLAGS
 _GH_API_PREFIX = _GH_PREFIX + r"api\b"
 
+# The quote-BALANCED value token (#1118 re-model) — the single Q-SAFE primitive both
+# carrier 8 and carrier 9 consume via _strip_flag_values. A value token is a maximal run
+# of {unquoted non-quote char | complete single-quoted span | complete double-quoted
+# span}, ending at unquoted whitespace. Because it consumes quoted spans ATOMICALLY it can
+# never bite a PARTIAL quoted span (a lone quote is neither `[^\s'"]` nor a complete
+# `"…"`/`'…'`), so it structurally CANNOT emit a dangling quote into the `stripped` string
+# that _mask_shell_quotes / _slice_stripped_legs consume — the root-cause fix for the
+# SEC-1/SEC-2 leg-merge regression. Assembled from the module's own quote-span fragments
+# (`[^\s'"]`, `'[^']*'`, `"(?:[^"\\]|\\.)*"`); the three alternatives have disjoint first
+# chars → linear, no ReDoS (same property as carriers 7/8's spans).
+_VALUE_TOKEN = r"""(?:[^\s'"]|'[^']*'|"(?:[^"\\]|\\.)*")+"""
+
 # Pre-compiled patterns for the operation-type classifier (consistent with
 # DANGEROUS_PATTERNS style).
 _GH_PR_MERGE_RE = re.compile(_GH_PREFIX + r"pr\s+merge\b")
@@ -1796,6 +1808,28 @@ def _has_command_substitution(quoted_content: str) -> bool:
     return "$(" in quoted_content or "`" in quoted_content
 
 
+def _strip_flag_values(span: str, flag_sep_regex: str, keep_fn) -> str:
+    """Quote-safe value strip for a flag family within a single command span (#1118
+    re-model). KEEPS the flag(+separator) token; replaces the VALUE with a BALANCED
+    placeholder. Three arms by value-quoting (order load-bearing: quoted arms first, so
+    the unquoted VALUE-TOKEN arm never re-touches an already-stripped quoted value):
+      1. double-quoted value  -> keep_fn (preserves $()/backtick cmd-sub — it executes)
+      2. single-quoted value  -> unconditional 'STRIPPED' (single quotes never expand)
+      3. unquoted VALUE TOKEN  -> keep_fn (Q-SAFE: consumes a COMPLETE quote-balanced token
+                                  incl. embedded quoted spans, so it can NEVER emit a
+                                  dangling quote that would merge legs — the SEC-1/SEC-2
+                                  root-cause fix).
+    `flag_sep_regex` MUST be ONE capturing group (keep_fn uses m.group(1); the sq arm
+    backrefs `\\1`) and must introduce no OTHER capturing group. SHARED by carriers 8 & 9
+    so the two value strips can never drift again (the shared non-quote-aware matcher was
+    the #1118 root cause).
+    """
+    span = re.sub(flag_sep_regex + r'"(?:[^"\\]|\\.)*"', keep_fn, span)     # 1
+    span = re.sub(flag_sep_regex + r"'[^']*'", r"\1'STRIPPED'", span)       # 2
+    span = re.sub(flag_sep_regex + _VALUE_TOKEN, keep_fn, span)             # 3
+    return span
+
+
 def _strip_non_executable_content(command: str) -> str:
     """Strip shell content that is clearly non-executable before pattern matching.
 
@@ -2147,41 +2181,121 @@ def _strip_non_executable_content(command: str) -> str:
                     return m.group(0)  # value contains $()/backtick → executes; keep
                 return m.group(1) + "'STRIPPED'"
 
-            # (a) direct-value body flags — double- then single-quoted.
-            span = re.sub(
-                r"(" + _data_flag + r"\s+)\"(?:[^\"\\]|\\.)*\"", _keep_flag_dq, span
-            )
-            span = re.sub(
-                r"(" + _data_flag + r"\s+)'[^']*'", r"\1'STRIPPED'", span
-            )
-            # (b) KEY=VALUE field flags — double- then single-quoted. `<key>` is a
-            # bare word (letters/digits/._-); the value AFTER `=` is what is stripped.
-            span = re.sub(
-                r"(" + _field_flag + r"\s+[\w.\-]+=)\"(?:[^\"\\]|\\.)*\"",
-                _keep_flag_dq,
-                span,
-            )
-            span = re.sub(
-                r"(" + _field_flag + r"\s+[\w.\-]+=)'[^']*'", r"\1'STRIPPED'", span
-            )
-            # (#1096 §2.3) UNQUOTED body/field values — closes the endpoint-decoy the
-            # quoted-only arms above miss (`-f note=pulls/5/merge`, `-d body`), and the
-            # #1037 unquoted-body read-floor over-block (carrier-8 feeds is_dangerous).
-            # Runs AFTER the quoted arms, and the value's first char is a NON-quote
-            # (`[^\s'"]`), so a quoted value already handled above is never re-touched.
-            # Anchored on the body-flag(+key=) prefix, so the URL POSITIONAL endpoint
-            # (never preceded by such a prefix) is never matched -> never stripped
-            # (over-block-safe). Reuses _keep_flag_dq: a $()/backtick value executes and
-            # is kept; otherwise the 'STRIPPED' placeholder replaces the bare value.
-            span = re.sub(
-                r"(" + _data_flag + r"\s+)[^\s'\"]\S*", _keep_flag_dq, span
-            )
-            span = re.sub(
-                r"(" + _field_flag + r"\s+[\w.\-]+=)[^\s'\"]\S*", _keep_flag_dq, span
+            # Body flag VALUES via the SHARED quote-safe strip (#1118 re-model, FIX-A).
+            # Each call does 3 arms (dq / sq / unquoted VALUE-TOKEN); the unquoted arm now
+            # consumes a COMPLETE quote-balanced token, so an embedded-quote body value
+            # (`-f k=x"y z"`, a jq-ish `-d '...' ` payload) can no longer leave a dangling
+            # quote that mis-pairs in _mask_shell_quotes and MERGES legs — the pre-existing
+            # carrier-8 under-block (#1118 review). This closes the endpoint-decoy the
+            # quoted-only arms miss (`-f note=pulls/5/merge`, `-d body`) + the #1037
+            # unquoted-body read-floor over-block, over-block-safely: the arm is anchored on
+            # the body-flag(+key=) prefix, so the URL POSITIONAL endpoint (never preceded by
+            # such a prefix) is never matched. SPACE-form separator ONLY here — carrier-8's
+            # `=`-joined-flag completeness (`--field=k=v`) is a DIFFERENT, deferred issue
+            # (#1125); this commit fixes ONLY carrier-8's quote-safety.
+            # (a) direct-value body flags -d/--data*; (b) key=value field flags -f/-F/--field.
+            span = _strip_flag_values(span, r"(" + _data_flag + r"\s+)", _keep_flag_dq)
+            span = _strip_flag_values(
+                span, r"(" + _field_flag + r"\s+[\w.\-]+=)", _keep_flag_dq
             )
             return span
 
         result = re.sub(_http_client_span, _strip_http_body_span, result)
+
+    # 9. Strip gh-api CLIENT-SIDE OUTPUT-SELECTOR + non-target flag VALUES (#1118), via
+    #    the SHARED quote-safe _strip_flag_values helper.
+    #    Carrier 8 removes the merge/git-refs FP substring from request-BODY values, but a
+    #    gh-api command's output selectors (--jq/-q jq filter, --template/-t Go template)
+    #    and other non-target value flags (-H/--header, --input body-file name, --hostname,
+    #    -p/--preview) still carry it, so a graphql/REST READ whose --jq names a response
+    #    field like `mergeStateStatus` is OVER-BLOCKED by the .*merge implicit-POST arm.
+    #    These VALUES can NEVER be the request ENDPOINT or METHOD (jq/template run on the
+    #    RESPONSE client-side; a header is request metadata; --input names a local file; a
+    #    hostname/preview name is not the resource — the endpoint is always the URL
+    #    positional), so stripping ONLY the value is zero-under-block (the CLIENT-vs-SERVER
+    #    analogue of carrier 8's PATH-vs-BODY invariant). gh-api's flag vocabulary is FINITE
+    #    + DOCUMENTED, so this surface is BOUNDED (unlike curl/wget's unbounded value-flag
+    #    vocabulary -> WON'T-FIX by construction, #1098). Scoped to a gh-api span ONLY (its
+    #    OWN _GH_API_PREFIX anchor, NARROWER than carrier 8's shared curl/wget/gh-api span),
+    #    and the FORM-AWARE `_selector_flagsep` is token-boundary anchored (`(?<!\S)`), so
+    #    -q/-t/-H/-p can never mis-strip curl -t (--telnet-option), wget -t (--tries),
+    #    gh pr create -t (--title, carrier 7), or a `-q` mid-token. Every flag token is KEPT
+    #    (only the value is replaced) so the implicit-POST lookaheads still fire on a genuine
+    #    write (a real mutation via --input to a path-resident endpoint keeps its --input
+    #    flag and stays HELD; its destructive target lives in the URL positional, never
+    #    stripped). CONTENTS-API early-return mirrors carrier 8: never touch a contents/ span
+    #    (its main/master gating signal is body/positional-resident). --cache is OUT (its
+    #    duration grammar provably cannot carry the substring).
+    #
+    #    QUOTE-SAFETY (#1118 re-model): the value strip goes through the SHARED
+    #    _strip_flag_values (quote-BALANCED _VALUE_TOKEN) + the FORM-AWARE separator (space /
+    #    =-long / =-short / attached-short). The PRIOR shipped carrier 9 used a
+    #    non-quote-aware unquoted arm (`[^\s'"]\S*`) + a `\s+`-only separator; its earlier
+    #    "additive-pure / cannot open a new under-block" claim was FALSIFIED by the #1118
+    #    review — on an embedded-quote value it emitted a DANGLING quote that mis-paired in
+    #    _mask_shell_quotes, MERGED legs, and regressed the guard in BOTH directions (SEC-1
+    #    over-block + SEC-2 under-block). This is NOT +N/-0; correctness is proven by
+    #    BIDIRECTIONAL base-vs-HEAD-vs-PATCH testing, never byte-diff. Same execution-routing
+    #    guards as carriers 3/5/7/8: skip when piped/process-sub to a shell; the double-
+    #    quoted arm preserves a value containing command substitution `$(`/backtick.
+    if not piped_to_shell and not process_sub_to_shell:
+        # The gh-api command span: from a gh-api head up to the first UNQUOTED shell
+        # separator. Quote-aware body (balanced quotes consumed atomically; disjoint
+        # first chars -> linear, no ReDoS) — identical shape to carriers 7/8, but
+        # anchored on gh-api ONLY (no curl/wget head), so -q/-t/-H/-p can never be
+        # mis-read as a curl/wget short flag. The URL positional and the -X/--method
+        # flag live in this span but are never matched by the selector-flag arms below
+        # (which require a selector FLAG directly before the value), so they survive.
+        _gh_api_selector_span = (
+            r"(?:" + _GH_API_PREFIX + r")"
+            r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+        )
+        # FORM-AWARE, token-anchored separator (#1118 re-model, FIX-B). gh (cobra/pflag)
+        # accepts a flag value four ways: space (`--jq x`), =-long (`--jq=x`), =-short
+        # (`-q=x`), attached-short (`-qx`). Long flags require a separator; short flags may
+        # attach. `(?<!\S)` anchors the flag at a token boundary, so `-q`/`-t`/`-H`/`-p`
+        # never match inside a positional (`some-q-endpoint`) or an already-stripped value.
+        # Long forms BEFORE short forms (so `--template` is not read as `-t` + `emplate`).
+        # Boolean flags (`--paginate`, `--slurp`, …) carry no value and are absent from the
+        # set. Wrapped in ONE capturing group at the call site (see _strip_flag_values).
+        _selector_flagsep = (
+            r"(?<!\S)(?:"
+            r"(?:--jq|--template|--header|--input|--hostname|--preview)(?:\s+|=)"
+            r"|(?:-q|-t|-H|-p)(?:\s+|=)?"
+            r")"
+        )
+
+        def _keep_selector_dq(m: re.Match) -> str:
+            # group(1) = the flag(+separator) captured by the wrapped _selector_flagsep.
+            # Preserve a value that contains command substitution ($()/backtick) — it
+            # would EXECUTE and must stay visible to the danger arms (same shape as carrier
+            # 8's _keep_flag_dq; both are passed as keep_fn to the shared _strip_flag_values).
+            if _has_command_substitution(m.group(0)):
+                return m.group(0)
+            return m.group(1) + "'STRIPPED'"
+
+        def _strip_gh_api_selectors(span_match: re.Match) -> str:
+            span = span_match.group(0)
+            # CONTENTS-API exception (IGNORECASE, mirrors carrier 8): a contents span
+            # carries its main/master gating signal in the body/positional, so preserve
+            # the span verbatim (an output selector on a contents span is a rare, fail-
+            # safe pre-existing residual, not in #1118 scope).
+            if re.search(r"contents/", span, re.IGNORECASE):
+                return span
+            # Selector flag VALUES via the SHARED quote-safe strip (FIX-A + FIX-B). One call
+            # does all three arms (dq / sq / unquoted VALUE-TOKEN) across all four value-
+            # attachment forms. The unquoted arm consumes a COMPLETE quote-balanced token, so
+            # an embedded-quote selector value (a jq `.a+" "+.b`, a Go template
+            # `{{.n}}" "{{.t}}`, `-q x"y z"`) can no longer leave a dangling quote that merges
+            # legs (SEC-1/SEC-2). Anchored on the selector-flag(+separator) prefix, so the URL
+            # POSITIONAL endpoint (never preceded by such a prefix) is never matched -> a real
+            # destructive target in the path is never removed (over-block-safe).
+            span = _strip_flag_values(
+                span, r"(" + _selector_flagsep + r")", _keep_selector_dq
+            )
+            return span
+
+        result = re.sub(_gh_api_selector_span, _strip_gh_api_selectors, result)
 
     return result
 
