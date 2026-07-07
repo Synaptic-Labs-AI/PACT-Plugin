@@ -2183,6 +2183,97 @@ def _strip_non_executable_content(command: str) -> str:
 
         result = re.sub(_http_client_span, _strip_http_body_span, result)
 
+    # 9. Strip gh-api CLIENT-SIDE OUTPUT-SELECTOR + non-target flag VALUES (#1118).
+    #    Carrier 8 removes the merge/git-refs FP substring from request-BODY values,
+    #    but a gh-api command's output selectors (--jq/-q jq filter, --template/-t Go
+    #    template) and other non-target value flags (-H/--header, --input body-file
+    #    name, --hostname, -p/--preview) still carry it, so a graphql/REST READ whose
+    #    --jq names a response field like `mergeStateStatus` is OVER-BLOCKED by the
+    #    .*merge implicit-POST arm. These VALUES can NEVER be the request ENDPOINT or
+    #    METHOD (jq/template run on the RESPONSE client-side; a header is request
+    #    metadata; --input names a local file; a hostname/preview name is not the
+    #    resource — the endpoint is always the URL positional), so stripping ONLY the
+    #    value is zero-under-block (the CLIENT-vs-SERVER analogue of carrier 8's
+    #    PATH-vs-BODY invariant). gh-api's flag vocabulary is FINITE + DOCUMENTED, so
+    #    this surface is BOUNDED (unlike curl/wget's unbounded value-flag vocabulary
+    #    -> WON'T-FIX by construction, #1098). Scoped to a gh-api span ONLY (its OWN
+    #    _GH_API_PREFIX anchor, NARROWER than carrier 8's shared curl/wget/gh-api
+    #    span): -q/-t/-H/-p are gh-api short flags here, so the strip never touches
+    #    curl -t (--telnet-option), wget -t (--tries), or gh pr create -t (--title,
+    #    carrier 7). Every flag token is KEPT (only the value is replaced) so the
+    #    implicit-POST lookaheads still fire on a genuine write (a real mutation via
+    #    --input to a path-resident endpoint keeps its --input flag and stays HELD;
+    #    its destructive target lives in the URL positional, which is never stripped).
+    #    CONTENTS-API early-return mirrors carrier 8: never touch a contents/ span (its
+    #    main/master gating signal is body/positional-resident). --cache is OUT (its
+    #    duration grammar provably cannot carry the substring — a genuine non-source,
+    #    not a residual); every other non-target value flag is IN. Same execution-
+    #    routing guards as carriers 3/5/7/8: skip when piped/process-sub to a shell;
+    #    the double-quoted arm preserves a value containing command substitution
+    #    `$(`/backtick (it would execute). ADDITIVE-PURE: a self-contained carrier that
+    #    only REMOVES incidental FP substrings from non-gating values — it adds no arm
+    #    and modifies no existing danger path, so it cannot open a new under-block.
+    if not piped_to_shell and not process_sub_to_shell:
+        # The gh-api command span: from a gh-api head up to the first UNQUOTED shell
+        # separator. Quote-aware body (balanced quotes consumed atomically; disjoint
+        # first chars -> linear, no ReDoS) — identical shape to carriers 7/8, but
+        # anchored on gh-api ONLY (no curl/wget head), so -q/-t/-H/-p can never be
+        # mis-read as a curl/wget short flag. The URL positional and the -X/--method
+        # flag live in this span but are never matched by the selector-flag arms below
+        # (which require a selector FLAG directly before the value), so they survive.
+        _gh_api_selector_span = (
+            r"(?:" + _GH_API_PREFIX + r")"
+            r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+        )
+        # Long forms BEFORE short forms; the trailing `\s+` (added at each use) prevents
+        # `-t` matching inside `--template` and `-p` matching inside the boolean
+        # `--paginate` (deliberately NOT in the set — it carries no value). -q/-t/-H/-p
+        # are gh-api short flags (safe: this span is gh-api-only); --input/--hostname/
+        # --preview have no colliding short form here.
+        _selector_flag = (
+            r"(?:--jq|--template|--header|--input|--hostname|--preview"
+            r"|-q|-t|-H|-p)"
+        )
+
+        def _keep_selector_dq(m: re.Match) -> str:
+            # group(1) = the flag (+ trailing whitespace) up to the opening quote.
+            # Preserve a value that contains command substitution ($()/backtick) — it
+            # would EXECUTE and must stay visible to the danger arms (mirrors carrier
+            # 8's _keep_flag_dq; a SEPARATE helper here to keep this carrier +N / -0).
+            if _has_command_substitution(m.group(0)):
+                return m.group(0)
+            return m.group(1) + "'STRIPPED'"
+
+        def _strip_gh_api_selectors(span_match: re.Match) -> str:
+            span = span_match.group(0)
+            # CONTENTS-API exception (IGNORECASE, mirrors carrier 8): a contents span
+            # carries its main/master gating signal in the body/positional, so preserve
+            # the span verbatim (an output selector on a contents span is a rare, fail-
+            # safe pre-existing residual, not in #1118 scope).
+            if re.search(r"contents/", span, re.IGNORECASE):
+                return span
+            # double-quoted value (preserve command-substitution)
+            span = re.sub(
+                r"(" + _selector_flag + r"\s+)\"(?:[^\"\\]|\\.)*\"",
+                _keep_selector_dq,
+                span,
+            )
+            # single-quoted value (never expands)
+            span = re.sub(
+                r"(" + _selector_flag + r"\s+)'[^']*'", r"\1'STRIPPED'", span
+            )
+            # UNQUOTED value (#1096 §2.3) — runs AFTER the quoted arms; the value's
+            # first char is a NON-quote (`[^\s'"]`), so a quoted value already handled
+            # above is never re-touched. Anchored on the selector-flag prefix, so the
+            # URL POSITIONAL endpoint (never preceded by such a prefix) is never matched
+            # -> a real destructive target in the path is never removed (over-block-safe).
+            span = re.sub(
+                r"(" + _selector_flag + r"\s+)[^\s'\"]\S*", _keep_selector_dq, span
+            )
+            return span
+
+        result = re.sub(_gh_api_selector_span, _strip_gh_api_selectors, result)
+
     return result
 
 
