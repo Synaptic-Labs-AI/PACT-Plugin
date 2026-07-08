@@ -240,10 +240,11 @@ class TestTokenPersistenceCanonicalization:
         assert len(tokens) == 1
         payload = json.loads(tokens[0].read_text())
         # The token carries the shared-SSOT context; branch_set is the canonical,
-        # sorted, comma-joined STRING (a list/tuple would have survived the JSON
+        # sorted, NUL-joined STRING (#1135 F1 — NUL is git-forbidden in ref names, so
+        # the joined identity is INJECTIVE; a list/tuple would have survived the JSON
         # round-trip as a list and broken str-comparison matching).
         ctx = payload.get("context", payload)
-        assert ctx.get("branch_set") == "aa,bb,cc"
+        assert ctx.get("branch_set") == "aa\x00bb\x00cc"
         assert isinstance(ctx.get("branch_set"), str)
         # And a reordered exec of the same set authorizes against the persisted token.
         assert _execute(_cmd(_D, ["bb", "cc", "aa"]), tmp_path) == ALLOW
@@ -259,7 +260,7 @@ class TestGatherCorrectness:
     def test_dash_flag_is_not_gathered_as_a_branch(self, tmp_path):
         # `-r` (a dash-flag) must be dropped; only the two real names form the set.
         cmd = _cmd(_D + " -r", ["origin/x", "origin/y"])
-        assert mgc.extract_command_context(cmd).get("branch_set") == "origin/x,origin/y"
+        assert mgc.extract_command_context(cmd).get("branch_set") == "origin/x\x00origin/y"
         minted, rc = _roundtrip(cmd, cmd, tmp_path)
         assert minted == 1
         assert rc == ALLOW
@@ -362,3 +363,85 @@ class TestNonVacuity:
         # Control: single-branch matches on the scalar `branch` key, not branch_set.
         smint, src = _roundtrip(_cmd(_D, ["solo"]), _cmd(_D, ["solo"]), tmp_path)
         assert smint == 1 and src == ALLOW
+
+
+# ===========================================================================
+# REVIEW REMEDIATION (peer-review cycle 1) — the comma-collision under-block
+# closed by the #1135 F1 NUL-separator fix, plus the 3 Minor coverage rows the
+# review surfaced. These pin the exact witnesses from the review.
+# ===========================================================================
+class TestCommaNameCollisionClosed:
+    """#1135 F1: git ref names PERMIT commas, so the OLD `,`-joined branch_set was
+    non-injective — {aa,'bb,cc'} (2 branches) and {aa,bb,cc} (3 branches) both joined
+    to `aa,bb,cc`, letting a 2-branch token authorize a 3-branch delete (a cross-set
+    UNDER-BLOCK; the review witness). The NUL join (git-forbidden in ref names) makes
+    the identity INJECTIVE: the two sets now produce distinct strings, so the token no
+    longer cross-authorizes. The over-block direction is untouched (see the self-match)."""
+
+    def test_two_set_and_three_set_no_longer_collide(self):
+        two = mgc._extract_branch_delete_set(_cmd(_D, ["aa", "bb,cc"]))       # {aa, 'bb,cc'}
+        three = mgc._extract_branch_delete_set(_cmd(_D, ["aa", "bb", "cc"]))  # {aa, bb, cc}
+        assert two != three, "comma-named 2-set must not collide with the 3-set (F1)"
+        assert two == "aa\x00bb,cc" and three == "aa\x00bb\x00cc"
+
+    def test_two_set_token_does_not_authorize_three_set_delete(self, tmp_path):
+        # The review's cross-set under-block witness — now REFUSED.
+        minted, rc = _roundtrip(_cmd(_D, ["aa", "bb,cc"]), _cmd(_D, ["aa", "bb", "cc"]), tmp_path)
+        assert minted == 1, "the 2-branch approval must still MINT (the refuse is a read decision)"
+        assert rc == DENY, "a {aa,'bb,cc'} token must NOT authorize deleting {aa,bb,cc} (F1)"
+
+    def test_three_set_token_does_not_authorize_two_set_delete(self, tmp_path):
+        minted, rc = _roundtrip(_cmd(_D, ["aa", "bb", "cc"]), _cmd(_D, ["aa", "bb,cc"]), tmp_path)
+        assert minted == 1
+        assert rc == DENY
+
+    def test_comma_named_branch_self_matches_faithful_unaffected(self, tmp_path):
+        # Over-block direction untouched: a faithful click deleting a comma-named
+        # branch set still mints + authorizes its own byte-identical exec.
+        cmd = _cmd(_D, ["aa", "bb,cc"])
+        minted, rc = _roundtrip(cmd, cmd, tmp_path)
+        assert minted == 1
+        assert rc == ALLOW
+
+
+class TestBenignContinuationAndCompound:
+    """M1 + M2: a multi-branch delete carrying a BENIGN continuation is a single
+    destructive leg and mints+authorizes (#1069); a multi-branch delete CHAINED with a
+    second destructive op is compound (>=2 destructive legs) and is REFUSED (no mint)."""
+
+    @pytest.mark.parametrize("tail", [" ; echo done", " > /tmp/pact_r1_log", " &"])
+    def test_multi_branch_with_benign_continuation_authorizes(self, tail, tmp_path):
+        cmd = _cmd(_D, ["aa", "bb"]) + tail
+        minted, rc = _roundtrip(cmd, cmd, tmp_path)
+        assert minted == 1, "faithful multi-branch + benign continuation must mint (#1069)"
+        assert rc == ALLOW
+
+    @pytest.mark.parametrize("tail", [" && git push --force", " && rm -rf x"])
+    def test_multi_branch_chained_with_destructive_is_compound_refused(self, tail, tmp_path):
+        cmd = _cmd(_D, ["aa", "bb"]) + tail
+        assert mgc.is_compound_destructive_command(cmd) is True
+        minted, rc = _roundtrip(cmd, cmd, tmp_path)
+        assert minted == 0, "a compound (>=2 destructive legs) must NOT mint"
+        assert rc == DENY
+
+
+class TestQuotedBranchNames:
+    """M3: quoted branch names canonicalize via _strip_surrounding_quotes, so quoting is
+    transparent — a faithful click that quotes the names authorizes the unquoted exec
+    (and vice-versa), and the canonical identity is quote-insensitive."""
+
+    def _q(self, names):
+        return _GB + _D + " " + " ".join("'%s'" % n for n in names)
+
+    def test_quoted_names_canonicalize_quote_insensitively(self):
+        assert mgc._extract_branch_delete_set(self._q(["aa", "bb"])) == "aa\x00bb"
+
+    def test_quoted_mint_authorizes_unquoted_exec(self, tmp_path):
+        minted, rc = _roundtrip(self._q(["aa", "bb"]), _cmd(_D, ["aa", "bb"]), tmp_path)
+        assert minted == 1
+        assert rc == ALLOW
+
+    def test_unquoted_mint_authorizes_quoted_reordered_exec(self, tmp_path):
+        minted, rc = _roundtrip(_cmd(_D, ["aa", "bb"]), self._q(["bb", "aa"]), tmp_path)
+        assert minted == 1
+        assert rc == ALLOW
