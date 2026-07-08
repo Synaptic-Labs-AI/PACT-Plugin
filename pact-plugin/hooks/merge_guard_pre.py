@@ -588,11 +588,12 @@ def check_merge_authorization(command: str, token_dir: Path | None = None) -> st
     """Check if a dangerous command is authorized.
 
     Tokens are bounded-use, not single-use: one approval authorizes up to
-    MAX_USES=2 identical-context attempts within TOKEN_TTL. A SUCCESSFUL
+    MAX_USES identical-context attempts within TOKEN_TTL. A SUCCESSFUL
     operation immediately retires the token (renamed to .consumed) regardless
     of remaining uses (invariant I-2) — a success never leaves a reusable
-    token — while a FAILED first attempt preserves the token so exactly one
-    identical-context retry stays authorized within TTL (invariant I-4). The
+    token — while a FAILED first attempt preserves the token so up to
+    MAX_USES-1 identical-context retries stay authorized within TTL
+    (invariant I-4). The
     .use-N slot claims and the terminal .consumed rename are atomic on POSIX
     filesystems and idempotent — a concurrent invocation that already retired
     the token recognizes the .consumed file and allows the command. The token's
