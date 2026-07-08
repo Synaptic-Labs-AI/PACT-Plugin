@@ -39,6 +39,8 @@ from merge_guard_pre import _token_matches_command  # noqa: E402
 
 # FORCE flag assembled at runtime — no raw `git branch -D` literal in the source.
 _D = "-" + "D"
+# The canonical branch_set join separator (NUL, ref-illegal → injective; F1 fix).
+_SEP = "\x00"
 
 
 def _cmd(flags: str, names: list[str]) -> str:
@@ -67,7 +69,7 @@ def test_multi_branch_force_delete_mints_branch_set_and_self_matches(flags):
     assert ctx.get("operation_type") == "branch-delete"
     # The additive key is populated with the canonical sorted identity, and the
     # scalar `branch` key stays ABSENT (mutual exclusivity).
-    assert ctx.get("branch_set") == "A,B,C"
+    assert ctx.get("branch_set") == _SEP.join(["A", "B", "C"])
     assert "branch" not in ctx
     # The faithful click now mints+matches (the over-block cure).
     assert _matches(cmd, cmd) is True
@@ -107,7 +109,7 @@ def test_duplicate_names_dedup_to_same_set():
 
 def test_slashed_branch_names_mint_and_match():
     cmd = _cmd(_D, ["feature/x", "feature/y"])
-    assert extract_command_context(cmd).get("branch_set") == "feature/x,feature/y"
+    assert extract_command_context(cmd).get("branch_set") == _SEP.join(["feature/x", "feature/y"])
     assert _matches(cmd, cmd) is True
 
 
@@ -124,7 +126,23 @@ def test_lowercase_delete_stays_ungated(flags):
 def test_branch_set_is_order_independent_canonical_string():
     a = _extract_branch_delete_set(_cmd(_D, ["A", "B", "C"]))
     b = _extract_branch_delete_set(_cmd(_D, ["C", "B", "A"]))
-    assert a == b == "A,B,C"
+    assert a == b == _SEP.join(["A", "B", "C"])
     assert isinstance(a, str)  # STRING, never a tuple/list (JSON round-trip safety)
     # Fewer than two positionals -> None -> defers to the scalar `branch` path.
     assert _extract_branch_delete_set(_cmd(_D, ["solo"])) is None
+
+
+def test_comma_named_branch_does_not_collide_with_a_different_set():
+    # F1 regression: with the NUL separator the identity is INJECTIVE, so a branch
+    # literally NAMED `a,b` plus `c` (a 2-branch set) does NOT collide with the
+    # 3-branch set {a, b, c}. A bare `,` join collided them (both -> 'a,b,c') and
+    # cross-authorized distinct sets. `'a,b'` stays ONE shell token via the quotes.
+    two = _cmd(_D, ["'a,b'", "c"])       # branches: "a,b" and "c"
+    three = _cmd(_D, ["a", "b", "c"])    # branches: a, b, c
+    assert _extract_branch_delete_set(two) != _extract_branch_delete_set(three)
+    # Cross-authorization REFUSED both directions (the auth-level proof).
+    assert _matches(two, three) is False
+    assert _matches(three, two) is False
+    # Each still self-matches (faithful clicks unaffected).
+    assert _matches(two, two) is True
+    assert _matches(three, three) is True

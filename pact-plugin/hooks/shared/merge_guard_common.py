@@ -881,7 +881,7 @@ def _extract_branch_delete_set(command: str) -> str | None:
     The MULTI-target sibling of _extract_branch_name (which owns the SINGLE
     branch). Handles the CLI `git branch -D|--delete --force <a> <b> ...` form
     with TWO OR MORE positional branch names, returning a canonical
-    sort+dedup+quote-strip comma-joined identity STRING (e.g. `a,b,c`), or None
+    sort+dedup+quote-strip identity STRING joined on NUL (`\x00`), or None
     when fewer than two branch names are positively extractable (<2 -> defers to
     the scalar _extract_branch_name path — the BOUNDARY discriminator, so a
     command populates EXACTLY ONE of `branch` / `branch_set`).
@@ -891,9 +891,16 @@ def _extract_branch_delete_set(command: str) -> str | None:
     JSON, and the read side compares via `str()`, so a list<->tuple round-trip
     must never enter the identity), built + canonicalized in this ONE shared SSOT
     so mint and read derive byte-identical strings (D2 symmetry by construction).
-    Set-EQUALITY on this string then closes the #1032 multi-target under-block
-    unconditionally: a `{a,b}` token cannot authorize `{a,b,c}` (unequal strings)
-    while a `{b,a}` reorder MATCHES (both canonicalize to `a,b`).
+    The join separator is NUL (`\x00`): git forbids control bytes in branch
+    names, so no name can contain it and the joined identity is INJECTIVE —
+    distinct branch SETS never collide. (A bare `,` was NOT injective: a branch
+    literally named `a,b` collided with the set {a, b}, cross-authorizing distinct
+    sets — the F1 review finding. NUL is JSON/str()-safe: json escapes it on dump,
+    restores it on load, and str() is stable, so the round-trip holds.)
+    Set-EQUALITY on this INJECTIVE string then closes the #1032 multi-target
+    under-block UNCONDITIONALLY: a `{a,b}` token cannot authorize `{a,b,c}`
+    (unequal strings) while a `{b,a}` reorder MATCHES (both canonicalize to the
+    same NUL-joined string).
 
     Uses the SAME tokenization as _extract_branch_name (executable-prefix
     truncation at a benign continuation/redirect via _executable_prefix, then drop
@@ -914,7 +921,12 @@ def _extract_branch_delete_set(command: str) -> str | None:
     if len(positionals) < 2:
         return None
     names = sorted({_strip_surrounding_quotes(t) for t in positionals})
-    return ",".join(names) or None
+    # Join on NUL (\x00) — a REF-ILLEGAL separator (git forbids control bytes in
+    # branch names) so no name can contain it -> the identity is INJECTIVE and
+    # distinct sets never collide (the F1 fix; a bare `,` collided a branch named
+    # `a,b` with the set {a, b}). JSON/str()-safe, so D2 mint==read symmetry and
+    # the JSON token round-trip both hold.
+    return "\x00".join(names) or None
 
 
 def _extract_force_push_target_ref(command: str) -> str | None:
@@ -1415,7 +1427,8 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
         pr_number:  str  (merge / close)
         branch:     str  (branch-delete — SINGLE target, exactly 1 positional)
         branch_set: str  (branch-delete — MULTI target #1129, >=2 positionals) —
-                     canonical sort+dedup+quote-strip comma-joined names (`a,b,c`)
+                     canonical sort+dedup+quote-strip names joined on NUL (`\x00`,
+                     a ref-illegal separator → injective, no delimiter collision)
         target_ref: str  (force-push / push-to-main, KD-6; remote-ref-delete #1062a)
         mass_target: str (remote-mass-delete #1062b) — normalized identity tuple
                      <sorted-mass-flags>@<remote-or-implicit-marker>[#<sorted-refspecs>]
