@@ -262,7 +262,7 @@ def find_valid_token(token_dir: Path | None = None) -> tuple[dict, str] | tuple[
     # Layer 3 (cross-cutting disk hygiene): reap unconsumed tokens older
     # than ORPHAN_TOKEN_MAX_AGE_SECONDS (12x TOKEN_TTL). Primary trigger
     # — runs on every dangerous-Bash precheck so orphans are bounded
-    # within ~1h of the next destructive command. Fail-open by
+    # within 12x TOKEN_TTL of the next destructive command. Fail-open by
     # construction; cleanup_orphan_tokens swallows all OSError paths.
     _cleanup_orphan_tokens(token_dir)
 
@@ -539,7 +539,7 @@ def _token_matches_command(token: dict, command: str) -> bool:
     # Checked AFTER op-type identity and BEFORE the per-op target returns so it
     # applies uniformly to all four op-classes. A pre-fix token without the key
     # defaults to the empty set, so any privileged execution mismatches -> REFUSE
-    # (over-block-safe; tokens expire in 5 min, so no backward-compat is needed).
+    # (over-block-safe; tokens expire after TOKEN_TTL, so no backward-compat is needed).
     # bound_flags is an attribute checked here, never part of pair identity.
     if set(context.get("bound_flags", [])) != set(cmd.get("bound_flags", [])):
         return False
@@ -587,13 +587,18 @@ def _token_matches_command(token: dict, command: str) -> bool:
 def check_merge_authorization(command: str, token_dir: Path | None = None) -> str | None:
     """Check if a dangerous command is authorized.
 
-    Tokens are single-use: once a token authorizes a command, it is consumed
-    (renamed to .consumed) so that each approval authorizes exactly one operation.
-    The rename is atomic on POSIX filesystems and idempotent — if a concurrent
-    hook invocation already consumed the token, the second invocation recognizes
-    the .consumed file and allows the command. The token's context is validated
-    against the command to ensure the approved operation matches what is being
-    executed.
+    Tokens are bounded-use, not single-use: one approval authorizes up to
+    MAX_USES identical-context attempts within TOKEN_TTL. A SUCCESSFUL
+    operation immediately retires the token (renamed to .consumed) regardless
+    of remaining uses (invariant I-2) — a success never leaves a reusable
+    token — while a FAILED first attempt preserves the token so up to
+    MAX_USES-1 identical-context retries stay authorized within TTL
+    (invariant I-4). The
+    .use-N slot claims and the terminal .consumed rename are atomic on POSIX
+    filesystems and idempotent — a concurrent invocation that already retired
+    the token recognizes the .consumed file and allows the command. The token's
+    context is validated against the command to ensure the approved operation
+    matches what is being executed.
 
     Args:
         command: The bash command to check

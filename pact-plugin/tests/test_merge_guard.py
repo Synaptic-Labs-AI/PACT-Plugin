@@ -1163,6 +1163,7 @@ class TestNUseSlotMarkerCleanup:
         """`.use-N` markers older than TOKEN_TTL are removed by cleanup."""
         from shared.merge_guard_common import (
             MAX_USES,
+            TOKEN_TTL,
             USE_MARKER_SUFFIX,
             cleanup_consumed_tokens,
         )
@@ -1178,7 +1179,7 @@ class TestNUseSlotMarkerCleanup:
             assert Path(token_path + USE_MARKER_SUFFIX + str(slot)).exists()
 
         # Age them past TTL
-        old_mtime = time.time() - 600
+        old_mtime = time.time() - (2 * TOKEN_TTL)
         for marker in tmp_path.glob("merge-authorized-*.use-*"):
             os.utime(marker, (old_mtime, old_mtime))
         # Age the .consumed file too so it doesn't interfere
@@ -1208,6 +1209,46 @@ class TestNUseSlotMarkerCleanup:
         cleanup_consumed_tokens(tmp_path)
         for slot in range(1, MAX_USES + 1):
             assert Path(token_path + USE_MARKER_SUFFIX + str(slot)).exists()
+
+    def test_reaper_boundary_tracks_token_ttl(self, tmp_path):
+        """Guard: the reaper's staleness boundary IS TOKEN_TTL, not a hardcoded literal.
+
+        Regression-class guard for the reaper-path-vs-auth-path cert-gap. The reaper
+        (cleanup_consumed_tokens) reaps by ``now - mtime > TOKEN_TTL``, so any TTL
+        change silently shifts the boundary: reaper-path *mtime* tests that hardcode
+        an offset (the original ``- 600``) break at the new TTL, while auth-path
+        *stored-expires_at* fixtures do not. This pins the boundary to TOKEN_TTL by
+        aging two ``.consumed`` files that straddle it — both offsets derived from
+        TOKEN_TTL so the test self-adjusts at any TTL. If the reaper threshold is ever
+        replaced with a hardcoded constant, one arm flips and this fails. (The same
+        ``now - mtime > TOKEN_TTL`` predicate governs the ``.use-N`` markers, so
+        pinning one pattern pins the shared boundary.)
+        """
+        from shared.merge_guard_common import TOKEN_TTL, cleanup_consumed_tokens
+
+        # Proportional margin: self-adjusts with TOKEN_TTL and stays comfortably
+        # larger than test-execution wall-clock drift for any realistic TTL.
+        margin = TOKEN_TTL // 10
+        now = time.time()
+
+        within = tmp_path / "merge-authorized-00001.consumed"  # younger than TOKEN_TTL
+        within.write_text('{}')
+        os.utime(within, (now - (TOKEN_TTL - margin), now - (TOKEN_TTL - margin)))
+
+        beyond = tmp_path / "merge-authorized-00002.consumed"  # older than TOKEN_TTL
+        beyond.write_text('{}')
+        os.utime(beyond, (now - (TOKEN_TTL + margin), now - (TOKEN_TTL + margin)))
+
+        cleanup_consumed_tokens(tmp_path)
+
+        assert within.exists(), (
+            "a .consumed file younger than TOKEN_TTL must be RETAINED — the reaper "
+            "boundary must track TOKEN_TTL, not a hardcoded literal"
+        )
+        assert not beyond.exists(), (
+            "a .consumed file older than TOKEN_TTL must be REAPED — the reaper "
+            "boundary must track TOKEN_TTL, not a hardcoded literal"
+        )
 
 
 # =============================================================================
@@ -2485,13 +2526,13 @@ class TestTokenSecurity:
         assert isinstance(data["context"], dict)
         assert data["expires_at"] > data["created_at"]
 
-    def test_token_ttl_is_5_minutes(self):
-        """TOKEN_TTL constant must be 300 seconds (5 minutes)."""
+    def test_token_ttl_is_15_minutes(self):
+        """TOKEN_TTL constant must be 900 seconds (15 minutes)."""
         from merge_guard_post import TOKEN_TTL as post_ttl
         from merge_guard_pre import TOKEN_TTL as pre_ttl
 
-        assert post_ttl == 300
-        assert pre_ttl == 300
+        assert post_ttl == 900
+        assert pre_ttl == 900
 
     def test_token_ttl_matches_between_hooks(self):
         """Both hooks must agree on TOKEN_TTL."""
@@ -6296,12 +6337,12 @@ class TestIdempotentTokenConsumption:
 
     def test_cleanup_removes_expired_consumed_tokens(self, tmp_path):
         """_cleanup_consumed_tokens removes .consumed files older than TOKEN_TTL."""
-        from merge_guard_pre import _cleanup_consumed_tokens
+        from merge_guard_pre import _cleanup_consumed_tokens, TOKEN_TTL
 
         # Create a stale .consumed file (mtime far in the past)
         stale = tmp_path / "merge-authorized-00001.consumed"
         stale.write_text('{}')
-        old_mtime = time.time() - 600  # 10 minutes ago
+        old_mtime = time.time() - (2 * TOKEN_TTL)  # older than TTL
         os.utime(str(stale), (old_mtime, old_mtime))
 
         _cleanup_consumed_tokens(tmp_path)
@@ -6339,11 +6380,11 @@ class TestIdempotentTokenConsumption:
 
     def test_cleanup_handles_concurrent_deletion(self, tmp_path):
         """_cleanup_consumed_tokens handles file deleted by concurrent cleanup."""
-        from merge_guard_pre import _cleanup_consumed_tokens
+        from merge_guard_pre import _cleanup_consumed_tokens, TOKEN_TTL
 
         stale = tmp_path / "merge-authorized-00001.consumed"
         stale.write_text('{}')
-        old_mtime = time.time() - 600
+        old_mtime = time.time() - (2 * TOKEN_TTL)
         os.utime(str(stale), (old_mtime, old_mtime))
 
         # Mock os.path.getmtime to raise FileNotFoundError (concurrent deletion)
@@ -6353,12 +6394,12 @@ class TestIdempotentTokenConsumption:
 
     def test_cleanup_mixed_expired_and_fresh(self, tmp_path):
         """_cleanup_consumed_tokens removes only expired files from a mixed set."""
-        from merge_guard_pre import _cleanup_consumed_tokens
+        from merge_guard_pre import _cleanup_consumed_tokens, TOKEN_TTL
 
         # Stale consumed token
         stale = tmp_path / "merge-authorized-00001.consumed"
         stale.write_text('{}')
-        old_mtime = time.time() - 600
+        old_mtime = time.time() - (2 * TOKEN_TTL)
         os.utime(str(stale), (old_mtime, old_mtime))
 
         # Fresh consumed token
@@ -6376,11 +6417,11 @@ class TestIdempotentTokenConsumption:
 
     def test_post_hook_cleanup_removes_expired_consumed(self, tmp_path):
         """Post-hook _cleanup_consumed_tokens removes stale .consumed files."""
-        from merge_guard_post import _cleanup_consumed_tokens
+        from merge_guard_post import _cleanup_consumed_tokens, TOKEN_TTL
 
         stale = tmp_path / "merge-authorized-00001.consumed"
         stale.write_text('{}')
-        old_mtime = time.time() - 600
+        old_mtime = time.time() - (2 * TOKEN_TTL)
         os.utime(str(stale), (old_mtime, old_mtime))
 
         _cleanup_consumed_tokens(tmp_path)
@@ -6404,12 +6445,12 @@ class TestIdempotentTokenConsumption:
 
     def test_write_token_cleans_up_stale_consumed(self, tmp_path):
         """write_token() cleans up stale .consumed files during token creation."""
-        from merge_guard_post import write_token
+        from merge_guard_post import write_token, TOKEN_TTL
 
         # Create a stale .consumed file
         stale = tmp_path / "merge-authorized-00001.consumed"
         stale.write_text('{}')
-        old_mtime = time.time() - 600
+        old_mtime = time.time() - (2 * TOKEN_TTL)
         os.utime(str(stale), (old_mtime, old_mtime))
 
         # Create a new token — should clean up stale consumed files
@@ -6481,12 +6522,12 @@ class TestIdempotentTokenConsumption:
 
     def test_find_valid_token_calls_cleanup(self, tmp_path):
         """find_valid_token() triggers cleanup of stale consumed tokens."""
-        from merge_guard_pre import find_valid_token
+        from merge_guard_pre import find_valid_token, TOKEN_TTL
 
         # Create a stale consumed token
         stale = tmp_path / "merge-authorized-00001.consumed"
         stale.write_text('{}')
-        old_mtime = time.time() - 600
+        old_mtime = time.time() - (2 * TOKEN_TTL)
         os.utime(str(stale), (old_mtime, old_mtime))
 
         find_valid_token(token_dir=tmp_path)
@@ -6673,7 +6714,7 @@ class TestIdempotentTokenConsumption:
 
     def test_full_lifecycle_create_consume_cleanup(self, tmp_path):
         """Full lifecycle: create token -> consume MAX_USES times -> cleanup after TTL."""
-        from shared.merge_guard_common import MAX_USES
+        from shared.merge_guard_common import MAX_USES, TOKEN_TTL
         from merge_guard_post import write_token
         from merge_guard_pre import (
             _cleanup_consumed_tokens,
@@ -6699,7 +6740,7 @@ class TestIdempotentTokenConsumption:
         assert Path(consumed_path).exists()  # Still within TTL
 
         # 4. After TTL, consumed file is cleaned up (along with .use-N markers)
-        old_mtime = time.time() - 600
+        old_mtime = time.time() - (2 * TOKEN_TTL)
         os.utime(consumed_path, (old_mtime, old_mtime))
         for marker in tmp_path.glob("merge-authorized-*.use-*"):
             os.utime(marker, (old_mtime, old_mtime))
@@ -11550,6 +11591,8 @@ class TestTokenLifecycleInvariants:
         old_time = time.time() - 7200
         os.utime(token, (old_time, old_time))
 
+        # 3600 is an explicit 1h threshold, intentionally decoupled from the ORPHAN
+        # default (12*TOKEN_TTL); exercises reaper behavior at a chosen value, not the default.
         cleanup_orphan_tokens(tmp_path, max_age_seconds=3600)
 
         assert not token.exists()
@@ -11567,6 +11610,8 @@ class TestTokenLifecycleInvariants:
         token.write_text('{"context": {}}')
         # Default mtime is "just now"
 
+        # 3600 is an explicit 1h threshold, intentionally decoupled from the ORPHAN
+        # default (12*TOKEN_TTL); exercises reaper behavior at a chosen value, not the default.
         cleanup_orphan_tokens(tmp_path, max_age_seconds=3600)
 
         assert token.exists()
@@ -11590,6 +11635,8 @@ class TestTokenLifecycleInvariants:
         for p in (consumed, marker):
             os.utime(p, (old_time, old_time))
 
+        # 3600 is an explicit 1h threshold, intentionally decoupled from the ORPHAN
+        # default (12*TOKEN_TTL); exercises reaper behavior at a chosen value, not the default.
         cleanup_orphan_tokens(tmp_path, max_age_seconds=3600)
 
         # Both preserved — these live in cleanup_consumed_tokens' domain
