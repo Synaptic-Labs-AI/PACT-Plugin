@@ -1210,6 +1210,46 @@ class TestNUseSlotMarkerCleanup:
         for slot in range(1, MAX_USES + 1):
             assert Path(token_path + USE_MARKER_SUFFIX + str(slot)).exists()
 
+    def test_reaper_boundary_tracks_token_ttl(self, tmp_path):
+        """Guard: the reaper's staleness boundary IS TOKEN_TTL, not a hardcoded literal.
+
+        Regression-class guard for the reaper-path-vs-auth-path cert-gap. The reaper
+        (cleanup_consumed_tokens) reaps by ``now - mtime > TOKEN_TTL``, so any TTL
+        change silently shifts the boundary: reaper-path *mtime* tests that hardcode
+        an offset (the original ``- 600``) break at the new TTL, while auth-path
+        *stored-expires_at* fixtures do not. This pins the boundary to TOKEN_TTL by
+        aging two ``.consumed`` files that straddle it — both offsets derived from
+        TOKEN_TTL so the test self-adjusts at any TTL. If the reaper threshold is ever
+        replaced with a hardcoded constant, one arm flips and this fails. (The same
+        ``now - mtime > TOKEN_TTL`` predicate governs the ``.use-N`` markers, so
+        pinning one pattern pins the shared boundary.)
+        """
+        from shared.merge_guard_common import TOKEN_TTL, cleanup_consumed_tokens
+
+        # Proportional margin: self-adjusts with TOKEN_TTL and stays comfortably
+        # larger than test-execution wall-clock drift for any realistic TTL.
+        margin = TOKEN_TTL // 10
+        now = time.time()
+
+        within = tmp_path / "merge-authorized-00001.consumed"  # younger than TOKEN_TTL
+        within.write_text('{}')
+        os.utime(within, (now - (TOKEN_TTL - margin), now - (TOKEN_TTL - margin)))
+
+        beyond = tmp_path / "merge-authorized-00002.consumed"  # older than TOKEN_TTL
+        beyond.write_text('{}')
+        os.utime(beyond, (now - (TOKEN_TTL + margin), now - (TOKEN_TTL + margin)))
+
+        cleanup_consumed_tokens(tmp_path)
+
+        assert within.exists(), (
+            "a .consumed file younger than TOKEN_TTL must be RETAINED — the reaper "
+            "boundary must track TOKEN_TTL, not a hardcoded literal"
+        )
+        assert not beyond.exists(), (
+            "a .consumed file older than TOKEN_TTL must be REAPED — the reaper "
+            "boundary must track TOKEN_TTL, not a hardcoded literal"
+        )
+
 
 # =============================================================================
 # Adversarial: command bypass attempts
@@ -11551,6 +11591,8 @@ class TestTokenLifecycleInvariants:
         old_time = time.time() - 7200
         os.utime(token, (old_time, old_time))
 
+        # 3600 is an explicit 1h threshold, intentionally decoupled from the ORPHAN
+        # default (12*TOKEN_TTL); exercises reaper behavior at a chosen value, not the default.
         cleanup_orphan_tokens(tmp_path, max_age_seconds=3600)
 
         assert not token.exists()
@@ -11568,6 +11610,8 @@ class TestTokenLifecycleInvariants:
         token.write_text('{"context": {}}')
         # Default mtime is "just now"
 
+        # 3600 is an explicit 1h threshold, intentionally decoupled from the ORPHAN
+        # default (12*TOKEN_TTL); exercises reaper behavior at a chosen value, not the default.
         cleanup_orphan_tokens(tmp_path, max_age_seconds=3600)
 
         assert token.exists()
@@ -11591,6 +11635,8 @@ class TestTokenLifecycleInvariants:
         for p in (consumed, marker):
             os.utime(p, (old_time, old_time))
 
+        # 3600 is an explicit 1h threshold, intentionally decoupled from the ORPHAN
+        # default (12*TOKEN_TTL); exercises reaper behavior at a chosen value, not the default.
         cleanup_orphan_tokens(tmp_path, max_age_seconds=3600)
 
         # Both preserved — these live in cleanup_consumed_tokens' domain
