@@ -875,6 +875,60 @@ def _extract_branch_name(command: str) -> str | None:
     return _strip_surrounding_quotes(positionals[0])
 
 
+def _extract_branch_delete_set(command: str) -> str | None:
+    """Extract the canonical MULTI-branch identity of a force-delete command.
+
+    The MULTI-target sibling of _extract_branch_name (which owns the SINGLE
+    branch). Handles the CLI `git branch -D|--delete --force <a> <b> ...` form
+    with TWO OR MORE positional branch names, returning a canonical
+    sort+dedup+quote-strip identity STRING joined on NUL (`\x00`), or None
+    when fewer than two branch names are positively extractable (<2 -> defers to
+    the scalar _extract_branch_name path — the BOUNDARY discriminator, so a
+    command populates EXACTLY ONE of `branch` / `branch_set`).
+
+    Mirrors the _extract_mass_delete_target precedent (#1062b): an
+    ORDER-INDEPENDENT identity STRING (never a tuple/list — a token persists as
+    JSON, and the read side compares via `str()`, so a list<->tuple round-trip
+    must never enter the identity), built + canonicalized in this ONE shared SSOT
+    so mint and read derive byte-identical strings (D2 symmetry by construction).
+    The join separator is NUL (`\x00`): git forbids control bytes in branch
+    names, so no name can contain it and the joined identity is INJECTIVE —
+    distinct branch SETS never collide. (A bare `,` was NOT injective: a branch
+    literally named `a,b` collided with the set {a, b}, cross-authorizing distinct
+    sets — the F1 review finding. NUL is JSON/str()-safe: json escapes it on dump,
+    restores it on load, and str() is stable, so the round-trip holds.)
+    Set-EQUALITY on this INJECTIVE string then closes the #1032 multi-target
+    under-block UNCONDITIONALLY: a `{a,b}` token cannot authorize `{a,b,c}`
+    (unequal strings) while a `{b,a}` reorder MATCHES (both canonicalize to the
+    same NUL-joined string).
+
+    Uses the SAME tokenization as _extract_branch_name (executable-prefix
+    truncation at a benign continuation/redirect via _executable_prefix, then drop
+    dash-flags), so the single/multi boundary is computed IDENTICALLY and no
+    command is double-counted or dropped. FORCE-only rides on op_type: the caller
+    reaches here only when detect_command_operation_type already classified
+    branch-delete (the FORCE `-D`/`-Df`/`-fD`/`--delete --force` spellings; #1094
+    per-leg cure), so a lowercase `-d`/`--delete` merged-branch delete (ungated at
+    HEAD) never reaches this and never populates `branch_set`.
+    """
+    prefix = _executable_prefix(command)
+    if prefix is None:
+        return None
+    branch_match = re.search(_GIT_PREFIX + r"branch\b(.*)$", prefix)
+    if not branch_match:
+        return None
+    positionals = [t for t in branch_match.group(1).split() if not t.startswith("-")]
+    if len(positionals) < 2:
+        return None
+    names = sorted({_strip_surrounding_quotes(t) for t in positionals})
+    # Join on NUL (\x00) — a REF-ILLEGAL separator (git forbids control bytes in
+    # branch names) so no name can contain it -> the identity is INJECTIVE and
+    # distinct sets never collide (the F1 fix; a bare `,` collided a branch named
+    # `a,b` with the set {a, b}). JSON/str()-safe, so D2 mint==read symmetry and
+    # the JSON token round-trip both hold.
+    return "\x00".join(names) or None
+
+
 def _extract_force_push_target_ref(command: str) -> str | None:
     """Conservative force-push destination-ref parse (KD-6) — refuse on ambiguity.
 
@@ -1371,7 +1425,10 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
                         | "push-to-main" | "remote-ref-delete" | "remote-mass-delete"
                         | "branch-protection"
         pr_number:  str  (merge / close)
-        branch:     str  (branch-delete)
+        branch:     str  (branch-delete — SINGLE target, exactly 1 positional)
+        branch_set: str  (branch-delete — MULTI target #1129, >=2 positionals) —
+                     canonical sort+dedup+quote-strip names joined on NUL (`\x00`,
+                     a ref-illegal separator → injective, no delimiter collision)
         target_ref: str  (force-push / push-to-main, KD-6; remote-ref-delete #1062a)
         mass_target: str (remote-mass-delete #1062b) — normalized identity tuple
                      <sorted-mass-flags>@<remote-or-implicit-marker>[#<sorted-refspecs>]
@@ -1420,9 +1477,22 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
         if pr_number is not None:
             context["pr_number"] = pr_number
     elif op_type == "branch-delete":
+        # Single-branch scalar path (BYTE-IDENTICAL): exactly ONE positional.
         branch = _extract_branch_name(command)
         if branch is not None:
             context["branch"] = branch
+        else:
+            # Multi-branch (>=2 positionals) FORCE-delete: bind the canonical
+            # sorted+deduped branch-SET identity (#1129 R1, mirrors mass_target).
+            # _extract_branch_name returns non-None ONLY for exactly 1 positional
+            # and _extract_branch_delete_set ONLY for >=2, so they are MUTUALLY
+            # EXCLUSIVE -> a command populates EXACTLY ONE of `branch` /
+            # `branch_set` (the boundary discriminator). The distinct key plus the
+            # op-type-identity check in the read switch keep a scalar token from
+            # cross-authorizing a set command (and vice-versa).
+            branch_set = _extract_branch_delete_set(command)
+            if branch_set is not None:
+                context["branch_set"] = branch_set
     elif op_type in ("force-push", "push-to-main"):
         # push-to-main reuses the force-push target parser: its target IS the
         # main/master ref that parser already returns for a plain push.
