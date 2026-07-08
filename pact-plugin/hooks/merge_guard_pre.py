@@ -550,7 +550,19 @@ def _token_matches_command(token: dict, command: str) -> bool:
     if token_op in ("merge", "close"):
         return _both_present_equal(context.get("pr_number"), cmd.get("pr_number"))
     if token_op == "branch-delete":
-        return _both_present_equal(context.get("branch"), cmd.get("branch"))
+        # #1129 R1: SINGLE-branch scalar OR MULTI-branch canonical SET (D1/D2
+        # set-EQUALITY). Exactly one key is present per command (1 positional ->
+        # `branch`; >=2 -> `branch_set`, built + canonicalized in the shared
+        # SSOT), so a scalar token can NOT authorize a set command or vice-versa
+        # (the absent-key side fails _both_present_equal), and a {a,b} token can
+        # NOT authorize {a,b,c} (unequal canonical strings) while a {b,a} reorder
+        # MATCHES (both canonicalize to `a,b`). The #1032 under-block is closed by
+        # equality; both sides derive via the ONE extract_command_context SSOT so
+        # mint and read cannot drift.
+        return (
+            _both_present_equal(context.get("branch"), cmd.get("branch"))
+            or _both_present_equal(context.get("branch_set"), cmd.get("branch_set"))
+        )
     if token_op in ("force-push", "push-to-main", "remote-ref-delete"):
         # KD-6 (SECURITY-RATIFICATION-PENDING): the destination ref must match
         # explicitly — an op-type-only floor would let a 'force-push feature'
