@@ -13,7 +13,7 @@ Used by: pytest (merge-guard suite).
 Non-vacuity:
   * ALLOW canaries (proof-class P): the comment-verb membership is what flips them.
     Proven dynamically by VERB-DISCRIMINATION (a carrier verb ALLOWs an inert
-    --body; the SAME --body under a non-carrier sibling verb `gh pr edit` BLOCKs)
+    --body; the SAME --body under a non-carrier sibling verb `gh pr review` BLOCKs)
     + a mechanism assertion (_strip blanks the --body value to STRIPPED, so the
     dangerous literal never reaches DANGEROUS_PATTERNS). Build-time source-revert
     MEASUREMENT (remove the comment verbs from `_gh_carrier_span`): {5 of 5 ALLOW
@@ -76,18 +76,20 @@ class TestNarrowGhCommentCarrierStripAllow:
         [
             (
                 'gh pr comment 5 --body "ref gh pr merge 5"',
-                'gh pr edit 5 --body "ref gh pr merge 5"',
+                'gh pr review 5 --body "ref gh pr merge 5"',
             ),
             (
                 'gh pr comment 8 --body "ref git push --force origin main"',
-                'gh pr edit 8 --body "ref git push --force origin main"',
+                'gh pr review 8 --body "ref git push --force origin main"',
             ),
         ],
     )
     def test_comment_verb_membership_is_load_bearing(self, carrier, sibling):
         # non-vacuity (proof-class P): the comment verb being IN the alternation is
         # what flips these. The identical --body under a NON-carrier sibling verb
-        # (`gh pr edit`, absent from the pr alternation) is NOT stripped and BLOCKs.
+        # (`gh pr review`, absent from the pr alternation — #1129 R2 added `pr edit`
+        # to the carrier set, so `review` is now the discriminating non-carrier sibling)
+        # is NOT stripped and BLOCKs.
         # This is the runnable equivalent of reverting the comment verbs from
         # `_gh_carrier_span` (build-time measured: {5 of 5 ALLOW flip to BLOCK}).
         from merge_guard_pre import is_dangerous_command

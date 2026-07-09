@@ -13881,19 +13881,22 @@ class TestD2GhCarrierStrip:
 
     # ---- NEGATIVE: non-carrier gh verbs are NOT exempted ----
 
-    def test_gh_pr_edit_is_not_a_carrier(self):
-        """SECURITY NEGATIVE: `gh pr edit` is NOT in the carrier alternation
-        (only `gh issue edit` + `gh pr create`/`gh issue create` are), so a
-        dangerous literal in its --title is NOT stripped.
+    def test_gh_pr_edit_is_now_a_carrier(self):
+        """#1129 R2 (OB1): `gh pr edit` is NOW an INTENTIONAL carrier — its
+        --title/--body value is non-executing API prose (identical in kind to the
+        already-carried `gh issue edit`), so a dangerous literal there is STRIPPED
+        and the command is NOT flagged. The pre-R2 issue-edit/pr-edit asymmetry (an
+        over-conservative over-block = cardinal-sin OB1) is intentionally removed.
 
-        # non-vacuity: a verb alternation widened to `pr\\s+(?:create|edit)`
-        #   would strip this → is_dangerous returns False → FAILS. Pins the
-        #   pr-edit exclusion (the asymmetry: issue edit IS a carrier, pr edit
-        #   is NOT).
+        # non-vacuity: reverting the `pr edit` carrier (EDIT 1) leaves the literal
+        #   unstripped → is_dangerous returns True → this assertion FAILS. Pins the
+        #   pr-edit INCLUSION. The "non-carrier gh verb is NOT exempted" guardrail is
+        #   pinned separately by the `gh pr review` sibling in
+        #   test_merge_guard_1037_narrow.
         """
         from merge_guard_pre import is_dangerous_command
 
-        assert is_dangerous_command('gh pr edit 5 --title "git branch -D x"')
+        assert not is_dangerous_command('gh pr edit 5 --title "git branch -D x"')
 
     def test_gh_pr_merge_is_not_a_carrier(self):
         """SECURITY NEGATIVE: `gh pr merge` (a real destructive op) is not a
@@ -14260,10 +14263,15 @@ class TestD2QuoteAwareSpanRemediation:
         cmd = 'gh pr close 42 --delete-branch --body "git branch -D x"'
         assert '"git branch -D x"' in _strip_non_executable_content(cmd)
 
-    def test_carveout_pr_edit_not_a_carrier(self):
+    def test_carveout_pr_edit_is_now_a_carrier(self):
+        # #1129 R2 (OB1): `gh pr edit` is NOW an intentional carrier (joins gh issue
+        # edit as a non-executing --title/--body prose carrier), so a dangerous literal
+        # in its value is STRIPPED and NOT flagged. Reverting EDIT 1 flips this True →
+        # the assert FAILS (non-vacuous). The non-carrier-verb guardrail is pinned by
+        # the `gh pr review` sibling in test_merge_guard_1037_narrow.
         from merge_guard_pre import is_dangerous_command
 
-        assert is_dangerous_command('gh pr edit 5 --title "git branch -D x"')
+        assert not is_dangerous_command('gh pr edit 5 --title "git branch -D x"')
 
     # ---- 7.E — ReDoS guard for the span ITSELF (the quote-aware body's own
     #            linear profile; distinct from the M1 D3 ladder ReDoS). ----

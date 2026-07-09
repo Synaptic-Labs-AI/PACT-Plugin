@@ -1879,6 +1879,20 @@ def _has_command_substitution(quoted_content: str) -> bool:
     return "$(" in quoted_content or "`" in quoted_content
 
 
+def _keep_carrier_value(m: "re.Match") -> str:
+    """Shared $()-preserving value replacer for the gh/git prose-carrier strips (#1129
+    R2): issue/pr create|edit|comment, release create|edit, gist create|edit, git tag
+    -m. Passed as `keep_fn` to _strip_flag_values (arms 1 & 3 — double-quoted + unquoted
+    VALUE-TOKEN). A double-quoted value containing $()/backtick EXECUTES, so it is
+    PRESERVED (stays caught); otherwise the flag(+separator) is kept and the value
+    replaced with the inert `STRIPPED` bareword. Hoisted from carrier-7's former
+    `_strip_dq` so every PR-added carrier shares ONE $()-preserving replacer (the
+    single-quoted arm strips unconditionally, handled inside _strip_flag_values)."""
+    if _has_command_substitution(m.group(0)):
+        return m.group(0)
+    return m.group(1) + "STRIPPED"
+
+
 def _strip_flag_values(span: str, flag_sep_regex: str, keep_fn) -> str:
     """Quote-safe value strip for a flag family within a single command span (#1118
     re-model). KEEPS the flag(+separator) token; replaces the VALUE with a BALANCED
@@ -2144,34 +2158,93 @@ def _strip_non_executable_content(command: str) -> str:
         # op OUTSIDE the body, after an unquoted separator OR a bare escaped quote
         # not following a carrier flag, is NEVER stripped and stays caught).
         _gh_carrier_span = (
-            r"gh\s+(?:issue\s+(?:create|edit|comment)|pr\s+(?:create|comment))\b"
+            r"gh\s+(?:issue\s+(?:create|edit|comment)|pr\s+(?:create|comment|edit))\b"
             r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
         )
 
         def _strip_gh_carrier_span(span_match: re.Match) -> str:
-            span = span_match.group(0)
-
-            # Double-quoted value: preserve if it contains command
-            # substitution ($()/backtick executes inside double quotes).
-            def _strip_dq(m: re.Match) -> str:
-                if _has_command_substitution(m.group(0)):
-                    return m.group(0)
-                return m.group(1) + "STRIPPED"
-
-            span = re.sub(
-                r"((?:--title|--body|-t|-b)\s+)\"(?:[^\"\\]|\\.)*\"",
-                _strip_dq,
-                span,
+            # Migrated (#1129 R2) to the SHARED quote-balanced _strip_flag_values (#1118
+            # machinery, same as carriers 8/9): its 3 arms
+            # (dq→keep_fn / sq→'STRIPPED' / unquoted VALUE-TOKEN→keep_fn) replace the
+            # former inline dq+sq re.sub. The unquoted VALUE-TOKEN arm ADDS coverage of
+            # ANSI-C `$'…'` + adjacent-concat `"a"'b'` body forms (consumed ATOMICALLY, so
+            # no dangling quote → no leg-merge). $()/backtick preserve rides on
+            # _keep_carrier_value. `edit` added to the pr alternation (OB1).
+            return _strip_flag_values(
+                span_match.group(0),
+                r"((?:--title|--body|-t|-b)\s+)",
+                _keep_carrier_value,
             )
-            # Single-quoted value: never expands, no substitution guard.
-            span = re.sub(
-                r"((?:--title|--body|-t|-b)\s+)'[^']*'",
-                r"\1STRIPPED",
-                span,
-            )
-            return span
 
         result = re.sub(_gh_carrier_span, _strip_gh_carrier_span, result)
+
+        # 7b. gh release CREATE/EDIT carrier (#1129 R2). --notes/-n + --title/-t carry API
+        #     prose (never executed). EXCLUDE --notes-file/-F (a FILE, off-line) AND the
+        #     -d/--draft + -p/--prerelease BOOLEANS (arity verified vs gh 2.96.0) — a
+        #     boolean must never enter a value-strip set or the strip mis-consumes the
+        #     following token (PER-CARRIER flag sets, NEVER a union). Subcommand-specific
+        #     (create|edit, NEVER bare `gh release`) so `gh release delete` can never
+        #     start a carrier span. Shared quote-balanced _strip_flag_values + $()-preserve.
+        _gh_release_span = (
+            r"gh\s+release\s+(?:create|edit)\b"
+            r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+        )
+        result = re.sub(
+            _gh_release_span,
+            lambda m: _strip_flag_values(
+                m.group(0), r"((?:--notes|-n|--title|-t)\s+)", _keep_carrier_value
+            ),
+            result,
+        )
+
+        # 7c. gh gist CREATE/EDIT carrier (#1129 R2). --desc/-d is API prose. `-d` is
+        #     admissible ONLY here (gist -d=--desc VALUE; contrast release -d=--draft
+        #     BOOLEAN — the reason PER-CARRIER flag sets are mandatory). Subcommand-specific
+        #     (create|edit, NEVER bare `gh gist`) so `gh gist delete` never starts a carrier.
+        _gh_gist_span = (
+            r"gh\s+gist\s+(?:create|edit)\b"
+            r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+        )
+        result = re.sub(
+            _gh_gist_span,
+            lambda m: _strip_flag_values(
+                m.group(0), r"((?:--desc|-d)\s+)", _keep_carrier_value
+            ),
+            result,
+        )
+
+        # 7d. git tag MESSAGE carrier (#1129 R2; F1 leg-merge fix, HALT #64) — SPAN-BOUNDED
+        #     + FLAG-ANCHORED. `git tag -m/--message` (benign annotation prose) shares the
+        #     `tag` verb with the DESTRUCTIVE `git tag -d/--delete`, so the strip is
+        #     FLAG-anchored to the -m/--message VALUE only (never touches -d), and BOUNDED
+        #     to a git-tag span whose body (the SAME quote-aware body as 7/7b/7c) STOPS at
+        #     the first UNQUOTED ;/&&/|/newline. The span bound is LOAD-BEARING: the prior
+        #     WHOLE-COMMAND strip let _strip_flag_values arm 3 (unquoted VALUE-TOKEN, which
+        #     does NOT stop at ;&|) re-touch the arm-1 `STRIPPED` bareword and consume
+        #     `STRIPPED;gh` together — EATING the next leg's `gh` head
+        #     (`git tag -m "x";gh pr merge 5 --delete-branch` -> gh gone -> auto-ALLOW). The
+        #     span stops at the separator, so the executing tail stays OUTSIDE and caught.
+        #     The prefix is a NON-gobbling `git <bounded non-separator words> tag`
+        #     (handles global flags like `-C <path>`) whose word class EXCLUDES `;&|` so it
+        #     CANNOT cross an unquoted separator — deliberately NOT `_GIT_PREFIX`, whose
+        #     `(?:\S+\s+){0,N}` gobbler (its `\S+` spans separators) could cross a `;gh …;`
+        #     into a LATER `git tag`, re-opening the leg-merge on a command like
+        #     `git commit -m "x";gh pr merge 5;git tag v1`. Bounded `{0,N}` (same
+        #     _MAX_GLOBAL_FLAG_TOKENS as _GIT_PREFIX) keeps the match linear/sub-quadratic.
+        #     `-d` stays visible (only the -m value strips, within the span); a faithful
+        #     `git tag -m "…" v1` has no unquoted separator -> one span -> OB3 still strips.
+        #     $()/backtick preserve rides on _keep_carrier_value.
+        _git_tag_span = (
+            r"\bgit\s+(?:[^;&|\n\s]+\s+){0,%d}tag\b" % _MAX_GLOBAL_FLAG_TOKENS
+            + r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+        )
+        result = re.sub(
+            _git_tag_span,
+            lambda mm: _strip_flag_values(
+                mm.group(0), r"((?:-m|--message)\s+)", _keep_carrier_value
+            ),
+            result,
+        )
 
     # 8. Strip HTTP-client request-body flag VALUES (curl / wget / gh api).
     #    The #1061 widening (host-agnostic `.*git/refs`) and the #1063
