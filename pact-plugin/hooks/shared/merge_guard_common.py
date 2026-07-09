@@ -2213,17 +2213,38 @@ def _strip_non_executable_content(command: str) -> str:
             result,
         )
 
-        # 7d. git tag MESSAGE carrier (#1129 R2), FLAG-ANCHORED — NEVER a verb-span.
-        #     `git tag -m/--message` (benign annotation prose) shares the `tag` verb with
-        #     the DESTRUCTIVE `git tag -d/--delete`, so a verb-span would swallow `-d`.
-        #     Gate on `git tag` presence and strip ONLY the -m/--message value → `-d` + the
-        #     target ref stay visible in EVERY ordering. The shared _strip_flag_values
-        #     VALUE-TOKEN stops at the first unquoted separator, so a compound tail
-        #     (`… && git push --force`) falls OUTSIDE the strip and stays caught (leg-locality).
-        if re.search(_GIT_PREFIX + r"tag\b", result):
-            result = _strip_flag_values(
-                result, r"((?:-m|--message)\s+)", _keep_carrier_value
-            )
+        # 7d. git tag MESSAGE carrier (#1129 R2; F1 leg-merge fix, HALT #64) — SPAN-BOUNDED
+        #     + FLAG-ANCHORED. `git tag -m/--message` (benign annotation prose) shares the
+        #     `tag` verb with the DESTRUCTIVE `git tag -d/--delete`, so the strip is
+        #     FLAG-anchored to the -m/--message VALUE only (never touches -d), and BOUNDED
+        #     to a git-tag span whose body (the SAME quote-aware body as 7/7b/7c) STOPS at
+        #     the first UNQUOTED ;/&&/|/newline. The span bound is LOAD-BEARING: the prior
+        #     WHOLE-COMMAND strip let _strip_flag_values arm 3 (unquoted VALUE-TOKEN, which
+        #     does NOT stop at ;&|) re-touch the arm-1 `STRIPPED` bareword and consume
+        #     `STRIPPED;gh` together — EATING the next leg's `gh` head
+        #     (`git tag -m "x";gh pr merge 5 --delete-branch` -> gh gone -> auto-ALLOW). The
+        #     span stops at the separator, so the executing tail stays OUTSIDE and caught.
+        #     The prefix is a NON-gobbling `git <bounded non-separator words> tag`
+        #     (handles global flags like `-C <path>`) whose word class EXCLUDES `;&|` so it
+        #     CANNOT cross an unquoted separator — deliberately NOT `_GIT_PREFIX`, whose
+        #     `(?:\S+\s+){0,N}` gobbler (its `\S+` spans separators) could cross a `;gh …;`
+        #     into a LATER `git tag`, re-opening the leg-merge on a command like
+        #     `git commit -m "x";gh pr merge 5;git tag v1`. Bounded `{0,N}` (same
+        #     _MAX_GLOBAL_FLAG_TOKENS as _GIT_PREFIX) keeps the match linear/sub-quadratic.
+        #     `-d` stays visible (only the -m value strips, within the span); a faithful
+        #     `git tag -m "…" v1` has no unquoted separator -> one span -> OB3 still strips.
+        #     $()/backtick preserve rides on _keep_carrier_value.
+        _git_tag_span = (
+            r"\bgit\s+(?:[^;&|\n\s]+\s+){0,%d}tag\b" % _MAX_GLOBAL_FLAG_TOKENS
+            + r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+        )
+        result = re.sub(
+            _git_tag_span,
+            lambda mm: _strip_flag_values(
+                mm.group(0), r"((?:-m|--message)\s+)", _keep_carrier_value
+            ),
+            result,
+        )
 
     # 8. Strip HTTP-client request-body flag VALUES (curl / wget / gh api).
     #    The #1061 widening (host-agnostic `.*git/refs`) and the #1063
