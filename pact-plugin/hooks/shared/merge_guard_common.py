@@ -1873,7 +1873,7 @@ def _has_process_substitution_to_shell(command: str) -> bool:
 # the opener tail and regress the pinned heredoc-pipe/procsub canaries
 # (under-block). Same input-side guard as carrier 1: a shell-fed body
 # (`bash <<EOF`) executes, so it is preserved. The REAL carrier-1 strip is
-# untouched (plan-D5).
+# intentionally left untouched (this excision builds a view-only scan surface).
 _HEREDOC_BODY_RE = re.compile(
     r"(<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n)"   # 1: operator+marker+opener TAIL (kept)
     r"(?:.*?\n)?"                            #    body (excised)
@@ -1895,6 +1895,18 @@ def _excise_heredoc_bodies_for_routing_scan(command: str) -> str:
     return _HEREDOC_BODY_RE.sub(_repl, command)
 
 
+def _excise_and_mask(command: str) -> tuple[str, str]:
+    """Shared prefix for the two routing-flag views (#1129 R3): excise heredoc
+    bodies (opener line + closing marker kept; shell-fed bodies preserved), then
+    space-mask every balanced quoted span via _mask_shell_quotes. Returns
+    (excised, view). ORDER IS LOAD-BEARING: excision FIRST removes stray body
+    quotes that could desync the quote mask. _mask_shell_quotes is SAME-LENGTH,
+    so view and excised align 1:1 by offset."""
+    excised = _excise_heredoc_bodies_for_routing_scan(command)
+    view = _mask_shell_quotes(excised)
+    return excised, view
+
+
 def _executed_surface_view(command: str) -> str:
     """Routing-flag scan surface (#1129 R3): the command with non-executed
     data removed — heredoc BODIES excised (opener line + closing marker kept;
@@ -1907,7 +1919,7 @@ def _executed_surface_view(command: str) -> str:
     that could desync the quote mask. Consumed ONLY by the hoisted
     piped_to_shell / process_sub_to_shell computation; never fed to
     DANGEROUS_PATTERNS and never returned as strip output."""
-    return _mask_shell_quotes(_excise_heredoc_bodies_for_routing_scan(command))
+    return _excise_and_mask(command)[1]
 
 
 def _procsub_anchor_view(command: str) -> str:
@@ -1918,17 +1930,17 @@ def _procsub_anchor_view(command: str) -> str:
     incidental >("ba"sh)->>(    sh) catch is preserved). Re-catches the R3 arm-B
     anchor regression WITHOUT a blanket fill (which breaks the shell-name region ->
     a NEW under-block on >("ba"sh)) and WITHOUT computing arm B over raw (which
-    reverts B3). Relies on _mask_shell_quotes being SAME-LENGTH: view and excised
-    align 1:1 by offset. Consumed ONLY by process_sub_to_shell."""
-    excised = _excise_heredoc_bodies_for_routing_scan(command)
-    view = _mask_shell_quotes(excised)               # space-fill, offsets preserved
+    would re-flag a `>(shell)` sitting inside quoted carrier data). Relies on
+    _mask_shell_quotes being SAME-LENGTH: view and excised align 1:1 by offset.
+    Consumed ONLY by process_sub_to_shell."""
+    excised, view = _excise_and_mask(command)        # excise + space-mask; offsets aligned
     if ">(" not in view:                             # cheap short-circuit (common case)
         return view
     out = list(view)
     for m in re.finditer(r">\(", view):              # each SURVIVING >( on the view
         i = m.start()
         k = i - 1
-        # skip GENUINE whitespace (a space in BOTH view and raw)
+        # skip a genuine UNMASKED bash blank (space OR tab): view==excised at an unmasked position
         while k >= 0 and view[k] == excised[k] and excised[k] in " \t":
             k -= 1
         # stop char masked to space in the view but a CLOSING QUOTE in raw ==
@@ -2050,7 +2062,8 @@ def _strip_non_executable_content(command: str) -> str:
     # space-mask with arm B's LEFT anchor restored immediately-left of a surviving
     # >(shell) whose writer was a masked quoted token — re-catching the R3 arm-B
     # regression (`echo "…" | "tee" >(bash)`) without a blanket fill (which would
-    # regress `>("ba"sh)`) and without computing arm B over raw (which reverts B3).
+    # regress `>("ba"sh)`) and without computing arm B over raw (which would re-flag
+    # a `>(shell)` sitting inside quoted carrier data).
     piped_to_shell = _has_pipe_to_shell(_executed_surface_view(command))
     process_sub_to_shell = _has_process_substitution_to_shell(_procsub_anchor_view(command))
 
