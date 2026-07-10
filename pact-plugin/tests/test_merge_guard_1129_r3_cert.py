@@ -5,7 +5,7 @@ Summary: COMPREHENSIVE BIDIRECTIONAL certification for #1129 R3 — scoping the 
          the EXECUTED SURFACE so a routing token inside quoted carrier DATA / a
          heredoc BODY no longer disables the carrier strips and re-exposes co-residing
          destructive text — PLUS the R3-fix remediation of the arm-B anchor under-block
-         the R3 view first introduced (found by the independent security pass #18).
+         the R3 view first introduced (found by the independent security review pass).
 
          Proven against the REAL classifier, up to FOUR baked columns, NEVER a byte-diff
          (#1118):
@@ -31,12 +31,12 @@ Summary: COMPREHENSIVE BIDIRECTIONAL certification for #1129 R3 — scoping the 
            False, asserted PATCH=False (NOT must-be-True; demanding True is the trap toward
            the over-broad \\s fix that re-introduces over-blocks).
 
-         Row classes (design §8 matrix + §13.8 remediation):
+         Row classes (executed-surface scoping + the R3-fix remediation):
            - FIX (carrier-DATA over-block CLOSURE): base True -> R3HEAD False -> PATCH
              False. Pipe/procsub/input-procsub token inside a quoted carrier value or a
              heredoc body across carriers 1/3/5/7/7b/7c/7d/8/9. The base=True column
              proves each was a genuine faithful-click over-block (never a vacuous green).
-           - REGRESSION-FIX (§13.8 R-1..R-4): base True -> R3HEAD False -> PATCH True.
+           - REGRESSION-FIX (R-1..R-4): base True -> R3HEAD False -> PATCH True.
              A genuinely-EXECUTING output-side procsub whose FIFO-writer name is quoted
              (`echo "<d>" | "tee" >(bash)`, class "tee"/'tee'/"dd"/"cat"). base catches
              (the closing `"` anchors arm B); R3's space-mask blanks the anchor ->
@@ -46,7 +46,7 @@ Summary: COMPREHENSIVE BIDIRECTIONAL certification for #1129 R3 — scoping the 
            - PRESERVE (executing routing stays caught): base True -> PATCH True — real
              `| sh`/`| bash`/`| xargs bash`, $()/backtick/eval/bash -c, heredoc opener
              tails, input-side `bash <(..)`, honest `tee >(bash)`/arm-A `> >(bash)`, and
-             carrier value + EXECUTING tail (C18/C19). Plus §13.8 P-1 (B3 survives:
+             carrier value + EXECUTING tail (C18/C19). Plus P-1 (B3 survives:
              quoted `>(bash)` DATA stays False at PATCH) and P-2 (the incidental
              `>("ba"sh)` under-block R3's mask closed must NOT regress).
            - DIFFERENTIAL (pre-existing under-blocks / correct negatives): False==False
@@ -55,7 +55,7 @@ Summary: COMPREHENSIVE BIDIRECTIONAL certification for #1129 R3 — scoping the 
              stderr `2> >(bash)` exclusion; PLUS the separator DIFFERENTIALs above
              (non-executing {NL,CR,FF,VT} + zero-sep adjacency). Asserted False (NOT
              must-stay-True) — asserting True on a pre-existing under-block or a
-             non-executing form would wrongly implicate R3/fix (plan cert caveat).
+             non-executing form would wrongly implicate R3/fix.
            - BONUS-CLOSURE (document, don't gate): `echo "<d>" | "tee" >("ba"sh)`
              base False -> PATCH True — genuinely-executing under-block the R3-fix closes;
              MORE correct than base, not an over-block.
@@ -71,10 +71,11 @@ revert `view[k]==excised[k]` -> `view[k]==" "`, which flips the non-space-blank 
 False while SPACE stays True) are documented in the HANDOFF with cardinality — they exercise
 the LIVE 7561d32d source.
 
-Cross-refs: docs/architecture/merge-guard-r3-carrier-data-pipe-scope.md §6 (invariants),
-§8 (R3 cert plan), §13 (R3-fix remediation), §13.8 (updated cert plan). Destructive verbs
-are assembled at runtime (PF/BD/M9/SH) so this file carries no raw force-push/force-delete
-/merge literal and stays inert to the live guard; probe forms are never run as shell.
+This cert covers both the R3 executed-surface scoping and the R3-fix arm-B/whitespace
+remediation; each row class below carries its own base/R3HEAD/FIX1/PATCH expectation inline,
+so a reader needs no external design doc. Destructive verbs are assembled at runtime
+(PF/BD/M9/SH) so this file carries no raw force-push/force-delete/merge literal and stays
+inert to the live guard; probe forms are never run as shell.
 """
 import subprocess
 import sys
@@ -145,7 +146,7 @@ SH = "s" + "h"                                    # shell name, kept un-obvious
 
 
 # ===========================================================================
-# §13.8 REGRESSION-FIX — quoted-writer output-side procsub: the arm-B anchor
+# REGRESSION-FIX — quoted-writer output-side procsub: the arm-B anchor
 # under-block R3 introduced and the R3-fix re-catches.
 #   base True  (closing quote anchors arm B on the raw command)
 #   R3HEAD False (space-mask blanks the anchor == the CONFIRMED auth under-block
@@ -172,7 +173,7 @@ class TestR3FixQuotedWriterRegression:
 
 
 # ===========================================================================
-# §13-fix2 SEPARATOR CLASS — whitespace-widening of the arm-B anchor restore.
+# SEPARATOR CLASS (R3-fix2) — whitespace-widening of the arm-B anchor restore.
 # The quoted-writer procsub `echo "<d>" | <writer><SEP>>(bash)` genuinely EXECUTES a
 # fanout ONLY when <SEP> is a run of bash BLANKS (space/tab): those are shell word
 # separators that fan echo's stdout into the >(bash) FIFO. fix2 (7561d32d) widened the
@@ -230,7 +231,8 @@ class TestR3Fix2NonExecutingDifferential:
     (regex-match != shell-execution), but the widen fix targets executing bash blanks ONLY and
     deliberately does NOT replicate the over-match. Asserted PATCH=False, NOT must-be-True:
     demanding must-be-True is the trap that pushes toward the over-broad \\s fix which
-    re-introduces over-blocks. (\\n verdict: architect §13-fix-2.5 — DIFFERENTIAL-False.)"""
+    re-introduces over-blocks. (\\n verdict: ratified DIFFERENTIAL-False — \\n is a command
+    separator, not an intra-command fanout.)"""
 
     @pytest.mark.parametrize("wl,w", _WRITERS)
     @pytest.mark.parametrize("sl,s", _NONEXEC_WS)
@@ -267,7 +269,7 @@ class TestR3Fix2ZeroSepPreExistingGap:
 
 
 # ===========================================================================
-# §13.8 PRESERVE — the R3-fix must not regress B3 (data-resident procsub stays
+# PRESERVE — the R3-fix must not regress B3 (data-resident procsub stays
 # closed) or the incidental >("ba"sh) win R3's mask closed.
 # ===========================================================================
 class TestR3FixPreserves:
@@ -301,7 +303,7 @@ class TestR3FixPreserves:
 
 
 # ===========================================================================
-# §13.8 BONUS-CLOSURE (document, don't gate) — quoted writer AND quoted shell name.
+# BONUS-CLOSURE (document, don't gate) — quoted writer AND quoted shell name.
 # base False -> PATCH True. Genuinely-executing under-block the R3-fix additionally
 # closes (more correct than base); NOT an over-block.
 # ===========================================================================
@@ -316,7 +318,7 @@ class TestR3FixBonusClosure:
 
 
 # ===========================================================================
-# §13.8 DIFFERENTIAL — stderr exclusion + no-space arm-B gap (F==F==F).
+# DIFFERENTIAL — stderr exclusion + no-space arm-B gap (F==F==F).
 # ===========================================================================
 class TestR3FixDifferential:
 
@@ -343,7 +345,7 @@ class TestR3FixDifferential:
 
 
 # ===========================================================================
-# §13.8 PRESERVE — honest output-side procsub stays caught (base True -> PATCH True).
+# PRESERVE — honest output-side procsub stays caught (base True -> PATCH True).
 # ===========================================================================
 class TestHonestProcsubPreserved:
 
@@ -367,8 +369,8 @@ class TestHonestProcsubPreserved:
 
 
 # ===========================================================================
-# §8 BOUNDARY + DOCUMENTED RESIDUAL — fail-closed direction and the accepted
-# over-block residuals (comment-resident token §3.5; ANSI-C \\' desync §11 / plan-D6).
+# BOUNDARY + DOCUMENTED RESIDUAL — fail-closed direction and the accepted
+# over-block residuals (comment-resident token; ANSI-C\\' desync).
 # All stay True across base/R3HEAD/PATCH — R3 neither introduces nor removes them.
 # The residual rows PIN the over-block so a future change cannot silently flip them;
 # they are asserted True==True==True as DOCUMENTED residuals (over-block-safe), NOT as
@@ -377,21 +379,21 @@ class TestHonestProcsubPreserved:
 class TestR3BoundaryAndResidual:
 
     @pytest.mark.parametrize("label,cmd", [
-        # probe-D4: an unbalanced quote near a routing token — the mask fails TOWARD
+        # an unbalanced quote near a routing token — the mask fails TOWARD
         # unmasked, so the token stays visible and the flag fires (fail-closed). A
         # malformed-quote click is not a faithful click, so this residual over-block is
-        # accepted (design §5 pt5).
-        ("probe-D4 unbalanced quote", 'echo "%s | %s' % (PF, SH)),
-        # probe-D5: a routing token inside a carrier value AND a REAL destructive tail on
+        # accepted (malformed input, not a faithful single-command click).
+        ("unbalanced quote near routing token", 'echo "%s | %s' % (PF, SH)),
+        # a routing token inside a carrier value AND a REAL destructive tail on
         # a second leg — the tail is executed surface and stays caught.
-        ("probe-D5 body token + && tail", 'gh pr edit 123 --body "x | %s" && %s' % (SH, PF)),
-        ("probe-D5 body token + ; tail", 'gh pr edit 123 --body "x | %s" ; %s' % (SH, PF)),
+        ("body token + && exec tail", 'gh pr edit 123 --body "x | %s" && %s' % (SH, PF)),
+        ("body token + ; exec tail", 'gh pr edit 123 --body "x | %s" ; %s' % (SH, PF)),
         # E3: comment-resident routing token — comments are deliberately NOT excised from
-        # the view (§3.5: excising them on the masked view is an under-block trap), so this
+        # the view (excising them on the masked view is an under-block trap), so this
         # stays a documented residual over-block. Narrower than the surface R3 fixes.
         ("E3 comment-resident token", 'echo "%s" # docs: | %s' % (PF, SH)),
         # E4: an ANSI-C \\' desyncs the single-quote mask so the token stays visible — the
-        # exact mirror of plan-D6's ratified ANSI-C residual (design §11).
+        # exact mirror of the ratified ANSI-C residual.
         ("E4 ANSI-C backslash-quote desync", "gh pr comment 1 --body $'%s\\' | %s'" % (PF, SH)),
     ])
     def test_boundary_residual_true_at_patch(self, label, cmd):
@@ -399,7 +401,7 @@ class TestR3BoundaryAndResidual:
             "%s: fail-closed / documented-residual over-block must stay caught at PATCH: %r" % (label, cmd)
 
     @pytest.mark.parametrize("label,cmd", [
-        ("probe-D4 unbalanced quote", 'echo "%s | %s' % (PF, SH)),
+        ("unbalanced quote near routing token", 'echo "%s | %s' % (PF, SH)),
         ("E3 comment-resident token", 'echo "%s" # docs: | %s' % (PF, SH)),
         ("E4 ANSI-C backslash-quote desync", "gh pr comment 1 --body $'%s\\' | %s'" % (PF, SH)),
     ])
@@ -410,7 +412,7 @@ class TestR3BoundaryAndResidual:
 
 
 # ===========================================================================
-# §8 PRESERVE — executing routing stays caught (base True -> R3HEAD True -> PATCH True).
+# PRESERVE — executing routing stays caught (base True -> R3HEAD True -> PATCH True).
 # ===========================================================================
 class TestR3PreserveExecuting:
 
@@ -419,7 +421,7 @@ class TestR3PreserveExecuting:
         ("C2 exec | bash", 'echo "%s" | bash' % PF),
         ("C11 exec | xargs bash", 'echo "%s" | xargs bash' % PF),
         ("C12 second-leg && | sh", 'echo ok && echo "%s" | %s' % (PF, SH)),
-        ("C6 $()-in-body (plan-D4)", 'gh pr create --body "$(%s)"' % PF),
+        ("C6 $()-in-body", 'gh pr create --body "$(%s)"' % PF),
         ("C7 backtick-in-body", 'gh pr create --body "`%s`"' % PF),
         ("C8 eval", 'eval "%s"' % PF),
         ("C9 bash -c", 'bash -c "%s"' % PF),
@@ -447,7 +449,7 @@ class TestR3PreserveExecuting:
 
 
 # ===========================================================================
-# §8 FIX — carrier-DATA over-block CLOSURE (base True -> R3HEAD False -> PATCH False).
+# FIX — carrier-DATA over-block CLOSURE (base True -> R3HEAD False -> PATCH False).
 # A pipe/procsub/input-procsub routing token inside a quoted carrier value or a heredoc
 # body no longer disables the carrier strip. base=True proves each was a genuine vector.
 # ===========================================================================
@@ -465,8 +467,8 @@ class TestR3FixCarrierDataOverBlock:
         ("A-c9 gh api --jq sq", "gh api repos/o/r --jq '%s | %s'" % (PF, SH)),
         ("B3 output procsub-in-body", 'gh pr edit 123 --body "%s > >(bash)"' % PF),
         ("B1fix input-procsub-in-body", 'gh pr edit 123 --body "bash <(echo %s)"' % PF),
-        ("probeD1 cross-value", 'gh pr edit 123 --title "%s" --body "x | %s"' % (PF, SH)),
-        ("probeD2 cross-leg newline", 'gh pr edit 1 --body "x | %s"\ngh pr edit 2 --body "%s"' % (SH, PF)),
+        ("cross-value title+body", 'gh pr edit 123 --title "%s" --body "x | %s"' % (PF, SH)),
+        ("cross-leg newline", 'gh pr edit 1 --body "x | %s"\ngh pr edit 2 --body "%s"' % (SH, PF)),
         ("E6 ANSI-C $'..| sh' body", "gh pr comment 1 --body $'%s | %s'" % (PF, SH)),
         ("E7 concat \"..\"'| sh' body", "gh pr comment 1 --body \"%s\"'| %s'" % (PF, SH)),
     ])
@@ -480,7 +482,7 @@ class TestR3FixCarrierDataOverBlock:
         ("A-c8 curl -d dq", 'curl -d "%s | %s" https://x.example' % (PF, SH)),
         ("B3 output procsub-in-body", 'gh pr edit 123 --body "%s > >(bash)"' % PF),
         ("B1fix input-procsub-in-body", 'gh pr edit 123 --body "bash <(echo %s)"' % PF),
-        ("probeD2 cross-leg newline", 'gh pr edit 1 --body "x | %s"\ngh pr edit 2 --body "%s"' % (SH, PF)),
+        ("cross-leg newline", 'gh pr edit 1 --body "x | %s"\ngh pr edit 2 --body "%s"' % (SH, PF)),
         ("E6 ANSI-C $'..| sh' body", "gh pr comment 1 --body $'%s | %s'" % (PF, SH)),
         ("E7 concat \"..\"'| sh' body", "gh pr comment 1 --body \"%s\"'| %s'" % (PF, SH)),
     ])
@@ -492,9 +494,9 @@ class TestR3FixCarrierDataOverBlock:
 
 
 # ===========================================================================
-# §8 DIFFERENTIAL — pre-existing under-blocks / correct negatives (F==F==F).
+# DIFFERENTIAL — pre-existing under-blocks / correct negatives (F==F==F).
 # Asserted False==False (NOT must-stay-True): asserting True on a pre-existing
-# under-block would wrongly implicate R3 (plan cert caveat).
+# under-block would wrongly implicate R3.
 # ===========================================================================
 class TestR3Differential:
 
@@ -518,3 +520,101 @@ class TestR3Differential:
     def test_differential_false_across_all_three(self, label, cmd):
         assert D_BASE(cmd) is False and D_R3(cmd) is False and D(cmd) is False, \
             "%s: differential must be False==False==False (not implicating R3): %r" % (label, cmd)
+
+
+# ===========================================================================
+# TEST-HARDENING PINS (#1129 R3) — durable rows for coverage gaps surfaced in
+# review. Each behavior was spot-verified working; pinning it means a future
+# regression reds a row. Two groups: (1) heredoc marker/opener variants the
+# primary rows above did not exercise (shell-fed sh/zsh preservation; <<- dash
+# and quoted-marker excision); (2) the two internal view-builder invariants the
+# arm-B anchor-restore offset math depends on (excise-before-mask ORDER, and the
+# SAME-LENGTH mask that keeps view/excised aligned 1:1 by offset).
+# ===========================================================================
+class TestR3HardeningHeredocVariants:
+    """Heredoc-body excision + its shell-fed guard across marker/opener variants
+    the primary rows only exercised for `bash <<EOF` / bare `cat <<EOF`."""
+
+    # sh-/zsh-fed heredoc: the shell-fed guard PRESERVES the body (it executes),
+    # so the in-body `| sh` stays caught. PRESERVE: base True / R3HEAD True / PATCH True.
+    _SHELL_FED = [
+        ("sh-fed heredoc body | sh", 'sh <<EOF\n%s | %s\nEOF' % (PF, SH)),
+        ("zsh-fed heredoc body | sh", 'zsh <<EOF\n%s | %s\nEOF' % (PF, SH)),
+    ]
+
+    @pytest.mark.parametrize("label,cmd", _SHELL_FED)
+    def test_shell_fed_heredoc_preserved_at_patch(self, label, cmd):
+        assert D(cmd) is True, \
+            "%s: shell-fed heredoc body executes, must stay caught at PATCH: %r" % (label, cmd)
+
+    @pytest.mark.parametrize("label,cmd", _SHELL_FED)
+    @requires_history
+    def test_shell_fed_heredoc_true_on_base_and_r3(self, label, cmd):
+        assert D_BASE(cmd) is True and D_R3(cmd) is True, \
+            "%s: shell-fed heredoc must be caught on base AND R3HEAD (preserved, not excised): %r" % (label, cmd)
+
+    # <<- dash-indent + quoted-marker (single/double) NAKED heredoc: excision closes the
+    # carrier-DATA over-block like a plain naked body. FIX: base True / R3HEAD False / PATCH False.
+    _NAKED_MARKER_VARIANTS = [
+        ("dash <<- naked body | sh", 'cat <<-EOF\n%s | %s\n\tEOF' % (PF, SH)),
+        ("sq-marker <<'EOF' naked body | sh", "cat <<'EOF'\n%s | %s\nEOF" % (PF, SH)),
+        ('dq-marker <<"EOF" naked body | sh', 'cat <<"EOF"\n%s | %s\nEOF' % (PF, SH)),
+    ]
+
+    @pytest.mark.parametrize("label,cmd", _NAKED_MARKER_VARIANTS)
+    def test_heredoc_marker_variant_excised_at_patch(self, label, cmd):
+        assert D(cmd) is False, \
+            "%s: naked heredoc-marker variant body must be excised/closed at PATCH: %r" % (label, cmd)
+
+    @pytest.mark.parametrize("label,cmd", _NAKED_MARKER_VARIANTS)
+    @requires_history
+    def test_heredoc_marker_variant_was_a_genuine_base_vector(self, label, cmd):
+        assert D_BASE(cmd) is True, \
+            "%s: base must OVER-BLOCK the raw naked body (else the closure row is vacuous): %r" % (label, cmd)
+        assert D_R3(cmd) is False, \
+            "%s: R3 excision closed the carrier-DATA over-block: %r" % (label, cmd)
+
+
+class TestR3ViewBuilderInvariants:
+    """The two internal invariants the anchor-restore offset math relies on, pinned
+    directly on the shared _excise_and_mask helper so a future refactor that breaks
+    either reds a row instead of silently mis-aligning the anchor walk-left."""
+
+    def test_excision_precedes_mask_order_is_load_bearing(self):
+        # ORDER INVARIANT: _excise_and_mask must excise heredoc bodies BEFORE masking
+        # quotes. Witness: a NAKED heredoc body carrying a stray unbalanced quote, then a
+        # quoted carrier value. Excise-first removes the body, keeping the quote mask synced
+        # over the trailing carrier; mask-first would let the stray body quote desync the
+        # mask. Pin: the live view equals excise-then-mask, and DIFFERS from mask-then-excise
+        # on this witness — so excision-before-mask is provably load-bearing (a swapped order
+        # reds both asserts).
+        cmd = 'cat <<EOF\n" | %s\nEOF\ngh pr comment 1 --body "%s | %s"' % (SH, PF, SH)
+        excised, view = mgc._excise_and_mask(cmd)
+        assert "HEREDOC_BODY_EXCISED" in excised, "the naked heredoc body must be excised: %r" % cmd
+        assert view == mgc._mask_shell_quotes(
+            mgc._excise_heredoc_bodies_for_routing_scan(cmd)), \
+            "live view must equal excise-then-mask: %r" % cmd
+        assert view != mgc._excise_heredoc_bodies_for_routing_scan(
+            mgc._mask_shell_quotes(cmd)), \
+            "mask-then-excise must differ -> excision-before-mask is load-bearing: %r" % cmd
+
+    @pytest.mark.parametrize("s", [
+        'gh pr edit 1 --body "%s | %s"' % (PF, SH),
+        'echo "%s" | "tee" >(bash)' % PF,
+        "gh pr comment 1 --body '%s | %s'" % (PF, SH),
+        'cat <<EOF\n%s | %s\nEOF' % (PF, SH),
+        'gh pr edit 1 --body "unbalanced %s' % PF,        # unbalanced quote (fail-open path)
+        'echo "%s" | tee >("ba"sh)' % PF,                  # nested quote in procsub
+        '',
+        'plain command no quotes',
+    ])
+    def test_mask_is_same_length_and_view_excised_parity(self, s):
+        # SAME-LENGTH INVARIANT: _procsub_anchor_view walks left comparing view[k] to
+        # excised[k] by offset, sound only if _mask_shell_quotes preserves length
+        # (space-fill, never add/drop chars). Pin length parity on the masker and on the
+        # (excised, view) pair the shared _excise_and_mask returns.
+        assert len(mgc._mask_shell_quotes(s)) == len(s), \
+            "_mask_shell_quotes must be same-length (offset alignment): %r" % s
+        excised, view = mgc._excise_and_mask(s)
+        assert len(view) == len(excised), \
+            "view/excised length parity (offset alignment): %r" % s
