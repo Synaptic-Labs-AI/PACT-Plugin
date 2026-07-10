@@ -190,6 +190,22 @@ class TestUnderBlockClosure:
         assert _mint(_HASH_2, tmp_path) == 1
         assert _execute(_HASH_3, tmp_path) == DENY
 
+    def test_base_encoder_through_real_gate_cross_authorizes(self, tmp_path):
+        # DIRECT gate-level non-vacuity for the two closure rows above: patch the BAKED BASE
+        # encoder (loaded from 9256c93c) into the ONE SSOT both mint and read derive from, and
+        # the collision CROSS-AUTHORIZES at the REAL mint->execute gate — a 2-set token ALLOWs
+        # the DISTINCT exec — for BOTH witnesses. This exhibits the bug through the ACTUAL
+        # machinery (not just the pure-function identity), so the HEAD DENY rows are genuine
+        # differentials: a revert of the netstring encoder to the @/#/comma joins reopens this
+        # exact cross-authorization. (Base-through-gate ALLOW verified empirically before adding.)
+        for name, two, three in [("comma", _COMMA_2, _COMMA_3), ("hash", _HASH_2, _HASH_3)]:
+            d = tmp_path / name
+            d.mkdir()
+            with patch.object(mgc, "_extract_mass_delete_target", MT_BASE):
+                assert _mint(two, d) == 1, "%s: base 2-set must mint through the gate" % name
+                assert _execute(three, d) == ALLOW, \
+                    "%s: base collision must cross-authorize at the gate (else HEAD row is vacuous)" % name
+
     # NON-VACUITY note: the coupling proof for these rows is the BAKED BASE column above
     # (MT_BASE, loaded from the real pre-fix source 9256c93c) — it uses the actual @/# encoding
     # and so faithfully reproduces BOTH the comma AND the # collisions on base, asserting HEAD
@@ -209,6 +225,10 @@ class TestOverBlockSelfMatchCorpus:
         ("3-ref delete", PUSH + "origin " + DEL + "a b c"),
         ("comma-in-name", PUSH + "origin " + DEL + '"a,b" c'),
         ("hash-in-name", PUSH + "origin " + DEL + '"a#b" c'),
+        ("hash-in-remote", _HASH_3),  # `#` in the REMOTE (not the ref) — the #-witness's OTHER
+                                      # set. A faithful click here mints+self-matches, so the
+                                      # #-gate-closure DENY below is a WRONG-SET denial, not an
+                                      # unmintable-always-deny artifact (non-vacuity control).
         ("colon-empty-src", PUSH + "origin " + ":a :b"),
         ("mirror implicit", PUSH + "--mirror origin"),
         ("prune", PUSH + "--prune origin refs/heads/x refs/heads/y"),
