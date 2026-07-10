@@ -267,7 +267,9 @@ def _is_checkpointed_session(session_dir: str) -> bool:
     Returns:
         True iff a `session_paused` or `session_refreshed` event exists.
     """
-    return (read_last_event_from(session_dir, "session_paused") is not None
+    # Composed on _is_paused_session (not inlined) so there is exactly ONE
+    # paused-existence predicate — the two can never drift.
+    return (_is_paused_session(session_dir)
             or read_last_event_from(session_dir, "session_refreshed") is not None)
 
 
