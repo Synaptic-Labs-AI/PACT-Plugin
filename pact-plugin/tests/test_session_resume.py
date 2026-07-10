@@ -1334,6 +1334,32 @@ class TestRefreshPromptSanitization:
         )
         assert "Feature: x y z." in result
 
+    def test_nel_and_c1_controls_stripped(self):
+        """NEL (U+0085) is a str.splitlines boundary and the C1 block's
+        other members are equally non-printable \u2014 all collapse to spaces
+        like their C0 siblings."""
+        from shared.session_resume import _interpret_refreshed_event
+
+        result = _interpret_refreshed_event(
+            _refresh_event(feature_subject="real\x85INJECTED", next_phase="co\x80\x9fde")
+        )
+        assert "\x85" not in result
+        assert "Feature: real INJECTED." in result
+        assert "Next phase: co de." in result
+
+    def test_nel_bearing_ts_renders_unavailable(self):
+        """The ts guard shares the control-char class: a NEL-bearing ts
+        flips to the UNAVAILABLE branch, never a raw echo."""
+        from shared.session_resume import _interpret_refreshed_event
+
+        evil_ts = "2026-07-10T12:00:00Z\x85TRAILER"
+        result = _interpret_refreshed_event(
+            _refresh_event(ts=evil_ts, feature_subject="work")
+        )
+        assert "\x85" not in result
+        assert evil_ts not in result
+        assert "refresh_ts=UNAVAILABLE" in result
+
     def test_10k_subject_truncated_with_marker(self):
         from shared.session_resume import (
             _REFRESH_FIELD_TRUNCATION_LIMIT,

@@ -59,10 +59,11 @@ _REFRESH_FIELD_TRUNCATION_LIMIT = 200
 _REFRESH_PATH_TRUNCATION_LIMIT = 512
 
 # Control characters stripped from interpolated refreshed-prompt fields:
-# C0 controls (includes \n, \r, \t), DEL, and the Unicode line/paragraph
-# separators — anything that could break the prompt onto a new line and
-# masquerade as a separate directive.
-_PROMPT_CONTROL_CHARS_RE = re.compile("[\\x00-\\x1f\\x7f\\u2028\\u2029]+")
+# C0 controls (includes \n, \r, \t), DEL plus the full C1 block (which
+# includes NEL U+0085 — a str.splitlines boundary), and the Unicode
+# line/paragraph separators — anything that could break the prompt onto
+# a new line and masquerade as a separate directive.
+_PROMPT_CONTROL_CHARS_RE = re.compile("[\\x00-\\x1f\\x7f-\\x9f\\u2028\\u2029]+")
 
 # Maximum characters for phase strings rendered into journal resume output.
 # Phases are nominally short uppercase identifiers (CODE, TEST, etc.) but the
