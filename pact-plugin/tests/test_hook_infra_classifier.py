@@ -454,8 +454,10 @@ def _is_dynamic_import_line(line: str) -> bool:
 
 
 def _is_refresh_edge_line(line: str) -> bool:
-    """True for an import edge into the hooks/refresh/ subpackage (outside the
-    oracle's idx glob of hooks/*.py + hooks/shared/*.py)."""
+    """True for an import edge into a hooks/refresh/ subpackage. The package
+    was removed from the hooks tree; this detector stays as a canary because
+    any reintroduced refresh subpackage would sit OUTSIDE the oracle's idx
+    glob (hooks/*.py + hooks/shared/*.py) and its edges would false-pass."""
     s = line.strip()
     if s.startswith("#"):
         return False
@@ -491,10 +493,11 @@ class TestOracleStaticImportBoundBackstop:
     def test_no_refresh_subpackage_edge_in_hooks(self):
         hits = _scan_hook_modules(_is_refresh_edge_line)
         assert not hits, (
-            "an import edge into hooks/refresh/ appeared — it is OUTSIDE the C6-A "
-            "oracle's idx glob (hooks/*.py + hooks/shared/*.py), so both the oracle "
-            "and the literal would miss it (vacuous false-pass). Extend the oracle's "
-            f"idx to include hooks/refresh/ before adding such an edge. Offending: {hits}"
+            "an import edge into a hooks/refresh/ subpackage appeared — the package "
+            "was removed, and a reintroduced one is OUTSIDE the C6-A oracle's idx "
+            "glob (hooks/*.py + hooks/shared/*.py), so both the oracle and the "
+            "literal would miss its edges (vacuous false-pass). Extend the oracle's "
+            f"idx to cover the subpackage before adding such an edge. Offending: {hits}"
         )
 
     def test_backstop_detectors_are_non_vacuous(self):

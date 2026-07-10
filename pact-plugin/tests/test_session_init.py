@@ -541,6 +541,15 @@ class TestRefreshSurfacingMatrix:
         additional = output["hookSpecificOutput"]["additionalContext"]
         assert "Refreshed workstream detected" not in additional
         assert "refresh_ts=" not in additional
+        # frame_is_lead conjunct pin on the PRESENTATION seam: the unknown-role
+        # frame is the ONE non-lead shape that reaches the compact branch
+        # (teammate frames divert to peer-injection before the directive
+        # renders), so the wording pin is scoped there — on the teammate rows
+        # the directive never renders and the assertion would be
+        # vacuous-by-unreachability. Dropping frame_is_lead from the
+        # refresh_pending conjunction must turn this row RED.
+        if agent_type is None:
+            assert "Teammates were shut down by /PACT:refresh" not in additional
 
     def test_quit_path_topology_prev_dir_differs(self, monkeypatch, tmp_path):
         """Topology invariance, quit path: CLAUDE.md points at the PRIOR
