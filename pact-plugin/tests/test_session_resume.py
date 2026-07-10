@@ -920,6 +920,536 @@ class TestCheckPausedState:
 
 
 # ---------------------------------------------------------------------------
+# check_resume_state() / refresh interpreter -- unified resume-claim resolver
+# ---------------------------------------------------------------------------
+
+
+def _write_journal_events(session_dir, events):
+    """Append events as JSONL to session_dir/session-journal.jsonl."""
+    import json as _json
+
+    journal = session_dir / "session-journal.jsonl"
+    with open(str(journal), "a") as f:
+        for event in events:
+            f.write(_json.dumps(event) + "\n")
+
+
+def _refresh_event(ts="2026-07-10T12:00:00Z", **fields):
+    """Minimal valid session_refreshed event with optional overrides."""
+    event = {
+        "v": 1,
+        "type": "session_refreshed",
+        "consolidation_completed": True,
+        "halt_active": False,
+        "ts": ts,
+    }
+    event.update(fields)
+    return event
+
+
+class TestInterpretRefreshedEventFailSafe:
+    """P0 fail-safe tier: the refresh interpreter is TOTAL over dict input.
+
+    _interpret_refreshed_event MUST return a non-empty str for ANY dict —
+    malformed fields degrade prompt CONTENT, never its PRESENCE. This is
+    the opposite fail direction from the paused interpreter's PR-gated
+    silent-None; the counter-test below proves the two never converged.
+    """
+
+    _HUGE = "x" * 10_000
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            {},
+            {"consolidation_completed": "yes", "halt_active": 3,
+             "halt_task_ids": {"a": 1}, "feature_task_id": 99,
+             "feature_subject": [], "next_phase": 7,
+             "worktrees": "not-a-list", "pr_number": "42"},
+            {"consolidation_completed": True, "halt_active": True,
+             "feature_subject": "mid-flight work"},  # missing ts
+            {"ts": 12345, "feature_subject": None, "worktrees": [1, 2, 3]},
+            {"ts": "2026-07-10T12:00:00Z", "feature_subject": _HUGE,
+             "next_phase": _HUGE, "worktrees": [_HUGE]},
+        ],
+        ids=["empty-dict", "every-field-wrong-typed", "missing-ts",
+             "non-str-ts-and-junk", "huge-junk-values"],
+    )
+    def test_malformed_event_yields_prompt_never_none(self, event):
+        """Any dict input produces a non-empty prompt string."""
+        from shared.session_resume import _interpret_refreshed_event
+
+        result = _interpret_refreshed_event(event)
+        assert isinstance(result, str)
+        assert result.strip()
+
+    def test_effectively_empty_dict_yields_degraded_floor(self):
+        """The degraded floor is a complete, actionable prompt — not None."""
+        from shared.session_resume import _interpret_refreshed_event
+
+        result = _interpret_refreshed_event({})
+        assert result == (
+            "Refresh detected — run TaskList to recover state, "
+            "then /PACT:bootstrap."
+        )
+
+    def test_missing_ts_emits_unavailable_consumption_key(self):
+        """No usable ts ⇒ the UNAVAILABLE consumption note, prompt intact."""
+        from shared.session_resume import _interpret_refreshed_event
+
+        result = _interpret_refreshed_event(
+            {"feature_subject": "thing", "halt_active": True}
+        )
+        assert "refresh_ts=UNAVAILABLE" in result
+        assert "Refreshed workstream detected" in result
+
+    def test_counter_fail_directions_never_converged(self):
+        """COUNTER-TEST: one maximally malformed shape, both interpreters.
+
+        The paused interpreter's junk-pr_number silent-None is CORRECT for
+        pause; the refresh interpreter must still surface a prompt for the
+        same garbage. If this test ever fails on the refresh leg, the named
+        trap fired — the refresh interpreter was 'cleaned up' toward
+        pause's shape.
+        """
+        from shared.session_resume import (
+            _interpret_paused_event,
+            _interpret_refreshed_event,
+        )
+
+        malformed = {"pr_number": "junk", "ts": None, "halt_active": "maybe"}
+        assert _interpret_paused_event(malformed) is None
+        refreshed_result = _interpret_refreshed_event(malformed)
+        assert isinstance(refreshed_result, str) and refreshed_result.strip()
+
+
+class TestRefreshIsSpent:
+    """P0 spent-check: ts-bound fire-once consumption (I5).
+
+    Every failure path lands on UNSPENT — a malformed consumption can never
+    suppress a prompt. The >= conjunct blocks only the wrong-spend shape
+    (a consumption predating its claim).
+    """
+
+    def _sd(self, tmp_path):
+        sd = tmp_path / "sess"
+        sd.mkdir(parents=True, exist_ok=True)
+        return sd
+
+    def test_matching_consumption_at_or_after_is_spent(self, tmp_path):
+        from shared.session_resume import _refresh_is_spent
+
+        sd = self._sd(tmp_path)
+        refreshed = _refresh_event(ts="2026-07-10T12:00:00Z")
+        _write_journal_events(sd, [
+            refreshed,
+            {"v": 1, "type": "session_refresh_consumed",
+             "refresh_ts": "2026-07-10T12:00:00Z",
+             "ts": "2026-07-10T12:05:00Z"},
+        ])
+        assert _refresh_is_spent(str(sd), refreshed) is True
+
+    def test_no_consumption_is_unspent(self, tmp_path):
+        from shared.session_resume import _refresh_is_spent
+
+        sd = self._sd(tmp_path)
+        refreshed = _refresh_event()
+        _write_journal_events(sd, [refreshed])
+        assert _refresh_is_spent(str(sd), refreshed) is False
+
+    def test_refresh_ts_mismatch_is_unspent(self, tmp_path):
+        from shared.session_resume import _refresh_is_spent
+
+        sd = self._sd(tmp_path)
+        refreshed = _refresh_event(ts="2026-07-10T12:00:00Z")
+        _write_journal_events(sd, [
+            refreshed,
+            {"v": 1, "type": "session_refresh_consumed",
+             "refresh_ts": "2026-07-09T09:00:00Z",  # binds a DIFFERENT claim
+             "ts": "2026-07-10T12:05:00Z"},
+        ])
+        assert _refresh_is_spent(str(sd), refreshed) is False
+
+    @pytest.mark.parametrize(
+        "consumption",
+        [
+            {"v": 1, "type": "session_refresh_consumed",
+             "ts": "2026-07-10T12:05:00Z"},                      # missing refresh_ts
+            {"v": 1, "type": "session_refresh_consumed",
+             "refresh_ts": "2026-07-10T12:00:00Z"},              # missing own ts
+            {"v": 1, "type": "session_refresh_consumed",
+             "refresh_ts": "2026-07-10T12:00:00Z",
+             "ts": "not-a-timestamp"},                           # unparseable own ts
+            {"v": 1, "type": "session_refresh_consumed",
+             "refresh_ts": "2026-07-10T12:00:00Z",
+             "ts": "2026-07-10T11:00:00Z"},                      # PREDATES the claim
+        ],
+        ids=["missing-refresh_ts", "missing-own-ts",
+             "unparseable-own-ts", "earlier-than-claim"],
+    )
+    def test_malformed_or_early_consumption_is_unspent(
+        self, tmp_path, consumption
+    ):
+        """The suppress-direction belt: every bad consumption ⇒ UNSPENT."""
+        from shared.session_resume import _refresh_is_spent
+
+        sd = self._sd(tmp_path)
+        refreshed = _refresh_event(ts="2026-07-10T12:00:00Z")
+        _write_journal_events(sd, [refreshed, consumption])
+        assert _refresh_is_spent(str(sd), refreshed) is False
+
+    def test_refresh_missing_ts_is_unspent(self, tmp_path):
+        """A refresh event with no ts cannot be spent (fail toward surfacing)."""
+        from shared.session_resume import _refresh_is_spent
+
+        sd = self._sd(tmp_path)
+        refreshed = {"v": 1, "type": "session_refreshed",
+                     "consolidation_completed": True, "halt_active": False}
+        _write_journal_events(sd, [refreshed])
+        assert _refresh_is_spent(str(sd), refreshed) is False
+
+    def test_two_refreshes_only_the_bound_one_retired(self, tmp_path):
+        """Consumption binds ONE claim: the earlier refresh is spent, the
+        later one still surfaces (a later refresh is never retired by an
+        earlier consumption)."""
+        from shared.session_resume import _refresh_is_spent, check_resume_state
+
+        sd = self._sd(tmp_path)
+        first = _refresh_event(ts="2026-07-10T10:00:00Z")
+        second = _refresh_event(ts="2026-07-10T14:00:00Z")
+        _write_journal_events(sd, [
+            first,
+            {"v": 1, "type": "session_refresh_consumed",
+             "refresh_ts": "2026-07-10T10:00:00Z",
+             "ts": "2026-07-10T10:30:00Z"},
+            second,
+        ])
+        assert _refresh_is_spent(str(sd), first) is True
+        assert _refresh_is_spent(str(sd), second) is False
+        # End-to-end: the latest (unspent) refresh surfaces.
+        result = check_resume_state(prev_session_dir=str(sd))
+        assert result is not None
+        assert "refresh_ts=2026-07-10T14:00:00Z" in result
+
+    def test_orphan_consumption_has_no_effect(self, tmp_path):
+        """A consumption with no matching refresh neither crashes nor
+        suppresses the live claim."""
+        from shared.session_resume import check_resume_state
+
+        sd = self._sd(tmp_path)
+        _write_journal_events(sd, [
+            {"v": 1, "type": "session_refresh_consumed",
+             "refresh_ts": "2026-01-01T00:00:00Z",
+             "ts": "2026-01-01T00:01:00Z"},
+            _refresh_event(ts="2026-07-10T12:00:00Z"),
+        ])
+        result = check_resume_state(prev_session_dir=str(sd))
+        assert result is not None
+        assert "refresh_ts=2026-07-10T12:00:00Z" in result
+
+
+class TestResumeArbitration:
+    """P0 arbitration (D-c): newest-ts-wins at ONE point; the losing claim
+    is always mentioned; unordered timestamps surface BOTH claims."""
+
+    def _paused_event(self, ts):
+        return {
+            "v": 1, "type": "session_paused", "pr_number": 77,
+            "pr_url": "https://github.com/o/r/pull/77", "branch": "feat/p",
+            "worktree_path": "/tmp/wt-p", "consolidation_completed": True,
+            "ts": ts,
+        }
+
+    def _resolve(self, sd):
+        from unittest.mock import patch as mock_patch
+        from shared.session_resume import check_resume_state
+
+        # Pin the gh probe OPEN so the paused leg reaches its formatter.
+        with mock_patch(
+            "shared.session_resume._check_pr_state", return_value="OPEN"
+        ):
+            return check_resume_state(prev_session_dir=str(sd))
+
+    def test_refreshed_newer_wins_and_mentions_stale_paused(self, tmp_path):
+        sd = tmp_path / "s1"
+        sd.mkdir()
+        _write_journal_events(sd, [
+            self._paused_event("2026-07-09T08:00:00Z"),
+            _refresh_event(ts="2026-07-10T12:00:00Z"),
+        ])
+        result = self._resolve(sd)
+        assert "Refreshed workstream detected" in result
+        assert "A stale paused claim from 2026-07-09 also exists." in result
+        assert "Paused work detected" not in result
+
+    def test_paused_newer_wins_and_mentions_stale_refreshed(self, tmp_path):
+        sd = tmp_path / "s2"
+        sd.mkdir()
+        _write_journal_events(sd, [
+            _refresh_event(ts="2026-07-09T08:00:00Z"),
+            self._paused_event("2026-07-10T12:00:00Z"),
+        ])
+        result = self._resolve(sd)
+        assert result.startswith("Paused work detected")
+        assert "A stale refreshed claim from 2026-07-09 also exists." in result
+
+    def test_equal_ts_refreshed_wins(self, tmp_path):
+        """Ties go to the refreshed claim — the more specific mid-flight one."""
+        sd = tmp_path / "s3"
+        sd.mkdir()
+        same = "2026-07-10T12:00:00Z"
+        _write_journal_events(sd, [
+            self._paused_event(same),
+            _refresh_event(ts=same),
+        ])
+        result = self._resolve(sd)
+        assert "Refreshed workstream detected" in result
+        assert "stale paused claim" in result
+
+    def test_unparseable_paused_ts_surfaces_both_with_conflict(self, tmp_path):
+        """Fail-safe edge: unordered claims surface BOTH in full plus an
+        explicit conflict note — never silently drop a resume claim."""
+        sd = tmp_path / "s4"
+        sd.mkdir()
+        _write_journal_events(sd, [
+            self._paused_event("garbage-not-a-ts"),
+            _refresh_event(ts="2026-07-10T12:00:00Z"),
+        ])
+        result = self._resolve(sd)
+        assert "Refreshed workstream detected" in result
+        assert "Paused work detected" in result
+        assert "CONFLICT" in result
+        assert "verify via TaskList before resuming" in result
+
+
+class TestRefreshHaltLine:
+    """P0 HALT adversarial sweep (I2): line presence/absence exactly per
+    the composition rule; staleness never drops the HALT line."""
+
+    def test_halt_active_with_str_ids_includes_ids(self):
+        from shared.session_resume import _interpret_refreshed_event
+
+        result = _interpret_refreshed_event(
+            _refresh_event(halt_active=True, halt_task_ids=["7", "12"])
+        )
+        assert "A HALT/algedonic signal was ACTIVE at refresh" in result
+        assert "(tasks: 7, 12)" in result
+        assert "do not assume it resolved" in result
+
+    def test_halt_false_with_nonempty_ids_has_no_halt_line(self):
+        """halt_active=False + ids: the ids are diagnostic residue, not a
+        claim — no HALT line (live tasks still cover the union's other leg)."""
+        from shared.session_resume import _interpret_refreshed_event
+
+        result = _interpret_refreshed_event(
+            _refresh_event(halt_active=False, halt_task_ids=["7"])
+        )
+        assert "HALT" not in result
+
+    def test_halt_true_empty_ids_line_without_task_note(self):
+        from shared.session_resume import _interpret_refreshed_event
+
+        result = _interpret_refreshed_event(
+            _refresh_event(halt_active=True, halt_task_ids=[])
+        )
+        assert "A HALT/algedonic signal was ACTIVE at refresh —" in result
+        assert "(tasks:" not in result
+
+    def test_halt_true_non_str_elements_filtered(self):
+        from shared.session_resume import _interpret_refreshed_event
+
+        result = _interpret_refreshed_event(
+            _refresh_event(halt_active=True, halt_task_ids=[7, "9", None, ""])
+        )
+        assert "(tasks: 9)" in result
+
+    def test_halt_malformed_drops_line_keeps_prompt(self):
+        from shared.session_resume import _interpret_refreshed_event
+
+        result = _interpret_refreshed_event(_refresh_event(halt_active="yes"))
+        assert "HALT" not in result
+        assert "Refreshed workstream detected" in result
+
+    def test_stale_prompt_retains_halt_line(self):
+        """I6 x I2: the 48h downgrade changes the header prefix ONLY — a
+        3-day-old checkpoint with a live HALT keeps its HALT line."""
+        from datetime import datetime, timedelta, timezone
+        from shared.session_resume import _interpret_refreshed_event
+
+        old_ts = (
+            datetime.now(timezone.utc) - timedelta(days=3)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        result = _interpret_refreshed_event(
+            _refresh_event(ts=old_ts, halt_active=True, halt_task_ids=["3"])
+        )
+        assert result.startswith("STALE checkpoint from")
+        assert "older than 48h" in result
+        assert "A HALT/algedonic signal was ACTIVE at refresh (tasks: 3)" in result
+        assert f"refresh_ts={old_ts}" in result
+
+    def test_fresh_prompt_has_no_stale_prefix(self):
+        from shared.session_resume import _interpret_refreshed_event
+
+        from datetime import datetime, timezone
+        now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        result = _interpret_refreshed_event(_refresh_event(ts=now_ts))
+        assert not result.startswith("STALE")
+        assert result.startswith("Refreshed workstream detected")
+
+
+class TestRefreshPrNumberNeverGates:
+    """P1: pr_number is surface-only — its absence or malformation never
+    gates the refresh prompt (the no-inherited-early-return proof)."""
+
+    @pytest.mark.parametrize(
+        "pr_field",
+        [{}, {"pr_number": "junk"}, {"pr_number": {"n": 1}},
+         {"pr_number": None}, {"pr_number": -3}],
+        ids=["absent", "str", "dict", "none", "negative"],
+    )
+    def test_prompt_surfaces_regardless_of_pr_number(self, pr_field):
+        from shared.session_resume import _interpret_refreshed_event
+
+        result = _interpret_refreshed_event(_refresh_event(**pr_field))
+        assert isinstance(result, str)
+        assert "Refreshed workstream detected" in result
+
+
+class TestCheckResumeState:
+    """Entry-point behavior: single seam, delegation intact both legs."""
+
+    def test_none_dir_returns_none(self):
+        from shared.session_resume import check_resume_state
+
+        assert check_resume_state(prev_session_dir=None) is None
+        assert check_resume_state(prev_session_dir="") is None
+
+    def test_empty_journal_returns_none(self, tmp_path):
+        from shared.session_resume import check_resume_state
+
+        sd = tmp_path / "empty"
+        sd.mkdir()
+        assert check_resume_state(prev_session_dir=str(sd)) is None
+
+    def test_refreshed_only_surfaces_with_consumption_key(self, tmp_path):
+        from shared.session_resume import check_resume_state
+
+        sd = tmp_path / "r-only"
+        sd.mkdir()
+        _write_journal_events(sd, [_refresh_event(
+            ts="2026-07-10T12:00:00Z",
+            feature_subject="checkpoint work",
+            feature_task_id="14",
+            next_phase="test",
+            worktrees=["/tmp/wt-a"],
+        )])
+        result = check_resume_state(prev_session_dir=str(sd))
+        assert "Refreshed workstream detected" in result
+        assert "Feature: checkpoint work (task 14)." in result
+        assert "Next phase: test." in result
+        assert "Worktrees: /tmp/wt-a." in result
+        assert "refresh_ts=2026-07-10T12:00:00Z" in result
+        assert "Do NOT message any pre-refresh teammate name" in result
+
+    def test_paused_only_delegation_intact(self, tmp_path):
+        """The paused leg through the entry point behaves exactly like
+        check_paused_state: same prompt, same PR-gated logic."""
+        from unittest.mock import patch as mock_patch
+        from shared.session_resume import check_paused_state, check_resume_state
+
+        sd = tmp_path / "p-only"
+        sd.mkdir()
+        _write_journal_events(sd, [{
+            "v": 1, "type": "session_paused", "pr_number": 88,
+            "pr_url": "https://github.com/o/r/pull/88", "branch": "feat/q",
+            "worktree_path": "/tmp/wt-q", "consolidation_completed": True,
+            "ts": "2026-07-10T11:00:00Z",
+        }])
+        with mock_patch(
+            "shared.session_resume._check_pr_state", return_value="OPEN"
+        ):
+            via_entry = check_resume_state(prev_session_dir=str(sd))
+            via_legacy = check_paused_state(prev_session_dir=str(sd))
+        assert via_entry == via_legacy
+        assert via_entry.startswith("Paused work detected: PR #88")
+
+    def test_spent_refresh_falls_back_to_paused(self, tmp_path):
+        from unittest.mock import patch as mock_patch
+        from shared.session_resume import check_resume_state
+
+        sd = tmp_path / "spent"
+        sd.mkdir()
+        _write_journal_events(sd, [
+            {"v": 1, "type": "session_paused", "pr_number": 99,
+             "pr_url": "https://github.com/o/r/pull/99", "branch": "feat/z",
+             "worktree_path": "/tmp/wt-z", "consolidation_completed": True,
+             "ts": "2026-07-09T11:00:00Z"},
+            _refresh_event(ts="2026-07-10T12:00:00Z"),
+            {"v": 1, "type": "session_refresh_consumed",
+             "refresh_ts": "2026-07-10T12:00:00Z",
+             "ts": "2026-07-10T12:10:00Z"},
+        ])
+        with mock_patch(
+            "shared.session_resume._check_pr_state", return_value="OPEN"
+        ):
+            result = check_resume_state(prev_session_dir=str(sd))
+        assert result.startswith("Paused work detected: PR #99")
+        assert "Refreshed workstream detected" not in result
+
+
+class TestHasUnspentRefresh:
+    """Presentation-only compact-branch signal: never raises, never
+    composes text, any internal error is False."""
+
+    def test_none_or_empty_dir_is_false(self):
+        from shared.session_resume import has_unspent_refresh
+
+        assert has_unspent_refresh(None) is False
+        assert has_unspent_refresh("") is False
+
+    def test_no_refresh_event_is_false(self, tmp_path):
+        from shared.session_resume import has_unspent_refresh
+
+        sd = tmp_path / "none"
+        sd.mkdir()
+        assert has_unspent_refresh(str(sd)) is False
+
+    def test_unspent_refresh_is_true(self, tmp_path):
+        from shared.session_resume import has_unspent_refresh
+
+        sd = tmp_path / "live"
+        sd.mkdir()
+        _write_journal_events(sd, [_refresh_event()])
+        assert has_unspent_refresh(str(sd)) is True
+
+    def test_spent_refresh_is_false(self, tmp_path):
+        from shared.session_resume import has_unspent_refresh
+
+        sd = tmp_path / "spent"
+        sd.mkdir()
+        _write_journal_events(sd, [
+            _refresh_event(ts="2026-07-10T12:00:00Z"),
+            {"v": 1, "type": "session_refresh_consumed",
+             "refresh_ts": "2026-07-10T12:00:00Z",
+             "ts": "2026-07-10T12:10:00Z"},
+        ])
+        assert has_unspent_refresh(str(sd)) is False
+
+    def test_internal_error_is_false(self, tmp_path, monkeypatch):
+        from shared import session_resume
+
+        sd = tmp_path / "err"
+        sd.mkdir()
+        _write_journal_events(sd, [_refresh_event()])
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("synthetic")
+
+        monkeypatch.setattr(session_resume, "_refresh_is_spent", _boom)
+        assert session_resume.has_unspent_refresh(str(sd)) is False
+
+
+# ---------------------------------------------------------------------------
 # _check_pr_state() -- direct tests
 # ---------------------------------------------------------------------------
 
