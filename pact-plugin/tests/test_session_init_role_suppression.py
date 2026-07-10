@@ -14,7 +14,7 @@ THE MATRIX: each of session_init's 4 Class-A lead-only writes ×
     write_context disk-write      | runs | SUPPRESS | SUPPRESS
     append_event(session_start)   | runs | SUPPRESS | SUPPRESS
     update_session_info           | runs | SUPPRESS | SUPPRESS
-    check_paused_state            | runs | SUPPRESS | SUPPRESS
+    check_resume_state            | runs | SUPPRESS | SUPPRESS
 
 CRUCIAL split-correctness property (the one non-mechanical site, #877):
 ``write_context`` populates the in-process ``_cache`` / ``_context_path``
@@ -78,7 +78,7 @@ def _run_main_with(stdin_data: str, monkeypatch, tmp_path):
          patch("session_init.persist_context", return_value=None) as mock_persist, \
          patch("session_init.append_event") as mock_append, \
          patch("session_init.update_session_info", return_value=None) as mock_update, \
-         patch("session_init.check_paused_state", return_value=None) as mock_paused, \
+         patch("session_init.check_resume_state", return_value=None) as mock_paused, \
          patch("sys.stdin", io.StringIO(stdin_data)), \
          patch("sys.stdout", new_callable=io.StringIO):
         with pytest.raises(SystemExit) as exc_info:
@@ -93,7 +93,7 @@ def _run_main_with(stdin_data: str, monkeypatch, tmp_path):
         "persist_context": mock_persist,
         "append_event": mock_append,
         "update_session_info": mock_update,
-        "check_paused_state": mock_paused,
+        "check_resume_state": mock_paused,
     }
 
 
@@ -131,7 +131,7 @@ class TestLeadRowsAllWritesRun:
         # CLAUDE.md Current Session block written.
         mocks["update_session_info"].assert_called_once()
         # paused-state surface checked.
-        mocks["check_paused_state"].assert_called_once()
+        mocks["check_resume_state"].assert_called_once()
 
     def test_lead_with_missing_session_id_suppresses_all_writes(
         self, monkeypatch, tmp_path
@@ -191,7 +191,7 @@ class TestNonLeadRowsAllWritesSuppressed:
             f"{role} frame must NOT append the session_start journal anchor"
         )
         mocks["update_session_info"].assert_not_called()
-        mocks["check_paused_state"].assert_not_called()
+        mocks["check_resume_state"].assert_not_called()
 
     def test_teammate_specific_agent_types_all_suppress(self, monkeypatch, tmp_path):
         """A range of specialist agent_types all suppress (not just the
@@ -340,7 +340,7 @@ class TestUnknownRoleStartupWarning:
              patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             with pytest.raises(SystemExit):

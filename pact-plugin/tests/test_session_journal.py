@@ -2621,7 +2621,7 @@ class TestSessionInitJournalWrite:
              patch("session_init.persist_context"), \
              patch("session_init.check_resumption_context", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None):
+             patch("session_init.check_resume_state", return_value=None):
 
             with pytest.raises(SystemExit) as exc:
                 from session_init import main
