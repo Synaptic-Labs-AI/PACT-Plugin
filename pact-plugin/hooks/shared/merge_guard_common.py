@@ -1866,6 +1866,50 @@ def _has_process_substitution_to_shell(command: str) -> bool:
     )
 
 
+# Heredoc-BODY excision for the routing-flag view (#1129 R3). Reuses carrier-1's
+# marker grammar but replaces the BODY ONLY: the opener line (including a
+# genuinely-executing `| bash` / `> >(bash)` TAIL) and the closing marker stay
+# visible to the routing scan. Carrier-1's whole-match replacement would swallow
+# the opener tail and regress the pinned heredoc-pipe/procsub canaries
+# (under-block). Same input-side guard as carrier 1: a shell-fed body
+# (`bash <<EOF`) executes, so it is preserved. The REAL carrier-1 strip is
+# untouched (plan-D5).
+_HEREDOC_BODY_RE = re.compile(
+    r"(<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n)"   # 1: operator+marker+opener TAIL (kept)
+    r"(?:.*?\n)?"                            #    body (excised)
+    r"(\t*\2(?![\w]))",                      # 3: closing marker (kept)
+    re.DOTALL,
+)
+
+
+def _excise_heredoc_bodies_for_routing_scan(command: str) -> str:
+    if "<<" not in command:          # cheap short-circuit (perf: common case)
+        return command
+
+    def _repl(m: "re.Match") -> str:
+        preceding = command[: m.start()].rstrip()
+        if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+            return m.group(0)        # shell-fed heredoc: body executes — keep
+        return m.group(1) + "HEREDOC_BODY_EXCISED\n" + m.group(3)
+
+    return _HEREDOC_BODY_RE.sub(_repl, command)
+
+
+def _executed_surface_view(command: str) -> str:
+    """Routing-flag scan surface (#1129 R3): the command with non-executed
+    data removed — heredoc BODIES excised (opener line + closing marker kept;
+    shell-fed bodies preserved), then every balanced quoted span masked to
+    spaces via _mask_shell_quotes (defined later in this module; resolved at
+    call time). Fail direction: unbalanced/ambiguous quoting leaves text
+    UNMASKED -> the routing token stays visible -> detection preserved (at
+    worst a residual over-block on malformed input, never an under-block).
+    ORDER IS LOAD-BEARING: heredoc excision FIRST removes stray body quotes
+    that could desync the quote mask. Consumed ONLY by the hoisted
+    piped_to_shell / process_sub_to_shell computation; never fed to
+    DANGEROUS_PATTERNS and never returned as strip output."""
+    return _mask_shell_quotes(_excise_heredoc_bodies_for_routing_scan(command))
+
+
 def _has_eval_or_source(command: str) -> bool:
     """Check if command contains eval or source that could execute variable values.
 
@@ -1961,8 +2005,16 @@ def _strip_non_executable_content(command: str) -> str:
     # stripping (preserve content → detect). Hoisted above carrier 1 so the
     # heredoc carrier can consult them too. MONOTONIC: a True flag only ADDS
     # detection (skip strip → more content scanned); never removes it.
-    piped_to_shell = _has_pipe_to_shell(command)
-    process_sub_to_shell = _has_process_substitution_to_shell(command)
+    #
+    # The flags defend the EXECUTED surface, so they are computed over the
+    # executed-surface view (#1129 R3): quoted spans masked, heredoc bodies
+    # excised. Carrier DATA (a `| sh` or `>(bash)` inside a quoted value or
+    # heredoc body) can no longer disable the carriers; genuinely-executing
+    # routing (unquoted tails, opener-line tails) is unquoted shell structure
+    # and survives the view at identical offsets.
+    _routing_view = _executed_surface_view(command)
+    piped_to_shell = _has_pipe_to_shell(_routing_view)
+    process_sub_to_shell = _has_process_substitution_to_shell(_routing_view)
 
     # 1. Strip heredoc bodies: << 'EOF' ... EOF, << EOF ... EOF, << "EOF" ... EOF
     #    Match the heredoc marker, then everything up to and including the
