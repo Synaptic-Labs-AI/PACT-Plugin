@@ -81,6 +81,13 @@ jobs:
       # These majors run on Node24 (checkout@v4 / setup-python@v5 were Node20,
       # deprecated by GitHub — forced off by 2026-06-16, so re-pinned forward).
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          # Full history so the baked-base cert files can `git show <base-sha>`
+          # (their base-vs-HEAD non-vacuity differentials). The default shallow
+          # clone (fetch-depth: 1) lacks the base commits -> `git show` fails ->
+          # those files abort collection (0 tests run). Full history makes every
+          # differential RUN in CI; the in-file self-skip guards are the fallback.
+          fetch-depth: 0
 
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:

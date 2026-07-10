@@ -81,24 +81,50 @@ _PREFIX_SHA = "6f404f2e"  # R2 pre-F1-fix (whole-command 7d — the HALT #64 reg
 
 
 def _load_classifier(sha):
+    """Load merge_guard_common as it existed at `sha`, or None if unavailable.
+
+    Returns None on any git/exec failure — git missing, or a SHALLOW clone lacking
+    the base/pre-fix commit (CI's default fetch-depth) — so collection SUCCEEDS and the
+    base-vs-HEAD / pre-fix-vs-fixed differential rows self-SKIP (@requires_history)
+    instead of aborting the whole file. Mirrors test_merge_guard_1118_recert._load_module_at.
+    """
     wt = Path(__file__).resolve().parents[2]  # worktree root (tests/../../)
-    src = subprocess.check_output(
-        ["git", "-C", str(wt), "show",
-         sha + ":pact-plugin/hooks/shared/merge_guard_common.py"]
-    ).decode()
+    try:
+        src = subprocess.check_output(
+            ["git", "-C", str(wt), "show",
+             sha + ":pact-plugin/hooks/shared/merge_guard_common.py"],
+            stderr=subprocess.DEVNULL,
+        ).decode()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
     mod = types.ModuleType("merge_guard_common_1129r2_" + sha)
     mod.__file__ = str(wt / "pact-plugin/hooks/shared/merge_guard_common.py")
     mod.__package__ = "shared"  # so its `from shared.x import ...` resolve on sys.path
-    exec(compile(src, mod.__file__, "exec"), mod.__dict__)
+    try:
+        exec(compile(src, mod.__file__, "exec"), mod.__dict__)
+    except Exception:
+        return None
     return mod
 
 
 _BASE = _load_classifier(_BASE_SHA)
 _PREFIX = _load_classifier(_PREFIX_SHA)
-D_BASE = _BASE.is_dangerous_command
-D_PREFIX = _PREFIX.is_dangerous_command
+# None-safe: guarding _load_classifier alone is NOT enough — a bare
+# `_BASE.is_dangerous_command` would AttributeError at import when the base/pre-fix
+# source is unavailable (shallow clone), re-aborting collection. D_BASE/D_PREFIX are
+# only ever called by the @requires_history-guarded differential rows.
+D_BASE = _BASE.is_dangerous_command if _BASE is not None else None
+D_PREFIX = _PREFIX.is_dangerous_command if _PREFIX is not None else None
 D = mgc.is_dangerous_command
 STRIP = mgc._strip_non_executable_content
+
+# Skip the base-vs-HEAD / pre-fix-vs-fixed differential (non-vacuity) rows when the
+# baked history is unavailable (shallow clone); the HEAD-side + absolute rows still
+# run. With fetch-depth:0 in CI both commits are present, so every differential runs.
+requires_history = pytest.mark.skipif(
+    _BASE is None or _PREFIX is None,
+    reason="base-vs-HEAD / pre-fix differential requires merged history (shallow clone / missing history)",
+)
 
 # Destructive verbs assembled at runtime — this file carries no raw literal.
 BD = "git " + "branch " + "-D main"           # destructive branch-delete literal
@@ -161,6 +187,7 @@ class TestOverBlockClosure:
         ("OB6 adjacent-concat", 'gh pr create --title "Fix "\'%s\'' % M5),
         ("OB8 gh release create --title", 'gh release create v1 --title "%s"' % BD),
     ])
+    @requires_history
     def test_over_block_closed_base_true_head_false(self, label, cmd):
         assert D_BASE(cmd) is True, "%s: expected a BASE over-block vector (else vacuous)" % label
         assert D(cmd) is False, "%s: HEAD must CLOSE the faithful-click over-block" % label
@@ -179,6 +206,7 @@ class TestMustNotRegress:
         ("UB3b leg-tail && branch-delete", 'gh pr create --body "x" && %s' % BD),
         ("UB3c leg-tail ; force-push", 'gh pr create --body "x" ; %s' % PF),
     ])
+    @requires_history
     def test_stays_gated_base_and_head(self, label, cmd):
         assert D_BASE(cmd) is True, "%s: must be gated on base" % label
         assert D(cmd) is True, "%s: R2 must NOT narrow detection here" % label
@@ -228,6 +256,7 @@ class TestSubcommandDeleteAcceptedResidualPin:
         ("gh gist delete", 'gh gist delete abc123'),
         ("git tag -d", 'git tag -d oldtag'),
     ])
+    @requires_history
     def test_still_undetected_unchanged(self, label, cmd):
         assert D_BASE(cmd) is False and D(cmd) is False, \
             "%s: accepted-residual PIN — must stay undetected in R2 (hardening tracked in #1137)" % label
@@ -253,6 +282,7 @@ class TestLaunderClosureRoundTrip:
         assert _mint(carrier, tmp_path) == [], "HEAD must mint NO launder token"
         assert _execute(M5 + " --delete-branch", tmp_path) == DENY, "the base-usable laundered exec must DENY at HEAD"
 
+    @requires_history
     def test_gist_base_mint_witness_is_a_usable_launder(self):
         # MINOR-2 (baked base-mint non-vacuity): the BASE (023ee2c3) classifier both GATES
         # the gist carrier AND extracts a USABLE {merge, pr 5, --delete-branch} context from
@@ -302,6 +332,7 @@ class TestF1LegMergeRegression:
     @pytest.mark.parametrize("sep", [";", "&&", "|"])
     @pytest.mark.parametrize("head_label,head", _HEADS)
     @pytest.mark.parametrize("msg_label,tag", _MSGS)
+    @requires_history
     def test_nospace_destructive_head_leg_merge_closed(self, sep, head_label, head, msg_label, tag):
         # `git tag -m <msg><SEP-no-space><destructive-head>` — the F1 eaten-head auth-bypass,
         # across the {gh, curl, wget} head family × {;,&&,|} × {quoted, unquoted} message.
@@ -319,11 +350,13 @@ class TestF1LegMergeRegression:
         assert D(cmd) is True, "mixed-quote message must not leg-merge the tail: %r" % cmd
 
     @pytest.mark.parametrize("sep", [";", "&&", "|"])
+    @requires_history
     def test_safe_control_spaced_separator_no_flip(self, sep):
         # A SPACE before gh keeps the head intact on the pre-fix strip -> no leg-merge.
         cmd = "%s %s %s --delete-branch" % (self._TAG, sep, M5)
         assert D_BASE(cmd) is True and D_PREFIX(cmd) is True and D(cmd) is True
 
+    @requires_history
     def test_safe_control_git_headed_tail_no_flip(self):
         # No-space but git-HEADED tail survives via the permissive _GIT_PREFIX (not eaten).
         cmd = self._TAG + ";" + PF
@@ -333,6 +366,7 @@ class TestF1LegMergeRegression:
         'gh release create v1 --notes "Release v1.0"',
         'gh gist create f.txt --desc "note"',
     ])
+    @requires_history
     def test_other_new_carriers_never_leg_merged(self, carrier):
         # release/gist were already span-scoped (7/7b/7c): the F1-class trigger never
         # leg-merged them (NO second under-block). True on base AND pre-fix AND fixed.
@@ -346,6 +380,7 @@ class TestOverAnchoring:
     -m value. The pre-fix whole-command 7d DID (it matched the trailing `git tag` and
     stripped `git commit`'s -m, leg-merging the gh leg). base=True / pre-fix=False / fixed=True."""
 
+    @requires_history
     def test_over_anchoring_witness_closed(self):
         cmd = 'git commit -m "x";gh pr merge 5;git tag v1'
         assert D_BASE(cmd) is True
@@ -367,6 +402,7 @@ class TestNewCarrierAxisCoverage:
     ]
 
     @pytest.mark.parametrize("label,prefix,suffix", _CARRIERS)
+    @requires_history
     def test_cmdsub_preserved_stays_gated(self, label, prefix, suffix):
         # $()/backtick in the value EXECUTES -> must stay gated (base AND HEAD).
         for val in ['"$(%s)"' % PF, '"`%s`"' % PF]:

@@ -281,19 +281,19 @@ class TestRemoteRefDeleteParityMintAndNonVacuity:
 # ===========================================================================
 
 # Faithful mass forms: (command, expected mass_target). mass_target binds the
-# destructive IDENTITY (sorted mass-flags @ remote-or-implicit [# sorted refspecs]),
+# destructive IDENTITY (the netstring _canonical_join of the field tuple),
 # NOT the whole command.
 REMOTE_MASS_DELETE_SPELLINGS = [
-    ("git push --mirror origin", "--mirror@origin"),
-    ("git push --mirror", f"--mirror@{IMPLICIT}"),                 # implicit remote
-    ("git push --prune origin", "--prune@origin"),
-    ("git push --prune origin refs/heads/main", "--prune@origin#refs/heads/main"),
-    ("git push origin --delete a b", "--delete@origin#a,b"),       # multi-ref
-    ("git push origin :a :b", "--delete@origin#a,b"),              # multi colon
-    ("git push origin --mirror", "--mirror@origin"),               # flag after remote
-    ("git push origin --prune", "--prune@origin"),                 # flag after remote
-    ("git push origin --delete a b c", "--delete@origin#a,b,c"),   # three-ref
-    ('git push --mirror "origin"', "--mirror@origin"),             # quoted remote
+    ("git push --mirror origin", mgc._canonical_join(["--mirror", "origin"])),
+    ("git push --mirror", mgc._canonical_join(["--mirror", IMPLICIT])),                 # implicit remote
+    ("git push --prune origin", mgc._canonical_join(["--prune", "origin"])),
+    ("git push --prune origin refs/heads/main", mgc._canonical_join(["--prune", "origin", "refs/heads/main"])),
+    ("git push origin --delete a b", mgc._canonical_join(["--delete", "origin", "a", "b"])),       # multi-ref
+    ("git push origin :a :b", mgc._canonical_join(["--delete", "origin", "a", "b"])),              # multi colon
+    ("git push origin --mirror", mgc._canonical_join(["--mirror", "origin"])),               # flag after remote
+    ("git push origin --prune", mgc._canonical_join(["--prune", "origin"])),                 # flag after remote
+    ("git push origin --delete a b c", mgc._canonical_join(["--delete", "origin", "a", "b", "c"])),   # three-ref
+    ('git push --mirror "origin"', mgc._canonical_join(["--mirror", "origin"])),             # quoted remote
 ]
 
 
@@ -323,7 +323,7 @@ class TestRemoteMassDeleteNoUnderBlock:
         cmd = "git push --mirror"
         assert D(cmd) is True
         assert OP(cmd) == "remote-mass-delete"
-        assert CTX(cmd).get("mass_target") == f"--mirror@{IMPLICIT}"
+        assert CTX(cmd).get("mass_target") == mgc._canonical_join(["--mirror", IMPLICIT])
 
 
 class TestRemoteMassDeleteCrossAuthDistinctness:
@@ -337,21 +337,21 @@ class TestRemoteMassDeleteCrossAuthDistinctness:
         assert CTX("git push origin --delete a b")["mass_target"] != CTX("git push origin --delete a c")["mass_target"]
 
     def test_prune_token_does_not_authorize_mirror(self):
-        tok = token("remote-mass-delete", mass_target="--prune@origin")
+        tok = token("remote-mass-delete", mass_target=mgc._canonical_join(["--prune", "origin"]))
         assert MATCH(tok, "git push --prune origin") is True            # authorizes its own
         assert MATCH(tok, "git push --mirror origin") is False          # not a different identity
 
     def test_mirror_token_does_not_authorize_prune(self):
-        tok = token("remote-mass-delete", mass_target="--mirror@origin")
+        tok = token("remote-mass-delete", mass_target=mgc._canonical_join(["--mirror", "origin"]))
         assert MATCH(tok, "git push --mirror origin") is True
         assert MATCH(tok, "git push --prune origin") is False
 
     def test_distinct_remote_does_not_cross_authorize(self):
-        tok = token("remote-mass-delete", mass_target="--mirror@origin")
+        tok = token("remote-mass-delete", mass_target=mgc._canonical_join(["--mirror", "origin"]))
         assert MATCH(tok, "git push --mirror origin2") is False
 
     def test_refspec_set_closure_a_b_does_not_authorize_a_c(self):
-        tok = token("remote-mass-delete", mass_target="--delete@origin#a,b")
+        tok = token("remote-mass-delete", mass_target=mgc._canonical_join(["--delete", "origin", "a", "b"]))
         assert MATCH(tok, "git push origin --delete a b") is True
         assert MATCH(tok, "git push origin --delete a c") is False
 
@@ -369,8 +369,8 @@ class TestRemoteMassDeleteBoundary:
             # git grammar: `git push --delete a b` => repo=a, ref=b => SINGLE delete
             ("git push --delete a b", "remote-ref-delete", "b"),
             # explicit remote + 2 refs => MULTI => remote-mass-delete
-            ("git push origin --delete a b", "remote-mass-delete", "--delete@origin#a,b"),
-            ("git push --mirror origin", "remote-mass-delete", "--mirror@origin"),
+            ("git push origin --delete a b", "remote-mass-delete", mgc._canonical_join(["--delete", "origin", "a", "b"])),
+            ("git push --mirror origin", "remote-mass-delete", mgc._canonical_join(["--mirror", "origin"])),
         ],
     )
     def test_single_vs_multi_delete_routing(self, cmd, expected_op, expected_target):
@@ -411,9 +411,9 @@ class TestRemoteMassDeleteParityMintAndNonVacuity:
     @pytest.mark.parametrize(
         "cmd,mass_target",
         [
-            ("git push --mirror origin", "--mirror@origin"),
-            ("git push --mirror", f"--mirror@{IMPLICIT}"),
-            ("git push origin --delete a b", "--delete@origin#a,b"),
+            ("git push --mirror origin", mgc._canonical_join(["--mirror", "origin"])),
+            ("git push --mirror", mgc._canonical_join(["--mirror", IMPLICIT])),
+            ("git push origin --delete a b", mgc._canonical_join(["--delete", "origin", "a", "b"])),
         ],
     )
     def test_faithful_click_mints_and_authorizes(self, cmd, mass_target):
@@ -425,8 +425,8 @@ class TestRemoteMassDeleteParityMintAndNonVacuity:
 
     def test_mint_authorize_proof_is_non_vacuous_wrong_target_refused(self):
         cmd = "git push --mirror origin"
-        assert MATCH(token("remote-mass-delete", mass_target="--mirror@origin"), cmd) is True
-        assert MATCH(token("remote-mass-delete", mass_target="--prune@origin"), cmd) is False
+        assert MATCH(token("remote-mass-delete", mass_target=mgc._canonical_join(["--mirror", "origin"])), cmd) is True
+        assert MATCH(token("remote-mass-delete", mass_target=mgc._canonical_join(["--prune", "origin"])), cmd) is False
 
 
 class TestRemoteMassDeleteNoOverBlock:
@@ -785,8 +785,8 @@ class TestStaleSnapshotIntegration:
     @pytest.mark.parametrize(
         "cmd,mass_target",
         [
-            ("git push origin --delete a b", "--delete@origin#a,b"),
-            ("git push --mirror origin", "--mirror@origin"),
+            ("git push origin --delete a b", mgc._canonical_join(["--delete", "origin", "a", "b"])),
+            ("git push --mirror origin", mgc._canonical_join(["--mirror", "origin"])),
         ],
     )
     def test_formerly_deferred_forms_now_gate_as_mass(self, cmd, mass_target):
