@@ -704,6 +704,32 @@ class TestCheckUnpausedPr:
     # #453 Fix B — session_consolidated short-circuit tests
     # ========================================================================
 
+    def test_refresh_consolidated_preemit_no_false_warn(self):
+        """A refresh that pre-emitted session_consolidated does not warn.
+
+        The refresh command's journal-write step emits session_consolidated
+        (when the harvest completed) before session_refreshed — the same
+        structural signal wrap-up/pause emit. A quit after refresh with an
+        open PR must therefore NOT produce the unpaused-PR warning: the
+        knowledge was consolidated; the workstream is a declared
+        continuation, not an abandoned session.
+        """
+        from session_end import check_unpaused_pr
+
+        def mock_read_events(event_type=None):
+            if event_type == "session_consolidated":
+                return [{"type": "session_consolidated", "pass": 2,
+                         "ts": "2026-07-10T12:00:00Z"}]
+            if event_type == "review_dispatch":
+                return [{"type": "review_dispatch", "pr_number": 77,
+                         "ts": "2026-07-10T09:00:00Z"}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events):
+            warning = check_unpaused_pr(tasks=None, project_slug="proj")
+
+        assert warning is None
+
     def test_session_consolidated_short_circuits_warning(self):
         """session_consolidated present → no warning regardless of PR state.
 

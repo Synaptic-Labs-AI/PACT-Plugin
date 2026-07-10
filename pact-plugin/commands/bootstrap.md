@@ -14,6 +14,8 @@ Read `team_name` from the **Current Session** block in the project's `CLAUDE.md`
 
 The platform manages exactly one team per session, named `{team_name}` — it is provisioned automatically; you do not create it (the `TeamCreate`/`TeamDelete` tools no longer exist). Use `{team_name}` for every specialist dispatch.
 
+**Team-config expectations (bidirectional)**: on resume, a PRESENT team config is reused — never re-create it. An ABSENT config is the NORM after a clean session end — the platform provisions the session team; both states are normal, neither is corruption. **Ghost-detection**: if a spawn or send fails with a team-not-found error, do NOT blind-retry `Agent()` — the platform spawn is non-atomic and the process may already be running. Check for inbound messages from the "failed" agent name first; re-spawn only if it stays silent.
+
 ## Step 2 — Spawn `pact-secretary`
 
 Spawn the session secretary using single-task dispatch — the `pact-secretary` agentType is exempt from the teachback gate. No Task A teachback round-trip.
@@ -25,11 +27,24 @@ Spawn the session secretary using single-task dispatch — the `pact-secretary` 
 
 The secretary delivers the session briefing at spawn, answers memory queries during the session, and processes HANDOFFs at workflow boundaries. The briefing task is a discrete deliverable: the secretary MUST self-complete it (`TaskUpdate(status="completed")`) as the final act of delivering the briefing — you do NOT complete it, and you MUST NOT expect to. Completing the task does NOT end the secretary's role; it continues as memory consultant and HANDOFF harvester for the rest of the session. Memory queries from any other agent are blocked until the secretary is alive.
 
-Spawn the secretary **only once per session** — reuse the same secretary for any subsequent memory queries or HANDOFF harvesting.
+Spawn the secretary **only once per session** — reuse the same secretary for any subsequent memory queries or HANDOFF harvesting — AND respawn it after `/PACT:refresh`, whose shutdown stopped the previous secretary process. Post-refresh, respawning is MANDATORY BEFORE any SendMessage to the secretary name: a send to the stopped name resurrects its stale pre-refresh transcript instead of starting fresh.
 
 ## Step 3 — Surface paused state
 
 Paused state is surfaced **automatically** by the `session_init` hook: when the previous session ran `/PACT:pause`, it wrote a `session_paused` event to the session journal, and `session_init` reads that event on resume and injects the paused-work prompt into the SessionStart context. There is **no `paused-state.json` file** — do not attempt to read one (nothing writes it). Watch the SessionStart context for a "Paused work detected" line. If it appears, **do not silently resume.** Surface it to the user and ask whether to continue the paused workflow or start fresh; their choice drives next-step dispatch.
+
+**Refreshed state**: also watch the SessionStart context for a refreshed-workstream prompt (a "Refreshed workstream detected" line carrying a `refresh_ts=` key). If present, this is a DECLARED CONTINUATION, not a fresh start: surface the mid-flight state to the user (feature, next phase, worktrees, any HALT line) and AUTO-PROCEED to respawn the specialists the named next phase needs. Ask the user ONLY on inconsistency: the prompt's HALT line has no matching live blocker task in `TaskList` (or live blockers exist the prompt doesn't mention), or a listed worktree path does not exist on disk. A HALT line always surfaces to the user regardless.
+
+**Consumption write (fire-once)**: immediately after confirming resumption (secretary respawned, mid-flight state surfaced), retire the refresh prompt by writing the consumption event — substitute the `refresh_ts=` value copied VERBATIM from the surfaced prompt:
+
+```bash
+python3 "{plugin_root}/hooks/shared/session_journal.py" write \
+  --type session_refresh_consumed --session-dir '{session_dir}' --stdin <<'JSON'
+{"refresh_ts": "{refresh_ts}"}
+JSON
+```
+
+If the prompt said `refresh_ts=UNAVAILABLE`, skip the write (the prompt may re-surface once; its staleness downgrade bounds the repetition). Never write a consumption event when no refresh prompt surfaced.
 
 ## Step 4 — Plugin banner
 
