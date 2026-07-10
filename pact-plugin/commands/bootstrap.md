@@ -44,7 +44,7 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
 JSON
 ```
 
-If the prompt said `refresh_ts=UNAVAILABLE`, skip the write (the prompt may re-surface once; its staleness downgrade bounds the repetition). Never write a consumption event when no refresh prompt surfaced.
+If the prompt said `refresh_ts=UNAVAILABLE`, skip the write (the prompt may re-surface once; its staleness downgrade bounds the repetition). Never write a consumption event when no refresh prompt surfaced. On a quit-then-new-session resume the consumption event lands in the NEW session's journal (a harmless orphan record) — fire-once on that path is enforced by the one-hop-back journal read, while the ts-bound consumption covers the same-session paths (`/compact` and same-session `--resume`).
 
 ## Step 4 — Plugin banner
 

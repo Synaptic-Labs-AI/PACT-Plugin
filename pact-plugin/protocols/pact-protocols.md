@@ -2358,7 +2358,7 @@ From most to least durable:
 
 | Trigger | What Runs | Entry Point |
 |---------|-----------|-------------|
-| **Session start** | Restore previous session context + detect paused work | `session_init.py` → `restore_last_session()`, `check_paused_state()` |
+| **Session start** | Restore previous session context + detect paused or refreshed work | `session_init.py` → `restore_last_session()`, `check_resume_state()` |
 | **Post-compaction** | Orchestrator rebuilds current session state | CLAUDE.md State Recovery steps + workflow command auto-recovery |
 | **Manual** | User or orchestrator reads journal directly | CLI: `python3 session_journal.py read --session-dir {session_dir}` |
 

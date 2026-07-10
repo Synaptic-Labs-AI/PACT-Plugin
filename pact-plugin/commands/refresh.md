@@ -56,6 +56,7 @@ Then compute the checkpoint payload:
 
 - `halt_active` + `halt_task_ids`: scan `TaskList` for tasks with `metadata.type` in {`blocker`, `algedonic`} and status not `completed`. Always computable — `false` and omit the ids when none are live.
 - `feature_task_id` / `feature_subject`: from the in_progress feature task (omit both in the degenerate case).
+- `team_name`: the active session team's name — the same value bootstrap reads from the Current Session block at resume, giving it an identity cross-check.
 - `next_phase`: from the phase-task state. Bounded vocabulary, writer-enforced (the journal validator does not check enums): `prepare|architect|code|test|peer-review|deploy`.
 - `worktrees`: JSON list of ABSOLUTE paths of the active worktrees.
 - `pr_number`: only when a PR is open — informational surface data; it never gates anything.
@@ -83,7 +84,7 @@ JSON
 esac
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type session_refreshed --session-dir '{session_dir}' --stdin <<'JSON'
-{"consolidation_completed": {true_or_false}, "halt_active": {halt_active}, "halt_task_ids": {halt_task_ids}, "feature_task_id": "{feature_task_id}", "feature_subject": "{feature_subject}", "next_phase": "{next_phase}", "worktrees": {worktrees}, "pr_number": {pr_number}}
+{"consolidation_completed": {true_or_false}, "halt_active": {halt_active}, "halt_task_ids": {halt_task_ids}, "feature_task_id": "{feature_task_id}", "feature_subject": "{feature_subject}", "team_name": "{team_name}", "next_phase": "{next_phase}", "worktrees": {worktrees}, "pr_number": {pr_number}}
 JSON
 ```
 
@@ -107,6 +108,7 @@ JSON
 | `halt_task_ids` | list of strings | no | Ids of the live signal tasks (diagnostic — the live task store is the SSOT at resume) |
 | `feature_task_id` | string | no | The in_progress feature task id |
 | `feature_subject` | string | no | The in_progress feature task subject |
+| `team_name` | string | no | The active session team's name — resume-time identity cross-check |
 | `next_phase` | string | no | Bounded vocabulary above |
 | `worktrees` | list of strings | no | Absolute paths of active worktrees |
 | `pr_number` | integer | no | Open PR number — surface-only, never gates surfacing |
