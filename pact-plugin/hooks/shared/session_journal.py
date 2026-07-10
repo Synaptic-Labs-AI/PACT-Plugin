@@ -187,6 +187,25 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
         "worktree_path": str,
         "consolidation_completed": bool,
     },
+    # commands/refresh.md writes session_refreshed at the PERSIST/VERIFY step with
+    # consolidation_completed (unquoted bool) and halt_active (unquoted bool).
+    # Optional mid-flight fields (halt_task_ids, feature_task_id, feature_subject,
+    # team_name, next_phase, worktrees, pr_number) are validated when present via
+    # _OPTIONAL_FIELDS_BY_TYPE; a degenerate no-workstream refresh writes the two
+    # required fields only. worktrees is typed list — the validator is SHALLOW on
+    # list fields (same caveat as artifact_paths); per-element validity is the
+    # writer's responsibility. pr_number is surface-only and never gates surfacing.
+    "session_refreshed": {
+        "consolidation_completed": bool,
+        "halt_active": bool,
+    },
+    # commands/bootstrap.md writes session_refresh_consumed at CONFIRMED resumption
+    # (never at surface time). refresh_ts (quoted string) binds the consumption to
+    # ONE specific session_refreshed event's ts — a later refresh is never retired
+    # by an earlier consumption.
+    "session_refresh_consumed": {
+        "refresh_ts": str,
+    },
     # hooks/session_end.py writes session_end with NO required fields — one
     # writer passes an optional `warning` (line 119), the other passes
     # nothing (line 316). commands/wrap-up.md CLI also writes session_end
@@ -291,6 +310,30 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
         "pass": int,
         "task_count": int,
         "memories_saved": int,
+    },
+    # commands/refresh.md writes session_refreshed with optional mid-flight
+    # pointers, present only when the refresh found an active workstream:
+    # halt_task_ids (JSON list of signal-task ids — diagnostic cross-check;
+    # the live task store is the SSOT at resume time), feature_task_id /
+    # feature_subject (the in_progress feature task), next_phase (bounded
+    # vocabulary prepare|architect|code|test|peer-review|deploy — a WRITER-side
+    # contract documented in refresh.md; the shallow validator does not
+    # enforce enums), worktrees (list of absolute paths; SHALLOW list check —
+    # per-element validity is the writer's responsibility, same caveat as
+    # artifact_paths), team_name, and pr_number (surface-only, never gates
+    # surfacing). The required-fields registration above
+    # ("session_refreshed": {...}) is what ACTIVATES this optional check —
+    # _validate_event_schema short-circuits on unknown types and would
+    # otherwise skip the optional loop (same activation pattern as
+    # session_end / missed_wake / teachback_ack).
+    "session_refreshed": {
+        "halt_task_ids": list,
+        "feature_task_id": str,
+        "feature_subject": str,
+        "team_name": str,
+        "next_phase": str,
+        "worktrees": list,
+        "pr_number": int,
     },
     # hooks/missed_wake_scan.py writes missed_wake with optional task_subject
     # (human-readable task label) and reason (the intentional_wait reason —

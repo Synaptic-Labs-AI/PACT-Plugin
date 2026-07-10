@@ -2373,6 +2373,8 @@ Events are JSONL entries with common fields `v` (schema version), `type`, and `t
 | `session_start` | session_init hook | `team`, `session_id`, `project_dir`, `worktree`, `source` | Session boundary marker; `source` ∈ {`startup`, `resume`, `compact`, `clear`, `unknown`} attributes the event to startup vs auto-compact vs `/clear` vs `/resume` for direct triage (no timing-cluster triangulation needed) |
 | `session_end` | session_end hook | `warning` (optional) | Detect incomplete shutdowns |
 | `session_paused` | pause command | `pr_number`, `pr_url`, `branch`, `worktree_path`, `consolidation_completed`, `team_name` | Resume paused PR work |
+| `session_refreshed` | refresh command | `consolidation_completed`, `halt_active`; optional: `halt_task_ids`, `feature_task_id`, `feature_subject`, `team_name`, `next_phase`, `worktrees`, `pr_number` | Resume mid-workstream after context refresh |
+| `session_refresh_consumed` | bootstrap command | `refresh_ts` | Retire a consumed refresh prompt (fire-once) |
 | `session_consolidated` | wrap-up, pause commands | `pass`, `task_count`, `memories_saved` (all optional int) | Signal that Pass 2 memory consolidation ran this session — consumed by `check_unpaused_pr` so SessionEnd does not warn on consolidated sessions regardless of PR state |
 | `variety_assessed` | orchestrate command | `task_id`, `variety` | Restore variety context |
 | `phase_transition` | orchestrate, comPACT | `phase`, `status` (`started`/`completed`) | Determine current phase |
@@ -2403,6 +2405,13 @@ Events are JSONL entries with common fields `v` (schema version), `type`, and `t
 2. TTL check: older than 14 days → return stale notice
 3. PR validation: `gh pr view` → if MERGED/CLOSED → return informational
 4. Return actionable resume prompt with PR number, branch, worktree path
+
+**Refreshed state detection** (via `check_resume_state`):
+
+1. Read `session_refreshed` event (most recent) from the session journal
+2. Spent check: a `session_refresh_consumed` event whose `refresh_ts` equals the refresh event's `ts` (and whose own `ts` is at-or-after it) retires the claim — no prompt
+3. TTL check: older than 48 hours → prefix a stale notice (informational downgrade only, never suppression)
+4. Return mid-flight resume prompt: feature task, next phase, worktree paths, and a HALT cross-check against live signal tasks (the event can never suppress a live HALT)
 
 **Post-compaction recovery** (orchestrator rebuilds mid-session):
 
