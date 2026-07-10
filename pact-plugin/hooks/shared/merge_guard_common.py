@@ -1929,7 +1929,7 @@ def _procsub_anchor_view(command: str) -> str:
         i = m.start()
         k = i - 1
         # skip GENUINE whitespace (a space in BOTH view and raw)
-        while k >= 0 and view[k] == " " and excised[k] in " \t":
+        while k >= 0 and view[k] == excised[k] and excised[k] in " \t":
             k -= 1
         # stop char masked to space in the view but a CLOSING QUOTE in raw ==
         # a quoted writer token ended here -> reveal its closing quote (in arm B's
