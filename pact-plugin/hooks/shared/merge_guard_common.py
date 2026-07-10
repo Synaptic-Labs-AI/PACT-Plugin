@@ -168,6 +168,7 @@ import os
 import re
 import shlex
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 from .paths import get_claude_config_dir
@@ -875,32 +876,44 @@ def _extract_branch_name(command: str) -> str | None:
     return _strip_surrounding_quotes(positionals[0])
 
 
+def _canonical_join(items: Sequence[str]) -> str:
+    """Netstring/length-prefix encode a sequence of strings into ONE canonical
+    identity STRING, injective by construction (a left-inverse decoder exists), so
+    distinct sequences never collide REGARDLESS of item content — incl. commas, '@',
+    '#', ':' and NUL. Pure + deterministic (no sort, no dedup — the caller supplies a
+    canonical ordered list). Stays a `str` (the token persists as JSON; compared by
+    str()-equality, never decoded). Shared SSOT for branch_set + mass_target (#1136)."""
+    return "".join(f"{len(i)}:{i}" for i in items)
+
+
 def _extract_branch_delete_set(command: str) -> str | None:
     """Extract the canonical MULTI-branch identity of a force-delete command.
 
     The MULTI-target sibling of _extract_branch_name (which owns the SINGLE
     branch). Handles the CLI `git branch -D|--delete --force <a> <b> ...` form
     with TWO OR MORE positional branch names, returning a canonical
-    sort+dedup+quote-strip identity STRING joined on NUL (`\x00`), or None
+    sort+dedup+quote-strip identity STRING (the shared netstring `_canonical_join`
+    SSOT), or None
     when fewer than two branch names are positively extractable (<2 -> defers to
     the scalar _extract_branch_name path — the BOUNDARY discriminator, so a
     command populates EXACTLY ONE of `branch` / `branch_set`).
 
-    Mirrors the _extract_mass_delete_target precedent (#1062b): an
+    Shares the _extract_mass_delete_target encoder (#1062b/#1136): an
     ORDER-INDEPENDENT identity STRING (never a tuple/list — a token persists as
     JSON, and the read side compares via `str()`, so a list<->tuple round-trip
     must never enter the identity), built + canonicalized in this ONE shared SSOT
     so mint and read derive byte-identical strings (D2 symmetry by construction).
-    The join separator is NUL (`\x00`): git forbids control bytes in branch
-    names, so no name can contain it and the joined identity is INJECTIVE —
-    distinct branch SETS never collide. (A bare `,` was NOT injective: a branch
-    literally named `a,b` collided with the set {a, b}, cross-authorizing distinct
-    sets — the F1 review finding. NUL is JSON/str()-safe: json escapes it on dump,
-    restores it on load, and str() is stable, so the round-trip holds.)
+    Encoding is the netstring `_canonical_join` (`len:name` framing): the identity
+    is INJECTIVE by construction and CONTENT-AGNOSTIC, so distinct branch SETS never
+    collide regardless of name content — no separator has to be ref-illegal. (A bare
+    `,` join was NOT injective: a branch literally named `a,b` collided with the set
+    {a, b}, cross-authorizing distinct sets — the F1 review finding; framing closes
+    that class outright. The string is JSON/str()-safe: json round-trips it and str()
+    is stable, so the identity survives token persistence.)
     Set-EQUALITY on this INJECTIVE string then closes the #1032 multi-target
     under-block UNCONDITIONALLY: a `{a,b}` token cannot authorize `{a,b,c}`
     (unequal strings) while a `{b,a}` reorder MATCHES (both canonicalize to the
-    same NUL-joined string).
+    same string).
 
     Uses the SAME tokenization as _extract_branch_name (executable-prefix
     truncation at a benign continuation/redirect via _executable_prefix, then drop
@@ -921,12 +934,13 @@ def _extract_branch_delete_set(command: str) -> str | None:
     if len(positionals) < 2:
         return None
     names = sorted({_strip_surrounding_quotes(t) for t in positionals})
-    # Join on NUL (\x00) — a REF-ILLEGAL separator (git forbids control bytes in
-    # branch names) so no name can contain it -> the identity is INJECTIVE and
-    # distinct sets never collide (the F1 fix; a bare `,` collided a branch named
-    # `a,b` with the set {a, b}). JSON/str()-safe, so D2 mint==read symmetry and
-    # the JSON token round-trip both hold.
-    return "\x00".join(names) or None
+    # Encode via the shared netstring SSOT (_canonical_join): each name is framed as
+    # `len:name`, so the identity is INJECTIVE by construction and CONTENT-AGNOSTIC —
+    # distinct sets never collide regardless of name content, without depending on any
+    # separator being ref-illegal (an earlier bare `,` join collided a branch named
+    # `a,b` with the set {a, b}). JSON/str()-safe, so mint==read symmetry and the JSON
+    # token round-trip both hold.
+    return _canonical_join(names) or None
 
 
 def _extract_force_push_target_ref(command: str) -> str | None:
@@ -1102,14 +1116,15 @@ def _extract_mass_delete_target(command: str) -> str | None:
     benign `-o ci.skip` does not over-bind; privileged flags ride the existing #1042
     `bound_flags` axis. Derived identically on BOTH arms via this ONE SSOT → mint==read
     parity by construction; recognition⟺mintability (the arm returns the op IFF this is
-    non-None) → #1064-impossible. Returns a READABLE tuple, never a hash:
+    non-None) → #1064-impossible. Returns a READABLE netstring identity STRING
+    (`len:value`-framed field tuple; no `@`/`#`/`,` delimiters; #1136), never a hash:
 
-        <sorted-mass-flags>@<remote-or-implicit-marker>[#<sorted-refspecs>]
-        git push --mirror origin               → --mirror@origin
-        git push --mirror                      → --mirror@\\x00implicit (implicit-remote MINTABLE)
-        git push --prune origin refs/heads/main → --prune@origin#refs/heads/main
-        git push origin --delete a b           → --delete@origin#a,b (binds the EXACT deleted set)
-        git push origin :a :b                  → --delete@origin#a,b
+        _canonical_join([<sorted-mass-flags>, <remote-or-implicit-marker>, *<sorted-deduped-refspecs>])
+        git push --mirror origin               → 8:--mirror6:origin
+        git push --mirror                      → 8:--mirror9:\\x00implicit (implicit-remote MINTABLE)
+        git push --prune origin refs/heads/main → 7:--prune6:origin15:refs/heads/main
+        git push origin --delete a b           → 8:--delete6:origin1:a1:b (binds the EXACT deleted set)
+        git push origin :a :b                  → 8:--delete6:origin1:a1:b
 
     BOUNDARY (lead-mandated, no double-classification): a SINGLE-ref delete is owned by
     `_extract_remote_ref_delete_target` (tried FIRST in the recognition arm). This
@@ -1162,10 +1177,11 @@ def _extract_mass_delete_target(command: str) -> str | None:
     else:
         return None
 
-    target = f"{flags_part}@{remote}"
-    if refspecs:
-        target += "#" + ",".join(refspecs)
-    return target
+    # Encode the destructive identity via the shared netstring SSOT (_canonical_join):
+    # framing subsumes the old `@`/`#`/`,` delimiters, so the identity is injective for
+    # ANY field content (closes the #1136 `#`/comma collision class). Dedup refspecs
+    # (a duplicate ref is the same target); empty refspecs frame uniformly (no `#`).
+    return _canonical_join([flags_part, remote, *sorted(set(refspecs))])
 
 
 # -----------------------------------------------------------------------------
@@ -1427,11 +1443,11 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
         pr_number:  str  (merge / close)
         branch:     str  (branch-delete — SINGLE target, exactly 1 positional)
         branch_set: str  (branch-delete — MULTI target #1129, >=2 positionals) —
-                     canonical sort+dedup+quote-strip names joined on NUL (`\x00`,
-                     a ref-illegal separator → injective, no delimiter collision)
+                     canonical sort+dedup+quote-strip names via the shared netstring _canonical_join (`len:name` framing,
+                     injective by construction, content-agnostic — no delimiter collision)
         target_ref: str  (force-push / push-to-main, KD-6; remote-ref-delete #1062a)
-        mass_target: str (remote-mass-delete #1062b) — normalized identity tuple
-                     <sorted-mass-flags>@<remote-or-implicit-marker>[#<sorted-refspecs>]
+        mass_target: str (remote-mass-delete #1062b) — normalized identity STRING
+                     _canonical_join([<sorted-mass-flags>, <remote-or-implicit-marker>, *<sorted-deduped-refspecs>])
         protected_branch: str (branch-protection #1063) — the branch from the
                      branches/<b>/protection URL path
         bound_flags: list[str]  (#1042) — sorted normalized privileged flags;

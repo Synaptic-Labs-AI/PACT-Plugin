@@ -556,7 +556,7 @@ def _token_matches_command(token: dict, command: str) -> bool:
         # SSOT), so a scalar token can NOT authorize a set command or vice-versa
         # (the absent-key side fails _both_present_equal), and a {a,b} token can
         # NOT authorize {a,b,c} (unequal canonical strings) while a {b,a} reorder
-        # MATCHES (both canonicalize to `a,b`). The #1032 under-block is closed by
+        # MATCHES (both canonicalize to the SAME string). The #1032 under-block is closed by
         # equality; both sides derive via the ONE extract_command_context SSOT so
         # mint and read cannot drift.
         return (
