@@ -618,6 +618,10 @@ class TestRefreshSurfacingMatrix:
         assert "Context was compacted." in additional
         assert "Prior conversation auto-compacted." not in additional
         assert "Pre-refresh agents (STOPPED — respawn before messaging)" in additional
+        # The re-label replaces with count=1: a second upstream occurrence of
+        # the legacy label would survive the replace and mislabel STOPPED
+        # agents as active — pin full absence, not just replacement presence.
+        assert "Active Agents" not in additional
         # Names still come from live task data — only the label changed.
         assert "auditor: observe" in additional
         # The FULL prompt still comes from step 8 (unified resolver).
