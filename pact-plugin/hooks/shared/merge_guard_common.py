@@ -1910,6 +1910,37 @@ def _executed_surface_view(command: str) -> str:
     return _mask_shell_quotes(_excise_heredoc_bodies_for_routing_scan(command))
 
 
+def _procsub_anchor_view(command: str) -> str:
+    """OUTPUT-SIDE process-substitution routing view (#1129 R3-fix). The space-mask
+    executed-surface view, then arm B's preceding-token ANCHOR restored ONLY
+    immediately-left of a SURVIVING >(shell) whose writer token was a masked quoted
+    span. Everything from >( rightward is viewed EXACTLY as the space-mask (so the
+    incidental >("ba"sh)->>(    sh) catch is preserved). Re-catches the R3 arm-B
+    anchor regression WITHOUT a blanket fill (which breaks the shell-name region ->
+    a NEW under-block on >("ba"sh)) and WITHOUT computing arm B over raw (which
+    reverts B3). Relies on _mask_shell_quotes being SAME-LENGTH: view and excised
+    align 1:1 by offset. Consumed ONLY by process_sub_to_shell."""
+    excised = _excise_heredoc_bodies_for_routing_scan(command)
+    view = _mask_shell_quotes(excised)               # space-fill, offsets preserved
+    if ">(" not in view:                             # cheap short-circuit (common case)
+        return view
+    out = list(view)
+    for m in re.finditer(r">\(", view):              # each SURVIVING >( on the view
+        i = m.start()
+        k = i - 1
+        # skip GENUINE whitespace (a space in BOTH view and raw)
+        while k >= 0 and view[k] == " " and excised[k] in " \t":
+            k -= 1
+        # stop char masked to space in the view but a CLOSING QUOTE in raw ==
+        # a quoted writer token ended here -> reveal its closing quote (in arm B's
+        # class ['\w"')\]}]) so `<anchor>\s+>\(` matches. A redirect op (>, 2>) or a
+        # genuine separator is NOT a quote -> no restore -> arm A / stderr-exclusion
+        # and the absent-anchor case are all untouched.
+        if k >= 0 and view[k] == " " and excised[k] in "\"'":
+            out[k] = excised[k]
+    return "".join(out)
+
+
 def _has_eval_or_source(command: str) -> bool:
     """Check if command contains eval or source that could execute variable values.
 
@@ -2012,9 +2043,16 @@ def _strip_non_executable_content(command: str) -> str:
     # heredoc body) can no longer disable the carriers; genuinely-executing
     # routing (unquoted tails, opener-line tails) is unquoted shell structure
     # and survives the view at identical offsets.
-    _routing_view = _executed_surface_view(command)
-    piped_to_shell = _has_pipe_to_shell(_routing_view)
-    process_sub_to_shell = _has_process_substitution_to_shell(_routing_view)
+    #
+    # The two flags read DIFFERENT views (#1129 R3-fix): piped_to_shell stays on
+    # the pure space-mask executed-surface view (the security 216-case pipe sweep
+    # stays byte-valid). process_sub_to_shell reads _procsub_anchor_view — the same
+    # space-mask with arm B's LEFT anchor restored immediately-left of a surviving
+    # >(shell) whose writer was a masked quoted token — re-catching the R3 arm-B
+    # regression (`echo "…" | "tee" >(bash)`) without a blanket fill (which would
+    # regress `>("ba"sh)`) and without computing arm B over raw (which reverts B3).
+    piped_to_shell = _has_pipe_to_shell(_executed_surface_view(command))
+    process_sub_to_shell = _has_process_substitution_to_shell(_procsub_anchor_view(command))
 
     # 1. Strip heredoc bodies: << 'EOF' ... EOF, << EOF ... EOF, << "EOF" ... EOF
     #    Match the heredoc marker, then everything up to and including the
