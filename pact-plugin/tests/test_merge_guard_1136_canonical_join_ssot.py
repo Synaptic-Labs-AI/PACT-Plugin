@@ -51,22 +51,48 @@ _BASE_SHA = "9256c93c"  # main HEAD — #1136 pre-dates this refactor (comma/@/#
 
 
 def _load_classifier(sha):
+    """Load merge_guard_common as it existed at `sha`, or None if unavailable.
+
+    Returns None on any git/exec failure — git missing, or a SHALLOW clone lacking
+    the base commit (CI's default fetch-depth) — so collection SUCCEEDS and the
+    base-vs-HEAD differential rows self-SKIP (@requires_history) instead of aborting
+    the whole file. Mirrors test_merge_guard_1118_recert._load_module_at.
+    """
     wt = Path(__file__).resolve().parents[2]
-    src = subprocess.check_output(
-        ["git", "-C", str(wt), "show", sha + ":pact-plugin/hooks/shared/merge_guard_common.py"]
-    ).decode()
+    try:
+        src = subprocess.check_output(
+            ["git", "-C", str(wt), "show", sha + ":pact-plugin/hooks/shared/merge_guard_common.py"],
+            stderr=subprocess.DEVNULL,
+        ).decode()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
     mod = types.ModuleType("merge_guard_common_1136_" + sha)
     mod.__file__ = str(wt / "pact-plugin/hooks/shared/merge_guard_common.py")
     mod.__package__ = "shared"
-    exec(compile(src, mod.__file__, "exec"), mod.__dict__)
+    try:
+        exec(compile(src, mod.__file__, "exec"), mod.__dict__)
+    except Exception:
+        return None
     return mod
 
 
 _BASE = _load_classifier(_BASE_SHA)
 CJ = mgc._canonical_join
 MT = mgc._extract_mass_delete_target          # HEAD (netstring)
-MT_BASE = _BASE._extract_mass_delete_target    # base (comma/@/#)
+# None-safe: guarding _load_classifier alone is NOT enough — a bare
+# `_BASE._extract_mass_delete_target` would AttributeError at import when _BASE is None
+# (shallow clone), re-aborting collection. MT_BASE is only ever read by the
+# @requires_history-guarded differential rows, which skip when _BASE is None.
+MT_BASE = _BASE._extract_mass_delete_target if _BASE is not None else None  # base (comma/@/#)
 D = mgc.is_dangerous_command
+
+# Skip the base-vs-HEAD differential (non-vacuity) rows when the base source is
+# unavailable (shallow clone / missing history); the HEAD-side + absolute rows still
+# run. With fetch-depth:0 in CI the base IS present, so every differential runs there.
+requires_history = pytest.mark.skipif(
+    _BASE is None,
+    reason="base-vs-HEAD differential requires merged history (shallow clone / missing history)",
+)
 ALLOW, DENY = 0, 2
 
 # Destructive verbs assembled at runtime — this file carries no raw literal.
@@ -173,13 +199,24 @@ class TestCanonicalJoinInjectivity:
 # ===========================================================================
 class TestUnderBlockClosure:
 
-    def test_comma_identity_base_collides_head_distinct(self):
-        assert MT_BASE(_COMMA_2) == MT_BASE(_COMMA_3) and MT_BASE(_COMMA_2) is not None  # base COLLIDES
+    def test_comma_identity_head_distinct(self):
+        # HEAD-side closure REFUSE — ALWAYS RUNS (unguarded) so CI catches a fix-revert
+        # even on a shallow clone where the base differential below skips.
         assert MT(_COMMA_2) != MT(_COMMA_3)  # HEAD REFUSES
 
-    def test_hash_identity_base_collides_head_distinct(self):
-        assert MT_BASE(_HASH_2) == MT_BASE(_HASH_3) and MT_BASE(_HASH_2) is not None  # base COLLIDES
+    @requires_history
+    def test_comma_identity_base_collides(self):
+        # Base non-vacuity differential (skipped w/o history): base COLLIDES the two sets.
+        assert MT_BASE(_COMMA_2) == MT_BASE(_COMMA_3) and MT_BASE(_COMMA_2) is not None
+
+    def test_hash_identity_head_distinct(self):
+        # HEAD-side closure REFUSE — ALWAYS RUNS (unguarded).
         assert MT(_HASH_2) != MT(_HASH_3)  # HEAD REFUSES
+
+    @requires_history
+    def test_hash_identity_base_collides(self):
+        # Base non-vacuity differential (skipped w/o history): base COLLIDES the two sets.
+        assert MT_BASE(_HASH_2) == MT_BASE(_HASH_3) and MT_BASE(_HASH_2) is not None
 
     def test_comma_collision_closed_at_real_gate(self, tmp_path):
         # HEAD: a token minted for the 2-set does NOT authorize executing the 3-set.
@@ -190,6 +227,7 @@ class TestUnderBlockClosure:
         assert _mint(_HASH_2, tmp_path) == 1
         assert _execute(_HASH_3, tmp_path) == DENY
 
+    @requires_history
     def test_base_encoder_through_real_gate_cross_authorizes(self, tmp_path):
         # DIRECT gate-level non-vacuity for the two closure rows above: patch the BAKED BASE
         # encoder (loaded from 9256c93c) into the ONE SSOT both mint and read derive from, and
@@ -258,22 +296,32 @@ class TestOverBlockSelfMatchCorpus:
 # ===========================================================================
 class TestDoubledSurfaceBaseVsHead:
 
+    @requires_history
     def test_mass_target_collision_flips_base_to_head(self):
         # mass_target: base(comma) COLLIDES -> HEAD(netstring) REFUSES (the #1136 flip).
+        # Base-differential (skipped w/o history); the HEAD `!=` half runs unguarded in
+        # test_comma_identity_head_distinct, so a fix-revert is still caught on a shallow clone.
         assert MT_BASE(_COMMA_2) == MT_BASE(_COMMA_3)
         assert MT(_COMMA_2) != MT(_COMMA_3)
 
-    def test_branch_set_stays_collision_safe_across_the_move(self):
-        # branch_set was ALREADY collision-safe on base (NUL join, R1 F1) -> its non-vacuity is
-        # NOT a base-flip. It must STAY correct across the move onto the shared netstring helper:
-        # a comma-named branch set and a 3-branch set are DISTINCT on BOTH base and HEAD.
+    def test_branch_set_head_collision_safe(self):
+        # HEAD-side: a comma-named branch set and a 3-branch set are DISTINCT at HEAD
+        # (netstring). ALWAYS RUNS (unguarded) so CI catches a fix-revert on a shallow clone.
         _D = "-" + "D"
         two = "git branch " + _D + ' "aa,bb" cc'
         three = "git branch " + _D + " aa bb cc"
         bset = mgc._extract_branch_delete_set
+        assert bset(two) != bset(three)            # stays safe at HEAD (netstring)
+
+    @requires_history
+    def test_branch_set_base_collision_safe(self):
+        # branch_set was ALREADY collision-safe on base (NUL join, R1 F1) -> its non-vacuity is
+        # NOT a base-flip; this differential confirms it stays distinct on base too. Skipped w/o history.
+        _D = "-" + "D"
+        two = "git branch " + _D + ' "aa,bb" cc'
+        three = "git branch " + _D + " aa bb cc"
         bset_base = _BASE._extract_branch_delete_set
         assert bset_base(two) != bset_base(three)  # already safe on base (NUL)
-        assert bset(two) != bset(three)            # stays safe at HEAD (netstring)
 
     def test_branch_set_over_block_intact_across_move(self, tmp_path):
         _D = "-" + "D"
