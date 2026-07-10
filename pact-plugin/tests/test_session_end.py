@@ -1618,6 +1618,188 @@ class TestIsPausedSession:
 
 
 # =============================================================================
+# _is_checkpointed_session() Tests — paused OR refreshed existence predicate
+# =============================================================================
+
+class TestIsCheckpointedSession:
+    """Existence-OR truth table for session_end._is_checkpointed_session().
+
+    The predicate extends _is_paused_session to refresh checkpoints:
+    True iff the journal holds ANY session_paused OR session_refreshed
+    event. Pure existence — no ts comparison — so the refresh→quit race
+    (session_end fires ~1s after the session_refreshed write) can never
+    produce a wrong answer, mirroring the AdvF1/BugF2 pause precedent.
+    """
+
+    def _write_journal(self, session_dir, events):
+        journal = Path(session_dir) / "session-journal.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text("".join(json.dumps(e) + "\n" for e in events))
+
+    @pytest.mark.parametrize(
+        "event_types, expected",
+        [
+            (["session_paused"], True),
+            (["session_refreshed"], True),
+            (["session_paused", "session_refreshed"], True),
+            (["session_start", "session_end"], False),
+            ([], False),
+        ],
+        ids=["paused-only", "refreshed-only", "both", "neither", "empty"],
+    )
+    def test_existence_or_truth_table(self, tmp_path, event_types, expected):
+        from session_end import _is_checkpointed_session
+
+        session_dir = str(tmp_path / "sess-ckpt")
+        events = [
+            {"v": 1, "type": t, "ts": f"2026-01-01T0{i}:00:00Z"}
+            for i, t in enumerate(event_types)
+        ]
+        self._write_journal(session_dir, events)
+        assert _is_checkpointed_session(session_dir) is expected
+
+    def test_refreshed_then_ended_still_counts(self, tmp_path):
+        """refresh→quit race: a session_end AFTER the refresh does not
+        downgrade the session — existence, not ordering."""
+        from session_end import _is_checkpointed_session
+
+        session_dir = str(tmp_path / "sess-race")
+        self._write_journal(session_dir, [
+            {"v": 1, "type": "session_refreshed", "ts": "2026-01-01T01:00:00Z"},
+            {"v": 1, "type": "session_end", "ts": "2026-01-01T01:00:01Z"},
+        ])
+        assert _is_checkpointed_session(session_dir) is True
+
+    def test_no_ts_refreshed_event_still_counts(self, tmp_path):
+        """A refresh event with NO ts field still trips the predicate —
+        existence semantics never consult the timestamp."""
+        from session_end import _is_checkpointed_session
+
+        session_dir = str(tmp_path / "sess-no-ts")
+        self._write_journal(session_dir, [
+            {"v": 1, "type": "session_refreshed"},
+        ])
+        assert _is_checkpointed_session(session_dir) is True
+
+    def test_missing_journal_is_false(self, tmp_path):
+        from session_end import _is_checkpointed_session
+
+        assert _is_checkpointed_session(str(tmp_path / "nope")) is False
+
+
+# =============================================================================
+# cleanup_old_sessions() — Refreshed Session Preservation Tests
+# =============================================================================
+
+class TestCleanupRefreshedPreservation:
+    """Dual-bound behavior for refreshed sessions in cleanup_old_sessions().
+
+    The 180-day journal guard is the LONG-GAP bound: a
+    refreshed-but-never-resumed journal survives the 30-day active TTL
+    (30d = full-fidelity resume bound — tasks/teams reapers are
+    journal-blind and still reap at 30d; the resume prompt's HALT
+    cross-check surfaces the documented loud-mismatch warning past that)
+    and still ages out past the 180-day checkpoint TTL.
+    """
+
+    def _create_session_dir(self, slug_dir, session_id):
+        session_dir = slug_dir / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "pact-session-context.json").write_text("{}")
+        return session_dir
+
+    def _set_age(self, session_dir, age_days):
+        import os as _os
+        import time as _time
+        old_time = _time.time() - (age_days * 86400)
+        _os.utime(str(session_dir), (old_time, old_time))
+
+    def _write_journal(self, session_dir, events):
+        journal = session_dir / "session-journal.jsonl"
+        journal.write_text("".join(json.dumps(e) + "\n" for e in events))
+
+    def test_refreshed_session_survives_beyond_30d(self, tmp_path):
+        """A 35-day-old refreshed session survives the active TTL —
+        WITHOUT the guard this journal would be reaped at 30 days."""
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        refreshed_id = "33333333-4444-5555-6666-777777777777"
+
+        self._create_session_dir(slug_dir, current_id)
+        refreshed_dir = self._create_session_dir(slug_dir, refreshed_id)
+        self._write_journal(refreshed_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_refreshed",
+             "consolidation_completed": True, "halt_active": False,
+             "ts": "2026-01-01T01:00:00Z"},
+            {"v": 1, "type": "session_end", "ts": "2026-01-01T01:00:01Z"},
+        ])
+        self._set_age(refreshed_dir, 35)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        assert refreshed_dir.exists()
+
+    def test_refreshed_session_ages_out_past_checkpoint_ttl(self, tmp_path):
+        """The extended TTL is protection, not permanent retention: a
+        refreshed session older than paused_max_age_days is reaped
+        (injected small bound per the existing kwarg test seam)."""
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        ancient_id = "44444444-5555-6666-7777-888888888888"
+
+        self._create_session_dir(slug_dir, current_id)
+        ancient_dir = self._create_session_dir(slug_dir, ancient_id)
+        self._write_journal(ancient_dir, [
+            {"v": 1, "type": "session_refreshed",
+             "consolidation_completed": True, "halt_active": False,
+             "ts": "2025-01-01T01:00:00Z"},
+        ])
+        self._set_age(ancient_dir, 60)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+            paused_max_age_days=45,
+        )
+
+        assert not ancient_dir.exists()
+
+    def test_active_session_still_reaped_at_30d(self, tmp_path):
+        """Control: a non-checkpointed 35-day-old session is still reaped
+        — the guard widens the policy for checkpointed sessions only."""
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        active_id = "55555555-6666-7777-8888-999999999999"
+
+        self._create_session_dir(slug_dir, current_id)
+        active_dir = self._create_session_dir(slug_dir, active_id)
+        self._write_journal(active_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+        ])
+        self._set_age(active_dir, 35)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        assert not active_dir.exists()
+
+
+# =============================================================================
 # cleanup_old_sessions() — Paused Session Preservation Tests
 # =============================================================================
 

@@ -8,7 +8,7 @@ Used by: hooks.json SessionEnd hook
 Actions:
 1. Write session_end event to the session journal
 2. Detect open PRs that were not paused (append warning to journal)
-3. Clean up stale session directories using a dual TTL (30 days active, 180 days paused)
+3. Clean up stale session directories using a dual TTL (30 days active, 180 days paused/refreshed)
 
 Purely observational — no destructive operations on project files. Session
 directory cleanup is best-effort and never blocks session termination.
@@ -242,6 +242,35 @@ def _is_paused_session(session_dir: str) -> bool:
     return read_last_event_from(session_dir, "session_paused") is not None
 
 
+def _is_checkpointed_session(session_dir: str) -> bool:
+    """True iff the session ever recorded a session_paused OR session_refreshed
+    event. Pure existence — NO ts comparison (the pause→quit race precedent:
+    ts-ordering against session_end deletes state the user meant to keep;
+    the same race exists verbatim for refresh→quit, where session_end fires
+    ~1s after the session_refreshed write).
+
+    Extends the `_is_paused_session` policy predicate to refresh checkpoints
+    so `cleanup_old_sessions` applies the extended paused TTL
+    (`_PAUSED_SESSION_MAX_AGE_DAYS`, default 180 days) to a
+    refreshed-but-never-resumed journal. This guard protects the JOURNAL
+    only: the tasks/teams stores keep their own 30-day reapers (which never
+    read journals), so past 30 days a refresh resume degrades to
+    journal-only fidelity — the resume prompt's HALT cross-check against
+    live tasks then surfaces its loud mismatch warning by design.
+
+    Fail-open like `_is_paused_session`: unreadable journal ⇒ False ⇒
+    standard active-session TTL.
+
+    Args:
+        session_dir: Absolute path to the session directory.
+
+    Returns:
+        True iff a `session_paused` or `session_refreshed` event exists.
+    """
+    return (read_last_event_from(session_dir, "session_paused") is not None
+            or read_last_event_from(session_dir, "session_refreshed") is not None)
+
+
 def cleanup_old_sessions(
     project_slug: str,
     current_session_id: str,
@@ -253,13 +282,13 @@ def cleanup_old_sessions(
     Remove stale session directories, applying a dual TTL.
 
     Each candidate session directory is checked against a TTL selected per
-    entry: paused sessions (those whose journal contains any
-    `session_paused` event) use the extended `paused_max_age_days`
-    threshold (default 180 days), while active sessions use
-    `max_age_days` (default 30 days). The extended threshold protects
-    in-progress user work across the pause→resume workflow without
-    retaining paused state forever — paused sessions still age out past
-    180 days.
+    entry: checkpointed sessions (those whose journal contains any
+    `session_paused` or `session_refreshed` event) use the extended
+    `paused_max_age_days` threshold (default 180 days), while active
+    sessions use `max_age_days` (default 30 days). The extended threshold
+    protects in-progress user work across the pause→resume and
+    refresh→resume workflows without retaining checkpoint state forever —
+    checkpointed sessions still age out past 180 days.
 
     Best-effort cleanup — never raises. Skips the current session's
     directory and any entry that doesn't look like a UUID directory.
@@ -299,11 +328,12 @@ def cleanup_old_sessions(
                 continue
             try:
                 age_days = (time.time() - entry.stat().st_mtime) / 86400
-                # Select TTL per entry: paused sessions get the extended
-                # threshold; active sessions get the standard one.
+                # Select TTL per entry: checkpointed sessions (paused OR
+                # refreshed) get the extended threshold; active sessions
+                # get the standard one.
                 threshold = (
                     paused_max_age_days
-                    if _is_paused_session(str(entry))
+                    if _is_checkpointed_session(str(entry))
                     else max_age_days
                 )
                 if age_days > threshold:
