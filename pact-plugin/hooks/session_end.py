@@ -203,13 +203,6 @@ _SESSION_MAX_AGE_DAYS = 30
 # retention — paused sessions still age out past this threshold.
 _PAUSED_SESSION_MAX_AGE_DAYS = 180
 
-# Checkpoint file expiration for ~/.claude/pact-refresh/*.json. 7 days
-# matches the prior refresh/constants.py CHECKPOINT_MAX_AGE_DAYS value.
-# This cleanup is primarily a one-time sweep for existing deployments —
-# with precompact_refresh.py removed (#413), no new checkpoints are
-# written, so the directory asymptotically empties.
-_CHECKPOINT_MAX_AGE_DAYS = 7
-
 
 def _is_paused_session(session_dir: str) -> bool:
     """
@@ -763,65 +756,6 @@ def _prune_registry_dead_teams(
     return pruned
 
 
-def _cleanup_old_checkpoints(
-    checkpoint_dir: Path | None = None,
-    max_age_days: int = _CHECKPOINT_MAX_AGE_DAYS,
-) -> int:
-    """
-    Remove checkpoint files older than max_age_days from ~/.claude/pact-refresh/.
-
-    Post-#413, the precompact_refresh.py hook that wrote these files is deleted,
-    so this cleanup is primarily a one-time sweep for existing deployments —
-    a directory that never gets written to will eventually empty.
-
-    Best-effort: never raises. Swallows per-file OSError (handles races) and
-    the outer glob failure (hook-fail-open invariant).
-
-    Args:
-        checkpoint_dir: Directory containing checkpoint files. Defaults to
-            ~/.claude/pact-refresh. Accepts override for testing.
-        max_age_days: TTL for checkpoint files (default: 7).
-
-    Returns:
-        Number of files cleaned up.
-    """
-    if checkpoint_dir is None:
-        checkpoint_dir = get_claude_config_dir() / "pact-refresh"
-
-    if not checkpoint_dir.exists():
-        return 0
-
-    max_age_seconds = max_age_days * 24 * 60 * 60
-    cutoff_time = time.time() - max_age_seconds
-    cleaned = 0
-
-    try:
-        for checkpoint_file in checkpoint_dir.glob("*.json"):
-            # Skip symlinks (live or dangling). Mirrors cycle-1 hardening
-            # on the three sibling reapers — `is_symlink()` uses lstat
-            # semantics, so it short-circuits before any follow-semantic
-            # probe. Prevents a planted link from driving the TTL oracle
-            # off the target's mtime or from unlinking the link when the
-            # link's own mtime is within TTL but the target's is older.
-            if checkpoint_file.is_symlink():
-                continue
-            try:
-                # lstat (not stat) — cycle-2 defense: even with the
-                # symlink guard above, lstat is the correct probe for
-                # the link's own mtime if the guard is ever removed or
-                # if a future caller bypasses it. Defense-in-isolation.
-                mtime = checkpoint_file.lstat().st_mtime
-                if mtime < cutoff_time:
-                    checkpoint_file.unlink()
-                    cleaned += 1
-            except OSError:
-                pass
-    except OSError:
-        pass
-
-    return cleaned
-
-
 def main():
     try:
         try:
@@ -926,10 +860,6 @@ def main():
             ))
         except Exception as e:
             print(f"Hook warning (cleanup_summary journal): {e}", file=sys.stderr)
-
-        # Clean up stale pact-refresh checkpoint files (7-day TTL).
-        # Post-#413, these accumulate only in legacy deployments.
-        _cleanup_old_checkpoints()
 
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)

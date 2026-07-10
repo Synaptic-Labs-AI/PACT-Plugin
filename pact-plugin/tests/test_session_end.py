@@ -65,7 +65,6 @@ class TestMainEntryPoint:
             "cleanup_old_sessions": patch("session_end.cleanup_old_sessions"),
             "cleanup_old_teams": patch("session_end.cleanup_old_teams", return_value=(0, 0)),
             "cleanup_old_tasks": patch("session_end.cleanup_old_tasks", return_value=(0, 0)),
-            "_cleanup_old_checkpoints": patch("session_end._cleanup_old_checkpoints"),
         }
         defaults.update(overrides)
         return defaults
@@ -151,7 +150,8 @@ class TestMainEntryPoint:
 
     def test_main_call_ordering(self):
         """main() must call functions in correct order:
-        check_unpaused_pr -> cleanup_old_sessions -> _cleanup_old_checkpoints.
+        check_unpaused_pr -> cleanup_old_sessions -> cleanup_old_teams
+        -> cleanup_old_tasks.
         check_unpaused_pr now runs BEFORE the journal write so its return
         value can be merged into the single session_end event.
         """
@@ -162,7 +162,7 @@ class TestMainEntryPoint:
         def _record(name):
             def _side_effect(*args, **kw):
                 call_order.append(name)
-                return None  # check_unpaused_pr returns Optional[str]; _cleanup_old_checkpoints is called with no args
+                return None  # check_unpaused_pr returns Optional[str]
             return _side_effect
 
         def _record_tuple(name):
@@ -180,8 +180,6 @@ class TestMainEntryPoint:
                 side_effect=_record_tuple("cleanup_old_teams")),
             cleanup_old_tasks=patch("session_end.cleanup_old_tasks",
                 side_effect=_record_tuple("cleanup_old_tasks")),
-            _cleanup_old_checkpoints=patch("session_end._cleanup_old_checkpoints",
-                side_effect=_record("_cleanup_old_checkpoints")),
         )
         with patch("sys.stdin", io.StringIO("{}")):
             with ExitStack() as stack:
@@ -195,7 +193,6 @@ class TestMainEntryPoint:
             "cleanup_old_sessions",
             "cleanup_old_teams",
             "cleanup_old_tasks",
-            "_cleanup_old_checkpoints",
         ]
 
     def test_main_emits_single_session_end_event_when_warning(self):
@@ -1430,8 +1427,7 @@ class TestMainIntegrationCleanup:
     """Integration tests for main() exercising cleanup functions with session context.
 
     Verifies that main() correctly chains pact_context.init() ->
-    cleanup_old_sessions() -> _cleanup_old_checkpoints() using the session
-    context from stdin.
+    cleanup_old_sessions() using the session context from stdin.
     """
 
     def test_main_calls_cleanup_old_sessions(self):
@@ -1448,7 +1444,6 @@ class TestMainIntegrationCleanup:
              patch("session_end.get_task_list", return_value=[]), \
              patch("session_end.check_unpaused_pr"), \
              patch("session_end.cleanup_old_sessions") as mock_cleanup, \
-             patch("session_end._cleanup_old_checkpoints"), \
              pytest.raises(SystemExit):
             mock_ctx.init = MagicMock()
             from session_end import main
@@ -1458,33 +1453,6 @@ class TestMainIntegrationCleanup:
             project_slug="proj",
             current_session_id="test-session",
         )
-
-    def test_main_calls_cleanup_old_checkpoints(self):
-        """main() should call _cleanup_old_checkpoints (pact-refresh TTL sweep).
-
-        Wiring guard: removing the call from session_end.main() must break
-        at least one test. Post-#413, _cleanup_old_checkpoints is the
-        third cleanup step and touches ~/.claude/pact-refresh/.
-        """
-        from unittest.mock import patch, MagicMock
-        import io
-
-        input_data = json.dumps({"session_id": "test-session"})
-
-        with patch("sys.stdin", io.StringIO(input_data)), \
-             patch("session_end.pact_context") as mock_ctx, \
-             patch("session_end.get_project_dir", return_value="/test/proj"), \
-             patch("session_end.get_session_id", return_value="test-session"), \
-             patch("session_end.get_task_list", return_value=[]), \
-             patch("session_end.check_unpaused_pr"), \
-             patch("session_end.cleanup_old_sessions"), \
-             patch("session_end._cleanup_old_checkpoints") as mock_cleanup, \
-             pytest.raises(SystemExit):
-            mock_ctx.init = MagicMock()
-            from session_end import main
-            main()
-
-        mock_cleanup.assert_called_once_with()
 
 
 # =============================================================================
@@ -1959,216 +1927,6 @@ class TestTTLDefault:
         )
 
         assert not old_dir.exists(), "31-day-old session should be cleaned with 30-day TTL"
-
-
-class TestCleanupOldCheckpoints:
-    """Tests for session_end._cleanup_old_checkpoints() — 7-day TTL sweep
-    for legacy ~/.claude/pact-refresh/*.json files.
-
-    Migrated from test_precompact_refresh.py:TestCleanupOldCheckpoints
-    when the function was relocated in #413. Two new tests (default-path
-    resolution, max_age_days kwarg) cover the expanded signature.
-    """
-
-    def test_nonexistent_dir_returns_zero(self, tmp_path: Path):
-        """Non-existent checkpoint directory returns 0 without error."""
-        from session_end import _cleanup_old_checkpoints
-
-        result = _cleanup_old_checkpoints(tmp_path / "does-not-exist")
-
-        assert result == 0
-
-    def test_empty_dir_returns_zero(self, tmp_path: Path):
-        """Empty checkpoint directory returns 0."""
-        from session_end import _cleanup_old_checkpoints
-
-        result = _cleanup_old_checkpoints(tmp_path)
-
-        assert result == 0
-
-    def test_old_json_file_deleted(self, tmp_path: Path):
-        """Checkpoint files older than _CHECKPOINT_MAX_AGE_DAYS are deleted."""
-        import os as _os
-        import time as _time
-
-        from session_end import _CHECKPOINT_MAX_AGE_DAYS, _cleanup_old_checkpoints
-
-        old_time = _time.time() - (_CHECKPOINT_MAX_AGE_DAYS + 1) * 86400
-        for name in ("old-project-a.json", "old-project-b.json"):
-            f = tmp_path / name
-            f.write_text(json.dumps({"old": True}))
-            _os.utime(f, (old_time, old_time))
-
-        result = _cleanup_old_checkpoints(tmp_path)
-
-        assert result == 2
-        assert not (tmp_path / "old-project-a.json").exists()
-        assert not (tmp_path / "old-project-b.json").exists()
-
-    def test_recent_json_file_preserved(self, tmp_path: Path):
-        """Checkpoint files newer than _CHECKPOINT_MAX_AGE_DAYS are kept."""
-        import os as _os
-        import time as _time
-
-        from session_end import _CHECKPOINT_MAX_AGE_DAYS, _cleanup_old_checkpoints
-
-        old_time = _time.time() - (_CHECKPOINT_MAX_AGE_DAYS + 1) * 86400
-        old_file = tmp_path / "old.json"
-        old_file.write_text(json.dumps({"old": True}))
-        _os.utime(old_file, (old_time, old_time))
-
-        recent_file = tmp_path / "recent.json"
-        recent_file.write_text(json.dumps({"recent": True}))
-        # recent_file keeps its current mtime (just created).
-
-        result = _cleanup_old_checkpoints(tmp_path)
-
-        assert result == 1
-        assert not old_file.exists()
-        assert recent_file.exists()
-
-    def test_non_json_files_ignored(self, tmp_path: Path):
-        """Non-.json files are not touched by cleanup regardless of age."""
-        import os as _os
-        import time as _time
-
-        from session_end import _CHECKPOINT_MAX_AGE_DAYS, _cleanup_old_checkpoints
-
-        old_time = _time.time() - (_CHECKPOINT_MAX_AGE_DAYS + 1) * 86400
-
-        txt_file = tmp_path / "notes.txt"
-        txt_file.write_text("some notes")
-        _os.utime(txt_file, (old_time, old_time))
-
-        log_file = tmp_path / "audit.log"
-        log_file.write_text("log line")
-        _os.utime(log_file, (old_time, old_time))
-
-        json_file = tmp_path / "old-checkpoint.json"
-        json_file.write_text(json.dumps({"data": True}))
-        _os.utime(json_file, (old_time, old_time))
-
-        result = _cleanup_old_checkpoints(tmp_path)
-
-        assert result == 1
-        assert txt_file.exists()
-        assert log_file.exists()
-        assert not json_file.exists()
-
-    def test_oserror_on_unlink_suppressed(self, tmp_path: Path):
-        """OSError during individual file deletion is swallowed per fail-open invariant."""
-        import os as _os
-        import time as _time
-
-        from session_end import _CHECKPOINT_MAX_AGE_DAYS, _cleanup_old_checkpoints
-
-        old_time = _time.time() - (_CHECKPOINT_MAX_AGE_DAYS + 1) * 86400
-        f = tmp_path / "undeletable.json"
-        f.write_text(json.dumps({"data": True}))
-        _os.utime(f, (old_time, old_time))
-
-        original_unlink = Path.unlink
-
-        def mock_unlink(self, *args, **kwargs):
-            if self.name == "undeletable.json":
-                raise OSError("Permission denied")
-            return original_unlink(self, *args, **kwargs)
-
-        with patch.object(Path, "unlink", mock_unlink):
-            result = _cleanup_old_checkpoints(tmp_path)
-
-        # Deletion failed, so cleaned count stays 0; call did not raise.
-        assert result == 0
-        assert f.exists()
-
-    def test_default_dir_resolves_home_pact_refresh(self, tmp_path: Path):
-        """With no dir arg, defaults to ~/.claude/pact-refresh (via Path.home())."""
-        from session_end import _cleanup_old_checkpoints
-
-        # Point Path.home() at tmp_path; the default directory won't exist,
-        # so the function should return 0 without touching anything.
-        with patch("pathlib.Path.home", return_value=tmp_path):
-            result = _cleanup_old_checkpoints()
-
-        assert result == 0
-        # Confirm the expected default path is what would have been used.
-        expected_default = tmp_path / ".claude" / "pact-refresh"
-        assert not expected_default.exists()
-
-    def test_max_age_override_honored(self, tmp_path: Path):
-        """max_age_days kwarg overrides the default TTL."""
-        import os as _os
-        import time as _time
-
-        from session_end import _cleanup_old_checkpoints
-
-        # File that is 2 days old: preserved at default (7d) but deleted at 1d override.
-        two_day_old = _time.time() - (2 * 86400)
-        f = tmp_path / "two-day.json"
-        f.write_text(json.dumps({"data": True}))
-        _os.utime(f, (two_day_old, two_day_old))
-
-        # Override TTL to 1 day — file should now be past cutoff.
-        result = _cleanup_old_checkpoints(tmp_path, max_age_days=1)
-
-        assert result == 1
-        assert not f.exists()
-
-    # Cycle-8 Test 1 — symlink guard on the 4th reaper
-    def test_symlink_with_old_target_is_skipped(self, tmp_path: Path):
-        """Symlink whose TARGET is old-mtime is SKIPPED, not unlinked.
-
-        Cycle-8 parity with cycle-1 sibling reapers: `_cleanup_old_checkpoints`
-        now has `if checkpoint_file.is_symlink(): continue` BEFORE the
-        `lstat/unlink` path. Without the guard, a planted symlink whose
-        TARGET has an old mtime would be unlinked by the reaper — either
-        deleting user-planted links (pure destruction since unlink on a
-        symlink never touches the target) OR, if the guard were absent
-        AND the helper naively used `stat()`, deleting based on target-
-        mtime (oracle leak).
-
-        COUNTER-TEST BY REVERT target: removing the `is_symlink` guard
-        flips this test — under the current `lstat()` probe the link's
-        own (fresh) mtime saves it; but if lstat ALSO gets reverted to
-        stat() (cycle-2 belt-and-suspenders), the target's old mtime
-        would drive the unlink. Either regression the guard defends
-        against shows up as test failure via the link-is-unlinked
-        assertion.
-        """
-        import os as _os
-        import time as _time
-        from session_end import _cleanup_old_checkpoints
-
-        # External target with OLD mtime (40d > 7d default TTL).
-        target = tmp_path.parent / f"{tmp_path.name}-ext-target.json"
-        target.write_text(json.dumps({"target": True}))
-        old = _time.time() - (40 * 86400)
-        _os.utime(str(target), (old, old))
-
-        # Symlink planted inside checkpoint_dir, with FRESH link-mtime
-        # so even under lstat the link is within TTL. Guard is what
-        # prevents the unlink irrespective of the TTL math.
-        link = tmp_path / "evil.json"
-        link.symlink_to(target)
-
-        try:
-            result = _cleanup_old_checkpoints(tmp_path, max_age_days=7)
-
-            assert result == 0, (
-                "Symlink must NOT be counted as cleaned. Guard removal "
-                "flips this to 1."
-            )
-            assert link.is_symlink(), (
-                "Symlink itself must survive. If this fails, either the "
-                "`is_symlink` guard was removed OR lstat was reverted to "
-                "stat() (target mtime would then drive unlink)."
-            )
-            assert target.exists(), "Target must survive"
-        finally:
-            if link.is_symlink():
-                link.unlink()
-            if target.exists():
-                target.unlink()
 
 
 # =============================================================================
@@ -2666,7 +2424,6 @@ class TestCleanupSummaryEvent:
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(3, 1)),
             patch("session_end.cleanup_old_tasks", return_value=(2, 0)),
-            patch("session_end._cleanup_old_checkpoints"),
             patch("session_end.append_event", side_effect=record),
         ]
         with ExitStack() as stack:
@@ -2711,7 +2468,6 @@ class TestCleanupSummaryEvent:
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(0, 0)),
             patch("session_end.cleanup_old_tasks", return_value=(0, 0)),
-            patch("session_end._cleanup_old_checkpoints"),
             patch("session_end.append_event", side_effect=lambda e: captured.append(e)),
         ]
         with ExitStack() as stack:
@@ -2836,7 +2592,6 @@ class TestMainReaperWiring:
             patch("session_end.get_task_list", return_value=[]),
             patch("session_end.check_unpaused_pr", return_value=None),
             patch("session_end.cleanup_old_sessions"),
-            patch("session_end._cleanup_old_checkpoints"),
             patch("session_end.append_event"),
         ]
 
@@ -2922,19 +2677,18 @@ class TestMainReaperWiring:
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(0, 0)),
             patch("session_end.cleanup_old_tasks", return_value=(0, 0)),
-            patch("session_end._cleanup_old_checkpoints"),
             patch("session_end.append_event", side_effect=flaky_append),
         ]
         with ExitStack() as stack:
-            mocks = [stack.enter_context(p) for p in patches]
-            mock_chk = mocks[-2]  # _cleanup_old_checkpoints
+            for p in patches:
+                stack.enter_context(p)
             from session_end import main
             with pytest.raises(SystemExit) as exc:
                 main()
 
         assert exc.value.code == 0  # fire-and-forget
-        # Checkpoint cleanup still ran despite cleanup_summary journal failure.
-        mock_chk.assert_called_once()
+        # Both journal writes were attempted despite the cleanup_summary failure.
+        assert call_count["n"] == 2
 
 
 # =============================================================================
@@ -3151,7 +2905,6 @@ class TestReaperBehaviorPins:
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", side_effect=rec_teams),
             patch("session_end.cleanup_old_tasks", side_effect=rec_tasks),
-            patch("session_end._cleanup_old_checkpoints"),
             patch("session_end.append_event", side_effect=rec_append),
         ]
         with ExitStack() as stack:
@@ -3300,7 +3053,6 @@ class TestTaskListIdAllowlistRejection:
             patch("session_end.check_unpaused_pr", return_value=None),
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(0, 0)),
-            patch("session_end._cleanup_old_checkpoints"),
             patch("session_end.append_event"),
         ]
         mock_tasks_ref = {}
@@ -3350,7 +3102,6 @@ class TestTaskListIdAllowlistRejection:
             patch("session_end.check_unpaused_pr", return_value=None),
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(0, 0)),
-            patch("session_end._cleanup_old_checkpoints"),
             patch("session_end.append_event"),
         ]
         with ExitStack() as stack:
@@ -3397,7 +3148,6 @@ class TestTaskListIdAllowlistRejection:
             patch("session_end.check_unpaused_pr", return_value=None),
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(0, 0)),
-            patch("session_end._cleanup_old_checkpoints"),
             patch("session_end.append_event"),
         ]
         with ExitStack() as stack:
@@ -3765,7 +3515,6 @@ class TestCleanupSummaryReaperRan:
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(0, 0)),
             patch("session_end.cleanup_old_tasks", return_value=(0, 0)),
-            patch("session_end._cleanup_old_checkpoints"),
             patch("session_end.append_event", side_effect=lambda e: captured.append(e)),
         ]
         with ExitStack() as stack:
@@ -4474,7 +4223,6 @@ class TestSessionIdAllowlist:
             patch("session_end.check_unpaused_pr", return_value=None),
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(0, 0)),
-            patch("session_end._cleanup_old_checkpoints"),
             patch("session_end.append_event"),
         ]
         mock_tasks_ref = {}
@@ -4519,7 +4267,6 @@ class TestSessionIdAllowlist:
             patch("session_end.check_unpaused_pr", return_value=None),
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(0, 0)),
-            patch("session_end._cleanup_old_checkpoints"),
             patch("session_end.append_event"),
         ]
         with ExitStack() as stack:
@@ -4585,7 +4332,6 @@ class TestTeamNameAllowlist:
             patch("session_end.check_unpaused_pr", return_value=None),
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(0, 0)),
-            patch("session_end._cleanup_old_checkpoints"),
             patch("session_end.append_event"),
         ]
         mock_tasks_ref = {}
@@ -4631,7 +4377,6 @@ class TestTeamNameAllowlist:
             patch("session_end.check_unpaused_pr", return_value=None),
             patch("session_end.cleanup_old_sessions"),
             patch("session_end.cleanup_old_teams", return_value=(0, 0)),
-            patch("session_end._cleanup_old_checkpoints"),
             patch("session_end.append_event"),
         ]
         with ExitStack() as stack:
