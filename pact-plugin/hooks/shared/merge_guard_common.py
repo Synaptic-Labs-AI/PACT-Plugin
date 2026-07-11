@@ -755,7 +755,7 @@ def _api_merge_leg_endpoint(leg: str) -> str | None:
     path. A curl/wget merge classifies None here -> gated-but-unmintable (read arms still gate).
 
     Extraction binds the pulls/<N>/merge that is the URL POSITIONAL: strip body values
-    (carrier-8, §2.3), shlex-tokenize, then walk skipping flags + the gh-api value-flag
+    (carrier-8), shlex-tokenize, then walk skipping flags + the gh-api value-flag
     values, and take the first surviving positional. On tokenizer failure NEVER returns
     None for a recognized leg (falls back to the stripped/raw first-match) — a mis-parse
     must not gate a faithful merge (over-block-safe).
@@ -2426,14 +2426,14 @@ def _strip_non_executable_content(command: str) -> str:
             # or a `?branch=` query, NOT the URL path (the contents API path is
             # `/contents/{filepath}`, branch-less). This is the ONE gated arm whose
             # signal is body-resident; stripping its body would REMOVE the main/master
-            # gating signal → an UNDER-BLOCK. The architecture (§3) mandates leaving the
-            # contents arm UNCHANGED, so preserve a contents-API span verbatim. Detected
+            # gating signal → an UNDER-BLOCK. The contents arm must be left UNCHANGED
+            # (signal is body-resident), so preserve a contents-API span verbatim. Detected
             # per-span (a compound's `/log` span is still stripped). git/refs and
             # branches/protection targets are path-resident, so their bodies stay strippable.
             # IGNORECASE to match the case-insensitive contents READ arm
             # (`contents/.*(?:main|master)`, re.IGNORECASE): a `Contents/` (any case)
             # span carries its main/master gating signal in the BODY, so it must be
-            # preserved from stripping in ANY case — else the #1096 §2.3 unquoted body
+            # preserved from stripping in ANY case — else the #1096 unquoted body
             # strip removes the signal for a capital-case spelling -> under-block.
             if re.search(r"contents/", span, re.IGNORECASE):
                 return span
