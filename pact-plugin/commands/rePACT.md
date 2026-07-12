@@ -189,6 +189,7 @@ Branch behavior depends on whether rePACT is invoked with a scope contract:
 Before starting, verify:
 1. **Nesting depth**: Read `TaskGet(taskId).metadata.nesting_depth` — if > 1, reject (max depth exceeded). If absent, treat as 0.
 2. **Scope contract**: If this rePACT was dispatched from ATOMIZE, read the scope contract from `TaskGet(taskId).metadata.scope_contract` instead of expecting it inline in the prompt. This ensures scope state survives compaction.
+   - **Journal fallback (covers items 1–2)**: If `TaskGet(taskId)` cannot resolve (task store drained), recover from the session journal instead: run `python3 "{plugin_root}/hooks/shared/session_journal.py" read --session-dir "{session_dir}" --type task_metadata_snapshot` (prints a JSON array), filter to events whose `task_id` matches this task, take the latest-`ts` event, and read `nesting_depth` / `scope_contract` from its `metadata` (honor `_truncated` / `_dropped_keys` markers if present).
 3. **Scope appropriateness**: Is this truly a sub-task of the parent?
 4. **Domain determination**: Single-domain or multi-domain?
 

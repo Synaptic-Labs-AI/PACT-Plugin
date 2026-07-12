@@ -34,7 +34,7 @@ This phase dispatches sub-scopes for independent execution. Each sub-scope runs 
 
 This phase verifies that independently-developed sub-scopes are compatible before comprehensive testing.
 
-**Recover scope state**: Read from `TaskGet(scopeTaskId).metadata` (`scope_contract`, `worktree_path`) for each sub-scope.
+**Recover scope state**: Read from `TaskGet(scopeTaskId).metadata` (`scope_contract`, `worktree_path`) for each sub-scope. If `TaskGet(scopeTaskId)` cannot resolve (task store drained), recover from the session journal instead: run `python3 "{plugin_root}/hooks/shared/session_journal.py" read --session-dir "{session_dir}" --type task_metadata_snapshot` (prints a JSON array), filter to events whose `task_id` matches the scope task, take the latest-`ts` event, and read `scope_contract` / `worktree_path` from its `metadata` (honor `_truncated` / `_dropped_keys` markers if present).
 
 **Merge sub-scope branches**: Before running contract verification, merge each sub-scope's work back:
 1. For each completed sub-scope, merge its suffix branch to the feature branch
