@@ -133,7 +133,13 @@ def _truncation_marker(canonical: bytes) -> dict:
 
 
 def _is_marker(value: object) -> bool:
-    """True iff ``value`` is a truncation marker THIS module produced."""
+    """True iff ``value`` has the truncation-marker SHAPE.
+
+    Shape recognition is a TEST/reader oracle only — production marker
+    identity inside build_snapshot_payload is provenance-tracked (the
+    local set of keys that run truncated), never shape-tested, so a
+    caller-supplied lookalike can never be treated as a marker.
+    """
     return (
         isinstance(value, dict)
         and set(value.keys()) == set(_MARKER_KEYS)
@@ -161,17 +167,36 @@ def build_snapshot_payload(
     1. Per-value: each non-excluded value over PER_VALUE_CAP is replaced by
        the truncation marker (see _truncation_marker).
     2. Payload: while the whole payload exceeds PAYLOAD_CAP, the LARGEST
-       remaining un-truncated value is replaced by the marker; ties broken
-       by ascending lexicographic key order (pinned). Markers count toward
-       the total; stage-1 markers are not re-candidates.
-    3. Pathological floor: if all-markers still exceeds the cap, set head
-       to "" in descending original_bytes order (same tie-break); if STILL
-       over, keep whole keys in ascending key order while they fit and
-       record the remainder name-only in a top-level "_dropped_keys" list
-       (ascending). Key existence is never silently lost.
+       remaining not-yet-truncated value is replaced by the marker; ties
+       broken by ascending lexicographic key order (pinned). Markers count
+       toward the total; keys this run already truncated are not
+       re-candidates.
+    3. Pathological floor: if the payload still exceeds the cap, set head
+       to "" across this run's markers in descending original_bytes order
+       (same tie-break); if STILL over, keep whole keys in ascending key
+       order while they fit and record the remainder name-only in a
+       top-level "_dropped_keys" list (ascending). Key existence is never
+       silently lost.
+
+    Marker identity is PROVENANCE-tracked, never shape-tested: a local set
+    records which keys THIS run truncated, and stages 2/3 consult that set
+    only. An input value that merely looks marker-shaped is ordinary
+    caller data — a normal eviction candidate (replaced by OUR marker
+    computed from its serialization) and never sorted by stage 3, whose
+    original_bytes sort therefore only ever sees ints (total by
+    construction).
     """
     payload: dict = {}
     truncated = False
+    # Provenance set — the keys whose payload slot THIS run replaced with a
+    # truncation marker. Marker identity is provenance-tracked, never
+    # shape-tested: an input value that merely LOOKS marker-shaped is
+    # ordinary caller data (a normal stage-2 eviction candidate, replaced
+    # by OUR marker computed from ITS serialization), and stage 3a sorts
+    # only keys in this set — whose markers carry int original_bytes by
+    # construction, making the sort total (a caller lookalike's arbitrary
+    # original_bytes value can never reach it).
+    marker_keys: set[str] = set()
 
     # Stage 1 — per-value cap. Iteration over sorted keys makes the stage
     # order-independent by construction (the output would be equivalent
@@ -184,35 +209,39 @@ def build_snapshot_payload(
         canonical = _canonical_bytes(value)
         if len(canonical) > PER_VALUE_CAP:
             payload[key] = _truncation_marker(canonical)
+            marker_keys.add(key)
             truncated = True
         else:
             payload[key] = value
 
-    # Stage 2 — payload cap: evict largest un-truncated values first.
+    # Stage 2 — payload cap: evict largest not-yet-truncated values first.
+    # Candidacy is provenance-based (key not in marker_keys), so a caller
+    # lookalike is evicted like any ordinary value.
     while len(_canonical_bytes(payload)) > PAYLOAD_CAP:
         candidates = {
             key: len(_canonical_bytes(value))
             for key, value in payload.items()
-            if not _is_marker(value)
+            if key not in marker_keys
         }
         if not candidates:
             break
         largest = max(candidates.values())
         key = min(k for k, size in candidates.items() if size == largest)
         payload[key] = _truncation_marker(_canonical_bytes(payload[key]))
+        marker_keys.add(key)
         truncated = True
 
-    # Stage 3a — empty marker heads, biggest originals first. REBUILD the
-    # marker rather than assigning into it: stage 1 inserts under-cap input
-    # values by REFERENCE, so a caller-supplied value that is already
-    # exactly marker-shaped reaches this loop as a shared object — an
-    # in-place head write would mutate the CALLER's metadata dict and break
-    # the read-only invariant (the seams feed this same object to the
-    # handoff path). Rebuilding is provenance-agnostic: safe for markers we
-    # created and for caller lookalikes alike.
+    # Stage 3a — empty this run's marker heads, biggest originals first.
+    # Provenance-scoped: iterates marker_keys only, so every sorted
+    # original_bytes is an int by construction and no caller object is ever
+    # a target. REBUILD the marker rather than assigning into it — the
+    # structural read-only guarantee (no in-place writes to any payload
+    # value, regardless of provenance) is what keeps the caller's metadata
+    # dict safe even if a future edit widens what reaches this loop; the
+    # seams feed the same object to the handoff path.
     if len(_canonical_bytes(payload)) > PAYLOAD_CAP:
         by_size_desc = sorted(
-            (k for k, v in payload.items() if _is_marker(v)),
+            marker_keys,
             key=lambda k: (-payload[k]["original_bytes"], k),
         )
         for key in by_size_desc:

@@ -260,24 +260,24 @@ class TestPathologicalFloor:
 class TestReadOnlyAdversarialMarkerShapedInput:
     """The read-only invariant must hold for INPUT values that are already
     exactly marker-shaped: stage 1 inserts under-cap values by reference,
-    so stage-3a head-emptying must REBUILD the marker rather than write
-    through the shared reference into the caller's dict."""
+    and no stage may ever write through that shared reference into the
+    caller's dict. Under provenance identity the lookalike is ordinary
+    data — evicted and re-markered on the pathological path — and the
+    caller's object stays byte-identical throughout."""
 
     def _adversarial_metadata(self):
-        """A >PAYLOAD_CAP all-marker payload whose FIRST 3a-emptying target
-        (largest original_bytes) is a caller-owned marker-shaped value."""
+        """A >PAYLOAD_CAP pathological payload containing a caller-owned
+        marker-shaped value (under PER_VALUE_CAP, inserted by reference at
+        stage 1) among genuinely over-cap jumbos."""
         metadata = {
-            # Caller-owned marker lookalike, under PER_VALUE_CAP (inserted
-            # by reference at stage 1), with the largest original_bytes so
-            # stage 3a reaches it first.
             "caller_marker": {
                 "_truncated": True,
                 "original_bytes": 10**9,
                 "head": "caller-owned-head",
             },
         }
-        # Enough genuinely over-cap values that the all-marker payload
-        # (~1KB head each) exceeds PAYLOAD_CAP and stage 3a must run.
+        # Enough genuinely over-cap values that the payload exceeds
+        # PAYLOAD_CAP (~1KB marker head each) and stage 3a must run.
         for index in range(70):
             metadata[f"key{index:03d}"] = _jumbo_str(PER_VALUE_CAP + 100)
         return metadata
@@ -288,10 +288,14 @@ class TestReadOnlyAdversarialMarkerShapedInput:
         payload, truncated = build_snapshot_payload(metadata)
         assert truncated is True
         assert _size(payload) <= PAYLOAD_CAP
-        # The pathological path DID empty the lookalike's head in the
-        # emitted payload (largest original_bytes goes first)...
-        assert payload["caller_marker"]["head"] == ""
-        # ...but the CALLER's object is untouched — the invariant under test.
+        # The lookalike was treated as ordinary data: evicted by stage 2
+        # and replaced by OUR marker carrying its TRUE serialized size
+        # (its claimed billion is ignored).
+        slot = payload["caller_marker"]
+        assert _is_marker(slot)
+        assert isinstance(slot["original_bytes"], int)
+        assert slot["original_bytes"] == _size(before["caller_marker"])
+        # And the CALLER's object is untouched — the invariant under test.
         assert metadata == before
         assert metadata["caller_marker"]["head"] == "caller-owned-head"
 
@@ -303,6 +307,75 @@ class TestReadOnlyAdversarialMarkerShapedInput:
         before = copy.deepcopy(metadata)
         build_snapshot_payload(metadata)
         assert metadata == before
+
+
+class TestProvenanceMarkerIdentity:
+    """Marker identity is PROVENANCE-tracked, never shape-tested: only
+    markers this run built are eviction-exempt and stage-3-sorted. An
+    input value that merely looks marker-shaped is ordinary caller data."""
+
+    def test_lookalike_is_ordinary_eviction_candidate(self):
+        """A large marker-shaped input is evicted by stage 2 like any value
+        and replaced by OUR marker computed from ITS serialization — never
+        trusted as an already-truncated marker (its claimed original_bytes
+        is ignored in favor of the true serialized size)."""
+        big_lookalike = {
+            "_truncated": True,
+            "original_bytes": 10**9,  # claimed — must NOT be believed
+            "head": "x" * (PER_VALUE_CAP - 2048),  # large but under cap
+        }
+        metadata = {"z_lookalike": big_lookalike}
+        # Ordinary near-cap values so the payload exceeds PAYLOAD_CAP and
+        # stage 2 must evict; the lookalike is among the largest.
+        for index in range(5):
+            metadata[f"mid{index}"] = _jumbo_str(PER_VALUE_CAP - 4096)
+        payload, truncated = build_snapshot_payload(metadata)
+        assert truncated is True
+        assert _size(payload) <= PAYLOAD_CAP
+        slot = payload["z_lookalike"]
+        assert _is_marker(slot), "evicted lookalike is re-markered by US"
+        # OUR marker records the TRUE serialized size of the lookalike
+        # dict, not its claimed billion.
+        assert slot["original_bytes"] == _size(big_lookalike)
+        # And the head is the serialized prefix of the lookalike itself.
+        assert slot["head"].startswith('{"_truncated":true')
+        # Caller object untouched.
+        assert big_lookalike["original_bytes"] == 10**9
+
+    def test_non_int_original_bytes_lookalike_no_drop(self):
+        """The totality payoff: a lookalike whose original_bytes is a
+        non-int must not crash the stage-3 sort (which now touches only
+        markers WE built, int by construction) — the >64KB snapshot is
+        BUILT, not dropped."""
+        metadata = {
+            "poison": {
+                "_truncated": True,
+                "original_bytes": "not-an-int",
+                "head": "h",
+            },
+        }
+        for index in range(70):
+            metadata[f"key{index:03d}"] = _jumbo_str(PER_VALUE_CAP + 100)
+        payload, truncated = build_snapshot_payload(metadata)
+        assert truncated is True
+        assert _size(payload) <= PAYLOAD_CAP
+        assert payload, "snapshot payload must be built, not dropped"
+
+    def test_totality_every_input_key_in_payload_or_dropped(self):
+        """Totality invariant across lookalikes + jumbos on the deep
+        pathological path: every input key appears in the payload or in
+        _dropped_keys — existence is never silently lost."""
+        metadata = {
+            "lk_int": {"_truncated": True, "original_bytes": 7, "head": "h"},
+            "lk_str": {"_truncated": True, "original_bytes": "x", "head": "h"},
+        }
+        for index in range(1500):
+            metadata[f"key{index:05d}"] = _jumbo_str(PER_VALUE_CAP + 100)
+        payload, _ = build_snapshot_payload(metadata)
+        assert _size(payload) <= PAYLOAD_CAP
+        surviving = set(payload) - {"_dropped_keys"}
+        dropped = set(payload.get("_dropped_keys", []))
+        assert surviving | dropped == set(metadata)
 
 
 class TestDeterminismAndHash:
