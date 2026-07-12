@@ -256,6 +256,32 @@ class TestPathologicalFloor:
             kept < dropped[0] for kept in surviving
         ), "kept keys precede the first dropped key in ascending order"
 
+    def test_dropped_keys_census_overrun_is_the_documented_residual(self):
+        """PINNED characterization of the documented residual: when the
+        name-only key census ALONE exceeds PAYLOAD_CAP, the final payload
+        exceeds the cap — the _dropped_keys list is deliberately unbounded
+        because key EXISTENCE is never silently lost, and that invariant
+        outranks the cap in this doubly-pathological corner. The overrun is
+        bounded by the key-name mass (itself bounded by the source task
+        file's own size), the payload stays valid JSON, and the build does
+        not crash. A future change that restores the cap here by sacrificing
+        the existence invariant must flip this test consciously, not by
+        accident."""
+        metadata = {
+            ("k" * 200 + f"{index:05d}"): _jumbo_str(PER_VALUE_CAP + 10)
+            for index in range(400)
+        }
+        payload, truncated = build_snapshot_payload(metadata)
+        assert truncated is True
+        # The overrun IS the residual: the census cannot fit, so the cap is
+        # exceeded rather than any key name dropped.
+        assert _size(payload) > PAYLOAD_CAP
+        # And the overrun is EXACTLY the name-only census — nothing else is
+        # kept, so the excess is O(key-name mass) by construction.
+        assert payload == {"_dropped_keys": sorted(metadata)}
+        # The event line remains valid JSON (JSONL-poisoning guard).
+        assert json.loads(json.dumps(payload)) == payload
+
 
 class TestReadOnlyAdversarialMarkerShapedInput:
     """The read-only invariant must hold for INPUT values that are already
