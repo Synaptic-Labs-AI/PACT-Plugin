@@ -1,5 +1,0 @@
-{"type": "user", "sessionId": "test-session-123", "message": {"role": "user", "content": "Hello, can you help me understand this codebase?"}, "timestamp": "2025-01-22T09:00:00Z"}
-{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Of course! Let me explore the project structure..."}]}, "timestamp": "2025-01-22T09:00:05Z"}
-{"type": "user", "sessionId": "test-session-123", "message": {"role": "user", "content": "What's in the hooks directory?"}, "timestamp": "2025-01-22T09:00:30Z"}
-{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Looking at the hooks directory..."}, {"type": "tool_use", "id": "read-123", "name": "Read", "input": {"file_path": "/project/hooks/hooks.json"}}]}, "timestamp": "2025-01-22T09:00:35Z"}
-{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "The hooks directory contains several Python hooks for Claude Code integration."}]}, "timestamp": "2025-01-22T09:00:45Z"}

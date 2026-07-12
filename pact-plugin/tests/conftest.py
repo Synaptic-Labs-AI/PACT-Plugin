@@ -4,11 +4,11 @@ Shared test fixtures and infrastructure.
 This conftest.py is intentionally thin. It owns:
 - sys.path setup for tests/, hooks/, skills/pact-memory/
 - the genuinely cross-cutting ``pact_context`` fixture
-- re-exports of pytest-fixture-injected symbols from tests/fixtures/
 
 Concern-specific helpers live in tests/fixtures/<concern>.py and are
 imported directly by the test files that need them (direct-import
-symbols) or re-exported here (pytest-fixture-injected symbols).
+symbols); pytest-fixture-injected symbols would need a conftest
+re-export to be discoverable, but none are currently defined there.
 """
 
 import json
@@ -26,19 +26,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 # Add pact-memory scripts to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'skills', 'pact-memory'))
-
-# Re-exports for pytest-fixture-injection.
-# Pytest discovers fixtures by name in conftest.py; these re-exports
-# make subdir-defined fixtures injectable in any test_*.py file.
-from fixtures.refresh_system import (  # noqa: E402, F401
-    tmp_transcript,
-    sample_checkpoint,
-    peer_review_mid_workflow_transcript,
-    orchestrate_code_phase_transcript,
-    no_workflow_transcript,
-    terminated_workflow_transcript,
-)
-
 
 @pytest.fixture
 def pact_context(tmp_path, monkeypatch):

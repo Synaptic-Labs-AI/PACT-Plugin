@@ -10,6 +10,8 @@ Manages:
 2. Restoring last session context from session journal
 3. Checking for in-progress tasks that indicate resumable work
 4. Detecting paused state from session journal
+5. Unified resume-claim resolution over paused/refreshed checkpoints
+   (check_resume_state — the single seam session_init step 8 calls)
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from __future__ import annotations
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from shared.claude_md_manager import (
@@ -30,10 +32,38 @@ from shared.claude_md_manager import (
     file_lock,
     resolve_project_claude_md_path,
 )
-from shared.session_journal import read_events_from, read_last_event_from
+from shared.session_journal import (
+    _parse_ts,
+    _ts_supersedes,
+    read_events_from,
+    read_last_event_from,
+)
 
 # Maximum characters for decision summaries in journal resume output
 _DECISION_TRUNCATION_LIMIT = 80
+
+# Staleness horizon for a session_refreshed checkpoint. A refresh is meant
+# to be consumed within minutes (refresh → /compact → bootstrap); past this
+# horizon the prompt gets an informational STALE prefix. Downgrade ONLY —
+# never suppression: the mid-flight claim (and any HALT line) survives.
+_REFRESH_STALE_HOURS = 48
+
+# Bounds for event field values interpolated into the refreshed resume
+# prompt. Journal events are written by the refresh command but the journal
+# file itself is plain JSONL on disk — a hand-crafted or corrupted event
+# must not be able to flood the SessionStart context or smuggle directive
+# lines into the prompt. Free-text fields (feature_subject, next_phase,
+# task ids) get the tight bound; worktree paths get a wider one because
+# legitimate absolute paths can be long.
+_REFRESH_FIELD_TRUNCATION_LIMIT = 200
+_REFRESH_PATH_TRUNCATION_LIMIT = 512
+
+# Control characters stripped from interpolated refreshed-prompt fields:
+# C0 controls (includes \n, \r, \t), DEL plus the full C1 block (which
+# includes NEL U+0085 — a str.splitlines boundary), and the Unicode
+# line/paragraph separators — anything that could break the prompt onto
+# a new line and masquerade as a separate directive.
+_PROMPT_CONTROL_CHARS_RE = re.compile("[\\x00-\\x1f\\x7f-\\x9f\\u2028\\u2029]+")
 
 # Maximum characters for phase strings rendered into journal resume output.
 # Phases are nominally short uppercase identifiers (CODE, TEST, etc.) but the
@@ -591,7 +621,23 @@ def _check_journal_paused_state(session_dir: str) -> str | None:
     event = read_last_event_from(session_dir, "session_paused")
     if not event:
         return None
+    return _interpret_paused_event(event)
 
+
+def _interpret_paused_event(event: dict) -> str | None:
+    """Interpret an already-read session_paused event into a resume prompt.
+
+    Split from _check_journal_paused_state so check_resume_state can feed
+    it the event it already read (one journal read per event type). The
+    body is byte-identical to the pre-split logic: pr_number type-narrowing,
+    14-day TTL, `gh` PR-state probe, and the silent-None branches.
+
+    Fail direction: PR-GATED SILENT-None is CORRECT here — a paused claim
+    whose PR is gone (or that never had a valid PR) has nothing to resume.
+    This is the OPPOSITE of the refresh interpreter's fail direction; the
+    two interpreters deliberately share no predicate (see
+    _interpret_refreshed_event).
+    """
     pr_number = event.get("pr_number")
     branch = event.get("branch", "unknown")
     worktree_path = event.get("worktree_path", "unknown")
@@ -638,6 +684,343 @@ def _check_journal_paused_state(session_dir: str) -> str | None:
         f"Worktree at {worktree_path}. "
         f"Run /PACT:peer-review to resume review/merge.{consolidation_note}"
     )
+
+
+def check_resume_state(
+    prev_session_dir: str | None = None,
+) -> str | None:
+    """Unified resume-claim resolver over {session_paused, session_refreshed}.
+
+    Single public seam: session_init step 8 calls THIS (and only this).
+    Single-dir signature is sufficient for all three paths: post-compact and
+    same-session --resume, prev_session_dir self-resolves to the CURRENT
+    session dir; the quit path reads one hop back.
+
+    The two per-event-type interpreters stay SEPARATE functions because
+    their fail directions are opposite and must never share a predicate:
+    the paused interpreter keeps its PR-gated silent-None (correct for
+    pause), the refreshed interpreter is fail-safe-toward-surfacing (any
+    unspent session_refreshed event yields a prompt). When both claims
+    survive interpretation, _arbitrate picks the newer one — the losing
+    claim is always mentioned, never silently dropped.
+
+    Args:
+        prev_session_dir: Previous session's directory path (from CLAUDE.md).
+
+    Returns:
+        The winning resume prompt, or None when no claim survives.
+    """
+    if not prev_session_dir:
+        return None
+    paused = read_last_event_from(prev_session_dir, "session_paused")
+    refreshed = read_last_event_from(prev_session_dir, "session_refreshed")
+    if refreshed is not None and _refresh_is_spent(prev_session_dir, refreshed):
+        refreshed = None
+    paused_msg = (
+        _interpret_paused_event(paused) if paused is not None else None
+    )  # may be None (correct for pause)
+    refresh_msg = (
+        _interpret_refreshed_event(refreshed) if refreshed is not None else None
+    )
+    if paused_msg and refresh_msg:
+        return _arbitrate(paused, paused_msg, refreshed, refresh_msg)
+    return refresh_msg or paused_msg
+
+
+def _sanitize_prompt_field(
+    value: str,
+    limit: int = _REFRESH_FIELD_TRUNCATION_LIMIT,
+) -> str:
+    """Sanitize an event field value for interpolation into a resume prompt.
+
+    Collapses control characters (C0, DEL, U+2028/U+2029 — anything that
+    could break the prompt onto a new line and masquerade as a separate
+    directive) to single spaces, strips, and bounds the length with the
+    same ``...`` truncation convention as ``_coerce_decision_summary``.
+
+    Total for any input: an internal failure returns ``""`` so the caller
+    drops that field's LINE — content degrades, prompt presence never does
+    (a sanitizer error must not become a new suppress path).
+    """
+    try:
+        cleaned = _PROMPT_CONTROL_CHARS_RE.sub(" ", value).strip()
+        if len(cleaned) > limit:
+            cleaned = cleaned[:limit - 3] + "..."
+        return cleaned
+    except Exception:
+        return ""
+
+
+def _compose_halt_line(event: dict) -> str | None:
+    """Compose the HALT verify-line for a session_refreshed event, or None
+    when ``halt_active`` is not exactly True.
+
+    Single composition point shared by ``_interpret_refreshed_event`` and
+    ``_arbitrate`` so the interpreter and the losing-claim survival path
+    can never render the same event's HALT state differently. Task ids are
+    sanitized HERE, once — "verbatim" preservation downstream means this
+    sanitized line. Include ids only when ``halt_task_ids`` is a list
+    holding non-empty strings; ``halt_active`` malformed/absent ⇒ no line
+    (live-task surfacing still covers the union's other leg).
+    """
+    if event.get("halt_active") is not True:
+        return None
+    halt_task_ids = event.get("halt_task_ids")
+    ids = (
+        [_sanitize_prompt_field(i) for i in halt_task_ids if isinstance(i, str)]
+        if isinstance(halt_task_ids, list)
+        else []
+    )
+    ids = [i for i in ids if i]
+    id_note = f" (tasks: {', '.join(ids)})" if ids else ""
+    return (
+        f"A HALT/algedonic signal was ACTIVE at refresh{id_note} — "
+        f"verify against TaskList before proceeding; do not assume it "
+        f"resolved."
+    )
+
+
+def _interpret_refreshed_event(event: dict) -> str:
+    """Interpret an already-read session_refreshed event into a prompt.
+
+    MUST return a non-empty prompt for ANY dict input (fail-safe-toward-
+    surfacing; return type is str, NOT str | None — totality by signature).
+    Malformed fields degrade CONTENT, never PRESENCE. Do NOT copy the paused
+    interpreter's early returns: no pr_number gate, no gh probe, no
+    silent-None branch of any kind.
+
+    Prompt composition: each absent/malformed field drops its line only.
+    The 48h staleness horizon (_REFRESH_STALE_HOURS) prefixes an
+    informational downgrade and changes nothing else — a stale prompt
+    retains its HALT line. An unparseable/missing ts means no downgrade
+    (treat as fresh — fail toward full surfacing).
+    """
+    ts = event.get("ts")
+    # A ts carrying control characters is treated as INVALID for prompt
+    # purposes: the consumption key must be echoed VERBATIM to keep the
+    # spend-binding exact-match, so it cannot be sanitized — instead the
+    # UNAVAILABLE branch renders (fails toward surfacing; the prompt may
+    # re-surface once, bounded by the staleness downgrade). Clean ts
+    # values keep the byte-exact echo.
+    ts_valid = (
+        isinstance(ts, str)
+        and bool(ts.strip())
+        and not _PROMPT_CONTROL_CHARS_RE.search(ts)
+    )
+
+    content: list[str] = []
+
+    # String fields are SANITIZED at interpolation (_sanitize_prompt_field:
+    # control-char strip + length bound) — the journal is plain JSONL on
+    # disk, so a hand-crafted event must not smuggle directive lines or
+    # flood the SessionStart context. Sanitization can empty a value
+    # (all-control-chars input); an emptied field drops its line only.
+    feature_subject = event.get("feature_subject")
+    feature_task_id = event.get("feature_task_id")
+    subject = (
+        _sanitize_prompt_field(feature_subject)
+        if isinstance(feature_subject, str)
+        else ""
+    )
+    task_id = (
+        _sanitize_prompt_field(feature_task_id)
+        if isinstance(feature_task_id, str)
+        else ""
+    )
+    if subject and task_id:
+        content.append(f"Feature: {subject} (task {task_id}).")
+    elif subject:
+        content.append(f"Feature: {subject}.")
+    elif task_id:
+        content.append(f"Feature task: {task_id}.")
+
+    next_phase = event.get("next_phase")
+    if isinstance(next_phase, str):
+        phase = _sanitize_prompt_field(next_phase)
+        if phase:
+            content.append(f"Next phase: {phase}.")
+
+    worktrees = event.get("worktrees")
+    if isinstance(worktrees, list):
+        # Paths sanitized like every interpolated field (wider bound —
+        # legitimate absolute paths can be long); existence checking still
+        # happens at bootstrap, not here — the resolver stays a pure
+        # journal reader.
+        paths = [
+            _sanitize_prompt_field(w, _REFRESH_PATH_TRUNCATION_LIMIT)
+            for w in worktrees
+            if isinstance(w, str)
+        ]
+        paths = [p for p in paths if p]
+        if paths:
+            content.append("Worktrees: " + ", ".join(paths) + ".")
+
+    # HALT line (I2): composed by _compose_halt_line (shared with
+    # _arbitrate's losing-claim path) — present iff halt_active is True;
+    # NEVER omit the prompt itself.
+    halt_line = _compose_halt_line(event)
+    if halt_line:
+        content.append(halt_line)
+
+    # Capture-knowledge warning (wording mirrors the paused interpreter's
+    # consolidation note). Trigger is an EXPLICIT False — the field is
+    # required + bool-validated at write time, so a missing/malformed
+    # value means a malformed event, which keeps the degraded floor below
+    # instead of fabricating a warning.
+    if event.get("consolidation_completed") is False:
+        content.append(
+            "Memory consolidation did NOT complete — "
+            "run /PACT:pause or /PACT:wrap-up to capture session knowledge."
+        )
+
+    # Degraded floor: a dict with no usable field at all still surfaces.
+    if not content and not ts_valid:
+        return (
+            "Refresh detected — run TaskList to recover state, "
+            "then /PACT:bootstrap."
+        )
+
+    header = (
+        "Refreshed workstream detected — mid-flight resume, "
+        "not a fresh start."
+    )
+    if ts_valid:
+        try:
+            refreshed_at = _parse_ts(ts)
+            if refreshed_at.tzinfo is None:
+                refreshed_at = refreshed_at.replace(tzinfo=timezone.utc)
+            age = datetime.now(timezone.utc) - refreshed_at
+            if age > timedelta(hours=_REFRESH_STALE_HOURS):
+                header = (
+                    f"STALE checkpoint from "
+                    f"{refreshed_at.strftime('%Y-%m-%d')} (older than "
+                    f"{_REFRESH_STALE_HOURS}h). " + header
+                )
+        except (ValueError, TypeError):
+            pass  # Unparseable ts ⇒ no downgrade — fail toward full surfacing.
+
+    parts = [header]
+    parts.extend(content)
+    # Consumption key, ALWAYS when ts is a non-empty str — verbatim and
+    # machine-copyable; bootstrap's consumption write substitutes this value.
+    if ts_valid:
+        parts.append(f"refresh_ts={ts}")
+    else:
+        parts.append(
+            "refresh_ts=UNAVAILABLE — consumption cannot be recorded; "
+            "prompt may re-surface once."
+        )
+    parts.append(
+        "Run /PACT:bootstrap to respawn the secretary and resume. "
+        "Do NOT message any pre-refresh teammate name before bootstrap "
+        "respawns it."
+    )
+    return " ".join(parts)
+
+
+def _refresh_is_spent(session_dir: str, refreshed: dict) -> bool:
+    """True iff a session_refresh_consumed event retires this refresh claim.
+
+    Fire-once via ts-bound consumption: the refresh event's `ts` IS the
+    claim id; a consumption's `refresh_ts` must match it exactly (string
+    compare — no parsing on the identity axis). Every failure path lands on
+    UNSPENT (return False), so a malformed consumption can never suppress a
+    prompt. The `>=` conjunct is a belt on the SUPPRESS direction only: the
+    consumption must also be temporally sane (written at-or-after its
+    refresh). It can never wrongly KEEP a prompt (worst case one duplicate),
+    and it blocks the only wrong-spend shape — a consumption record
+    predating its claim.
+    """
+    ts = refreshed.get("ts")
+    if not isinstance(ts, str) or not ts:
+        return False  # fail toward surfacing
+    for consumption in read_events_from(session_dir, "session_refresh_consumed"):
+        if consumption.get("refresh_ts") != ts:  # exact string match — the ts IS the claim id
+            continue
+        try:
+            if _parse_ts(consumption.get("ts")) >= _parse_ts(ts):
+                return True
+        except Exception:
+            continue  # fail toward surfacing
+    return False
+
+
+def _both_parse(*timestamps: Any) -> bool:
+    """True iff every argument parses via _parse_ts without raising."""
+    for value in timestamps:
+        try:
+            _parse_ts(value)
+        except (ValueError, TypeError):
+            return False
+    return True
+
+
+def _claim_date(ts: Any) -> str:
+    """Render a claim timestamp as YYYY-MM-DD for the superseded-claim
+    clause. Callers guarantee parseability via _both_parse."""
+    return _parse_ts(ts).strftime("%Y-%m-%d")
+
+
+def _arbitrate(
+    paused_ev: dict,
+    paused_msg: str,
+    refreshed_ev: dict,
+    refresh_msg: str,
+) -> str:
+    """Pick the newer of two surviving resume claims (newest-ts-wins).
+
+    Never silently drop a resume claim: the losing claim is always
+    mentioned in one clause; when either ts is unparseable the claims
+    cannot be ordered, so BOTH surface in full with an explicit conflict
+    note. Ties go to the refreshed claim (`_ts_supersedes` is `>=`) — the
+    mid-flight claim is the more specific.
+
+    HALT survival: a LOSING refreshed claim that carried an active HALT
+    keeps its verify-line VERBATIM (the `_compose_halt_line` rendering —
+    one composition point with the interpreter) and is labeled
+    "superseded", not "stale" — arbitration must never become a suppress
+    path for an algedonic signal.
+    """
+    p_ts, r_ts = paused_ev.get("ts"), refreshed_ev.get("ts")
+    if not _both_parse(p_ts, r_ts):
+        return (
+            refresh_msg + " | " + paused_msg +
+            " | CONFLICT: both a paused and a refreshed claim exist with "
+            "unordered timestamps — verify via TaskList before resuming."
+        )
+    if _ts_supersedes(r_ts, p_ts):
+        return refresh_msg + (
+            f" (A stale paused claim from {_claim_date(p_ts)} also exists.)"
+        )
+    halt_line = _compose_halt_line(refreshed_ev)
+    if halt_line:
+        return paused_msg + (
+            f" (A superseded refreshed claim from {_claim_date(r_ts)} also "
+            f"exists.) {halt_line}"
+        )
+    return paused_msg + (
+        f" (A stale refreshed claim from {_claim_date(r_ts)} also exists.)"
+    )
+
+
+def has_unspent_refresh(session_dir: str | None) -> bool:
+    """True iff the dir's latest session_refreshed exists and is unconsumed.
+
+    Presentation-only signal for session_init's compact branch (suppress
+    'Re-engage secretary', re-label the agent list). The FULL prompt comes
+    only from check_resume_state at step 8 — this helper never composes
+    surfacing text. Any internal error returns False (the directive keeps
+    its current wording — degraded, not broken).
+    """
+    try:
+        if not session_dir:
+            return False
+        refreshed = read_last_event_from(session_dir, "session_refreshed")
+        if refreshed is None:
+            return False
+        return not _refresh_is_spent(session_dir, refreshed)
+    except Exception:
+        return False
 
 
 def _check_pr_state(pr_number: int | str) -> str:

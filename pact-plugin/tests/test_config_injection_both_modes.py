@@ -80,7 +80,7 @@ def _emit(frame, monkeypatch, tmp_path):
          patch("session_init.persist_context", return_value=None), \
          patch("session_init.append_event"), \
          patch("session_init.update_session_info", return_value=None), \
-         patch("session_init.check_paused_state", return_value=None), \
+         patch("session_init.check_resume_state", return_value=None), \
          patch("session_init._registry_resolve", return_value=None), \
          patch("session_init.get_peer_context", return_value=None), \
          patch("sys.stdin", io.StringIO(stdin_data)), \

@@ -16,7 +16,7 @@ Performs PACT environment initialization:
 5b. Writes session resume info (resume command, team, timestamp) to project CLAUDE.md
 6. Checks for in_progress Tasks (resumption context via Task integration)
 7. Restores last session snapshot for cross-session continuity
-8. Checks for paused work from previous session's /PACT:pause
+8. Checks for paused or refreshed work from a previous /PACT:pause or /PACT:refresh
 
 Note: Plan detection (scanning docs/plans/) was removed from session startup
 to reduce latency. Plan detection is deferred to /PACT:orchestrate, which
@@ -116,7 +116,8 @@ from shared.session_resume import (
     update_session_info,
     restore_last_session,
     check_resumption_context,
-    check_paused_state,
+    check_resume_state,
+    has_unspent_refresh,
 )
 
 
@@ -713,7 +714,7 @@ def main():
     5b. Writes session resume info (resume command, team, timestamp) to project CLAUDE.md
     6. Checks for in_progress Tasks (resumption context via Task integration)
     7. Restores last session snapshot for cross-session continuity
-    8. Checks for paused work from previous session's /PACT:pause
+    8. Checks for paused or refreshed work from a previous /PACT:pause or /PACT:refresh
 
     Note: Plan detection (scanning docs/plans/) was removed from session startup
     to reduce latency. Plan detection is deferred to /PACT:orchestrate, which
@@ -1320,14 +1321,36 @@ def main():
                 # Post-compaction: bootstrap directive subsumes "recover state"
                 # guidance; keep concrete task-resumption bullets for the
                 # orchestrator's next actions after bootstrap.
+                # Refresh-awareness (presentation-only): an unspent
+                # session_refreshed event means /PACT:refresh stopped the
+                # teammates before this compact — a SendMessage to a stopped
+                # teammate's name silently RESUMES its stale pre-refresh
+                # transcript, so the "Re-engage secretary" instruction must
+                # be suppressed until bootstrap respawns it. The FULL refresh
+                # prompt comes only from check_resume_state at step 8; this
+                # signal adjusts wording. When False, every byte below is
+                # identical to the non-refresh-aware text (fail-safe default
+                # — a non-lead or errored read keeps today's wording).
+                refresh_pending = frame_is_lead and has_unspent_refresh(session_dir)
+                if refresh_pending:
+                    _secretary_clause = (
+                        "Teammates were shut down by /PACT:refresh. Do NOT "
+                        "message any pre-refresh teammate name (a send "
+                        "RESUMES its stale transcript). Run /PACT:bootstrap "
+                        "to respawn the secretary first."
+                    )
+                else:
+                    _secretary_clause = (
+                        "Re-engage secretary: SendMessage(to='secretary', "
+                        "message='Post-compaction: deliver session briefing with current state.')."
+                    )
                 context_parts.insert(0, (
                     f'{_team_directive} '
                     f'After bootstrap, recover session state: '
                     f'(1) Read {get_compact_summary_path()} for prior context, '
                     f'(2) Run TaskList to find in-progress work, '
                     f'(3) TaskGet on in-progress tasks for details. '
-                    f"Re-engage secretary: SendMessage(to='secretary', "
-                    f"message='Post-compaction: deliver session briefing with current state.')."
+                    f'{_secretary_clause}'
                 ))
                 # Secondary-layer (#444): append POST-COMPACTION CHECKPOINT block
                 # when tasks in_progress. Consumes the hoisted `tasks` variable
@@ -1344,6 +1367,23 @@ def main():
                             agents=find_active_agents(tasks),
                             blockers=find_blockers(tasks),
                         )
+                        if refresh_pending:
+                            # Post-refresh re-label: the compaction was the
+                            # user's manual /compact (indistinguishable from
+                            # auto-compact downstream — neutral wording), and
+                            # the "active" agents are STOPPED pre-refresh
+                            # names whose task entries survive. Names still
+                            # come from live task data; only labels change.
+                            _checkpoint_block = _checkpoint_block.replace(
+                                "Prior conversation auto-compacted.",
+                                "Context was compacted.",
+                                1,
+                            ).replace(
+                                "Active Agents",
+                                "Pre-refresh agents (STOPPED — respawn "
+                                "before messaging)",
+                                1,
+                            )
                         context_parts.append(_checkpoint_block)
             elif source == "clear":
                 # Context cleared via /clear: no compact-summary, but team and tasks survive
@@ -1386,7 +1426,7 @@ def main():
         # session's info. READ-BEFORE-WRITE invariant: _extract_prev_session_dir
         # must run before update_session_info, otherwise it reads back the
         # just-written current session dir and silently breaks cross-session
-        # resume (step 7) and paused-work detection (step 8).
+        # resume (step 7) and paused/refreshed-work detection (step 8).
         prev_session_dir = _extract_prev_session_dir(project_dir)
 
         # 5b. Write session resume info to project CLAUDE.md
@@ -1432,16 +1472,18 @@ def main():
         if session_snapshot:
             context_parts.append(session_snapshot)
 
-        # 8. Check for paused work from previous session's /PACT:pause.
-        # Lead-only (#877): mechanically this is a READ (it surfaces a
-        # resume/paused-work prompt, not a write), but surfacing the lead's
-        # paused-work is a lead-only operation — a teammate/plain frame must not
-        # receive the lead's resume prompt. Gate the check itself so a non-lead
-        # frame does no journal read either.
+        # 8. Check for paused or refreshed work from a previous /PACT:pause
+        # or /PACT:refresh. ONE unified resolver (check_resume_state) reads
+        # both event types and arbitrates newest-wins — never two parallel
+        # reader paths at this seam. Lead-only (#877): mechanically this is
+        # a READ (it surfaces a resume prompt, not a write), but surfacing
+        # the lead's resume claim is a lead-only operation — a teammate/plain
+        # frame must not receive the lead's resume prompt. Gate the check
+        # itself so a non-lead frame does no journal read either.
         if frame_is_lead:
-            paused_msg = check_paused_state(prev_session_dir=prev_session_dir)
-            if paused_msg:
-                context_parts.append(paused_msg)
+            resume_msg = check_resume_state(prev_session_dir=prev_session_dir)
+            if resume_msg:
+                context_parts.append(resume_msg)
 
         # Build output
         output = {}

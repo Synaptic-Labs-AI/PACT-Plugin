@@ -28,6 +28,7 @@ EXPECTED_COMMANDS = {
     "pin-memory",
     "plan-mode",
     "rePACT",
+    "refresh",
     "telegram-setup",
     "wrap-up",
 }
@@ -961,3 +962,110 @@ class TestAFirstOrderingDisciplinePresentInPersona:
             f"teammate at Task B by its subject pattern, not by a forward task id."
         )
 
+
+# =============================================================================
+# refresh.md + bootstrap.md structural pins — mid-workstream checkpoint command
+# =============================================================================
+
+
+class TestRefreshCommandStructure:
+    """Structural pins for commands/refresh.md (LLM-loaded).
+
+    Pins the load-bearing invariant statements, the canonical journal-write
+    template markers, the write-ban on the legacy ~/.claude/pact-refresh/
+    directory, and the zero-planning-artifact rule for LLM-loaded files.
+    """
+
+    @pytest.fixture
+    def refresh_text(self):
+        return (COMMANDS_DIR / "refresh.md").read_text(encoding="utf-8")
+
+    def test_file_exists_with_frontmatter_description(self, refresh_text):
+        fm = parse_frontmatter(refresh_text)
+        assert fm is not None
+        assert fm["description"] == (
+            "Mid-workstream context checkpoint — harvest, persist, shut down "
+            "teammates, stand by for /compact + /PACT:bootstrap"
+        )
+
+    def test_canonical_write_template_present(self, refresh_text):
+        """The journal write mirrors pause.md byte-conventions: shell-clamped
+        case for the conditional session_consolidated pre-emit, quoted-heredoc
+        --stdin for the session_refreshed write, set -e + ERR trap."""
+        assert "case '{true_or_false}' in" in refresh_text
+        assert "--type session_consolidated" in refresh_text
+        assert "--type session_refreshed" in refresh_text
+        assert "--stdin <<'JSON'" in refresh_text
+        assert "set -e" in refresh_text
+        assert "trap 'rc=$?" in refresh_text
+
+    @pytest.mark.parametrize(
+        "invariant",
+        [
+            "LEAD-FRAME-ONLY",
+            "Never clean worktrees, branches, or commits",
+            "Never complete or delete tasks",
+            "RESPAWN-BEFORE-SEND",
+            "resurrects its stale transcript",
+            "Expect and IGNORE stragglers",
+            "Drain-confirmation gate (MUST)",
+            "Do NOT delete the team",
+        ],
+        ids=["lead-frame-only", "never-clean-worktrees", "never-complete-tasks",
+             "respawn-before-send", "resume-on-send-hazard", "ignore-stragglers",
+             "drain-gate", "no-team-delete"],
+    )
+    def test_invariant_statement_present(self, refresh_text, invariant):
+        assert invariant in refresh_text
+
+    def test_pact_refresh_dir_appears_only_as_write_ban(self, refresh_text):
+        """The legacy ~/.claude/pact-refresh/ directory may appear ONLY in
+        the constraints block's prohibition — never as a write target."""
+        occurrences = [
+            line for line in refresh_text.splitlines()
+            if "pact-refresh/" in line
+        ]
+        assert len(occurrences) == 1
+        assert "Never write under" in occurrences[0]
+
+    def test_zero_planning_artifacts(self, refresh_text):
+        """LLM-loaded files carry no issue/PR numbers, task ids, or
+        version-roadmap markers."""
+        assert not re.search(r"#\d+", refresh_text)
+        assert "Task #" not in refresh_text
+        assert not re.search(r"v4\.\d", refresh_text)
+
+
+class TestBootstrapRefreshClauses:
+    """Structural pins for the refresh-related bootstrap.md clauses."""
+
+    @pytest.fixture
+    def bootstrap_text(self):
+        return (COMMANDS_DIR / "bootstrap.md").read_text(encoding="utf-8")
+
+    def test_secretary_respawn_carveout(self, bootstrap_text):
+        assert "respawn it after `/PACT:refresh`" in bootstrap_text
+        assert "resurrects its stale pre-refresh transcript" in bootstrap_text
+
+    def test_refreshed_state_paragraph(self, bootstrap_text):
+        assert "Refreshed workstream detected" in bootstrap_text
+        assert "DECLARED CONTINUATION" in bootstrap_text
+        assert "AUTO-PROCEED" in bootstrap_text
+        assert "A HALT line always surfaces to the user regardless." in bootstrap_text
+
+    def test_consumption_write_template(self, bootstrap_text):
+        assert "--type session_refresh_consumed" in bootstrap_text
+        assert '{"refresh_ts": "{refresh_ts}"}' in bootstrap_text
+        assert "refresh_ts=UNAVAILABLE" in bootstrap_text
+        assert (
+            "Never write a consumption event when no refresh prompt surfaced."
+            in bootstrap_text
+        )
+
+    def test_team_config_expectations_h1_h2(self, bootstrap_text):
+        # H2 (bidirectional re-identify)
+        assert "An ABSENT config is the NORM" in bootstrap_text
+        assert "neither is corruption" in bootstrap_text
+        # H1 (ghost-detection)
+        assert "do NOT blind-retry `Agent()`" in bootstrap_text
+        assert "Check for inbound messages" in bootstrap_text

@@ -378,8 +378,10 @@ class TestDiscoveryFloor:
         # aggregate rules pass vacuously over zero files — silently green.
         # Floor rather than exact count so adding hooks never breaks it;
         # bump the floor as hooks/ grows, never lower it without a
-        # deliberate scope decision.
-        assert len(_SCANNED_FILES) >= 63
+        # deliberate scope decision. Lowered 63 -> 55 when the dormant
+        # hooks/refresh/ package (8 modules) was removed, dropping the
+        # scanned count 66 -> 58; the floor keeps the same slack of 3.
+        assert len(_SCANNED_FILES) >= 55
 
 
 class TestPy39SyntaxFloor:

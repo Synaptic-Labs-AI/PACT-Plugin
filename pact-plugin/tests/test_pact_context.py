@@ -128,7 +128,7 @@ init()-before-reader ordering guard:
 
 Library module init() contract:
 71. task_utils.get_task_list() works when init() was called by a prior hook
-72. checkpoint_builder.get_session_id() works when init() was called by a prior hook
+72. get_session_id() serves import-only library modules when init() was called by a prior hook
 """
 
 import json
@@ -1954,9 +1954,10 @@ class TestInitBeforeReaderOrdering:
 class TestLibraryModuleInitContract:
     """Verify library modules that call pact_context readers work when init() was called first.
 
-    task_utils.py and checkpoint_builder.py call pact_context readers (get_session_id)
-    without calling init() themselves — they rely on the calling hook to have initialized
-    the module. These tests verify the transitive contract works correctly.
+    Library modules (e.g. shared/task_utils.py) call pact_context readers
+    (get_session_id, get_team_name) without calling init() themselves — they rely
+    on the calling hook to have initialized the module. These tests verify the
+    transitive contract works correctly.
     """
 
     def test_task_utils_get_task_list_after_init(self, pact_context, monkeypatch, tmp_path):
@@ -1988,14 +1989,14 @@ class TestLibraryModuleInitContract:
         assert len(result) == 1
         assert result[0]["subject"] == "test task"
 
-    def test_checkpoint_builder_session_id_dependency_after_init(self, pact_context):
-        """checkpoint_builder depends on shared.pact_context.get_session_id after init().
+    def test_get_session_id_serves_library_modules_after_init(self, pact_context):
+        """get_session_id() returns the initializing hook's value to a later caller.
 
-        checkpoint_builder.py imports get_session_id as _pact_get_session_id and
-        wraps it: `_pact_get_session_id() or "unknown"`. This test verifies the
-        underlying dependency returns the correct value when init() was called
-        by a prior hook. (checkpoint_builder can't be imported directly in tests
-        due to relative imports from the refresh package.)
+        Library modules import get_session_id without calling init() themselves
+        and rely on the calling hook having initialized the module. This test
+        verifies the underlying dependency returns the correct value when init()
+        was called by a prior hook. (Originally motivated by a since-removed
+        import-only consumer; the contract is consumer-agnostic.)
         """
         from shared.pact_context import get_session_id
 

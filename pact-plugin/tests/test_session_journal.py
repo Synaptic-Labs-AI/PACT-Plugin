@@ -2621,7 +2621,7 @@ class TestSessionInitJournalWrite:
              patch("session_init.persist_context"), \
              patch("session_init.check_resumption_context", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None):
+             patch("session_init.check_resume_state", return_value=None):
 
             with pytest.raises(SystemExit) as exc:
                 from session_init import main
@@ -3126,6 +3126,116 @@ class TestCLI:
         assert event["message"].count("'") == 3
         assert event["branch"].count("'") == 1
 
+    def test_write_session_refreshed_stdin_roundtrip(
+        self, journal_home, session_dir, journal_file,
+    ):
+        """session_refreshed + session_refresh_consumed round-trip via the
+        CLI --stdin write path (the exact seam refresh.md and bootstrap.md
+        use), read back with read-last.
+
+        Covers both the full mid-flight payload and the consumption event,
+        pinning that the schema entries accept what the command templates
+        will actually pipe through the quoted-heredoc stdin path.
+        """
+        refreshed_payload = {
+            "consolidation_completed": True,
+            "halt_active": True,
+            "halt_task_ids": ["7"],
+            "feature_task_id": "14",
+            "feature_subject": "mid-workstream checkpoint",
+            "team_name": "pact-abc12345",
+            "next_phase": "test",
+            "worktrees": ["/tmp/wt-a"],
+            "pr_number": 42,
+        }
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "write",
+                "--type", "session_refreshed",
+                "--session-dir", session_dir,
+                "--stdin",
+            ],
+            input=json.dumps(refreshed_payload),
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 0, result.stderr
+
+        # Read back the refresh event and capture its ts — the claim id
+        # the consumption write binds to.
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "read-last",
+                "--type", "session_refreshed",
+                "--session-dir", session_dir,
+            ],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 0, result.stderr
+        event = json.loads(result.stdout)
+        assert event is not None
+        for key, value in refreshed_payload.items():
+            assert event[key] == value
+        refresh_ts = event["ts"]
+        assert isinstance(refresh_ts, str) and refresh_ts
+
+        # Consumption write bound to the surfaced ts (bootstrap's shape).
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "write",
+                "--type", "session_refresh_consumed",
+                "--session-dir", session_dir,
+                "--stdin",
+            ],
+            input=json.dumps({"refresh_ts": refresh_ts}),
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 0, result.stderr
+
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "read-last",
+                "--type", "session_refresh_consumed",
+                "--session-dir", session_dir,
+            ],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 0, result.stderr
+        consumed = json.loads(result.stdout)
+        assert consumed["refresh_ts"] == refresh_ts
+
+    def test_write_session_refreshed_degenerate_minimal_event(
+        self, journal_home, session_dir, journal_file,
+    ):
+        """The degenerate no-workstream refresh (two required fields only)
+        writes clean through the CLI — the minimal-event oracle: exactly
+        one session_refreshed event per refresh, required fields always
+        present, optionals absent."""
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "write",
+                "--type", "session_refreshed",
+                "--session-dir", session_dir,
+                "--stdin",
+            ],
+            input=json.dumps(
+                {"consolidation_completed": False, "halt_active": False}
+            ),
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 0, result.stderr
+
+        event = json.loads(journal_file.read_text().strip())
+        assert event["type"] == "session_refreshed"
+        assert event["consolidation_completed"] is False
+        assert event["halt_active"] is False
+        assert "halt_task_ids" not in event
+        assert "feature_task_id" not in event
+
     def test_write_stdin_and_data_are_mutually_exclusive(
         self, journal_home, session_dir, journal_file,
     ):
@@ -3267,6 +3377,17 @@ class TestValidateEventSchemaPerType:
             "branch": "feat/x",
             "worktree_path": "/tmp/wt",
             "consolidation_completed": True,
+        },
+        # Required fields only — deliberately identical to the degenerate
+        # no-workstream refresh event (the minimal-event oracle). The sample
+        # must NOT carry optional fields: the missing-field test removes each
+        # sample key and expects rejection, which only holds for required ones.
+        "session_refreshed": {
+            "consolidation_completed": True,
+            "halt_active": False,
+        },
+        "session_refresh_consumed": {
+            "refresh_ts": "2026-07-10T15:00:00Z",
         },
         "session_end": {},  # No required fields; baseline-only.
         "cleanup_summary": {},  # No required fields; optional-only (#412 Fix B).
@@ -3509,8 +3630,13 @@ class TestValidateEventSchemaPerType:
         ("s2_state_seeded", "agents", {"k": "v"}, "list", "dict"),
         ("review_dispatch", "reviewers", {"k": "v"}, "list", "dict"),
         ("remediation", "items", {"k": "v"}, "list", "dict"),
-        # bool field fed an int (bool fields currently only consolidation_completed)
+        # bool fields fed non-bool values (consolidation_completed on both
+        # lifecycle events; halt_active on session_refreshed)
         ("session_paused", "consolidation_completed", 1, "bool", "int"),
+        ("session_refreshed", "consolidation_completed", 1, "bool", "int"),
+        ("session_refreshed", "halt_active", "yes", "bool", "str"),
+        # str field fed an int (the consumption claim id must be a ts string)
+        ("session_refresh_consumed", "refresh_ts", 42, "str", "int"),
     ]
 
     @pytest.mark.parametrize(
@@ -3724,6 +3850,96 @@ class TestValidateOptionalFieldTypes:
         from shared.session_journal import _OPTIONAL_FIELDS_BY_TYPE
 
         assert _OPTIONAL_FIELDS_BY_TYPE.get("session_start") == {"source": str}
+
+    def test_session_refreshed_optionals_declared(self):
+        """session_refreshed declares the seven optional mid-flight fields.
+
+        Pins the field-name → type contract for the refresh event's
+        optional payload. The required-fields registration for
+        session_refreshed is what activates this optional check —
+        _validate_event_schema short-circuits on unknown types.
+        """
+        from shared.session_journal import _OPTIONAL_FIELDS_BY_TYPE
+
+        assert _OPTIONAL_FIELDS_BY_TYPE.get("session_refreshed") == {
+            "halt_task_ids": list,
+            "feature_task_id": str,
+            "feature_subject": str,
+            "team_name": str,
+            "next_phase": str,
+            "worktrees": list,
+            "pr_number": int,
+        }
+
+    def test_session_refreshed_full_optional_payload_passes(self):
+        """A refresh event carrying every optional field, correctly typed,
+        validates clean — the full mid-flight (non-degenerate) shape."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "session_refreshed",
+            consolidation_completed=True,
+            halt_active=True,
+            halt_task_ids=["7", "12"],
+            feature_task_id="14",
+            feature_subject="Implement mid-workstream checkpoint",
+            team_name="pact-abc12345",
+            next_phase="test",
+            worktrees=["/tmp/wt-a", "/tmp/wt-b"],
+            pr_number=42,
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True
+        assert reason == "ok"
+
+    @pytest.mark.parametrize(
+        "field, bad_value, expected_name, got_name",
+        [
+            ("halt_task_ids", {"7": True}, "list", "dict"),
+            ("feature_task_id", 14, "str", "int"),
+            ("next_phase", 3, "str", "int"),
+            ("worktrees", "/tmp/wt-a", "list", "str"),
+            ("pr_number", "42", "int", "str"),
+        ],
+        ids=["halt_task_ids", "feature_task_id", "next_phase", "worktrees", "pr_number"],
+    )
+    def test_session_refreshed_optional_wrong_type_rejected(
+        self, field, bad_value, expected_name, got_name,
+    ):
+        """Present-but-mistyped optional refresh fields are rejected with the
+        precise optional-field reason string."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "session_refreshed",
+            consolidation_completed=True,
+            halt_active=False,
+            **{field: bad_value},
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+        assert reason == (
+            f"optional field '{field}' for type 'session_refreshed' must "
+            f"be {expected_name}, got {got_name}"
+        )
+
+    def test_session_refreshed_pr_number_rejects_bool(self):
+        """pr_number (optional int) rejects bool — bool subclasses int, so
+        the explicit bool-in-int guard must fire for optionals too."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "session_refreshed",
+            consolidation_completed=True,
+            halt_active=False,
+            pr_number=True,
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+        assert reason == (
+            "optional field 'pr_number' for type 'session_refreshed' must "
+            "be int, got bool"
+        )
 
     def test_optional_field_correct_type_passes(self):
         """Optional field with correct type passes validation."""

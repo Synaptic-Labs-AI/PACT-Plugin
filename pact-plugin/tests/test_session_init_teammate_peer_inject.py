@@ -86,7 +86,7 @@ def _run_main_capture(stdin_data, monkeypatch, tmp_path, *, peer_return=_PEER_SE
          patch("session_init.persist_context", return_value=None), \
          patch("session_init.append_event"), \
          patch("session_init.update_session_info", return_value=None), \
-         patch("session_init.check_paused_state", return_value=None), \
+         patch("session_init.check_resume_state", return_value=None), \
          patch("session_init._registry_resolve", return_value=resolver_return), \
          patch("session_init.get_peer_context",
                side_effect=(RuntimeError("peer-build boom") if peer_raises else None),

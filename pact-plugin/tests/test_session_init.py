@@ -18,7 +18,7 @@ Resume-aware team detection (main() integration):
 12. Team instruction is first in context_parts (insert at position 0)
 
 main() integration:
-13. check_paused_state non-None result appears in additionalContext output
+13. check_resume_state non-None result appears in additionalContext output
 
 check_additional_directories():
 14. Returns None when ~/.claude/teams is present (absolute path)
@@ -194,10 +194,10 @@ class TestGenerateTeamName:
 
 
 class TestMainPausedStateIntegration:
-    """Integration test: check_paused_state wiring in session_init.main()."""
+    """Integration test: check_resume_state wiring in session_init.main()."""
 
     def test_paused_state_appears_in_additional_context(self, monkeypatch):
-        """Non-None check_paused_state result should appear in additionalContext output."""
+        """Non-None check_resume_state result should appear in additionalContext output."""
         from session_init import main
 
         paused_msg = "Paused work detected: PR #42 (feat/login) — awaiting merge."
@@ -205,7 +205,7 @@ class TestMainPausedStateIntegration:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
 
         # Provide valid JSON on stdin with a session_id (#877: lead frame so the
-        # is_lead-gated check_paused_state actually runs).
+        # is_lead-gated check_resume_state actually runs).
         stdin_data = json.dumps(_with_lead_role(
             {"session_id": "aabb1122-0000-0000-0000-000000000000"}
         ))
@@ -216,7 +216,7 @@ class TestMainPausedStateIntegration:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=paused_msg) as mock_paused, \
+             patch("session_init.check_resume_state", return_value=paused_msg) as mock_paused, \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             with pytest.raises(SystemExit) as exc_info:
@@ -230,7 +230,7 @@ class TestMainPausedStateIntegration:
         assert paused_msg in additional
 
     def test_none_paused_state_excluded_from_output(self, monkeypatch):
-        """None check_paused_state result should not appear in additionalContext."""
+        """None check_resume_state result should not appear in additionalContext."""
         from session_init import main
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
@@ -243,7 +243,7 @@ class TestMainPausedStateIntegration:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             with pytest.raises(SystemExit):
@@ -262,12 +262,12 @@ class TestMainPrevSessionDirOrdering:
     before calling _extract_prev_session_dir(). That caused _extract_prev_session_dir
     to read back the just-written current session dir, silently breaking:
       - restore_last_session(prev_session_dir=...) -> reads current (empty) journal
-      - check_paused_state(prev_session_dir=...)   -> never finds paused events
+      - check_resume_state(prev_session_dir=...)   -> never finds paused events
 
     Invariant: READ prior CLAUDE.md BEFORE OVERWRITING it.
 
     This test drives main() end-to-end (no mocking of update_session_info,
-    _extract_prev_session_dir, restore_last_session, or check_paused_state).
+    _extract_prev_session_dir, restore_last_session, or check_resume_state).
     It pre-seeds a prior session with a session_paused event in its journal and
     asserts the paused-state message appears in the hook output — which can
     only happen if prev_session_dir was captured before the block rewrite.
@@ -328,28 +328,31 @@ class TestMainPrevSessionDirOrdering:
         )
 
         # --- Arrange: current session id (different from the prior one) ---
-        # #877: lead frame so the is_lead-gated check_paused_state runs.
+        # #877: lead frame so the is_lead-gated check_resume_state runs.
         current_session_id = "aabb1122-0000-0000-0000-000000000000"
         stdin_data = json.dumps(_with_lead_role({"session_id": current_session_id}))
 
         # Spies so we can assert exactly which prev_session_dir the downstream
         # calls received. We wrap rather than replace so the real implementations
-        # still run (end-to-end coverage).
+        # still run (end-to-end coverage). check_resume_state is the unified
+        # resolver seam (paused + refreshed) with the same single-dir signature
+        # the old check_paused_state seam had — the paused prompt still flows
+        # through it, so the pass-through assertions are unchanged.
         from session_init import (
-            check_paused_state as real_check_paused_state,
+            check_resume_state as real_check_resume_state,
             restore_last_session as real_restore_last_session,
         )
 
         restore_calls: list[str | None] = []
-        paused_calls: list[str | None] = []
+        resume_calls: list[str | None] = []
 
         def spy_restore_last_session(prev_session_dir=None):
             restore_calls.append(prev_session_dir)
             return real_restore_last_session(prev_session_dir=prev_session_dir)
 
-        def spy_check_paused_state(prev_session_dir=None):
-            paused_calls.append(prev_session_dir)
-            return real_check_paused_state(prev_session_dir=prev_session_dir)
+        def spy_check_resume_state(prev_session_dir=None):
+            resume_calls.append(prev_session_dir)
+            return real_check_resume_state(prev_session_dir=prev_session_dir)
 
         # Patch boundary side effects that are unrelated to the ordering invariant:
         #   - setup_plugin_symlinks / remove_stale_kernel_block / update_pact_routing /
@@ -370,8 +373,8 @@ class TestMainPrevSessionDirOrdering:
                  side_effect=spy_restore_last_session,
              ), \
              patch(
-                 "session_init.check_paused_state",
-                 side_effect=spy_check_paused_state,
+                 "session_init.check_resume_state",
+                 side_effect=spy_check_resume_state,
              ), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
@@ -387,9 +390,9 @@ class TestMainPrevSessionDirOrdering:
             f"This indicates update_session_info() ran before "
             f"_extract_prev_session_dir() and clobbered the CLAUDE.md block."
         )
-        assert paused_calls == [prior_session_dir_str], (
-            f"check_paused_state should have received the prior session dir "
-            f"({prior_session_dir_str!r}), but got {paused_calls!r}."
+        assert resume_calls == [prior_session_dir_str], (
+            f"check_resume_state should have received the prior session dir "
+            f"({prior_session_dir_str!r}), but got {resume_calls!r}."
         )
 
         # --- Assert: the paused-work message made it into the hook output ---
@@ -403,6 +406,264 @@ class TestMainPrevSessionDirOrdering:
         rewritten = claude_md.read_text(encoding="utf-8")
         assert f"claude --resume {current_session_id}" in rewritten
         assert f"claude --resume {prior_session_id}" not in rewritten
+
+
+class TestRefreshSurfacingMatrix:
+    """Real-main() round-trip matrix for the refreshed-state surface.
+
+    Non-mocked seam tier: check_resume_state / restore_last_session /
+    has_unspent_refresh run REAL against seeded journals — only boundary
+    side effects (symlinks, memory-md, staleness, task list, gh) are
+    patched. The step-8 surface keys on the frame's agent_type alone
+    (is_lead is PURE on that one field), so the session-topology axis
+    (sid==leadSid in-process vs sid!=leadSid tmux) is exercised through
+    the teammate rows by varying the stdin session_id relative to the
+    seeded session dir.
+
+    COUNTER-TEST-BY-REVERT (executed once at authoring time, then
+    restored): temporarily reverting the step-8 call swap in
+    session_init.main() back to the paused-only resolver
+    (check_paused_state) turned EXACTLY 5 tests in this class RED —
+    test_lead_frame_surfaces_refresh_prompt[compact|resume|startup],
+    test_quit_path_topology_prev_dir_differs, and
+    test_compact_branch_suppression_and_relabel_with_refresh (its step-8
+    assertion) — proving the round-trip matrix depends on the
+    check_resume_state seam re-point, not on any mocked shim. The
+    non-lead rows, byte-identity, and spent-refresh tests stayed green
+    under the revert, as expected (they pin suppression/presentation,
+    not the resolver seam).
+    """
+
+    _REFRESH_TS = "2026-07-10T12:00:00Z"
+
+    def _seed(self, tmp_path, session_id, refresh=True):
+        """Seed home, project CLAUDE.md, and a session journal holding a
+        session_refreshed event; returns (project_dir, session_dir) strs."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir(exist_ok=True)
+
+        session_dir = (
+            tmp_path / ".claude" / "pact-sessions" / "project" / session_id
+        )
+        session_dir.mkdir(parents=True, exist_ok=True)
+        if refresh:
+            event = {
+                "v": 1,
+                "type": "session_refreshed",
+                "ts": self._REFRESH_TS,
+                "consolidation_completed": True,
+                "halt_active": True,
+                "halt_task_ids": ["7"],
+                "feature_subject": "mid-flight feature",
+                "next_phase": "test",
+            }
+            journal = session_dir / "session-journal.jsonl"
+            journal.write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+        claude_md_dir = project_dir / ".claude"
+        claude_md_dir.mkdir(exist_ok=True)
+        (claude_md_dir / "CLAUDE.md").write_text(
+            "# Project Memory\n\n"
+            "<!-- SESSION_START -->\n"
+            "## Current Session\n"
+            f"- Resume: `claude --resume {session_id}`\n"
+            "- Team: `session-testteam`\n"
+            f"- Session dir: `{session_dir}`\n"
+            "- Started: 2026-01-01 00:00:00 UTC\n"
+            "<!-- SESSION_END -->\n",
+            encoding="utf-8",
+        )
+        return str(project_dir), str(session_dir)
+
+    def _run_main(self, monkeypatch, tmp_path, stdin_payload, project_dir,
+                  tasks=None):
+        from session_init import main
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", project_dir)
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.get_task_list", return_value=tasks), \
+             patch("shared.session_resume._check_pr_state", return_value=""), \
+             patch("sys.stdin", io.StringIO(json.dumps(stdin_payload))), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 0
+        return json.loads(mock_stdout.getvalue())
+
+    @pytest.mark.parametrize("source", ["compact", "resume", "startup"])
+    def test_lead_frame_surfaces_refresh_prompt(
+        self, monkeypatch, tmp_path, source
+    ):
+        """Lead frame × every source: the unspent refresh claim surfaces
+        (post-compact/same-session --resume topology: prev == current dir)."""
+        session_id = "aabb1122-0000-0000-0000-00000000cafe"
+        project_dir, _ = self._seed(tmp_path, session_id)
+        output = self._run_main(
+            monkeypatch, tmp_path,
+            {"session_id": session_id, "source": source,
+             "agent_type": _LEAD_AGENT_TYPE},
+            project_dir,
+        )
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert "Refreshed workstream detected" in additional
+        assert f"refresh_ts={self._REFRESH_TS}" in additional
+        assert "A HALT/algedonic signal was ACTIVE at refresh (tasks: 7)" in additional
+
+    @pytest.mark.parametrize(
+        "agent_type, sid_matches_seeded",
+        [
+            ("pact-architect", True),   # in-process shape: same session id
+            ("pact-architect", False),  # tmux shape: own session id
+            (None, True),               # unknown role, same-session topology
+        ],
+        ids=["teammate-inprocess", "teammate-tmux", "unknown-role"],
+    )
+    def test_non_lead_frames_never_get_refresh_prompt(
+        self, monkeypatch, tmp_path, agent_type, sid_matches_seeded
+    ):
+        """Teammate (both sid topologies) and unknown frames: step 8 is
+        frame_is_lead-gated — no resume prompt, regardless of session-id
+        topology (I8: the branch keys on agent_type, a runtime structural
+        signal; non-lead is the fail-safe default)."""
+        seeded_id = "aabb1122-0000-0000-0000-00000000cafe"
+        project_dir, _ = self._seed(tmp_path, seeded_id)
+        stdin_id = seeded_id if sid_matches_seeded else (
+            "ffee9988-0000-0000-0000-00000000beef"
+        )
+        payload = {"session_id": stdin_id, "source": "compact"}
+        if agent_type is not None:
+            payload["agent_type"] = agent_type
+        output = self._run_main(monkeypatch, tmp_path, payload, project_dir)
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert "Refreshed workstream detected" not in additional
+        assert "refresh_ts=" not in additional
+        # frame_is_lead conjunct pin on the PRESENTATION seam: the unknown-role
+        # frame is the ONE non-lead shape that reaches the compact branch
+        # (teammate frames divert to peer-injection before the directive
+        # renders), so the wording pin is scoped there — on the teammate rows
+        # the directive never renders and the assertion would be
+        # vacuous-by-unreachability. Dropping frame_is_lead from the
+        # refresh_pending conjunction must turn this row RED.
+        if agent_type is None:
+            assert "Teammates were shut down by /PACT:refresh" not in additional
+
+    def test_quit_path_topology_prev_dir_differs(self, monkeypatch, tmp_path):
+        """Topology invariance, quit path: CLAUDE.md points at the PRIOR
+        (refreshed) session dir while the current session id differs — the
+        same step-8 read surfaces the same prompt (no source/mode branching
+        in the resolver)."""
+        prior_id = "deadbeef-1111-2222-3333-44445555cafe"
+        project_dir, _ = self._seed(tmp_path, prior_id)
+        output = self._run_main(
+            monkeypatch, tmp_path,
+            {"session_id": "aabb1122-9999-0000-0000-000000000000",
+             "source": "startup", "agent_type": _LEAD_AGENT_TYPE},
+            project_dir,
+        )
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert "Refreshed workstream detected" in additional
+        assert f"refresh_ts={self._REFRESH_TS}" in additional
+
+    def _in_progress_tasks(self):
+        return [
+            {"id": "14", "subject": "Implement mid-flight feature",
+             "status": "in_progress", "metadata": {}},
+            {"id": "17", "subject": "CODE: mid-flight feature",
+             "status": "in_progress", "metadata": {}},
+            {"id": "26", "subject": "auditor: observe",
+             "status": "in_progress", "metadata": {}},
+        ]
+
+    def test_compact_branch_byte_identity_without_refresh(
+        self, monkeypatch, tmp_path
+    ):
+        """refresh_pending False ⇒ the compact directive and checkpoint
+        block are byte-identical to the pre-refresh-aware wording: the
+        legacy Re-engage-secretary sentence, the auto-compacted line, and
+        the Active Agents label all present verbatim."""
+        session_id = "aabb1122-0000-0000-0000-00000000cafe"
+        project_dir, _ = self._seed(tmp_path, session_id, refresh=False)
+        output = self._run_main(
+            monkeypatch, tmp_path,
+            {"session_id": session_id, "source": "compact",
+             "agent_type": _LEAD_AGENT_TYPE},
+            project_dir,
+            tasks=self._in_progress_tasks(),
+        )
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert (
+            "Re-engage secretary: SendMessage(to='secretary', "
+            "message='Post-compaction: deliver session briefing with current state.')."
+        ) in additional
+        assert "Prior conversation auto-compacted." in additional
+        assert "Active Agents" in additional
+        assert "Pre-refresh agents" not in additional
+        assert "Teammates were shut down by /PACT:refresh" not in additional
+
+    def test_compact_branch_suppression_and_relabel_with_refresh(
+        self, monkeypatch, tmp_path
+    ):
+        """refresh_pending True ⇒ the Re-engage-secretary sentence is
+        REPLACED by the respawn-before-send directive, the compaction line
+        reads neutrally, and the agents line is re-labeled STOPPED — while
+        the agent names still come from live task data."""
+        session_id = "aabb1122-0000-0000-0000-00000000cafe"
+        project_dir, _ = self._seed(tmp_path, session_id, refresh=True)
+        output = self._run_main(
+            monkeypatch, tmp_path,
+            {"session_id": session_id, "source": "compact",
+             "agent_type": _LEAD_AGENT_TYPE},
+            project_dir,
+            tasks=self._in_progress_tasks(),
+        )
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert "Teammates were shut down by /PACT:refresh" in additional
+        assert "Run /PACT:bootstrap to respawn the secretary first." in additional
+        assert "Re-engage secretary" not in additional
+        assert "Context was compacted." in additional
+        assert "Prior conversation auto-compacted." not in additional
+        assert "Pre-refresh agents (STOPPED — respawn before messaging)" in additional
+        # The re-label replaces with count=1: a second upstream occurrence of
+        # the legacy label would survive the replace and mislabel STOPPED
+        # agents as active — pin full absence, not just replacement presence.
+        assert "Active Agents" not in additional
+        # Names still come from live task data — only the label changed.
+        assert "auditor: observe" in additional
+        # The FULL prompt still comes from step 8 (unified resolver).
+        assert "Refreshed workstream detected" in additional
+
+    def test_spent_refresh_reverts_compact_branch_to_legacy_wording(
+        self, monkeypatch, tmp_path
+    ):
+        """A consumed refresh is not pending: the compact branch keeps the
+        legacy wording (has_unspent_refresh False) and step 8 surfaces no
+        refresh prompt."""
+        session_id = "aabb1122-0000-0000-0000-00000000cafe"
+        project_dir, session_dir = self._seed(tmp_path, session_id)
+        consumption = {
+            "v": 1, "type": "session_refresh_consumed",
+            "refresh_ts": self._REFRESH_TS, "ts": "2026-07-10T12:10:00Z",
+        }
+        with open(
+            str(Path(session_dir) / "session-journal.jsonl"), "a",
+            encoding="utf-8",
+        ) as f:
+            f.write(json.dumps(consumption) + "\n")
+        output = self._run_main(
+            monkeypatch, tmp_path,
+            {"session_id": session_id, "source": "compact",
+             "agent_type": _LEAD_AGENT_TYPE},
+            project_dir,
+            tasks=self._in_progress_tasks(),
+        )
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert "Re-engage secretary" in additional
+        assert "Refreshed workstream detected" not in additional
+        assert "Pre-refresh agents" not in additional
 
 
 class TestCompactSummaryCleanup:
@@ -439,7 +700,7 @@ class TestCompactSummaryCleanup:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO):
             with pytest.raises(SystemExit) as exc_info:
@@ -718,7 +979,7 @@ class TestCheckAdditionalDirectoriesMainIntegration:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             with pytest.raises(SystemExit) as exc_info:
@@ -756,7 +1017,7 @@ class TestCheckAdditionalDirectoriesMainIntegration:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             with pytest.raises(SystemExit) as exc_info:
@@ -800,7 +1061,7 @@ class TestCheckAdditionalDirectoriesMainIntegration:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             with pytest.raises(SystemExit) as exc_info:
@@ -895,7 +1156,7 @@ class TestInprocessModeNoticeIntegration:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             with pytest.raises(SystemExit) as exc_info:
@@ -1123,7 +1384,7 @@ class TestWriteContextIntegration:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("session_init.build_context_cache",
                    return_value=(Path("/tmp/ctx.json"), {})) as mock_build_ctx, \
              patch("session_init.persist_context", return_value=None), \
@@ -1171,7 +1432,7 @@ class TestWriteContextIntegration:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("session_init.build_context_cache") as mock_build_ctx, \
              patch("session_init.persist_context") as mock_persist, \
              patch("session_init.append_event") as mock_append, \
@@ -1238,7 +1499,7 @@ class TestWriteContextIntegration:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event") as mock_append, \
              patch("sys.stdin", io.StringIO(stdin_data)), \
@@ -1287,7 +1548,7 @@ class TestWriteContextIntegration:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO), \
              patch("sys.stderr", new_callable=io.StringIO):
@@ -1355,7 +1616,7 @@ class TestWriteContextIntegration:
              patch("session_init.update_session_info") as mock_update_info, \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=True), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
@@ -1393,7 +1654,7 @@ class TestWriteContextIntegration:
              patch("session_init.update_session_info", return_value=None) as mock_update_info, \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=True), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
@@ -1453,7 +1714,7 @@ class TestFailureLogIntegration:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=None), \
              patch("session_init.append_failure") as mock_append_failure, \
@@ -1500,7 +1761,7 @@ class TestFailureLogIntegration:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=None), \
              patch("session_init.append_failure") as mock_append_failure, \
@@ -1538,7 +1799,7 @@ class TestFailureLogIntegration:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=None), \
              patch("session_init.append_failure") as mock_append_failure, \
@@ -1577,7 +1838,7 @@ class TestFailureLogIntegration:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=None), \
              patch("session_init.append_failure") as mock_append_failure, \
@@ -1616,7 +1877,7 @@ class TestFailureLogIntegration:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=None), \
              patch("session_init.append_failure") as mock_append_failure, \
@@ -1660,7 +1921,7 @@ class TestFailureLogIntegration:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=None), \
              patch("session_init.append_failure", side_effect=raising_append_failure), \
@@ -1735,7 +1996,7 @@ class TestFailureLogIntegration:
              patch("session_init.update_session_info") as mock_update_session_info, \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("session_init.build_context_cache") as mock_build_context, \
              patch("session_init.persist_context") as mock_persist_context, \
              patch("session_init.append_event", return_value=None), \
@@ -1801,7 +2062,7 @@ class TestFailureLogIntegration:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=None), \
              patch("session_init.append_failure") as mock_append_failure, \
@@ -2556,7 +2817,7 @@ class TestPluginRootEnvWiring:
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO):
             with pytest.raises(SystemExit) as exc_info:
@@ -2618,7 +2879,7 @@ class TestPluginRootEnvWiring:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO):
             with pytest.raises(SystemExit) as exc_info:
@@ -2687,7 +2948,7 @@ def _run_session_init_for_path(
          patch("session_init.update_session_info", return_value=None), \
          patch("session_init.get_task_list", return_value=None), \
          patch("session_init.restore_last_session", return_value=None), \
-         patch("session_init.check_paused_state", return_value=None), \
+         patch("session_init.check_resume_state", return_value=None), \
          patch("sys.stdin", io.StringIO(stdin_data)), \
          patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
         with pytest.raises(SystemExit) as exc_info:
@@ -2804,7 +3065,7 @@ class TestSessionStartSourceField:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event") as mock_append, \
              patch("sys.stdin", io.StringIO(stdin_data)), \
@@ -2995,7 +3256,7 @@ def _run_session_init_compact(
         patch("session_init.check_pinned_staleness", return_value=None),
         patch("session_init.update_session_info", return_value=None),
         patch("session_init.restore_last_session", return_value=None),
-        patch("session_init.check_paused_state", return_value=None),
+        patch("session_init.check_resume_state", return_value=None),
         patch("sys.stdin", io.StringIO(stdin_data)),
     ]
     if patch_get_task_list is not None:
@@ -3146,7 +3407,7 @@ class TestSessionInitSlotAIntegration:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             with pytest.raises(SystemExit) as exc_info:
@@ -3265,7 +3526,7 @@ class TestCounterTestBySlotARevert:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             with pytest.raises(SystemExit):
@@ -3313,7 +3574,7 @@ class TestTeamResumeDetection:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             with pytest.raises(SystemExit) as exc_info:
@@ -3367,7 +3628,7 @@ class TestTeamResumeDetection:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             with pytest.raises(SystemExit) as exc_info:
@@ -3441,7 +3702,7 @@ class TestSourceAwareness:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             with pytest.raises(SystemExit) as exc_info:
@@ -3723,7 +3984,7 @@ class TestSourceAwareness:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             with pytest.raises(SystemExit) as exc_info:
@@ -3922,7 +4183,7 @@ class TestHappyPathOutputInvariant:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             with pytest.raises(SystemExit) as exc_info:
@@ -4130,7 +4391,7 @@ class TestBuildSafetyNetContext:
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=None), \
              patch("session_init.get_task_list",
@@ -4200,7 +4461,7 @@ class TestM2TeammateAdvisoryGating:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
@@ -4326,7 +4587,7 @@ class TestReadOnlyHomeScenario:
                  patch("session_init.check_pinned_staleness", return_value=None), \
                  patch("session_init.get_task_list", return_value=None), \
                  patch("session_init.restore_last_session", return_value=None), \
-                 patch("session_init.check_paused_state", return_value=None), \
+                 patch("session_init.check_resume_state", return_value=None), \
                  patch("sys.stdin", io.StringIO(stdin_data)), \
                  patch("sys.stdout", new_callable=io.StringIO) as mock_stdout, \
                  patch("sys.stderr", new_callable=io.StringIO):
@@ -4443,7 +4704,7 @@ class TestMainExceptionSafetyNet:
              patch("session_init.update_session_info", side_effect=raise_late), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             with pytest.raises(SystemExit) as exc_info:
@@ -4533,7 +4794,7 @@ class TestNonDictStdinNeverRaiseDominance:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.persist_context", return_value=None), \
              patch("session_init.append_event", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_str)), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             with pytest.raises(SystemExit) as exc_info:
@@ -4719,7 +4980,7 @@ class TestSessionInitCompactPhantomWorkflow:
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", stdout):
             with pytest.raises(SystemExit) as exc_info:
@@ -4780,7 +5041,7 @@ class TestSessionInitCompactPhantomWorkflow:
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", stdout):
             with pytest.raises(SystemExit) as exc_info:
@@ -4837,7 +5098,7 @@ class TestSessionInitCompactBranchExceptions:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", side_effect=raising_get_task_list), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", stdout):
             with pytest.raises(SystemExit) as exc_info:
@@ -4869,7 +5130,7 @@ class TestSessionInitCompactBranchExceptions:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO("not json")), \
              patch("sys.stdout", stdout):
             with pytest.raises(SystemExit) as exc_info:
@@ -4941,7 +5202,7 @@ class TestSessionInitCompactBranchExceptions:
              patch("session_init.update_session_info", return_value=None), \
              patch(f"session_init.{func_name}", side_effect=raise_boom), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", stdout):
             with pytest.raises(SystemExit) as exc_info:
@@ -5006,7 +5267,7 @@ class TestSessionInitCompactBranchExceptions:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", mock_task_list), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", stdout):
             with pytest.raises(SystemExit) as exc_info:
@@ -5053,7 +5314,7 @@ class TestSessionInitDirectiveAcrossAllSources:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", stdout):
             with pytest.raises(SystemExit) as exc_info:
@@ -5143,7 +5404,7 @@ class TestSessionInitDirectiveAcrossAllSources:
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", stdout):
             with pytest.raises(SystemExit) as exc_info:

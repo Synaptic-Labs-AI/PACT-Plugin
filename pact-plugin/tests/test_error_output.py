@@ -968,7 +968,7 @@ class TestSessionInitSuppressOutput:
              patch("session_init.update_session_info", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
              patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}, clear=False):
             with pytest.raises(SystemExit) as exc_info:
                 main()

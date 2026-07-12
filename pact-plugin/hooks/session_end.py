@@ -8,7 +8,7 @@ Used by: hooks.json SessionEnd hook
 Actions:
 1. Write session_end event to the session journal
 2. Detect open PRs that were not paused (append warning to journal)
-3. Clean up stale session directories using a dual TTL (30 days active, 180 days paused)
+3. Clean up stale session directories using a dual TTL (30 days active, 180 days paused/refreshed)
 
 Purely observational — no destructive operations on project files. Session
 directory cleanup is best-effort and never blocks session termination.
@@ -203,13 +203,6 @@ _SESSION_MAX_AGE_DAYS = 30
 # retention — paused sessions still age out past this threshold.
 _PAUSED_SESSION_MAX_AGE_DAYS = 180
 
-# Checkpoint file expiration for ~/.claude/pact-refresh/*.json. 7 days
-# matches the prior refresh/constants.py CHECKPOINT_MAX_AGE_DAYS value.
-# This cleanup is primarily a one-time sweep for existing deployments —
-# with precompact_refresh.py removed (#413), no new checkpoints are
-# written, so the directory asymptotically empties.
-_CHECKPOINT_MAX_AGE_DAYS = 7
-
 
 def _is_paused_session(session_dir: str) -> bool:
     """
@@ -249,6 +242,37 @@ def _is_paused_session(session_dir: str) -> bool:
     return read_last_event_from(session_dir, "session_paused") is not None
 
 
+def _is_checkpointed_session(session_dir: str) -> bool:
+    """True iff the session ever recorded a session_paused OR session_refreshed
+    event. Pure existence — NO ts comparison (the pause→quit race precedent:
+    ts-ordering against session_end deletes state the user meant to keep;
+    the same race exists verbatim for refresh→quit, where session_end fires
+    ~1s after the session_refreshed write).
+
+    Extends the `_is_paused_session` policy predicate to refresh checkpoints
+    so `cleanup_old_sessions` applies the extended paused TTL
+    (`_PAUSED_SESSION_MAX_AGE_DAYS`, default 180 days) to a
+    refreshed-but-never-resumed journal. This guard protects the JOURNAL
+    only: the tasks/teams stores keep their own 30-day reapers (which never
+    read journals), so past 30 days a refresh resume degrades to
+    journal-only fidelity — the resume prompt's HALT cross-check against
+    live tasks then surfaces its loud mismatch warning by design.
+
+    Fail-open like `_is_paused_session`: unreadable journal ⇒ False ⇒
+    standard active-session TTL.
+
+    Args:
+        session_dir: Absolute path to the session directory.
+
+    Returns:
+        True iff a `session_paused` or `session_refreshed` event exists.
+    """
+    # Composed on _is_paused_session (not inlined) so there is exactly ONE
+    # paused-existence predicate — the two can never drift.
+    return (_is_paused_session(session_dir)
+            or read_last_event_from(session_dir, "session_refreshed") is not None)
+
+
 def cleanup_old_sessions(
     project_slug: str,
     current_session_id: str,
@@ -260,13 +284,13 @@ def cleanup_old_sessions(
     Remove stale session directories, applying a dual TTL.
 
     Each candidate session directory is checked against a TTL selected per
-    entry: paused sessions (those whose journal contains any
-    `session_paused` event) use the extended `paused_max_age_days`
-    threshold (default 180 days), while active sessions use
-    `max_age_days` (default 30 days). The extended threshold protects
-    in-progress user work across the pause→resume workflow without
-    retaining paused state forever — paused sessions still age out past
-    180 days.
+    entry: checkpointed sessions (those whose journal contains any
+    `session_paused` or `session_refreshed` event) use the extended
+    `paused_max_age_days` threshold (default 180 days), while active
+    sessions use `max_age_days` (default 30 days). The extended threshold
+    protects in-progress user work across the pause→resume and
+    refresh→resume workflows without retaining checkpoint state forever —
+    checkpointed sessions still age out past 180 days.
 
     Best-effort cleanup — never raises. Skips the current session's
     directory and any entry that doesn't look like a UUID directory.
@@ -306,11 +330,12 @@ def cleanup_old_sessions(
                 continue
             try:
                 age_days = (time.time() - entry.stat().st_mtime) / 86400
-                # Select TTL per entry: paused sessions get the extended
-                # threshold; active sessions get the standard one.
+                # Select TTL per entry: checkpointed sessions (paused OR
+                # refreshed) get the extended threshold; active sessions
+                # get the standard one.
                 threshold = (
                     paused_max_age_days
-                    if _is_paused_session(str(entry))
+                    if _is_checkpointed_session(str(entry))
                     else max_age_days
                 )
                 if age_days > threshold:
@@ -763,65 +788,6 @@ def _prune_registry_dead_teams(
     return pruned
 
 
-def _cleanup_old_checkpoints(
-    checkpoint_dir: Path | None = None,
-    max_age_days: int = _CHECKPOINT_MAX_AGE_DAYS,
-) -> int:
-    """
-    Remove checkpoint files older than max_age_days from ~/.claude/pact-refresh/.
-
-    Post-#413, the precompact_refresh.py hook that wrote these files is deleted,
-    so this cleanup is primarily a one-time sweep for existing deployments —
-    a directory that never gets written to will eventually empty.
-
-    Best-effort: never raises. Swallows per-file OSError (handles races) and
-    the outer glob failure (hook-fail-open invariant).
-
-    Args:
-        checkpoint_dir: Directory containing checkpoint files. Defaults to
-            ~/.claude/pact-refresh. Accepts override for testing.
-        max_age_days: TTL for checkpoint files (default: 7).
-
-    Returns:
-        Number of files cleaned up.
-    """
-    if checkpoint_dir is None:
-        checkpoint_dir = get_claude_config_dir() / "pact-refresh"
-
-    if not checkpoint_dir.exists():
-        return 0
-
-    max_age_seconds = max_age_days * 24 * 60 * 60
-    cutoff_time = time.time() - max_age_seconds
-    cleaned = 0
-
-    try:
-        for checkpoint_file in checkpoint_dir.glob("*.json"):
-            # Skip symlinks (live or dangling). Mirrors cycle-1 hardening
-            # on the three sibling reapers — `is_symlink()` uses lstat
-            # semantics, so it short-circuits before any follow-semantic
-            # probe. Prevents a planted link from driving the TTL oracle
-            # off the target's mtime or from unlinking the link when the
-            # link's own mtime is within TTL but the target's is older.
-            if checkpoint_file.is_symlink():
-                continue
-            try:
-                # lstat (not stat) — cycle-2 defense: even with the
-                # symlink guard above, lstat is the correct probe for
-                # the link's own mtime if the guard is ever removed or
-                # if a future caller bypasses it. Defense-in-isolation.
-                mtime = checkpoint_file.lstat().st_mtime
-                if mtime < cutoff_time:
-                    checkpoint_file.unlink()
-                    cleaned += 1
-            except OSError:
-                pass
-    except OSError:
-        pass
-
-    return cleaned
-
-
 def main():
     try:
         try:
@@ -926,10 +892,6 @@ def main():
             ))
         except Exception as e:
             print(f"Hook warning (cleanup_summary journal): {e}", file=sys.stderr)
-
-        # Clean up stale pact-refresh checkpoint files (7-day TTL).
-        # Post-#413, these accumulate only in legacy deployments.
-        _cleanup_old_checkpoints()
 
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
