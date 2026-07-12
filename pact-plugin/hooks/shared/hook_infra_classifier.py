@@ -138,8 +138,11 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     }),
     "agent_handoff_emitter": frozenset({
         "agent_handoff_marker", "constants", "pact_context", "paths",
-        "session_journal", "session_registry", "session_state", "task_utils",
-    }),
+        "session_journal", "session_registry", "session_state",
+        "task_metadata_snapshot", "task_utils",
+    }),  # task_metadata_snapshot reached via the teammate-frame snapshot
+         # seam (emit_task_metadata_snapshot); its own transitive edges
+         # (agent_handoff_marker, session_journal) were already here.
     "session_init": frozenset({
         "claude_md_manager", "constants", "dispatch_helpers", "failure_log",
         "merge_guard_common", "pact_config", "pact_context", "paths",
@@ -170,9 +173,11 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     "task_lifecycle_gate": frozenset({
         "agent_handoff_marker", "constants", "dispatch_helpers",
         "intentional_wait", "pact_context", "paths", "session_journal",
-        "session_registry", "session_state", "task_utils", "teachback_schema",
-        "tool_response", "variety_scorer",
-    }),
+        "session_registry", "session_state", "task_metadata_snapshot",
+        "task_utils", "teachback_schema", "tool_response", "variety_scorer",
+    }),  # task_metadata_snapshot reached via the lead-completion +
+         # post-completion-backstop snapshot seams; its transitive edges
+         # were already in this closure.
     "bootstrap_gate": frozenset({
         "constants", "marker_schema", "pact_context",
         "paths", "session_journal", "session_registry",
