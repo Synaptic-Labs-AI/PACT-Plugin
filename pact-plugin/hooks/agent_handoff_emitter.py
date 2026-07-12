@@ -75,6 +75,7 @@ from shared.agent_handoff_marker import (
     unclaim,
 )
 from shared.session_journal import append_event, get_journal_path, make_event
+from shared.task_metadata_snapshot import emit_task_metadata_snapshot
 from shared.task_utils import read_task_json
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths.
@@ -199,6 +200,38 @@ def main() -> None:
             if task_data.get("status") != "completed":  # Invariant (1b) fallback
                 print(_SUPPRESS_OUTPUT)
                 sys.exit(0)
+
+        # task_metadata_snapshot seam — teammate-frame twin (hermetic; own
+        # gates in the substrate). Positioned immediately AFTER the
+        # transition gate and BEFORE the signal-task bypass: the hardened
+        # exits below (signal gate, handoff-presence gate, writability gate,
+        # marker gate) would make an after-the-emit call unreachable for
+        # exactly the tasks whose seam coverage matters here — self-completed
+        # tasks with sibling metadata but no/malformed handoff, and signal
+        # tasks (which DO snapshot; the agent_handoff suppression below is
+        # untouched). Isolation from the handoff path is carried by the
+        # hermetic try/except, the substrate's read-only payload build and
+        # never-raise contract, and the SEPARATE marker namespace — not by
+        # ordering; this block must not touch any variable the handoff path
+        # consumes below (task_metadata, handoff, occupant, marker state).
+        # The transition gate above IS the stdin-primary/disk-fallback
+        # discipline — the snapshot inherits it by position and adds NO disk
+        # status requirement of its own (the disk write can be mid-flight at
+        # TaskCompleted fire-time). The metadata read is the already-
+        # performed read_task_json result, best-effort: an empty read yields
+        # an empty payload and a clean no-emit. An unresolvable teammate
+        # frame defers inside the substrate (writability precondition — no
+        # claim, no write); the lead-frame seams cover it.
+        try:
+            emit_task_metadata_snapshot(
+                team_name,
+                task_id,
+                task_subject,
+                teammate_name,
+                task_data.get("metadata") or {},
+            )
+        except Exception:
+            pass
 
         # `or {}` handles explicit JSON null in addition to missing key —
         # .get("metadata", {}) returns None when the key is present with a
