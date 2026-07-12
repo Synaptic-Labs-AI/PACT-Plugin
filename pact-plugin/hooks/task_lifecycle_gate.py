@@ -798,6 +798,26 @@ def _emit_per_write_snapshot(
         pass
 
 
+def _created_task_id(tool_response: object, tool_input: dict) -> str:
+    """Id of the task a TaskCreate just made: tool_response.task.id
+    (canonical — the id does not exist in tool_input), falling back to a
+    harness-echoed tool_input.taskId. "" when unresolvable.
+
+    Extracted from the dispatch_variety emit block (behavior-identical) so
+    the per-write TaskCreate leg and the dispatch_variety emit resolve the
+    id through ONE expression of the create-result post-state shape.
+    """
+    created_task = (
+        tool_response.get("task") if isinstance(tool_response, dict) else None
+    )
+    new_task_id = ""
+    if isinstance(created_task, dict):
+        new_task_id = str(created_task.get("id") or "")
+    if not new_task_id:
+        new_task_id = str(tool_input.get("taskId") or "")
+    return new_task_id
+
+
 # ─── core evaluation ─────────────────────────────────────────────────────────
 
 
@@ -1282,16 +1302,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                 else None
             )
             if isinstance(create_variety, dict) and create_variety:
-                created_task = (
-                    tool_response.get("task")
-                    if isinstance(tool_response, dict)
-                    else None
-                )
-                new_task_id = ""
-                if isinstance(created_task, dict):
-                    new_task_id = str(created_task.get("id") or "")
-                if not new_task_id:
-                    new_task_id = str(tool_input.get("taskId") or "")
+                new_task_id = _created_task_id(tool_response, tool_input)
                 if new_task_id:
                     # §5.1-fidelity projection: mirror ONLY the 4 dimensions +
                     # total, dropping the *_rationale strings — the journal is
@@ -1317,6 +1328,31 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                         ))
                     except Exception:
                         pass  # fail-open: emit failure never breaks the gate
+
+        # task_metadata_snapshot seam — per-write mirror, TaskCreate leg. A
+        # created task whose initial metadata carries a targeted key
+        # (PER_WRITE_MIRROR_KEYS) mirrors the whole payload immediately —
+        # the create IS the first write of the open-task-consumed class.
+        # SIBLING of the dispatch_variety block above, deliberately NOT
+        # nested under its is_lead gate: this leg carries its own frame
+        # gate (canonical-journal-frame) because targeted keys include
+        # teammate-written classes. The platform-assigned id exists only in
+        # the create response, so resolution goes through _created_task_id;
+        # a missing id skips the emit (coverage degrades by one write,
+        # never breaks the gate — the dispatch_variety posture). The
+        # helper's own read_task_json returns the just-created file (the
+        # platform write lands before PostToolUse), so subject/owner
+        # resolve from disk and the overlay is a near-identity merge.
+        if (
+            isinstance(incoming_metadata, dict)
+            and any(k in PER_WRITE_MIRROR_KEYS for k in incoming_metadata)
+            and pact_context.is_canonical_journal_frame(input_data)
+        ):
+            new_task_id = _created_task_id(tool_response, tool_input)
+            if new_task_id:
+                _emit_per_write_snapshot(
+                    team_name, new_task_id, incoming_metadata
+                )
 
     # ③ TaskUpdate-to-completed rules — paired-send, handoff presence,
     # handoff schema, self-completion

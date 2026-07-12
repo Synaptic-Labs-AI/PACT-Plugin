@@ -422,3 +422,107 @@ class TestPerWriteFirePredicate:
         snaps = _snapshots(snapshot_events)
         assert len(snaps) == 1
         assert snaps[0]["metadata"] == {"scope_contract": SCOPE}
+
+
+# =============================================================================
+# TaskCreate leg
+# =============================================================================
+class TestPerWriteTaskCreateLeg:
+    def _create_payload(self, task_id, metadata, subject="scope: sub-scope"):
+        """A TaskCreate PostToolUse frame: the platform-assigned id exists
+        only in the create response (tool_response.task.id)."""
+        return {
+            "tool_name": "TaskCreate",
+            "tool_input": {"subject": subject, "metadata": metadata},
+            "tool_response": {"task": {"id": task_id}},
+            "agent_type": LEAD,
+            "session_id": LEAD_SID,
+        }
+
+    def test_create_with_targeted_key_emits_keyed_to_response_id(
+        self, home, pact_context, snapshot_events
+    ):
+        """TaskCreate carrying a targeted key → 1 snapshot keyed to
+        tool_response.task.id, with subject/owner resolved from the
+        just-created on-disk file (platform write lands before
+        PostToolUse) overlaid with the incoming delta."""
+        pact_context(team_name=TEAM, session_id=LEAD_SID)
+        _seed_task(
+            home,
+            TEAM,
+            "70",
+            subject="scope: sub-scope",
+            owner="team-lead",
+            status="pending",
+            metadata={"scope_contract": SCOPE},
+        )
+        tlg.evaluate_lifecycle(
+            self._create_payload("70", {"scope_contract": SCOPE})
+        )
+        snaps = _snapshots(snapshot_events)
+        assert len(snaps) == 1
+        event = snaps[0]
+        assert event["task_id"] == "70"
+        assert event["subject"] == "scope: sub-scope"
+        assert event["metadata"] == {"scope_contract": SCOPE}
+
+    def test_create_without_targeted_key_no_emit(
+        self, home, pact_context, snapshot_events
+    ):
+        """Byte-identical default on the create surface: an untargeted
+        initial metadata emits nothing."""
+        pact_context(team_name=TEAM, session_id=LEAD_SID)
+        tlg.evaluate_lifecycle(
+            self._create_payload("71", {"note": "plain create"})
+        )
+        assert _snapshots(snapshot_events) == []
+
+    def test_create_with_unresolvable_id_skips(
+        self, home, pact_context, snapshot_events
+    ):
+        """Missing id → skip (coverage degrades by one write; the gate is
+        never broken) — the dispatch_variety posture."""
+        pact_context(team_name=TEAM, session_id=LEAD_SID)
+        payload = {
+            "tool_name": "TaskCreate",
+            "tool_input": {
+                "subject": "scope: sub-scope",
+                "metadata": {"scope_contract": SCOPE},
+            },
+            "tool_response": {},
+            "agent_type": LEAD,
+            "session_id": LEAD_SID,
+        }
+        tlg.evaluate_lifecycle(payload)
+        assert _snapshots(snapshot_events) == []
+
+    def test_tmux_teammate_create_no_event_no_marker(
+        self, home, pact_context
+    ):
+        """The create leg carries its own frame gate: a tmux teammate frame
+        (session_id != leadSessionId) writes nothing anywhere and claims no
+        marker."""
+        pact_context(team_name=TEAM, session_id=TMUX_SID)
+        _seed_team_config(home)
+        _seed_task(
+            home,
+            TEAM,
+            "72",
+            subject="scope: sub-scope",
+            owner="team-lead",
+            status="pending",
+            metadata={},
+        )
+        payload = {
+            "tool_name": "TaskCreate",
+            "tool_input": {
+                "subject": "scope: sub-scope",
+                "metadata": {"scope_contract": SCOPE},
+            },
+            "tool_response": {"task": {"id": "72"}},
+            "agent_type": TEAMMATE,
+            "session_id": TMUX_SID,
+        }
+        tlg.evaluate_lifecycle(payload)
+        assert _journal_files(home) == []
+        assert _marker_files(home) == []
