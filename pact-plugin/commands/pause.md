@@ -105,14 +105,15 @@ The timestamp (`ts`) is set automatically by `make_event()` and serves the same 
 
 ### 6. Shut Down Teammates
 
-Send `shutdown_request` individually to each active teammate **by name** and wait for responses. The secretary must have completed consolidation tasks (steps 1 and 3) before receiving the shutdown request.
+Shut down each active teammate **by name**, staggered 1-2 sends per turn (rate-limit discipline): graceful `shutdown_request` first, then `TaskStop("{teammate_name}")` as the guarantee tier — `shutdown_request` is cooperative-only (empirically, on the tmux backend an approved `shutdown_response` does not terminate the teammate's pane/process); `TaskStop` is authoritative. The secretary must have completed consolidation tasks (steps 1 and 3) before receiving the shutdown request.
 
 ```
 For each active teammate:
   SendMessage(to="{teammate_name}", message={"type": "shutdown_request", "reason": "Session paused"})
+  then: TaskStop("{teammate_name}")
 ```
 
-Do NOT delete the team — it will be garbage-collected or reused on resume.
+EXPECTED post-state: each stop removes that member's roster entry — the config FILE and the team IDENTITY survive; a lead-only roster is the correct post-pause state, not corruption. Do NOT delete the team — it will be garbage-collected or reused on resume.
 
 ### 7. Report
 

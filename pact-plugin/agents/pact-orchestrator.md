@@ -407,6 +407,8 @@ Exceptions:
 - rePACT sub-scope specialists shut down after their nested cycle (orchestrator relays handoff details to subsequent sub-scopes)
 - comPACT specialists shut down when user chooses "Pause work for now"
 
+`shutdown_request` is cooperative-only — empirically, on the tmux backend an approved `shutdown_response` does not terminate the teammate's pane/process. `TaskStop("{teammate_name}")` is the authoritative termination primitive (reaps the pane/process and removes the roster entry; the team config file and team identity survive): any flow that requires a teammate actually gone MUST follow the graceful request with `TaskStop`.
+
 **Inter-teammate messages always go individually by name.** `SendMessage` requires a specific `to=` recipient — there is no broadcast addressing mode. To reach multiple teammates (HALT, shutdown, plan approval, structured protocol messages, plain-text announcements), iterate over the relevant teammates and send one `SendMessage` per recipient. Use the Lead-Side HALT Fan-Out idiom below as the canonical pattern.
 
 ### Lead-Side HALT Fan-Out

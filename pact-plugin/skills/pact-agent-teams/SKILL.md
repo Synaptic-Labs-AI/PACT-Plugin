@@ -520,7 +520,9 @@ When you receive a `shutdown_request`:
 | Idle, consultant with no active questions, or domain no longer relevant | Approve |
 | Mid-task, awaiting response, or remediation may need your input | Reject with reason |
 
-> **Save memory before approving**: If you haven't saved domain learnings to your agent memory yet, do so before approving — your process terminates on approval.
+> **Save memory before approving**: If you haven't saved domain learnings to your agent memory yet, do so before approving — treat approval as your final turn.
+
+`shutdown_request` is cooperative-only: your approval authorizes termination but does not itself perform it — empirically, on the tmux backend an approved `shutdown_response` does not terminate the teammate's pane/process. `TaskStop` is the termination primitive; any flow that requires a teammate actually gone MUST follow the graceful request with `TaskStop` (or verify pane/process death).
 
 ## Completion Integrity (SACROSANCT)
 
