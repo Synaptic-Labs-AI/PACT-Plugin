@@ -9,23 +9,26 @@ Registry invariants:
 1. PER_WRITE_MIRROR_KEYS is disjoint from SNAPSHOT_EXCLUDE — a targeted key
    that the substrate then drops from the payload would be a fire that
    mirrors nothing (silent durability hole), so disjointness is pinned.
-2. Registry is a non-empty frozenset of strings (shape pin only — exact
+2. Registry is a non-empty frozenset of strings (shape pin — exact
    membership is deliberately NOT pinned so a registry extension stays a
    one-string source diff).
+3. The five ruled keys are a MINIMUM SUBSET of the registry — deletion of
+   a ruled key goes red while extensions stay one-string diffs (the
+   deletion-protection complement of the no-exact-membership choice).
 
 _read_lead_session_id() (shared copy):
-3. Returns the leadSessionId string from a valid team config
-4. teams_dir override is honored
-5. Returns "" on: unsafe team_name, missing config, malformed JSON,
+4. Returns the leadSessionId string from a valid team config
+5. teams_dir override is honored
+6. Returns "" on: unsafe team_name, missing config, malformed JSON,
    non-object top-level, missing key, non-string key value
 
 is_canonical_journal_frame():
-6. Lead frame → True with NO config and NO session_id (is_lead leg is
+7. Lead frame → True with NO config and NO session_id (is_lead leg is
    independent of the topology leg's resolvability)
-7. Teammate frame with session_id == leadSessionId → True (in-process
+8. Teammate frame with session_id == leadSessionId → True (in-process
    topology; the positive control for the topology leg)
-8. Teammate frame with session_id != leadSessionId → False (tmux topology)
-9. Resolution failures all → False: missing session_id, non-string
+9. Teammate frame with session_id != leadSessionId → False (tmux topology)
+10. Resolution failures all → False: missing session_id, non-string
    session_id, missing config, malformed config, non-string leadSessionId,
    empty team context (fail-closed team resolution), empty input frame
 """
@@ -57,6 +60,21 @@ class TestPerWriteMirrorKeysRegistry:
         assert isinstance(PER_WRITE_MIRROR_KEYS, frozenset)
         assert PER_WRITE_MIRROR_KEYS
         assert all(isinstance(k, str) and k for k in PER_WRITE_MIRROR_KEYS)
+
+    def test_ruled_keys_are_minimum_subset(self):
+        """Deletion protection for the ruled keys: a superset assert keeps
+        registry EXTENSIONS a one-string source diff while the silent
+        removal of any ruled key goes red. Without this pin (and with
+        exact membership deliberately unpinned above), dropping a key
+        that no seam test uses as its fire trigger would ship green —
+        un-mirroring that key class with zero test signal."""
+        assert frozenset({
+            "scope_contract",
+            "nesting_depth",
+            "worktree_path",
+            "teachback_submit",
+            "teachback_rejection",
+        }) <= PER_WRITE_MIRROR_KEYS
 
 
 @pytest.fixture

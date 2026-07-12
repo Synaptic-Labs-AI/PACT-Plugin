@@ -7,8 +7,10 @@ Summary: Seam tests for the per-write task_metadata_snapshot mirror inside
          (lead / in-process teammate / tmux teammate / tmux lead — the
          is_lead + session_id-vs-leadSessionId structural signals), the
          byte-identical default for untargeted traffic, unchanged-rewrite
-         dedup, cross-seam dedup against the lead-completion seam, and
-         delete-only (None-valued targeted key) semantics. The tmux teammate
+         dedup, cross-seam dedup against the lead-completion seam,
+         delete-only (None-valued targeted key) semantics, and the
+         rejection-cycle catch-up (a teachback_rejection-triggered fire
+         carries the on-disk teachback_submit sibling). The tmux teammate
          row asserts WHERE events land (no journal file, no marker claim),
          not merely that nothing raises.
 Used by: pytest (CODE-phase verification for the per-write seam; adversarial
@@ -380,6 +382,42 @@ class TestPerWriteFirePredicate:
         assert len(snaps) == 1
         assert snaps[0]["metadata"] == {"worktree_path": "/tmp/wt"}
         assert "scope_contract" not in snaps[0]["metadata"]
+
+    def test_rejection_fire_carries_on_disk_submit_sibling(
+        self, home, pact_context, snapshot_events
+    ):
+        """teachback_rejection as the fire TRIGGER (lead-written, so it
+        fires in BOTH teammate modes): the whole-payload overlay drags the
+        teammate's ON-DISK teachback_submit revision into the same event —
+        the rejection-cycle catch-up that gives the teammate-written class
+        its tmux durability. The delta carries ONLY the rejection, so this
+        row also goes red if teachback_rejection leaves the registry."""
+        pact_context(team_name=TEAM, session_id=LEAD_SID)
+        # Neutral subject on purpose: this row pins the MIRROR overlay,
+        # not the write-time teachback advisory rules — a teachback-pattern
+        # subject would entangle the two layers.
+        _seed_task(
+            home,
+            TEAM,
+            "74",
+            subject="backend-coder: implement parser fix",
+            owner="backend-coder",
+            status="in_progress",
+            metadata={"teachback_submit": {"understanding": "revised u2"}},
+        )
+        tlg.evaluate_lifecycle(
+            _open_write_payload(
+                "74",
+                {"teachback_rejection": {"reason": "first_action too vague"}},
+                session_id=LEAD_SID,
+            )
+        )
+        snaps = _snapshots(snapshot_events)
+        assert len(snaps) == 1
+        assert snaps[0]["metadata"] == {
+            "teachback_submit": {"understanding": "revised u2"},
+            "teachback_rejection": {"reason": "first_action too vague"},
+        }
 
     def test_completed_disk_status_routes_to_backstop_not_this_leg(
         self, home, pact_context, snapshot_events
