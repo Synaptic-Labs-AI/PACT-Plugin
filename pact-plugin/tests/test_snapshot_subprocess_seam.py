@@ -35,10 +35,20 @@ read is coupled to the write, not an always-true parse).
 
 Counter-test-by-revert (source-only; production is committed, test files
 stage separately): restoring the six production files to their pre-arc shape
-(`git checkout main -- <hooks paths>`) must fail every test in this file that
-asserts a task_metadata_snapshot event, with ZERO failures among the
-pre-existing agent_handoff suites. The measured cardinality is documented in
-the TEST-phase HANDOFF (task metadata + journal mirror).
+(`git checkout main -- <hooks paths>`; the substrate module is absent on
+main, so delete it) must fail every test in this file that asserts a
+task_metadata_snapshot event, with ZERO failures among the pre-existing
+agent_handoff suites. Measured expected cardinality (snapshot-family suites
+run with --continue-on-collection-errors): 19 behavioral FAILURES — 9
+test_session_journal schema cases + all 3 test_snapshot_roundtrip + exactly
+the 7 tests in THIS file that assert snapshot events (the 3 absence-controls
+pass as designed) — plus 6 collection ERRORS (89 tests unimportable: the
+substrate deletion breaks the importing suites — an expected artifact of the
+revert, not behavioral protection; that count grows as those suites grow, so
+re-derive it via --collect-only rather than trusting 89). AND the 281
+pre-existing agent_handoff/gate/marker pin tests pass with ZERO failures on
+the same reverted tree — that zero IS the no-regression-to-handoff
+guarantee.
 ================================================================================
 """
 
