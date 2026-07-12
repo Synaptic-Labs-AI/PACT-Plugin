@@ -338,7 +338,10 @@ def main():
                 # to send a shutdown_request via systemMessage.
                 messages.append(
                     f"ACTION REQUIRED: Send shutdown_request to '{teammate_name}' "
-                    f"via SendMessage(type=\"shutdown_request\", recipient=\"{teammate_name}\")."
+                    f"via SendMessage(type=\"shutdown_request\", recipient=\"{teammate_name}\"), "
+                    f"then TaskStop(\"{teammate_name}\") — shutdown_request is "
+                    f"cooperative-only and does not itself terminate the teammate; "
+                    f"TaskStop is the termination primitive."
                 )
 
             output = {"systemMessage": IDLE_PREAMBLE + " | ".join(messages)}

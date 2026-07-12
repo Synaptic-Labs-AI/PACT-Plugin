@@ -117,7 +117,7 @@ The timestamp (`ts`) is set automatically by the journal writer and becomes the 
 
 ### 5. SHUTDOWN teammates
 
-Shut down each active teammate **by name**, staggered 1-2 sends per turn (rate-limit discipline): graceful `shutdown_request` first, then `TaskStop(name)` as the guarantee tier — a teammate may reject the request mid-task; `TaskStop` is authoritative.
+Shut down each active teammate **by name**, staggered 1 teammate per turn — the stagger counts ops, and request + stop = 2 ops (rate-limit discipline): graceful `shutdown_request` first, then `TaskStop(name)` as the guarantee tier — `shutdown_request` is cooperative-only (empirically, on the tmux backend an approved `shutdown_response` does not terminate the teammate's pane/process); `TaskStop` is authoritative.
 
 ```
 For each active teammate:
