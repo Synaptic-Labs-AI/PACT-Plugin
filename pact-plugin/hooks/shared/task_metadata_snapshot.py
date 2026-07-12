@@ -147,11 +147,14 @@ def build_snapshot_payload(
     """Return ``(payload, truncated)`` — the size-bounded mirror payload.
 
     READ-ONLY on input: never mutates ``task_metadata`` or any value inside
-    it — a new dict is built, and the only dicts ever mutated (stage-3 head
-    emptying) are truncation markers this function itself created. This is
-    load-bearing: at the seams the same metadata object feeds the handoff
-    emit path, and mutating shared state from an "additive" pass is the
-    known silent-regression class on this pipeline.
+    it — a new dict is built, and no value object is ever written in place:
+    stage-3a head emptying REBUILDS the marker (``{**marker, "head": ""}``)
+    instead of assigning into it, so even a caller-supplied value that is
+    already exactly marker-shaped (inserted by reference at stage 1) is
+    never written through. This is load-bearing: at the seams the same
+    metadata object feeds the handoff emit path, and mutating shared state
+    from an "additive" pass is the known silent-regression class on this
+    pipeline.
 
     Dual-cap three-stage semantics (all sizes = len(_canonical_bytes(x))):
 
@@ -199,7 +202,14 @@ def build_snapshot_payload(
         payload[key] = _truncation_marker(_canonical_bytes(payload[key]))
         truncated = True
 
-    # Stage 3a — empty marker heads, biggest originals first.
+    # Stage 3a — empty marker heads, biggest originals first. REBUILD the
+    # marker rather than assigning into it: stage 1 inserts under-cap input
+    # values by REFERENCE, so a caller-supplied value that is already
+    # exactly marker-shaped reaches this loop as a shared object — an
+    # in-place head write would mutate the CALLER's metadata dict and break
+    # the read-only invariant (the seams feed this same object to the
+    # handoff path). Rebuilding is provenance-agnostic: safe for markers we
+    # created and for caller lookalikes alike.
     if len(_canonical_bytes(payload)) > PAYLOAD_CAP:
         by_size_desc = sorted(
             (k for k, v in payload.items() if _is_marker(v)),
@@ -209,7 +219,7 @@ def build_snapshot_payload(
             if len(_canonical_bytes(payload)) <= PAYLOAD_CAP:
                 break
             if payload[key]["head"]:
-                payload[key]["head"] = ""
+                payload[key] = {**payload[key], "head": ""}
                 truncated = True
 
     # Stage 3b — name-only survival: greedily keep whole keys in ascending

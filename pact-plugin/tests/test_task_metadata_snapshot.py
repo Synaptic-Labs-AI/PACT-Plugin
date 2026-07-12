@@ -257,6 +257,54 @@ class TestPathologicalFloor:
         ), "kept keys precede the first dropped key in ascending order"
 
 
+class TestReadOnlyAdversarialMarkerShapedInput:
+    """The read-only invariant must hold for INPUT values that are already
+    exactly marker-shaped: stage 1 inserts under-cap values by reference,
+    so stage-3a head-emptying must REBUILD the marker rather than write
+    through the shared reference into the caller's dict."""
+
+    def _adversarial_metadata(self):
+        """A >PAYLOAD_CAP all-marker payload whose FIRST 3a-emptying target
+        (largest original_bytes) is a caller-owned marker-shaped value."""
+        metadata = {
+            # Caller-owned marker lookalike, under PER_VALUE_CAP (inserted
+            # by reference at stage 1), with the largest original_bytes so
+            # stage 3a reaches it first.
+            "caller_marker": {
+                "_truncated": True,
+                "original_bytes": 10**9,
+                "head": "caller-owned-head",
+            },
+        }
+        # Enough genuinely over-cap values that the all-marker payload
+        # (~1KB head each) exceeds PAYLOAD_CAP and stage 3a must run.
+        for index in range(70):
+            metadata[f"key{index:03d}"] = _jumbo_str(PER_VALUE_CAP + 100)
+        return metadata
+
+    def test_caller_marker_shaped_value_not_mutated(self):
+        metadata = self._adversarial_metadata()
+        before = copy.deepcopy(metadata)
+        payload, truncated = build_snapshot_payload(metadata)
+        assert truncated is True
+        assert _size(payload) <= PAYLOAD_CAP
+        # The pathological path DID empty the lookalike's head in the
+        # emitted payload (largest original_bytes goes first)...
+        assert payload["caller_marker"]["head"] == ""
+        # ...but the CALLER's object is untouched — the invariant under test.
+        assert metadata == before
+        assert metadata["caller_marker"]["head"] == "caller-owned-head"
+
+    def test_whole_input_intact_on_pathological_path(self):
+        """Belt-and-suspenders sweep: nothing anywhere in the input mapping
+        (keys, nested dicts, marker lookalikes) changes across the build,
+        even when stage 3a empties many heads."""
+        metadata = self._adversarial_metadata()
+        before = copy.deepcopy(metadata)
+        build_snapshot_payload(metadata)
+        assert metadata == before
+
+
 class TestDeterminismAndHash:
     def test_insertion_order_shuffles_identical_payload_and_hash(self):
         """Identical mapping under any insertion order → byte-identical
