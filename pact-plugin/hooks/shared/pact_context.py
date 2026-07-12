@@ -906,6 +906,94 @@ def classify_session_role(input_data: dict) -> str:
     return "unknown"
 
 
+def _read_lead_session_id(team_name: str, teams_dir: str | None = None) -> str:
+    """Read the top-level ``leadSessionId`` from
+    ``~/.claude/teams/{team_name}/config.json``.
+
+    LOGIC-PARITY: this is the SSOT copy — ``task_claim_gate`` imports it
+    directly (its former inline copy is consolidated here; the ``teams_dir``
+    test override is part of the shared signature). The ONE remaining inline
+    copy is ``session_registry._read_lead_session_id``, INLINED there by
+    design: that module's self-contained-leaf invariant forbids ``shared.*``
+    imports, so it must not be re-pointed here. Keep the two implementations
+    behaviorally identical — the behavioral-parity drift-guard test compares
+    them on the same logical inputs.
+
+    Fail-safe: returns "" on any of: unsafe team_name, missing/unreadable
+    file, malformed JSON, non-object top-level, or a missing/non-string key.
+    Callers treat "" as "topology unresolvable" and take their own fail-safe
+    branch. Never raises.
+
+    CURRENCY DEPENDENCY (shared with both parity copies): the value is only
+    as current as the platform-maintained team config — a stale
+    ``leadSessionId`` after a session resume can misclassify an in-process
+    frame as tmux (or vice-versa). Consumers must bound that blast radius to
+    coordination-only decisions (see ``is_canonical_journal_frame``).
+    """
+    if not is_safe_path_component(team_name):
+        return ""
+    if teams_dir:
+        config_path = Path(teams_dir) / team_name / "config.json"
+    else:
+        config_path = get_claude_config_dir() / "teams" / team_name / "config.json"
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        lead_session_id = data.get("leadSessionId")
+    except (OSError, json.JSONDecodeError, ValueError, AttributeError, TypeError):
+        return ""
+    return lead_session_id if isinstance(lead_session_id, str) else ""
+
+
+def is_canonical_journal_frame(input_data: dict) -> bool:
+    """True iff THIS process's journal writes land in the canonical
+    (lead-session) journal: the lead frame in either teammateMode, or an
+    in-process teammate frame (session_id == leadSessionId — one process,
+    one session). False for a tmux teammate frame (distinct session_id)
+    and on ANY resolution failure of the topology leg (unreadable team
+    config, missing session_id): skipping defers durability to the
+    completion-time seams — never worse than the shipped baseline — while
+    emitting from a misclassified frame could silo the event AND poison
+    the shared content-hash marker namespace, suppressing a later
+    canonical emit. The is_lead leg is independent of config readability,
+    so lead-written keys keep full both-modes coverage even when the
+    topology leg cannot resolve. Never raises.
+    """
+    try:
+        if is_lead(input_data):
+            return True
+        sid = input_data.get("session_id")
+        if not (isinstance(sid, str) and sid):
+            # Missing/non-string session_id: topology unresolvable — skip
+            # before paying the config read.
+            return False
+        # Team resolution goes through this module's own identity-matched
+        # resolver (fail-closed empty on an unknown team, which routes the
+        # helper to its "" return and this leg to False).
+        #
+        # DELIBERATE SPLIT — do not unify with the callers' team resolution.
+        # The per-write emit legs (task_lifecycle_gate) resolve their
+        # team_name ONCE from the persisted ctx SSOT
+        # (get_pact_context()["team_name"]) and use it for task reads +
+        # marker namespacing, because the dedup namespace must stay
+        # internally CONSISTENT across every seam that shares those markers
+        # (all gate seams use the same persisted value). THIS predicate
+        # instead answers a session-topology question — "does my session_id
+        # match the REAL platform team's leadSessionId?" — which requires
+        # the identity-ALIGNED resolver: after a resume-divergence the
+        # persisted name can point at a config whose leadSessionId is
+        # stale/wrong, flipping the topology answer. Re-pointing the emit
+        # path to the aligned resolver would fragment the marker namespace
+        # against the pre-existing seams (duplicate events); re-pointing
+        # this predicate to the persisted value would mis-answer topology
+        # after divergence. Divergent outcomes are bounded (skip or
+        # duplicate emit — bias-to-preservation, never a lost canonical
+        # emit), which is why the split is safe as well as intentional.
+        lead_session_id = _read_lead_session_id(get_team_name())
+        return bool(lead_session_id) and sid == lead_session_id
+    except Exception:
+        return False
+
+
 def _iter_members(
     team_name: str,
     teams_dir: str | None = None,

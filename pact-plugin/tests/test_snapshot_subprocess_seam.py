@@ -172,6 +172,47 @@ def _gate_completion_frame(task_id: str, *, subject="design X",
     }
 
 
+def _gate_open_write_frame(task_id: str, metadata: dict, *,
+                           agent_type="PACT:pact-orchestrator",
+                           session_id=SID) -> dict:
+    """A metadata-only PostToolUse TaskUpdate (no status key) — the
+    per-write mirror leg's fire surface."""
+    return {
+        "hook_event_name": "PostToolUse",
+        "session_id": session_id,
+        "agent_type": agent_type,
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": task_id, "metadata": metadata},
+        "tool_response": {},
+    }
+
+
+def _seed_team_config(home: Path, *, lead_session_id: str) -> None:
+    """Write ~/.claude/teams/{TEAM}/config.json — the topology leg's
+    leadSessionId compare source, resolved by the REAL hook process."""
+    team_dir = home / ".claude" / "teams" / TEAM
+    team_dir.mkdir(parents=True, exist_ok=True)
+    (team_dir / "config.json").write_text(
+        json.dumps({"leadSessionId": lead_session_id}), encoding="utf-8"
+    )
+
+
+def _cli_read_snapshots(session_dir: Path, home: Path) -> list[dict]:
+    """The harvest skill's documented consumer command, run verbatim as a
+    real CLI subprocess."""
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    result = subprocess.run(
+        [sys.executable,
+         str(HOOKS_DIR / "shared" / "session_journal.py"),
+         "read", "--session-dir", str(session_dir),
+         "--type", "task_metadata_snapshot"],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
 def _read_journal(session_dir: Path) -> list[dict]:
     journal = session_dir / "session-journal.jsonl"
     if not journal.exists():
@@ -369,17 +410,9 @@ class TestHarvestCliReadSeam:
     real CLI subprocess against a journal a real hook subprocess wrote."""
 
     def _cli_read(self, session_dir: Path, home: Path) -> list[dict]:
-        env = os.environ.copy()
-        env["HOME"] = str(home)
-        result = subprocess.run(
-            [sys.executable,
-             str(HOOKS_DIR / "shared" / "session_journal.py"),
-             "read", "--session-dir", str(session_dir),
-             "--type", "task_metadata_snapshot"],
-            capture_output=True, text=True, env=env, timeout=30,
-        )
-        assert result.returncode == 0, result.stderr
-        return json.loads(result.stdout)
+        # Delegates to the module-level helper shared with the per-write
+        # drain-recovery rows.
+        return _cli_read_snapshots(session_dir, home)
 
     def test_cli_read_recovers_snapshot_after_task_drain(self, tmp_path):
         # Acceptance criterion end-to-end with REAL entrypoints on both
@@ -411,3 +444,142 @@ class TestHarvestCliReadSeam:
         events = _read_journal(session_dir)
         assert len(_typed(events, "agent_handoff")) == 1
         assert self._cli_read(session_dir, home) == []
+
+
+class TestPerWriteSubprocess:
+    """task_lifecycle_gate.py as a real process: OPEN-task metadata-only
+    TaskUpdate frames carrying targeted keys -> real journal. The non-mocked
+    seam-integration rows for the per-write mirror leg: real append_event
+    schema validation, real O_EXCL marker filesystem, real pact_context env
+    resolution, and the real teams/config.json topology read, all on one
+    code path."""
+
+    SCOPE = {"files": ["a.py"], "boundaries": "backend only"}
+
+    def test_open_task_targeted_write_lands_snapshot_in_real_journal(
+            self, tmp_path):
+        home, session_dir, tasks_dir = _seed_home(tmp_path)
+        _write_task(tasks_dir, "80", status="in_progress",
+                    metadata={"note": "existing"})
+
+        result = _run_hook(
+            "task_lifecycle_gate.py",
+            _gate_open_write_frame("80", {"scope_contract": self.SCOPE}),
+            home,
+        )
+
+        assert result.returncode == 0, (
+            f"exit non-zero. stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        snapshots = _typed(_read_journal(session_dir),
+                           "task_metadata_snapshot")
+        assert len(snapshots) == 1, (
+            "exactly one snapshot must land in the REAL journal for an "
+            "open-task targeted write; got %d" % len(snapshots)
+        )
+        assert snapshots[0]["task_id"] == "80"
+        assert snapshots[0]["metadata"]["scope_contract"] == self.SCOPE
+        assert snapshots[0]["metadata"]["note"] == "existing"
+
+    def test_open_task_untargeted_write_no_snapshot(self, tmp_path):
+        # Negative control: the identical frame shape with a non-targeted
+        # key must leave the real journal untouched (byte-identical
+        # default through the real process).
+        home, session_dir, tasks_dir = _seed_home(tmp_path)
+        _write_task(tasks_dir, "80", status="in_progress", metadata={})
+
+        result = _run_hook(
+            "task_lifecycle_gate.py",
+            _gate_open_write_frame("80", {"note": "mid-task"}),
+            home,
+        )
+
+        assert result.returncode == 0
+        assert _typed(_read_journal(session_dir),
+                      "task_metadata_snapshot") == []
+
+    def test_in_process_teammate_frame_emits_via_real_config_read(
+            self, tmp_path):
+        # Topology leg through the REAL config file: a teammate frame whose
+        # session_id equals the on-disk leadSessionId emits (the gate that
+        # makes teammate-written targeted keys recoverable in-process).
+        home, session_dir, tasks_dir = _seed_home(tmp_path)
+        _seed_team_config(home, lead_session_id=SID)
+        _write_task(tasks_dir, "81", status="in_progress", metadata={})
+
+        result = _run_hook(
+            "task_lifecycle_gate.py",
+            _gate_open_write_frame(
+                "81",
+                {"teachback_submit": {"understanding": "u"}},
+                agent_type="pact-backend-coder",
+            ),
+            home,
+        )
+
+        assert result.returncode == 0
+        snapshots = _typed(_read_journal(session_dir),
+                           "task_metadata_snapshot")
+        assert len(snapshots) == 1
+        assert snapshots[0]["metadata"]["teachback_submit"] == {
+            "understanding": "u"
+        }
+
+    def test_tmux_teammate_frame_no_event_no_marker_real_process(
+            self, tmp_path):
+        # The silo row through a real process: a distinct session_id must
+        # produce NO journal write and NO marker claim anywhere on disk.
+        home, session_dir, tasks_dir = _seed_home(tmp_path)
+        _seed_team_config(home, lead_session_id="another-lead-session")
+        _write_task(tasks_dir, "82", status="in_progress", metadata={})
+
+        result = _run_hook(
+            "task_lifecycle_gate.py",
+            _gate_open_write_frame(
+                "82",
+                {"teachback_submit": {"understanding": "u"}},
+                agent_type="pact-backend-coder",
+            ),
+            home,
+        )
+
+        assert result.returncode == 0
+        # ZERO snapshot events in ANY journal under the test HOME. (The
+        # gate's pre-existing lifecycle_decision advisory record is not the
+        # mirror's emit and is out of scope for this row.)
+        all_journal_events = [
+            json.loads(line)
+            for journal in home.rglob("*.jsonl")
+            for line in journal.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert _typed(all_journal_events, "task_metadata_snapshot") == []
+        marker_dir = (home / ".claude" / "teams" / TEAM
+                      / ".task_metadata_snapshot_emitted")
+        assert not marker_dir.exists() or not any(marker_dir.iterdir()), (
+            "a skipped frame must claim nothing in the shared marker "
+            "namespace (a poisoned marker would suppress a later "
+            "canonical emit)"
+        )
+
+    def test_drain_recovery_targeted_write_unlink_cli_read(self, tmp_path):
+        # Open-task drain-recovery end-to-end with REAL entrypoints on both
+        # sides: the per-write leg mirrors the targeted key while the task
+        # is OPEN; the task store is drained (real unlink); the skill's CLI
+        # read recovers the key from the journal alone — the exact loss
+        # scenario the per-write mirror exists to close.
+        home, session_dir, tasks_dir = _seed_home(tmp_path)
+        _write_task(tasks_dir, "83", status="in_progress", metadata={})
+        assert _run_hook(
+            "task_lifecycle_gate.py",
+            _gate_open_write_frame("83", {"scope_contract": self.SCOPE}),
+            home,
+        ).returncode == 0
+
+        (tasks_dir / "83.json").unlink()  # the drain
+        assert not (tasks_dir / "83.json").exists()
+
+        recovered = _cli_read_snapshots(session_dir, home)
+        assert len(recovered) == 1
+        assert recovered[0]["task_id"] == "83"
+        assert recovered[0]["metadata"]["scope_contract"] == self.SCOPE

@@ -75,9 +75,11 @@ UserPromptSubmit / PostToolUse) but is NOT read on TaskCompleted — that frame 
 captured for the #917 emit-path, which gates on `team_name` + journal
 writability rather than this predicate. On PreToolUse, `is_lead` is read via the
 match-all `bootstrap_gate` (matcher `''`, so it fires before every tool —
-including `TaskCreate` / `TaskUpdate`) and the `Edit` / `Write` pin gates; there
-is no `TaskCreate` / `TaskUpdate`-matched PreToolUse hook (that matcher is
-PostToolUse-only — `task_lifecycle_gate`, the row above).
+including `TaskCreate` / `TaskUpdate`), the `Edit` / `Write` pin gates, and the
+`TaskUpdate`-matched `handoff_ordering_gate` (which gates both of its rules on
+`is_lead`). `TaskCreate` has no PreToolUse-matched hook — its only
+task-lifecycle observer is the PostToolUse-matched `task_lifecycle_gate` (the
+row above).
 
 ### UserPromptSubmit has no teammate fire path
 

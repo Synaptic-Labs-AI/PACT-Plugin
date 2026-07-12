@@ -92,7 +92,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-from pathlib import Path
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
@@ -111,6 +110,12 @@ _STDIN_READ_MAX = 8 * 1024 * 1024  # 8 MB
 # catch keeps the exit code clean (0) and the output well-formed.
 try:
     import shared.pact_context as pact_context
+    # SSOT delegation: the shared _read_lead_session_id implementation lives
+    # in shared.pact_context (session_registry keeps the one remaining inline
+    # copy, forced by its self-contained-leaf invariant). The from-import
+    # binds the name as THIS module's attribute, preserving the test seam
+    # that monkeypatches task_claim_gate._read_lead_session_id.
+    from shared.pact_context import _read_lead_session_id
     from shared.session_registry import resolve as registry_resolve
     from shared.task_utils import (
         iter_team_task_jsons,
@@ -198,44 +203,6 @@ def _stdin_team(stdin: dict) -> str:
     on tmux PreToolUse frames). Returns "" when missing/non-string."""
     team = stdin.get("team_name")
     return team if isinstance(team, str) else ""
-
-
-def _read_lead_session_id(team_name: str, teams_dir: str | None = None) -> str:
-    """Read the top-level ``leadSessionId`` from
-    ``~/.claude/teams/{team_name}/config.json``.
-
-    Mirrors the guarded-read shape of ``pact_context._iter_members``
-    (try/except → default) — net-new read; no hook reads ``leadSessionId``
-    today. Returns "" on any of: unsafe team_name, missing/unreadable file,
-    malformed JSON, non-object top-level, or a missing/non-string key. An empty
-    return routes the caller to the fail-safe in-process/NO-OP default. Never
-    raises.
-
-    CURRENCY DEPENDENCY (the in-process/tmux topology compare rests on this):
-    in-process safety assumes ``config.leadSessionId`` is CURRENT. A STALE value
-    — e.g. after a session resume where the team config retains a prior session's
-    id — could make the caller's ``session_id == leadSessionId`` compare
-    MISCLASSIFY an in-process frame as tmux (or vice-versa). Blast radius is
-    BOUNDED and benign: the discriminator is coordination-only (all frames are the
-    same OS user; no privilege boundary), and the worst misclassification outcome
-    is a benign ``pending → in_progress`` auto-flip of the teammate's OWN
-    owned-unblocked-pending task (in-process misread as tmux) — the very action
-    the teammate was supposed to take — or a missed nudge (tmux misread as
-    in-process). The ``owner == confident_name`` conjunction still bounds it to
-    the resolved teammate's task; no wrong-teammate flip, no escalation.
-    """
-    if not is_safe_path_component(team_name):
-        return ""
-    if teams_dir:
-        config_path = Path(teams_dir) / team_name / "config.json"
-    else:
-        config_path = get_claude_config_dir() / "teams" / team_name / "config.json"
-    try:
-        data = json.loads(config_path.read_text(encoding="utf-8"))
-        lead_session_id = data.get("leadSessionId")
-    except (OSError, json.JSONDecodeError, ValueError, AttributeError, TypeError):
-        return ""
-    return lead_session_id if isinstance(lead_session_id, str) else ""
 
 
 # ─── claim-candidate predicates ──────────────────────────────────────────────
@@ -453,6 +420,15 @@ def _evaluate(stdin: dict) -> str | None:
         return None  # cannot locate config → fail-safe NO-OP
 
     # ── Step 3: topology discriminator (the final D3 signal — a config read) ──
+    # CURRENCY (this gate's blast-radius bound; the generic currency note lives
+    # on the shared helper): the compare below assumes config.leadSessionId is
+    # CURRENT. A stale value (e.g. after a session resume) can misclassify an
+    # in-process frame as tmux or vice-versa — bounded and benign HERE: the
+    # worst outcome is a benign pending→in_progress auto-flip of the teammate's
+    # OWN owned-unblocked-pending task (the very action it was supposed to
+    # take) or a missed nudge. The owner == confident_name conjunction bounds
+    # it to the resolved teammate's task; no wrong-teammate flip, no
+    # escalation.
     lead_session_id = _read_lead_session_id(team_name)
     if not lead_session_id:
         # ASYMMETRY (design note): an UNKNOWN topology (config unreadable / no

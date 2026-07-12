@@ -298,7 +298,10 @@ try:
         make_event,
         read_events,
     )
-    from shared.task_metadata_snapshot import emit_task_metadata_snapshot
+    from shared.task_metadata_snapshot import (
+        PER_WRITE_MIRROR_KEYS,
+        emit_task_metadata_snapshot,
+    )
     from shared.task_utils import is_teachback_subject as _is_teachback_subject
     from shared.task_utils import read_task_json
     from shared.teachback_schema import (
@@ -749,6 +752,70 @@ def _emit_lead_side_agent_handoff(
         # Fail-open: a journal-emit failure must never break the gate's
         # advisory evaluation or its exit-0 contract.
         pass
+
+
+def _emit_per_write_snapshot(
+    team_name: str,
+    task_id: str,
+    delta: dict,
+    task: dict | None = None,
+) -> None:
+    """Per-write mirror emit — hermetic; never raises; READ-ONLY on every
+    input (new dicts only: the overlay comprehension builds a fresh
+    mapping; neither ``delta``, ``task``, nor ``task['metadata']`` is
+    written). ``task=None`` → one read_task_json; the TaskUpdate leg passes
+    its already-read task_a (zero marginal disk cost).
+
+    Shared by the TaskCreate and TaskUpdate per-write legs. Degenerate
+    inputs are the substrate's job (sentinel subject, owner normalize,
+    empty-payload no-emit); ``task_id`` sanitization also happens inside
+    ``emit_task_metadata_snapshot()``'s content-key-claim path — no new
+    sanitizer here. A missing/drained task file (``task == {}``) degrades
+    to a delta-only payload — correct: mirror what the write shows us. A
+    None-valued delta key is the platform DELETE op; the overlay drops it
+    so the emit mirrors the post-delete disk state (deduping if unchanged).
+    """
+    try:
+        if task is None:
+            task = read_task_json(task_id, team_name) if team_name else {}
+        if not isinstance(task, dict):
+            task = {}
+        disk_md = (
+            task.get("metadata")
+            if isinstance(task.get("metadata"), dict)
+            else {}
+        )
+        emit_task_metadata_snapshot(
+            team_name,
+            task_id,
+            task.get("subject") or "",
+            task.get("owner"),
+            {**disk_md, **{k: v for k, v in delta.items() if v is not None}},
+        )
+    except Exception:
+        # Exit-0 advisory contract: a mirror failure must never block or
+        # annotate the hooked tool call.
+        pass
+
+
+def _created_task_id(tool_response: object, tool_input: dict) -> str:
+    """Id of the task a TaskCreate just made: tool_response.task.id
+    (canonical — the id does not exist in tool_input), falling back to a
+    harness-echoed tool_input.taskId. "" when unresolvable.
+
+    Extracted from the dispatch_variety emit block (behavior-identical) so
+    the per-write TaskCreate leg and the dispatch_variety emit resolve the
+    id through ONE expression of the create-result post-state shape.
+    """
+    created_task = (
+        tool_response.get("task") if isinstance(tool_response, dict) else None
+    )
+    new_task_id = ""
+    if isinstance(created_task, dict):
+        new_task_id = str(created_task.get("id") or "")
+    if not new_task_id:
+        new_task_id = str(tool_input.get("taskId") or "")
+    return new_task_id
 
 
 # ─── core evaluation ─────────────────────────────────────────────────────────
@@ -1235,16 +1302,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                 else None
             )
             if isinstance(create_variety, dict) and create_variety:
-                created_task = (
-                    tool_response.get("task")
-                    if isinstance(tool_response, dict)
-                    else None
-                )
-                new_task_id = ""
-                if isinstance(created_task, dict):
-                    new_task_id = str(created_task.get("id") or "")
-                if not new_task_id:
-                    new_task_id = str(tool_input.get("taskId") or "")
+                new_task_id = _created_task_id(tool_response, tool_input)
                 if new_task_id:
                     # §5.1-fidelity projection: mirror ONLY the 4 dimensions +
                     # total, dropping the *_rationale strings — the journal is
@@ -1270,6 +1328,31 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                         ))
                     except Exception:
                         pass  # fail-open: emit failure never breaks the gate
+
+        # task_metadata_snapshot seam — per-write mirror, TaskCreate leg. A
+        # created task whose initial metadata carries a targeted key
+        # (PER_WRITE_MIRROR_KEYS) mirrors the whole payload immediately —
+        # the create IS the first write of the open-task-consumed class.
+        # SIBLING of the dispatch_variety block above, deliberately NOT
+        # nested under its is_lead gate: this leg carries its own frame
+        # gate (canonical-journal-frame) because targeted keys include
+        # teammate-written classes. The platform-assigned id exists only in
+        # the create response, so resolution goes through _created_task_id;
+        # a missing id skips the emit (coverage degrades by one write,
+        # never breaks the gate — the dispatch_variety posture). The
+        # helper's own read_task_json returns the just-created file (the
+        # platform write lands before PostToolUse), so subject/owner
+        # resolve from disk and the overlay is a near-identity merge.
+        if (
+            isinstance(incoming_metadata, dict)
+            and any(k in PER_WRITE_MIRROR_KEYS for k in incoming_metadata)
+            and pact_context.is_canonical_journal_frame(input_data)
+        ):
+            new_task_id = _created_task_id(tool_response, tool_input)
+            if new_task_id:
+                _emit_per_write_snapshot(
+                    team_name, new_task_id, incoming_metadata
+                )
 
     # ③ TaskUpdate-to-completed rules — paired-send, handoff presence,
     # handoff schema, self-completion
@@ -1808,6 +1891,53 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                 )
             except Exception:
                 pass
+
+        # task_metadata_snapshot seam — OPEN-task per-write mirror. A
+        # metadata write carrying a targeted key (PER_WRITE_MIRROR_KEYS:
+        # the open-task-consumed class that a status-blind whole-store
+        # drain destroys while load-bearing) mirrors the whole overlay
+        # immediately, instead of waiting for a completion-time seam that
+        # a drained task never reaches. SIBLING of the post-completion
+        # backstop above — disjoint by construction on the same
+        # task_a.status read (backstop fires == "completed", this leg
+        # fires otherwise); do not merge the conditions. A COMPLETING
+        # TaskUpdate carrying targeted keys never lands here (status ==
+        # "completed" routes to the completion block, whose lead-completion
+        # seam mirrors the same overlay — no double-fire). Missing task
+        # file / unknown status is treated as open → fire: an over-fire of
+        # already-mirrored content dedups to a no-op on the shared
+        # content-hash marker, while a skipped fire is a durability hole —
+        # over-firing is self-correcting, under-firing is not.
+        #
+        # Frame gate is is_canonical_journal_frame, NOT is_lead: targeted
+        # keys include teammate-written ones (teachback_submit), and the
+        # in-process teammate frame writes the canonical journal (one
+        # process, one session). A tmux teammate frame skips — emitting
+        # there could silo the event AND poison the shared content-hash
+        # marker namespace. Conjunction order is deliberate (perf):
+        # ns-scale registry scan first, already-paid disk-status read
+        # second, the predicate's config.json read LAST (paid only on
+        # matched non-lead frames — rare by construction).
+        #
+        # NOTE (deliberate split, applies to BOTH per-write legs): the
+        # predicate resolves its team via the identity-matched
+        # pact_context.get_team_name(), while this leg's emit + task_a
+        # read use the persisted ctx team_name resolved once at function
+        # top — do not unify either direction; full rationale at the
+        # resolver call inside is_canonical_journal_frame.
+        if (
+            isinstance(incoming_metadata, dict)
+            and any(k in PER_WRITE_MIRROR_KEYS for k in incoming_metadata)
+            and (
+                task_a.get("status") != "completed"
+                if isinstance(task_a, dict)
+                else True
+            )
+            and pact_context.is_canonical_journal_frame(input_data)
+        ):
+            _emit_per_write_snapshot(
+                team_name, task_id, incoming_metadata, task=task_a
+            )
 
     return advisories
 
