@@ -906,6 +906,75 @@ def classify_session_role(input_data: dict) -> str:
     return "unknown"
 
 
+def _read_lead_session_id(team_name: str, teams_dir: str | None = None) -> str:
+    """Read the top-level ``leadSessionId`` from
+    ``~/.claude/teams/{team_name}/config.json``.
+
+    LOGIC-PARITY: the guarded-read shape is a third copy of two existing
+    PRIVATE helpers — ``task_claim_gate._read_lead_session_id`` (same
+    signature including the ``teams_dir`` test override) and
+    ``session_registry._read_lead_session_id`` (INLINED there by design: that
+    module's self-contained-leaf invariant forbids ``shared.*`` imports, so it
+    must not be re-pointed here). Keep all three behaviorally identical; a
+    flagged consolidation may later re-point ``task_claim_gate`` to this
+    shared copy.
+
+    Fail-safe: returns "" on any of: unsafe team_name, missing/unreadable
+    file, malformed JSON, non-object top-level, or a missing/non-string key.
+    Callers treat "" as "topology unresolvable" and take their own fail-safe
+    branch. Never raises.
+
+    CURRENCY DEPENDENCY (shared with both parity copies): the value is only
+    as current as the platform-maintained team config — a stale
+    ``leadSessionId`` after a session resume can misclassify an in-process
+    frame as tmux (or vice-versa). Consumers must bound that blast radius to
+    coordination-only decisions (see ``is_canonical_journal_frame``).
+    """
+    if not is_safe_path_component(team_name):
+        return ""
+    if teams_dir:
+        config_path = Path(teams_dir) / team_name / "config.json"
+    else:
+        config_path = get_claude_config_dir() / "teams" / team_name / "config.json"
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        lead_session_id = data.get("leadSessionId")
+    except (OSError, json.JSONDecodeError, ValueError, AttributeError, TypeError):
+        return ""
+    return lead_session_id if isinstance(lead_session_id, str) else ""
+
+
+def is_canonical_journal_frame(input_data: dict) -> bool:
+    """True iff THIS process's journal writes land in the canonical
+    (lead-session) journal: the lead frame in either teammateMode, or an
+    in-process teammate frame (session_id == leadSessionId — one process,
+    one session). False for a tmux teammate frame (distinct session_id)
+    and on ANY resolution failure of the topology leg (unreadable team
+    config, missing session_id): skipping defers durability to the
+    completion-time seams — never worse than the shipped baseline — while
+    emitting from a misclassified frame could silo the event AND poison
+    the shared content-hash marker namespace, suppressing a later
+    canonical emit. The is_lead leg is independent of config readability,
+    so lead-written keys keep full both-modes coverage even when the
+    topology leg cannot resolve. Never raises.
+    """
+    try:
+        if is_lead(input_data):
+            return True
+        sid = input_data.get("session_id")
+        if not (isinstance(sid, str) and sid):
+            # Missing/non-string session_id: topology unresolvable — skip
+            # before paying the config read.
+            return False
+        # Team resolution goes through this module's own identity-matched
+        # resolver (fail-closed empty on an unknown team, which routes the
+        # helper to its "" return and this leg to False).
+        lead_session_id = _read_lead_session_id(get_team_name())
+        return bool(lead_session_id) and sid == lead_session_id
+    except Exception:
+        return False
+
+
 def _iter_members(
     team_name: str,
     teams_dir: str | None = None,

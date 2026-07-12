@@ -62,6 +62,24 @@ from .session_journal import append_event, get_journal_path, make_event
 # exclude set stays minimal by design.
 SNAPSHOT_EXCLUDE: frozenset[str] = frozenset({"handoff"})
 
+# Keys whose WRITE (TaskCreate/TaskUpdate delta) triggers an immediate
+# whole-payload mirror — the open-task-consumed class that a status-blind
+# whole-store drain destroys while load-bearing (mid-arc readers consume
+# these via TaskGet while the task is still open). The fire predicate is
+# targeted-key-in-delta; the payload is always the full overlay (never a
+# projection), so cross-seam content-hash dedup stays coherent with the
+# completion-time seams. Disjoint from SNAPSHOT_EXCLUDE by test-pinned
+# invariant. NOT here: "variety" (already per-write-mirrored at its write
+# point by the dispatch_variety emit); "intentional_wait" (rides along in
+# the overlay; a wait-only write is not load-bearing alone).
+PER_WRITE_MIRROR_KEYS: frozenset[str] = frozenset({
+    "scope_contract",
+    "nesting_depth",
+    "worktree_path",
+    "teachback_submit",
+    "teachback_rejection",
+})
+
 # Size caps on the canonical serialization (see _canonical_bytes). Empirics
 # over the full journal/task-file population found the largest real value at
 # ~10 KB and no journal event ever ≥ 32 KB, so both caps are anomaly paths:
