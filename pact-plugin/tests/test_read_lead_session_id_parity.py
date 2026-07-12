@@ -1,25 +1,31 @@
-"""Behavioral-parity DRIFT-GUARD for the _read_lead_session_id dual-copy.
+"""Behavioral-parity DRIFT-GUARD for the two _read_lead_session_id
+implementations.
 
-session_registry._read_lead_session_id and task_claim_gate._read_lead_session_id
-are INDEPENDENT inline copies (session_registry is a self-contained leaf that
-imports nothing from shared.*, so it cannot import the task_claim_gate copy). The
-session_registry copy's docstring claims "LOGIC-PARITY with
-task_claim_gate._read_lead_session_id" — but until now that claim was prose-only,
-not test-enforced. This test makes it enforced: if a future edit changes the
-leadSessionId-resolution behavior of one copy without the other, this test goes
-red. It mirrors the established inline-dual-copy parity-guard convention already
-used for _sanitize_agent_name (session_registry vs peer_context) and
-_is_safe_team_segment (session_registry vs session_end).
+shared.pact_context._read_lead_session_id is the SSOT implementation;
+task_claim_gate consumes it via a from-import (a module-attribute binding, so
+the established task_claim_gate._read_lead_session_id patch seam survives —
+this file exercises the gate's binding, which IS the pact_context function).
+session_registry._read_lead_session_id is the ONE remaining inline copy: that
+module is a self-contained leaf that imports nothing from shared.*, so it
+cannot be re-pointed to the SSOT. Its docstring claims LOGIC-PARITY with the
+pact_context copy; this test makes that claim enforced — if a future edit
+changes the leadSessionId-resolution behavior of either implementation without
+the other, this test goes red. It mirrors the established inline-copy
+parity-guard convention already used for _sanitize_agent_name
+(session_registry vs peer_context) and _is_safe_team_segment
+(session_registry vs session_end).
 
-WHAT "PARITY" MEANS HERE — BEHAVIORAL, not structural. The two copies have a
-KNOWN, ACCEPTED STRUCTURAL DIVERGENCE that this test deliberately accommodates:
+WHAT "PARITY" MEANS HERE — BEHAVIORAL, not structural. The two implementations
+have a KNOWN, ACCEPTED STRUCTURAL DIVERGENCE that this test deliberately
+accommodates:
 
   * session_registry._read_lead_session_id(team) — one positional arg; resolves
     the teams dir via the INLINED _config_root() (no parameter); gates the team
     segment with _is_safe_team_segment.
-  * task_claim_gate._read_lead_session_id(team_name, teams_dir=None) — takes an
-    optional teams_dir; resolves via get_claude_config_dir() when teams_dir is
-    None; gates with is_safe_path_component (a positive-allowlist regex).
+  * pact_context._read_lead_session_id(team_name, teams_dir=None) — the SSOT
+    copy the gate binds; takes an optional teams_dir; resolves via
+    get_claude_config_dir() when teams_dir is None; gates with
+    is_safe_path_component (a positive-allowlist regex).
 
 So this test does NOT assert the functions are byte-identical. It asserts they
 return the SAME leadSessionId for the SAME LOGICAL INPUT — the same on-disk
