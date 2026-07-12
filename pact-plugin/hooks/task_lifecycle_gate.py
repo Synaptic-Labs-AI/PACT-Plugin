@@ -671,6 +671,17 @@ def _emit_lead_side_agent_handoff(
     this hook's livelock-safe exit-0 posture; never raises to the caller).
     """
     try:
+        # #1165 parity: sanitize task_id at intake, mirroring b1's intake
+        # pattern (agent_handoff_emitter sanitizes before its filesystem
+        # sinks). Covers BOTH b2 call sites (acceptance-commit + the
+        # write-after-completion backstop route through this function).
+        # Without this, a pathological task_id yields a b1/b2 divergence:
+        # the emitted event's task_id form differs from b1's (breaking the
+        # reader's cross-family join) and the O_EXCL marker key can split
+        # (b1 claims the sanitized form, b2 the raw form → dedup miss →
+        # double emit). The marker resolver's own internal sanitization is
+        # retained — this intake pass is what aligns the EVENT field.
+        task_id = sanitize_path_component(str(task_id))
         # Emit-eligibility (mirrors b1). owner-empty / teachback / signal-task
         # / handoff-absent all suppress, same as the emitter's bypass gates.
         # #917 R2 (validate-before-claim): also reject a WHITESPACE-only owner —
