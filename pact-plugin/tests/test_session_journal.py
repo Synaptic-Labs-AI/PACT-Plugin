@@ -3335,6 +3335,14 @@ class TestValidateEventSchemaPerType:
             "task_id": "41",
             "rationale_articulates_this_dispatch": "yes",
         },
+        # Required fields only — subject/owner/task_type/truncated/occupant
+        # are optional (see TestValidateOptionalFieldTypes); the missing-field
+        # test removes each sample key and expects rejection, which only
+        # holds for required ones.
+        "task_metadata_snapshot": {
+            "task_id": "9",
+            "metadata": {"teachback_submit": {"understanding": "x"}},
+        },
         "phase_transition": {"phase": "CODE", "status": "started"},
         "checkpoint": {"phase": "CODE"},
         "agent_dispatch": {"agent": "coder", "task_id": "1", "phase": "CODE"},
@@ -4182,6 +4190,90 @@ class TestValidateOptionalFieldTypes:
         assert reason == (
             f"optional field 'concern' for type 'teachback_ack' must "
             f"be str, got {got_name}"
+        )
+
+    def test_task_metadata_snapshot_optionals_declared(self):
+        """task_metadata_snapshot declares its five optional fields.
+
+        Pins the field-name → type contract for the snapshot event's
+        optional payload (subject sentinel, ownerless-task owner absence,
+        signal-task task_type mirror, truncation flag, task-id-reuse
+        occupant discriminator). The required-fields registration for
+        task_metadata_snapshot is what activates this optional check —
+        _validate_event_schema short-circuits on unknown types.
+        """
+        from shared.session_journal import _OPTIONAL_FIELDS_BY_TYPE
+
+        assert _OPTIONAL_FIELDS_BY_TYPE.get("task_metadata_snapshot") == {
+            "subject": str,
+            "owner": str,
+            "task_type": str,
+            "truncated": bool,
+            "occupant": str,
+        }
+
+    def test_task_metadata_snapshot_full_optional_payload_passes(self):
+        """A snapshot event carrying every optional field, correctly typed,
+        validates clean — the full (owned, signal-typed, truncated) shape."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "task_metadata_snapshot",
+            task_id="9",
+            metadata={"teachback_submit": {"understanding": "x"}},
+            subject="backend-coder: implement thing",
+            owner="backend-coder",
+            task_type="blocker",
+            truncated=True,
+            occupant="a1b2c3d4e5f60718",
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True
+        assert reason == "ok"
+
+    def test_task_metadata_snapshot_optionals_absent_passes(self):
+        """Required-only snapshot (ownerless, untruncated) validates clean —
+        optional absence is valid by definition."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "task_metadata_snapshot",
+            task_id="9",
+            metadata={"variety": {"total": 7}},
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True
+        assert reason == "ok"
+
+    @pytest.mark.parametrize(
+        "field, bad_value, expected_name, got_name",
+        [
+            ("subject", 42, "str", "int"),
+            ("owner", ["backend-coder"], "str", "list"),
+            ("task_type", 1, "str", "int"),
+            ("truncated", "yes", "bool", "str"),
+            ("occupant", 0xA1B2, "str", "int"),
+        ],
+        ids=["subject", "owner", "task_type", "truncated", "occupant"],
+    )
+    def test_task_metadata_snapshot_wrong_type_rejected(
+        self, field, bad_value, expected_name, got_name
+    ):
+        """task_metadata_snapshot with a mis-typed optional field fails
+        validation with the canonical optional-field reason format."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "task_metadata_snapshot",
+            task_id="9",
+            metadata={"variety": {"total": 7}},
+            **{field: bad_value},
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is False, f"{field}={bad_value!r} should be rejected"
+        assert reason == (
+            f"optional field '{field}' for type 'task_metadata_snapshot' "
+            f"must be {expected_name}, got {got_name}"
         )
 
     def test_cleanup_summary_all_fields_pass(self):
