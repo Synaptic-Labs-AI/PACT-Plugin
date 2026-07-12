@@ -600,3 +600,6 @@ class TestMainEdgeCases:
         msg = output.get("systemMessage", "")
         assert "ACTION REQUIRED" in msg
         assert "shutdown_request" in msg
+        # Two-tier pin: the advisory must carry the cooperative-only rationale AND the TaskStop tier (request-only guidance = regression).
+        assert "cooperative-only" in msg
+        assert "TaskStop" in msg
