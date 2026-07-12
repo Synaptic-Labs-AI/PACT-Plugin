@@ -526,3 +526,50 @@ class TestPerWriteTaskCreateLeg:
         tlg.evaluate_lifecycle(payload)
         assert _journal_files(home) == []
         assert _marker_files(home) == []
+
+
+# =============================================================================
+# READ-ONLY payload build (shared-object identity)
+# =============================================================================
+class TestReadOnlyPayloadBuild:
+    def test_shared_metadata_object_deep_unchanged_after_fire(
+        self, home, pact_context, snapshot_events
+    ):
+        """The certification row for the READ-ONLY contract: ONE metadata
+        object travels through the whole gate (advisory evaluation + the
+        per-write leg's overlay build) and comes out deep-equal to its
+        pre-call copy — no by-reference mutation, no key injection, no
+        None-filter applied in place. The emitted payload is a FRESH
+        mapping, not the caller's object."""
+        import copy
+
+        pact_context(team_name=TEAM, session_id=LEAD_SID)
+        _seed_task(
+            home,
+            TEAM,
+            "73",
+            subject="scope: atomize sub-scope",
+            owner="team-lead",
+            status="in_progress",
+            metadata={"note": "existing"},
+        )
+        shared_delta = {
+            "scope_contract": SCOPE,
+            "teachback_submit": {"understanding": "u"},
+            "worktree_path": None,
+        }
+        before = copy.deepcopy(shared_delta)
+        tlg.evaluate_lifecycle(
+            _open_write_payload("73", shared_delta, session_id=LEAD_SID)
+        )
+        assert shared_delta == before, (
+            "the gate mutated the caller's metadata object — READ-ONLY "
+            "payload-build contract violated"
+        )
+        snaps = _snapshots(snapshot_events)
+        assert len(snaps) == 1
+        assert snaps[0]["metadata"] is not shared_delta
+        # The None-valued key was dropped from the EMITTED overlay only —
+        # never from the caller's object (asserted deep-equal above).
+        assert "worktree_path" not in snaps[0]["metadata"]
+        assert snaps[0]["metadata"]["note"] == "existing"
