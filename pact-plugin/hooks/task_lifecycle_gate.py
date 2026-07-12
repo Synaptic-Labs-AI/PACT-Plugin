@@ -1316,7 +1316,10 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
             # shallow merge mirrors the platform's shallow metadata-merge
             # semantics and the pass-it-resolved pattern of the handoff
             # backstop below (order-independent: correct whether or not the
-            # platform's write has landed at fire time). All eligibility,
+            # platform's write has landed at fire time). A None-valued
+            # incoming key is the platform's DELETE op (set-to-null removes
+            # the key), so the overlay drops it rather than mirroring a
+            # phantom null the post-state no longer carries. All eligibility,
             # dedup, and size-bounding live in the substrate; a snapshot
             # failure must never affect the handoff emit above or this
             # hook's advisory evaluation.
@@ -1331,7 +1334,14 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                     task_id,
                     subject,
                     owner,
-                    {**metadata, **incoming_md},
+                    {
+                        **metadata,
+                        **{
+                            k: v
+                            for k, v in incoming_md.items()
+                            if v is not None
+                        },
+                    },
                 )
             except Exception:
                 pass
@@ -1751,6 +1761,10 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
         # do not merge the conditions. Content-key dedup in the substrate
         # makes the re-fire idempotent: an unchanged payload no-ops, a
         # changed one emits a superseding event readers resolve latest-ts.
+        # A None-valued incoming key is the platform's DELETE op (set-to-null
+        # removes the key), so the overlay drops it rather than mirroring a
+        # phantom null the disk state no longer carries; a delete-ONLY write
+        # therefore mirrors the disk state as-is (deduping if unchanged).
         # is_lead-gated like every lead-frame emit: only the lead's process
         # resolves the canonical journal; a teammate frame self-drops.
         if (
@@ -1772,7 +1786,14 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                     task_id,
                     task_a.get("subject") or "",
                     task_a.get("owner"),
-                    {**disk_md, **incoming_metadata},
+                    {
+                        **disk_md,
+                        **{
+                            k: v
+                            for k, v in incoming_metadata.items()
+                            if v is not None
+                        },
+                    },
                 )
             except Exception:
                 pass

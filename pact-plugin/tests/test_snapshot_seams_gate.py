@@ -262,6 +262,32 @@ class TestSeamALeadCompletion:
             "r2_verification": {"verified": True},
         }
 
+    def test_null_delete_incoming_key_not_mirrored(
+        self, tmp_path, monkeypatch, pact_context, snapshot_events
+    ):
+        """The platform's metadata merge treats a None-valued key as
+        DELETE-the-key, so the seam's overlay must drop it — a deleted key
+        must appear in the snapshot neither as a value nor as a phantom
+        null (the post-state view already reflects the deletion)."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        pact_context(team_name=TEAM, session_id="s1")
+        tlg.evaluate_lifecycle(
+            _completion_payload(
+                metadata={"variety": {"total": 10}},
+                incoming_metadata={
+                    "parked_analysis": None,
+                    "r2_verification": {"verified": True},
+                },
+            )
+        )
+        snaps = _snapshots(snapshot_events)
+        assert len(snaps) == 1
+        assert snaps[0]["metadata"] == {
+            "variety": {"total": 10},
+            "r2_verification": {"verified": True},
+        }
+        assert "parked_analysis" not in snaps[0]["metadata"]
+
     def test_unchanged_recompletion_dedups_changed_supersedes(
         self, tmp_path, monkeypatch, pact_context, snapshot_events
     ):
@@ -392,6 +418,53 @@ class TestSeamBPostCompletionBackstop:
             "identical content must dedup across seams via the shared "
             "content-keyed marker"
         )
+
+    def test_delete_only_late_write_mirrors_disk_without_phantom_null(
+        self, tmp_path, monkeypatch, pact_context, snapshot_events
+    ):
+        """A late delete-only TaskUpdate (all incoming values None — the
+        platform's DELETE op) must mirror the disk state as-is: the deleted
+        key appears neither as a value nor as a phantom null."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        pact_context(team_name=TEAM, session_id="s1")
+        _seed_task(
+            tmp_path,
+            TEAM,
+            "60",
+            subject="devops: delete-only late write",
+            owner="devops",
+            status="completed",
+            metadata={"variety": {"total": 8}},
+        )
+        tlg.evaluate_lifecycle(
+            _metadata_only_payload("60", {"obsolete_note": None})
+        )
+        snaps = _snapshots(snapshot_events)
+        assert len(snaps) == 1
+        assert snaps[0]["metadata"] == {"variety": {"total": 8}}
+        assert "obsolete_note" not in snaps[0]["metadata"]
+
+    def test_delete_only_late_write_on_empty_disk_no_emit(
+        self, tmp_path, monkeypatch, pact_context, snapshot_events
+    ):
+        """Delete-only incoming over EMPTY disk metadata filters to an empty
+        overlay → empty payload → ineligible → clean no-emit (no nulls-only
+        noise snapshot)."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        pact_context(team_name=TEAM, session_id="s1")
+        _seed_task(
+            tmp_path,
+            TEAM,
+            "61",
+            subject="devops: delete-only empty disk",
+            owner="devops",
+            status="completed",
+            metadata={},
+        )
+        tlg.evaluate_lifecycle(
+            _metadata_only_payload("61", {"obsolete_note": None})
+        )
+        assert _snapshots(snapshot_events) == []
 
     def test_handoff_backstop_and_snapshot_backstop_both_fire_sibling(
         self, tmp_path, monkeypatch, pact_context, snapshot_events,
