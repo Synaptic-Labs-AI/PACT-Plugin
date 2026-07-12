@@ -1069,3 +1069,106 @@ class TestBootstrapRefreshClauses:
         # H1 (ghost-detection)
         assert "do NOT blind-retry `Agent()`" in bootstrap_text
         assert "Check for inbound messages" in bootstrap_text
+
+
+# =============================================================================
+# pause.md teammate-shutdown structural pins + cross-surface termination
+# skeleton — deliberate drift detectors, anchored on stable tokens agreed
+# with the doc surfaces. Surrounding prose is intentionally unpinned.
+# =============================================================================
+
+
+class TestPauseShutdownStructure:
+    """Structural pins for commands/pause.md's teammate-shutdown step (LLM-loaded).
+
+    Each assertion is a drift detector: it anchors on a stable token and its
+    docstring names the regression it catches. Prose around the tokens is
+    deliberately unpinned so wording can evolve without touching these tests.
+    """
+
+    @pytest.fixture
+    def pause_text(self):
+        return (COMMANDS_DIR / "pause.md").read_text(encoding="utf-8")
+
+    def test_taskstop_guarantee_tier_present(self, pause_text):
+        """Detects: silent regression to single-tier shutdown. Dropping the
+        TaskStop line from the per-teammate loop reverts pause to the
+        cooperative-only request, which does not by itself terminate the
+        teammate's pane/process — panes would survive every pause."""
+        assert 'then: TaskStop("{teammate_name}")' in pause_text
+
+    def test_graceful_request_precedes_taskstop(self, pause_text):
+        """Detects: tier inversion. TaskStop issued before the graceful
+        shutdown_request reaps teammates before they can save agent memory
+        and approve — the cooperative tier must come first. Both anchor
+        literals occur exactly once in pause.md, so first-occurrence
+        index comparison encodes the loop ordering."""
+        request = pause_text.index('"type": "shutdown_request"')
+        stop = pause_text.index('then: TaskStop("{teammate_name}")')
+        assert request < stop
+
+    def test_cooperative_only_rationale_present(self, pause_text):
+        """Detects: loss of the rationale that makes the guarantee tier
+        non-optional. Without the cooperative-only statement, a future
+        editor can plausibly judge the TaskStop line redundant and remove
+        it as cleanup."""
+        assert "cooperative-only" in pause_text
+
+    def test_expected_post_state_note_present(self, pause_text):
+        """Detects: removal of the post-state expectation. A lead-only
+        roster after the stops is the correct post-pause state, not
+        corruption — losing this note invites 'repair' behavior (team
+        deletion or blind respawns) on resume."""
+        assert "EXPECTED post-state" in pause_text
+
+    def test_no_team_delete_invariant_survives(self, pause_text):
+        """Detects: the team-deletion prohibition being dropped while the
+        shutdown step is edited — the config file and team identity must
+        survive a pause for resume to reuse them."""
+        assert "Do NOT delete the team" in pause_text
+
+    def test_taskstop_error_idempotency_present(self, pause_text):
+        """Detects: loss of the already-stopped-success rule. Without it, a
+        TaskStop not-found / already-exited error mid-loop reads as a
+        failure and can abort the remaining teammate shutdowns instead of
+        continuing the loop."""
+        assert "already-stopped success" in pause_text
+
+
+# Per-surface stable anchors for the shutdown termination-primitive skeleton.
+# All four surfaces carry the uniform 'cooperative-only' statement (refresh.md's
+# rationale clause is harmonized to the shared skeleton sentence); refresh.md
+# additionally pins its two-tier loop/tier tokens as secondary structural
+# anchors. Presence-only assertions — occurrence counts and surrounding prose
+# are not pinned.
+TERMINATION_SKELETON_SURFACES = [
+    ("commands/pause.md", ("cooperative-only",)),
+    ("commands/refresh.md", ("cooperative-only", "then: TaskStop", "guarantee tier")),
+    ("skills/pact-agent-teams/SKILL.md", ("cooperative-only",)),
+    ("agents/pact-orchestrator.md", ("cooperative-only",)),
+]
+
+
+class TestShutdownTerminationSkeletonAcrossSurfaces:
+    """The shutdown termination rule spans multiple LLM-loaded surfaces.
+
+    Detects: single-surface drift. An edit that removes the rule from one
+    surface while the others keep it silently forks the team's understanding
+    of whether shutdown_request alone terminates a teammate (it does not —
+    TaskStop is the termination primitive).
+    """
+
+    @pytest.mark.parametrize(
+        ("relpath", "tokens"),
+        TERMINATION_SKELETON_SURFACES,
+        ids=[relpath for relpath, _ in TERMINATION_SKELETON_SURFACES],
+    )
+    def test_surface_carries_termination_skeleton(self, relpath, tokens):
+        text = (COMMANDS_DIR.parent / relpath).read_text(encoding="utf-8")
+        for token in tokens:
+            assert token in text, (
+                f"{relpath} lost the shutdown termination-skeleton anchor "
+                f"{token!r}. Every surface that instructs teammate shutdown "
+                f"must state (or embody) the two-tier rule: shutdown_request "
+                f"is cooperative-only; TaskStop is the termination primitive."
+            )
