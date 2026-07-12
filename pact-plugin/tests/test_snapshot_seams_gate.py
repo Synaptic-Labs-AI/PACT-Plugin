@@ -344,9 +344,14 @@ class TestSeamBPostCompletionBackstop:
     def test_open_task_metadata_write_no_backstop_fire(
         self, tmp_path, monkeypatch, pact_context, snapshot_events
     ):
-        """The backstop keys on disk status == completed — a metadata write
-        on an OPEN task is normal mid-task traffic, not a missed mirror
-        (its completion-time snapshot will cover it)."""
+        """The backstop keys on disk status == completed — a NON-TARGETED
+        metadata write on an OPEN task is normal mid-task traffic and fires
+        no seam at all: not the backstop (status is open), and not the
+        per-write mirror (the key is outside PER_WRITE_MIRROR_KEYS). This
+        pins the backstop's completed-only predicate AND the per-write
+        leg's byte-identical default for untargeted traffic; the per-write
+        fire on TARGETED open-task keys is asserted by the per-write seam
+        tests."""
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         pact_context(team_name=TEAM, session_id="s1")
         _seed_task(
@@ -359,7 +364,7 @@ class TestSeamBPostCompletionBackstop:
             metadata={},
         )
         tlg.evaluate_lifecycle(
-            _metadata_only_payload("56", {"scope_contract": {"files": []}})
+            _metadata_only_payload("56", {"note": "mid-task working note"})
         )
         assert _snapshots(snapshot_events) == []
 

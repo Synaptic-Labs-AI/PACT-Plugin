@@ -298,7 +298,10 @@ try:
         make_event,
         read_events,
     )
-    from shared.task_metadata_snapshot import emit_task_metadata_snapshot
+    from shared.task_metadata_snapshot import (
+        PER_WRITE_MIRROR_KEYS,
+        emit_task_metadata_snapshot,
+    )
     from shared.task_utils import is_teachback_subject as _is_teachback_subject
     from shared.task_utils import read_task_json
     from shared.teachback_schema import (
@@ -748,6 +751,50 @@ def _emit_lead_side_agent_handoff(
     except Exception:
         # Fail-open: a journal-emit failure must never break the gate's
         # advisory evaluation or its exit-0 contract.
+        pass
+
+
+def _emit_per_write_snapshot(
+    team_name: str,
+    task_id: str,
+    delta: dict,
+    task: dict | None = None,
+) -> None:
+    """Per-write mirror emit — hermetic; never raises; READ-ONLY on every
+    input (new dicts only: the overlay comprehension builds a fresh
+    mapping; neither ``delta``, ``task``, nor ``task['metadata']`` is
+    written). ``task=None`` → one read_task_json; the TaskUpdate leg passes
+    its already-read task_a (zero marginal disk cost).
+
+    Shared by the TaskCreate and TaskUpdate per-write legs. Degenerate
+    inputs are the substrate's job (sentinel subject, owner normalize,
+    empty-payload no-emit); ``task_id`` sanitization also happens inside
+    ``emit_task_metadata_snapshot()``'s content-key-claim path — no new
+    sanitizer here. A missing/drained task file (``task == {}``) degrades
+    to a delta-only payload — correct: mirror what the write shows us. A
+    None-valued delta key is the platform DELETE op; the overlay drops it
+    so the emit mirrors the post-delete disk state (deduping if unchanged).
+    """
+    try:
+        if task is None:
+            task = read_task_json(task_id, team_name) if team_name else {}
+        if not isinstance(task, dict):
+            task = {}
+        disk_md = (
+            task.get("metadata")
+            if isinstance(task.get("metadata"), dict)
+            else {}
+        )
+        emit_task_metadata_snapshot(
+            team_name,
+            task_id,
+            task.get("subject") or "",
+            task.get("owner"),
+            {**disk_md, **{k: v for k, v in delta.items() if v is not None}},
+        )
+    except Exception:
+        # Exit-0 advisory contract: a mirror failure must never block or
+        # annotate the hooked tool call.
         pass
 
 
@@ -1808,6 +1855,46 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
                 )
             except Exception:
                 pass
+
+        # task_metadata_snapshot seam — OPEN-task per-write mirror. A
+        # metadata write carrying a targeted key (PER_WRITE_MIRROR_KEYS:
+        # the open-task-consumed class that a status-blind whole-store
+        # drain destroys while load-bearing) mirrors the whole overlay
+        # immediately, instead of waiting for a completion-time seam that
+        # a drained task never reaches. SIBLING of the post-completion
+        # backstop above — disjoint by construction on the same
+        # task_a.status read (backstop fires == "completed", this leg
+        # fires otherwise); do not merge the conditions. A COMPLETING
+        # TaskUpdate carrying targeted keys never lands here (status ==
+        # "completed" routes to the completion block, whose lead-completion
+        # seam mirrors the same overlay — no double-fire). Missing task
+        # file / unknown status is treated as open → fire: an over-fire of
+        # already-mirrored content dedups to a no-op on the shared
+        # content-hash marker, while a skipped fire is a durability hole —
+        # over-firing is self-correcting, under-firing is not.
+        #
+        # Frame gate is is_canonical_journal_frame, NOT is_lead: targeted
+        # keys include teammate-written ones (teachback_submit), and the
+        # in-process teammate frame writes the canonical journal (one
+        # process, one session). A tmux teammate frame skips — emitting
+        # there could silo the event AND poison the shared content-hash
+        # marker namespace. Conjunction order is deliberate (perf):
+        # ns-scale registry scan first, already-paid disk-status read
+        # second, the predicate's config.json read LAST (paid only on
+        # matched non-lead frames — rare by construction).
+        if (
+            isinstance(incoming_metadata, dict)
+            and any(k in PER_WRITE_MIRROR_KEYS for k in incoming_metadata)
+            and (
+                task_a.get("status") != "completed"
+                if isinstance(task_a, dict)
+                else True
+            )
+            and pact_context.is_canonical_journal_frame(input_data)
+        ):
+            _emit_per_write_snapshot(
+                team_name, task_id, incoming_metadata, task=task_a
+            )
 
     return advisories
 
