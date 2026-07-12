@@ -298,6 +298,7 @@ try:
         make_event,
         read_events,
     )
+    from shared.task_metadata_snapshot import emit_task_metadata_snapshot
     from shared.task_utils import is_teachback_subject as _is_teachback_subject
     from shared.task_utils import read_task_json
     from shared.teachback_schema import (
@@ -1307,6 +1308,33 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
             _emit_lead_side_agent_handoff(
                 team_name, task_id, owner, subject, metadata
             )
+            # task_metadata_snapshot seam — lead completion (additive-after;
+            # hermetic). Mirrors non-handoff sibling metadata into the
+            # journal at the lead's acceptance-commit, the completion-time
+            # point that lands BEFORE the boundary-shaped task-store drain
+            # that would destroy the source file. The {**disk, **incoming}
+            # shallow merge mirrors the platform's shallow metadata-merge
+            # semantics and the pass-it-resolved pattern of the handoff
+            # backstop below (order-independent: correct whether or not the
+            # platform's write has landed at fire time). All eligibility,
+            # dedup, and size-bounding live in the substrate; a snapshot
+            # failure must never affect the handoff emit above or this
+            # hook's advisory evaluation.
+            try:
+                incoming_md = (
+                    incoming_metadata
+                    if isinstance(incoming_metadata, dict)
+                    else {}
+                )
+                emit_task_metadata_snapshot(
+                    team_name,
+                    task_id,
+                    subject,
+                    owner,
+                    {**metadata, **incoming_md},
+                )
+            except Exception:
+                pass
 
         # artifact_paths emit BACKSTOP (#927 durability nudge). A FAIL-OPEN
         # advisory: when a PREPARE/ARCHITECT phase task completes but the
@@ -1712,6 +1740,42 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
             _emit_lead_side_agent_handoff(
                 team_name, task_id, owner_bs, subject_bs, meta_for_emit
             )
+
+        # task_metadata_snapshot seam — post-completion backstop (hermetic).
+        # GENERALIZES the handoff backstop above from handoff-only to
+        # any-metadata: a metadata-only TaskUpdate landing on an ALREADY-
+        # completed task (late verification records, a superseding analysis
+        # write) is observed by neither completion-time seam, so it is
+        # mirrored here. Kept a SIBLING block of the handoff backstop — the
+        # fire predicates differ by design (handoff-dict vs any-metadata);
+        # do not merge the conditions. Content-key dedup in the substrate
+        # makes the re-fire idempotent: an unchanged payload no-ops, a
+        # changed one emits a superseding event readers resolve latest-ts.
+        # is_lead-gated like every lead-frame emit: only the lead's process
+        # resolves the canonical journal; a teammate frame self-drops.
+        if (
+            pact_context.is_lead(input_data)
+            and isinstance(incoming_metadata, dict)
+            and incoming_metadata
+            and isinstance(task_a, dict)
+            and task_a
+            and task_a.get("status") == "completed"
+        ):
+            try:
+                disk_md = (
+                    task_a.get("metadata")
+                    if isinstance(task_a.get("metadata"), dict)
+                    else {}
+                )
+                emit_task_metadata_snapshot(
+                    team_name,
+                    task_id,
+                    task_a.get("subject") or "",
+                    task_a.get("owner"),
+                    {**disk_md, **incoming_metadata},
+                )
+            except Exception:
+                pass
 
     return advisories
 
