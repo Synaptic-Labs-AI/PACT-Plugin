@@ -91,6 +91,21 @@ for task_id in unprocessed:
 
 Read all HANDOFFs before proceeding to extraction.
 
+### Step 3.1: Resolve Sibling Metadata (three-tier snapshot fallback)
+
+A HANDOFF may reference sibling metadata keys on its task (verification records, parked analyses, teachback history, variety rationales). Those siblings die with the task file when the task store drains — but every completed task's non-handoff metadata is also mirrored into the journal as a `task_metadata_snapshot` event. Resolve sibling keys through this three-tier fallback:
+
+1. **Task file** (freshest; may be drained): `read_task_metadata(task_id)` — the raw task JSON's `metadata` object, exactly as in the Step 3 pseudocode.
+2. **Snapshot fallback** (GC-proof): read the mirrored snapshots via the existing subcommand (explicit `--session-dir`, masked-read-safe):
+
+   ```bash
+   SNAPSHOTS=$(python3 "{plugin_root}/hooks/shared/session_journal.py" read \
+                 --session-dir "$SESSION_DIR" --type task_metadata_snapshot)
+   ```
+
+   As in Step 1, `read` prints a **JSON ARRAY** — parse the whole stdout once, then iterate. Each event carries `task_id`, `metadata` (the size-bounded sibling-key payload), `subject`, `occupant`, and optionally `owner` / `task_type` / `truncated`. **Selection**: filter to events with the matching `task_id`; because the platform reuses task_ids across arcs, when you are resolving siblings FOR an `agent_handoff` event, additionally filter to events whose `occupant` equals `occupant_hash(agent, task_subject)` computed from that handoff event's own fields with the SAME shared function (`python3 -c "import sys; sys.path.insert(0, '{plugin_root}/hooks'); from shared.agent_handoff_marker import occupant_hash; print(occupant_hash(sys.argv[1], sys.argv[2]))" "$AGENT" "$TASK_SUBJECT"`) — never a local reimplementation. Aggregate (whole-arc) reads apply the arc-scoped `--since` bound first, exactly as Step 10 does for `variety_assessed`. Take the **latest-`ts`** event within the match, **last-wins on an equal `ts`** (journal events stamp `ts` at second granularity, so a same-second re-emit ties; the later line in journal order is the authoritative one — the same tie-break the artifact-paths supersede uses) — a task may legally carry multiple snapshots (a changed payload after completion re-emits; the latest is the authoritative end-state). A value of shape `{"_truncated": true, ...}` or a top-level `_dropped_keys` list means the full value lived only in the task file — note the truncation in your synthesis, don't fake the missing content.
+3. **Graceful degrade**: neither source resolves → record the gap (task_id, key, timestamp) exactly as Step 3's report-gap tier does; never invent content.
+
 ### Step 3.5: Resolve and Read Phase Artifacts (always)
 
 Each phase's HANDOFF is the **distilled frame**; the phase's disk artifact (e.g. `docs/preparation/{feature}.md`, `docs/architecture/{feature}.md`, `docs/plans/{slug}-plan.md`, `docs/review/…`) is the **fuller substance**. The lead writes a path-only `artifact_paths` journal event pointing at each phase's artifact(s); that event lives in the journal (outside any worktree), so it survives `git worktree remove` even though the pointed-at file is worktree-ephemeral. **Always** resolve these events and fold the artifact substance into the same synthesis the HANDOFF drives.
@@ -215,6 +230,7 @@ After processing HANDOFFs, gather calibration metrics for the orchestrator's var
     summary="Calibration check: variety {X}")
   ```
 - On team-lead's response, compute the full CalibrationRecord and save to pact-memory with entities `['orchestration_calibration', '{domain}']`
+- **Consumer exclusivity guard**: the calibration aggregation reads `dispatch_variety` events ONLY. `task_metadata_snapshot` events also carry `variety` payloads, but the snapshot is a recovery/breadth source for sibling-key CONTENT (Step 3.1) and must NEVER become an additive second numerator for the coverage ratio — counting both would double-count dispatches.
 
 ---
 

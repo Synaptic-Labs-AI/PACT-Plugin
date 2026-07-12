@@ -127,6 +127,13 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # "yes"|"no"|"concern" flag. The GC-immune mirror read by wrap-up Q6's
     # cargo_cult_signal_rate (the task store goes false-empty after GC).
     "teachback_ack": {"task_id": str, "rationale_articulates_this_dispatch": str},
+    # hooks/shared/task_metadata_snapshot.emit_task_metadata_snapshot writes
+    # task_metadata_snapshot at completion (seams in task_lifecycle_gate.py +
+    # agent_handoff_emitter.py) — the GC-immune mirror of non-handoff task
+    # metadata (the N-key generalization of dispatch_variety/teachback_ack).
+    # task_id is the source task; metadata is the size-bounded sibling-key
+    # payload (SNAPSHOT_EXCLUDE'd, truncation-marked — see the substrate module).
+    "task_metadata_snapshot": {"task_id": str, "metadata": dict},
     # commands/orchestrate.md + comPACT.md write phase_transition with
     # phase + status (both quoted strings). session_resume._build_journal_resume
     # subscripts `p["phase"]` — this schema check is the defensive bulwark
@@ -355,6 +362,28 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # missed_wake).
     "teachback_ack": {
         "concern": str,
+    },
+    # hooks/shared/task_metadata_snapshot.emit_task_metadata_snapshot writes
+    # task_metadata_snapshot with these optionals. subject is sentinel-
+    # substituted "(no subject)" when degenerate (never required-invalid,
+    # #917 validate-before-claim); owner is absent for ownerless (e.g.
+    # signal) tasks; task_type mirrors metadata.type so readers distinguish
+    # signal snapshots (signal tasks DO snapshot — the agent_handoff
+    # suppression's reader-purity basis does not transfer to the durability
+    # mirror); truncated is present (True) only when size-bounding fired;
+    # occupant is occupant_hash(owner or "", subject) — the task-id-reuse
+    # discriminator readers join against the agent_handoff event's
+    # (agent, task_subject) identity. The required-fields registration above
+    # ("task_metadata_snapshot": {...}) is what ACTIVATES this optional check
+    # — _validate_event_schema short-circuits on unknown types and would
+    # otherwise skip the optional loop (same activation pattern as
+    # session_end / missed_wake / teachback_ack).
+    "task_metadata_snapshot": {
+        "subject": str,
+        "owner": str,
+        "task_type": str,
+        "truncated": bool,
+        "occupant": str,
     },
     # commands/peer-review.md writes remediation with an optional task_id —
     # the fixer's Task-B task id. The Q5 coverage denominator

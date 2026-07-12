@@ -52,6 +52,15 @@ from .paths import get_claude_config_dir
 # most), while keeping the marker filename short.
 _OCCUPANT_HASH_LEN = 16
 
+# Default O_EXCL marker directory name — the agent_handoff event family's
+# namespace. Keyword-only `namespace` parameters below default to this so
+# every pre-existing caller resolves a byte-identical marker path; a sibling
+# event family (task_metadata_snapshot) passes its own module-constant
+# namespace through hard-bound wrappers so the two families' dedup markers
+# can never suppress each other. Namespace values are module constants,
+# never input-derived.
+_DEFAULT_MARKER_NAMESPACE = ".agent_handoff_emitted"
+
 # Signal-task types — tasks that MUST NOT emit a phantom agent_handoff event
 # (a blocker/algedonic completion is a control signal, not a HANDOFF; emitting
 # would pollute read_events("agent_handoff") + mis-route secretary harvest).
@@ -123,24 +132,31 @@ def occupant_hash(teammate_name: str, task_subject: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:_OCCUPANT_HASH_LEN]
 
 
-def _marker_dir(team_name: str) -> Path:
+def _marker_dir(
+    team_name: str, *, namespace: str = _DEFAULT_MARKER_NAMESPACE
+) -> Path:
     """
-    Return the per-team marker directory path.
+    Return the per-team marker directory path for one event-family namespace.
 
-    Lives under ~/.claude/teams/{team}/.agent_handoff_emitted/ — a sibling
-    to the team's inboxes/ and config.json. session_end.py's team reaper
-    removes the whole team directory (shutil.rmtree), so the marker dir is
-    cleaned up automatically when the team ages out.
+    Lives under ~/.claude/teams/{team}/{namespace}/ (default
+    .agent_handoff_emitted) — a sibling to the team's inboxes/ and
+    config.json. session_end.py's team reaper removes the whole team
+    directory (shutil.rmtree), so every namespace's marker dir is cleaned
+    up automatically when the team ages out.
 
     Kept task-scoped (not session-scoped) so fire-once semantics survive
     pause/resume: a secretary standing task that spans sessions must emit
     its agent_handoff event exactly once across the whole team lifespan.
     """
-    return get_claude_config_dir() / "teams" / team_name / ".agent_handoff_emitted"
+    return get_claude_config_dir() / "teams" / team_name / namespace
 
 
 def _resolve_marker_target(
-    team_name: str, task_id: str, occupant: str
+    team_name: str,
+    task_id: str,
+    occupant: str,
+    *,
+    namespace: str = _DEFAULT_MARKER_NAMESPACE,
 ) -> "tuple[int | None, str | None]":
     """
     Sanitize + validate + pin the marker directory; return the open directory
@@ -195,7 +211,7 @@ def _resolve_marker_target(
     ):
         return None, None
 
-    marker_dir = _marker_dir(team_name)
+    marker_dir = _marker_dir(team_name, namespace=namespace)
     # Symlink-containment pre-check: if marker_dir already exists as a
     # symlink, refuse to use it (a pre-planted symlink could redirect marker
     # creation outside the team directory). Fail-open emit rather than risk
@@ -251,7 +267,13 @@ def _resolve_marker_target(
     return dir_fd, f"{task_id}-{occupant}"
 
 
-def already_emitted(team_name: str, task_id: str, occupant: str) -> bool:
+def already_emitted(
+    team_name: str,
+    task_id: str,
+    occupant: str,
+    *,
+    namespace: str = _DEFAULT_MARKER_NAMESPACE,
+) -> bool:
     """
     Test-and-set the per-(team, task_id, occupant) marker.
 
@@ -285,7 +307,9 @@ def already_emitted(team_name: str, task_id: str, occupant: str) -> bool:
     compensating-unclaim closes the OTHER suppression source (a marker this
     process claimed but whose journal write then failed) — see unclaim().
     """
-    dir_fd, filename = _resolve_marker_target(team_name, task_id, occupant)
+    dir_fd, filename = _resolve_marker_target(
+        team_name, task_id, occupant, namespace=namespace
+    )
     if dir_fd is None:
         # Degenerate key / symlink-guarded / unresolvable → fail-open emit.
         return False
@@ -307,7 +331,13 @@ def already_emitted(team_name: str, task_id: str, occupant: str) -> bool:
         os.close(dir_fd)
 
 
-def unclaim(team_name: str, task_id: str, occupant: str) -> None:
+def unclaim(
+    team_name: str,
+    task_id: str,
+    occupant: str,
+    *,
+    namespace: str = _DEFAULT_MARKER_NAMESPACE,
+) -> None:
     """
     Compensating rollback (#901, R1) — remove the marker THIS process just
     created when the subsequent journal write FAILED (append_event returned
@@ -332,7 +362,9 @@ def unclaim(team_name: str, task_id: str, occupant: str) -> None:
     Worst case the marker persists and behavior reverts to today's (a poisoned
     marker) — strictly no worse than not having the rollback. Never raises.
     """
-    dir_fd, filename = _resolve_marker_target(team_name, task_id, occupant)
+    dir_fd, filename = _resolve_marker_target(
+        team_name, task_id, occupant, namespace=namespace
+    )
     if dir_fd is None:
         return
     try:

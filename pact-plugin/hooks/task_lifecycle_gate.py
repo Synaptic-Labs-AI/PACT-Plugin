@@ -298,6 +298,7 @@ try:
         make_event,
         read_events,
     )
+    from shared.task_metadata_snapshot import emit_task_metadata_snapshot
     from shared.task_utils import is_teachback_subject as _is_teachback_subject
     from shared.task_utils import read_task_json
     from shared.teachback_schema import (
@@ -670,6 +671,17 @@ def _emit_lead_side_agent_handoff(
     this hook's livelock-safe exit-0 posture; never raises to the caller).
     """
     try:
+        # #1165 parity: sanitize task_id at intake, mirroring b1's intake
+        # pattern (agent_handoff_emitter sanitizes before its filesystem
+        # sinks). Covers BOTH b2 call sites (acceptance-commit + the
+        # write-after-completion backstop route through this function).
+        # Without this, a pathological task_id yields a b1/b2 divergence:
+        # the emitted event's task_id form differs from b1's (breaking the
+        # reader's cross-family join) and the O_EXCL marker key can split
+        # (b1 claims the sanitized form, b2 the raw form → dedup miss →
+        # double emit). The marker resolver's own internal sanitization is
+        # retained — this intake pass is what aligns the EVENT field.
+        task_id = sanitize_path_component(str(task_id))
         # Emit-eligibility (mirrors b1). owner-empty / teachback / signal-task
         # / handoff-absent all suppress, same as the emitter's bypass gates.
         # #917 R2 (validate-before-claim): also reject a WHITESPACE-only owner —
@@ -1307,6 +1319,43 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
             _emit_lead_side_agent_handoff(
                 team_name, task_id, owner, subject, metadata
             )
+            # task_metadata_snapshot seam — lead completion (additive-after;
+            # hermetic). Mirrors non-handoff sibling metadata into the
+            # journal at the lead's acceptance-commit, the completion-time
+            # point that lands BEFORE the boundary-shaped task-store drain
+            # that would destroy the source file. The {**disk, **incoming}
+            # shallow merge mirrors the platform's shallow metadata-merge
+            # semantics and the pass-it-resolved pattern of the handoff
+            # backstop below (order-independent: correct whether or not the
+            # platform's write has landed at fire time). A None-valued
+            # incoming key is the platform's DELETE op (set-to-null removes
+            # the key), so the overlay drops it rather than mirroring a
+            # phantom null the post-state no longer carries. All eligibility,
+            # dedup, and size-bounding live in the substrate; a snapshot
+            # failure must never affect the handoff emit above or this
+            # hook's advisory evaluation.
+            try:
+                incoming_md = (
+                    incoming_metadata
+                    if isinstance(incoming_metadata, dict)
+                    else {}
+                )
+                emit_task_metadata_snapshot(
+                    team_name,
+                    task_id,
+                    subject,
+                    owner,
+                    {
+                        **metadata,
+                        **{
+                            k: v
+                            for k, v in incoming_md.items()
+                            if v is not None
+                        },
+                    },
+                )
+            except Exception:
+                pass
 
         # artifact_paths emit BACKSTOP (#927 durability nudge). A FAIL-OPEN
         # advisory: when a PREPARE/ARCHITECT phase task completes but the
@@ -1712,6 +1761,53 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
             _emit_lead_side_agent_handoff(
                 team_name, task_id, owner_bs, subject_bs, meta_for_emit
             )
+
+        # task_metadata_snapshot seam — post-completion backstop (hermetic).
+        # GENERALIZES the handoff backstop above from handoff-only to
+        # any-metadata: a metadata-only TaskUpdate landing on an ALREADY-
+        # completed task (late verification records, a superseding analysis
+        # write) is observed by neither completion-time seam, so it is
+        # mirrored here. Kept a SIBLING block of the handoff backstop — the
+        # fire predicates differ by design (handoff-dict vs any-metadata);
+        # do not merge the conditions. Content-key dedup in the substrate
+        # makes the re-fire idempotent: an unchanged payload no-ops, a
+        # changed one emits a superseding event readers resolve latest-ts.
+        # A None-valued incoming key is the platform's DELETE op (set-to-null
+        # removes the key), so the overlay drops it rather than mirroring a
+        # phantom null the disk state no longer carries; a delete-ONLY write
+        # therefore mirrors the disk state as-is (deduping if unchanged).
+        # is_lead-gated like every lead-frame emit: only the lead's process
+        # resolves the canonical journal; a teammate frame self-drops.
+        if (
+            pact_context.is_lead(input_data)
+            and isinstance(incoming_metadata, dict)
+            and incoming_metadata
+            and isinstance(task_a, dict)
+            and task_a
+            and task_a.get("status") == "completed"
+        ):
+            try:
+                disk_md = (
+                    task_a.get("metadata")
+                    if isinstance(task_a.get("metadata"), dict)
+                    else {}
+                )
+                emit_task_metadata_snapshot(
+                    team_name,
+                    task_id,
+                    task_a.get("subject") or "",
+                    task_a.get("owner"),
+                    {
+                        **disk_md,
+                        **{
+                            k: v
+                            for k, v in incoming_metadata.items()
+                            if v is not None
+                        },
+                    },
+                )
+            except Exception:
+                pass
 
     return advisories
 
