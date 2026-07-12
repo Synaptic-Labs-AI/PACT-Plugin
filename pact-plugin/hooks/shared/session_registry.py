@@ -355,9 +355,11 @@ def _read_lead_session_id(team: str) -> str:
 
     Used by ``register()``'s in-process self-guard to compute the runtime
     structural topology signal ``own session_id == leadSessionId`` (in-process)
-    vs ``!=`` (tmux). LOGIC-PARITY with ``task_claim_gate._read_lead_session_id``,
-    INLINED here (not imported) to preserve this module's self-contained-leaf
-    invariant (no ``shared.*`` imports — see module docstring). Reuses the exact
+    vs ``!=`` (tmux). LOGIC-PARITY with the SSOT copy,
+    ``pact_context._read_lead_session_id`` (which ``task_claim_gate`` also
+    imports rather than duplicating), INLINED here (not imported) to preserve
+    this module's self-contained-leaf invariant (no ``shared.*`` imports — see
+    module docstring). Reuses the exact
     ``_is_safe_team_segment`` guard + ``_config_root()`` config-read idiom that
     ``_name_is_team_member`` above already uses, so the read adds no new I/O
     machinery.

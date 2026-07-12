@@ -910,14 +910,14 @@ def _read_lead_session_id(team_name: str, teams_dir: str | None = None) -> str:
     """Read the top-level ``leadSessionId`` from
     ``~/.claude/teams/{team_name}/config.json``.
 
-    LOGIC-PARITY: the guarded-read shape is a third copy of two existing
-    PRIVATE helpers — ``task_claim_gate._read_lead_session_id`` (same
-    signature including the ``teams_dir`` test override) and
-    ``session_registry._read_lead_session_id`` (INLINED there by design: that
-    module's self-contained-leaf invariant forbids ``shared.*`` imports, so it
-    must not be re-pointed here). Keep all three behaviorally identical; a
-    flagged consolidation may later re-point ``task_claim_gate`` to this
-    shared copy.
+    LOGIC-PARITY: this is the SSOT copy — ``task_claim_gate`` imports it
+    directly (its former inline copy is consolidated here; the ``teams_dir``
+    test override is part of the shared signature). The ONE remaining inline
+    copy is ``session_registry._read_lead_session_id``, INLINED there by
+    design: that module's self-contained-leaf invariant forbids ``shared.*``
+    imports, so it must not be re-pointed here. Keep the two implementations
+    behaviorally identical — the behavioral-parity drift-guard test compares
+    them on the same logical inputs.
 
     Fail-safe: returns "" on any of: unsafe team_name, missing/unreadable
     file, malformed JSON, non-object top-level, or a missing/non-string key.
