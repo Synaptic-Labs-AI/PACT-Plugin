@@ -8,9 +8,10 @@ Summary: Seam tests for the per-write task_metadata_snapshot mirror inside
          is_lead + session_id-vs-leadSessionId structural signals), the
          byte-identical default for untargeted traffic, unchanged-rewrite
          dedup, cross-seam dedup against the lead-completion seam,
-         delete-only (None-valued targeted key) semantics, and the
+         delete-only (None-valued targeted key) semantics, the
          rejection-cycle catch-up (a teachback_rejection-triggered fire
-         carries the on-disk teachback_submit sibling). The tmux teammate
+         carries the on-disk teachback_submit sibling), and the audit
+         verdict class (audit_summary as fire trigger). The tmux teammate
          row asserts WHERE events land (no journal file, no marker claim),
          not merely that nothing raises.
 Used by: pytest (CODE-phase verification for the per-write seam; adversarial
@@ -417,6 +418,44 @@ class TestPerWriteFirePredicate:
         assert snaps[0]["metadata"] == {
             "teachback_submit": {"understanding": "revised u2"},
             "teachback_rejection": {"reason": "first_action too vague"},
+        }
+
+    def test_audit_summary_fire_mirrors_overlay(
+        self, home, pact_context, snapshot_events
+    ):
+        """audit_summary as the fire TRIGGER: an open-task write of the
+        audit verdict mirrors the whole overlay immediately — the verdict
+        class a status-blind drain destroys while the lead still consumes
+        it. The delta carries ONLY audit_summary, so this row also goes
+        red if the key leaves the registry. Lead frame with NO
+        audit_summary_authored on disk on purpose: the gate's
+        authored-verdict preservation machinery (non-lead MIRROR write,
+        lead overwrite advisory) stays out of this row — it pins the
+        snapshot seam, not the advisory layer."""
+        pact_context(team_name=TEAM, session_id=LEAD_SID)
+        # Neutral subject per the file's established discipline: it must
+        # not pattern-match any write-time advisory rule.
+        _seed_task(
+            home,
+            TEAM,
+            "75",
+            subject="backend-coder: implement parser fix",
+            owner="backend-coder",
+            status="in_progress",
+            metadata={"note": "existing"},
+        )
+        tlg.evaluate_lifecycle(
+            _open_write_payload(
+                "75",
+                {"audit_summary": {"signal": "YELLOW", "findings": "gap"}},
+                session_id=LEAD_SID,
+            )
+        )
+        snaps = _snapshots(snapshot_events)
+        assert len(snaps) == 1
+        assert snaps[0]["metadata"] == {
+            "note": "existing",
+            "audit_summary": {"signal": "YELLOW", "findings": "gap"},
         }
 
     def test_completed_disk_status_routes_to_backstop_not_this_leg(

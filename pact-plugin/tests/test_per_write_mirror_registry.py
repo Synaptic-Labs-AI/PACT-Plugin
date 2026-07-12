@@ -12,7 +12,7 @@ Registry invariants:
 2. Registry is a non-empty frozenset of strings (shape pin — exact
    membership is deliberately NOT pinned so a registry extension stays a
    one-string source diff).
-3. The five ruled keys are a MINIMUM SUBSET of the registry — deletion of
+3. The seven ruled keys are a MINIMUM SUBSET of the registry — deletion of
    a ruled key goes red while extensions stay one-string diffs (the
    deletion-protection complement of the no-exact-membership choice).
 
@@ -74,6 +74,8 @@ class TestPerWriteMirrorKeysRegistry:
             "worktree_path",
             "teachback_submit",
             "teachback_rejection",
+            "audit_summary",
+            "audit_summary_authored",
         }) <= PER_WRITE_MIRROR_KEYS
 
 
