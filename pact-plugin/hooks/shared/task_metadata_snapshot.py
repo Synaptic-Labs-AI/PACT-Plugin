@@ -72,12 +72,28 @@ SNAPSHOT_EXCLUDE: frozenset[str] = frozenset({"handoff"})
 # invariant. NOT here: "variety" (already per-write-mirrored at its write
 # point by the dispatch_variety emit); "intentional_wait" (rides along in
 # the overlay; a wait-only write is not load-bearing alone).
+#
+# The audit pair is targeted for the same reasons as teachback_submit:
+# audit_summary (the auditor's live verdict) and audit_summary_authored
+# (the overwrite-protection mirror of the authored verdict) are consumed
+# by the lead at CODE-phase close while the audited task is still OPEN,
+# so a status-blind whole-store drain destroys them exactly while
+# load-bearing (a prior drain lost live audit verdicts mid-arc). Both are
+# teammate-written-class keys (the auditor writes from a teammate frame),
+# so they carry the same canonical-frame tmux asymmetry as
+# teachback_submit: in-process frames mirror per-write; a tmux teammate
+# frame defers to the completion seams. audit_summary_authored rides the
+# overlay whenever audit_summary fires (the gate's own writeback lands
+# before the leg's disk read), but stays targeted in its own right so a
+# direct write of the mirror alone is durability-covered too.
 PER_WRITE_MIRROR_KEYS: frozenset[str] = frozenset({
     "scope_contract",
     "nesting_depth",
     "worktree_path",
     "teachback_submit",
     "teachback_rejection",
+    "audit_summary",
+    "audit_summary_authored",
 })
 
 # Size caps on the canonical serialization (see _canonical_bytes). Empirics
