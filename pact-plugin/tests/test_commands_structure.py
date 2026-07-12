@@ -1136,14 +1136,16 @@ class TestPauseShutdownStructure:
 
 
 # Per-surface stable anchors for the shutdown termination-primitive skeleton.
-# All four surfaces carry the uniform 'cooperative-only' statement (refresh.md's
-# rationale clause is harmonized to the shared skeleton sentence); refresh.md
-# additionally pins its two-tier loop/tier tokens as secondary structural
-# anchors. Presence-only assertions — occurrence counts and surrounding prose
-# are not pinned.
+# Every listed surface carries the uniform 'cooperative-only' statement
+# (refresh.md's rationale clause is harmonized to the shared skeleton
+# sentence); refresh.md additionally pins its two-tier loop/tier tokens as
+# secondary structural anchors. Presence-only assertions — occurrence counts
+# and surrounding prose are not pinned. Any LLM-loaded surface that instructs
+# or reasons about teammate shutdown qualifies for a row here.
 TERMINATION_SKELETON_SURFACES = [
     ("commands/pause.md", ("cooperative-only",)),
     ("commands/refresh.md", ("cooperative-only", "then: TaskStop", "guarantee tier")),
+    ("commands/imPACT.md", ("cooperative-only",)),
     ("skills/pact-agent-teams/SKILL.md", ("cooperative-only",)),
     ("agents/pact-orchestrator.md", ("cooperative-only",)),
 ]
