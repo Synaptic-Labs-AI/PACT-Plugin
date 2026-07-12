@@ -105,7 +105,7 @@ The timestamp (`ts`) is set automatically by `make_event()` and serves the same 
 
 ### 6. Shut Down Teammates
 
-Shut down each active teammate **by name**, staggered 1-2 sends per turn (rate-limit discipline): graceful `shutdown_request` first, then `TaskStop("{teammate_name}")` as the guarantee tier — `shutdown_request` is cooperative-only (empirically, on the tmux backend an approved `shutdown_response` does not terminate the teammate's pane/process); `TaskStop` is authoritative. The secretary must have completed consolidation tasks (steps 1 and 3) before receiving the shutdown request.
+Shut down each active teammate **by name**, staggered 1 teammate per turn — the stagger counts ops, and request + stop = 2 ops (rate-limit discipline): graceful `shutdown_request` first, then `TaskStop("{teammate_name}")` as the guarantee tier — `shutdown_request` is cooperative-only (empirically, on the tmux backend an approved `shutdown_response` does not terminate the teammate's pane/process); `TaskStop` is authoritative. The secretary must have completed consolidation tasks (steps 1 and 3) before receiving the shutdown request.
 
 ```
 For each active teammate:
@@ -113,7 +113,9 @@ For each active teammate:
   then: TaskStop("{teammate_name}")
 ```
 
-EXPECTED post-state: each stop removes that member's roster entry — the config FILE and the team IDENTITY survive; a lead-only roster is the correct post-pause state, not corruption. Do NOT delete the team — it will be garbage-collected or reused on resume.
+Treat a `TaskStop` not-found / already-exited error as already-stopped success and CONTINUE the loop — never abort mid-iteration; an abort strands later teammates unstopped.
+
+EXPECTED post-state: each stop removes that member's roster entry — the config FILE and the team IDENTITY survive; a lead-only roster is the correct post-pause state, not corruption. Do NOT add synchronous send-confirmation (message delivery lands asynchronously) — verify by a disk re-read of the team config, or simply proceed. A send to an already-stopped teammate fails hard with a no-agent-reachable error — this is EXPECTED post-stop behavior, not a diagnostic detour. Do NOT delete the team — it will be garbage-collected or reused on resume.
 
 ### 7. Report
 
