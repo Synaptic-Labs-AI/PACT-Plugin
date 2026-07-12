@@ -1918,6 +1918,13 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
         # ns-scale registry scan first, already-paid disk-status read
         # second, the predicate's config.json read LAST (paid only on
         # matched non-lead frames — rare by construction).
+        #
+        # NOTE (deliberate split, applies to BOTH per-write legs): the
+        # predicate resolves its team via the identity-matched
+        # pact_context.get_team_name(), while this leg's emit + task_a
+        # read use the persisted ctx team_name resolved once at function
+        # top — do not unify either direction; full rationale at the
+        # resolver call inside is_canonical_journal_frame.
         if (
             isinstance(incoming_metadata, dict)
             and any(k in PER_WRITE_MIRROR_KEYS for k in incoming_metadata)

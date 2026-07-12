@@ -969,6 +969,25 @@ def is_canonical_journal_frame(input_data: dict) -> bool:
         # Team resolution goes through this module's own identity-matched
         # resolver (fail-closed empty on an unknown team, which routes the
         # helper to its "" return and this leg to False).
+        #
+        # DELIBERATE SPLIT — do not unify with the callers' team resolution.
+        # The per-write emit legs (task_lifecycle_gate) resolve their
+        # team_name ONCE from the persisted ctx SSOT
+        # (get_pact_context()["team_name"]) and use it for task reads +
+        # marker namespacing, because the dedup namespace must stay
+        # internally CONSISTENT across every seam that shares those markers
+        # (all gate seams use the same persisted value). THIS predicate
+        # instead answers a session-topology question — "does my session_id
+        # match the REAL platform team's leadSessionId?" — which requires
+        # the identity-ALIGNED resolver: after a resume-divergence the
+        # persisted name can point at a config whose leadSessionId is
+        # stale/wrong, flipping the topology answer. Re-pointing the emit
+        # path to the aligned resolver would fragment the marker namespace
+        # against the pre-existing seams (duplicate events); re-pointing
+        # this predicate to the persisted value would mis-answer topology
+        # after divergence. Divergent outcomes are bounded (skip or
+        # duplicate emit — bias-to-preservation, never a lost canonical
+        # emit), which is why the split is safe as well as intentional.
         lead_session_id = _read_lead_session_id(get_team_name())
         return bool(lead_session_id) and sid == lead_session_id
     except Exception:
