@@ -28,9 +28,12 @@ requirement (signal tasks may be ownerless).
 Supersession: multiple snapshots per task are legal — a changed payload
 after completion re-emits under a new content key; an unchanged payload
 never re-emits (the content-keyed O_EXCL marker dedups across all seams).
-Readers take latest-ts within the (task_id, occupant) group; the occupant
-field is the task-id-reuse discriminator (platform reuses task ids across
-arcs within one team).
+The content-key marker claims under the team root, or under the session-dir
+root when team_name is empty (dedup-resolvable ⇔ journal-resolvable — both
+derive from the same session context, so an emit that can reach the journal
+can always claim its dedup marker). Readers take latest-ts within the
+(task_id, occupant) group; the occupant field is the task-id-reuse
+discriminator (platform reuses task ids across arcs within one team).
 
 Size-bounding invariant: key EXISTENCE is never silently lost — worst case
 a key survives name-only in the payload's top-level "_dropped_keys" list.
@@ -52,6 +55,7 @@ from .agent_handoff_marker import (
     sanitize_path_component,
     unclaim,
 )
+from .pact_context import get_session_dir
 from .session_journal import append_event, get_journal_path, make_event
 
 # Keys never mirrored: only entries with equivalent-or-better journal
@@ -109,6 +113,23 @@ HEAD_BYTES: int = 1024
 # agent_handoff marker dir so the two event families can never suppress each
 # other. Module constant, never input-derived.
 SNAPSHOT_MARKER_NAMESPACE: str = ".task_metadata_snapshot_emitted"
+
+
+def _snapshot_marker_root(team_name: str) -> str | None:
+    """Marker-root policy for the snapshot family (the ONE place it lives).
+
+    Non-empty team -> None (default team-scoped root, path-identical to
+    the pre-fallback behavior). Empty team -> the session directory, so
+    dedup resolvability is equal-by-construction to journal resolvability
+    (get_journal_path derives from the same get_session_dir); the
+    "empty team + resolvable journal" fail-open gap cannot reopen. An
+    unresolvable session dir returns "" — the resolver treats a falsy
+    root as no-valid-target and fail-opens, which the emit path never
+    reaches (its writability precondition already returned).
+    """
+    if team_name:
+        return None
+    return get_session_dir()
 
 # Marker-dict key set used to recognize truncation markers this module
 # itself produced (stage-2 candidate filtering + stage-3 head emptying).
@@ -341,9 +362,17 @@ def snapshot_already_emitted(
     marker functions: a forgotten namespace arg would claim in one dir and
     no-op-unclaim against the other, leaving a poisoned marker; the wrapper
     makes that impossible by construction.
+
+    The marker root is likewise hard-bound: it comes from
+    _snapshot_marker_root, the family's single root-policy site, so the
+    claim and the rollback derive the same root by construction.
     """
     return already_emitted(
-        team_name, task_id, content_key, namespace=SNAPSHOT_MARKER_NAMESPACE
+        team_name,
+        task_id,
+        content_key,
+        namespace=SNAPSHOT_MARKER_NAMESPACE,
+        root_dir=_snapshot_marker_root(team_name),
     )
 
 
@@ -351,11 +380,15 @@ def snapshot_unclaim(team_name: str, task_id: str, content_key: str) -> None:
     """Compensating rollback for a claim whose journal write failed.
 
     Hard-bound twin of snapshot_already_emitted — same namespace constant,
-    same resolver SSOT underneath, so the claim and the rollback can never
-    reference divergent paths.
+    same root policy (_snapshot_marker_root), same resolver SSOT underneath,
+    so the claim and the rollback can never reference divergent paths.
     """
     unclaim(
-        team_name, task_id, content_key, namespace=SNAPSHOT_MARKER_NAMESPACE
+        team_name,
+        task_id,
+        content_key,
+        namespace=SNAPSHOT_MARKER_NAMESPACE,
+        root_dir=_snapshot_marker_root(team_name),
     )
 
 

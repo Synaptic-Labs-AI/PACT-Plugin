@@ -954,7 +954,11 @@ def is_canonical_journal_frame(input_data: dict) -> bool:
     completion-time seams — never worse than the shipped baseline — while
     emitting from a misclassified frame could silo the event AND poison
     the shared content-hash marker namespace, suppressing a later
-    canonical emit. The is_lead leg is independent of config readability,
+    canonical emit. On an empty-team frame the teammate-completion seams
+    starve by construction (no team namespace to read task state from),
+    so the effective deferral target is the lead-completion seam, whose
+    snapshot substrate dedups under the session-dir marker root when the
+    team is empty. The is_lead leg is independent of config readability,
     so lead-written keys keep full both-modes coverage even when the
     topology leg cannot resolve. Never raises.
     """
