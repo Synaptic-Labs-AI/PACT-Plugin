@@ -157,6 +157,7 @@ def _resolve_marker_target(
     occupant: str,
     *,
     namespace: str = _DEFAULT_MARKER_NAMESPACE,
+    root_dir: "str | Path | None" = None,
 ) -> "tuple[int | None, str | None]":
     """
     Sanitize + validate + pin the marker directory; return the open directory
@@ -169,6 +170,16 @@ def _resolve_marker_target(
     sites is the #877/#878 parallel-path-rot class — a single derivation makes
     alignment structural rather than a convention two sites must each remember.
 
+    root_dir (keyword-only, default None) is a caller-owned root override:
+    when provided, team_name is IGNORED (the caller owns root policy) and the
+    marker dir becomes {root_dir}/{namespace} with root_dir itself as the
+    containment base. A falsy or non-absolute root_dir is treated as "no
+    valid target" (same fail-open signal as a degenerate team). The default
+    None keeps the team-scoped derivation byte-identical to the pre-override
+    behavior. Only the (marker_dir, containment base) selection branches —
+    the guard/pin flow below is single-copy for both roots, so the override
+    cannot diverge from the team path's symlink/TOCTOU/dir_fd hazards.
+
     Returns (dir_fd, filename) on success — the caller MUST os.close(dir_fd).
     Returns (None, None) on any degenerate-key / symlink / containment /
     resolution failure; the caller fail-opens (already_emitted → emit;
@@ -179,42 +190,67 @@ def _resolve_marker_target(
     to the fd, cannot be redirected through a symlinked directory swapped in
     after this resolution.
     """
-    # Centralized normalization (SSOT): case-fold + sanitize team_name HERE so
-    # every caller derives a BYTE-IDENTICAL marker dir regardless of what it
-    # passed in — b1 (agent_handoff_emitter) pre-lowercases for its
-    # read_task_json path, b2 (task_lifecycle_gate) does not; folding .lower()
-    # in here makes the two structurally identical and closes the dormant
-    # case-drift (the #887 divergence shape one level up). Idempotent w.r.t.
-    # b1's external .lower(). The normalized value flows into BOTH _marker_dir()
-    # and the TOCTOU team_base below, keeping the containment check consistent.
-    team_name = sanitize_path_component(team_name.lower())
     task_id = sanitize_path_component(task_id)
     occupant = sanitize_path_component(occupant)
 
     # Degenerate post-sanitization values collapse the marker path onto an
-    # existing directory:
-    #   _marker_dir(".")  → .../teams/./.agent_handoff_emitted
-    #   _marker_dir("..") → .../teams/../.agent_handoff_emitted
-    # For the filename, the composite key f"{task_id}-{occupant}" no longer
-    # collapses on a degenerate task_id alone ("." → ".-<hash>", a normal
-    # file) — but the task_id guard is retained for defense + behavioral
-    # parity with the pre-occupant key, and a missing occupant (only possible
-    # if a caller bypasses occupant_hash()) is treated as "no valid key".
-    # In every degenerate case: signal "no valid target" so the caller
-    # fail-opens (already_emitted emits rather than suppresses; unclaim no-ops).
-    if (
-        not team_name
-        or team_name in (".", "..")
-        or not task_id
-        or task_id in (".", "..")
-        or not occupant
-    ):
+    # existing directory (see the team guard below for the dir-collapse
+    # shape). For the filename, the composite key f"{task_id}-{occupant}" no
+    # longer collapses on a degenerate task_id alone ("." → ".-<hash>", a
+    # normal file) — but the task_id guard is retained for defense +
+    # behavioral parity with the pre-occupant key, and a missing occupant
+    # (only possible if a caller bypasses occupant_hash()) is treated as "no
+    # valid key". These key guards apply under EITHER root. In every
+    # degenerate case: signal "no valid target" so the caller fail-opens
+    # (already_emitted emits rather than suppresses; unclaim no-ops).
+    if not task_id or task_id in (".", "..") or not occupant:
         return None, None
 
-    marker_dir = _marker_dir(team_name, namespace=namespace)
+    if root_dir is None:
+        # Centralized normalization (SSOT): case-fold + sanitize team_name
+        # HERE so every caller derives a BYTE-IDENTICAL marker dir regardless
+        # of what it passed in — b1 (agent_handoff_emitter) pre-lowercases
+        # for its read_task_json path, b2 (task_lifecycle_gate) does not;
+        # folding .lower() in here makes the two structurally identical and
+        # closes the dormant case-drift (the #887 divergence shape one level
+        # up). Idempotent w.r.t. b1's external .lower(). The normalized value
+        # flows into BOTH _marker_dir() and the TOCTOU containment base,
+        # keeping the containment check consistent.
+        #
+        # Degenerate team values collapse the marker path onto an existing
+        # directory:
+        #   _marker_dir(".")  → .../teams/./.agent_handoff_emitted
+        #   _marker_dir("..") → .../teams/../.agent_handoff_emitted
+        team_name = sanitize_path_component(team_name.lower())
+        if not team_name or team_name in (".", ".."):
+            return None, None
+        marker_dir = _marker_dir(team_name, namespace=namespace)
+        base = get_claude_config_dir() / "teams" / team_name
+    else:
+        # Caller-owned root: team_name is ignored (root policy lives with
+        # the caller). A falsy or relative root cannot anchor a containment
+        # check → no valid target, fail-open.
+        if not root_dir or not Path(root_dir).is_absolute():
+            return None, None
+        base = Path(root_dir)
+        # Pre-create the base itself at 0o700 when absent: the shared mkdir
+        # below applies mode= to the FINAL component (the namespace dir)
+        # only, so parents it creates get umask-default permissions — a
+        # claim that materializes a missing base (e.g. a session dir the
+        # journal writer has not created yet) would otherwise leave it
+        # looser than every other creator, which mkdirs the base as its own
+        # 0o700 leaf. exist_ok keeps an already-present base's mode
+        # untouched; on failure, refuse the target (fail-open emit),
+        # consistent with the shared mkdir's OSError posture below.
+        try:
+            base.mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError:
+            return None, None
+        marker_dir = base / namespace
+
     # Symlink-containment pre-check: if marker_dir already exists as a
     # symlink, refuse to use it (a pre-planted symlink could redirect marker
-    # creation outside the team directory). Fail-open emit rather than risk
+    # creation outside the containment base). Fail-open emit rather than risk
     # writing to an attacker-controlled location.
     if marker_dir.is_symlink():
         return None, None
@@ -226,19 +262,18 @@ def _resolve_marker_target(
 
     # TOCTOU containment re-check (closes the window between the is_symlink()
     # pre-check above and this mkdir): a symlink race could swap marker_dir
-    # to a directory OUTSIDE the team base between the two operations, and
-    # mkdir(exist_ok=True) silently follows an existing symlink. Re-resolve
-    # both paths and verify marker_dir is still contained within the team
-    # base. commonpath (not str.startswith — defeats the /teams/foo vs
+    # to a directory OUTSIDE the containment base between the two operations,
+    # and mkdir(exist_ok=True) silently follows an existing symlink.
+    # Re-resolve both paths and verify marker_dir is still contained within
+    # the base. commonpath (not str.startswith — defeats the /teams/foo vs
     # /teams/foobar prefix-collision) is the robust containment test; chosen
     # over Path.is_relative_to because pyproject pins requires-python >=3.7
     # and is_relative_to is 3.9+. On breach OR any resolution error: fail-open
     # emit (return None) WITHOUT writing a marker at the escaped path —
     # consistent with the is_symlink() pre-check's fail-open posture.
-    team_base = get_claude_config_dir() / "teams" / team_name
     try:
         real_marker = os.path.realpath(marker_dir)
-        real_base = os.path.realpath(team_base)
+        real_base = os.path.realpath(base)
         if os.path.commonpath([real_marker, real_base]) != real_base:
             return None, None
     except (OSError, ValueError):
@@ -273,9 +308,14 @@ def already_emitted(
     occupant: str,
     *,
     namespace: str = _DEFAULT_MARKER_NAMESPACE,
+    root_dir: "str | Path | None" = None,
 ) -> bool:
     """
     Test-and-set the per-(team, task_id, occupant) marker.
+
+    root_dir is a caller-policy root override (see _resolve_marker_target),
+    resolved through the same SSOT as unclaim() so the claim and the rollback
+    can never diverge.
 
     Returns True iff a prior fire for the same key already created the marker
     (caller should suppress the journal write). Returns False on fresh fires —
@@ -308,7 +348,7 @@ def already_emitted(
     process claimed but whose journal write then failed) — see unclaim().
     """
     dir_fd, filename = _resolve_marker_target(
-        team_name, task_id, occupant, namespace=namespace
+        team_name, task_id, occupant, namespace=namespace, root_dir=root_dir
     )
     if dir_fd is None:
         # Degenerate key / symlink-guarded / unresolvable → fail-open emit.
@@ -337,6 +377,7 @@ def unclaim(
     occupant: str,
     *,
     namespace: str = _DEFAULT_MARKER_NAMESPACE,
+    root_dir: "str | Path | None" = None,
 ) -> None:
     """
     Compensating rollback (#901, R1) — remove the marker THIS process just
@@ -345,6 +386,10 @@ def unclaim(
     the marker exists but no journal entry was written, so already_emitted()
     suppresses every later fire for the key forever (the silent-permanent-loss
     residual the writability gate only narrowed, not closed).
+
+    root_dir is a caller-policy root override (see _resolve_marker_target),
+    resolved through the same SSOT as already_emitted() so the rollback can
+    never target a root that diverges from the claim.
 
     Caller contract: invoke ONLY when this process OWNS the marker — i.e.
     already_emitted() returned False on THIS fire (a fresh O_EXCL create).
@@ -363,7 +408,7 @@ def unclaim(
     marker) — strictly no worse than not having the rollback. Never raises.
     """
     dir_fd, filename = _resolve_marker_target(
-        team_name, task_id, occupant, namespace=namespace
+        team_name, task_id, occupant, namespace=namespace, root_dir=root_dir
     )
     if dir_fd is None:
         return
