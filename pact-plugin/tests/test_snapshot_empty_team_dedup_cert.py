@@ -384,3 +384,54 @@ class TestResolverGuardOrderFailOpen:
         )
         unclaim(bad_team, degenerate_task_id, "k1")  # must not raise
         assert list(home.rglob("*-k1")) == []
+
+
+# =============================================================================
+# Healing transition — context repaired mid-session flips the marker root
+# =============================================================================
+class TestHealingTransition:
+    def test_heal_appends_exactly_one_duplicate_never_suppresses(
+        self, home, pact_context
+    ):
+        """Context repaired mid-session (empty team heals to a real team,
+        same session): the session-root marker claimed while the team was
+        empty is INVISIBLE to the teams-namespace check, so the first
+        healed emit of the identical payload APPENDS (bias-to-
+        preservation — the canonical emit is never suppressed by the
+        degenerate-state marker) and claims under the team root. The two
+        marker populations coexist disjointly on disk, and a further
+        identical healed emit is suppressed by the team-root marker — the
+        transition costs EXACTLY one duplicate append, no more."""
+        team = "pact-heal"
+        pact_context(team_name="", session_id="s-heal")
+        session_dir = pact_context_module.get_session_dir()
+        assert session_dir, "harness: session dir must resolve"
+
+        emit_task_metadata_snapshot("", "88", "subject", "owner", PAYLOAD_A)
+
+        assert len(_snapshot_events(session_dir)) == 1
+        assert len(_marker_files(Path(session_dir))) == 1
+
+        # Heal: same session_id/project_dir (same session dir, same
+        # journal), team_name now non-empty — as after a context repair.
+        pact_context(team_name=team, session_id="s-heal")
+        assert pact_context_module.get_session_dir() == session_dir
+
+        emit_task_metadata_snapshot(team, "88", "subject", "owner", PAYLOAD_A)
+
+        assert len(_snapshot_events(session_dir)) == 2, (
+            "the healed canonical emit was suppressed by the "
+            "degenerate-state session-root marker"
+        )
+        team_root = home / ".claude" / "teams" / team
+        assert len(_marker_files(team_root)) == 1
+        assert len(_marker_files(Path(session_dir))) == 1, (
+            "the healed emit disturbed the session-root population"
+        )
+
+        # The duplicate bound is exactly one: the team-root marker now
+        # suppresses further identical emits.
+        emit_task_metadata_snapshot(team, "88", "subject", "owner", PAYLOAD_A)
+
+        assert len(_snapshot_events(session_dir)) == 2
+        assert len(_marker_files(team_root)) == 1
