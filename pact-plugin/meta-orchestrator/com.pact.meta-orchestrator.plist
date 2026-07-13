@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.pact.meta-orchestrator.plist — launchd service definition
+
+  This runs the PACT Meta-Orchestrator as a persistent background service.
+  It auto-starts on login (RunAtLoad) and restarts on crash (KeepAlive).
+
+  Install: cp this to ~/Library/LaunchAgents/ then launchctl load it
+  See install.sh for automated installation.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pact.meta-orchestrator</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <!-- Use $HOME expansion via the shell to avoid hardcoded paths -->
+        <string>exec "$HOME/.claude/meta-orchestrator/launch.sh"</string>
+    </array>
+
+    <!-- Auto-start when the plist is loaded / user logs in -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart if the process exits (crash recovery) -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Don't restart faster than every 30 seconds to avoid tight crash loops -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <!-- Working directory for the service -->
+    <!-- Note: launchd doesn't expand ~ but does expand $HOME via the shell invocation above -->
+    <key>WorkingDirectory</key>
+    <string>/tmp</string>
+    <!-- WorkingDirectory is set to /tmp as a safe fallback since launchd
+         doesn't expand ~ or $HOME here. The actual cd happens in launch.sh. -->
+
+    <!-- Standard output/error logs managed by launchd as a fallback.
+         Primary logging is handled by launch.sh to LOG_DIR. These catch
+         any output before launch.sh's logging takes over. -->
+    <key>StandardOutPath</key>
+    <string>/tmp/com.pact.meta-orchestrator.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/com.pact.meta-orchestrator.stderr.log</string>
+
+    <!-- Environment variables -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- PATH must include locations for claude CLI, node, and standard tools.
+             This is a broad PATH to cover common install locations.
+             launch.sh refines this further at runtime. -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+
+        <!-- LANG/LC_ALL ensure proper text handling -->
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+
+        <key>LC_ALL</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+
+    <!-- Nice label for Activity Monitor -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>
