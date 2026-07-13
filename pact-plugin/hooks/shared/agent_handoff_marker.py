@@ -233,6 +233,19 @@ def _resolve_marker_target(
         if not root_dir or not Path(root_dir).is_absolute():
             return None, None
         base = Path(root_dir)
+        # Pre-create the base itself at 0o700 when absent: the shared mkdir
+        # below applies mode= to the FINAL component (the namespace dir)
+        # only, so parents it creates get umask-default permissions — a
+        # claim that materializes a missing base (e.g. a session dir the
+        # journal writer has not created yet) would otherwise leave it
+        # looser than every other creator, which mkdirs the base as its own
+        # 0o700 leaf. exist_ok keeps an already-present base's mode
+        # untouched; on failure, refuse the target (fail-open emit),
+        # consistent with the shared mkdir's OSError posture below.
+        try:
+            base.mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError:
+            return None, None
         marker_dir = base / namespace
 
     # Symlink-containment pre-check: if marker_dir already exists as a

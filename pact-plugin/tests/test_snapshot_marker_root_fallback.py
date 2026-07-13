@@ -7,8 +7,11 @@ Summary: Verification tests for the snapshot family's session-dir marker-root
          fire emits AND claims under the session root; an identical repeat is
          suppressed; the healthy-team marker path is byte-identical to the
          pre-fallback behavior (no session-dir marker dir is created); an
-         unresolvable journal still defers before any claim; and a falsy or
-         relative root_dir at the resolver level fails open (emit, no marker).
+         unresolvable journal still defers before any claim; a falsy or
+         relative root_dir at the resolver level fails open (emit, no marker);
+         and a session dir materialized BY the fallback claim is created
+         0o700 (mode-pinned under a controlled umask) while a pre-existing
+         session dir's mode is never altered.
          Runs against the REAL marker SSOT and a REAL on-disk journal (no
          mocking of agent_handoff_marker internals) so claim, dedup, and
          append exercise the production paths end to end.
@@ -18,6 +21,8 @@ Used by: pytest. The comprehensive bidirectional certification suite
          the implementation works.
 """
 
+import os
+import stat
 from pathlib import Path
 
 import shared.pact_context as pact_context_module
@@ -118,6 +123,53 @@ class TestHealthyTeamTwoRootRegression:
         assert len(team_markers) == 1
         assert team_markers[0].startswith("9-")
         assert _marker_files(Path(session_dir)) == []
+
+
+class TestFallbackRootMaterializationMode:
+    def test_claim_materialized_session_dir_is_0o700(
+        self, tmp_path, monkeypatch, pact_context
+    ):
+        """A session dir materialized BY the fallback claim must be 0o700,
+        matching every other creator of the dir (which mkdirs it as its own
+        0o700 leaf). Pinned under an explicit umask: mkdir's mode= applies
+        to the final component only, so without the branch-local base
+        pre-create the session dir would land at umask default."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        pact_context(team_name="", session_id="s-mode-pin")
+        session_dir = Path(pact_context_module.get_session_dir())
+        assert not session_dir.exists(), "harness: dir must be claim-created"
+
+        prior_umask = os.umask(0o022)
+        try:
+            emit_task_metadata_snapshot("", "5", "subject", "owner", PAYLOAD)
+        finally:
+            os.umask(prior_umask)
+
+        assert session_dir.is_dir(), "claim must have materialized the dir"
+        assert stat.S_IMODE(session_dir.stat().st_mode) == 0o700
+        marker_dir = session_dir / SNAPSHOT_MARKER_NAMESPACE
+        assert stat.S_IMODE(marker_dir.stat().st_mode) == 0o700
+        assert len(_snapshot_events(str(session_dir))) == 1
+
+    def test_existing_session_dir_mode_untouched(
+        self, tmp_path, monkeypatch, pact_context
+    ):
+        """The pre-create is exist_ok — a session dir that already exists
+        keeps its mode exactly (no chmod side effect on the healthy path)."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        pact_context(team_name="", session_id="s-mode-keep")
+        session_dir = Path(pact_context_module.get_session_dir())
+        session_dir.mkdir(parents=True)
+        session_dir.chmod(0o750)
+
+        prior_umask = os.umask(0o022)
+        try:
+            emit_task_metadata_snapshot("", "5", "subject", "owner", PAYLOAD)
+        finally:
+            os.umask(prior_umask)
+
+        assert stat.S_IMODE(session_dir.stat().st_mode) == 0o750
+        assert len(_snapshot_events(str(session_dir))) == 1
 
 
 class TestRootDirResolverGuards:
