@@ -181,6 +181,30 @@ requires_prefold = pytest.mark.skipif(
     reason="fold-all-4 pre-fold differential requires merged history (shallow clone / missing 3972bb5f)",
 )
 
+# --- CARRIER-4 EQUALS-FORM baseline (#1176 remediation cycle 3). The final adversarial re-review's
+#     completeness critic caught an attached-equals over-block: a double-quoted variable-assignment
+#     value (an attached-equals flag `--message=`/`--title=`/… OR a general `FOO=`) carrying a benign
+#     command-substitution beside danger-looking prose was reverted WHOLE by carrier-4's _strip_var_dq
+#     (its old `if _has_command_substitution: return whole`), so the danger prose survived -> over-block.
+#     Fix 00195c1a routes such a value through the SAME _preserve_substitution_spans scanner the message
+#     carriers use (strip the inert literal, preserve the genuine $()/backtick spans), with two guards
+#     kept ahead of it: _var_is_expanded FIRST (a bare $VAR expansion executes the WHOLE value), and a
+#     `.`-guard (the matched key is preceded by `.` -> a `git -c section.key=` config injection, whose
+#     literal is not provably inert -> preserve WHOLE, keeping the #11 config-injection surface at EXACT
+#     status quo). D_PREFIX_C4 = bf7c8786 is the DIRECT PARENT of the fix (== 00195c1a^) and the SHARPEST
+#     immediate pre-fix baseline: it isolates THIS fix (carrier-4's pre-fix whole-preserve _strip_var_dq),
+#     where every equals-form over-block still reproduces. Each equals-form OVER-BLOCK-CLOSURE row asserts
+#     D_PREFIX_C4(cmd) is True -> D(cmd) is False. (D_PREFOLD=3972bb5f carries the same over-block — carrier-4
+#     was byte-identical there — but conflates it with the whole remediation arc; bf7c8786 is the per-fix
+#     discriminator.) Polarities were EMPIRICALLY ground-truthed at both baselines before codifying.
+_PREFIX_C4_SHA = "bf7c8786"  # 00195c1a^ — immediate pre-fix parent (span-scope not yet in _strip_var_dq)
+_PREFIX_C4 = _load_classifier(_PREFIX_C4_SHA)
+D_PREFIX_C4 = _PREFIX_C4.is_dangerous_command if _PREFIX_C4 is not None else None
+requires_prefix_c4 = pytest.mark.skipif(
+    _PREFIX_C4 is None,
+    reason="carrier-4 equals-form pre-fix differential requires merged history (shallow clone / missing bf7c8786)",
+)
+
 
 # --- Destructive verbs assembled at runtime — this file carries no raw literal.
 BD = "git " + "branch " + "-D victim"          # destructive branch-delete (prose target)
@@ -1030,3 +1054,173 @@ class TestFoldReDoSLinearity:
     def test_f2_save_flag_run_linear(self, n):
         # The stash-save positional anchor `(save(?:\s+-[-\w]+)*\s+)` is a deterministic per-flag loop.
         assert _elapsed_ms('git stash save ' + "-a " * n + '"msg"') < 1000.0, "save flag-run n=%d" % n
+
+
+# ===========================================================================
+# ===  #1176 CARRIER-4 EQUALS-FORM — remediation cycle 3. _strip_var_dq now  ===
+# ===  routes a non-expanded, non-config NAME="...$()..." value through the   ===
+# ===  SAME span scanner the message carriers use (_var_is_expanded FIRST +   ===
+# ===  a `.`-guard keeping git -c section.key= config injections at status    ===
+# ===  quo). NON-VACUITY vs D_PREFIX_C4 (bf7c8786 = 00195c1a^): every         ===
+# ===  equals-form closure flips True(pre-fix) -> False(HEAD). True-positives, ===
+# ===  the `-c` status-quo pins, and expanded/eval hold True at BOTH; the      ===
+# ===  no-$() literals / sq forms hold False at BOTH. Polarities EMPIRICALLY   ===
+# ===  ground-truthed (bf7c8786 AND 3972bb5f) before codification.            ===
+# ===========================================================================
+
+class TestC4EqualsFormClosure:
+    # The attached-equals over-block the completeness critic caught: a dq variable-assignment value
+    # (attached-equals flag OR general FOO=) carrying a benign $()/backtick beside danger prose was
+    # reverted WHOLE at pre-fix -> danger survived. The span-scope strips the inert literal and
+    # preserves only the genuine substitution span. Non-vacuity: True(bf7c8786) -> False(HEAD).
+    @pytest.mark.parametrize("label,cmd", [
+        ("commit --message=",   'git commit --message="as of $(date): note %s"' % BD),
+        ("commit -m=",          'git commit -m="$(date) note %s"' % BD),
+        ("commit backtick=",    'git commit --message="ran on `hostname`, then %s"' % BD),
+        ("commit apostrophe=",  'git commit --message="it\'s $(date); %s"' % BD),
+        ("commit two-sub=",     'git commit --message="$(date) and $(whoami): %s"' % BD),
+        ("gh issue --title=",   'gh issue create --title="as of $(date): %s"' % BD),
+        ("gh pr --body=",       'gh pr create --body="$(date) note %s"' % BD),
+        ("gh release --notes=", 'gh release create v1 --notes="$(date) drop %s"' % BD),
+        ("gh gist --desc=",     'gh gist create --desc="$(date) note %s" f.txt' % BD),
+        ("merge --message=",    'git merge --message="$(date) %s" feat' % BD),
+        ("stash push --message=", 'git stash push --message="$(date) %s"' % BD),
+        ("notes add --message=", 'git notes add --message="$(date) %s"' % BD),
+        ("general FOO=",        'FOO="$(date) note %s"' % BD),
+    ])
+    @requires_prefix_c4
+    def test_equals_form_closed(self, label, cmd):
+        assert D_PREFIX_C4(cmd) is True, \
+            "%s: must be over-blocked at pre-fix bf7c8786 (else the closure is vacuous): %r" % (label, cmd)
+        assert D(cmd) is False, \
+            "%s: the fix must CLOSE the equals-form over-block (cardinal sin if blocked): %r" % (label, cmd)
+
+
+class TestC4EquivalenceAxis:
+    # The under-block-safety REDUCES to carrier-4's accepted no-$() status quo (design §4.1):
+    #   (i)  no-$() literal        -> stripped WHOLE -> False  [carrier-4 ALREADY did this]
+    #   (ii) $()+literal           -> literal stripped, span preserved -> False  [SAME disposition
+    #        on the literal as (i), + the span] -> a CLOSURE (True pre-fix -> False HEAD)
+    #   (iii) expanded / eval      -> preserve WHOLE -> True  [_var_is_expanded/_has_eval FIRST]
+    # Because (ii) gives the literal the identical disposition as (i), the fix adds ZERO new
+    # under-block beyond carrier-4's accepted status quo.
+    @pytest.mark.parametrize("label,cmd", [
+        ("(i) FOO= no-$()",       'FOO="just note %s"' % BD),
+        ("(i) --message= no-$()", 'git commit --message="just note %s"' % BD),
+    ])
+    def test_axis_i_nosub_literal_false_both(self, label, cmd):
+        # (i) status quo: carrier-4's no-$() strip removes the whole inert literal at EVERY baseline.
+        assert D(cmd) is False, "%s: no-$() literal must be stripped -> False: %r" % (label, cmd)
+        if D_PREFIX_C4 is not None:
+            assert D_PREFIX_C4(cmd) is False, "%s: (i) must be False at pre-fix too (status quo): %r" % (label, cmd)
+
+    @pytest.mark.parametrize("label,cmd", [
+        ("(ii) FOO= $()+literal",       'FOO="$(date) just note %s"' % BD),
+        ("(ii) --message= $()+literal", 'git commit --message="$(date) just note %s"' % BD),
+    ])
+    @requires_prefix_c4
+    def test_axis_ii_sub_plus_literal_closes(self, label, cmd):
+        # (ii): the literal gets the SAME disposition as (i) (stripped) + the span preserved -> False.
+        # It was an over-block at pre-fix (whole-value revert) -> a genuine closure.
+        assert D_PREFIX_C4(cmd) is True, "%s: must be over-blocked at pre-fix: %r" % (label, cmd)
+        assert D(cmd) is False, "%s: (ii) literal must strip to the SAME False as (i): %r" % (label, cmd)
+
+    @pytest.mark.parametrize("label,cmd", [
+        ("(iii) expanded no-$()",  'FOO="drop %s" && $FOO' % BD),
+        ("(iii) expanded has-$()", 'FOO="$(date) %s" && $FOO' % BD),
+        ("(iii) eval no-$()",      'FOO="drop %s" ; eval $FOO' % BD),
+        ("(iii) eval has-$()",     'FOO="$(date) %s" ; eval $FOO' % BD),
+    ])
+    @requires_prefix_c4
+    def test_axis_iii_expanded_eval_true_both(self, label, cmd):
+        # (iii): a bare $VAR expansion / eval executes the WHOLE value -> preserve whole -> caught at
+        # BOTH baselines (the _var_is_expanded / _has_eval-FIRST guards, unchanged by the fix).
+        assert D_PREFIX_C4(cmd) is True and D(cmd) is True, \
+            "%s: expanded/eval must preserve-whole -> caught at both: %r" % (label, cmd)
+
+
+class TestC4TruePositive:
+    # The scanner PRESERVES $()/backtick spans VERBATIM (they execute at assignment), and an executing
+    # tail is a separate caught leg (leg-locality). True == pre-fix.
+    @pytest.mark.parametrize("label,cmd", [
+        ("commit =$(mal)",    'git commit --message="$(%s)"' % BD),
+        ("FOO=$(mal)",        'FOO="$(%s)"' % BD),
+        ("FOO=backtick",      'FOO="`%s`"' % BD),
+        ("gh --title=$(mal)", 'gh issue create --title="$(%s)"' % BD),
+        ("FOO= + && tail",    'FOO="note wip" && %s' % BD),
+        ("=value + && tail",  'git commit --message="ok $(date)" && %s' % BD),
+    ])
+    @requires_prefix_c4
+    def test_equals_truepositive_caught(self, label, cmd):
+        assert D_PREFIX_C4(cmd) is True and D(cmd) is True, \
+            "%s: a real $(destructive)/executing tail must stay caught at both: %r" % (label, cmd)
+
+
+class TestC4DotGuardStatusQuo:
+    # `git -c section.key=value` config-injection (#11) is OUT OF SCOPE: a config value can be an
+    # EXECUTABLE config (core.pager/alias.*/core.editor), so the `.`-guard (matched key preceded by
+    # `.`) preserves the WHOLE value, keeping the -c surface at EXACT status quo. Every `-c` case is
+    # PATCH == BASE (the fix neither improves nor weakens -c detection). Empirically ground-truthed:
+    # the guard keys on match.string[start-1]=='.' over the POST-carrier-1..3 sub surface, and on a
+    # `-c user.name=` the char before `name` IS `.`, while on `--message=`/`FOO=` it is `-`/nothing.
+    @pytest.mark.parametrize("label,cmd,expected", [
+        ("residual over-block", 'git -c user.name="$(date) %s" commit' % BD, True),   # deliberate `.`-guard trade
+        ("benign sub",          'git -c user.name="$(date)" commit', False),
+        ("#11 gap no-$()",      'git -c core.pager="%s" commit' % BD, False),          # carrier-4 no-$() strip
+        ("preserved $(danger)", 'git -c core.pager="$(%s)" commit' % BD, True),
+    ])
+    @requires_prefix_c4
+    def test_c_config_patch_equals_base(self, label, cmd, expected):
+        assert D(cmd) is expected, "%s: -c status-quo expected %s at HEAD: %r" % (label, expected, cmd)
+        assert D_PREFIX_C4(cmd) is expected, \
+            "%s: -c config detection must be PATCH==BASE (status quo, no change): %r" % (label, cmd)
+
+
+class TestC4SqControls:
+    # Single-quoted assignments are UNAFFECTED by the fix (the sq strip is unconditional inside the
+    # non-expanded branch; sq $() is a literal, never executed). False at HEAD (and at pre-fix).
+    @pytest.mark.parametrize("label,cmd", [
+        ("--message= sq", "git commit --message='$(date):%s'" % BD),
+        ("FOO= sq",       "FOO='$(date) %s'" % BD),
+    ])
+    def test_sq_equals_stays_false(self, label, cmd):
+        assert D(cmd) is False, "%s: single-quoted assignment (sq $() is literal) must stay False: %r" % (label, cmd)
+
+
+class TestC4StripSurfaceMechanism:
+    # Document HOW each disposition happens on the real strip surface (so a mechanism regression is
+    # visible, not just a boolean flip).
+    def test_equals_span_scoped(self):
+        assert STRIP('git commit --message="as of $(date): note %s"' % BD) \
+            == 'git commit --message="STRIPPED$(date)STRIPPED"'
+
+    def test_general_foo_span_scoped(self):
+        assert STRIP('FOO="$(date) note %s"' % BD) == 'FOO="$(date)STRIPPED"'
+
+    def test_nosub_literal_stripped_whole(self):
+        assert STRIP('FOO="just note %s"' % BD) == "FOO=STRIPPED"
+
+    def test_dot_guard_preserves_config_value_whole(self):
+        # The `.`-guard preserves the WHOLE -c config value (danger stays visible -> caught == base).
+        s = STRIP('git -c user.name="$(date) %s" commit' % BD)
+        assert BD in s, "the `.`-guard must preserve the whole -c value (status quo): %r" % s
+        assert s == 'git -c user.name="$(date) %s" commit' % BD
+
+    def test_nondot_flag_is_span_scoped_not_guarded(self):
+        # The `.`-guard must NOT fire on a `--flag=` name (preceded by `-`, not `.`) -> span-scoped.
+        # Leading $(date) span preserved, trailing inert literal -> STRIPPED (no leading literal here).
+        assert STRIP('git commit --message="$(date) %s"' % BD) == 'git commit --message="$(date)STRIPPED"'
+
+    def test_c_no_sub_config_stripped_11_gap(self):
+        # #11 gap unchanged: a -c config value with NO $() is stripped by carrier-4's no-$() arm.
+        assert STRIP('git -c core.pager="%s" commit' % BD) == "git -c core.pager=STRIPPED commit"
+
+
+class TestC4ReDoSLinearity:
+    # The reused _preserve_substitution_spans scanner is O(n) and the `.`-guard is O(1); a light
+    # linearity pin on the equals-form var-assignment path (measured ~73 ms at n=16000).
+    @pytest.mark.parametrize("n", [4000, 16000])
+    def test_equals_form_path_linear(self, n):
+        assert _elapsed_ms('FOO="' + "$(" * n + '"') < 1000.0, "FOO= unterminated $( n=%d" % n
+        assert _elapsed_ms('FOO="$(' + "(" * n + ")" * n + ')"') < 1000.0, "FOO= nested parens n=%d" % n
+        assert _elapsed_ms('FOO="' + "'" * n + '$(date)"') < 1000.0, "FOO= apostrophe-run n=%d" % n
