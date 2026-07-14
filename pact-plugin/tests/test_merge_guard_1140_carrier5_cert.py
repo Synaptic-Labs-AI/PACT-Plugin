@@ -151,6 +151,36 @@ requires_history = pytest.mark.skipif(
     reason="base-vs-firstfix-vs-fixR differentials require merged history (shallow clone / missing history)",
 )
 
+# --- FOLD-ALL-4 baseline (#1176 remediation cycle 2). A FRESH independent adversarial re-review of
+#     the FIX-R+C4 HEAD found FOUR MORE pre-existing over-blocks on the message-value strip surface;
+#     three fold commits closed them:
+#       F3+F4 (span-scoped substitution preserve — _preserve_substitution_spans + _extract_* scanners
+#              in the SHARED _keep_carrier_value: preserve only the genuine $()/backtick SPANS, strip
+#              the surrounding inert literal, dq-inner apostrophe folded into the literal run),
+#       F1    (per-verb message-abbreviation anchors: git commit long arm = any prefix-of-message
+#              --m..--message; git tag long arm BOUNDED to --mes..--message so it can never touch the
+#              value-taking --merged/--no-merged),
+#       F2    (sibling message-carrying git verbs: merge / stash push+store+save / notes add+append;
+#              cherry-pick/revert EXCLUDED — their -m is --mainline <NUMBER>, not a message).
+#     D_PREFOLD is the SINGLE unifying pre-fold baseline for ALL THREE classes: 3972bb5f is the
+#     DIRECT PARENT of the first fold commit (== 6a3a86b7^) and, being a TEST-ONLY commit (the 88-test
+#     cert expansion above), its merge_guard_common.py is byte-identical to the C4 source — so it LACKS
+#     _preserve_substitution_spans / _MSG_FLAG_ANCHOR / the --m(?:e...)? long arm and every fold
+#     over-block still reproduces there. THE NON-VACUITY CRUX: each fold OVER-BLOCK-CLOSURE row asserts
+#     D_PREFOLD(cmd) is True -> D(cmd) is False (the flip that proves the fix is load-bearing). A vector
+#     that is False at BOTH proves nothing about the fold and is codified as a CONTROL instead — see the
+#     `--m` boundary control (TestF1AbbreviationControls): `--m` ends exactly at the message `m`, so the
+#     UNCHANGED C4 short arm `-[a-ln-zA-Z]*m` already stripped its value pre-fold; the genuine closure
+#     set begins at `--me` (a trailing char after the `m` is what breaks the short arm). This boundary
+#     was found EMPIRICALLY by ground-truthing every vector's {pre-fold, HEAD} polarity before codifying.
+_PREFOLD_SHA = "3972bb5f"  # 6a3a86b7^ — FIX-R+C4 HEAD, source byte-identical to f7f370a3 (pre-fold)
+_PREFOLD = _load_classifier(_PREFOLD_SHA)
+D_PREFOLD = _PREFOLD.is_dangerous_command if _PREFOLD is not None else None
+requires_prefold = pytest.mark.skipif(
+    _PREFOLD is None,
+    reason="fold-all-4 pre-fold differential requires merged history (shallow clone / missing 3972bb5f)",
+)
+
 
 # --- Destructive verbs assembled at runtime — this file carries no raw literal.
 BD = "git " + "branch " + "-D victim"          # destructive branch-delete (prose target)
@@ -600,17 +630,31 @@ class TestCarrier4NonRegression:
 # --- C4 ANCHOR char-class DRIFT-DETECTOR (design-intent, deliberately NOT brittle).
 class TestC4AnchorDriftDetector:
     def test_anchor_uses_m_excluding_class(self):
-        # DESIGN-INTENT DRIFT-DETECTOR — the char class `[a-ln-zA-Z]` in C4's bundled-flag anchor
-        # arm `-[a-ln-zA-Z]*m` deliberately EXCLUDES lowercase `m`. That exclusion is LOAD-BEARING:
+        # DESIGN-INTENT DRIFT-DETECTOR — the char class `[a-ln-zA-Z]` in the bundled-flag SHORT ARM
+        # `-[a-ln-zA-Z]*m` deliberately EXCLUDES lowercase `m`. That exclusion is LOAD-BEARING:
         # it makes the cluster match stop at the message `m` with NO backtracking, so the pattern is
         # UNBOUNDED (closes even the absurd -aa..am cluster — zero residual over-block) AND PROVABLY
         # LINEAR. A greedy `-[A-Za-z]*m` / `-[a-zA-Z]*m` (INCLUDING m) backtracks to "find" the m ->
         # O(n^2) = a ReDoS over-block-BY-TIMEOUT; a bounded `-[a-ln-zA-Z]{0,N}m` would leave an
         # absurd-cluster residual over-block. A future reader must NOT "simplify"/bound this class.
-        anchor = r"((?:--message|-[a-ln-zA-Z]*m)\s*)"
+        #
+        # REALIGNED for the fold (F1): the positive check pins the m-EXCLUDING SHORT ARM
+        # `-[a-ln-zA-Z]*m` — the load-bearing linear/unbounded invariant — NOT the full anchor string.
+        # F1 legitimately rewrote each carrier's LONG arm (commit -> the prefix-of-message
+        # `--m(?:e(?:s...)?)?`; tag -> the bounded `--mes(?:s...)?`), leaving the short arm UNCHANGED,
+        # so the OLD full-string pin `((?:--message|-[a-ln-zA-Z]*m)\s*)` now appears 0x and its
+        # positive assertion was a STALE incidental over-coupling. This detector owns the short-arm
+        # class ONLY; the long arm's abbreviation-closure + --merged/--no-merged over-strip-safety is
+        # guarded BEHAVIORALLY by the F1 vector classes (TestF1CommitAbbreviationClosure /
+        # TestF1TagAbbreviationClosure / TestF1AbbreviationControls), not by a brittle full-string pin.
+        # Re-pinning the whole (now per-verb-divergent) anchor here would re-introduce exactly the
+        # over-coupling this comment warns against — do NOT. The short arm appears at BOTH the commit
+        # AND tag carriers (>= 2; F2's _MSG_FLAG_ANCHOR adds a 3rd, but this detector deliberately does
+        # NOT couple to F2's carrier count — >= 2, not >= 3).
+        short_arm = r"-[a-ln-zA-Z]*m"
         src = Path(mgc.__file__).read_text()
-        assert src.count(anchor) >= 2, \
-            "the C4 m-excluding anchor must appear at BOTH the commit AND tag carriers; found %d" % src.count(anchor)
+        assert src.count(short_arm) >= 2, \
+            "the m-excluding SHORT ARM must appear at BOTH the commit AND tag carriers; found %d" % src.count(short_arm)
         assert r"-[A-Za-z]*m" not in src and r"-[a-zA-Z]*m" not in src, \
             "the anchor must NOT use an m-INCLUDING class (backtracking -> ReDoS/over-block-by-timeout)"
         assert r"-[a-ln-zA-Z]{0," not in src, \
@@ -642,3 +686,347 @@ class TestReDoSLinearity:
         assert _elapsed_ms('git commit -m ' + '"' * n) < 1000.0, "unclosed-dq run n=%d" % n
         assert _elapsed_ms("git commit -m " + "$'" * n) < 1000.0, "ansi-c open run n=%d" % n
         assert _elapsed_ms('git commit -m ' + '\\' * n) < 1000.0, "backslash run n=%d" % n
+
+
+# ===========================================================================
+# ===  #1176 FOLD-ALL-4 — four re-review over-blocks closed on the message  ===
+# ===  value-strip surface (F1 abbreviated --message, F2 sibling verbs,     ===
+# ===  F3+F4 span-scoped substitution preserve). NON-VACUITY vs D_PREFOLD    ===
+# ===  (3972bb5f = 6a3a86b7^): EVERY over-block-closure flips True(pre-fold) ===
+# ===  -> False(HEAD); true-positives / under-block canaries / fail-safe     ===
+# ===  residuals hold True at BOTH. Polarities were EMPIRICALLY ground-      ===
+# ===  truthed against the real classifier before codification (the --m     ===
+# ===  boundary control is a False==False vector reclassified OUT of the     ===
+# ===  closure set — a closure that does not flip would be vacuous).         ===
+# ===========================================================================
+
+# --- F1 — abbreviated spaced --message anchor (commit prefix-of-message, tag bounded --mes).
+class TestF1CommitAbbreviationClosure:
+    # git commit's ONLY --m* option is --message, so every --m prefix unambiguously means it. The C4
+    # short arm mis-matched the `-m` INSIDE a longer abbreviation (--mess -> --mSTRIPPED, the real
+    # quoted value survived -> over-block); F1's prefix-of-message long arm matches the whole
+    # abbreviation and strips the value. The closure set BEGINS at --me (--m is the boundary control).
+    @pytest.mark.parametrize("label,cmd", [
+        ("--me",     'git commit --me "run %s later"' % BD),
+        ("--mes",    'git commit --mes "run %s later"' % BD),
+        ("--mess",   'git commit --mess "run %s later"' % BD),
+        ("--messa",  'git commit --messa "run %s later"' % BD),
+        ("--messag", 'git commit --messag "run %s later"' % BD),
+        ("--mess sq", "git commit --mess 'run %s later'" % BD),
+    ])
+    @requires_prefold
+    def test_commit_abbrev_closed(self, label, cmd):
+        assert D_PREFOLD(cmd) is True, \
+            "%s: must be over-blocked at pre-fold (else the closure is vacuous): %r" % (label, cmd)
+        assert D(cmd) is False, \
+            "%s: F1 must CLOSE the abbreviated-message over-block (cardinal sin if blocked): %r" % (label, cmd)
+
+
+class TestF1TagAbbreviationClosure:
+    # git tag ALSO has value-taking --merged/--no-merged, so its long arm is BOUNDED to --mes..--message
+    # (--m/--me are ambiguous — git rejects them). --mes onward unambiguously means --message.
+    @pytest.mark.parametrize("label,cmd", [
+        ("--mes",   'git tag --mes "run %s later" v1' % BD),
+        ("--mess",  'git tag --mess "run %s later" v1' % BD),
+        ("--messa", 'git tag --messa "run %s later" v1' % BD),
+    ])
+    @requires_prefold
+    def test_tag_abbrev_closed(self, label, cmd):
+        assert D_PREFOLD(cmd) is True, "%s: must be over-blocked at pre-fold: %r" % (label, cmd)
+        assert D(cmd) is False, "%s: F1 must CLOSE the tag abbreviated-message over-block: %r" % (label, cmd)
+
+
+class TestF1AbbreviationControls:
+    # Faithful forms that must NEVER be blocked at HEAD. `--m` is the BOUNDARY: it ends exactly at the
+    # message `m`, so the UNCHANGED C4 short arm already stripped its value pre-fold (False at BOTH
+    # baselines -> a CONTROL, NOT a closure; codifying it as a closure would be VACUOUS). --merged /
+    # --no-merged are the over-strip-safety controls: the tag long arm (bounded --mes) can never
+    # consume their values (char 3 is r != s), so they stay non-dangerous reads.
+    @pytest.mark.parametrize("label,cmd", [
+        ("commit --m boundary",  'git commit --m "run %s later"' % BD),
+        ("commit --message",     'git commit --message "run %s later"' % BD),
+        ("commit -m",            'git commit -m "run %s later"' % BD),
+        ("commit --mess benign", 'git commit --mess "just a normal message"'),
+        ("tag --message",        'git tag --message "run %s later" v1' % BD),
+        ("tag --merged",         'git tag --merged mainbranch'),
+        ("tag --no-merged",      'git tag --no-merged mainbranch'),
+    ])
+    def test_faithful_abbrev_stays_false(self, label, cmd):
+        assert D(cmd) is False, "%s: a faithful message-abbreviation click must NEVER be blocked: %r" % (label, cmd)
+
+    @requires_prefold
+    def test_dashm_boundary_was_false_prefold(self):
+        # Documents WHERE the closure set starts: `--m` was NOT over-blocked pre-fold (the C4 short
+        # arm already handled it), so it is a control, not a closure — the empirical basis for the
+        # closure set beginning at --me. This assertion is the tripwire that keeps the boundary honest.
+        assert D_PREFOLD('git commit --m "run %s later"' % BD) is False
+
+
+class TestF1AbbreviationUnderBlock:
+    # F1 widened the anchor; it must NOT open an under-block. An executing destructive tail after an
+    # abbreviated-message commit/tag stays a separate leg and is caught. Non-vacuity: True at BOTH.
+    @pytest.mark.parametrize("label,cmd", [
+        ("commit --mess && tail",  'git commit --mess "ok" && %s' % BDR),
+        ("commit --messa ; merge", 'git commit --messa "ok" ; %s' % M5),
+        ("tag --mess && tail",     'git tag --mess "ok" v1 && %s' % BDR),
+        ("tag --merged && tail",   'git tag --merged mainbranch && %s' % BDR),
+    ])
+    @requires_prefold
+    def test_abbrev_tail_caught(self, label, cmd):
+        assert D_PREFOLD(cmd) is True and D(cmd) is True, \
+            "%s: the executing tail after an abbreviated-message flag must stay caught: %r" % (label, cmd)
+
+    @requires_prefold
+    def test_nonfaithful_multiword_documented(self):
+        # `git commit --mess <BD>` UNQUOTED (multi-word) stays True at BOTH — NOT a regression: an
+        # unquoted git message is a SINGLE word, so `--mess git` takes `git` as the message and the
+        # `-D` makes git itself reject the command. A malformed non-faithful form; documented as
+        # True==True (no closure claimed, no under-block opened).
+        cmd = 'git commit --mess %s' % BD
+        assert D_PREFOLD(cmd) is True and D(cmd) is True, cmd
+
+
+class TestF1AbbreviationTruePositive:
+    @requires_prefold
+    def test_abbrev_substitution_still_caught(self):
+        # An abbreviated flag carrying a REAL $(destructive) still executes -> stays caught (True both).
+        cmd = 'git commit --mess "$(%s)"' % BD
+        assert D_PREFOLD(cmd) is True and D(cmd) is True, cmd
+
+
+# --- F2 — sibling message-carrying git verbs (merge / stash push+store+save / notes add+append).
+class TestF2SiblingVerbClosure:
+    # Pre-fold has NO carrier for these verbs, so a destructive literal in the message survived ->
+    # over-block. F2 adds a span-bounded flag-anchored carrier for each (the same machinery as
+    # carriers 5/7d). Non-vacuity: True(pre-fold) -> False(HEAD).
+    @pytest.mark.parametrize("label,cmd", [
+        ("merge -m",             'git merge -m "run %s later" feat' % BD),
+        ("merge --message",      'git merge --message "run %s later" feat' % BD),
+        ("merge --mess",         'git merge --mess "run %s later" feat' % BD),
+        ("stash push -m",        'git stash push -m "run %s later"' % BD),
+        ("stash push --message", 'git stash push --message "run %s later"' % BD),
+        ("stash store -m",       'git stash store -m "run %s later" abc123' % BD),
+        ("stash save positional", 'git stash save "run %s later"' % BD),
+        ("stash save -u",        'git stash save -u "run %s later"' % BD),
+        ("notes add -m",         'git notes add -m "run %s later"' % BD),
+        ("notes append -m",      'git notes append -m "run %s later"' % BD),
+        ("notes --ref add -m",   'git notes --ref refs/notes/x add -m "run %s later"' % BD),
+        ("merge -m F2xF3 sub",   'git merge -m "as of $(date): run %s later" feat' % BD),
+    ])
+    @requires_prefold
+    def test_sibling_verb_closed(self, label, cmd):
+        assert D_PREFOLD(cmd) is True, \
+            "%s: must be over-blocked at pre-fold (no carrier existed): %r" % (label, cmd)
+        assert D(cmd) is False, "%s: F2 must CLOSE the sibling-verb message over-block: %r" % (label, cmd)
+
+
+class TestF2Exclusions:
+    # cherry-pick/revert -m is --mainline <parent-number> (a NUMBER, not a message) — DELIBERATELY
+    # excluded from the message carriers. Faithful forms are False (no danger); a real destructive
+    # tail after them stays caught via leg-locality (True both).
+    @pytest.mark.parametrize("label,cmd", [
+        ("cherry-pick -m 1", 'git cherry-pick -m 1 abc123'),
+        ("revert -m 1",      'git revert -m 1 HEAD'),
+    ])
+    def test_exclusion_faithful_false(self, label, cmd):
+        assert D(cmd) is False, "%s: cherry-pick/revert mainline form is faithful: %r" % (label, cmd)
+
+    @pytest.mark.parametrize("label,cmd", [
+        ("cherry-pick tail", 'git cherry-pick -m 1 abc123 && %s' % BD),
+        ("revert tail",      'git revert -m 1 HEAD ; %s' % M5),
+    ])
+    @requires_prefold
+    def test_exclusion_tail_caught(self, label, cmd):
+        assert D_PREFOLD(cmd) is True and D(cmd) is True, \
+            "%s: the executing tail after an EXCLUDED verb must stay caught: %r" % (label, cmd)
+
+
+class TestF2BenignControls:
+    # Non-message forms + benign messages that must stay False at HEAD (F->F). `git merge-base` must
+    # NOT be mis-handled as `git merge`; bare `stash save` (no message) must not misfire.
+    @pytest.mark.parametrize("label,cmd", [
+        ("merge feat",      'git merge feat'),
+        ("merge -m benign", 'git merge -m "just merging main" feat'),
+        ("stash list",      'git stash list'),
+        ("stash pop",       'git stash pop'),
+        ("notes list",      'git notes list'),
+        ("merge-base",      'git merge-base main feat'),
+        ("stash save bare", 'git stash save'),
+        ("stash save wip",  'git stash save wip'),
+    ])
+    def test_benign_stays_false(self, label, cmd):
+        assert D(cmd) is False, "%s: benign sibling-verb form must stay False: %r" % (label, cmd)
+
+
+class TestF2UnderBlock:
+    @pytest.mark.parametrize("label,cmd", [
+        ("merge -m && tail",   'git merge -m "ok" feat && %s' % BD),
+        ("stash push && tail", 'git stash push -m "ok" && %s' % BD),
+        ("stash save ; merge", 'git stash save "ok" ; %s' % M5),
+        ("notes add | tail",   'git notes add -m "ok" | %s' % BD),
+    ])
+    @requires_prefold
+    def test_sibling_tail_caught(self, label, cmd):
+        assert D_PREFOLD(cmd) is True and D(cmd) is True, \
+            "%s: the executing tail after a new carrier must stay caught: %r" % (label, cmd)
+
+
+class TestF2TruePositive:
+    @pytest.mark.parametrize("label,cmd", [
+        ("merge $(mal)",      'git merge -m "$(%s)" feat' % BD),
+        ("stash save $(mal)", 'git stash save "$(%s)"' % BD),
+    ])
+    @requires_prefold
+    def test_sibling_substitution_caught(self, label, cmd):
+        assert D_PREFOLD(cmd) is True and D(cmd) is True, \
+            "%s: a REAL $(destructive) via a new carrier must stay caught: %r" % (label, cmd)
+
+
+# --- F3+F4 — span-scoped command-substitution preserve (benign $()/backtick + danger prose).
+class TestF3SubstitutionClosure:
+    # Pre-fold's _keep_carrier_value preserved the WHOLE value on ANY $()/backtick, so a benign
+    # $(date) beside danger-looking prose survived -> over-block. F3 preserves ONLY the genuine
+    # substitution SPANS and strips the surrounding inert literal. Non-vacuity: True -> False.
+    @pytest.mark.parametrize("label,cmd", [
+        ("benign $(date)",             'git commit -m "as of $(date +%%F): stop %s shim"' % PF),
+        ("escaped \\$( inert",         'git commit -m "doc \\$(date); note %s"' % BD),
+        ("nested $()",                 'git commit -m "build $(echo $(date)) then %s"' % BD),
+        ("two-sub",                    'git commit -m "$(date) and $(whoami): %s"' % BD),
+        ("backtick benign",            'git commit -m "ran on `hostname`, then %s"' % BD),
+        ("apostrophe it's",            'git commit -m "it\'s the $(date) build; note %s"' % BD),
+        ("apostrophe don't",           'git commit -m "don\'t $(date): %s"' % BD),
+        ("multi-apostrophe",           'git commit -m "it\'s Bob\'s $(date) fix; %s"' % BD),
+        ("tag sub",                    'git tag -m "built $(date), see %s" v1' % BD),
+        ("escaped-quote OUTside span", 'git commit -m "use \\"$(date)\\" then %s"' % BD),
+    ])
+    @requires_prefold
+    def test_substitution_closed(self, label, cmd):
+        assert D_PREFOLD(cmd) is True, \
+            "%s: must be over-blocked at pre-fold (whole-value preserve): %r" % (label, cmd)
+        assert D(cmd) is False, "%s: F3 must CLOSE the benign-substitution over-block: %r" % (label, cmd)
+
+
+class TestF3Controls:
+    # Faithful forms False at BOTH (F->F). apostrophe-NO-sub is inert prose (no $()) -> stripped at
+    # both. benign-sub-no-danger preserves a harmless $(date) at pre-fold (no danger to survive). The
+    # single-quoted VALUE is untouched by the fold (arm-2 strips sq unconditionally) — no sq work.
+    @pytest.mark.parametrize("label,cmd", [
+        ("normal message",       'git commit -m "just a normal message"'),
+        ("benign sub no danger", 'git commit -m "the $(date) build"'),
+        ("apostrophe NO sub",    'git commit -m "it\'s a fix; drop %s"' % BD),
+        ("sq VALUE untouched",   "git commit -m '$(date) then %s'" % BD),
+    ])
+    def test_faithful_substitution_stays_false(self, label, cmd):
+        assert D(cmd) is False, "%s: faithful message must never be blocked: %r" % (label, cmd)
+
+
+class TestF3TruePositive:
+    # The scanner PRESERVES $()/backtick spans VERBATIM, so a REAL $(destructive) stays caught.
+    @pytest.mark.parametrize("label,cmd", [
+        ("whole $(mal)", 'git commit -m "$(%s)"' % BD),
+        ("embedded",     'git commit -m "pre $(%s) post"' % BD),
+        ("backtick mal", 'git commit -m "`%s`"' % BD),
+        ("tag $(mal)",   'git tag -m "$(%s)" v1' % BD),
+    ])
+    @requires_prefold
+    def test_substitution_truepositive_caught(self, label, cmd):
+        assert D_PREFOLD(cmd) is True and D(cmd) is True, \
+            "%s: a preserved $(destructive) span must stay caught: %r" % (label, cmd)
+
+
+class TestF3UnderBlock:
+    # The span ends at the first UNQUOTED separator, so an executing tail (even after a benign
+    # $(date) or an apostrophe value) stays a separate caught leg.
+    @pytest.mark.parametrize("label,cmd", [
+        ("benign sub + tail",     'git commit -m "ok $(date)" && %s' % BD),
+        ("apostrophe val + tail", 'git commit -m "it\'s ok $(date)" && %s' % BD),
+        ("benign sub ; merge",    'git commit -m "the $(date) build" ; %s' % M5),
+    ])
+    @requires_prefold
+    def test_substitution_tail_caught(self, label, cmd):
+        assert D_PREFOLD(cmd) is True and D(cmd) is True, \
+            "%s: the executing tail after a benign substitution must stay caught: %r" % (label, cmd)
+
+
+class TestF3GhSharedCarrierClosure:
+    # _keep_carrier_value is SHARED, so the identical benign-$()+danger over-block latent in the gh
+    # issue/pr create carriers is closed by the SAME F3 change (uniform 'model the semantics' fix).
+    @pytest.mark.parametrize("label,cmd", [
+        ("gh issue create", 'gh issue create --title "as of $(date): %s"' % BD),
+        ("gh pr create",    'gh pr create --title "$(date) release; drop %s"' % BD),
+    ])
+    @requires_prefold
+    def test_gh_carrier_substitution_closed(self, label, cmd):
+        assert D_PREFOLD(cmd) is True, "%s: must be over-blocked at pre-fold: %r" % (label, cmd)
+        assert D(cmd) is False, "%s: F3 must CLOSE the shared gh-carrier over-block: %r" % (label, cmd)
+
+    @requires_prefold
+    def test_gh_carrier_truepositive_kept(self):
+        cmd = 'gh issue create --title "$(%s)"' % BD
+        assert D_PREFOLD(cmd) is True and D(cmd) is True, "gh-carrier $(destructive) must stay caught: %r" % cmd
+
+
+class TestF3FailSafeResidual:
+    # The DOCUMENTED fail-safe residual (design §3.3): a quote-bearing $(...) span coexisting with
+    # danger prose in ONE dq value makes _preserve_substitution_spans return None -> preserve the
+    # WHOLE value (today's behavior). True==base — NOT a new over-block (== pre-fold) and NOT an
+    # under-block (preserve is maximally-caught). BOTH escaped and raw inner-quote forms.
+    @pytest.mark.parametrize("label,cmd", [
+        ("escaped inner-quote span", 'git commit -m "fix $(basename \\"$d\\") then %s"' % BD),
+        ("raw inner-quote span",     'git commit -m "fix $(basename "$d") then %s"' % BD),
+    ])
+    @requires_prefold
+    def test_failsafe_residual_true_at_both(self, label, cmd):
+        assert D_PREFOLD(cmd) is True and D(cmd) is True, \
+            "%s: the fail-safe residual must be True==base (no regression, no under-block): %r" % (label, cmd)
+
+
+# --- FOLD STRIP-SURFACE MECHANISM PINS — document HOW each fold closure/retention happens.
+class TestFoldStripSurfaceMechanism:
+    def test_f1_abbrev_value_stripped(self):
+        # F1: the long arm matches the whole abbreviation, so the value strips to the inert bareword.
+        assert STRIP('git commit --me "run %s later"' % BD) == "git commit --me STRIPPED"
+        assert STRIP('git commit --messag "run %s later"' % BD) == "git commit --messag STRIPPED"
+
+    def test_dashm_boundary_stripped_at_head(self):
+        # The `--m` boundary control: the long arm matches --m and strips the value at HEAD too -> False.
+        assert STRIP('git commit --m "run %s later"' % BD) == "git commit --m STRIPPED"
+
+    def test_tag_merged_cosmetic_strip(self):
+        # Lead pin: the UNCHANGED short arm cosmetically strips --merged -> --mSTRIPPED, but the
+        # positional survives and the command stays a non-dangerous read (False). Documented, harmless.
+        assert STRIP('git tag --merged mainbranch') == "git tag --mSTRIPPED mainbranch"
+        assert STRIP('git tag --no-merged mainbranch') == "git tag --no-mSTRIPPED mainbranch"
+
+    def test_f2_save_positional_stripped(self):
+        assert STRIP('git stash save "run %s later"' % BD) == "git stash save STRIPPED"
+        assert STRIP('git stash save -u "run %s later"' % BD) == "git stash save -u STRIPPED"
+
+    def test_f2_mergebase_not_mishandled(self):
+        # `git merge-base` must survive intact (no message flag for the carrier to anchor on).
+        assert STRIP('git merge-base main feat') == "git merge-base main feat"
+
+    def test_f3_span_scoped_strip(self):
+        # F3: inert literal -> STRIPPED, the benign span preserved VERBATIM.
+        assert STRIP('git commit -m "use \\"$(date)\\" then %s"' % BD) == 'git commit -m "STRIPPED$(date)STRIPPED"'
+
+    def test_f3_residual_whole_value_preserved(self):
+        # Fail-safe residual: the whole value is preserved (danger survives -> stays caught), == pre-fold.
+        s = STRIP('git commit -m "fix $(basename \\"$d\\") then %s"' % BD)
+        assert BD in s, "the fail-safe residual must preserve the whole value (danger stays visible): %r" % s
+
+
+# --- FOLD ReDoS LINEARITY pins (ReDoS is an over-block BY TIMEOUT). The F3 scanners + the F2 save
+#     flag-run must be linear; the measured cost is ~50 ms at n=16000 (bounds are generous vs that).
+class TestFoldReDoSLinearity:
+    @pytest.mark.parametrize("n", [4000, 16000])
+    def test_f3_scanner_linear(self, n):
+        assert _elapsed_ms('git commit -m "' + "$(" * n + '"') < 1000.0, "unterminated $( n=%d" % n
+        assert _elapsed_ms('git commit -m "$(' + "(" * n + ")" * n + ')"') < 1000.0, "nested parens n=%d" % n
+        assert _elapsed_ms('git commit -m "' + "'" * n + '$(date)"') < 1000.0, "apostrophe-run n=%d" % n
+        assert _elapsed_ms('git commit -m "' + "$" * n + '"') < 1000.0, "dollar-run n=%d" % n
+
+    @pytest.mark.parametrize("n", [4000, 16000])
+    def test_f2_save_flag_run_linear(self, n):
+        # The stash-save positional anchor `(save(?:\s+-[-\w]+)*\s+)` is a deterministic per-flag loop.
+        assert _elapsed_ms('git stash save ' + "-a " * n + '"msg"') < 1000.0, "save flag-run n=%d" % n
