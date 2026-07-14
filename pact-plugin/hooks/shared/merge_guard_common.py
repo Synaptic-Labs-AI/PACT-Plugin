@@ -2161,26 +2161,33 @@ def _strip_non_executable_content(command: str) -> str:
             result,
         )
 
-    # 5. Strip git commit -m quoted arguments
-    #    The -m argument to git commit is a message, never executed directly.
-    #    GUARD (cmd-subst): preserve a double-quoted message containing $()/backtick.
+    # 5. git commit MESSAGE carrier — SPAN-BOUNDED + FLAG-ANCHORED (migrated from the
+    #    former inline -m-only literal-quote arms to the shared quote-balanced machinery;
+    #    a structural clone of carrier-7d `git tag -m`). The -m/--message argument is a
+    #    commit message, never executed directly. FLAG-anchored to the -m/--message VALUE
+    #    only; BOUNDED to a git-commit span whose body (the SAME quote-aware body as
+    #    carriers 7/7b/7c/7d) STOPS at the first UNQUOTED ;/&&/|/newline so an executing
+    #    tail stays OUTSIDE the span and is caught. The prefix is a NON-gobbling
+    #    `git <bounded non-separator words> commit` (handles global flags like -C <path>)
+    #    whose word class EXCLUDES ;&| so it CANNOT cross an unquoted separator —
+    #    deliberately NOT _GIT_PREFIX, whose (?:\S+\s+){0,N} gobbler spans separators and
+    #    would let a later `git commit` pull an intermediate `;gh …;` into ONE span,
+    #    re-opening the #1129-class leg-merge under-block. Bounded {0,N} keeps it linear.
     #    GUARD (output-side): a commit SUBJECT is echoed to git's stdout, so
-    #    `git commit -m "..." > >(bash)` (or `| bash`) routes it to a shell — the
-    #    outer piped/process-sub skip preserves it for detection (#1002).
+    #    `git commit -m "..." > >(bash)` (or `| bash`) routes it to a shell — the outer
+    #    piped/process-sub skip preserves it for detection (#1002).
+    #    GUARD (cmd-subst): $()/backtick in a double-quoted value preserves — rides on
+    #    _keep_carrier_value.
     if not piped_to_shell and not process_sub_to_shell:
-        def _strip_commit_msg_dq(match: re.Match) -> str:
-            if _has_command_substitution(match.group(0)):
-                return match.group(0)  # Preserve — $() executes
-            return match.group(1) + ' -m STRIPPED'
-
-        result = re.sub(
-            r'\b(git\s+commit)\s+-m\s+"(?:[^"\\]|\\.)*"',
-            _strip_commit_msg_dq,
-            result,
+        _git_commit_span = (
+            r"\bgit\s+(?:[^;&|\n\s]+\s+){0,%d}commit\b" % _MAX_GLOBAL_FLAG_TOKENS
+            + r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
         )
         result = re.sub(
-            r"\b(git\s+commit)\s+-m\s+'[^']*'",
-            r"\1 -m STRIPPED",
+            _git_commit_span,
+            lambda mm: _strip_flag_values(
+                mm.group(0), r"((?:-m|--message)\s+)", _keep_carrier_value
+            ),
             result,
         )
 
