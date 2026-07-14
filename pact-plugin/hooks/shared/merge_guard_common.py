@@ -288,17 +288,41 @@ _GH_PREFIX = r"\bgh\s+" + _GH_GLOBAL_FLAGS
 _GIT_PREFIX = r"\bgit\s+" + _GIT_GLOBAL_FLAGS
 _GH_API_PREFIX = _GH_PREFIX + r"api\b"
 
-# The quote-BALANCED value token (#1118 re-model) — the single Q-SAFE primitive both
-# carrier 8 and carrier 9 consume via _strip_flag_values. A value token is a maximal run
-# of {unquoted non-quote char | complete single-quoted span | complete double-quoted
-# span}, ending at unquoted whitespace. Because it consumes quoted spans ATOMICALLY it can
-# never bite a PARTIAL quoted span (a lone quote is neither `[^\s'"]` nor a complete
-# `"…"`/`'…'`), so it structurally CANNOT emit a dangling quote into the `stripped` string
-# that _mask_shell_quotes / _slice_stripped_legs consume — the root-cause fix for the
-# SEC-1/SEC-2 leg-merge regression. Assembled from the module's own quote-span fragments
-# (`[^\s'"]`, `'[^']*'`, `"(?:[^"\\]|\\.)*"`); the three alternatives have disjoint first
-# chars → linear, no ReDoS (same property as carriers 7/8's spans).
-_VALUE_TOKEN = r"""(?:[^\s'"]|'[^']*'|"(?:[^"\\]|\\.)*")+"""
+# The quote-BALANCED value token (#1118 re-model) — the single Q-SAFE primitive the
+# verb-message value strips consume via _strip_flag_values (arm 3, shared by carriers
+# 5/7/7b/7c/7d/8/9). A value token is a maximal run of bash quoted/escaped word pieces,
+# ending at unquoted whitespace. Because it consumes quoted spans ATOMICALLY it can never
+# bite a PARTIAL quoted span (a lone quote is not a complete `'…'`/`"…"`/`$'…'`), so it
+# structurally CANNOT emit a dangling quote into the `stripped` string that
+# _mask_shell_quotes / _slice_stripped_legs consume — the root-cause fix for the SEC-1/SEC-2
+# leg-merge regression. Its arm set mirrors _VERB_MSG_BODY below (bash's five quoting
+# mechanisms + backslash-escape), differing only in the plain-char class `[^\s'"$\\]` (a
+# value ends at unquoted whitespace) and the closing `+`. Inner quoted-span alternations are
+# first-char-disjoint (linear); the outer arms overlap only at the three `$`-initial arms, a
+# bounded per-unit ambiguity (both partitions reach the same offset) that cannot compound,
+# and the token matches only in trailing position so the greedy match never backtracks.
+# Linearity is verified empirically (the regex-perf suite + adversarial `$'…'`-repetition
+# timing).
+_VALUE_TOKEN = (
+    r"""(?:\\.|\$'(?:[^'\\]|\\.)*'|\$?"(?:[^"\\]|\\.)*"|'[^']*'|[^\s'"$\\]|\$)+"""
+)
+
+# Bash-faithful verb-message span BODY: a command's words from the verb to the first
+# UNQUOTED ;/&&/|/newline. Models ALL FIVE bash quoting mechanisms + backslash-escape so
+# it can NEVER desync quote-pairing and pair a `'` across a separator (the naive
+# `'[^']*'`-only body's leg-merge under-block). Arms in order:
+#   \\.                        backslash-escape OUTSIDE quotes (\'  \;  \&  \"  \\ …)
+#   \$'(?:[^'\\]|\\.)*'        ANSI-C  $'...'  (backslash honored inside)
+#   \$?"(?:[^"\\]|\\.)*"       double-quote "..." AND locale $"..." (backslash honored)
+#   '[^']*'                    single-quote '...'  (bash: NO escaping inside)
+#   [^&|;\n"'$\\]+             plain chars (excl. separators, quotes, $, backslash)
+#   \$                         a bare $ (e.g. $VAR)
+# Separators ;&|newline are excluded from EVERY arm, so the span stops at a real unquoted
+# separator. Shared SSOT for all verb-message carriers (5, 7/7b/7c/7d, curl) — replaces 7
+# former inline copies so they can never drift.
+_VERB_MSG_BODY = (
+    r"""(?:\\.|\$'(?:[^'\\]|\\.)*'|\$?"(?:[^"\\]|\\.)*"|'[^']*'|[^&|;\n"'$\\]+|\$)*"""
+)
 
 # Pre-compiled patterns for the operation-type classifier (consistent with
 # DANGEROUS_PATTERNS style).
@@ -2181,7 +2205,7 @@ def _strip_non_executable_content(command: str) -> str:
     if not piped_to_shell and not process_sub_to_shell:
         _git_commit_span = (
             r"\bgit\s+(?:[^;&|\n\s]+\s+){0,%d}commit\b" % _MAX_GLOBAL_FLAG_TOKENS
-            + r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+            + _VERB_MSG_BODY
         )
         result = re.sub(
             _git_commit_span,
@@ -2285,7 +2309,7 @@ def _strip_non_executable_content(command: str) -> str:
         # not following a carrier flag, is NEVER stripped and stays caught).
         _gh_carrier_span = (
             r"gh\s+(?:issue\s+(?:create|edit|comment)|pr\s+(?:create|comment|edit))\b"
-            r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+            + _VERB_MSG_BODY
         )
 
         def _strip_gh_carrier_span(span_match: re.Match) -> str:
@@ -2313,7 +2337,7 @@ def _strip_non_executable_content(command: str) -> str:
         #     start a carrier span. Shared quote-balanced _strip_flag_values + $()-preserve.
         _gh_release_span = (
             r"gh\s+release\s+(?:create|edit)\b"
-            r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+            + _VERB_MSG_BODY
         )
         result = re.sub(
             _gh_release_span,
@@ -2329,7 +2353,7 @@ def _strip_non_executable_content(command: str) -> str:
         #     (create|edit, NEVER bare `gh gist`) so `gh gist delete` never starts a carrier.
         _gh_gist_span = (
             r"gh\s+gist\s+(?:create|edit)\b"
-            r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+            + _VERB_MSG_BODY
         )
         result = re.sub(
             _gh_gist_span,
@@ -2362,7 +2386,7 @@ def _strip_non_executable_content(command: str) -> str:
         #     $()/backtick preserve rides on _keep_carrier_value.
         _git_tag_span = (
             r"\bgit\s+(?:[^;&|\n\s]+\s+){0,%d}tag\b" % _MAX_GLOBAL_FLAG_TOKENS
-            + r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+            + _VERB_MSG_BODY
         )
         result = re.sub(
             _git_tag_span,
@@ -2416,7 +2440,7 @@ def _strip_non_executable_content(command: str) -> str:
         # over-block re-opens for that spelling (the strip would not run).
         _http_client_span = (
             r"(?:\bcurl\b|\bwget\b|" + _GH_API_PREFIX + r")"
-            r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+            + _VERB_MSG_BODY
         )
         # Direct-value body flags (form a).
         _data_flag = r"(?:--data(?:-(?:raw|binary|ascii|urlencode))?|--body-data|--post-data|-d)"
@@ -2518,7 +2542,7 @@ def _strip_non_executable_content(command: str) -> str:
         # (which require a selector FLAG directly before the value), so they survive.
         _gh_api_selector_span = (
             r"(?:" + _GH_API_PREFIX + r")"
-            r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+            + _VERB_MSG_BODY
         )
         # FORM-AWARE, token-anchored separator (#1118 re-model, FIX-B). gh (cobra/pflag)
         # accepts a flag value four ways: space (`--jq x`), =-long (`--jq=x`), =-short
