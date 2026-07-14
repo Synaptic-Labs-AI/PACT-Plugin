@@ -2230,28 +2230,37 @@ def _strip_non_executable_content(command: str) -> str:
     #    ``bash -c`` content is implicitly preserved and correctly detected.
     #    (piped_to_shell / process_sub_to_shell are hoisted to the top.)
     if not piped_to_shell and not process_sub_to_shell:
-        # Double-quoted: also guard against command substitution inside
-        def _strip_echo_dq(match: re.Match) -> str:
-            if not _has_command_substitution(match.group(0)):
-                return match.group(1) + " STRIPPED"   # no-$() unchanged (bareword)
-            # has-$(): span-scope the value — strip the inert literal, preserve the executing
-            # $()/backtick spans (#1140). Emit the scanner's native dq output: it keeps each
-            # preserved span in the SAME executing dq context the coarse preserve used, so a
-            # real $(...) is detected IDENTICALLY to base (verified by the bidirectional cert).
-            # group(2) = the dq value.
-            transformed = _preserve_substitution_spans(match.group(2))
-            if transformed is None:
-                return match.group(0)                 # fail-safe: preserve whole
-            return match.group(1) + " " + transformed
+        # echo/printf PRINT their args, they never execute them (#1140). Strip / span-scope
+        # EVERY positional quoted arg, not just the first: a danger literal in a 2nd+ arg is
+        # inert (printed) yet was over-blocking a faithful click. The ONLY execution path is
+        # output-routing to a shell (`| bash`, `> >(bash)`), already handled by the outer
+        # piped/process-sub skip this whole block sits inside — so widening to ALL args is
+        # under-block-safe.
+        def _strip_echo_dq_arg(m: re.Match) -> str:
+            # One double-quoted arg. Inert -> bareword STRIPPED; a value with $()/backtick is
+            # span-scoped (inert literal stripped, executing spans preserved in the SAME dq
+            # context as base so detection is identical); fail-safe preserves whole.
+            if not _has_command_substitution(m.group(0)):
+                return "STRIPPED"
+            transformed = _preserve_substitution_spans(m.group(0))
+            return m.group(0) if transformed is None else transformed
 
+        def _strip_echo_span(span_match: re.Match) -> str:
+            # Strip every quoted arg within the echo/printf span. dq FIRST, then sq, so a dq
+            # value's embedded `'` is consumed before the sq pass runs (no cross-contamination);
+            # sq -> bareword STRIPPED (sq $() is literal). The verb + flags sit OUTSIDE these
+            # inner subs and stay intact.
+            span = span_match.group(0)
+            span = re.sub(r'"(?:[^"\\]|\\.)*"', _strip_echo_dq_arg, span)
+            span = re.sub(r"'[^']*'", "STRIPPED", span)
+            return span
+
+        # Span = verb + the shared quote-aware body that STOPS at the first UNQUOTED
+        # ;/&&/|/newline, so an executing tail (`echo "x" && git branch -D y`) stays OUTSIDE the
+        # span and is caught (leg-locality). Keep the `\s+` so a bare `echo` token never matches.
         result = re.sub(
-            r'\b(echo|printf)\s+(?:-[neE]+\s+)*("(?:[^"\\]|\\.)*")',
-            _strip_echo_dq,
-            result,
-        )
-        result = re.sub(
-            r"\b(echo|printf)\s+(?:-[neE]+\s+)*'[^']*'",
-            r"\1 STRIPPED",
+            r"\b(echo|printf)\s+" + _VERB_MSG_BODY,
+            _strip_echo_span,
             result,
         )
 
