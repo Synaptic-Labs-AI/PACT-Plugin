@@ -2006,18 +2006,106 @@ def _has_command_substitution(quoted_content: str) -> bool:
     return "$(" in quoted_content or "`" in quoted_content
 
 
+# Span-scoped command-substitution preserve (#1140). The two scanners below let
+# _keep_carrier_value preserve ONLY the genuine `$(...)`/backtick SPANS of a value
+# (they execute -> stay caught) while stripping the surrounding INERT literal — the
+# cure for the over-block where a benign `$(date)` beside danger-looking prose caused
+# the WHOLE value to be preserved. Both are single-pass char walks (O(n), no regex
+# backtracking): each advances its cursor monotonically and visits every char O(1) times.
+def _extract_dollar_paren(c, i):
+    """Return the balanced ``$(...)`` span starting at c[i] (c[i]=='$', c[i+1]=='(')
+    and the index just past it, via a quote-aware + escape-aware depth counter: a ``)``
+    inside a NESTED ``$(...)`` or inside a quoted span does NOT close the outer span.
+    Returns (None, len(c)) when the span is unterminated."""
+    n = len(c); depth = 0; j = i
+    while j < n:
+        ch = c[j]
+        if ch == "\\": j += 2; continue
+        if ch in "\"'":
+            q = ch; j += 1
+            while j < n:
+                if c[j] == "\\" and q == '"': j += 2; continue
+                if c[j] == q: j += 1; break
+                j += 1
+            continue
+        if ch == "(": depth += 1; j += 1; continue
+        if ch == ")":
+            depth -= 1; j += 1
+            if depth == 0: return c[i:j], j
+            continue
+        j += 1
+    return None, n   # unterminated
+
+
+def _extract_backtick(c, i):
+    """Return the balanced backtick span starting at c[i] (c[i]=='`') and the index
+    just past it. Returns (None, len(c)) when the span is unterminated."""
+    n = len(c); j = i + 1
+    while j < n:
+        if c[j] == "\\": j += 2; continue
+        if c[j] == "`": return c[i:j+1], j+1
+        j += 1
+    return None, n
+
+
+def _preserve_substitution_spans(value):
+    """Replace literal (inert) text with 'STRIPPED'; preserve $(...)/`...` spans VERBATIM.
+    Escaped \\$( and \\` are inert. value is a dq "..." (arm 1) or an unquoted VALUE-TOKEN (arm 3).
+    QUOTE-CONTEXT-FAITHFUL: inside a dq value a ' is a LITERAL apostrophe (bash does not treat
+    it as structural), so dq-inner folds it into the stripped literal run (else ubiquitous
+    it's/don't over-block). A " in dq-inner cannot occur well-formed (arm 1 matched
+    "(?:[^"\\]|\\.)*") -> malformed -> fail-safe. In the UNQUOTED arm BOTH ' and " stay
+    structural -> fail-safe. Return None -> FAIL-SAFE (caller preserves whole value = today's
+    behavior) for: unterminated span, a preserved span carrying a quote, a " in dq-inner, or
+    either quote in the unquoted arm."""
+    def _scan(c, dq_inner):
+        out = []; lit = False; i = 0; n = len(c)
+        def flush():
+            nonlocal lit
+            if lit: out.append("STRIPPED"); lit = False
+        while i < n:
+            ch = c[i]
+            if ch == "\\": lit = True; i += 2 if i+1 < n else 1; continue
+            if ch == "$" and i+1 < n and c[i+1] == "(":
+                span, j = _extract_dollar_paren(c, i)
+                if span is None or '"' in span or "'" in span: return None
+                flush(); out.append(span); i = j; continue
+            if ch == "`":
+                span, j = _extract_backtick(c, i)
+                if span is None or '"' in span or "'" in span: return None
+                flush(); out.append(span); i = j; continue
+            if ch == '"': return None              # structural dq terminator -> fail-safe (malformed in dq-inner)
+            if ch == "'" and not dq_inner: return None   # unquoted: ' is structural -> fail-safe
+            lit = True; i += 1                     # dq-inner ' falls through -> LITERAL
+        flush()
+        return "".join(out)
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        inner = _scan(value[1:-1], True)
+        return None if inner is None else '"' + inner + '"'
+    return _scan(value, False)                     # unquoted VALUE-TOKEN
+
+
 def _keep_carrier_value(m: "re.Match") -> str:
-    """Shared $()-preserving value replacer for the gh/git prose-carrier strips (#1129
-    R2): issue/pr create|edit|comment, release create|edit, gist create|edit, git tag
-    -m. Passed as `keep_fn` to _strip_flag_values (arms 1 & 3 — double-quoted + unquoted
-    VALUE-TOKEN). A double-quoted value containing $()/backtick EXECUTES, so it is
-    PRESERVED (stays caught); otherwise the flag(+separator) is kept and the value
-    replaced with the inert `STRIPPED` bareword. Hoisted from carrier-7's former
-    `_strip_dq` so every PR-added carrier shares ONE $()-preserving replacer (the
-    single-quoted arm strips unconditionally, handled inside _strip_flag_values)."""
-    if _has_command_substitution(m.group(0)):
-        return m.group(0)
-    return m.group(1) + "STRIPPED"
+    """Shared value replacer for the gh/git prose-carrier strips (#1129 R2): issue/pr
+    create|edit|comment, release create|edit, gist create|edit, git commit/tag -m, and
+    (new) merge/stash/notes. Passed as `keep_fn` to _strip_flag_values (arms 1 & 3 —
+    double-quoted + unquoted VALUE-TOKEN). Inert prose (no $()/backtick) -> the
+    flag(+separator) is kept and the value replaced with the inert `STRIPPED` bareword.
+    A value CONTAINING command substitution is SPAN-SCOPED (#1140): only the genuine
+    `$(...)`/backtick spans are preserved VERBATIM (they execute -> stay caught) while
+    the surrounding inert literal is stripped, so a benign `$(date)` beside
+    danger-looking prose no longer preserves the whole value (the over-block cure). On a
+    span the scanner cannot safely resolve (unterminated span, a preserved span carrying
+    a quote, or a structural quote in the value) it FAILS SAFE — the whole value is
+    preserved (today's behavior), never dropped. The single-quoted arm strips
+    unconditionally inside _strip_flag_values (untouched)."""
+    if not _has_command_substitution(m.group(0)):
+        return m.group(1) + "STRIPPED"          # inert prose -> strip (unchanged)
+    flag = m.group(1); value = m.group(0)[len(flag):]
+    transformed = _preserve_substitution_spans(value)
+    if transformed is None:
+        return m.group(0)                       # FAIL-SAFE: preserve whole value
+    return flag + transformed
 
 
 def _strip_flag_values(span: str, flag_sep_regex: str, keep_fn) -> str:
