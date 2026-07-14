@@ -205,6 +205,32 @@ requires_prefix_c4 = pytest.mark.skipif(
     reason="carrier-4 equals-form pre-fix differential requires merged history (shallow clone / missing bf7c8786)",
 )
 
+# --- F-C1 4-CARRIER baseline (#1176 remediation cycle 4 — the FINAL coarse-substitution-preserve cure).
+#     The adversarial re-review found the same benign-$()-preserves-whole pathology latent in the LAST 4
+#     prose carriers that had NOT yet been span-scoped: C3 echo/printf (_strip_echo_dq), C6 here-string
+#     (_strip_herestring_dq), C8 HTTP-body -d/--data (_keep_flag_dq), C9 gh-api -q/--jq selector
+#     (_keep_selector_dq) — each reverted the WHOLE dq value on ANY $()/backtick, so a benign $(date)
+#     beside danger prose survived -> over-block. Fix 3f25c8ea routes all four through the SAME
+#     _preserve_substitution_spans scanner, emitting the scanner's NATIVE DOUBLE-QUOTED output. That
+#     native-dq output is load-bearing: C8/C9 emit single-quoted 'STRIPPED' for a no-$() value but a
+#     DOUBLE-quoted "...STRIPPED..." for a has-$() value, keeping each preserved span in the SAME
+#     executing dq context the coarse preserve used — so a REAL $(malicious) is detected IDENTICALLY to
+#     base (verified True==base on every per-carrier true-positive below; a TP flipping to False would be
+#     a security under-block, not codified around). Each carrier's existing guards (outer piped/procsub
+#     skip; C6 shell-preceding bash/sh/zsh) stay AHEAD of the span-scope; sq carriers are untouched. This
+#     closes the coarse-preserve class across ALL 6 carriers (message via F3, var-assignment via the
+#     equals-form fix, + these 4). D_PREFIX_FC1 = a62703f1 is the DIRECT PARENT of the fix (== 3f25c8ea^)
+#     — the equals-form CERT commit whose merge_guard_common.py source is the post-equals-form / pre-F-C1
+#     classifier where all 4 carriers still coarse-preserve — the SHARP per-fix discriminator. Each closure
+#     asserts D_PREFIX_FC1(cmd) is True -> D(cmd) is False. Polarities EMPIRICALLY ground-truthed first.
+_PREFIX_FC1_SHA = "a62703f1"  # 3f25c8ea^ — pre-F-C1 classifier (the 4 carriers still coarse-preserve)
+_PREFIX_FC1 = _load_classifier(_PREFIX_FC1_SHA)
+D_PREFIX_FC1 = _PREFIX_FC1.is_dangerous_command if _PREFIX_FC1 is not None else None
+requires_prefix_fc1 = pytest.mark.skipif(
+    _PREFIX_FC1 is None,
+    reason="F-C1 4-carrier pre-fix differential requires merged history (shallow clone / missing a62703f1)",
+)
+
 
 # --- Destructive verbs assembled at runtime — this file carries no raw literal.
 BD = "git " + "branch " + "-D victim"          # destructive branch-delete (prose target)
@@ -1224,3 +1250,213 @@ class TestC4ReDoSLinearity:
         assert _elapsed_ms('FOO="' + "$(" * n + '"') < 1000.0, "FOO= unterminated $( n=%d" % n
         assert _elapsed_ms('FOO="$(' + "(" * n + ")" * n + ')"') < 1000.0, "FOO= nested parens n=%d" % n
         assert _elapsed_ms('FOO="' + "'" * n + '$(date)"') < 1000.0, "FOO= apostrophe-run n=%d" % n
+
+
+# ===========================================================================
+# ===  #1176 F-C1 4-CARRIER CURE — remediation cycle 4 (the FINAL           ===
+# ===  coarse-substitution-preserve closure). The last 4 prose carriers      ===
+# ===  (C3 echo/printf, C6 here-string, C8 HTTP-body -d/--data, C9 gh-api     ===
+# ===  -q/--jq) now span-scope has-substitution values via                   ===
+# ===  _preserve_substitution_spans (NATIVE DQ output). NON-VACUITY vs        ===
+# ===  D_PREFIX_FC1 (a62703f1 = 3f25c8ea^): every closure flips True(pre-fix) ===
+# ===  -> False(HEAD); every per-carrier TRUE-POSITIVE holds True==base (the  ===
+# ===  load-bearing native-dq under-block check — a TP->False would be a      ===
+# ===  security under-block); controls hold False==False. The echo/printf     ===
+# ===  MULTI-ARG anchor gap is pinned as a PRE-EXISTING out-of-scope boundary ===
+# ===  (True==base, over-blocks even with NO substitution). EMPIRICALLY       ===
+# ===  ground-truthed at a62703f1 vs HEAD before codification.               ===
+# ===========================================================================
+
+_FC1_URL = "http://example.com/api"
+
+
+class TestFC1EchoPrintfCarrier:
+    # C3: the echo/printf dq argument is PRINTED (never executed); only the $()/backtick span executes
+    # at command-build time and is preserved. Routed-to-shell (| bash / >(bash)) is skipped by the outer
+    # piped/procsub guard (unchanged). Closure set: benign substitution/backtick + danger prose.
+    @pytest.mark.parametrize("label,cmd", [
+        ("echo $()+danger",   'echo "as of $(date): note %s"' % BD),
+        ("printf $()+danger",  'printf "as of $(date): note %s"' % BD),
+        ("echo backtick",     'echo "ran on `hostname`, then %s"' % BD),
+        ("echo apostrophe",   'echo "it\'s $(date); %s"' % BD),
+        ("echo two-sub",      'echo "$(date) $(whoami): %s"' % BD),
+    ])
+    @requires_prefix_fc1
+    def test_closure(self, label, cmd):
+        assert D_PREFIX_FC1(cmd) is True, "%s: must be over-blocked at pre-fix (else vacuous): %r" % (label, cmd)
+        assert D(cmd) is False, "%s: F-C1 must CLOSE the echo/printf coarse-substitution over-block: %r" % (label, cmd)
+
+    @pytest.mark.parametrize("label,cmd", [
+        ("echo $(mal)",       'echo "$(%s)"' % BD),
+        ("echo embedded",     'echo "pre $(%s) post"' % BD),
+        ("echo backtick mal", 'echo "`%s`"' % BD),
+        ("echo + tail",       'echo "ok $(date)" && %s' % BD),
+    ])
+    @requires_prefix_fc1
+    def test_truepositive(self, label, cmd):
+        assert D_PREFIX_FC1(cmd) is True and D(cmd) is True, \
+            "%s: a real substitution / executing tail must stay caught at BOTH (native-dq): %r" % (label, cmd)
+
+    @pytest.mark.parametrize("label,cmd", [
+        ("benign sub",   'echo "release $(date +%F)"'),
+        ("no sub",       'echo "just a note"'),
+        ("sq untouched", "echo '$(date) %s'" % BD),
+    ])
+    def test_control(self, label, cmd):
+        assert D(cmd) is False, "%s: benign/sq echo must stay False: %r" % (label, cmd)
+
+
+class TestFC1HereStringCarrier:
+    # C6: the here-string value feeds the command's STDIN (inert) UNLESS the command IS a shell
+    # interpreter -> the shell-preceding guard (bash/sh/zsh) preserves whole in that case (a TP). Only
+    # the $() span executes at build time and is preserved.
+    @pytest.mark.parametrize("label,cmd", [
+        ("herestr $()+danger", 'cat <<< "as of $(date): note %s"' % BD),
+        ("herestr backtick",   'cat <<< "ran `hostname`: %s"' % BD),
+    ])
+    @requires_prefix_fc1
+    def test_closure(self, label, cmd):
+        assert D_PREFIX_FC1(cmd) is True, "%s: must be over-blocked at pre-fix (else vacuous): %r" % (label, cmd)
+        assert D(cmd) is False, "%s: F-C1 must CLOSE the here-string coarse-substitution over-block: %r" % (label, cmd)
+
+    @pytest.mark.parametrize("label,cmd", [
+        ("herestr $(mal)",       'cat <<< "$(%s)"' % BD),
+        ("herestr embedded",     'cat <<< "pre $(%s) post"' % BD),
+        ("herestr shell-preceding", 'bash <<< "$(date) %s"' % BD),  # shell reads stdin -> preserve whole -> True
+        ("herestr + tail",       'cat <<< "ok $(date)" ; %s' % BD),
+    ])
+    @requires_prefix_fc1
+    def test_truepositive(self, label, cmd):
+        assert D_PREFIX_FC1(cmd) is True and D(cmd) is True, \
+            "%s: real substitution / shell-preceding / tail must stay caught at BOTH: %r" % (label, cmd)
+
+    @pytest.mark.parametrize("label,cmd", [
+        ("no sub",       'cat <<< "just a note"'),
+        ("sq untouched", "cat <<< '$(date) %s'" % BD),
+    ])
+    def test_control(self, label, cmd):
+        assert D(cmd) is False, "%s: benign/sq here-string must stay False: %r" % (label, cmd)
+
+
+class TestFC1CurlDataCarrier:
+    # C8: the -d/--data value is request DATA sent over the network (not executed locally); only the
+    # $() span executes at build time and is preserved. The native-dq output is LOAD-BEARING here — this
+    # carrier emitted single-quoted 'STRIPPED' for a no-$() value, so a has-$() value now switches to a
+    # DOUBLE-quoted output to keep the preserved span executing; the TPs below prove detection is
+    # IDENTICAL to base (True==base).
+    @pytest.mark.parametrize("label,cmd", [
+        ("curl -d $()+danger",   'curl -d "as of $(date): note %s" %s' % (BD, _FC1_URL)),
+        ("curl --data $()+danger", 'curl --data "$(date) drop %s" %s' % (BD, _FC1_URL)),
+    ])
+    @requires_prefix_fc1
+    def test_closure(self, label, cmd):
+        assert D_PREFIX_FC1(cmd) is True, "%s: must be over-blocked at pre-fix (else vacuous): %r" % (label, cmd)
+        assert D(cmd) is False, "%s: F-C1 must CLOSE the curl -d coarse-substitution over-block: %r" % (label, cmd)
+
+    @pytest.mark.parametrize("label,cmd", [
+        ("curl -d $(mal)",   'curl -d "$(%s)" %s' % (BD, _FC1_URL)),
+        ("curl -d embedded", 'curl -d "pre $(%s) post" %s' % (BD, _FC1_URL)),
+        ("curl -d + tail",   'curl -d "ok $(date)" %s && %s' % (_FC1_URL, BD)),
+    ])
+    @requires_prefix_fc1
+    def test_truepositive(self, label, cmd):
+        assert D_PREFIX_FC1(cmd) is True and D(cmd) is True, \
+            "%s: real substitution in a curl -d value must stay caught at BOTH (native-dq): %r" % (label, cmd)
+
+    @pytest.mark.parametrize("label,cmd", [
+        ("benign sub",   'curl -d "user=$(whoami)" %s' % _FC1_URL),
+        ("no sub",       'curl -d "just a note" %s' % _FC1_URL),
+        ("sq untouched", "curl -d '$(date) %s' %s" % (BD, _FC1_URL)),
+    ])
+    def test_control(self, label, cmd):
+        assert D(cmd) is False, "%s: benign/sq curl -d must stay False: %r" % (label, cmd)
+
+
+class TestFC1GhApiSelectorCarrier:
+    # C9: the -q/--jq value is a jq filter / Go template evaluated by gh against the API response (not a
+    # local shell command); only the $() span executes at build time and is preserved. Native-dq output
+    # is load-bearing exactly as C8 — the TPs prove True==base.
+    @pytest.mark.parametrize("label,cmd", [
+        ("gh -q $()+danger",   'gh api repos/o/r -q "as of $(date): %s"' % BD),
+        ("gh --jq $()+danger", 'gh api repos/o/r --jq "$(date) %s"' % BD),
+    ])
+    @requires_prefix_fc1
+    def test_closure(self, label, cmd):
+        assert D_PREFIX_FC1(cmd) is True, "%s: must be over-blocked at pre-fix (else vacuous): %r" % (label, cmd)
+        assert D(cmd) is False, "%s: F-C1 must CLOSE the gh-api selector coarse-substitution over-block: %r" % (label, cmd)
+
+    @pytest.mark.parametrize("label,cmd", [
+        ("gh -q $(mal)",   'gh api repos/o/r -q "$(%s)"' % BD),
+        ("gh --jq $(mal)", 'gh api repos/o/r --jq "$(%s)"' % BD),
+        ("gh -q + tail",   'gh api repos/o/r -q "ok $(date)" && %s' % BD),
+    ])
+    @requires_prefix_fc1
+    def test_truepositive(self, label, cmd):
+        assert D_PREFIX_FC1(cmd) is True and D(cmd) is True, \
+            "%s: real substitution in a gh-api selector must stay caught at BOTH (native-dq): %r" % (label, cmd)
+
+    @pytest.mark.parametrize("label,cmd", [
+        ("jq filter",    'gh api repos/o/r -q ".name"'),
+        ("benign sub",   'gh api repos/o/r -q "$(date)"'),
+        ("sq untouched", "gh api repos/o/r -q '$(date) %s'" % BD),
+    ])
+    def test_control(self, label, cmd):
+        assert D(cmd) is False, "%s: benign/sq gh-api selector must stay False: %r" % (label, cmd)
+
+
+class TestFC1MultiArgBoundary:
+    # BOUNDARY PIN (design scope edge): the echo/printf carrier-3 anchor matches ONLY the FIRST dq
+    # argument, so a SECOND dq arg carrying danger prose is NEVER stripped -> over-block. This is a
+    # SEPARATE PRE-EXISTING anchor-coverage gap, NOT the coarse-substitution-preserve class F-C1 closes,
+    # so it is BASE==PATCH==True (documented out-of-scope). The no-substitution form proves it is the
+    # anchor gap (it over-blocks even without a $()), NOT an F-C1 miss. (A later cycle may fold this
+    # anchor-coverage class; until then this pin records the boundary so a future reader does not mistake
+    # it for an F-C1 regression.)
+    @requires_prefix_fc1
+    def test_multiarg_has_sub_true_at_both(self):
+        cmd = 'printf "%%s\\n" "note $(date) %s"' % BD
+        assert D_PREFIX_FC1(cmd) is True and D(cmd) is True, \
+            "the multi-arg 2nd-dq-arg over-block is PRE-EXISTING (True==base, out of F-C1 scope): %r" % cmd
+
+    @requires_prefix_fc1
+    def test_multiarg_no_sub_still_over_blocks(self):
+        # The load-bearing proof: it over-blocks even with NO substitution in the 2nd arg -> it is the
+        # carrier-3 first-arg-only anchor gap, NOT a coarse-substitution-preserve miss.
+        cmd = 'printf "%%s\\n" "note %s"' % BD
+        assert D_PREFIX_FC1(cmd) is True and D(cmd) is True, \
+            "the multi-arg gap over-blocks WITHOUT a substitution -> it is the anchor gap, not F-C1: %r" % cmd
+
+
+class TestFC1StripSurfaceMechanism:
+    # Document the native-dq span-scope surface (literal -> STRIPPED, span preserved VERBATIM) per
+    # carrier, so a mechanism regression is visible.
+    def test_echo_span_scoped(self):
+        assert STRIP('echo "as of $(date): note %s"' % BD) == 'echo "STRIPPED$(date)STRIPPED"'
+
+    def test_echo_truepositive_span_preserved(self):
+        assert STRIP('echo "$(%s)"' % BD) == 'echo "$(%s)"' % BD
+
+    def test_herestring_span_scoped(self):
+        assert STRIP('cat <<< "as of $(date): note %s"' % BD) == 'cat <<<"STRIPPED$(date)STRIPPED"'
+
+    def test_curl_data_native_dq_span_scoped(self):
+        # C8: the has-$() output is DOUBLE-quoted (native dq), NOT the single-quoted 'STRIPPED' the
+        # no-$() path emits — this keeps the preserved span executing (the under-block-safety hinge).
+        assert STRIP('curl -d "as of $(date): note %s" %s' % (BD, _FC1_URL)) \
+            == 'curl -d "STRIPPED$(date)STRIPPED" %s' % _FC1_URL
+
+    def test_curl_data_truepositive_span_preserved(self):
+        assert STRIP('curl -d "$(%s)" %s' % (BD, _FC1_URL)) == 'curl -d "$(%s)" %s' % (BD, _FC1_URL)
+
+    def test_gh_selector_native_dq_span_scoped(self):
+        assert STRIP('gh api repos/o/r -q "as of $(date): %s"' % BD) \
+            == 'gh api repos/o/r -q "STRIPPED$(date)STRIPPED"'
+
+
+class TestFC1ReDoSLinearity:
+    # The reused _preserve_substitution_spans scanner is O(n) across all 4 carriers; a light linearity
+    # pin (measured ~46 ms at n=16000).
+    @pytest.mark.parametrize("n", [4000, 16000])
+    def test_carrier_scanner_linear(self, n):
+        assert _elapsed_ms('echo "' + "$(" * n + '"') < 1000.0, "echo unterminated $( n=%d" % n
+        assert _elapsed_ms('curl -d "$(' + "(" * n + ")" * n + ')" ' + _FC1_URL) < 1000.0, "curl -d nested parens n=%d" % n
