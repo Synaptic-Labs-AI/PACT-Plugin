@@ -324,6 +324,17 @@ _VERB_MSG_BODY = (
     r"""(?:\\.|\$'(?:[^'\\]|\\.)*'|\$?"(?:[^"\\]|\\.)*"|'[^']*'|[^&|;\n"'$\\]+|\$)*"""
 )
 
+# Shared message-flag anchor (flag_sep group 1) for the sibling message-carrying git
+# verbs whose SOLE value-taking --m* option is --message — git merge, git stash
+# push/store, git notes add/append (verified via `git <verb> -h`, 2.50.1). The long
+# arm accepts any unambiguous abbreviation of --message (--m -> --message); the short
+# arm covers -m / bundled / attached. EXACTLY ONE capturing group (internals are all
+# non-capturing) so it satisfies the _strip_flag_values contract. This is byte-identical
+# to the git-commit anchor (carrier-5) but kept as a SEPARATE constant: the commit
+# carrier stays a self-contained literal, and git tag needs a DIFFERENT bounded variant
+# (its --merged/--no-merged collision), so the three are intentionally not unified.
+_MSG_FLAG_ANCHOR = r"((?:--m(?:e(?:s(?:s(?:a(?:g(?:e)?)?)?)?)?)?|-[a-ln-zA-Z]*m)\s*)"
+
 # Pre-compiled patterns for the operation-type classifier (consistent with
 # DANGEROUS_PATTERNS style).
 _GH_PR_MERGE_RE = re.compile(_GH_PREFIX + r"pr\s+merge\b")
@@ -2494,6 +2505,77 @@ def _strip_non_executable_content(command: str) -> str:
                 # re-unify with the commit anchor. Short arm unchanged.
                 r"((?:--mes(?:s(?:a(?:g(?:e)?)?)?)?|-[a-ln-zA-Z]*m)\s*)",
                 _keep_carrier_value,
+            ),
+            result,
+        )
+
+        # 7e. Sibling message-carrying git verbs — SPAN-BOUNDED + FLAG-ANCHORED, the same
+        #     machinery as carriers 5/7d. `git merge`, `git stash push/store/save`, and
+        #     `git notes add/append` accept a -m/--message (or, for `stash save`, a
+        #     POSITIONAL) whose value is annotation prose, never executed. A destructive
+        #     literal named inside that prose (e.g. `git merge -m "...git branch -D x..."`)
+        #     must not trip DANGEROUS_PATTERNS. Each span is a NON-gobbling
+        #     `git <bounded non-separator words> <verb>` (word class EXCLUDES ;&| so it
+        #     CANNOT cross an unquoted separator — deliberately NOT _GIT_PREFIX, whose
+        #     gobbler would re-open the leg-merge under-block) + _VERB_MSG_BODY (STOPS at
+        #     the first UNQUOTED ;/&&/|/newline, so an executing tail stays OUTSIDE the span
+        #     and is caught). merge / stash push / stash store / notes are anchored on
+        #     _MSG_FLAG_ANCHOR (their SOLE value-taking --m* is --message, verified via
+        #     `git <verb> -h`). git cherry-pick / git revert are DELIBERATELY EXCLUDED:
+        #     their -m is --mainline <parent-number> (a NUMBER, not a message) — treating
+        #     them as message carriers would be wrong; a real destructive tail after them
+        #     stays caught via leg-locality. $()/backtick preserve rides on
+        #     _keep_carrier_value.
+        _git_merge_span = (
+            r"\bgit\s+(?:[^;&|\n\s]+\s+){0,%d}merge\b" % _MAX_GLOBAL_FLAG_TOKENS
+            + _VERB_MSG_BODY
+        )
+        result = re.sub(
+            _git_merge_span,
+            lambda mm: _strip_flag_values(
+                mm.group(0), _MSG_FLAG_ANCHOR, _keep_carrier_value
+            ),
+            result,
+        )
+        # git stash push / store — both take -m/--message.
+        _git_stash_flag_span = (
+            r"\bgit\s+(?:[^;&|\n\s]+\s+){0,%d}stash\s+(?:push|store)\b" % _MAX_GLOBAL_FLAG_TOKENS
+            + _VERB_MSG_BODY
+        )
+        result = re.sub(
+            _git_stash_flag_span,
+            lambda mm: _strip_flag_values(
+                mm.group(0), _MSG_FLAG_ANCHOR, _keep_carrier_value
+            ),
+            result,
+        )
+        # git stash save <message> — the (deprecated) message is a POSITIONAL; save's
+        # non-message args are ALL boolean flags, so the anchor consumes `save` + any run
+        # of boolean flags + whitespace, and the dq/sq/VALUE-TOKEN arms strip the first
+        # value token (the positional message). Bare `git stash save` (no message) has no
+        # trailing value -> the anchor's trailing `\s+`+value never matches -> no misfire.
+        _git_stash_save_span = (
+            r"\bgit\s+(?:[^;&|\n\s]+\s+){0,%d}stash\s+save\b" % _MAX_GLOBAL_FLAG_TOKENS
+            + _VERB_MSG_BODY
+        )
+        result = re.sub(
+            _git_stash_save_span,
+            lambda mm: _strip_flag_values(
+                mm.group(0), r"(save(?:\s+-[-\w]+)*\s+)", _keep_carrier_value
+            ),
+            result,
+        )
+        # git notes add / append (-m/--message; an optional `--ref <ref>` global may
+        # precede the verb).
+        _git_notes_span = (
+            r"\bgit\s+(?:[^;&|\n\s]+\s+){0,%d}notes\s+(?:--ref(?:=|\s+)\S+\s+)?(?:add|append)\b"
+            % _MAX_GLOBAL_FLAG_TOKENS
+            + _VERB_MSG_BODY
+        )
+        result = re.sub(
+            _git_notes_span,
+            lambda mm: _strip_flag_values(
+                mm.group(0), _MSG_FLAG_ANCHOR, _keep_carrier_value
             ),
             result,
         )
