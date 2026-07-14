@@ -2351,7 +2351,16 @@ def _strip_non_executable_content(command: str) -> str:
                 # (--m -> --message): on `git commit` the ONLY --m* option IS
                 # --message, so a --m-prefix can never over-strip another option's
                 # value. Short arm (-m/bundled -am/attached -mMSG) unchanged.
-                r"((?:--m(?:e(?:s(?:s(?:a(?:g(?:e)?)?)?)?)?)?|-[a-ln-zA-Z]*m)\s*)",
+                # --trailer (#1178) carries a commit TRAILER (`Key: value` metadata
+                # appended to the message) — inert prose git never executes, so a
+                # danger-looking literal in a trailer value must not gate a faithful
+                # click. FLAG-anchored to the --trailer VALUE only (never a bare token),
+                # exactly like --message; disjoint from the --m* arm (t != m after --),
+                # so it can never over-strip another option's value. The `--trailer=VALUE`
+                # equals form is already stripped upstream by the variable-assignment
+                # carrier (which matches `trailer=...` as a NAME=VALUE), so only the SPACE
+                # form reaches here.
+                r"((?:--m(?:e(?:s(?:s(?:a(?:g(?:e)?)?)?)?)?)?|--trailer|-[a-ln-zA-Z]*m)\s*)",
                 _keep_carrier_value,
             ),
             result,
@@ -2469,9 +2478,16 @@ def _strip_non_executable_content(command: str) -> str:
             # ANSI-C `$'…'` + adjacent-concat `"a"'b'` body forms (consumed ATOMICALLY, so
             # no dangling quote → no leg-merge). $()/backtick preserve rides on
             # _keep_carrier_value. `edit` added to the pr alternation (OB1).
+            # --assignee/-a (create) + --add-assignee/--remove-assignee (edit) carry a
+            # GitHub LOGIN value (#1178) — inert API metadata never executed by a shell,
+            # so a danger-looking literal in an assignee value must not gate a faithful
+            # click. VALUE-taking on every carrier-7 verb (login arg), so they join the
+            # value-strip set; -a is admissible here because within these issue/pr verbs
+            # -a is unambiguously --assignee (contrast release -a=--attach, carrier 7b —
+            # a DIFFERENT span, never matched by this gh issue/pr anchor).
             return _strip_flag_values(
                 span_match.group(0),
-                r"((?:--title|--body|-t|-b)\s+)",
+                r"((?:--title|--body|--assignee|--add-assignee|--remove-assignee|-t|-b|-a)\s+)",
                 _keep_carrier_value,
             )
 

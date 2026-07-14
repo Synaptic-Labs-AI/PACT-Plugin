@@ -1553,25 +1553,40 @@ class TestEchoPrintfCarveoutControls:
 
 
 class TestEchoPrintfDeferredBoundary:
-    # DEFERRED-BOUNDARY pins — the STILL-OPEN positional over-block class the carve-out did NOT touch
-    # (it is echo/printf-only by construction). One REPRESENTATIVE PER CARRIER (C5/C7/C8), deliberately
-    # NOT an exhaustive enumeration: the cert's job is to RECORD the boundary (echo/printf multi-arg
-    # CLOSED vs the structural positional class DEFERRED), not to pin the deferred class — that is the
-    # dedicated anchor-coverage audit's job, and over-pinning would couple this cert to a class it does
-    # not fix. Each carrier's non-message positional/flag value is NOT stripped, so a danger literal
-    # there over-blocks — True==both, structurally untouched by the carve-out. Every example uses a
-    # PLAIN danger literal (NO substitution) — that IS the no-substitution proof: the over-block does
-    # not depend on a $(), it is the structural positional gap, so a future reader does not mistake
-    # True==both for a carve-out miss. When the deferred audit lands, these flip to closures.
+    # BOUNDARY pins for the positional over-block class the echo/printf carve-out did NOT touch
+    # (it is echo/printf-only by construction). C5 git --trailer + C7 gh --assignee WERE deferred
+    # here as True==both; the #1178 per-flag carrier extensions CLOSED them (now pinned as closures
+    # in TestPositionalCarrierNowClosed below). C8 curl -H remains True==both — a PERMANENT
+    # http-client-excluded residual: its destructive target is a quoted URL that masking hides, so
+    # a strip would UNDER-block (#1098-consistent, deliberately not closed). The example uses a
+    # PLAIN danger literal (NO substitution) — the over-block does not depend on a $(), it is the
+    # structural positional gap, so a future reader does not mistake True==both for a carve-out miss.
     @pytest.mark.parametrize("label,cmd", [
-        ("C5 git --trailer",  'git commit --trailer "Ref: %s"' % BD),
-        ("C7 gh --assignee",  'gh issue create --title "ok" --assignee "%s"' % BD),
         ("C8 curl -H header", 'curl -H "X-Note: %s" %s' % (BD, _FC1_URL)),
     ])
     @requires_prefix_echo
     def test_deferred_positional_stays_true_both(self, label, cmd):
         assert D_PREFIX_ECHO(cmd) is True and D(cmd) is True, \
-            "%s: STILL-DEFERRED positional over-block must be True==both (untouched by echo/printf carve-out): %r" % (label, cmd)
+            "%s: PERMANENT http-client-excluded positional residual must be True==both: %r" % (label, cmd)
+
+
+class TestPositionalCarrierNowClosed:
+    # #1178 closures — the C5/C7 positional over-blocks the deferred boundary pin above anticipated
+    # ("when the deferred audit lands, these flip to closures"). Each per-flag carrier extension
+    # strips the INERT flag VALUE (a git commit --trailer is `Key: value` metadata git never
+    # executes; a gh --assignee is a GitHub login), flag-anchored exactly like --message — so a
+    # faithful click now mints+merges. C1 does NOT apply (flag-anchored, not the general positional
+    # strip). MINIMAL boundary flip: ONE representative space-form per carrier (1:1 replacement of
+    # the two pins removed from the deferred class above), PLAIN literal (no $()). The comprehensive
+    # baked-baseline / non-vacuity closure cert across every spelling (-a, --add-assignee /
+    # --remove-assignee, --trailer+msg) is TEST-phase work, not pinned here.
+    @pytest.mark.parametrize("label,cmd", [
+        ("C5 git --trailer",  'git commit --trailer "Ref: %s"' % BD),
+        ("C7 gh --assignee",  'gh issue create --title "ok" --assignee "%s"' % BD),
+    ])
+    def test_positional_carrier_now_closed(self, label, cmd):
+        assert D(cmd) is False, \
+            "%s: #1178 per-flag carrier extension must CLOSE the positional over-block (False): %r" % (label, cmd)
 
 
 class TestEchoPrintfCarveoutStripSurface:
