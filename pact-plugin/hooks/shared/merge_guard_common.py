@@ -2210,7 +2210,7 @@ def _strip_non_executable_content(command: str) -> str:
         result = re.sub(
             _git_commit_span,
             lambda mm: _strip_flag_values(
-                mm.group(0), r"((?:-m|--message)\s+)", _keep_carrier_value
+                mm.group(0), r"((?:--message|-[a-ln-zA-Z]*m)\s*)", _keep_carrier_value
             ),
             result,
         )
@@ -2391,7 +2391,7 @@ def _strip_non_executable_content(command: str) -> str:
         result = re.sub(
             _git_tag_span,
             lambda mm: _strip_flag_values(
-                mm.group(0), r"((?:-m|--message)\s+)", _keep_carrier_value
+                mm.group(0), r"((?:--message|-[a-ln-zA-Z]*m)\s*)", _keep_carrier_value
             ),
             result,
         )
