@@ -2298,7 +2298,13 @@ def _strip_non_executable_content(command: str) -> str:
         result = re.sub(
             _git_commit_span,
             lambda mm: _strip_flag_values(
-                mm.group(0), r"((?:--message|-[a-ln-zA-Z]*m)\s*)", _keep_carrier_value
+                mm.group(0),
+                # Long arm accepts any unambiguous abbreviation of --message
+                # (--m -> --message): on `git commit` the ONLY --m* option IS
+                # --message, so a --m-prefix can never over-strip another option's
+                # value. Short arm (-m/bundled -am/attached -mMSG) unchanged.
+                r"((?:--m(?:e(?:s(?:s(?:a(?:g(?:e)?)?)?)?)?)?|-[a-ln-zA-Z]*m)\s*)",
+                _keep_carrier_value,
             ),
             result,
         )
@@ -2479,7 +2485,15 @@ def _strip_non_executable_content(command: str) -> str:
         result = re.sub(
             _git_tag_span,
             lambda mm: _strip_flag_values(
-                mm.group(0), r"((?:--message|-[a-ln-zA-Z]*m)\s*)", _keep_carrier_value
+                mm.group(0),
+                # Long arm is BOUNDED to --mes...--message — DELIBERATELY DIFFERENT
+                # from the commit anchor. `git tag` ALSO has the value-taking
+                # --merged/--no-merged options, which diverge from --message at char
+                # 3 (r != s), so starting the arm at --mes can never consume their
+                # values (--m/--me are ambiguous and git rejects them). Do NOT
+                # re-unify with the commit anchor. Short arm unchanged.
+                r"((?:--mes(?:s(?:a(?:g(?:e)?)?)?)?|-[a-ln-zA-Z]*m)\s*)",
+                _keep_carrier_value,
             ),
             result,
         )
