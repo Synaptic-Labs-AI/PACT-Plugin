@@ -288,17 +288,52 @@ _GH_PREFIX = r"\bgh\s+" + _GH_GLOBAL_FLAGS
 _GIT_PREFIX = r"\bgit\s+" + _GIT_GLOBAL_FLAGS
 _GH_API_PREFIX = _GH_PREFIX + r"api\b"
 
-# The quote-BALANCED value token (#1118 re-model) — the single Q-SAFE primitive both
-# carrier 8 and carrier 9 consume via _strip_flag_values. A value token is a maximal run
-# of {unquoted non-quote char | complete single-quoted span | complete double-quoted
-# span}, ending at unquoted whitespace. Because it consumes quoted spans ATOMICALLY it can
-# never bite a PARTIAL quoted span (a lone quote is neither `[^\s'"]` nor a complete
-# `"…"`/`'…'`), so it structurally CANNOT emit a dangling quote into the `stripped` string
-# that _mask_shell_quotes / _slice_stripped_legs consume — the root-cause fix for the
-# SEC-1/SEC-2 leg-merge regression. Assembled from the module's own quote-span fragments
-# (`[^\s'"]`, `'[^']*'`, `"(?:[^"\\]|\\.)*"`); the three alternatives have disjoint first
-# chars → linear, no ReDoS (same property as carriers 7/8's spans).
-_VALUE_TOKEN = r"""(?:[^\s'"]|'[^']*'|"(?:[^"\\]|\\.)*")+"""
+# The quote-BALANCED value token (#1118 re-model) — the single Q-SAFE primitive the
+# verb-message value strips consume via _strip_flag_values (arm 3, shared by carriers
+# 5/7/7b/7c/7d/8/9). A value token is a maximal run of bash quoted/escaped word pieces,
+# ending at unquoted whitespace. Because it consumes quoted spans ATOMICALLY it can never
+# bite a PARTIAL quoted span (a lone quote is not a complete `'…'`/`"…"`/`$'…'`), so it
+# structurally CANNOT emit a dangling quote into the `stripped` string that
+# _mask_shell_quotes / _slice_stripped_legs consume — the root-cause fix for the SEC-1/SEC-2
+# leg-merge regression. Its arm set mirrors _VERB_MSG_BODY below (bash's five quoting
+# mechanisms + backslash-escape), differing only in the plain-char class `[^\s'"$\\]` (a
+# value ends at unquoted whitespace) and the closing `+`. Inner quoted-span alternations are
+# first-char-disjoint (linear); the outer arms overlap only at the three `$`-initial arms, a
+# bounded per-unit ambiguity (both partitions reach the same offset) that cannot compound,
+# and the token matches only in trailing position so the greedy match never backtracks.
+# Linearity is verified empirically (the regex-perf suite + adversarial `$'…'`-repetition
+# timing).
+_VALUE_TOKEN = (
+    r"""(?:\\.|\$'(?:[^'\\]|\\.)*'|\$?"(?:[^"\\]|\\.)*"|'[^']*'|[^\s'"$\\]|\$)+"""
+)
+
+# Bash-faithful verb-message span BODY: a command's words from the verb to the first
+# UNQUOTED ;/&&/|/newline. Models ALL FIVE bash quoting mechanisms + backslash-escape so
+# it can NEVER desync quote-pairing and pair a `'` across a separator (the naive
+# `'[^']*'`-only body's leg-merge under-block). Arms in order:
+#   \\.                        backslash-escape OUTSIDE quotes (\'  \;  \&  \"  \\ …)
+#   \$'(?:[^'\\]|\\.)*'        ANSI-C  $'...'  (backslash honored inside)
+#   \$?"(?:[^"\\]|\\.)*"       double-quote "..." AND locale $"..." (backslash honored)
+#   '[^']*'                    single-quote '...'  (bash: NO escaping inside)
+#   [^&|;\n"'$\\]+             plain chars (excl. separators, quotes, $, backslash)
+#   \$                         a bare $ (e.g. $VAR)
+# Separators ;&|newline are excluded from EVERY arm, so the span stops at a real unquoted
+# separator. Shared SSOT for all verb-message carriers (5, 7/7b/7c/7d, curl) — replaces 7
+# former inline copies so they can never drift.
+_VERB_MSG_BODY = (
+    r"""(?:\\.|\$'(?:[^'\\]|\\.)*'|\$?"(?:[^"\\]|\\.)*"|'[^']*'|[^&|;\n"'$\\]+|\$)*"""
+)
+
+# Shared message-flag anchor (flag_sep group 1) for the sibling message-carrying git
+# verbs whose SOLE value-taking --m* option is --message — git merge, git stash
+# push/store, git notes add/append (verified via `git <verb> -h`, 2.50.1). The long
+# arm accepts any unambiguous abbreviation of --message (--m -> --message); the short
+# arm covers -m / bundled / attached. EXACTLY ONE capturing group (internals are all
+# non-capturing) so it satisfies the _strip_flag_values contract. This is byte-identical
+# to the git-commit anchor (carrier-5) but kept as a SEPARATE constant: the commit
+# carrier stays a self-contained literal, and git tag needs a DIFFERENT bounded variant
+# (its --merged/--no-merged collision), so the three are intentionally not unified.
+_MSG_FLAG_ANCHOR = r"((?:--m(?:e(?:s(?:s(?:a(?:g(?:e)?)?)?)?)?)?|-[a-ln-zA-Z]*m)\s*)"
 
 # Pre-compiled patterns for the operation-type classifier (consistent with
 # DANGEROUS_PATTERNS style).
@@ -1982,18 +2017,106 @@ def _has_command_substitution(quoted_content: str) -> bool:
     return "$(" in quoted_content or "`" in quoted_content
 
 
+# Span-scoped command-substitution preserve (#1140). The two scanners below let
+# _keep_carrier_value preserve ONLY the genuine `$(...)`/backtick SPANS of a value
+# (they execute -> stay caught) while stripping the surrounding INERT literal — the
+# cure for the over-block where a benign `$(date)` beside danger-looking prose caused
+# the WHOLE value to be preserved. Both are single-pass char walks (O(n), no regex
+# backtracking): each advances its cursor monotonically and visits every char O(1) times.
+def _extract_dollar_paren(c, i):
+    """Return the balanced ``$(...)`` span starting at c[i] (c[i]=='$', c[i+1]=='(')
+    and the index just past it, via a quote-aware + escape-aware depth counter: a ``)``
+    inside a NESTED ``$(...)`` or inside a quoted span does NOT close the outer span.
+    Returns (None, len(c)) when the span is unterminated."""
+    n = len(c); depth = 0; j = i
+    while j < n:
+        ch = c[j]
+        if ch == "\\": j += 2; continue
+        if ch in "\"'":
+            q = ch; j += 1
+            while j < n:
+                if c[j] == "\\" and q == '"': j += 2; continue
+                if c[j] == q: j += 1; break
+                j += 1
+            continue
+        if ch == "(": depth += 1; j += 1; continue
+        if ch == ")":
+            depth -= 1; j += 1
+            if depth == 0: return c[i:j], j
+            continue
+        j += 1
+    return None, n   # unterminated
+
+
+def _extract_backtick(c, i):
+    """Return the balanced backtick span starting at c[i] (c[i]=='`') and the index
+    just past it. Returns (None, len(c)) when the span is unterminated."""
+    n = len(c); j = i + 1
+    while j < n:
+        if c[j] == "\\": j += 2; continue
+        if c[j] == "`": return c[i:j+1], j+1
+        j += 1
+    return None, n
+
+
+def _preserve_substitution_spans(value):
+    """Replace literal (inert) text with 'STRIPPED'; preserve $(...)/`...` spans VERBATIM.
+    Escaped \\$( and \\` are inert. value is a dq "..." (arm 1) or an unquoted VALUE-TOKEN (arm 3).
+    QUOTE-CONTEXT-FAITHFUL: inside a dq value a ' is a LITERAL apostrophe (bash does not treat
+    it as structural), so dq-inner folds it into the stripped literal run (else ubiquitous
+    it's/don't over-block). A " in dq-inner cannot occur well-formed (arm 1 matched
+    "(?:[^"\\]|\\.)*") -> malformed -> fail-safe. In the UNQUOTED arm BOTH ' and " stay
+    structural -> fail-safe. Return None -> FAIL-SAFE (caller preserves whole value = today's
+    behavior) for: unterminated span, a preserved span carrying a quote, a " in dq-inner, or
+    either quote in the unquoted arm."""
+    def _scan(c, dq_inner):
+        out = []; lit = False; i = 0; n = len(c)
+        def flush():
+            nonlocal lit
+            if lit: out.append("STRIPPED"); lit = False
+        while i < n:
+            ch = c[i]
+            if ch == "\\": lit = True; i += 2 if i+1 < n else 1; continue
+            if ch == "$" and i+1 < n and c[i+1] == "(":
+                span, j = _extract_dollar_paren(c, i)
+                if span is None or '"' in span or "'" in span: return None
+                flush(); out.append(span); i = j; continue
+            if ch == "`":
+                span, j = _extract_backtick(c, i)
+                if span is None or '"' in span or "'" in span: return None
+                flush(); out.append(span); i = j; continue
+            if ch == '"': return None              # structural dq terminator -> fail-safe (malformed in dq-inner)
+            if ch == "'" and not dq_inner: return None   # unquoted: ' is structural -> fail-safe
+            lit = True; i += 1                     # dq-inner ' falls through -> LITERAL
+        flush()
+        return "".join(out)
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        inner = _scan(value[1:-1], True)
+        return None if inner is None else '"' + inner + '"'
+    return _scan(value, False)                     # unquoted VALUE-TOKEN
+
+
 def _keep_carrier_value(m: "re.Match") -> str:
-    """Shared $()-preserving value replacer for the gh/git prose-carrier strips (#1129
-    R2): issue/pr create|edit|comment, release create|edit, gist create|edit, git tag
-    -m. Passed as `keep_fn` to _strip_flag_values (arms 1 & 3 — double-quoted + unquoted
-    VALUE-TOKEN). A double-quoted value containing $()/backtick EXECUTES, so it is
-    PRESERVED (stays caught); otherwise the flag(+separator) is kept and the value
-    replaced with the inert `STRIPPED` bareword. Hoisted from carrier-7's former
-    `_strip_dq` so every PR-added carrier shares ONE $()-preserving replacer (the
-    single-quoted arm strips unconditionally, handled inside _strip_flag_values)."""
-    if _has_command_substitution(m.group(0)):
-        return m.group(0)
-    return m.group(1) + "STRIPPED"
+    """Shared value replacer for the gh/git prose-carrier strips (#1129 R2): issue/pr
+    create|edit|comment, release create|edit, gist create|edit, git commit/tag -m, and
+    (new) merge/stash/notes. Passed as `keep_fn` to _strip_flag_values (arms 1 & 3 —
+    double-quoted + unquoted VALUE-TOKEN). Inert prose (no $()/backtick) -> the
+    flag(+separator) is kept and the value replaced with the inert `STRIPPED` bareword.
+    A value CONTAINING command substitution is SPAN-SCOPED (#1140): only the genuine
+    `$(...)`/backtick spans are preserved VERBATIM (they execute -> stay caught) while
+    the surrounding inert literal is stripped, so a benign `$(date)` beside
+    danger-looking prose no longer preserves the whole value (the over-block cure). On a
+    span the scanner cannot safely resolve (unterminated span, a preserved span carrying
+    a quote, or a structural quote in the value) it FAILS SAFE — the whole value is
+    preserved (today's behavior), never dropped. The single-quoted arm strips
+    unconditionally inside _strip_flag_values (untouched)."""
+    if not _has_command_substitution(m.group(0)):
+        return m.group(1) + "STRIPPED"          # inert prose -> strip (unchanged)
+    flag = m.group(1); value = m.group(0)[len(flag):]
+    transformed = _preserve_substitution_spans(value)
+    if transformed is None:
+        return m.group(0)                       # FAIL-SAFE: preserve whole value
+    return flag + transformed
 
 
 def _strip_flag_values(span: str, flag_sep_regex: str, keep_fn) -> str:
@@ -2107,20 +2230,37 @@ def _strip_non_executable_content(command: str) -> str:
     #    ``bash -c`` content is implicitly preserved and correctly detected.
     #    (piped_to_shell / process_sub_to_shell are hoisted to the top.)
     if not piped_to_shell and not process_sub_to_shell:
-        # Double-quoted: also guard against command substitution inside
-        def _strip_echo_dq(match: re.Match) -> str:
-            if _has_command_substitution(match.group(0)):
-                return match.group(0)  # Preserve — $() executes
-            return match.group(1) + " STRIPPED"
+        # echo/printf PRINT their args, they never execute them (#1140). Strip / span-scope
+        # EVERY positional quoted arg, not just the first: a danger literal in a 2nd+ arg is
+        # inert (printed) yet was over-blocking a faithful click. The ONLY execution path is
+        # output-routing to a shell (`| bash`, `> >(bash)`), already handled by the outer
+        # piped/process-sub skip this whole block sits inside — so widening to ALL args is
+        # under-block-safe.
+        def _strip_echo_dq_arg(m: re.Match) -> str:
+            # One double-quoted arg. Inert -> bareword STRIPPED; a value with $()/backtick is
+            # span-scoped (inert literal stripped, executing spans preserved in the SAME dq
+            # context as base so detection is identical); fail-safe preserves whole.
+            if not _has_command_substitution(m.group(0)):
+                return "STRIPPED"
+            transformed = _preserve_substitution_spans(m.group(0))
+            return m.group(0) if transformed is None else transformed
 
+        def _strip_echo_span(span_match: re.Match) -> str:
+            # Strip every quoted arg within the echo/printf span. dq FIRST, then sq, so a dq
+            # value's embedded `'` is consumed before the sq pass runs (no cross-contamination);
+            # sq -> bareword STRIPPED (sq $() is literal). The verb + flags sit OUTSIDE these
+            # inner subs and stay intact.
+            span = span_match.group(0)
+            span = re.sub(r'"(?:[^"\\]|\\.)*"', _strip_echo_dq_arg, span)
+            span = re.sub(r"'[^']*'", "STRIPPED", span)
+            return span
+
+        # Span = verb + the shared quote-aware body that STOPS at the first UNQUOTED
+        # ;/&&/|/newline, so an executing tail (`echo "x" && git branch -D y`) stays OUTSIDE the
+        # span and is caught (leg-locality). Keep the `\s+` so a bare `echo` token never matches.
         result = re.sub(
-            r'\b(echo|printf)\s+(?:-[neE]+\s+)*"(?:[^"\\]|\\.)*"',
-            _strip_echo_dq,
-            result,
-        )
-        result = re.sub(
-            r"\b(echo|printf)\s+(?:-[neE]+\s+)*'[^']*'",
-            r"\1 STRIPPED",
+            r"\b(echo|printf)\s+" + _VERB_MSG_BODY,
+            _strip_echo_span,
             result,
         )
 
@@ -2135,11 +2275,31 @@ def _strip_non_executable_content(command: str) -> str:
     if not has_eval:
         # Double-quoted: guard against command substitution and bare expansion
         def _strip_var_dq(match: re.Match) -> str:
-            if _has_command_substitution(match.group(0)):
-                return match.group(0)  # Preserve — $() executes
             var_name = match.group(1)
+            # ORDER LOAD-BEARING: a bare $VAR/${VAR} expansion word-splits and EXECUTES the
+            # WHOLE value (the inert literal INCLUDED, not just a substitution), so an expanded
+            # var preserves WHOLE — this MUST precede the substitution span-scope below.
             if _var_is_expanded(var_name, command):
-                return match.group(0)  # Preserve — $VAR executes
+                return match.group(0)  # Preserve — $VAR executes the whole value
+            if _has_command_substitution(match.group(0)):
+                # `git -c section.key=value` config injection is OUT OF SCOPE (#11): a git config
+                # value can be an EXECUTABLE config (core.pager / alias.* / core.editor), so its
+                # literal is not provably inert — preserve WHOLE to keep the -c surface at its
+                # exact status quo. Tell: a git config key ALWAYS has a `.`, so the matched key
+                # segment is preceded by `.`; a shell var / `--flag=` name never is. Use
+                # match.string (the post-carrier-1..3 result being sub'd), NOT `command` — the
+                # match offsets index into that result, not the raw command.
+                if match.start() > 0 and match.string[match.start() - 1] == ".":
+                    return match.group(0)  # config injection — status-quo preserve
+                # Non-expanded, non-config value WITH a substitution: strip the inert literal but
+                # preserve the genuine $()/backtick spans (they execute) via the same certified
+                # span scanner the message carriers use. A benign $(date) beside danger-looking
+                # prose no longer reverts the whole value (the equals-form over-block cure).
+                value = match.group(0)[len(var_name) + 1:]  # text after `NAME=`
+                transformed = _preserve_substitution_spans(value)
+                if transformed is None:
+                    return match.group(0)  # FAIL-SAFE: preserve whole (exotic span)
+                return var_name + "=" + transformed
             return var_name + "=STRIPPED"
 
         result = re.sub(
@@ -2161,26 +2321,39 @@ def _strip_non_executable_content(command: str) -> str:
             result,
         )
 
-    # 5. Strip git commit -m quoted arguments
-    #    The -m argument to git commit is a message, never executed directly.
-    #    GUARD (cmd-subst): preserve a double-quoted message containing $()/backtick.
+    # 5. git commit MESSAGE carrier — SPAN-BOUNDED + FLAG-ANCHORED (migrated from the
+    #    former inline -m-only literal-quote arms to the shared quote-balanced machinery;
+    #    a structural clone of carrier-7d `git tag -m`). The -m/--message argument is a
+    #    commit message, never executed directly. FLAG-anchored to the -m/--message VALUE
+    #    only; BOUNDED to a git-commit span whose body (the SAME quote-aware body as
+    #    carriers 7/7b/7c/7d) STOPS at the first UNQUOTED ;/&&/|/newline so an executing
+    #    tail stays OUTSIDE the span and is caught. The prefix is a NON-gobbling
+    #    `git <bounded non-separator words> commit` (handles global flags like -C <path>)
+    #    whose word class EXCLUDES ;&| so it CANNOT cross an unquoted separator —
+    #    deliberately NOT _GIT_PREFIX, whose (?:\S+\s+){0,N} gobbler spans separators and
+    #    would let a later `git commit` pull an intermediate `;gh …;` into ONE span,
+    #    re-opening the #1129-class leg-merge under-block. Bounded {0,N} keeps it linear.
     #    GUARD (output-side): a commit SUBJECT is echoed to git's stdout, so
-    #    `git commit -m "..." > >(bash)` (or `| bash`) routes it to a shell — the
-    #    outer piped/process-sub skip preserves it for detection (#1002).
+    #    `git commit -m "..." > >(bash)` (or `| bash`) routes it to a shell — the outer
+    #    piped/process-sub skip preserves it for detection (#1002).
+    #    GUARD (cmd-subst): $()/backtick in a double-quoted value preserves — rides on
+    #    _keep_carrier_value.
     if not piped_to_shell and not process_sub_to_shell:
-        def _strip_commit_msg_dq(match: re.Match) -> str:
-            if _has_command_substitution(match.group(0)):
-                return match.group(0)  # Preserve — $() executes
-            return match.group(1) + ' -m STRIPPED'
-
-        result = re.sub(
-            r'\b(git\s+commit)\s+-m\s+"(?:[^"\\]|\\.)*"',
-            _strip_commit_msg_dq,
-            result,
+        _git_commit_span = (
+            r"\bgit\s+(?:[^;&|\n\s]+\s+){0,%d}commit\b" % _MAX_GLOBAL_FLAG_TOKENS
+            + _VERB_MSG_BODY
         )
         result = re.sub(
-            r"\b(git\s+commit)\s+-m\s+'[^']*'",
-            r"\1 -m STRIPPED",
+            _git_commit_span,
+            lambda mm: _strip_flag_values(
+                mm.group(0),
+                # Long arm accepts any unambiguous abbreviation of --message
+                # (--m -> --message): on `git commit` the ONLY --m* option IS
+                # --message, so a --m-prefix can never over-strip another option's
+                # value. Short arm (-m/bundled -am/attached -mMSG) unchanged.
+                r"((?:--m(?:e(?:s(?:s(?:a(?:g(?:e)?)?)?)?)?)?|-[a-ln-zA-Z]*m)\s*)",
+                _keep_carrier_value,
+            ),
             result,
         )
 
@@ -2193,17 +2366,24 @@ def _strip_non_executable_content(command: str) -> str:
     #    routed to a shell via `| bash` / `> >(bash)`. The guards COMPOSE.
     if not piped_to_shell and not process_sub_to_shell:
         def _strip_herestring_dq(match: re.Match) -> str:
-            # Check what command precedes the <<<
+            # Check what command precedes the <<< (shell-interpreter guard stays FIRST).
             start = match.start()
             preceding = command[:start].rstrip()
             if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
-                return match.group(0)  # Preserve — content executes
-            if _has_command_substitution(match.group(0)):
-                return match.group(0)  # Preserve — $() executes
-            return "<<<STRIPPED"
+                return match.group(0)  # Preserve — a shell reads the here-string as stdin
+            if not _has_command_substitution(match.group(0)):
+                return "<<<STRIPPED"                  # no-$() unchanged (bareword)
+            # has-$(): span-scope the value — strip the inert literal, preserve the executing
+            # spans (#1140). Emit the scanner's native dq output: it keeps each preserved span
+            # in the SAME executing dq context the coarse preserve used, so a real $(...) is
+            # detected IDENTICALLY to base (verified by the bidirectional cert). group(1) = dq value.
+            transformed = _preserve_substitution_spans(match.group(1))
+            if transformed is None:
+                return match.group(0)                 # fail-safe: preserve whole
+            return "<<<" + transformed
 
         result = re.sub(
-            r'<<<\s*"(?:[^"\\]|\\.)*"',
+            r'<<<\s*("(?:[^"\\]|\\.)*")',
             _strip_herestring_dq,
             result,
         )
@@ -2278,7 +2458,7 @@ def _strip_non_executable_content(command: str) -> str:
         # not following a carrier flag, is NEVER stripped and stays caught).
         _gh_carrier_span = (
             r"gh\s+(?:issue\s+(?:create|edit|comment)|pr\s+(?:create|comment|edit))\b"
-            r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+            + _VERB_MSG_BODY
         )
 
         def _strip_gh_carrier_span(span_match: re.Match) -> str:
@@ -2306,7 +2486,7 @@ def _strip_non_executable_content(command: str) -> str:
         #     start a carrier span. Shared quote-balanced _strip_flag_values + $()-preserve.
         _gh_release_span = (
             r"gh\s+release\s+(?:create|edit)\b"
-            r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+            + _VERB_MSG_BODY
         )
         result = re.sub(
             _gh_release_span,
@@ -2322,7 +2502,7 @@ def _strip_non_executable_content(command: str) -> str:
         #     (create|edit, NEVER bare `gh gist`) so `gh gist delete` never starts a carrier.
         _gh_gist_span = (
             r"gh\s+gist\s+(?:create|edit)\b"
-            r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+            + _VERB_MSG_BODY
         )
         result = re.sub(
             _gh_gist_span,
@@ -2355,12 +2535,91 @@ def _strip_non_executable_content(command: str) -> str:
         #     $()/backtick preserve rides on _keep_carrier_value.
         _git_tag_span = (
             r"\bgit\s+(?:[^;&|\n\s]+\s+){0,%d}tag\b" % _MAX_GLOBAL_FLAG_TOKENS
-            + r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+            + _VERB_MSG_BODY
         )
         result = re.sub(
             _git_tag_span,
             lambda mm: _strip_flag_values(
-                mm.group(0), r"((?:-m|--message)\s+)", _keep_carrier_value
+                mm.group(0),
+                # Long arm is BOUNDED to --mes...--message — DELIBERATELY DIFFERENT
+                # from the commit anchor. `git tag` ALSO has the value-taking
+                # --merged/--no-merged options, which diverge from --message at char
+                # 3 (r != s), so starting the arm at --mes can never consume their
+                # values (--m/--me are ambiguous and git rejects them). Do NOT
+                # re-unify with the commit anchor. Short arm unchanged.
+                r"((?:--mes(?:s(?:a(?:g(?:e)?)?)?)?|-[a-ln-zA-Z]*m)\s*)",
+                _keep_carrier_value,
+            ),
+            result,
+        )
+
+        # 7e. Sibling message-carrying git verbs — SPAN-BOUNDED + FLAG-ANCHORED, the same
+        #     machinery as carriers 5/7d. `git merge`, `git stash push/store/save`, and
+        #     `git notes add/append` accept a -m/--message (or, for `stash save`, a
+        #     POSITIONAL) whose value is annotation prose, never executed. A destructive
+        #     literal named inside that prose (e.g. `git merge -m "...git branch -D x..."`)
+        #     must not trip DANGEROUS_PATTERNS. Each span is a NON-gobbling
+        #     `git <bounded non-separator words> <verb>` (word class EXCLUDES ;&| so it
+        #     CANNOT cross an unquoted separator — deliberately NOT _GIT_PREFIX, whose
+        #     gobbler would re-open the leg-merge under-block) + _VERB_MSG_BODY (STOPS at
+        #     the first UNQUOTED ;/&&/|/newline, so an executing tail stays OUTSIDE the span
+        #     and is caught). merge / stash push / stash store / notes are anchored on
+        #     _MSG_FLAG_ANCHOR (their SOLE value-taking --m* is --message, verified via
+        #     `git <verb> -h`). git cherry-pick / git revert are DELIBERATELY EXCLUDED:
+        #     their -m is --mainline <parent-number> (a NUMBER, not a message) — treating
+        #     them as message carriers would be wrong; a real destructive tail after them
+        #     stays caught via leg-locality. $()/backtick preserve rides on
+        #     _keep_carrier_value.
+        _git_merge_span = (
+            r"\bgit\s+(?:[^;&|\n\s]+\s+){0,%d}merge\b" % _MAX_GLOBAL_FLAG_TOKENS
+            + _VERB_MSG_BODY
+        )
+        result = re.sub(
+            _git_merge_span,
+            lambda mm: _strip_flag_values(
+                mm.group(0), _MSG_FLAG_ANCHOR, _keep_carrier_value
+            ),
+            result,
+        )
+        # git stash push / store — both take -m/--message.
+        _git_stash_flag_span = (
+            r"\bgit\s+(?:[^;&|\n\s]+\s+){0,%d}stash\s+(?:push|store)\b" % _MAX_GLOBAL_FLAG_TOKENS
+            + _VERB_MSG_BODY
+        )
+        result = re.sub(
+            _git_stash_flag_span,
+            lambda mm: _strip_flag_values(
+                mm.group(0), _MSG_FLAG_ANCHOR, _keep_carrier_value
+            ),
+            result,
+        )
+        # git stash save <message> — the (deprecated) message is a POSITIONAL; save's
+        # non-message args are ALL boolean flags, so the anchor consumes `save` + any run
+        # of boolean flags + whitespace, and the dq/sq/VALUE-TOKEN arms strip the first
+        # value token (the positional message). Bare `git stash save` (no message) has no
+        # trailing value -> the anchor's trailing `\s+`+value never matches -> no misfire.
+        _git_stash_save_span = (
+            r"\bgit\s+(?:[^;&|\n\s]+\s+){0,%d}stash\s+save\b" % _MAX_GLOBAL_FLAG_TOKENS
+            + _VERB_MSG_BODY
+        )
+        result = re.sub(
+            _git_stash_save_span,
+            lambda mm: _strip_flag_values(
+                mm.group(0), r"(save(?:\s+-[-\w]+)*\s+)", _keep_carrier_value
+            ),
+            result,
+        )
+        # git notes add / append (-m/--message; an optional `--ref <ref>` global may
+        # precede the verb).
+        _git_notes_span = (
+            r"\bgit\s+(?:[^;&|\n\s]+\s+){0,%d}notes\s+(?:--ref(?:=|\s+)\S+\s+)?(?:add|append)\b"
+            % _MAX_GLOBAL_FLAG_TOKENS
+            + _VERB_MSG_BODY
+        )
+        result = re.sub(
+            _git_notes_span,
+            lambda mm: _strip_flag_values(
+                mm.group(0), _MSG_FLAG_ANCHOR, _keep_carrier_value
             ),
             result,
         )
@@ -2409,7 +2668,7 @@ def _strip_non_executable_content(command: str) -> str:
         # over-block re-opens for that spelling (the strip would not run).
         _http_client_span = (
             r"(?:\bcurl\b|\bwget\b|" + _GH_API_PREFIX + r")"
-            r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+            + _VERB_MSG_BODY
         )
         # Direct-value body flags (form a).
         _data_flag = r"(?:--data(?:-(?:raw|binary|ascii|urlencode))?|--body-data|--post-data|-d)"
@@ -2440,9 +2699,18 @@ def _strip_non_executable_content(command: str) -> str:
 
             def _keep_flag_dq(m: re.Match) -> str:
                 # group(1) = the flag (+ key= for form b) up to the opening quote.
-                if _has_command_substitution(m.group(0)):
-                    return m.group(0)  # value contains $()/backtick → executes; keep
-                return m.group(1) + "'STRIPPED'"
+                if not _has_command_substitution(m.group(0)):
+                    return m.group(1) + "'STRIPPED'"  # no-$() unchanged (single-quoted)
+                # has-$(): span-scope the value after the flag — strip the inert literal,
+                # preserve the executing $()/backtick spans (#1140). Emit the scanner's native
+                # dq output (NOT sq): it keeps each preserved span in the SAME executing dq
+                # context the coarse preserve used, so a real $(...) is detected IDENTICALLY to
+                # base (verified by the bidirectional cert).
+                flag = m.group(1)
+                transformed = _preserve_substitution_spans(m.group(0)[len(flag):])
+                if transformed is None:
+                    return m.group(0)                 # fail-safe: preserve whole
+                return flag + transformed
 
             # Body flag VALUES via the SHARED quote-safe strip (#1118 re-model, FIX-A).
             # Each call does 3 arms (dq / sq / unquoted VALUE-TOKEN); the unquoted arm now
@@ -2511,7 +2779,7 @@ def _strip_non_executable_content(command: str) -> str:
         # (which require a selector FLAG directly before the value), so they survive.
         _gh_api_selector_span = (
             r"(?:" + _GH_API_PREFIX + r")"
-            r"""(?:[^&|;\n"']+|"(?:[^"\\]|\\.)*"|'[^']*')*"""
+            + _VERB_MSG_BODY
         )
         # FORM-AWARE, token-anchored separator (#1118 re-model, FIX-B). gh (cobra/pflag)
         # accepts a flag value four ways: space (`--jq x`), =-long (`--jq=x`), =-short
@@ -2530,12 +2798,18 @@ def _strip_non_executable_content(command: str) -> str:
 
         def _keep_selector_dq(m: re.Match) -> str:
             # group(1) = the flag(+separator) captured by the wrapped _selector_flagsep.
-            # Preserve a value that contains command substitution ($()/backtick) — it
-            # would EXECUTE and must stay visible to the danger arms (same shape as carrier
-            # 8's _keep_flag_dq; both are passed as keep_fn to the shared _strip_flag_values).
-            if _has_command_substitution(m.group(0)):
-                return m.group(0)
-            return m.group(1) + "'STRIPPED'"
+            # Same shape as carrier 8's _keep_flag_dq; both are keep_fn to _strip_flag_values.
+            if not _has_command_substitution(m.group(0)):
+                return m.group(1) + "'STRIPPED'"      # no-$() unchanged (single-quoted)
+            # has-$(): span-scope the value after the flag — strip the inert literal, preserve
+            # the executing $()/backtick spans (#1140). Emit the scanner's native dq output (NOT
+            # sq): it keeps each preserved span in the SAME executing dq context the coarse
+            # preserve used, so a real $(...) is detected IDENTICALLY to base (verified by cert).
+            flag = m.group(1)
+            transformed = _preserve_substitution_spans(m.group(0)[len(flag):])
+            if transformed is None:
+                return m.group(0)                     # fail-safe: preserve whole
+            return flag + transformed
 
         def _strip_gh_api_selectors(span_match: re.Match) -> str:
             span = span_match.group(0)
