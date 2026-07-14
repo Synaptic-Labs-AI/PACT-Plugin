@@ -231,6 +231,28 @@ requires_prefix_fc1 = pytest.mark.skipif(
     reason="F-C1 4-carrier pre-fix differential requires merged history (shallow clone / missing a62703f1)",
 )
 
+# --- ECHO/PRINTF CARVE-OUT baseline (#1176 remediation cycle 5b — the bounded echo/printf multi-arg fold).
+#     The anchor-coverage audit found that carrier-3 (echo/printf) matched ONLY the FIRST quoted arg, so a
+#     danger literal in a 2nd+ positional arg was never stripped -> over-block (the boundary this cert pinned
+#     in cycle 4). The user chose a BOUNDED echo/printf-only carve-out (e2145b44): echo/printf PROVABLY never
+#     execute their positional args (they PRINT them), so the carrier now strips EVERY quoted positional arg
+#     (dq span-scoped via _preserve_substitution_spans, sq -> bareword) inside the piped/procsub skip, with
+#     leg-locality keeping an executing tail outside the span. The broader positional over-block surface in
+#     commands that DO execute args (C5 git-trailer/author, C7 gh non-carrier flags, C8 curl non-body flags,
+#     + the general shape) is DEFERRED to a dedicated audit (see TestEchoPrintfDeferredBoundary). D_PREFIX_ECHO
+#     = a542e21b is the DIRECT PARENT of the carve-out (== e2145b44^) — the F-C1 cert commit whose source is
+#     the post-F-C1 pre-carve-out classifier where echo/printf still strips only the first arg — the SHARP
+#     per-fix discriminator. Each closure asserts D_PREFIX_ECHO(cmd) is True -> D(cmd) is False. EMPIRICALLY
+#     ground-truthed (a single-arg backtick case was reclassified OUT — it was already closed by F-C1, so it
+#     is False==False vs this baseline, NOT a carve-out closure; only 2nd+ arg cases flip here).
+_PREFIX_ECHO_SHA = "a542e21b"  # e2145b44^ — post-F-C1 pre-carve-out (echo/printf strips only the 1st arg)
+_PREFIX_ECHO = _load_classifier(_PREFIX_ECHO_SHA)
+D_PREFIX_ECHO = _PREFIX_ECHO.is_dangerous_command if _PREFIX_ECHO is not None else None
+requires_prefix_echo = pytest.mark.skipif(
+    _PREFIX_ECHO is None,
+    reason="echo/printf carve-out pre-fix differential requires merged history (shallow clone / missing a542e21b)",
+)
+
 
 # --- Destructive verbs assembled at runtime — this file carries no raw literal.
 BD = "git " + "branch " + "-D victim"          # destructive branch-delete (prose target)
@@ -1404,27 +1426,28 @@ class TestFC1GhApiSelectorCarrier:
         assert D(cmd) is False, "%s: benign/sq gh-api selector must stay False: %r" % (label, cmd)
 
 
-class TestFC1MultiArgBoundary:
-    # BOUNDARY PIN (design scope edge): the echo/printf carrier-3 anchor matches ONLY the FIRST dq
-    # argument, so a SECOND dq arg carrying danger prose is NEVER stripped -> over-block. This is a
-    # SEPARATE PRE-EXISTING anchor-coverage gap, NOT the coarse-substitution-preserve class F-C1 closes,
-    # so it is BASE==PATCH==True (documented out-of-scope). The no-substitution form proves it is the
-    # anchor gap (it over-blocks even without a $()), NOT an F-C1 miss. (A later cycle may fold this
-    # anchor-coverage class; until then this pin records the boundary so a future reader does not mistake
-    # it for an F-C1 regression.)
-    @requires_prefix_fc1
-    def test_multiarg_has_sub_true_at_both(self):
+class TestEchoPrintfMultiArgClosure:
+    # REALIGNED (cycle 5b) — was TestFC1MultiArgBoundary in cycle 4, where the echo/printf multi-arg
+    # over-block (carrier-3 anchor matched ONLY the FIRST dq arg, so a 2nd dq arg carrying danger was
+    # never stripped) was pinned as a PRE-EXISTING out-of-scope anchor gap (True==both), and the pin
+    # docstring foretold "a later cycle may fold this anchor-coverage class." Cycle 5b IS that fold:
+    # the carve-out (e2145b44) strips EVERY positional echo/printf arg, so these are now CLOSURES.
+    # Non-vacuity flips against the carve-out's OWN sharp immediate parent (D_PREFIX_ECHO = e2145b44^ =
+    # a542e21b, where echo/printf still stripped only the first arg) per the per-fix-discriminator
+    # discipline. The no-substitution form flips too (the carve-out strips args regardless of $()).
+    @requires_prefix_echo
+    def test_printf_multiarg_has_sub_closed(self):
         cmd = 'printf "%%s\\n" "note $(date) %s"' % BD
-        assert D_PREFIX_FC1(cmd) is True and D(cmd) is True, \
-            "the multi-arg 2nd-dq-arg over-block is PRE-EXISTING (True==base, out of F-C1 scope): %r" % cmd
+        assert D_PREFIX_ECHO(cmd) is True, "must be over-blocked at pre-carve a542e21b (else vacuous): %r" % cmd
+        assert D(cmd) is False, "the carve-out must CLOSE the printf multi-arg over-block: %r" % cmd
 
-    @requires_prefix_fc1
-    def test_multiarg_no_sub_still_over_blocks(self):
-        # The load-bearing proof: it over-blocks even with NO substitution in the 2nd arg -> it is the
-        # carrier-3 first-arg-only anchor gap, NOT a coarse-substitution-preserve miss.
+    @requires_prefix_echo
+    def test_printf_multiarg_no_sub_closed(self):
+        # The no-substitution form ALSO flips True->False: the carve-out strips every positional arg
+        # regardless of $(), so the 2nd-arg danger literal is now stripped.
         cmd = 'printf "%%s\\n" "note %s"' % BD
-        assert D_PREFIX_FC1(cmd) is True and D(cmd) is True, \
-            "the multi-arg gap over-blocks WITHOUT a substitution -> it is the anchor gap, not F-C1: %r" % cmd
+        assert D_PREFIX_ECHO(cmd) is True, "must be over-blocked at pre-carve a542e21b (else vacuous): %r" % cmd
+        assert D(cmd) is False, "the carve-out must CLOSE the printf multi-arg no-substitution over-block: %r" % cmd
 
 
 class TestFC1StripSurfaceMechanism:
@@ -1460,3 +1483,124 @@ class TestFC1ReDoSLinearity:
     def test_carrier_scanner_linear(self, n):
         assert _elapsed_ms('echo "' + "$(" * n + '"') < 1000.0, "echo unterminated $( n=%d" % n
         assert _elapsed_ms('curl -d "$(' + "(" * n + ")" * n + ')" ' + _FC1_URL) < 1000.0, "curl -d nested parens n=%d" % n
+
+
+# ===========================================================================
+# ===  #1176 ECHO/PRINTF MULTI-ARG CARVE-OUT — remediation cycle 5b. The     ===
+# ===  carrier-3 first-arg-only strip is replaced by a span+per-arg loop that ===
+# ===  strips EVERY positional echo/printf arg (bounded to echo/printf, which ===
+# ===  never execute their args). NON-VACUITY vs D_PREFIX_ECHO (a542e21b =    ===
+# ===  e2145b44^): every 2nd+ arg over-block flips True(pre-carve)->False;     ===
+# ===  under-block guards (piped/procsub/tail/inline-malicious) hold True;     ===
+# ===  the still-open C5/C7/C8 positional class stays pinned True==both        ===
+# ===  (deferred audit). EMPIRICALLY ground-truthed at a542e21b vs HEAD.       ===
+# ===========================================================================
+
+class TestEchoPrintfCarveoutClosure:
+    # Every quoted positional arg is now stripped, so danger in a 2nd/3rd arg (dq or sq, any order,
+    # with or without a substitution/backtick) closes. NOTE: a SINGLE-arg has-$()/backtick case is NOT
+    # here — F-C1 already closed those (False==False vs this baseline); the carve-out closes the
+    # MULTI-arg surface. Non-vacuity flips against D_PREFIX_ECHO.
+    @pytest.mark.parametrize("label,cmd", [
+        ("echo 2nd dq arg + sub",  'echo "first arg" "note $(date) %s"' % BD),
+        ("echo 2nd dq arg no-sub", 'echo "first arg" "note %s"' % BD),
+        ("echo 3rd dq arg",        'echo "a" "b" "drop %s"' % BD),
+        ("echo 2nd sq arg",        "echo 'a' 'note %s'" % BD),
+        ("echo mixed dq,sq",       'echo "a" \'note %s\'' % BD),
+        ("echo mixed sq,dq",       'echo \'a\' "note %s"' % BD),
+        ("echo 2nd-arg backtick",  'echo "first" "ran `hostname`, then %s"' % BD),
+        ("printf fmt+data + sub",  'printf "%%s" "note $(date) %s"' % BD),
+        ("printf fmt+data no-sub", 'printf "%%s" "note %s"' % BD),
+    ])
+    @requires_prefix_echo
+    def test_multiarg_closed(self, label, cmd):
+        assert D_PREFIX_ECHO(cmd) is True, \
+            "%s: must be over-blocked at pre-carve a542e21b (else vacuous): %r" % (label, cmd)
+        assert D(cmd) is False, "%s: the carve-out must CLOSE the echo/printf multi-arg over-block: %r" % (label, cmd)
+
+
+class TestEchoPrintfCarveoutUnderBlock:
+    # The carve-out must NOT open an under-block. Output-routing to a shell (| bash / >(bash)) is the
+    # only execution path and is SKIPPED by the outer guard (whole command preserved -> caught). An
+    # executing tail after an unquoted separator stays OUTSIDE the span (leg-locality). A real
+    # $(malicious) in ANY arg is span-preserved and stays caught. All True at BOTH baselines.
+    @pytest.mark.parametrize("label,cmd", [
+        ("dq piped to shell",   'echo "%s" | bash' % BD),
+        ("sq piped to shell",   "echo '%s' | bash" % BD),
+        ("2nd-arg piped",       'echo "a" "%s" | bash' % BD),
+        ("process-sub",         'echo "%s" > >(bash)' % BD),
+        ("executing && tail",   'echo "x" && %s' % BD),
+        ("executing ; tail",    'echo "x" ; %s' % BD),
+        ("inline $() 1st arg",  'echo "$(%s)"' % BD),
+        ("inline $() 2nd arg",  'echo "a" "$(%s)"' % BD),
+    ])
+    @requires_prefix_echo
+    def test_underblock_stays_caught(self, label, cmd):
+        assert D_PREFIX_ECHO(cmd) is True and D(cmd) is True, \
+            "%s: the carve-out must NOT open an under-block (True at both): %r" % (label, cmd)
+
+
+class TestEchoPrintfCarveoutControls:
+    # Benign echo/printf and cross-context mentions stay False (no danger to over-block).
+    @pytest.mark.parametrize("label,cmd", [
+        ("benign echo",        'echo "hello world"'),
+        ("benign printf",      'printf "%%s\\n" "just a note"'),
+        ("benign sub",         'echo "release $(date +%F)"'),
+        ("cross-context git-msg", 'git commit -m "run echo to test the thing"'),
+    ])
+    def test_benign_stays_false(self, label, cmd):
+        assert D(cmd) is False, "%s: benign/cross-context must stay False: %r" % (label, cmd)
+
+
+class TestEchoPrintfDeferredBoundary:
+    # DEFERRED-BOUNDARY pins — the STILL-OPEN positional over-block class the carve-out did NOT touch
+    # (it is echo/printf-only by construction). One REPRESENTATIVE PER CARRIER (C5/C7/C8), deliberately
+    # NOT an exhaustive enumeration: the cert's job is to RECORD the boundary (echo/printf multi-arg
+    # CLOSED vs the structural positional class DEFERRED), not to pin the deferred class — that is the
+    # dedicated anchor-coverage audit's job, and over-pinning would couple this cert to a class it does
+    # not fix. Each carrier's non-message positional/flag value is NOT stripped, so a danger literal
+    # there over-blocks — True==both, structurally untouched by the carve-out. Every example uses a
+    # PLAIN danger literal (NO substitution) — that IS the no-substitution proof: the over-block does
+    # not depend on a $(), it is the structural positional gap, so a future reader does not mistake
+    # True==both for a carve-out miss. When the deferred audit lands, these flip to closures.
+    @pytest.mark.parametrize("label,cmd", [
+        ("C5 git --trailer",  'git commit --trailer "Ref: %s"' % BD),
+        ("C7 gh --assignee",  'gh issue create --title "ok" --assignee "%s"' % BD),
+        ("C8 curl -H header", 'curl -H "X-Note: %s" %s' % (BD, _FC1_URL)),
+    ])
+    @requires_prefix_echo
+    def test_deferred_positional_stays_true_both(self, label, cmd):
+        assert D_PREFIX_ECHO(cmd) is True and D(cmd) is True, \
+            "%s: STILL-DEFERRED positional over-block must be True==both (untouched by echo/printf carve-out): %r" % (label, cmd)
+
+
+class TestEchoPrintfCarveoutStripSurface:
+    # Document the span+per-arg-loop surface: EVERY quoted arg -> STRIPPED (dq span-scoped, sq
+    # bareword); the verb stays intact; leg-locality keeps a tail outside; a $() span is preserved.
+    def test_all_args_stripped(self):
+        assert STRIP('echo "first arg" "note %s"' % BD) == "echo STRIPPED STRIPPED"
+
+    def test_mixed_quote_args_stripped(self):
+        assert STRIP('echo "a" \'note %s\'' % BD) == "echo STRIPPED STRIPPED"
+
+    def test_printf_fmt_and_data_stripped(self):
+        assert STRIP('printf "%%s\\n" "note $(date) %s"' % BD) == 'printf STRIPPED "STRIPPED$(date)STRIPPED"'
+
+    def test_leg_locality_tail_preserved(self):
+        assert STRIP('echo "x" && %s' % BD) == "echo STRIPPED && %s" % BD
+
+    def test_piped_whole_preserved(self):
+        # The outer piped-to-shell skip preserves the whole command (danger stays visible -> caught).
+        assert STRIP('echo "%s" | bash' % BD) == 'echo "%s" | bash' % BD
+
+    def test_inline_second_arg_substitution_preserved(self):
+        assert STRIP('echo "a" "$(%s)"' % BD) == 'echo STRIPPED "$(%s)"' % BD
+
+
+class TestEchoPrintfCarveoutReDoS:
+    # The span + per-arg loop is O(total length); a many-args input and a nested-paren input both stay
+    # linear (measured ~142 ms at 16000 args, ~50 ms nested).
+    @pytest.mark.parametrize("n", [4000, 16000])
+    def test_carveout_linear(self, n):
+        assert _elapsed_ms('echo ' + '"a" ' * n + '"%s"' % BD) < 2000.0, "echo many-args n=%d" % n
+        assert _elapsed_ms('echo "$(' + "(" * n + ")" * n + ')"') < 2000.0, "echo nested parens n=%d" % n
