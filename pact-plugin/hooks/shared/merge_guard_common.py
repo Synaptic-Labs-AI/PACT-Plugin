@@ -2232,12 +2232,20 @@ def _strip_non_executable_content(command: str) -> str:
     if not piped_to_shell and not process_sub_to_shell:
         # Double-quoted: also guard against command substitution inside
         def _strip_echo_dq(match: re.Match) -> str:
-            if _has_command_substitution(match.group(0)):
-                return match.group(0)  # Preserve — $() executes
-            return match.group(1) + " STRIPPED"
+            if not _has_command_substitution(match.group(0)):
+                return match.group(1) + " STRIPPED"   # no-$() unchanged (bareword)
+            # has-$(): span-scope the value — strip the inert literal, preserve the executing
+            # $()/backtick spans (#1140). Emit the scanner's native dq output: it keeps each
+            # preserved span in the SAME executing dq context the coarse preserve used, so a
+            # real $(...) is detected IDENTICALLY to base (verified by the bidirectional cert).
+            # group(2) = the dq value.
+            transformed = _preserve_substitution_spans(match.group(2))
+            if transformed is None:
+                return match.group(0)                 # fail-safe: preserve whole
+            return match.group(1) + " " + transformed
 
         result = re.sub(
-            r'\b(echo|printf)\s+(?:-[neE]+\s+)*"(?:[^"\\]|\\.)*"',
+            r'\b(echo|printf)\s+(?:-[neE]+\s+)*("(?:[^"\\]|\\.)*")',
             _strip_echo_dq,
             result,
         )
@@ -2349,17 +2357,24 @@ def _strip_non_executable_content(command: str) -> str:
     #    routed to a shell via `| bash` / `> >(bash)`. The guards COMPOSE.
     if not piped_to_shell and not process_sub_to_shell:
         def _strip_herestring_dq(match: re.Match) -> str:
-            # Check what command precedes the <<<
+            # Check what command precedes the <<< (shell-interpreter guard stays FIRST).
             start = match.start()
             preceding = command[:start].rstrip()
             if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
-                return match.group(0)  # Preserve — content executes
-            if _has_command_substitution(match.group(0)):
-                return match.group(0)  # Preserve — $() executes
-            return "<<<STRIPPED"
+                return match.group(0)  # Preserve — a shell reads the here-string as stdin
+            if not _has_command_substitution(match.group(0)):
+                return "<<<STRIPPED"                  # no-$() unchanged (bareword)
+            # has-$(): span-scope the value — strip the inert literal, preserve the executing
+            # spans (#1140). Emit the scanner's native dq output: it keeps each preserved span
+            # in the SAME executing dq context the coarse preserve used, so a real $(...) is
+            # detected IDENTICALLY to base (verified by the bidirectional cert). group(1) = dq value.
+            transformed = _preserve_substitution_spans(match.group(1))
+            if transformed is None:
+                return match.group(0)                 # fail-safe: preserve whole
+            return "<<<" + transformed
 
         result = re.sub(
-            r'<<<\s*"(?:[^"\\]|\\.)*"',
+            r'<<<\s*("(?:[^"\\]|\\.)*")',
             _strip_herestring_dq,
             result,
         )
@@ -2675,9 +2690,18 @@ def _strip_non_executable_content(command: str) -> str:
 
             def _keep_flag_dq(m: re.Match) -> str:
                 # group(1) = the flag (+ key= for form b) up to the opening quote.
-                if _has_command_substitution(m.group(0)):
-                    return m.group(0)  # value contains $()/backtick → executes; keep
-                return m.group(1) + "'STRIPPED'"
+                if not _has_command_substitution(m.group(0)):
+                    return m.group(1) + "'STRIPPED'"  # no-$() unchanged (single-quoted)
+                # has-$(): span-scope the value after the flag — strip the inert literal,
+                # preserve the executing $()/backtick spans (#1140). Emit the scanner's native
+                # dq output (NOT sq): it keeps each preserved span in the SAME executing dq
+                # context the coarse preserve used, so a real $(...) is detected IDENTICALLY to
+                # base (verified by the bidirectional cert).
+                flag = m.group(1)
+                transformed = _preserve_substitution_spans(m.group(0)[len(flag):])
+                if transformed is None:
+                    return m.group(0)                 # fail-safe: preserve whole
+                return flag + transformed
 
             # Body flag VALUES via the SHARED quote-safe strip (#1118 re-model, FIX-A).
             # Each call does 3 arms (dq / sq / unquoted VALUE-TOKEN); the unquoted arm now
@@ -2765,12 +2789,18 @@ def _strip_non_executable_content(command: str) -> str:
 
         def _keep_selector_dq(m: re.Match) -> str:
             # group(1) = the flag(+separator) captured by the wrapped _selector_flagsep.
-            # Preserve a value that contains command substitution ($()/backtick) — it
-            # would EXECUTE and must stay visible to the danger arms (same shape as carrier
-            # 8's _keep_flag_dq; both are passed as keep_fn to the shared _strip_flag_values).
-            if _has_command_substitution(m.group(0)):
-                return m.group(0)
-            return m.group(1) + "'STRIPPED'"
+            # Same shape as carrier 8's _keep_flag_dq; both are keep_fn to _strip_flag_values.
+            if not _has_command_substitution(m.group(0)):
+                return m.group(1) + "'STRIPPED'"      # no-$() unchanged (single-quoted)
+            # has-$(): span-scope the value after the flag — strip the inert literal, preserve
+            # the executing $()/backtick spans (#1140). Emit the scanner's native dq output (NOT
+            # sq): it keeps each preserved span in the SAME executing dq context the coarse
+            # preserve used, so a real $(...) is detected IDENTICALLY to base (verified by cert).
+            flag = m.group(1)
+            transformed = _preserve_substitution_spans(m.group(0)[len(flag):])
+            if transformed is None:
+                return m.group(0)                     # fail-safe: preserve whole
+            return flag + transformed
 
         def _strip_gh_api_selectors(span_match: re.Match) -> str:
             span = span_match.group(0)
