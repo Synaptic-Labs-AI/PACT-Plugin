@@ -2258,11 +2258,31 @@ def _strip_non_executable_content(command: str) -> str:
     if not has_eval:
         # Double-quoted: guard against command substitution and bare expansion
         def _strip_var_dq(match: re.Match) -> str:
-            if _has_command_substitution(match.group(0)):
-                return match.group(0)  # Preserve — $() executes
             var_name = match.group(1)
+            # ORDER LOAD-BEARING: a bare $VAR/${VAR} expansion word-splits and EXECUTES the
+            # WHOLE value (the inert literal INCLUDED, not just a substitution), so an expanded
+            # var preserves WHOLE — this MUST precede the substitution span-scope below.
             if _var_is_expanded(var_name, command):
-                return match.group(0)  # Preserve — $VAR executes
+                return match.group(0)  # Preserve — $VAR executes the whole value
+            if _has_command_substitution(match.group(0)):
+                # `git -c section.key=value` config injection is OUT OF SCOPE (#11): a git config
+                # value can be an EXECUTABLE config (core.pager / alias.* / core.editor), so its
+                # literal is not provably inert — preserve WHOLE to keep the -c surface at its
+                # exact status quo. Tell: a git config key ALWAYS has a `.`, so the matched key
+                # segment is preceded by `.`; a shell var / `--flag=` name never is. Use
+                # match.string (the post-carrier-1..3 result being sub'd), NOT `command` — the
+                # match offsets index into that result, not the raw command.
+                if match.start() > 0 and match.string[match.start() - 1] == ".":
+                    return match.group(0)  # config injection — status-quo preserve
+                # Non-expanded, non-config value WITH a substitution: strip the inert literal but
+                # preserve the genuine $()/backtick spans (they execute) via the same certified
+                # span scanner the message carriers use. A benign $(date) beside danger-looking
+                # prose no longer reverts the whole value (the equals-form over-block cure).
+                value = match.group(0)[len(var_name) + 1:]  # text after `NAME=`
+                transformed = _preserve_substitution_spans(value)
+                if transformed is None:
+                    return match.group(0)  # FAIL-SAFE: preserve whole (exotic span)
+                return var_name + "=" + transformed
             return var_name + "=STRIPPED"
 
         result = re.sub(
