@@ -3256,6 +3256,7 @@ _SHELL_STRING_EXECUTORS = re.compile(
     r"^(?:"
     r"sh|bash|zsh|dash|ash|fish|csh|tcsh"                # POSIX + common shells
     r"|ksh(?:93)?|rksh|mksh"                             # ksh family (ksh93 != ksh)
+    r"|hush|lash|msh"                                   # busybox exec-shell applets (run a -c string)
     r"|eval|expect|watch"                               # string runners
     r"|ssh|rsh|remsh|slogin|su"                         # remote / user-switch (-c / a command)
     r"|python[0-9.]*|perl|ruby[0-9.]*|nodejs|node|php|awk|gawk"  # interpreters (-c/-e/-r)
@@ -3268,14 +3269,19 @@ _SHELL_STRING_EXECUTORS = re.compile(
 # preserve, case A caught; nested inert → strip, case B freed). sudo is RECURSE (≈ doas + a
 # bigger flag table; -i/-s/-e = shell/edit forms → preserve): sudo is ubiquitous and
 # `sudo logger "…"` / `sudo mycmd "…"` over-blocks are COMMON, not contrived, so coarse-
-# preserving it would retain a cardinal over-block. COARSE: grammars whose nested-command
-# boundary is NOT reliably skippable — find's `-exec CMD` is `;`/`+`-terminated with `{}`
-# placeholders; flock has a leading LOCKFILE positional + a `-c "STR"` string-exec arm (flock
-# -c runs via sh -c) + FD forms; busybox's applet is the 2nd token; stdbuf uses attached
-# `-oL` value forms — preserved WHOLE (over-block-safe: `flock -c "STR"`/`busybox sh -c` stay
-# CAUGHT; the `flock /lock mycmd "…"` wrapped-inert over-block is a contrived, tracked
-# residual). Enumerating EVERY wrapper is the #1098 wall (D1): an unmodeled custom wrapper's
-# under-block is a tolerated residual.
+# preserving it would retain a cardinal over-block. busybox + stdbuf are ALSO RECURSE: busybox's
+# applet is simply token[1] (empty own-flag grammar → nested command = token[1..]), and stdbuf's
+# only options are the -i/-o/-e buffering-mode VALUE-flags (attached `-oL` / separated `-o L` /
+# long `--output=L`) skippable by the phased walk — so their wrapped-inert over-block is CLOSEABLE
+# and MUST be closed. COARSE (still): grammars whose nested-command boundary is NOT reliably
+# skippable — find's `-exec CMD` is `;`/`+`-terminated with `{}` placeholders; flock has a leading
+# LOCKFILE positional + a `-c "STR"` string-exec arm (flock -c runs via sh -c) + FD forms —
+# preserved WHOLE (over-block-safe: `flock -c "STR"` stays CAUGHT; the `flock /lock mycmd "…"`
+# wrapped-inert over-block is a contrived, tracked residual). Enumerating EVERY wrapper is the
+# #1098 wall (D1): an unmodeled custom wrapper's under-block is a tolerated residual. NOTE:
+# recursing busybox requires its exec-capable shell applets (sh/ash/hush/lash/msh + awk) to be
+# recognized preserve-heads — hush/lash/msh were added to _SHELL_STRING_EXECUTORS so
+# `busybox hush -c "danger"` stays CAUGHT after the flip (else a fix-introduced under-block).
 _EXEC_WRAPPERS_RECURSE = frozenset({
     "nohup", "setsid", "nice", "doas", "sudo", "timeout", "xargs", "env",
     # Nameable exec-prefix family (#1178, user ruling = Option X + RECURSION). All 13 nameable
@@ -3288,14 +3294,19 @@ _EXEC_WRAPPERS_RECURSE = frozenset({
     # (myrunner-style) exec-wrapper tail (ratified D1 — enumerating every wrapper = the #1098 wall).
     "time", "exec", "command", "chrt", "taskset", "ionice", "unbuffer",
     "proxychains", "torsocks", "catchsegv", "nocache", "eatmydata", "rlwrap",
+    # busybox + stdbuf RECURSE (F2 closure): busybox = empty own-flag grammar, applet = token[1]
+    # (its exec-capable shell applets sh/ash/hush/lash/msh + awk are recognized preserve-heads so
+    # `busybox sh -c "danger"` stays caught while `busybox mycmd "danger"` frees); stdbuf = -i/-o/-e
+    # buffering-mode VALUE-flags (attached `-oL` handled by the phased walk's short-value branch).
+    "busybox", "stdbuf",
 })
 _EXEC_WRAPPERS_COARSE = frozenset({
-    # Plan-ratified members (pre-escalation). find's -exec CMD is ;/+-terminated with {}
-    # placeholders; flock has a lockfile positional + a -c string-exec arm; busybox's applet is
-    # the 2nd token; stdbuf uses attached -oL value forms — all COARSE preserve-whole (their
-    # `<wrapper> bash -c "danger"` stays caught; the wrapped-inert over-block is a contrived,
-    # tracked residual). The nameable exec-prefix family RECURSES (above), not here.
-    "find", "flock", "busybox", "stdbuf",
+    # Plan-ratified members whose nested-command boundary is NOT reliably skippable: find's -exec
+    # CMD is ;/+-terminated with {} placeholders; flock has a lockfile positional + a -c string-exec
+    # arm — both COARSE preserve-whole (their `<wrapper> bash -c "danger"` stays caught; the
+    # wrapped-inert over-block is a contrived, tracked residual). busybox/stdbuf moved to RECURSE
+    # (above, F2). The nameable exec-prefix family RECURSES, not here.
+    "find", "flock",
 })
 
 # (b) http-client heads whose destructive target is a quoted URL that _mask_shell_quotes
@@ -3369,6 +3380,15 @@ _WRAPPER_GRAMMAR: "dict[str, _WrapperGrammar]" = {
     "nocache":     _WrapperGrammar(frozenset(), frozenset({"-n"}), frozenset(), 0),
     "eatmydata":   _WrapperGrammar(frozenset(), frozenset(), frozenset(), 0),
     "rlwrap":      _WrapperGrammar(frozenset({"-A", "-c", "-h", "-i", "-I", "-n", "-N", "-o", "-r", "-R", "-U", "-W", "-x", "-a", "-m", "-p", "--always-readline", "--complete-filenames", "--case-insensitive", "--no-children", "--one-shot", "--remember", "--quiet", "--help"}), frozenset({"-b", "-C", "-D", "-e", "-f", "-g", "-H", "-l", "-O", "-P", "-q", "-s", "-S", "-t", "-w", "-z", "--break-chars", "--command-name", "--history-no-dupes", "--forget-matching", "--file", "--history-filename", "--logfile", "--substitute-prompt", "--prompt", "--quote-characters", "--histsize", "--set-terminal-name", "--wait-before-prompt", "--filter"}), frozenset(), 0),
+    # busybox + stdbuf (#1178 F2). busybox: the wrapper-usage form is `busybox APPLET [args]` with NO
+    # own-flags before the applet — empty grammar, positionals=0, so the nested command is token[1]
+    # (the applet); its exec-capable shell applets (sh/ash/hush/lash/msh) + awk are recognized
+    # preserve-heads. stdbuf: the -i/-o/-e buffering-mode VALUE-flags (long --input/--output/--error);
+    # the MODE value attaches (`-oL`), separates (`-o L`), or long-equals (`--output=L`) — the
+    # attached-short form is consumed by _wrapper_nested_command's PHASE-1 short-value branch. no
+    # shell forms, positionals=0. --help/--version are unlisted → unrecognized → preserve (over-block-safe).
+    "busybox":     _WrapperGrammar(frozenset(), frozenset(), frozenset(), 0),
+    "stdbuf":      _WrapperGrammar(frozenset(), frozenset({"-i", "-o", "-e", "--input", "--output", "--error"}), frozenset(), 0),
 }
 
 
@@ -3480,6 +3500,19 @@ def _wrapper_nested_command(leg: str, head: str) -> "str | None":
                 i += 1 if "=" in tok else 2      # --flag=value one token; --flag value two
                 continue
             if flagname in g.bool_flags:
+                i += 1
+                continue
+            # ATTACHED-SHORT-VALUE getopt form (`-oL` = short value-flag `-o` + glued value `L`).
+            # A SHORT flag only (`-X`, single dash + one char), whose 2-char prefix is a DECLARED
+            # value_flag, with the value glued on (len > 2). The glued remainder is the value, so
+            # the whole token is consumed (i += 1). GENERAL across RECURSE wrappers (getopt-universal:
+            # `-Xvalue` always binds the value to -X), never bundled-boolean shorts (the prefix must be
+            # a value_flag). Cannot swallow the nested command: a command never starts with `-` (the
+            # PHASE-4 bare-dash guard), and PHASE-1 stops at the first non-flag, so an executor's own
+            # `-c` (which follows the non-flag command head) is never reached here. MONOTONIC: it only
+            # ADVANCES past a wrapper option, never synthesizes danger — so it can only CLOSE an
+            # over-block (recurse to an inert nested command), never open an under-block.
+            if len(tok) > 2 and tok[1] != "-" and tok[:2] in g.value_flags:
                 i += 1
                 continue
             return None                          # unrecognized dash-flag → preserve
