@@ -694,7 +694,9 @@ class TestCarrier4NonRegression:
         # C4 anchor. It was False before #1140 and the anchor widening must not break it.
         cmd = 'git commit --message="run %s later"' % BD
         assert D(cmd) is False, "carrier-4 --message= must stay False at HEAD: %r" % cmd
-        if D_BASE is not None:
+        # Gate on ALL three baselines (mirrors `requires_history`, L149): D_FIRSTFIX/D_FIXR are
+        # squashed-away non-ancestors -> None in a clean/CI clone; the HEAD control above always runs.
+        if None not in (D_BASE, D_FIRSTFIX, D_FIXR):
             assert D_BASE(cmd) is False and D_FIRSTFIX(cmd) is False and D_FIXR(cmd) is False, \
                 "carrier-4 --message= must be non-regressed across ALL baselines: %r" % cmd
 
