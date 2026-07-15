@@ -170,6 +170,7 @@ import shlex
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import NamedTuple
 
 from .paths import get_claude_config_dir
 
@@ -2119,6 +2120,20 @@ def _keep_carrier_value(m: "re.Match") -> str:
     return flag + transformed
 
 
+def _strip_inert_dq_value(m: "re.Match") -> str:
+    """Replace an inert double-quoted positional value with the bareword ``STRIPPED``;
+    span-scope a value that contains ``$()``/backtick (executing spans preserved VERBATIM
+    in the SAME dq context, surrounding inert literal stripped); FAIL-SAFE preserve-whole on
+    a span the scanner cannot resolve. Byte-identical to the echo/printf carrier's dq-arg
+    strip; used by the general inert-default positional strip (#1178, carrier 10) so a
+    non-flag-anchored quoted positional is stripped with the SAME $()-preserve + fail-safe
+    discipline as the flag-anchored carriers."""
+    if not _has_command_substitution(m.group(0)):
+        return "STRIPPED"
+    transformed = _preserve_substitution_spans(m.group(0))
+    return m.group(0) if transformed is None else transformed
+
+
 def _strip_flag_values(span: str, flag_sep_regex: str, keep_fn) -> str:
     """Quote-safe value strip for a flag family within a single command span (#1118
     re-model). KEEPS the flag(+separator) token; replaces the VALUE with a BALANCED
@@ -2850,6 +2865,23 @@ def _strip_non_executable_content(command: str) -> str:
 
         result = re.sub(_gh_api_selector_span, _strip_gh_api_selectors, result)
 
+    # 10. GENERAL inert-default positional strip (#1178) — the strip-inert-by-default
+    #     inversion. For each shell-operator leg whose head is NEITHER a shell-string executor
+    #     / modeled wrapper (a) NOR an http-client (b), AND whose masked surface is NOT itself
+    #     dangerous (c), the quoted POSITIONAL values are INERT (POSIX argv of an unrecognized
+    #     command is never executed by the outer shell), so a danger-looking literal there must
+    #     not gate a faithful click — strip them (dq span-scopes $()/backtick; sq → bareword)
+    #     while PRESERVING executor / http-client / dangerous legs verbatim so every executing
+    #     arg stays caught and every destructive target survives for mint/read binding.
+    #     MONOTONIC toward False (only removes inert quoted content; never synthesizes a danger
+    #     token) so it can only CLOSE an over-block, never open one. Runs LAST (after the
+    #     flag-anchored carriers 1–9 have stripped their prose) under the SAME output-routing
+    #     skip. Leg slicing reuses the _slice_stripped_legs substrate on the in-progress result
+    #     (NOT _split_into_legs → re-strip recursion), rejoined with the ORIGINAL separators so
+    #     downstream leg boundaries are byte-unchanged.
+    if not piped_to_shell and not process_sub_to_shell:
+        result = _strip_inert_positional_legs(result)
+
     return result
 
 
@@ -3195,6 +3227,411 @@ def _flag_condition_danger_op(command: str) -> str | None:
     return None
 
 
+# =============================================================================
+# #1178 GENERAL inert-default positional strip — catalog, preserve-predicate,
+# wrapper recursion, and the carrier-10 leg strip.
+#
+# The strip-inert-by-DEFAULT inversion (design of record, SOUND-BOUNDED): a leg whose head
+# is an UNRECOGNIZED command has POSIX-argv-inert quoted positionals (the outer shell never
+# executes them), so a danger-looking literal there must not gate a faithful click — strip
+# it. A leg is PRESERVED (not stripped) iff its quoted content is load-bearing for a True
+# verdict: (a) its head hands a quoted string to a shell/interpreter (executor), or wraps a
+# command that does (modeled wrapper, RECURSED); (b) its head is an http-client whose
+# destructive target is a quoted URL that masking hides; or (c) its masked surface is itself
+# dangerous (a bare-token git/gh op whose quoted TARGET must survive mint/read binding). The
+# strip is MONOTONIC toward False: it only ever REPLACES an inert quoted value with STRIPPED
+# (or a $()-span-scoped value) — it never synthesizes a danger token — so it can only CLOSE
+# an over-block (True->False), never OPEN one; the whole safety burden reduces to preserve-
+# predicate completeness on the load-bearing legs.
+# =============================================================================
+
+# (a) Shell-string executors / interpreters. TOKEN-EQUALITY on the basename-normalized head
+# (C1 CARDINAL — NEVER substring/\b: a substring scan sees `bash` in `bash-completion` /
+# `python` in `python-config` and would wrongly PRESERVE an inert command's quoted arg,
+# re-opening the over-block). Bounded per-FAMILY patterns fold version/alias variants into
+# ONE member (python[0-9.]* / node|nodejs / ksh(93)?) so a real versioned interpreter is
+# caught while distinct tokens (python-config, node-gyp) are NOT (^…$ anchors the whole
+# token). busybox is a WRAPPER (its applet/executor is the 2nd token) → the wrapper set below.
+_SHELL_STRING_EXECUTORS = re.compile(
+    r"^(?:"
+    r"sh|bash|zsh|dash|ash|fish|csh|tcsh"                # POSIX + common shells
+    r"|ksh(?:93)?|rksh|mksh"                             # ksh family (ksh93 != ksh)
+    r"|eval|expect|watch"                               # string runners
+    r"|ssh|rsh|remsh|slogin|su"                         # remote / user-switch (-c / a command)
+    r"|python[0-9.]*|perl|ruby[0-9.]*|nodejs|node|php|awk|gawk"  # interpreters (-c/-e/-r)
+    r")$"
+)
+
+# (a) Modeled exec-WRAPPERS whose (possibly nested) executor's quoted arg executes. Split by
+# grammar tractability. RECURSE: the wrapper's own args are a bounded, well-known skip from
+# the head to the nested command, which _is_preserve_leg then RE-EVALUATES (nested executor →
+# preserve, case A caught; nested inert → strip, case B freed). sudo is RECURSE (≈ doas + a
+# bigger flag table; -i/-s/-e = shell/edit forms → preserve): sudo is ubiquitous and
+# `sudo logger "…"` / `sudo mycmd "…"` over-blocks are COMMON, not contrived, so coarse-
+# preserving it would retain a cardinal over-block. COARSE: grammars whose nested-command
+# boundary is NOT reliably skippable — find's `-exec CMD` is `;`/`+`-terminated with `{}`
+# placeholders; flock has a leading LOCKFILE positional + a `-c "STR"` string-exec arm (flock
+# -c runs via sh -c) + FD forms; busybox's applet is the 2nd token; stdbuf uses attached
+# `-oL` value forms — preserved WHOLE (over-block-safe: `flock -c "STR"`/`busybox sh -c` stay
+# CAUGHT; the `flock /lock mycmd "…"` wrapped-inert over-block is a contrived, tracked
+# residual). Enumerating EVERY wrapper is the #1098 wall (D1): an unmodeled custom wrapper's
+# under-block is a tolerated residual.
+_EXEC_WRAPPERS_RECURSE = frozenset({
+    "nohup", "setsid", "nice", "doas", "sudo", "timeout", "xargs", "env",
+    # Nameable exec-prefix family (#1178, user ruling = Option X + RECURSION). All 13 nameable
+    # exec-prefixes RECURSE (via _WRAPPER_GRAMMAR) so `<prefix> bash -c "danger"` stays CAUGHT
+    # AND the faithful inert `<prefix> mycmd "danger"` FREES — the over-block is CLOSEABLE, so
+    # it MUST be closed ("contrived" is not a valid exception under the user principle; only a
+    # by-construction-unclosable residual like curl/wget is acceptable). Per-prefix arg-skip
+    # grammar below, each BIDIRECTIONALLY certified (bash -c caught ∧ mycmd freed ∧ value-flag-
+    # before-executor caught). The ONLY tolerated under-block residual is the genuinely-CUSTOM
+    # (myrunner-style) exec-wrapper tail (ratified D1 — enumerating every wrapper = the #1098 wall).
+    "time", "exec", "command", "chrt", "taskset", "ionice", "unbuffer",
+    "proxychains", "torsocks", "catchsegv", "nocache", "eatmydata", "rlwrap",
+})
+_EXEC_WRAPPERS_COARSE = frozenset({
+    # Plan-ratified members (pre-escalation). find's -exec CMD is ;/+-terminated with {}
+    # placeholders; flock has a lockfile positional + a -c string-exec arm; busybox's applet is
+    # the 2nd token; stdbuf uses attached -oL value forms — all COARSE preserve-whole (their
+    # `<wrapper> bash -c "danger"` stays caught; the wrapped-inert over-block is a contrived,
+    # tracked residual). The nameable exec-prefix family RECURSES (above), not here.
+    "find", "flock", "busybox", "stdbuf",
+})
+
+# (b) http-client heads whose destructive target is a quoted URL that _mask_shell_quotes
+# blanks (so the danger battery on the masked surface CANNOT see it) → preserving is the
+# load-bearing #1098-consistent exclusion (a strip would UNDER-block). curl/wget matched by
+# shlex basename head (catches a quoted "curl": base-True via \bcurl\b + a .* lookahead that
+# spans the closing quote). gh api is matched on the masked surface via _GH_API_PREFIX (an
+# unquoted `gh api`; a quoted "gh" api is base-FALSE — \bgh\s+ is broken by the closing quote
+# — so it needs no preserve).
+_HTTP_CLIENT_HEADS = frozenset({"curl", "wget"})
+
+# Recognized git/gh TOOL heads. Carrier 10 PRESERVES these legs wholesale and DEFERS to their
+# dedicated carriers (5 git commit / 7 gh issue-pr / 7b-e / 8 curl-body / 9 gh-api selector) +
+# the danger floor: re-stripping a value those carriers intentionally preserved is an
+# under-block (a git commit -m/tag $() fail-safe value, a `git -c` config dot-guard value, an
+# expanded var), and a DANGEROUS git/gh leg's target must survive for binding. Non-carrier
+# git/gh prose (e.g. `git log --grep "…git branch -D…"`) stays a benign over-block RESIDUAL —
+# never an under-block. (curl/wget/gh-api are the http-client heads above / the gh-api masked
+# clause, handled separately.)
+_TOOL_HEADS = frozenset({"git", "gh"})
+
+# Bounded recursion depth for nested wrappers (`timeout nice bash -c …`). Beyond this →
+# fail-safe PRESERVE. 3 covers realistic nesting; the guard prevents pathological recursion.
+_MAX_WRAPPER_DEPTH = 3
+
+class _WrapperGrammar(NamedTuple):
+    """Per-wrapper own-arg grammar for the recursion walk. bool_flags = flags to skip (token
+    only); value_flags = flags whose NEXT token is a value to skip too; shell_flags = flags
+    that invoke a shell / make the arg the command → PRESERVE the whole leg; positionals =
+    count of leading NON-flag positional args to skip before the command (timeout's DURATION =
+    1). Long =forms (`--flag=x`) collapse to one token; env NAME=VALUE is handled generically.
+    An UNRECOGNIZED dash-flag (unknown arity) → PRESERVE — skipping the wrong number of tokens
+    could land PAST the executor = the under-block the fail-safe forbids."""
+    bool_flags: "frozenset[str]"
+    value_flags: "frozenset[str]"
+    shell_flags: "frozenset[str]"
+    positionals: int
+
+
+_WRAPPER_GRAMMAR: "dict[str, _WrapperGrammar]" = {
+    "nohup":   _WrapperGrammar(frozenset(), frozenset(), frozenset(), 0),
+    "setsid":  _WrapperGrammar(frozenset({"-c", "-f", "-w", "--ctty", "--fork", "--wait"}), frozenset(), frozenset(), 0),
+    "nice":    _WrapperGrammar(frozenset(), frozenset({"-n", "--adjustment"}), frozenset(), 0),
+    "doas":    _WrapperGrammar(frozenset({"-L", "-n"}), frozenset({"-C", "-u"}), frozenset({"-s"}), 0),
+    "timeout": _WrapperGrammar(frozenset({"--preserve-status", "--foreground", "-v", "--verbose"}), frozenset({"-s", "--signal", "-k", "--kill-after"}), frozenset(), 1),
+    "xargs":   _WrapperGrammar(frozenset({"-0", "--null", "-r", "--no-run-if-empty", "-t", "--verbose", "-p", "--interactive", "-x", "--exit", "-o", "--open-tty"}), frozenset({"-I", "-i", "-n", "--max-args", "-L", "--max-lines", "-P", "--max-procs", "-s", "--max-chars", "-d", "--delimiter", "-E", "-e", "-a", "--arg-file"}), frozenset(), 0),
+    "env":     _WrapperGrammar(frozenset({"-i", "--ignore-environment", "-0", "--null", "-v"}), frozenset({"-u", "--unset", "-C", "--chdir"}), frozenset({"-S", "--split-string"}), 0),
+    # sudo (≈ doas + a bigger table). shell/edit forms {-i,-s,-e} → preserve (no explicit CMD).
+    # -h OMITTED (ambiguous help-vs-host) → unrecognized → preserve (over-block-safe). Value
+    # flags (-u/-g/-C/-p/-R/-r/-T/-t/-U/-D) verified vs sudo(8). Arity errors here would
+    # under-block, so the value/bool split is cert-pinned per Q2 (value-flag-before-executor).
+    "sudo":    _WrapperGrammar(frozenset({"-A", "--askpass", "-B", "--bell", "-b", "--background", "-E", "--preserve-env", "-H", "--set-home", "-K", "--remove-timestamp", "-k", "--reset-timestamp", "-l", "--list", "-n", "--non-interactive", "-P", "--preserve-groups", "-S", "--stdin", "-V", "--version", "-v", "--validate"}), frozenset({"-C", "--close-from", "-D", "--chdir", "-g", "--group", "-p", "--prompt", "-R", "--chroot", "-r", "--role", "-T", "--command-timeout", "-t", "--type", "-U", "--other-user", "-u", "--user"}), frozenset({"-i", "--login", "-s", "--shell", "-e", "--edit"}), 0),
+    # Nameable exec-prefixes (#1178 Option X, RECURSION). Each bidirectionally certified (bash -c
+    # caught ∧ mycmd freed ∧ value-flag-before-executor caught). Unlisted flags → unrecognized →
+    # PRESERVE (fail-safe: an unmodeled option over-blocks rather than mis-skips past the
+    # executor). time = bash keyword (-p) + /usr/bin/time (-o/-f value). chrt/taskset carry a
+    # leading PRIORITY/MASK positional + a -p/--pid operate-on-existing-PID form (no CMD → shell/
+    # preserve). ionice: -c/-n class values. proxychains: -f config. torsocks: -d/-a/-p/-P/-u/-s
+    # values. rlwrap: large value set (-b/-C/-D/-e/-f/-g/-H/-l/-O/-P/-q/-s/-S/-t/-w/-z); -a/-m/-p
+    # are OPTIONAL-ATTACHED (bool unless attached). catchsegv/nocache/eatmydata take no options.
+    "time":        _WrapperGrammar(frozenset({"-a", "-p", "-q", "-v", "-V", "--append", "--portability", "--quiet", "--verbose", "--version", "--help"}), frozenset({"-o", "-f", "--output", "--format"}), frozenset(), 0),
+    "exec":        _WrapperGrammar(frozenset({"-c", "-l"}), frozenset({"-a"}), frozenset(), 0),
+    "command":     _WrapperGrammar(frozenset({"-p", "-V", "-v"}), frozenset(), frozenset(), 0),
+    "chrt":        _WrapperGrammar(frozenset({"-f", "-b", "-o", "-r", "-i", "-d", "-R", "-m", "-a", "-v", "--fifo", "--batch", "--other", "--rr", "--idle", "--deadline", "--reset-on-fork", "--all-tasks", "--verbose"}), frozenset(), frozenset({"-p", "--pid"}), 1),
+    "taskset":     _WrapperGrammar(frozenset({"-a", "--all-tasks", "-c", "--cpu-list"}), frozenset(), frozenset({"-p", "--pid"}), 1),
+    "ionice":      _WrapperGrammar(frozenset({"-t", "--ignore"}), frozenset({"-c", "--class", "-n", "--classdata"}), frozenset({"-p", "--pid"}), 0),
+    "unbuffer":    _WrapperGrammar(frozenset({"-p"}), frozenset(), frozenset(), 0),
+    "proxychains": _WrapperGrammar(frozenset({"-q", "--quiet"}), frozenset({"-f", "--config"}), frozenset(), 0),
+    "torsocks":    _WrapperGrammar(frozenset({"-h", "-q", "-i", "--isolate", "-H", "-V", "--version", "--help", "--shell"}), frozenset({"-d", "--debug", "-a", "--address", "-p", "--port", "-P", "--control-port", "-u", "--user", "-s", "--socks5"}), frozenset(), 0),
+    "catchsegv":   _WrapperGrammar(frozenset(), frozenset(), frozenset(), 0),
+    "nocache":     _WrapperGrammar(frozenset(), frozenset({"-n"}), frozenset(), 0),
+    "eatmydata":   _WrapperGrammar(frozenset(), frozenset(), frozenset(), 0),
+    "rlwrap":      _WrapperGrammar(frozenset({"-A", "-c", "-h", "-i", "-I", "-n", "-N", "-o", "-r", "-R", "-U", "-W", "-x", "-a", "-m", "-p", "--always-readline", "--complete-filenames", "--case-insensitive", "--no-children", "--one-shot", "--remember", "--quiet", "--help"}), frozenset({"-b", "-C", "-D", "-e", "-f", "-g", "-H", "-l", "-O", "-P", "-q", "-s", "-S", "-t", "-w", "-z", "--break-chars", "--command-name", "--history-no-dupes", "--forget-matching", "--file", "--history-filename", "--logfile", "--substitute-prompt", "--prompt", "--quote-characters", "--histsize", "--set-terminal-name", "--wait-before-prompt", "--filter"}), frozenset(), 0),
+}
+
+
+def _stripped_surface_danger(stripped: str) -> bool:
+    """The literal danger battery over an ALREADY-STRIPPED (or MASKED) surface: the
+    DANGEROUS_PATTERNS scan + the four per-leg literal-arm families + the additive
+    normalized-flag condition. Factored out of ``is_dangerous_command`` (behavior-identical)
+    so the #1178 preserve-predicate can consult the SAME danger predicate on a masked leg
+    WITHOUT re-entering ``_strip_non_executable_content`` (which would recurse — the predicate
+    runs INSIDE that strip). SURFACE-AGNOSTIC: it neither strips nor masks, only matches, so a
+    ``_mask_shell_quotes(leg)`` surface is safe (masking is idempotent for these regexes).
+    The SSOT for "is this surface dangerous" — the read floor and the preserve predicate can
+    never drift."""
+    for pattern in DANGEROUS_PATTERNS:
+        if pattern.search(stripped):
+            return True
+    # Literal arms matched PER-LEG over the SAME surface (identical provenance to the read
+    # floor). Legs computed ONCE and shared by all four arm loops.
+    legs = _slice_stripped_legs(stripped)
+    for _leg in legs:
+        if any(arm.search(_leg) for arm in _FORCE_PUSH_LITERAL_ARMS):
+            return True
+    for _leg in legs:
+        if any(arm.search(_leg) for arm in _CLOSE_LITERAL_ARMS):
+            return True
+    for _leg in legs:
+        if any(arm.search(_leg) for arm in _API_LITERAL_ARMS):
+            return True
+    for _leg in legs:
+        if any(arm.search(_leg) for arm in _BRANCH_DELETE_LITERAL_ARMS):
+            return True
+    if _flag_condition_danger_op(stripped) is not None:
+        return True
+    return False
+
+
+def _leg_token_spans(leg: str) -> "list[tuple[int, int]]":
+    """Quote-aware shell-token spans (start, end) into `leg`: a token is a maximal run with NO
+    UNQUOTED whitespace (a quoted or backslash-escaped whitespace stays INSIDE the token).
+    Mirrors the ``_mask_shell_quotes`` scanner exactly (backslash-escape outside quotes; `\\`
+    honored inside "…" but not '…'), so an embedded quoted span (`FOO=a"b c"d` = ONE token) never
+    SPLITS a token and a quoted head (`"timeout"`) stays token[0] — the two failure modes a
+    masked-`\\S+` tokenization has (an internal-quote span erases to spaces and either splits the
+    token or erases a quoted head, misaligning the walk). Callers reach here only on a balanced
+    leg (``_is_preserve_leg`` preserves an unbalanced one up front), so quotes always close."""
+    spans: list[tuple[int, int]] = []
+    i, n = 0, len(leg)
+    tok_start = -1
+    while i < n:
+        c = leg[i]
+        if c.isspace():
+            if tok_start >= 0:
+                spans.append((tok_start, i))
+                tok_start = -1
+            i += 1
+            continue
+        if tok_start < 0:
+            tok_start = i
+        if c == "\\":
+            i += 2
+            continue
+        if c == "'" or c == '"':
+            q = c
+            i += 1
+            while i < n:
+                if q == '"' and leg[i] == "\\":
+                    i += 2
+                    continue
+                if leg[i] == q:
+                    i += 1
+                    break
+                i += 1
+            continue
+        i += 1
+    if tok_start >= 0:
+        spans.append((tok_start, n))
+    return spans
+
+
+def _wrapper_nested_command(leg: str, head: str) -> "str | None":
+    """For a RECURSE-set wrapper leg, return the ORIGINAL-string substring of the nested
+    command (quotes intact) for ``_is_preserve_leg`` to recurse on, or None → FAIL-SAFE
+    PRESERVE. Tokens + offsets come from ``_leg_token_spans`` (quote-aware: an adjacent-concat
+    arg stays ONE token, a quoted head stays token[0]); flag recognition reads the RAW token
+    text (a NAME= prefix / a dash-flag is before any quote), and the returned slice indexes the
+    ORIGINAL leg so the nested command keeps its quotes. Returns None on ANY uncertainty: an
+    unrecognized dash-flag (unknown arity → can't safely skip its value = the mis-skip-past-
+    executor under-block), a shell-invocation flag (env -S / sudo -i,-s,-e / doas -s / …), a
+    value-flag at end-of-tokens, or no nested command."""
+    g = _WRAPPER_GRAMMAR[head]
+    spans = _leg_token_spans(leg)    # spans[0] is the wrapper head (quoted or not)
+    i, n = 1, len(spans)
+    # PHASE 1 — the wrapper's OWN flags (which PRECEDE any positional / the command). Stopping
+    # flag-consumption once a non-flag or `--` is seen is load-bearing: a wrapper flag that
+    # COLLIDES with a nested-command flag (taskset's `-c`=--cpu-list vs `bash -c`) must NOT be
+    # re-consumed AFTER the positional — else `taskset MASK bash -c "danger"`'s `-c` (bash's)
+    # would be eaten as taskset's, mis-locating the command → under-block.
+    while i < n:
+        start, end = spans[i]
+        tok = leg[start:end]
+        if tok == "--":
+            i += 1
+            break                                # end-of-options; rest is positionals + command
+        if tok.startswith("-") and tok != "-":
+            flagname = tok.split("=", 1)[0]
+            if flagname in g.shell_flags:
+                return None                      # shell-invocation form → preserve
+            if flagname in g.value_flags:
+                i += 1 if "=" in tok else 2      # --flag=value one token; --flag value two
+                continue
+            if flagname in g.bool_flags:
+                i += 1
+                continue
+            return None                          # unrecognized dash-flag → preserve
+        break                                    # first non-flag token → positionals / command
+    # PHASE 2 — the wrapper's leading POSITIONALS (timeout DURATION, chrt PRIORITY, taskset MASK).
+    for _ in range(g.positionals):
+        if i >= n:
+            return None                          # ran out (positional missing) → preserve
+        i += 1
+    # PHASE 3 — env NAME=VALUE assignments (env has positionals=0; they precede the command).
+    if head == "env":
+        while i < n and re.match(r"^[A-Za-z_]\w*=", leg[spans[i][0]:spans[i][1]]):
+            i += 1
+    # PHASE 4 — the nested command head.
+    if i >= n:
+        return None                              # no command → preserve
+    cmd_start, cmd_end = spans[i]
+    if leg[cmd_start:cmd_end].startswith("-"):
+        return None                              # a bare dash-flag is never a real command → preserve
+    return leg[cmd_start:]                        # nested command head (original, quotes intact)
+
+
+def _leg_command_word(leg: str) -> "str | None":
+    """Return the leg SUBSTRING starting at the TRUE command word — skipping any LEADING
+    env-assignment (`NAME=value`, quoted OR bare: `LC_ALL=C`, `FOO="a b"`) and redirection
+    (`>`, `2>`, `&>`, `2>/dev/null`, `2>&1`, `< in`…) tokens that PRECEDE the command. Returns
+    None when the leg is ONLY assignments/redirects (no command). SECURITY (#1178 head-
+    displacement): a leading assignment/redirect displaces tokens[0], so `_is_preserve_leg`
+    must compute the head on the TRUE command — else `LC_ALL=C bash -c "danger"` reads head
+    `LC_ALL=C`, no preserve clause fires, and the executor's danger arg is stripped = a
+    destructive UNDER-block. Mirrors the env WRAPPER's own NAME=VALUE skip (grammar PHASE 3)
+    at the leg top level for the BARE prefix form. Quote-aware via _leg_token_spans."""
+    spans = _leg_token_spans(leg)
+    k, n = 0, len(spans)
+    while k < n:
+        start, end = spans[k]
+        tok = leg[start:end]
+        # NAME=value / NAME+=value / NAME= (empty) assignment — the `\+?` covers the append
+        # form (`PATH+=/x`); the whole token is skipped so an embedded '='/'$'/quote in the value
+        # (`FOO=a=b`, `FOO=$HOME`, `FOO="a b"` → carrier-4-stripped to `FOO=STRIPPED`) stays inside
+        # the skipped token. (carrier 4 already stripped a non-expanded quoted RHS to NAME=STRIPPED
+        # BEFORE carrier 10, so quotes are not relied on surviving.)
+        if re.match(r"^[A-Za-z_]\w*\+?=", tok):
+            k += 1
+            continue
+        if re.match(r"^(?:[0-9]*(?:&?[<>]|<>)|&>>?)", tok):   # redirection operator
+            k += 1
+            # a BARE operator (`>`, `>>`, `2>`, `<`, `&>`, and SPACED-target `>&`/`<&`/`2>&`, `>|`)
+            # consumes the NEXT token as its target; a self-contained form (`2>&1`/`3>&2`/`>&2`
+            # fd-dup, `2>/dev/null`/`>file` attached target) does not. The `[<>]&` alt classifies a
+            # spaced redirect-both (`>& file`) as BARE (architect finding — else the walk lands on
+            # `file` and misses the real executor = under-block); `2>&1`/`>&2` stay self-contained
+            # (a trailing fd digit fails the fullmatch).
+            if re.fullmatch(r"[0-9]*(?:[<>]{1,2}|[<>]&|>\|)|&>>?", tok):
+                k += 1
+            continue
+        return leg[start:]                               # the true command word
+    return None                                          # only assignments/redirects → no command
+
+
+def _is_preserve_leg(leg: str, _depth: int = 0) -> bool:
+    """True iff this single leg's quoted-arg values must be PRESERVED (not stripped) by the
+    #1178 general inert-default strip — see the catalog block above for clauses (a)/(b)/(c).
+    FAIL-SAFE to PRESERVE (True) on any ambiguity (unparseable quotes, uncertain wrapper
+    boundary, recursion depth): preserving is the OVER-BLOCK-safe direction (it can only leave
+    an over-block unclosed, never open an under-block)."""
+    if _shell_tokenize(leg) is None:
+        return True                                      # unbalanced quote → fail-safe preserve
+    # (d1) a QUOTED variable-assignment RHS that survived the variable-assignment carrier (4)
+    # is an EXPANDED value: carrier 4 strips a non-expanded `NAME="…"` to `NAME=STRIPPED`, and
+    # when eval/source is present it skips entirely (preserving all) — either way, a `NAME="…"`
+    # / `NAME='…'` still QUOTED here is one carrier 4 kept because it executes via its expansion
+    # (`FOO="gh pr merge 5" && $FOO`, `export CMD="…" && eval $CMD`). Carrier 10 must NOT
+    # re-strip it (under-block). Covers leading (`FOO=`) and builder (`export/declare NAME=`)
+    # forms alike. NOTE: this un-anchored regex also matches a `--flag="v"` (the `flag="`
+    # inside) — but carrier 4 pre-strips flag-attached literals before carrier 10, so it is a
+    # no-op there; and either way the false-match direction is always PRESERVE (over-block-safe,
+    # never under-block).
+    if re.search(r"""[A-Za-z_]\w*=["']""", leg):
+        return True
+    # HEAD-DISPLACEMENT guard (#1178 SEC): compute the head clauses on the TRUE command word
+    # (skip leading env-assignment / redirection prefixes) — else a leading `LC_ALL=C` / bare
+    # `FOO=bar` / `2>/dev/null` displaces tokens[0] and the real executor is missed (under-block).
+    cmd_leg = _leg_command_word(leg)
+    if cmd_leg is not None:
+        tokens = _shell_tokenize(cmd_leg)
+        if tokens:
+            head = os.path.basename(tokens[0])
+            if head in _TOOL_HEADS:                      # (d2) git/gh → defer to carriers 5/7/8/9
+                return True
+            if _SHELL_STRING_EXECUTORS.match(head):      # (a) executor / interpreter
+                return True
+            if head in _HTTP_CLIENT_HEADS:               # (b) curl/wget (quoted head via shlex)
+                return True
+            if head in _EXEC_WRAPPERS_COARSE:            # (a) wrapper, boundary not skippable
+                return True
+            if head in _EXEC_WRAPPERS_RECURSE:           # (a) wrapper, recurse to nested command
+                if _depth >= _MAX_WRAPPER_DEPTH:
+                    return True                          # depth guard → fail-safe preserve
+                nested = _wrapper_nested_command(cmd_leg, head)
+                if nested is None:
+                    return True                          # uncertain boundary → fail-safe preserve
+                return _is_preserve_leg(nested, _depth + 1)
+    masked = _mask_shell_quotes(leg)                     # tail checks on the WHOLE leg (conservative)
+    # (d3) an unquoted process substitution `<(cmd)` / `>(cmd)` EXECUTES cmd, so its quoted args
+    # may execute — preserve. Masking blanks a quoted `"<("`, so only a REAL procsub triggers.
+    if _PROCSUB_MARKER_RE.search(masked):
+        return True
+    if re.search(_GH_API_PREFIX, masked):                # (b) gh api (unquoted `gh api`)
+        return True
+    return _stripped_surface_danger(masked)              # (c) bare-token danger (defense-in-depth)
+
+
+def _maybe_strip_leg(leg: str) -> str:
+    """Strip a leg's quoted positional VALUES iff it is inert (not preserved); else verbatim.
+    dq span-scopes $()/backtick (via _strip_inert_dq_value); sq → bareword STRIPPED. The verb +
+    unquoted structure stay intact; the leg carries NO shell-operator separator (those are
+    outside the leg), so this never re-slices."""
+    if _is_preserve_leg(leg):
+        return leg
+    stripped = re.sub(r'"(?:[^"\\]|\\.)*"', _strip_inert_dq_value, leg)
+    stripped = re.sub(r"'[^']*'", "STRIPPED", stripped)
+    # QUOTE-BALANCE fail-safe (#1118 leg-merge guard): the per-span dq regex is NOT
+    # $()-nesting-aware, so on an exotic nested-quote value (`"a $(b "c") d"`) it can mis-pair
+    # and emit an unbalanced leg. An unbalanced leg fed downstream could let _mask_shell_quotes
+    # pair a stray quote ACROSS a separator and MERGE legs (under-block). shlex is the oracle:
+    # we only reach here with a balanced ORIGINAL (an unbalanced one preserved at the top), so
+    # if the strip broke balance, preserve the ORIGINAL leg rather than emit a dangling quote.
+    if _shell_tokenize(stripped) is None:
+        return leg
+    return stripped
+
+
+def _strip_inert_positional_legs(result: str) -> str:
+    """Carrier-10 core (#1178): slice `result` into shell-operator legs — the SAME masked +
+    FD-neutralize substrate as ``_slice_stripped_legs``, but RETAINING the original separators
+    — and strip each INERT (non-preserved) leg's quoted positional values, emitting preserve
+    legs verbatim. Rejoined with the ORIGINAL separators so a downstream re-slice of this
+    result sees byte-unchanged leg boundaries. Slices via this in-line walk (NOT
+    ``_split_into_legs``, which re-strips → recursion)."""
+    view = _FD_REDIRECT_RE.sub(
+        lambda m: " " * len(m.group()), _mask_shell_quotes(result)
+    )
+    out, last = [], 0
+    for m in _COMPOUND_OPS_RE.finditer(view):
+        out.append(_maybe_strip_leg(result[last:m.start()]))
+        out.append(result[m.start():m.end()])            # ORIGINAL separator, verbatim
+        last = m.end()
+    out.append(_maybe_strip_leg(result[last:]))
+    return "".join(out)
+
+
 def is_dangerous_command(command: str) -> bool:
     """Check if a bash command is a dangerous git operation.
 
@@ -3217,58 +3654,12 @@ def is_dangerous_command(command: str) -> bool:
     # any matching (so this floor + the substrate join lines identically).
     command = _normalize_line_continuations(command)
     stripped = _strip_non_executable_content(command)
-    for pattern in DANGEROUS_PATTERNS:
-        if pattern.search(stripped):
-            return True
-    # Literal force-push arms, matched PER-LEG (#1082): leg boundaries come from
-    # _slice_stripped_legs over this SAME `stripped` text — identical strip
-    # provenance to _split_into_legs (normalize + strip, above), so read-floor legs
-    # and substrate legs can never diverge, and the strip is not recomputed. An arm
-    # fires iff push and the force-class flag co-occur within ONE leg, in ANY leg
-    # position (the match-anywhere purpose, per leg). The legs are computed ONCE
-    # here and shared by all four literal-arm loops below (force-push, close, API,
-    # branch-delete).
-    legs = _slice_stripped_legs(stripped)
-    for _leg in legs:
-        if any(arm.search(_leg) for arm in _FORCE_PUSH_LITERAL_ARMS):
-            return True
-    # Literal close arms, matched PER-LEG (#1087): same leg substrate and strip
-    # provenance as the force-push loop above. An arm fires iff `gh pr close` and
-    # `--delete-branch` co-occur within ONE leg — so the ambiguous cross-leg
-    # multi-close is is_dangerous=False here, the mint write-gate refuses (no token),
-    # and the escalated-single laundering channel is structurally closed.
-    for _leg in legs:
-        if any(arm.search(_leg) for arm in _CLOSE_LITERAL_ARMS):
-            return True
-    # Literal API danger arms, matched PER-LEG (#1086): same leg substrate and strip
-    # provenance as the loops above. An arm fires iff the API client, its mutating
-    # method (or implicit-POST body flag), and the target endpoint co-occur within ONE
-    # leg — so a method/body-flag token in a benign continuation leg no longer
-    # over-blocks the compound, while a same-leg dangerous API call still gates. The
-    # negative-lookahead arms operate within-leg (correct exclusion/inclusion direction).
-    for _leg in legs:
-        if any(arm.search(_leg) for arm in _API_LITERAL_ARMS):
-            return True
-    # Literal branch-delete arms, matched PER-LEG (#1094): same leg substrate and
-    # strip provenance as the loops above. An arm fires iff `git branch` and the
-    # force-delete flag co-occur within ONE leg — a stray `-D` / `--delete --force`
-    # token in a benign continuation leg no longer gates the compound (and the
-    # formerly-mintable ambiguous compound is is_dangerous=False, so the mint
-    # write-gate refuses → no token → the laundering substrate is structurally
-    # closed), while a same-leg force-delete still gates in ANY leg position.
-    # Clustered/split flag spellings remain the union arm's job (below).
-    for _leg in legs:
-        if any(arm.search(_leg) for arm in _BRANCH_DELETE_LITERAL_ARMS):
-            return True
-    # ADDITIVE union arm (INV-AU): a quote-aware normalized-flag danger CONDITION across
-    # every flag spelling the literal floor misses — `-d`/`-cd` close delete, `-Df`/`-fD`/
-    # `--delete -f` branch force-delete. Runs on the STRIPPED surface (same as the floor)
-    # so a flag spelled inside a comment / heredoc / echo / var-assignment does NOT false-
-    # trigger; the shlex tokenizer keeps a quoted argument as ONE token so a flag inside a
-    # quoted value is never read as a flag. The literal floor stays the fail-closed default.
-    if _flag_condition_danger_op(stripped) is not None:
-        return True
-    return False
+    # The literal danger battery (DANGEROUS_PATTERNS + the four per-leg literal-arm families +
+    # the additive normalized-flag condition) is the SSOT _stripped_surface_danger — factored
+    # out so the #1178 general-strip preserve-predicate can consult the SAME predicate on a
+    # masked leg without re-entering the strip (recursion). Behavior-identical to the prior
+    # inline battery.
+    return _stripped_surface_danger(stripped)
 
 
 # A plain `rm` head token at a compound leg's start. DELIBERATELY rm-SPECIFIC and used

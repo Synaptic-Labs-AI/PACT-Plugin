@@ -175,17 +175,17 @@ class TestNarrowGhCommentCarrierStripBlock:
 
         assert is_dangerous_command('python3 -c "print(' + _SQ + "gh pr merge 42" + _SQ + ')"')
 
-    def test_general_grep_papercut_still_blocks(self):
-        # SUPPRESSOR-NEUTRAL regression guard: a bare `grep "...op..."` is a known
-        # #1037 over-block papercut the NARROW fix deliberately does NOT address
-        # (out of scope — only gh-comment). The carrier-strip never touches grep (not
-        # a gh carrier verb), so NO carrier mutation flips this; it is caught by the
-        # base substring scan. Asserted so a future change cannot silently ALLOW grep
-        # without the proper fix. (NOTE: `echo "...op..."` is correctly ALLOWED by the
-        # pre-existing echo carrier-strip — it is NOT a BLOCK canary.)
+    def test_general_grep_papercut_now_closed(self):
+        # The `grep "...op..."` over-block papercut this #1037 NARROW fix deliberately left
+        # OUT OF SCOPE (only gh-comment) is CLOSED by the #1178 general inert-default positional
+        # strip — "the proper fix" this pin previously guarded against a suppressor faking. grep
+        # is an unrecognized head, so its quoted pattern is POSIX-argv-inert (never executed);
+        # carrier 10 strips it exactly like the echo carrier-strip -> ALLOW is CORRECT (a
+        # faithful `grep "gh pr merge 5" file` no longer gates). Flipped from block to allow when
+        # #1178 landed; the general strip is the general fix the papercut awaited.
         from merge_guard_pre import is_dangerous_command
 
-        assert is_dangerous_command('grep "gh pr merge 5" file')
+        assert not is_dangerous_command('grep "gh pr merge 5" file')
 
 
 class TestNarrowGhCommentInertAllow:
