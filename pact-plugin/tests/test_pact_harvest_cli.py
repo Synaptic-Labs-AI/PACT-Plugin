@@ -251,7 +251,14 @@ class TestResolveSessionDirSubprocess:
             {"project_dir": project_dir, "session_id": session_id}), encoding="utf-8")
         return ctx
 
-    def test_valid_context_exit0_absolute_dir(self, tmp_path):
+    def test_valid_context_exit0_absolute_dir(self, tmp_path, monkeypatch):
+        # Subprocess isolation: the autouse conftest fixture redirects
+        # Path.home() IN-PROCESS only (monkeypatch.setattr does not cross to
+        # the child), so the subprocess must inherit CLAUDE_CONFIG_DIR to
+        # resolve the SAME tmp root as the parent oracle
+        # (pact_context.reconstruct_session_dir). See conftest
+        # _isolate_config_root_to_tmp "WHY NOT ALSO SET HOME ENV".
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
         ctx = self._write_ctx(tmp_path, "/clean/project", "sess-abcd")
         r = _run_cli("resolve-session-dir", "--context-file", str(ctx))
         assert r.returncode == _EXIT_OK
@@ -260,7 +267,7 @@ class TestResolveSessionDirSubprocess:
         # Oracle = the SSOT helper itself (NOT a hand-built path).
         assert out == pact_context.reconstruct_session_dir("/clean/project", "sess-abcd")
 
-    def test_b1_class_drift_both_axes_sanitized_no_drift(self, tmp_path):
+    def test_b1_class_drift_both_axes_sanitized_no_drift(self, tmp_path, monkeypatch):
         """THE critical durability test (the exact bug class cross-lane review
         caught in #927). A project basename with a DOT and a session_id with a
         non-[A-Za-z0-9_-] char must reconstruct the SANITIZED path the WRITER
@@ -270,6 +277,10 @@ class TestResolveSessionDirSubprocess:
         companion: a RAW un-sanitized join DIFFERS — proving the special-char
         input actually triggers sanitization on BOTH axes (slug + session_id),
         which is what clean-basename masking hid."""
+        # Subprocess isolation: see test_valid_context_exit0_absolute_dir —
+        # the child must inherit CLAUDE_CONFIG_DIR to resolve the SAME tmp
+        # root as the parent oracle (pact_context.reconstruct_session_dir).
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
         project_dir = "/Users/x/my.project dir"   # dot AND space in the basename
         session_id = "abc.def 123"                  # dot AND space (non-allowlist)
         ctx = self._write_ctx(tmp_path, project_dir, session_id)
@@ -401,7 +412,7 @@ class TestResolveArtifactsSubprocess:
 #     shared.pact_context (the non-vacuous seam the bootstrap fix addresses).
 # =============================================================================
 class TestImportSeamBootstrap:
-    def test_direct_script_resolves_pact_context_package_chain(self, tmp_path):
+    def test_direct_script_resolves_pact_context_package_chain(self, tmp_path, monkeypatch):
         """The CLI run as a direct script (cwd OUTSIDE the repo) must resolve
         `from shared.pact_context import reconstruct_session_dir` AND
         pact_context's own package-relative imports (from .session_state, etc).
@@ -409,6 +420,10 @@ class TestImportSeamBootstrap:
         is only possible if the bootstrap made `shared` a real package. If a
         future edit removes the sys.path bootstrap, this goes RED (ModuleNotFound
         or a non-zero exit), failing loudly."""
+        # Subprocess isolation: see test_valid_context_exit0_absolute_dir —
+        # the child must inherit CLAUDE_CONFIG_DIR to resolve the SAME tmp
+        # root as the parent oracle (pact_context.reconstruct_session_dir).
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
         ctx = tmp_path / "pact-session-context.json"
         ctx.write_text(json.dumps(
             {"project_dir": "/p", "session_id": "s"}), encoding="utf-8")
@@ -506,7 +521,7 @@ class TestSubcommandArgparseContract:
 #         resolve-artifacts (exit 1 + traceback); it degrades gracefully.
 # =============================================================================
 class TestTraversalAndGracefulTs:
-    def test_traversal_session_id_is_sanitized_no_escape(self, tmp_path):
+    def test_traversal_session_id_is_sanitized_no_escape(self, tmp_path, monkeypatch):
         """A '../../etc/passwd' session_id reconstructs INSIDE pact-sessions
         with the traversal characters neutralized (no '..' segment, stays under
         the sessions root). Oracle = the SSOT reconstruct_session_dir.
@@ -520,6 +535,10 @@ class TestTraversalAndGracefulTs:
         traversal, a session_id-regex-only revert does NOT leave a '..' segment
         (this test stays green under it) — so the structural assertion pins the
         no-escape OUTCOME, not the regex mechanism in isolation."""
+        # Subprocess isolation: see test_valid_context_exit0_absolute_dir —
+        # the child must inherit CLAUDE_CONFIG_DIR to resolve the SAME tmp
+        # root as the parent oracle (pact_context.reconstruct_session_dir).
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
         ctx = tmp_path / "pact-session-context.json"
         ctx.write_text(json.dumps(
             {"project_dir": "/clean/project", "session_id": "../../etc/passwd"}),

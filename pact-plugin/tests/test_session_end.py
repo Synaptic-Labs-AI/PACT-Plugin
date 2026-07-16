@@ -49,7 +49,8 @@ class TestMainEntryPoint:
 
         Default mocks: pact_context.init, get_project_dir,
         get_session_id, get_team_name, get_task_list, append_event,
-        check_unpaused_pr, cleanup_old_sessions.
+        check_unpaused_pr, cleanup_old_sessions, cleanup_old_teams,
+        cleanup_old_tasks, _prune_registry_dead_teams.
 
         Pass keyword overrides to replace defaults (e.g., get_task_list=...).
         """
@@ -65,6 +66,15 @@ class TestMainEntryPoint:
             "cleanup_old_sessions": patch("session_end.cleanup_old_sessions"),
             "cleanup_old_teams": patch("session_end.cleanup_old_teams", return_value=(0, 0)),
             "cleanup_old_tasks": patch("session_end.cleanup_old_tasks", return_value=(0, 0)),
+            # #1187 closer: main() calls _prune_registry_dead_teams() with NO
+            # args, so the default registry_path resolves via
+            # get_claude_config_dir() and would run the REAL reaper against the
+            # operator's .teammate-registry.jsonl under the test. Patch it at
+            # the module attr main() resolves (bare call → session_end global
+            # lookup). return_value=0 matches the int-pruned contract; main()
+            # does not consume it today. Together with conftest's CLAUDE_CONFIG_DIR
+            # redirect, the unrooted registry write is unreachable by construction.
+            "_prune_registry_dead_teams": patch("session_end._prune_registry_dead_teams", return_value=0),
         }
         defaults.update(overrides)
         return defaults

@@ -177,14 +177,15 @@ _UUID_PATTERN = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z'
 )
 
-# Regex for validating PACT team directory names. Intentionally LOOSER
-# than what `generate_team_name` in shared/pact_context.py actually emits —
-# the producer emits `pact-` + `secrets.token_hex(4)` (8 lowercase hex
-# chars, no internal hyphens) or the session-id-prefix fallback
-# (`pact-` + 8 hex chars). This regex accepts any `pact-`-prefixed
-# lowercase-hex-and-hyphen shape so the reaper tolerates future drift
-# in the producer (e.g. a naming scheme that introduces internal
-# hyphens) without silently reaping a live team dir.
+# Regex gating which team directory names the teams-reaper may consider
+# reaping. generate_team_name was migrated to emit `session-<id8>`
+# (shared/pact_context.py); this reaper DELIBERATELY stays `^pact-`-scoped
+# — its historical namespace — because the platform owns teardown of its
+# own `session-*` namespace, so widening toward `session-*` would arm
+# `shutil.rmtree` against live platform-owned dirs. Within the `pact-`
+# namespace the regex accepts any `pact-`-prefixed lowercase-hex-and-hyphen
+# shape to tolerate drift (e.g. a future naming scheme that introduces
+# internal hyphens) without silently reaping a live team dir.
 # Non-matching entries in ~/.claude/teams/ belong to other tooling and
 # MUST NOT be reaped by cleanup_old_teams, even if they're stale by
 # mtime. The reaper treats ~/.claude/teams/ as shared space, not
@@ -446,10 +447,16 @@ def cleanup_old_teams(
 
     Three defense layers:
     1. Name-pattern gate — only directories matching `_TEAM_NAME_PATTERN`
-       (`^pact-[a-f0-9-]+$`) are candidates. This mirrors the INVARIANT
-       documented on `generate_team_name` in shared/pact_context.py. Non-PACT
-       writers that create `~/.claude/teams/foo-bar/` are out of scope:
-       `~/.claude/teams/` is shared space, not PACT-owned space.
+       (`^pact-[a-f0-9-]+$`) are candidates. This gate is DELIBERATELY
+       NARROWER than `generate_team_name`'s current `session-<id8>` output:
+       after the `pact-<id8>` -> `session-<id8>` migration the platform
+       owns teardown of its own `session-*` namespace, so this reaper must
+       NEVER reap live `session-*` dirs (widening `^pact-` to match
+       `session-*` would arm `shutil.rmtree` against platform-owned dirs).
+       See the "Reaper coupling" note on `generate_team_name` in
+       shared/pact_context.py. Non-PACT writers that create
+       `~/.claude/teams/foo-bar/` are out of scope: `~/.claude/teams/` is
+       shared space, not PACT-owned space.
     2. Current-team skip — exact-match skip of `current_team_name`.
     3. Fail-closed on empty `current_team_name` — returns (0, 0) without
        reaping anything. An empty skip key combined with a permissive
@@ -502,10 +509,13 @@ def cleanup_old_teams(
                 continue
             if not entry.is_dir():
                 continue
-            # Name-shape gate: only touch PACT-shaped team dirs. Mirrors
-            # the generate_team_name INVARIANT in shared/pact_context.py. Non-
-            # matching entries belong to other tooling and are out of
-            # scope for this reaper.
+            # Name-shape gate: only touch `pact-`-prefixed team dirs
+            # (legacy/orphaned). DELIBERATELY narrower than
+            # generate_team_name's current `session-<id8>` output: the
+            # platform owns teardown of its own `session-*` namespace, so
+            # this reaper must NEVER reap them (do NOT widen `^pact-` to
+            # match `session-*`). Non-matching entries belong to other
+            # tooling and are out of scope for this reaper.
             if not _TEAM_NAME_PATTERN.match(entry.name):
                 continue
             # Case-insensitive skip (cycle-5 defensive): pact_context's
