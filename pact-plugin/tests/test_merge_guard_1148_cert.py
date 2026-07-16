@@ -311,3 +311,155 @@ class TestR1EscapeAwarePredecessor:
             assert not (base_d(cmd) is False and D(cmd) is True), (
                 "F1 introduced a new over-block on %s" % label
             )
+
+
+# =========================================================================================
+# R2 / F3 — BASH-CORRECT LINE-CONTINUATION SPLICE (remediation commit 6). The 3rd instance
+# of _excise_comments_view mis-modeling bash comment semantics: a `#` whose predecessor is a
+# shell LINE-CONTINUATION (`\<newline>`) was over-excised as a comment. Bash SPLICES
+# `\<newline>` (removes it, gluing surrounding text), so `echo "…"\<newline>#x` becomes
+# `echo "…"#x` — `#` glued to the closing quote (a NON-delimiter) = NOT a comment = the pipe
+# EXECUTES. The former space-join (`\<newline>` -> " ") turned `#` into a false comment,
+# excising a real `| sh` and bypassing the gate. FIX = the one-char SSOT splice in
+# _normalize_line_continuations (`replace("\\n"," ")` -> `replace("\\n","")`); F1's predicate
+# is byte-untouched (it is correct once fed a bash-spliced surface).
+#
+# DISCRIMINANT (design intent) = does bash execute the pipe? Line-continuation splices ->
+# the `#` glues to a non-delimiter -> pipe executes -> gate. Bare-newline / plain-space /
+# CRLF -> genuine comment -> pipe suppressed -> stay closed. Verified below against real bash.
+# =========================================================================================
+_FP = "git " + "push " + "--force origin main"
+_BRD = "git " + "branch " + "-D victim"
+_MRG = "gh " + "pr " + "merge 5 --admin"
+_LC = "\\\n"   # backslash + newline (a shell line-continuation)
+
+# F3 under-block: line-continuation before # -> bash splices -> NOT a comment -> gate.
+_F3_CLOSE = []
+for _pl_label, _pl in [("force", _FP), ("branch", _BRD), ("merge", _MRG)]:
+    for _pipe_label, _pipe in [("pipe-sh", "| sh"), ("pipe-bash", "| bash"), ("pipe-sh-nospace", "|sh")]:
+        _F3_CLOSE.append(
+            ("f3-%s-%s" % (_pl_label, _pipe_label), 'echo "%s"%s#x %s' % (_pl, _LC, _pipe))
+        )
+# 4th-edge: double line-continuation (global splice removes BOTH by construction).
+_F3_CLOSE.append(("f3-double-continuation", 'echo "%s"%s%s#x | sh' % (_FP, _LC, _LC)))
+# procsub routing after a spliced #: still routes to a shell -> gate.
+_F3_CLOSE.append(("f3-procsub-tail", 'echo "%s"%s#x > >(bash)' % (_FP, _LC)))
+
+# genuine comments (bash does NOT execute) — MUST stay not-dangerous (over-block safety).
+_F3_GENUINE = [
+    # HARD BOUNDARY: bare newline (no backslash) fully comments line 2 -> pipe suppressed.
+    ("f3-hard-boundary-bare-newline", 'echo "%s"\n#x | sh' % _FP),
+    ("f3-plain-space", 'echo "%s" #x | sh' % _FP),
+    ("f3-even-backslash", 'echo "%s"\\\\ #x | sh' % _FP),
+    ("f3-orig-1148-repro", REPRO),
+    # CRLF: `\<CR><LF>` is NOT a bash line-continuation (splice matches `\<LF>` only); line 2
+    # (`#x | sh`) is a genuine comment -> pipe suppressed -> not-dangerous is bash-correct.
+    ("f3-crlf-genuine-comment", 'echo "%s"\\\r\n#x | sh' % _FP),
+]
+
+
+def _bash_pipe_executes(cmd):
+    """Real-bash oracle: substitute the `| sh` sink with `| touch MARKER` and report whether
+    bash actually ran the pipe (i.e. the `#` was NOT a comment)."""
+    import os
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        marker = os.path.join(td, "M")
+        full = cmd.replace("| sh", "| touch %s" % marker).replace("|sh", "|touch %s" % marker)
+        subprocess.run(["bash", "-c", full], capture_output=True)
+        return os.path.exists(marker)
+
+
+class TestR2LineContinuationSplice:
+    @pytest.mark.parametrize("label,cmd", _F3_CLOSE, ids=[r[0] for r in _F3_CLOSE])
+    def test_line_continuation_before_hash_stays_gated(self, label, cmd):
+        # PRIMARY: the fixed classifier GATES the executing form (F3 under-block closed).
+        assert D(cmd) is True, "F3 line-continuation-splice under-block re-opened"
+        # NON-VACUITY: the routing token survives the view (a revert of the splice would
+        # excise it). Base fixture also caught it (the splice runs on the same substrate).
+        view = mgc._executed_surface_view(cmd)
+        assert mgc._has_pipe_to_shell(view) or mgc._has_process_substitution_to_shell(
+            mgc._procsub_anchor_view(cmd)
+        ), "the routing token was wrongly excised after a line-continuation"
+        assert _base()(cmd) is True, "row not caught at base (vacuous)"
+
+    @pytest.mark.parametrize("label,cmd", _F3_GENUINE, ids=[r[0] for r in _F3_GENUINE])
+    def test_genuine_comment_stays_closed(self, label, cmd):
+        # OVER-BLOCK SAFETY: a real comment (bare-newline / plain-space / even-backslash /
+        # CRLF) is still excised -> not dangerous. The splice must not re-over-block these.
+        assert D(cmd) is False, "F3 fix over-blocked a genuine comment (bare-newline etc.)"
+
+    def test_bash_oracle_discriminant(self):
+        # Ground truth pinned to real bash: line-continuation -> pipe executes (gate);
+        # bare-newline / plain-space / CRLF -> comment -> pipe suppressed (stay closed).
+        assert _bash_pipe_executes('echo "hi"%s#x | sh' % _LC) is True         # line-cont -> executes
+        assert _bash_pipe_executes('echo "hi"%s%s#x | sh' % (_LC, _LC)) is True  # double -> executes
+        assert _bash_pipe_executes('echo "hi"\n#x | sh') is False               # bare newline -> comment
+        assert _bash_pipe_executes('echo "hi" #x | sh') is False                # plain space -> comment
+        assert _bash_pipe_executes('echo "hi"\\\r\n#x | sh') is False           # CRLF -> comment
+
+    def test_flag_scan_control_binds_delete_class(self):
+        # TWO-PURPOSE tension (load-bearing): a space-ADJACENT continuation flag must still
+        # bind. `gh pr close 5 \<newline>-d` splices to `gh pr close 5 -d` (the space before
+        # the backslash survives), so -d/--delete-branch stays a clean bound token at base
+        # AND fixed-HEAD — the global splice did NOT reopen the flag-scan under-block the
+        # space-join fixed (proves global splice serves both surfaces).
+        base = load_baseline()
+        for cmd in ("gh pr close 5 %s-d" % _LC, "gh pr close 5 %s--delete-branch" % _LC):
+            b_ctx = base.extract_command_context(cmd)
+            h_ctx = mgc.extract_command_context(cmd)
+            assert h_ctx.get("bound_flags") == b_ctx.get("bound_flags"), (
+                "splice dropped a flag binding the space-join kept: %r" % cmd
+            )
+            assert "--delete-branch" in h_ctx.get("bound_flags", []), cmd
+            assert D(cmd) is True and base.is_dangerous_command(cmd) is True, cmd
+
+    def test_no_space_glue_de_detections_are_bash_correct(self):
+        # base-True -> HEAD-False here is CORRECT, NOT a regression: bash GLUES a no-space
+        # `\<newline>` into a different/invalid token, so the command is not the dangerous op
+        # the space-join over-detected (`gh pr merge\<newline>5` -> `gh pr merge5`, an invalid
+        # subcommand; `git push\<newline>--force …` -> `git push--force …`, invalid). Removing
+        # a detection on a bash-non-command is bash-faithful de-detection, over-block-safe.
+        base = load_baseline()
+        for cmd in ("gh pr merge%s5" % _LC, "git push%s--force origin main" % _LC):
+            assert base.is_dangerous_command(cmd) is True, "space-join over-detected (expected)"
+            assert D(cmd) is False, "splice must de-detect the bash-glued non-command"
+
+    def test_split_word_bonus_closure(self):
+        # BONUS (strictly-more-bash-faithful): a mid-word line-continuation the space-join
+        # MISSED. `git pus\<newline>h --force origin main` splices to `git push --force origin
+        # main` (a REAL force-push); the space-join gave `git pus h …` (not a git command) and
+        # UNDER-BLOCKED it. This is base-False -> HEAD-True but OVER-BLOCK-SAFE: bash executes a
+        # real force-push, so gating is CORRECT (an intended closure, not a new over-block).
+        base = load_baseline()
+        splitword = "git pus%sh --force origin main" % _LC
+        assert base.is_dangerous_command(splitword) is False   # space-join under-blocked it
+        assert D(splitword) is True                            # splice gates the real force-push
+        assert mgc.detect_command_operation_type(splitword) == "force-push"
+
+    def test_mint_read_parity_across_battery(self):
+        # mint==read by construction: both route through the SSOT splice, so both see the
+        # identical spliced surface. Across the faithful continuation battery, the read
+        # classifier and the mint detector agree.
+        for cmd in (
+            "gh pr close 5 %s--delete-branch" % _LC,
+            "gh pr merge 5 %s--admin" % _LC,
+            "git push %s--force-with-lease origin main" % _LC,
+            "git push origin main",
+        ):
+            assert mgc.detect_command_operation_type(cmd) == load_baseline().detect_command_operation_type(cmd), cmd
+
+    def test_f3_monotonicity_no_unexpected_over_block(self):
+        # No base-False -> HEAD-True EXCEPT the documented split-word bonus closure (which is
+        # over-block-safe: bash executes a real force-push). Every other row is either a
+        # base-True closure/retention or a bash-correct de-detection.
+        base_d = _base()
+        splitword = "git pus%sh --force origin main" % _LC
+        for label, cmd in _F3_CLOSE + _F3_GENUINE:
+            assert not (base_d(cmd) is False and D(cmd) is True), (
+                "unexpected new over-block on %s" % label
+            )
+        # the ONE intended base-False -> HEAD-True is the bonus closure, asserted separately.
+        assert base_d(splitword) is False and D(splitword) is True

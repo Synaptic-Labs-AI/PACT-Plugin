@@ -3119,13 +3119,20 @@ def _mask_shell_quotes(command: str) -> str:
 
 
 def _normalize_line_continuations(command: str) -> str:
-    """P0 (shell-semantic substrate SSOT): join bash line-continuations
-    (`\\<newline>` → space) BEFORE tokenization, so a `\\<newline>`-split flag
-    (`gh pr close 5 \\<newline>-d`) becomes a clean separate token instead of a fused
-    `\\n-d` that the flag scan would miss (the security line-continuation under-block).
-    Routed through every floor call site + the new substrate so mint and read join
-    lines identically (mint==read by construction)."""
-    return command.replace("\\\n", " ")
+    """P0 (shell-semantic substrate SSOT): resolve bash line-continuations BEFORE
+    tokenization. Bash-faithful semantics: `\\<newline>` is SPLICED — REMOVED entirely,
+    gluing the surrounding text — NOT replaced with a space. A separating space
+    survives ONLY when one was already adjacent: `gh pr close 5 \\<newline>-d` splices
+    to `gh pr close 5 -d` (the space before the backslash survives, so `-d` stays a
+    clean separate token — the flag-scan under-block the split fix addresses), while
+    `merge\\<newline>5` glues to `merge5` (bash's printf-verified tokenization). This
+    empty-join (vs the former `→ space`) is what makes the comment predicate see the
+    REAL predecessor: `echo "…"\\<newline>#x` splices to `echo "…"#x`, so the `#` is
+    glued to the closing quote (a NON-delimiter) = NOT a comment, closing the #1148
+    line-continuation-splice comment under-block by construction. Routed through every
+    floor + mint call site, so mint and read resolve continuations IDENTICALLY
+    (mint==read by construction)."""
+    return command.replace("\\\n", "")
 
 
 # Benign continuation / redirect terminator for the positional target extractors
