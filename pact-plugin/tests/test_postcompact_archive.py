@@ -18,9 +18,11 @@ Tests cover:
 5. Module constants
 """
 import json
+import os
 import stat
 import subprocess
 import sys
+import tempfile
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -33,14 +35,44 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 HOOK_PATH = str(Path(__file__).parent.parent / "hooks" / "postcompact_archive.py")
 
 
-def run_hook(stdin_data: str | None = None) -> subprocess.CompletedProcess:
-    """Run the hook as a subprocess and return the result."""
+def run_hook(
+    stdin_data: str | None = None,
+    env_root: str | None = None,
+) -> subprocess.CompletedProcess:
+    """Run the hook as a subprocess and return the result.
+
+    Config-root isolation (#1191): the postcompact child resolves its write
+    target via ``get_claude_config_dir()`` (precedence-1 ``$CLAUDE_CONFIG_DIR``,
+    else ``$HOME/.claude``). The autouse ``_isolate_config_root_to_tmp`` fixture
+    redirects ``Path.home`` IN-PROCESS ONLY — that ``setattr`` does NOT cross to
+    this subprocess child, and the fixture DELIBERATELY does not set the HOME env
+    var (see conftest's "WHY NOT ALSO SET HOME ENV" note: a global HOME override
+    breaks the telegram ``cwd_is_home`` tests). Without an explicit env pin here,
+    a LEAD-frame input (``agent_type`` in ``LEAD_AGENT_TYPES`` + truthy
+    ``compact_summary``) opens the ``is_lead`` gate (postcompact_archive.py) and
+    the child writes ``compact-summary.txt`` to the operator's REAL
+    ``~/.claude/pact-sessions/``.
+
+    Pin BOTH ``HOME`` and ``CLAUDE_CONFIG_DIR`` to a tmp root so the child
+    resolves the tmp, never real home — matching the suite's per-test
+    subprocess-isolation convention (Form A: ``monkeypatch.setenv`` of
+    ``CLAUDE_CONFIG_DIR`` in test_pact_harvest_cli / test_config_dir_*; Form B:
+    ``env={**os.environ, "HOME": tmp}`` in test_session_journal). Setting both is
+    belt-and-suspenders: ``CLAUDE_CONFIG_DIR`` precedence-1 does the resolution
+    work; ``HOME`` is a harmless backup covering any HOME-fallthrough path.
+    ``env_root`` defaults to a fresh ``mkdtemp`` so EVERY caller is isolated —
+    the latent #1191 gap is closed universally, not just for callers that pass a
+    root.
+    """
+    if env_root is None:
+        env_root = tempfile.mkdtemp(prefix="postcompact-hook-test-")
     return subprocess.run(
         [sys.executable, HOOK_PATH],
         input=stdin_data or "",
         capture_output=True,
         text=True,
         timeout=10,
+        env={**os.environ, "HOME": env_root, "CLAUDE_CONFIG_DIR": env_root},
     )
 
 
@@ -383,3 +415,89 @@ class TestPostcompactLeadGateRealDisk:
         assert summary_path.read_text(encoding="utf-8") == "NEW LEAD SUMMARY", (
             "a lead PostCompact must still archive the compact summary"
         )
+
+
+# ---------------------------------------------------------------------------
+# #1191: config-root isolation pin for the run_hook subprocess spawn.
+# ---------------------------------------------------------------------------
+
+
+class TestPostcompactRunHookConfigRootIsolation:
+    """Delete-the-fix counter-test for run_hook's config-root env pin (#1191).
+
+    ``run_hook`` spawns the postcompact child as a subprocess. The child's
+    compact-summary write resolves through ``get_claude_config_dir()``
+    (precedence-1 ``$CLAUDE_CONFIG_DIR``, else ``$HOME/.claude``). The autouse
+    ``_isolate_config_root_to_tmp`` fixture redirects ``Path.home`` IN-PROCESS
+    ONLY — that ``setattr`` does NOT cross to the subprocess child, and the
+    fixture deliberately does NOT set the HOME env var (see conftest's "WHY NOT
+    ALSO SET HOME ENV"). Without run_hook's env= pin, a LEAD-frame input opens
+    the ``is_lead`` gate and the child writes ``compact-summary.txt`` to the
+    operator's REAL ``~/.claude/pact-sessions/``. ``run_hook`` pins BOTH ``HOME``
+    and ``CLAUDE_CONFIG_DIR`` to a tmp root so the child resolves the tmp.
+
+    SOLE-PROVIDER DOCTRINE (#1189 / test_conftest_config_root_isolation.py):
+    this test does NOT self-provide HOME/CLAUDE_CONFIG_DIR isolation (no
+    ``monkeypatch.setenv``, no in-body env override). It passes
+    ``env_root=str(tmp_path)`` only to SELECT the tmp target the pin should
+    resolve to; the ISOLATION mechanism is run_hook's env= pin itself. The test
+    therefore stays green solely because run_hook applies the pin — the #1189
+    "the test's pass depends on the fix's correctness" shape.
+
+    COUNTER-TEST PROPERTY (the pinning property this class exists for): if the
+    ``env=env`` pin is deleted from run_hook (``env_root`` threaded but unused),
+    the child inherits the test process's ``os.environ`` — HOME=real-operator-
+    home, CLAUDE_CONFIG_DIR absent (scrubbed by the autouse fixture) — resolves
+    the REAL ``~/.claude``, and writes ``compact-summary.txt`` there. The
+    ``tmp_path`` target this test asserts would be MISSING, so the containment
+    assertion FAILS.
+
+    Verified by guarded-mutation (per the #1189 precedent's "Verified by local
+    fixture-disable, reverted before staging"): with the fix committed, delete
+    ONLY the ``env=env`` line from run_hook, run THIS test under a guarded HOME
+    (``HOME=/tmp/<throwaway>``) so the mutation's real-home-resolved write lands
+    in the throwaway and NOT the operator's real ``~/.claude``, observe the
+    ``tmp_path``-containment assertion FAIL, then restore via
+    ``git restore -- pact-plugin/tests/test_postcompact_archive.py`` (recovers
+    the committed pinned version byte-identically; ``git diff --quiet -- <file>``
+    exits 0). The guard prevents the leak DURING the probe; the POSITIVE
+    ``tmp_path``-containment assertion is the load-bearing signal the delete
+    breaks (a not-at-real-home negative is optional belt-and-suspenders and does
+    NOT replace the guard — it would only fire AFTER a leak had already fired).
+    """
+
+    def test_lead_frame_write_lands_under_pinned_tmp_not_real_home(self, tmp_path):
+        """A LEAD-frame PostCompact through run_hook writes compact-summary.txt
+        under the run_hook env-pin tmp root, NOT the operator's real home.
+
+        Drives the REAL write path: the LEAD frame (``agent_type`` a lead
+        spelling + truthy ``compact_summary``) opens the ``is_lead`` gate, so
+        ``write_compact_summary -> get_compact_summary_path ->
+        get_claude_config_dir`` fires in the child. With the pin, the child
+        resolves ``tmp_path``; without it (delete-the-fix), the child resolves
+        the real home and the ``tmp_path`` target is empty.
+        """
+        from fixtures.role_frames import postcompact_frame
+
+        lead_frame = postcompact_frame(
+            "PACT:pact-orchestrator", compact_summary="LEAD COUNTER-TEST SUMMARY"
+        )
+        result = run_hook(json.dumps(lead_frame), env_root=str(tmp_path))
+        assert result.returncode == 0, (
+            f"postcompact child exited {result.returncode}; stderr={result.stderr!r}"
+        )
+
+        # POSITIVE tmp-target assertion (load-bearing). Robust to the Form A vs
+        # Form B leaf shape: CCD=tmp -> tmp/pact-sessions/compact-summary.txt;
+        # HOME=tmp -> tmp/.claude/pact-sessions/compact-summary.txt. A recursive
+        # glob catches either.
+        written = list(tmp_path.glob("**/compact-summary.txt"))
+        assert len(written) == 1, (
+            f"expected exactly one compact-summary.txt under the pinned tmp root "
+            f"{tmp_path}, found {written}. If run_hook's env= pin is absent, the "
+            f"child resolved the REAL ~/.claude (HOME fallthrough — the autouse "
+            f"Path.home setattr does not cross to subprocesses) and wrote "
+            f"elsewhere: the #1191 latent leak is OPEN. (delete-the-fix: this "
+            f"assertion is what the env= pin's absence breaks.)"
+        )
+        assert written[0].read_text(encoding="utf-8") == "LEAD COUNTER-TEST SUMMARY"
