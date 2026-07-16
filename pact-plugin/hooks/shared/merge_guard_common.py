@@ -1975,15 +1975,56 @@ def _excise_heredoc_bodies_for_routing_scan(command: str) -> str:
     return _HEREDOC_BODY_RE.sub(_repl, command)
 
 
+def _excise_comments_view(excised: str, view: str) -> str:
+    """Step 3 of _excise_and_mask: view-only, SAME-LENGTH comment excision. A `#`
+    is a comment iff (a) it SURVIVES the quote mask (view[i] == "#": unquoted by
+    construction) AND (b) its predecessor ON THE PRE-MASK SURFACE (excised[i-1];
+    i == 0 counts as a comment start) is one of {start, space, tab, newline, ;,
+    &, |}. Testing the RAW predecessor is load-bearing: a masked closing quote
+    reads as a space on the view, so a view-side test would misclassify
+    `"x"#tail` as a comment (an executing tail eaten = under-block). The excision
+    replaces `#`..end-of-line (newline EXCLUDED) with spaces — same length, so
+    both consumers' 1:1 view/excised offset alignment holds (_procsub_anchor_view
+    indexes the pair pairwise). FAIL-TOWARD-NOT-COMMENT: any predecessor outside
+    the set leaves the text visible (worst case a residual over-block, never an
+    under-block). The pinned predecessor set is a strict SUBSET of bash's
+    comment-start contexts (bash also comments after `(`, backtick, …): fewer
+    excisions than bash = fail-toward-not-comment relative to ground truth — do
+    not widen without cert rows. Mask-BEFORE-excise gives quote-awareness for
+    free: a `#` inside a balanced quoted span is already spaces in `view`, so a
+    quoted `# … | sh` payload can never be excised through this step."""
+    if "#" not in view:                       # cheap short-circuit
+        return view
+    out = list(view)
+    i, n = 0, len(view)
+    while i < n:
+        if view[i] == "#" and (i == 0 or excised[i - 1] in " \t\n;&|"):
+            j = view.find("\n", i)
+            if j == -1:
+                j = n
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+        else:
+            i += 1
+    return "".join(out)
+
+
 def _excise_and_mask(command: str) -> tuple[str, str]:
     """Shared prefix for the two routing-flag views (#1129 R3): excise heredoc
     bodies (opener line + closing marker kept; shell-fed bodies preserved), then
-    space-mask every balanced quoted span via _mask_shell_quotes. Returns
-    (excised, view). ORDER IS LOAD-BEARING: excision FIRST removes stray body
-    quotes that could desync the quote mask. _mask_shell_quotes is SAME-LENGTH,
-    so view and excised align 1:1 by offset."""
+    space-mask every balanced quoted span via _mask_shell_quotes, then excise
+    unquoted comments from the VIEW ONLY (a `#`-comment's `| sh` must not flip
+    piped_to_shell and disable every carrier — the comment text never executes).
+    Returns (excised, view). ORDER IS LOAD-BEARING: heredoc excision FIRST (stray
+    body quotes desync the quote mask — and a `#` inside a heredoc body is gone
+    before step 3 runs); mask BEFORE comment excision ("survives the mask" IS the
+    quote-awareness — a pre-mask excision on the raw string would eat executing
+    `' | sh'` tails through a quoted `#`). Steps 2 and 3 are both SAME-LENGTH, so
+    view and excised align 1:1 by offset."""
     excised = _excise_heredoc_bodies_for_routing_scan(command)
     view = _mask_shell_quotes(excised)
+    view = _excise_comments_view(excised, view)
     return excised, view
 
 
