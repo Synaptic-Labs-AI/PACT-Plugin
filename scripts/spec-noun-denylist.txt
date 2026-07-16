@@ -1,0 +1,64 @@
+# Denylist for scripts/verify-spec-nouns.sh.
+# One pattern per line; case-sensitive fixed strings (grep -F).
+# Blank lines and lines starting with # are ignored.
+#
+# These are substrate mechanism names that must not appear in the
+# spec's normative core (spec/pact-protocol.md + spec/schemas/).
+# The annex and binding documents are exempt surfaces by design and
+# are not scanned. Schema FIELD names (protocol payload vocabulary)
+# are not listed here — the denylist targets mechanism names only.
+
+# --- Claude Code / plugin nouns ---
+SendMessage
+TaskUpdate
+TaskGet
+TaskList
+TaskCreate
+TaskStop
+AskUserQuestion
+blockedBy
+addBlockedBy
+CLAUDE.md
+Agent Teams
+teammateMode
+tmux
+PreToolUse
+PostToolUse
+SessionStart
+SessionEnd
+TeammateIdle
+UserPromptSubmit
+PreCompact
+task_lifecycle_gate
+session_journal.py
+variety_scorer.py
+teachback_schema.py
+intentional_wait.py
+missed_wake_scan
+pact-memory
+pact-secretary
+pact-orchestrator
+pact-preparer
+pact-architect
+hooks/shared
+plugin.json
+worktree-setup
+gh pr
+
+# --- LangChain-stack nouns (symmetric) ---
+LangChain
+LangGraph
+langgraph
+Deep Agents
+deepagents
+StateGraph
+create_agent
+checkpointer
+Checkpointer
+interrupt(
+Command(resume
+BaseStore
+wrap_tool_call
+before_model
+after_model
+write_todos
