@@ -630,8 +630,109 @@ after which the condition MUST be escalated as an ALERT-class signal
 
 ## 5. Level 2 — Phases and Variety
 
-> Reserved. This level's keyed requirements (groups PG, VS, VA, PS, AU)
-> are drafted in a subsequent stage of this document's authoring.
+Level 2 governs how work is shaped before it is dispatched: the grammar of
+workflow productions, the variety assessment that routes work into them,
+the per-dispatch stamping and acknowledgment loop, protection against
+silent phase skips, and concurrent observation of implementation work.
+
+### 5.1 Phase grammar (PG)
+
+The protocol's workflow productions: the **base cycle** (the four phases
+Prepare, Architect, Code, Test, in order); **comPACT** (phase-less
+concurrent dispatch for independent, self-contained tasks); **plan-mode**
+(planning-only — analysis, consultation, synthesis, presentation; no
+implementation); **rePACT** (a nested cycle within one phase of a parent
+cycle); and **imPACT** (triage after a blocker or repeated failure).
+Realizations can extend this catalog; the requirements below apply to
+whatever catalog is declared.
+
+**L2-PG-01** — Declared productions with observable phases
+
+A realization MUST declare its workflow productions and the phase sequence
+each production executes, and every phase of an executing production MUST
+be represented as a work record in the TaskStore.
+
+**L2-PG-02** — Bounded nesting with parent reporting
+
+A nested cycle MUST NOT exceed a nesting depth of one, and a nested cycle
+MUST report its results to its parent cycle via the HANDOFF mechanism
+(§4.5). Signals emitted within a nested cycle remain governed by L1-SG-02
+and bypass both the nested and the parent coordinator.
+
+### 5.2 Variety scoring and routing (VS)
+
+**L2-VS-01** — Four-dimensional variety score
+
+A dispatch-variety assessment MUST score exactly four dimensions —
+novelty, scope, uncertainty, and risk — each as an integer from 1 to 4,
+and MUST record the total as their sum (range 4 to 16).
+
+**L2-VS-02** — Routing bands
+
+Workflow routing MUST follow the variety total per this table:
+
+| Variety total | Routed production |
+|---|---|
+| 4–6 | comPACT (phase-less concurrent dispatch) |
+| 7–10 | base cycle |
+| 11–14 | plan-mode, then the base cycle |
+| 15–16 | research spike, then reassessment |
+
+The method-reconstruction floor declared under L1-TB-06 SHOULD equal the
+lower bound of the plan-mode band (11).
+
+### 5.3 Per-dispatch stamping and acknowledgment (VA)
+
+**L2-VA-01** — Fresh per-dispatch stamp
+
+Every Specialist work record MUST be stamped at creation with a variety
+assessment comprising the four dimension scores, one one-sentence
+rationale per dimension, and the total; the assessment MUST be scored
+afresh for that dispatch — neither inherited from nor capped by any
+enclosing assessment.
+
+**L2-VA-02** — Acknowledgment resolution
+
+A teachback variety acknowledgment other than affirmative (a "no" or
+"concern" value) MUST receive a durable resolution — a revised variety
+stamp or a rejection record — before gate acceptance.
+
+### 5.4 Phase-skip protection (PS)
+
+**L2-PS-01** — Recorded skips only
+
+A phase MUST NOT be skipped without a durable skip annotation on the
+phase's work record (the skip transition of L1-TS-01) recording a reason
+drawn from a declared reason set.
+
+**L2-PS-02** — Plan-completeness check before skip
+
+A skip justified by an approved plan MUST be preceded by a
+text-observable incompleteness check of the corresponding plan section,
+applying a declared signal set covering at least: unchecked research
+items, placeholder table cells, forward references, unchecked questions,
+placeholder text, open research questions, and research-shaped
+implementation items.
+
+### 5.5 Concurrent observation (AU)
+
+An observer reads implementation output as it is produced and compares it
+against the design contracts, emitting graded verdicts. The integrity of
+an authored verdict against later overwrites is a governance concern keyed
+in the L3 observer-verdict group.
+
+**L2-AU-01** — Declared observation coverage
+
+For every implementation-bearing production, the realization MUST declare
+whether concurrent observation is engaged, and a decision to skip
+observation where the realization's declared engagement conditions hold
+MUST be justified in a durable record.
+
+**L2-AU-02** — Verdict absence semantics
+
+The absence of an observer verdict MUST be interpreted as "not yet
+written", never as "no findings"; a consumer MUST NOT infer a clean
+observation from a missing verdict.
 
 ## 6. Level 3 — Governance
 
@@ -736,3 +837,13 @@ successor key. Closure tooling reads this table's status column.
 | L1-WT-03 | L1 | WT | active | Staleness detection |
 | L1-ST-01 | L1 | ST | active | Evidence-based stall diagnosis |
 | L1-ST-02 | L1 | ST | active | Bounded recovery |
+| L2-PG-01 | L2 | PG | active | Declared productions with observable phases |
+| L2-PG-02 | L2 | PG | active | Bounded nesting with parent reporting |
+| L2-VS-01 | L2 | VS | active | Four-dimensional variety score |
+| L2-VS-02 | L2 | VS | active | Routing bands |
+| L2-VA-01 | L2 | VA | active | Fresh per-dispatch stamp |
+| L2-VA-02 | L2 | VA | active | Acknowledgment resolution |
+| L2-PS-01 | L2 | PS | active | Recorded skips only |
+| L2-PS-02 | L2 | PS | active | Plan-completeness check before skip |
+| L2-AU-01 | L2 | AU | active | Declared observation coverage |
+| L2-AU-02 | L2 | AU | active | Verdict absence semantics |
