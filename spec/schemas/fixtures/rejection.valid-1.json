@@ -1,0 +1,10 @@
+{
+  "$comment": "Valid: all four required fields; since carries an explicit UTC offset.",
+  "reason": "Teachback omits the idempotency constraint that motivated the dispatch",
+  "corrections": [
+    "Restate the retry model and why the worker must be idempotent",
+    "Name the assumption about queue delivery semantics being made"
+  ],
+  "since": "2026-07-16T18:04:11+00:00",
+  "revision_number": 1
+}

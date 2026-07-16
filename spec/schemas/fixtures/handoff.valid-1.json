@@ -1,0 +1,21 @@
+{
+  "$comment": "Valid: all five required fields plus the optional reasoning_chain.",
+  "produced": [
+    "services/payments/refund_worker (new)",
+    "services/payments/api: refund endpoint wired to worker"
+  ],
+  "decisions": [
+    "Idempotency key derived from charge id + amount so queue retries cannot double-refund"
+  ],
+  "reasoning_chain": "Refunds are retried by the queue on timeout, so the worker had to be idempotent, which required a deterministic idempotency key.",
+  "uncertainty": [
+    "[HIGH] Partial-refund rounding for multi-currency charges - verify against ledger fixtures",
+    "[LOW] Metrics counter naming may collide with the legacy dashboard"
+  ],
+  "integration": [
+    "ledger service (posts reversal entries)"
+  ],
+  "open_questions": [
+    "Should refunds older than 90 days route to manual review?"
+  ]
+}

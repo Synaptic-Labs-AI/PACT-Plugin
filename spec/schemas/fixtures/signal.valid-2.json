@@ -1,0 +1,22 @@
+{
+  "$comment": "Valid: blocker with description and a partial HANDOFF.",
+  "level": "blocker",
+  "description": "The ledger service's reversal-entry contract is undocumented and its owner is unavailable; cannot define the worker interface without it.",
+  "partial_handoff": {
+    "produced": [
+      "services/payments/refund_worker: skeleton and tests for the idempotency key"
+    ],
+    "decisions": [
+      "Deferred interface definition pending the ledger contract"
+    ],
+    "uncertainty": [
+      "[HIGH] Reversal-entry field semantics unknown"
+    ],
+    "integration": [
+      "ledger service"
+    ],
+    "open_questions": [
+      "Who owns the ledger reversal contract?"
+    ]
+  }
+}

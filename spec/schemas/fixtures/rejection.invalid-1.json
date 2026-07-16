@@ -1,0 +1,9 @@
+{
+  "$comment": "INVALID: violates properties.since pattern - the timestamp is naive (no timezone offset or Z). Timezone-aware timestamps are required; naive ones fail loud.",
+  "reason": "HANDOFF claims tests ran but records no verification evidence",
+  "corrections": [
+    "Run the suite and record the result, or declare tests inapplicable with reasoning"
+  ],
+  "since": "2026-07-16T18:04:11",
+  "revision_number": 1
+}

@@ -1,0 +1,9 @@
+{
+  "$comment": "INVALID: violates the HALT branch's category enum - QUALITY is an ALERT-class category; the HALT class set is SECURITY, DATA, ETHICS. Fails every oneOf branch.",
+  "level": "HALT",
+  "category": "QUALITY",
+  "issue": "Repeated test flakiness in the refund suite",
+  "evidence": "Three consecutive runs alternate pass/fail on the same commit",
+  "impact": "Merge gate is unreliable",
+  "recommended_action": "Quarantine the flaky tests and open a stabilization task"
+}
