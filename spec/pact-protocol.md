@@ -736,13 +736,149 @@ observation from a missing verdict.
 
 ## 6. Level 3 — Governance
 
-> Reserved. This level's keyed requirements (groups PC, IR, DL, QG, SC,
-> OB) are drafted in a subsequent stage of this document's authoring.
+Level 3 keys the governance boundaries whose violation is observable at a
+substrate interface. It is deliberately requirement-sparse: most
+governance content is judgment guidance that binds to actor instructions,
+not to keyed requirements (§3.7). Behaviors already keyed at L1 are not
+re-keyed here — signal non-suppression and bypass are L1-SG-02, HALT
+resolution is L1-SG-04, and message authenticity is L1-MC-04; the L3
+policy classes consume that L1 vocabulary.
+
+### 6.1 Policy classes and escalation duties (PC)
+
+**L3-PC-01** — Declared policy classes
+
+A realization MUST declare its policy classes — at minimum covering
+security, quality, ethics, delegation, Principal approval, and integrity —
+and, for each class, the escalation behavior a suspected violation
+triggers.
+
+**L3-PC-02** — Duty to emit on recognition
+
+When an actor recognizes a condition matching a declared policy class, or
+recognizes that its work exceeds its declared autonomy bounds, it MUST
+emit the corresponding signal (§4.6) rather than proceed silently; the
+recognition thresholds themselves are declared guidance, not keyed
+requirements.
+
+**L3-PC-03** — Mechanical enforcement of the security class
+
+A realization SHOULD enforce its security policy class mechanically at an
+EnforcementPoint — for example, denying secret-bearing artifacts at the
+change-integration gate — rather than relying on actor discipline alone.
+
+### 6.2 Irreversible-action confirmation (IR)
+
+**L3-IR-01** — Verified confirmation channel
+
+An irreversible action on the shared change-integration surface —
+integrating changes into a mainline, rewriting shared history, or deleting
+a shared line of work — MUST be confirmed by the Principal through a
+verified confirmation channel before execution; unverified free-form text
+MUST NOT be treated as confirmation.
+
+### 6.3 Delegation boundary (DL)
+
+**L3-DL-01** — The Lead does not implement
+
+The Lead MUST NOT create or modify implementation artifacts; the boundary
+between implementation artifacts and coordination artifacts MUST be drawn
+by a declared file-class predicate, and where the substrate provides an
+EnforcementPoint the boundary SHOULD be enforced there.
+
+### 6.4 Quality gates (QG)
+
+**L3-QG-01** — No known-broken integration
+
+A change MUST NOT pass the change-integration gate while its verification
+status is known-failing, and verification MUST have been run — or been
+explicitly declared inapplicable — before integration.
+
+### 6.5 Scope contracts and concurrent write boundaries (SC)
+
+**L3-SC-01** — Declared concurrent write boundaries
+
+Concurrently dispatched Specialists MUST have declared, non-overlapping
+write boundaries or a declared sequencing over the shared surface before
+concurrent work begins.
+
+**L3-SC-02** — Scope contracts with fulfillment reporting
+
+When scoped sub-cycles are activated, each sub-scope MUST carry a declared
+scope contract — identity, deliverables, interfaces, and constraints
+including shared files — and the sub-scope's completion HANDOFF MUST
+report fulfillment against that contract.
+
+**L3-SC-03** — Merge conflict is contract-violation evidence
+
+At consolidation of concurrent sub-scopes, a merge conflict between
+sibling scopes MUST be treated as scope-contract-violation evidence and
+escalated as an ALERT-class signal (§4.6).
+
+### 6.6 Observer-verdict integrity (OB)
+
+**L3-OB-01** — No silent verdict replacement
+
+An observer's authored verdict MUST NOT be silently replaced: any
+overwrite MUST durably preserve the authored verdict and MUST leave a
+visible record that an overwrite occurred.
 
 ## 7. Level 4 — Memory
 
-> Reserved. This level's keyed requirements (groups JR, MS, HV, SR) are
-> drafted in a subsequent stage of this document's authoring.
+Level 4 governs institutional memory: the journal contract, the memory
+store, harvest, and recovery. Level 4 conformance requires a memory actor
+(the Secretary, §1.2); below Level 4 that actor is optional.
+
+### 7.1 Journal contract (JR)
+
+**L4-JR-01** — Append-only survival
+
+The Journal MUST be an append-only durable event log that survives actor
+context loss, TaskStore garbage collection, and team teardown; every
+entry MUST carry a schema version, an event type, and a UTC timestamp.
+
+**L4-JR-02** — Typed events, filtered reads
+
+Journal events MUST be typed against a declared event registry with
+per-type required fields, and Journal reads MUST support time-filtered,
+parseable batches.
+
+**L4-JR-03** — Accepted HANDOFFs are journaled
+
+The acceptance of a Specialist work record MUST emit a Journal event
+carrying the accepted HANDOFF payload, so that completed work survives
+TaskStore garbage collection.
+
+### 7.2 MemoryStore contract (MS)
+
+**L4-MS-01** — Typed, queryable, additive
+
+The MemoryStore MUST provide durable cross-session persistence of typed
+records with entity tagging, semantic query with relevance ranking, and
+additive list-merge updates that refuse ambiguous update targets.
+
+### 7.3 Harvest triggers (HV)
+
+**L4-HV-01** — Event-driven harvest
+
+Memory harvest MUST be triggered by protocol events — workflow-phase
+completions, session consolidation points, and orphan recovery at session
+start — and MUST NOT depend on wall-clock timers alone.
+
+**L4-HV-02** — Drain-proof reads with deduplication
+
+Harvest MUST read accepted HANDOFFs from the Journal in preference to the
+TaskStore, and MUST deduplicate using durable processed-work tracking
+namespaced per team.
+
+### 7.4 State recovery (SR)
+
+**L4-SR-01** — Journal-sufficient reconstruction
+
+After actor context loss, workflow state — phase progress, completed work
+with accepted HANDOFFs, and paused or suspended workflow state — MUST be
+reconstructible from the Journal alone, without reliance on any actor's
+in-context memory.
 
 ## 8. Hazard Model (INFORMATIVE)
 
@@ -847,3 +983,20 @@ successor key. Closure tooling reads this table's status column.
 | L2-PS-02 | L2 | PS | active | Plan-completeness check before skip |
 | L2-AU-01 | L2 | AU | active | Declared observation coverage |
 | L2-AU-02 | L2 | AU | active | Verdict absence semantics |
+| L3-PC-01 | L3 | PC | active | Declared policy classes |
+| L3-PC-02 | L3 | PC | active | Duty to emit on recognition |
+| L3-PC-03 | L3 | PC | active | Mechanical enforcement of the security class |
+| L3-IR-01 | L3 | IR | active | Verified confirmation channel |
+| L3-DL-01 | L3 | DL | active | The Lead does not implement |
+| L3-QG-01 | L3 | QG | active | No known-broken integration |
+| L3-SC-01 | L3 | SC | active | Declared concurrent write boundaries |
+| L3-SC-02 | L3 | SC | active | Scope contracts with fulfillment reporting |
+| L3-SC-03 | L3 | SC | active | Merge conflict is contract-violation evidence |
+| L3-OB-01 | L3 | OB | active | No silent verdict replacement |
+| L4-JR-01 | L4 | JR | active | Append-only survival |
+| L4-JR-02 | L4 | JR | active | Typed events, filtered reads |
+| L4-JR-03 | L4 | JR | active | Accepted HANDOFFs are journaled |
+| L4-MS-01 | L4 | MS | active | Typed, queryable, additive |
+| L4-HV-01 | L4 | HV | active | Event-driven harvest |
+| L4-HV-02 | L4 | HV | active | Drain-proof reads with deduplication |
+| L4-SR-01 | L4 | SR | active | Journal-sufficient reconstruction |
