@@ -1794,7 +1794,7 @@ class TestCliSubprocess:
 
     # ----- Cycle 3 H3: AMBIGUOUS_PREFIX envelope scrubs $HOME from match contexts -----
 
-    def test_ambiguous_prefix_scrubs_context_in_envelope(self, cli_script_path, cli_db):
+    def test_ambiguous_prefix_scrubs_context_in_envelope(self, monkeypatch, cli_script_path, cli_db):
         """E2E: AMBIGUOUS_PREFIX envelope replaces user $HOME path with '~' in each match context.
 
         Contexts may carry absolute paths from agent notes; piping the envelope
@@ -1803,6 +1803,27 @@ class TestCliSubprocess:
         sites (cmd_get, cmd_update, cmd_delete); this test exercises cmd_get
         as representative.
         """
+        # Subprocess + truncation isolation: the autouse conftest fixture
+        # redirects Path.home() -> tmp_path IN-PROCESS only (setattr does not
+        # cross to the child), and this test verifies $HOME scrubbing, so the
+        # subprocess must read the SAME home the parent captures. Two reasons a
+        # SHORT controlled home is needed here (not the fixture's tmp_path):
+        #  (a) SUBPROCESS: the child reads $HOME, not the setattr — override
+        #      Path.home() AND set $HOME together so parent and child agree.
+        #  (b) TRUNCATION: the envelope's per-match context snippet is capped
+        #      at descriptor_chars=60 (database.py). The fixture's tmp_path is
+        #      ~98 chars on macOS (/private/var/folders/...), so the snippet
+        #      cuts the home path mid-way, before "/Sites/" — _scrub can never
+        #      match the full home and "~/Sites/..." never appears. A short
+        #      home keeps "Note about <home>/Sites/secret-project/file.py"
+        #      (52 chars) inside the 60-char window (same shape as the original
+        #      /Users/mj assumption). This test writes via --db-path (never
+        #      under ~/.claude), so a controlled fake home re-opens no #1186
+        #      leak. See conftest _isolate_config_root_to_tmp "WHY NOT ALSO SET
+        #      HOME ENV".
+        short_home = "/tmp/pmscrub"
+        monkeypatch.setattr(Path, "home", lambda: Path(short_home))
+        monkeypatch.setenv("HOME", short_home)
         home = str(Path.home())
         # Guard against an unresolved tilde — _scrub no-ops if HOME is unset
         # or returns the literal '~', and this test would not be exercising
