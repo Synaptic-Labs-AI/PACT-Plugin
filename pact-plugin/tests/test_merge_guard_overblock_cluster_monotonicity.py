@@ -39,6 +39,16 @@ Summary: TEST-phase CORPUS-WIDE monotonicity sweep + intended-closure accounting
              STRUCTURALLY CANNOT SEE. The catch is a DETECT-OP PARITY dimension
              (base.detect == HEAD.detect == restored op), see TestR1DetectOpParity; a thin
              standing e2e launder smoke rides in TestR1LaunderE2ESmoke.
+           * F3 line-continuation splice (#1148, commit 6): a `#` after a backslash-newline
+             is NOT a bash comment (bash SPLICES the line-continuation, gluing `#` to the
+             preceding token). _F3_CLOSE (imported) rides the DESTRUCTIVE battery (base-True
+             -> HEAD-True retention); _F3_GENUINE (imported) rides the closure set. F3 also
+             introduces the SOLE legitimate base-False -> HEAD-True: the split-word bonus (a
+             mid-word line-continuation that splices to a REAL force-push base under-blocked)
+             -> EXPECTED_BONUS, a lead-ratified SINGLETON whose membership predicate is
+             SEMANTIC (bash runs it as a destructive op, so gating it is never an over-block).
+             The cardinal-direction gate is {base-False -> HEAD-True} SUBSET-OF EXPECTED_BONUS
+             (was == EMPTY); any OTHER False->True still reds. See TestR3* classes.
 
          NON-VACUITY EVIDENCE (authoring-time measurements — documented here, NOT
          committed as git-show-by-SHA test code, per the #1182 CI-invisible-non-ancestor
@@ -54,6 +64,9 @@ Summary: TEST-phase CORPUS-WIDE monotonicity sweep + intended-closure accounting
                      (is_dangerous False) at the parent, gated at HEAD
                F2   (f6f94c3e, parent 7ca8de80): 10/10 _R1_DELETE rows op-downgrade to
                      push-to-main at the parent, restored op at HEAD (is_dangerous True both)
+               F3   (b4ea5bfc, parent 07a2994f): 11/11 _F3_CLOSE rows under-blocked
+                     (is_dangerous False) at the parent, gated at HEAD; the split-word bonus
+                     gate appears at commit 6 (parent False -> HEAD True force-push)
              The committed non-vacuity artifact is the base leg of every assertion below
              (baseline fixture) + the loader's pre-fix discriminators.
            * tree-wide harvest: 1620 command literals AST-harvested from the entire
@@ -98,6 +111,17 @@ from test_merge_guard_1155_cert import (  # noqa: E402
 
 # Combined (label, cmd, want_op) rows for the F2 detect-op parity guard.
 _R1_OP_ROWS = _R1_DELETE + _R1_FAITHFUL_ROWS
+
+# F3 line-continuation-splice sets (commit 6), imported for the SAME anti-drift coupling:
+#   _F3_CLOSE   : line-continuation-before-# forms that GATE (base-True->HEAD-True retention)
+#   _F3_GENUINE : genuine comments (bare-newline/plain-space/even-backslash/CRLF) that stay
+#                 excised -> base-True->HEAD-False closures (the over-block-safety companion)
+#   _F3_LC      : the backslash-newline literal, to build the flag-scan control + the bonus.
+from test_merge_guard_1148_cert import (  # noqa: E402
+    _F3_CLOSE,
+    _F3_GENUINE,
+    _LC as _F3_LC,
+)
 
 D = mgc.is_dangerous_command
 
@@ -276,6 +300,16 @@ DESTRUCTIVE = [
     # TestR1DetectOpParity below (the required detect-op dimension).
     *[cmd for _, cmd, _ in _R1_DELETE],
     *[cmd for _, cmd, _ in _R1_FAITHFUL_ROWS],
+    # --- F3 line-continuation additions (commit 6 — the 3rd #1148 under-block class) ---
+    # _F3_CLOSE: a `#` after a backslash-newline is NOT a bash comment (bash SPLICES the
+    # line-continuation, gluing `#` to the preceding token) -> the routing token survives
+    # -> stays GATED (base-True->HEAD-True; a commit-6 revert re-excises it -> under-block).
+    *[cmd for _, cmd in _F3_CLOSE],
+    # flag-scan control: `gh pr close 5 <LC>-d` splices to `... -d` so -d stays bound ->
+    # dangerous on both trees (the ONE global splice serves the flag surface too; the
+    # bound-flags parity is checked in TestR3LineContinuationSplice).
+    "gh pr close 5 %s-d" % _F3_LC,
+    "gh pr close 5 %s--delete-branch" % _F3_LC,
 ]
 
 # The union of every enumerated intended closure — the ONLY commands the sweep permits
@@ -289,11 +323,33 @@ _CLOSURE_CMDS = (
     + [cmd for _, cmd in _C1148]
     + [cmd for _, cmd in MATRIX_BROADENING]
     + [cmd for _, cmd in _R1_GENUINE]
+    # _F3_GENUINE are #1148 genuine-comment-excision closures too (base-True->HEAD-False):
+    # bash-faithful comments the splice must keep excising (over-block safety).
+    + [cmd for _, cmd in _F3_GENUINE]
 )
 _INTENDED_CLOSURE_SET = set(_CLOSURE_CMDS)
 
-# Full corpus swept by the monotonicity accounting: benign + destructive + every closure.
-CORPUS = BENIGN + DESTRUCTIVE + _CLOSURE_CMDS
+# EXPECTED_BONUS — the SOLE permitted base-False -> HEAD-True transition (commit 6). A
+# mid-word line-continuation the space-join MISSED: `git pus<LC>h --force origin main`
+# SPLICES to a REAL `git push --force origin main`. This is directionally identical to a
+# cardinal-sin over-block (base-False->HEAD-True) but SEMANTICALLY its opposite: bash
+# executes it as a genuinely DESTRUCTIVE force-push, so gating it is NEVER an over-block —
+# it routes through approval and a faithful click still mints. The membership predicate is
+# that semantic (a destructive HEAD op), pinned by TestR3ExpectedBonus; the real-bash
+# ground truth lives in test_merge_guard_1148_cert (its _bash_pipe_executes oracle +
+# test_split_word_bonus_closure). SINGLETON GUARD (lead-ratified): if this set ever needs a
+# 2nd member to keep the sweep green, DO NOT widen it — a 2nd False->True is either a new
+# bonus (bash-oracle-verify it is destructive, then the lead approves adding it) or a real
+# cardinal over-block. Either way it is a lead decision; the cardinal-direction test REDS on
+# any False->True not listed here, forcing escalation instead of a silent widen.
+EXPECTED_BONUS = [
+    ("split-word-force-push", "git pus%sh --force origin main" % _F3_LC, "force-push"),
+]
+_EXPECTED_BONUS_SET = {cmd for _, cmd, _ in EXPECTED_BONUS}
+
+# Full corpus swept by the monotonicity accounting: benign + destructive + every closure
+# + the expected bonus (so the sweep exercises the EXPECTED_BONUS exemption path).
+CORPUS = BENIGN + DESTRUCTIVE + _CLOSURE_CMDS + [c for _, c, _ in EXPECTED_BONUS]
 
 
 class TestCorpusMonotonicity:
@@ -301,10 +357,16 @@ class TestCorpusMonotonicity:
 
     def test_zero_new_over_block_cardinal_direction(self):
         base_d = _base()
-        offenders = [c for c in CORPUS if base_d(c) is False and D(c) is True]
+        # base-False -> HEAD-True is the cardinal-sin direction (a faithful click newly
+        # blocked) EXCEPT the enumerated EXPECTED_BONUS (a provably-destructive closure —
+        # see TestR3ExpectedBonus). Any OTHER False->True reds here, forcing escalation.
+        offenders = [
+            c for c in CORPUS
+            if base_d(c) is False and D(c) is True and c not in _EXPECTED_BONUS_SET
+        ]
         assert offenders == [], (
-            "CARDINAL SIN — base-False -> HEAD-True (faithful click newly blocked): %r"
-            % offenders
+            "CARDINAL SIN — base-False -> HEAD-True (faithful click newly blocked), NOT in "
+            "the enumerated EXPECTED_BONUS: %r" % offenders
         )
 
     def test_every_closure_is_intended(self):
@@ -448,4 +510,80 @@ class TestR1LaunderE2ESmoke:
         victim = "git push " + "'origin' --delete main"
         assert merge_guard_pre.check_merge_authorization(victim, tmp_path) is not None, (
             "LAUNDER OPEN: a benign push-to-main token authorized a quoted-remote delete"
+        )
+
+
+# =========================================================================================
+# R3 / F3 — LINE-CONTINUATION SPLICE (remediation commit 6). A `#` after a shell
+# line-continuation (backslash-newline) is NOT a bash comment: bash SPLICES the
+# line-continuation (removes the backslash+newline and glues the surrounding text), so the
+# `#` glues to a non-delimiter and the pipe executes. The fix splices FIRST, then applies
+# the escape-aware comment predicate to the spliced surface (subsumes F1). is_dangerous-
+# visible: _F3_CLOSE are base-True -> HEAD-True retention; a commit-6 revert re-excises them
+# -> under-block (delete-the-fix, git-show parent b4ea5bfc^=07a2994f: 11/11 _F3_CLOSE under-
+# block at the parent). _F3_GENUINE (bare-newline/plain-space/even-backslash/CRLF) are real
+# comments -> excised -> base-True -> HEAD-False closures (over-block safety; they ride the
+# closure set). Sets imported from the 1148 cert (anti-drift).
+# =========================================================================================
+class TestR3LineContinuationSplice:
+    @pytest.mark.parametrize("label,cmd", _F3_CLOSE, ids=[r[0] for r in _F3_CLOSE])
+    def test_line_continuation_before_hash_stays_gated(self, label, cmd):
+        assert _base()(cmd) is True, "%s: not a genuine gated form at base (vacuous)" % label
+        assert D(cmd) is True, (
+            "%s: F3 line-continuation-splice under-block re-opened (# wrongly excised after "
+            "a spliced line-continuation)" % label
+        )
+
+    @pytest.mark.parametrize("label,cmd", _F3_GENUINE, ids=[r[0] for r in _F3_GENUINE])
+    def test_genuine_comment_stays_excised_no_over_block(self, label, cmd):
+        # OVER-BLOCK SAFETY: a real comment (bare-newline / plain-space / even-backslash /
+        # CRLF) stays excised -> not dangerous. The splice must NOT re-over-block these.
+        assert D(cmd) is False, (
+            "%s: F3 splice over-blocked a genuine comment (cardinal-direction regression)" % label
+        )
+
+    def test_flag_scan_control_binds_delete_class_across_splice(self):
+        # the ONE global splice serves the FLAG surface too: `gh pr close 5 <LC>-d` splices
+        # to `gh pr close 5 -d`, so -d / --delete-branch stays a bound token (base==HEAD) and
+        # gated — proving the splice did not drop a flag binding the space-join kept.
+        base = load_baseline()
+        for cmd in ("gh pr close 5 %s-d" % _F3_LC, "gh pr close 5 %s--delete-branch" % _F3_LC):
+            b_ctx = base.extract_command_context(cmd)
+            h_ctx = mgc.extract_command_context(cmd)
+            assert h_ctx.get("bound_flags") == b_ctx.get("bound_flags"), (
+                "splice dropped a flag binding the space-join kept: %r" % cmd
+            )
+            assert "--delete-branch" in h_ctx.get("bound_flags", []), cmd
+            assert D(cmd) is True and base.is_dangerous_command(cmd) is True, cmd
+
+
+class TestR3ExpectedBonus:
+    """The SOLE permitted base-False -> HEAD-True. Its membership predicate is SEMANTIC
+    (lead ruling): bash executes it as a genuinely DESTRUCTIVE command, so gating it is a
+    destructive-command closure — routing through approval, a faithful click still mints —
+    NOT a benign-click over-block. Delete-the-fix (git-show parent b4ea5bfc^=07a2994f): the
+    gate appears at commit 6 (parent False -> HEAD True). Real-bash ground truth lives in
+    test_merge_guard_1148_cert (_bash_pipe_executes + test_split_word_bonus_closure)."""
+
+    @pytest.mark.parametrize(
+        "label,cmd,op", EXPECTED_BONUS, ids=[r[0] for r in EXPECTED_BONUS]
+    )
+    def test_bonus_is_a_destructive_closure_not_over_block(self, label, cmd, op):
+        assert _base()(cmd) is False, "%s: bonus is not base-False (not a bonus)" % label
+        assert D(cmd) is True, "%s: bonus does not gate at HEAD (F3 splice incomplete)" % label
+        # the SEMANTIC discriminant: HEAD classifies a genuinely destructive op, so the gate
+        # is a destructive-command closure, not a faithful-benign-click block.
+        assert mgc.detect_command_operation_type(cmd) == op, (
+            "%s: bonus HEAD op %r is not the destructive op %r — a base-False->HEAD-True "
+            "that is NOT a provable destructive closure must NOT be whitelisted" % (
+                label, mgc.detect_command_operation_type(cmd), op)
+        )
+
+    def test_expected_bonus_is_a_singleton(self):
+        # SINGLETON GUARD (lead-ratified): a 2nd member is a lead decision (bash-oracle-
+        # verify it is genuinely destructive, then the lead approves) or a real over-block —
+        # never a silent widen. The cardinal-direction sweep REDS on any unlisted False->True.
+        assert len(EXPECTED_BONUS) == 1, (
+            "EXPECTED_BONUS gained a member — do NOT widen the primary cardinal gate; "
+            "escalate to the lead to bash-oracle-verify the new row is genuinely destructive"
         )
