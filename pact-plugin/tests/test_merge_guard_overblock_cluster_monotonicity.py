@@ -22,18 +22,40 @@ Summary: TEST-phase CORPUS-WIDE monotonicity sweep + intended-closure accounting
          never skip) vs HEAD (live worktree module). NEVER a byte-diff / additive-lines
          argument (the #1118 doctrine for this SACROSANCT control).
 
+         R1 REMEDIATION EXTENSION (commits 4 & 5 — the PERMANENT gap-closure). An
+         independent adversarial audit found two under-blocks this file's ORIGINAL
+         curated corpus missed (exactly its own documented limitation: a spelling absent
+         from the corpus can go unseen). Both classes are now folded into the standing
+         corpus so a future regression is caught HERE, not only in the per-fix certs:
+           * F1 escaped-predecessor (#1148, commit 4): a `#` after a backslash-escaped
+             delimiter is NOT a bash comment; the escape-aware excision leaves the routing
+             token visible -> stays GATED. is_dangerous-visible (base-True -> HEAD-True);
+             _R1_ESC rides the DESTRUCTIVE battery; _R1_GENUINE (real comments still
+             excised, base-True -> HEAD-False) rides the closure set as the over-block-
+             safety companion. See TestR1EscapedPredecessor.
+           * F2 quoted-remote/quoted-flag launder (#1155, commit 5): is_dangerous stays
+             True on BOTH trees — the launder is an OP-DOWNGRADE (remote-ref-delete /
+             remote-mass-delete / force-push -> push-to-main) that the is_dangerous sweep
+             STRUCTURALLY CANNOT SEE. The catch is a DETECT-OP PARITY dimension
+             (base.detect == HEAD.detect == restored op), see TestR1DetectOpParity; a thin
+             standing e2e launder smoke rides in TestR1LaunderE2ESmoke.
+
          NON-VACUITY EVIDENCE (authoring-time measurements — documented here, NOT
          committed as git-show-by-SHA test code, per the #1182 CI-invisible-non-ancestor
          lesson):
            * per-commit DELETE-THE-FIX counter-tests (git-show parent-tree isolation at
-             test-authoring time): every closure row is True (pre-flip) against its
-             commit's PARENT tree and False at the commit itself, so each fix is
-             individually load-bearing for its own closures —
+             test-authoring time): every closure/gated row is at its PRE-flip value against
+             its commit's PARENT tree and at its fixed value at the commit, so each fix is
+             individually load-bearing —
                #1181 (796a83e3, parent b4041ccf): 20/20 closures pre-flip True->False
                #1155 (bf95a1f6, parent 796a83e3): 2/2 find closures pre-flip True->False
                #1148 (7b34e8cf, parent bf95a1f6): 2/2 comment closures pre-flip True->False
-             The committed non-vacuity artifact is the base-True leg of every closure
-             assertion below (baseline fixture) + the loader's pre-fix discriminators.
+               F1   (7ca8de80, parent 4e130f6f): 10/10 _R1_ESC rows under-blocked
+                     (is_dangerous False) at the parent, gated at HEAD
+               F2   (f6f94c3e, parent 7ca8de80): 10/10 _R1_DELETE rows op-downgrade to
+                     push-to-main at the parent, restored op at HEAD (is_dangerous True both)
+             The committed non-vacuity artifact is the base leg of every assertion below
+             (baseline fixture) + the loader's pre-fix discriminators.
            * tree-wide harvest: 1620 command literals AST-harvested from the entire
              test_merge_guard*.py corpus and swept base-vs-HEAD -> 0 base-False->HEAD-True.
 
@@ -49,6 +71,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 sys.path.insert(0, str(Path(__file__).parent))
 
 import shared.merge_guard_common as mgc  # noqa: E402
+import merge_guard_pre  # noqa: E402  # R1/F2 e2e launder smoke
+import merge_guard_post  # noqa: E402  # R1/F2 e2e launder smoke
 from merge_guard_baseline_loader import load_baseline  # noqa: E402
 
 # The three per-commit certs own the authoritative closure enumerations; import them so
@@ -56,6 +80,24 @@ from merge_guard_baseline_loader import load_baseline  # noqa: E402
 from test_merge_guard_1181_cert import INTENDED_CLOSURES as _C1181  # noqa: E402
 from test_merge_guard_1155_cert import FIND_CLOSURES as _C1155  # noqa: E402
 from test_merge_guard_1148_cert import CLOSURES as _C1148  # noqa: E402
+
+# R1 remediation sets (commits 4 & 5) — imported for the SAME anti-drift coupling as the
+# closure sets above; the per-fix cert modules own these enumerations.
+#   _R1_ESC     (#1148 F1): escaped-# spellings that stay GATED (is_dangerous True->True).
+#   _R1_GENUINE (#1148 F1): real comments that stay excised (base-True->HEAD-False closure;
+#               the over-block-safety companion proving F1 did not over-reach).
+#   _R1_DELETE  (#1155 F2): quoted-remote/quoted-flag launder rows — is_dangerous True BOTH
+#   _R1_FAITHFUL(#1155 F2): faithful push rows. F2's bug is an OP-DOWNGRADE invisible to the
+#               is_dangerous sweep, so these are guarded by TestR1DetectOpParity (detect op),
+#               not the is_dangerous accounting.
+from test_merge_guard_1148_cert import _ESC as _R1_ESC, _GENUINE as _R1_GENUINE  # noqa: E402
+from test_merge_guard_1155_cert import (  # noqa: E402
+    _R1_DELETE_CLASS as _R1_DELETE,
+    _R1_FAITHFUL as _R1_FAITHFUL_ROWS,
+)
+
+# Combined (label, cmd, want_op) rows for the F2 detect-op parity guard.
+_R1_OP_ROWS = _R1_DELETE + _R1_FAITHFUL_ROWS
 
 D = mgc.is_dangerous_command
 
@@ -223,15 +265,30 @@ DESTRUCTIVE = [
     # carrier-7e known residual: committer x merge-literal stays True (pinned by #1181).
     "git log --committer '%s'" % M5,
     "git show --committer '%s'" % M5,
+    # --- R1 remediation additions (the corpus gap that let two under-blocks through) ---
+    # F1 escaped-predecessor class (commit 4): a `#` after a backslash-escaped delimiter
+    # is NOT a bash comment -> the routing token survives -> stays GATED (True->True; a
+    # commit-4 regression re-excises it -> True->False, caught here as a freed destructive).
+    *[cmd for _, cmd in _R1_ESC],
+    # F2 quoted-remote/quoted-flag push/branch class (commit 5): is_dangerous is True on
+    # BOTH trees — the launder was an OP-DOWNGRADE, INVISIBLE to this sweep. These rows
+    # ride here only to pin "stays gated"; the op-downgrade itself is caught by
+    # TestR1DetectOpParity below (the required detect-op dimension).
+    *[cmd for _, cmd, _ in _R1_DELETE],
+    *[cmd for _, cmd, _ in _R1_FAITHFUL_ROWS],
 ]
 
 # The union of every enumerated intended closure — the ONLY commands the sweep permits
 # to transition base-True -> HEAD-False. Coupled to the certs via the imports above.
+# _R1_GENUINE are #1148 genuine-comment-excision closures (base-True -> HEAD-False): F1's
+# escape-awareness must PRESERVE their excision, so they are intended closures, not
+# over-blocks — including them here keeps the F1 over-block-safety direction in the sweep.
 _CLOSURE_CMDS = (
     [cmd for _, cmd in _C1181]
     + [cmd for _, cmd in _C1155]
     + [cmd for _, cmd in _C1148]
     + [cmd for _, cmd in MATRIX_BROADENING]
+    + [cmd for _, cmd in _R1_GENUINE]
 )
 _INTENDED_CLOSURE_SET = set(_CLOSURE_CMDS)
 
@@ -308,3 +365,87 @@ class TestBiteOracleFaithfulness:
         # the fix changes WHICH op the read side binds (merge->close), not whether gated.
         assert load_baseline().is_dangerous_command(BITE) is True
         assert D(BITE) is True
+
+
+# =========================================================================================
+# R1 / F1 — ESCAPED-PREDECESSOR CLASS (remediation commit 4). The original curated corpus
+# MISSED this spelling, which is how the under-block got through (my Task #31 uncertainty
+# #1: a faithful/executing spelling absent from the corpus can go unseen). Permanent
+# gap-closure: a `#` after a BACKSLASH-ESCAPED whitespace/;/&/| delimiter is NOT a bash
+# comment (bash executes the tail), so an escape-aware excision must LEAVE the routing
+# token visible -> the real `| sh` stays -> stays GATED. is_dangerous-visible: base-True
+# -> HEAD-True retention. Delete-the-fix (authoring-time, git-show parent 4e130f6f):
+# 10/10 _R1_ESC rows go under-blocked (is_dangerous False) at the parent, gated at HEAD —
+# commit 4 is individually load-bearing.
+# =========================================================================================
+class TestR1EscapedPredecessor:
+    @pytest.mark.parametrize("label,cmd", _R1_ESC, ids=[r[0] for r in _R1_ESC])
+    def test_escaped_delimiter_stays_gated(self, label, cmd):
+        assert load_baseline().is_dangerous_command(cmd) is True, (
+            "%s: not a genuine gated form at base (vacuous)" % label
+        )
+        assert mgc.is_dangerous_command(cmd) is True, (
+            "%s: escaped-# comment wrongly excised -> a real pipe-to-shell was freed" % label
+        )
+
+    @pytest.mark.parametrize("label,cmd", _R1_GENUINE, ids=[r[0] for r in _R1_GENUINE])
+    def test_genuine_comment_stays_excised_no_over_block(self, label, cmd):
+        # OVER-BLOCK SAFETY (the primary gate): F1's escape-awareness must NOT re-gate a
+        # faithful click carrying a REAL comment — a genuine comment stays excised -> not
+        # dangerous. (base-True -> HEAD-False; these ride in _CLOSURE_CMDS as intended.)
+        assert mgc.is_dangerous_command(cmd) is False, (
+            "%s: genuine comment wrongly treated as non-comment -> faithful click "
+            "OVER-BLOCKED (cardinal-direction regression)" % label
+        )
+
+
+# =========================================================================================
+# R1 / F2 — DETECT-OP PARITY (remediation commit 5). The quoted-remote/quoted-flag launder
+# keeps is_dangerous=True on BOTH trees — it is an OP-DOWNGRADE (remote-ref-delete /
+# remote-mass-delete / force-push -> push-to-main) that the is_dangerous monotonicity sweep
+# STRUCTURALLY CANNOT SEE. This is the standing regression catch the corpus previously
+# lacked: base.detect == HEAD.detect == the restored op over the imported R1 rows. A
+# commit-5 regression (push/branch arms back on the masked view) re-downgrades the op ->
+# HEAD.detect diverges from base.detect -> fails here. Delete-the-fix (authoring-time,
+# git-show parent 7ca8de80): 10/10 _R1_DELETE rows op-downgrade to push-to-main at the
+# parent — commit 5 is individually load-bearing. Coupling: rows imported from the 1155
+# cert (anti-drift). The full mint->auth launder round-trip lives in that cert; a thin
+# standing smoke rides in TestR1LaunderE2ESmoke below.
+# =========================================================================================
+class TestR1DetectOpParity:
+    @pytest.mark.parametrize(
+        "label,cmd,want", _R1_OP_ROWS, ids=[r[0] for r in _R1_OP_ROWS]
+    )
+    def test_detect_op_parity_base_equals_head(self, label, cmd, want):
+        base_detect = load_baseline().detect_command_operation_type
+        assert base_detect(cmd) == want, "%s: base op drifted from the expected op" % label
+        assert mgc.detect_command_operation_type(cmd) == want, (
+            "%s: op-downgrade launder re-opened — HEAD detect diverged from base "
+            "(is_dangerous cannot see this; only detect-op parity does)" % label
+        )
+        assert mgc.is_dangerous_command(cmd) is True, "%s: lost gating" % label
+
+
+class TestR1LaunderE2ESmoke:
+    """Belt-and-suspenders standing anchor for the F2 launder. The full mint->auth
+    round-trip lives in test_merge_guard_1155_cert::TestR1PushArmsOffView; this thin smoke
+    survives even if that cert is later refactored: a benign push-to-main token must REFUSE
+    a quoted-remote DELETE (the confirmed end-to-end launder)."""
+
+    def test_benign_push_token_refuses_quoted_remote_delete(self, tmp_path):
+        question = {
+            "question": "Proceed?",
+            "options": [{"label": "Yes", "description": "Run `git push origin main` now"}],
+            "multiSelect": False,
+        }
+        ctx, refusal = merge_guard_post._mint_context_from_bundle(
+            [question], {"Proceed?": "Yes"}
+        )
+        assert ctx is not None and ctx["operation_type"] == "push-to-main", (
+            "faithful push-to-main click stopped minting (%s)" % refusal
+        )
+        merge_guard_post.write_token(ctx, token_dir=tmp_path)
+        victim = "git push " + "'origin' --delete main"
+        assert merge_guard_pre.check_merge_authorization(victim, tmp_path) is not None, (
+            "LAUNDER OPEN: a benign push-to-main token authorized a quoted-remote delete"
+        )
