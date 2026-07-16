@@ -510,21 +510,65 @@ def detect_command_operation_type(command: str) -> str | None:
                           which the tightened token-match semantic treats as
                           a deny-on-typed-token signal rather than permissive)
     """
+    # TWO-PASS (view-first, raw fallback): recognition's PRIMARY surface is the
+    # executed-surface view — quoted data (a --comment/-m message) is masked, so
+    # an op keyword living in prose no longer classifies (the cross-auth cure:
+    # `gh pr close 5 --comment '…gh pr merge 5…'` classifies close, not merge,
+    # so mint and read bind the SAME faithful (op, target)). The raw fallback
+    # pass is arm-for-arm equivalent to the pre-view classifier, so every
+    # currently-recognized spelling keeps its non-None result BY CONSTRUCTION —
+    # load-bearing for the module INVARIANT: a wrapped faithful click
+    # (`bash -c 'gh pr merge 5'`) classifies None on the view (its payload is
+    # masked) and the read side REFUSES on a None op, so a view-only detect
+    # would permanently block it. The view pass only ever REFINES the op to the
+    # executed surface; extraction-coupled and API-URL arms stay RAW in BOTH
+    # passes (see _detect_op_pass). Substrates are hoisted so each is computed
+    # once per call.
+    legs = _split_into_legs(command)
+    view = _executed_surface_view(command)
+    masked_legs = [_mask_shell_quotes(leg) for leg in legs]
+    return (
+        _detect_op_pass(command, view, legs, masked_legs)   # view pass (CLI arms on view)
+        or _detect_op_pass(command, command, legs, legs)    # raw fallback == pre-view classifier
+    )
+
+
+def _detect_op_pass(
+    command: str,
+    surface: str,
+    raw_legs: "list[str]",
+    arm_legs: "list[str]",
+) -> str | None:
+    """One precedence-ordered classification pass, parameterized by surface.
+
+    - `surface`: the string the CLI literal arms (merge/close/push-to-main) match.
+      View pass: the executed-surface view; fallback pass: the raw command.
+    - `arm_legs`: the legs the per-leg literal-arm loops (force-push,
+      branch-delete) match. View pass: quote-masked legs; fallback: raw legs.
+    - `command` / `raw_legs` are ALWAYS the raw inputs — the arms below marked
+      RAW consume them in BOTH passes and MUST NOT move to the view:
+        * gh-api/curl/wget git-refs + branches/protection arms: a quoted
+          `gh api 'repos/o/r/git/refs/…' -X DELETE` is a faithful MINTING
+          spelling; the view blanks the quoted URL, so a view-side match would
+          make it gated-but-unmintable (a cardinal over-block).
+        * _api_merge_leg_endpoint: recognition⟺extractability coupling — the
+          leg classifies merge IFF its endpoint-position PR is extractable from
+          the SAME surface; masking would decouple them.
+        * _flag_condition_danger_op: already quote-aware via shlex and embeds
+          the remote-ref/mass-delete extractors (recognition⟺mintability); a
+          masked input would break quoted-refspec (`':main'`) extraction.
+    Precedence order is byte-identical to the pre-view classifier."""
     # Order matters: gh pr close --delete-branch is BOTH a close and a
     # branch-delete operation; the AskUserQuestion-side classifier
     # (extract_context) tags it as "close" in priority order, so match
     # the same precedence here for write/read symmetry.
-    if _GH_PR_MERGE_RE.search(command):
+    if _GH_PR_MERGE_RE.search(surface):
         return "merge"
-    if _GH_PR_CLOSE_RE.search(command):
+    if _GH_PR_CLOSE_RE.search(surface):
         # gh pr close --delete-branch is a close-type operation per the
         # write-side classifier. Branch-delete-via-pr-close is folded into
         # the close class on both sides for symmetric authorization.
         return "close"
-    # Legs are computed ONCE here and shared by the three per-leg loops below
-    # (force-push, api-merge, branch-delete) — the same single-substrate hoist
-    # idiom as the read floor's `legs` in is_dangerous_command.
-    legs = _split_into_legs(command)
     # force-push: git push ... --force (excludes --force-with-lease — carved out
     # of the force-push arms ONLY; the push-to-main arm still gates lease pushes
     # to a default branch). Matched PER-LEG over the shared _FORCE_PUSH_LITERAL_ARMS
@@ -532,7 +576,7 @@ def detect_command_operation_type(command: str) -> str | None:
     # substrate (_split_into_legs), so a force-class flag in a benign continuation
     # leg no longer classifies the first-leg push as force-push and read==mint
     # holds by construction on this class.
-    for _leg in legs:
+    for _leg in arm_legs:
         if any(arm.search(_leg) for arm in _FORCE_PUSH_LITERAL_ARMS):
             return "force-push"
     # Direct push to a default branch (main/master) — plain OR --force-with-lease —
@@ -550,11 +594,11 @@ def detect_command_operation_type(command: str) -> str | None:
     # a faithful click was permanently blocked). The READ floor gates BOTH forms
     # (DANGEROUS_PATTERNS unchanged). Uses the same `(?!:)` refspec exclusion as
     # DANGEROUS_PATTERNS push-to-main.
-    if re.search(_GIT_PREFIX + r"push\s+\S+\s+HEAD:(?:main|master)\b", command):
+    if re.search(_GIT_PREFIX + r"push\s+\S+\s+HEAD:(?:main|master)\b", surface):
         return "push-to-main"
     if re.search(
         _GIT_PREFIX + r"push\s+(?:-\S+\s+){0,%d}\S+\s+(?:main|master)(?!:)\b" % _MAX_GLOBAL_FLAG_TOKENS,
-        command,
+        surface,
     ):
         return "push-to-main"
     # API-based ref-mutation forms (gh api / curl / wget targeting
@@ -608,7 +652,7 @@ def detect_command_operation_type(command: str) -> str | None:
     # `gh -R o/r api` global-flag spelling also mints) + IGNORECASE PUT/PATCH/POST +
     # case-SENSITIVE pulls/<N>/merge path. DELETE excluded; the implicit-POST (-f/--data,
     # no method keyword) spelling is a deliberate residual, per the git/refs detect arm.
-    for _leg in legs:
+    for _leg in raw_legs:
         if _api_merge_leg_endpoint(_leg) is not None:
             return "merge"
     # branch-delete: git branch -D / --delete --force / --force --delete. Matched
@@ -620,7 +664,7 @@ def detect_command_operation_type(command: str) -> str | None:
     # some stripped leg matches iff detect classifies branch-delete here).
     # Clustered spellings (-Df / -fD / --delete -f) fall through to the union-arm
     # fallback below, same as the read floor.
-    for _leg in legs:
+    for _leg in arm_legs:
         if any(arm.search(_leg) for arm in _BRANCH_DELETE_LITERAL_ARMS):
             return "branch-delete"
     # Quote-aware normalized-flag FALLBACK (ADDITIVE, INV-AU): catches the
@@ -2425,6 +2469,34 @@ def _strip_non_executable_content(command: str) -> str:
             _strip_herestring_sq,
             result,
         )
+
+    # 6b. find -name/-path VALUE carrier: find's match-pattern values are inert
+    #     (find matches names; it never executes a -name/-path value), so a
+    #     danger-looking quoted pattern (`find . -name 'gh pr merge…'`) must not
+    #     gate a faithful search click. Span-bounded like carrier 5 (the
+    #     structural template): _VERB_MSG_BODY stops at the first unquoted
+    #     ;/&&/|/newline, so an executing tail stays OUTSIDE the span and is
+    #     caught. An executing find PRIMARY (-exec/-execdir/-ok/-okdir) anywhere
+    #     in the span disables the strip entirely (fail-toward-preserve: the
+    #     stripped value could be the -exec payload's evidence). Vocabulary is
+    #     EXACTLY -name/-path; -iname/-ipath/-regex etc. are deliberate
+    #     exclusions (preserved = status-quo residual — extend only with their
+    #     own cert rows). find itself stays in _EXEC_WRAPPERS_COARSE, so
+    #     carrier 10 still preserves find legs wholesale; the danger literal is
+    #     simply gone from the -name value by the time the floor scans.
+    if not piped_to_shell and not process_sub_to_shell:
+        _find_exec_primary_re = re.compile(r"(?<!\S)-(?:exec|execdir|ok|okdir)(?!\S)")
+        _find_span = r"\bfind\s+" + _VERB_MSG_BODY
+
+        def _strip_find_span(m: "re.Match") -> str:
+            span = m.group(0)
+            if _find_exec_primary_re.search(span):
+                return span                   # -exec/-ok present => preserve whole span
+            return _strip_flag_values(
+                span, r"((?<!\S)-(?:name|path)\s+)", _keep_carrier_value
+            )
+
+        result = re.sub(_find_span, _strip_find_span, result)
 
     # 7. Strip gh issue/pr CREATION/COMMENT-carrier quoted arguments.
     #    `gh issue create/edit/comment` and `gh pr create/comment` accept
