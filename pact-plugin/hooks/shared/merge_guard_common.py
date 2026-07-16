@@ -510,26 +510,31 @@ def detect_command_operation_type(command: str) -> str | None:
                           which the tightened token-match semantic treats as
                           a deny-on-typed-token signal rather than permissive)
     """
-    # TWO-PASS (view-first, raw fallback): recognition's PRIMARY surface is the
-    # executed-surface view — quoted data (a --comment/-m message) is masked, so
-    # an op keyword living in prose no longer classifies (the cross-auth cure:
-    # `gh pr close 5 --comment '…gh pr merge 5…'` classifies close, not merge,
-    # so mint and read bind the SAME faithful (op, target)). The raw fallback
-    # pass is arm-for-arm equivalent to the pre-view classifier, so every
-    # currently-recognized spelling keeps its non-None result BY CONSTRUCTION —
-    # load-bearing for the module INVARIANT: a wrapped faithful click
-    # (`bash -c 'gh pr merge 5'`) classifies None on the view (its payload is
-    # masked) and the read side REFUSES on a None op, so a view-only detect
-    # would permanently block it. The view pass only ever REFINES the op to the
-    # executed surface; extraction-coupled and API-URL arms stay RAW in BOTH
-    # passes (see _detect_op_pass). Substrates are hoisted so each is computed
-    # once per call.
-    legs = _split_into_legs(command)
+    # TWO-PASS (view-first, raw fallback): recognition's PRIMARY surface for the
+    # gh-pr PROSE arms is the executed-surface view — quoted data (a --comment/-m
+    # message) is masked, so an op keyword living in prose no longer classifies
+    # (the cross-auth cure: `gh pr close 5 --comment '…gh pr merge 5…'`
+    # classifies close, not merge, so mint and read bind the SAME faithful
+    # (op, target)). The raw fallback pass is arm-for-arm equivalent to the
+    # pre-view classifier, so every currently-recognized spelling keeps its
+    # non-None result BY CONSTRUCTION — load-bearing for the module INVARIANT:
+    # a wrapped faithful click (`bash -c 'gh pr merge 5'`) classifies None on
+    # the view (its payload is masked) and the read side REFUSES on a None op,
+    # so a view-only detect would permanently block it.
+    #
+    # ONLY the gh-pr merge/close arms consult the view. Every push/branch arm
+    # runs on RAW in BOTH passes: those are POSITIONAL / flag-presence
+    # classifiers, and masking a cosmetically-quoted EXECUTING token (a quoted
+    # remote name — `git push 'origin' --delete main`) turns it into a
+    # whitespace gap that a positional regex binds ACROSS, downgrading the op
+    # (remote-ref-delete → push-to-main) and laundering a benign push-to-main
+    # token into a delete authorization. The gh-pr prose arms are presence
+    # detectors with no positional mask-gap bind, so they carry no analogue.
     view = _executed_surface_view(command)
-    masked_legs = [_mask_shell_quotes(leg) for leg in legs]
+    legs = _split_into_legs(command)
     return (
-        _detect_op_pass(command, view, legs, masked_legs)   # view pass (CLI arms on view)
-        or _detect_op_pass(command, command, legs, legs)    # raw fallback == pre-view classifier
+        _detect_op_pass(command, view, legs)      # view pass (gh-pr prose arms on view)
+        or _detect_op_pass(command, command, legs)  # raw fallback == pre-view classifier
     )
 
 
@@ -537,16 +542,20 @@ def _detect_op_pass(
     command: str,
     surface: str,
     raw_legs: "list[str]",
-    arm_legs: "list[str]",
 ) -> str | None:
     """One precedence-ordered classification pass, parameterized by surface.
 
-    - `surface`: the string the CLI literal arms (merge/close/push-to-main) match.
-      View pass: the executed-surface view; fallback pass: the raw command.
-    - `arm_legs`: the legs the per-leg literal-arm loops (force-push,
-      branch-delete) match. View pass: quote-masked legs; fallback: raw legs.
-    - `command` / `raw_legs` are ALWAYS the raw inputs — the arms below marked
-      RAW consume them in BOTH passes and MUST NOT move to the view:
+    - `surface`: the string the gh-pr PROSE arms (merge/close) match. View pass:
+      the executed-surface view; fallback pass: the raw command. These are the
+      ONLY view-consulting arms (presence detectors — no positional mask-gap).
+    - `command` / `raw_legs` are ALWAYS the raw inputs — every other arm
+      consumes them in BOTH passes and MUST NOT move to the view:
+        * force-push / push-to-main (both arms) / branch-delete: positional or
+          flag-presence classifiers on git commands — masking a cosmetically-
+          quoted EXECUTING token (quoted remote) lets the positional arm bind
+          across the gap and DOWNGRADE the op (the quoted-remote-delete
+          laundering), or hides a quoted flag from a higher-precedence arm.
+          RAW == the certified base behavior for these classes.
         * gh-api/curl/wget git-refs + branches/protection arms: a quoted
           `gh api 'repos/o/r/git/refs/…' -X DELETE` is a faithful MINTING
           spelling; the view blanks the quoted URL, so a view-side match would
@@ -576,7 +585,7 @@ def _detect_op_pass(
     # substrate (_split_into_legs), so a force-class flag in a benign continuation
     # leg no longer classifies the first-leg push as force-push and read==mint
     # holds by construction on this class.
-    for _leg in arm_legs:
+    for _leg in raw_legs:
         if any(arm.search(_leg) for arm in _FORCE_PUSH_LITERAL_ARMS):
             return "force-push"
     # Direct push to a default branch (main/master) — plain OR --force-with-lease —
@@ -594,11 +603,11 @@ def _detect_op_pass(
     # a faithful click was permanently blocked). The READ floor gates BOTH forms
     # (DANGEROUS_PATTERNS unchanged). Uses the same `(?!:)` refspec exclusion as
     # DANGEROUS_PATTERNS push-to-main.
-    if re.search(_GIT_PREFIX + r"push\s+\S+\s+HEAD:(?:main|master)\b", surface):
+    if re.search(_GIT_PREFIX + r"push\s+\S+\s+HEAD:(?:main|master)\b", command):
         return "push-to-main"
     if re.search(
         _GIT_PREFIX + r"push\s+(?:-\S+\s+){0,%d}\S+\s+(?:main|master)(?!:)\b" % _MAX_GLOBAL_FLAG_TOKENS,
-        surface,
+        command,
     ):
         return "push-to-main"
     # API-based ref-mutation forms (gh api / curl / wget targeting
@@ -664,7 +673,7 @@ def _detect_op_pass(
     # some stripped leg matches iff detect classifies branch-delete here).
     # Clustered spellings (-Df / -fD / --delete -f) fall through to the union-arm
     # fallback below, same as the read floor.
-    for _leg in arm_legs:
+    for _leg in raw_legs:
         if any(arm.search(_leg) for arm in _BRANCH_DELETE_LITERAL_ARMS):
             return "branch-delete"
     # Quote-aware normalized-flag FALLBACK (ADDITIVE, INV-AU): catches the
