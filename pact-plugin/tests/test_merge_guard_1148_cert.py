@@ -400,6 +400,19 @@ class TestR2LineContinuationSplice:
         assert _bash_pipe_executes('echo "hi" #x | sh') is False                # plain space -> comment
         assert _bash_pipe_executes('echo "hi"\\\r\n#x | sh') is False           # CRLF -> comment
 
+    def test_crlf_no_splice_disposition(self):
+        # CRLF `\<CR><LF>` needs NO code handling — the splice matches backslash+`\n` only,
+        # so CRLF is left unchanged, AND that is bash-correct: bash does not treat `\<CR><LF>`
+        # as a line-continuation (the backslash escapes the CR; the LF stays a real newline).
+        # These two rows pin the intentional no-splice-of-CRLF property (design decision).
+        crlf = "\\\r\n"
+        # (1) CRLF before # -> line 2 is a genuine comment -> pipe suppressed -> not-dangerous.
+        assert D('echo "%s"%s#x | sh' % (_FP, crlf)) is False
+        assert _bash_pipe_executes('echo "hi"%s#x | sh' % crlf) is False
+        # (2) CRLF then a real command on line 2 -> the LF ends line 1, leg-split catches the
+        #     line-2 merge -> dangerous (the CR does not swallow line 2).
+        assert D('echo "hi"%sgh pr merge 5 --admin' % crlf) is True
+
     def test_flag_scan_control_binds_delete_class(self):
         # TWO-PURPOSE tension (load-bearing): a space-ADJACENT continuation flag must still
         # bind. `gh pr close 5 \<newline>-d` splices to `gh pr close 5 -d` (the space before
