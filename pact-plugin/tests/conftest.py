@@ -265,3 +265,91 @@ def _scrub_claude_plugin_root_env():
         os.environ.pop("CLAUDE_PLUGIN_ROOT", None)
     else:
         os.environ["CLAUDE_PLUGIN_ROOT"] = original
+
+
+@pytest.fixture(autouse=True)
+def _isolate_config_root_to_tmp(tmp_path, monkeypatch):
+    """Redirect the Claude Code config/state root to a per-test tmp tree for
+    EVERY test (autouse, opt-OUT), via TWO mechanisms: scrub any inherited
+    CLAUDE_CONFIG_DIR, then redirect ``Path.home()`` -> tmp_path. Runs for EVERY
+    test.
+
+    ``get_claude_config_dir()`` (hooks/shared/paths.py) — the single source of
+    truth every PACT state writer resolves through — honors ``$CLAUDE_CONFIG_DIR``
+    FIRST (precedence-1), falling back to ``Path.home() / ".claude"`` ONLY when
+    the var is unset. The two mechanisms make the redirect DETERMINISTIC
+    regardless of contributor env:
+
+    1. SCRUB CLAUDE_CONFIG_DIR at setup (POP any inherited value; restore the
+       original at teardown) — same posture as the sibling
+       ``_scrub_claude_plugin_root_env``. This makes the HOME fallthrough the
+       LIVE resolution path. A contributor who exports CLAUDE_CONFIG_DIR (their
+       real config) must NOT leak through — exactly the "forgetting is the
+       default" gap #1186 exists to close.
+    2. REDIRECT ``Path.home()`` -> tmp_path (``monkeypatch.setattr``, matching
+       the suite's own isolation convention — e.g. test_artifact_paths_durability
+       and the teammate_mode ``_ModeEnv`` harness). In-process,
+       ``get_claude_config_dir()`` now resolves to ``tmp_path / ".claude"``, so
+       every SSOT-respecting in-process writer (``agent_handoff_marker._marker_dir``
+       = ``get_claude_config_dir() / "teams" / team / namespace``; the registry
+       reaper's default root; etc.) lands under the per-test tmp, NEVER the
+       operator's real ``~/.claude``. This closes #1186's destructive leak (the
+       marker writer is in-process).
+
+    WHY NOT ALSO SET ``HOME`` ENV (deliberate): ``monkeypatch.setattr`` does not
+    cross to subprocesses, so a subprocess test that needs its child to resolve
+    the SAME tmp root must set the env var ITSELF in-body (the established
+    pattern — see test_pact_harvest_cli's subprocess test that does
+    ``monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))``
+    alongside its Path.home patch). A GLOBAL ``HOME`` env override here was
+    tried and REJECTED: it breaks the telegram tests
+    (``test_*_cwd_is_home``), which capture ``home = os.path.expanduser("~")``,
+    then ``patch.dict(os.environ, {}, clear=True)`` and assert the cwd-is-home
+    branch — under a ``HOME`` override the captured value is tmp but the
+    cleared-env ``expanduser`` falls back to the real pwd-home, so cwd no longer
+    equals home. A global ``HOME`` override trades ~3 legitimate tests for ~4
+    accidentally-consistent subprocess tests — a bad trade. Subprocess
+    hermeticity is per-test (the in-body env pattern), not a fixture
+    responsibility; residual non-isolated subprocess tests surface as findings
+    for per-test fixes, not as a fixture gap. #1186's destructive leak
+    (in-process marker writes) is fully closed by the setattr alone.
+
+    CRITICAL — DO NOT SET CLAUDE_CONFIG_DIR HERE. Precedence-1 makes it shadow
+    ``Path.home()`` entirely. The suite's pervasive isolation convention patches
+    ``Path.home()`` (-> a tmp) and relies on the HOME fallthrough being ACTIVE;
+    setting CLAUDE_CONFIG_DIR defeated that convention and broke ~336 tests (all
+    HOME-patchers) while helping none. The SCRUB keeps the fallthrough live (it
+    UNSETS the var); tests that genuinely need a specific config root set
+    CLAUDE_CONFIG_DIR THEMSELVES in-body, and precedence-1 then overrides the
+    scrub for that one test. Verified non-vacuity tests (e.g. test_task_utils
+    ``TestReadTaskJsonResolverEnvSet``: sets CLAUDE_CONFIG_DIR + redirects HOME
+    to an EMPTY dir to certify the env-set path) pass because their in-body
+    patches override BOTH this fixture's scrub and HOME-redirect.
+
+    Concrete leak this guards (#1186): the sibling autouse fixtures snapshot
+    CLAUDE_PROJECT_DIR and scrub CLAUDE_PLUGIN_ROOT but redirect NEITHER HOME
+    nor CLAUDE_CONFIG_DIR — the var (and its HOME fallback) governing every
+    destructive path. ``agent_handoff_marker._marker_dir`` resolved
+    ``get_claude_config_dir() / "teams" / team_name`` internally with no seam, so
+    a test exercising the marker writer against the live resolver wrote
+    test-fixture marker dirs into the operator's real ``~/.claude/teams/`` since
+    ~2026-04-05. This fixture inverts opt-in to opt-OUT: every test gets a
+    throwaway ``tmp_path / ".claude"`` root regardless of ambient env.
+
+    A test that ONLY passed against the real ``~/.claude`` (or the operator's
+    ambient ``CLAUDE_CONFIG_DIR``) was never isolated — under this fixture it
+    surfaces as a failure, which IS the finding: fix the test to be isolated,
+    never by re-pointing at the real home, weakening this redirect, or widening
+    any reaper. ``Path.home`` is patched in-process (what
+    ``get_claude_config_dir`` calls); subprocess tests that need their child to
+    resolve tmp set the env var themselves in-body (see "WHY NOT ALSO SET HOME"
+    above).
+    """
+    _UNSET = object()
+    original_cfg = os.environ.pop("CLAUDE_CONFIG_DIR", _UNSET)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    yield
+    if original_cfg is _UNSET:
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+    else:
+        os.environ["CLAUDE_CONFIG_DIR"] = original_cfg
