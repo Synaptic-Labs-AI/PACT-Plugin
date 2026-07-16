@@ -24,6 +24,9 @@
 #   what-was-searched respectively).
 # - BIDIRECTIONAL closure per document: every active key has exactly one row;
 #   every row references an existing active key.
+# - The summary includes an INFORMATIONAL count of satisfied(structural)
+#   annotations and not-applicable predicate citations in the annex (audit-pass
+#   convenience; never a gate).
 #
 # Group codes are data (the regex admits any uppercase group), so registry
 # appends need no script change. Missing documents are skipped with a clear
@@ -160,6 +163,8 @@ class Checker:
             self.fail(f"{path}: no keyed tables found (expected tables whose first header cell is 'Key')")
             return
         seen = {}
+        structural_count = 0
+        na_predicate_count = 0
         for header, rows in keyed_tables:
             status_col = find_column(header, "status")
             annotation_col = find_column(header, "annotation")
@@ -198,8 +203,12 @@ class Checker:
                         self.fail(f"{path}:{line_no}: {key} is not-applicable but cites no predicate")
                     elif status == "satisfied-with-deviation" and not last_cell:
                         self.fail(f"{path}:{line_no}: {key} is satisfied-with-deviation but names no deviation")
+                    if status == "not-applicable" and last_cell:
+                        na_predicate_count += 1
                     if annotation_col is not None and cells[annotation_col] not in ANNOTATIONS:
                         self.fail(f"{path}:{line_no}: {key} has unknown annotation '{cells[annotation_col]}' (allowed: structural or empty)")
+                    elif annotation_col is not None and cells[annotation_col] == "structural":
+                        structural_count += 1
                 else:
                     confidence = cells[confidence_col]
                     if confidence not in CONFIDENCE_TIERS:
@@ -212,6 +221,11 @@ class Checker:
         if len(seen) != len(active_keys) and not missing:
             self.fail(f"{path}: row count {len(seen)} != active key count {len(active_keys)}")
         self.notes.append(f"{doc_name}: {len(seen)} rows vs {len(active_keys)} active keys")
+        if kind == "annex":
+            self.notes.append(
+                f"{doc_name} (informational): {structural_count} satisfied(structural) annotation(s), "
+                f"{na_predicate_count} not-applicable predicate citation(s)"
+            )
 
 
 def run_checks(spec_md, annex_md, binding_md):
@@ -278,8 +292,13 @@ GOOD_BINDING = """# Binding
 
 
 def self_test():
+    # (name, spec, annex, binding, expected_rc, expected_error_substring,
+    #  expected_note_substring) — the note check pins the informational
+    #  annotation/predicate counts on the clean fixture (1 structural row,
+    #  1 not-applicable row with a predicate).
     cases = [
-        ("clean fixture stays GREEN", GOOD_SPEC, GOOD_ANNEX, GOOD_BINDING, 0, None),
+        ("clean fixture stays GREEN", GOOD_SPEC, GOOD_ANNEX, GOOD_BINDING, 0, None,
+         "1 satisfied(structural) annotation(s), 1 not-applicable predicate citation(s)"),
         ("annex closure gap goes RED", GOOD_SPEC,
          GOOD_ANNEX.replace("| L2-VS-01 | Variety bands | scoring module | not-applicable | | pull-only-waiters |\n", ""),
          GOOD_BINDING, 1, "CLOSURE GAP"),
@@ -302,7 +321,9 @@ def self_test():
 
     print("=== Self-Test (known-bad fixtures must go RED) ===")
     fails = 0
-    for name, spec, annex, binding, expected_rc, expected_msg in cases:
+    for case in cases:
+        name, spec, annex, binding, expected_rc, expected_msg = case[:6]
+        expected_note = case[6] if len(case) > 6 else None
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = {}
             for fname, content in (("spec.md", spec), ("annex.md", annex), ("binding.md", binding)):
@@ -316,10 +337,11 @@ def self_test():
                 checker = run_checks(paths["spec.md"], paths["annex.md"], paths["binding.md"])
             rc = 1 if checker.errors else 0
             msg_ok = expected_msg is None or any(expected_msg in e for e in checker.errors)
-            if rc == expected_rc and msg_ok:
+            note_ok = expected_note is None or any(expected_note in n for n in checker.notes)
+            if rc == expected_rc and msg_ok and note_ok:
                 print(f"✓ {name}")
             else:
-                print(f"✗ {name}: rc={rc} (expected {expected_rc}); errors={checker.errors}")
+                print(f"✗ {name}: rc={rc} (expected {expected_rc}); errors={checker.errors}; notes={checker.notes}")
                 fails += 1
     if fails:
         print(f"SELF-TEST FAILED ({fails} case(s))")

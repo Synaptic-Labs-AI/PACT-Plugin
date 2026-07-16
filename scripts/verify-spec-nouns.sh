@@ -1,11 +1,14 @@
 #!/bin/bash
 # scripts/verify-spec-nouns.sh
-# Scans the spec's normative core (spec/pact-protocol.md + spec/schemas/*.json)
-# for substrate mechanism nouns that must not appear there. Patterns live in
-# scripts/spec-noun-denylist.txt (case-sensitive fixed strings, one per line).
+# Scans the spec's committed prose surface (spec/pact-protocol.md +
+# spec/README.md + spec/schemas/*.json) for substrate mechanism nouns that
+# must not appear there. Patterns live in scripts/spec-noun-denylist.txt
+# (case-sensitive fixed strings, one per line).
 #
 # Rules:
 # - spec/pact-protocol.md is scanned in FULL — informative sections included.
+# - spec/README.md is scanned the same way (it carries the framework-agnostic
+#   claim, so substrate nouns must not accumulate there either).
 # - Schema JSON files are scanned against a projection with every "$comment"
 #   string value blanked first: $comment values are annotation, and the schema
 #   extraction-pin convention requires them to cite source-code filenames that
@@ -23,13 +26,14 @@
 # observed failing is indistinguishable from broken).
 #
 # Internal env overrides (used by --self-test; not part of the manual-run
-# interface): VERIFY_SPEC_MD, VERIFY_SCHEMAS_DIR.
+# interface): VERIFY_SPEC_MD, VERIFY_SPEC_README, VERIFY_SCHEMAS_DIR.
 
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DENYLIST="$SCRIPT_DIR/spec-noun-denylist.txt"
 SPEC_MD="${VERIFY_SPEC_MD:-spec/pact-protocol.md}"
+SPEC_README="${VERIFY_SPEC_README:-spec/README.md}"
 SCHEMAS_DIR="${VERIFY_SCHEMAS_DIR:-spec/schemas}"
 
 HITS=0
@@ -109,12 +113,15 @@ main_scan() {
     echo "=== Spec Noun Audit ==="
     echo ""
 
-    if [ -f "$SPEC_MD" ]; then
-        scan_text "$SPEC_MD" "$SPEC_MD"
-        SCANNED=$((SCANNED + 1))
-    else
-        echo "SKIP: $SPEC_MD not found (not yet authored)"
-    fi
+    local md_target
+    for md_target in "$SPEC_MD" "$SPEC_README"; do
+        if [ -f "$md_target" ]; then
+            scan_text "$md_target" "$md_target"
+            SCANNED=$((SCANNED + 1))
+        else
+            echo "SKIP: $md_target not found (not yet authored)"
+        fi
+    done
 
     if [ -d "$SCHEMAS_DIR" ]; then
         local found_schema=0
@@ -165,6 +172,8 @@ self_test() {
 
     printf 'The Lead calls SendMessage to notify the Specialist.\n' > "$tmpdir/spec-bad.md"
     printf 'The Lead emits a wake signal after the durable write.\n' > "$tmpdir/spec-clean.md"
+    printf 'This specification is framework-agnostic and built on LangGraph.\n' > "$tmpdir/readme-bad.md"
+    printf 'This specification is framework-agnostic.\n' > "$tmpdir/readme-clean.md"
     mkdir -p "$tmpdir/schemas-comment-only" "$tmpdir/schemas-bad" "$tmpdir/schemas-empty"
     printf '{"$comment": "extracted from teachback_schema.py", "title": "payload"}\n' \
         > "$tmpdir/schemas-comment-only/a.schema.json"
@@ -172,8 +181,9 @@ self_test() {
         > "$tmpdir/schemas-bad/b.schema.json"
 
     run_case() {
-        local name="$1" spec="$2" schemas="$3" expected="$4" rc
-        VERIFY_SPEC_MD="$spec" VERIFY_SCHEMAS_DIR="$schemas" "$0" > /dev/null 2>&1
+        local name="$1" spec="$2" readme="$3" schemas="$4" expected="$5" rc
+        VERIFY_SPEC_MD="$spec" VERIFY_SPEC_README="$readme" VERIFY_SCHEMAS_DIR="$schemas" \
+            "$0" > /dev/null 2>&1
         rc=$?
         if [ "$rc" -eq "$expected" ]; then
             echo "✓ $name (exit $rc)"
@@ -184,13 +194,15 @@ self_test() {
     }
 
     run_case "denylisted noun in spec markdown goes RED" \
-        "$tmpdir/spec-bad.md" "$tmpdir/schemas-empty" 1
+        "$tmpdir/spec-bad.md" "$tmpdir/readme-clean.md" "$tmpdir/schemas-empty" 1
+    run_case "denylisted noun in README goes RED" \
+        "$tmpdir/spec-clean.md" "$tmpdir/readme-bad.md" "$tmpdir/schemas-empty" 1
     run_case "clean spec + noun only inside \$comment stays GREEN" \
-        "$tmpdir/spec-clean.md" "$tmpdir/schemas-comment-only" 0
+        "$tmpdir/spec-clean.md" "$tmpdir/readme-clean.md" "$tmpdir/schemas-comment-only" 0
     run_case "noun OUTSIDE \$comment in a schema goes RED" \
-        "$tmpdir/spec-clean.md" "$tmpdir/schemas-bad" 1
+        "$tmpdir/spec-clean.md" "$tmpdir/readme-clean.md" "$tmpdir/schemas-bad" 1
     run_case "clean control stays GREEN" \
-        "$tmpdir/spec-clean.md" "$tmpdir/schemas-empty" 0
+        "$tmpdir/spec-clean.md" "$tmpdir/readme-clean.md" "$tmpdir/schemas-empty" 0
 
     rm -rf "$tmpdir"
     if [ "$fails" -gt 0 ]; then
