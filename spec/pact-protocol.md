@@ -81,6 +81,9 @@ shown here.
   only by reading shared state; nothing pushes a resumption to it. Whether
   waiters are pull-only is a substrate property declared by the
   `pull-only-waiters` predicate (§3.4).
+- **Principal Channel** — a substrate-distinguished input channel whose
+  events are attributable to the Principal and cannot be originated by any
+  protocol actor.
 - **Protocol-boundary message** — a message that initiates or resolves a
   protocol-defined wait, or that carries a completion claim, a teachback
   submission, a rejection, or a blocker report.
@@ -300,6 +303,11 @@ Requirements can be conditional on a predicate; a requirement block's
 requirement conditional on a predicate the profile lacks is
 `not-applicable`, citing that predicate. This is the device that keeps
 dual-binding closure honest instead of forcing vacuous claims.
+
+Some keyed requirements oblige a realization or binding to declare a set,
+threshold, or predicate rather than to produce runtime events. Such a
+declaration-class requirement is discharged by the binding's conformance
+declaration; its locus is the declaration document itself.
 
 ### 3.5 Not-applicable versus structurally satisfied
 
@@ -549,9 +557,10 @@ and MUST unblock only on Principal resolution.
 **L1-SG-04** — HALT resolution
 
 Resumption after a HALT MUST require explicit Principal acknowledgment. A
-Principal override MUST be recorded with risk-specific justification and
-MUST NOT carry forward: if an overridden risk later materializes, it MUST
-be re-signaled.
+Principal override MUST be recorded on the signal record — TaskStore
+metadata or a Journal event — with risk-specific justification, and MUST
+NOT carry forward: if an overridden risk later materializes, it MUST be
+re-signaled.
 
 ### 4.7 MessageChannel conduct (MC)
 
@@ -665,7 +674,8 @@ and bypass both the nested and the parent coordinator.
 
 A dispatch-variety assessment MUST score exactly four dimensions —
 novelty, scope, uncertainty, and risk — each as an integer from 1 to 4,
-and MUST record the total as their sum (range 4 to 16).
+and MUST record the total as their sum (range 4 to 16) in the work
+record's variety stamp (L2-VA-01).
 
 **L2-VS-02** — Routing bands
 
@@ -712,7 +722,8 @@ text-observable incompleteness check of the corresponding plan section,
 applying a declared signal set covering at least: unchecked research
 items, placeholder table cells, forward references, unchecked questions,
 placeholder text, open research questions, and research-shaped
-implementation items.
+implementation items. The check's outcome MUST be recorded in the skip
+annotation of L2-PS-01.
 
 ### 5.5 Concurrent observation (AU)
 
@@ -726,12 +737,13 @@ in the L3 observer-verdict group.
 For every implementation-bearing production, the realization MUST declare
 whether concurrent observation is engaged, and a decision to skip
 observation where the realization's declared engagement conditions hold
-MUST be justified in a durable record.
+MUST be justified in a durable record in the TaskStore or Journal.
 
 **L2-AU-02** — Verdict absence semantics
 
-The absence of an observer verdict MUST be interpreted as "not yet
-written", never as "no findings"; a consumer MUST NOT infer a clean
+An observer verdict MUST be recorded on the observer's own TaskStore work
+record. The absence of an observer verdict MUST be interpreted as "not
+yet written", never as "no findings"; a consumer MUST NOT infer a clean
 observation from a missing verdict.
 
 ## 6. Level 3 — Governance
@@ -773,9 +785,10 @@ change-integration gate — rather than relying on actor discipline alone.
 
 An irreversible action on the shared change-integration surface —
 integrating changes into a mainline, rewriting shared history, or deleting
-a shared line of work — MUST be confirmed by the Principal through a
-verified confirmation channel before execution; unverified free-form text
-MUST NOT be treated as confirmation.
+a shared line of work — MUST be preceded by a confirmation event on the
+Principal Channel (§1.1); unverified free-form text MUST NOT be treated
+as confirmation. Confirmation evidence SHOULD be recorded in the
+TaskStore or Journal.
 
 ### 6.3 Delegation boundary (DL)
 
@@ -790,24 +803,29 @@ EnforcementPoint the boundary SHOULD be enforced there.
 
 **L3-QG-01** — No known-broken integration
 
-A change MUST NOT pass the change-integration gate while its verification
-status is known-failing, and verification MUST have been run — or been
-explicitly declared inapplicable — before integration.
+A change MUST NOT pass the change-integration gate (an EnforcementPoint
+interception on the change-integration action class, §2.4) while its
+verification status is known-failing, and verification MUST have been run
+— or been explicitly declared inapplicable — before integration.
 
 ### 6.5 Scope contracts and concurrent write boundaries (SC)
 
 **L3-SC-01** — Declared concurrent write boundaries
 
-Concurrently dispatched Specialists MUST have declared, non-overlapping
-write boundaries or a declared sequencing over the shared surface before
-concurrent work begins.
+Concurrently dispatched Specialists MUST have non-overlapping write
+boundaries or a declared sequencing over the shared surface, and the
+boundary declaration MUST be recorded in a durable substrate interface —
+work-record metadata in the TaskStore or a Journal event — before any
+covered Specialist begins work.
 
 **L3-SC-02** — Scope contracts with fulfillment reporting
 
-When scoped sub-cycles are activated, each sub-scope MUST carry a declared
-scope contract — identity, deliverables, interfaces, and constraints
-including shared files — and the sub-scope's completion HANDOFF MUST
-report fulfillment against that contract.
+When scoped sub-cycles are activated, each sub-scope MUST carry a scope
+contract — identity, deliverables, interfaces, and constraints including
+shared files — recorded in a durable substrate interface (work-record
+metadata in the TaskStore or a Journal event) before sub-scope work
+begins, and the sub-scope's completion HANDOFF MUST report fulfillment
+against that contract.
 
 **L3-SC-03** — Merge conflict is contract-violation evidence
 
@@ -820,7 +838,8 @@ escalated as an ALERT-class signal (§4.6).
 **L3-OB-01** — No silent verdict replacement
 
 An observer's authored verdict MUST NOT be silently replaced: any
-overwrite MUST durably preserve the authored verdict and MUST leave a
+overwrite MUST durably preserve the authored verdict within the same
+substrate record that carries the verdict (L2-AU-02), and MUST leave a
 visible record that an overwrite occurred.
 
 ## 7. Level 4 — Memory
