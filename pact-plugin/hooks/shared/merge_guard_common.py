@@ -1975,12 +1975,32 @@ def _excise_heredoc_bodies_for_routing_scan(command: str) -> str:
     return _HEREDOC_BODY_RE.sub(_repl, command)
 
 
+def _delimiter_is_unescaped(excised: str, d: int) -> bool:
+    """True iff the char at excised[d] is an UNescaped shell word-delimiter. Counts the
+    consecutive backslash run ending at d-1: EVEN (incl. 0) → the delimiter is real; ODD →
+    the delimiter is backslash-escaped (a literal char, part of the word) → NOT a delimiter.
+    Real-bash discriminant (the design intent): with `echo "x"\\ #y | sh`, the escaped space
+    is a literal argument char, the `#` is mid-word, and bash EXECUTES the pipe — so the
+    routing view must keep it; with `echo "x" #y | sh` (unescaped) bash treats `#`..EOL as a
+    comment and the pipe is SUPPRESSED — so excision is correct. `\\\\ #` (even run: literal
+    backslash then a real space) is a comment again, matching bash."""
+    b = d - 1
+    bs = 0
+    while b >= 0 and excised[b] == "\\":
+        bs += 1
+        b -= 1
+    return bs % 2 == 0
+
+
 def _excise_comments_view(excised: str, view: str) -> str:
     """Step 3 of _excise_and_mask: view-only, SAME-LENGTH comment excision. A `#`
     is a comment iff (a) it SURVIVES the quote mask (view[i] == "#": unquoted by
     construction) AND (b) its predecessor ON THE PRE-MASK SURFACE (excised[i-1];
     i == 0 counts as a comment start) is one of {start, space, tab, newline, ;,
-    &, |}. Testing the RAW predecessor is load-bearing: a masked closing quote
+    &, |} AND (c) that delimiter is UNESCAPED (_delimiter_is_unescaped: even
+    backslash run immediately before it — `\\ #` / `\\<tab>#` / `\\;#` / `\\&#` /
+    `\\|#` make the `#` mid-word, NOT a comment, and bash EXECUTES what follows).
+    Testing the RAW predecessor is load-bearing: a masked closing quote
     reads as a space on the view, so a view-side test would misclassify
     `"x"#tail` as a comment (an executing tail eaten = under-block). The excision
     replaces `#`..end-of-line (newline EXCLUDED) with spaces — same length, so
@@ -1998,7 +2018,13 @@ def _excise_comments_view(excised: str, view: str) -> str:
     out = list(view)
     i, n = 0, len(view)
     while i < n:
-        if view[i] == "#" and (i == 0 or excised[i - 1] in " \t\n;&|"):
+        if view[i] == "#" and (
+            i == 0
+            or (
+                excised[i - 1] in " \t\n;&|"
+                and _delimiter_is_unescaped(excised, i - 1)
+            )
+        ):
             j = view.find("\n", i)
             if j == -1:
                 j = n

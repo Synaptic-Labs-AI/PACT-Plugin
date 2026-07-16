@@ -215,3 +215,99 @@ class TestComposedEndState:
                 assert label in closure_labels, (
                     "unintended True->False transition on %s" % label
                 )
+
+
+# =========================================================================================
+# R1 / F1 — ESCAPE-AWARE COMMENT PREDECESSOR (remediation commit 4). Commit 3's comment
+# excision was escape-BLIND: a `#` after a BACKSLASH-ESCAPED delimiter (`\ #`, `\<tab>#`,
+# `\;#`, `\&#`, `\|#`) is NOT a bash comment (the escaped delimiter is a literal word char,
+# so bash EXECUTES what follows), but commit 3 excised it, deleting a real `| sh` from the
+# routing view and neutralizing the gate (a token-independent under-block). _delimiter_is_
+# unescaped (backslash-PARITY) closes it: ODD run = escaped = NOT a comment = text stays
+# visible = gated; EVEN run (incl. 0) = real delimiter = comment (unchanged).
+#
+# DISCRIMINANT (design intent) = does bash execute the pipe? Verified below against a live
+# `bash -c` with a touch-MARKER oracle: escaped delimiter -> pipe executes -> must gate;
+# unescaped/plain -> comment -> pipe suppressed -> stays closed (the #1148 closure, preserved).
+# =========================================================================================
+_ESC = [  # escaped delimiter -> NON-comment -> routing token survives -> stays GATED
+    ("esc-space-force-pipe-sh", 'echo "%s"\\ #x | sh' % PF),
+    ("esc-space-force-pipe-bash", 'echo "%s"\\ #x | bash' % PF),
+    ("esc-space-force-pipe-sh-nospace", 'echo "%s"\\ #x |sh' % PF),
+    ("esc-tab-force", 'echo "%s"\\\t#x | sh' % PF),
+    ("esc-semicolon-force", 'echo "%s"\\;#x | sh' % PF),
+    ("esc-amp-force", 'echo "%s"\\&#x | sh' % PF),
+    ("esc-pipe-force", 'echo "%s"\\|#x | sh' % PF),
+    ("esc-space-branch-delete", 'echo "%s"\\ #x | sh' % ("git " + "branch " + "-D victim")),
+    ("esc-space-merge-payload", 'echo "%s"\\ #x | sh' % M5),
+    ("multi-escape-odd-run-3", 'echo "%s"\\ \\ \\ #x | sh' % PF),
+]
+_GENUINE = [  # real comment -> excised -> not dangerous (over-block safety; F1 must PRESERVE)
+    ("plain-space-comment", 'echo "%s" #x | sh' % PF),
+    ("unescaped-semicolon-then-comment", 'echo "%s" ;# c | sh' % PF),
+    ("even-backslash-run-2-comment", 'echo "%s"\\\\ #x | sh' % PF),
+    ("orig-1148-repro", REPRO),
+]
+
+
+class TestR1EscapeAwarePredecessor:
+    @pytest.mark.parametrize("label,cmd", _ESC, ids=[r[0] for r in _ESC])
+    def test_escaped_delimiter_stays_gated(self, label, cmd):
+        # PRIMARY: the fixed classifier GATES the executing form (under-block closed).
+        assert D(cmd) is True, "escaped-delimiter under-block re-opened (gate bypassed)"
+        # NON-VACUITY at the mechanism level: the comment is NOT excised, so the routing
+        # `| sh`/`| bash` survives on the view (a revert of _delimiter_is_unescaped would
+        # excise it and flip this False). Base fixture also caught it (no excision pre-#1148).
+        view = mgc._executed_surface_view(cmd)
+        assert mgc._has_pipe_to_shell(view) is True, "escaped-# comment was wrongly excised"
+        assert _base()(cmd) is True, "row not caught at base (vacuous retention)"
+
+    @pytest.mark.parametrize("label,cmd", _GENUINE, ids=[r[0] for r in _GENUINE])
+    def test_genuine_comment_still_excised(self, label, cmd):
+        # OVER-BLOCK SAFETY: a real comment (unescaped / even-backslash delimiter) is still
+        # excised -> not dangerous. F1 must not gate a faithful #-comment click.
+        assert D(cmd) is False, "F1 over-blocked a genuine #-comment (regressed #1148 closure)"
+        view = mgc._executed_surface_view(cmd)
+        assert mgc._has_pipe_to_shell(view) is False, "genuine comment survived the view"
+
+    def test_delimiter_parity_unit(self):
+        # d points at the DELIMITER (the space here); count the backslash run ending at d-1.
+        # 0/2 backslashes -> unescaped (real delimiter); 1/3 -> escaped (literal char).
+        assert mgc._delimiter_is_unescaped("x #", 1) is True         # 0 backslashes
+        assert mgc._delimiter_is_unescaped("x\\ #", 2) is False      # 1 backslash (escaped)
+        assert mgc._delimiter_is_unescaped("x\\\\ #", 3) is True     # 2 backslashes (literal \\ + real space)
+        assert mgc._delimiter_is_unescaped("x\\\\\\ #", 4) is False  # 3 backslashes (escaped)
+
+    def test_bash_oracle_discriminant(self):
+        # Ground truth: the design intent is "does bash execute the pipe?". This pins the
+        # classifier's gate/excise decision to real bash comment semantics.
+        import os
+        import subprocess
+        import tempfile
+
+        cases = {
+            " #x": False,        # plain space -> comment -> pipe suppressed
+            "\\ #x": True,       # escaped space -> non-comment -> pipe executes
+            "\\;#x": True,       # escaped ; -> non-comment
+            "\\&#x": True,       # escaped & -> non-comment
+            "\\\\ #x": False,    # even backslash -> comment
+        }
+        for tail, should_execute in cases.items():
+            with tempfile.TemporaryDirectory() as td:
+                marker = os.path.join(td, "M")
+                subprocess.run(
+                    ["bash", "-c", 'echo "hi"%s | touch %s' % (tail, marker)],
+                    capture_output=True,
+                )
+                assert os.path.exists(marker) is should_execute, (
+                    "bash oracle mismatch for tail %r" % tail
+                )
+
+    def test_r1_monotonic_no_new_over_block(self):
+        # every R1 row: no base-False -> HEAD-True (the escaped rows are base-True already;
+        # the genuine rows are base-True -> HEAD-False closures). No faithful click blocked.
+        base_d = _base()
+        for label, cmd in _ESC + _GENUINE:
+            assert not (base_d(cmd) is False and D(cmd) is True), (
+                "F1 introduced a new over-block on %s" % label
+            )
