@@ -167,10 +167,14 @@ class TestEqualsFormControls:
 
 
 # =========================================================================================
-# KNOWN RESIDUAL — pre-existing carrier interaction (see module docstring). Pinned
-# True->True so a future fix of the merge-span prefix flips this row DELIBERATELY.
+# FORMER KNOWN RESIDUAL — now CLOSED by the OBS-A3/7e (?<!\S) anchor on the -m cluster
+# arm. The original pin documented `git log/show --committer '<merge literal>'` as a
+# True->True residual and said "if the git-merge span prefix was fixed, move this row to
+# INTENDED_CLOSURES deliberately". The 7e anchor is that fix: it stops carrier-7e's
+# git-merge span from mis-matching -com inside --committer, so the read-verb strip now
+# cleans the inert committer value -> not-dangerous. Deliberately flipped True->False.
 # =========================================================================================
-class TestKnownResiduals:
+class TestCommitterMergeLiteralClosure:
     @pytest.mark.parametrize(
         "label,cmd",
         [
@@ -179,11 +183,11 @@ class TestKnownResiduals:
         ],
         ids=["log-committer-merge-literal", "show-committer-merge-literal"],
     )
-    def test_committer_merge_literal_residual(self, label, cmd):
-        assert _base()(cmd) is True
-        assert D(cmd) is True, (
-            "residual unexpectedly closed — if the git-merge span prefix was fixed, "
-            "move this row to INTENDED_CLOSURES deliberately"
+    def test_committer_merge_literal_now_closes(self, label, cmd):
+        assert _base()(cmd) is True, "row was not a genuine over-block at base (vacuous)"
+        assert D(cmd) is False, (
+            "the OBS-A3/7e anchor closure regressed — the --committer read search over "
+            "an inert merge-literal value must be not-dangerous"
         )
 
 
@@ -229,16 +233,23 @@ class TestStructuralNegatives:
 # this cert introduces.)
 # =========================================================================================
 class TestMonotonicityAccounting:
+    # The two --committer×merge-literal rows are now INTENDED closures (OBS-A3/7e anchor),
+    # no longer True->True residuals — accounted here so the sweep does not flag them.
+    _COMMITTER_CLOSURES = [
+        ("log-committer-merge-literal", "git log --committer '%s'" % M5),
+        ("show-committer-merge-literal", "git show --committer '%s'" % M5),
+    ]
+
     def test_no_false_to_true_and_closures_accounted(self):
         base_d = _base()
         all_rows = (
             INTENDED_CLOSURES + RETENTION + EQUALS_FORM_CONTROLS
-            + [
-                ("log-committer-merge-literal", "git log --committer '%s'" % M5),
-                ("show-committer-merge-literal", "git show --committer '%s'" % M5),
-            ]
+            + self._COMMITTER_CLOSURES
         )
-        closure_labels = {r[0] for r in INTENDED_CLOSURES}
+        closure_labels = (
+            {r[0] for r in INTENDED_CLOSURES}
+            | {r[0] for r in self._COMMITTER_CLOSURES}
+        )
         for label, cmd in all_rows:
             b, h = base_d(cmd), D(cmd)
             assert not (b is False and h is True), (

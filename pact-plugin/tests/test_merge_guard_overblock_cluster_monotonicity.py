@@ -123,6 +123,14 @@ from test_merge_guard_1148_cert import (  # noqa: E402
     _LC as _F3_LC,
 )
 
+# OBS-A3/7e committer-census closure set (OBS commit 1): the carrier-7e -m-cluster
+# `(?<!\S)` token-start anchor stops the mid-flag mis-match inside `--committer`, so the
+# read-verb strip then cleans the INERT committer FILTER value -> `git log/show/shortlog
+# --committer '<danger>'` flips base-True -> HEAD-False. git MATCHES a committer value, it
+# never shell-executes it, so these were pre-existing OVER-BLOCKS (a benign committer value
+# is never gated) — not destructive ops. Imported for anti-drift, same discipline as _R1/_F3.
+from test_merge_guard_obs_cert import COMMITTER_CENSUS  # noqa: E402
+
 D = mgc.is_dangerous_command
 
 
@@ -286,9 +294,10 @@ DESTRUCTIVE = [
     "git commit -m '%s # b' | sh" % M5,
     'echo "%s"# not-a-comment | sh' % M5,
     "%s # done" % M5,
-    # carrier-7e known residual: committer x merge-literal stays True (pinned by #1181).
-    "git log --committer '%s'" % M5,
-    "git show --committer '%s'" % M5,
+    # NOTE: `git log/show --committer '<danger>'` were HERE (pinned True->True as the
+    # carrier-7e residual) but MOVED to the closure set — OBS-A3/7e closed that pre-existing
+    # over-block (the danger sat in the INERT committer FILTER value; git matches it, never
+    # executes). See the COMMITTER_CENSUS import in _CLOSURE_CMDS below.
     # --- R1 remediation additions (the corpus gap that let two under-blocks through) ---
     # F1 escaped-predecessor class (commit 4): a `#` after a backslash-escaped delimiter
     # is NOT a bash comment -> the routing token survives -> stays GATED (True->True; a
@@ -326,6 +335,12 @@ _CLOSURE_CMDS = (
     # _F3_GENUINE are #1148 genuine-comment-excision closures too (base-True->HEAD-False):
     # bash-faithful comments the splice must keep excising (over-block safety).
     + [cmd for _, cmd in _F3_GENUINE]
+    # OBS-A3/7e committer-census closures (base-True->HEAD-False): the danger literal sat in
+    # the INERT committer FILTER value (git matches it, never executes), so these were
+    # pre-existing over-blocks the 7e -m-cluster anchor closes. RECLASSIFIED from DESTRUCTIVE
+    # (verified: a benign committer value is not gated on either tree; the destructive floor
+    # — git -C/-c wrappers, timeout/nice gh pr merge, push positional grep — still gates).
+    + [cmd for _, cmd in COMMITTER_CENSUS]
 )
 _INTENDED_CLOSURE_SET = set(_CLOSURE_CMDS)
 

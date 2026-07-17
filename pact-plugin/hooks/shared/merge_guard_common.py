@@ -334,7 +334,13 @@ _VERB_MSG_BODY = (
 # to the git-commit anchor (carrier-5) but kept as a SEPARATE constant: the commit
 # carrier stays a self-contained literal, and git tag needs a DIFFERENT bounded variant
 # (its --merged/--no-merged collision), so the three are intentionally not unified.
-_MSG_FLAG_ANCHOR = r"((?:--m(?:e(?:s(?:s(?:a(?:g(?:e)?)?)?)?)?)?|-[a-ln-zA-Z]*m)\s*)"
+# The short cluster arm is TOKEN-START anchored `(?<!\S)` so it can only match a `-`
+# beginning a word: without it, `-[a-ln-zA-Z]*m` mis-matches MID-FLAG inside a longer
+# option (`-com` in `--committer`, `-adm` in `--admin`, `-am` in `--amend`), which lets
+# carrier-7e's git-merge span mangle a `git log --committer '…merge…'` surface and leave
+# the danger visible (an over-block). Genuine token-start clusters (`-m`, `-am`, `-cm`)
+# are whitespace-preceded so the anchor still admits them (no strip regression).
+_MSG_FLAG_ANCHOR = r"((?:--m(?:e(?:s(?:s(?:a(?:g(?:e)?)?)?)?)?)?|(?<!\S)-[a-ln-zA-Z]*m)\s*)"
 
 # Pre-compiled patterns for the operation-type classifier (consistent with
 # DANGEROUS_PATTERNS style).
@@ -2495,7 +2501,13 @@ def _strip_non_executable_content(command: str) -> str:
                 # equals form is already stripped upstream by the variable-assignment
                 # carrier (which matches `trailer=...` as a NAME=VALUE), so only the SPACE
                 # form reaches here.
-                r"((?:--m(?:e(?:s(?:s(?:a(?:g(?:e)?)?)?)?)?)?|--trailer|-[a-ln-zA-Z]*m)\s*)",
+                # Short cluster arm TOKEN-START anchored `(?<!\S)` (DEFENSIVE-CONSISTENCY
+                # mirror of _MSG_FLAG_ANCHOR): genuine `-m`/`-am`/attached `-mMSG` are
+                # whitespace-preceded so still strip; the anchor only blocks a MID-FLAG
+                # mis-match (`-com`/`-adm`/`-ame`) that a future strip-order shift could
+                # turn into an over-block. No census over-block runs through this carrier
+                # today; the anchor keeps carrier-5 identical to the merge anchor's fix.
+                r"((?:--m(?:e(?:s(?:s(?:a(?:g(?:e)?)?)?)?)?)?|--trailer|(?<!\S)-[a-ln-zA-Z]*m)\s*)",
                 _keep_carrier_value,
             ),
             result,
