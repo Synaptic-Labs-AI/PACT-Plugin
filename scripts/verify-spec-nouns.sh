@@ -101,8 +101,6 @@ git / commit / branch / merge / PR / worktree
                            - normative core says "version control" / "change-integration gate"
 middleware / node / graph / reducer / thread
                            - generic CS uses OK; check no substrate mechanism is smuggled
-orchestrator               - spec actor vocabulary is "Lead"; deniable once terminology lands
-teammate / team-lead       - platform-flavored spellings of Specialist/Lead; gray until terminology lands
 secretary / task / journal / metadata / PACT-family production names
                            - allowed by design; confirm deliberate use
 FOOTER
@@ -171,6 +169,7 @@ self_test() {
     echo "=== Self-Test (known-bad fixtures must go RED) ==="
 
     printf 'The Lead calls SendMessage to notify the Specialist.\n' > "$tmpdir/spec-bad.md"
+    printf 'The orchestrator dispatches work to a teammate.\n' > "$tmpdir/spec-actor-vocab.md"
     printf 'The Lead emits a wake signal after the durable write.\n' > "$tmpdir/spec-clean.md"
     printf 'This specification is framework-agnostic and built on LangGraph.\n' > "$tmpdir/readme-bad.md"
     printf 'This specification is framework-agnostic.\n' > "$tmpdir/readme-clean.md"
@@ -197,6 +196,8 @@ self_test() {
         "$tmpdir/spec-bad.md" "$tmpdir/readme-clean.md" "$tmpdir/schemas-empty" 1
     run_case "denylisted noun in README goes RED" \
         "$tmpdir/spec-clean.md" "$tmpdir/readme-bad.md" "$tmpdir/schemas-empty" 1
+    run_case "promoted actor-vocabulary noun goes RED" \
+        "$tmpdir/spec-actor-vocab.md" "$tmpdir/readme-clean.md" "$tmpdir/schemas-empty" 1
     run_case "clean spec + noun only inside \$comment stays GREEN" \
         "$tmpdir/spec-clean.md" "$tmpdir/readme-clean.md" "$tmpdir/schemas-comment-only" 0
     run_case "noun OUTSIDE \$comment in a schema goes RED" \

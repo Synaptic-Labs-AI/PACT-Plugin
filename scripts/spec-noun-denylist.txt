@@ -45,6 +45,14 @@ plugin.json
 worktree-setup
 gh pr
 
+# --- Platform actor-vocabulary spellings (promoted from the gray zone) ---
+# The spec's normative actor vocabulary (section 1.2) is Lead / Specialist /
+# Secretary / Principal. These platform-flavored spellings became deniable
+# once the terminology section landed.
+orchestrator
+teammate
+team-lead
+
 # --- LangChain-stack nouns (symmetric) ---
 LangChain
 LangGraph
