@@ -17,8 +17,16 @@
 # - Annex status enum is closed: satisfied | satisfied-with-deviation |
 #   unsatisfied | not-applicable. Unknown value = failure.
 #   unsatisfied rows must carry an issue link; not-applicable rows must cite
-#   a predicate; satisfied-with-deviation rows must describe the deviation.
-#   Annotation column (when present) admits only "structural" or empty.
+#   a predicate DECLARED in a predicate registry (the spec's applicability
+#   table or the document's own Binding Profile table) — free-form
+#   non-applicability is a closure failure per the spec's conformance rules;
+#   satisfied-with-deviation rows must describe the deviation.
+#   Annotation column (when present) admits only "structural" or empty —
+#   enforced for BOTH document kinds (annex and binding).
+# - The deviation / predicate / issue cell is located by HEADER NAME
+#   (a header containing "deviation", "predicate", or "issue"), not by
+#   column position; a keyed table lacking such a column falls back to the
+#   last cell with a warning-free legacy read only when statuses need it.
 # - Binding confidence enum is closed: clean | plausible-with-pattern | gap.
 #   Every row's Evidence cell must be non-empty (citation / named pattern /
 #   what-was-searched respectively).
@@ -101,6 +109,35 @@ def find_column(header, name):
     return lowered.index(name) if name in lowered else None
 
 
+def find_column_containing(header, substrings):
+    """Index of the first header cell containing any of the substrings
+    (case-insensitive), else None. Used to locate the deviation /
+    predicate / issue column by name instead of by position."""
+    lowered = [cell.lower() for cell in header]
+    for i, cell in enumerate(lowered):
+        if any(s in cell for s in substrings):
+            return i
+    return None
+
+
+def collect_declared_predicates(paths):
+    """Union of predicate names declared in any table whose first header
+    cell is 'Predicate' across the given documents (the spec's
+    applicability-predicate registry and a conformance document's own
+    Binding Profile table). Backticks are stripped from the name cell."""
+    predicates = set()
+    for path in paths:
+        if not path or not os.path.isfile(path):
+            continue
+        for header, rows in parse_tables(path):
+            if not header or header[0].strip().lower() != "predicate":
+                continue
+            for _line_no, cells in rows:
+                if cells:
+                    predicates.add(cells[0].strip().strip("`"))
+    return predicates
+
+
 class Checker:
     def __init__(self):
         self.errors = []
@@ -155,7 +192,8 @@ class Checker:
             index[key] = status
         return index
 
-    def check_keyed_doc(self, path, doc_name, active_keys, deprecated_keys, kind):
+    def check_keyed_doc(self, path, doc_name, active_keys, deprecated_keys, kind,
+                        declared_predicates):
         """Validate one conformance document (annex or binding) and its closure."""
         tables = parse_tables(path)
         keyed_tables = [t for t in tables if t[0] and t[0][0].lower() == "key"]
@@ -170,6 +208,9 @@ class Checker:
             annotation_col = find_column(header, "annotation")
             confidence_col = find_column(header, "confidence")
             evidence_col = find_column(header, "evidence")
+            # Locate the deviation / predicate / issue cell by header name;
+            # fall back to the last cell only when no such header exists.
+            detail_col = find_column_containing(header, ("deviation", "predicate", "issue"))
             if kind == "annex" and status_col is None:
                 self.fail(f"{path}: keyed table missing Status column (header: {header})")
                 continue
@@ -192,23 +233,36 @@ class Checker:
                     self.fail(f"{path}:{line_no}: row for DEPRECATED key {key} — one row per ACTIVE key only")
                 elif key not in active_keys:
                     self.fail(f"{path}:{line_no}: row references key {key} absent from the requirement index")
-                last_cell = cells[-1]
+                detail_cell = cells[detail_col] if detail_col is not None else cells[-1]
+                # Annotation enum is closed for BOTH document kinds.
+                if annotation_col is not None and cells[annotation_col] not in ANNOTATIONS:
+                    self.fail(f"{path}:{line_no}: {key} has unknown annotation '{cells[annotation_col]}' (allowed: structural or empty)")
+                elif annotation_col is not None and cells[annotation_col] == "structural":
+                    structural_count += 1
                 if kind == "annex":
                     status = cells[status_col]
                     if status not in ANNEX_STATUSES:
                         self.fail(f"{path}:{line_no}: {key} has unknown status '{status}' (allowed: {sorted(ANNEX_STATUSES)})")
-                    elif status == "unsatisfied" and "http" not in last_cell:
+                    elif status == "unsatisfied" and "http" not in detail_cell:
                         self.fail(f"{path}:{line_no}: {key} is unsatisfied but carries no issue link")
-                    elif status == "not-applicable" and not last_cell:
-                        self.fail(f"{path}:{line_no}: {key} is not-applicable but cites no predicate")
-                    elif status == "satisfied-with-deviation" and not last_cell:
+                    elif status == "not-applicable":
+                        if not detail_cell:
+                            self.fail(f"{path}:{line_no}: {key} is not-applicable but cites no predicate")
+                        elif not declared_predicates:
+                            self.fail(
+                                f"{path}:{line_no}: {key} is not-applicable but no predicate registry was found "
+                                f"(no table with a 'Predicate' header in the spec or this document) — citation unverifiable"
+                            )
+                        elif not any(p and p in detail_cell for p in declared_predicates):
+                            self.fail(
+                                f"{path}:{line_no}: {key} is not-applicable citing '{detail_cell}' — "
+                                f"no DECLARED predicate matches (declared: {sorted(declared_predicates)}); "
+                                f"free-form non-applicability is a closure failure"
+                            )
+                        else:
+                            na_predicate_count += 1
+                    elif status == "satisfied-with-deviation" and not detail_cell:
                         self.fail(f"{path}:{line_no}: {key} is satisfied-with-deviation but names no deviation")
-                    if status == "not-applicable" and last_cell:
-                        na_predicate_count += 1
-                    if annotation_col is not None and cells[annotation_col] not in ANNOTATIONS:
-                        self.fail(f"{path}:{line_no}: {key} has unknown annotation '{cells[annotation_col]}' (allowed: structural or empty)")
-                    elif annotation_col is not None and cells[annotation_col] == "structural":
-                        structural_count += 1
                 else:
                     confidence = cells[confidence_col]
                     if confidence not in CONFIDENCE_TIERS:
@@ -225,6 +279,10 @@ class Checker:
             self.notes.append(
                 f"{doc_name} (informational): {structural_count} satisfied(structural) annotation(s), "
                 f"{na_predicate_count} not-applicable predicate citation(s)"
+            )
+        else:
+            self.notes.append(
+                f"{doc_name} (informational): {structural_count} structural annotation(s)"
             )
 
 
@@ -253,17 +311,26 @@ def run_checks(spec_md, annex_md, binding_md):
     print(f"Requirement index: {len(active)} active, {len(deprecated)} deprecated")
 
     if annex_exists:
-        checker.check_keyed_doc(annex_md, "annex", active, deprecated, "annex")
+        predicates = collect_declared_predicates([spec_md, annex_md])
+        checker.check_keyed_doc(annex_md, "annex", active, deprecated, "annex", predicates)
     else:
         print(f"SKIP: {annex_md} not found (not yet authored)")
     if binding_exists:
-        checker.check_keyed_doc(binding_md, "binding", active, deprecated, "binding")
+        predicates = collect_declared_predicates([spec_md, binding_md])
+        checker.check_keyed_doc(binding_md, "binding", active, deprecated, "binding", predicates)
     else:
         print(f"SKIP: {binding_md} not found (not yet authored)")
     return checker
 
 
 GOOD_SPEC = """# Protocol
+
+## Applicability predicates
+
+| Predicate | Meaning |
+|---|---|
+| `pull-only-waiters` | A waiting actor observes state by reading |
+| `broadcast-channel` | One send reaches all active actors |
 
 ## Appendix B — Requirement Index
 
@@ -272,6 +339,17 @@ GOOD_SPEC = """# Protocol
 | L1-TS-01 | L1 | TS | active | Durable work records |
 | L1-TS-02 | L1 | TS | deprecated | Withdrawn; successor L1-TS-03 |
 | L2-VS-01 | L2 | VS | active | Variety scoring bands |
+"""
+
+# Column order deliberately differs from GOOD_ANNEX: the deviation /
+# predicate / issue column is NOT last. Pins the header-name column lookup
+# (a positional cells[-1] read would misread these rows).
+REORDERED_ANNEX = """# Annex
+
+| Key | Requirement (summary) | Deviation / predicate / issue | Realizing mechanism | Status | Annotation |
+|---|---|---|---|---|---|
+| L1-TS-01 | Durable records | https://issues.example/7 | durable store files | unsatisfied | |
+| L2-VS-01 | Variety bands | pull-only-waiters | scoring module | not-applicable | |
 """
 
 GOOD_ANNEX = """# Annex
@@ -284,10 +362,10 @@ GOOD_ANNEX = """# Annex
 
 GOOD_BINDING = """# Binding
 
-| Key | Proposed binding | Confidence | Evidence | Notes |
+| Key | Proposed binding | Confidence | Annotation | Evidence |
 |---|---|---|---|---|
-| L1-TS-01 | state channels | clean | vendor docs section 3 | |
-| L2-VS-01 | scoring node | plausible-with-pattern | documented scoring pattern | |
+| L1-TS-01 | state channels | clean | structural | vendor docs section 3 |
+| L2-VS-01 | scoring node | plausible-with-pattern | | documented scoring pattern |
 """
 
 
@@ -314,9 +392,23 @@ def self_test():
         ("superseded 'plausible' shorthand goes RED", GOOD_SPEC, GOOD_ANNEX,
          GOOD_BINDING.replace("plausible-with-pattern", "plausible"), 1, "unknown confidence"),
         ("empty binding Evidence cell goes RED", GOOD_SPEC, GOOD_ANNEX,
-         GOOD_BINDING.replace("| clean | vendor docs section 3 |", "| clean | |"), 1, "empty Evidence"),
+         GOOD_BINDING.replace("| structural | vendor docs section 3 |", "| structural | |"), 1, "empty Evidence"),
         ("row referencing unknown key goes RED", GOOD_SPEC,
          GOOD_ANNEX + "| L3-PC-01 | Ghost | x | satisfied | | |\n", GOOD_BINDING, 1, "absent from the requirement index"),
+        ("not-applicable citing an UNDECLARED predicate goes RED", GOOD_SPEC,
+         GOOD_ANNEX.replace("| not-applicable | | pull-only-waiters |",
+                            "| not-applicable | | push-only-dreamers |"),
+         GOOD_BINDING, 1, "free-form non-applicability"),
+        ("not-applicable with NO predicate registry anywhere goes RED",
+         GOOD_SPEC.replace("| `pull-only-waiters` | A waiting actor observes state by reading |\n", "")
+                  .replace("| `broadcast-channel` | One send reaches all active actors |\n", "")
+                  .replace("| Predicate | Meaning |\n|---|---|\n", ""),
+         GOOD_ANNEX, GOOD_BINDING, 1, "no predicate registry was found"),
+        ("binding annotation garbage goes RED", GOOD_SPEC, GOOD_ANNEX,
+         GOOD_BINDING.replace("| clean | structural |", "| clean | structura1 |"),
+         1, "unknown annotation"),
+        ("reordered columns with header-name lookup stay GREEN", GOOD_SPEC,
+         REORDERED_ANNEX, GOOD_BINDING, 0, None),
     ]
 
     print("=== Self-Test (known-bad fixtures must go RED) ===")

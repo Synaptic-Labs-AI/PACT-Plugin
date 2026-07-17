@@ -3,7 +3,9 @@
 # Scans the spec's committed prose surface (spec/pact-protocol.md +
 # spec/README.md + spec/schemas/*.json) for substrate mechanism nouns that
 # must not appear there. Patterns live in scripts/spec-noun-denylist.txt
-# (case-sensitive fixed strings, one per line).
+# (CASE-INSENSITIVE fixed strings, one per line — 'Orchestrator',
+# 'orchestrator', and 'ORCHESTRATOR' all hit; a case-sensitive scan lets
+# capitalization variants of denylisted nouns through).
 #
 # Rules:
 # - spec/pact-protocol.md is scanned in FULL — informative sections included.
@@ -82,7 +84,7 @@ scan_text() {
         case "$pattern" in
             ''|'#'*) continue ;;
         esac
-        matches=$(grep -nF -- "$pattern" "$text_path" || true)
+        matches=$(grep -inF -- "$pattern" "$text_path" || true)
         if [ -n "$matches" ]; then
             echo "✗ $label: denylisted noun '$pattern'"
             echo "$matches" | head -5 | sed 's/^/    /'
@@ -95,7 +97,10 @@ print_grayzone_footer() {
     echo ""
     echo "--- Gray-zone terms (manual attestation pass; NOT failures here) ---"
     cat <<'FOOTER'
-idle / wake / inbox        - not in normative sentences; informative hazard text OK
+idle / inbox               - not in normative sentences; informative hazard text OK
+wake                       - "wake signal" is a spec-defined term of art (section 1.1,
+                             scheduler semantics disclaimed) and is allowed in normative
+                             text; bare scheduler-sense "wake"/"woken" remains gray
 hook                       - generic English OK; deny when naming a platform mechanism
 git / commit / branch / merge / PR / worktree
                            - normative core says "version control" / "change-integration gate"
@@ -168,8 +173,28 @@ self_test() {
 
     echo "=== Self-Test (known-bad fixtures must go RED) ==="
 
+    # COUPLING PRECONDITION: the known-bad fixtures below embed specific
+    # denylist entries. If one of those entries is ever removed from
+    # spec-noun-denylist.txt, the corresponding RED case would silently
+    # become a wrong-reason failure — so verify the coupling explicitly
+    # and fail with an actionable message instead.
+    local coupled_term
+    for coupled_term in "SendMessage" "orchestrator" "LangGraph" "teachback_schema.py" "TaskUpdate"; do
+        if ! grep -qxF -- "$coupled_term" "$DENYLIST"; then
+            echo "✗ COUPLING: self-test fixture term '$coupled_term' is no longer in $DENYLIST"
+            echo "  Either restore the denylist entry or update the self-test fixtures to use a current entry."
+            fails=$((fails + 1))
+        fi
+    done
+    if [ "$fails" -gt 0 ]; then
+        rm -rf "$tmpdir"
+        echo "SELF-TEST FAILED ($fails coupling precondition(s))"
+        exit 1
+    fi
+
     printf 'The Lead calls SendMessage to notify the Specialist.\n' > "$tmpdir/spec-bad.md"
     printf 'The orchestrator dispatches work to a teammate.\n' > "$tmpdir/spec-actor-vocab.md"
+    printf 'The Orchestrator assigns langchain middleware to a Teammate.\n' > "$tmpdir/spec-case-variant.md"
     printf 'The Lead emits a wake signal after the durable write.\n' > "$tmpdir/spec-clean.md"
     printf 'This specification is framework-agnostic and built on LangGraph.\n' > "$tmpdir/readme-bad.md"
     printf 'This specification is framework-agnostic.\n' > "$tmpdir/readme-clean.md"
@@ -198,6 +223,8 @@ self_test() {
         "$tmpdir/spec-clean.md" "$tmpdir/readme-bad.md" "$tmpdir/schemas-empty" 1
     run_case "promoted actor-vocabulary noun goes RED" \
         "$tmpdir/spec-actor-vocab.md" "$tmpdir/readme-clean.md" "$tmpdir/schemas-empty" 1
+    run_case "capitalization variants of denylisted nouns go RED" \
+        "$tmpdir/spec-case-variant.md" "$tmpdir/readme-clean.md" "$tmpdir/schemas-empty" 1
     run_case "clean spec + noun only inside \$comment stays GREEN" \
         "$tmpdir/spec-clean.md" "$tmpdir/readme-clean.md" "$tmpdir/schemas-comment-only" 0
     run_case "noun OUTSIDE \$comment in a schema goes RED" \

@@ -1,5 +1,7 @@
 # Denylist for scripts/verify-spec-nouns.sh.
-# One pattern per line; case-sensitive fixed strings (grep -F).
+# One pattern per line; CASE-INSENSITIVE fixed strings (grep -iF) —
+# capitalization variants of every entry are denied, so list each noun
+# once in its canonical casing.
 # Blank lines and lines starting with # are ignored.
 #
 # These are substrate mechanism names that must not appear in the
@@ -54,15 +56,14 @@ teammate
 team-lead
 
 # --- LangChain-stack nouns (symmetric) ---
+# (one canonical casing per noun; the scan is case-insensitive)
 LangChain
 LangGraph
-langgraph
 Deep Agents
 deepagents
 StateGraph
 create_agent
 checkpointer
-Checkpointer
 interrupt(
 Command(resume
 BaseStore

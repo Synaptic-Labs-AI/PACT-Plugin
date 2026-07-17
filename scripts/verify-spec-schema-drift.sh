@@ -21,6 +21,17 @@
 #   TEACHBACK_VARIETY_ACK_VALID_VALUES). reasoning_reconstruction must NOT be
 #   in the schema's required list (its requiredness varies by variety band —
 #   lifecycle prose territory, schemas are shape-only).
+# - handoff.schema.json: required field set must equal the gate's
+#   _HANDOFF_REQUIRED_FIELDS (hooks/task_lifecycle_gate.py) MINUS
+#   reasoning_chain — the ratified canon leaves reasoning_chain optional in
+#   shape while the as-built gate checks it at advisory severity (the
+#   schema's own $comment records this deviation). reasoning_chain must be
+#   declared as a property and must NOT be required.
+# - signal.schema.json: the top-level level enum must equal (case-
+#   insensitively) the severity classes derived from SYSTEM_TASK_PREFIXES
+#   (hooks/shared/constants.py) minus the "Phase:" prefix — the enum's
+#   lowercase "blocker" is protocol prose convention (coordinator-triaged),
+#   so the compare is on uppercased names.
 # - Every enum in every schema is compared against the acknowledgment values,
 #   the wait-reason vocabulary, and the resolver vocabulary: an enum that
 #   overlaps one of those sets in 2+ members without being equal is drift.
@@ -51,6 +62,8 @@ SOURCE_DIR = "pact-plugin/hooks/shared"
 TEACHBACK_SOURCE = os.path.join(SOURCE_DIR, "teachback_schema.py")
 WAIT_SOURCE = os.path.join(SOURCE_DIR, "intentional_wait.py")
 VARIETY_SOURCE = os.path.join(SOURCE_DIR, "variety_scorer.py")
+GATE_SOURCE = "pact-plugin/hooks/task_lifecycle_gate.py"
+CONSTANTS_SOURCE = os.path.join(SOURCE_DIR, "constants.py")
 
 DRAFT_2020_12 = "https://json-schema.org/draft/2020-12/schema"
 ID_RE = re.compile(r"^urn:pact:spec:[0-9]+\.[0-9]+\.[0-9]+:(?P<name>[A-Za-z0-9_.-]+)$")
@@ -215,6 +228,43 @@ class Checker:
         if not has_ack_enum:
             self.fail(f"{basename}: no enum equals the acknowledgment values {sorted(ack_values)}")
 
+    def check_handoff(self, path, doc):
+        basename = os.path.basename(path)
+        gate_fields = set(self.constants["_HANDOFF_REQUIRED_FIELDS"])
+        expected_required = gate_fields - {"reasoning_chain"}
+        top_required = doc.get("required")
+        if not isinstance(top_required, list):
+            self.fail(f"{basename}: no top-level required list")
+            return
+        if set(top_required) != expected_required:
+            self.fail(
+                f"{basename}: required field set drift — schema {sorted(top_required)} "
+                f"vs gate-derived {sorted(expected_required)} "
+                f"(_HANDOFF_REQUIRED_FIELDS minus reasoning_chain)"
+            )
+        if "reasoning_chain" in top_required:
+            self.fail(f"{basename}: reasoning_chain must not be required (optional in shape per the ratified canon)")
+        declared = set()
+        find_property_names(doc, declared)
+        for field in sorted(gate_fields):
+            if field not in declared:
+                self.fail(f"{basename}: property {field!r} not declared anywhere in the schema")
+
+    def check_signal(self, path, doc):
+        basename = os.path.basename(path)
+        prefixes = self.constants["SYSTEM_TASK_PREFIXES"]
+        expected_levels = {p.rstrip(":").upper() for p in prefixes} - {"PHASE"}
+        level_enum = (doc.get("properties", {}).get("level", {}) or {}).get("enum")
+        if not isinstance(level_enum, list):
+            self.fail(f"{basename}: no properties.level.enum found")
+            return
+        schema_levels = {str(v).upper() for v in level_enum}
+        if schema_levels != expected_levels:
+            self.fail(
+                f"{basename}: level enum drift — schema {sorted(schema_levels)} vs "
+                f"SYSTEM_TASK_PREFIXES-derived {sorted(expected_levels)} (case-insensitive compare)"
+            )
+
 
 def load_constants():
     constants = {}
@@ -225,6 +275,8 @@ def load_constants():
     ]))
     constants.update(extract_constants(WAIT_SOURCE, ["KNOWN_REASONS", "KNOWN_RESOLVERS"]))
     constants.update(extract_constants(VARIETY_SOURCE, ["COMPACT_MAX", "ORCHESTRATE_MAX", "PLAN_MODE_MAX"]))
+    constants.update(extract_constants(GATE_SOURCE, ["_HANDOFF_REQUIRED_FIELDS"]))
+    constants.update(extract_constants(CONSTANTS_SOURCE, ["SYSTEM_TASK_PREFIXES"]))
     return constants
 
 
@@ -251,6 +303,10 @@ def run_checks(schemas_dir, constants):
         checker.check_enum_drift(path, doc)
         if basename.startswith("teachback"):
             checker.check_teachback(path, doc)
+        elif basename.startswith("handoff"):
+            checker.check_handoff(path, doc)
+        elif basename.startswith("signal"):
+            checker.check_signal(path, doc)
     return checker, len(schema_paths)
 
 
@@ -279,6 +335,33 @@ def good_teachback_schema(constants):
         "type": "object",
         "required": fields,
         "properties": properties,
+    }
+
+
+def good_handoff_schema(constants):
+    fields = [f for f in constants["_HANDOFF_REQUIRED_FIELDS"] if f != "reasoning_chain"]
+    properties = {name: {"type": "array"} for name in fields}
+    properties["reasoning_chain"] = {"type": "string"}
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "urn:pact:spec:0.1.0:handoff.schema.json",
+        "$comment": "Normative appendix; extracted from hooks/task_lifecycle_gate.py",
+        "type": "object",
+        "required": fields,
+        "properties": properties,
+    }
+
+
+def good_signal_schema(constants):
+    levels = sorted({p.rstrip(":") for p in constants["SYSTEM_TASK_PREFIXES"]} - {"Phase"})
+    levels = [lv if lv != "BLOCKER" else "blocker" for lv in levels]
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "urn:pact:spec:0.1.0:signal.schema.json",
+        "$comment": "Normative appendix; extracted from constants.py",
+        "type": "object",
+        "required": ["level"],
+        "properties": {"level": {"enum": levels}},
     }
 
 
@@ -317,26 +400,49 @@ def self_test(constants):
         }
         doc["then"] = {"required": ["variety_acknowledgment"]}
 
+    good_handoff = good_handoff_schema(constants)
+    good_signal = good_signal_schema(constants)
+
+    def mutate_handoff_drop_required(doc):
+        doc["required"] = [f for f in doc["required"] if f != "uncertainty"]
+
+    def mutate_handoff_require_rc(doc):
+        doc["required"] = doc["required"] + ["reasoning_chain"]
+
+    def mutate_signal_drop_level(doc):
+        doc["properties"]["level"]["enum"] = [
+            v for v in doc["properties"]["level"]["enum"] if v != "blocker"
+        ]
+
+    # (name, target basename, mutate, expected_rc, expected_msg)
     cases = [
-        ("clean fixture stays GREEN", None, 0, None),
-        ("acknowledgment enum drift goes RED", mutate_enum, 1, "overlaps acknowledgment values"),
-        ("missing $comment anchor goes RED", mutate_comment, 1, "$comment"),
-        ("$comment citing vanished source goes RED", mutate_ghost_source, 1, "does not exist"),
-        ("non-URN $id goes RED", mutate_id, 1, "$id"),
-        ("required field set drift goes RED", mutate_required, 1, "required field set drift"),
-        ("required reasoning_reconstruction goes RED", mutate_rr_required, 1, "must not be required"),
-        ("subset enum under an 'if' selector stays GREEN", mutate_if_subset, 0, None),
+        ("clean fixture stays GREEN", "teachback", None, 0, None),
+        ("acknowledgment enum drift goes RED", "teachback", mutate_enum, 1, "overlaps acknowledgment values"),
+        ("missing $comment anchor goes RED", "teachback", mutate_comment, 1, "$comment"),
+        ("$comment citing vanished source goes RED", "teachback", mutate_ghost_source, 1, "does not exist"),
+        ("non-URN $id goes RED", "teachback", mutate_id, 1, "$id"),
+        ("required field set drift goes RED", "teachback", mutate_required, 1, "required field set drift"),
+        ("required reasoning_reconstruction goes RED", "teachback", mutate_rr_required, 1, "must not be required"),
+        ("subset enum under an 'if' selector stays GREEN", "teachback", mutate_if_subset, 0, None),
+        ("handoff required-set drift goes RED", "handoff", mutate_handoff_drop_required, 1, "required field set drift"),
+        ("required reasoning_chain goes RED", "handoff", mutate_handoff_require_rc, 1, "must not be required"),
+        ("signal level enum drift goes RED", "signal", mutate_signal_drop_level, 1, "level enum drift"),
     ]
 
     print("=== Self-Test (known-bad fixtures must go RED) ===")
     fails = 0
-    for name, mutate, expected_rc, expected_msg in cases:
-        doc = copy.deepcopy(good)
+    for name, target, mutate, expected_rc, expected_msg in cases:
+        docs = {
+            "teachback.schema.json": copy.deepcopy(good),
+            "handoff.schema.json": copy.deepcopy(good_handoff),
+            "signal.schema.json": copy.deepcopy(good_signal),
+        }
         if mutate:
-            mutate(doc)
+            mutate(docs[f"{target}.schema.json"])
         with tempfile.TemporaryDirectory() as tmpdir:
-            with open(os.path.join(tmpdir, "teachback.schema.json"), "w") as f:
-                json.dump(doc, f, indent=2)
+            for fname, doc in docs.items():
+                with open(os.path.join(tmpdir, fname), "w") as f:
+                    json.dump(doc, f, indent=2)
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 checker, _ = run_checks(tmpdir, constants)
