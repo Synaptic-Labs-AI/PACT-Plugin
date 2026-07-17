@@ -2567,11 +2567,13 @@ def _strip_non_executable_content(command: str) -> str:
     #     caught. An executing find PRIMARY (-exec/-execdir/-ok/-okdir) anywhere
     #     in the span disables the strip entirely (fail-toward-preserve: the
     #     stripped value could be the -exec payload's evidence). Vocabulary is
-    #     EXACTLY -name/-path; -iname/-ipath/-regex etc. are deliberate
-    #     exclusions (preserved = status-quo residual — extend only with their
-    #     own cert rows). find itself stays in _EXEC_WRAPPERS_COARSE, so
-    #     carrier 10 still preserves find legs wholesale; the danger literal is
-    #     simply gone from the -name value by the time the floor scans.
+    #     the match-pattern primaries -name/-path/-iname/-ipath/-regex/-iregex
+    #     (#1195 OBS-A2 broadening — all inert: find MATCHES the pattern, never
+    #     shell-executes it). The ONE executing primary family
+    #     (-exec/-execdir/-ok/-okdir) stays whole-span-preserved (the deny below
+    #     fires first). find itself stays in _EXEC_WRAPPERS_COARSE, so carrier 10
+    #     still preserves find legs wholesale; the danger literal is simply gone
+    #     from the match-pattern value by the time the floor scans.
     if not piped_to_shell and not process_sub_to_shell:
         _find_exec_primary_re = re.compile(r"(?<!\S)-(?:exec|execdir|ok|okdir)(?!\S)")
         _find_span = r"\bfind\s+" + _VERB_MSG_BODY
@@ -2581,7 +2583,9 @@ def _strip_non_executable_content(command: str) -> str:
             if _find_exec_primary_re.search(span):
                 return span                   # -exec/-ok present => preserve whole span
             return _strip_flag_values(
-                span, r"((?<!\S)-(?:name|path)\s+)", _keep_carrier_value
+                span,
+                r"((?<!\S)-(?:name|path|iname|ipath|regex|iregex)\s+)",
+                _keep_carrier_value,
             )
 
         result = re.sub(_find_span, _strip_find_span, result)
@@ -3565,14 +3569,17 @@ _READ_VERB_SPECS: "dict[tuple[str, ...], _ReadVerbSpec]" = {
     ("git", "log"): _ReadVerbSpec(
         re.compile(
             r"((?<!\S)(?:--grep-reflog|--grep|--author|--committer)\s+"
-            r"|(?<!\S)-[SG]\s*)"
+            # bundled-cluster pickaxe short (#1195 OBS-A2): a dash cluster ENDING in the
+            # uppercase pickaxe flag S/G (`-nS'…'`, `-wG'…'`). [SG] uppercase-only so it
+            # never mis-binds `-s`/lowercase; the value is an inert pickaxe string.
+            r"|(?<!\S)-[a-zA-Z]*[SG]\s*)"
         ),
         None, False,
     ),
     ("git", "show"): _ReadVerbSpec(
         re.compile(
             r"((?<!\S)(?:--grep|--author|--committer)\s+"
-            r"|(?<!\S)-[SG]\s*)"
+            r"|(?<!\S)-[a-zA-Z]*[SG]\s*)"
         ),
         None, False,
     ),
@@ -3970,7 +3977,46 @@ def _strip_quoted_positionals(leg: str) -> str:
     return re.sub(r"'[^']*'", "STRIPPED", stripped)
 
 
-def _strip_read_verb_values(leg: str) -> "str | None":
+# git global options that PRECEDE the subcommand (for _resolve_git_subcommand, #1195 OBS-A1).
+# VALUE-taking (skip the flag AND its value token):
+_GIT_GLOBAL_VALUE_FLAGS = frozenset({
+    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env",
+})
+# Boolean (skip the flag token only):
+_GIT_GLOBAL_BOOL_FLAGS = frozenset({
+    "--no-pager", "--paginate", "-p", "--bare", "--no-replace-objects",
+    "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
+    "--icase-pathspecs", "--no-optional-locks",
+})
+
+
+def _resolve_git_subcommand(tokens: "list[str]") -> "int | None":
+    """tokens[0] == 'git'; skip leading git GLOBAL flags to return the SUBCOMMAND token
+    index, or None if none is reached. Skips ONLY dash-prefixed global flags (never a
+    positional word), so a DESTRUCTIVE subcommand always resolves to ITSELF —
+    `git push origin grep ':main'` -> 'push' (index 1, the first non-flag token), never
+    'grep'. This is the load-bearing invariant for destructive-still-gates: the resolver
+    can never gobble a positional into a read-verb key. An UNKNOWN global dash-flag returns
+    None (fail-safe: don't resolve -> the leg preserves = over-block-safe)."""
+    i, n = 1, len(tokens)
+    while i < n:
+        t = tokens[i]
+        if t in _GIT_GLOBAL_VALUE_FLAGS:
+            i += 2                                   # flag + its value token
+            continue
+        if "=" in t and t.split("=", 1)[0] in _GIT_GLOBAL_VALUE_FLAGS:
+            i += 1                                   # --flag=value (one token)
+            continue
+        if t in _GIT_GLOBAL_BOOL_FLAGS:
+            i += 1
+            continue
+        if t.startswith("-"):
+            return None                              # unknown global flag -> fail-safe preserve
+        return i                                     # first non-flag token = subcommand
+    return None
+
+
+def _strip_read_verb_values(leg: str, _depth: int = 0) -> "str | None":
     """READ-VERB value carve-out (pre-d2): strip the inert search/filter VALUES of a
     closed set of git/gh read verbs (_READ_VERB_SPECS) so a danger-looking quoted
     literal there (`git log --grep "…"`, `git grep '…'`, `gh pr list --search '…'`)
@@ -4022,10 +4068,30 @@ def _strip_read_verb_values(leg: str) -> "str | None":
     if not tokens:
         return None
     head = os.path.basename(tokens[0])
-    if head == "git" and len(tokens) >= 2:
-        key = ("git", tokens[1])
+    if head == "git":
+        si = _resolve_git_subcommand(tokens)         # A1: skip git globals to the real verb
+        if si is None:                               #    (git -C x log …, git -c k=v log …)
+            return None
+        key = ("git", tokens[si])
     elif head == "gh" and len(tokens) >= 3:
         key = ("gh", tokens[1], tokens[2])
+    elif head in _EXEC_WRAPPERS_RECURSE and _depth < _MAX_WRAPPER_DEPTH:
+        # A1: a read-only WRAPPER prefix (timeout/nice/env/…) — resolve the nested command
+        # and RECURSE. _wrapper_nested_command returns preserve (None) for shell-invocation
+        # forms (env -S, sudo -s) and any wrapper whose boundary is uncertain, so a wrapper
+        # that CHANGES execution semantics never resolves to a strippable read verb (no
+        # under-block). A stripped nested maps back under the verbatim wrapper prefix:
+        # `nested` is a suffix of `leg`, so the prefix is byte-preserved by length.
+        nested = _wrapper_nested_command(cmd_leg, head)
+        if nested is None:
+            return None
+        rv = _strip_read_verb_values(nested, _depth + 1)
+        if rv is None:
+            return None
+        mapped = leg[: len(leg) - len(nested)] + rv
+        if _shell_tokenize(mapped) is None:          # g7 balance fail-safe on the mapped leg
+            return leg
+        return mapped
     else:
         return None
     spec = _READ_VERB_SPECS.get(key)                 # g5b exact-verb miss => None

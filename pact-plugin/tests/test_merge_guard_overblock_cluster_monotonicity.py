@@ -131,6 +131,14 @@ from test_merge_guard_1148_cert import (  # noqa: E402
 # is never gated) — not destructive ops. Imported for anti-drift, same discipline as _R1/_F3.
 from test_merge_guard_obs_cert import COMMITTER_CENSUS  # noqa: E402
 
+# OBS-A2 vocab-broadening closure set (OBS commit 2): find carrier-6b now covers
+# -iname/-ipath/-regex/-iregex, and the bundled-cluster pickaxe shorts (-nS/-wG) strip too.
+# `find . -iname/-ipath/-regex/-iregex '<danger>'` matches a name/path PATTERN — find never
+# shell-executes it — so a benign pattern was never gated; these were pre-existing
+# OVER-BLOCKS (the -iname one was my declared residual). Imported wholesale (the A2 closure
+# set incl. the bundled-short closures) for anti-drift, same discipline as _R1/_F3/COMMITTER.
+from test_merge_guard_obs_cert import A2_CENSUS  # noqa: E402
+
 D = mgc.is_dangerous_command
 
 
@@ -289,7 +297,11 @@ DESTRUCTIVE = [
     "find . -name '%s' | sh" % M5,
     "awk '/%s/ {print}' f" % M5,
     "python -c \"print('%s')\"" % M5,
-    "find . -iname '%s'" % M5,
+    # NOTE: `find . -iname '<danger>'` was HERE (the declared -iname residual) but MOVED to
+    # the closure set — OBS-A2 broadened find carrier-6b to -iname/-ipath/-regex/-iregex,
+    # closing the inert match-pattern over-block (find matches a name/path, never executes).
+    # See the A2_CENSUS import in _CLOSURE_CMDS below. (awk / python -c STAY here — they
+    # EXECUTE their strings, so no view/vocab broadening may free them.)
     # #1148 trap canaries (executing tails must stay caught).
     "git commit -m '%s # b' | sh" % M5,
     'echo "%s"# not-a-comment | sh' % M5,
@@ -341,6 +353,11 @@ _CLOSURE_CMDS = (
     # (verified: a benign committer value is not gated on either tree; the destructive floor
     # — git -C/-c wrappers, timeout/nice gh pr merge, push positional grep — still gates).
     + [cmd for _, cmd in COMMITTER_CENSUS]
+    # OBS-A2 vocab-broadening closures (base-True->HEAD-False): find -iname/-ipath/-regex/
+    # -iregex match-pattern searches (+ bundled-short pickaxe -nS/-wG). RECLASSIFIED the
+    # -iname row from DESTRUCTIVE (verified: benign find patterns not gated on either tree;
+    # the find -exec/-pipe executing forms + awk/python -c STILL gate; the 6-row floor holds).
+    + [cmd for _, cmd in A2_CENSUS]
 )
 _INTENDED_CLOSURE_SET = set(_CLOSURE_CMDS)
 

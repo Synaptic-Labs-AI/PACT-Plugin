@@ -112,3 +112,68 @@ class TestObsA3CommitterAnchor:
     def test_anchor_present_in_both_sites(self):
         # L337 _MSG_FLAG_ANCHOR (census-load-bearing) + carrier-5 inline copy (defensive).
         assert "(?<!\\S)-[a-ln-zA-Z]*m" in mgc._MSG_FLAG_ANCHOR
+
+
+# =========================================================================================
+# OBS-A1 — prefix/wrapper-aware read-verb resolution (commit 2). git GLOBAL-flag prefixes
+# (`git -C /p log`, `git -c k=v log`, `git --no-pager log`) and read-only WRAPPER prefixes
+# (`timeout 5 git log`, `nice git log`) previously key-missed -> fell to d2 wholesale
+# preserve -> over-block. _resolve_git_subcommand skips git globals to the real verb;
+# _wrapper_nested_command + recursion resolves the wrapped read verb.
+# =========================================================================================
+A1_CENSUS = [
+    ("git-C-prefix-log-grep", "git -C /p log --grep '%s'" % DANGER),
+    ("git-c-config-log-grep", "git -c core.pager=x log --grep '%s'" % DANGER),
+    ("git-no-pager-log-grep", "git --no-pager log --grep '%s'" % DANGER),
+    ("git-C-grep-e", "git -C /p grep -e '%s'" % DANGER),
+    ("timeout-wrapper-log-grep", "timeout 5 git log --grep '%s'" % DANGER),
+    ("nice-wrapper-log-grep", "nice git log --grep '%s'" % DANGER),
+    ("timeout-wrapper-grep-positional", "timeout 5 git grep '%s'" % DANGER),
+]
+
+# OBS-A2 — bundled-cluster pickaxe short + find -iname/-ipath/-regex/-iregex.
+A2_CENSUS = [
+    ("bundled-nS-separate", "git log -n5 -S'%s'" % DANGER),
+    ("bundled-nS-attached", "git log -nS'%s'" % DANGER),
+    ("bundled-wG", "git log -wG'%s'" % DANGER),
+    ("find-iname", "find . -iname '%s'" % DANGER),
+    ("find-ipath", "find . -ipath '%s'" % DANGER),
+    ("find-regex", "find . -regex '%s'" % DANGER),
+    ("find-iregex", "find . -iregex '%s'" % DANGER),
+]
+
+# Retention under the broadenings: executing/deny forms MUST still gate.
+A1A2_RETENTION = [
+    ("git-C-grep-O-deny", "git -C /p grep -O'vim' '%s'" % DANGER),
+    ("wrapper-grep-procsub", "timeout 5 git grep -f <(sh -c '%s')" % DANGER),
+    ("find-iname-exec-deny", r"find . -iname '%s' -exec cat {} \;" % DANGER),
+]
+
+
+class TestObsA1PrefixWrapperResolution:
+    @pytest.mark.parametrize("label,cmd", A1_CENSUS, ids=[r[0] for r in A1_CENSUS])
+    def test_prefix_wrapper_read_search_closes(self, label, cmd):
+        assert _base()(cmd) is True, "not a genuine over-block at base (vacuous)"
+        assert D(cmd) is False, "prefix/wrapper read search still gated at HEAD"
+
+    def test_resolver_stops_at_first_positional(self):
+        # the load-bearing invariant: a destructive subcommand resolves to ITSELF, never
+        # gobbling a positional word into a read-verb key.
+        assert mgc._resolve_git_subcommand(["git", "push", "origin", "grep", ":main"]) == 1
+        assert mgc._resolve_git_subcommand(["git", "-C", "/p", "branch", "-D", "x"]) == 3
+        assert mgc._resolve_git_subcommand(["git", "-c", "k=v", "log"]) == 3
+        assert mgc._resolve_git_subcommand(["git", "--foo", "log"]) is None  # unknown -> None
+
+
+class TestObsA2VocabBroadening:
+    @pytest.mark.parametrize("label,cmd", A2_CENSUS, ids=[r[0] for r in A2_CENSUS])
+    def test_bundled_short_and_find_pattern_close(self, label, cmd):
+        assert _base()(cmd) is True, "not a genuine over-block at base (vacuous)"
+        assert D(cmd) is False, "bundled-short / find match-pattern search still gated"
+
+
+class TestObsA1A2Retention:
+    @pytest.mark.parametrize("label,cmd", A1A2_RETENTION, ids=[r[0] for r in A1A2_RETENTION])
+    def test_executing_and_deny_forms_stay_gated(self, label, cmd):
+        assert _base()(cmd) is True
+        assert D(cmd) is True, "the broadening opened an under-block on an executing form"

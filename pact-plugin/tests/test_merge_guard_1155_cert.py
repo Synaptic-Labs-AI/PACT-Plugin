@@ -120,8 +120,10 @@ DECLARED_RESIDUALS = [
     # may free them (proven base-True->False under the naive masked scan).
     ("awk-residual", "awk '/%s/ {print}' f" % M5),
     ("python-c-residual", "python -c \"print('%s')\"" % M5),
-    # -iname is a deliberate vocabulary exclusion (extend only with own cert rows).
-    ("find-iname-residual", "find . -iname '%s'" % M5),
+    # NOTE: `find -iname` was a declared residual here at commit-2 time; #1195 OBS-A2
+    # broadened the find carrier to -iname/-ipath/-regex/-iregex (all inert match
+    # patterns), so it now CLOSES. The closure is certified in test_merge_guard_obs_cert.py
+    # (OBS-A2). awk/python -c stay residuals — they EXECUTE their string.
 ]
 GREP_CLASS_REGRESSION = [
     # closed upstream (positional over-block class) — must STAY closed (False on both).
