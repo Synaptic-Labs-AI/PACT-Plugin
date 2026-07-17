@@ -207,12 +207,31 @@ class TestRemoteRefDeleteNoOverBlock:
     )
     def test_quoted_colon_not_read_as_ref_delete(self, cmd):
         """#1037 brittleness class: a colon mentioned inside a quoted push-option
-        value must not be mis-read as a ref-delete refspec. (These still gate as
-        push-to-main on their own merits — that is asserted in the integration
-        class; here we only assert they are not mis-bound as a ref-delete.)"""
-        assert OP(cmd) != "remote-ref-delete"
-        assert CTX(cmd).get("target_ref") in (None,), (
-            f"{cmd!r} leaked a target_ref: {CTX(cmd).get('target_ref')!r}"
+        value must not be mis-read as a ref-delete refspec.
+
+        OBS-C hardened the force-push/push-to-main target parser to SKIP a
+        value-taking push-option's value token (`-o ':oldref'`) via
+        `_push_positionals`, recovering the REAL refspec positional (`main`) instead
+        of miscounting the colon-bearing value as a 3rd positional and abstaining.
+        The prior `target_ref in (None,)` assertion encoded that pre-OBS-C over-block
+        miscount; the STRONGER post-OBS-C invariant is: the quoted push-option colon
+        is NEVER bound as a delete refspec — the op stays a NON-delete class AND any
+        recovered `target_ref` is the real refspec (`main`), never `:oldref`/`:weird`.
+        mint==read holds by construction (both derive via extract_command_context)."""
+        op = OP(cmd)
+        tr = CTX(cmd).get("target_ref")
+        # op-axis: the -o-embedded colon must never promote the command to a delete
+        # class (the core #1037 protection — kept and widened to mass-delete).
+        assert op not in ("remote-ref-delete", "remote-mass-delete"), (
+            f"{cmd!r} mis-classified as a delete op: {op!r}"
+        )
+        # target-axis: the recovered target is the REAL refspec (`main`) or absent,
+        # NEVER the quoted push-option colon (the #1037 leak this row guards).
+        assert tr in (None, "main"), (
+            f"{cmd!r} recovered a non-refspec target_ref: {tr!r}"
+        )
+        assert tr is None or not tr.startswith(":"), (
+            f"{cmd!r} leaked a colon delete-refspec as target_ref: {tr!r}"
         )
 
 

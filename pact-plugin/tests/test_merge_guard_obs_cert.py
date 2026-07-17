@@ -239,3 +239,79 @@ class TestObsA3gLazyMergeSpan:
     )
     def test_controls_unchanged(self, label, cmd, want):
         assert D(cmd) is want, "control changed under the lazy git-merge span: %r" % cmd
+
+
+# =========================================================================================
+# OBS-C — force-push target recovery past -o/--push-option (commit 4). The prior naive
+# split-filter in _extract_force_push_target_ref counted -o's NON-dash value (`ci.skip`)
+# as a 3rd positional -> None -> a faithful force-push carrying a push-option was
+# gated-but-unmintable (over-block). The fix reuses the SHARED _push_positionals helper
+# (the same one the remote-ref-delete/mass-delete builders use), which skips a value
+# flag's value token — recovering the REAL refspec positional. MINT-ENABLING ONLY:
+# is_dangerous and the op-class are unchanged; the bound target is the real refspec,
+# never the -o value (mint==read via the shared extract_command_context).
+# =========================================================================================
+_FPUSH = "git " + "push " + "--force "
+OBS_C_MINT_RECOVERY = [
+    ("o-space", _FPUSH + "-o ci.skip origin main"),
+    ("o-space-kv", _FPUSH + "-o ci.skip=true origin main"),
+    ("push-option-space", _FPUSH + "--push-option x origin main"),
+    ("push-option-inline", _FPUSH + "--push-option=x origin main"),
+    ("o-multi", _FPUSH + "-o a -o b origin main"),
+    ("o-with-colon-refspec", _FPUSH + "-o x origin feature:main"),
+]
+
+
+class TestObsCForcePushOptionTargetRecovery:
+    @pytest.mark.parametrize(
+        "label,cmd", OBS_C_MINT_RECOVERY, ids=[r[0] for r in OBS_C_MINT_RECOVERY]
+    )
+    def test_target_recovered_and_mints(self, label, cmd):
+        import merge_guard_pre
+        from merge_guard_post import _mint_context_from_bundle, _target_value
+
+        # target recovered = the real refspec positional (never the -o value)
+        ctx = mgc.extract_command_context(cmd)
+        assert ctx.get("target_ref") == "main", (
+            "target_ref not recovered past the push-option value: %r" % cmd
+        )
+        # full production round-trip: the faithful click MINTS and its token authorizes
+        question = {
+            "question": "Proceed?",
+            "options": [{"label": "Yes", "description": "Run `%s` now" % cmd}],
+            "multiSelect": False,
+        }
+        mint_ctx, refusal = _mint_context_from_bundle([question], {"Proceed?": "Yes"})
+        assert mint_ctx is not None, (
+            "faithful force-push with a push-option STOPPED MINTING (%s): %r" % (refusal, cmd)
+        )
+        assert _target_value(mint_ctx) == "main"
+        assert merge_guard_pre._token_matches_command({"context": mint_ctx}, cmd) is True
+
+    @pytest.mark.parametrize(
+        "label,cmd", OBS_C_MINT_RECOVERY, ids=[r[0] for r in OBS_C_MINT_RECOVERY]
+    )
+    def test_gating_unchanged(self, label, cmd):
+        # MINT-ENABLING ONLY: every faithful force-push still gates at base AND HEAD.
+        assert _base()(cmd) is True
+        assert D(cmd) is True, "OBS-C changed gating (must only enable the mint): %r" % cmd
+
+    def test_plain_force_push_unchanged(self):
+        # no regression on the plain forms: target + gating identical to base.
+        base = load_baseline()
+        for cmd, want in [
+            (_FPUSH + "origin main", "main"),
+            (_FPUSH + "origin feature:main", "main"),
+            (_FPUSH + "origin", None),   # remote-only: implicit target stays refused
+        ]:
+            assert mgc.extract_command_context(cmd).get("target_ref") == want, cmd
+            assert base.extract_command_context(cmd).get("target_ref") == want, cmd
+            assert D(cmd) is True and base.is_dangerous_command(cmd) is True, cmd
+
+    def test_o_value_never_leaks_as_target(self):
+        # the #1037 concern under OBS-C: a colon inside a quoted -o value must never be
+        # bound as a refspec target — the recovered target is the REAL positional.
+        cmd = "git " + "push " + "origin main -o 'ci.message=cleanup :oldref'"
+        ctx = mgc.extract_command_context(cmd)
+        assert ctx.get("target_ref") == "main"
+        assert "oldref" not in str(ctx)

@@ -1062,11 +1062,19 @@ def _extract_force_push_target_ref(command: str) -> str | None:
     if api_ref is not None:
         return api_ref
 
-    # CLI push: isolate the token sequence after `push`, drop dash-flags, and
-    # require EXACTLY remote + refspec (2 positionals). 0 = implicit push; 1 =
-    # remote-only (implicit branch); >2 = multi-ref/chained -> all ambiguous,
-    # REFUSE. A value-taking dash-flag (e.g. `-o opt`) shifts the positional
-    # count off 2 -> also refused (conservative over-block).
+    # CLI push: isolate the token sequence after `push` and require EXACTLY
+    # remote + refspec (2 positionals). 0 = implicit push; 1 = remote-only
+    # (implicit branch); >2 = multi-ref/chained -> all ambiguous, REFUSE.
+    # Positionals are counted via the SHARED _push_positionals helper (#1195
+    # OBS-C), which SKIPS the value token of a git-push value-taking option flag
+    # (`-o ci.skip`, `--push-option x`, `--repo url`) — the same helper the
+    # remote-ref-delete/mass-delete builders use. The prior naive
+    # `.split()`-drop-dash-flags miscounted `-o`'s NON-dash value (`ci.skip`) as
+    # a 3rd positional -> None -> a faithful force-push carrying a push-option
+    # was gated-but-unmintable (an over-block). Skipping the value token
+    # recovers the real refspec positional. Only MINT-ENABLING: is_dangerous and
+    # the op-class are unchanged; the target is the real refspec, never the -o
+    # value (mint==read, both via extract_command_context).
     # Truncate at the first benign continuation / redirect on the quote-masked
     # view BEFORE counting positionals, so a faithful single force-push with a
     # trailing continuation (`git push --force origin main | tail`, `... 2>&1`,
@@ -1082,7 +1090,10 @@ def _extract_force_push_target_ref(command: str) -> str | None:
     push_match = re.search(_GIT_PREFIX + r"push\b(.*)$", prefix)
     if not push_match:
         return None
-    positionals = [t for t in push_match.group(1).split() if not t.startswith("-")]
+    after_push = _shell_tokenize(push_match.group(1))
+    if after_push is None:                       # unbalanced quote -> abstain (safe over-block)
+        return None
+    positionals = _push_positionals(after_push)
     if len(positionals) != 2:
         return None
     refspec = _strip_surrounding_quotes(positionals[1])
