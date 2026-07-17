@@ -169,7 +169,7 @@ forcing vacuous claims.
 ### 2.6 ActorLifecycle — actor creation, termination, and liveness
 
 Lifecycle events are interface-observable and are referenced by the L1
-dispatch, stall, and shutdown requirements; none of the other five
+dispatch and stall requirements; none of the other five
 interfaces owns them (a channel to an actor that does not yet exist is
 incoherent, and creating an actor is not the interception of an action).
 
@@ -179,6 +179,15 @@ incoherent, and creating an actor is not the interception of an action).
 | `terminate(actor)` | Ends the actor; termination is observable (distinct from silent death) | core |
 | `liveness-observe(actor)` | Some evidence channel distinguishes "working" from "gone" | core |
 | `resume(actor, context)` | Re-animate with preserved context | optional (binding-declared) |
+
+**The Principal Channel is deliberately not a seventh interface.** Its
+whole contract is the single guarantee of §1.1 — events attributable to
+the Principal that no protocol actor can originate — with no operation
+set for a binding to map operation-by-operation. A binding documents how
+its substrate distinguishes the channel in the binding's substrate model;
+where a substrate cannot distinguish it, the conformance annex records
+the gap as a deviation on the keys that consume the channel (for example
+L1-SG-02, L1-MC-04, L3-IR-01).
 
 ## 3. Conformance
 
@@ -277,6 +286,14 @@ status from the closed set:
   mechanism. Realization-specific compensating rituals appear here as
   evidence.
 
+`satisfied-with-deviation` is bounded: the deviation must leave the
+requirement's defining construct present and operative. A row whose
+realizing mechanism omits or substitutes away that construct records
+`unsatisfied` with its tracked-issue link, carrying any compensating
+mechanism as evidence there. A deviation may weaken the assurance behind
+the construct — enforcement locus, prevention versus detection, evidence
+recording — but it may not stand in for the construct's absence.
+
 **The `structural` annotation.** `satisfied (structural)` is an annotation
 on `satisfied`, not a fifth status: it records that the substrate makes
 violation unrepresentable (for example, an append-only history satisfied
@@ -309,6 +326,17 @@ threshold, or predicate rather than to produce runtime events. Such a
 declaration-class requirement is discharged by the binding's conformance
 declaration; its locus is the declaration document itself.
 
+The declaration-class components at this version are those of L1-DP-03
+(the gate-exempt set), L1-CA-02 (the self-completion exemption set),
+L1-TB-03 (the implementation action classes), L1-TB-05 (the
+rejection-cycle threshold), L1-TB-06 (the variety band floor), L1-ST-02
+(the retry bound), L1-WT-03 (the staleness threshold), L2-PG-01 (the
+production catalog), L2-PS-01 (the skip reason set), L3-DL-01 (the
+file-class predicate), L3-PC-01 (the policy classes), and L3-QG-01 (the
+change-integration action class). The named component discharges by
+declaration; every other clause of the same key remains a runtime
+obligation.
+
 ### 3.5 Not-applicable versus structurally satisfied
 
 The two mechanisms of §3.3 and §3.4 answer different questions and are
@@ -320,6 +348,16 @@ not interchangeable:
 - `satisfied (structural)` is reserved for requirements that **apply and
   cannot be violated**: the hazard is real on this substrate, and the
   substrate's construction rules the violation out.
+
+The discriminating question is what the requirement constrains.
+`not-applicable` is reserved for keys whose constrained **entity is
+absent** from the profile — the condition an applicability predicate
+names: with no pull-only waiter on the profile, there is nothing for a
+wake-ordering requirement to govern. A key whose constrained entities all
+exist (writes, signals, reads) but whose **violating interleaving** the
+substrate's construction rules out applies and is recorded
+`satisfied (structural)` — the correct recording even where hazard prose
+observes that the violating interleaving cannot occur on such substrates.
 
 Recording a cannot-arise requirement as structurally satisfied overstates
 the binding; recording an applies-but-unviolable requirement as
@@ -337,6 +375,12 @@ confidence tier from the closed set:
   they rely on; the suffix carries an evidence obligation the bare word
   would lose.
 - `gap` rows name what was searched and not found.
+
+A key conditional on a predicate the proposed profile lacks (§3.4) still
+receives a row in a prospective binding: the row states the
+non-applicability, citing the predicate, and its confidence tier grades
+the evidence for the profile's predicate derivation rather than a
+proposed mechanism.
 
 ### 3.7 Admission criterion (informative)
 
@@ -552,11 +596,16 @@ intermediate coordinator, including the coordinators of nested cycles.
 
 An ALERT MUST block the current phase-scope work and a HALT MUST block the
 enclosing feature-scope work. Signal records MUST persist in the TaskStore
-and MUST unblock only on Principal resolution.
+and MUST unblock only on Principal resolution. Where the substrate
+provides a Principal Channel (§1.1), the resolution that unblocks a
+signal record SHOULD be accepted only from a Principal Channel event.
 
 **L1-SG-04** — HALT resolution
 
-Resumption after a HALT MUST require explicit Principal acknowledgment. A
+Resumption after a HALT MUST require explicit Principal acknowledgment.
+Where the substrate provides a Principal Channel (§1.1), the
+acknowledgment SHOULD arrive as a Principal Channel event, and unverified
+free-form content SHOULD NOT be treated as Principal acknowledgment. A
 Principal override MUST be recorded on the signal record — TaskStore
 metadata or a Journal event — with risk-specific justification, and MUST
 NOT carry forward: if an overridden risk later materializes, it MUST be
@@ -790,6 +839,11 @@ Principal Channel (§1.1); unverified free-form text MUST NOT be treated
 as confirmation. Confirmation evidence SHOULD be recorded in the
 TaskStore or Journal.
 
+*Example (informative)*: where the change-integration surface is a
+review-based version-control flow, closing or declining an open change
+proposal without integrating it discards a shared line of work and falls
+within this action class.
+
 ### 6.3 Delegation boundary (DL)
 
 **L3-DL-01** — The Lead does not implement
@@ -911,8 +965,8 @@ annex rows of the keyed invariants listed here, not in this document.
 
 | Race class | Hazard | Keyed invariant(s) | Structural note |
 |---|---|---|---|
-| RC-1 — trailing write | An advertising signal arrives before the durable write it advertises is visible to the reader | L1-CA-03, L1-CA-05 | Cannot arise on substrates without `out-of-band-signaling`: where message delivery and state commit are the same transaction, a signal cannot outrun its write |
-| RC-2 — crossed wake | A wake signal and the state change it announces are observed in inverted order | L1-CA-04, L1-CA-05, L1-CA-06 | Same structural exemption as RC-1; cannot arise where waiters are not pull-only |
+| RC-1 — trailing write | An advertising signal arrives before the durable write it advertises is visible to the reader | L1-CA-03, L1-CA-05 | Cannot be violated on substrates without `out-of-band-signaling`: where message delivery and state commit are the same transaction, a signal cannot outrun its write — the violating interleaving is unrepresentable and the keyed invariants are satisfied structurally (§3.5) |
+| RC-2 — crossed wake | A wake signal and the state change it announces are observed in inverted order | L1-CA-04, L1-CA-05, L1-CA-06 | Same structural satisfaction as RC-1 where delivery and commit share a transaction; where waiters are not pull-only, the predicate-conditional keys (L1-CA-04, L1-CA-06) are instead not applicable (§3.4) |
 | RC-3 — mid-turn directive | A directive delivered while the recipient has a turn in flight is invisible to it until a later processing boundary, so a deliverable composed during that turn can silently predate the directive | L1-MC-02, L1-MC-03 | Turn-based substrates only; step-committed substrates read committed state at every step by construction |
 | RC-4 — false stall | A legitimately waiting actor is indistinguishable from a dead one, triggering wrongful recovery | L1-WT-01, L1-WT-03, L1-ST-01 | Substrates on which suspension is itself observable satisfy the wait-observability requirement structurally |
 
