@@ -331,9 +331,10 @@ The declaration-class components at this version are those of L1-DP-03
 L1-TB-03 (the implementation action classes), L1-TB-05 (the
 rejection-cycle threshold), L1-TB-06 (the variety band floor), L1-ST-02
 (the retry bound), L1-WT-03 (the staleness threshold), L2-PG-01 (the
-production catalog), L2-PS-01 (the skip reason set), L3-DL-01 (the
-file-class predicate), L3-PC-01 (the policy classes), and L3-QG-01 (the
-change-integration action class). The named component discharges by
+production catalog), L2-PS-01 (the skip reason set), L2-PS-02 (the
+signal set), L2-AU-01 (the per-production audit engagement), L3-DL-01
+(the file-class predicate), L3-PC-01 (the policy classes), and L3-QG-01
+(the change-integration action class). The named component discharges by
 declaration; every other clause of the same key remains a runtime
 obligation.
 
