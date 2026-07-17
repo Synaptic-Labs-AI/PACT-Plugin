@@ -92,11 +92,12 @@ substrate, each derived from the evidence base rather than assumed:
 
 **Profile consequences.** Both predicate-conditional requirements (L1-CA-04,
 L1-CA-06 — conditional on `pull-only-waiters`) are `not-applicable` on this
-profile, citing that predicate. With `out-of-band-signaling` FALSE, the
-hazard-model race classes RC-1 and RC-2 cannot arise here (specification §8,
-structural notes); the unconditional keys that guard them (L1-CA-03,
-L1-CA-05) still apply and are carried as structurally satisfied rows — see
-Findings for the resulting spec observation.
+profile: their constrained entity, a pull-only waiter, is absent. With
+`out-of-band-signaling` FALSE, the RC-1 violating interleaving is
+unrepresentable here, and its unconditional keys (L1-CA-03, L1-CA-05) apply
+— their constrained entities all exist on this profile — and are carried
+`clean (structural)` per the §3.5 discriminator (specification §8,
+structural notes; see Finding 1).
 
 **Declared values** (declaration-class requirements discharge in this
 declaration, per specification §3.4):
@@ -111,6 +112,8 @@ declaration, per specification §3.4):
 | Stall retry bound (L1-ST-02) | 2 re-dispatches, then ALERT |
 | Wait staleness threshold (L1-WT-03) | 30 minutes |
 | Skip reason set (L2-PS-01) | {approved-plan, out-of-scope, superseded, duplicate} |
+| Plan-completeness signal set (L2-PS-02) | The §5.4 minimum set: unchecked research items, placeholder table cells, forward references, unchecked questions, placeholder text, open research questions, research-shaped implementation items |
+| Concurrent-observation engagement (L2-AU-01) | Engaged for every implementation-bearing production — the base cycle's implementation phase, nested cycles, and phase-less concurrent dispatch when the dispatched work is implementation-bearing; plan-mode carries no implementation. Skip decisions require the durable justification of the AU-01 row |
 | Implementation action classes (L1-TB-03) | File-mutation and execution tool classes of the Specialist tool set |
 | File-class predicate (L3-DL-01) | Path-prefix rule: implementation artifacts are all paths outside the coordination namespace, routed and permissioned per backend |
 | Policy classes (L3-PC-01) | Security, quality, ethics, delegation, Principal approval, integrity — each mapped to a signal class |
@@ -199,7 +202,7 @@ declaration, per specification §3.4):
 | L3-PC-02 | Duty to emit the matching signal on recognition | Conduct requirement bound into every actor mission (recognition thresholds are declared guidance); the emission path is guaranteed available by the substrate's no-ACL property — any node can always write the signals channel, so a recognizing actor is never blocked from emitting | plausible-with-pattern | | Pattern: mission-bound conduct rule with structurally-available emission path (graph-api — any node writes any channel; survey Verdict A) |
 | L3-PC-03 | Security class enforced mechanically at an EnforcementPoint (SHOULD) | Security-policy denial at the tool boundary: `awrap_tool_call` middleware inspects security-classed actions (for example secret-bearing artifacts at the change-integration tool) and short-circuits with a deny ToolMessage without invoking the handler | clean | | "Can skip calling it to short-circuit" — the async wrap variant's handler contract (mw-source, pinned 1.3.14); deny-with-feedback shape also documented for the human-decision path (hitl — reject skips the tool and injects feedback) |
 | L3-IR-01 | Irreversible integration actions preceded by a Principal Channel confirmation event | `HumanInTheLoopMiddleware(interrupt_on={integration tools})` pauses after the model proposes the call and before it executes; the decision arrives as a Principal Channel event (`Command(resume={"decisions": [...]})`, originatable only by the external invoker); free-form message text never reaches the decision path. The interrupt and resume decisions are checkpointed, satisfying the evidence SHOULD. Pre-interrupt effects are idempotent per the survey's re-run verdict | clean | structural | HITL middleware pauses before tool execution with decisions approve, edit, reject, respond; checkpointer required; resume delivered via Command (hitl; interrupts) — with the gate configured, executing the action without a Principal Channel event is unrepresentable |
-| L3-DL-01 | Lead never implements; declared file-class boundary | The Lead agent's tool set excludes all implementation tool classes, and Deep Agents filesystem permission rules deny the Lead write access outside the coordination namespace per the declared path-prefix predicate; a denied write cannot execute | clean | structural | Filesystem backends carry per-backend permission rules for read and write access; composite backends route by path prefix (deepagents-backends; deepagents-overview) — under this configuration the violating write is unrepresentable |
+| L3-DL-01 | Lead never implements; declared file-class boundary | The Lead agent's tool set excludes all implementation tool classes, and the Deep Agents pre-backend permissions layer denies the Lead write access outside the coordination namespace — an explicit first-match deny rule over the declared path-prefix predicate (the no-match default is allow, so the deny is stated, never implied). Permissions cover the built-in filesystem tools only; the tool-set exclusion closes every other write path. A denied write cannot execute | clean | structural | Permissions are a layer evaluated before the backend is called, enforced in middleware before tool execution: `FilesystemPermission(operations, paths, mode)` via the `permissions` parameter, first-match-wins evaluation (deepagents-permissions, live re-fetch; deepagents-backends) — under this configuration the violating write is unrepresentable |
 | L3-QG-01 | Change-integration gate (EnforcementPoint interception) rejects known-failing verification | The change-integration action class is the declared integration tool set, and Specialist actions are tool calls by construction of the agent loop — so `awrap_tool_call` interception covers the class completely: the gate middleware reads the change's verification status from `request.state` and short-circuits a deny while it is known-failing or unrun-without-declaration. No new applicability predicate is needed: the §2.4 interception the key presumes is exactly this documented middleware surface | clean | | Tool-boundary interception with state access and short-circuit deny (mw-source — awrap_tool_call, "Access state via `request.state`", "Can skip calling it to short-circuit"; wrap-tool-call-ref); scope condition: integration occurs only through the declared tools, per the Declared values table |
 | L3-SC-01 | Concurrent write boundaries recorded durably before covered work begins | Each concurrent Specialist's write boundary is its subgraph state schema; the dispatch node records the boundary declaration (schema channel list or declared sequencing) into the covered work records' metadata in the dispatch super-step — before any covered Specialist node runs. The schemas then also enforce what was declared | clean | | Boundary recording is the L1-DP-01 dispatch write (checkpointers atomic super-step); schema-scoped subgraph channels are documented (use-subgraphs) |
 | L3-SC-02 | Scope contracts recorded durably before sub-scope work; fulfillment reported in HANDOFF | The sub-scope contract (identity, deliverables, interfaces, constraints including shared files) is a typed metadata payload written on the sub-scope's work record at dispatch, before the sub-scope subgraph is invoked; the completion HANDOFF schema carries a fulfillment section reporting against it | clean | | Dispatch-time metadata write per L1-DP-01 mechanics; HANDOFF payload per L1-HO-01 (graph-api; checkpointers) |
@@ -223,17 +226,22 @@ declaration, per specification §3.4):
 Observations produced by writing this binding — the exam results, recorded
 for the specification's maintainers:
 
-1. **L1-CA-03 and L1-CA-05 versus the §3.5 discrimination rule.** The hazard
-   model's RC-1 structural note says the trailing-write hazard *cannot
-   arise* on substrates without `out-of-band-signaling` — which is a
-   cannot-arise framing — yet both keys are unconditional (no Applicability
-   line), so `not-applicable` is illegal for them and this binding records
-   them `clean (structural)` instead. If the cannot-arise framing is the
-   intended semantics, the two keys arguably deserve
-   `Applicability: out-of-band-signaling` lines; as keyed today, profile-
-   lacking substrates are forced into structural annotations where the
-   hazard model itself says the hazard does not exist. Either resolution is
-   coherent; the current asymmetry is worth an explicit decision.
+1. **L1-CA-03 and L1-CA-05 stay unconditional — resolved by the §3.5
+   discriminator.** This binding originally flagged a tension: the hazard
+   model framed the RC-1 trailing-write hazard as one that could not occur
+   without `out-of-band-signaling`, yet both keys are unconditional. §3.5's
+   discriminating question — what the requirement constrains — resolves it:
+   these keys constrain writes, signals, and reads, entities that all exist
+   on this profile; only the violating interleaving is ruled out by the
+   substrate's construction. Per §3.5 such keys apply and are recorded
+   `satisfied (structural)` — the correct recording even where hazard prose
+   observes that the violating interleaving cannot occur — and §8's RC-1
+   note now carries the same framing ("Cannot be violated"). The
+   `clean (structural)` rows above are therefore the sanctioned recording
+   and no Applicability lines are needed: `not-applicable` stays reserved
+   for keys whose constrained entity is absent from the profile, which on
+   this substrate is the L1-CA-04 and L1-CA-06 case (no pull-only waiter
+   exists for a wake-ordering requirement to govern).
 2. **The substrate's documented gaps are not load-bearing.** The capability
    survey records three gap-tier substrate capabilities — cross-thread and
    cross-graph transactions, store TTL, and live duplex messaging within a
@@ -253,18 +261,19 @@ for the specification's maintainers:
    applies to L1-SG-04, L1-WT-01, and L3-IR-01 alike: pre-interrupt side
    effects in gate nodes must be idempotent or `@task`-wrapped. A realization
    audit of this binding should test exactly that on each gate node.
-5. **Declaration-class discharge works as specified.** Twelve of the
-   thirteen declared values in the Binding Profile discharge the
+5. **Declaration-class discharge works as specified.** Fourteen of the
+   fifteen declared values in the Binding Profile discharge the
    declaration-class components of L1-DP-03, L1-CA-02, L1-TB-03, L1-TB-05,
-   L1-TB-06, L1-ST-02, L1-WT-03, L2-PG-01, L2-PS-01, L3-DL-01, L3-PC-01,
-   and L3-QG-01 (the thirteenth, the durability-mode pin, is a profile
-   declaration with no key of its own) without any of them needing a
-   runtime mechanism row — the §3.4 discharge sentence carried its weight
-   here.
+   L1-TB-06, L1-ST-02, L1-WT-03, L2-PG-01, L2-PS-01, L2-PS-02, L2-AU-01,
+   L3-DL-01, L3-PC-01, and L3-QG-01 (the fifteenth, the durability-mode
+   pin, is a profile declaration with no key of its own) without any of
+   them needing a runtime mechanism row — the §3.4 discharge sentence
+   carried its weight here.
 
 ## Sources
 
-All retrieved 2026-07-16 (the capability-survey retrieval date; pins above).
+All retrieved 2026-07-16 (the capability-survey retrieval date; pins above)
+unless marked as a live re-fetch, retrieved 2026-07-17.
 
 | Slug | Source |
 |---|---|
@@ -279,5 +288,6 @@ All retrieved 2026-07-16 (the capability-survey retrieval date; pins above).
 | hitl | docs.langchain.com/oss/python/langchain/human-in-the-loop — decision set including reject semantics, checkpointer requirement |
 | wrap-tool-call-ref | reference.langchain.com/python/langchain/agents/middleware/types/wrap_tool_call — tool-wrap reference |
 | deepagents-overview | docs.langchain.com/oss/python/deepagents/overview — harness, task delegation, filesystem tools |
-| deepagents-backends | docs.langchain.com/oss/python/deepagents/backends — backend permission rules, composite path routing |
+| deepagents-backends | docs.langchain.com/oss/python/deepagents/backends — backends and composite path routing; permissions "are evaluated before the backend is called" (live re-fetch 2026-07-17) |
+| deepagents-permissions | docs.langchain.com/oss/python/deepagents/permissions — pre-backend permission layer: FilesystemPermission(operations, paths, mode) on the permissions parameter, first-match-wins, no-match default allow, built-in filesystem tools only (live re-fetch 2026-07-17) |
 | mw-source | langchain 1.3.14 (pinned release), `langchain/agents/middleware/types.py` — `awrap_tool_call` handler contract ("Can skip calling it to short-circuit"; "Access state via `request.state`"); the synchronous `wrap_tool_call` docstring does not carry the skip sentence, so programmatic denial cites the async variant specifically |
