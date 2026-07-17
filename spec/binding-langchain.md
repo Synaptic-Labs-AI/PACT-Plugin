@@ -170,7 +170,7 @@ declaration, per specification §3.4):
 | L1-MC-03 | Verify durable state before executing a channel-received directive | Intrinsic to the read model: a directive arrives as durable state, and the node acting on it reads directive and current state in one consistent committed snapshot — there is no directive channel separate from durable state to act on unverified | clean | structural | Single-snapshot node reads of committed channel state (graph-api; checkpointers) |
 | L1-MC-04 | No content mistakable for Principal input; sender-attributed messages | Principal input exists only as Principal Channel events (`Command(resume=...)`), which no node can originate — agent content is channel-separated from Principal input by construction. Agent messages carry a sender field in their typed payload, stamped by the emitting helper | clean | | Resume values are delivered by the external invoker only (interrupts); typed payload fields carry attribution (graph-api state schemas) |
 | L1-MC-05 | Suppress assertions already fully represented in durable state (SHOULD) | The emitting node compares the would-be assertion against the same committed snapshot it reads anyway and skips emission when the recipient-visible state already carries the content; conduct half binds to actor missions | plausible-with-pattern | | Pattern: snapshot-diff conditional emission in node code over documented state reads (graph-api) |
-| L1-WT-01 | Waits observable in TaskStore with reason, resolver, tz-aware timestamp | A waiting actor declares the wait as a typed wait record on its task entry (reason, expected resolver, timezone-aware timestamp) in the same update that suspends via `interrupt(payload)`; the suspension itself is additionally checkpoint-observable (`get_state` shows the pending interrupt and next nodes) | clean | | interrupt surfaces its payload and the paused thread state is inspectable (interrupts; checkpointers; cf. specification §8 RC-4 note — suspension is itself observable here) |
+| L1-WT-01 | Waits observable in TaskStore with reason, resolver, tz-aware timestamp | A waiting actor declares the wait as a typed wait record on its task entry (reason, expected resolver, timezone-aware timestamp) in the same update that suspends via `interrupt(payload)`; the suspension itself is additionally checkpoint-observable (`get_state` shows the pending interrupt and next nodes). Pre-interrupt effects in the wait-declaring node are kept idempotent per the survey's re-run verdict | clean | | interrupt surfaces its payload and the paused thread state is inspectable (interrupts; checkpointers; cf. specification §8 RC-4 note — suspension is itself observable here) |
 | L1-WT-02 | Naive-timestamp waits rejected or surfaced as malformed | The wait-declaring helper validates timezone-awareness before writing and raises on a naive timestamp; the validating reducer refuses a wait record lacking timezone information — fail-loud on both paths | clean | | In-node and reducer validation are application code over documented primitives (graph-api reducers) |
 | L1-WT-03 | Staleness path re-surfaces old waits to the expected resolver | A wait registry in a Store namespace mirrors open wait records; a sweep in the coordination graph's `before_agent` hook (running once per invocation) re-surfaces entries older than the declared threshold to the expected resolver's channel. No native timer exists; the sweep rides protocol activity | plausible-with-pattern | | Pattern: Store-namespace registry plus before_agent sweep (stores; middleware — before_agent runs once per invocation) |
 | L1-ST-01 | Stall diagnosis from substrate observables; declared waits excluded | Diagnosis reads `stream_mode="tasks"` events (per-node start, finish, error — checkpointer-backed) and checkpoint recency per thread; a non-terminal record with no task events or checkpoint advance, and no wait record per L1-WT-01, diagnoses a stall. Interrupt records exclude declared waits from the evidence by construction of the check | plausible-with-pattern | | Pattern: tasks-event and checkpoint-recency probe with wait-record exclusion (streaming — tasks mode events including errors; checkpointers) |
@@ -253,12 +253,14 @@ for the specification's maintainers:
    applies to L1-SG-04, L1-WT-01, and L3-IR-01 alike: pre-interrupt side
    effects in gate nodes must be idempotent or `@task`-wrapped. A realization
    audit of this binding should test exactly that on each gate node.
-5. **Declaration-class discharge works as specified.** Thirteen declared
-   values in the Binding Profile discharge the declaration-class components
-   of L1-DP-03, L1-CA-02, L1-TB-05, L1-TB-06, L1-ST-02, L1-WT-03, L2-PG-01,
-   L2-PS-01, L3-PC-01, and L3-QG-01 without any of them needing a runtime
-   mechanism row of its own — the §3.4 discharge sentence carried its
-   weight here.
+5. **Declaration-class discharge works as specified.** Twelve of the
+   thirteen declared values in the Binding Profile discharge the
+   declaration-class components of L1-DP-03, L1-CA-02, L1-TB-03, L1-TB-05,
+   L1-TB-06, L1-ST-02, L1-WT-03, L2-PG-01, L2-PS-01, L3-DL-01, L3-PC-01,
+   and L3-QG-01 (the thirteenth, the durability-mode pin, is a profile
+   declaration with no key of its own) without any of them needing a
+   runtime mechanism row — the §3.4 discharge sentence carried its weight
+   here.
 
 ## Sources
 
