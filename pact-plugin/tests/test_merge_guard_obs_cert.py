@@ -177,3 +177,65 @@ class TestObsA1A2Retention:
     def test_executing_and_deny_forms_stay_gated(self, label, cmd):
         assert _base()(cmd) is True
         assert D(cmd) is True, "the broadening opened an under-block on an executing form"
+
+
+# =========================================================================================
+# OBS-A3g — LAZY git-merge span gobbler (commit 3). "merge" is uniquely BOTH a carrier verb
+# AND a substring of the `gh pr merge` danger pattern, so the GREEDY `{0,N}` prefix gobbler
+# crossed into a `-m` message VALUE containing "merge" and anchored on the INNER merge,
+# leaving the danger visible (over-block). The one-char `{0,N}?` (lazy) anchors on the VERB
+# so the `-m` value strips cleanly. This is a SACROSANCT danger-detection change held to the
+# STRICT bar: no new over-block AND no ungated good-faith destructive command (leg-locality).
+# =========================================================================================
+A3G_CLOSURE = [
+    ("merge-m", "git merge -m '%s'" % DANGER),
+    ("merge-branch-m", "git merge feature -m '%s'" % DANGER),
+    ("merge-no-ff-m", "git merge --no-ff feature -m '%s'" % DANGER),
+    ("merge-multiple-m", "git merge -m 'note' -m '%s'" % DANGER),
+    ("merge-c-mergetool", "git -c merge.tool=x merge -m '%s'" % DANGER),
+    ("merge-c-quoted", "git -c 'user.name=A B' merge -m '%s'" % DANGER),
+    ("merge-C-prefix", "git -C /p merge -m '%s'" % DANGER),
+]
+
+# MUST-STILL-GATE — a real destructive op in a SEPARATE leg is NOT swallowed (the lazy
+# change touches only WHERE `merge` matches, not the _VERB_MSG_BODY leg-locality terminator).
+_BD = "git " + "branch " + "-D main"
+_PF = "git " + "push " + "--force origin main"
+A3G_COMPOUND_GATES = [
+    ("merge-then-gh-merge-amp", "git merge -m 'note' && %s" % DANGER),
+    ("merge-then-force-push-semi", "git merge -m 'note' ; %s" % _PF),
+    ("merge-then-gh-merge-pipe", "git merge -m 'note' | %s" % DANGER),
+    ("merge-then-branch-delete-amp", "git merge -m 'note' && %s" % _BD),
+]
+
+# CONTROLS — no-message merge unchanged; sibling message carriers (commit/tag/stash) stay
+# GREEDY and were never affected (no danger pattern contains their verb word).
+A3G_CONTROLS = [
+    ("commit-m-mentions-merge", "git commit -m 'commit the %s fix'" % DANGER, False),
+    ("tag-m-mentions-merge", "git tag -m 'tag before %s' v1" % DANGER, False),
+    ("stash-m-mentions-merge", "git stash push -m 'stash the %s wip'" % DANGER, False),
+    ("merge-no-message", "git merge feature", False),
+]
+
+
+class TestObsA3gLazyMergeSpan:
+    @pytest.mark.parametrize("label,cmd", A3G_CLOSURE, ids=[r[0] for r in A3G_CLOSURE])
+    def test_merge_message_over_block_closes(self, label, cmd):
+        assert _base()(cmd) is True, "not a genuine over-block at base (vacuous)"
+        assert D(cmd) is False, "git merge -m '<danger>' still gated at HEAD"
+
+    @pytest.mark.parametrize(
+        "label,cmd", A3G_COMPOUND_GATES, ids=[r[0] for r in A3G_COMPOUND_GATES]
+    )
+    def test_separate_destructive_leg_still_gates(self, label, cmd):
+        # STRICT SACROSANCT: the lazy change must NOT ungate a real destructive sibling leg.
+        assert D(cmd) is True, (
+            "leg-locality broken — a real destructive op in a separate leg was swallowed: %r"
+            % cmd
+        )
+
+    @pytest.mark.parametrize(
+        "label,cmd,want", A3G_CONTROLS, ids=[r[0] for r in A3G_CONTROLS]
+    )
+    def test_controls_unchanged(self, label, cmd, want):
+        assert D(cmd) is want, "control changed under the lazy git-merge span: %r" % cmd

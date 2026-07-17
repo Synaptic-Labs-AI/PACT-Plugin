@@ -2765,8 +2765,18 @@ def _strip_non_executable_content(command: str) -> str:
         #     them as message carriers would be wrong; a real destructive tail after them
         #     stays caught via leg-locality. $()/backtick preserve rides on
         #     _keep_carrier_value.
+        # LAZY prefix gobbler `{0,N}?` (#1195 OBS-A3g) — SCOPED TO git-merge ONLY. "merge"
+        # is uniquely BOTH a carrier verb AND a substring of the `gh pr merge` danger
+        # pattern, so a GREEDY `{0,N}` gobbler crosses into a `-m` message VALUE that
+        # contains "merge" (`git merge -m 'gh pr merge 5 --admin'`) and anchors the span on
+        # that INNER merge, stripping from the wrong offset -> the danger literal survives
+        # (over-block). Lazy matches the FIRST (VERB) merge, so _VERB_MSG_BODY spans the real
+        # -m value and it strips cleanly. Only WHERE `merge` is matched changes; the
+        # _VERB_MSG_BODY leg-locality terminator (stops at the first unquoted ;/&&/|/newline)
+        # is UNCHANGED, so a real destructive op in a SEPARATE leg is never swallowed.
+        # commit/tag/stash spans stay GREEDY — no danger pattern contains their verb word.
         _git_merge_span = (
-            r"\bgit\s+(?:[^;&|\n\s]+\s+){0,%d}merge\b" % _MAX_GLOBAL_FLAG_TOKENS
+            r"\bgit\s+(?:[^;&|\n\s]+\s+){0,%d}?merge\b" % _MAX_GLOBAL_FLAG_TOKENS
             + _VERB_MSG_BODY
         )
         result = re.sub(
