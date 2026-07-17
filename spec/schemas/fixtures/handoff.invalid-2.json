@@ -1,0 +1,17 @@
+{
+  "$comment": "INVALID: violates the uncertainty oneOf - the no-uncertainty sentence is mixed with a prioritized entry. The sentence declares an EMPTY uncertainty set, so it must be the array's only element; mixing it with entries is a contradiction.",
+  "produced": [
+    "services/payments/refund_worker (new)"
+  ],
+  "decisions": [
+    "Idempotency key derived from charge id + amount"
+  ],
+  "uncertainty": [
+    "[HIGH] Partial-refund rounding for multi-currency charges",
+    "No areas of uncertainty flagged."
+  ],
+  "integration": [
+    "ledger service"
+  ],
+  "open_questions": []
+}

@@ -24,14 +24,18 @@
     },
     "uncertainty": {
       "type": "array",
-      "items": {
-        "type": "string",
-        "anyOf": [
-          { "pattern": "^\\[(HIGH|MEDIUM|LOW)\\] " },
-          { "const": "No areas of uncertainty flagged." }
-        ]
-      },
-      "description": "Prioritized uncertainty entries. Each entry is prefixed with its priority from the closed set HIGH, MEDIUM, LOW; an empty uncertainty set is declared with the explicit no-uncertainty sentence, never by omitting the field."
+      "minItems": 1,
+      "oneOf": [
+        {
+          "description": "Prioritized entries: every item carries a priority prefix.",
+          "items": { "type": "string", "pattern": "^\\[(HIGH|MEDIUM|LOW)\\] " }
+        },
+        {
+          "description": "Empty uncertainty set: exactly the no-uncertainty sentence, alone.",
+          "const": ["No areas of uncertainty flagged."]
+        }
+      ],
+      "description": "Prioritized uncertainty entries. Each entry is prefixed with its priority from the closed set HIGH, MEDIUM, LOW. An empty uncertainty set is declared with the explicit no-uncertainty sentence as the array's only element — never by omitting the field, never by an empty array, and never mixed with prioritized entries."
     },
     "integration": {
       "type": "array",

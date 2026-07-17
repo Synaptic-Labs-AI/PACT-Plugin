@@ -16,22 +16,26 @@
     "understanding": {
       "type": "string",
       "minLength": 1,
-      "description": "What the Specialist understands it is building: key constraints and interfaces."
+      "pattern": "\\S",
+      "description": "What the Specialist understands it is building: key constraints and interfaces. Non-empty, non-whitespace."
     },
     "most_likely_wrong": {
       "type": "string",
       "minLength": 1,
-      "description": "The part of the restated understanding the Specialist is least confident about."
+      "pattern": "\\S",
+      "description": "The part of the restated understanding the Specialist is least confident about. Non-empty, non-whitespace."
     },
     "least_confident_item": {
       "type": "string",
       "minLength": 1,
-      "description": "One specific assumption the Specialist asks the Lead to confirm."
+      "pattern": "\\S",
+      "description": "One specific assumption the Specialist asks the Lead to confirm. Non-empty, non-whitespace."
     },
     "first_action": {
       "type": "string",
       "minLength": 1,
-      "description": "The first concrete step the Specialist will take after acceptance."
+      "pattern": "\\S",
+      "description": "The first concrete step the Specialist will take after acceptance. Non-empty, non-whitespace."
     },
     "variety_acknowledgment": {
       "type": "object",
@@ -44,7 +48,8 @@
         "concern": {
           "type": "string",
           "minLength": 1,
-          "description": "Names the smell; required whenever the acknowledgment value is not \"yes\"."
+          "pattern": "\\S",
+          "description": "Names the smell; required whenever the acknowledgment value is not \"yes\". Non-empty, non-whitespace."
         }
       },
       "if": {

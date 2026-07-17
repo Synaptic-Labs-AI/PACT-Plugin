@@ -1,0 +1,14 @@
+{
+  "$comment": "INVALID: violates uncertainty minItems - the array is empty. An empty uncertainty set is declared with the explicit no-uncertainty sentence as the only element, never by an empty array (and never by omitting the field, see handoff.invalid-1).",
+  "produced": [
+    "docs/runbooks/refund-replay: new replay procedure"
+  ],
+  "decisions": [
+    "Documented the replay path as read-only"
+  ],
+  "uncertainty": [],
+  "integration": [
+    "none"
+  ],
+  "open_questions": []
+}
