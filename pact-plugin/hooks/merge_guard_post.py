@@ -188,14 +188,36 @@ def _target_value(cmd_ctx: dict) -> str | None:
     )
 
 
+def _extraction_surface(region: str) -> str:
+    """The surface extract_command_context consumes for a region (#1195 OBS-H) — the
+    IDENTICAL three-tier expression the read side's _token_matches_command uses at
+    execution time (tier-1 unique dangerous leg; tier-2 unique detectable leg, the
+    emergent-danger case; else the whole region = the pre-OBS-H behavior, the
+    fail-safe collapse: ambiguity mints nothing, the over-block direction). One
+    expression, FOUR consumers (this mint surface, the read bind, the #1083
+    flag-scan window, the retirement observer below) — mint==read by construction,
+    which is the reduction-theorem premise: a quoted cd-prefix single-destructive
+    compound mints exactly the token its BARE destructive leg already minted on
+    certified bytes. Regions themselves stay WHOLE (GAP5 compound-refuse and the
+    GAP1 danger check consume the region, not this surface — the two-gates-one-value
+    coupling is deliberate and cert-pinned)."""
+    return (
+        _single_destructive_leg(region)
+        or _single_detectable_leg(region)
+        or region
+    )
+
+
 def _collect_pairs(texts: list) -> dict:
     """Map every COMPLETE (op_type, target) pair found across `texts` to the
     command region that produced it (locate_command_regions + extract_command_context
-    + _target_value). A region with an op but no target contributes no pair."""
+    over the read-symmetric _extraction_surface + _target_value). A region with an op
+    but no target contributes no pair. The PAIR still maps to the WHOLE region (the
+    leg surface feeds only the extraction — anchoring/multiplicity/GAP1 see the region)."""
     pairs: dict = {}
     for text in texts:
         for region in locate_command_regions(text):
-            cmd_ctx = extract_command_context(region)
+            cmd_ctx = extract_command_context(_extraction_surface(region))
             op_type = cmd_ctx.get("operation_type")
             target = _target_value(cmd_ctx)
             if op_type is not None and target is not None:
@@ -314,8 +336,12 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
          ==0 yields no token. The question prose is NOT scanned.
       3b. OPTION ANCHORING — the minted (op,target) MUST be carried by a CLICKED
          option (true by construction, since Step 3 scans only the clicked options).
-      5. extract_command_context(the single distinct command) → the mint context,
-         binding op/target (#1031/#1032) + privileged flags (#1042 set-equality).
+      5. extract_command_context(_extraction_surface(the single distinct command))
+         → the mint context, binding op/target (#1031/#1032) + privileged flags
+         (#1042 set-equality). The extraction consumes the read-symmetric
+         three-tier LEG surface (#1195 OBS-H) so a quoted single-destructive
+         compound mints from its destructive leg; the danger/compound gates and
+         the pair mapping still see the WHOLE region.
 
     ACCEPTED RESIDUALS (the user explicitly chose the most-minimal gate, eyes-open
     on these — they are a ratified S5 scope decision, NOT under-block bugs): the
@@ -464,7 +490,7 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
     # #1042 set-equality stays EXACT, so an exec-time EXTRA flag still REFUSES. ──
     return MintResult(
         extract_command_context(
-            the_command,
+            _extraction_surface(the_command),
             flag_scan_text=_leg_bounded_flag_scan_surface(
                 _strip_command_wrapper(" ".join(selected_option_texts)), the_command
             ),
@@ -717,10 +743,13 @@ def _retire_token_for_command(
     # extract_command_context call, mirroring the read arm (merge_guard_pre.py:536-540),
     # so retirement, mint, and read agree on (op, target, bound_flags) identity by
     # construction — the SAME _target_value + the SAME extract_privileged_flags SSOT.
-    # Compounds are refused at mint, so the single-leg selection collapses to the whole
-    # command for every real token; the `or command` tail preserves the pre-fix whole-
-    # command behavior when neither leg selector binds. (The API-merge form reuses
-    # pr_number per #1096, so target coverage stays uniform with zero extra code.)
+    # Quoted single-destructive compounds MINT from their destructive leg
+    # (#1195 OBS-H, the same three-tier surface via _extraction_surface), so this
+    # leg selection is LOAD-BEARING for those tokens — retirement must select the
+    # same leg the mint bound; the `or command` tail is the shared fail-safe
+    # collapse when neither leg selector binds (ambiguity → whole command, the
+    # unmintable / no-retire direction). (The API-merge form reuses pr_number per
+    # #1096, so target coverage stays uniform with zero extra code.)
     cmd_ctx = extract_command_context(
         _single_destructive_leg(command)
         or _single_detectable_leg(command)

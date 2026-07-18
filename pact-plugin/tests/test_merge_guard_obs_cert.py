@@ -708,12 +708,16 @@ class TestObsGPushSetMintability:
             assert "target_ref" not in ctx and "push_set" not in ctx
             assert mgpost._target_value(ctx) is None
 
-    def test_cd_prefix_quoted_presentation_symmetrically_unmintable(self):
-        # the realistic quoted approval presentation: the region is the WHOLE quoted
-        # compound -> first-leg-anchored -> NO pair, identically for scalar and set.
+    def test_cd_prefix_quoted_presentation_symmetrically_mintable(self):
+        # CONTROL-SWAP (OBS-H): the quoted compound region now extracts through the
+        # read-symmetric _extraction_surface -> the destructive LEG -> a pair IS
+        # collected, identically for scalar and set (previously symmetric-unmintable;
+        # the intended posture CHANGED with the extraction-surface fix, so this row
+        # flipped as a control-swap, not a reframe).
         scalar = mgpost._collect_pairs(["Approve: `cd /repo && " + _PG + "origin main`"])
         multi = mgpost._collect_pairs(["Approve: `cd /repo && " + _PG + "origin main feature`"])
-        assert scalar == {} and multi == {}
+        assert list(scalar) == [("push-to-main", "main")]
+        assert list(multi) == [("push-to-main", mgc._canonical_join(["feature", "main"]))]
 
     def test_cd_prefix_bare_presentation_set_mirrors_scalar(self):
         # bare-text presentation: locate_command_regions recovers the `git ...` span for
@@ -857,16 +861,16 @@ class TestObsGRealMintExecuteRoundTrip:
         assert minted == 0, "a multi-ref force-push approval minted — scope boundary broken"
         assert rc == _G_DENY
 
-    def test_cd_prefix_compound_approval_symmetrically_unmintable_end_to_end(self, tmp_path):
-        # the cd-prefix seam through the REAL pipeline: the quoted compound approval
-        # region is the WHOLE compound -> first-leg-anchored extract -> NO pair ->
-        # mints ZERO, and the compound execution is denied — SYMMETRIC
-        # gated-but-unmintable (non-first-leg extraction mintability is a separate,
-        # deliberately-unrelaxed scope), for the SET exactly as for the scalar.
+    def test_cd_prefix_compound_approval_symmetrically_mintable_end_to_end(self, tmp_path):
+        # CONTROL-SWAP (OBS-H): the cd-prefix seam through the REAL pipeline — the
+        # quoted compound approval now extracts through _extraction_surface -> the
+        # destructive leg -> MINTS, and the (unchanged) read side tier-1-binds the
+        # compound execution -> ALLOW. Previously pinned symmetric-unmintable; the
+        # intended posture changed with the extraction-surface fix (control-swap).
         cmd = "cd /repo && " + _PG + "origin main feature"
         minted, rc = _g_roundtrip(cmd, cmd, tmp_path)
-        assert minted == 0, "a cd-prefix multi-ref approval minted — the first-leg anchor moved"
-        assert rc == _G_DENY
+        assert minted == 1, "the faithful cd-prefix multi-ref click did not mint"
+        assert rc == _G_ALLOW
 
     @pytest.mark.parametrize(
         "label,approve_tail,exec_tail",
@@ -896,3 +900,256 @@ class TestObsGRealMintExecuteRoundTrip:
             "set diverged from the scalar posture on %s: scalar=%s/%s set=%s/%s"
             % (label, s_m, s_rc, t_m, t_rc)
         )
+
+
+# =========================================================================================
+# OBS-H — cd-prefix per-leg EXTRACTION mintability (the `_extraction_surface` fix; MINT
+# surface, the arc's last cure). Closes the last over-block: a QUOTED single-destructive
+# cd-prefix compound approval (`Approve: \`cd /repo && git push origin main\``) detected
+# push-to-main (whole-candidate, per-leg detection) but extracted first-leg-anchored (the
+# cd leg -> no target) -> no pair -> gated-but-unmintable. The fix: extraction at the TWO
+# mint call sites consumes `_extraction_surface(region)` — the read side's VERBATIM
+# three-tier expression (tier-1 unique dangerous leg; tier-2 unique detectable leg; else
+# the whole region = the fail-safe unmintable collapse). SECURITY = the REDUCTION THEOREM
+# (ratified #89/#91): mint(quoted cd-prefix X) == mint(bare leg-of-X on already-certified
+# bytes) by dict-equality on the FULL (op, target, bound_flags); the read side is
+# byte-untouched, so every post-fix outcome maps to an already-certified pre-fix outcome.
+# REQUIRED addition (the #91 RATIFY-WITH-CHANGES condition): NON-PUSH-class cd-prefix
+# quoted mint PARITY pins — the surface rewires extraction for ALL op-classes, so the
+# merge/close/branch-delete/ref-delete parity is pinned against a future helper/tier-fn
+# edit silently regressing a non-push class (mirrors the OBS-G 5th-property pin).
+# =========================================================================================
+def _h_mint(desc):
+    """Context-level mint through the REAL `_mint_context_from_bundle` (the mint entry
+    the post hook runs after option selection): returns (context, refusal_reason)."""
+    q = {"question": "Proceed?",
+         "options": [{"label": "Yes", "description": desc}],
+         "multiSelect": False}
+    return mgpost._mint_context_from_bundle([q], {"Proceed?": "Yes"})
+
+
+def _h_reads(ctx, cmd):
+    return mgpre._token_matches_command({"context": ctx}, cmd)
+
+
+_H_CMD = "cd /repo && " + _PG + "origin main"
+_H_LEG = _PG + "origin main"
+_H_CMDS = "cd /repo && " + _PG + "origin main feature"
+_H_LEGS = _PG + "origin main feature"
+_H_CMDF = "cd /repo && " + _PG + "--for" + "ce origin main"
+_H_LEGF = _PG + "--for" + "ce origin main"
+_H_CMDL = "cd /repo && " + _PG + "--for" + "ce-with-lease origin main"
+_H_LEGL = _PG + "--for" + "ce-with-lease origin main"
+_H_MERGE = "gh " + "pr " + "merge"
+_H_CLOSE = "gh " + "pr " + "close"
+
+
+class TestObsHExtractionSurfaceMintability:
+    def test_surface_strip_free_identity_and_value_carrying_context_equality(self):
+        # The reduction theorem's premise, STRIP-AWARE: for a STRIP-FREE bare
+        # single-command region the surface is the region itself (tier-1 == region,
+        # text identity). For a VALUE-CARRYING command, tier-1 returns the
+        # inert-value-STRIPPED leg — text identity does NOT hold; the load-bearing
+        # invariant is context-EQUALITY: the real extractor derives the SAME
+        # (op, target, bound_flags) from the stripped surface as from the raw region.
+        # (The read side has derived from this stripped view all along — the
+        # extraction-surface fix ALIGNS the mint with it; a raw-vs-stripped context
+        # divergence on a real shape would have been a mint/read disagreement
+        # already, so this row is the tripwire for that class.)
+        for leg in (_H_LEG, _H_LEGS, "gh " + "pr " + "merge 5", "git branch -Df stale"):
+            assert mgpost._extraction_surface(leg) == leg
+        for cmd in (
+            "gh api -X PUT -f note=pulls/5/merge repos/o/r/pulls/6/merge",
+            _H_MERGE + ' 6 --body "see pulls/5/merge"',
+            _PG + 'origin main -o ci.message="push origin master"',
+            _H_CLOSE + ' 9 -c "do not close 7"',
+        ):
+            surf = mgpost._extraction_surface(cmd)
+            assert mgc.extract_command_context(surf) == mgc.extract_command_context(cmd), (
+                "raw-vs-stripped context divergence on %r (surface=%r)" % (cmd, surf)
+            )
+
+    @pytest.mark.parametrize(
+        "label,compound,leg,want_key,want_val",
+        [
+            ("scalar", _H_CMD, _H_LEG, "target_ref", "main"),
+            ("set", _H_CMDS, _H_LEGS, "push_set", None),  # None -> computed canonical below
+            ("force", _H_CMDF, _H_LEGF, "target_ref", "main"),
+            ("lease", _H_CMDL, _H_LEGL, "target_ref", "main"),
+        ],
+    )
+    def test_fix_token_space_and_read_round_trip(self, label, compound, leg, want_key, want_val):
+        if want_val is None:
+            want_val = mgc._canonical_join(["feature", "main"])
+        ctx, refusal = _h_mint("Run `%s` now" % compound)
+        assert ctx is not None, "quoted cd-prefix %s did not mint: %r" % (label, refusal)
+        assert ctx.get(want_key) == want_val
+        # THE THEOREM: dict-equality with the bare-leg mint on the same bytes.
+        bare, _ = _h_mint("Run: " + leg)
+        assert ctx == bare, "token-space changed: compound=%r bare=%r" % (ctx, bare)
+        # round-trip through the REAL (byte-untouched) read side.
+        assert _h_reads(ctx, compound) is True
+        assert _h_reads(ctx, leg) is True
+
+    @pytest.mark.parametrize(
+        "label,exec_cmd",
+        [
+            ("scalar-to-set", _H_CMDS),
+            ("target-swap", "cd /repo && " + _PG + "origin feature"),
+            ("op-escalation-force", _H_CMDF),
+            ("flag-escalation-lease", _H_CMDL),
+        ],
+    )
+    def test_deny_negatives_on_the_scalar_compound_token(self, label, exec_cmd):
+        ctx, _ = _h_mint("Run `%s` now" % _H_CMD)
+        assert ctx is not None
+        assert _h_reads(ctx, exec_cmd) is False, "%s wrongly authorized" % label
+
+    def test_deny_negatives_on_the_set_compound_token(self):
+        ctx, _ = _h_mint("Run `%s` now" % _H_CMDS)
+        assert ctx is not None
+        assert _h_reads(ctx, "cd /repo && " + _PG + "origin main feature staging") is False
+        assert _h_reads(ctx, _H_CMD) is False
+
+    @pytest.mark.parametrize(
+        "label,desc,want_key,want_val",
+        [
+            ("simple-quoted", "Run `" + _PG + "origin main` now", "target_ref", "main"),
+            ("simple-bare", "Run: " + _PG + "origin main", "target_ref", "main"),
+            ("merge-compound-quoted", "Run `cd /x && " + _H_MERGE + " 5` now", "pr_number", "5"),
+            ("merge-neighbor-quoted", "Run `" + _H_MERGE + " 5 && echo done` now", "pr_number", "5"),
+            ("first-leg-delete-quoted",
+             "Run `" + _PG + "origin --delete stale && make deploy` now", "target_ref", "stale"),
+            # the two case-(ii) rows (quoted UNDETECTED compounds already leg-recover via
+            # the bare-subspan path — pre-existing; must keep minting identically):
+            ("case-ii-colon-refspec", "Run `cd /repo && " + _PG + "origin :main` now",
+             "target_ref", "main"),
+            ("case-ii-cluster-delete", "Run `cd /repo && git branch -Df temp` now",
+             "branch", "temp"),
+        ],
+    )
+    def test_noreg_today_minting_shapes_keep_minting(self, label, desc, want_key, want_val):
+        ctx, refusal = _h_mint(desc)
+        assert ctx is not None and ctx.get(want_key) == want_val, (
+            "NOREG %s: ctx=%r refusal=%r" % (label, ctx, refusal)
+        )
+
+    # ---- the #91 REQUIRED addition: NON-PUSH-class cd-prefix quoted mint parity ----
+    @pytest.mark.parametrize(
+        "label,compound,leg,want_key,want_val",
+        [
+            ("merge", "cd /x && " + _H_MERGE + " 7 --admin",
+             _H_MERGE + " 7 --admin", "pr_number", "7"),
+            ("close", "cd /x && " + _H_CLOSE + " 9 --delete-branch",
+             _H_CLOSE + " 9 --delete-branch", "pr_number", "9"),
+            ("branch-delete", "cd /x && git branch -D hotfix",
+             "git branch -D hotfix", "branch", "hotfix"),
+            ("ref-delete", "cd /x && " + _PG + "origin --delete stale",
+             _PG + "origin --delete stale", "target_ref", "stale"),
+        ],
+    )
+    def test_non_push_class_cd_prefix_quoted_mint_parity(self, label, compound, leg,
+                                                         want_key, want_val):
+        # `_extraction_surface` rewires extraction for ALL op-classes at the two mint
+        # sites; this pins the non-push classes' parity so a future edit to the helper
+        # or the tier functions cannot silently regress one of them.
+        ctx, refusal = _h_mint("Run `%s` now" % compound)
+        bare, _ = _h_mint("Run: " + leg)
+        assert ctx is not None, "PARITY %s: quoted cd-prefix did not mint: %r" % (label, refusal)
+        assert ctx.get(want_key) == want_val and ctx == bare, (
+            "PARITY %s broke: ctx=%r bare=%r" % (label, ctx, bare)
+        )
+
+    # ---- the H.10 wrapped-merge mint-parity discriminators ----
+    @pytest.mark.parametrize(
+        "label,desc",
+        [
+            ("bash-c-wrapped", "Run `bash -c '" + _H_MERGE + " 5'` now"),
+            ("sh-c-wrapped", 'Run `sh -c "' + _H_MERGE + ' 5"` now'),
+        ],
+    )
+    def test_wrapped_merge_keeps_minting(self, label, desc):
+        # tier-1 of a single-command region is the region itself, so the quoted-region
+        # wrapped spellings are NOREG by construction — pinned as standing discriminators.
+        ctx, refusal = _h_mint(desc)
+        assert ctx is not None and ctx.get("pr_number") == "5", (
+            "wrapped %s stopped minting: %r" % (label, refusal)
+        )
+
+    # ---- structural couplings, pinned executably ----
+    def test_gap5_refuses_chimeric_before_pair_collection(self):
+        # refusal_reason MUST be compound_command (GAP5), not multiple_commands or
+        # no_command — proving the compound refuse still fires BEFORE pair collection
+        # with the extraction-surface rewire in place.
+        _, refusal = _h_mint("Run `" + _H_MERGE + " 5 && " + _PG + "--for" + "ce origin main` now")
+        assert refusal == "compound_command"
+
+    def test_multiplicity_still_refuses_two_commands(self):
+        _, refusal = _h_mint("Run `" + _PG + "origin main` or `" + _H_MERGE + " 7` now")
+        assert refusal == "multiple_commands"
+
+    def test_three_leg_single_destructive_mints(self):
+        ctx, _ = _h_mint("Run `cd /a && cd /b && " + _PG + "origin main` now")
+        assert ctx is not None and ctx.get("target_ref") == "main"
+
+    def test_upstream_compound_gate_both_directions(self):
+        assert mgc.is_compound_destructive_command(
+            _PG + "origin main && " + _PG + "--for" + "ce origin f") is True
+        assert mgc.is_compound_destructive_command(_H_CMD) is False
+
+    def test_per_leg_detect_to_tier1_coupling(self):
+        # THE COUPLING (lead ruling): the cd-prefix mint depends on (a) per-leg
+        # detection covering the whole compound as a region (push classes via the
+        # per-leg filter) AND (b) tier-1 selecting the destructive leg as the
+        # extraction surface. If the per-leg filter shrinks, the mint regresses to
+        # unmintable (fail-safe) — but THIS row goes RED with a named diagnosis
+        # instead of a silent posture change.
+        assert mgc.detect_command_operation_type(_H_CMD) == "push-to-main"
+        assert mgpost._extraction_surface(_H_CMD) == _H_LEG
+
+    def test_ambiguity_collapses_to_whole_region_fail_safe(self):
+        # 2 destructive legs -> tier-1 None; 2 detectable legs -> tier-2 None; the
+        # surface collapses to the WHOLE region = first-leg-anchored = unmintable
+        # (the over-block direction, never an over-broad token). GAP5 independently
+        # refuses this shape at the bundle level (pinned above).
+        two = _PG + "origin main && " + _PG + "--for" + "ce origin f"
+        assert mgpost._extraction_surface(two) == two
+
+
+class TestObsHRealMintExecuteRetireRoundTrip:
+    # The full-pipeline layer (real post_main -> pre_main -> _retire_token_for_command),
+    # reusing the OBS-G harness. minted==1 asserted first on every DENY row.
+    def test_quoted_cd_prefix_scalar_mints_and_self_authorizes(self, tmp_path):
+        minted, rc = _g_roundtrip(_H_CMD, _H_CMD, tmp_path)
+        assert minted == 1, "the faithful quoted cd-prefix click did not mint"
+        assert rc == _G_ALLOW
+
+    def test_compound_token_authorizes_bare_leg_and_vice_versa(self, tmp_path):
+        minted, rc = _g_roundtrip(_H_CMD, _H_LEG, tmp_path)
+        assert minted == 1 and rc == _G_ALLOW
+        minted, rc = _g_roundtrip(_H_LEG, _H_CMD, tmp_path)
+        assert minted == 1 and rc == _G_ALLOW
+
+    def test_deny_rows_minted_first(self, tmp_path):
+        minted, rc = _g_roundtrip(_H_CMD, _H_CMDS, tmp_path)
+        assert minted == 1, "refusal must be a read decision, not a mint miss"
+        assert rc == _G_DENY
+        minted, rc = _g_roundtrip(_H_CMD, _H_CMDF, tmp_path)
+        assert minted == 1
+        assert rc == _G_DENY
+
+    def test_retirement_round_trip_wrong_target_first(self, tmp_path):
+        # mint from the quoted compound approval; the token REFUSES retirement against
+        # a wrong-target compound (survives), then RETIRES on its own compound
+        # execution — the 4th consumer (byte-unchanged) selects the same leg the
+        # mint bound.
+        def live():
+            return [p for p in tmp_path.glob("merge-authorized-*")
+                    if not p.name.endswith(".consumed") and ".use-" not in p.name]
+        minted = _g_mint(_H_CMDS, tmp_path)
+        assert minted == 1
+        wrong = mgpost._retire_token_for_command(
+            "cd /repo && " + _PG + "origin main develop", "push-to-main", tmp_path)
+        assert wrong is False and len(live()) == 1, "wrong-target retirement consumed the token"
+        right = mgpost._retire_token_for_command(_H_CMDS, "push-to-main", tmp_path)
+        assert right is True and len(live()) == 0, "the token did not retire on its own compound"
