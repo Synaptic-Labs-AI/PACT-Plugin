@@ -1,0 +1,9 @@
+{
+  "$comment": "INVALID: violates the since pattern - the value carries a timezone offset but is not an ISO-8601 date-time. The anchored full-shape pattern rejects offset-suffixed garbage that the earlier suffix-only check would have admitted.",
+  "reason": "HANDOFF claims tests ran but records no verification evidence",
+  "corrections": [
+    "Run the suite and record the result, or declare tests inapplicable with reasoning"
+  ],
+  "since": "not-a-date+00:00",
+  "revision_number": 1
+}

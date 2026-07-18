@@ -1,0 +1,15 @@
+{
+  "$comment": "Valid: five canonical fields plus the optional reasoning_reconstruction with its exact three sub-keys.",
+  "understanding": "Implement the refund worker behind the existing payments API, idempotent under queue retries, without touching the ledger service's write path.",
+  "most_likely_wrong": "Whether multi-currency partial refunds round at the worker or at the ledger.",
+  "least_confident_item": "That the ledger accepts reversal entries denominated in the original charge's currency.",
+  "first_action": "Read the ledger service's reversal-entry contract before writing the worker interface.",
+  "variety_acknowledgment": {
+    "rationale_articulates_this_dispatch": "yes"
+  },
+  "reasoning_reconstruction": {
+    "decision_attribution": "The designer chose queue-driven retries because the payment provider's API times out under load, making synchronous refunds unreliable.",
+    "assumption_trace": "This depends on the queue delivering at-least-once, and on the idempotency key being stable across retries.",
+    "contingency_clause": "If the queue were exactly-once, the idempotency requirement could relax to a plain uniqueness check."
+  }
+}

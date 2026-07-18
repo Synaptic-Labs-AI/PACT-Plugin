@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pact:spec:0.1.0:teachback.schema.json",
+  "$comment": "Normative appendix for L1-TB-01; extracted from hooks/shared/teachback_schema.py at plugin 4.6.8 / commit b4041ccf (required-field tuple, variety-acknowledgment value set, reasoning-reconstruction sub-key set).",
+  "title": "Teachback payload",
+  "description": "A Specialist's pre-work restatement of its dispatched mission, recorded in the gate record's metadata. Shape-only: the acceptance/rejection lifecycle lives in the prose requirements L1-TB-01 through L1-TB-06.",
+  "type": "object",
+  "required": [
+    "understanding",
+    "most_likely_wrong",
+    "least_confident_item",
+    "first_action",
+    "variety_acknowledgment"
+  ],
+  "properties": {
+    "understanding": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "description": "What the Specialist understands it is building: key constraints and interfaces. Non-empty, non-whitespace."
+    },
+    "most_likely_wrong": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "description": "The part of the restated understanding the Specialist is least confident about. Non-empty, non-whitespace."
+    },
+    "least_confident_item": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "description": "One specific assumption the Specialist asks the Lead to confirm. Non-empty, non-whitespace."
+    },
+    "first_action": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "description": "The first concrete step the Specialist will take after acceptance. Non-empty, non-whitespace."
+    },
+    "variety_acknowledgment": {
+      "type": "object",
+      "description": "The Specialist's review of the dispatch's variety rationales. An object, never a free-text string.",
+      "required": ["rationale_articulates_this_dispatch"],
+      "properties": {
+        "rationale_articulates_this_dispatch": {
+          "enum": ["yes", "no", "concern"]
+        },
+        "concern": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "Names the smell; required whenever the acknowledgment value is not \"yes\". Non-empty, non-whitespace."
+        }
+      },
+      "if": {
+        "properties": {
+          "rationale_articulates_this_dispatch": { "enum": ["no", "concern"] }
+        },
+        "required": ["rationale_articulates_this_dispatch"]
+      },
+      "then": {
+        "required": ["concern"]
+      },
+      "additionalProperties": true
+    },
+    "reasoning_reconstruction": {
+      "type": "object",
+      "description": "Method-level reconstruction of the upstream actor's reasoning. Optional below the declared variety band floor and required at or above it (L1-TB-06). Exactly these three sub-keys, each a non-empty, non-whitespace string.",
+      "required": ["decision_attribution", "assumption_trace", "contingency_clause"],
+      "properties": {
+        "decision_attribution": { "type": "string", "minLength": 1, "pattern": "\\S" },
+        "assumption_trace": { "type": "string", "minLength": 1, "pattern": "\\S" },
+        "contingency_clause": { "type": "string", "minLength": 1, "pattern": "\\S" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true,
+  "examples": [
+    {
+      "understanding": "Implement the refund worker behind the existing payments API, idempotent under queue retries, without touching the ledger service's write path.",
+      "most_likely_wrong": "Whether multi-currency partial refunds round at the worker or at the ledger.",
+      "least_confident_item": "That the ledger accepts reversal entries with the original charge's currency.",
+      "first_action": "Read the ledger service's reversal-entry contract before writing the worker interface.",
+      "variety_acknowledgment": {
+        "rationale_articulates_this_dispatch": "yes"
+      },
+      "reasoning_reconstruction": {
+        "decision_attribution": "The designer chose queue-driven retries because the payment provider's API times out under load, making synchronous refunds unreliable.",
+        "assumption_trace": "This depends on the queue delivering at-least-once, and on the idempotency key being stable across retries.",
+        "contingency_clause": "If the queue were exactly-once, the idempotency requirement could relax to a plain uniqueness check."
+      }
+    }
+  ]
+}

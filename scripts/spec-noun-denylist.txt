@@ -1,0 +1,73 @@
+# Denylist for scripts/verify-spec-nouns.sh.
+# One pattern per line; CASE-INSENSITIVE fixed strings (grep -iF) —
+# capitalization variants of every entry are denied, so list each noun
+# once in its canonical casing.
+# Blank lines and lines starting with # are ignored.
+#
+# These are substrate mechanism names that must not appear in the
+# spec's normative core (spec/protocol.md + spec/schemas/).
+# The annex and binding documents are exempt surfaces by design and
+# are not scanned. Schema FIELD names (protocol payload vocabulary)
+# are not listed here — the denylist targets mechanism names only.
+
+# --- Claude Code / plugin nouns ---
+SendMessage
+TaskUpdate
+TaskGet
+TaskList
+TaskCreate
+TaskStop
+AskUserQuestion
+blockedBy
+addBlockedBy
+CLAUDE.md
+Agent Teams
+teammateMode
+tmux
+PreToolUse
+PostToolUse
+SessionStart
+SessionEnd
+TeammateIdle
+UserPromptSubmit
+PreCompact
+task_lifecycle_gate
+session_journal.py
+variety_scorer.py
+teachback_schema.py
+intentional_wait.py
+missed_wake_scan
+pact-memory
+pact-secretary
+pact-orchestrator
+pact-preparer
+pact-architect
+hooks/shared
+plugin.json
+worktree-setup
+gh pr
+
+# --- Platform actor-vocabulary spellings (promoted from the gray zone) ---
+# The spec's normative actor vocabulary (section 1.2) is Lead / Specialist /
+# Secretary / Principal. These platform-flavored spellings became deniable
+# once the terminology section landed.
+orchestrator
+teammate
+team-lead
+
+# --- LangChain-stack nouns (symmetric) ---
+# (one canonical casing per noun; the scan is case-insensitive)
+LangChain
+LangGraph
+Deep Agents
+deepagents
+StateGraph
+create_agent
+checkpointer
+interrupt(
+Command(resume
+BaseStore
+wrap_tool_call
+before_model
+after_model
+write_todos

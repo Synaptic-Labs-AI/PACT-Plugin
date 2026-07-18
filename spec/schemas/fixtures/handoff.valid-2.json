@@ -1,0 +1,16 @@
+{
+  "$comment": "Valid: reasoning_chain omitted - the field is optional in shape (L1-HO-01 recommends it for non-trivial work). Uncertainty uses the explicit no-uncertainty sentence.",
+  "produced": [
+    "docs/runbooks/refund-replay: new replay procedure"
+  ],
+  "decisions": [
+    "Documented the replay path as read-only; replays never re-post ledger entries"
+  ],
+  "uncertainty": [
+    "No areas of uncertainty flagged."
+  ],
+  "integration": [
+    "none"
+  ],
+  "open_questions": []
+}

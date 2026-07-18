@@ -1,0 +1,13 @@
+{
+  "$comment": "INVALID: violates required[uncertainty] - the uncertainty field is absent entirely. An empty uncertainty set is declared explicitly with the no-uncertainty sentence, never omitted.",
+  "produced": [
+    "services/payments/refund_worker (new)"
+  ],
+  "decisions": [
+    "Idempotency key derived from charge id + amount"
+  ],
+  "integration": [
+    "ledger service"
+  ],
+  "open_questions": []
+}

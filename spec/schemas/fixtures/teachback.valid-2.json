@@ -1,0 +1,11 @@
+{
+  "$comment": "Valid: reasoning_reconstruction omitted (legal below the declared variety band floor, L1-TB-06). Acknowledgment value 'concern' carries the required concern text.",
+  "understanding": "Write the replay runbook for refunds, covering operator preconditions and the read-only replay path.",
+  "most_likely_wrong": "Which operator role owns replay approval.",
+  "least_confident_item": "That replay never re-posts ledger entries under any flag combination.",
+  "first_action": "Enumerate the replay tool's flags and classify each as read-only or write-capable.",
+  "variety_acknowledgment": {
+    "rationale_articulates_this_dispatch": "concern",
+    "concern": "The scope rationale reads as single-document work, but the runbook spans two operator audiences; scope may be understated by one point."
+  }
+}

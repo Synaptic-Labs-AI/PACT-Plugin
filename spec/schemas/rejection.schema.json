@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pact:spec:0.1.0:rejection.schema.json",
+  "$comment": "Normative appendix for L1-CA-07; extracted from protocols/pact-completion-authority.md (rejection record shape) at plugin 4.6.8 / commit b4041ccf. One schema serves both rejection kinds — gate (teachback) and work (HANDOFF). Normatively stronger than the as-built realization, which enforced no shape validator at the fork point; conformance annexes record this as satisfied-with-deviation.",
+  "title": "Rejection record",
+  "description": "A Lead's durable rejection of a teachback or a HANDOFF. Shape-only: the re-submission lifecycle lives in the prose requirements L1-TB-04 and L1-CA-07.",
+  "type": "object",
+  "required": ["reason", "corrections", "since", "revision_number"],
+  "properties": {
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Why the submission was rejected."
+    },
+    "corrections": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1,
+      "description": "The specific corrections the revised submission is expected to make."
+    },
+    "since": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$",
+      "description": "Timezone-aware ISO-8601 timestamp of the rejection. Naive (zone-less) timestamps are invalid. The anchored pattern enforces the full date-time shape and the trailing offset mechanically; calendar validity (real months, days, leap rules) remains format territory, and format is annotation-only in draft 2020-12."
+    },
+    "revision_number": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Rejection-cycle counter. The Lead writes 1 at first rejection; each re-submission increments it. Feeds the escalation threshold of L1-TB-05."
+    }
+  },
+  "additionalProperties": true,
+  "examples": [
+    {
+      "reason": "Teachback omits the idempotency constraint that motivated the dispatch",
+      "corrections": [
+        "Restate the retry model and why the worker must be idempotent",
+        "Name the assumption about queue delivery semantics being made"
+      ],
+      "since": "2026-07-16T18:04:11+00:00",
+      "revision_number": 1
+    }
+  ]
+}

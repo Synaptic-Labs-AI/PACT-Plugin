@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pact:spec:0.1.0:signal.schema.json",
+  "$comment": "Normative appendix for L1-SG-01; extracted from protocols/algedonic.md (HALT/ALERT payload template and category classes) and skills/pact-agent-teams/SKILL.md (blocker report shape) at plugin 4.6.8 / commit b4041ccf. Normatively stronger than the as-built realization, which enforced no payload validator at the fork point; conformance annexes record this as satisfied-with-deviation.",
+  "title": "Signal payload",
+  "description": "A blocker, ALERT, or HALT payload. Shape-only: bypass, scope-amplification, and resolution semantics live in the prose requirements L1-SG-01 through L1-SG-04.",
+  "type": "object",
+  "required": ["level"],
+  "properties": {
+    "level": {
+      "enum": ["HALT", "ALERT", "blocker"],
+      "description": "Severity class. HALT and ALERT are Principal-directed; blocker is coordinator-triaged."
+    },
+    "category": {
+      "type": "string",
+      "description": "Signal category; the legal set is closed per level (see the oneOf branches)."
+    },
+    "issue": { "type": "string", "minLength": 1 },
+    "evidence": { "type": "string", "minLength": 1 },
+    "impact": { "type": "string", "minLength": 1 },
+    "recommended_action": { "type": "string", "minLength": 1 },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "description": "What is blocking (blocker level only)."
+    },
+    "partial_handoff": {
+      "type": "object",
+      "description": "Partial completion state accompanying the signal. A complete instance validates against the handoff schema (urn:pact:spec:0.1.0:handoff.schema.json); partial instances are not required to."
+    }
+  },
+  "oneOf": [
+    {
+      "description": "HALT — viability threat; blocks feature-scope work.",
+      "properties": {
+        "level": { "const": "HALT" },
+        "category": { "enum": ["SECURITY", "DATA", "ETHICS"] }
+      },
+      "required": ["level", "category", "issue", "evidence", "impact", "recommended_action"]
+    },
+    {
+      "description": "ALERT — serious degradation; blocks phase-scope work.",
+      "properties": {
+        "level": { "const": "ALERT" },
+        "category": { "enum": ["QUALITY", "SCOPE", "META-BLOCK"] }
+      },
+      "required": ["level", "category", "issue", "evidence", "impact", "recommended_action"]
+    },
+    {
+      "description": "blocker — operational impediment; coordinator-triaged.",
+      "properties": {
+        "level": { "const": "blocker" }
+      },
+      "required": ["level", "description"]
+    }
+  ],
+  "additionalProperties": true,
+  "examples": [
+    {
+      "level": "HALT",
+      "category": "SECURITY",
+      "issue": "Provider API key committed in a configuration fixture",
+      "evidence": "config/fixtures/provider.json line 12 contains a live-format key",
+      "impact": "Key is exposed to anyone with repository read access",
+      "recommended_action": "Rotate the key, purge the fixture, and gate fixtures on a secret scan"
+    },
+    {
+      "level": "blocker",
+      "description": "The ledger service's reversal-entry contract is undocumented and its owner is unavailable; cannot define the worker interface without it.",
+      "partial_handoff": {
+        "produced": ["services/payments/refund_worker: skeleton and tests for the idempotency key"],
+        "decisions": ["Deferred interface definition pending the ledger contract"],
+        "uncertainty": ["[HIGH] Reversal-entry field semantics unknown"],
+        "integration": ["ledger service"],
+        "open_questions": ["Who owns the ledger reversal contract?"]
+      }
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "$comment": "Valid: HALT with a SECURITY-class category and the full six-field payload.",
+  "level": "HALT",
+  "category": "SECURITY",
+  "issue": "Provider API key committed in a configuration fixture",
+  "evidence": "config/fixtures/provider.json line 12 contains a live-format key",
+  "impact": "Key is exposed to anyone with repository read access",
+  "recommended_action": "Rotate the key, purge the fixture, and gate fixtures on a secret scan"
+}
