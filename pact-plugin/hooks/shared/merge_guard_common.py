@@ -113,8 +113,14 @@ NB this first-leg anchoring is SPECIFIC to those parse-dependent forms: the LITE
 danger arms (the DANGEROUS_PATTERNS bank + the per-leg literal-arm tuples: force-push,
 branch-delete, close, API ref/protection) match in ANY leg position (per-leg for the
 tuple arms) and STILL gate in a non-first leg
-(`cd /repo && git push --force origin main` is caught). When an over-block of a faithful
-click is found, the fix WIDENS the mint, never narrows detection into a new under-block.
+(`cd /repo && git push --force origin main` is caught). PUSH-TO-MAIN (and the `+refspec`
+force spelling) are ALSO gated in ANY leg (#1195 OBS-E/F-PL): the accurate refspec-DST
+predicate `_flag_condition_danger_op` is additionally invoked PER-LEG by its callers
+(detect_command_operation_type + _stripped_surface_danger), filtered to
+`_PER_LEG_PUSH_OPS` — so `cd /repo && git push origin main` is caught. (delete/mirror/:ref
+non-first-leg forms above STAY ungated — the per-leg push filter excludes them.) When an
+over-block of a faithful click is found, the fix WIDENS the mint, never narrows detection
+into a new under-block.
 =============================================================================
 
 Centralizes TOKEN_TTL, TOKEN_DIR, TOKEN_PREFIX, consumed-token cleanup,
@@ -538,10 +544,24 @@ def detect_command_operation_type(command: str) -> str | None:
     # detectors with no positional mask-gap bind, so they carry no analogue.
     view = _executed_surface_view(command)
     legs = _split_into_legs(command)
-    return (
+    op = (
         _detect_op_pass(command, view, legs)      # view pass (gh-pr prose arms on view)
         or _detect_op_pass(command, command, legs)  # raw fallback == pre-view classifier
     )
+    if op is not None:
+        return op
+    # PER-LEG push arms (OBS-E/F-PL): restore the ANY-LEG push-to-main/force-push coverage
+    # the removed whole-string DANGEROUS_PATTERNS rows carried — the union arm is FIRST-LEG-
+    # anchored, so a push in a non-first leg (`cd /repo && git push origin main`) needs a
+    # per-leg call. CALLER-LEVEL (not inside _detect_op_pass): reached ONLY after BOTH passes
+    # return None, so every existing classification is byte-stable (the api-merge additive
+    # precedent), and the raw-fallback gh-pr arms still run before this (so
+    # `bash -c 'gh pr merge 5' && git push origin main` stays merge, not push-to-main).
+    for _leg in legs:
+        _lop = _flag_condition_danger_op(_leg)
+        if _lop in _PER_LEG_PUSH_OPS:
+            return _lop
+    return None
 
 
 def _detect_op_pass(
@@ -595,27 +615,15 @@ def _detect_op_pass(
         if any(arm.search(_leg) for arm in _FORCE_PUSH_LITERAL_ARMS):
             return "force-push"
     # Direct push to a default branch (main/master) — plain OR --force-with-lease —
-    # is a review-bypass, a DISTINCT op from force-push. Returning its own
-    # `push-to-main` op (rather than folding into force-push) closes the
-    # token-collapse where a plain-push approval authorized a force-push. WITHIN the
-    # class, plain and lease pushes mint DIFFERENT tokens via the --force-with-lease
-    # presence bind (PRIVILEGED_FLAGS; the close/--delete-branch precedent), so a
-    # plain-push token can never authorize a lease push (which CAN rewrite history).
-    # The --force/-f checks ABOVE run FIRST, so a forced push to main returns
-    # force-push and never reaches here; ordering is load-bearing. The flag-walk is
-    # byte-identical to the read floor's push-to-main arm (mint==read parity at the
-    # source; the old lease-excluding lookahead here was a gated-but-unmintable
-    # over-block: the read floor gated the lease push while the mint refused it, so
-    # a faithful click was permanently blocked). The READ floor gates BOTH forms
-    # (DANGEROUS_PATTERNS unchanged). Uses the same `(?!:)` refspec exclusion as
-    # DANGEROUS_PATTERNS push-to-main.
-    if re.search(_GIT_PREFIX + r"push\s+\S+\s+HEAD:(?:main|master)\b", command):
-        return "push-to-main"
-    if re.search(
-        _GIT_PREFIX + r"push\s+(?:-\S+\s+){0,%d}\S+\s+(?:main|master)(?!:)\b" % _MAX_GLOBAL_FLAG_TOKENS,
-        command,
-    ):
-        return "push-to-main"
+    # is a review-bypass, a DISTINCT op from force-push. It is now recognized by the
+    # UNIFIED refspec-DST predicate in the shared `_flag_condition_danger_op` push-to-main
+    # arm (#1195 OBS-E), reached via the union-arm fallback at the END of this function —
+    # so the former inline literals here (a `HEAD:(?:main|master)` arm + a bounded-flag-walk
+    # `(?:main|master)(?!:)` arm) were REMOVED. The unified predicate is accurate BOTH ways
+    # the literals were not (it excludes main-release/main.foo prefix over-blocks and
+    # catches feature:main / refs/heads/main under-blocks), and being the single shared arm
+    # both detect and the read floor call it is mint==read by construction. The --force/-f
+    # checks ABOVE still run first (a forced push to main returns force-push).
     # API-based ref-mutation forms (gh api / curl / wget targeting
     # /git/refs with mutating HTTP methods) classify by HTTP semantic:
     # DELETE → branch-delete class (removes a ref)
@@ -1892,17 +1900,13 @@ re.compile(_GH_PREFIX + r"pr\s+merge\b"),
 # patterns above) — matched PER-LEG by is_dangerous_command after this list misses
 # (#1086 leg isolation), NOT whole-string here (a whole-command match fired cross-leg
 # and over-blocked a benign compound carrying a method/body-flag token in a benign leg).
-# Direct push to default branch (bypasses PR merge)
-re.compile(_GIT_PREFIX + r"push\s+\S+\s+HEAD:main\b"),
-re.compile(_GIT_PREFIX + r"push\s+\S+\s+HEAD:master\b"),
-# Regular push to main/master (e.g., local merge then push)
-# Negative lookahead (?!:) prevents matching refspecs like main:feature-branch.
-# The dash-flag walk is BOUNDED {0,K} — defense-in-depth that removes the last
-# unbounded `*` prefix walk in the push patterns so their linearity is
-# structural/intrinsic rather than contingent on the global-flag prefix bound
-# (#1001 family); already linear at HEAD, not a hang-fix.
-re.compile(_GIT_PREFIX + r"push\s+(?:-\S+\s+){0,%d}\S+\s+main(?!:)\b"   % _MAX_GLOBAL_FLAG_TOKENS),
-re.compile(_GIT_PREFIX + r"push\s+(?:-\S+\s+){0,%d}\S+\s+master(?!:)\b" % _MAX_GLOBAL_FLAG_TOKENS),
+# Direct push to a default branch (bypasses PR merge) — the former HEAD:main / HEAD:master
+# and bounded-flag-walk main / master literals were REMOVED (#1195 OBS-E): the read floor
+# recognizes push-to-main via `_flag_condition_danger_op` (its sole consumer here,
+# _stripped_surface_danger, calls it), using the UNIFIED _PUSH_MAIN_DST_RE refspec-DST
+# predicate — the SAME arm detect uses, so mint==read holds by construction with no second
+# copy to drift. The unified predicate fixes both the prefix over-block (main-release) and
+# the <src>:dst / full-ref under-block (feature:main / refs/heads/main) the literals had.
 ]
 
 
@@ -3351,13 +3355,48 @@ def _normalized_flags(tokens: list[str], surface: str) -> set[str]:
     return found
 
 
+# OBS-E (#1195) — the UNIFIED push-to-main destination-ref predicate. A push refspec whose
+# DESTINATION ref is EXACTLY main/master (optionally `<src>:`-prefixed, optionally
+# `refs/heads/`-prefixed), matched as a COMPLETE ref via .fullmatch on the refspec TOKEN.
+# Replaces the inaccurate `(?:main|master)(?!:)\b` predicate that was wrong BOTH ways
+# (prefix-matched main-release/main.foo/main@v1 = cardinal over-block; required main to
+# START the token so feature:main/refs/heads/main = under-block). The trailing negative-
+# lookahead forbids any ref-name continuation char (a COMPLETE ref); the `[^\s:+]` src
+# class excludes a leading `+` so `+main` is NOT a push-to-main dst (it FORCES → OBS-F).
+# SSOT: the ONE predicate the shared _flag_condition_danger_op push-to-main arm uses, which
+# BOTH detect (_detect_op_pass fallback) AND the read floor (_stripped_surface_danger) call
+# — mint==read by construction, no literal/DANGEROUS_PATTERNS copy left to drift.
+_PUSH_MAIN_DST_RE = re.compile(
+    r"(?:[^\s:+][^\s:]*:)?"   # optional <src>:  (src has no ':' and no leading '+')
+    r"(?:refs/heads/)?"      # optional full-ref dst prefix
+    r"(?:main|master)"       # the DESTINATION branch
+    r"(?![\w./@+-])"         # ... as a COMPLETE ref: no continuation char follows
+)
+
+# OBS-E/F-PL (#1195) — per-leg push-op filter. The push-to-main + force-push detection lives
+# in the whole-command `_flag_condition_danger_op`, which is FIRST-LEG-ANCHORED — so a push in
+# a NON-first leg (`cd /repo && git push origin main`) was lost when the whole-string
+# DANGEROUS_PATTERNS push-to-main rows were removed (unlike branch-delete/force-push, push-to-
+# main had no per-leg literal arm). The caller-level per-leg loops (in
+# detect_command_operation_type + _stripped_surface_danger) restore ANY-LEG coverage by calling
+# the SAME union arm per leg, filtered to these classes — a THIN caller, no second predicate.
+# Reached ONLY after the existing pipeline returns None/False, so every existing classification
+# is byte-stable. force-push is in the filter (not just push-to-main) so a non-first-leg
+# clustered/`+refspec` force spelling gates too (sibling consistency with `cd && push --force`).
+_PER_LEG_PUSH_OPS = ("push-to-main", "force-push")
+
+
 def _flag_condition_danger_op(command: str) -> str | None:
     """P4 union arm: classify the FIRST EXECUTABLE LEG of `command` by a quote-aware
     NORMALIZED-FLAG danger CONDITION across every flag spelling, returning the
     op-class ("close" / "branch-delete" / "force-push" / "remote-ref-delete" /
-    "remote-mass-delete") iff a condition fires, else None. FIRST-LEG-ANCHORED
-    (extending the conservative-RECOGNITION posture to this
-    arm): every surface consulted here — the token list, the coarse-shape prefixes,
+    "remote-mass-delete" / "push-to-main") iff a condition fires, else None.
+    FIRST-LEG-ANCHORED (extending the conservative-RECOGNITION posture to this arm).
+    NOTE (#1195 OBS-E/F-PL): callers ALSO invoke this per-leg for the push classes
+    (detect_command_operation_type + _stripped_surface_danger, filtered to
+    `_PER_LEG_PUSH_OPS`) to catch a push-to-main/force-push in a NON-first leg — this
+    function itself stays first-leg-anchored; the per-leg reach is the callers'.
+    Every surface consulted here — the token list, the coarse-shape prefixes,
     and the extractor inputs — derives from `_executable_prefix(command)`, because
     deriving FLAGS from the whole command while POSITIONALS came from the first
     executable leg let a force/delete flag in a benign CONTINUATION leg mislabel a
@@ -3416,6 +3455,23 @@ def _flag_condition_danger_op(command: str) -> str | None:
         # included via the definite \x00implicit marker).
         if _extract_mass_delete_target(prefix) is not None:
             return "remote-mass-delete"
+        # push-to-main via the UNIFIED refspec-DST predicate (#1195 OBS-E, supersedes the
+        # OBS-D branch-token arm + the removed detect literals + DANGEROUS_PATTERNS copies).
+        # fullmatch _PUSH_MAIN_DST_RE on positionals[1:] — the REFSPECS. positionals[0] is
+        # the REMOTE and is DELIBERATELY SKIPPED: a remote literally NAMED 'main'
+        # (`git push main feature`) must NOT gate (it is a push of 'feature' to a remote
+        # called 'main', not a push to the main branch). _push_positionals skips interposed
+        # `-o` push-option values (OBS-C/D machinery); the K bound keeps the flag walk
+        # linear; the `push\s` reachability (single guarded match) keeps a glued
+        # `git push--force …` non-command out. LAST in the push branch (force/delete/mass
+        # classify above); SHARED arm ⇒ mint==read by construction.
+        _pm = re.search(_GIT_PREFIX + r"push\s(.*)$", prefix)         # well-formed push only
+        if _pm is not None:                                          #   (excludes push--force glue)
+            _tail = _pm.group(1).split()
+            if sum(1 for t in _tail if t.startswith("-")) <= _MAX_GLOBAL_FLAG_TOKENS:  # perf bound
+                for _refspec in _push_positionals(_tail)[1:]:        # REFSPECS only (skip remote)
+                    if _PUSH_MAIN_DST_RE.fullmatch(_strip_surrounding_quotes(_refspec)):
+                        return "push-to-main"
     return None
 
 
@@ -3756,7 +3812,9 @@ _WRAPPER_GRAMMAR: "dict[str, _WrapperGrammar]" = {
 def _stripped_surface_danger(stripped: str) -> bool:
     """The literal danger battery over an ALREADY-STRIPPED (or MASKED) surface: the
     DANGEROUS_PATTERNS scan + the four per-leg literal-arm families + the additive
-    normalized-flag condition. Factored out of ``is_dangerous_command`` (behavior-identical)
+    whole-surface normalized-flag condition + the PER-LEG push-op loop (#1195 OBS-E/F-PL:
+    _flag_condition_danger_op per leg, filtered to _PER_LEG_PUSH_OPS, for a push-to-main /
+    force-push in a NON-first leg). Factored out of ``is_dangerous_command`` (behavior-identical)
     so the #1178 preserve-predicate can consult the SAME danger predicate on a masked leg
     WITHOUT re-entering ``_strip_non_executable_content`` (which would recurse — the predicate
     runs INSIDE that strip). SURFACE-AGNOSTIC: it neither strips nor masks, only matches, so a
@@ -3783,6 +3841,14 @@ def _stripped_surface_danger(stripped: str) -> bool:
             return True
     if _flag_condition_danger_op(stripped) is not None:
         return True
+    # PER-LEG push arms (OBS-E/F-PL): the whole-surface union call above is FIRST-LEG-
+    # anchored, so a push-to-main/force-push in a NON-first leg (`cd /repo && git push origin
+    # main`) needs a per-leg call — the SAME union arm per leg, filtered to the push classes
+    # (the shared _PER_LEG_PUSH_OPS constant → mint==read with the detect loop). leg[0] is
+    # harmlessly re-checked (the loop runs only after the whole-surface call returned None).
+    for _leg in legs:
+        if _flag_condition_danger_op(_leg) in _PER_LEG_PUSH_OPS:
+            return True
     return False
 
 

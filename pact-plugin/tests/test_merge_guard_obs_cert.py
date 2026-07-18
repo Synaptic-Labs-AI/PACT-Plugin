@@ -315,3 +315,115 @@ class TestObsCForcePushOptionTargetRecovery:
         ctx = mgc.extract_command_context(cmd)
         assert ctx.get("target_ref") == "main"
         assert "oldref" not in str(ctx)
+
+
+# =========================================================================================
+# OBS-E (+ OBS-E/F-PL per-leg) — the UNIFIED refspec-DST push-to-main predicate applied
+# BOTH whole-command (via _flag_condition_danger_op) AND PER-LEG (caller-level loops in
+# detect_command_operation_type + _stripped_surface_danger). Fixes the inaccurate
+# `(?:main|master)(?!:)\b` literal BOTH ways (prefix over-block main-release; <src>:dst
+# under-block feature:main) AND restores the ANY-LEG coverage the removed whole-string
+# DANGEROUS_PATTERNS rows carried (a push-to-main in a non-first leg, `cd && git push
+# origin main`). Executable PL.5 matrix; mint==read symmetry (gate <=> detect non-None).
+# =========================================================================================
+DETECT = mgc.detect_command_operation_type
+
+# FIX: push-to-main in a NON-first leg now gates (the regression the per-leg loops close).
+OBS_E_PERLEG_FIX = [
+    ("cd-push-main", "cd /repo && git push origin main"),
+    ("cd-lease-main", "cd /repo && git push --force-with-lease origin main"),
+    ("fetch-feature-colon-main", "git fetch && git push origin feature:main"),
+    ("cd-HEAD-main", "cd /x && git push origin HEAD:main"),
+    ("assign-then-push-main", "a=1; git push origin main"),
+    ("cd-o-interposed-main", "cd /repo && git push origin -o ci.skip=true main"),
+    ("cd-quoted-main", "cd /repo && git push origin 'main'"),
+    ("cd-quoted-origin-main", "cd /repo && git push 'origin' \"main\""),
+]
+# NO-REGRESSION: first-leg push-to-main forms stay gated.
+OBS_E_NO_REGRESSION = [
+    ("origin-main", "git push origin main"), ("origin-master", "git push origin master"),
+    ("HEAD-main", "git push origin HEAD:main"), ("HEAD-master", "git push origin HEAD:master"),
+    ("dash-u", "git push -u origin main"), ("set-upstream", "git push --set-upstream origin main"),
+    ("non-origin", "git push upstream main"), ("multi-main-master", "git push origin main master"),
+    ("lease", "git push --force-with-lease origin main"),
+]
+# UNDER-BLOCK now gated (the <src>:dst / full-ref spellings the literal missed).
+OBS_E_UNDER_BLOCK_NOW_GATE = [
+    ("feature-colon-main", "git push origin feature:main"),
+    ("develop-colon-main", "git push origin develop:main"),
+    ("refs-heads-main", "git push origin refs/heads/main"),
+    ("HEAD-refs-heads-main", "git push origin HEAD:refs/heads/main"),
+]
+# OVER-BLOCK boundary: main-prefixed non-main / remote-named-main / redirect — STAY ungated,
+# incl. cd-prefixed (the per-leg loop applies the ACCURATE predicate, not the old prefix `\b`).
+OBS_E_OVER_BLOCK_STAYS_UNGATED = [
+    ("cd-main-release", "cd /repo && git push origin main-release"),
+    ("cd-main-x", "cd /repo && git push origin main-x"),
+    ("cd-main-dot-foo", "cd /repo && git push origin main.foo"),
+    ("cd-main-at-v1", "cd /repo && git push origin main@v1"),
+    ("remote-named-main", "git push main feature"),
+    ("cd-remote-named-main", "cd /repo && git push main feature"),
+    ("redirect-target-main", "git push origin feature > main"),
+    ("cd-redirect-target-main", "cd /repo && git push origin feature > main"),
+    ("echo-main-then-push-feature", "echo main && git push origin feature"),
+    ("commitmsg-main-then-push-feature", "git commit -m 'see main' && git push origin feature"),
+    ("feature-colon-main-release", "git push origin feature:main-release"),
+]
+# EXCLUDED per-leg residuals (delete/mass/branch-delete in a non-first leg) — the
+# {push-to-main, force-push} filter deliberately does NOT gate these (pre-existing, out of
+# scope; deleting main is rarely good-faith → acceptable under-block).
+OBS_E_PERLEG_RESIDUALS = [
+    ("cd-colon-main", "cd /repo && git push origin :main"),
+    ("cd-delete-main", "cd /repo && git push origin --delete main"),
+    ("fetch-mirror", "git fetch && git push --mirror origin"),
+    ("cd-branch-Df", "cd /repo && git branch -Df temp"),
+]
+
+
+class TestObsEPerLegPushToMain:
+    @pytest.mark.parametrize("label,cmd", OBS_E_PERLEG_FIX, ids=[r[0] for r in OBS_E_PERLEG_FIX])
+    def test_non_first_leg_push_to_main_gates(self, label, cmd):
+        assert DETECT(cmd) == "push-to-main"
+        assert D(cmd) is True, "non-first-leg push-to-main under-block re-opened: %r" % cmd
+
+    @pytest.mark.parametrize("label,cmd", OBS_E_NO_REGRESSION, ids=[r[0] for r in OBS_E_NO_REGRESSION])
+    def test_first_leg_push_to_main_unchanged(self, label, cmd):
+        assert DETECT(cmd) == "push-to-main" and D(cmd) is True
+
+    @pytest.mark.parametrize(
+        "label,cmd", OBS_E_UNDER_BLOCK_NOW_GATE, ids=[r[0] for r in OBS_E_UNDER_BLOCK_NOW_GATE]
+    )
+    def test_src_dst_and_full_ref_under_block_now_gates(self, label, cmd):
+        assert load_baseline().detect_command_operation_type(cmd) is None, "not an under-block at base"
+        assert DETECT(cmd) == "push-to-main" and D(cmd) is True
+
+    @pytest.mark.parametrize(
+        "label,cmd", OBS_E_OVER_BLOCK_STAYS_UNGATED, ids=[r[0] for r in OBS_E_OVER_BLOCK_STAYS_UNGATED]
+    )
+    def test_over_block_boundary_stays_ungated(self, label, cmd):
+        # PRIMARY cardinal gate: no faithful non-main / remote-named-main / redirect push gates.
+        assert D(cmd) is False, "OBS-E over-blocked a non-main push: %r" % cmd
+        assert DETECT(cmd) is None
+
+    @pytest.mark.parametrize(
+        "label,cmd", OBS_E_PERLEG_RESIDUALS, ids=[r[0] for r in OBS_E_PERLEG_RESIDUALS]
+    )
+    def test_excluded_perleg_residuals_stay_ungated(self, label, cmd):
+        assert D(cmd) is False, "the {push-to-main,force-push} filter wrongly gated a delete/mass leg"
+
+    def test_precedence_first_leg_unchanged(self):
+        assert DETECT("git push origin --delete main") == "remote-ref-delete"
+        assert DETECT("git push origin --mirror origin") == "remote-mass-delete"
+        assert DETECT("git push --mirror origin main") == "remote-mass-delete"
+
+    def test_cd_prefix_force_and_branch_delete_still_gate(self):
+        assert DETECT("cd /repo && git push --for" + "ce origin main") == "force-push"
+        assert DETECT("cd /repo && git branch -D main") == "branch-delete"
+
+    def test_mint_read_symmetry_across_matrix(self):
+        # gate <=> detect non-None on every matrix row (the mint==read symmetry the shared
+        # _PER_LEG_PUSH_OPS filter + one predicate guarantee by construction).
+        rows = (OBS_E_PERLEG_FIX + OBS_E_NO_REGRESSION + OBS_E_UNDER_BLOCK_NOW_GATE
+                + OBS_E_OVER_BLOCK_STAYS_UNGATED + OBS_E_PERLEG_RESIDUALS)
+        for _label, cmd in rows:
+            assert (DETECT(cmd) is not None) == (D(cmd) is True), "mint!=read on %r" % cmd

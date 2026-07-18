@@ -454,15 +454,23 @@ class TestR2LineContinuationSplice:
 
     def test_mint_read_parity_across_battery(self):
         # mint==read by construction: both route through the SSOT splice, so both see the
-        # identical spliced surface. Across the faithful continuation battery, the read
-        # classifier and the mint detector agree.
+        # identical spliced surface — the read floor gates IFF detect classifies an op.
+        # NOTE (#1195 OBS-E): this asserts the REAL mint==read invariant (detect-non-None
+        # <=> is_dangerous), replacing a prior HEAD==base proxy that OBS-E legitimately
+        # flips on the lease line-continuation row: `git push \<nl>--force-with-lease origin
+        # main` was detect=None at the b4041ccf base (the removed detect literal ran on the
+        # RAW command, so a `\<newline>` before the flags MISSED it — an under-block), while
+        # the OBS-E per-leg union arm sees the SPLICED leg → push-to-main. HEAD != base there
+        # is an INTENDED under-block closure, not a parity break; the invariant below holds.
         for cmd in (
             "gh pr close 5 %s--delete-branch" % _LC,
             "gh pr merge 5 %s--admin" % _LC,
             "git push %s--force-with-lease origin main" % _LC,
             "git push origin main",
         ):
-            assert mgc.detect_command_operation_type(cmd) == load_baseline().detect_command_operation_type(cmd), cmd
+            assert (mgc.detect_command_operation_type(cmd) is not None) == (
+                mgc.is_dangerous_command(cmd)
+            ), cmd
 
     def test_f3_monotonicity_no_unexpected_over_block(self):
         # No base-False -> HEAD-True EXCEPT the documented split-word bonus closure (which is
