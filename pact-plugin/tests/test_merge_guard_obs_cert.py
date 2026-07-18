@@ -616,9 +616,14 @@ class TestObsGPushSetMintability:
         assert ctx.get("operation_type") == want_op
         assert "push_set" not in ctx, "the elif scope boundary leaked push_set to %s" % want_op
 
-    def test_multi_ref_force_push_stays_unmintable(self):
+    def test_multi_ref_force_push_now_mints_via_force_push_set(self):
+        # CONTROL-SWAP (OBS-I): the OBS-G scope boundary is REVERSED under its own
+        # ratified proof — the multi-ref force-push now mints the DISTINCT
+        # forced-normalized `force_push_set` (never push_set; the op split keeps
+        # the keys disjoint, pinned in the OBS-I class below).
         ctx = _gctx(_PG + "--for" + "ce origin main feature")
-        assert mgpost._target_value(ctx) is None, "multi-ref force-push became mintable"
+        assert ctx.get("force_push_set") == mgc._canonical_join(["+feature", "+main"])
+        assert mgpost._target_value(ctx) == ctx["force_push_set"]
 
     def test_scalar_extractor_multi_ref_behavior_unchanged(self):
         # `_extract_force_push_target_ref` is byte-untouched: multi-ref still None.
@@ -853,13 +858,14 @@ class TestObsGRealMintExecuteRoundTrip:
         assert minted == 1
         assert rc == _G_DENY, "plain push_set token authorized a --force multi-ref push"
 
-    def test_multi_ref_force_push_approval_stays_unmintable(self, tmp_path):
-        # scope boundary end-to-end: the multi-ref FORCE approval mints ZERO tokens
-        # (its relaxation is out of scope) and the execution stays denied.
+    def test_multi_ref_force_push_approval_now_mints_end_to_end(self, tmp_path):
+        # CONTROL-SWAP (OBS-I): the multi-ref FORCE approval now MINTS (the OBS-G
+        # boundary reversed under its own proof) and the faithful click
+        # self-authorizes end-to-end.
         cmd = _PG + "--for" + "ce origin main feature"
         minted, rc = _g_roundtrip(cmd, cmd, tmp_path)
-        assert minted == 0, "a multi-ref force-push approval minted — scope boundary broken"
-        assert rc == _G_DENY
+        assert minted == 1, "the faithful multi-ref force-push click did not mint"
+        assert rc == _G_ALLOW
 
     def test_cd_prefix_compound_approval_symmetrically_mintable_end_to_end(self, tmp_path):
         # CONTROL-SWAP (OBS-H): the cd-prefix seam through the REAL pipeline — the
@@ -1153,3 +1159,295 @@ class TestObsHRealMintExecuteRetireRoundTrip:
         assert wrong is False and len(live()) == 1, "wrong-target retirement consumed the token"
         right = mgpost._retire_token_for_command(_H_CMDS, "push-to-main", tmp_path)
         assert right is True and len(live()) == 0, "the token did not retire on its own compound"
+
+
+# =========================================================================================
+# OBS-I — multi-ref force-push MINTABILITY (`force_push_set`, reversing the OBS-G scope
+# boundary under its own ratified proof). Cures the peer-review-found cardinal over-block
+# (`git push origin +feature main` gated-but-unmintable). THREE security layers, each
+# load-bearing: (1) FORCED-FORM NORMALIZATION — class-wide --force upgrades every element
+# to its `+` form so the identity tracks WHICH REFS GET FORCED (the plain->forced
+# mixed-set collision cure; --force is NOT a bound flag, so the identity must carry the
+# semantics); (2) the ALLOWLIST-INVERSION guard — force_push_set populates ONLY when EVERY
+# flag token is ref-scope-NEUTRAL (a closed, SECURITY-OWNED membership set pinned below);
+# delete/mass op-triggers, scope expanders, dry-run, lease-on-force, unknown/future flags
+# all fail SAFE to None. The census walks the RAW tail (never `_normalized_flags`, which
+# is condition-scoped and BLIND to --tags/--all — a census built on it would false-green
+# the smuggle) with getopt-style value-`-o` resolution in ANY cluster position, feeding
+# the SHARED byte-untouched `_push_positionals` a value-free tail so the census and the
+# positional gather agree by construction; (3) the ':'-element delete guard
+# (defense-in-depth). mint==read via the ONE shared extractor => the READ direction closes
+# by construction: a non-neutral EXECUTION derives force_push_set=None and no pure-force
+# token matches (None-identity denial).
+# =========================================================================================
+def FORCE_SET(cmd):
+    """Call-time module-attr resolution (revert non-vacuity: a source-only revert of
+    OBS-I fails these rows PER-ROW, never as a collection-wide ImportError)."""
+    return mgc._extract_force_push_set(cmd)
+
+
+_I_PURE = _PG + "--for" + "ce origin main feature"
+
+
+def _i_pure_id():
+    return mgc._canonical_join(["+feature", "+main"])
+
+
+class TestObsIForcePushSetMintability:
+    # ---- the cardinal over-block cures ----
+    @pytest.mark.parametrize(
+        "label,tail,want",
+        [
+            ("plus-pair-peer-review-row", "origin +feature main", ["+feature", "main"]),
+            ("plus-both", "origin +main +feature", ["+feature", "+main"]),
+            ("pure-force", "--for" + "ce origin main feature", ["+feature", "+main"]),
+            ("short-f", "-f origin main feature", ["+feature", "+main"]),
+            ("mixed-force-plus", "--for" + "ce origin +feature main", ["+feature", "+main"]),
+        ],
+    )
+    def test_fix_rows_mint_the_normalized_identity(self, label, tail, want):
+        cmd = _PG + tail
+        want_id = mgc._canonical_join(want)
+        assert FORCE_SET(cmd) == want_id
+        ctx = _gctx(cmd)
+        assert ctx.get("operation_type") == "force-push"
+        assert ctx.get("force_push_set") == want_id
+        assert "target_ref" not in ctx and "push_set" not in ctx
+        assert mgpost._target_value(ctx) == want_id
+        # round-trip through the real read side
+        assert _greads({"context": ctx}, cmd) is True
+
+    # ---- (A) every non-neutral flag -> None (the escalation stays closed) ----
+    @pytest.mark.parametrize(
+        "label,flags",
+        [
+            ("delete", "--for" + "ce --delete"), ("short-d", "--for" + "ce -d"),
+            ("mirror", "--for" + "ce --mirror"), ("prune", "--for" + "ce --prune"),
+            ("fd-cluster", "-fd"), ("tags", "--for" + "ce --tags"),
+            ("follow-tags", "--for" + "ce --follow-tags"), ("all", "--for" + "ce --all"),
+            ("branches", "--for" + "ce --branches"),
+            ("recurse-submodules", "--for" + "ce --recurse-submodules=on-demand"),
+            ("short-n", "--for" + "ce -n"), ("dry-run", "--for" + "ce --dry-run"),
+            ("lease-on-force", "--for" + "ce --for" + "ce-with-lease"),
+            ("no-force", "--no-for" + "ce"), ("receive-pack", "--for" + "ce --receive-pack=x"),
+            ("repo", "--for" + "ce --repo=r"), ("end-of-options", "--for" + "ce --"),
+            ("unknown-future", "--for" + "ce --zzz"),
+        ],
+    )
+    def test_non_neutral_flags_yield_none(self, label, flags):
+        cmd = _PG + flags + " origin main feature"
+        assert FORCE_SET(cmd) is None, "%s wrongly minted a force set" % label
+
+    # ---- (B) every neutral spelling MINTS (the cardinal-over-block gate) ----
+    @pytest.mark.parametrize(
+        "label,flags",
+        [
+            ("pure", "--for" + "ce"), ("short-f", "-f"), ("fu-cluster", "-fu"),
+            ("verbose-short", "--for" + "ce -v"), ("quiet-upstream", "--for" + "ce -q -u"),
+            ("atomic-porcelain", "--for" + "ce --atomic --porcelain"),
+            ("verbose-long", "--for" + "ce --verbose"),
+            ("progress", "--for" + "ce --progress"),
+            ("no-progress", "--for" + "ce --no-progress"),
+            ("o-value", "--for" + "ce -o ci.skip=true"),
+            ("push-option-inline", "--for" + "ce --push-option=x"),
+            ("push-option-separate", "--for" + "ce --push-option x"),
+            ("signed", "--for" + "ce --signed"),
+            ("ipv4-thin", "--for" + "ce -4 --thin"),
+            ("no-verify", "--for" + "ce --no-verify"),
+        ],
+    )
+    def test_neutral_spellings_mint(self, label, flags):
+        cmd = _PG + flags + " origin main feature"
+        assert FORCE_SET(cmd) == _i_pure_id(), "%s over-blocked (allowlist too strict)" % label
+
+    # ---- the -o family IDENTITY-VALUE rows (getopt-complete cluster handling) ----
+    @pytest.mark.parametrize(
+        "label,flags",
+        [
+            ("fvo-next-token", "-fvo msg"),
+            ("fo-next-token", "-fo msg"),
+            ("vfo-next-token", "-vfo msg"),
+            ("fov-rest-of-token", "-fov"),
+            ("fvo-glued-value", "-fvoMSG"),
+            ("o-token-start", "--for" + "ce -o msg"),
+        ],
+    )
+    def test_o_family_identity_value(self, label, flags):
+        # the IDENTITY VALUE is asserted (not just mint-success): a value-token leak
+        # into the positional gather would bind the -o value as the remote and the
+        # remote as a +refspec — this row pins the correct {+feature,+main}.
+        cmd = _PG + flags + " origin main feature"
+        assert FORCE_SET(cmd) == _i_pure_id(), "%s mis-bound the identity" % label
+
+    def test_o_first_glued_value_fails_safe(self):
+        # THE RULED AMBIGUITY CLASS (lead+security): `-ofv` = getopt -o=fv (NO
+        # force) but the pre-existing cluster-blind DETECTION sees the 'f' and
+        # classifies force-push — git's parse and the classifier diverge on WHAT
+        # THE OPERATION IS, so minting ANY identity would be wrong under one
+        # reading. Fail SAFE: an o-first / no-f-before-o GLUED value returns None
+        # (gated-but-unmintable — an exotic, documented residual over-block).
+        # Glued values stay MINTABLE when `f` is unambiguously BEFORE the `o` in
+        # the same cluster (-fov / -fvoMSG — pinned green in the -o family rows).
+        for label, cmd in [
+            ("ofv", _PG + "-ofv origin main feature"),
+            ("vox", _PG + "--for" + "ce -vox origin main feature"),
+        ]:
+            assert FORCE_SET(cmd) is None, "%s minted despite the ambiguity ruling" % label
+        ctx = _gctx(_PG + "-ofv origin main feature")
+        assert ctx.get("operation_type") == "for" + "ce-push"   # pre-existing detection, out of scope
+        assert "force_push_set" not in ctx, "the ambiguous shape must stay unmintable"
+        assert mgpost._target_value(ctx) is None
+
+    def test_o_missing_value_is_malformed_fail_safe(self):
+        assert FORCE_SET(_PG + "-fvo") is None
+        assert FORCE_SET(_PG + "--for" + "ce --push-option") is None
+
+    # ---- collision negatives + semantic equivalence ----
+    def test_plain_forced_collision_closed_both_directions(self):
+        plain_mixed = _gctx(_PG + "origin +feature main")
+        all_forced = _gctx(_PG + "--for" + "ce origin +feature main")
+        assert plain_mixed["force_push_set"] != all_forced["force_push_set"]
+        assert _greads({"context": plain_mixed}, _PG + "--for" + "ce origin +feature main") is False
+        assert _greads({"context": all_forced}, _PG + "origin +feature main") is False
+
+    def test_semantic_equivalence_force_equals_all_plus(self):
+        force_tok = _gctx(_I_PURE)
+        plus_tok = _gctx(_PG + "origin +main +feature")
+        assert _greads({"context": force_tok}, _PG + "origin +main +feature") is True
+        assert _greads({"context": plus_tok}, _I_PURE) is True
+
+    # ---- ':' delete guard + fail-safes ----
+    @pytest.mark.parametrize(
+        "label,cmd",
+        [
+            ("colon-element", _PG + "--for" + "ce origin :main feature"),
+            ("plus-colon-element", _PG + "origin +:main feature"),
+            ("unbalanced-quote", _PG + "--for" + "ce origin main 'feature"),
+            ("procsub", _PG + "--for" + "ce origin main <(echo x)"),
+            ("flag-flood", _PG + " ".join("-v" for _ in range(40)) + " --for" + "ce origin main feature"),
+            ("single-ref-boundary", _PG + "--for" + "ce origin main"),
+        ],
+    )
+    def test_guard_and_fail_safe_shapes_yield_none(self, label, cmd):
+        assert FORCE_SET(cmd) is None, "%s minted an over-broad force set" % label
+
+    # ---- 4-key exactly-one-populated + cross negatives ----
+    @pytest.mark.parametrize(
+        "label,cmd,want_key",
+        [
+            ("single-force", _PG + "--for" + "ce origin main", "target_ref"),
+            ("multi-force", _I_PURE, "force_push_set"),
+            ("single-ptm", _PG + "origin main", "target_ref"),
+            ("multi-ptm", _PG + "origin main feature", "push_set"),
+        ],
+    )
+    def test_four_key_exactly_one_populated(self, label, cmd, want_key):
+        ctx = _gctx(cmd)
+        present = tuple(k for k in ("target_ref", "push_set", "force_push_set") if k in ctx)
+        assert present == (want_key,), "co-population/wrong key on %s: %r" % (label, present)
+
+    def test_cross_op_and_set_negatives(self):
+        force_tok = {"context": _gctx(_I_PURE)}
+        assert _greads(force_tok, _PG + "origin main feature") is False       # op-gate vs push_set
+        assert _greads({"context": _gctx(_PG + "origin main feature")}, _I_PURE) is False
+        assert _greads(force_tok, _PG + "--for" + "ce origin main feature staging") is False
+        assert _greads(force_tok, _PG + "--for" + "ce origin main") is False
+        assert _greads(force_tok, _PG + "--for" + "ce origin main develop") is False
+        assert _greads(force_tok, _PG + "--for" + "ce origin feature main") is True   # reorder
+        assert _greads(force_tok, _PG + "--for" + "ce upstream main feature") is True  # remote-agnostic
+
+    # ---- (C) READ-direction closure: pure token vs non-neutral executions ----
+    @pytest.mark.parametrize(
+        "label,exec_flags",
+        [
+            ("delete-exec", "--for" + "ce --delete"),
+            ("tags-exec", "--for" + "ce --tags"),
+            ("mirror-exec", "--for" + "ce --mirror"),
+            ("dry-run-exec", "--for" + "ce -n"),
+        ],
+    )
+    def test_pure_token_denies_non_neutral_executions(self, label, exec_flags):
+        # the mint guard and the read refusal are the SAME code: the non-neutral
+        # execution derives force_push_set=None -> None-identity denial.
+        pure_tok = {"context": _gctx(_I_PURE)}
+        exec_cmd = _PG + exec_flags + " origin main feature"
+        assert _greads(pure_tok, exec_cmd) is False, "%s wrongly authorized" % label
+
+    def test_no_verify_a2_discrimination(self):
+        nv_cmd = _PG + "--for" + "ce --no-verify origin main feature"
+        nv = _gctx(nv_cmd)
+        assert nv.get("force_push_set") == _i_pure_id()
+        assert nv.get("bound_flags") == ["--no-verify"]
+        assert _greads({"context": _gctx(_I_PURE)}, nv_cmd) is False  # plain refuses nv (a2)
+        assert _greads({"context": nv}, nv_cmd) is True
+
+    # ---- the ALLOWLIST MEMBERSHIP PIN (security-owned surface) ----
+    def test_allowlist_membership_pin(self):
+        # Like PRIVILEGED_FLAGS: any future addition to this set is a REVIEWED,
+        # deliberate act — this pin makes a silent widening fail loudly.
+        assert mgc._FORCE_PUSH_NEUTRAL_LONG == frozenset({
+            "--for" + "ce", "--no-verify",
+            "--verbose", "--quiet", "--progress", "--no-progress", "--porcelain",
+            "--set-upstream", "--atomic",
+            "--ipv4", "--ipv6", "--thin", "--no-thin",
+            "--signed", "--no-signed",
+            "--push-option",
+        })
+        assert mgc._FORCE_PUSH_NEUTRAL_SHORT == frozenset("fvqu46")
+        assert "o" not in mgc._FORCE_PUSH_NEUTRAL_SHORT  # value-resolved pre-census
+
+    # ---- OBS-H composition + NOREG scalars ----
+    def test_obsh_cd_prefix_composition(self):
+        cdc = "cd /repo && " + _I_PURE
+        assert _gctx(mgpost._extraction_surface(cdc)) == _gctx(_I_PURE)
+
+    def test_noreg_scalar_behaviors_unchanged(self):
+        assert _gctx(_PG + "--for" + "ce origin main").get("target_ref") == "main"
+        assert _gctx(_PG + "origin +main").get("target_ref") == "+main"
+
+
+class TestObsIRealMintExecuteRetireRoundTrip:
+    def test_pure_force_approval_mints_and_self_authorizes(self, tmp_path):
+        minted, rc = _g_roundtrip(_I_PURE, _I_PURE, tmp_path)
+        assert minted == 1, "the faithful multi-ref force click did not mint"
+        assert rc == _G_ALLOW
+
+    def test_reorder_and_plus_spelling_authorize(self, tmp_path):
+        minted, rc = _g_roundtrip(_I_PURE, _PG + "--for" + "ce origin feature main", tmp_path)
+        assert minted == 1 and rc == _G_ALLOW
+        minted, rc = _g_roundtrip(_I_PURE, _PG + "origin +main +feature", tmp_path)
+        assert minted == 1 and rc == _G_ALLOW  # the ratified semantic equivalence
+
+    @pytest.mark.parametrize(
+        "label,exec_tail",
+        [
+            ("different-set", "--for" + "ce origin main develop"),
+            ("superset", "--for" + "ce origin main feature staging"),
+            ("subset-scalar", "--for" + "ce origin main"),
+            ("plain-mixed", "origin +feature main"),
+            ("delete-spelling", "--for" + "ce --delete origin main feature"),
+            ("tags-spelling", "--for" + "ce --tags origin main feature"),
+        ],
+    )
+    def test_deny_rows_minted_first(self, label, exec_tail, tmp_path):
+        minted, rc = _g_roundtrip(_I_PURE, _PG + exec_tail, tmp_path)
+        assert minted == 1, "the pure approval must MINT (refusal must be a read decision)"
+        assert rc == _G_DENY, "the pure force token wrongly authorized the %s" % label
+
+    def test_o_cluster_real_round_trip(self, tmp_path):
+        cmd = _PG + "-fvo msg origin main feature"
+        minted, rc = _g_roundtrip(cmd, cmd, tmp_path)
+        assert minted == 1, "the -fvo cluster spelling did not mint (the #100 over-block)"
+        assert rc == _G_ALLOW
+
+    def test_retirement_round_trip_wrong_target_first(self, tmp_path):
+        def live():
+            return [p for p in tmp_path.glob("merge-authorized-*")
+                    if not p.name.endswith(".consumed") and ".use-" not in p.name]
+        minted = _g_mint(_I_PURE, tmp_path)
+        assert minted == 1
+        wrong = mgpost._retire_token_for_command(
+            _PG + "--for" + "ce origin main develop", "for" + "ce-push", tmp_path)
+        assert wrong is False and len(live()) == 1, "wrong-target retirement consumed the token"
+        right = mgpost._retire_token_for_command(_I_PURE, "for" + "ce-push", tmp_path)
+        assert right is True and len(live()) == 0, "the token did not retire on its own execution"

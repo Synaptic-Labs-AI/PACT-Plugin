@@ -174,15 +174,17 @@ def _target_value(cmd_ctx: dict) -> str | None:
     listed); remote-mass-delete (#1062b) uses the distinct `mass_target`; branch-protection
     (#1063) uses `protected_branch`; multi-branch force-delete (#1129) uses the distinct
     `branch_set` (its scalar single-branch sibling `branch` is already listed);
-    multi-ref push-to-main (#1195 OBS-G) uses the distinct `push_set` (its scalar
-    single-ref sibling `target_ref` is already listed) — each added here so that op
-    MINTS, not just gates."""
+    multi-ref push-to-main (#1195 OBS-G) uses the distinct `push_set` and multi-ref
+    force-push (#1195 OBS-I) the distinct `force_push_set` (their scalar single-ref
+    sibling `target_ref` is already listed) — each added here so that op MINTS, not
+    just gates."""
     return (
         cmd_ctx.get("pr_number")
         or cmd_ctx.get("branch")
         or cmd_ctx.get("branch_set")
         or cmd_ctx.get("target_ref")
         or cmd_ctx.get("push_set")
+        or cmd_ctx.get("force_push_set")
         or cmd_ctx.get("mass_target")
         or cmd_ctx.get("protected_branch")
     )

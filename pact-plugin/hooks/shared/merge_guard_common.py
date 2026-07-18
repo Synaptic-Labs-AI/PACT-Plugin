@@ -1148,6 +1148,159 @@ def _extract_push_to_main_set(command: str) -> str | None:
     return _canonical_join(sorted(set(refspecs)))   # sort+dedup+canonical (branch_set mirror)
 
 
+# #1195 OBS-I — the REF-SCOPE-NEUTRAL flag allowlist for force_push_set (the
+# ALLOWLIST-INVERSION guard; a SECURITY-OWNED membership surface like
+# PRIVILEGED_FLAGS — any future addition is a reviewed, deliberate act; the cert
+# pins the exact membership). force_push_set is populated ONLY when EVERY flag
+# token resolves into this set; ANYTHING else — the delete/mass op-triggers
+# (--delete/-d/--mirror/--prune), the scope expanders (--tags/--follow-tags/
+# --all/--branches), --recurse-submodules, -n/--dry-run, --force-with-lease on a
+# force-classified command, --no-force, the exotic --repo/--receive-pack/--exec,
+# the `--` end-of-options marker, and every unknown/FUTURE flag — fails SAFE to
+# None = gated-but-unmintable. Rationale: `_push_positionals` skips flags BY
+# DESIGN, so a positional set-identity is structurally BLIND to flag-borne
+# ref-scope semantics (`--force --delete origin main feature` classifies
+# force-push — force outranks delete — and would collide byte-identically with
+# the pure force set); such semantics can only be GUARDED (None), never encoded.
+# Allowlist incompleteness costs an exotic residual over-block, never a hole.
+_FORCE_PUSH_NEUTRAL_LONG = frozenset({
+    "--force",                     # the op itself + the forced-form trigger
+    "--no-verify",                 # bound via force-push PRIVILEGED_FLAGS (a2 discriminates)
+    "--verbose", "--quiet", "--progress", "--no-progress", "--porcelain",  # output-only
+    "--set-upstream",              # local tracking config
+    "--atomic",                    # transaction semantics, same ref set
+    "--ipv4", "--ipv6", "--thin", "--no-thin",                             # transport
+    "--signed", "--no-signed",     # transport signing
+    "--push-option",               # server-side message (value inert to ref scope)
+})
+_FORCE_PUSH_NEUTRAL_SHORT = frozenset("fvqu46")   # -f -v -q -u -4 -6 (cluster letters)
+
+
+def _resolve_neutral_force_tail(_tail: list) -> "tuple[list, bool] | None":
+    """ONE raw-token walk over the post-`push` tail (#1195 OBS-I): resolves git's
+    getopt-style value-taking `-o` in ANY cluster position, runs the
+    ref-scope-neutrality census, and detects the class-wide force flag —
+    returning (resolved_tail, force) or None when ANY flag token is non-neutral,
+    unknown, or malformed (fail-safe: gated-but-unmintable, never an over-broad
+    token).
+
+    WHY RAW TOKENS (load-bearing): `_normalized_flags` is CONDITION-SCOPED — it
+    reports only the flags the danger conditions test and is BLIND to
+    --tags/--all/-v/... — so a census built on it would silently pass a
+    scope-expansion smuggle. WHY the value resolution lives HERE: `-o` takes a
+    VALUE; getopt semantics make everything after `o` in a short cluster (or the
+    next token when `o` is last) that value, NOT flags — `-fvo msg` = -f -v
+    -o=msg; `-fov` = -f -o=v. The resolved tail (value tokens dropped, the
+    `o`+value consumed from clusters) is what the SHARED `_push_positionals`
+    then gathers, so the census and the positional gather agree on value tokens
+    BY CONSTRUCTION — while `_push_positionals` itself stays byte-untouched (its
+    other consumers keep today's behavior). The value-short set is
+    BOUNDED-COMPLETE = {-o}: every other git-push short is boolean.
+
+    O-FIRST GLUED-VALUE AMBIGUITY (lead+security ruling): a glued rest-of-token
+    value MINTS only when `f` is unambiguously present BEFORE the `o` in the
+    SAME cluster (`-fov`, `-fvoMSG` — force established either way you read the
+    tail). An o-first/no-f-before-o glued form (`-ofv`, `-vox`) is the shape
+    where git's parse (o consumes the rest as a VALUE — no force) diverges from
+    the pre-existing cluster-blind detection (which sees the letters as flags):
+    the OPERATION itself is parse-dependent, so minting ANY identity would be
+    wrong under one reading — fail SAFE to None (an exotic, low-good-faith
+    residual over-block; the detection mis-parse itself is out of scope here)."""
+    resolved: list = []
+    force = False
+    i, n = 0, len(_tail)
+    while i < n:
+        tok = _tail[i]
+        if not tok.startswith("-") or tok == "-":
+            resolved.append(tok)             # positional (or the bare '-' token)
+            i += 1
+            continue
+        if tok.startswith("--"):
+            name = tok.split("=", 1)[0]
+            if name not in _FORCE_PUSH_NEUTRAL_LONG:
+                return None                  # incl. bare `--` + unknown/future flags
+            if name == "--force":
+                force = True
+            if name == "--push-option" and "=" not in tok:
+                if i + 1 >= n:
+                    return None              # separate-value form missing its value
+                i += 2                       # skip the value token
+                continue
+            i += 1
+            continue
+        # Short cluster: boolean letters until a value-`o`; at `o` the rest of the
+        # token (or the next token when `o` is last) is its VALUE — never flags.
+        consumed_next = False
+        cluster_bad = False
+        cluster_force = False
+        for j in range(1, len(tok)):
+            ch = tok[j]
+            if ch == "o":
+                if j == len(tok) - 1:        # `-...o` last: next token is the value
+                    if i + 1 >= n:
+                        cluster_bad = True   # missing value (malformed) — fail-safe
+                    else:
+                        consumed_next = True
+                elif not cluster_force:
+                    # o-first / no-f-before-o GLUED value (`-ofv`, `-vox`): git's
+                    # parse and the cluster-blind detection diverge on WHAT THE
+                    # OPERATION IS — ambiguous, fail SAFE to None (lead ruling).
+                    cluster_bad = True
+                break                        # rest-of-token (if any) is the value
+            if ch not in _FORCE_PUSH_NEUTRAL_SHORT:
+                cluster_bad = True
+                break
+            if ch == "f":
+                force = True
+                cluster_force = True
+        if cluster_bad:
+            return None
+        i += 2 if consumed_next else 1
+    return resolved, force
+
+
+def _extract_force_push_set(command: str) -> str | None:
+    """MULTI-ref sibling of the SCALAR force-push target — the force-push analog
+    of _extract_push_to_main_set (#1195 OBS-I, reversing the OBS-G scope boundary
+    under its own ratified proof). Same skeleton (fail-safe prefix, single
+    guarded `push\\s` search, K flag bound, remote-agnostic positionals[1:],
+    `<2 -> None` scalar boundary, injective netstring `_canonical_join` identity)
+    PLUS the three OBS-I-specific layers:
+      (a) the ALLOWLIST-INVERSION census + the value-`-o` resolution + the force
+          trigger — ONE raw-token walk (_resolve_neutral_force_tail);
+      (b) FORCED-FORM NORMALIZATION: class-wide --force/-f upgrades every element
+          to its `+` form so the identity tracks WHICH REFS GET FORCED — the
+          mixed-set plain->forced collision cure (`+feature main` stays DISTINCT
+          from `--force +feature main`) while `--force feature main` ==
+          `+feature +main` (ratified: the same operation, one identity);
+      (c) the `:`-element DELETE GUARD (defense-in-depth for the refspec-syntax
+          channel when force wins classification): None on any ':'-leading
+          element after '+'-strip — a delete can never smuggle into a mintable
+          force set.
+    """
+    prefix = _executable_prefix(command)
+    if prefix is None:
+        return None                     # fail-safe (unparseable / procsub)
+    _pm = re.search(_GIT_PREFIX + r"push\s(.*)$", prefix)
+    if _pm is None:
+        return None                     # well-formed push only (excludes glue)
+    _tail = _pm.group(1).split()
+    if sum(1 for t in _tail if t.startswith("-")) > _MAX_GLOBAL_FLAG_TOKENS:
+        return None                     # perf bound (mirrors the OBS-D/E flag walk)
+    _resolved = _resolve_neutral_force_tail(_tail)
+    if _resolved is None:
+        return None                     # non-neutral / unknown / malformed flag
+    _clean_tail, _force = _resolved
+    refspecs = [_strip_surrounding_quotes(r) for r in _push_positionals(_clean_tail)[1:]]
+    if len(refspecs) < 2:
+        return None                     # <2 -> the scalar target_ref path owns it
+    if _force:
+        refspecs = [r if r.startswith("+") else "+" + r for r in refspecs]
+    if any(r.lstrip("+").startswith(":") for r in refspecs):
+        return None                     # delete-refspec guard (fail-safe)
+    return _canonical_join(sorted(set(refspecs)))
+
+
 # git-push value-taking OPTION flags whose VALUE token must be skipped when
 # counting refspec positionals (else a contrived `-o ':weird'` push-option leaks
 # a fake delete refspec — the #1037 brittleness class). Their `--flag=value` form
@@ -1602,6 +1755,11 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
                      canonical sort+dedup FULL-refspec identity via the shared
                      netstring _canonical_join (remote-agnostic; the scalar
                      target_ref owns the single-ref form — exactly one populated)
+        force_push_set: str (force-push MULTI-ref #1195 OBS-I, >=2 refspecs) —
+                     canonical FORCED-NORMALIZED identity (class-wide --force
+                     upgrades elements to '+'-form) gated by the ref-scope-neutral
+                     flag allowlist; exactly one of target_ref / push_set /
+                     force_push_set populated per command
         mass_target: str (remote-mass-delete #1062b) — normalized identity STRING
                      _canonical_join([<sorted-mass-flags>, <remote-or-implicit-marker>, *<sorted-deduped-refspecs>])
         protected_branch: str (branch-protection #1063) — the branch from the
@@ -1672,19 +1830,30 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
         if target_ref is not None:
             context["target_ref"] = target_ref
         elif op_type == "push-to-main":
-            # SCOPE BOUNDARY (#1195 OBS-G): the MULTI-ref set identity is
-            # populated ONLY for push-to-main, ONLY when the scalar refused
-            # (multi-ref -> target_ref None). force-push NEVER reaches this elif,
-            # and _extract_force_push_target_ref above is byte-untouched, so a
-            # multi-ref force-push / delete stays gated-but-unmintable (its
-            # relaxation has no security proof in scope). Exactly ONE of
-            # `target_ref` / `push_set` is populated per command (the scalar's
-            # `!=2 -> None` and the set's `<2 -> None` are mutually exclusive by
-            # construction), so a scalar token can never cross-authorize a set
-            # command or vice-versa.
+            # DISTINCT-set boundary (#1195 OBS-G): the MULTI-ref push-to-main
+            # identity, populated ONLY when the scalar refused (multi-ref ->
+            # target_ref None). Exactly ONE of `target_ref` / `push_set` /
+            # `force_push_set` is populated per command — the scalar's `!=2 ->
+            # None`, the sets' `<2 -> None`, and this op split are mutually
+            # exclusive by construction — so no scalar/set or cross-op
+            # cross-authorization window exists.
             push_set = _extract_push_to_main_set(command)
             if push_set is not None:
                 context["push_set"] = push_set
+        else:
+            # force-push (#1195 OBS-I, reversing the OBS-G scope boundary under
+            # its own ratified proof): the MULTI-ref FORCED-NORMALIZED set
+            # identity, gated by the ref-scope-neutral flag ALLOWLIST (see
+            # _extract_force_push_set) — a delete/mass/scope-expander/unknown
+            # flag on the execution or the approval derives force_push_set=None
+            # and fails SAFE to gated-but-unmintable / read-refused. The scalar
+            # _extract_force_push_target_ref above remains byte-untouched;
+            # multi-ref DELETE spellings still never mint (delete never gains a
+            # set — they classify remote-ref-delete/mass, not force-push, and a
+            # force-masked delete flag fails the allowlist).
+            force_push_set = _extract_force_push_set(command)
+            if force_push_set is not None:
+                context["force_push_set"] = force_push_set
     elif op_type == "remote-ref-delete":
         # #1062a: REUSE the `target_ref` key — the parser yields a ref, the key is
         # semantically right, and the op-class identity (checked FIRST in the read

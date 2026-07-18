@@ -585,14 +585,34 @@ def _token_matches_command(token: dict, command: str) -> bool:
             _both_present_equal(context.get("target_ref"), cmd.get("target_ref"))
             or _both_present_equal(context.get("push_set"), cmd.get("push_set"))
         )
-    if token_op in ("force-push", "remote-ref-delete"):
+    if token_op == "force-push":
+        # KD-6 target bind, widened for the MULTI-ref set (#1195 OBS-I — the
+        # push-to-main/branch_set split precedent): SINGLE-ref scalar `target_ref`
+        # OR MULTI-ref canonical `force_push_set`, set-EQUALITY on the injective
+        # FORCED-NORMALIZED identity — the identity tracks WHICH refs get forced,
+        # so a plain-mixed token can NOT authorize the --force spelling of the
+        # same refs or vice versa (the plain->forced escalation stays closed),
+        # while `--force feature main` and `+feature +main` — the same operation
+        # — share one identity. The ALLOWLIST guard in the shared extractor means
+        # a delete/mass/scope-expander/unknown-flag EXECUTION derives
+        # force_push_set=None and is REFUSED here via the absent-side rule
+        # (mint and read are the same guarded extractor — the escalation closes
+        # in both directions by construction). Exactly one of target_ref /
+        # force_push_set is present per command; the a2 bound_flags equality
+        # above still discriminates --no-verify.
+        return (
+            _both_present_equal(context.get("target_ref"), cmd.get("target_ref"))
+            or _both_present_equal(context.get("force_push_set"), cmd.get("force_push_set"))
+        )
+    if token_op == "remote-ref-delete":
         # KD-6 (SECURITY-RATIFICATION-PENDING): the destination ref must match
-        # explicitly — an op-type-only floor would let a 'force-push feature'
-        # approval authorize 'force-push main'. An implicit/multi-ref/unparseable
-        # ref is ABSENT in extract_command_context, so this REFUSES it (a
-        # multi-ref force-push stays unmintable — the OBS-G set relaxation is
-        # confined to push-to-main above).
-        # #1062a: remote-ref-delete ALSO binds on target_ref (the deleted ref); the
+        # explicitly — an op-type-only floor would let a delete-feature approval
+        # authorize a delete-main. An implicit/multi-ref/unparseable ref is
+        # ABSENT in extract_command_context, so this REFUSES it — delete stays
+        # SCALAR-ONLY and NEVER gains a set (deliberate: deleting refs in bulk is
+        # rarely good-faith; multi-ref delete spellings remain
+        # gated-but-unmintable).
+        # #1062a: remote-ref-delete binds on target_ref (the deleted ref); the
         # op-type identity checked above keeps a remote-ref-delete token from
         # cross-authorizing a force-push/push-to-main sharing the same target_ref
         # (the lead Q1 distinct-op-class guarantee).
