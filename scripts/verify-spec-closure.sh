@@ -3,7 +3,7 @@
 # Verifies dual-binding closure between the spec's requirement index and the
 # two conformance documents:
 #
-#   spec/pact-protocol.md      — requirement index (the closure denominator)
+#   spec/protocol.md      — requirement index (the closure denominator)
 #   spec/annex-claude-code.md  — as-built audit rows
 #   spec/binding-langchain.md  — prospective binding rows
 #
@@ -61,7 +61,7 @@ ANNEX_STATUSES = {"satisfied", "satisfied-with-deviation", "unsatisfied", "not-a
 CONFIDENCE_TIERS = {"clean", "plausible-with-pattern", "gap"}
 ANNOTATIONS = {"", "structural"}
 
-SPEC_MD = os.environ.get("VERIFY_SPEC_MD", "spec/pact-protocol.md")
+SPEC_MD = os.environ.get("VERIFY_SPEC_MD", "spec/protocol.md")
 ANNEX_MD = os.environ.get("VERIFY_ANNEX_MD", "spec/annex-claude-code.md")
 BINDING_MD = os.environ.get("VERIFY_BINDING_MD", "spec/binding-langchain.md")
 

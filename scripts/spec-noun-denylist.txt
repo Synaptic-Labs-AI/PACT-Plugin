@@ -5,7 +5,7 @@
 # Blank lines and lines starting with # are ignored.
 #
 # These are substrate mechanism names that must not appear in the
-# spec's normative core (spec/pact-protocol.md + spec/schemas/).
+# spec's normative core (spec/protocol.md + spec/schemas/).
 # The annex and binding documents are exempt surfaces by design and
 # are not scanned. Schema FIELD names (protocol payload vocabulary)
 # are not listed here — the denylist targets mechanism names only.

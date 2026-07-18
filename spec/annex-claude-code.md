@@ -1,6 +1,6 @@
 <!--
   spec/annex-claude-code.md — as-built conformance annex for the Claude Code
-  PACT plugin. One row per active requirement key of spec/pact-protocol.md,
+  PACT plugin. One row per active requirement key of spec/protocol.md,
   auditing the plugin realization row-by-row. Consumed by readers assessing
   the plugin's conformance and by scripts/verify-spec-closure.sh (dual-binding
   closure against the requirement index).
@@ -13,11 +13,11 @@
 - **Realization**: PACT plugin for Claude Code, version **4.6.8**, commit `b4041ccf`.
 - **Fork point**: this is the realization the specification was extracted
   from (specification version 0.1.0, fork point restated in
-  `spec/README.md` and `spec/pact-protocol.md` §0). The audited version and
+  `spec/README.md` and `spec/protocol.md` §0). The audited version and
   the fork point coincide: this annex records extraction-time
   synchronization, and later plugin versions require re-audit.
 - **Requirement set**: the requirement index and requirement text of
-  `spec/pact-protocol.md` as of commit `716de286` (64 active keys, levels 1
+  `spec/protocol.md` as of commit `716de286` (64 active keys, levels 1
   through 4).
 - **Citations**: paths in the Realizing-mechanism column are relative to
   the plugin root (`pact-plugin/`). Code files are cited as realizing

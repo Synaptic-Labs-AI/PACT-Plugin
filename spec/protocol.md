@@ -1,5 +1,5 @@
 <!--
-  spec/pact-protocol.md — the PACT protocol specification (normative core).
+  spec/protocol.md — the PACT protocol specification (normative core).
   Single-spine document: terminology, substrate interfaces, conformance rules,
   and the keyed requirement levels L1-L4. Consumed by conformance annexes,
   prospective binding documents, and the validation scripts under scripts/.

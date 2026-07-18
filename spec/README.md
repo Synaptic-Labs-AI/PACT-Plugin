@@ -1,8 +1,8 @@
 <!--
   spec/README.md — orientation for the PACT protocol specification.
-  Points readers at the normative core (pact-protocol.md), the schemas,
+  Points readers at the normative core (protocol.md), the schemas,
   and the conformance model. The fork-point declaration below is mirrored
-  in pact-protocol.md §0 and in every conformance annex header.
+  in protocol.md §0 and in every conformance annex header.
 -->
 
 # PACT Protocol Specification
@@ -20,7 +20,7 @@ semantics can be audited on — or ported to — other substrates.
 
 | File | Role |
 |---|---|
-| `pact-protocol.md` | **Normative core.** Terminology, the six substrate interfaces, conformance rules, and the keyed requirement levels L1–L4 |
+| `protocol.md` | **Normative core.** Terminology, the six substrate interfaces, conformance rules, and the keyed requirement levels L1–L4 |
 | `schemas/*.schema.json` | Normative payload shapes (HANDOFF, teachback, signal, rejection), referenced by keyed requirements |
 | `schemas/fixtures/` | Valid and invalid example instances for every schema |
 

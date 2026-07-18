@@ -1,7 +1,7 @@
 <!--
   spec/binding-langchain.md — prospective binding of the PACT protocol onto
   the LangChain stack (LangGraph runtime, LangChain agent middleware, Deep
-  Agents harness). One row per active requirement key of spec/pact-protocol.md
+  Agents harness). One row per active requirement key of spec/protocol.md
   with a confidence tier and evidence citation per row. Consumed by readers
   assessing protocol portability and by scripts/verify-spec-closure.sh
   (dual-binding closure against the requirement index).

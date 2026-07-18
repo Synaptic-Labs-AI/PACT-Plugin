@@ -16,7 +16,7 @@
 #   by this anchor check — their lifecycle semantics live in prose, not here.
 # - "$id" semver cross-check: the urn:pact:spec:<semver> segment of every
 #   schema $id must equal the Specification version declared in
-#   spec/pact-protocol.md section 0 (the same-change bump convention of the
+#   spec/protocol.md section 0 (the same-change bump convention of the
 #   spec's Appendix A). Skipped with a note if the spec document is absent.
 #
 # Constant compares against source (fail-loud when the source constant is
@@ -64,7 +64,7 @@ import re
 import sys
 
 SCHEMAS_DIR = os.environ.get("VERIFY_SCHEMAS_DIR", "spec/schemas")
-SPEC_MD = os.environ.get("VERIFY_SPEC_MD", "spec/pact-protocol.md")
+SPEC_MD = os.environ.get("VERIFY_SPEC_MD", "spec/protocol.md")
 SOURCE_DIR = "pact-plugin/hooks/shared"
 TEACHBACK_SOURCE = os.path.join(SOURCE_DIR, "teachback_schema.py")
 WAIT_SOURCE = os.path.join(SOURCE_DIR, "intentional_wait.py")

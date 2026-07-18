@@ -1,6 +1,6 @@
 #!/bin/bash
 # scripts/verify-spec-nouns.sh
-# Scans the spec's committed prose surface (spec/pact-protocol.md +
+# Scans the spec's committed prose surface (spec/protocol.md +
 # spec/README.md + spec/schemas/*.json) for substrate mechanism nouns that
 # must not appear there. Patterns live in scripts/spec-noun-denylist.txt
 # (CASE-INSENSITIVE fixed strings, one per line — 'Orchestrator',
@@ -8,7 +8,7 @@
 # capitalization variants of denylisted nouns through).
 #
 # Rules:
-# - spec/pact-protocol.md is scanned in FULL — informative sections included.
+# - spec/protocol.md is scanned in FULL — informative sections included.
 # - spec/README.md is scanned the same way (it carries the framework-agnostic
 #   claim, so substrate nouns must not accumulate there either).
 # - Schema JSON files are scanned against a projection with every "$comment"
@@ -34,7 +34,7 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DENYLIST="$SCRIPT_DIR/spec-noun-denylist.txt"
-SPEC_MD="${VERIFY_SPEC_MD:-spec/pact-protocol.md}"
+SPEC_MD="${VERIFY_SPEC_MD:-spec/protocol.md}"
 SPEC_README="${VERIFY_SPEC_README:-spec/README.md}"
 SCHEMAS_DIR="${VERIFY_SCHEMAS_DIR:-spec/schemas}"
 
