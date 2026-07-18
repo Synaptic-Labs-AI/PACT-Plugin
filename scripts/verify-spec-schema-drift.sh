@@ -8,10 +8,16 @@
 # - Valid JSON (parse failure is a failure, not a skip).
 # - "$schema" declares draft 2020-12.
 # - "$id" matches urn:pact:spec:<semver>:<basename>.
-# - "$comment" extraction anchor present and non-empty; every file path it
-#   cites must exist (a vanished source file means the pin has drifted).
-#   Prose-sourced shapes (handoff, signal, rejection) are covered by this
-#   anchor check — their lifecycle semantics live in prose, not here.
+# - "$comment" extraction anchor present and non-empty, and it must cite at
+#   least ONE recognizable source-file token (*.py / *.md) — an anchor with
+#   zero file citations is vacuous (nothing to pin against) and fails; every
+#   file path it cites must exist (a vanished source file means the pin has
+#   drifted). Prose-sourced shapes (handoff, signal, rejection) are covered
+#   by this anchor check — their lifecycle semantics live in prose, not here.
+# - "$id" semver cross-check: the urn:pact:spec:<semver> segment of every
+#   schema $id must equal the Specification version declared in
+#   spec/pact-protocol.md section 0 (the same-change bump convention of the
+#   spec's Appendix A). Skipped with a note if the spec document is absent.
 #
 # Constant compares against source (fail-loud when the source constant is
 # missing — a renamed constant is drift, not a skip):
@@ -58,6 +64,7 @@ import re
 import sys
 
 SCHEMAS_DIR = os.environ.get("VERIFY_SCHEMAS_DIR", "spec/schemas")
+SPEC_MD = os.environ.get("VERIFY_SPEC_MD", "spec/pact-protocol.md")
 SOURCE_DIR = "pact-plugin/hooks/shared"
 TEACHBACK_SOURCE = os.path.join(SOURCE_DIR, "teachback_schema.py")
 WAIT_SOURCE = os.path.join(SOURCE_DIR, "intentional_wait.py")
@@ -66,8 +73,20 @@ GATE_SOURCE = "pact-plugin/hooks/task_lifecycle_gate.py"
 CONSTANTS_SOURCE = os.path.join(SOURCE_DIR, "constants.py")
 
 DRAFT_2020_12 = "https://json-schema.org/draft/2020-12/schema"
-ID_RE = re.compile(r"^urn:pact:spec:[0-9]+\.[0-9]+\.[0-9]+:(?P<name>[A-Za-z0-9_.-]+)$")
+ID_RE = re.compile(r"^urn:pact:spec:(?P<semver>[0-9]+\.[0-9]+\.[0-9]+):(?P<name>[A-Za-z0-9_.-]+)$")
 PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:py|md)")
+SPEC_VERSION_RE = re.compile(r"\*\*Specification version\*\*:\s*([0-9]+\.[0-9]+\.[0-9]+)")
+
+
+def get_spec_version(path):
+    """Semver declared in the spec document's Status section, or None when
+    the spec document (or its version line) is absent — callers skip the
+    cross-check with a printed note in that case."""
+    if not os.path.isfile(path):
+        return None
+    with open(path) as f:
+        match = SPEC_VERSION_RE.search(f.read())
+    return match.group(1) if match else None
 
 
 def extract_constants(path, names):
@@ -146,9 +165,10 @@ def find_object_with_required(node, member_names):
 
 
 class Checker:
-    def __init__(self, constants):
+    def __init__(self, constants, spec_version=None):
         self.errors = []
         self.constants = constants
+        self.spec_version = spec_version
 
     def fail(self, msg):
         self.errors.append(msg)
@@ -161,11 +181,23 @@ class Checker:
         match = ID_RE.fullmatch(schema_id) if isinstance(schema_id, str) else None
         if not match:
             self.fail(f"{basename}: $id {schema_id!r} does not match urn:pact:spec:<semver>:<name>")
-        elif match.group("name") != basename:
-            self.fail(f"{basename}: $id names {match.group('name')!r}, file is {basename!r}")
+        else:
+            if match.group("name") != basename:
+                self.fail(f"{basename}: $id names {match.group('name')!r}, file is {basename!r}")
+            if self.spec_version is not None and match.group("semver") != self.spec_version:
+                self.fail(
+                    f"{basename}: $id semver {match.group('semver')} != specification version "
+                    f"{self.spec_version} declared in the spec document (same-change bump convention)"
+                )
         comment = doc.get("$comment")
         if not isinstance(comment, str) or not comment.strip():
             self.fail(f"{basename}: missing or empty $comment extraction anchor")
+            return
+        if not PATH_TOKEN_RE.findall(comment):
+            self.fail(
+                f"{basename}: $comment extraction anchor cites no source file (*.py/*.md) — "
+                f"a citation-free anchor is vacuous (nothing to pin against)"
+            )
             return
         for token in PATH_TOKEN_RE.findall(comment):
             # Citations may be repo-relative or plugin-relative (the schemas'
@@ -280,8 +312,8 @@ def load_constants():
     return constants
 
 
-def run_checks(schemas_dir, constants):
-    checker = Checker(constants)
+def run_checks(schemas_dir, constants, spec_version=None):
+    checker = Checker(constants, spec_version)
     if not os.path.isdir(schemas_dir):
         print(f"SKIP: {schemas_dir}/ not found (not yet authored)")
         return checker, 0
@@ -414,6 +446,12 @@ def self_test(constants):
             v for v in doc["properties"]["level"]["enum"] if v != "blocker"
         ]
 
+    def mutate_id_semver(doc):
+        doc["$id"] = "urn:pact:spec:9.9.9:teachback.schema.json"
+
+    def mutate_citation_free_anchor(doc):
+        doc["$comment"] = "Normative appendix; shape settled by maintainer consensus."
+
     # (name, target basename, mutate, expected_rc, expected_msg)
     cases = [
         ("clean fixture stays GREEN", "teachback", None, 0, None),
@@ -427,6 +465,8 @@ def self_test(constants):
         ("handoff required-set drift goes RED", "handoff", mutate_handoff_drop_required, 1, "required field set drift"),
         ("required reasoning_chain goes RED", "handoff", mutate_handoff_require_rc, 1, "must not be required"),
         ("signal level enum drift goes RED", "signal", mutate_signal_drop_level, 1, "level enum drift"),
+        ("$id semver out of sync with spec version goes RED", "teachback", mutate_id_semver, 1, "same-change bump convention"),
+        ("citation-free $comment anchor goes RED", "teachback", mutate_citation_free_anchor, 1, "vacuous"),
     ]
 
     print("=== Self-Test (known-bad fixtures must go RED) ===")
@@ -445,7 +485,7 @@ def self_test(constants):
                     json.dump(doc, f, indent=2)
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                checker, _ = run_checks(tmpdir, constants)
+                checker, _ = run_checks(tmpdir, constants, spec_version="0.1.0")
             rc = 1 if checker.errors else 0
             msg_ok = expected_msg is None or any(expected_msg in e for e in checker.errors)
             if rc == expected_rc and msg_ok:
@@ -471,7 +511,12 @@ if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
 
 print("=== Spec Schema Drift Verification ===")
 print("")
-result, scanned = run_checks(SCHEMAS_DIR, CONSTANTS)
+SPEC_VERSION = get_spec_version(SPEC_MD)
+if SPEC_VERSION is None:
+    print(f"NOTE: no Specification version found in {SPEC_MD} — $id semver cross-check skipped")
+else:
+    print(f"Specification version: {SPEC_VERSION} (from {SPEC_MD}; $id semver cross-check active)")
+result, scanned = run_checks(SCHEMAS_DIR, CONSTANTS, SPEC_VERSION)
 print("")
 print("--- Variety band cuts (manual prose cross-check; not schema shapes) ---")
 print(f"COMPACT_MAX={CONSTANTS['COMPACT_MAX']}  ORCHESTRATE_MAX={CONSTANTS['ORCHESTRATE_MAX']}  PLAN_MODE_MAX={CONSTANTS['PLAN_MODE_MAX']}")

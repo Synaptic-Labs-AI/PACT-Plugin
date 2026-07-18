@@ -253,10 +253,16 @@ class Checker:
                                 f"{path}:{line_no}: {key} is not-applicable but no predicate registry was found "
                                 f"(no table with a 'Predicate' header in the spec or this document) — citation unverifiable"
                             )
-                        elif not any(p and p in detail_cell for p in declared_predicates):
+                        elif not (set(re.findall(r"[A-Za-z0-9][A-Za-z0-9-]*", detail_cell))
+                                  & {p for p in declared_predicates if p}):
+                            # Exact-token match: the cell is tokenized on
+                            # predicate-name characters, so a superstring like
+                            # 'almost-pull-only-waiters' does NOT discharge a
+                            # citation of 'pull-only-waiters'.
                             self.fail(
                                 f"{path}:{line_no}: {key} is not-applicable citing '{detail_cell}' — "
-                                f"no DECLARED predicate matches (declared: {sorted(declared_predicates)}); "
+                                f"no DECLARED predicate matches as an exact token "
+                                f"(declared: {sorted(declared_predicates)}); "
                                 f"free-form non-applicability is a closure failure"
                             )
                         else:
@@ -399,6 +405,10 @@ def self_test():
          GOOD_ANNEX.replace("| not-applicable | | pull-only-waiters |",
                             "| not-applicable | | push-only-dreamers |"),
          GOOD_BINDING, 1, "free-form non-applicability"),
+        ("not-applicable citing a predicate-SUPERSTRING token goes RED", GOOD_SPEC,
+         GOOD_ANNEX.replace("| not-applicable | | pull-only-waiters |",
+                            "| not-applicable | | almost-pull-only-waiters |"),
+         GOOD_BINDING, 1, "exact token"),
         ("not-applicable with NO predicate registry anywhere goes RED",
          GOOD_SPEC.replace("| `pull-only-waiters` | A waiting actor observes state by reading |\n", "")
                   .replace("| `broadcast-channel` | One send reaches all active actors |\n", "")
