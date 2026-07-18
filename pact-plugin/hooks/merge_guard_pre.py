@@ -516,8 +516,9 @@ def _token_matches_command(token: dict, command: str) -> bool:
     # Only when BOTH tiers abstain (0 or >=2 candidate legs — ambiguity) do we
     # fall back to the WHOLE command: the existing over-binding scan, the SAFE
     # over-block direction; ambiguity can only collapse WIDER, never narrower.
-    # Op/target are still derived the SAME way the mint side does (mint
-    # isolates per-region via locate_command_regions), so the two arms cannot drift.
+    # Op/target are still derived the SAME way the mint side does (mint isolates
+    # per-region via locate_command_regions AND per-leg via _extraction_surface,
+    # #1195 OBS-H), so the two arms cannot drift.
     cmd = extract_command_context(
         _single_destructive_leg(command)
         or _single_detectable_leg(command)
