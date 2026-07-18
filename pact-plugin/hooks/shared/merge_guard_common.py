@@ -3469,8 +3469,20 @@ def _flag_condition_danger_op(command: str) -> str | None:
         if _pm is not None:                                          #   (excludes push--force glue)
             _tail = _pm.group(1).split()
             if sum(1 for t in _tail if t.startswith("-")) <= _MAX_GLOBAL_FLAG_TOKENS:  # perf bound
-                for _refspec in _push_positionals(_tail)[1:]:        # REFSPECS only (skip remote)
-                    if _PUSH_MAIN_DST_RE.fullmatch(_strip_surrounding_quotes(_refspec)):
+                _refspecs = [_strip_surrounding_quotes(r) for r in _push_positionals(_tail)[1:]]
+                # +<refspec> force-push (#1195 OBS-F): a leading '+' on ANY refspec is git's
+                # documented FORCE spelling — symmetric with `--force` → force-push for any
+                # target. Checked AFTER delete/mass (a `+:main` / `--delete +main` is a DELETE,
+                # claimed above) and BEFORE push-to-main (a `+main` FORCES → force-push, never
+                # push-to-main: a push-to-main token must NOT authorize a forced ref update;
+                # `git push origin +feature main` = force-push). `_PUSH_MAIN_DST_RE.fullmatch`
+                # is already False on a `+`-leading token (the src class excludes leading '+'),
+                # so no conflict. Over-block-safe by construction: force-push already gates any
+                # target; `+ref` is just another spelling. Bare `+` is not a refspec (len > 1).
+                if any(r.startswith("+") and len(r) > 1 for r in _refspecs):
+                    return "force-push"
+                for _r in _refspecs:                                  # REFSPECS only (skip remote)
+                    if _PUSH_MAIN_DST_RE.fullmatch(_r):
                         return "push-to-main"
     return None
 

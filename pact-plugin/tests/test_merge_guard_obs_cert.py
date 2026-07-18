@@ -427,3 +427,62 @@ class TestObsEPerLegPushToMain:
                 + OBS_E_OVER_BLOCK_STAYS_UNGATED + OBS_E_PERLEG_RESIDUALS)
         for _label, cmd in rows:
             assert (DETECT(cmd) is not None) == (D(cmd) is True), "mint!=read on %r" % cmd
+
+
+# =========================================================================================
+# OBS-F — `+refspec` force-push recognition (commit 2). A leading `+` on any push refspec is
+# git's documented FORCE spelling (`git push origin +main` force-updates main), but was
+# UNRECOGNIZED for any target (detect=None) while `--force` gated. The +refspec branch in the
+# union arm — BETWEEN mass-delete and push-to-main — gates it as force-push; via the OBS-E/F-PL
+# per-leg loops it also gates in a NON-first leg. Over-block-safe by construction (force-push
+# already gates any target; `+ref` is another spelling of the same op).
+# =========================================================================================
+_PF2 = "git " + "push "
+OBS_F_FORCE_PUSH = [
+    ("plus-main", _PF2 + "origin +main"),
+    ("plus-master", _PF2 + "origin +master"),
+    ("plus-feature", _PF2 + "origin +feature"),
+    ("plus-feature-colon-main", _PF2 + "origin +feature:main"),
+    ("plus-refs-heads-main", _PF2 + "origin +refs/heads/main"),
+    ("cd-plus-main-perleg", "cd /repo && " + _PF2 + "origin +main"),
+    ("cd-plus-feature-perleg", "cd /x && " + _PF2 + "origin +feature"),
+    ("quoted-plus-notaforce", _PF2 + "origin '+notaforce'"),
+]
+OBS_F_PRECEDENCE = [
+    # +feature main: the + forces → force-push, never push-to-main (a push-to-main token must
+    # not authorize a forced ref update).
+    ("plus-feature-then-main-force-wins", _PF2 + "origin +feature main", "force-push"),
+    # a + on a delete/mass form: delete/mass claim it FIRST (checked above the +refspec branch).
+    ("plus-colon-main-delete-wins", _PF2 + "origin +:main", "remote-ref-delete"),
+    ("delete-plus-main-delete-wins", _PF2 + "origin --delete +main", "remote-ref-delete"),
+    ("mirror-plus-main-mass-wins", _PF2 + "--mirror origin +main", "remote-mass-delete"),
+]
+
+
+class TestObsFPlusRefspecForcePush:
+    @pytest.mark.parametrize("label,cmd", OBS_F_FORCE_PUSH, ids=[r[0] for r in OBS_F_FORCE_PUSH])
+    def test_plus_refspec_gates_force_push(self, label, cmd):
+        assert load_baseline().detect_command_operation_type(cmd) is None, "not ungated at base"
+        assert mgc.detect_command_operation_type(cmd) == "force-push"
+        assert D(cmd) is True
+
+    @pytest.mark.parametrize("label,cmd,want", OBS_F_PRECEDENCE, ids=[r[0] for r in OBS_F_PRECEDENCE])
+    def test_plus_refspec_precedence(self, label, cmd, want):
+        assert mgc.detect_command_operation_type(cmd) == want, "precedence wrong: %r" % cmd
+        assert D(cmd) is True
+
+    def test_bare_plus_is_not_a_refspec(self):
+        # `git push origin +` (bare '+') is not a refspec — the len>1 guard excludes it.
+        assert mgc.detect_command_operation_type(_PF2 + "origin +") is None
+        assert D(_PF2 + "origin +") is False
+
+    def test_non_plus_forms_unaffected(self):
+        assert mgc.detect_command_operation_type(_PF2 + "origin main") == "push-to-main"
+        assert mgc.detect_command_operation_type(_PF2 + "origin --delete main") == "remote-ref-delete"
+        assert mgc.detect_command_operation_type(_PF2 + "--for" + "ce origin main") == "force-push"
+        assert mgc.detect_command_operation_type(_PF2 + "origin feature") is None
+
+    def test_plus_refspec_mint_read_symmetry(self):
+        rows = OBS_F_FORCE_PUSH + [(l, c) for l, c, _ in OBS_F_PRECEDENCE]
+        for _label, cmd in rows:
+            assert (mgc.detect_command_operation_type(cmd) is not None) == (D(cmd) is True), cmd
