@@ -16,6 +16,12 @@
   `spec/README.md` and `spec/protocol.md` §0). The audited version and
   the fork point coincide: this annex records extraction-time
   synchronization, and later plugin versions require re-audit.
+- **Co-release**: specification 0.1.0 is co-released with plugin
+  version 4.7.0, and post-specification plugin divergence is tracked from
+  that release. This marker is distinct from the audit baseline above:
+  this annex audits version 4.6.8 at the extraction commit only, and
+  plugin changes between the audited commit and the co-released version
+  are not covered by this audit.
 - **Requirement set**: the requirement index and requirement text of
   `spec/protocol.md` as of commit `716de286` (64 active keys, levels 1
   through 4).

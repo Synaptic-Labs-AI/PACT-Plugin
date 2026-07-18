@@ -66,6 +66,12 @@ is attached to a keyed requirement.
 - **Specification version**: 0.1.0
 - **Fork point**: extracted from the PACT plugin for Claude Code,
   version 4.6.8, commit `b4041ccf`.
+- **Co-release**: specification 0.1.0 is co-released with plugin
+  version 4.7.0; divergence between the specification and the plugin is
+  tracked from that release onward. The co-release marker is a versioning
+  statement, not an audit claim — the audited baseline remains the
+  extraction commit above, and plugin changes between the audited commit
+  and the co-released version are outside the conformance annex's audit.
 
 From the fork point onward the specification is versioned independently of
 any realization (semver; the schema `$id` URNs embed the specification
