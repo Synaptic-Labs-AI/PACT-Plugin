@@ -164,22 +164,25 @@ def _selected_option_text(options: object, answer: object) -> str | None:
 
 def _target_value(cmd_ctx: dict) -> str | None:
     """The op-class target value (pr_number / branch / branch_set / target_ref /
-    mass_target / protected_branch) from an extracted command context, or None. A located
-    region is a COMPLETE (op, target) pair only when this is non-None — an op without a
-    target contributes NO pair to the multiplicity gate.
+    push_set / mass_target / protected_branch) from an extracted command context, or None.
+    A located region is a COMPLETE (op, target) pair only when this is non-None — an op
+    without a target contributes NO pair to the multiplicity gate.
 
     MINT-SIDE FOUR-SITE ELEMENT (#1064): every op-class that uses a NEW context key MUST
     be enumerated here, or the mint cannot extract its target → the op gates on the read
     side but is gated-but-unmintable. remote-ref-delete reuses `target_ref` (already
     listed); remote-mass-delete (#1062b) uses the distinct `mass_target`; branch-protection
     (#1063) uses `protected_branch`; multi-branch force-delete (#1129) uses the distinct
-    `branch_set` (its scalar single-branch sibling `branch` is already listed) — each added
-    here so that op MINTS, not just gates."""
+    `branch_set` (its scalar single-branch sibling `branch` is already listed);
+    multi-ref push-to-main (#1195 OBS-G) uses the distinct `push_set` (its scalar
+    single-ref sibling `target_ref` is already listed) — each added here so that op
+    MINTS, not just gates."""
     return (
         cmd_ctx.get("pr_number")
         or cmd_ctx.get("branch")
         or cmd_ctx.get("branch_set")
         or cmd_ctx.get("target_ref")
+        or cmd_ctx.get("push_set")
         or cmd_ctx.get("mass_target")
         or cmd_ctx.get("protected_branch")
     )

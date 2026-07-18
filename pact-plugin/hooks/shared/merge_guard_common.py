@@ -1110,6 +1110,44 @@ def _extract_force_push_target_ref(command: str) -> str | None:
     return refspec or None
 
 
+def _extract_push_to_main_set(command: str) -> str | None:
+    """MULTI-ref sibling of the SCALAR push-to-main target (_extract_force_push_target_ref).
+
+    Returns the canonical injective identity of the pushed REFSPECS (>=2), or None
+    when fewer than two refspecs are extractable (<2 -> the scalar path owns the
+    single-ref form: the BOUNDARY discriminator, so a push-to-main command
+    populates EXACTLY ONE of `target_ref` / `push_set` — #1195 OBS-G, the
+    branch/branch_set (#1129) precedent transferred). Reuses the netstring
+    `_canonical_join` SSOT (#1136): injective by construction and CONTENT-AGNOSTIC
+    (colon / `+` / comma / `refs/heads/` content never collides), JSON/str()-safe,
+    so mint==read symmetry and the token round-trip both hold. The identity is
+    over the FULL refspec tokens (`feature:main` kept, never its dst alone) — the
+    tighter binding: src:dst pairs bind exactly, and a `+refspec` element stays
+    distinct from its plain spelling. The refspecs are `_push_positionals(...)[1:]`
+    — the remote positional is SKIPPED (a remote-AGNOSTIC identity, mirroring the
+    scalar target_ref, which binds the ref only; security-ratified). Tokenization
+    mirrors the push-to-main DETECTION arm in `_flag_condition_danger_op`
+    (`.split()` + the K flag bound + `push\\s` well-formedness), so the refspecs
+    bound here are the SAME tokens the detection predicate walked. Fail-safe:
+    unparseable / procsub (`_executable_prefix` None) or a flag-flood (>K) -> None
+    -> the command stays gated-but-unmintable (a residual over-block, never an
+    over-broad token).
+    """
+    prefix = _executable_prefix(command)
+    if prefix is None:
+        return None                     # fail-safe (unparseable / procsub)
+    _pm = re.search(_GIT_PREFIX + r"push\s(.*)$", prefix)
+    if _pm is None:
+        return None                     # well-formed push only (excludes `push--force` glue)
+    _tail = _pm.group(1).split()
+    if sum(1 for t in _tail if t.startswith("-")) > _MAX_GLOBAL_FLAG_TOKENS:
+        return None                     # perf bound (mirrors the OBS-D/E flag walk)
+    refspecs = [_strip_surrounding_quotes(r) for r in _push_positionals(_tail)[1:]]
+    if len(refspecs) < 2:
+        return None                     # <2 -> the scalar target_ref path owns it (boundary)
+    return _canonical_join(sorted(set(refspecs)))   # sort+dedup+canonical (branch_set mirror)
+
+
 # git-push value-taking OPTION flags whose VALUE token must be skipped when
 # counting refspec positionals (else a contrived `-o ':weird'` push-option leaks
 # a fake delete refspec — the #1037 brittleness class). Their `--flag=value` form
@@ -1560,6 +1598,10 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
                      canonical sort+dedup+quote-strip names via the shared netstring _canonical_join (`len:name` framing,
                      injective by construction, content-agnostic — no delimiter collision)
         target_ref: str  (force-push / push-to-main, KD-6; remote-ref-delete #1062a)
+        push_set:   str  (push-to-main MULTI-ref #1195 OBS-G, >=2 refspecs) —
+                     canonical sort+dedup FULL-refspec identity via the shared
+                     netstring _canonical_join (remote-agnostic; the scalar
+                     target_ref owns the single-ref form — exactly one populated)
         mass_target: str (remote-mass-delete #1062b) — normalized identity STRING
                      _canonical_join([<sorted-mass-flags>, <remote-or-implicit-marker>, *<sorted-deduped-refspecs>])
         protected_branch: str (branch-protection #1063) — the branch from the
@@ -1629,6 +1671,20 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
         target_ref = _extract_force_push_target_ref(command)
         if target_ref is not None:
             context["target_ref"] = target_ref
+        elif op_type == "push-to-main":
+            # SCOPE BOUNDARY (#1195 OBS-G): the MULTI-ref set identity is
+            # populated ONLY for push-to-main, ONLY when the scalar refused
+            # (multi-ref -> target_ref None). force-push NEVER reaches this elif,
+            # and _extract_force_push_target_ref above is byte-untouched, so a
+            # multi-ref force-push / delete stays gated-but-unmintable (its
+            # relaxation has no security proof in scope). Exactly ONE of
+            # `target_ref` / `push_set` is populated per command (the scalar's
+            # `!=2 -> None` and the set's `<2 -> None` are mutually exclusive by
+            # construction), so a scalar token can never cross-authorize a set
+            # command or vice-versa.
+            push_set = _extract_push_to_main_set(command)
+            if push_set is not None:
+                context["push_set"] = push_set
     elif op_type == "remote-ref-delete":
         # #1062a: REUSE the `target_ref` key — the parser yields a ref, the key is
         # semantically right, and the op-class identity (checked FIRST in the read
