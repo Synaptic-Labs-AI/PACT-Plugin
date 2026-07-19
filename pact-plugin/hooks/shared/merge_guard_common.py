@@ -819,10 +819,23 @@ def _extract_pr_number(command: str) -> str | None:
 # the LITERAL `/pull/` path element, so digits inside owner/repo (`o/r-123`) are
 # never mistaken for the PR number; `(\d+)(?![\w-])` stops exactly at the PR
 # number, so a trailing path (`/pull/5/files`), query (`?diff=split`), or
-# fragment (`#c-9`) cannot extend or replace it. Matches ANY host (github.com AND
-# GitHub Enterprise) so an enterprise URL is not an over-block.
+# fragment (`#c-9`) cannot extend or replace it. The host char class accepts a
+# PORT (`ghe.corp:8443`) and USERINFO (`user@github.com`) so a faithful GHE-with-
+# port or userinfo url MINTS — gh RUNS both (empirically confirmed), so leaving
+# them target=None was a gated-but-unmintable over-block. The widen is HOST-
+# SEGMENT ONLY: the owner/repo group and the `/pull/(\d+)(?![\w-])` anchor are
+# unchanged, so the PR number still resolves exactly (no anchor drift). The host
+# is captured VERBATIM into the minted identity (NOT normalized): distinct
+# spellings mint distinct identities (`user@github.com` != `github.com`,
+# `ghe.corp:8443` != `ghe.corp`), so a token binds ONLY its own exact command and
+# can NEVER cross-authorize a different host/PR (mint==read by construction; over-
+# block-safe, never a launder — a deceptive `github.com@evil.com` mints its own
+# verbatim id and authorizes only that exact typed command). STILL UNMATCHED: a
+# BRACKETED IPv6-literal host (`https://[::1]/o/r/pull/9`) — `[`/`]` are outside
+# the class — a non-realistic faithful form that stays a safe-direction over-
+# block; widen to include `[]` only if a real gh IPv6 form ever appears.
 _GH_PULL_URL_RE = re.compile(
-    r"https?://([\w.-]+)/([\w.-]+/[\w.-]+)/pull/(\d+)(?![\w-])"
+    r"https?://([\w.@:-]+)/([\w.-]+/[\w.-]+)/pull/(\d+)(?![\w-])"
 )
 
 # The COMPLETE set of value-taking flags on `gh pr close` (verified against
@@ -958,6 +971,8 @@ def _extract_close_target(command: str) -> str | None:
     if positionals is None or len(positionals) != 1:
         return None
     target = _strip_surrounding_quotes(positionals[0])
+    if not target:
+        return None  # empty/degenerate positional -> abstain, never a garbage id
     # Classify the SINGLE positional (value-flag values already stripped, so a
     # digit/url/branch here IS the target, never a --repo/--comment value).
     if target.isdigit():
