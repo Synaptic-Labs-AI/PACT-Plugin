@@ -12986,6 +12986,32 @@ class TestTokenLifecycleExtensions:
         # counter-test: change LAYER1_SUCCESS_STDOUT_PATTERNS["force-push"]
         #               from None to a fixed string → assertion fails.
         # expected RED cardinality: {1}
+
+        IF YOU ARE HERE BECAUSE YOU ADDED `remote-ref-delete` OR
+        `remote-mass-delete`, READ THIS BEFORE UPDATING THE PIN.
+
+        Adding either key is not a mistake — it is a live deferred proposal. But it
+        RE-OPENS A QUESTION THAT IS CURRENTLY CLOSED, and updating this pin to match
+        your edit would close it silently.
+
+        The question: the per-leg op-filter widening lets an EARLIER leg claim a
+        verdict a later leg used to win, which RE-LABELS 216 commands across 6
+        distinct transitions (e.g. `cd /repo && git branch -Df temp && git push
+        origin main` classifies branch-delete, not push-to-main). That was measured
+        BENIGN for retirement — 0 tokens survive that previously retired.
+
+        WHY it is benign is the part your change disturbs. These rows never retired
+        at base either: they passed Block 1 and then failed the IDENTITY match
+        (`cmd_target` is None on a two-dangerous-leg fallback, against a token target
+        of `main`). Post-widening they fail EARLIER, at Block 1, precisely because the
+        two remote-delete classes are ABSENT from this table. Different mechanism,
+        same outcome — so the benignity currently rests on the identity mismatch AND
+        on that absence.
+
+        Add either key and those transitions begin clearing Block 1 again, leaving
+        only the identity mismatch. That may well still hold. But it has not been
+        measured, so: REDO THE RE-LABEL RETIREMENT ANALYSIS (216 commands, 6
+        transitions) before shipping the addition, and record the result here.
         """
         from shared.merge_guard_common import LAYER1_SUCCESS_STDOUT_PATTERNS
 

@@ -1615,26 +1615,82 @@ class TestBranchDeleteLiteralArmCrossLegSweep:
             "— detect is not consuming the shared leg seam"
         )
 
-    def test_literal_tuple_is_load_bearing_on_both_sides_via_golden_row(self, monkeypatch):
-        """Detect-side load-bearing discriminator, on the GOLDEN row
-        `cd /repo && git branch -D temp`: the union arm is first-leg-anchored
-        and abstains on it, so ONLY the literal tuple can catch it on either
-        side. Neutering the tuple ALONE (no identity slice) must drop BOTH the
-        gate (D False) and the classification (OP None) — proving the tuple, not
-        a neighboring family, carries this form. The single-leg `-D` /
-        `--delete --force` rows would NOT discriminate (the union arm also
-        recognizes their spellings in the first leg)."""
+    def test_golden_row_split_proof_each_mechanism_isolated(self, monkeypatch):
+        """SPLIT PROOF on the GOLDEN row `cd /repo && git branch -D temp`.
+
+        WHY THE PREVIOUS SHAPE HAD TO BE RE-DERIVED, not repaired. This test used to
+        neuter the literal tuple ALONE and assert the row went ungated, on the premise
+        that "the union arm is first-leg-anchored and abstains here, so ONLY the tuple
+        can catch it." That premise was falsified by design, not by drift: the per-leg
+        filter now carries `branch-delete`, so the union loop reaches this row too and
+        the tuple-only neuter no longer drops it. Loosening the old assertion would
+        have hidden a real change; the proof is re-derived instead.
+
+        WHY THE ENDPOINTS PROVE NOTHING NOW. After the widening there are TWO
+        independently sufficient covering mechanisms, so:
+          - `untouched -> gates` passes even if one mechanism is already silently dead
+            (the survivor covers the row);
+          - `both neutered -> ungated` ALSO passes if one is already dead.
+        Neither endpoint can detect a silently-dead mechanism. A bare either-covers
+        assertion is exactly the check that proves nothing.
+
+        THE DISCRIMINATING ASSERTION IS THE ONE THAT ISOLATES A SINGLE MECHANISM.
+        Rows 1 and 2 below each neuter ONE mechanism and require the OTHER to carry
+        the row alone; that is what makes this a SPLIT proof rather than a union
+        check. Row 3 neuters both and requires the row to drop — it proves nothing
+        else covers the form, and it doubles as the known-bad control for rows 1-2,
+        so each assertion is demonstrated failing on a known-bad input BY
+        CONSTRUCTION rather than merely demonstrated passing."""
         cmd = "cd /repo && git branch -D temp"
+        arms = mgc._BRANCH_DELETE_LITERAL_ARMS
+        per_leg = mgc._PER_LEG_OPS
+        filter_without_branch_delete = tuple(
+            op for op in per_leg if op != "branch-delete"
+        )
+        assert filter_without_branch_delete != per_leg, (
+            "VACUITY GUARD: 'branch-delete' is not in the per-leg filter, so the "
+            "filter-side neuter below is a no-op and row 2 would prove nothing."
+        )
+
+        # Baseline: both mechanisms live.
         assert mgc.is_dangerous_command(cmd) is True
         assert mgc.detect_command_operation_type(cmd) == "branch-delete"
+
+        # ROW 1 — neuter the LITERAL TUPLE only. The per-leg filter must carry it.
         monkeypatch.setattr(mgc, "_BRANCH_DELETE_LITERAL_ARMS", ())
+        monkeypatch.setattr(mgc, "_PER_LEG_OPS", per_leg)
+        assert mgc.is_dangerous_command(cmd) is True, (
+            "FILTER SIDE IS DEAD: with the literal tuple neutered, the per-leg "
+            "filter failed to gate a non-first-leg `-D`. The #1134 under-block is "
+            "re-opened for every form that has no literal arm."
+        )
+        assert mgc.detect_command_operation_type(cmd) == "branch-delete", (
+            "filter side is dead on the detect arm (read/mint would disagree)"
+        )
+
+        # ROW 2 — neuter the PER-LEG FILTER only. The literal tuple must carry it.
+        monkeypatch.setattr(mgc, "_BRANCH_DELETE_LITERAL_ARMS", arms)
+        monkeypatch.setattr(mgc, "_PER_LEG_OPS", filter_without_branch_delete)
+        assert mgc.is_dangerous_command(cmd) is True, (
+            "TUPLE SIDE IS DEAD: with `branch-delete` dropped from the per-leg "
+            "filter, the literal arms failed to gate a non-first-leg `-D`. The "
+            "any-leg literal floor has silently stopped carrying this family."
+        )
+        assert mgc.detect_command_operation_type(cmd) == "branch-delete", (
+            "tuple side is dead on the detect arm"
+        )
+
+        # ROW 3 — neuter BOTH. Nothing else may cover the row. This is the
+        # known-bad control that makes rows 1-2 non-vacuous.
+        monkeypatch.setattr(mgc, "_BRANCH_DELETE_LITERAL_ARMS", ())
+        monkeypatch.setattr(mgc, "_PER_LEG_OPS", filter_without_branch_delete)
         assert mgc.is_dangerous_command(cmd) is False, (
-            "non-first-leg -D still gates with the tuple neutered — a second "
-            "family covers it and the tuple is not load-bearing on the read floor"
+            "A THIRD mechanism covers this row. Rows 1-2 above are therefore "
+            "vacuous — they cannot attribute coverage to the mechanism they name. "
+            "Identify the third family before trusting this proof."
         )
         assert mgc.detect_command_operation_type(cmd) is None, (
-            "non-first-leg -D still classifies with the tuple neutered — a "
-            "second family covers it and the tuple is not load-bearing in detect"
+            "a third mechanism classifies this row on the detect arm"
         )
 
 
@@ -1656,6 +1712,354 @@ class _ApiMergeDetectArmDisabledRe:
 
     def __getattr__(self, name):
         return getattr(_real_re, name)
+
+
+class TestBranchDeleteWordBoundaryMustStayOff:
+    """MUST_STAY_OFF — the `\\b` on the `-D` literal arm, enforced.
+
+    The branch-delete arm is `git\\s+...branch\\s+.*-D\\b`. The trailing `\\b` is the
+    only thing stopping `-D` from matching INSIDE an ordinary branch name: any name
+    whose second hyphen-separated word starts with a capital D reads as `-D` to a
+    boundaryless pattern — `feature-Dashboard`, `release-December`, `*-Dev*`,
+    `new-Design`.
+
+    WHY THIS CLASS EXISTS AT ALL. "Do not touch the `\\b`" was a documented mandate
+    with NOTHING enforcing it. Removing the boundary from all three occurrences
+    produces a suite failure set IDENTICAL to control — zero new failures, zero
+    disappeared — while gating SIX ordinary good-faith commands, including
+    `git branch feature-Dashboard`, which CREATES a branch and would be classified
+    `branch-delete`. That is the cardinal over-block, invisible, with a green suite.
+
+    So this is not a check that proved nothing; it was an invariant with no check.
+    These rows convert it into a visible one. Every command below is benign and
+    must never gate."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git branch feature-Dashboard",              # CREATES a branch
+            'git branch --list "release-Dec*"',          # list, glob
+            'git branch --list "*-Dev*"',                # list, leading glob
+            "git branch --contains feature-Dashboard",   # read: which branches contain
+            "git branch -m old new-Design",              # rename
+            "git branch --merged release-December",      # read: merged-into filter
+        ],
+    )
+    def test_capital_d_inside_a_branch_name_never_gates(self, cmd):
+        assert D(cmd) is False, (
+            "CARDINAL OVER-BLOCK: an ordinary branch name containing a hyphen "
+            "followed by a capital D gated. The `-D` literal arm has lost its "
+            "trailing word boundary, so `-D` is matching inside a NAME rather than "
+            f"as a flag. Restore the `\\b`: {cmd!r}"
+        )
+        assert OP(cmd) is None, (
+            f"same boundary regression, on the detect arm — note `git branch "
+            f"feature-Dashboard` CREATES a branch: {cmd!r}"
+        )
+
+    def test_the_boundary_rows_are_not_vacuous(self):
+        """Control: the arm this class guards still fires on a REAL `-D`. Without
+        this, every row above would stay green if the branch-delete arm were
+        deleted outright — passing for the wrong reason."""
+        assert D("git branch -D temp") is True, (
+            "the branch-delete arm no longer gates a genuine `-D`, so the "
+            "boundary rows above prove nothing"
+        )
+        assert OP("git branch -D temp") == "branch-delete"
+
+
+def _close_target(cmd):
+    """The minted close-target identity for `cmd` via the REAL post path."""
+    res = mint(cmd)
+    assert res.context is not None, f"close did not mint (refusal={res.refusal_reason}): {cmd!r}"
+    return _target_value(res.context)
+
+
+def _authorizes(approve_cmd, execute_cmd):
+    """True iff a token minted from `approve_cmd` authorizes `execute_cmd`."""
+    res = mint(approve_cmd)
+    assert res.context is not None, f"approve did not mint: {approve_cmd!r}"
+    return MATCH(token_from_ctx(res.context), execute_cmd)
+
+
+_PULL5 = "https://github.com/o/r/pull/5"
+
+
+class TestCloseTargetMintsAllFaithfulForms:
+    """`gh pr close` accepts ``{<number> | <url> | <branch>}`` — all three are
+    faithful. The per-leg widening gated the url/branch forms in a non-first leg
+    but ``_extract_pr_number`` is number-only, so they gated WITHOUT a mint path
+    = a HEAD-introduced faithful GATED-BUT-UNMINTABLE over-block (and the same
+    shape pre-existed on the first leg). `_extract_close_target` closes it by
+    minting every faithful form. These rows are the MUST_FLIP cert for that.
+
+    The no-arg form (`gh pr close -d`) is NOT here: gh refuses a close with no
+    positional, so it has no faithful click and its gated-but-unmintable state is
+    not an over-block (measured separately)."""
+
+    @pytest.mark.parametrize(
+        "cmd,expected",
+        [
+            ("gh pr close 5 -d", "5"),
+            ("cd /repo && gh pr close 5 -d", "5"),
+            (f"gh pr close {_PULL5} -d", "url:github.com/o/r#5"),
+            (f"cd /repo && gh pr close {_PULL5} -d", "url:github.com/o/r#5"),
+            ("gh pr close feature -d", "branch:feature"),
+            ("cd /repo && gh pr close feature -d", "branch:feature"),
+        ],
+    )
+    def test_every_faithful_close_form_gates_and_mints(self, cmd, expected):
+        assert D(cmd) is True, f"faithful close stopped gating: {cmd!r}"
+        assert _close_target(cmd) == expected, (
+            f"close minted the wrong identity for {cmd!r} — recognition<=>mint "
+            f"coupling (#1064) requires the identity to be exactly the target"
+        )
+
+    def test_minted_identity_is_exactly_the_target_not_a_neighbor(self):
+        """#1064: the url mints the PR IN THAT url, the branch mints THAT branch —
+        never a different PR. The identity is parsed from the `/pull/<N>` segment
+        gh itself resolves, so it cannot name a PR the command does not close."""
+        assert _close_target(f"gh pr close {_PULL5} -d") == "url:github.com/o/r#5"
+        assert _close_target("gh pr close https://github.com/x/y/pull/9 -d") == "url:github.com/x/y#9"
+        assert _close_target("gh pr close release/2.0 -d") == "branch:release/2.0"
+
+    @pytest.mark.parametrize(
+        "cmd,expected",
+        [
+            # repo/owner containing digits — the /pull/ anchor is not fooled
+            ("gh pr close https://github.com/o/r-123/pull/5 -d", "url:github.com/o/r-123#5"),
+            ("gh pr close https://github.com/o123/r/pull/7 -d", "url:github.com/o123/r#7"),
+            # trailing path / query / fragment — (\d+)(?![\w-]) stops at the PR number
+            ("gh pr close https://github.com/o/r/pull/5/files -d", "url:github.com/o/r#5"),
+            ("gh pr close https://github.com/o/r/pull/5?diff=split -d", "url:github.com/o/r#5"),
+            ("gh pr close https://github.com/o/r/pull/5#issuecomment-9 -d", "url:github.com/o/r#5"),
+            # GitHub Enterprise host — must still mint (not an over-block)
+            ("gh pr close https://github.company.com/o/r/pull/42 -d", "url:github.company.com/o/r#42"),
+        ],
+    )
+    def test_url_number_parse_robust_against_decoy_digits(self, cmd, expected):
+        """The URL identity is anchored on the literal `/pull/<N>` segment, so a
+        digit in the owner/repo, a query string, a fragment, or a trailing path
+        component can never be mistaken for (or extend) the PR number."""
+        assert _close_target(cmd) == expected
+
+
+class TestCloseTargetLaunderingRefused:
+    """MINT-LAUNDERING known-bads (#1064) — each MUST be caught (REFUSE). Shown
+    FAILING-on-known-bad, not just the happy path passing. The four identity
+    namespaces (`5` / `url:host/o/r#N` / `branch:name`) are disjoint, and the URL
+    is HOST- and repo-QUALIFIED specifically so it can never set-equal a bare
+    number in a DIFFERENT repo."""
+
+    def test_cross_repo_url_to_bare_number_refuses(self):
+        """THE SHARP ONE. Approve closing PR #5 via an explicit-repo URL; execute
+        a bare `gh pr close 5` — which closes PR #5 of whatever repo it runs in.
+        If the url minted bare `5`, this would authorize closing PR #5 in a
+        DIFFERENT repo (cross-repo target confusion). Repo-qualification blocks it."""
+        assert _authorizes(f"gh pr close {_PULL5} -d", "gh pr close 5 -d") is False
+
+    def test_cross_host_url_refuses(self):
+        assert _authorizes(
+            "gh pr close https://github.com/o/r/pull/5 -d",
+            "gh pr close https://github.enterprise.com/o/r/pull/5 -d",
+        ) is False
+
+    def test_cross_repo_url_to_url_refuses(self):
+        assert _authorizes(
+            "gh pr close https://github.com/o/r/pull/5 -d",
+            "gh pr close https://github.com/evil/repo/pull/5 -d",
+        ) is False
+
+    def test_branch_to_different_branch_refuses(self):
+        assert _authorizes("gh pr close feature -d", "gh pr close other -d") is False
+
+    def test_branch_to_number_refuses(self):
+        assert _authorizes("gh pr close feature -d", "gh pr close 5 -d") is False
+
+    def test_number_to_different_number_refuses(self):
+        assert _authorizes("gh pr close 5 -d", "gh pr close 6 -d") is False
+
+    def test_faithful_self_authorizes_every_form(self):
+        """Non-vacuity for the REFUSE rows: the same command DOES authorize itself
+        on every form, so the refusals above are discrimination, not a blanket
+        deny."""
+        for cmd in ("gh pr close 5 -d", f"gh pr close {_PULL5} -d", "gh pr close feature -d",
+                    "cd /repo && gh pr close feature -d"):
+            assert _authorizes(cmd, cmd) is True, f"faithful re-execution refused: {cmd!r}"
+
+
+class TestCloseTargetBranchInertAndLegScoped:
+    """Constraint B — the branch identity binds the LITERAL positional token, and
+    that binding is (i) LEG-SCOPED (no cross-leg pickup) and (ii) FLAG-INERT (a
+    dash-token can never be bound as the target, a quoted token binds its literal
+    content and cannot inject)."""
+
+    def test_branch_identity_is_leg_scoped(self):
+        """A url/branch in a BENIGN continuation leg is never picked up as the
+        close target — the extractor reads only the first executable leg. If it
+        leaked, the first-leg numbered close would mis-bind the later leg's ref."""
+        # first leg is the real close (mints 5); a decoy branch/url follows benign
+        assert _close_target("gh pr close 5 -d && echo feature") == "5"
+        assert _close_target(f"gh pr close 5 -d ; echo {_PULL5}") == "5"
+
+    def test_dash_token_is_never_bound_as_the_target(self):
+        """A flag can never become the close identity — positionals starting with
+        `-` are dropped. `gh pr close --repo o/r -d` has NO positional target
+        (the repo is a flag value), so it abstains (mint None), never binds a flag."""
+        assert _close_target_or_none("gh pr close -d --repo o/r") is None
+        assert _close_target_or_none("gh pr close --repo o/r -d") is None
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "gh pr close feature --repo o/r -d",     # --repo VALUE after target
+            "gh pr close --repo o/r feature -d",     # --repo VALUE before target
+            "gh pr close feature -R o/r -d",         # short -R value
+            "gh pr close -dR o/r feature",           # clustered -dR, value is next token
+            'gh pr close -c "nice work" feature -d',  # -c comment value (quoted)
+            "gh pr close feature -cd",               # -c attached-cluster value
+            "gh pr close --comment hello feature -d",  # --comment value
+        ],
+    )
+    def test_value_flag_value_is_not_bound_as_the_target(self, cmd):
+        """CONSTRAINT B — a VALUE-taking flag's value (`-R/--repo o/r`,
+        `-c/--comment msg`) is stripped before the positional scan, so a faithful
+        branch-close WITH such a flag still binds the BRANCH (never over-blocks by
+        counting the value as a second positional, never mis-binds the value)."""
+        assert D(cmd) is True
+        assert _close_target(cmd) == "branch:feature", (
+            f"a value-taking flag's value was mis-read as the close target: {cmd!r}"
+        )
+
+    def test_comment_value_that_is_a_url_is_not_read_as_the_pr(self):
+        """The sharpest value-flag case: a PR URL passed as a `--comment` value
+        must NOT be extracted as the close target — the real target is the branch
+        positional. Value stripping happens BEFORE URL classification."""
+        cmd = "gh pr close feature --comment https://github.com/o/r/pull/999 -d"
+        assert _close_target(cmd) == "branch:feature", (
+            "a URL inside a --comment value was mis-bound as the PR — the value "
+            "strip must precede URL classification"
+        )
+
+    def test_quoted_branch_binds_its_literal_content(self):
+        """A quoted branch name binds the literal string (quotes stripped); it is
+        a target IDENTITY, never executed, so it cannot inject a flag or a second
+        command. Two distinct quoted names stay distinct identities."""
+        assert _close_target('gh pr close "feature/x" -d') == "branch:feature/x"
+        assert _authorizes('gh pr close "feature/x" -d', 'gh pr close "feature/y" -d') is False
+
+    def test_branch_shaped_like_a_flag_is_not_bound_and_does_not_inject(self):
+        """A positional that LOOKS like a flag (`--force`, `-D`) is dropped by the
+        dash-filter, so it is never bound as the target and cannot inject. A close
+        whose only positional-looking token is dash-prefixed has NO target ->
+        abstains (the command is not a faithful single-target close anyway)."""
+        assert _close_target_or_none("gh pr close --force -d") is None
+        assert _close_target_or_none("gh pr close -D -d") is None
+
+    def test_branch_with_shell_metachars_binds_literal_inert_identity(self):
+        """A branch name carrying shell metacharacters binds the LITERAL token as
+        an identity string — it is compared, never executed, so it cannot inject a
+        command. Two different such names stay distinct identities (no collision)."""
+        # _executable_prefix truncates at an unquoted metachar, so a bare $(...) is
+        # not a single clean positional -> abstain; a QUOTED odd name binds literal.
+        assert _close_target('gh pr close "weird;name" -d') == "branch:weird;name"
+        assert _authorizes('gh pr close "weird;name" -d', 'gh pr close "other;name" -d') is False
+
+    def test_branch_shaped_like_a_url_but_not_a_pull_url_abstains(self):
+        """A positional containing `://` that is NOT a github `/pull/<N>` URL is an
+        unrecognized URL form -> abstain (mint None), never a garbage `branch:`
+        identity. gh would reject such a target anyway."""
+        assert _close_target_or_none("gh pr close https://github.com/o/r/issues/5 -d") is None
+        assert _close_target_or_none("gh pr close https://evil.example/o/r/tree/main -d") is None
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "gh pr close --repo 5/6 feature -d",    # numeric-leading repo, --repo BEFORE branch
+            "gh pr close -R 5/6 feature -d",        # short -R, the form a long-only guard misses
+            "gh pr close -dR 5/6 feature",          # clustered -dR
+            "gh pr close --repo 55/66 feature -d",  # multi-digit repo
+        ],
+    )
+    def test_numeric_leading_repo_value_does_not_shadow_the_branch(self, cmd):
+        """REGRESSION (security finding): a `--repo`/`-R` value whose owner starts
+        with digits (`5/6`) must NOT be mis-read as the PR number. The old close
+        path called `_extract_pr_number` FIRST, whose long-only value-flag guard
+        let the regex backtrack onto the repo's leading digit and shadow the branch
+        — laundering an approved branch-close into a different-PR close. The single
+        value-flag-complete positional walk closes it: the branch is bound, the
+        repo digits are stripped as a flag value."""
+        assert _close_target(cmd) == "branch:feature", (
+            f"a numeric-leading --repo/-R value shadowed the branch target: {cmd!r}"
+        )
+
+    def test_numeric_repo_launder_refuses(self):
+        """The security-confirmed launder MUST be caught: approving a branch-close
+        whose `--repo 5/6` shadowed the PR must NOT authorize closing PR #5."""
+        assert _authorizes(
+            "gh pr close --repo 5/6 feature -d",   # approve: closes branch `feature`
+            "gh pr close 5 --repo 5/6 -d",         # execute: closes PR #5 — different target
+        ) is False
+
+    @pytest.mark.parametrize("cmd", [
+        "gh pr close --label 5 -d",   # --label is NOT a gh pr close flag
+        "gh pr close --foo 5 -d",     # arbitrary unknown flag
+    ])
+    def test_unknown_value_flag_on_nonfaithful_close_is_adversarial_only(self, cmd):
+        """DOCUMENTED ADVERSARIAL-ONLY RESIDUAL (pinned so it stays visible, not
+        hidden behind a false 'never a mis-bind' claim). An UNKNOWN flag whose
+        value is the SOLE positional-shaped token (`gh pr close --label 5`) binds
+        that value ('5') as the target — the value-flag walk can't know `--label`
+        takes a value. BUT `gh pr close` has no `--label` flag and no valid
+        positional here, so gh ITSELF REJECTS the command: it is NON-FAITHFUL.
+        Exploiting the minted '5' is a confused-deputy that needs the user to
+        approve a command gh won't run, which a good-faith user never does. This
+        is TOLERATED under the good-faith model and deliberately NOT closed (the
+        FAITHFUL --repo mis-bind above IS closed). If this ever needs closing, the
+        route is a known-close-flag allow-list, not this test loosening."""
+        assert _close_target(cmd) == "5", (
+            "the documented adversarial-only residual changed shape — re-confirm "
+            f"the disposition rather than silently updating the pin: {cmd!r}"
+        )
+
+    def test_branch_named_like_a_number_binds_the_number_namespace(self):
+        """DOCUMENTED AMBIGUITY: gh resolves a bare digit as the PR NUMBER (number
+        precedes branch in `{number|url|branch}`), so a branch literally named `5`
+        is indistinguishable from PR #5 to gh itself. The extractor matches that
+        precedence: `gh pr close 5` binds number `5`, never `branch:5`. Not a
+        collision — both spellings resolve to the same command for gh."""
+        assert _close_target("gh pr close 5 -d") == "5"
+        assert _close_target("gh pr close 5 -d") != "branch:5"
+
+
+def _close_target_or_none(cmd):
+    """Like _close_target but tolerates a non-minting (abstaining) close: returns
+    the identity or None, without asserting a mint occurred."""
+    res = mint(cmd)
+    return _target_value(res.context) if res.context is not None else None
+
+
+class TestCloseTargetExtensionNonVacuous:
+    """The extractor extension must be shown LIVE: neuter it back to the
+    number-only behavior and a url/branch MUST_FLIP row loses its mint. If it
+    keeps minting with the extension reverted, the extension is not what carries
+    these forms and every row above is vacuous."""
+
+    def test_url_and_branch_lose_mint_when_extractor_reverted(self, monkeypatch):
+        # sanity: with the extension live, url + branch mint
+        assert _close_target(f"gh pr close {_PULL5} -d") == "url:github.com/o/r#5"
+        assert _close_target("gh pr close feature -d") == "branch:feature"
+        # revert _extract_close_target to the pre-fix number-only behavior
+        monkeypatch.setattr(mgc, "_extract_close_target", mgc._extract_pr_number)
+        assert _close_target_or_none(f"gh pr close {_PULL5} -d") is None, (
+            "url still mints with the extractor reverted — the extension is not "
+            "carrying the url form, so the MUST_FLIP rows are vacuous"
+        )
+        assert _close_target_or_none("gh pr close feature -d") is None, (
+            "branch still mints with the extractor reverted — vacuous"
+        )
+        # and the NUMBER form is unaffected by the revert (it never needed the extension)
+        assert _close_target_or_none("gh pr close 5 -d") == "5"
 
 
 class TestApiMergeMintParity:
@@ -2176,39 +2580,112 @@ class TestApiMergeEndpointResidualBoundary:
 
 
 class TestAcceptedRecognitionLimitationPins:
-    """FORWARD-PROTECTION pins for the ACCEPTED conservative-recognition limitation
-    (the review-cycle-1 SECURITY-HALT disposition). These forms run UNGATED BY
-    DESIGN, and these tests assert that ON PURPOSE — they are the executable tripwire
-    so a future maintainer who 'hardens' recognition into a match-anywhere / per-leg
-    scan (which would re-block faithful clicks) sees these flip RED and STOPS.
+    """FORWARD-PROTECTION pins for the recognition posture.
 
-    THE PRINCIPLE (do NOT 'fix' these): the git-push remote-ref-delete (:ref /
-    --delete / -d) and mass-delete (--mirror / --prune / multi-ref) forms need a
-    positional, quote-aware parse, so their recognition is ANCHORED to the FIRST
-    executable leg and does NOT chase the op into NON-FIRST compound legs. Chasing it
-    requires a match-anywhere scan that fires on a quoted :ref / --mirror mention in a
-    benign leg = an over-block of a faithful click, which is WRONG BY DEFINITION
-    (worse than missing a buried op). The fix for any over-block WIDENS the mint,
-    never narrows detection into a new under-block.
+    THE PRINCIPLE these pins protect is unchanged and is the reason they exist:
+    over-blocking a faithful click is WRONG BY DEFINITION, worse than missing a
+    buried op, and the fix for any over-block WIDENS the mint rather than narrowing
+    detection into a new under-block.
+
+    WHAT CHANGED — read this before restoring anything from git history. These pins
+    were originally written to assert that non-first-leg push-delete / mass-delete /
+    cluster-flag forms run UNGATED, on the premise that reaching them REQUIRED a
+    match-anywhere scan (which would fire on a quoted `:ref` / `--mirror` mention in
+    a benign leg and over-block a faithful click). THAT PREMISE WAS FALSE. A quote-
+    aware PER-LEG predicate reaches those forms with no match-anywhere behavior: each
+    call sees ONE isolated leg and derives flags AND positionals from it, so a mention
+    inside a benign leg stays a mention. Leaving them ungated was therefore not a
+    principled limitation but a good-faith-reachable UNDER-BLOCK (`cd /repo && git
+    push origin --delete feature` ran completely ungated), and it was closed.
+
+    So the OUTCOME assertion those pins carried was a PROXY for the author's real
+    intent — protect faithful clicks — and the proxy broke when the mechanism it
+    stood on was replaced. The pins below now assert the intent directly: the
+    MECHANISM that would genuinely over-block is still absent / the property that
+    makes per-leg safe is still present, PLUS benign rows that must stay ungated.
+
+    STILL TRUE, and still the thing to guard: the LITERAL arms' word boundary must
+    not be loosened. That WOULD grant delete tokens match-anywhere coverage and IS
+    the over-block this class was created to prevent.
     """
+
+    def test_no_match_anywhere_literal_arm_for_delete_tokens(self):
+        """MECHANISM PIN #1 — asserts the ABSENCE of the one unsafe mechanism.
+
+        The over-block this class guards comes from ONE specific shape: a literal arm
+        that matches a delete token ANYWHERE in the command string, with no word
+        boundary and no leg isolation. Such an arm fires on a delete token sitting
+        inside a benign leg — a quoted `--mirror` in a push option, a `:main` inside a
+        commit message — and blocks a faithful click.
+
+        Non-first-leg reach is NOT that shape and must not be confused with it: it is
+        the SAME quote-aware predicate re-invoked on an ISOLATED leg. This pin
+        therefore constrains the literal arms only, and is deliberately silent about
+        per-leg coverage.
+
+        Worded as an ABSENCE claim (contrast mechanism pin #2, which asserts a
+        PRESENCE): the two failure modes differ, and one shared pin would paper over
+        that difference.
+
+        NOT a regex-shape assertion. Inspecting the arm patterns for word boundaries
+        proves nothing here — every arm carries `\\b` in its leading `\\bgit` anchor, so
+        a 'pattern contains \\b' check passes unconditionally. Match-anywhere is a
+        property of HOW the arms are APPLIED, not of what they contain, so this pin
+        measures the application.
+
+        The row is chosen so the arm regex ITSELF spans the leg separator: the
+        branch-delete arm is `git\\s+...branch\\s+.*-D\\b`, and its `.*` happily crosses
+        `&&`, so it MATCHES the whole compound below. The guard nonetheless returns
+        False — which is only possible if the arms are evaluated PER-LEG. That makes
+        the pin self-controlling: the first assertion establishes the arm would fire
+        whole-string (if it ever stops, the premise moved and you are told so rather
+        than passing silently), and the second establishes it does not."""
+        cmd = "git branch new-feature && echo -D"
+        assert any(arm.search(cmd) for arm in mgc._BRANCH_DELETE_LITERAL_ARMS), (
+            "PREMISE MOVED: no branch-delete arm matches this compound whole-string "
+            "any more, so this row no longer discriminates per-leg from "
+            "match-anywhere. Re-derive the row before trusting the pin below."
+        )
+        assert mgc.is_dangerous_command(cmd) is False, (
+            "MATCH-ANYWHERE REGRESSION: a branch-delete arm whose regex spans the leg "
+            "separator now gates a command whose only `-D` sits in a BENIGN `echo` "
+            "leg. The literal arms are being applied to the WHOLE command instead of "
+            "per-leg — this is the faithful-click over-block this class exists to "
+            "prevent."
+        )
+        assert mgc.detect_command_operation_type(cmd) is None, (
+            "same match-anywhere regression, on the detect side"
+        )
 
     @pytest.mark.parametrize(
         "cmd",
         [
-            "cd /repo && git push origin --delete main",   # ref-delete in a non-first leg
-            "git fetch && git push --mirror origin",        # mass-delete in a non-first leg
-            "NOTE=x ; git push origin :main",               # colon-delete after an assignment leg
+            # A delete token quoted inside a benign push OPTION — the canonical
+            # match-anywhere casualty.
+            'git push origin feature -o "note: use --mirror for backups"',
+            'git push origin feature -o "cleanup: replaces --delete flow"',
+            # A delete token inside a commit message on a benign leg.
+            'git commit -m "document --mirror and :main semantics"',
+            # A delete token echoed, never executed.
+            'echo "run git push origin :main to drop it"',
+            # Reads that merely NAME the destructive spellings.
+            "git help push | grep -- --mirror",
         ],
     )
-    def test_non_first_leg_push_delete_ungated_by_design(self, cmd):
-        """ACCEPTED LIMITATION — do NOT fix. A push-delete/mass-delete in a NON-FIRST
-        compound leg is ungated (first-leg anchoring). If this assertion FAILS, the
-        recognition was hardened into a match-anywhere scan that over-blocks faithful
-        clicks — that is the WRONG fix; re-read the conservative-recognition principle."""
+    def test_delete_token_in_benign_context_stays_ungated(self, cmd):
+        """OUTCOME ROWS for mechanism pin #1 — the faithful clicks the absent
+        mechanism would have blocked.
+
+        Mechanism-only is weaker than it looks: it can be fully satisfied while an
+        over-block returns by another route. These rows assert the INTENT (a faithful
+        click is never blocked) rather than a proxy for it, so they stay valid even if
+        the mechanism is later re-expressed some other way. Every row names a delete
+        token but executes nothing destructive."""
         assert D(cmd) is False, (
-            f"Recognition was hardened to chase a non-first-leg push-delete — this "
-            f"RE-INTRODUCES a faithful-click over-block. Do NOT 'fix' this form: {cmd!r}"
+            f"OVER-BLOCK: a delete token in a BENIGN context gated a faithful click. "
+            f"Something acquired match-anywhere reach over delete tokens: {cmd!r}"
         )
+        assert OP(cmd) is None, f"benign delete-token mention classified as an op: {cmd!r}"
 
     def test_httpie_protection_ungated_by_design(self):
         """ACCEPTED LIMITATION — do NOT fix by bolting on an httpie read arm. The mint
@@ -2253,24 +2730,71 @@ class TestAcceptedRecognitionLimitationPins:
         assert D(cmd) is True, f"UNDER-BLOCK: literal arm stopped gating in a non-first leg: {cmd!r}"
         assert OP(cmd) == expected_op
 
+    def test_leg_locality_invariant_flags_and_positionals_share_one_leg(self):
+        """MECHANISM PIN #2 — asserts the PRESENCE of the property that makes
+        per-leg coverage safe. This is the STRONGER of the two pins.
+
+        Deliberately worded as a PRESENCE claim, unlike pin #1's absence claim. The
+        failure modes are not the same and a single shared pin would hide the
+        difference: pin #1 guards against a mechanism being ADDED (match-anywhere
+        reach), this one guards against a property being REMOVED (leg locality).
+
+        THE INVARIANT: `_flag_condition_danger_op(leg)` sets
+        `prefix = _executable_prefix(leg)` and derives EVERYTHING from that one
+        prefix — the token list, the coarse op-shape, and the extractor inputs. So
+        flags AND positionals come from the SAME isolated leg. This is what makes it
+        safe for callers to re-invoke the arm per leg: the cross-leg flag leak
+        (positionals from leg 1, flags from the whole command, so a `--force` in a
+        benign continuation mislabels a benign first-leg op) is impossible BY
+        CONSTRUCTION, not by an ordering accident.
+
+        If this property is ever removed, per-leg invocation becomes actively unsafe
+        and the widened `_PER_LEG_OPS` filter turns into an over-block engine —
+        which is why this pin is stronger than pin #1 and why it must fail loudly."""
+        # Positionals name a BENIGN op; the danger flag lives in a LATER leg.
+        # If flags leaked from the whole command, leg 1 would be mislabeled.
+        leaky = "git branch new-feature && echo --delete --force"
+        assert mgc._flag_condition_danger_op(leaky) is None, (
+            "CROSS-LEG FLAG LEAK: the union arm classified a benign first-leg "
+            "`git branch new-feature` as dangerous by picking up `--delete --force` "
+            "from a LATER leg. Flags are no longer derived from the same isolated "
+            "leg as the positionals — per-leg invocation is now unsafe."
+        )
+        # Control: the SAME flags, in the SAME leg as the positionals, DO fire.
+        # Without this, the assertion above passes even if the arm stopped
+        # recognizing the op entirely (verified presence, not function).
+        same_leg = "git branch --delete --force temp"
+        assert mgc._flag_condition_danger_op(same_leg) == "branch-delete", (
+            "VACUITY CONTROL FAILED: the union arm no longer recognizes "
+            "`--delete --force` even within ONE leg, so the leak assertion above "
+            "proves nothing. Re-derive both rows."
+        )
+        # And the invariant survives leg isolation: the danger leg, taken alone,
+        # still classifies — this is exactly what the per-leg callers rely on.
+        assert mgc._flag_condition_danger_op("git branch -Df temp") == "branch-delete"
+
     @pytest.mark.parametrize(
         "cmd",
         [
-            "cd /repo && git branch -Df temp",   # cluster force-delete in a non-first leg
-            "cd /repo && gh pr close 5 -d",      # short -d close in a non-first leg
+            # Benign first leg + a danger-flag SPELLING in a later, non-executing leg.
+            "git branch new-feature && echo --delete --force",
+            "git branch --list && echo -Df",
+            "gh pr view 5 && echo --delete-branch",
+            # Flag-shaped text as an argument VALUE on a benign command.
+            "git config --get alias.nuke",
+            "grep -Df pattern file.txt",
         ],
     )
-    def test_non_first_leg_cluster_flag_forms_ungated_by_design(self, cmd):
-        """ACCEPTED LIMITATION — do NOT fix. The flag-condition union arm is
-        FIRST-LEG-ANCHORED, so a clustered/short danger flag in a NON-FIRST leg
-        loses union coverage. Re-detecting these requires whole-command or per-leg
-        flag derivation — exactly the cross-leg flag leak the anchoring removed /
-        the pinned over-block reintroduction. The idiomatic spellings (`-D`,
-        `--delete-branch`) remain caught per-leg, in any leg, by the literal floor
-        (the contrast rows in this class)."""
+    def test_flags_in_a_benign_leg_never_label_a_benign_op(self, cmd):
+        """OUTCOME ROWS for mechanism pin #2 — the faithful clicks a leak would block.
+
+        Pairs with the mechanism assertion above for the same reason pin #1 carries
+        outcome rows: a mechanism pin can be fully satisfied while an over-block
+        returns by another route. Each row has a benign executable op and a danger
+        flag that must stay inert because it is not in that op's leg."""
         assert D(cmd) is False, (
-            f"Recognition was widened to chase a non-first-leg cluster flag — this "
-            f"RE-INTRODUCES a faithful-click over-block. Do NOT 'fix' this form: {cmd!r}"
+            f"OVER-BLOCK: a danger flag in a NON-EXECUTING leg labeled a benign op "
+            f"as dangerous — the cross-leg flag leak is back: {cmd!r}"
         )
 
 

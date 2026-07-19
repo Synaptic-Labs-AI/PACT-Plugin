@@ -221,9 +221,12 @@ class TestCrossLegLeakSeparatorAndPlacementMatrix:
     def test_real_destructive_op_in_later_leg_still_gates(self, cmd, expected_op):
         """DISCRIMINATION CONTRAST — NOT an over-block. When the NON-first leg holds
         a GENUINELY destructive op (idiomatic `git branch -D` / `gh pr close
-        --delete-branch`), the LITERAL floor gates it match-anywhere BY DESIGN (SSOT
-        header NB), and it is authorizable via the read side's single-destructive-leg
-        isolation. This differs from BOTH the cured benign-leak rows above (where the
+        --delete-branch`), the LITERAL floor gates it in ANY leg position BY DESIGN
+        (SSOT header NB) — PER-LEG, not match-anywhere: the arms are evaluated against
+        each isolated leg, which is why a danger token sitting in a BENIGN leg (the
+        rows above) still runs free while a real op in a later leg gates. It is
+        authorizable via the read side's single-destructive-leg isolation. This
+        differs from BOTH the cured benign-leak rows above (where the
         later leg is a benign `rm`/`echo` whose flag leaked into the union arm) AND
         the #1082 over-block residual (a benign push mislabeled force-push by a later
         `rm -f`/`rm --force`) — here a real destructive op is present, so gating is
