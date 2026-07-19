@@ -4742,6 +4742,79 @@ def _strip_inert_positional_legs(result: str) -> str:
     return "".join(out)
 
 
+def _is_inert_help_leg(leg: str) -> bool:
+    """True iff `leg` is an INERT help invocation that mutates nothing — a `--help`
+    / `-h` help request, or a `gh|git help <sub>` head form. Such a leg contributes
+    NO danger: `gh pr merge --help`, `git push --force --help`, `gh help pr merge`
+    all print help and exit without merging/pushing, so gating them is pure friction
+    (a cardinal over-block under the good-faith model).
+
+    QUOTE-AWARE + VALUE-FLAG-AWARE (fail-TOWARD-gating on any ambiguity):
+      - Tokens come from the quote-aware `_leg_token_spans`, so a `--help` living
+        INSIDE a quoted value (`gh pr merge 5 --comment "…--help…"`) is one value
+        token, never a bare flag — it stays gated.
+      - A `-h` that is the VALUE of a gh-pr value-taking flag (`--subject -h`) is
+        SKIPPED with its flag, so the decoy is not read as help — it stays gated.
+      - Only an EXACT `--help` / `-h` flag token counts; a bundled short cluster
+        (`-fh`) is NOT `-h`, so it does not match and the command stays gated
+        (fail-toward-gating). An unbalanced-quote leg abstains (→ not inert → gated).
+
+    The `gh|git help <sub>` head form is matched on the command HEAD (first token
+    past any `NAME=value` env-assignments), so a quoted `"gh help"` decoy in a value
+    never triggers it. `git help …` is a no-op here (a `git help` leg is already
+    non-dangerous), included only so the recognizer is uniform across gh/git."""
+    if _shell_tokenize(leg) is None:
+        return False                              # unbalanced quotes → abstain (gate)
+    tokens = [leg[s:e] for s, e in _leg_token_spans(leg)]
+    # gh|git help <sub> head form — the command head past leading env-assignments.
+    positionals = [_strip_surrounding_quotes(t) for t in tokens if not t.startswith("-")]
+    head = 0
+    while head < len(positionals) and re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_]*=.*", positionals[head]
+    ):
+        head += 1
+    if (
+        head + 1 < len(positionals)
+        and positionals[head] in ("gh", "git")
+        and positionals[head + 1] == "help"
+    ):
+        return True
+    # Exact --help/-h flag token, skipping any gh-pr value-taking flag's value token
+    # (so a value `-h` is never misread as a help request).
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.split("=", 1)[0] in _GH_PR_VALUE_TAKING_FLAGS and "=" not in tok:
+            i += 2                                # skip the flag AND its separate value token
+            continue
+        if tok in ("--help", "-h"):
+            return True
+        i += 1
+    return False
+
+
+def _neutralize_inert_help_legs(stripped: str) -> str:
+    """Blank every INERT help leg (`_is_inert_help_leg`) in an already-stripped
+    surface with an EQUAL-LENGTH run of spaces, leaving separators + non-inert legs
+    byte-untouched. Applied by `is_dangerous_command` BEFORE the danger battery, so
+    a leg whose only danger is a help-suppressed op stops gating while every REAL
+    destructive leg keeps its exact bytes and still gates (per-leg, NOT a whole-
+    command prefilter: `--help && gh pr merge 6` blanks leg 1 only → leg 2 gates).
+
+    Equal-length blanking preserves ALL offsets, so the battery's whole-surface
+    scans (`DANGEROUS_PATTERNS`, `_flag_condition_danger_op`) and its per-leg re-slice
+    map 1:1 back to the original — the same offset-preserving discipline the
+    `_FD_REDIRECT_RE` neutralize uses in `_slice_stripped_leg_spans`. Idempotent, and
+    a strict no-op on a surface with no inert leg."""
+    spans = _slice_stripped_leg_spans(stripped)
+    result = list(stripped)
+    for start, end in spans:
+        if _is_inert_help_leg(stripped[start:end]):
+            for i in range(start, end):
+                result[i] = " "
+    return "".join(result)
+
+
 def is_dangerous_command(command: str) -> bool:
     """Check if a bash command is a dangerous git operation.
 
@@ -4764,6 +4837,15 @@ def is_dangerous_command(command: str) -> bool:
     # any matching (so this floor + the substrate join lines identically).
     command = _normalize_line_continuations(command)
     stripped = _strip_non_executable_content(command)
+    # C1 (#1203) — inert-help suppression: blank any leg that is an inert `--help`/
+    # `-h` / `gh help` invocation BEFORE the danger battery, so a faithful help
+    # request stops gating (a cardinal over-block). Per-leg + offset-preserving, so
+    # every REAL destructive leg keeps its bytes and still gates. This is the SINGLE
+    # load-bearing layer: the gate (check_merge_authorization), the compound counter
+    # (is_compound_destructive_command → _leg_is_destructive), and the read/mint leg
+    # selection (_single_destructive_leg) ALL route through is_dangerous_command, so
+    # suppressing here makes every consumer agree the inert leg is non-gating.
+    stripped = _neutralize_inert_help_legs(stripped)
     # The literal danger battery (DANGEROUS_PATTERNS + the four per-leg literal-arm families +
     # the additive normalized-flag condition) is the SSOT _stripped_surface_danger — factored
     # out so the #1178 general-strip preserve-predicate can consult the SAME predicate on a
@@ -4811,15 +4893,26 @@ def _slice_stripped_legs(stripped: str) -> list[str]:
     `2>&1 | rm -rf ~`). The leg slices are taken from `stripped`, never the masked
     `view` — the view exists ONLY to locate the operator offsets.
     """
+    return [stripped[s:e] for s, e in _slice_stripped_leg_spans(stripped)]
+
+
+def _slice_stripped_leg_spans(stripped: str) -> "list[tuple[int, int]]":
+    """The (start, end) offset spans of each leg within `stripped` — the span form
+    of `_slice_stripped_legs` (which is `[stripped[s:e] for s, e in ...]`, byte-
+    identical output by construction). Factored out so an OFFSET-preserving consumer
+    (the C1 inert-help neutralizer) can blank a leg IN PLACE with an equal-length
+    run without re-deriving the leg boundaries — one leg-boundary substrate, no
+    drift. Same masked + FD-neutralized view + `_COMPOUND_OPS_RE` scan as the slice
+    form; the view exists ONLY to locate operator offsets, spans index `stripped`."""
     view = _FD_REDIRECT_RE.sub(
         lambda m: " " * len(m.group()), _mask_shell_quotes(stripped)
     )
-    legs, last = [], 0
+    spans, last = [], 0
     for m in _COMPOUND_OPS_RE.finditer(view):
-        legs.append(stripped[last : m.start()])
+        spans.append((last, m.start()))
         last = m.end()
-    legs.append(stripped[last:])
-    return legs
+    spans.append((last, len(stripped)))
+    return spans
 
 
 def _split_into_legs(command: str) -> list[str]:
