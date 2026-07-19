@@ -839,6 +839,166 @@ class TestCloseRepoValueMisbindClosed:
         assert _execute(cmd, tmp_path) == _ALLOW, "faithful --repo close did not self-authorize: %r" % cmd
 
 
+# ── gh pr close URL HOST-CLASS WIDEN (over-block closure) ──────────────────────────
+# The close URL extractor's host char class was `[\w.-]+`, which REJECTED ':' (port)
+# and '@' (userinfo). A faithful GHE-on-a-custom-port URL
+# (`gh pr close https://ghe.corp:8443/o/r/pull/9 -d`) and a userinfo URL therefore
+# extracted target=None -> gated-but-unmintable OVER-BLOCK (gh RUNS both). The widen to
+# `[\w.@:-]+` (HOST SEGMENT ONLY — the owner/repo group and the `/pull/(\d+)(?![\w-])`
+# anchor are untouched) mints them. Identity encoding is KEEP-IN (lead-ratified): the
+# host is captured VERBATIM into `url:<host>/<owner>/<repo>#<N>`, so distinct spellings
+# (userinfo vs bare, port vs no-port, and the deceptive `github.com@evil.com` whose
+# verbatim id set-equals NEITHER `github.com` NOR `evil.com`) can never cross-authorize.
+# All identity strings measured against the committed host-widen, not computed.
+CLOSE_HOSTWIDEN_MINT = [
+    (_GH + "close https://ghe.corp:8443/o/r/pull/9 -d", "url:ghe.corp:8443/o/r#9"),
+    (_GH + "close https://user@github.com/o/r/pull/9 -d", "url:user@github.com/o/r#9"),
+    (_GH + "close https://u@ghe.corp:8443/o/r/pull/9 -d", "url:u@ghe.corp:8443/o/r#9"),
+]
+
+# KEEP-IN laundering: a widened-host token must REFUSE a DIFFERENT-host execution; each
+# faithful self-execution AUTHORIZES. The deceptive row is the load-bearing one — it pins
+# that the verbatim-host identity set-equals neither the apparent host nor the real host.
+# (name, approve, execute, expect_allow.)
+CLOSE_HOSTWIDEN_LAUNDERING = [
+    ("userinfo token -> bare host", _GH + "close https://user@github.com/o/r/pull/9 -d",
+     _GH + "close https://github.com/o/r/pull/9 -d", False),
+    ("port token -> no-port host", _GH + "close https://ghe.corp:8443/o/r/pull/9 -d",
+     _GH + "close https://ghe.corp/o/r/pull/9 -d", False),
+    ("deceptive userinfo-as-host -> apparent host", _GH + "close https://github.com@evil.com/o/r/pull/9 -d",
+     _GH + "close https://github.com/o/r/pull/9 -d", False),
+    ("deceptive userinfo-as-host -> real host", _GH + "close https://github.com@evil.com/o/r/pull/9 -d",
+     _GH + "close https://evil.com/o/r/pull/9 -d", False),
+    ("faithful port self", _GH + "close https://ghe.corp:8443/o/r/pull/9 -d",
+     _GH + "close https://ghe.corp:8443/o/r/pull/9 -d", True),
+    ("faithful userinfo self", _GH + "close https://user@github.com/o/r/pull/9 -d",
+     _GH + "close https://user@github.com/o/r/pull/9 -d", True),
+]
+
+# Anchor integrity under the widened host: the `/pull/(\d+)` anchor still resolves N with a
+# port/userinfo host, digits in the repo, and a trailing path/query/fragment.
+CLOSE_HOSTWIDEN_ANCHOR = [
+    (_GH + "close https://ghe.corp:8443/o/r-123/pull/9 -d", "url:ghe.corp:8443/o/r-123#9"),
+    (_GH + "close https://ghe.corp:8443/o/r/pull/9/files -d", "url:ghe.corp:8443/o/r#9"),
+    (_GH + "close https://ghe.corp:8443/o/r/pull/9?diff=split -d", "url:ghe.corp:8443/o/r#9"),
+    (_GH + "close https://ghe.corp:8443/o/r/pull/9#c-1 -d", "url:ghe.corp:8443/o/r#9"),
+]
+
+
+class TestCloseHostWidenGateAndMint:
+    """OVER-BLOCK CLOSURE: the close URL host class widened `[\\w.-]` -> `[\\w.@:-]` to admit
+    port (`:`) and userinfo (`@`). A faithful GHE-on-a-custom-port / userinfo close URL
+    previously extracted target=None -> gated-but-unmintable OVER-BLOCK. Each row now gates,
+    mints ONE token binding op=close and the VERBATIM KEEP-IN identity (read OFF the token),
+    and self-authorizes. The counter-test-by-revert known-bad narrows `_GH_PULL_URL_RE` back
+    to its pre-widen host class and asserts the forms mint None again, coupling the rows to
+    the host-widen commit."""
+
+    @pytest.mark.parametrize(
+        "cmd,value", CLOSE_HOSTWIDEN_MINT, ids=[r[0] for r in CLOSE_HOSTWIDEN_MINT]
+    )
+    def test_widened_host_gates_and_mints_keep_in(self, cmd, value, tmp_path):
+        assert D(cmd) is True, "widened-host faithful close not gated: %r" % cmd
+        minted, ctx = _mint(cmd, tmp_path)
+        assert minted == 1, (
+            "OVER-BLOCK persists — widened-host close gates but does NOT mint "
+            "(gated-but-unmintable): %r" % cmd
+        )
+        assert ctx.get("operation_type") == "close", (
+            "token bound the wrong op: %r for %r" % (ctx.get("operation_type"), cmd)
+        )
+        assert ctx.get("pr_number") == value, (
+            "wrong KEEP-IN close identity: got %r, expected the verbatim-host %r for %r"
+            % (ctx.get("pr_number"), value, cmd)
+        )
+        assert _execute(cmd, tmp_path) == _ALLOW, (
+            "the faithful widened-host close's own token did not self-authorize: %r" % cmd
+        )
+
+    def test_narrowing_the_host_class_reopens_the_over_block(self, monkeypatch):
+        import re as _re
+        # VACUITY GUARD: the live regex must currently mint on the widened form, else the
+        # narrow below is a no-op and this proves nothing.
+        assert mgc._extract_close_target(CLOSE_HOSTWIDEN_MINT[0][0]) is not None, (
+            "the widened-host form already mints None at head — the host-widen is absent, so "
+            "the narrow known-bad below would prove nothing"
+        )
+        # KNOWN-BAD: revert `_GH_PULL_URL_RE` to the pre-widen host class (`[\w.-]`, no :/@).
+        narrow = _re.compile(r"https?://([\w.-]+)/([\w.-]+/[\w.-]+)/pull/(\d+)(?![\w-])")
+        monkeypatch.setattr(mgc, "_GH_PULL_URL_RE", narrow)
+        reopened = [
+            cmd for cmd, _v in CLOSE_HOSTWIDEN_MINT
+            if mgc._extract_close_target(cmd) is not None
+        ]
+        assert reopened == [], (
+            "with the host class narrowed to its pre-widen shape, these widened-host forms "
+            "STILL extract a target — the host-widen is not the attributable cause, so the "
+            "gate+mint rows above prove nothing: %r" % reopened
+        )
+
+
+class TestCloseHostWidenLaundering:
+    """The KEEP-IN safety property, certified BEHAVIORALLY end-to-end: a widened-host token
+    must NOT authorize a DIFFERENT-host execution — including the deceptive userinfo-as-host
+    form (`github.com@evil.com`, whose VERBATIM identity `url:github.com@evil.com/o/r#9`
+    set-equals NEITHER `github.com` NOR `evil.com`). minted==1 asserted FIRST so a DENY is a
+    read decision. Each escalation is its own known-bad: the verbatim-host qualifier is what
+    makes it refuse, and an identity coarsening (normalizing the host, dropping userinfo/port)
+    would flip it to AUTHORIZE. Faithful self-executions AUTHORIZE (no over-block)."""
+
+    @pytest.mark.parametrize(
+        "name,approve,execute,expect_allow", CLOSE_HOSTWIDEN_LAUNDERING,
+        ids=[r[0] for r in CLOSE_HOSTWIDEN_LAUNDERING],
+    )
+    def test_keep_in_identity_refuses_cross_host(self, name, approve, execute, expect_allow, tmp_path):
+        minted, _ = _mint(approve, tmp_path)
+        assert minted == 1, "approve did not mint (%s): %r" % (name, approve)
+        rc = _execute(execute, tmp_path)
+        if expect_allow:
+            assert rc == _ALLOW, (
+                "OVER-BLOCK: a faithful widened-host close self-execution was REFUSED "
+                "(%s): %r" % (name, execute)
+            )
+        else:
+            assert rc == _DENY, (
+                "LAUNDERING: a widened-host close token authorized a DIFFERENT-host "
+                "execution (%s): approve=%r execute=%r" % (name, approve, execute)
+            )
+
+
+class TestCloseHostWidenAnchorAndResiduals:
+    """Anchor integrity under the widened host (the `/pull/(\\d+)` anchor still resolves N
+    with a port/userinfo host, repo digits, and a trailing path/query/fragment), the
+    empty-target guard (an empty positional binds None, not a degenerate `branch:`), and a
+    DOCUMENTED pre-existing residual: a bracketed-IPv6 host still mints None — a faithful-but-
+    rare gated-but-unmintable over-block that the host-widen does NOT close (the host class
+    never admitted `[`/`]`; None pre-widen too). It is pinned VISIBLE like the `--label 5`
+    residual, NOT asserted-closed; if it is ever closed, re-confirm the disposition rather
+    than silently updating this pin."""
+
+    @pytest.mark.parametrize(
+        "cmd,value", CLOSE_HOSTWIDEN_ANCHOR, ids=[r[0] for r in CLOSE_HOSTWIDEN_ANCHOR]
+    )
+    def test_anchor_resolves_under_widened_host(self, cmd, value):
+        got = mgc._extract_close_target(cmd)
+        assert got == value, (
+            "the widened host broke the /pull/N anchor: got %r, expected %r for %r"
+            % (got, value, cmd)
+        )
+
+    def test_empty_target_binds_none(self):
+        # An empty positional was minting a degenerate `branch:` identity; it now binds None.
+        got = mgc._extract_close_target(_GH + "close '' -d")
+        assert got is None, "empty close target no longer None (degenerate mint reopened): %r" % got
+
+    def test_bracketed_ipv6_host_is_a_documented_residual(self):
+        got = mgc._extract_close_target(_GH + "close https://[::1]/o/r/pull/9 -d")
+        assert got is None, (
+            "the bracketed-IPv6 residual changed shape — re-confirm the disposition rather "
+            "than silently updating this pin: %r" % got
+        )
+
+
 class TestMergeExtractorUnchangedByCloseFold:
     """The fold restructured CLOSE to derive from `_gh_close_positionals` and NOT call
     `_extract_pr_number`; the MERGE path STILL uses `_extract_pr_number`. This pins the
@@ -880,6 +1040,63 @@ class TestMergeExtractorUnchangedByCloseFold:
         assert minted == 1 and ctx.get("pr_number") == "42", (
             "merge no longer mints the positional PR through the real hook: minted=%s pr=%r"
             % (minted, ctx.get("pr_number") if ctx else None)
+        )
+
+
+class TestMergeShadowGuardIsLoadBearing:
+    """NON-VACUITY for the merge value-flag-shadow guard in `_extract_pr_number` (the
+    `--max-retries 5`-style rejection at the preceding-value-flag check). The
+    TestMergeExtractorUnchangedByCloseFold behavioral rows place the positional BEFORE the
+    value-flag (`gh pr merge 42 <flag> 99`), so `_GH_PR_NUMBER_RE` matches the positional 42
+    DIRECTLY and the shadow guard is never the deciding factor — disabling the guard entirely
+    trips ZERO of those rows. This closes that gap.
+
+    The guard fires ONLY when a value-flag's value is the SOLE positional-shaped digit
+    (`gh pr merge --max-retries 5`, NO PR positional — a FAITHFUL command; gh infers the
+    current-branch PR). At HEAD the guard makes the extractor ABSTAIN (None) rather than
+    mis-bind the flag value as PR `5` — a laundering vector (approve a current-branch merge,
+    reuse the token to merge PR #5).
+
+    THE KNOWN-BAD LEG IS LOAD-BEARING: a base==head `is None` assertion WITHOUT the monkeypatch
+    leg would itself be another untested-guard vacuity — the exact pattern this arc exists to
+    close. The monkeypatch (drop `--max-retries` from the value-flag set) demonstrates the
+    guard mis-binds `5` when killed, so the live `is None` assertion is a REAL guard-test rather
+    than a second dead check. Mirrors TestBenignWordBoundaryKnownBad."""
+
+    _SHADOW = _GH + "merge --max-retries 5"  # value-flag value is the ONLY positional-shaped digit
+
+    def test_shadow_form_abstains_live_base_and_head(self):
+        # The guard's correct behavior: the `--max-retries` value `5` is NOT mis-bound as
+        # the PR number — the extractor abstains so gh's current-branch inference stands.
+        assert mgc._extract_pr_number(self._SHADOW) is None, (
+            "merge shadow guard regressed at head — the --max-retries value was mis-bound "
+            "as the PR number: %r" % self._SHADOW
+        )
+        assert load_baseline_172a77dd()._extract_pr_number(self._SHADOW) is None, (
+            "baseline does not abstain on the shadow form — the merge extractor is not the "
+            "byte-identical pre-fix state, so the head==None pin certifies nothing: %r"
+            % self._SHADOW
+        )
+
+    def test_dropping_the_flag_reopens_the_mis_bind(self, monkeypatch):
+        # VACUITY GUARD: --max-retries must currently be in the value-flag set, else the drop
+        # below is a no-op and this proves nothing.
+        assert "--max-retries" in mgc._GH_PR_VALUE_TAKING_FLAGS, (
+            "--max-retries is not in _GH_PR_VALUE_TAKING_FLAGS — the drop below is a no-op; "
+            "the shadow guard's flag set changed shape"
+        )
+        # KNOWN-BAD: drop `--max-retries` from the value-flag set (kill the shadow guard for
+        # this flag). The extractor now mis-binds the flag value `5` as the PR — the exact
+        # laundering the guard prevents. This is what makes the live `is None` above coupled
+        # to the guard rather than an untested-guard vacuity.
+        reduced = frozenset(
+            f for f in mgc._GH_PR_VALUE_TAKING_FLAGS if f != "--max-retries"
+        )
+        monkeypatch.setattr(mgc, "_GH_PR_VALUE_TAKING_FLAGS", reduced)
+        assert mgc._extract_pr_number(self._SHADOW) == "5", (
+            "dropping --max-retries did NOT reopen the mis-bind — the shadow guard is not the "
+            "attributable cause of the abstain, so test_shadow_form_abstains_live_base_and_head "
+            "proves nothing: %r" % self._SHADOW
         )
 
 
