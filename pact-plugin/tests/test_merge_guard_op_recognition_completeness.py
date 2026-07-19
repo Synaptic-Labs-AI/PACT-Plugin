@@ -1972,6 +1972,56 @@ class TestCloseTargetBranchInertAndLegScoped:
         assert _close_target_or_none("gh pr close https://github.com/o/r/issues/5 -d") is None
         assert _close_target_or_none("gh pr close https://evil.example/o/r/tree/main -d") is None
 
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "gh pr close --repo 5/6 feature -d",    # numeric-leading repo, --repo BEFORE branch
+            "gh pr close -R 5/6 feature -d",        # short -R, the form a long-only guard misses
+            "gh pr close -dR 5/6 feature",          # clustered -dR
+            "gh pr close --repo 55/66 feature -d",  # multi-digit repo
+        ],
+    )
+    def test_numeric_leading_repo_value_does_not_shadow_the_branch(self, cmd):
+        """REGRESSION (security finding): a `--repo`/`-R` value whose owner starts
+        with digits (`5/6`) must NOT be mis-read as the PR number. The old close
+        path called `_extract_pr_number` FIRST, whose long-only value-flag guard
+        let the regex backtrack onto the repo's leading digit and shadow the branch
+        — laundering an approved branch-close into a different-PR close. The single
+        value-flag-complete positional walk closes it: the branch is bound, the
+        repo digits are stripped as a flag value."""
+        assert _close_target(cmd) == "branch:feature", (
+            f"a numeric-leading --repo/-R value shadowed the branch target: {cmd!r}"
+        )
+
+    def test_numeric_repo_launder_refuses(self):
+        """The security-confirmed launder MUST be caught: approving a branch-close
+        whose `--repo 5/6` shadowed the PR must NOT authorize closing PR #5."""
+        assert _authorizes(
+            "gh pr close --repo 5/6 feature -d",   # approve: closes branch `feature`
+            "gh pr close 5 --repo 5/6 -d",         # execute: closes PR #5 — different target
+        ) is False
+
+    @pytest.mark.parametrize("cmd", [
+        "gh pr close --label 5 -d",   # --label is NOT a gh pr close flag
+        "gh pr close --foo 5 -d",     # arbitrary unknown flag
+    ])
+    def test_unknown_value_flag_on_nonfaithful_close_is_adversarial_only(self, cmd):
+        """DOCUMENTED ADVERSARIAL-ONLY RESIDUAL (pinned so it stays visible, not
+        hidden behind a false 'never a mis-bind' claim). An UNKNOWN flag whose
+        value is the SOLE positional-shaped token (`gh pr close --label 5`) binds
+        that value ('5') as the target — the value-flag walk can't know `--label`
+        takes a value. BUT `gh pr close` has no `--label` flag and no valid
+        positional here, so gh ITSELF REJECTS the command: it is NON-FAITHFUL.
+        Exploiting the minted '5' is a confused-deputy that needs the user to
+        approve a command gh won't run, which a good-faith user never does. This
+        is TOLERATED under the good-faith model and deliberately NOT closed (the
+        FAITHFUL --repo mis-bind above IS closed). If this ever needs closing, the
+        route is a known-close-flag allow-list, not this test loosening."""
+        assert _close_target(cmd) == "5", (
+            "the documented adversarial-only residual changed shape — re-confirm "
+            f"the disposition rather than silently updating the pin: {cmd!r}"
+        )
+
     def test_branch_named_like_a_number_binds_the_number_namespace(self):
         """DOCUMENTED AMBIGUITY: gh resolves a bare digit as the PR NUMBER (number
         precedes branch in `{number|url|branch}`), so a branch literally named `5`

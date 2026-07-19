@@ -839,11 +839,25 @@ _GH_PULL_URL_RE = re.compile(
 # impossible and #1098 closed WON'T-FIX. Bounded => completable is the whole
 # reason gh-close has a real fix.
 #
-# FAIL-SAFE (future gh flags only): a value-taking flag NOT listed here has its
-# value counted as a positional, making a 2-positional command ABSTAIN (an
-# over-block — the SAFE, VISIBLE direction; fixable by adding the flag), never a
-# mis-bind/under-block/launder. Convert a potential silent launder into a visible
-# over-block, because an over-block comes out and a launder does not.
+# BEHAVIOR ON AN UNLISTED VALUE-FLAG — two sub-cases, stated honestly (NOT
+# "never a mis-bind"):
+#  (a) the flag's value is an EXTRA token alongside a real target
+#      (`gh pr close feature --newflag x`) -> TWO positionals -> ABSTAIN
+#      (over-block, the SAFE/VISIBLE direction; fixable by listing the flag).
+#  (b) the flag's value is the SOLE positional-shaped token
+#      (`gh pr close --newflag 5`, NO real target) -> that value is bound as the
+#      target. BUT such a command has no valid {number|url|branch} positional, so
+#      gh ITSELF REJECTS it -> it is NON-FAITHFUL. Minting from it is a
+#      confused-deputy: an adversary must get the user to APPROVE a command gh
+#      won't run, then reuse the token on a real one. ADVERSARIAL-ONLY, tolerated
+#      under the good-faith model (a good-faith user never approves a command that
+#      cannot execute). This is a DOCUMENTED RESIDUAL, not closed here — see
+#      test_unknown_value_flag_on_nonfaithful_close_is_adversarial_only.
+# `--repo`/`-c/--comment` are LISTED, so the security-reported FAITHFUL mis-bind
+# (`gh pr close --repo 5/6 feature` shadowing the branch with the repo digit) is
+# fully closed. curl/wget contrast (#1098): gh's per-subcommand value-flag set is
+# bounded/documented so the FAITHFUL forms are completely covered; curl/wget's is
+# unbounded, so no sound extractor exists there.
 _GH_CLOSE_VALUE_LONG = frozenset({"--repo", "--comment"})
 _GH_CLOSE_VALUE_SHORT = frozenset("Rc")
 
@@ -916,10 +930,21 @@ def _extract_close_target(command: str) -> str | None:
     target. Numeric precedence matches gh's own: a bare digit is always the PR
     number, so a branch literally named ``5`` is indistinguishable from PR #5 to
     BOTH gh and this guard (documented, not a collision — the two resolve to the
-    same command)."""
-    number = _extract_pr_number(command)
-    if number is not None:
-        return number
+    same command).
+
+    SINGLE VALUE-FLAG SSOT (structural — do NOT reintroduce a second list): ALL
+    three forms (number, url, branch) are classified from the ONE positional that
+    ``_gh_close_positionals`` returns, which strips value-flag values via the
+    single ``_GH_CLOSE_VALUE_*`` set. The number path deliberately does NOT call
+    ``_extract_pr_number`` — that function's value-flag handling is (a) long-form
+    only (blind to ``-R``) and (b) a DIFFERENT, incomplete flag list, so routing
+    close numbers through it re-created the two-lists-diverge mis-bind: on
+    ``gh pr close --repo 5/6 feature`` / ``-R 5/6 feature`` its regex backtracks
+    to grab the repo's leading digit as the PR (shadowing the branch), which
+    LAUNDERED an approved branch-close into a different-PR close. Deriving every
+    close form from the one value-flag-complete positional walk makes that
+    divergence impossible by construction. (merge still uses ``_extract_pr_number``
+    — its value-flags differ; this SSOT is close-scoped.)"""
     prefix = _executable_prefix(command)
     if prefix is None:
         return None  # unbalanced quote / procsub -> abstain (existing safe posture)
@@ -933,9 +958,10 @@ def _extract_close_target(command: str) -> str | None:
     if positionals is None or len(positionals) != 1:
         return None
     target = _strip_surrounding_quotes(positionals[0])
-    # Classify the SINGLE positional. It is a genuine positional (value-flag
-    # values already stripped), so a URL here IS the PR the command closes, never
-    # a --comment/--body value.
+    # Classify the SINGLE positional (value-flag values already stripped, so a
+    # digit/url/branch here IS the target, never a --repo/--comment value).
+    if target.isdigit():
+        return target  # bare PR number — gh's number precedence, repo-implicit
     url = _GH_PULL_URL_RE.search(target)
     if url is not None:
         return "url:" + url.group(1) + "/" + url.group(2) + "#" + url.group(3)
