@@ -1521,11 +1521,26 @@ def _extract_mass_delete_target(command: str) -> str | None:
 # EXCLUDES op-trigger flags that already change op_type (and are therefore
 # already bound through it): --force/-f (force-push), -D (branch-delete), and
 # gh pr close's --delete-branch (the close-danger trigger). Listing them here
-# would double-bind and needlessly over-block. NB the asymmetry: --delete-branch
-# /-d on gh pr MERGE is a post-merge SIDE-EFFECT (deletes the source branch), not
-# a merge op-trigger, so it IS bound on the `merge` class — and -d (merge
-# delete-branch) is a DIFFERENT op from -D (branch force-delete); op-class scoping
-# keeps them from being conflated.
+# would double-bind and needlessly over-block.
+#
+# THE EXCLUSION IS PER-CLASS, NOT GLOBAL — it is the flag's ROLE ON THAT CLASS
+# that decides, and the same flag can have different roles on different classes.
+# The rule: EXCLUDE A TRIGGER FROM THE CLASS IT TRIGGERS; BIND IT WHERE IT IS A
+# MODIFIER. Worked instances, all three of which look like exceptions until the
+# rule is stated this way:
+#   - --delete-branch/-d TRIGGERS `close`, but on gh pr MERGE it is a post-merge
+#     SIDE-EFFECT (deletes the source branch), so it IS bound on `merge`. (And -d
+#     on merge is a DIFFERENT op from -D branch force-delete; op-class scoping
+#     keeps them from being conflated.) It is ALSO bound on `close` itself, for
+#     the narrower reason spelled out at that entry: op_type folds bare-close and
+#     close --delete-branch into ONE op, so there the trigger does not
+#     discriminate and the flag binding is what separates them.
+#   - --mirror/--prune TRIGGER `remote-mass-delete`, but on `remote-ref-delete`
+#     they are scope-widening MODIFIERS, so they ARE bound there — that binding
+#     is what stops a single-branch-delete approval from authorizing a wholesale
+#     remote wipe.
+# So "is this flag an op-trigger?" is the WRONG question at this table. The right
+# one is "is it a trigger OF THIS CLASS?"
 PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
     "merge": {
         "--admin":         (("--admin",), False),               # bypass branch protection
@@ -1569,18 +1584,48 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
         # extension point so a future bound flag is a one-line data edit here.
     },
     "remote-ref-delete": {
-        # No bound flags: remote-ref-delete's privileged effect (removing a remote
-        # ref) IS its op-trigger (--delete/-d/empty-source colon), already bound via
-        # op_type. Empty entry = explicit #1042 extension point (a future bound flag
-        # is a one-line data edit); it adds NO new bound flag, so the set-equality
-        # bind is untouched.
+        # The op-TRIGGER here is --delete/-d/empty-source colon, already bound via
+        # op_type. These three are MODIFIERS on top of that trigger, so binding them
+        # adds a dimension the identity did not previously capture.
+        #
+        # --mirror/--prune are LOAD-BEARING on this class. A single-ref delete's
+        # identity is otherwise the bare ref (`main`), so an approval for
+        # `git push origin :main` (delete ONE branch) set-equaled an execution of
+        # `git push origin --mirror :main` — which deletes EVERY remote ref with no
+        # local counterpart. Single-branch approval, wholesale remote wipe. The
+        # single-ref extractor wins the boundary discriminator, so the scope-changing
+        # flag rode an identity that did not capture it. Binding closes it.
+        "--mirror":    (("--mirror",), False),
+        "--prune":     (("--prune",), False),
+        # bypasses the pre-push hook — a privilege, not a target change
+        "--no-verify": (("--no-verify",), False),
     },
     "remote-mass-delete": {
-        # No bound flags: remote-mass-delete's privileged effect (the mass destructive
-        # push) IS its op-trigger (--mirror/--prune/multi-ref-delete), bound via op_type
-        # AND folded into the mass_target identity tuple. The --mirror/--prune additions
-        # go to _FLAG_SPEC (danger-condition recognition) ONLY, NOT here, so the #1042
-        # set-equality bind is untouched. Empty entry = explicit extension point.
+        # DELIBERATELY NARROWER THAN ITS SIBLING, and the asymmetry is not cosmetic:
+        # exclude a trigger from the class it triggers; bind it where it is a modifier.
+        # --mirror/--prune are the op-TRIGGER for this class, and _extract_mass_delete_target
+        # EMBEDS them in the identity netstring (`git push --mirror origin` binds
+        # '8:--mirror6:origin', `--prune` binds '7:--prune6:origin'). So a --mirror/--prune
+        # escalation on this class ALREADY refuses at the identity layer, and binding them
+        # here changes no outcome TODAY — a cert row for it would be vacuous, and on a
+        # control whose dominant failure mode is checks that prove nothing, an entry that
+        # reads as protection while proving nothing is a real cost.
+        #
+        # VACUOUS TODAY IS NOT THE SAME CLAIM AS INERT, and the difference decides the
+        # design. Binding them here WOULD matter if the identity ever coarsened (see the
+        # COUPLING note below) — so the choice is not "redundant vs useful", it is
+        # "auditable now, with the coupling pinned" vs "silently defended, unverifiably".
+        # We take the first: narrow entry + a load-bearing pin on what it depends on.
+        #
+        # COUPLING — LOAD-BEARING, pinned by test, not left implicit. This narrowness
+        # DEPENDS on mass_target continuing to EMBED the flag. Measured under a coarsened
+        # mass_target (remote only): the split binding lets the --mirror/--prune escalation
+        # OPEN, while a symmetric binding would keep it closed. So the redundancy is NOT
+        # inert — split is chosen for auditability and is safety-equivalent to symmetric
+        # ONLY while that embedding holds.
+        # REMEDY: if you coarsen mass_target, you MUST bind --mirror and --prune HERE in
+        # the same commit. See test_mass_target_embeds_the_scope_flag_in_its_identity.
+        "--no-verify": (("--no-verify",), False),
     },
     "branch-protection": {
         # No bound flags: branch-protection's privileged effect (weakening protection)

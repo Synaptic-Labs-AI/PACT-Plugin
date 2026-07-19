@@ -578,3 +578,117 @@ class TestFlagVariationIsPairAttribute:
 
         pairs = _collect_pairs(["gh pr merge 5 --admin", "gh pr merge 6"])
         assert len(pairs) == 2
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# REMOTE-DELETE SPLIT BINDING — data shape + the coupling it depends on
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestRemoteDeleteSplitBinding:
+    """The two remote-delete classes get DIFFERENT bindings, and the asymmetry is
+    deliberate:
+
+        remote-ref-delete   --mirror, --prune, --no-verify
+        remote-mass-delete  --no-verify only
+
+    WHY THESE ASSERTIONS ARE STRUCTURAL AND NOT BEHAVIORAL. A behavioral row here
+    would be decorative by construction. The correct SPLIT binding and a defective
+    SYMMETRIC one (all three flags on BOTH classes) produce ZERO observable
+    behavioral differences: every mass-class flag escalation ALREADY refuses at
+    base, because `_extract_mass_delete_target` embeds the flag in the identity
+    netstring. So an authorize-outcome test passes identically under both, and
+    someone who binds all three on both classes reports every cert row green,
+    truthfully. The check would prove nothing.
+
+    The reason the split still stands is AUDITABILITY, not behavior: a redundant
+    binding installs a guard that changes no outcome while reading as protection.
+    On a control whose dominant failure mode is checks that prove nothing, every
+    entry in the table must be load-bearing. So the shape itself is what gets
+    asserted."""
+
+    def test_ref_delete_binds_all_three_modifiers(self):
+        """--mirror/--prune are MODIFIERS on this class (the trigger is
+        --delete/-d/empty-source colon), so they must be bound. This is the half
+        that closes the escalation where approving a single-branch delete
+        authorized a wholesale remote wipe."""
+        from shared.merge_guard_common import PRIVILEGED_FLAGS
+
+        bound = set(PRIVILEGED_FLAGS["remote-ref-delete"])
+        assert bound == {"--mirror", "--prune", "--no-verify"}, (
+            "remote-ref-delete's binding changed. --mirror/--prune are LOAD-BEARING "
+            "here: without them a `git push origin :main` approval set-equals a "
+            "`git push origin --mirror :main` execution, which deletes every remote "
+            f"ref with no local counterpart. Found: {sorted(bound)}"
+        )
+
+    def test_mass_delete_binds_only_no_verify(self):
+        """--mirror/--prune TRIGGER this class and are already folded into the
+        mass_target identity, so binding them here would be inert. Asserted as an
+        exact set so an 'improvement' that symmetrizes the two entries turns RED
+        and has to justify itself against the pin below."""
+        from shared.merge_guard_common import PRIVILEGED_FLAGS
+
+        bound = set(PRIVILEGED_FLAGS["remote-mass-delete"])
+        assert bound == {"--no-verify"}, (
+            "remote-mass-delete's binding changed. --mirror/--prune are the "
+            "op-TRIGGER for this class and are already embedded in the mass_target "
+            "identity, so binding them here adds an entry that changes no outcome — "
+            "a guard that does nothing while reading as protection. If you are "
+            "symmetrizing the two remote-delete entries, read the coupling pin "
+            f"below first. Found: {sorted(bound)}"
+        )
+
+    def test_mass_target_embeds_the_scope_flag_in_its_identity(self):
+        """COUPLING PIN — LOAD-BEARING, NOT DOCUMENTARY. Do not treat this as a
+        note about `_extract_mass_delete_target`; it is the assertion that makes the
+        split binding above SAFE rather than merely tidy.
+
+        WHAT BREAKS IF THIS TEST IS REMOVED OR WEAKENED. The narrow
+        `remote-mass-delete` binding is sound ONLY while mass_target keeps the scope
+        flag inside the identity it returns. Measured, under a coarsened mass_target
+        that returns the remote only:
+
+            split binding      -> the --mirror/--prune escalation OPENS (authorizes)
+            symmetric binding  -> the escalation stays closed
+
+        So the redundancy that symmetric binding would carry is NOT inert — it is
+        defense-in-depth against exactly this coarsening. Split is chosen for
+        auditability, and split-plus-this-pin is safety-equivalent to symmetric.
+        Delete this pin and that equivalence is gone: the escalation reopens on the
+        mass class with nothing to catch it. `vacuous today` and `inert` are
+        different claims, and this one is only the first.
+
+        REMEDY — IF YOU COARSEN `mass_target`, YOU MUST BIND `--mirror` AND
+        `--prune` ON `remote-mass-delete` IN THE SAME COMMIT. That restores the
+        protection the embedding was providing. Do not simply update this test to
+        match a coarsened identity.
+
+        Why this is a plausible future edit rather than a hypothetical: it is this
+        codebase's own recurring coarsening shape — a scalar extractor normalizing
+        away a semantic distinction that its set sibling explicitly guards. It reads
+        like a cleanup."""
+        from shared.merge_guard_common import _extract_mass_delete_target
+
+        push = "git " + "push "
+        mirror = _extract_mass_delete_target(push + "--mirror origin")
+        prune = _extract_mass_delete_target(push + "--prune origin")
+
+        assert mirror is not None and prune is not None, (
+            "mass_target stopped binding the --mirror/--prune forms entirely; the "
+            "identity-layer defense this pin protects is gone"
+        )
+        assert mirror != prune, (
+            "COUPLING BROKEN: --mirror and --prune now produce the SAME identity, so "
+            "the identity layer no longer separates them. The remote-mass-delete "
+            "binding is deliberately narrow BECAUSE that separation existed — with "
+            "it gone, a --mirror<->--prune escalation on the mass class is "
+            "unguarded. Either restore the embedding, or bind --mirror/--prune on "
+            "remote-mass-delete as well."
+        )
+        assert "--mirror" in mirror and "--prune" in prune, (
+            "COUPLING BROKEN: mass_target no longer EMBEDS the scope flag in its "
+            f"identity (got {mirror!r} / {prune!r}). Same consequence as above: the "
+            "narrow mass-delete binding is only sound while the flag is part of the "
+            "identity."
+        )
