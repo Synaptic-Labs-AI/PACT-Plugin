@@ -815,6 +815,135 @@ def _extract_pr_number(command: str) -> str | None:
     return match.group(1)
 
 
+# A `gh pr close` PR URL: host + owner/repo + the /pull/<N> segment. Anchored on
+# the LITERAL `/pull/` path element, so digits inside owner/repo (`o/r-123`) are
+# never mistaken for the PR number; `(\d+)(?![\w-])` stops exactly at the PR
+# number, so a trailing path (`/pull/5/files`), query (`?diff=split`), or
+# fragment (`#c-9`) cannot extend or replace it. Matches ANY host (github.com AND
+# GitHub Enterprise) so an enterprise URL is not an over-block.
+_GH_PULL_URL_RE = re.compile(
+    r"https?://([\w.-]+)/([\w.-]+/[\w.-]+)/pull/(\d+)(?![\w-])"
+)
+
+# The COMPLETE set of value-taking flags on `gh pr close` (verified against
+# `gh pr close --help`): `-R/--repo` and `-c/--comment`. `-d/--delete-branch` is
+# boolean. This set is used to strip a flag's VALUE from the positional scan so a
+# repo (`--repo o/r`) or comment (`-c "msg"`) value is never mistaken for the
+# {number|url|branch} target.
+#
+# WHY gh IS SOLVABLE WHERE curl/wget IS NOT (the #1098 WON'T-FIX contrast): gh's
+# value-flag vocabulary for a given subcommand is BOUNDED and documented (two
+# flags here), so this set can be COMPLETE for current gh — every faithful form
+# is handled, zero over-block today. curl/wget's value-flag vocabulary is
+# unbounded and version-growing, which is why a sound extractor there is
+# impossible and #1098 closed WON'T-FIX. Bounded => completable is the whole
+# reason gh-close has a real fix.
+#
+# FAIL-SAFE (future gh flags only): a value-taking flag NOT listed here has its
+# value counted as a positional, making a 2-positional command ABSTAIN (an
+# over-block — the SAFE, VISIBLE direction; fixable by adding the flag), never a
+# mis-bind/under-block/launder. Convert a potential silent launder into a visible
+# over-block, because an over-block comes out and a launder does not.
+_GH_CLOSE_VALUE_LONG = frozenset({"--repo", "--comment"})
+_GH_CLOSE_VALUE_SHORT = frozenset("Rc")
+
+
+def _gh_close_positionals(tokens: "list[str]") -> "list[str] | None":
+    """The positional args of a ``gh pr close`` token list, with value-taking
+    flags AND their values removed (cobra semantics: clustered shorts, ``=``-joined
+    and attached values all handled). Returns the positionals after ``close``, or
+    None if ``close`` is absent. A repo/comment VALUE can never survive as a
+    positional, so it can never be mis-bound as the {number|url|branch} target."""
+    try:
+        i = tokens.index("close") + 1
+    except ValueError:
+        return None
+    positionals: "list[str]" = []
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if tok.startswith("--"):
+            flag, has_eq, _v = tok.partition("=")
+            # `--repo value` / `--comment value` consume the NEXT token; the
+            # `=`-joined and boolean/unknown long forms are self-contained.
+            i += 2 if (flag in _GH_CLOSE_VALUE_LONG and not has_eq) else 1
+            continue
+        if tok.startswith("-") and tok != "-":
+            # Short cluster (cobra): a value-taking short consumes the REST of the
+            # cluster as its attached value, or — if it is the last char — the NEXT
+            # token. Booleans before it (`-dR value` = -d + -R value) don't matter.
+            body = tok[1:]
+            consumes_next = False
+            for j, ch in enumerate(body):
+                if ch in _GH_CLOSE_VALUE_SHORT:
+                    consumes_next = j == len(body) - 1   # `-R value`; else `-Rvalue`
+                    break
+            i += 2 if consumes_next else 1
+            continue
+        positionals.append(tok)
+        i += 1
+    return positionals
+
+
+def _extract_close_target(command: str) -> str | None:
+    """The close-target identity for a faithful ``gh pr close`` command, across
+    all three positional forms gh accepts (``{<number> | <url> | <branch>}``).
+
+    Returns one of FOUR disjoint identity namespaces (so no spelling can ever
+    set-equal another):
+
+    - bare PR number -> the digits (``"5"``). Repo-IMPLICIT, exactly as the
+      pre-existing number-close identity already is.
+    - github/enterprise PR URL -> ``"url:<host>/<owner>/<repo>#<N>"``. HOST- and
+      repo-QUALIFIED on purpose: a URL names an explicit repo, so binding only
+      the number would let it set-equal a bare ``"5"`` and authorize closing PR
+      #5 in a DIFFERENT repo (cross-repo target confusion). The number is parsed
+      from the ``/pull/<N>`` segment gh itself resolves, so the identity IS the
+      PR the command closes.
+    - single branch positional -> ``"branch:<name>"``. Name-only (repo-implicit
+      like the number form — a bare branch carries no repo). Branch names may
+      contain ``/`` (``feature/foo``), so slashes are allowed; a token carrying
+      ``://`` is an UNRECOGNIZED url form (not a github ``/pull/`` URL) -> abstain
+      rather than mint a garbage ``branch:`` identity.
+    - none of the above (incl. the NO-positional form ``gh pr close -d``, which
+      gh itself refuses) -> ``None`` (abstain; the read floor still gates, but a
+      command gh will not run has no faithful click to over-block).
+
+    LEG-LOCAL: everything is derived from ``_executable_prefix(command)`` (the
+    first executable leg), so a URL/branch mentioned in a benign continuation leg
+    is never picked up (no cross-leg identity injection). Dash-prefixed tokens
+    are dropped from the positional scan, so a flag can never be bound as the
+    target. Numeric precedence matches gh's own: a bare digit is always the PR
+    number, so a branch literally named ``5`` is indistinguishable from PR #5 to
+    BOTH gh and this guard (documented, not a collision — the two resolve to the
+    same command)."""
+    number = _extract_pr_number(command)
+    if number is not None:
+        return number
+    prefix = _executable_prefix(command)
+    if prefix is None:
+        return None  # unbalanced quote / procsub -> abstain (existing safe posture)
+    tokens = _shell_tokenize(prefix)
+    if tokens is None:
+        return None  # unparseable -> abstain
+    positionals = _gh_close_positionals(tokens)
+    # Exactly ONE positional is a single-target close. 0 (the no-arg form gh
+    # refuses) or >=2 (ambiguous / an unlisted value-flag's value survived) ->
+    # abstain; the >=2 case is the over-block-safe fail direction.
+    if positionals is None or len(positionals) != 1:
+        return None
+    target = _strip_surrounding_quotes(positionals[0])
+    # Classify the SINGLE positional. It is a genuine positional (value-flag
+    # values already stripped), so a URL here IS the PR the command closes, never
+    # a --comment/--body value.
+    url = _GH_PULL_URL_RE.search(target)
+    if url is not None:
+        return "url:" + url.group(1) + "/" + url.group(2) + "#" + url.group(3)
+    if "://" in target:
+        return None  # unrecognized URL form -> abstain, never a garbage branch id
+    return "branch:" + target
+
+
 def _extract_api_ref(command: str) -> str | None:
     """Parse the ref from an API ref-mutation command's `git/refs/<ref>` path.
 
@@ -1859,9 +1988,15 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
         flag_scan_text if flag_scan_text is not None else command, op_type
     )
     if op_type in ("merge", "close"):
-        pr_number = _extract_pr_number(command)
-        if pr_number is None and op_type == "merge":
-            pr_number = _extract_api_merge_pr(command)   # #1096 API pulls/<N>/merge
+        # close accepts {<number>|<url>|<branch>} — bind whichever the command
+        # carries so EVERY faithful close form MINTS (not just the number form).
+        # merge keeps the number-only extractor (+ the #1096 API pulls/<N> path).
+        if op_type == "close":
+            pr_number = _extract_close_target(command)
+        else:
+            pr_number = _extract_pr_number(command)
+            if pr_number is None:
+                pr_number = _extract_api_merge_pr(command)   # #1096 API pulls/<N>/merge
         if pr_number is not None:
             context["pr_number"] = pr_number
     elif op_type == "branch-delete":

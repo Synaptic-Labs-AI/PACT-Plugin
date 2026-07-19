@@ -1768,6 +1768,250 @@ class TestBranchDeleteWordBoundaryMustStayOff:
         assert OP("git branch -D temp") == "branch-delete"
 
 
+def _close_target(cmd):
+    """The minted close-target identity for `cmd` via the REAL post path."""
+    res = mint(cmd)
+    assert res.context is not None, f"close did not mint (refusal={res.refusal_reason}): {cmd!r}"
+    return _target_value(res.context)
+
+
+def _authorizes(approve_cmd, execute_cmd):
+    """True iff a token minted from `approve_cmd` authorizes `execute_cmd`."""
+    res = mint(approve_cmd)
+    assert res.context is not None, f"approve did not mint: {approve_cmd!r}"
+    return MATCH(token_from_ctx(res.context), execute_cmd)
+
+
+_PULL5 = "https://github.com/o/r/pull/5"
+
+
+class TestCloseTargetMintsAllFaithfulForms:
+    """`gh pr close` accepts ``{<number> | <url> | <branch>}`` — all three are
+    faithful. The per-leg widening gated the url/branch forms in a non-first leg
+    but ``_extract_pr_number`` is number-only, so they gated WITHOUT a mint path
+    = a HEAD-introduced faithful GATED-BUT-UNMINTABLE over-block (and the same
+    shape pre-existed on the first leg). `_extract_close_target` closes it by
+    minting every faithful form. These rows are the MUST_FLIP cert for that.
+
+    The no-arg form (`gh pr close -d`) is NOT here: gh refuses a close with no
+    positional, so it has no faithful click and its gated-but-unmintable state is
+    not an over-block (measured separately)."""
+
+    @pytest.mark.parametrize(
+        "cmd,expected",
+        [
+            ("gh pr close 5 -d", "5"),
+            ("cd /repo && gh pr close 5 -d", "5"),
+            (f"gh pr close {_PULL5} -d", "url:github.com/o/r#5"),
+            (f"cd /repo && gh pr close {_PULL5} -d", "url:github.com/o/r#5"),
+            ("gh pr close feature -d", "branch:feature"),
+            ("cd /repo && gh pr close feature -d", "branch:feature"),
+        ],
+    )
+    def test_every_faithful_close_form_gates_and_mints(self, cmd, expected):
+        assert D(cmd) is True, f"faithful close stopped gating: {cmd!r}"
+        assert _close_target(cmd) == expected, (
+            f"close minted the wrong identity for {cmd!r} — recognition<=>mint "
+            f"coupling (#1064) requires the identity to be exactly the target"
+        )
+
+    def test_minted_identity_is_exactly_the_target_not_a_neighbor(self):
+        """#1064: the url mints the PR IN THAT url, the branch mints THAT branch —
+        never a different PR. The identity is parsed from the `/pull/<N>` segment
+        gh itself resolves, so it cannot name a PR the command does not close."""
+        assert _close_target(f"gh pr close {_PULL5} -d") == "url:github.com/o/r#5"
+        assert _close_target("gh pr close https://github.com/x/y/pull/9 -d") == "url:github.com/x/y#9"
+        assert _close_target("gh pr close release/2.0 -d") == "branch:release/2.0"
+
+    @pytest.mark.parametrize(
+        "cmd,expected",
+        [
+            # repo/owner containing digits — the /pull/ anchor is not fooled
+            ("gh pr close https://github.com/o/r-123/pull/5 -d", "url:github.com/o/r-123#5"),
+            ("gh pr close https://github.com/o123/r/pull/7 -d", "url:github.com/o123/r#7"),
+            # trailing path / query / fragment — (\d+)(?![\w-]) stops at the PR number
+            ("gh pr close https://github.com/o/r/pull/5/files -d", "url:github.com/o/r#5"),
+            ("gh pr close https://github.com/o/r/pull/5?diff=split -d", "url:github.com/o/r#5"),
+            ("gh pr close https://github.com/o/r/pull/5#issuecomment-9 -d", "url:github.com/o/r#5"),
+            # GitHub Enterprise host — must still mint (not an over-block)
+            ("gh pr close https://github.company.com/o/r/pull/42 -d", "url:github.company.com/o/r#42"),
+        ],
+    )
+    def test_url_number_parse_robust_against_decoy_digits(self, cmd, expected):
+        """The URL identity is anchored on the literal `/pull/<N>` segment, so a
+        digit in the owner/repo, a query string, a fragment, or a trailing path
+        component can never be mistaken for (or extend) the PR number."""
+        assert _close_target(cmd) == expected
+
+
+class TestCloseTargetLaunderingRefused:
+    """MINT-LAUNDERING known-bads (#1064) — each MUST be caught (REFUSE). Shown
+    FAILING-on-known-bad, not just the happy path passing. The four identity
+    namespaces (`5` / `url:host/o/r#N` / `branch:name`) are disjoint, and the URL
+    is HOST- and repo-QUALIFIED specifically so it can never set-equal a bare
+    number in a DIFFERENT repo."""
+
+    def test_cross_repo_url_to_bare_number_refuses(self):
+        """THE SHARP ONE. Approve closing PR #5 via an explicit-repo URL; execute
+        a bare `gh pr close 5` — which closes PR #5 of whatever repo it runs in.
+        If the url minted bare `5`, this would authorize closing PR #5 in a
+        DIFFERENT repo (cross-repo target confusion). Repo-qualification blocks it."""
+        assert _authorizes(f"gh pr close {_PULL5} -d", "gh pr close 5 -d") is False
+
+    def test_cross_host_url_refuses(self):
+        assert _authorizes(
+            "gh pr close https://github.com/o/r/pull/5 -d",
+            "gh pr close https://github.enterprise.com/o/r/pull/5 -d",
+        ) is False
+
+    def test_cross_repo_url_to_url_refuses(self):
+        assert _authorizes(
+            "gh pr close https://github.com/o/r/pull/5 -d",
+            "gh pr close https://github.com/evil/repo/pull/5 -d",
+        ) is False
+
+    def test_branch_to_different_branch_refuses(self):
+        assert _authorizes("gh pr close feature -d", "gh pr close other -d") is False
+
+    def test_branch_to_number_refuses(self):
+        assert _authorizes("gh pr close feature -d", "gh pr close 5 -d") is False
+
+    def test_number_to_different_number_refuses(self):
+        assert _authorizes("gh pr close 5 -d", "gh pr close 6 -d") is False
+
+    def test_faithful_self_authorizes_every_form(self):
+        """Non-vacuity for the REFUSE rows: the same command DOES authorize itself
+        on every form, so the refusals above are discrimination, not a blanket
+        deny."""
+        for cmd in ("gh pr close 5 -d", f"gh pr close {_PULL5} -d", "gh pr close feature -d",
+                    "cd /repo && gh pr close feature -d"):
+            assert _authorizes(cmd, cmd) is True, f"faithful re-execution refused: {cmd!r}"
+
+
+class TestCloseTargetBranchInertAndLegScoped:
+    """Constraint B — the branch identity binds the LITERAL positional token, and
+    that binding is (i) LEG-SCOPED (no cross-leg pickup) and (ii) FLAG-INERT (a
+    dash-token can never be bound as the target, a quoted token binds its literal
+    content and cannot inject)."""
+
+    def test_branch_identity_is_leg_scoped(self):
+        """A url/branch in a BENIGN continuation leg is never picked up as the
+        close target — the extractor reads only the first executable leg. If it
+        leaked, the first-leg numbered close would mis-bind the later leg's ref."""
+        # first leg is the real close (mints 5); a decoy branch/url follows benign
+        assert _close_target("gh pr close 5 -d && echo feature") == "5"
+        assert _close_target(f"gh pr close 5 -d ; echo {_PULL5}") == "5"
+
+    def test_dash_token_is_never_bound_as_the_target(self):
+        """A flag can never become the close identity — positionals starting with
+        `-` are dropped. `gh pr close --repo o/r -d` has NO positional target
+        (the repo is a flag value), so it abstains (mint None), never binds a flag."""
+        assert _close_target_or_none("gh pr close -d --repo o/r") is None
+        assert _close_target_or_none("gh pr close --repo o/r -d") is None
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "gh pr close feature --repo o/r -d",     # --repo VALUE after target
+            "gh pr close --repo o/r feature -d",     # --repo VALUE before target
+            "gh pr close feature -R o/r -d",         # short -R value
+            "gh pr close -dR o/r feature",           # clustered -dR, value is next token
+            'gh pr close -c "nice work" feature -d',  # -c comment value (quoted)
+            "gh pr close feature -cd",               # -c attached-cluster value
+            "gh pr close --comment hello feature -d",  # --comment value
+        ],
+    )
+    def test_value_flag_value_is_not_bound_as_the_target(self, cmd):
+        """CONSTRAINT B — a VALUE-taking flag's value (`-R/--repo o/r`,
+        `-c/--comment msg`) is stripped before the positional scan, so a faithful
+        branch-close WITH such a flag still binds the BRANCH (never over-blocks by
+        counting the value as a second positional, never mis-binds the value)."""
+        assert D(cmd) is True
+        assert _close_target(cmd) == "branch:feature", (
+            f"a value-taking flag's value was mis-read as the close target: {cmd!r}"
+        )
+
+    def test_comment_value_that_is_a_url_is_not_read_as_the_pr(self):
+        """The sharpest value-flag case: a PR URL passed as a `--comment` value
+        must NOT be extracted as the close target — the real target is the branch
+        positional. Value stripping happens BEFORE URL classification."""
+        cmd = "gh pr close feature --comment https://github.com/o/r/pull/999 -d"
+        assert _close_target(cmd) == "branch:feature", (
+            "a URL inside a --comment value was mis-bound as the PR — the value "
+            "strip must precede URL classification"
+        )
+
+    def test_quoted_branch_binds_its_literal_content(self):
+        """A quoted branch name binds the literal string (quotes stripped); it is
+        a target IDENTITY, never executed, so it cannot inject a flag or a second
+        command. Two distinct quoted names stay distinct identities."""
+        assert _close_target('gh pr close "feature/x" -d') == "branch:feature/x"
+        assert _authorizes('gh pr close "feature/x" -d', 'gh pr close "feature/y" -d') is False
+
+    def test_branch_shaped_like_a_flag_is_not_bound_and_does_not_inject(self):
+        """A positional that LOOKS like a flag (`--force`, `-D`) is dropped by the
+        dash-filter, so it is never bound as the target and cannot inject. A close
+        whose only positional-looking token is dash-prefixed has NO target ->
+        abstains (the command is not a faithful single-target close anyway)."""
+        assert _close_target_or_none("gh pr close --force -d") is None
+        assert _close_target_or_none("gh pr close -D -d") is None
+
+    def test_branch_with_shell_metachars_binds_literal_inert_identity(self):
+        """A branch name carrying shell metacharacters binds the LITERAL token as
+        an identity string — it is compared, never executed, so it cannot inject a
+        command. Two different such names stay distinct identities (no collision)."""
+        # _executable_prefix truncates at an unquoted metachar, so a bare $(...) is
+        # not a single clean positional -> abstain; a QUOTED odd name binds literal.
+        assert _close_target('gh pr close "weird;name" -d') == "branch:weird;name"
+        assert _authorizes('gh pr close "weird;name" -d', 'gh pr close "other;name" -d') is False
+
+    def test_branch_shaped_like_a_url_but_not_a_pull_url_abstains(self):
+        """A positional containing `://` that is NOT a github `/pull/<N>` URL is an
+        unrecognized URL form -> abstain (mint None), never a garbage `branch:`
+        identity. gh would reject such a target anyway."""
+        assert _close_target_or_none("gh pr close https://github.com/o/r/issues/5 -d") is None
+        assert _close_target_or_none("gh pr close https://evil.example/o/r/tree/main -d") is None
+
+    def test_branch_named_like_a_number_binds_the_number_namespace(self):
+        """DOCUMENTED AMBIGUITY: gh resolves a bare digit as the PR NUMBER (number
+        precedes branch in `{number|url|branch}`), so a branch literally named `5`
+        is indistinguishable from PR #5 to gh itself. The extractor matches that
+        precedence: `gh pr close 5` binds number `5`, never `branch:5`. Not a
+        collision — both spellings resolve to the same command for gh."""
+        assert _close_target("gh pr close 5 -d") == "5"
+        assert _close_target("gh pr close 5 -d") != "branch:5"
+
+
+def _close_target_or_none(cmd):
+    """Like _close_target but tolerates a non-minting (abstaining) close: returns
+    the identity or None, without asserting a mint occurred."""
+    res = mint(cmd)
+    return _target_value(res.context) if res.context is not None else None
+
+
+class TestCloseTargetExtensionNonVacuous:
+    """The extractor extension must be shown LIVE: neuter it back to the
+    number-only behavior and a url/branch MUST_FLIP row loses its mint. If it
+    keeps minting with the extension reverted, the extension is not what carries
+    these forms and every row above is vacuous."""
+
+    def test_url_and_branch_lose_mint_when_extractor_reverted(self, monkeypatch):
+        # sanity: with the extension live, url + branch mint
+        assert _close_target(f"gh pr close {_PULL5} -d") == "url:github.com/o/r#5"
+        assert _close_target("gh pr close feature -d") == "branch:feature"
+        # revert _extract_close_target to the pre-fix number-only behavior
+        monkeypatch.setattr(mgc, "_extract_close_target", mgc._extract_pr_number)
+        assert _close_target_or_none(f"gh pr close {_PULL5} -d") is None, (
+            "url still mints with the extractor reverted — the extension is not "
+            "carrying the url form, so the MUST_FLIP rows are vacuous"
+        )
+        assert _close_target_or_none("gh pr close feature -d") is None, (
+            "branch still mints with the extractor reverted — vacuous"
+        )
+        # and the NUMBER form is unaffected by the revert (it never needed the extension)
+        assert _close_target_or_none("gh pr close 5 -d") == "5"
+
+
 class TestApiMergeMintParity:
     """#1096 API-merge mint parity — the bidirectional cert for the additive
     per-leg detect arm (GH-API-ONLY per Option B + mutating PUT/PATCH/POST + a
