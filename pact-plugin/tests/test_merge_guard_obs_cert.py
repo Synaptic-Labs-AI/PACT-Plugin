@@ -376,14 +376,20 @@ OBS_E_OVER_BLOCK_STAYS_UNGATED = [
     ("commitmsg-main-then-push-feature", "git commit -m 'see main' && git push origin feature"),
     ("feature-colon-main-release", "git push origin feature:main-release"),
 ]
-# EXCLUDED per-leg residuals (delete/mass/branch-delete in a non-first leg) — the
-# {push-to-main, force-push} filter deliberately does NOT gate these (pre-existing, out of
-# scope; deleting main is rarely good-faith → acceptable under-block).
-OBS_E_PERLEG_RESIDUALS = [
+# Per-leg delete/mass/branch-delete forms. These were formerly EXCLUDED from the per-leg
+# filter and asserted to stay ungated, on the reasoning that "deleting main is rarely
+# good-faith → acceptable under-block". That reasoning does not survive the good-faith
+# model: `cd /repo && git push origin --delete feature` is an ordinary thing to type and
+# it ran COMPLETELY UNGATED, which is a breach of the one floor, not an acceptable
+# residual. The filter now carries all six union-arm classes, so these GATE.
+OBS_E_PERLEG_NOW_GATED = [
     ("cd-colon-main", "cd /repo && git push origin :main"),
     ("cd-delete-main", "cd /repo && git push origin --delete main"),
     ("fetch-mirror", "git fetch && git push --mirror origin"),
     ("cd-branch-Df", "cd /repo && git branch -Df temp"),
+    # the good-faith row that motivated the change (a feature branch, not main)
+    ("cd-delete-feature", "cd /repo && git push origin --delete feature"),
+    ("cd-close-short-d", "cd /repo && gh pr close 5 -d"),
 ]
 
 
@@ -413,10 +419,21 @@ class TestObsEPerLegPushToMain:
         assert DETECT(cmd) is None
 
     @pytest.mark.parametrize(
-        "label,cmd", OBS_E_PERLEG_RESIDUALS, ids=[r[0] for r in OBS_E_PERLEG_RESIDUALS]
+        "label,cmd", OBS_E_PERLEG_NOW_GATED, ids=[r[0] for r in OBS_E_PERLEG_NOW_GATED]
     )
-    def test_excluded_perleg_residuals_stay_ungated(self, label, cmd):
-        assert D(cmd) is False, "the {push-to-main,force-push} filter wrongly gated a delete/mass leg"
+    def test_non_first_leg_delete_and_mass_forms_gate(self, label, cmd):
+        """#1134: a delete/mass/close op in a NON-FIRST leg gates, and stays MINTABLE.
+        Gating alone would be half a fix — a gated form whose target cannot be bound is
+        the cardinal gated-but-unmintable over-block, so detect must also classify."""
+        assert load_baseline().is_dangerous_command(cmd) is False, (
+            "not an under-block at base — this row no longer demonstrates the #1134 "
+            "fix and should be moved to a no-regression set: %r" % cmd
+        )
+        assert D(cmd) is True, "non-first-leg delete/mass under-block re-opened: %r" % cmd
+        assert DETECT(cmd) is not None, (
+            "gated but unclassified — the mint cannot bind this form, which is the "
+            "cardinal gated-but-unmintable over-block: %r" % cmd
+        )
 
     def test_precedence_first_leg_unchanged(self):
         assert DETECT("git push origin --delete main") == "remote-ref-delete"
@@ -431,7 +448,7 @@ class TestObsEPerLegPushToMain:
         # gate <=> detect non-None on every matrix row (the mint==read symmetry the shared
         # _PER_LEG_PUSH_OPS filter + one predicate guarantee by construction).
         rows = (OBS_E_PERLEG_FIX + OBS_E_NO_REGRESSION + OBS_E_UNDER_BLOCK_NOW_GATE
-                + OBS_E_OVER_BLOCK_STAYS_UNGATED + OBS_E_PERLEG_RESIDUALS)
+                + OBS_E_OVER_BLOCK_STAYS_UNGATED + OBS_E_PERLEG_NOW_GATED)
         for _label, cmd in rows:
             assert (DETECT(cmd) is not None) == (D(cmd) is True), "mint!=read on %r" % cmd
 

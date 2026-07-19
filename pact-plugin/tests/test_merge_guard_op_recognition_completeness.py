@@ -1615,26 +1615,82 @@ class TestBranchDeleteLiteralArmCrossLegSweep:
             "— detect is not consuming the shared leg seam"
         )
 
-    def test_literal_tuple_is_load_bearing_on_both_sides_via_golden_row(self, monkeypatch):
-        """Detect-side load-bearing discriminator, on the GOLDEN row
-        `cd /repo && git branch -D temp`: the union arm is first-leg-anchored
-        and abstains on it, so ONLY the literal tuple can catch it on either
-        side. Neutering the tuple ALONE (no identity slice) must drop BOTH the
-        gate (D False) and the classification (OP None) — proving the tuple, not
-        a neighboring family, carries this form. The single-leg `-D` /
-        `--delete --force` rows would NOT discriminate (the union arm also
-        recognizes their spellings in the first leg)."""
+    def test_golden_row_split_proof_each_mechanism_isolated(self, monkeypatch):
+        """SPLIT PROOF on the GOLDEN row `cd /repo && git branch -D temp`.
+
+        WHY THE PREVIOUS SHAPE HAD TO BE RE-DERIVED, not repaired. This test used to
+        neuter the literal tuple ALONE and assert the row went ungated, on the premise
+        that "the union arm is first-leg-anchored and abstains here, so ONLY the tuple
+        can catch it." That premise was falsified by design, not by drift: the per-leg
+        filter now carries `branch-delete`, so the union loop reaches this row too and
+        the tuple-only neuter no longer drops it. Loosening the old assertion would
+        have hidden a real change; the proof is re-derived instead.
+
+        WHY THE ENDPOINTS PROVE NOTHING NOW. After the widening there are TWO
+        independently sufficient covering mechanisms, so:
+          - `untouched -> gates` passes even if one mechanism is already silently dead
+            (the survivor covers the row);
+          - `both neutered -> ungated` ALSO passes if one is already dead.
+        Neither endpoint can detect a silently-dead mechanism. A bare either-covers
+        assertion is exactly the check that proves nothing.
+
+        THE DISCRIMINATING ASSERTION IS THE ONE THAT ISOLATES A SINGLE MECHANISM.
+        Rows 1 and 2 below each neuter ONE mechanism and require the OTHER to carry
+        the row alone; that is what makes this a SPLIT proof rather than a union
+        check. Row 3 neuters both and requires the row to drop — it proves nothing
+        else covers the form, and it doubles as the known-bad control for rows 1-2,
+        so each assertion is demonstrated failing on a known-bad input BY
+        CONSTRUCTION rather than merely demonstrated passing."""
         cmd = "cd /repo && git branch -D temp"
+        arms = mgc._BRANCH_DELETE_LITERAL_ARMS
+        per_leg = mgc._PER_LEG_PUSH_OPS
+        filter_without_branch_delete = tuple(
+            op for op in per_leg if op != "branch-delete"
+        )
+        assert filter_without_branch_delete != per_leg, (
+            "VACUITY GUARD: 'branch-delete' is not in the per-leg filter, so the "
+            "filter-side neuter below is a no-op and row 2 would prove nothing."
+        )
+
+        # Baseline: both mechanisms live.
         assert mgc.is_dangerous_command(cmd) is True
         assert mgc.detect_command_operation_type(cmd) == "branch-delete"
+
+        # ROW 1 — neuter the LITERAL TUPLE only. The per-leg filter must carry it.
         monkeypatch.setattr(mgc, "_BRANCH_DELETE_LITERAL_ARMS", ())
+        monkeypatch.setattr(mgc, "_PER_LEG_PUSH_OPS", per_leg)
+        assert mgc.is_dangerous_command(cmd) is True, (
+            "FILTER SIDE IS DEAD: with the literal tuple neutered, the per-leg "
+            "filter failed to gate a non-first-leg `-D`. The #1134 under-block is "
+            "re-opened for every form that has no literal arm."
+        )
+        assert mgc.detect_command_operation_type(cmd) == "branch-delete", (
+            "filter side is dead on the detect arm (read/mint would disagree)"
+        )
+
+        # ROW 2 — neuter the PER-LEG FILTER only. The literal tuple must carry it.
+        monkeypatch.setattr(mgc, "_BRANCH_DELETE_LITERAL_ARMS", arms)
+        monkeypatch.setattr(mgc, "_PER_LEG_PUSH_OPS", filter_without_branch_delete)
+        assert mgc.is_dangerous_command(cmd) is True, (
+            "TUPLE SIDE IS DEAD: with `branch-delete` dropped from the per-leg "
+            "filter, the literal arms failed to gate a non-first-leg `-D`. The "
+            "any-leg literal floor has silently stopped carrying this family."
+        )
+        assert mgc.detect_command_operation_type(cmd) == "branch-delete", (
+            "tuple side is dead on the detect arm"
+        )
+
+        # ROW 3 — neuter BOTH. Nothing else may cover the row. This is the
+        # known-bad control that makes rows 1-2 non-vacuous.
+        monkeypatch.setattr(mgc, "_BRANCH_DELETE_LITERAL_ARMS", ())
+        monkeypatch.setattr(mgc, "_PER_LEG_PUSH_OPS", filter_without_branch_delete)
         assert mgc.is_dangerous_command(cmd) is False, (
-            "non-first-leg -D still gates with the tuple neutered — a second "
-            "family covers it and the tuple is not load-bearing on the read floor"
+            "A THIRD mechanism covers this row. Rows 1-2 above are therefore "
+            "vacuous — they cannot attribute coverage to the mechanism they name. "
+            "Identify the third family before trusting this proof."
         )
         assert mgc.detect_command_operation_type(cmd) is None, (
-            "non-first-leg -D still classifies with the tuple neutered — a "
-            "second family covers it and the tuple is not load-bearing in detect"
+            "a third mechanism classifies this row on the detect arm"
         )
 
 
@@ -1656,6 +1712,60 @@ class _ApiMergeDetectArmDisabledRe:
 
     def __getattr__(self, name):
         return getattr(_real_re, name)
+
+
+class TestBranchDeleteWordBoundaryMustStayOff:
+    """MUST_STAY_OFF — the `\\b` on the `-D` literal arm, enforced.
+
+    The branch-delete arm is `git\\s+...branch\\s+.*-D\\b`. The trailing `\\b` is the
+    only thing stopping `-D` from matching INSIDE an ordinary branch name: any name
+    whose second hyphen-separated word starts with a capital D reads as `-D` to a
+    boundaryless pattern — `feature-Dashboard`, `release-December`, `*-Dev*`,
+    `new-Design`.
+
+    WHY THIS CLASS EXISTS AT ALL. "Do not touch the `\\b`" was a documented mandate
+    with NOTHING enforcing it. Removing the boundary from all three occurrences
+    produces a suite failure set IDENTICAL to control — zero new failures, zero
+    disappeared — while gating SIX ordinary good-faith commands, including
+    `git branch feature-Dashboard`, which CREATES a branch and would be classified
+    `branch-delete`. That is the cardinal over-block, invisible, with a green suite.
+
+    So this is not a check that proved nothing; it was an invariant with no check.
+    These rows convert it into a visible one. Every command below is benign and
+    must never gate."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "git branch feature-Dashboard",              # CREATES a branch
+            'git branch --list "release-Dec*"',          # list, glob
+            'git branch --list "*-Dev*"',                # list, leading glob
+            "git branch --contains feature-Dashboard",   # read: which branches contain
+            "git branch -m old new-Design",              # rename
+            "git branch --merged release-December",      # read: merged-into filter
+        ],
+    )
+    def test_capital_d_inside_a_branch_name_never_gates(self, cmd):
+        assert D(cmd) is False, (
+            "CARDINAL OVER-BLOCK: an ordinary branch name containing a hyphen "
+            "followed by a capital D gated. The `-D` literal arm has lost its "
+            "trailing word boundary, so `-D` is matching inside a NAME rather than "
+            f"as a flag. Restore the `\\b`: {cmd!r}"
+        )
+        assert OP(cmd) is None, (
+            f"same boundary regression, on the detect arm — note `git branch "
+            f"feature-Dashboard` CREATES a branch: {cmd!r}"
+        )
+
+    def test_the_boundary_rows_are_not_vacuous(self):
+        """Control: the arm this class guards still fires on a REAL `-D`. Without
+        this, every row above would stay green if the branch-delete arm were
+        deleted outright — passing for the wrong reason."""
+        assert D("git branch -D temp") is True, (
+            "the branch-delete arm no longer gates a genuine `-D`, so the "
+            "boundary rows above prove nothing"
+        )
+        assert OP("git branch -D temp") == "branch-delete"
 
 
 class TestApiMergeMintParity:
@@ -2176,39 +2286,112 @@ class TestApiMergeEndpointResidualBoundary:
 
 
 class TestAcceptedRecognitionLimitationPins:
-    """FORWARD-PROTECTION pins for the ACCEPTED conservative-recognition limitation
-    (the review-cycle-1 SECURITY-HALT disposition). These forms run UNGATED BY
-    DESIGN, and these tests assert that ON PURPOSE — they are the executable tripwire
-    so a future maintainer who 'hardens' recognition into a match-anywhere / per-leg
-    scan (which would re-block faithful clicks) sees these flip RED and STOPS.
+    """FORWARD-PROTECTION pins for the recognition posture.
 
-    THE PRINCIPLE (do NOT 'fix' these): the git-push remote-ref-delete (:ref /
-    --delete / -d) and mass-delete (--mirror / --prune / multi-ref) forms need a
-    positional, quote-aware parse, so their recognition is ANCHORED to the FIRST
-    executable leg and does NOT chase the op into NON-FIRST compound legs. Chasing it
-    requires a match-anywhere scan that fires on a quoted :ref / --mirror mention in a
-    benign leg = an over-block of a faithful click, which is WRONG BY DEFINITION
-    (worse than missing a buried op). The fix for any over-block WIDENS the mint,
-    never narrows detection into a new under-block.
+    THE PRINCIPLE these pins protect is unchanged and is the reason they exist:
+    over-blocking a faithful click is WRONG BY DEFINITION, worse than missing a
+    buried op, and the fix for any over-block WIDENS the mint rather than narrowing
+    detection into a new under-block.
+
+    WHAT CHANGED — read this before restoring anything from git history. These pins
+    were originally written to assert that non-first-leg push-delete / mass-delete /
+    cluster-flag forms run UNGATED, on the premise that reaching them REQUIRED a
+    match-anywhere scan (which would fire on a quoted `:ref` / `--mirror` mention in
+    a benign leg and over-block a faithful click). THAT PREMISE WAS FALSE. A quote-
+    aware PER-LEG predicate reaches those forms with no match-anywhere behavior: each
+    call sees ONE isolated leg and derives flags AND positionals from it, so a mention
+    inside a benign leg stays a mention. Leaving them ungated was therefore not a
+    principled limitation but a good-faith-reachable UNDER-BLOCK (`cd /repo && git
+    push origin --delete feature` ran completely ungated), and it was closed.
+
+    So the OUTCOME assertion those pins carried was a PROXY for the author's real
+    intent — protect faithful clicks — and the proxy broke when the mechanism it
+    stood on was replaced. The pins below now assert the intent directly: the
+    MECHANISM that would genuinely over-block is still absent / the property that
+    makes per-leg safe is still present, PLUS benign rows that must stay ungated.
+
+    STILL TRUE, and still the thing to guard: the LITERAL arms' word boundary must
+    not be loosened. That WOULD grant delete tokens match-anywhere coverage and IS
+    the over-block this class was created to prevent.
     """
+
+    def test_no_match_anywhere_literal_arm_for_delete_tokens(self):
+        """MECHANISM PIN #1 — asserts the ABSENCE of the one unsafe mechanism.
+
+        The over-block this class guards comes from ONE specific shape: a literal arm
+        that matches a delete token ANYWHERE in the command string, with no word
+        boundary and no leg isolation. Such an arm fires on a delete token sitting
+        inside a benign leg — a quoted `--mirror` in a push option, a `:main` inside a
+        commit message — and blocks a faithful click.
+
+        Non-first-leg reach is NOT that shape and must not be confused with it: it is
+        the SAME quote-aware predicate re-invoked on an ISOLATED leg. This pin
+        therefore constrains the literal arms only, and is deliberately silent about
+        per-leg coverage.
+
+        Worded as an ABSENCE claim (contrast mechanism pin #2, which asserts a
+        PRESENCE): the two failure modes differ, and one shared pin would paper over
+        that difference.
+
+        NOT a regex-shape assertion. Inspecting the arm patterns for word boundaries
+        proves nothing here — every arm carries `\\b` in its leading `\\bgit` anchor, so
+        a 'pattern contains \\b' check passes unconditionally. Match-anywhere is a
+        property of HOW the arms are APPLIED, not of what they contain, so this pin
+        measures the application.
+
+        The row is chosen so the arm regex ITSELF spans the leg separator: the
+        branch-delete arm is `git\\s+...branch\\s+.*-D\\b`, and its `.*` happily crosses
+        `&&`, so it MATCHES the whole compound below. The guard nonetheless returns
+        False — which is only possible if the arms are evaluated PER-LEG. That makes
+        the pin self-controlling: the first assertion establishes the arm would fire
+        whole-string (if it ever stops, the premise moved and you are told so rather
+        than passing silently), and the second establishes it does not."""
+        cmd = "git branch new-feature && echo -D"
+        assert any(arm.search(cmd) for arm in mgc._BRANCH_DELETE_LITERAL_ARMS), (
+            "PREMISE MOVED: no branch-delete arm matches this compound whole-string "
+            "any more, so this row no longer discriminates per-leg from "
+            "match-anywhere. Re-derive the row before trusting the pin below."
+        )
+        assert mgc.is_dangerous_command(cmd) is False, (
+            "MATCH-ANYWHERE REGRESSION: a branch-delete arm whose regex spans the leg "
+            "separator now gates a command whose only `-D` sits in a BENIGN `echo` "
+            "leg. The literal arms are being applied to the WHOLE command instead of "
+            "per-leg — this is the faithful-click over-block this class exists to "
+            "prevent."
+        )
+        assert mgc.detect_command_operation_type(cmd) is None, (
+            "same match-anywhere regression, on the detect side"
+        )
 
     @pytest.mark.parametrize(
         "cmd",
         [
-            "cd /repo && git push origin --delete main",   # ref-delete in a non-first leg
-            "git fetch && git push --mirror origin",        # mass-delete in a non-first leg
-            "NOTE=x ; git push origin :main",               # colon-delete after an assignment leg
+            # A delete token quoted inside a benign push OPTION — the canonical
+            # match-anywhere casualty.
+            'git push origin feature -o "note: use --mirror for backups"',
+            'git push origin feature -o "cleanup: replaces --delete flow"',
+            # A delete token inside a commit message on a benign leg.
+            'git commit -m "document --mirror and :main semantics"',
+            # A delete token echoed, never executed.
+            'echo "run git push origin :main to drop it"',
+            # Reads that merely NAME the destructive spellings.
+            "git help push | grep -- --mirror",
         ],
     )
-    def test_non_first_leg_push_delete_ungated_by_design(self, cmd):
-        """ACCEPTED LIMITATION — do NOT fix. A push-delete/mass-delete in a NON-FIRST
-        compound leg is ungated (first-leg anchoring). If this assertion FAILS, the
-        recognition was hardened into a match-anywhere scan that over-blocks faithful
-        clicks — that is the WRONG fix; re-read the conservative-recognition principle."""
+    def test_delete_token_in_benign_context_stays_ungated(self, cmd):
+        """OUTCOME ROWS for mechanism pin #1 — the faithful clicks the absent
+        mechanism would have blocked.
+
+        Mechanism-only is weaker than it looks: it can be fully satisfied while an
+        over-block returns by another route. These rows assert the INTENT (a faithful
+        click is never blocked) rather than a proxy for it, so they stay valid even if
+        the mechanism is later re-expressed some other way. Every row names a delete
+        token but executes nothing destructive."""
         assert D(cmd) is False, (
-            f"Recognition was hardened to chase a non-first-leg push-delete — this "
-            f"RE-INTRODUCES a faithful-click over-block. Do NOT 'fix' this form: {cmd!r}"
+            f"OVER-BLOCK: a delete token in a BENIGN context gated a faithful click. "
+            f"Something acquired match-anywhere reach over delete tokens: {cmd!r}"
         )
+        assert OP(cmd) is None, f"benign delete-token mention classified as an op: {cmd!r}"
 
     def test_httpie_protection_ungated_by_design(self):
         """ACCEPTED LIMITATION — do NOT fix by bolting on an httpie read arm. The mint
@@ -2253,24 +2436,71 @@ class TestAcceptedRecognitionLimitationPins:
         assert D(cmd) is True, f"UNDER-BLOCK: literal arm stopped gating in a non-first leg: {cmd!r}"
         assert OP(cmd) == expected_op
 
+    def test_leg_locality_invariant_flags_and_positionals_share_one_leg(self):
+        """MECHANISM PIN #2 — asserts the PRESENCE of the property that makes
+        per-leg coverage safe. This is the STRONGER of the two pins.
+
+        Deliberately worded as a PRESENCE claim, unlike pin #1's absence claim. The
+        failure modes are not the same and a single shared pin would hide the
+        difference: pin #1 guards against a mechanism being ADDED (match-anywhere
+        reach), this one guards against a property being REMOVED (leg locality).
+
+        THE INVARIANT: `_flag_condition_danger_op(leg)` sets
+        `prefix = _executable_prefix(leg)` and derives EVERYTHING from that one
+        prefix — the token list, the coarse op-shape, and the extractor inputs. So
+        flags AND positionals come from the SAME isolated leg. This is what makes it
+        safe for callers to re-invoke the arm per leg: the cross-leg flag leak
+        (positionals from leg 1, flags from the whole command, so a `--force` in a
+        benign continuation mislabels a benign first-leg op) is impossible BY
+        CONSTRUCTION, not by an ordering accident.
+
+        If this property is ever removed, per-leg invocation becomes actively unsafe
+        and the widened `_PER_LEG_PUSH_OPS` filter turns into an over-block engine —
+        which is why this pin is stronger than pin #1 and why it must fail loudly."""
+        # Positionals name a BENIGN op; the danger flag lives in a LATER leg.
+        # If flags leaked from the whole command, leg 1 would be mislabeled.
+        leaky = "git branch new-feature && echo --delete --force"
+        assert mgc._flag_condition_danger_op(leaky) is None, (
+            "CROSS-LEG FLAG LEAK: the union arm classified a benign first-leg "
+            "`git branch new-feature` as dangerous by picking up `--delete --force` "
+            "from a LATER leg. Flags are no longer derived from the same isolated "
+            "leg as the positionals — per-leg invocation is now unsafe."
+        )
+        # Control: the SAME flags, in the SAME leg as the positionals, DO fire.
+        # Without this, the assertion above passes even if the arm stopped
+        # recognizing the op entirely (verified presence, not function).
+        same_leg = "git branch --delete --force temp"
+        assert mgc._flag_condition_danger_op(same_leg) == "branch-delete", (
+            "VACUITY CONTROL FAILED: the union arm no longer recognizes "
+            "`--delete --force` even within ONE leg, so the leak assertion above "
+            "proves nothing. Re-derive both rows."
+        )
+        # And the invariant survives leg isolation: the danger leg, taken alone,
+        # still classifies — this is exactly what the per-leg callers rely on.
+        assert mgc._flag_condition_danger_op("git branch -Df temp") == "branch-delete"
+
     @pytest.mark.parametrize(
         "cmd",
         [
-            "cd /repo && git branch -Df temp",   # cluster force-delete in a non-first leg
-            "cd /repo && gh pr close 5 -d",      # short -d close in a non-first leg
+            # Benign first leg + a danger-flag SPELLING in a later, non-executing leg.
+            "git branch new-feature && echo --delete --force",
+            "git branch --list && echo -Df",
+            "gh pr view 5 && echo --delete-branch",
+            # Flag-shaped text as an argument VALUE on a benign command.
+            "git config --get alias.nuke",
+            "grep -Df pattern file.txt",
         ],
     )
-    def test_non_first_leg_cluster_flag_forms_ungated_by_design(self, cmd):
-        """ACCEPTED LIMITATION — do NOT fix. The flag-condition union arm is
-        FIRST-LEG-ANCHORED, so a clustered/short danger flag in a NON-FIRST leg
-        loses union coverage. Re-detecting these requires whole-command or per-leg
-        flag derivation — exactly the cross-leg flag leak the anchoring removed /
-        the pinned over-block reintroduction. The idiomatic spellings (`-D`,
-        `--delete-branch`) remain caught per-leg, in any leg, by the literal floor
-        (the contrast rows in this class)."""
+    def test_flags_in_a_benign_leg_never_label_a_benign_op(self, cmd):
+        """OUTCOME ROWS for mechanism pin #2 — the faithful clicks a leak would block.
+
+        Pairs with the mechanism assertion above for the same reason pin #1 carries
+        outcome rows: a mechanism pin can be fully satisfied while an over-block
+        returns by another route. Each row has a benign executable op and a danger
+        flag that must stay inert because it is not in that op's leg."""
         assert D(cmd) is False, (
-            f"Recognition was widened to chase a non-first-leg cluster flag — this "
-            f"RE-INTRODUCES a faithful-click over-block. Do NOT 'fix' this form: {cmd!r}"
+            f"OVER-BLOCK: a danger flag in a NON-EXECUTING leg labeled a benign op "
+            f"as dangerous — the cross-leg flag leak is back: {cmd!r}"
         )
 
 
