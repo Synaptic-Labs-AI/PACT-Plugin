@@ -388,10 +388,6 @@ class TestR3BoundaryAndResidual:
         # a second leg — the tail is executed surface and stays caught.
         ("body token + && exec tail", 'gh pr edit 123 --body "x | %s" && %s' % (SH, PF)),
         ("body token + ; exec tail", 'gh pr edit 123 --body "x | %s" ; %s' % (SH, PF)),
-        # E3: comment-resident routing token — comments are deliberately NOT excised from
-        # the view (excising them on the masked view is an under-block trap), so this
-        # stays a documented residual over-block. Narrower than the surface R3 fixes.
-        ("E3 comment-resident token", 'echo "%s" # docs: | %s' % (PF, SH)),
         # E4: an ANSI-C \\' desyncs the single-quote mask so the token stays visible — the
         # exact mirror of the ratified ANSI-C residual.
         ("E4 ANSI-C backslash-quote desync", "gh pr comment 1 --body $'%s\\' | %s'" % (PF, SH)),
@@ -402,13 +398,36 @@ class TestR3BoundaryAndResidual:
 
     @pytest.mark.parametrize("label,cmd", [
         ("unbalanced quote near routing token", 'echo "%s | %s' % (PF, SH)),
-        ("E3 comment-resident token", 'echo "%s" # docs: | %s' % (PF, SH)),
         ("E4 ANSI-C backslash-quote desync", "gh pr comment 1 --body $'%s\\' | %s'" % (PF, SH)),
     ])
     @requires_history
     def test_boundary_residual_unchanged_across_all_three(self, label, cmd):
         assert D_BASE(cmd) is True and D_R3(cmd) is True and D(cmd) is True, \
             "%s: R3 must neither introduce nor remove this residual (True==True==True): %r" % (label, cmd)
+
+    # E3 CLOSED (was a documented residual in both parametrized tests above): the
+    # comment-excision step of _excise_and_mask (view-only, same-length, RAW-
+    # predecessor test) now removes an unquoted `#`-comment from the routing view,
+    # so a comment-resident `| sh` no longer flips piped_to_shell and the echo
+    # carrier strips the quoted value. This is SOUND (not the under-block trap the
+    # old comment warned about) because the predecessor is tested on the PRE-MASK
+    # surface — a masked closing quote cannot fake a comment start, and a quoted
+    # `#` never survives the mask. Row moved from residual-True to closure; the
+    # deep cert lives in test_merge_guard_1148_cert.py.
+    _E3 = ("E3 comment-resident token", 'echo "%s" # docs: | %s' % (PF, SH))
+
+    def test_e3_comment_residual_closed_at_patch(self):
+        label, cmd = self._E3
+        assert D(cmd) is False, \
+            "%s: the comment-excision closure regressed (residual re-opened): %r" % (label, cmd)
+
+    @requires_history
+    def test_e3_closure_transition_across_all_three(self):
+        label, cmd = self._E3
+        assert D_BASE(cmd) is True and D_R3(cmd) is True, \
+            "%s: vacuity — E3 was a genuine residual at base and R3HEAD: %r" % (label, cmd)
+        assert D(cmd) is False, \
+            "%s: comment-excision closure must hold at PATCH: %r" % (label, cmd)
 
 
 # ===========================================================================

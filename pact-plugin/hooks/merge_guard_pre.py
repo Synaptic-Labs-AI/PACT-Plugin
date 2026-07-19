@@ -516,8 +516,9 @@ def _token_matches_command(token: dict, command: str) -> bool:
     # Only when BOTH tiers abstain (0 or >=2 candidate legs — ambiguity) do we
     # fall back to the WHOLE command: the existing over-binding scan, the SAFE
     # over-block direction; ambiguity can only collapse WIDER, never narrower.
-    # Op/target are still derived the SAME way the mint side does (mint
-    # isolates per-region via locate_command_regions), so the two arms cannot drift.
+    # Op/target are still derived the SAME way the mint side does (mint isolates
+    # per-region via locate_command_regions AND per-leg via _extraction_surface,
+    # #1195 OBS-H), so the two arms cannot drift.
     cmd = extract_command_context(
         _single_destructive_leg(command)
         or _single_detectable_leg(command)
@@ -563,16 +564,55 @@ def _token_matches_command(token: dict, command: str) -> bool:
             _both_present_equal(context.get("branch"), cmd.get("branch"))
             or _both_present_equal(context.get("branch_set"), cmd.get("branch_set"))
         )
-    if token_op in ("force-push", "push-to-main", "remote-ref-delete"):
+    if token_op == "push-to-main":
+        # KD-6 target bind, widened for the MULTI-ref set (#1195 OBS-G — the
+        # branch/branch_set arm mirrored): SINGLE-ref scalar `target_ref` OR
+        # MULTI-ref canonical `push_set`, set-EQUALITY on the injective netstring
+        # identity — a {main,feature} token cannot authorize {main,feature,staging}
+        # (unequal canonical strings) while a {feature,main} reorder / dup MATCHES
+        # (both canonicalize to the SAME string). Exactly one key is present per
+        # command (the scalar: exactly remote+refspec; the set: >=2 refspecs —
+        # mutually exclusive in the ONE extract_command_context SSOT), so a scalar
+        # token can NOT authorize a set command or vice-versa (the absent-key side
+        # fails _both_present_equal). GAP3 stays closed: a force-push token and a
+        # push-to-main token are DISTINCT ops (op-type identity above), and a
+        # `+refspec` / `--force` multi-ref classifies force-push, so the
+        # push→force collapse cannot re-open through the set arm; the a2
+        # bound_flags equality above keeps a PLAIN push_set token from authorizing
+        # a --force-with-lease multi-ref push (lease is a push-to-main privileged
+        # flag).
+        return (
+            _both_present_equal(context.get("target_ref"), cmd.get("target_ref"))
+            or _both_present_equal(context.get("push_set"), cmd.get("push_set"))
+        )
+    if token_op == "force-push":
+        # KD-6 target bind, widened for the MULTI-ref set (#1195 OBS-I — the
+        # push-to-main/branch_set split precedent): SINGLE-ref scalar `target_ref`
+        # OR MULTI-ref canonical `force_push_set`, set-EQUALITY on the injective
+        # FORCED-NORMALIZED identity — the identity tracks WHICH refs get forced,
+        # so a plain-mixed token can NOT authorize the --force spelling of the
+        # same refs or vice versa (the plain->forced escalation stays closed),
+        # while `--force feature main` and `+feature +main` — the same operation
+        # — share one identity. The ALLOWLIST guard in the shared extractor means
+        # a delete/mass/scope-expander/unknown-flag EXECUTION derives
+        # force_push_set=None and is REFUSED here via the absent-side rule
+        # (mint and read are the same guarded extractor — the escalation closes
+        # in both directions by construction). Exactly one of target_ref /
+        # force_push_set is present per command; the a2 bound_flags equality
+        # above still discriminates --no-verify.
+        return (
+            _both_present_equal(context.get("target_ref"), cmd.get("target_ref"))
+            or _both_present_equal(context.get("force_push_set"), cmd.get("force_push_set"))
+        )
+    if token_op == "remote-ref-delete":
         # KD-6 (SECURITY-RATIFICATION-PENDING): the destination ref must match
-        # explicitly — an op-type-only floor would let a 'force-push feature'
-        # approval authorize 'force-push main'. An implicit/multi-ref/unparseable
-        # ref is ABSENT in extract_command_context, so this REFUSES it. GAP3:
-        # push-to-main is target-matched identically (its target is the main/master
-        # ref), so a faithful plain-push token authorizes its own exec — while a
-        # force-push token and a push-to-main token stay DISTINCT ops (op-type
-        # identity is checked above), keeping the push→force collapse closed.
-        # #1062a: remote-ref-delete ALSO binds on target_ref (the deleted ref); the
+        # explicitly — an op-type-only floor would let a delete-feature approval
+        # authorize a delete-main. An implicit/multi-ref/unparseable ref is
+        # ABSENT in extract_command_context, so this REFUSES it — delete stays
+        # SCALAR-ONLY and NEVER gains a set (deliberate: deleting refs in bulk is
+        # rarely good-faith; multi-ref delete spellings remain
+        # gated-but-unmintable).
+        # #1062a: remote-ref-delete binds on target_ref (the deleted ref); the
         # op-type identity checked above keeps a remote-ref-delete token from
         # cross-authorizing a force-push/push-to-main sharing the same target_ref
         # (the lead Q1 distinct-op-class guarantee).

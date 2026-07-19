@@ -207,12 +207,31 @@ class TestRemoteRefDeleteNoOverBlock:
     )
     def test_quoted_colon_not_read_as_ref_delete(self, cmd):
         """#1037 brittleness class: a colon mentioned inside a quoted push-option
-        value must not be mis-read as a ref-delete refspec. (These still gate as
-        push-to-main on their own merits — that is asserted in the integration
-        class; here we only assert they are not mis-bound as a ref-delete.)"""
-        assert OP(cmd) != "remote-ref-delete"
-        assert CTX(cmd).get("target_ref") in (None,), (
-            f"{cmd!r} leaked a target_ref: {CTX(cmd).get('target_ref')!r}"
+        value must not be mis-read as a ref-delete refspec.
+
+        OBS-C hardened the force-push/push-to-main target parser to SKIP a
+        value-taking push-option's value token (`-o ':oldref'`) via
+        `_push_positionals`, recovering the REAL refspec positional (`main`) instead
+        of miscounting the colon-bearing value as a 3rd positional and abstaining.
+        The prior `target_ref in (None,)` assertion encoded that pre-OBS-C over-block
+        miscount; the STRONGER post-OBS-C invariant is: the quoted push-option colon
+        is NEVER bound as a delete refspec — the op stays a NON-delete class AND any
+        recovered `target_ref` is the real refspec (`main`), never `:oldref`/`:weird`.
+        mint==read holds by construction (both derive via extract_command_context)."""
+        op = OP(cmd)
+        tr = CTX(cmd).get("target_ref")
+        # op-axis: the -o-embedded colon must never promote the command to a delete
+        # class (the core #1037 protection — kept and widened to mass-delete).
+        assert op not in ("remote-ref-delete", "remote-mass-delete"), (
+            f"{cmd!r} mis-classified as a delete op: {op!r}"
+        )
+        # target-axis: the recovered target is the REAL refspec (`main`) or absent,
+        # NEVER the quoted push-option colon (the #1037 leak this row guards).
+        assert tr in (None, "main"), (
+            f"{cmd!r} recovered a non-refspec target_ref: {tr!r}"
+        )
+        assert tr is None or not tr.startswith(":"), (
+            f"{cmd!r} leaked a colon delete-refspec as target_ref: {tr!r}"
         )
 
 
@@ -1930,24 +1949,43 @@ class TestApiMergeEndpointPositionLaunderingClosed:
         assert err is not None, "standalone api-merge must DENY with no token"
 
     def test_laundering_closed_non_vacuous_under_flat_extractor(self, monkeypatch):
-        """NON-VACUITY (in-memory): restore the pre-fix FLAT first-match extractor
-        (`re.search(pulls/(\\d+)/merge)` over the whole command — the shape at
-        commit-parent that bound a decoy) on the command-level `_extract_api_merge_pr`
-        that `extract_command_context` calls, and assert the `-f` body decoy
-        RE-BINDS the decoy 5 — proving the endpoint-position assertions above are
-        coupled to the walk, not vacuously green. The module-global binding
-        resolves at call time."""
+        """NON-VACUITY (in-memory): the #1096 endpoint-position walk is LOAD-BEARING,
+        proven INDEPENDENTLY of the #1178 inert-value strip. The mint now isolates the
+        destructive leg via the read-symmetric extraction surface, whose leg-strip
+        replaces the `-f note=…` body decoy with 'STRIPPED' UPSTREAM — a SECOND,
+        independent laundering-closure layer. So a flat-extractor mutation can no longer
+        re-bind the decoy through the mint path (the strip removed it); to isolate the
+        WALK's coupling we restore the pre-fix flat first-match extractor and assert it
+        RE-BINDS the decoy 5 on the RAW extraction surface (`extract_command_context` of
+        the whole command — the surface the walk is defined against, where the strip is
+        not in the path). direction-2b then pins the LAYERED defense: through the stripped
+        mint path the same flat extractor binds the endpoint 6, so EITHER layer alone
+        closes the laundering. The module-global `_extract_api_merge_pr` binding resolves
+        at call time."""
         approve = "gh api -X PUT -f note=pulls/5/merge repos/o/r/pulls/6/merge"
-        # direction 1 — fix present: binds the endpoint
+        # direction 1 — fix present: the walk binds the ENDPOINT on both surfaces.
+        assert mgc.extract_command_context(approve).get("pr_number") == "6"
         assert _mint_pr(approve) == "6"
-        # direction 2 — flat first-match restored: binds the decoy again
+        # restore the pre-fix flat first-match extractor.
         def flat(command):
             m = _real_re.search(r"pulls/(\d+)/merge\b", command)
             return m.group(1) if m else None
         monkeypatch.setattr(mgc, "_extract_api_merge_pr", flat)
-        assert _mint_pr(approve) == "5", (
-            "flat-extractor mutation did not re-bind the decoy — the "
-            "laundering-closed assertions would be vacuous"
+        # direction 2a — WALK non-vacuity, ISOLATED from the strip: on the RAW extraction
+        # surface (strip not in the path) the flat first-match re-binds the decoy 5,
+        # proving the endpoint-position walk — not vacuity — is what binds 6 above.
+        assert mgc.extract_command_context(approve).get("pr_number") == "5", (
+            "flat-extractor mutation did not re-bind the decoy on the RAW extraction "
+            "surface — the endpoint-position walk assertions would be vacuous"
+        )
+        # direction 2b — LAYERED defense (the #1178 leg-strip): through the stripped mint
+        # path the `-f` body decoy is stripped to 'STRIPPED' upstream, so even the flat
+        # extractor binds the endpoint 6 — the strip closes the laundering INDEPENDENTLY
+        # of the walk. (Pre-strip, this bound the decoy 5; the additional layer is why
+        # the mint path can no longer exhibit the flat extractor's mis-bind.)
+        assert _mint_pr(approve) == "6", (
+            "the #1178 inert-value strip must independently close the -f body decoy in "
+            "the mint path even when the endpoint-position walk is defeated"
         )
 
 
