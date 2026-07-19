@@ -98,7 +98,7 @@ _executable_prefix view), deriving both POSITIONALS and FLAGS from that ONE leg
 force/delete flag in a benign continuation leg mislabel a benign first-leg op — the
 cross-leg flag leak).
 
-ANY-LEG reach is the CALLERS' (`_PER_LEG_PUSH_OPS`, below): they re-invoke this same arm on
+ANY-LEG reach is the CALLERS' (`_PER_LEG_OPS`, below): they re-invoke this same arm on
 each ISOLATED leg. That is NOT a match-anywhere scan — the distinction is the whole
 point. A match-anywhere scan fires on a quoted `:ref` / `--mirror` mention in a benign
 leg (a faithful-click over-block); a per-leg re-invocation runs the SAME positional,
@@ -127,7 +127,7 @@ per-leg rather than match-anywhere: the LITERAL danger arms (the DANGEROUS_PATTE
 match in ANY leg position (`cd /repo && git push --force origin main` is caught); and the
 accurate refspec-DST predicate `_flag_condition_danger_op` is additionally invoked PER-LEG
 by its callers (detect_command_operation_type + _stripped_surface_danger), filtered to
-`_PER_LEG_PUSH_OPS` — so `cd /repo && git push origin main` is caught. That filter carries ALL
+`_PER_LEG_OPS` — so `cd /repo && git push origin main` is caught. That filter carries ALL
 SIX union-arm classes, so the delete/mirror/:ref forms gate in any leg too. The two
 mechanisms OVERLAP on some forms (e.g. `cd /repo && git branch -D temp` is covered by
 both); when proving either one is load-bearing, isolate it — an assertion that exercises
@@ -572,7 +572,7 @@ def detect_command_operation_type(command: str) -> str | None:
     # `bash -c 'gh pr merge 5' && git push origin main` stays merge, not push-to-main).
     for _leg in legs:
         _lop = _flag_condition_danger_op(_leg)
-        if _lop in _PER_LEG_PUSH_OPS:
+        if _lop in _PER_LEG_OPS:
             return _lop
     return None
 
@@ -3683,7 +3683,7 @@ _PUSH_MAIN_DST_RE = re.compile(
 # evaluated on an ISOLATED leg, which is its own first leg, so the dangerous-leg count is
 # unchanged by this filter), and a >=2-dangerous-leg compound is refused at the pair level
 # regardless of which label it carries — so this re-labels a verdict that never authorizes.
-_PER_LEG_PUSH_OPS = (
+_PER_LEG_OPS = (
     "push-to-main",
     "force-push",
     "branch-delete",
@@ -3699,7 +3699,7 @@ def _flag_condition_danger_op(command: str) -> str | None:
     op-class ("close" / "branch-delete" / "force-push" / "remote-ref-delete" /
     "remote-mass-delete" / "push-to-main") iff a condition fires, else None.
     FIRST-LEG-ANCHORED (extending the conservative-RECOGNITION posture to this arm).
-    NOTE: callers ALSO invoke this per-leg for every class in `_PER_LEG_PUSH_OPS`
+    NOTE: callers ALSO invoke this per-leg for every class in `_PER_LEG_OPS`
     (detect_command_operation_type + _stripped_surface_danger) to catch a recognized op
     in a NON-first leg — this function itself stays first-leg-anchored; the per-leg reach
     is the callers'. That split is what makes per-leg coverage safe: each call still sees
@@ -4134,7 +4134,7 @@ def _stripped_surface_danger(stripped: str) -> bool:
     """The literal danger battery over an ALREADY-STRIPPED (or MASKED) surface: the
     DANGEROUS_PATTERNS scan + the four per-leg literal-arm families + the additive
     whole-surface normalized-flag condition + the PER-LEG op loop
-    (_flag_condition_danger_op per leg, filtered to _PER_LEG_PUSH_OPS, for any recognized op in
+    (_flag_condition_danger_op per leg, filtered to _PER_LEG_OPS, for any recognized op in
     a NON-first leg). Factored out of ``is_dangerous_command`` (behavior-identical)
     so the #1178 preserve-predicate can consult the SAME danger predicate on a masked leg
     WITHOUT re-entering ``_strip_non_executable_content`` (which would recurse — the predicate
@@ -4165,11 +4165,11 @@ def _stripped_surface_danger(stripped: str) -> bool:
     # PER-LEG arms: the whole-surface union call above is FIRST-LEG-anchored, so a recognized
     # op in a NON-first leg (`cd /repo && git push origin main`, `cd /repo && git push origin
     # --delete feature`) needs a per-leg call — the SAME union arm per leg, filtered by the
-    # SAME shared _PER_LEG_PUSH_OPS constant the detect loop uses (→ mint==read by construction).
+    # SAME shared _PER_LEG_OPS constant the detect loop uses (→ mint==read by construction).
     # leg[0] is harmlessly re-checked (the loop runs only after the whole-surface call
     # returned None).
     for _leg in legs:
-        if _flag_condition_danger_op(_leg) in _PER_LEG_PUSH_OPS:
+        if _flag_condition_danger_op(_leg) in _PER_LEG_OPS:
             return True
     return False
 

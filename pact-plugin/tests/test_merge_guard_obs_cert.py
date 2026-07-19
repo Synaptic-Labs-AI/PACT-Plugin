@@ -446,7 +446,7 @@ class TestObsEPerLegPushToMain:
 
     def test_mint_read_symmetry_across_matrix(self):
         # gate <=> detect non-None on every matrix row (the mint==read symmetry the shared
-        # _PER_LEG_PUSH_OPS filter + one predicate guarantee by construction).
+        # _PER_LEG_OPS filter + one predicate guarantee by construction).
         rows = (OBS_E_PERLEG_FIX + OBS_E_NO_REGRESSION + OBS_E_UNDER_BLOCK_NOW_GATE
                 + OBS_E_OVER_BLOCK_STAYS_UNGATED + OBS_E_PERLEG_NOW_GATED)
         for _label, cmd in rows:

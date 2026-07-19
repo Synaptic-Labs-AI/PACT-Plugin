@@ -1643,7 +1643,7 @@ class TestBranchDeleteLiteralArmCrossLegSweep:
         CONSTRUCTION rather than merely demonstrated passing."""
         cmd = "cd /repo && git branch -D temp"
         arms = mgc._BRANCH_DELETE_LITERAL_ARMS
-        per_leg = mgc._PER_LEG_PUSH_OPS
+        per_leg = mgc._PER_LEG_OPS
         filter_without_branch_delete = tuple(
             op for op in per_leg if op != "branch-delete"
         )
@@ -1658,7 +1658,7 @@ class TestBranchDeleteLiteralArmCrossLegSweep:
 
         # ROW 1 — neuter the LITERAL TUPLE only. The per-leg filter must carry it.
         monkeypatch.setattr(mgc, "_BRANCH_DELETE_LITERAL_ARMS", ())
-        monkeypatch.setattr(mgc, "_PER_LEG_PUSH_OPS", per_leg)
+        monkeypatch.setattr(mgc, "_PER_LEG_OPS", per_leg)
         assert mgc.is_dangerous_command(cmd) is True, (
             "FILTER SIDE IS DEAD: with the literal tuple neutered, the per-leg "
             "filter failed to gate a non-first-leg `-D`. The #1134 under-block is "
@@ -1670,7 +1670,7 @@ class TestBranchDeleteLiteralArmCrossLegSweep:
 
         # ROW 2 — neuter the PER-LEG FILTER only. The literal tuple must carry it.
         monkeypatch.setattr(mgc, "_BRANCH_DELETE_LITERAL_ARMS", arms)
-        monkeypatch.setattr(mgc, "_PER_LEG_PUSH_OPS", filter_without_branch_delete)
+        monkeypatch.setattr(mgc, "_PER_LEG_OPS", filter_without_branch_delete)
         assert mgc.is_dangerous_command(cmd) is True, (
             "TUPLE SIDE IS DEAD: with `branch-delete` dropped from the per-leg "
             "filter, the literal arms failed to gate a non-first-leg `-D`. The "
@@ -1683,7 +1683,7 @@ class TestBranchDeleteLiteralArmCrossLegSweep:
         # ROW 3 — neuter BOTH. Nothing else may cover the row. This is the
         # known-bad control that makes rows 1-2 non-vacuous.
         monkeypatch.setattr(mgc, "_BRANCH_DELETE_LITERAL_ARMS", ())
-        monkeypatch.setattr(mgc, "_PER_LEG_PUSH_OPS", filter_without_branch_delete)
+        monkeypatch.setattr(mgc, "_PER_LEG_OPS", filter_without_branch_delete)
         assert mgc.is_dangerous_command(cmd) is False, (
             "A THIRD mechanism covers this row. Rows 1-2 above are therefore "
             "vacuous — they cannot attribute coverage to the mechanism they name. "
@@ -2455,7 +2455,7 @@ class TestAcceptedRecognitionLimitationPins:
         CONSTRUCTION, not by an ordering accident.
 
         If this property is ever removed, per-leg invocation becomes actively unsafe
-        and the widened `_PER_LEG_PUSH_OPS` filter turns into an over-block engine —
+        and the widened `_PER_LEG_OPS` filter turns into an over-block engine —
         which is why this pin is stronger than pin #1 and why it must fail loudly."""
         # Positionals name a BENIGN op; the danger flag lives in a LATER leg.
         # If flags leaked from the whole command, leg 1 would be mislabeled.
