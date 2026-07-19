@@ -598,11 +598,23 @@ def _token_matches_command(token: dict, command: str) -> bool:
         # force_push_set=None and is REFUSED here via the absent-side rule
         # (mint and read are the same guarded extractor — the escalation closes
         # in both directions by construction). Exactly one of target_ref /
-        # force_push_set is present per command; the a2 bound_flags equality
-        # above still discriminates --no-verify.
+        # force_push_set / force_push_implicit is present per command; the a2
+        # bound_flags equality above still discriminates --no-verify.
+        #
+        # #1203 — the IMPLICIT current-branch force-push binds on the distinct
+        # target-blind `force_push_implicit` sentinel. op-type-first (checked above)
+        # already guarantees token_op == cmd_op == "force-push", and the sentinel is a
+        # DISTINCT key populated ONLY when target_ref/force_push_set are absent, so this
+        # clause can only match implicit↔implicit: an explicit-ref command has
+        # target_ref/force_push_set (not force_push_implicit) → the sentinel side is
+        # absent → _both_present_equal REFUSES, and vice-versa (no cross-authorization
+        # between an implicit-form token and an explicit `--force origin main`).
         return (
             _both_present_equal(context.get("target_ref"), cmd.get("target_ref"))
             or _both_present_equal(context.get("force_push_set"), cmd.get("force_push_set"))
+            or _both_present_equal(
+                context.get("force_push_implicit"), cmd.get("force_push_implicit")
+            )
         )
     if token_op == "remote-ref-delete":
         # KD-6 (SECURITY-RATIFICATION-PENDING): the destination ref must match

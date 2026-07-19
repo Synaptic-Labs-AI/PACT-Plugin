@@ -176,8 +176,9 @@ def _target_value(cmd_ctx: dict) -> str | None:
     `branch_set` (its scalar single-branch sibling `branch` is already listed);
     multi-ref push-to-main (#1195 OBS-G) uses the distinct `push_set` and multi-ref
     force-push (#1195 OBS-I) the distinct `force_push_set` (their scalar single-ref
-    sibling `target_ref` is already listed) — each added here so that op MINTS, not
-    just gates."""
+    sibling `target_ref` is already listed); the IMPLICIT current-branch force-push
+    (#1203) uses the distinct target-blind `force_push_implicit` sentinel — each added
+    here so that op MINTS, not just gates."""
     return (
         cmd_ctx.get("pr_number")
         or cmd_ctx.get("branch")
@@ -185,6 +186,7 @@ def _target_value(cmd_ctx: dict) -> str | None:
         or cmd_ctx.get("target_ref")
         or cmd_ctx.get("push_set")
         or cmd_ctx.get("force_push_set")
+        or cmd_ctx.get("force_push_implicit")
         or cmd_ctx.get("mass_target")
         or cmd_ctx.get("protected_branch")
     )
