@@ -12,11 +12,13 @@ You are now entering the **Wrap-Up Phase**. Your goal is to ensure the workspace
 Create a consolidation task for the secretary:
 ```
 TaskCreate(subject="secretary: session consolidation (Pass 2)",
-  description="Run Consolidation Harvest for team {team_name}. Follow the Consolidation Harvest workflow in your pact-handoff-harvest skill. Report summary when done.")
+  description="Run Consolidation Harvest for team {team_name}. Follow the Consolidation Harvest workflow in your pact-handoff-harvest skill. During this harvest the orchestrator will hand you its Orchestration Retrospective (step 4) via SendMessage so it lands in the SAME consolidation memory write as ONE coherent entry — do NOT save it separately. Hold finalization of that write until you have received EITHER the retrospective payload OR an explicit 'no retrospective this session' signal from the orchestrator; on receiving the payload, incorporate its decisions and entities into the consolidation entry before you finalize. Graceful degradation: if you have completed all HANDOFF harvest work and neither signal has arrived, finalize without it; if the retrospective payload then arrives late, save it as a normal follow-up memory write rather than holding — never hang, never drop it. Report summary when done.")
 TaskUpdate(taskId, owner="secretary")
 ```
 
 This is the deep-clean pass. Pass 1 (workflow-level HANDOFF review) is the primary mechanism; this consolidation is recommended — skip only for trivial sessions (single comPACT, no variety assessment performed).
+
+> **Concurrent, not serialized**: this harvest runs in the secretary's own turns. Do NOT wait for it here. Proceed immediately to steps 2-4 (all non-destructive) while the secretary harvests in parallel. Only the DESTRUCTIVE steps — step 6 (worktree cleanup) and step 7 (task audit) — wait for the harvest's drain-confirmation in step 5. Correctness invariant: no destructive step may run before the harvest has read what it would destroy.
 
 > **Track whether this ran**: step 5's journal template requires a `{consolidation_ran}` flag — pass the literal string `true` when the secretary confirms Pass 2 completed, or `false` when you skipped consolidation per the trivial-session rule above. The flag drives the shell-clamped `session_consolidated` emission in step 5.
 
@@ -70,7 +72,7 @@ Perform a brief self-assessment. Compare your initial variety assessment and orc
   inspect per-dispatch rationales for the flagged tasks
 ```
 
-**Save as pact-memory** (delegate to secretary):
+**Hand the retrospective to the secretary's in-flight consolidation** (single write — send via SendMessage, do NOT create a second save task): the secretary folds this payload into the SAME consolidation memory entry it is harvesting in step 1, so the session persists ONE coherent write (consolidation + retrospective) instead of two. Send exactly this payload to the secretary:
 ```
 context: "Orchestration retrospective for {feature}"
 goal: "Calibrate orchestration judgment via second-order observation"
@@ -86,13 +88,15 @@ entities: ["orchestration_calibration", "{domain}", "variety_acknowledgment", "c
 
 The `Per-dispatch variety` decision row is omitted when `coverage < 0.5`; the `Variety acknowledgment` decision row is appended only when question 6's dual-trigger fired. The `variety_acknowledgment` and `cargo_cult_signal` entities are added only when question 6 surfaces.
 
-**Skip when**: Session was trivial (single comPACT, no variety assessment performed).
+> **Always send exactly one end-of-step-4 signal to the secretary** — either the retrospective payload above (normal path) or, on the trivial-session skip below, a brief "no retrospective this session — finalize the consolidation write without it" marker. The secretary holds finalization of the single write until it receives one of these two signals, so it never finalizes early (losing the retrospective) and never hangs waiting for a retrospective that was skipped.
+
+**Skip when**: Session was trivial (single comPACT, no variety assessment performed). On skip, send the secretary the "no retrospective this session — finalize the consolidation write without it" marker so its held finalization releases.
 
 ## 5. Journal Drain-Before-Close
 
-Before ending the session (step 8), ensure all journal entries have been processed:
+Before ending the session (step 8), ensure all journal entries have been processed. This is the single drain-gate: steps 2-4 (documentation sync, workspace cleanup, the Orchestration Retrospective) already ran CONCURRENTLY with the secretary's step-1 harvest and did NOT block on it — only the DESTRUCTIVE steps that follow this gate (step 6 worktree cleanup, step 7 task audit) wait for the drain-confirmation below. Correctness invariant: no destructive step may run before the harvest has read what it would destroy.
 
-1. Confirm the secretary has completed the consolidation harvest (step 1). The secretary should confirm via `SendMessage`: "All journal entries processed to pact-memory."
+1. Confirm the secretary has completed the consolidation harvest (step 1) — because the step-4 single-save handoff folds the retrospective into that SAME harvest, this confirmation also means the retrospective was persisted. The secretary should confirm via `SendMessage`: "All journal entries processed to pact-memory."
 2. **Only on confirmation**: Proceed to worktree cleanup and session decision.
 3. **If secretary cannot confirm**: Warn user — unprocessed journal entries will not be distilled to pact-memory. The journal itself is safe (stored in `~/.claude/pact-sessions/`, not the team directory).
 
