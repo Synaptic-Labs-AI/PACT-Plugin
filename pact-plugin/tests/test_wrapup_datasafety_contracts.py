@@ -28,6 +28,7 @@ placement/label pin is not later mislabeled brittle: the branch labels and the
 delete-literal-per-branch placement ARE the data-safety contract, so pinning
 them is a deliberate drift detector, not over-fitting to churny wording.
 """
+import re
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,18 @@ BRANCH_C_LABEL = "**C — PR exists but is not merged**"
 # uses X/R placeholders, so it is deliberately distinct from these literals.
 LOCAL_DELETE = "git branch -D <branch>"
 REMOTE_DELETE = "git push <remote> --delete <branch>"
+
+# Placeholder-agnostic destructive-verb patterns. The exact-literal pins above
+# catch a verbatim copy of a minted delete migrating into the wrong PR-state
+# branch; these catch a REWORDED / RE-PLACEHOLDERED delete (a different
+# placeholder, a shell var, the long `--delete --force` form, a hardcoded
+# remote, or the `push <remote> :<branch>` colon-refspec form) that the exact
+# literals would miss. Deliberately CASE-SENSITIVE on the local verb: it matches
+# the FORCE delete (`-D` / `--delete`) but NOT the SAFE lowercase `git branch
+# -d`, which branch B legitimately names as the correct non-destructive outcome
+# (worktree-cleanup's `-d` declines a not-fully-merged branch).
+LOCAL_DELETE_VERB = re.compile(r"git\s+branch\s+(?:-D|--delete)\b")
+REMOTE_DELETE_VERB = re.compile(r"git\s+push\b[^\n]*?(?:--delete\b|\s:\S)")
 
 
 def _section(content, heading_prefix):
@@ -167,6 +180,23 @@ class TestStep6BranchCleanupDataSafety:
         assert LOCAL_DELETE not in branch_c, "local delete leaked into the unmerged branch"
         assert REMOTE_DELETE not in branch_c, "remote delete leaked into the unmerged branch"
 
+        # DESIGN-INTENT (verb-family hardening, NOT over-fitting): the exact
+        # literals above only catch a VERBATIM copy of a minted delete migrating
+        # into B/C. The pin's stated contract is broader — "a delete must NEVER
+        # fire without a verified MERGED" — so a REWORDED / RE-PLACEHOLDERED
+        # destructive verb leaking into B/C (e.g. `git branch -D <local>`,
+        # `git branch --delete --force <branch>`, `git push origin --delete
+        # <branch>`, `git push origin :<branch>`) is the SAME data-loss
+        # regression and must also trip. Positive control first so the
+        # confinement assertions can't degrade into a vacuous no-op if the delete
+        # machinery is ever removed from slice A.
+        assert LOCAL_DELETE_VERB.search(branch_a), "positive control: a local force-delete verb must exist in the MERGED slice"
+        assert REMOTE_DELETE_VERB.search(branch_a), "positive control: a remote-delete verb must exist in the MERGED slice"
+        assert not LOCAL_DELETE_VERB.search(branch_b), "a local delete verb (any wording) leaked into the no-PR branch"
+        assert not REMOTE_DELETE_VERB.search(branch_b), "a remote delete verb (any wording) leaked into the no-PR branch"
+        assert not LOCAL_DELETE_VERB.search(branch_c), "a local delete verb (any wording) leaked into the unmerged branch"
+        assert not REMOTE_DELETE_VERB.search(branch_c), "a remote delete verb (any wording) leaked into the unmerged branch"
+
     def test_no_bundled_compound_delete(self, step6):
         # DESIGN-INTENT: the merge-guard mints a single-target, single-leg
         # delete; bundling the two deletes into one approval is refused by the
@@ -207,8 +237,22 @@ class TestStep6BranchCleanupDataSafety:
         # DESIGN-INTENT: the post-delete main sync is --ff-only so a divergent
         # history surfaces as an anomaly instead of a silent auto-merge/rebase.
         # Detects removal of the --ff-only guard or its report-and-stop clause.
+        # "anomaly" alone is churny wording; the load-bearing SAFETY behavior is
+        # "never auto-merge or rebase" — pin that so a reword that keeps the word
+        # "anomaly" but drops the no-auto-resolve guarantee still trips.
         assert "git pull --ff-only origin main" in branch_a
         assert "anomaly" in branch_a
+        assert "never auto-merge or rebase" in branch_a
+
+    def test_step6_gated_on_step5_drain(self, step6):
+        # DESIGN-INTENT: the ENFORCEMENT-POINT half of the concurrency ordering
+        # invariant. test_concurrent_gated_split... pins the invariant in step 1
+        # (the note) and step 5 (the drain gate); THIS pins the step-6 side — the
+        # destructive step must itself declare it is gated on the step-5 drain,
+        # so a future edit can't drop step 6's own guard while leaving step 5's
+        # wording intact and silently let worktree teardown run before the
+        # harvest has read what it would destroy.
+        assert "gated on the step-5 drain-confirmation" in step6
 
 
 class TestSingleSaveSignalContract:
