@@ -296,6 +296,17 @@ class TestCorpusShape:
             "sentinels must be NUL-framed (a NUL can never appear in a real ref/pr_number)"
         )
 
+    def test_review_update_corpus_counts_pinned(self):
+        # M1 + F1 + close-output corpora (added in the peer-review cert-update).
+        assert len(MERGE_TARGET) == 5, "MERGE_TARGET drifted from 5"
+        assert len(MERGE_BARE) == 5, "MERGE_BARE drifted from 5"
+        assert len(MERGE_CROSS_AUTH) == 7, "MERGE_CROSS_AUTH drifted from 7"
+        assert len(F1_CROSS_AUTH) == 4, "F1_CROSS_AUTH drifted from 4"
+        assert len(CLOSE_OUTPUT_CORPUS) == 4, "CLOSE_OUTPUT_CORPUS drifted from 4"
+        # Finding #4 (both arms): 6 head-form + 4 flag-loop = 10 GIT gate forms.
+        assert len(F4_HEAD_FORM) == 6 and len(F4_FLAG_LOOP) == 4 and len(F4_GATE) == 10, "F4 gate corpus drifted"
+        assert len(F4_INERT) == 6 and len(F4_DECOY_GATED) == 3, "F4 control corpus drifted"
+
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # (a) MINT — every MUST_MINT form mints + is_dangerous stays True (target-precision).
@@ -620,4 +631,309 @@ class TestSetBNonRunnableResidual:
         assert not ctx.get("target_ref") and not ctx.get("force_push_set"), (
             "SET B bound an EXPLICIT target — a non-runnable form must never resolve a concrete "
             "ref (that would be the launder the SET A/SET B split exists to avoid): %r" % cmd
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# M1 (peer-review TIGHTEN) — pr merge <branch>/<url> bind DISTINCT qualified targets;
+# merge_implicit fires ONLY truly-bare. C3b's sentinel OVER-fired on a branch/url
+# positional (an over-mint the INDEPENDENT security lane caught — the #70 cert missed
+# this positional-type axis, mirroring the close url/branch axis the 1134 cert originally
+# missed). The merge target binds under pr_number with a `_classify_pr_target`-qualified
+# value (branch:<name> | url:<host>/<owner>/<repo>#<N> | <N>), the SAME shared SSOT close
+# uses. --match-head-commit is a REAL gh pr merge value flag (derived-SSOT set): its value
+# MUST be stripped so it never abstains (over-block) nor mis-binds a numeric value
+# (laundering) — the security-gap regression guard against RE-NARROWING the merge walk (a
+# hand-narrowed "merge-specific" subset dropped it once; the derived-SSOT superset is safe).
+# ═════════════════════════════════════════════════════════════════════════════════
+_URL5 = "https://github.com/o/r/pull/5"
+# (cmd_tail, expected pr_number qualified value) — positional-bearing forms.
+MERGE_TARGET = [
+    ("feature", "branch:feature"),
+    (_URL5, "url:github.com/o/r#5"),
+    ("42", "42"),
+    ("--subject foo bar", "branch:bar"),                     # value `foo` stripped -> `bar`
+    ("--match-head-commit abc123 feature", "branch:feature"),  # SECURITY: value stripped
+]
+# truly-bare forms (0 positionals after the value-flag walk) -> merge_implicit sentinel.
+MERGE_BARE = ["", "--admin", "--squash", "--subject foo", "--match-head-commit 123"]
+
+# M1 injectivity / cross-auth (the qualified identity keeps distinct targets from cross-
+# authorizing). (name, approve, execute, expect_allow).
+MERGE_CROSS_AUTH = [
+    ("branch-a != branch-b", _GH + "merge feature", _GH + "merge other", False),
+    ("branch != number", _GH + "merge feature", _GH + "merge 42", False),
+    ("merge_implicit != branch", _GH + "merge", _GH + "merge feature", False),
+    ("url cross-repo", _GH + "merge " + _URL5, _GH + "merge https://github.com/o/other/pull/5", False),
+    ("url cross-host", _GH + "merge " + _URL5, _GH + "merge https://ghe.evil.com/o/r/pull/5", False),
+    ("merge branch != close branch (cross-op)", _GH + "merge feature", _GH + "close feature -d", False),
+    ("faithful branch self", _GH + "merge feature", _GH + "merge feature", True),
+]
+
+
+class TestDimM1MergeTargetDistinct:
+    """Every faithful pr-merge with a positional binds its DISTINCT qualified target under
+    pr_number (never the bare sentinel); merge_implicit fires ONLY truly-bare. Closes the
+    C3b over-mint (merge_implicit on a branch/url positional)."""
+
+    @pytest.mark.parametrize("tail,value", MERGE_TARGET, ids=[r[0] for r in MERGE_TARGET])
+    def test_positional_binds_qualified_not_sentinel(self, tail, value):
+        cmd = (_GH + "merge " + tail).rstrip()
+        c = mgc.extract_command_context(cmd)
+        assert D(cmd) is True and c.get("operation_type") == "merge", "merge not gated: %r" % cmd
+        assert c.get("pr_number") == value, (
+            "merge target mis-bound: got %r expected %r for %r" % (c.get("pr_number"), value, cmd)
+        )
+        assert not c.get("merge_implicit"), (
+            "merge_implicit OVER-fired on a positional target (the C3b over-mint M1 closed): %r" % cmd
+        )
+
+    @pytest.mark.parametrize("tail", MERGE_BARE, ids=[t or "(bare)" for t in MERGE_BARE])
+    def test_truly_bare_binds_merge_implicit(self, tail):
+        cmd = (_GH + "merge " + tail).rstrip()
+        c = mgc.extract_command_context(cmd)
+        assert c.get("merge_implicit") == MERGE_SENTINEL, "truly-bare merge did not mint merge_implicit: %r" % cmd
+        assert not c.get("pr_number"), "truly-bare merge mis-bound a pr_number %r: %r" % (c.get("pr_number"), cmd)
+
+    def test_match_head_commit_in_derived_value_flag_set(self):
+        # SECURITY-GAP REGRESSION GUARD (against the #68 re-narrowing error): --match-head-commit
+        # MUST be a recognized merge value flag or its value leaks as a positional -> over-block
+        # AND numeric-value laundering. The derived-SSOT superset must be retained.
+        assert "--match-head-commit" in mgc._GH_MERGE_VALUE_LONG, (
+            "--match-head-commit dropped from the merge value-flag set — re-narrowing reopens the "
+            "over-block (`--match-head-commit <sha> feature` abstains) + laundering "
+            "(`--match-head-commit 123` mis-binds pr_number=123)"
+        )
+
+    def test_dropping_match_head_commit_reopens_overblock_and_launder(self, monkeypatch):
+        # NON-VACUITY for the regression guard: exclude --match-head-commit from the merge walk
+        # (the #68 error). The flag's value then leaks as a positional -> (a) over-block: `<sha>
+        # feature` = 2 positionals -> abstain (no target, no sentinel); (b) laundering: `123` mis-
+        # bound as pr_number. Demonstrates the guard fails on the known-bad.
+        assert "--match-head-commit" in mgc._GH_MERGE_VALUE_LONG, "vacuity guard: flag not in set"
+        narrowed = frozenset(mgc._GH_MERGE_VALUE_LONG) - {"--match-head-commit"}
+        monkeypatch.setattr(mgc, "_GH_MERGE_VALUE_LONG", narrowed)
+        over = mgc.extract_command_context(_GH + "merge --match-head-commit abc123 feature")
+        assert not over.get("pr_number") and not over.get("merge_implicit"), (
+            "dropping --match-head-commit did NOT reopen the over-block abstain — the guard proves nothing"
+        )
+        laund = mgc.extract_command_context(_GH + "merge --match-head-commit 123")
+        assert laund.get("pr_number") == "123", (
+            "dropping --match-head-commit did NOT reopen the numeric-value laundering mis-bind"
+        )
+
+    @pytest.mark.parametrize("name,approve,execute,expect_allow", MERGE_CROSS_AUTH,
+                             ids=[r[0] for r in MERGE_CROSS_AUTH])
+    def test_merge_target_cross_auth(self, name, approve, execute, expect_allow):
+        _, rc = _isolated_roundtrip(approve, execute)
+        if expect_allow:
+            assert rc == _ALLOW, "OVER-BLOCK: faithful merge self-execution REFUSED (%s)" % name
+        else:
+            assert rc == _DENY, (
+                "CROSS-AUTH OPEN: a merge token authorized a DIFFERENT-target execution (%s): "
+                "approve=%r execute=%r" % (name, approve, execute)
+            )
+
+    def test_neuter_positional_walk_reopens_the_over_mint(self, monkeypatch):
+        # NON-VACUITY (intra-arc-born tighten -> in-cert neuter, NOT a 5017 base differential): the
+        # M1 tighten IS the `_gh_merge_positionals` walk, SHARED by _extract_merge_target AND
+        # _is_bare_cli_merge (one boundary). Neuter it to the C3b behavior (0 positionals always) ->
+        # `merge feature` binds merge_implicit again (the over-mint), so a bare-merge token
+        # authorizes it cross-target. At HEAD the branch:feature identity REFUSES it.
+        monkeypatch.setattr(mgc, "_gh_merge_positionals", lambda tokens: [])
+        c = mgc.extract_command_context(_GH + "merge feature")
+        assert c.get("merge_implicit") == MERGE_SENTINEL and not c.get("pr_number"), (
+            "the positional-walk neuter did not revert `merge feature` to the over-mint sentinel — "
+            "vacuity guard (the walk is not the shared boundary the cross-auth rows depend on)"
+        )
+        _, rc = _isolated_roundtrip(_GH + "merge", _GH + "merge feature")
+        assert rc == _ALLOW, (
+            "with the merge positional walk neutered, a bare-merge token did NOT authorize `merge "
+            "feature` — the walk is not the attributable closer of the C3b over-mint, so the merge "
+            "cross-auth rows above prove nothing"
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# F1 (from the #77 cert review) — DRIFT-PROOFING the force-push cross-auth boundary that
+# is closed-by-construction (op-type-first + distinct NUL key) but was UNPINNED: the
+# multi-ref force_push_set / push_set interaction and the max_uses=2 second-use × cross-op
+# refusal. All verified refuse-by-construction; pinned so a future change to the
+# force_push_set/push_set arms (#1195) or the max_uses logic cannot silently reopen a
+# cross-auth without a red cert.
+# ═════════════════════════════════════════════════════════════════════════════════
+F1_CROSS_AUTH = [
+    ("fp-implicit -> multi-ref force_push_set", _PG + "--force", _PG + "--force origin main next", False),
+    ("multi-ref force_push_set -> fp-implicit", _PG + "--force origin main next", _PG + "--force", False),
+    ("fp-implicit -> push-to-main (cross-op)", _PG + "--force", _PG + "origin main", False),
+    ("push-to-main -> fp-implicit (cross-op)", _PG + "origin main", _PG + "--force", False),
+]
+
+
+class TestF1ForcePushCrossAuthDriftProof:
+    """The force_push_implicit sentinel cannot cross-authorize a MULTI-ref force_push_set /
+    push_set command, nor a cross-op push-to-main — closed by op-type-first + the distinct NUL
+    key. Pinned here (unpinned in #70) to catch a future set-arm or op-type change."""
+
+    @pytest.mark.parametrize("name,approve,execute,expect_allow", F1_CROSS_AUTH,
+                             ids=[r[0] for r in F1_CROSS_AUTH])
+    def test_boundary_refuses(self, name, approve, execute, expect_allow):
+        _, rc = _isolated_roundtrip(approve, execute)
+        assert rc == _DENY, (
+            "F1 CROSS-AUTH OPEN (%s): approve=%r execute=%r — the force_push_implicit sentinel "
+            "reached a multi-ref/cross-op command" % (name, approve, execute)
+        )
+
+    def test_max_uses_second_use_refuses_cross_op(self, tmp_path):
+        # The accepted max_uses=2 cross-branch ride is SAME-OP only. A SECOND use on a CROSS-OP
+        # command must still DENY (op-type-first applies per use).
+        minted, _ = _mint(_PG + "--force", tmp_path)
+        assert minted == 1
+        assert _execute(_PG + "--force", tmp_path) == _ALLOW, "slot-1 same-op self denied (unexpected)"
+        assert _execute(_GH + "merge 42", tmp_path) == _DENY, (
+            "the max_uses=2 SECOND use authorized a CROSS-OP execution — op-type-first is not "
+            "applied per-use"
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# CLOSE-OUTPUT-BEHAVIOR pin (per the lead's ruling on the _classify_pr_target refactor):
+# _extract_close_target's classification tail moved into the shared `_classify_pr_target`
+# SSOT (now shared by close AND merge). Close OUTPUT must be BYTE-IDENTICAL base(5017)->HEAD
+# — an OUTPUT-behavior pin (there is no body-hash pin to evolve; this deliberately pins
+# behavior, not source shape, so future close/merge classifier evolution stays output-safe).
+# ═════════════════════════════════════════════════════════════════════════════════
+CLOSE_OUTPUT_CORPUS = [
+    _GH + "close 5 -d",
+    _GH + "close feature -d",
+    _GH + "close https://github.com/o/r/pull/9 -d",
+    _GH + "close --repo o/r feature -d",
+]
+
+
+class TestCloseOutputBehaviorUnchanged:
+    @pytest.mark.parametrize("cmd", CLOSE_OUTPUT_CORPUS, ids=CLOSE_OUTPUT_CORPUS)
+    def test_close_target_byte_identical_base_to_head(self, cmd):
+        base = load_baseline_5017d1f2()
+        assert base._extract_close_target(cmd) == mgc._extract_close_target(cmd), (
+            "close target OUTPUT changed base->HEAD under the _classify_pr_target refactor: %r" % cmd
+        )
+        # And the classification tail IS the shared SSOT now (merge reuses it).
+        assert mgc._extract_close_target(_GH + "close feature -d") == "branch:feature"
+
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# FINDING #4 (Workflow-sweep, HIGH — inert-help VALUE-OPTION blindness, both arms). The
+# `git help <sub>` head-form recognizer AND the `-h`/`--help` flag-loop in _is_inert_help_leg
+# derived their subcommand/help position from a token stream that did NOT account for git's
+# LEADING global VALUE-options (-C / --work-tree / --git-dir / --namespace). So a value
+# literally "help" (head-form arm) or literally "-h"/"--help" (flag-loop arm) was mis-read as
+# the help subcommand / a help flag, and a REAL destructive leg was blanked as inert. A CLEAN
+# C1 regression (base 5017 gated True; the C1-introduced recognizer un-gated it). Fix @4e3b5235
+# (both arms): is_git_gh_head + immediate-adjacency `raw[head+1]=="help"` (head-form), and a
+# subcommand ANCHOR (first non-dash raw token after the head) guarding the -h/--help flag-loop
+# (`… and i >= anchor`). Enumeration-FREE (structural anchor, NOT a git-option list). gh's -R
+# is already covered by C1b's _INERT_HELP_EXTRA_VALUE_FLAGS — an ORTHOGONAL arm, untouched.
+# ═════════════════════════════════════════════════════════════════════════════════
+_GITX = "git "
+_PUSHF = "push " + "--force origin main"           # -> "push --force origin main" (assembled, inert source)
+_PUSHDEL = "push " + "origin --delete feature"     # -> "push origin --delete feature"
+_BRDEL = "branch " + "-D feature"                  # -> "branch -D feature"
+
+# 6 head-form + 4 flag-loop GIT forms — each a REAL destructive leg whose git-global-value-
+# option's value ("help" or "-h"/"--help") was mis-read as inert. ALL MUST GATE at the fix.
+F4_HEAD_FORM = [
+    _GITX + "-C help " + _PUSHF,
+    _GITX + "-C help " + _PUSHDEL,
+    _GITX + "-C help " + _BRDEL,
+    _GITX + "--work-tree help " + _PUSHF,
+    _GITX + "--namespace help " + _PUSHF,
+    _GITX + "--git-dir help " + _PUSHF,
+]
+F4_FLAG_LOOP = [
+    _GITX + "-C -h " + _PUSHF,
+    _GITX + "--work-tree -h " + _PUSHF,
+    _GITX + "--git-dir --help " + _PUSHF,
+    _GITX + "--namespace -h " + _BRDEL,
+]
+F4_GATE = F4_HEAD_FORM + F4_FLAG_LOOP
+# gh -R -h pr merge — ALREADY gated via C1b's -R value-skip (the orthogonal arm); a stays-gated
+# double-coverage control (NOT closed by the finding-#4 git-option fix).
+F4_GH_R_CONTROL = "gh " + "-R -h " + "pr " + "merge"
+# genuine inert help forms that MUST stay inert (no reopened over-block from the fix).
+F4_INERT = [
+    _GITX + "help " + "push",                        # genuine git help
+    "gh " + "help " + "pr " + "merge",               # gh help head-form
+    _GH + "merge --help", _PG + "--force --help",    # subcommand help
+    _GITX + "push " + "-h",                          # genuine post-subcommand help
+    _GITX + "-C /repo " + "push " + "-h",            # -C value /repo then post-subcommand -h
+]
+# C1b value-decoys (gh short/long value-flag value == -h) stay gated (orthogonal arm).
+F4_DECOY_GATED = [_GH + "merge 5 --subject -h", _GH + "merge 5 -t -h", _GH + 'merge 5 --subject "x --help y"']
+# ACCEPTED adversarial-only structurally-inherent residual (architect #84 + security #85 ruled
+# ACCEPT): -C's non-dash value /repo stops the anchor early, so --work-tree's -h reads as help.
+F4_RESIDUAL = _GITX + "-C /repo --work-tree -h " + _PUSHF
+
+
+class TestFinding4ValueOptionInertBlindness:
+    """The 10 GIT value-option forms RE-GATE at the fix (the durable positive regression-guard);
+    gh -R orthogonal-stays-gated; genuine inert forms + C1b decoys unchanged; the double-value-
+    option residual pinned as an ACCEPTED structurally-inherent adversarial-only residual."""
+
+    @pytest.mark.parametrize("cmd", F4_GATE, ids=F4_GATE)
+    def test_git_value_option_form_gates(self, cmd):
+        # DURABLE REGRESSION GUARD: any future re-un-gating of these reds directly. base 5017
+        # ALSO gates (True) — the C1-introduced recognizer regressed it; the fix RE-gates.
+        assert D(cmd) is True, "FINDING #4 REGRESSION: a real destructive git value-option leg was blanked as inert: %r" % cmd
+        assert _base()(cmd) is True, "base 5017 does not gate this form (mislabeled): %r" % cmd
+
+    def test_gh_dash_r_stays_gated_c1b_orthogonal(self):
+        assert D(F4_GH_R_CONTROL) is True, "gh -R -h pr merge un-gated — C1b's orthogonal -R skip regressed"
+
+    @pytest.mark.parametrize("cmd", F4_INERT, ids=F4_INERT)
+    def test_inert_controls_stay_inert(self, cmd):
+        assert D(cmd) is False, "FINDING #4 fix OVER-BLOCKED a genuine inert help form (cardinal): %r" % cmd
+
+    @pytest.mark.parametrize("cmd", F4_DECOY_GATED, ids=F4_DECOY_GATED)
+    def test_c1b_value_decoys_stay_gated(self, cmd):
+        assert D(cmd) is True, "a C1b value-decoy un-gated under the finding-#4 fix: %r" % cmd
+
+    def test_accepted_adversarial_residual_pinned(self):
+        # PINNED-CURRENT-BEHAVIOR (NOT should-gate), modeled on the curl/wget WON'T-FIX +
+        # force_push_implicit KD-3 accepted residuals. Architect #84 empirically proved closing
+        # it (option b) breaks `git --no-pager push -h` (a cardinal over-block) or needs a
+        # rot-prone git-global-option arity enumeration; both lanes ruled ACCEPT. If this form
+        # ever CHANGES (gates, or the anchor shifts), this reds and forces a re-confirm of the
+        # disposition rather than a silent shift.
+        assert D(F4_RESIDUAL) is False, (
+            "the ACCEPTED double-value-option residual changed behavior — re-confirm the "
+            "architect(#84)/security(#85) disposition, do NOT silently update this pin: %r" % F4_RESIDUAL
+        )
+
+    def test_reverted_fix_reopens_all_10_git_forms(self, monkeypatch):
+        # NON-VACUITY (mechanism a; intra-arc-born so a 5017 differential is vacuous —
+        # base==PATCH==True). PROGRAMMATIC SOURCE-REVERT of BOTH fix symbols: take the LIVE
+        # _is_inert_help_leg source, string-replace ONLY the two fix anchors, exec, monkeypatch.
+        # The rev!=src + both-symbols-gone VACUITY GUARD means a future fix-shape change trips
+        # this LOUDLY instead of going silently vacuous.
+        import inspect
+        src = inspect.getsource(mgc._is_inert_help_leg)
+        rev = src.replace('tok in ("--help", "-h") and i >= anchor', 'tok in ("--help", "-h")')   # ARM 2
+        rev = rev.replace('raw[head + 1] == "help"', '"help" in raw[head + 1:]')                    # ARM 1
+        assert rev != src and "and i >= anchor" not in rev and 'raw[head + 1] == "help"' not in rev, (
+            "the finding-#4 fix symbols were not found in _is_inert_help_leg's live source — the "
+            "reverted-body neuter is INERT (the fix shape changed); re-derive the revert"
+        )
+        ns = dict(mgc.__dict__)
+        exec(rev, ns)
+        monkeypatch.setattr(mgc, "_is_inert_help_leg", ns["_is_inert_help_leg"])
+        reopened = [c for c in F4_GATE if D(c) is False]
+        assert len(reopened) == len(F4_GATE), (
+            "reverting both fix symbols did NOT reopen all 10 GIT forms — the fix is not the "
+            "attributable closer, so the gate rows prove nothing: still-gated=%r"
+            % [c for c in F4_GATE if D(c) is True]
+        )
+        assert D(F4_GH_R_CONTROL) is True, (
+            "gh -R -h un-gated under the finding-#4 revert — the revert touched C1b's orthogonal "
+            "-R arm, not just the git-global-option anchors"
         )
