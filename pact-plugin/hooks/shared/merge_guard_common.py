@@ -934,6 +934,42 @@ def _gh_close_positionals(tokens: "list[str]") -> "list[str] | None":
     return positionals
 
 
+def _classify_pr_target(target: str) -> str | None:
+    """Classify a single ALREADY-QUOTE-STRIPPED gh-pr positional into one of FOUR
+    disjoint identity namespaces — the SHARED SSOT (#1203 M1) for BOTH the close and
+    the merge target identity, so the two can never diverge:
+
+    - empty / degenerate         -> None (abstain, never a garbage id)
+    - bare digits                -> the digits (repo-IMPLICIT PR number, gh's number
+                                    precedence)
+    - a github/enterprise PR URL -> ``url:<host>/<owner>/<repo>#<N>`` (HOST- and
+                                    repo-QUALIFIED, so a cross-host/cross-repo url can
+                                    never set-equal a bare number or a same-number url
+                                    in a different repo)
+    - a ``://``-bearing token that is NOT a recognized PR URL -> None (abstain, never a
+                                    garbage ``branch:`` id)
+    - anything else              -> ``branch:<name>`` (repo-IMPLICIT name-only;
+                                    cross-repo distinction is carried SEPARATELY by
+                                    ``--repo`` in bound_flags, the a2 axis)
+
+    Extracted VERBATIM from _extract_close_target's classification tail so close's
+    output stays byte-identical; _extract_merge_target feeds it a MERGE-value-flag-aware
+    positional (its own walk) — the CLASSIFICATION is shared, the positional walk is
+    op-specific. A branch literally named ``url:x`` classifies ``branch:url:x`` (no
+    ``://`` -> the branch namespace), never colliding with a real ``url:`` identity —
+    the namespaces are injective by construction."""
+    if not target:
+        return None  # empty/degenerate positional -> abstain, never a garbage id
+    if target.isdigit():
+        return target  # bare PR number — gh's number precedence, repo-implicit
+    url = _GH_PULL_URL_RE.search(target)
+    if url is not None:
+        return "url:" + url.group(1) + "/" + url.group(2) + "#" + url.group(3)
+    if "://" in target:
+        return None  # unrecognized URL form -> abstain, never a garbage branch id
+    return "branch:" + target
+
+
 def _extract_close_target(command: str) -> str | None:
     """The close-target identity for a faithful ``gh pr close`` command, across
     all three positional forms gh accepts (``{<number> | <url> | <branch>}``).
@@ -993,18 +1029,101 @@ def _extract_close_target(command: str) -> str | None:
     if positionals is None or len(positionals) != 1:
         return None
     target = _strip_surrounding_quotes(positionals[0])
-    if not target:
-        return None  # empty/degenerate positional -> abstain, never a garbage id
-    # Classify the SINGLE positional (value-flag values already stripped, so a
-    # digit/url/branch here IS the target, never a --repo/--comment value).
-    if target.isdigit():
-        return target  # bare PR number — gh's number precedence, repo-implicit
-    url = _GH_PULL_URL_RE.search(target)
-    if url is not None:
-        return "url:" + url.group(1) + "/" + url.group(2) + "#" + url.group(3)
-    if "://" in target:
-        return None  # unrecognized URL form -> abstain, never a garbage branch id
-    return "branch:" + target
+    # #1203 M1 — classify via the SHARED _classify_pr_target SSOT (extracted VERBATIM
+    # from here, so close's output is byte-identical; merge reuses the SAME classifier
+    # over its OWN merge-value-flag-aware positional walk). Value-flag values are
+    # already stripped by _gh_close_positionals, so the digit/url/branch here IS the
+    # target, never a --repo/--comment value.
+    return _classify_pr_target(target)
+
+
+# #1203 M1 — MERGE positional-walk value-flags: the merge value-taking flags whose value
+# token must be stripped so the branch/url TARGET positional is isolated — the SAME set
+# C1b established (the long value SSOT + --repo + the short aliases), NOT close's
+# {--repo,--comment}. DERIVED from the C1b sets so there is ONE value-flag SSOT: a merge
+# value-flag added for inert-help recognition is automatically honored by the target walk
+# too (the divergent-copies bug class this arc kept hitting cannot recur).
+_GH_MERGE_VALUE_LONG = _GH_PR_VALUE_TAKING_FLAGS | {"--repo"}
+_GH_MERGE_VALUE_SHORT = frozenset(
+    f[1] for f in _INERT_HELP_EXTRA_VALUE_FLAGS if len(f) == 2 and f[0] == "-"
+)
+
+
+def _gh_merge_positionals(tokens: "list[str]") -> "list[str] | None":
+    """The positional args of a ``gh pr merge`` token list, with MERGE value-taking flags
+    AND their values removed (mirrors _gh_close_positionals's cobra walk, but over the
+    MERGE value-flag set — NOT close's {--repo,--comment}: a merge form carries
+    --subject/--body/-t/… so close's walk would mis-read a value as the target, reviving
+    M1 one layer down). Returns the positionals after ``merge``, or None if ``merge`` is
+    absent. A value-flag VALUE can never survive as a positional, so it can never be
+    mis-bound as the {number|url|branch} target."""
+    try:
+        i = tokens.index("merge") + 1
+    except ValueError:
+        return None
+    positionals: "list[str]" = []
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if tok.startswith("--"):
+            flag, has_eq, _v = tok.partition("=")
+            i += 2 if (flag in _GH_MERGE_VALUE_LONG and not has_eq) else 1
+            continue
+        if tok.startswith("-") and tok != "-":
+            body = tok[1:]
+            consumes_next = False
+            for j, ch in enumerate(body):
+                if ch in _GH_MERGE_VALUE_SHORT:
+                    consumes_next = j == len(body) - 1   # `-R value`; else `-Rvalue`
+                    break
+            i += 2 if consumes_next else 1
+            continue
+        positionals.append(tok)
+        i += 1
+    return positionals
+
+
+def _extract_merge_target(command: str) -> str | None:
+    """The EXPLICIT merge-target identity for a faithful ``gh pr merge <branch>`` /
+    ``<url>`` (or ``<number>``, though _extract_pr_number owns that first), or None
+    (#1203 M1). Closes the cross-auth where every NON-numeric merge collapsed into the
+    target-blind merge_implicit sentinel: it isolates the target positional via the
+    MERGE-value-flag-aware _gh_merge_positionals (so ``--subject foo`` is NOT read as the
+    target), requires EXACTLY ONE positional (0 = truly-bare -> the caller mints
+    merge_implicit; >=2 = ambiguous -> abstain, gated-but-unmintable, the cross-auth-SAFE
+    direction), then classifies it via the SHARED _classify_pr_target (namespaces
+    IDENTICAL to close: number / url:<host>/<owner>/<repo>#N / branch:<name>). Abstains on
+    unbalanced quote / procsub / no merge token — the existing safe posture; mint==read
+    holds because BOTH hook arms derive via extract_command_context."""
+    prefix = _executable_prefix(command)
+    if prefix is None:
+        return None
+    tokens = _shell_tokenize(prefix)
+    if tokens is None:
+        return None
+    positionals = _gh_merge_positionals(tokens)
+    if positionals is None or len(positionals) != 1:
+        return None
+    return _classify_pr_target(_strip_surrounding_quotes(positionals[0]))
+
+
+def _is_bare_cli_merge(command: str) -> bool:
+    """True iff ``command`` is a TRULY-BARE CLI ``gh pr merge`` — the CLI merge shape
+    (_GH_PR_MERGE_RE on the quote-masked view, which excludes an API merge that always
+    carries an explicit endpoint PR) with ZERO real positional target (flags-only). This
+    is the ONLY form that mints the target-blind merge_implicit sentinel (#1203 M1: a
+    branch/url positional binds an explicit target via _extract_merge_target instead; a
+    >=2 ambiguous count abstains). The 0-positional test uses the SAME _gh_merge_positionals
+    walk _extract_merge_target uses, so bare-vs-explicit is ONE boundary (no double-count)."""
+    if not _GH_PR_MERGE_RE.search(_executed_surface_view(command)):
+        return False
+    prefix = _executable_prefix(command)
+    if prefix is None:
+        return False
+    tokens = _shell_tokenize(prefix)
+    if tokens is None:
+        return False
+    return _gh_merge_positionals(tokens) == []
 
 
 def _extract_api_ref(command: str) -> str | None:
@@ -2051,12 +2170,17 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
         operation_type: "merge" | "close" | "force-push" | "branch-delete"
                         | "push-to-main" | "remote-ref-delete" | "remote-mass-delete"
                         | "branch-protection"
-        pr_number:  str  (merge / close)
-        merge_implicit: str (merge IMPLICIT bare `gh pr merge` #1203) — a target-blind
-                     NUL-framed sentinel (_MERGE_IMPLICIT_SENTINEL), populated ONLY on
-                     op_type=='merge' when pr_number is absent (never close — the
-                     merge-only populate-site); distinct key so it never
-                     cross-authorizes an explicit pr_number
+        pr_number:  str  (merge / close) — the EXPLICIT PR/target identity: a bare
+                     number, OR (close + merge #1203 M1) a `url:<host>/<owner>/<repo>#N`
+                     / `branch:<name>` namespaced identity via the shared
+                     _classify_pr_target; op-type-first keeps merge⊥close
+        merge_implicit: str (merge IMPLICIT truly-bare `gh pr merge` #1203) — a
+                     target-blind NUL-framed sentinel (_MERGE_IMPLICIT_SENTINEL),
+                     populated ONLY on op_type=='merge' when pr_number is absent AND the
+                     command is truly-bare (_is_bare_cli_merge: CLI shape + ZERO real
+                     positional target; an explicit branch/url binds pr_number above, a
+                     >=2-positional form abstains; never close); distinct key so it never
+                     cross-authorizes an explicit pr_number (number/branch/url)
         branch:     str  (branch-delete — SINGLE target, exactly 1 positional)
         branch_set: str  (branch-delete — MULTI target #1129, >=2 positionals) —
                      canonical sort+dedup+quote-strip names via the shared netstring _canonical_join (`len:name` framing,
@@ -2127,29 +2251,36 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
             pr_number = _extract_pr_number(command)
             if pr_number is None:
                 pr_number = _extract_api_merge_pr(command)   # #1096 API pulls/<N>/merge
+            if pr_number is None:
+                # #1203 M1 — the EXPLICIT `gh pr merge <branch>`/`<url>` target. Mirrors
+                # close's {number|url|branch} bind via the SHARED _classify_pr_target, so
+                # a branch/url merge binds a DISTINCT explicit identity (branch:<name> /
+                # url:<host>/<owner>/<repo>#N) instead of the target-blind sentinel —
+                # closing the M1 cross-auth (every non-numeric merge previously collapsed
+                # to one identity). The positional is isolated by the MERGE-value-flag
+                # walk (_extract_merge_target), NOT close's, so a value like
+                # `--subject foo` is not mis-read as the branch. Reuses close's hardened
+                # host-qualified/injective identity logic; bound to pr_number (already a
+                # four-site mint key) so op-type-first keeps merge⊥close.
+                pr_number = _extract_merge_target(command)
         if pr_number is not None:
             context["pr_number"] = pr_number
-        elif op_type == "merge" and _GH_PR_MERGE_RE.search(
-            _executed_surface_view(command)
-        ):
-            # #1203 KD-8 — TARGET-BLIND sentinel for the faithful bare CLI `gh pr merge`
-            # (and `--admin`/`--squash` with no number), whose target is the current-
-            # branch PR = runtime state resolvable only by a network gh-API call at mint
-            # time (infeasible in-hook) → the same target-blind treatment as the force-
-            # push sentinel. Reached ONLY when pr_number is absent. Guarded THREE ways:
-            #   (1) MERGE-ONLY (op_type=="merge"): #1134 dissolved the bare `gh pr close`
-            #       (a close REQUIRES a target / is non-runnable), so a close must NEVER
-            #       mint this — the populate-site guarantees a close can't carry the key.
-            #   (2) CLI-SHAPE-ONLY (_GH_PR_MERGE_RE on the quote-masked view — the SAME
-            #       surface the detect CLI-merge arm uses): an API merge
-            #       (`gh api … /pulls/N/merge`) ALWAYS carries an explicit endpoint PR,
-            #       never a current-branch target, so it must NOT get the target-blind
-            #       sentinel; when its pr extractor yields nothing (malformed / neutered)
-            #       the command stays gated-but-unmintable, not sentinel-minted. Masking
-            #       the view keeps a quoted `gh pr merge` decoy in a flag value from
-            #       tripping the CLI shape.
-            # Distinct typed key (not pr_number) so an implicit-merge token cannot
-            # cross-authorize an explicit `gh pr merge 42` and vice-versa. is_dangerous
+        elif op_type == "merge" and _is_bare_cli_merge(command):
+            # #1203 KD-8 + M1 — TARGET-BLIND sentinel for ONLY the TRULY-BARE CLI
+            # `gh pr merge` (and `--admin`/`--squash` — flags-only, ZERO positional
+            # target), whose target is the current-branch PR = runtime state resolvable
+            # only by a network gh-API call at mint time (infeasible in-hook). Guarded:
+            #   (1) MERGE-ONLY (op_type=="merge"): #1134 dissolved bare `gh pr close`, so
+            #       a close must NEVER mint this — the populate-site can't carry the key.
+            #   (2) TRULY-BARE ONLY (_is_bare_cli_merge — CLI shape AND 0 real positionals
+            #       via the merge value-flag walk): an EXPLICIT branch/url target already
+            #       bound pr_number above (the M1 cross-auth fix), and a >=2 ambiguous
+            #       count abstains (gated-but-unmintable, cross-auth-safe) — never the
+            #       sentinel. The CLI-shape check also excludes an API merge (which always
+            #       carries an explicit endpoint PR).
+            # DISTINCT typed key (not pr_number) so an implicit-merge token cannot cross-
+            # authorize an EXPLICIT merge — now TRUE for number AND branch AND url (every
+            # explicit form binds pr_number; op-type-first keeps merge⊥close). is_dangerous
             # is unchanged (still True): target-PRECISION mint, never un-gating.
             context["merge_implicit"] = _MERGE_IMPLICIT_SENTINEL
     elif op_type == "branch-delete":
