@@ -2030,6 +2030,11 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
                         | "push-to-main" | "remote-ref-delete" | "remote-mass-delete"
                         | "branch-protection"
         pr_number:  str  (merge / close)
+        merge_implicit: str (merge IMPLICIT bare `gh pr merge` #1203) — a target-blind
+                     NUL-framed sentinel (_MERGE_IMPLICIT_SENTINEL), populated ONLY on
+                     op_type=='merge' when pr_number is absent (never close — the
+                     merge-only populate-site); distinct key so it never
+                     cross-authorizes an explicit pr_number
         branch:     str  (branch-delete — SINGLE target, exactly 1 positional)
         branch_set: str  (branch-delete — MULTI target #1129, >=2 positionals) —
                      canonical sort+dedup+quote-strip names via the shared netstring _canonical_join (`len:name` framing,
@@ -2102,6 +2107,29 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
                 pr_number = _extract_api_merge_pr(command)   # #1096 API pulls/<N>/merge
         if pr_number is not None:
             context["pr_number"] = pr_number
+        elif op_type == "merge" and _GH_PR_MERGE_RE.search(
+            _executed_surface_view(command)
+        ):
+            # #1203 KD-8 — TARGET-BLIND sentinel for the faithful bare CLI `gh pr merge`
+            # (and `--admin`/`--squash` with no number), whose target is the current-
+            # branch PR = runtime state resolvable only by a network gh-API call at mint
+            # time (infeasible in-hook) → the same target-blind treatment as the force-
+            # push sentinel. Reached ONLY when pr_number is absent. Guarded THREE ways:
+            #   (1) MERGE-ONLY (op_type=="merge"): #1134 dissolved the bare `gh pr close`
+            #       (a close REQUIRES a target / is non-runnable), so a close must NEVER
+            #       mint this — the populate-site guarantees a close can't carry the key.
+            #   (2) CLI-SHAPE-ONLY (_GH_PR_MERGE_RE on the quote-masked view — the SAME
+            #       surface the detect CLI-merge arm uses): an API merge
+            #       (`gh api … /pulls/N/merge`) ALWAYS carries an explicit endpoint PR,
+            #       never a current-branch target, so it must NOT get the target-blind
+            #       sentinel; when its pr extractor yields nothing (malformed / neutered)
+            #       the command stays gated-but-unmintable, not sentinel-minted. Masking
+            #       the view keeps a quoted `gh pr merge` decoy in a flag value from
+            #       tripping the CLI shape.
+            # Distinct typed key (not pr_number) so an implicit-merge token cannot
+            # cross-authorize an explicit `gh pr merge 42` and vice-versa. is_dangerous
+            # is unchanged (still True): target-PRECISION mint, never un-gating.
+            context["merge_implicit"] = _MERGE_IMPLICIT_SENTINEL
     elif op_type == "branch-delete":
         # Single-branch scalar path (BYTE-IDENTICAL): exactly ONE positional.
         branch = _extract_branch_name(command)

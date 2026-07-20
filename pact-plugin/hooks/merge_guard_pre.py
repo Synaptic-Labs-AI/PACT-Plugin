@@ -549,7 +549,24 @@ def _token_matches_command(token: dict, command: str) -> bool:
     # match. Unextractable or mismatched target -> REFUSE (over-block is the safe
     # #1031 direction; the read side never under-blocks #1032).
     if token_op in ("merge", "close"):
-        return _both_present_equal(context.get("pr_number"), cmd.get("pr_number"))
+        # #1203 — the faithful bare `gh pr merge` binds on the distinct target-blind
+        # `merge_implicit` sentinel, MERGE-ONLY. The `token_op == "merge"` guard keeps a
+        # close on the pr_number-only path (#1134: close was dissolved, and its
+        # populate-site never mints the sentinel, so this is defense-in-depth belt-and-
+        # suspenders on top of that). op-type-first (above) already fixed
+        # token_op == cmd_op; the DISTINCT key means an implicit-merge token (carries
+        # merge_implicit, not pr_number) can NOT authorize an explicit `gh pr merge 42`
+        # (carries pr_number, not merge_implicit) — the absent side fails
+        # _both_present_equal in BOTH directions — and never a close.
+        return (
+            _both_present_equal(context.get("pr_number"), cmd.get("pr_number"))
+            or (
+                token_op == "merge"
+                and _both_present_equal(
+                    context.get("merge_implicit"), cmd.get("merge_implicit")
+                )
+            )
+        )
     if token_op == "branch-delete":
         # #1129 R1: SINGLE-branch scalar OR MULTI-branch canonical SET (D1/D2
         # set-EQUALITY). Exactly one key is present per command (1 positional ->
