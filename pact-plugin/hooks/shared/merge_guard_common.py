@@ -1695,41 +1695,47 @@ _MERGE_IMPLICIT_SENTINEL = "\x00implicit-merge"
 
 def _implicit_force_push_identity(command: str) -> str | None:
     """The `force_push_implicit` mint identity for a CLEAN implicit-current-branch
-    force-push (SET A), or None (SET B / unparseable). #1203 cycle-3 (findings #1+#2)
-    REMOTE-QUALIFIES the identity so `--force origin` ⊥ `--force upstream` — the remote
-    is STATICALLY present in the command (unlike the runtime branch), so binding it
-    closes the remote-blind cross-auth WITHOUT any over-block (a faithful `--force
-    origin` still round-trips to authorize itself):
+    force-push (SET A), or None (multi-ref / unparseable). #1203 cycle-3 REMOTE-QUALIFIED
+    the identity (so `--force origin` ⊥ `--force upstream`); cycle-4 reframes the
+    separator to the NETSTRING SSOT so a URL-remote (which contains `:`) ALSO mints —
+    closing the pre-existing URL-remote over-block — while KEEPING injectivity and
+    WITHOUT any un-gate:
 
       - 0 positionals (bare `git push --force`/`-f`) → the PLAIN
         `_FORCE_PUSH_IMPLICIT_SENTINEL`: the remote is ALSO runtime-unknowable
         (push.default / @{upstream}), so the identity stays fully target-blind.
-      - exactly 1 PLAIN-remote positional (`git push --force origin`,
-        `git push origin --force`) → `_FORCE_PUSH_IMPLICIT_SENTINEL + ":" + <remote>`:
-        REMOTE-qualified, BRANCH-still-blind (the accepted KD-3 target-precision
-        residual — one click authorizes the current branch to THAT remote for the TTL).
+      - exactly 1 positional — ANY <repository>: a named remote (`origin`), a URL
+        (`git@github.com:o/r.git` / `ssh://…` / `https://…`), or even a refspec-SHAPED
+        token → `_FORCE_PUSH_IMPLICIT_SENTINEL + _canonical_join([<remote>])`:
+        REMOTE-qualified, BRANCH-still-blind (KD-3 residual). git parses a LONE push
+        positional as the <repository> regardless of shape, so ALL 1-positionals are
+        remotes; a refspec-shaped one is a NON-RUNNABLE repository spelling that binds
+        HARMLESSLY (self-authorizing-only — its token round-trips ONLY to itself).
+
+    The NETSTRING (`_canonical_join`, the branch_set/mass_target SSOT — `len:content`
+    framing) is content-agnostic + INJECTIVE by construction for ANY remote string incl.
+    `:`/`@`/NUL, which is why cycle-4 can DROP cycle-3's `:`/`refs/`/`HEAD`/`+`
+    single-positional refusal: injectivity no longer needs the remote to be `:`-free.
+    Distinct remotes → distinct frames; a qualified value (…`<len>:<remote>`) can never
+    set-equal the bare `_FORCE_PUSH_IMPLICIT_SENTINEL`.
 
     Consulted by extract_command_context's force-push branch ONLY after
     _extract_force_push_target_ref (scalar) AND _extract_force_push_set (multi-ref) both
     returned None (KD-4 mutual-exclusivity), so an explicit-ref/multi-ref command never
-    reaches here — a non-None identity mints the sentinel for a form that would
-    otherwise be gated-but-unmintable (the cardinal over-block).
+    reaches here — a non-None identity mints the sentinel for a form that would otherwise
+    be gated-but-unmintable (the cardinal over-block). is_dangerous is computed SEPARATELY
+    (unchanged) — this is a MINT-only change, never an un-gate.
 
-    SET B → None (fail-safe, stays gated-but-unmintable, UNCHANGED): a single positional
-    that is a REFSPEC/REF not a plain remote (`:`-bearing `HEAD:main`, an scp-URL remote
-    `git@github.com:o/r.git`, `refs/…`, a bare `HEAD`, a `+`-forced ref), or any multi-
-    positional / unparseable form. git parses a lone positional as the <repository>, so
-    those ref-looking single-positional forms are non-runnable (fatal 128) and need no
-    mint. The `:` EXCLUSION is ALSO what keeps the `<SENTINEL>:<remote>` separator
-    INJECTIVE — a qualified remote is always `:`-free, so distinct remotes → distinct
-    identities and no scp-URL colon can collide two commands. Positionals are counted via
-    the SHARED _push_positionals (value-flag skip), so a `-o ci.skip` push-option never
-    inflates the count NOR leaks as the remote. Unbalanced-quote / no-push → None.
+    None (fail-safe, gated-but-unmintable) for: MULTI-positional (>=2 — the explicit-ref
+    path owns target_ref, UNCHANGED); a degenerate empty/whitespace-only positional; and
+    any unparseable / unbalanced-quote / procsub form. Positionals are counted via the
+    SHARED _push_positionals (value-flag skip), so a `-o ci.skip` push-option never
+    inflates the count NOR leaks as the remote.
 
     mint==read BY CONSTRUCTION: both hook arms derive via extract_command_context and
     consume `force_push_implicit` generically (read `_both_present_equal`, mint
     `_target_value`); the value is a pure function of the command string (no runtime
-    resolution), so a more-specific remote-qualified value needs NO read/mint edit."""
+    resolution), so the netstring value needs NO read/mint edit."""
     after = _tokens_after_push(command)
     if after is None:
         return None                               # no push token / unbalanced → abstain
@@ -1738,18 +1744,17 @@ def _implicit_force_push_identity(command: str) -> str | None:
         return _FORCE_PUSH_IMPLICIT_SENTINEL      # bare — remote ALSO runtime-unknowable
     if len(positionals) == 1:
         remote = _strip_surrounding_quotes(positionals[0])
-        # A PLAIN remote (git treats a lone positional as the <repository>, so `origin`
-        # → push current branch to origin). A `:` / `refs/` / `HEAD` / `+` token is a
-        # refspec/ref (SET B, non-runnable) → refuse; the `:` refusal also guarantees
-        # the `<SENTINEL>:<remote>` separator stays injective.
-        if (
-            ":" not in remote
-            and not remote.startswith("refs/")
-            and remote != "HEAD"
-            and not remote.startswith("+")
-        ):
-            return _FORCE_PUSH_IMPLICIT_SENTINEL + ":" + remote
-    return None
+        if not remote.strip():
+            return None                           # degenerate empty/whitespace → abstain
+        # ANY 1-positional is the <repository> by git grammar — a named remote, a URL
+        # (`git@github.com:o/r.git` / `ssh://…` / `https://…`), OR a non-runnable
+        # refspec-SHAPED token; the NETSTRING _canonical_join binds it INJECTIVELY (incl.
+        # a `:`-bearing URL), so cycle-4 DROPS cycle-3's `:`/`refs/`/`HEAD`/`+` refusal —
+        # injectivity no longer needs the remote to be `:`-free, and a refspec-shaped
+        # bind is self-authorizing-only (non-runnable; its token round-trips ONLY to
+        # itself). This is the URL-remote over-block close (#1203 cycle-4).
+        return _FORCE_PUSH_IMPLICIT_SENTINEL + _canonical_join([remote])
+    return None                                   # >=2 positional → explicit-ref path owns it
 
 
 def _extract_remote_ref_delete_target(command: str) -> str | None:

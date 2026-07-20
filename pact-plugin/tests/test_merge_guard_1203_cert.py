@@ -105,6 +105,14 @@ FP_SENTINEL = mgc._FORCE_PUSH_IMPLICIT_SENTINEL
 MERGE_SENTINEL = mgc._MERGE_IMPLICIT_SENTINEL
 
 
+def _fpq(*positionals):
+    """The cycle-4 NETSTRING-qualified force_push_implicit identity for a 1-positional implicit
+    force-push: `SENTINEL + _canonical_join([<remote-or-url-or-refspec>])` (len-prefixed, e.g.
+    `SENTINEL + '6:origin'`). Derived through the REAL _canonical_join SSOT (not a hardcoded
+    `:remote`), so a netstring-format change is reflected here and the identity stays injective."""
+    return FP_SENTINEL + mgc._canonical_join(list(positionals))
+
+
 def _base():
     """The pre-#1203 (5017d1f2) classifier's is_dangerous_command."""
     return load_baseline_5017d1f2().is_dangerous_command
@@ -147,8 +155,8 @@ MUST_MINT_FORCE_PUSH = [
 FP_IMPLICIT_VALUE = {
     _PG + "--force": FP_SENTINEL,
     _PG + "-f": FP_SENTINEL,
-    _PG + "-f origin": FP_SENTINEL + ":origin",
-    _PG + "--force origin": FP_SENTINEL + ":origin",
+    _PG + "-f origin": _fpq("origin"),                # cycle-4: netstring-qualified
+    _PG + "--force origin": _fpq("origin"),           # cycle-4: netstring-qualified
     "git -c user.name=x push --force": FP_SENTINEL,
     _PREFIX + _PG + "--force": FP_SENTINEL,
 }
@@ -419,11 +427,12 @@ class TestDimBOffTokenRoundTrip:
         minted, ctx = _mint(cmd, tmp_path)
         assert minted == 1, "did not mint: %r" % cmd
         sentinel = ctx.get("force_push_implicit") or ctx.get("merge_implicit")
-        # cycle-3: force_push_implicit may be the plain sentinel (truly-implicit) OR a
-        # remote-qualified `SENTINEL:<remote>` (1-positional). merge_implicit is the plain merge
-        # sentinel. Either way the identity must be read OFF the token as a NUL-framed sentinel.
+        # force_push_implicit may be the plain sentinel (truly-implicit 0-positional) OR a
+        # cycle-4 netstring-qualified `SENTINEL + <_canonical_join([positional])>` (1-positional).
+        # merge_implicit is the plain merge sentinel. Either way the identity is read OFF the
+        # token as a NUL-framed sentinel (every force-push value begins with FP_SENTINEL).
         assert sentinel is not None and (
-            sentinel == MERGE_SENTINEL or sentinel == FP_SENTINEL or sentinel.startswith(FP_SENTINEL + ":")
+            sentinel == MERGE_SENTINEL or sentinel.startswith(FP_SENTINEL)
         ), "token did not carry a target-blind sentinel off the token file: %r (%r)" % (cmd, sentinel)
         assert _execute(cmd, tmp_path) == _ALLOW, "own token did not authorize: %r" % cmd
 
@@ -978,12 +987,12 @@ class TestFinding4ValueOptionInertBlindness:
 # ═════════════════════════════════════════════════════════════════════════════════
 # (cmd_tail, expected force_push_implicit identity)
 CYCLE3_IDENTITY = [
-    ("--force origin", FP_SENTINEL + ":origin"),
-    ("-f origin", FP_SENTINEL + ":origin"),
-    ("origin --force", FP_SENTINEL + ":origin"),          # ordering-agnostic (same identity)
-    ("--force upstream", FP_SENTINEL + ":upstream"),
-    ("--force -o ci.skip origin", FP_SENTINEL + ":origin"),  # -o value-skip preserved
-    ("--force", FP_SENTINEL),                             # bare 0-positional keeps plain sentinel
+    ("--force origin", _fpq("origin")),
+    ("-f origin", _fpq("origin")),
+    ("origin --force", _fpq("origin")),                  # ordering-agnostic (same identity)
+    ("--force upstream", _fpq("upstream")),
+    ("--force -o ci.skip origin", _fpq("origin")),       # -o value-skip preserved
+    ("--force", FP_SENTINEL),                            # bare 0-positional keeps plain sentinel
 ]
 # (name, approve, execute, expect_allow) — the cross-remote closure + the ordering-agnostic ALLOW.
 CYCLE3_CROSS_AUTH = [
@@ -995,8 +1004,13 @@ CYCLE3_CROSS_AUTH = [
 
 
 class TestCycle3RemoteQualifiedIdentity:
-    """The 1-positional force-push mints a REMOTE-QUALIFIED identity so distinct remotes cannot
-    cross-authorize; token order is agnostic; the bare form keeps the plain sentinel."""
+    """The 1-positional force-push mints a positional-QUALIFIED identity so distinct positionals
+    cannot cross-authorize; token order is agnostic; the bare 0-positional keeps the plain
+    sentinel. cycle-3 introduced `SENTINEL:<remote>`; cycle-4 (#90-93) generalized it to the
+    injective NETSTRING `SENTINEL + _canonical_join([positional])` AND dropped the refspec-shape
+    refusal, so ALL 1-positionals (named remotes, URL-remotes, refspec-shapes) now mint — closing
+    the URL-remote FAITHFUL over-block (a URL is a valid runnable remote). The `_fpq()` helper
+    derives the expected value through the REAL _canonical_join SSOT."""
 
     @pytest.mark.parametrize("tail,value", CYCLE3_IDENTITY, ids=[r[0] for r in CYCLE3_IDENTITY])
     def test_identity_value(self, tail, value):
@@ -1015,15 +1029,22 @@ class TestCycle3RemoteQualifiedIdentity:
                 "did not distinguish the identities" % (name, approve, execute)
             )
 
-    def test_mutual_exclusivity_and_setb_preserved(self):
-        # explicit target_ref still WINS (no implicit sentinel leak); SET B stays fpi-None + gated.
+    def test_mutual_exclusivity_and_multiref_preserved(self):
+        # explicit target_ref still WINS for a remote+ref pair (no implicit sentinel leak).
         ex = mgc.extract_command_context(_PG + "--force origin main")
         assert ex.get("target_ref") == "main" and not ex.get("force_push_implicit"), (
-            "cycle-3 leaked a remote-qualified sentinel onto an EXPLICIT-ref force-push: %r" % ex
+            "leaked an implicit sentinel onto an EXPLICIT remote+ref force-push: %r" % ex
         )
-        setb = mgc.extract_command_context(_PG + "--force HEAD")
-        assert not setb.get("force_push_implicit") and D(_PG + "--force HEAD") is True, (
-            "cycle-3 changed SET B: it must stay gated-but-unmintable (fpi None), not resolve a remote"
+        # cycle-4: a 1-positional refspec-shape (`--force HEAD`) now MINTS the netstring identity
+        # (the URL-remote closure binds ALL 1-positionals), NOT SET-B-None.
+        hd = mgc.extract_command_context(_PG + "--force HEAD")
+        assert hd.get("force_push_implicit") == _fpq("HEAD") and D(_PG + "--force HEAD") is True, (
+            "cycle-4: `--force HEAD` must mint the netstring identity (1-positional), not stay SET-B None: %r" % hd
+        )
+        # multi-ref (>=2 refspecs) still owns force_push_set — the set path, never the implicit sentinel.
+        mr = mgc.extract_command_context(_PG + "--force origin main next")
+        assert mr.get("force_push_set") and not mr.get("force_push_implicit"), (
+            "multi-ref force-push leaked the implicit sentinel — the set path must own >=2 refspecs: %r" % mr
         )
 
     def test_dropping_remote_qualifier_reopens_cross_remote(self, monkeypatch):
@@ -1034,7 +1055,7 @@ class TestCycle3RemoteQualifiedIdentity:
         # remote qualification.
         orig = mgc._implicit_force_push_identity
         # sanity: the live fn currently qualifies (else the coarsen below is a no-op).
-        assert orig(_PG + "--force origin") == FP_SENTINEL + ":origin", "vacuity guard: identity not remote-qualified"
+        assert orig(_PG + "--force origin") == _fpq("origin"), "vacuity guard: identity not remote-qualified"
         monkeypatch.setattr(mgc, "_implicit_force_push_identity", lambda c: (FP_SENTINEL if orig(c) else None))
         _, rc = _isolated_roundtrip(_PG + "--force origin", _PG + "--force upstream")
         assert rc == _ALLOW, (
@@ -1042,25 +1063,85 @@ class TestCycle3RemoteQualifiedIdentity:
             "auth — the remote qualifier is not the attributable closer, so the DENY rows prove nothing"
         )
 
+    # cycle-4: URL-remote + refspec-shape 1-positionals now MINT (the netstring closure of the
+    # URL-remote over-block). Identity is SENTINEL + _canonical_join([positional]), URL-verbatim.
+    _URL_A = "git@github.com" + ":o/r.git"
+    _URL_B = "git@github.com" + ":o/other.git"
+
     @pytest.mark.parametrize("url_remote", [
         "git@github.com" + ":o/r.git",           # scp-style
         "ssh://git@host" + "/o/r.git",           # ssh URL
         "https://github.com" + "/o/r.git",       # https URL
     ], ids=["scp", "ssh", "https"])
-    def test_url_remote_stays_set_b_pre_existing_over_block(self, url_remote):
-        # DOCUMENTED PRE-EXISTING RESIDUAL (security #89, OUT OF SCOPE for #1203): a URL-remote
-        # force-push (`git push --force git@host:repo`) is NOT recognized as a remote for the
-        # cycle-3 qualification, so it stays gated-but-UNMINTABLE (SET B) — a pre-existing
-        # OVER-BLOCK that predates this PR and needs a netstring-separator redesign to close
-        # (tracked separately). This is a PINNED-CURRENT-BEHAVIOR row (like the SET B + double-
-        # value-option residuals), NOT a should-mint assertion: it stays gated True (never
-        # un-gated) and binds NO identity (never a spurious remote-qualified mint). If it ever
-        # CHANGES, this reds and forces a re-confirm rather than a silent shift.
+    def test_url_remote_mints_netstring_identity(self, url_remote):
+        # BEHAVIOR FLIP (cycle-4, #90/#91/#92/#93): a URL-remote force-push (`git push --force
+        # git@host:repo`) IS a FAITHFUL runnable command — a URL is a valid git remote — so its
+        # former gated-but-UNMINTABLE state (the SET-B pin committed at b49af7ea) was a CARDINAL
+        # over-block. The netstring redesign now MINTS it: force_push_implicit == SENTINEL +
+        # _canonical_join([url]) (injective, URL captured VERBATIM), gated + self-authorizing.
         cmd = _PG + "--force " + url_remote
         c = mgc.extract_command_context(cmd)
         assert D(cmd) is True, "URL-remote force-push UN-GATED (would be an under-block): %r" % cmd
-        assert not c.get("force_push_implicit") and not c.get("target_ref") and not c.get("force_push_set"), (
-            "URL-remote force-push now binds an identity %r — the pre-existing SET-B over-block "
-            "changed; re-confirm the separate tracker's disposition, do NOT silently update: %r"
-            % (c, cmd)
+        assert c.get("force_push_implicit") == _fpq(url_remote), (
+            "URL-remote did not mint the netstring identity: got %r expected %r for %r"
+            % (c.get("force_push_implicit"), _fpq(url_remote), cmd)
+        )
+        _, rc = _isolated_roundtrip(cmd, cmd)
+        assert rc == _ALLOW, "faithful URL-remote force-push did not self-authorize (over-block): %r" % cmd
+
+    def test_url_and_refspec_injectivity_self_authorizing_only(self):
+        # INJECTIVITY (the point of the netstring): every newly-minting 1-positional authorizes
+        # ONLY itself. A URL token ⊥ a different URL / a named remote / the bare form; a refspec-
+        # shape ⊥ every other form. (name, approve, execute, expect_allow.)
+        rows = [
+            ("URL-A != URL-B", _PG + "--force " + self._URL_A, _PG + "--force " + self._URL_B, False),
+            ("bare != URL-A", _PG + "--force", _PG + "--force " + self._URL_A, False),
+            ("named origin != URL-A", _PG + "--force origin", _PG + "--force " + self._URL_A, False),
+            ("HEAD:main != +main", _PG + "--force HEAD:main", _PG + "--force +main", False),
+            ("HEAD:main != origin", _PG + "--force HEAD:main", _PG + "--force origin", False),
+            ("URL-A self", _PG + "--force " + self._URL_A, _PG + "--force " + self._URL_A, True),
+            ("HEAD:main self", _PG + "--force HEAD:main", _PG + "--force HEAD:main", True),
+        ]
+        for name, approve, execute, expect_allow in rows:
+            _, rc = _isolated_roundtrip(approve, execute)
+            if expect_allow:
+                assert rc == _ALLOW, "OVER-BLOCK: a faithful 1-positional self-execution REFUSED (%s)" % name
+            else:
+                assert rc == _DENY, (
+                    "CROSS-AUTH OPEN (%s): a netstring 1-positional token authorized a DIFFERENT "
+                    "1-positional — the netstring identity is not injective" % name
+                )
+
+    def test_reverting_url_refspec_binding_reopens_the_over_block(self, monkeypatch):
+        # NON-VACUITY (cycle-4 revert-of-the-fix known-bad): cycle-4 DROPPED cycle-3's
+        # `:`/`refs/`/`HEAD`/`+` single-positional REFUSAL (binding ALL 1-positionals via the
+        # injective netstring) — that drop is what CLOSED the URL-remote over-block. Re-apply the
+        # pre-cycle-4 refusal (refuse a `:`-bearing / refspec-shaped positional) → the URL +
+        # refspec-shape forms mint None again = gated-but-UNMINTABLE = the over-block REOPENS.
+        # Couples the URL/refspec mint rows to the cycle-4 drop-refusal; a plain named remote is
+        # UNAFFECTED (the attributable closer is specifically the drop-refusal, not the netstring
+        # reframe alone).
+        orig = mgc._implicit_force_push_identity
+        assert orig(_PG + "--force " + self._URL_A) is not None, (
+            "vacuity guard: the live fn does not currently bind a URL — cycle-4 absent, neuter is a no-op"
+        )
+
+        def _pre_cycle4(cmd):
+            ident = orig(cmd)
+            if ident and ident != FP_SENTINEL:
+                pos = ident[len(FP_SENTINEL):].split(":", 1)[1]   # netstring `<len>:<positional>`
+                if ":" in pos or pos.startswith("refs/") or pos.startswith("+") or pos == "HEAD":
+                    return None                                   # pre-cycle-4 refusal
+            return ident
+
+        monkeypatch.setattr(mgc, "_implicit_force_push_identity", _pre_cycle4)
+        for pos in [self._URL_A, "HEAD:main", "+main", "HEAD"]:
+            c = mgc.extract_command_context(_PG + "--force " + pos)
+            assert not c.get("force_push_implicit"), (
+                "reverting the URL/refspec binding did NOT reopen the over-block for %r — the "
+                "cycle-4 drop-refusal is not the attributable closer, so the URL/refspec mint rows "
+                "prove nothing" % pos
+            )
+        assert mgc.extract_command_context(_PG + "--force origin").get("force_push_implicit") == _fpq("origin"), (
+            "the revert wrongly un-bound a plain named remote — the pre-cycle-4 neuter over-reached"
         )
