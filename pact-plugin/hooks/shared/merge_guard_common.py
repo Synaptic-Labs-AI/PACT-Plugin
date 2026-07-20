@@ -779,6 +779,28 @@ _GH_PR_VALUE_TAKING_FLAGS = frozenset({
     "--timeout",
 })
 
+# #1203 C1b — value-taking gh pr merge/close flags the inert-help recognizer must skip
+# BEYOND the shared _GH_PR_VALUE_TAKING_FLAGS long-form SSOT, so a `-h`/`--help` sitting
+# in one of their VALUE positions (separate form `-t -h`, `-R -h`, `--repo -h`) is not
+# misread as a help request and does not un-gate a REAL merge/close (the auditor's
+# confirmed under-block). Two groups:
+#   • SHORT aliases of the shared long value flags: -t(--subject) -b(--body)
+#     -F(--body-file) -A(--author-email) -c(--comment).
+#   • --repo AND its short -R — a value-taking flag on merge AND close (test-engineer
+#     #68, live-verified) that is ABSENT from the shared long SSOT.
+# KEPT SEPARATE from _GH_PR_VALUE_TAKING_FLAGS ON PURPOSE: that SSOT is also consumed by
+# _extract_pr_number + the merge shadow-guard, so widening it would change target
+# extraction (the SEPARATE short/-repo pr_number MISBIND is escalated on its own, not
+# folded here). This set touches ONLY the inert recognizer.
+# ONLY genuinely value-taking flags belong here — a BOOLEAN (e.g. -d/--delete-branch,
+# -s/--squash, -r/--rebase, -m/--merge) would skip a real following `-h` and RE-INTRODUCE
+# an over-block; those are correctly EXCLUDED. The GLUED form (`-tVALUE` / `-t-h` /
+# `--repo=-h` / `-R=-h`) needs no entry — one token, not literally `-h`/`--help`, so it
+# neither skips nor matches (stays gated).
+_INERT_HELP_EXTRA_VALUE_FLAGS = frozenset(
+    {"-t", "-b", "-F", "-A", "-c", "-R", "--repo"}
+)
+
 
 def _strip_surrounding_quotes(token: str) -> str:
     """Strip one layer of matching surrounding quotes from a captured CLI token.
@@ -4858,8 +4880,11 @@ def _is_inert_help_leg(leg: str) -> bool:
       - Tokens come from the quote-aware `_leg_token_spans`, so a `--help` living
         INSIDE a quoted value (`gh pr merge 5 --comment "…--help…"`) is one value
         token, never a bare flag — it stays gated.
-      - A `-h` that is the VALUE of a gh-pr value-taking flag (`--subject -h`) is
-        SKIPPED with its flag, so the decoy is not read as help — it stays gated.
+      - A `-h` (or `--help`) that is the VALUE of a gh-pr value-taking flag is SKIPPED
+        with its flag, so the decoy is not read as help — it stays gated. Both the
+        shared LONG-form SSOT (`--subject -h`) AND the inert-recognizer supplement
+        `_INERT_HELP_EXTRA_VALUE_FLAGS` — the short aliases `-t`/`-b`/`-F`/`-A`/`-c` plus
+        `--repo`/`-R` (#1203 C1b) — are covered, across gh pr merge AND close.
       - Only an EXACT `--help` / `-h` flag token counts; a bundled short cluster
         (`-fh`) is NOT `-h`, so it does not match and the command stays gated
         (fail-toward-gating). An unbalanced-quote leg abstains (→ not inert → gated).
@@ -4885,12 +4910,26 @@ def _is_inert_help_leg(leg: str) -> bool:
     ):
         return True
     # Exact --help/-h flag token, skipping any gh-pr value-taking flag's value token
-    # (so a value `-h` is never misread as a help request).
+    # (so a value `-h` — or a value `--help` — is never misread as a help request).
+    # BOTH the LONG forms (--subject/--body/… incl. the `--flag=value` inline form) and
+    # their SHORT aliases (-t/-b/-F/-A/-c in the separate `-t <value>` form) are skipped
+    # (#1203 C1b), closing the short-form value-decoy under-block. `i += 2` skips the
+    # flag AND whatever its next token is, so `-t -h` AND `-t --help` both stay gated.
     i = 0
     while i < len(tokens):
         tok = tokens[i]
-        if tok.split("=", 1)[0] in _GH_PR_VALUE_TAKING_FLAGS and "=" not in tok:
-            i += 2                                # skip the flag AND its separate value token
+        flagname = tok.split("=", 1)[0]
+        # Skip a value-taking flag AND its separate value token: the shared long-form
+        # SSOT, PLUS the inert-recognizer's short aliases + --repo/-R (#1203 C1b). The
+        # `"=" not in tok` guard leaves the inline `--flag=value` / `-R=value` form as
+        # one token (already safe — not literally `-h`). `i += 2` skips whatever the
+        # value is, so both `-t -h` AND `-t --help` stay gated.
+        is_value_flag = (
+            flagname in _GH_PR_VALUE_TAKING_FLAGS
+            or flagname in _INERT_HELP_EXTRA_VALUE_FLAGS
+        ) and "=" not in tok
+        if is_value_flag:
+            i += 2
             continue
         if tok in ("--help", "-h"):
             return True
