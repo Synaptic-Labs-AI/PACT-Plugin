@@ -1693,46 +1693,63 @@ _FORCE_PUSH_IMPLICIT_SENTINEL = "\x00implicit-force-push"
 _MERGE_IMPLICIT_SENTINEL = "\x00implicit-merge"
 
 
-def _is_implicit_current_branch_force_push(command: str) -> bool:
-    """True iff `command` is a CLEAN implicit-current-branch force-push (SET A) — a
-    faithful form whose target is the current branch (runtime state, unknowable from
-    the string): 0 positionals (`git push --force`, `git push -f`) OR exactly 1
-    PLAIN-REMOTE positional (`git push --force origin`, `git push origin --force`).
+def _implicit_force_push_identity(command: str) -> str | None:
+    """The `force_push_implicit` mint identity for a CLEAN implicit-current-branch
+    force-push (SET A), or None (SET B / unparseable). #1203 cycle-3 (findings #1+#2)
+    REMOTE-QUALIFIES the identity so `--force origin` ⊥ `--force upstream` — the remote
+    is STATICALLY present in the command (unlike the runtime branch), so binding it
+    closes the remote-blind cross-auth WITHOUT any over-block (a faithful `--force
+    origin` still round-trips to authorize itself):
+
+      - 0 positionals (bare `git push --force`/`-f`) → the PLAIN
+        `_FORCE_PUSH_IMPLICIT_SENTINEL`: the remote is ALSO runtime-unknowable
+        (push.default / @{upstream}), so the identity stays fully target-blind.
+      - exactly 1 PLAIN-remote positional (`git push --force origin`,
+        `git push origin --force`) → `_FORCE_PUSH_IMPLICIT_SENTINEL + ":" + <remote>`:
+        REMOTE-qualified, BRANCH-still-blind (the accepted KD-3 target-precision
+        residual — one click authorizes the current branch to THAT remote for the TTL).
 
     Consulted by extract_command_context's force-push branch ONLY after
-    _extract_force_push_target_ref (scalar) AND _extract_force_push_set (multi-ref)
-    both returned None — an explicit-ref/multi-ref command already populated
-    target_ref/force_push_set and never reaches here (KD-4 mutual-exclusivity), so a
-    True here mints the target-blind `force_push_implicit` sentinel for a form that
-    would otherwise be gated-but-unmintable (the cardinal over-block).
+    _extract_force_push_target_ref (scalar) AND _extract_force_push_set (multi-ref) both
+    returned None (KD-4 mutual-exclusivity), so an explicit-ref/multi-ref command never
+    reaches here — a non-None identity mints the sentinel for a form that would
+    otherwise be gated-but-unmintable (the cardinal over-block).
 
-    SET B → False (fail-safe, stays gated-but-unmintable): a single positional that is
-    a REFSPEC/REF, not a plain remote (`:`-bearing `HEAD:main`, `refs/…`, a bare
-    `HEAD`, a `+`-forced ref), or any multi-positional / unparseable form. git parses a
-    lone positional as the <repository>, so those ref-looking single-positional forms
-    are non-runnable (fatal 128) and need no mint; refusing them keeps the sentinel
-    surface tight WITHOUT opening a faithful-click over-block. Positionals are counted
-    via the SHARED _push_positionals (value-flag skip), so a `-o ci.skip` push-option
-    never inflates the count. An unbalanced-quote / no-push form abstains → False."""
+    SET B → None (fail-safe, stays gated-but-unmintable, UNCHANGED): a single positional
+    that is a REFSPEC/REF not a plain remote (`:`-bearing `HEAD:main`, an scp-URL remote
+    `git@github.com:o/r.git`, `refs/…`, a bare `HEAD`, a `+`-forced ref), or any multi-
+    positional / unparseable form. git parses a lone positional as the <repository>, so
+    those ref-looking single-positional forms are non-runnable (fatal 128) and need no
+    mint. The `:` EXCLUSION is ALSO what keeps the `<SENTINEL>:<remote>` separator
+    INJECTIVE — a qualified remote is always `:`-free, so distinct remotes → distinct
+    identities and no scp-URL colon can collide two commands. Positionals are counted via
+    the SHARED _push_positionals (value-flag skip), so a `-o ci.skip` push-option never
+    inflates the count NOR leaks as the remote. Unbalanced-quote / no-push → None.
+
+    mint==read BY CONSTRUCTION: both hook arms derive via extract_command_context and
+    consume `force_push_implicit` generically (read `_both_present_equal`, mint
+    `_target_value`); the value is a pure function of the command string (no runtime
+    resolution), so a more-specific remote-qualified value needs NO read/mint edit."""
     after = _tokens_after_push(command)
     if after is None:
-        return False                              # no push token / unbalanced → abstain
+        return None                               # no push token / unbalanced → abstain
     positionals = _push_positionals(after)
     if len(positionals) == 0:
-        return True                               # bare implicit current-branch force-push
+        return _FORCE_PUSH_IMPLICIT_SENTINEL      # bare — remote ALSO runtime-unknowable
     if len(positionals) == 1:
         remote = _strip_surrounding_quotes(positionals[0])
         # A PLAIN remote (git treats a lone positional as the <repository>, so `origin`
         # → push current branch to origin). A `:` / `refs/` / `HEAD` / `+` token is a
-        # refspec/ref (SET B, non-runnable) → refuse.
+        # refspec/ref (SET B, non-runnable) → refuse; the `:` refusal also guarantees
+        # the `<SENTINEL>:<remote>` separator stays injective.
         if (
             ":" not in remote
             and not remote.startswith("refs/")
             and remote != "HEAD"
             and not remote.startswith("+")
         ):
-            return True
-    return False
+            return _FORCE_PUSH_IMPLICIT_SENTINEL + ":" + remote
+    return None
 
 
 def _extract_remote_ref_delete_target(command: str) -> str | None:
@@ -2196,11 +2213,14 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
                      flag allowlist; exactly one of target_ref / push_set /
                      force_push_set populated per command
         force_push_implicit: str (force-push IMPLICIT current-branch #1203) — a
-                     target-blind NUL-framed sentinel (_FORCE_PUSH_IMPLICIT_SENTINEL),
-                     populated ONLY on op_type=='force-push' when target_ref AND
-                     force_push_set are both absent (the clean 0/1-plain-remote-
-                     positional forms whose target is runtime state); distinct key so
-                     it never cross-authorizes an explicit target_ref/force_push_set
+                     branch-blind NUL-framed sentinel, REMOTE-QUALIFIED (cycle-3 #1+#2):
+                     bare form = `_FORCE_PUSH_IMPLICIT_SENTINEL` (remote also runtime-
+                     unknowable); 1-plain-remote form = `<SENTINEL>:<remote>` so
+                     `--force origin` ⊥ `--force upstream`. Populated ONLY on
+                     op_type=='force-push' when target_ref AND force_push_set are both
+                     absent (the clean 0/1-plain-remote forms; SET B → None → absent);
+                     distinct key so it never cross-authorizes an explicit
+                     target_ref/force_push_set (via _implicit_force_push_identity)
         mass_target: str (remote-mass-delete #1062b) — normalized identity STRING
                      _canonical_join([<sorted-mass-flags>, <remote-or-implicit-marker>, *<sorted-deduped-refspecs>])
         protected_branch: str (branch-protection #1063) — the branch from the
@@ -2331,21 +2351,26 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
             force_push_set = _extract_force_push_set(command)
             if force_push_set is not None:
                 context["force_push_set"] = force_push_set
-            elif _is_implicit_current_branch_force_push(command):
-                # #1203 KD-2/KD-4 — TARGET-BLIND sentinel for the implicit current-
-                # branch force-push (`git push --force`, `-f`, `--force origin`, …),
-                # whose real target is runtime state absent from the string. Reached
-                # ONLY when target_ref (scalar) AND force_push_set (multi-ref) are BOTH
-                # absent, on op_type=='force-push' (never the push-to-main path above),
-                # so an explicit-ref/multi-ref command never carries this sentinel —
-                # the mutual-exclusivity is structural. Distinct typed key (not a
-                # target_ref value) so op-type-first + distinct-key keeps this token
-                # from cross-authorizing an explicit `--force origin main`. The scalar
-                # (_extract_force_push_target_ref) and set (_extract_force_push_set)
-                # extractors above stay BYTE-UNTOUCHED — this is a pure additive elif
-                # on their shared None. is_dangerous is unchanged (still True): this is
-                # target-PRECISION (mint the over-blocked form), never un-gating.
-                context["force_push_implicit"] = _FORCE_PUSH_IMPLICIT_SENTINEL
+            else:
+                # #1203 KD-2/KD-4 + cycle-3 — REMOTE-QUALIFIED target-blind sentinel for
+                # the implicit current-branch force-push (`git push --force`, `-f`,
+                # `--force origin`, …), whose BRANCH target is runtime state absent from
+                # the string. Reached ONLY when target_ref (scalar) AND force_push_set
+                # (multi-ref) are BOTH absent, on op_type=='force-push' (never the
+                # push-to-main path above), so an explicit-ref/multi-ref command never
+                # carries this sentinel — the mutual-exclusivity is structural. Distinct
+                # typed key (not a target_ref value) so op-type-first + distinct-key keeps
+                # this token from cross-authorizing an explicit `--force origin main`.
+                # cycle-3 (#1+#2): the identity now binds the EXPLICIT remote (`…:origin`)
+                # for a 1-positional form so `--force origin` ⊥ `--force upstream`; the
+                # bare form stays fully blind (remote runtime-unknowable). SET B →
+                # identity None → key absent → gated-but-unmintable (UNCHANGED). The
+                # scalar/set extractors above stay BYTE-UNTOUCHED. is_dangerous is
+                # unchanged (still True): target-PRECISION (mint the over-blocked form),
+                # never un-gating.
+                fpi = _implicit_force_push_identity(command)
+                if fpi is not None:
+                    context["force_push_implicit"] = fpi
     elif op_type == "remote-ref-delete":
         # #1062a: REUSE the `target_ref` key — the parser yields a ref, the key is
         # semantically right, and the op-class identity (checked FIRST in the read

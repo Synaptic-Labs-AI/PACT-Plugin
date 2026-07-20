@@ -139,6 +139,20 @@ MUST_MINT_FORCE_PUSH = [
     _PREFIX + _PG + "--force",
 ]
 
+# cycle-3 (findings #1+#2 tighten): the force_push_implicit identity is REMOTE-QUALIFIED for
+# the 1-positional remote-only form (`--force origin` -> SENTINEL:origin), so a `--force origin`
+# approval no longer authorizes a `--force upstream` (cross-remote). The 0-positional truly-
+# implicit forms (bare `--force`/`-f`, global-flag, non-first-leg) keep the PLAIN sentinel. This
+# maps each MUST_MINT_FORCE_PUSH row to its expected identity value (pinned, not inferred).
+FP_IMPLICIT_VALUE = {
+    _PG + "--force": FP_SENTINEL,
+    _PG + "-f": FP_SENTINEL,
+    _PG + "-f origin": FP_SENTINEL + ":origin",
+    _PG + "--force origin": FP_SENTINEL + ":origin",
+    "git -c user.name=x push --force": FP_SENTINEL,
+    _PREFIX + _PG + "--force": FP_SENTINEL,
+}
+
 # MUST_MINT bare merge (faithful, gh infers the current-branch PR) — merge_implicit.
 MUST_MINT_MERGE = [
     _GH + "merge",
@@ -306,6 +320,9 @@ class TestCorpusShape:
         # Finding #4 (both arms): 6 head-form + 4 flag-loop = 10 GIT gate forms.
         assert len(F4_HEAD_FORM) == 6 and len(F4_FLAG_LOOP) == 4 and len(F4_GATE) == 10, "F4 gate corpus drifted"
         assert len(F4_INERT) == 6 and len(F4_DECOY_GATED) == 3, "F4 control corpus drifted"
+        # cycle-3 (remote-qualified force-push identity).
+        assert len(CYCLE3_IDENTITY) == 6 and len(CYCLE3_CROSS_AUTH) == 4, "cycle-3 corpus drifted"
+        assert len(FP_IMPLICIT_VALUE) == len(MUST_MINT_FORCE_PUSH) == 6, "FP_IMPLICIT_VALUE map drifted from the corpus"
 
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -332,7 +349,10 @@ class TestDimAMintForcePush:
             "implicit force-push bound the wrong key: %r (expected force_push_implicit): %r"
             % (_won_key(ctx), cmd)
         )
-        assert ctx.get("force_push_implicit") == FP_SENTINEL, "wrong sentinel value: %r" % ctx.get("force_push_implicit")
+        assert ctx.get("force_push_implicit") == FP_IMPLICIT_VALUE[cmd], (
+            "wrong force_push_implicit identity: got %r, expected %r (cycle-3 remote-qualification) for %r"
+            % (ctx.get("force_push_implicit"), FP_IMPLICIT_VALUE[cmd], cmd)
+        )
         assert _execute(cmd, tmp_path) == _ALLOW, "faithful click's own token did not self-authorize: %r" % cmd
 
 
@@ -399,9 +419,12 @@ class TestDimBOffTokenRoundTrip:
         minted, ctx = _mint(cmd, tmp_path)
         assert minted == 1, "did not mint: %r" % cmd
         sentinel = ctx.get("force_push_implicit") or ctx.get("merge_implicit")
-        assert sentinel in (FP_SENTINEL, MERGE_SENTINEL), (
-            "token did not carry a target-blind sentinel off the token file: %r" % cmd
-        )
+        # cycle-3: force_push_implicit may be the plain sentinel (truly-implicit) OR a
+        # remote-qualified `SENTINEL:<remote>` (1-positional). merge_implicit is the plain merge
+        # sentinel. Either way the identity must be read OFF the token as a NUL-framed sentinel.
+        assert sentinel is not None and (
+            sentinel == MERGE_SENTINEL or sentinel == FP_SENTINEL or sentinel.startswith(FP_SENTINEL + ":")
+        ), "token did not carry a target-blind sentinel off the token file: %r (%r)" % (cmd, sentinel)
         assert _execute(cmd, tmp_path) == _ALLOW, "own token did not authorize: %r" % cmd
 
     def test_mint_plus_allow_is_pipeline_blind_without_the_gate(self, tmp_path, monkeypatch):
@@ -411,7 +434,10 @@ class TestDimBOffTokenRoundTrip:
         # is the load-bearing leg: with the sentinel dropped, the row cannot mint AND cannot
         # authorize -> DENY. (Mirrors the 1134 cert's pipeline-blindness note.)
         row = _PG + "--force"
-        monkeypatch.setattr(mgc, "_is_implicit_current_branch_force_push", lambda c: False)
+        # cycle-3 renamed the implicit-force-push predicate to the identity function
+        # `_implicit_force_push_identity` (str|None). Neuter it to None (no identity) → the row
+        # binds no force_push_implicit → gated-but-unmintable.
+        monkeypatch.setattr(mgc, "_implicit_force_push_identity", lambda c: None)
         assert _mint_keys(mgc.extract_command_context(row)) == [], "revert did not un-mint the row (vacuity guard)"
         minted, _ = _mint(row, tmp_path)
         assert minted == 0, "row still minted after the populate revert"
@@ -936,4 +962,105 @@ class TestFinding4ValueOptionInertBlindness:
         assert D(F4_GH_R_CONTROL) is True, (
             "gh -R -h un-gated under the finding-#4 revert — the revert touched C1b's orthogonal "
             "-R arm, not just the git-global-option anchors"
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# CYCLE-3 (findings #1+#2 TIGHTEN) — the force_push_implicit identity is now REMOTE-QUALIFIED
+# for the 1-positional remote-only form. Before cycle-3, `git push --force origin` and
+# `git push --force upstream` both minted the PLAIN sentinel, so a `--force origin` approval
+# cross-authorized a `--force upstream` (a different remote) — a coarse-identity cross-auth.
+# Cycle-3 binds `SENTINEL:<remote>` (via _implicit_force_push_identity, str|None), so the two
+# are DISTINCT identities and cannot cross-authorize; the bare 0-positional forms keep the
+# plain sentinel. The identity is remote-AGNOSTIC only in TOKEN ORDER (`--force origin` ==
+# `origin --force`), never across DIFFERENT remotes. Mutual-exclusivity with explicit
+# target_ref (`--force origin main`) and SET B (fpi None + gated) is preserved (no over-block).
+# ═════════════════════════════════════════════════════════════════════════════════
+# (cmd_tail, expected force_push_implicit identity)
+CYCLE3_IDENTITY = [
+    ("--force origin", FP_SENTINEL + ":origin"),
+    ("-f origin", FP_SENTINEL + ":origin"),
+    ("origin --force", FP_SENTINEL + ":origin"),          # ordering-agnostic (same identity)
+    ("--force upstream", FP_SENTINEL + ":upstream"),
+    ("--force -o ci.skip origin", FP_SENTINEL + ":origin"),  # -o value-skip preserved
+    ("--force", FP_SENTINEL),                             # bare 0-positional keeps plain sentinel
+]
+# (name, approve, execute, expect_allow) — the cross-remote closure + the ordering-agnostic ALLOW.
+CYCLE3_CROSS_AUTH = [
+    ("--force origin != --force upstream (cross-remote CLOSED)", _PG + "--force origin", _PG + "--force upstream", False),
+    ("bare --force != --force origin", _PG + "--force", _PG + "--force origin", False),
+    ("--force origin == origin --force (ordering-agnostic)", _PG + "--force origin", _PG + "origin --force", True),
+    ("--force origin self", _PG + "--force origin", _PG + "--force origin", True),
+]
+
+
+class TestCycle3RemoteQualifiedIdentity:
+    """The 1-positional force-push mints a REMOTE-QUALIFIED identity so distinct remotes cannot
+    cross-authorize; token order is agnostic; the bare form keeps the plain sentinel."""
+
+    @pytest.mark.parametrize("tail,value", CYCLE3_IDENTITY, ids=[r[0] for r in CYCLE3_IDENTITY])
+    def test_identity_value(self, tail, value):
+        got = mgc.extract_command_context(_PG + tail).get("force_push_implicit")
+        assert got == value, "cycle-3 identity mis-bound: got %r expected %r for %r" % (got, value, _PG + tail)
+
+    @pytest.mark.parametrize("name,approve,execute,expect_allow", CYCLE3_CROSS_AUTH,
+                             ids=[r[0] for r in CYCLE3_CROSS_AUTH])
+    def test_cross_remote(self, name, approve, execute, expect_allow):
+        _, rc = _isolated_roundtrip(approve, execute)
+        if expect_allow:
+            assert rc == _ALLOW, "OVER-BLOCK: a faithful same-identity force-push was REFUSED (%s)" % name
+        else:
+            assert rc == _DENY, (
+                "CROSS-REMOTE CROSS-AUTH OPEN (%s): approve=%r execute=%r — the remote qualifier "
+                "did not distinguish the identities" % (name, approve, execute)
+            )
+
+    def test_mutual_exclusivity_and_setb_preserved(self):
+        # explicit target_ref still WINS (no implicit sentinel leak); SET B stays fpi-None + gated.
+        ex = mgc.extract_command_context(_PG + "--force origin main")
+        assert ex.get("target_ref") == "main" and not ex.get("force_push_implicit"), (
+            "cycle-3 leaked a remote-qualified sentinel onto an EXPLICIT-ref force-push: %r" % ex
+        )
+        setb = mgc.extract_command_context(_PG + "--force HEAD")
+        assert not setb.get("force_push_implicit") and D(_PG + "--force HEAD") is True, (
+            "cycle-3 changed SET B: it must stay gated-but-unmintable (fpi None), not resolve a remote"
+        )
+
+    def test_dropping_remote_qualifier_reopens_cross_remote(self, monkeypatch):
+        # NON-VACUITY: coarsen the identity back to the PLAIN sentinel (the pre-cycle-3 shape) —
+        # `_implicit_force_push_identity` returns SENTINEL for ANY implicit form, dropping the
+        # `:<remote>` qualifier. Then `--force origin` and `--force upstream` share ONE identity
+        # and cross-authorize (the cross-remote reopens). Couples the cross_remote rows to the
+        # remote qualification.
+        orig = mgc._implicit_force_push_identity
+        # sanity: the live fn currently qualifies (else the coarsen below is a no-op).
+        assert orig(_PG + "--force origin") == FP_SENTINEL + ":origin", "vacuity guard: identity not remote-qualified"
+        monkeypatch.setattr(mgc, "_implicit_force_push_identity", lambda c: (FP_SENTINEL if orig(c) else None))
+        _, rc = _isolated_roundtrip(_PG + "--force origin", _PG + "--force upstream")
+        assert rc == _ALLOW, (
+            "coarsening the identity to the plain sentinel did NOT reopen the cross-remote cross-"
+            "auth — the remote qualifier is not the attributable closer, so the DENY rows prove nothing"
+        )
+
+    @pytest.mark.parametrize("url_remote", [
+        "git@github.com" + ":o/r.git",           # scp-style
+        "ssh://git@host" + "/o/r.git",           # ssh URL
+        "https://github.com" + "/o/r.git",       # https URL
+    ], ids=["scp", "ssh", "https"])
+    def test_url_remote_stays_set_b_pre_existing_over_block(self, url_remote):
+        # DOCUMENTED PRE-EXISTING RESIDUAL (security #89, OUT OF SCOPE for #1203): a URL-remote
+        # force-push (`git push --force git@host:repo`) is NOT recognized as a remote for the
+        # cycle-3 qualification, so it stays gated-but-UNMINTABLE (SET B) — a pre-existing
+        # OVER-BLOCK that predates this PR and needs a netstring-separator redesign to close
+        # (tracked separately). This is a PINNED-CURRENT-BEHAVIOR row (like the SET B + double-
+        # value-option residuals), NOT a should-mint assertion: it stays gated True (never
+        # un-gated) and binds NO identity (never a spurious remote-qualified mint). If it ever
+        # CHANGES, this reds and forces a re-confirm rather than a silent shift.
+        cmd = _PG + "--force " + url_remote
+        c = mgc.extract_command_context(cmd)
+        assert D(cmd) is True, "URL-remote force-push UN-GATED (would be an under-block): %r" % cmd
+        assert not c.get("force_push_implicit") and not c.get("target_ref") and not c.get("force_push_set"), (
+            "URL-remote force-push now binds an identity %r — the pre-existing SET-B over-block "
+            "changed; re-confirm the separate tracker's disposition, do NOT silently update: %r"
+            % (c, cmd)
         )
