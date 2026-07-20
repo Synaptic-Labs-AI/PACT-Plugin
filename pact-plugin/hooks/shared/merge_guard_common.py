@@ -1037,16 +1037,20 @@ def _extract_close_target(command: str) -> str | None:
     return _classify_pr_target(target)
 
 
-# #1203 M1 — MERGE positional-walk value-flags: the merge value-taking flags whose value
-# token must be stripped so the branch/url TARGET positional is isolated — the SAME set
-# C1b established (the long value SSOT + --repo + the short aliases), NOT close's
-# {--repo,--comment}. DERIVED from the C1b sets so there is ONE value-flag SSOT: a merge
-# value-flag added for inert-help recognition is automatically honored by the target walk
-# too (the divergent-copies bug class this arc kept hitting cannot recur).
-_GH_MERGE_VALUE_LONG = _GH_PR_VALUE_TAKING_FLAGS | {"--repo"}
-_GH_MERGE_VALUE_SHORT = frozenset(
-    f[1] for f in _INERT_HELP_EXTRA_VALUE_FLAGS if len(f) == 2 and f[0] == "-"
+# #1203 M1 — MERGE positional-walk value-flags: the MERGE-SPECIFIC value-taking flags
+# whose value token must be stripped so the branch/url TARGET positional is isolated.
+# EXACTLY the 5 `gh pr merge` value flags (gh 2.96.0 `gh pr merge --help` census,
+# test-engineer #68) — deliberately NOT the gh-pr-WIDE _GH_PR_VALUE_TAKING_FLAGS union
+# (which carries close/review-only flags ABSENT from merge: --comment, --match-head-commit,
+# --max-retries, --retry-count, --timeout) and NOT close's {--repo,--comment}. Merge-
+# SPECIFIC for the SAME reason _gh_close_positionals is close-specific: a wider set could
+# mis-parse a NON-runnable merge's positional (symmetry with the close walk). Booleans
+# (--admin/--auto/-s/-r/-m/-d) are EXCLUDED — they take no value, so they never consume
+# the target positional.
+_GH_MERGE_VALUE_LONG = frozenset(
+    {"--author-email", "--body", "--body-file", "--subject", "--repo"}
 )
+_GH_MERGE_VALUE_SHORT = frozenset("AbFtR")   # -A/-b/-F/-t/-R (no -c: merge has no --comment)
 
 
 def _gh_merge_positionals(tokens: "list[str]") -> "list[str] | None":
