@@ -5020,41 +5020,65 @@ def _is_inert_help_leg(leg: str) -> bool:
         (`-fh`) is NOT `-h`, so it does not match and the command stays gated
         (fail-toward-gating). An unbalanced-quote leg abstains (→ not inert → gated).
 
-    The `gh|git help <sub>` head form is matched on the command HEAD (first token
-    past any `NAME=value` env-assignments), so a quoted `"gh help"` decoy in a value
-    never triggers it. `git help …` is a no-op here (a `git help` leg is already
-    non-dangerous), included only so the recognizer is uniform across gh/git."""
+    The `gh|git help <sub>` head form is ADJACENCY-strict (#1203 finding-#4): it fires
+    only when `help` is the IMMEDIATE raw token after the git/gh head (past NAME=value
+    env-assignments), and a `-h`/`--help` flag counts only AT/AFTER the subcommand
+    position (the first non-dash raw token after the head). A git GLOBAL value-option
+    whose VALUE is literally `help`/`-h`/`--help` (`git -C help push --force`,
+    `git -C -h push --force`) therefore stays GATED — its value sits in the leading
+    global-option region, not the subcommand slot. Both checks read the FULL raw token
+    stream, so an intervening dash-option is visible; a quoted `"gh help"` decoy in a
+    value never triggers it. Enumeration-free (no git global-value-option list) and
+    fail-safe toward gating."""
     if _shell_tokenize(leg) is None:
         return False                              # unbalanced quotes → abstain (gate)
     tokens = [leg[s:e] for s, e in _leg_token_spans(leg)]
-    # gh|git help <sub> head form — the command head past leading env-assignments.
-    positionals = [_strip_surrounding_quotes(t) for t in tokens if not t.startswith("-")]
+    # RAW quote-stripped token stream (#1203 finding-#4): BOTH the head-form adjacency
+    # AND the flag-loop subcommand-anchor are computed on the FULL stream — NEVER a
+    # dash-filtered positional list — so a git GLOBAL value-option positioned between the
+    # git/gh head and its target (`git -C help …`, `git -C -h …`) stays VISIBLE. The old
+    # dash-filtered list dropped it, misreading the option's VALUE as the `help`
+    # subcommand (head-form) or as a `-h` help flag (flag-loop) and UN-GATING a real
+    # destructive leg — the two siblings of the value-decoy gap C1b closed. ENUMERATION-
+    # FREE: neither arm needs to know which git global options take values; both key on
+    # token ADJACENCY / POSITION, failing TOWARD gating (avoids the --match-head-commit
+    # enumeration-drift trap).
+    raw = [_strip_surrounding_quotes(t) for t in tokens]
+    # Command head past leading NAME=value env-assignments (`FOO=bar git help push`
+    # still resolves git as the head).
     head = 0
-    while head < len(positionals) and re.fullmatch(
-        r"[A-Za-z_][A-Za-z0-9_]*=.*", positionals[head]
-    ):
+    while head < len(raw) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", raw[head]):
         head += 1
-    if (
-        head + 1 < len(positionals)
-        and positionals[head] in ("gh", "git")
-        and positionals[head + 1] == "help"
-    ):
+    is_git_gh_head = head < len(raw) and raw[head] in ("gh", "git")
+    # ARM 1 — head-form ADJACENCY: `gh|git help <sub>` is inert ONLY when `help` is the
+    # IMMEDIATE next raw token after the git/gh head. An intervening dash-token (a global
+    # value-option like `-C`, whose value happens to be literally `help`) breaks the
+    # adjacency → the head-form does NOT fire → the danger battery gates the real
+    # destructive leg (`git -C help push --force` gates).
+    if is_git_gh_head and head + 1 < len(raw) and raw[head + 1] == "help":
         return True
-    # Exact --help/-h flag token, skipping any gh-pr value-taking flag's value token
-    # (so a value `-h` — or a value `--help` — is never misread as a help request).
-    # BOTH the LONG forms (--subject/--body/… incl. the `--flag=value` inline form) and
-    # their SHORT aliases (-t/-b/-F/-A/-c in the separate `-t <value>` form) are skipped
-    # (#1203 C1b), closing the short-form value-decoy under-block. `i += 2` skips the
-    # flag AND whatever its next token is, so `-t -h` AND `-t --help` both stay gated.
+    # ARM 2 — flag-loop SUBCOMMAND-ANCHOR: a `-h`/`--help` is a help flag ONLY at/after
+    # the SUBCOMMAND position — the FIRST NON-DASH raw token after the git/gh head. A
+    # `-h`/`--help` in the LEADING global-option region (before that token) is a git
+    # global value-option's VALUE (`git -C -h …`, `git --git-dir --help …`), NOT help. A
+    # non-git/gh head has no global-option region to protect → anchor 0 (any help flag is
+    # help). Structural — no git global-value-option enumeration.
+    anchor = 0
+    if is_git_gh_head:
+        anchor = head + 1
+        while anchor < len(raw) and raw[anchor].startswith("-") and raw[anchor] != "-":
+            anchor += 1
+    # Exact --help/-h flag token (at/after the ARM-2 anchor), skipping any gh-pr
+    # value-taking flag's value token (#1203 C1b: --subject/--body/… + short aliases
+    # -t/-b/-F/-A/-c + --repo/-R), so a value `-h`/`--help` is never misread as help.
+    # The C1b enumerated skip (gh-pr SUBCOMMAND value flags) and the ARM-2 structural
+    # anchor (git LEADING global value-options) are COMPLEMENTARY — different option
+    # classes. `i += 2` skips the flag AND its value; `"=" not in tok` leaves the inline
+    # `--flag=value` form as one already-safe token.
     i = 0
     while i < len(tokens):
         tok = tokens[i]
         flagname = tok.split("=", 1)[0]
-        # Skip a value-taking flag AND its separate value token: the shared long-form
-        # SSOT, PLUS the inert-recognizer's short aliases + --repo/-R (#1203 C1b). The
-        # `"=" not in tok` guard leaves the inline `--flag=value` / `-R=value` form as
-        # one token (already safe — not literally `-h`). `i += 2` skips whatever the
-        # value is, so both `-t -h` AND `-t --help` stay gated.
         is_value_flag = (
             flagname in _GH_PR_VALUE_TAKING_FLAGS
             or flagname in _INERT_HELP_EXTRA_VALUE_FLAGS
@@ -5062,7 +5086,7 @@ def _is_inert_help_leg(leg: str) -> bool:
         if is_value_flag:
             i += 2
             continue
-        if tok in ("--help", "-h"):
+        if tok in ("--help", "-h") and i >= anchor:
             return True
         i += 1
     return False
