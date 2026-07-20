@@ -779,28 +779,6 @@ _GH_PR_VALUE_TAKING_FLAGS = frozenset({
     "--timeout",
 })
 
-# #1203 C1b — value-taking gh pr merge/close flags the inert-help recognizer must skip
-# BEYOND the shared _GH_PR_VALUE_TAKING_FLAGS long-form SSOT, so a `-h`/`--help` sitting
-# in one of their VALUE positions (separate form `-t -h`, `-R -h`, `--repo -h`) is not
-# misread as a help request and does not un-gate a REAL merge/close (the auditor's
-# confirmed under-block). Two groups:
-#   • SHORT aliases of the shared long value flags: -t(--subject) -b(--body)
-#     -F(--body-file) -A(--author-email) -c(--comment).
-#   • --repo AND its short -R — a value-taking flag on merge AND close (test-engineer
-#     #68, live-verified) that is ABSENT from the shared long SSOT.
-# KEPT SEPARATE from _GH_PR_VALUE_TAKING_FLAGS ON PURPOSE: that SSOT is also consumed by
-# _extract_pr_number + the merge shadow-guard, so widening it would change target
-# extraction (the SEPARATE short/-repo pr_number MISBIND is escalated on its own, not
-# folded here). This set touches ONLY the inert recognizer.
-# ONLY genuinely value-taking flags belong here — a BOOLEAN (e.g. -d/--delete-branch,
-# -s/--squash, -r/--rebase, -m/--merge) would skip a real following `-h` and RE-INTRODUCE
-# an over-block; those are correctly EXCLUDED. The GLUED form (`-tVALUE` / `-t-h` /
-# `--repo=-h` / `-R=-h`) needs no entry — one token, not literally `-h`/`--help`, so it
-# neither skips nor matches (stays gated).
-_INERT_HELP_EXTRA_VALUE_FLAGS = frozenset(
-    {"-t", "-b", "-F", "-A", "-c", "-R", "--repo"}
-)
-
 
 def _strip_surrounding_quotes(token: str) -> str:
     """Strip one layer of matching surrounding quotes from a captured CLI token.
@@ -934,42 +912,6 @@ def _gh_close_positionals(tokens: "list[str]") -> "list[str] | None":
     return positionals
 
 
-def _classify_pr_target(target: str) -> str | None:
-    """Classify a single ALREADY-QUOTE-STRIPPED gh-pr positional into one of FOUR
-    disjoint identity namespaces — the SHARED SSOT (#1203 M1) for BOTH the close and
-    the merge target identity, so the two can never diverge:
-
-    - empty / degenerate         -> None (abstain, never a garbage id)
-    - bare digits                -> the digits (repo-IMPLICIT PR number, gh's number
-                                    precedence)
-    - a github/enterprise PR URL -> ``url:<host>/<owner>/<repo>#<N>`` (HOST- and
-                                    repo-QUALIFIED, so a cross-host/cross-repo url can
-                                    never set-equal a bare number or a same-number url
-                                    in a different repo)
-    - a ``://``-bearing token that is NOT a recognized PR URL -> None (abstain, never a
-                                    garbage ``branch:`` id)
-    - anything else              -> ``branch:<name>`` (repo-IMPLICIT name-only;
-                                    cross-repo distinction is carried SEPARATELY by
-                                    ``--repo`` in bound_flags, the a2 axis)
-
-    Extracted VERBATIM from _extract_close_target's classification tail so close's
-    output stays byte-identical; _extract_merge_target feeds it a MERGE-value-flag-aware
-    positional (its own walk) — the CLASSIFICATION is shared, the positional walk is
-    op-specific. A branch literally named ``url:x`` classifies ``branch:url:x`` (no
-    ``://`` -> the branch namespace), never colliding with a real ``url:`` identity —
-    the namespaces are injective by construction."""
-    if not target:
-        return None  # empty/degenerate positional -> abstain, never a garbage id
-    if target.isdigit():
-        return target  # bare PR number — gh's number precedence, repo-implicit
-    url = _GH_PULL_URL_RE.search(target)
-    if url is not None:
-        return "url:" + url.group(1) + "/" + url.group(2) + "#" + url.group(3)
-    if "://" in target:
-        return None  # unrecognized URL form -> abstain, never a garbage branch id
-    return "branch:" + target
-
-
 def _extract_close_target(command: str) -> str | None:
     """The close-target identity for a faithful ``gh pr close`` command, across
     all three positional forms gh accepts (``{<number> | <url> | <branch>}``).
@@ -1029,101 +971,18 @@ def _extract_close_target(command: str) -> str | None:
     if positionals is None or len(positionals) != 1:
         return None
     target = _strip_surrounding_quotes(positionals[0])
-    # #1203 M1 — classify via the SHARED _classify_pr_target SSOT (extracted VERBATIM
-    # from here, so close's output is byte-identical; merge reuses the SAME classifier
-    # over its OWN merge-value-flag-aware positional walk). Value-flag values are
-    # already stripped by _gh_close_positionals, so the digit/url/branch here IS the
-    # target, never a --repo/--comment value.
-    return _classify_pr_target(target)
-
-
-# #1203 M1 — MERGE positional-walk value-flags: the merge value-taking flags whose value
-# token must be stripped so the branch/url TARGET positional is isolated — the SAME set
-# C1b established (the long value SSOT + --repo + the short aliases), NOT close's
-# {--repo,--comment}. DERIVED from the C1b sets so there is ONE value-flag SSOT: a merge
-# value-flag added for inert-help recognition is automatically honored by the target walk
-# too (the divergent-copies bug class this arc kept hitting cannot recur).
-_GH_MERGE_VALUE_LONG = _GH_PR_VALUE_TAKING_FLAGS | {"--repo"}
-_GH_MERGE_VALUE_SHORT = frozenset(
-    f[1] for f in _INERT_HELP_EXTRA_VALUE_FLAGS if len(f) == 2 and f[0] == "-"
-)
-
-
-def _gh_merge_positionals(tokens: "list[str]") -> "list[str] | None":
-    """The positional args of a ``gh pr merge`` token list, with MERGE value-taking flags
-    AND their values removed (mirrors _gh_close_positionals's cobra walk, but over the
-    MERGE value-flag set — NOT close's {--repo,--comment}: a merge form carries
-    --subject/--body/-t/… so close's walk would mis-read a value as the target, reviving
-    M1 one layer down). Returns the positionals after ``merge``, or None if ``merge`` is
-    absent. A value-flag VALUE can never survive as a positional, so it can never be
-    mis-bound as the {number|url|branch} target."""
-    try:
-        i = tokens.index("merge") + 1
-    except ValueError:
-        return None
-    positionals: "list[str]" = []
-    n = len(tokens)
-    while i < n:
-        tok = tokens[i]
-        if tok.startswith("--"):
-            flag, has_eq, _v = tok.partition("=")
-            i += 2 if (flag in _GH_MERGE_VALUE_LONG and not has_eq) else 1
-            continue
-        if tok.startswith("-") and tok != "-":
-            body = tok[1:]
-            consumes_next = False
-            for j, ch in enumerate(body):
-                if ch in _GH_MERGE_VALUE_SHORT:
-                    consumes_next = j == len(body) - 1   # `-R value`; else `-Rvalue`
-                    break
-            i += 2 if consumes_next else 1
-            continue
-        positionals.append(tok)
-        i += 1
-    return positionals
-
-
-def _extract_merge_target(command: str) -> str | None:
-    """The EXPLICIT merge-target identity for a faithful ``gh pr merge <branch>`` /
-    ``<url>`` (or ``<number>``, though _extract_pr_number owns that first), or None
-    (#1203 M1). Closes the cross-auth where every NON-numeric merge collapsed into the
-    target-blind merge_implicit sentinel: it isolates the target positional via the
-    MERGE-value-flag-aware _gh_merge_positionals (so ``--subject foo`` is NOT read as the
-    target), requires EXACTLY ONE positional (0 = truly-bare -> the caller mints
-    merge_implicit; >=2 = ambiguous -> abstain, gated-but-unmintable, the cross-auth-SAFE
-    direction), then classifies it via the SHARED _classify_pr_target (namespaces
-    IDENTICAL to close: number / url:<host>/<owner>/<repo>#N / branch:<name>). Abstains on
-    unbalanced quote / procsub / no merge token — the existing safe posture; mint==read
-    holds because BOTH hook arms derive via extract_command_context."""
-    prefix = _executable_prefix(command)
-    if prefix is None:
-        return None
-    tokens = _shell_tokenize(prefix)
-    if tokens is None:
-        return None
-    positionals = _gh_merge_positionals(tokens)
-    if positionals is None or len(positionals) != 1:
-        return None
-    return _classify_pr_target(_strip_surrounding_quotes(positionals[0]))
-
-
-def _is_bare_cli_merge(command: str) -> bool:
-    """True iff ``command`` is a TRULY-BARE CLI ``gh pr merge`` — the CLI merge shape
-    (_GH_PR_MERGE_RE on the quote-masked view, which excludes an API merge that always
-    carries an explicit endpoint PR) with ZERO real positional target (flags-only). This
-    is the ONLY form that mints the target-blind merge_implicit sentinel (#1203 M1: a
-    branch/url positional binds an explicit target via _extract_merge_target instead; a
-    >=2 ambiguous count abstains). The 0-positional test uses the SAME _gh_merge_positionals
-    walk _extract_merge_target uses, so bare-vs-explicit is ONE boundary (no double-count)."""
-    if not _GH_PR_MERGE_RE.search(_executed_surface_view(command)):
-        return False
-    prefix = _executable_prefix(command)
-    if prefix is None:
-        return False
-    tokens = _shell_tokenize(prefix)
-    if tokens is None:
-        return False
-    return _gh_merge_positionals(tokens) == []
+    if not target:
+        return None  # empty/degenerate positional -> abstain, never a garbage id
+    # Classify the SINGLE positional (value-flag values already stripped, so a
+    # digit/url/branch here IS the target, never a --repo/--comment value).
+    if target.isdigit():
+        return target  # bare PR number — gh's number precedence, repo-implicit
+    url = _GH_PULL_URL_RE.search(target)
+    if url is not None:
+        return "url:" + url.group(1) + "/" + url.group(2) + "#" + url.group(3)
+    if "://" in target:
+        return None  # unrecognized URL form -> abstain, never a garbage branch id
+    return "branch:" + target
 
 
 def _extract_api_ref(command: str) -> str | None:
@@ -1679,84 +1538,6 @@ def _tokens_after_push(command: str) -> list[str] | None:
     return None
 
 
-# #1203 — target-blind sentinel identities for the IMPLICIT destructive forms whose
-# real target is RUNTIME state absent from the command string (a bare force-push
-# rewrites f(push.default, @{upstream}); a bare `gh pr merge` merges the current-branch
-# PR). NUL-framed so the value is REF-ILLEGAL — no git ref/branch or gh PR identity can
-# contain a NUL, so a sentinel can NEVER collide with a real target_ref/pr_number
-# (defense-in-depth on top of the distinct typed key). Each is its OWN context key
-# (KD-2), never a value in target_ref/pr_number, so op-type-first + distinct-key keeps
-# an implicit-form token from cross-authorizing an explicit `--force origin main` /
-# `gh pr merge 42` and vice-versa. The KD-4 mutual-exclusivity holds by construction:
-# a sentinel populates ONLY when the explicit target key for that op is absent.
-_FORCE_PUSH_IMPLICIT_SENTINEL = "\x00implicit-force-push"
-_MERGE_IMPLICIT_SENTINEL = "\x00implicit-merge"
-
-
-def _implicit_force_push_identity(command: str) -> str | None:
-    """The `force_push_implicit` mint identity for a CLEAN implicit-current-branch
-    force-push (SET A), or None (multi-ref / unparseable). #1203 cycle-3 REMOTE-QUALIFIED
-    the identity (so `--force origin` ⊥ `--force upstream`); cycle-4 reframes the
-    separator to the NETSTRING SSOT so a URL-remote (which contains `:`) ALSO mints —
-    closing the pre-existing URL-remote over-block — while KEEPING injectivity and
-    WITHOUT any un-gate:
-
-      - 0 positionals (bare `git push --force`/`-f`) → the PLAIN
-        `_FORCE_PUSH_IMPLICIT_SENTINEL`: the remote is ALSO runtime-unknowable
-        (push.default / @{upstream}), so the identity stays fully target-blind.
-      - exactly 1 positional — ANY <repository>: a named remote (`origin`), a URL
-        (`git@github.com:o/r.git` / `ssh://…` / `https://…`), or even a refspec-SHAPED
-        token → `_FORCE_PUSH_IMPLICIT_SENTINEL + _canonical_join([<remote>])`:
-        REMOTE-qualified, BRANCH-still-blind (KD-3 residual). git parses a LONE push
-        positional as the <repository> regardless of shape, so ALL 1-positionals are
-        remotes; a refspec-shaped one is a NON-RUNNABLE repository spelling that binds
-        HARMLESSLY (self-authorizing-only — its token round-trips ONLY to itself).
-
-    The NETSTRING (`_canonical_join`, the branch_set/mass_target SSOT — `len:content`
-    framing) is content-agnostic + INJECTIVE by construction for ANY remote string incl.
-    `:`/`@`/NUL, which is why cycle-4 can DROP cycle-3's `:`/`refs/`/`HEAD`/`+`
-    single-positional refusal: injectivity no longer needs the remote to be `:`-free.
-    Distinct remotes → distinct frames; a qualified value (…`<len>:<remote>`) can never
-    set-equal the bare `_FORCE_PUSH_IMPLICIT_SENTINEL`.
-
-    Consulted by extract_command_context's force-push branch ONLY after
-    _extract_force_push_target_ref (scalar) AND _extract_force_push_set (multi-ref) both
-    returned None (KD-4 mutual-exclusivity), so an explicit-ref/multi-ref command never
-    reaches here — a non-None identity mints the sentinel for a form that would otherwise
-    be gated-but-unmintable (the cardinal over-block). is_dangerous is computed SEPARATELY
-    (unchanged) — this is a MINT-only change, never an un-gate.
-
-    None (fail-safe, gated-but-unmintable) for: MULTI-positional (>=2 — the explicit-ref
-    path owns target_ref, UNCHANGED); a degenerate empty/whitespace-only positional; and
-    any unparseable / unbalanced-quote / procsub form. Positionals are counted via the
-    SHARED _push_positionals (value-flag skip), so a `-o ci.skip` push-option never
-    inflates the count NOR leaks as the remote.
-
-    mint==read BY CONSTRUCTION: both hook arms derive via extract_command_context and
-    consume `force_push_implicit` generically (read `_both_present_equal`, mint
-    `_target_value`); the value is a pure function of the command string (no runtime
-    resolution), so the netstring value needs NO read/mint edit."""
-    after = _tokens_after_push(command)
-    if after is None:
-        return None                               # no push token / unbalanced → abstain
-    positionals = _push_positionals(after)
-    if len(positionals) == 0:
-        return _FORCE_PUSH_IMPLICIT_SENTINEL      # bare — remote ALSO runtime-unknowable
-    if len(positionals) == 1:
-        remote = _strip_surrounding_quotes(positionals[0])
-        if not remote.strip():
-            return None                           # degenerate empty/whitespace → abstain
-        # ANY 1-positional is the <repository> by git grammar — a named remote, a URL
-        # (`git@github.com:o/r.git` / `ssh://…` / `https://…`), OR a non-runnable
-        # refspec-SHAPED token; the NETSTRING _canonical_join binds it INJECTIVELY (incl.
-        # a `:`-bearing URL), so cycle-4 DROPS cycle-3's `:`/`refs/`/`HEAD`/`+` refusal —
-        # injectivity no longer needs the remote to be `:`-free, and a refspec-shaped
-        # bind is self-authorizing-only (non-runnable; its token round-trips ONLY to
-        # itself). This is the URL-remote over-block close (#1203 cycle-4).
-        return _FORCE_PUSH_IMPLICIT_SENTINEL + _canonical_join([remote])
-    return None                                   # >=2 positional → explicit-ref path owns it
-
-
 def _extract_remote_ref_delete_target(command: str) -> str | None:
     """Extract the SINGLE remote ref a `git push` delete would remove (#1062a), or
     None when the form is implicit-current/multi-ref/ambiguous (→ the caller defers:
@@ -2192,17 +1973,7 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
         operation_type: "merge" | "close" | "force-push" | "branch-delete"
                         | "push-to-main" | "remote-ref-delete" | "remote-mass-delete"
                         | "branch-protection"
-        pr_number:  str  (merge / close) — the EXPLICIT PR/target identity: a bare
-                     number, OR (close + merge #1203 M1) a `url:<host>/<owner>/<repo>#N`
-                     / `branch:<name>` namespaced identity via the shared
-                     _classify_pr_target; op-type-first keeps merge⊥close
-        merge_implicit: str (merge IMPLICIT truly-bare `gh pr merge` #1203) — a
-                     target-blind NUL-framed sentinel (_MERGE_IMPLICIT_SENTINEL),
-                     populated ONLY on op_type=='merge' when pr_number is absent AND the
-                     command is truly-bare (_is_bare_cli_merge: CLI shape + ZERO real
-                     positional target; an explicit branch/url binds pr_number above, a
-                     >=2-positional form abstains; never close); distinct key so it never
-                     cross-authorizes an explicit pr_number (number/branch/url)
+        pr_number:  str  (merge / close)
         branch:     str  (branch-delete — SINGLE target, exactly 1 positional)
         branch_set: str  (branch-delete — MULTI target #1129, >=2 positionals) —
                      canonical sort+dedup+quote-strip names via the shared netstring _canonical_join (`len:name` framing,
@@ -2217,15 +1988,6 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
                      upgrades elements to '+'-form) gated by the ref-scope-neutral
                      flag allowlist; exactly one of target_ref / push_set /
                      force_push_set populated per command
-        force_push_implicit: str (force-push IMPLICIT current-branch #1203) — a
-                     branch-blind NUL-framed sentinel, REMOTE-QUALIFIED (cycle-3 #1+#2):
-                     bare form = `_FORCE_PUSH_IMPLICIT_SENTINEL` (remote also runtime-
-                     unknowable); 1-plain-remote form = `<SENTINEL>:<remote>` so
-                     `--force origin` ⊥ `--force upstream`. Populated ONLY on
-                     op_type=='force-push' when target_ref AND force_push_set are both
-                     absent (the clean 0/1-plain-remote forms; SET B → None → absent);
-                     distinct key so it never cross-authorizes an explicit
-                     target_ref/force_push_set (via _implicit_force_push_identity)
         mass_target: str (remote-mass-delete #1062b) — normalized identity STRING
                      _canonical_join([<sorted-mass-flags>, <remote-or-implicit-marker>, *<sorted-deduped-refspecs>])
         protected_branch: str (branch-protection #1063) — the branch from the
@@ -2276,38 +2038,8 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
             pr_number = _extract_pr_number(command)
             if pr_number is None:
                 pr_number = _extract_api_merge_pr(command)   # #1096 API pulls/<N>/merge
-            if pr_number is None:
-                # #1203 M1 — the EXPLICIT `gh pr merge <branch>`/`<url>` target. Mirrors
-                # close's {number|url|branch} bind via the SHARED _classify_pr_target, so
-                # a branch/url merge binds a DISTINCT explicit identity (branch:<name> /
-                # url:<host>/<owner>/<repo>#N) instead of the target-blind sentinel —
-                # closing the M1 cross-auth (every non-numeric merge previously collapsed
-                # to one identity). The positional is isolated by the MERGE-value-flag
-                # walk (_extract_merge_target), NOT close's, so a value like
-                # `--subject foo` is not mis-read as the branch. Reuses close's hardened
-                # host-qualified/injective identity logic; bound to pr_number (already a
-                # four-site mint key) so op-type-first keeps merge⊥close.
-                pr_number = _extract_merge_target(command)
         if pr_number is not None:
             context["pr_number"] = pr_number
-        elif op_type == "merge" and _is_bare_cli_merge(command):
-            # #1203 KD-8 + M1 — TARGET-BLIND sentinel for ONLY the TRULY-BARE CLI
-            # `gh pr merge` (and `--admin`/`--squash` — flags-only, ZERO positional
-            # target), whose target is the current-branch PR = runtime state resolvable
-            # only by a network gh-API call at mint time (infeasible in-hook). Guarded:
-            #   (1) MERGE-ONLY (op_type=="merge"): #1134 dissolved bare `gh pr close`, so
-            #       a close must NEVER mint this — the populate-site can't carry the key.
-            #   (2) TRULY-BARE ONLY (_is_bare_cli_merge — CLI shape AND 0 real positionals
-            #       via the merge value-flag walk): an EXPLICIT branch/url target already
-            #       bound pr_number above (the M1 cross-auth fix), and a >=2 ambiguous
-            #       count abstains (gated-but-unmintable, cross-auth-safe) — never the
-            #       sentinel. The CLI-shape check also excludes an API merge (which always
-            #       carries an explicit endpoint PR).
-            # DISTINCT typed key (not pr_number) so an implicit-merge token cannot cross-
-            # authorize an EXPLICIT merge — now TRUE for number AND branch AND url (every
-            # explicit form binds pr_number; op-type-first keeps merge⊥close). is_dangerous
-            # is unchanged (still True): target-PRECISION mint, never un-gating.
-            context["merge_implicit"] = _MERGE_IMPLICIT_SENTINEL
     elif op_type == "branch-delete":
         # Single-branch scalar path (BYTE-IDENTICAL): exactly ONE positional.
         branch = _extract_branch_name(command)
@@ -2356,26 +2088,6 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
             force_push_set = _extract_force_push_set(command)
             if force_push_set is not None:
                 context["force_push_set"] = force_push_set
-            else:
-                # #1203 KD-2/KD-4 + cycle-3 — REMOTE-QUALIFIED target-blind sentinel for
-                # the implicit current-branch force-push (`git push --force`, `-f`,
-                # `--force origin`, …), whose BRANCH target is runtime state absent from
-                # the string. Reached ONLY when target_ref (scalar) AND force_push_set
-                # (multi-ref) are BOTH absent, on op_type=='force-push' (never the
-                # push-to-main path above), so an explicit-ref/multi-ref command never
-                # carries this sentinel — the mutual-exclusivity is structural. Distinct
-                # typed key (not a target_ref value) so op-type-first + distinct-key keeps
-                # this token from cross-authorizing an explicit `--force origin main`.
-                # cycle-3 (#1+#2): the identity now binds the EXPLICIT remote (`…:origin`)
-                # for a 1-positional form so `--force origin` ⊥ `--force upstream`; the
-                # bare form stays fully blind (remote runtime-unknowable). SET B →
-                # identity None → key absent → gated-but-unmintable (UNCHANGED). The
-                # scalar/set extractors above stay BYTE-UNTOUCHED. is_dangerous is
-                # unchanged (still True): target-PRECISION (mint the over-blocked form),
-                # never un-gating.
-                fpi = _implicit_force_push_identity(command)
-                if fpi is not None:
-                    context["force_push_implicit"] = fpi
     elif op_type == "remote-ref-delete":
         # #1062a: REUSE the `target_ref` key — the parser yields a ref, the key is
         # semantically right, and the op-class identity (checked FIRST in the read
@@ -5030,120 +4742,6 @@ def _strip_inert_positional_legs(result: str) -> str:
     return "".join(out)
 
 
-def _is_inert_help_leg(leg: str) -> bool:
-    """True iff `leg` is an INERT help invocation that mutates nothing — a `--help`
-    / `-h` help request, or a `gh|git help <sub>` head form. Such a leg contributes
-    NO danger: `gh pr merge --help`, `git push --force --help`, `gh help pr merge`
-    all print help and exit without merging/pushing, so gating them is pure friction
-    (a cardinal over-block under the good-faith model).
-
-    QUOTE-AWARE + VALUE-FLAG-AWARE (fail-TOWARD-gating on any ambiguity):
-      - Tokens come from the quote-aware `_leg_token_spans`, so a `--help` living
-        INSIDE a quoted value (`gh pr merge 5 --comment "…--help…"`) is one value
-        token, never a bare flag — it stays gated.
-      - A `-h` (or `--help`) that is the VALUE of a gh-pr value-taking flag is SKIPPED
-        with its flag, so the decoy is not read as help — it stays gated. Both the
-        shared LONG-form SSOT (`--subject -h`) AND the inert-recognizer supplement
-        `_INERT_HELP_EXTRA_VALUE_FLAGS` — the short aliases `-t`/`-b`/`-F`/`-A`/`-c` plus
-        `--repo`/`-R` (#1203 C1b) — are covered, across gh pr merge AND close.
-      - Only an EXACT `--help` / `-h` flag token counts; a bundled short cluster
-        (`-fh`) is NOT `-h`, so it does not match and the command stays gated
-        (fail-toward-gating). An unbalanced-quote leg abstains (→ not inert → gated).
-
-    The `gh|git help <sub>` head form is ADJACENCY-strict (#1203 finding-#4): it fires
-    only when `help` is the IMMEDIATE raw token after the git/gh head (past NAME=value
-    env-assignments), and a `-h`/`--help` flag counts only AT/AFTER the subcommand
-    position (the first non-dash raw token after the head). A git GLOBAL value-option
-    whose VALUE is literally `help`/`-h`/`--help` (`git -C help push --force`,
-    `git -C -h push --force`) therefore stays GATED — its value sits in the leading
-    global-option region, not the subcommand slot. Both checks read the FULL raw token
-    stream, so an intervening dash-option is visible; a quoted `"gh help"` decoy in a
-    value never triggers it. Enumeration-free (no git global-value-option list) and
-    fail-safe toward gating."""
-    if _shell_tokenize(leg) is None:
-        return False                              # unbalanced quotes → abstain (gate)
-    tokens = [leg[s:e] for s, e in _leg_token_spans(leg)]
-    # RAW quote-stripped token stream (#1203 finding-#4): BOTH the head-form adjacency
-    # AND the flag-loop subcommand-anchor are computed on the FULL stream — NEVER a
-    # dash-filtered positional list — so a git GLOBAL value-option positioned between the
-    # git/gh head and its target (`git -C help …`, `git -C -h …`) stays VISIBLE. The old
-    # dash-filtered list dropped it, misreading the option's VALUE as the `help`
-    # subcommand (head-form) or as a `-h` help flag (flag-loop) and UN-GATING a real
-    # destructive leg — the two siblings of the value-decoy gap C1b closed. ENUMERATION-
-    # FREE: neither arm needs to know which git global options take values; both key on
-    # token ADJACENCY / POSITION, failing TOWARD gating (avoids the --match-head-commit
-    # enumeration-drift trap).
-    raw = [_strip_surrounding_quotes(t) for t in tokens]
-    # Command head past leading NAME=value env-assignments (`FOO=bar git help push`
-    # still resolves git as the head).
-    head = 0
-    while head < len(raw) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", raw[head]):
-        head += 1
-    is_git_gh_head = head < len(raw) and raw[head] in ("gh", "git")
-    # ARM 1 — head-form ADJACENCY: `gh|git help <sub>` is inert ONLY when `help` is the
-    # IMMEDIATE next raw token after the git/gh head. An intervening dash-token (a global
-    # value-option like `-C`, whose value happens to be literally `help`) breaks the
-    # adjacency → the head-form does NOT fire → the danger battery gates the real
-    # destructive leg (`git -C help push --force` gates).
-    if is_git_gh_head and head + 1 < len(raw) and raw[head + 1] == "help":
-        return True
-    # ARM 2 — flag-loop SUBCOMMAND-ANCHOR: a `-h`/`--help` is a help flag ONLY at/after
-    # the SUBCOMMAND position — the FIRST NON-DASH raw token after the git/gh head. A
-    # `-h`/`--help` in the LEADING global-option region (before that token) is a git
-    # global value-option's VALUE (`git -C -h …`, `git --git-dir --help …`), NOT help. A
-    # non-git/gh head has no global-option region to protect → anchor 0 (any help flag is
-    # help). Structural — no git global-value-option enumeration.
-    anchor = 0
-    if is_git_gh_head:
-        anchor = head + 1
-        while anchor < len(raw) and raw[anchor].startswith("-") and raw[anchor] != "-":
-            anchor += 1
-    # Exact --help/-h flag token (at/after the ARM-2 anchor), skipping any gh-pr
-    # value-taking flag's value token (#1203 C1b: --subject/--body/… + short aliases
-    # -t/-b/-F/-A/-c + --repo/-R), so a value `-h`/`--help` is never misread as help.
-    # The C1b enumerated skip (gh-pr SUBCOMMAND value flags) and the ARM-2 structural
-    # anchor (git LEADING global value-options) are COMPLEMENTARY — different option
-    # classes. `i += 2` skips the flag AND its value; `"=" not in tok` leaves the inline
-    # `--flag=value` form as one already-safe token.
-    i = 0
-    while i < len(tokens):
-        tok = tokens[i]
-        flagname = tok.split("=", 1)[0]
-        is_value_flag = (
-            flagname in _GH_PR_VALUE_TAKING_FLAGS
-            or flagname in _INERT_HELP_EXTRA_VALUE_FLAGS
-        ) and "=" not in tok
-        if is_value_flag:
-            i += 2
-            continue
-        if tok in ("--help", "-h") and i >= anchor:
-            return True
-        i += 1
-    return False
-
-
-def _neutralize_inert_help_legs(stripped: str) -> str:
-    """Blank every INERT help leg (`_is_inert_help_leg`) in an already-stripped
-    surface with an EQUAL-LENGTH run of spaces, leaving separators + non-inert legs
-    byte-untouched. Applied by `is_dangerous_command` BEFORE the danger battery, so
-    a leg whose only danger is a help-suppressed op stops gating while every REAL
-    destructive leg keeps its exact bytes and still gates (per-leg, NOT a whole-
-    command prefilter: `--help && gh pr merge 6` blanks leg 1 only → leg 2 gates).
-
-    Equal-length blanking preserves ALL offsets, so the battery's whole-surface
-    scans (`DANGEROUS_PATTERNS`, `_flag_condition_danger_op`) and its per-leg re-slice
-    map 1:1 back to the original — the same offset-preserving discipline the
-    `_FD_REDIRECT_RE` neutralize uses in `_slice_stripped_leg_spans`. Idempotent, and
-    a strict no-op on a surface with no inert leg."""
-    spans = _slice_stripped_leg_spans(stripped)
-    result = list(stripped)
-    for start, end in spans:
-        if _is_inert_help_leg(stripped[start:end]):
-            for i in range(start, end):
-                result[i] = " "
-    return "".join(result)
-
-
 def is_dangerous_command(command: str) -> bool:
     """Check if a bash command is a dangerous git operation.
 
@@ -5166,15 +4764,6 @@ def is_dangerous_command(command: str) -> bool:
     # any matching (so this floor + the substrate join lines identically).
     command = _normalize_line_continuations(command)
     stripped = _strip_non_executable_content(command)
-    # C1 (#1203) — inert-help suppression: blank any leg that is an inert `--help`/
-    # `-h` / `gh help` invocation BEFORE the danger battery, so a faithful help
-    # request stops gating (a cardinal over-block). Per-leg + offset-preserving, so
-    # every REAL destructive leg keeps its bytes and still gates. This is the SINGLE
-    # load-bearing layer: the gate (check_merge_authorization), the compound counter
-    # (is_compound_destructive_command → _leg_is_destructive), and the read/mint leg
-    # selection (_single_destructive_leg) ALL route through is_dangerous_command, so
-    # suppressing here makes every consumer agree the inert leg is non-gating.
-    stripped = _neutralize_inert_help_legs(stripped)
     # The literal danger battery (DANGEROUS_PATTERNS + the four per-leg literal-arm families +
     # the additive normalized-flag condition) is the SSOT _stripped_surface_danger — factored
     # out so the #1178 general-strip preserve-predicate can consult the SAME predicate on a
@@ -5222,26 +4811,15 @@ def _slice_stripped_legs(stripped: str) -> list[str]:
     `2>&1 | rm -rf ~`). The leg slices are taken from `stripped`, never the masked
     `view` — the view exists ONLY to locate the operator offsets.
     """
-    return [stripped[s:e] for s, e in _slice_stripped_leg_spans(stripped)]
-
-
-def _slice_stripped_leg_spans(stripped: str) -> "list[tuple[int, int]]":
-    """The (start, end) offset spans of each leg within `stripped` — the span form
-    of `_slice_stripped_legs` (which is `[stripped[s:e] for s, e in ...]`, byte-
-    identical output by construction). Factored out so an OFFSET-preserving consumer
-    (the C1 inert-help neutralizer) can blank a leg IN PLACE with an equal-length
-    run without re-deriving the leg boundaries — one leg-boundary substrate, no
-    drift. Same masked + FD-neutralized view + `_COMPOUND_OPS_RE` scan as the slice
-    form; the view exists ONLY to locate operator offsets, spans index `stripped`."""
     view = _FD_REDIRECT_RE.sub(
         lambda m: " " * len(m.group()), _mask_shell_quotes(stripped)
     )
-    spans, last = [], 0
+    legs, last = [], 0
     for m in _COMPOUND_OPS_RE.finditer(view):
-        spans.append((last, m.start()))
+        legs.append(stripped[last : m.start()])
         last = m.end()
-    spans.append((last, len(stripped)))
-    return spans
+    legs.append(stripped[last:])
+    return legs
 
 
 def _split_into_legs(command: str) -> list[str]:

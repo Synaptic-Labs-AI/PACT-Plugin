@@ -8519,11 +8519,18 @@ class TestGhGlobalFlagBypassEdgeCases:
     # --- Many flags chained ---
 
     def test_three_global_flags(self):
-        """Three global flags before subcommand is detected."""
+        """Three global flags before subcommand is detected.
+
+        Uses --verbose (like the sibling test_five_flag_tokens), NOT --help: a
+        --help leg is an INERT help request (gh short-circuits to help and exits,
+        merging nothing), so it is correctly NOT gated. This test targets
+        flag-chaining robustness (many global flags must not bypass detection of
+        the real merge), not help suppression.
+        """
         from merge_guard_pre import is_dangerous_command
 
         assert is_dangerous_command(
-            "gh --repo owner/repo --hostname host.com --help pr merge 42"
+            "gh --repo owner/repo --hostname host.com --verbose pr merge 42"
         )
 
     def test_five_flag_tokens(self):

@@ -549,7 +549,24 @@ def _token_matches_command(token: dict, command: str) -> bool:
     # match. Unextractable or mismatched target -> REFUSE (over-block is the safe
     # #1031 direction; the read side never under-blocks #1032).
     if token_op in ("merge", "close"):
-        return _both_present_equal(context.get("pr_number"), cmd.get("pr_number"))
+        # #1203 — the faithful bare `gh pr merge` binds on the distinct target-blind
+        # `merge_implicit` sentinel, MERGE-ONLY. The `token_op == "merge"` guard keeps a
+        # close on the pr_number-only path (#1134: close was dissolved, and its
+        # populate-site never mints the sentinel, so this is defense-in-depth belt-and-
+        # suspenders on top of that). op-type-first (above) already fixed
+        # token_op == cmd_op; the DISTINCT key means an implicit-merge token (carries
+        # merge_implicit, not pr_number) can NOT authorize an explicit `gh pr merge 42`
+        # (carries pr_number, not merge_implicit) — the absent side fails
+        # _both_present_equal in BOTH directions — and never a close.
+        return (
+            _both_present_equal(context.get("pr_number"), cmd.get("pr_number"))
+            or (
+                token_op == "merge"
+                and _both_present_equal(
+                    context.get("merge_implicit"), cmd.get("merge_implicit")
+                )
+            )
+        )
     if token_op == "branch-delete":
         # #1129 R1: SINGLE-branch scalar OR MULTI-branch canonical SET (D1/D2
         # set-EQUALITY). Exactly one key is present per command (1 positional ->
@@ -598,11 +615,23 @@ def _token_matches_command(token: dict, command: str) -> bool:
         # force_push_set=None and is REFUSED here via the absent-side rule
         # (mint and read are the same guarded extractor — the escalation closes
         # in both directions by construction). Exactly one of target_ref /
-        # force_push_set is present per command; the a2 bound_flags equality
-        # above still discriminates --no-verify.
+        # force_push_set / force_push_implicit is present per command; the a2
+        # bound_flags equality above still discriminates --no-verify.
+        #
+        # #1203 — the IMPLICIT current-branch force-push binds on the distinct
+        # target-blind `force_push_implicit` sentinel. op-type-first (checked above)
+        # already guarantees token_op == cmd_op == "force-push", and the sentinel is a
+        # DISTINCT key populated ONLY when target_ref/force_push_set are absent, so this
+        # clause can only match implicit↔implicit: an explicit-ref command has
+        # target_ref/force_push_set (not force_push_implicit) → the sentinel side is
+        # absent → _both_present_equal REFUSES, and vice-versa (no cross-authorization
+        # between an implicit-form token and an explicit `--force origin main`).
         return (
             _both_present_equal(context.get("target_ref"), cmd.get("target_ref"))
             or _both_present_equal(context.get("force_push_set"), cmd.get("force_push_set"))
+            or _both_present_equal(
+                context.get("force_push_implicit"), cmd.get("force_push_implicit")
+            )
         )
     if token_op == "remote-ref-delete":
         # KD-6 (SECURITY-RATIFICATION-PENDING): the destination ref must match

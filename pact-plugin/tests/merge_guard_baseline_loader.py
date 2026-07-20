@@ -207,3 +207,117 @@ def load_baseline_172a77dd():
 
     _cached_baseline_172a77dd = module
     return module
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Third baseline: v4.6.10 (5017d1f2), the PARENT of the #1203 commits (C1/C3/C3b/
+# C1b). The base for test_merge_guard_1203_cert.py. A SEPARATE entry point rather
+# than a parameter, so the two existing consumers are byte-untouched. Vendored via
+# `git show 5017d1f2:…` (the parent is committed, so the SHA resolves; commit-code-
+# first satisfied). At this base every #1203 over-block is PRESENT: the implicit
+# force-push and bare `gh pr merge` are gated-but-UNMINTABLE (no sentinel key
+# exists yet), and the inert `gh pr merge --help` is gated (no inert recognizer).
+# ─────────────────────────────────────────────────────────────────────────────
+_FIXTURE_PATH_5017D1F2 = (
+    Path(__file__).parent
+    / "fixtures"
+    / "merge_guard_baseline"
+    / "merge_guard_common_5017d1f2.py"
+)
+# sha256 of merge_guard_common.py at 5017d1f2 (the #1203 parent, `git show`-vendored).
+_FIXTURE_SHA256_5017D1F2 = (
+    "e6bcca04e22bff115bb6d6be62cd5d397364a64934f5b74a74d4b545e71fab1a"
+)
+
+# The identity keys a mintable context may bind (the gated-but-unmintable check:
+# a #1203 implicit form is gated at base with NONE of these present).
+_MINT_KEYS_1203 = (
+    "pr_number", "branch", "branch_set", "target_ref", "push_set",
+    "force_push_set", "force_push_implicit", "merge_implicit",
+    "mass_target", "protected_branch",
+)
+
+# Pre-fix discriminator inputs (danger literals assembled at runtime so this file
+# carries no raw destructive literal and stays inert to the live guard).
+_DISCRIMINATOR_1203_FP = "git " + "push " + "--force"           # SET A implicit force-push
+_DISCRIMINATOR_1203_MERGE = "gh " + "pr " + "merge"             # bare gh pr merge
+_DISCRIMINATOR_1203_INERT = "gh " + "pr " + "merge --help"      # inert help over-block
+
+_cached_baseline_5017d1f2 = None
+
+
+def load_baseline_5017d1f2():
+    """Load the vendored v4.6.10 (5017d1f2) classifier module — the PARENT of the
+    #1203 commits — cached, loud-failing on any integrity problem. Same contract and
+    calling convention as load_baseline(); callers use it as
+    `load_baseline_5017d1f2().is_dangerous_command(cmd)`.
+
+    Pre-fix discriminators (the baseline MUST still exhibit the #1203 over-blocks, or
+    post-fix bytes were vendored and the cert would certify against itself):
+      1. `git push --force` is DANGEROUS (is_dangerous True) yet binds NONE of the mint
+         keys — the gated-but-UNMINTABLE implicit force-push over-block C3 closes.
+      2. bare `gh pr merge` is DANGEROUS yet binds no mint key — the gated-but-unmintable
+         bare-merge over-block C3b closes.
+      3. `gh pr merge --help` is DANGEROUS (no inert-help recognizer exists yet) — the
+         inert over-block C1 closes. Post-fix all three are fixed (sentinels mint / inert
+         un-gates), so a post-fix module fails these discriminators loudly.
+    """
+    global _cached_baseline_5017d1f2
+    if _cached_baseline_5017d1f2 is not None:
+        return _cached_baseline_5017d1f2
+
+    if not _FIXTURE_PATH_5017D1F2.is_file():
+        pytest.fail(
+            "5017d1f2 baseline fixture missing (%s) — the #1203 cert cannot run"
+            % _FIXTURE_PATH_5017D1F2
+        )
+    data = _FIXTURE_PATH_5017D1F2.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != _FIXTURE_SHA256_5017D1F2:
+        pytest.fail(
+            "5017d1f2 baseline fixture sha256 mismatch: got %s, pinned %s — fixture "
+            "bytes drifted; re-vendor from `git show 5017d1f2:…`"
+            % (digest, _FIXTURE_SHA256_5017D1F2)
+        )
+
+    spec = importlib.util.spec_from_file_location(
+        "shared._merge_guard_baseline_5017d1f2", _FIXTURE_PATH_5017D1F2
+    )
+    if spec is None or spec.loader is None:
+        pytest.fail(
+            "5017d1f2 baseline fixture spec unloadable: %s — the cert cannot run"
+            % _FIXTURE_PATH_5017D1F2
+        )
+    module = importlib.util.module_from_spec(spec)
+    module.__package__ = "shared"
+    spec.loader.exec_module(module)
+
+    def _binds_no_mint_key(cmd):
+        ctx = module.extract_command_context(cmd)
+        return not any(ctx.get(k) for k in _MINT_KEYS_1203)
+
+    if not (
+        module.is_dangerous_command(_DISCRIMINATOR_1203_FP) is True
+        and _binds_no_mint_key(_DISCRIMINATOR_1203_FP)
+    ):
+        pytest.fail(
+            "vendored 5017d1f2 baseline does not exhibit the implicit force-push "
+            "gated-but-unmintable over-block — post-fix bytes were vendored"
+        )
+    if not (
+        module.is_dangerous_command(_DISCRIMINATOR_1203_MERGE) is True
+        and _binds_no_mint_key(_DISCRIMINATOR_1203_MERGE)
+    ):
+        pytest.fail(
+            "vendored 5017d1f2 baseline does not exhibit the bare-merge "
+            "gated-but-unmintable over-block — post-fix bytes were vendored"
+        )
+    if module.is_dangerous_command(_DISCRIMINATOR_1203_INERT) is not True:
+        pytest.fail(
+            "vendored 5017d1f2 baseline does not gate the inert `gh pr merge --help` "
+            "form — the inert-help recognizer is already present; post-fix bytes were "
+            "vendored"
+        )
+
+    _cached_baseline_5017d1f2 = module
+    return module
