@@ -884,6 +884,14 @@ def test_unreadable_store_denies_while_the_owner_matching_task_survives(
     original_mode = stat.S_IMODE(tasks_dir.stat().st_mode)
     os.chmod(tasks_dir, 0o000)
     try:
+        # The state the diagnosis's positive arm describes, established as an
+        # OBSERVATION before the gate runs. Without this the assertion further
+        # down would only show that the sentence is PRESENT, not that it is
+        # TRUE here — which is the whole difference between pinning the text
+        # and pinning the advice.
+        with pytest.raises(PermissionError):
+            os.listdir(tasks_dir)
+
         _reset_context_caches(monkeypatch)
         code_unreadable, out_unreadable = _run_main(_make_input(), capsys)
     finally:
@@ -908,6 +916,81 @@ def test_unreadable_store_denies_while_the_owner_matching_task_survives(
     )
     assert stat.S_IMODE(tasks_dir.stat().st_mode) == original_mode, (
         "the store's mode must be restored"
+    )
+
+    # THE ADVICE, NOT MERELY THE TEXT. The self-check has exactly one arm that
+    # makes a proof-strength claim: a permissions error on the store PROVES
+    # cause (4). Every other test in this file can only show that sentence is
+    # PRESENT. This is the one scenario that is actually IN the state the
+    # sentence describes — the listing above genuinely raised PermissionError —
+    # so here the claim is verified rather than quoted.
+    assert _CAUSE4_POSITIVE_PROOF in reason, (
+        "the sound positive arm is missing from a deny emitted in exactly the "
+        "state it describes: the store raised a permissions error and the "
+        "reader is not told that this proves cause (4)"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The value property the A-xor-B inference rests on
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_fired_incumbent_produces_a_strictly_longer_message(
+    tmp_path, monkeypatch, capsys
+):
+    """When the incumbent fires it must return STRICTLY MORE than it was given.
+
+    The composer infers "the incumbent fired" from a value difference rather
+    than from a flag. That inference is sound only while the fire path is
+    append-only with a NON-EMPTY suffix — and nothing was pinning the non-empty
+    part. The concrete regression it admits: shrink the appended text to
+    nothing and a fired incumbent returns the message unchanged, the composer
+    reads that as "did not fire", and the enumeration appends on top of a case
+    the design deliberately suppresses. Silent, and in the wrong direction.
+
+    THE HALF THIS DOES NOT COVER, so it is not mistaken for the whole: "no
+    second path can ever change the message without the incumbent firing" is a
+    universal claim over future code and no test expresses it. That half stays
+    a declared residual with an escalation trigger in the composer docstring.
+    Only the VALUE property is testable today, and it is testable cheaply.
+
+    Coupled against one run: the stale marker present (the incumbent really
+    fired), the emitted text strictly longer than the journaled reason, and the
+    enumeration absent. Length alone would be satisfied by the enumeration
+    appending, which is the very case this must distinguish.
+    """
+    journal = _capture_journal(monkeypatch)
+
+    _full_setup(monkeypatch, tmp_path, tasks=(("someone-else", "pending"),))
+    _write_project_claude_md(monkeypatch, tmp_path, _STALE_SESSION_ID)
+    _reset_context_caches(monkeypatch)
+
+    code, out = _run_main(_make_input(), capsys)
+    emitted = out["hookSpecificOutput"]["permissionDecisionReason"]
+    rule, journaled = _journaled(journal, 0)
+
+    assert code == 2, "the deny must fire"
+    assert rule == "no_task_assigned", f"expected the no-task rule, got {rule!r}"
+
+    # Guards the derived marker itself: _STALE_MARKER is a slice of a
+    # production constant, and an empty constant would make every
+    # "_STALE_MARKER in reason" assertion in this file vacuously true and every
+    # "not in" assertion fail — so pin non-emptiness rather than assume it.
+    assert _STALE_MARKER, (
+        "the derived stale marker is empty — every assertion using it is now "
+        "either vacuous or inverted"
+    )
+    assert _STALE_MARKER in emitted, "the incumbent must actually have fired"
+
+    assert len(emitted) > len(journaled), (
+        "a fired incumbent must return strictly more than it was given; an "
+        "empty suffix makes the composer's fired-vs-not inference undecidable"
+    )
+    assert emitted.startswith(journaled), "the fire path must be append-only"
+    assert _ENUM_MARKER not in emitted, (
+        "the enumeration must stay suppressed when the incumbent fired — if it "
+        "appended here, the length check above passed for the wrong reason"
     )
 
 
