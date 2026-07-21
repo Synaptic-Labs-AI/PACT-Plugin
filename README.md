@@ -26,6 +26,8 @@ PACT turns one AI into a coordinated dev team. Instead of a single Claude guessi
 ## Quick Start
 
 > **Prerequisite:** PACT requires [Agent Teams](#enabling-agent-teams), which is experimental and disabled by default. Add `"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"` to the `"env"` section of your `~/.claude/settings.json` before installing.
+>
+> **Conditional prerequisite:** if specialist agents refuse to spawn once PACT is installed, one further setting may be required — see [If specialist agents will not spawn](#if-specialist-agents-will-not-spawn). Check before you set it. It carries a real cost, and most installs never need it.
 
 **1. Install the plugin**
 
@@ -385,9 +387,44 @@ The `env` setting enables Agent Teams. The `permissions.additionalDirectories` e
 
 > **Note:** Bash allow rules are intentionally omitted — they are [fragile](https://docs.anthropic.com/en/docs/claude-code/settings#permission-settings) for commands with arguments. When agents run `mkdir` or `rm` in `~/.claude/` paths, select **"Yes, and always allow from this project"** to add the rule automatically.
 
-Without the `env` setting, PACT commands like `/PACT:orchestrate` and `/PACT:comPACT` will fail to spawn specialist agents.
+Without the `env` setting, PACT commands like `/PACT:orchestrate` and `/PACT:comPACT` will fail to spawn specialist agents. If they still fail *with* the setting in place, see [If specialist agents will not spawn](#if-specialist-agents-will-not-spawn) below.
 
 > **Note:** Agent Teams have [known limitations](https://code.claude.com/docs/en/agent-teams#limitations) around session resumption, task coordination, and shutdown behavior. See the Claude Code docs for details.
+
+#### If specialist agents will not spawn
+
+**Symptom.** Every attempt to start a specialist is refused, and the refusal blames a missing task assignment. Creating that task is itself impossible, because the tools that create tasks are absent from the session. Claude Code decides server-side, based on the model a session is running, whether to withhold them. The session cannot recover on its own — the bootstrap step never completes, so file edits and further spawns stay blocked as well.
+
+**First, confirm this is what you are hitting.** In the stuck session, ask Claude:
+
+```
+Can you see all four of these tools right now: TaskCreate, TaskUpdate, TaskList,
+TaskGet? If your tools load on demand, run ToolSearch with the query
+select:TaskCreate,TaskUpdate,TaskList,TaskGet and tell me which of the four
+are present.
+```
+
+- **Any of the four missing** — this is the problem, and the setting below fixes it.
+- **All four present** — this is *not* the problem, and the setting below will not help. Something else is refusing the spawn; this check rules out one cause, not the rest.
+
+**The setting.** Add `DISABLE_GROWTHBOOK` to the `env` block of your `~/.claude/settings.json`, alongside the Agent Teams setting, then start a new session. A session that has already been denied the tools does not pick them up again, so the stuck one cannot be rescued:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "DISABLE_GROWTHBOOK": "1"
+  }
+}
+```
+
+**What it costs you.** The setting is blunt: it turns off Claude Code's remote configuration channel entirely. Every remotely-controlled option reverts to its built-in default, and Remote Control stops working. That channel is also the vendor's fastest lever for responding to an incident, so leaving this in place permanently opts you out of server-side mitigations that would otherwise reach you between releases.
+
+**The other side of the same trade.** Turning the channel off also means a vendor-controlled switch can no longer change how your already-installed client behaves. A reader who treats that capability as attack surface will see this setting as a hardening measure rather than a concession. Both readings are correct; which one governs depends on whether you are more exposed to a mitigation that never arrives or to a behavior change you never reviewed.
+
+**Taking it back out.** This is a workaround for current platform behavior, not a standing recommendation — the gate is server-controlled and can change without notice, so expect to remove this setting eventually.
+
+To find out whether you still need it, delete the entry, **start a new shell, and start a new session from that shell**, then run the check above. All three steps matter, because environment values propagate asymmetrically: a value added to `settings.json` reaches processes that are already running, but removing it does not retract it from them; a value set in a shell profile only affects shells started afterwards; and a value exported by hand in a live shell survives both. Deleting the line and re-testing in place tells you nothing.
 
 ### Optional dependencies
 
