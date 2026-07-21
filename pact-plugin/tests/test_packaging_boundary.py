@@ -63,14 +63,18 @@ test files that ship to consumers, and every natural remedy for it is an
 exclusion mechanism. A contributor who adds one must not be told by a failing
 test that they re-introduced the shim hazard, because they did not.
 
-One check is grouped by PRECAUTION rather than by knowledge, and its message
-says so: the selection-key tripwire on ``marketplace.json`` plugin entries. What
-such a key would do there cannot be established from this repository — none
-exists to observe and the schema belongs to the platform — so it is filed under
-expansion because that is the conservative reading, not because the mechanism
-has been demonstrated. Do not let that assertion's grouping be read as evidence
-about the platform's behaviour; a guard whose message overstates its own
-grounding is the same defect as one whose message accuses the wrong direction.
+One check is grouped by PRECAUTION rather than by knowledge: the selection-key
+tripwire on ``marketplace.json`` plugin entries. It sits on the expansion side
+because that is the conservative branch, NOT because anyone established that a
+marketplace key can name paths outside its declared ``source``.
+
+The reason that needs saying HERE and not only in the assertion is that
+PLACEMENT READS AS A CLAIM. A future reader who notices which test a check
+lives in will infer that someone determined its direction — structure carries
+no "conservative" qualifier of its own. The assertion's message handles the
+reader who trips it; this paragraph handles the reader who merely sees where it
+sits. A guard whose STRUCTURE overstates its grounding is the same defect as
+one whose MESSAGE accuses the wrong direction.
 
 THIS DOCSTRING IS THE SSOT FOR THE PACKAGING PREMISE
 ----------------------------------------------------
@@ -505,17 +509,25 @@ def test_premise_marketplace_maps_only_the_pact_plugin_subtree():
          if k in plugin}
     )
     assert not entry_keys, (
-        f"a marketplace.json plugin entry now carries file-selection key(s) "
-        f"{entry_keys}. This assertion is PRECAUTIONARY: what such a key does "
-        "in a marketplace entry is not established anywhere in this repo, so "
-        "treat this as 'the packaging model may have changed, go find out' and "
-        "NOT as a demonstrated escape. The conservative reading is that it "
-        "could name paths outside the declared source, which would EXPAND what "
-        "ships — and expansion is the one direction that can put repo-root "
-        "dev/ into a consumer's cache while this module's absence assertion "
-        "keeps passing. Establish the key's real semantics before relaxing "
-        "this; if it turns out to be exclusion-only, it belongs with the "
-        "exclusion tripwire in the sibling test instead."
+        "PRECAUTIONARY TRIPWIRE — NOT a demonstrated escape. A marketplace.json "
+        f"plugin entry now carries file-selection key(s) {entry_keys}, and what "
+        "such a key DOES in a marketplace entry is not established anywhere in "
+        "this repository: none exists here to observe and the schema is the "
+        "platform's.\n\n"
+        "BOTH BRANCHES, TOGETHER. If the key only removes paths it is harmless "
+        "to the shim boundary and means no more than that the packaging model "
+        "changed. If it can name paths outside the declared source it EXPANDS "
+        "what ships — the one direction that can put repo-root dev/ into a "
+        "consumer's cache while this module's absence assertion keeps passing. "
+        "This check sits on the expansion side because that is the conservative "
+        "branch, not because the mechanism is known.\n\n"
+        "THE SIBLING TEST TELLS YOU AN EXCLUSION-SHAPED KEY ON plugin.json IS "
+        "HARMLESS. THAT DOES NOT TRANSFER HERE. There the semantics are known; "
+        "here they are not — so an exclusion-shaped NAME in a marketplace entry "
+        "is not evidence of exclusion BEHAVIOUR. That asymmetry is exactly why "
+        "this check does not filter by key shape.\n\n"
+        "WHAT TO DO: establish the key's real semantics, then either relax this "
+        "assertion or move it to the exclusion tripwire in the sibling test."
     )
 
 
