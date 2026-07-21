@@ -20,9 +20,23 @@ wrap a live hook with a logging tee and record the raw stdin it receives.
 | `install_taskcompleted_logging_shim.sh` | `hooks/agent_handoff_emitter.py` (TaskCompleted) | `/tmp/pact-hook-stdin-captures/taskcompleted/agent_handoff_emitter/` |
 
 Each shim is a side-effect tee: it reads stdin, writes it to disk, then
-replays the identical bytes to the original hook. Hook behavior is preserved
-and any shim error falls through to the unmodified hook. That is the *only*
-part of this design that is defensive — everything below is not.
+replays the identical bytes to the original hook. On the happy path the
+wrapped hook sees exactly what it would have seen unwrapped.
+
+**The tee is not fail-safe.** Its `try/except` looks like a guarantee and is
+not. Two failure modes, both deterministic given the failing syscall:
+
+- **A capture write that fails *after* `stdin.read()` drops the payload.** The
+  replay assignment is the last statement inside the `try`, so a failed write
+  or rename skips it: the exception is swallowed and the wrapped hook then
+  reads an already-exhausted stream, receiving empty input instead of its
+  payload.
+- **A capture-directory creation failure crashes the hook.** The `mkdir` runs
+  *outside* the `try/except` and is not caught at all.
+
+Neither needs an adversary — a full disk, a read-only `/tmp`, or, on a shared
+machine, a capture directory already created mode `0700` by another user.
+Treat the tee as best-effort, not as a guarantee.
 
 ## Why these are dangerous
 
@@ -62,11 +76,17 @@ you to follow them.
 ## Uninstalling
 
 Each installer backs the hook up to a `.preshim.bak` sibling before editing.
-Reverting is a manual copy back over the modified file:
+Reverting is a manual copy back over the modified file, followed by removing
+the backup:
 
 ```bash
 cp <hook>.preshim.bak <hook>
+rm <hook>.preshim.bak
 ```
+
+Delete the backup as well as restoring from it. A leftover `.preshim.bak` is
+how the audit below tells you an uninstall was started and never finished — if
+you leave them lying around, that signal stops meaning anything.
 
 Uninstall as soon as the capture session ends — not "later". The intended
 lifecycle is: install, run one capture session, **immediately uninstall**,
@@ -79,11 +99,25 @@ unlikely to look for it. Audit the whole cache rather than just the current
 version:
 
 ```bash
-grep -rl 'PACT-PREPARER-LOGGING-SHIM-INSTALLED' ~/.claude/plugins/cache/pact-plugin/PACT/
+# Scope the marker scan to hooks/ — an installed shim only ever lives in a
+# hook file. The installers themselves contain the marker literal and ship
+# under tests/runbooks/, so scanning the cache root matches every installer
+# in every retained version and buries a real hit among them.
+grep -rl 'PACT-PREPARER-LOGGING-SHIM-INSTALLED' ~/.claude/plugins/cache/pact-plugin/PACT/*/hooks/
+
 find ~/.claude/plugins/cache/pact-plugin/PACT -name '*.preshim.bak'
 ```
 
-Either command returning results means a shim is still installed somewhere.
+Do not "simplify" the first command by dropping `*/hooks/`. That scoping is
+what makes it usable.
+
+The two commands report different things and must not be conflated:
+
+- A **marker hit under `*/hooks/`** means a shim **is installed** in that file.
+  Restore it from its backup.
+- A **`.preshim.bak` with no matching marker hit** means an **uninstall was
+  never completed**. The hook itself is already clean and only the stray
+  backup remains; delete it.
 
 ## Never move these back under `pact-plugin/`
 
@@ -104,14 +138,20 @@ plugin. Add new instruments of this kind to `dev/`, never to `pact-plugin/`.
 
 ## Why `dev/` is separate from `scripts/` and `testing/`
 
-Three repo-root directories hold things that are not application code. They
-are separated by *who runs them* and *what happens if they go wrong*:
+Three repo-root directories hold things that are not application code. One
+question separates them: **does running it change anything outside this
+repository?**
 
-| Directory | Runs how | Blast radius |
+| Directory | Changes state outside the repo? | What lives there |
 |---|---|---|
-| `scripts/` | Automated, CI-adjacent | Safe. Read-only verification gates (`verify-*.sh`) that inspect the repo and report. Failure means a red check. |
-| `testing/` | Manual, by a human | Inert. Scenario checklists and canary lists — Markdown a person follows. Nothing executes. |
-| `dev/` | Manual, by a human | **Dangerous.** Executables that mutate live machine state outside this repository and leave it mutated. |
+| `scripts/` | No | Read-only verification gates (`verify-*.sh`) that inspect the repo and report. Automated, CI-adjacent; failure means a red check. |
+| `testing/` | No | Scenario checklists and canary lists — Markdown a person follows. Nothing executes. |
+| `dev/` | **Yes, and leaves it changed** | Executables that mutate live machine state outside this repository. |
+
+Keying on that one question rather than on who runs it leaves no gap: a
+manual, human-run executable whose effects stay inside the repo is a
+`scripts/` item, not a `testing/` one, because `testing/` holds nothing that
+executes at all.
 
 `testing/` is the directory most likely to be mistaken for the right home,
 since these scripts are also manual and also serve verification. The
