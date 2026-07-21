@@ -1178,3 +1178,163 @@ def test_readme_pointer_has_a_referent():
         "were not updated, or the pointer shipped ahead of its referent. The "
         "shipped README's own links to this anchor break too."
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# No silent "just set this" — the setting never appears without its cost
+# ══════════════════════════════════════════════════════════════════════════
+
+# The setting has exactly ONE spelling and no synonym set. That is what makes
+# the TRIGGER side of this pin complete — see the disclaimer below for the side
+# that is not.
+_SETTING = "DISABLE_GROWTHBOOK"
+
+# Derived from the acceptance criteria, not composed fresh: the blast-radius
+# statement, the verification step, and the retirement note. The remaining
+# criteria (the prerequisite/env-block pairing, and project-agnostic wording)
+# are not co-occurrence properties and are deliberately out of scope here.
+#
+# Matched on SUBSTANTIVE CONTENT rather than on the bold label that introduces
+# each one, so relabelling a paragraph does not red while DELETING it does. A
+# label is presentation; these strings are the claim the criterion asks for.
+_DISCLOSURE_ELEMENTS = {
+    "blast-radius statement": "remote configuration channel",
+    "verification step": "select:TaskCreate,TaskUpdate,TaskList,TaskGet",
+    "retirement note": "not a standing recommendation",
+}
+
+_DOC_SURFACES = ("README.md", "pact-plugin/README.md")
+
+
+def _sections(text):
+    """Split markdown into (heading, body) at every ATX heading, FENCE-AWARE.
+
+    Lines inside ``` fences are never treated as headings. This matters
+    concretely rather than theoretically: the root README has a fenced shell
+    block whose comment lines begin with '#', and a naive splitter segments on
+    them, silently moving the section boundary and letting the co-occurrence
+    check straddle a heading it should have stopped at.
+    """
+    sections, heading, body, fenced = [], "<preamble>", [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        if not fenced and line.startswith("#"):
+            sections.append((heading, "\n".join(body)))
+            heading, body = line.strip(), []
+        else:
+            body.append(line)
+    sections.append((heading, "\n".join(body)))
+    return sections
+
+
+def test_setting_is_never_named_without_its_cost():
+    """Wherever the setting is NAMED, its cost is disclosed in the SAME section.
+
+    WHAT THIS PROVES. The setting cannot be mentioned in an operator-facing
+    markdown surface without the blast-radius statement, the verification step
+    and the retirement note appearing in the same section. On the TRIGGER side
+    this is COMPLETE, and that is unusual enough to be worth stating plainly:
+    ``DISABLE_GROWTHBOOK`` is an environment variable with exactly one spelling
+    and no synonyms, so a mention cannot be reworded out of detection the way a
+    prose concept could. Nobody can add the setting to these files and evade
+    this check except by not adding it.
+
+    WHAT THIS DOES NOT PROVE, and it must not be cited for any of it. The
+    SATISFACTION side is incomplete in three separate ways. (1) It cannot judge
+    ADEQUACY — that a blast-radius paragraph exists says nothing about whether
+    it describes the actual blast radius, or describes it correctly. (2) It
+    cannot judge ADJACENCY IN RENDERED OUTPUT — section containment is not
+    reading order, and an element can satisfy this check while sitting far
+    enough from the setting that a scrolling reader never connects them.
+    (3) It cannot judge SUFFICIENCY OF THE SET — these three elements come from
+    the acceptance criteria, and criteria can be incomplete. So a green result
+    here means "the setting is not named silently"; it does NOT mean "the
+    trade-off is adequately disclosed". Do not cite it for the latter.
+
+    WHICH REVIEW STEP OWNS THE REST. Human review of this subsection's CONTENT
+    at PR time, on the same two-site path the deny-reason literal forces: a
+    change that touches the setting's documentation must re-read the cost
+    paragraph rather than confirm a green. That includes the ordering invariant
+    named in ``test_readme_pointer_has_a_referent`` — verification before
+    remedy — which no artifact can enforce and which this test does not attempt
+    to. If the sole evidence offered for adequate disclosure is that this test
+    passed, the review step has been skipped, not satisfied.
+
+    COUPLED against the absence trap. The co-occurrence rule is an implication,
+    and an implication with no true antecedent is free: delete the whole
+    subsection and every co-occurrence check below passes trivially. So the
+    premise is asserted FIRST — the setting must actually be documented
+    somewhere — which is the same coupling discipline the enumeration pins use.
+    """
+    for name, marker in _DISCLOSURE_ELEMENTS.items():
+        assert marker.isascii(), (
+            f"{name} marker is not ASCII-only: {marker!r}. A marker spanning a "
+            "non-ASCII character invites a transcription that substitutes a "
+            "hyphen for U+2014, after which it silently stops matching."
+        )
+
+    surfaces = {}
+    for rel in _DOC_SURFACES:
+        path = _REPO_ROOT / rel
+        assert path.exists(), f"operator-facing surface missing: {path}"
+        surfaces[rel] = path.read_text(encoding="utf-8")
+
+    # PREMISE — without this the implication below is vacuous.
+    documenting = [rel for rel, text in surfaces.items() if _SETTING in text]
+    assert documenting, (
+        f"{_SETTING} is documented in NONE of {list(_DOC_SURFACES)}, so every "
+        "co-occurrence assertion below passes by absence and this test proves "
+        "nothing. If the setting was removed on purpose, delete this test in "
+        "the same change rather than leaving it green and hollow."
+    )
+
+    for rel in documenting:
+        naming = [
+            (h, b) for h, b in _sections(surfaces[rel]) if _SETTING in b or _SETTING in h
+        ]
+        assert naming, f"{_SETTING} present in {rel} but in no section"
+        for heading, body in naming:
+            missing = {
+                name: marker
+                for name, marker in _DISCLOSURE_ELEMENTS.items()
+                if marker not in body
+            }
+            assert not missing, (
+                f"{rel} names {_SETTING} under {heading!r} without, in the same "
+                f"section: {sorted(missing)}. A reader who applies the setting "
+                "from this section alone does so without being told what it "
+                "costs, how to confirm they need it, or when to take it back "
+                "out. Add the element to THIS section — moving it elsewhere in "
+                "the file satisfies a grep but not the reader."
+            )
+
+
+def test_gate_texts_point_at_the_setting_and_never_inline_it():
+    """The gates carry a POINTER; they must never inline the setting itself.
+
+    A deny message cannot carry the cost statement, the verification step and
+    the retirement note — so a gate that names the setting has necessarily
+    named it silently, which is the one form of disclosure the criteria
+    forbid outright. The pointer exists precisely so the setting is only ever
+    encountered next to its trade-off.
+
+    COUPLED, because a bare absence assertion here would pass if the gate texts
+    were emptied, deleted or renamed out of existence: the positive half
+    asserts each gate still carries its pointer URL. Absence of the setting is
+    only meaningful while the pointer is present to replace it.
+    """
+    for source_name in _GATE_SOURCES:
+        source = (Path(__file__).parent.parent / "hooks" / source_name).read_text(
+            encoding="utf-8"
+        )
+        assert _pointer_urls(source_name), (
+            f"{source_name} carries no pointer URL, so the absence check below "
+            "is vacuous — it would pass on an empty file."
+        )
+        assert _SETTING not in source, (
+            f"{source_name} inlines {_SETTING} into gate text. A deny message "
+            "cannot carry the blast radius, the verification step and the "
+            "retirement note, so naming the setting here discloses it "
+            "silently. Point at the documented section instead."
+        )
