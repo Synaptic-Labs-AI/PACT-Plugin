@@ -280,9 +280,12 @@ cheap-win dispatch-deny self-diagnosis already covers the transient window".
 
 ### Instrument: a SessionStart logging shim (DEV-only, reversible)
 
-Reuse the atomic-tee idiom in the sibling
-`install_session_start_logging_shim.sh` (`.tmp`-sibling + `os.rename`,
-`try/except: pass`, `.preshim.bak` backup, single in-file marker). Adapt it so
+Reuse the atomic-tee idiom in the repo-root
+`dev/install_session_start_logging_shim.sh` (`.tmp`-sibling + `os.rename`,
+`try/except: pass`, `.preshim.bak` backup, single in-file marker). That script
+lives in the PACT source repository and is deliberately NOT distributed in the
+plugin package — if you are reading this from an installed plugin cache,
+`dev/` is absent by design, not missing. Adapt it so
 each SessionStart fire ALSO appends the firing PID, wall-clock, and — if the
 NEW-id `pact-session-context.json` exists — its `session_id` field. That
 yields `t0`; a post-prompt read yields `t1`/`t2`. The shim is a **conditional**
