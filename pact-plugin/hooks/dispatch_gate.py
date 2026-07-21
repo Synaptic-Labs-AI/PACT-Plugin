@@ -626,16 +626,42 @@ def _augment_deny_with_stale_diagnosis(
 # The remedy for cause (3) is a pointer, never an inlined setting: it is a
 # conditional prerequisite with real blast radius, and a deny message cannot
 # carry the cost statement that has to accompany it.
+#
+# That pointer is an ABSOLUTE URL rather than a section name. The README
+# shipped INSIDE the plugin package does not contain that section — it lives
+# in the repository README — so a reader searching their local copy for a
+# quoted section title finds nothing, which is worse than no pointer at all.
+# The shipped README already links this exact URL twice, so this follows an
+# established convention rather than inventing one. The URL also lands on the
+# section TOGETHER WITH its cost paragraph, which is the entire reason the
+# remedy is a pointer; a terse local restatement would drop it. Do NOT
+# "simplify" this back to a section name.
+#
+# THE OPENING QUALIFIER IS LOAD-BEARING, not throat-clearing. The rule-⑧ base
+# message ends with an unhedged imperative — create the teachback task and the
+# work task — and that instruction is CORRECT only under cause (1). Under (2)
+# the tasks land in a store this gate does not read, under (3) they cannot be
+# created at all, and under (4) they cannot be read back; in every one of
+# those an operator who acts on the first sentence burns a cycle and gets a
+# byte-identical denial. The base message CANNOT be edited (the journalled
+# reason is pinned byte-identical to base), so the qualification has to live
+# here — and it has to REACH BACK and name that instruction explicitly. A
+# general hedge about observation-versus-existence does not do that, because
+# by the time it registers the reader has already acted on the imperative.
 _CAUSE_ENUMERATION = (
     "\n\n"
     "DIAGNOSIS — this gate did not OBSERVE a task assigned to this owner.\n"
     "That is not the same as one not existing.\n"
     "\n"
+    "The instruction above resolves cause (1) ONLY. Under (2), (3) and (4)\n"
+    "creating the tasks changes nothing and this denial repeats unchanged,\n"
+    "so identify the cause before acting on that instruction.\n"
+    "\n"
     "TO NARROW IT DOWN, confirm all four task tools are available to you:\n"
     "    ToolSearch \"select:TaskCreate,TaskUpdate,TaskList,TaskGet\"\n"
-    "  Any missing      -> case (3) below. See \"Enabling Agent Teams\" in the\n"
-    "                      PACT README for the setting that restores them,\n"
-    "                      and its trade-offs.\n"
+    "  Any missing      -> case (3) below. For the setting that restores\n"
+    "                      them, and its trade-offs, see\n"
+    "                      https://github.com/Synaptic-Labs-AI/PACT-Plugin#enabling-agent-teams\n"
     "  All four present -> not case (3). That rules out one cause, not the rest.\n"
     "If listing the task store reports a PERMISSIONS ERROR, you are in case (4).\n"
     "\n"
@@ -715,11 +741,17 @@ def _compose_deny_diagnosis(
     canonical reason, so the journal keeps the un-augmented text regardless of
     what this returns.
 
-    GRACEFUL DEGRADATION: the incumbent is itself never-raises and returns
-    ``message`` unchanged on any internal failure, which is indistinguishable
-    here from "no mismatch detected". A detector failure therefore falls
-    through to the enumeration — A's failure degrades INTO B, never into
-    silence.
+    GRACEFUL DEGRADATION, and note it is RULE-SCOPED. The incumbent is itself
+    never-raises and returns ``message`` unchanged on any internal failure,
+    which is indistinguishable here from "no mismatch detected". On
+    ``no_task_assigned`` a detector failure therefore falls through to the
+    enumeration — A's failure degrades INTO B rather than into silence.
+
+    On ``team_name_unavailable`` — the OTHER member of
+    ``_STALE_DIAGNOSABLE_RULES`` — there is no B, so the same failure degrades
+    into silence, and that is CORRECT: the un-augmented deny is the right
+    output there. Do not read this as a general property of the composer and
+    do not extend the enumeration to that rule to make it one.
 
     Note the ``augmented != message`` test infers "the incumbent fired" from a
     VALUE DIFFERENCE rather than from a flag the incumbent sets. That is sound

@@ -81,6 +81,7 @@ NON-VACUITY DISCIPLINE — the reasons, so a later editor does not undo them:
 
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -998,64 +999,182 @@ def test_fired_incumbent_produces_a_strictly_longer_message(
 # The pointer has a referent — and that is ALL this section pins
 # ══════════════════════════════════════════════════════════════════════════
 
-# Repo root, per the convention already used by the version-bump suite.
+# Repo root, per the convention already used by the version-bump suite. Used
+# ONLY for the anchor-referent leg below — see the shipped-vs-dev note there.
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
-# The README section both gate texts send the reader to.
-_POINTER_PHRASE = "Enabling Agent Teams"
-_POINTER_HEADING = f"### {_POINTER_PHRASE}"
+# THE SHIPPED ARTIFACT. marketplace.json packages `./pact-plugin` only, so this
+# README is what a consumer actually receives; the repo-root one is NOT
+# packaged. Any pin aimed solely at the repo root tests the DEV surface.
+_SHIPPED_README = Path(__file__).resolve().parent.parent / "README.md"
 
 # Read as SOURCE rather than imported: the dispatch-gate pointer lives inside a
 # post-fix constant, and importing it would make this an import artifact under
 # a revert. Reading the file also keeps one assertion covering both gates.
 _GATE_SOURCES = ("dispatch_gate.py", "bootstrap_gate.py")
 
+# DERIVED from the gate sources, never hand-typed. A hand-typed expected URL is
+# the failure mode this whole test exists to catch, one level up: it would go
+# stale silently the moment the gates changed, and its greenness would then
+# certify agreement with a string nobody emits.
+_POINTER_URL_RE = re.compile(r"https://github\.com/[^\s\"'\\]+#[^\s\"'\\]+")
+
+# THE VERIFIED PAIR — anchor as GitHub actually serves it, and the heading that
+# produces it. Measured, not derived; see the anchor-referent leg for the exact
+# command and why a computed slug would be unsound here. Both halves are pinned
+# so an edit to EITHER side reds, which is what makes this a correspondence
+# check rather than a restatement of one side.
+_VERIFIED_ANCHOR = "enabling-agent-teams"
+_VERIFIED_HEADING = "### Enabling Agent Teams"
+
+
+def _pointer_urls(source_name):
+    """Every anchored GitHub URL emitted by one gate's source."""
+    source = (Path(__file__).parent.parent / "hooks" / source_name).read_text(
+        encoding="utf-8"
+    )
+    return set(_POINTER_URL_RE.findall(source))
+
 
 def test_readme_pointer_has_a_referent():
-    """Both gates name a README section; that section must exist.
+    """Both gates emit a pointer URL; it must resolve from what a consumer has.
 
-    A deny message that sends an operator to a heading which is not there is
-    worse than one that says nothing — it spends the reader's remaining
-    patience on a search that cannot succeed. The two artifacts are edited by
-    different people at different times, and nothing else couples them.
+    A deny message that sends an operator somewhere that is not there is worse
+    than one that says nothing — it spends the reader's remaining patience on a
+    search that cannot succeed. The artifacts are edited by different people at
+    different times, and nothing else couples them.
 
-    COUPLED so it cannot pass by absence: the pointer must be PRESENT in both
-    gate texts AND the heading must exist. Testing only the implication
-    ("if the pointer is present then the heading exists") would pass trivially
-    the moment someone removed the pointer, which is exactly the state this is
-    meant to notice. Removing a pointer legitimately is still allowed — it just
-    has to come here and say so, the same two-site review path the canonical
-    deny-reason literal forces.
+    WHAT THIS PIN DEFENDS, STATED NARROWLY. A full URL in a deny message is
+    SELF-RESOLVING: the reader can follow it holding no README at all. So the
+    pointer's reachability is the URL's doing, not this test's. What this test
+    defends is that the URL is CORRECT — that its anchor has a real referent and
+    that the two gates have not drifted apart. Do not cite it as "consumers can
+    reach the docs"; that claim belongs to the URL and would over-read a green.
+
+    RESOLVE THE SUBJECT THE WAY THE READER DOES — the rule that fixes the aim.
+    An earlier version asserted a heading in the repo-root README while the
+    pointer named a SECTION BY TITLE, so the pin resolved a file the pointer did
+    not name; it stayed green while the pointer dangled. The lesson is NOT
+    "always aim at the packaged path" — under a URL pointer the packaged README
+    is the wrong target and such an assertion could not pass, because the
+    heading legitimately is not there. The aim follows the POINTER: under a URL,
+    the file that URL serves. Whenever the pointer's FORM changes, re-derive
+    this aim rather than carrying it over.
+
+    THE URL IS DERIVED FROM THE GATE SOURCES, never hand-typed. A hand-typed
+    expected URL is the same failure one level up — it goes stale silently the
+    moment the gates change, and then agrees with a string nobody emits.
+
+    COUPLED so it cannot pass by absence. Testing only the implication ("if a
+    pointer is present then it resolves") would pass trivially the moment
+    someone removed the pointer, which is exactly the state this is meant to
+    notice. Removing a pointer legitimately is still allowed — it just has to
+    come here and say so, the same two-site review path the canonical
+    deny-reason literal forces. The four legs, in order of what they carry:
+
+      ESSENTIAL — the anchor corresponds to a real heading in the ROOT README,
+        the file the URL serves. Under a URL pointer this is the correctness
+        case; the shipped README's own links to this anchor depend on it too.
+      ANTI-REGRESSION — both gates carry a URL rather than a bare section name,
+        catching the future author who "simplifies" the pointer back to a
+        readable title. That simplification is what produced the original
+        defect, so this leg is the one guarding against its return.
+      ANTI-DRIFT — the two gates carry the IDENTICAL URL, so they cannot half-
+        answer a reader the other sent somewhere else.
+      CROSS-CHECK — the URL also appears in the shipped README. Corroborating
+        rather than primary under a URL pointer, but it is the leg whose
+        non-vacuity was demonstrated by mutation (the predecessor pin stayed
+        GREEN under the same mutation that reds this one), so it is the one
+        with direct evidence behind it. Do not drop it as redundant.
 
     WHAT THIS DOES NOT PIN, and must not be read as pinning. The clause in the
-    bootstrap gate is safe to over-point partly because its referent OPENS with
-    a falsifiable check — the reader is told how to confirm they have this
-    problem before being shown a high-blast-radius setting. That protection is
-    a property of the PAIR, not of either file: reorder the README section to
-    lead with the remedy and the protection is gone while this test stays
-    green. Verification-before-remedy ordering is a review-time invariant with
-    no artifact that can enforce it. This test pins referent EXISTENCE only.
+    bootstrap gate is safe to over-point partly because the reader is told how
+    to confirm they have this problem before being shown a high-blast-radius
+    setting.
+
+    BE PRECISE ABOUT WHERE THAT PROTECTION LIVES — an earlier draft of this
+    docstring said the referent "opens with a falsifiable check", and it does
+    not. The pointed-at section opens with the Agent Teams settings block. The
+    check lives further down, inside its "If specialist agents will not spawn"
+    SUBSECTION, which opens with "First, confirm this is what you are hitting"
+    and only then reaches "The setting". So the ordering invariant is
+    check-before-remedy WITHIN THAT SUBSECTION, not at the top of the section
+    the gates name. The distinction matters because this paragraph exists for a
+    future auditor re-checking the ordering: one who reads "opens with" lands at
+    the section heading, finds a settings block and no check, and concludes the
+    protection has already been lost when it has not.
+
+    That protection is a property of the PAIR, not of either file: reorder the
+    subsection to lead with the remedy and the protection is gone while this
+    test stays green. Verification-before-remedy ordering is a review-time
+    invariant with no artifact that can enforce it. This test pins referent
+    EXISTENCE only.
     """
-    readme = _REPO_ROOT / "README.md"
-    assert readme.exists(), f"repo README not found at {readme}"
-    readme_text = readme.read_text(encoding="utf-8")
+    per_gate = {name: _pointer_urls(name) for name in _GATE_SOURCES}
 
-    pointing = []
-    for source_name in _GATE_SOURCES:
-        source = (Path(__file__).parent.parent / "hooks" / source_name).read_text(
-            encoding="utf-8"
-        )
-        if _POINTER_PHRASE in source:
-            pointing.append(source_name)
-
-    assert sorted(pointing) == sorted(_GATE_SOURCES), (
-        f"expected both gates to point at {_POINTER_PHRASE!r}; only {pointing} "
+    pointing = sorted(name for name, urls in per_gate.items() if urls)
+    assert pointing == sorted(_GATE_SOURCES), (
+        f"expected both gates to carry an anchored pointer URL; only {pointing} "
         "do. If a pointer was removed on purpose, update this test in the same "
         "change — silently dropping it is what this assertion exists to catch."
     )
 
-    assert _POINTER_HEADING in readme_text, (
-        f"the gates point at a README section {_POINTER_HEADING!r} that does "
-        "not exist. Either the heading was renamed and the gate texts were not "
-        "updated, or the pointer shipped ahead of its referent."
+    emitted = set().union(*per_gate.values())
+    assert len(emitted) == 1, (
+        f"the gates point at {len(emitted)} different URLs: {sorted(emitted)}. "
+        "One referent, or the two gates drift apart and each half-answers a "
+        "reader the other sent somewhere else."
+    )
+    url = emitted.pop()
+
+    # THE SHIPPED-SURFACE LEG. This is the one that must not be aimed at the
+    # repo root: that README is not packaged, so a pin against it stays green
+    # under BOTH the broken and the fixed state, and its greenness then reads as
+    # confirmation of a property it never checked.
+    assert _SHIPPED_README.exists(), (
+        f"shipped README not found at {_SHIPPED_README} — this leg cannot mean "
+        "anything until it points at a file that exists"
+    )
+    shipped_text = _SHIPPED_README.read_text(encoding="utf-8")
+    assert url in shipped_text, (
+        f"the gates emit {url!r}, which does not appear in the SHIPPED README "
+        f"({_SHIPPED_README.name}). marketplace.json packages ./pact-plugin "
+        "only, so that file is the artifact a consumer receives. A URL the "
+        "shipped docs never mention is one nobody can cross-check against the "
+        "artifact they actually have."
+    )
+
+    # ANCHOR-REFERENT LEG — THE ESSENTIAL ONE under a URL pointer. The URL names
+    # the REPO-ROOT README, so that file is the artifact the pointer actually
+    # resolves to; this leg is about GitHub's rendering target, NOT about what
+    # ships, and the two are different files ON PURPOSE.
+    #
+    # THE PAIR BELOW IS A MEASUREMENT, NOT A COMPUTATION, and that distinction
+    # is the whole reason it is written this way. Deriving the slug from the
+    # heading with an assumed lowercase-and-hyphenate rule would pass against a
+    # slug GitHub does not actually serve — this repo has a pinned precedent of
+    # a heading containing an em-dash, which strips to EMPTY and yields a
+    # DOUBLED hyphen where the obvious rule predicts a single one. A computed
+    # slug would then certify the transform rather than the correspondence.
+    #
+    # Verified empirically against GitHub's own renderer rather than assumed:
+    #     gh api repos/<owner>/<repo>/readme -H "Accept: application/vnd.github.html"
+    # which returned id="user-content-enabling-agent-teams" for this heading.
+    # Re-run that command if either side of the pair below changes; do NOT
+    # "simplify" this into a slugger.
+    anchor = url.split("#", 1)[1]
+    assert anchor == _VERIFIED_ANCHOR, (
+        f"the gates now point at anchor {anchor!r}, but the verified pair pins "
+        f"{_VERIFIED_ANCHOR!r}. Re-verify the anchor against GitHub's rendered "
+        "HTML and update BOTH halves of the pair — do not compute the new slug."
+    )
+
+    root_readme = _REPO_ROOT / "README.md"
+    assert root_readme.exists(), f"repo README not found at {root_readme}"
+    assert _VERIFIED_HEADING in root_readme.read_text(encoding="utf-8"), (
+        f"the gates point at anchor {anchor!r}, whose verified referent "
+        f"{_VERIFIED_HEADING!r} is not in the repo-root README that GitHub "
+        "renders at that URL. Either the heading was renamed and the gate texts "
+        "were not updated, or the pointer shipped ahead of its referent. The "
+        "shipped README's own links to this anchor break too."
     )

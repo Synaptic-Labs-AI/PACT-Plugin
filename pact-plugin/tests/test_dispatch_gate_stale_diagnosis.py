@@ -59,10 +59,65 @@ from test_dispatch_gate import (  # noqa: E402 — sibling harness reuse
     _TEAM,
 )
 
+# Pre-existing production symbol. Imported so the liveness pin below checks the
+# LIVE constant rather than a copy of it, and so this file keeps working under a
+# revert of any change that only touches the cause enumeration.
+from dispatch_gate import _STALE_REALIGN_HINT  # noqa: E402
+
 # A marker substring unique to the augmentation — asserting on it proves the
 # net-new self-diagnosis text is present without coupling to exact wording.
 _AUGMENT_MARKER = "STALE-TEAM/STORE MISMATCH"
 _REALIGN_MARKER = "pact-session-context.json"
+
+
+def test_stale_markers_are_live_and_ascii():
+    """Both markers are asserted ABSENT in ~10 places in this file; an absence
+    assertion on a literal that cannot match is vacuous forever, silently.
+
+    Today those absence assertions are safe only INCIDENTALLY: both markers are
+    also used in POSITIVE assertions here, and a green baseline on an ``in``
+    check is itself proof the literal matches. That protection lasts exactly as
+    long as the last positive assertion does — delete those and all ~10 absence
+    assertions go vacuous with nothing to notice. This converts the incidental
+    safety into designed safety, sibling to
+    ``test_load_failure_marker_is_live`` in test_dispatch_gate_cause_enumeration.
+
+    Checked against the LIVE ``_STALE_REALIGN_HINT`` rather than a source-text
+    scan: a substring can survive in the file (a comment, a docstring, a dead
+    branch) after it has stopped being part of the emitted text, and it is the
+    EMITTED text these markers are asserted against.
+
+    The ASCII conjunct guards the transcription slip specifically: a marker
+    spanning a non-ASCII character invites an eyeball copy that substitutes a
+    hyphen for U+2014, after which the ``not in`` check can never fail.
+
+    HONEST LIMIT ON THAT CONJUNCT — it is a FORWARD guard, not an independently
+    proven one. ``_STALE_REALIGN_HINT`` is currently pure ASCII, so any marker
+    that fails the ASCII check also fails the substring check below it: the two
+    cannot be falsified separately today, and a non-vacuity run will show them
+    co-firing. It is kept because the constant is PROSE and the prose in this
+    codebase routinely carries em-dashes — ``_CAUSE_ENUMERATION`` already does,
+    which is exactly why the sibling meta-test there IS independently
+    meaningful. The day this constant gains one mid-marker, this conjunct is the
+    only thing between a ``not in`` assertion and permanent silent vacuity.
+    Do not delete it for being redundant; it is redundant only while the
+    constant stays ASCII, and nothing enforces that.
+    """
+    for name, marker in (
+        ("_AUGMENT_MARKER", _AUGMENT_MARKER),
+        ("_REALIGN_MARKER", _REALIGN_MARKER),
+    ):
+        assert marker.isascii(), (
+            f"{name} is not ASCII-only: {marker!r}. A marker that spans a "
+            "non-ASCII character invites a transcription that substitutes a "
+            "hyphen for U+2014, after which it can never fail."
+        )
+        assert marker in _STALE_REALIGN_HINT, (
+            f"{name} ({marker!r}) is no longer a substring of the live "
+            "_STALE_REALIGN_HINT — every absence assertion using it in this "
+            "file is now vacuous. Re-derive the marker from the production "
+            "constant; do not re-type it."
+        )
 
 # session_id values for the both-modes matrix.
 _LIVE_SESSION_ID = "test-session"          # the stdin session_id _make_input uses

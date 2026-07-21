@@ -392,6 +392,15 @@ _SECRETARY_AGENT_TYPE = "pact-secretary"
 # ACTION in every state: when the condition does not hold the clause asks
 # nothing of the reader.
 #
+# The pointer is an ABSOLUTE URL rather than a section name, and that is not a
+# style choice. The README shipped INSIDE the plugin package does not contain
+# that section — it lives in the repository README — so a reader who searches
+# their local copy for a quoted section title finds nothing, which is worse
+# than no pointer at all. This URL is already the established convention in
+# the shipped README, which links it twice. It also lands on the section
+# together with its cost paragraph, which a terse local restatement would
+# drop. Do NOT "simplify" this back to a section name.
+#
 # Any change to this text must be mirrored into
 # ``_CANONICAL_DENY_REASON_LITERAL`` in tests/test_bootstrap_gate.py. That
 # two-site edit is the deny-reason drift detector's intended review path.
@@ -400,7 +409,8 @@ _DENY_REASON = (
     "Code-editing tools (Edit, Write) and agent dispatch (Agent) are blocked "
     "until bootstrap completes. Bash, Read, Glob, Grep are available. "
     "If bootstrap cannot complete because the task-management tools are "
-    "unavailable, see \"Enabling Agent Teams\" in the PACT README."
+    "unavailable, see "
+    "https://github.com/Synaptic-Labs-AI/PACT-Plugin#enabling-agent-teams"
 )
 
 
