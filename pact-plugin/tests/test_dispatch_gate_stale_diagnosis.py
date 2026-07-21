@@ -10,19 +10,34 @@ the EXISTING shared.stale_session.detect_stale_session_block detection at the
 two restart-symptom deny sites (rule ⑥ team_name_unavailable, rule ⑧
 no_task_assigned), MESSAGE-ONLY.
 
+SCOPE NOTE — what "unaugmented" means in this file. These tests assert the
+absence of the STALE-DIAGNOSIS markers, and nothing more. They do NOT assert
+that the emitted deny equals the rule's base message: on rule ⑧ the composer
+appends a cause enumeration whenever the stale detector does not fire, so the
+"no mismatch" legs below emit MORE than the base text while still correctly
+carrying no stale-diagnosis. Coverage of the enumeration itself lives in
+test_dispatch_gate_cause_enumeration.py.
+
+Worth stating plainly because the suite cannot catch it: every "falls back to
+the original message" test here asserts marker-ABSENCE, never message-equality,
+so all of them stayed green when the composer started appending. A fully green
+run proves nothing about whether these docstrings are accurate.
+
 What this file pins:
   - BOTH-MODES MATRIX (in-process session_id==leadSessionId AND tmux
     session_id!=leadSessionId): on a stale-team mismatch the augmented
-    self-diagnosis appears at BOTH deny sites; on no mismatch the ORIGINAL
-    message is preserved verbatim. The augmentation is mode-agnostic, so the
+    self-diagnosis appears at BOTH deny sites; on no mismatch NO stale
+    diagnosis is added. The augmentation is mode-agnostic, so the
     matrix is an INVARIANCE proof (same outcome both modes).
   - NON-VACUITY via PAIRED ENABLE/DISABLE (mismatch-present vs mismatch-absent
     inputs), not git-revert: the augmentation marker is present iff a mismatch
     is detected. A test would FAIL if the augmentation were removed.
   - DECISION UNCHANGED: the gate still DENYs (exit 2) on exactly the same
     inputs; only the message text changes.
-  - DEFENSIVE never-raises: if the detector raises, the deny still returns the
-    ORIGINAL message and no exception escapes.
+  - DEFENSIVE never-raises: if the detector raises, the deny still fires with
+    no stale diagnosis attached and no exception escapes. (On rule ⑧ the
+    composer then appends the cause enumeration — a detector failure degrades
+    INTO the generic diagnosis, not into silence.)
 
 Reuses the in-process harness from test_dispatch_gate.py (_run_main / _full_setup
 / _seed_team) so the both-modes setup matches the rest of the gate's suite.
@@ -126,9 +141,14 @@ def test_no_task_assigned_deny_augmented_on_stale_mismatch(
 def test_no_task_assigned_deny_unaugmented_when_no_mismatch(
     mode_label, lead_id, tmp_path, monkeypatch, capsys
 ):
-    """DISABLE leg: when recorded==live (healthy), the rule-⑧ deny keeps its
-    ORIGINAL message verbatim — no augmentation. Paired with the ENABLE test
-    above this is the non-vacuity proof (marker present IFF mismatch)."""
+    """DISABLE leg: when recorded==live (healthy), the rule-⑧ deny carries NO
+    stale diagnosis. Paired with the ENABLE test above this is the non-vacuity
+    proof (stale marker present IFF mismatch).
+
+    The deny is NOT byte-identical to the base message here — the composer
+    appends the cause enumeration precisely because the stale detector did not
+    fire. That is asserted in test_dispatch_gate_cause_enumeration.py; this leg
+    owns only the stale-marker-absence cell."""
     _full_setup(monkeypatch, tmp_path, tasks=(("someone-else", "pending"),))
     _seed_team_with_lead(
         tmp_path, _TEAM, lead_id, tasks=(("someone-else", "pending"),)
@@ -240,8 +260,11 @@ def test_non_symptom_deny_not_augmented_even_under_mismatch(
 def test_detector_exception_falls_back_to_original_message(
     mode_label, lead_id, tmp_path, monkeypatch, capsys
 ):
-    """If detect_stale_session_block raises, the deny still returns the ORIGINAL
-    message and the gate still exits 2 — no exception escapes dispatch."""
+    """If detect_stale_session_block raises, the deny still fires with no stale
+    diagnosis attached and the gate still exits 2 — no exception escapes
+    dispatch. On this rule-⑧ input the composer then appends the cause
+    enumeration, so the raise degrades INTO the generic diagnosis rather than
+    into silence; this leg owns the stale-marker-absence cell only."""
     _full_setup(monkeypatch, tmp_path, tasks=(("someone-else", "pending"),))
     _seed_team_with_lead(
         tmp_path, _TEAM, lead_id, tasks=(("someone-else", "pending"),)
@@ -382,8 +405,10 @@ def test_gate_site_claude_md_absent_falls_back_to_original_message(
     tmp_path, monkeypatch, capsys
 ):
     """M2: when the project CLAUDE.md is ABSENT (the worktree/gitignored case
-    the PR leans on), the detector returns None → the rule-⑧ deny keeps its
-    ORIGINAL message verbatim, end-to-end through dispatch_gate.main().
+    the PR leans on), the detector returns None → the rule-⑧ deny carries NO
+    stale diagnosis, end-to-end through dispatch_gate.main(). (The composer
+    appends the cause enumeration on this path; that cell is owned by
+    test_dispatch_gate_cause_enumeration.py.)
 
     Distinct from the healthy-recorded==live disable leg: there NO file is
     written at all, and CLAUDE_PROJECT_DIR points at a dir with no CLAUDE.md
@@ -414,7 +439,8 @@ def test_gate_site_unset_project_dir_falls_back_to_original_message(
     tmp_path, monkeypatch, capsys
 ):
     """M2 sibling: CLAUDE_PROJECT_DIR UNSET → detector returns None (cannot
-    locate CLAUDE.md) → original deny message, end-to-end."""
+    locate CLAUDE.md) → rule-⑧ deny with NO stale diagnosis, end-to-end. (The
+    composer appends the cause enumeration on this path.)"""
     _full_setup(monkeypatch, tmp_path, tasks=(("someone-else", "pending"),))
     _seed_team_with_lead(
         tmp_path, _TEAM, _LIVE_SESSION_ID, tasks=(("someone-else", "pending"),)
@@ -439,8 +465,9 @@ def test_gate_site_bad_session_id_falls_back_to_original_message(
 ):
     """M3: an invalid/sentinel/control-char stdin session_id makes the detector
     return None (per _is_unknown_or_missing_session — an unvalidated id must
-    never be interpolated into the warning) → the rule-⑧ deny keeps its
-    ORIGINAL message, even though a stale-recorded CLAUDE.md is present.
+    never be interpolated into the warning) → the rule-⑧ deny carries NO stale
+    diagnosis, even though a stale-recorded CLAUDE.md is present. (The composer
+    appends the cause enumeration on this path.)
 
     The CLAUDE.md records a DIFFERENT id, so were the bad id naively compared
     it would 'mismatch' and wrongly augment; the predicate gate must suppress

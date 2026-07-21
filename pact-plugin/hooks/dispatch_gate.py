@@ -556,8 +556,16 @@ def _augment_deny_with_stale_diagnosis(
         for the STALE team, so a marker-gated check would miss exactly the case
         this diagnoses.
       * When the shared detector returns None (no mismatch — the healthy case,
-        or CLAUDE.md absent as in worktrees), the ORIGINAL message is preserved
-        verbatim. The augmentation is purely additive on a detected mismatch.
+        or CLAUDE.md absent as in worktrees), THIS FUNCTION returns the
+        ORIGINAL message unchanged. The augmentation is purely additive on a
+        detected mismatch.
+
+    SCOPE OF THAT LAST CLAIM: it describes THIS FUNCTION's return value, NOT
+    the text the gate finally emits. ``_compose_deny_diagnosis`` reads an
+    unchanged return as "the incumbent did not fire" and may then append the
+    rule-⑧ cause enumeration. So on ``no_task_assigned`` the emitted deny can
+    carry appended text even though this function preserved the message
+    verbatim. The contract here is unchanged; only its consumer is new.
     """
     try:
         if rule not in _STALE_DIAGNOSABLE_RULES:
@@ -573,6 +581,167 @@ def _augment_deny_with_stale_diagnosis(
         # The deny itself is unaffected; only the optional self-diagnosis is
         # dropped. NEVER re-raise out of the dispatch path.
         return message
+
+
+# Appended to the rule-⑧ deny when no stale-team mismatch was detected.
+#
+# Rule ⑧ fires whenever no task with this owner is OBSERVED, and that is
+# already a conflated signal: an unreadable store, a symlink escape, an unsafe
+# team name and an I/O error all look identical to an empty store from inside
+# this gate. So the text ENUMERATES the known causes and hands the reader a
+# check they can run themselves, rather than asserting a cause this gate has no
+# way to determine. The framing is deliberately OBSERVATION, not existence.
+#
+# ACTION-FIRST ordering: the check and the pointer come before the cause list,
+# so anything downstream that truncates leaves the actionable part intact.
+#
+# The branch arms NARROW, they do not CLOSE. "All four present" eliminates
+# cause (3) and claims nothing further, because the four causes below are the
+# KNOWN ones rather than a proven-exhaustive set. Naming the complement ("you
+# are in case (1), (2) or (4)") would send a reader outside that set to chase
+# three wrong causes, which is the very defect this text exists to fix.
+#
+# Cause (1) is worded to COVER the store-clearing case rather than leaving it
+# uncovered, and the earlier "creation was genuinely skipped" is exactly what
+# it must not say. The task store is periodically cleared, so a task can be
+# created and then vanish before the spawn is evaluated — leaving a readable,
+# correctly-resolved, genuinely-empty store, which reads as none of (1)-(4).
+# The remedy for that reader is already (1)'s remedy, so the fix is to widen
+# (1)'s DESCRIPTION, not to add a fifth entry. Wording it as an assertion that
+# creation never happened would invite the one reader who KNOWS they created
+# the task to dismiss the only cause whose action would have helped them.
+#
+# Stated as the OBSERVABLE ("created and since cleared") rather than by naming
+# the clearing mechanism: that mechanism is undocumented and its trigger is
+# unknown, so naming it here would present an internal as a stable interface.
+#
+# The self-check is POSITIVE-ONLY, and that is load-bearing. A permissions
+# error PROVES cause (4); listing the store successfully proves NOTHING —
+# ``ls`` follows symlinks and validates no containment, while this gate's
+# iterator refuses a symlink escape, so a team dir symlinked outside the tasks
+# root makes this gate deny while ``ls`` lists fine. A negative arm would
+# therefore report "not case (4)" in precisely the case that IS (4). A cue that
+# NARROWS is admissible; an assertion that ELIMINATES is not.
+#
+# The remedy for cause (3) is a pointer, never an inlined setting: it is a
+# conditional prerequisite with real blast radius, and a deny message cannot
+# carry the cost statement that has to accompany it.
+_CAUSE_ENUMERATION = (
+    "\n\n"
+    "DIAGNOSIS — this gate did not OBSERVE a task assigned to this owner.\n"
+    "That is not the same as one not existing.\n"
+    "\n"
+    "TO NARROW IT DOWN, confirm all four task tools are available to you:\n"
+    "    ToolSearch \"select:TaskCreate,TaskUpdate,TaskList,TaskGet\"\n"
+    "  Any missing      -> case (3) below. See \"Enabling Agent Teams\" in the\n"
+    "                      PACT README for the setting that restores them,\n"
+    "                      and its trade-offs.\n"
+    "  All four present -> not case (3). That rules out one cause, not the rest.\n"
+    "If listing the task store reports a PERMISSIONS ERROR, you are in case (4).\n"
+    "\n"
+    "KNOWN CAUSES:\n"
+    " (1) No task exists for this owner — never created, or created and since\n"
+    "     cleared. Create the teachback task + the work task, then re-dispatch.\n"
+    " (2) This session's recorded team no longer matches the live one, so this\n"
+    "     gate reads a different task store than the one the task tools write.\n"
+    "     Completing the bootstrap ritual rewrites those records.\n"
+    " (3) The task-management tools are not available in this session at all.\n"
+    "     They can be withheld by a server-controlled feature gate keyed on the\n"
+    "     session's model — in which case (1) cannot be satisfied, because the\n"
+    "     tool needed to create the task is itself absent.\n"
+    " (4) The task store could not be READ — a permissions error, a relocated\n"
+    "     or unreadable store directory, or an I/O fault. This gate cannot\n"
+    "     distinguish an unreadable store from an empty one.\n"
+)
+
+
+# Fail-closed fallback for a violated precondition. Every DENY path in
+# ``evaluate_dispatch`` supplies a real message (11 of 11, verified by
+# enumeration), so this is UNREACHABLE today. It exists because the failure
+# DIRECTION of the alternative is wrong, not because the case is expected.
+#
+# Without it, a non-str ``message`` makes the concatenation below raise
+# TypeError — and the composer runs OUTSIDE the ``try`` that guards
+# ``evaluate_dispatch``, so nothing catches it. The hook would exit 1, and a
+# nonzero-non-2 exit is NON-BLOCKING: the tool call proceeds. A gate whose
+# entire job is to refuse would silently become a pass-through, which is the
+# one direction it must never fail in.
+#
+# Returning a string instead keeps the deny intact: ``main()`` derives exit 2
+# from the DECISION, never from this text. The text is deliberately a real
+# sentence rather than an empty string — ``reason or ""`` would trade a crash
+# for a blank denial, which fails closed but tells the operator nothing.
+_MISSING_DENY_REASON = (
+    "PACT dispatch_gate: dispatch DENIED, but the gate produced no reason "
+    "text. That is an internal defect in the gate itself, not a problem with "
+    "the dispatch. The denial stands."
+)
+
+
+def _compose_deny_diagnosis(
+    rule: str | None, message: str | None, input_data: dict,
+) -> str:
+    """Return the user-facing deny text: the incumbent stale-team diagnosis if
+    it fired, ELSE the cause enumeration on rule ⑧, ELSE ``message`` unchanged.
+
+    A-xor-B BY CONSTRUCTION — the two blocks are mutually exclusive, and the
+    precedence lives HERE, in one dispatcher, rather than as a call-order
+    agreement between two sites in ``main()``. An ordering convention has no
+    mechanism to survive the next edit of ``main()``; this does.
+
+    The incumbent wins because SPECIFIC EVIDENCE BEATS A GENERIC LIST: once the
+    detector has actually identified the mismatch, appending a four-cause "it
+    could be any of these" block would degrade a precise diagnosis into a vague
+    one.
+
+    NEVER RAISES. Its OWN BODY does no I/O and is a pure function of its
+    arguments — one string comparison and one concatenation.
+
+    IT IS NOT I/O-FREE OVERALL, and the distinction is load-bearing. It
+    delegates to ``_augment_deny_with_stale_diagnosis``, which calls
+    ``detect_stale_session_block``, which reads ``CLAUDE_PROJECT_DIR`` and
+    performs ``Path.exists()`` + ``Path.read_text()`` against the project
+    CLAUDE.md. The return value therefore depends on disk contents, not on the
+    arguments alone.
+
+    The true and load-bearing claim is ZERO **NEW** I/O: that read is
+    PRE-EXISTING on exactly this path, so this change adds no filesystem work
+    and cannot introduce the fail-open hang that a new unbounded read would.
+    Writing "no I/O" instead would be false, and would invite a future author
+    to relocate this call somewhere the read WOULD be new — which is precisely
+    the safety case this gate rests on.
+
+    It is called strictly AFTER ``_journal_decision`` has recorded the
+    canonical reason, so the journal keeps the un-augmented text regardless of
+    what this returns.
+
+    GRACEFUL DEGRADATION: the incumbent is itself never-raises and returns
+    ``message`` unchanged on any internal failure, which is indistinguishable
+    here from "no mismatch detected". A detector failure therefore falls
+    through to the enumeration — A's failure degrades INTO B, never into
+    silence.
+
+    Note the ``augmented != message`` test infers "the incumbent fired" from a
+    VALUE DIFFERENCE rather than from a flag the incumbent sets. That is sound
+    only because the incumbent's fire path is append-only with a non-empty
+    suffix, so a fired call is always strictly longer. If that ever stops
+    holding, this must become an explicit fired-signal rather than a smarter
+    comparison.
+
+    TOTAL over its argument types: a non-str ``message`` returns the fail-closed
+    fallback rather than raising. See ``_MISSING_DENY_REASON`` for why the
+    annotation alone is not sufficient here — an unenforced precondition on
+    this particular function fails OPEN.
+    """
+    if not isinstance(message, str):
+        return _MISSING_DENY_REASON
+
+    augmented = _augment_deny_with_stale_diagnosis(rule, message, input_data)
+    if augmented != message:
+        return augmented
+    if rule == "no_task_assigned":
+        return message + _CAUSE_ENUMERATION
+    return message
 
 
 def main() -> None:
@@ -613,12 +782,13 @@ def main() -> None:
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
     if decision == "DENY":
-        # MESSAGE-ONLY self-diagnosis: on a restart-symptom deny rule, append a
-        # stale-team/store mismatch explanation + re-align steps when detected.
+        # MESSAGE-ONLY self-diagnosis: either the stale-team/store mismatch
+        # explanation (when detected) or, on rule ⑧, the cause enumeration —
+        # never both, per the A-xor-B precedence inside the composer.
         # Journaling above recorded the canonical (un-augmented) reason; this
         # augments ONLY the user-facing message and never the decision. The
-        # helper is never-raises — on any error the original reason stands.
-        deny_message = _augment_deny_with_stale_diagnosis(rule, reason, input_data)
+        # composer is never-raises — on any error the original reason stands.
+        deny_message = _compose_deny_diagnosis(rule, reason, input_data)
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
