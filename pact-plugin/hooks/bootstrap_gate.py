@@ -379,10 +379,38 @@ _SECRETARY_AGENT_TYPE = "pact-secretary"
 # shared/marker_schema.py — the SSOT shared by producer
 # (bootstrap_marker_writer.py) and this verifier. Imported above.
 
+# The trailing clause is a POINTER, not a diagnosis. This gate reads no task
+# store and carries no rule identifier, so it cannot tell WHY bootstrap has not
+# completed — and the overwhelmingly common answer is the benign one: the
+# ritual simply has not been run yet. The clause is therefore CONDITIONED on a
+# symptom the reader can observe for themselves, never phrased as advice to go
+# change a setting. Routing a user who has merely not bootstrapped toward a
+# high-blast-radius configuration change would be actively harmful, which is
+# why the condition comes first and the pointer second.
+#
+# "State-independent" here means TRUE in every state, not RECOMMENDING THE SAME
+# ACTION in every state: when the condition does not hold the clause asks
+# nothing of the reader.
+#
+# The pointer is an ABSOLUTE URL rather than a section name, and that is not a
+# style choice. The README shipped INSIDE the plugin package does not contain
+# that section — it lives in the repository README — so a reader who searches
+# their local copy for a quoted section title finds nothing, which is worse
+# than no pointer at all. This URL is already the established convention in
+# the shipped README, which links it twice. It also lands on the section
+# together with its cost paragraph, which a terse local restatement would
+# drop. Do NOT "simplify" this back to a section name.
+#
+# Any change to this text must be mirrored into
+# ``_CANONICAL_DENY_REASON_LITERAL`` in tests/test_bootstrap_gate.py. That
+# two-site edit is the deny-reason drift detector's intended review path.
 _DENY_REASON = (
     "PACT bootstrap required. Invoke Skill(\"PACT:bootstrap\") first. "
     "Code-editing tools (Edit, Write) and agent dispatch (Agent) are blocked "
-    "until bootstrap completes. Bash, Read, Glob, Grep are available."
+    "until bootstrap completes. Bash, Read, Glob, Grep are available. "
+    "If bootstrap cannot complete because the task-management tools are "
+    "unavailable, see "
+    "https://github.com/Synaptic-Labs-AI/PACT-Plugin#enabling-agent-teams"
 )
 
 

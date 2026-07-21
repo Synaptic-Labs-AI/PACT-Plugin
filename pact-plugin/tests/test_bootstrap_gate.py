@@ -97,7 +97,10 @@ _SLUG = "project"
 _CANONICAL_DENY_REASON_LITERAL = (
     "PACT bootstrap required. Invoke Skill(\"PACT:bootstrap\") first. "
     "Code-editing tools (Edit, Write) and agent dispatch (Agent) are blocked "
-    "until bootstrap completes. Bash, Read, Glob, Grep are available."
+    "until bootstrap completes. Bash, Read, Glob, Grep are available. "
+    "If bootstrap cannot complete because the task-management tools are "
+    "unavailable, see "
+    "https://github.com/Synaptic-Labs-AI/PACT-Plugin#enabling-agent-teams"
 )
 
 
