@@ -26,6 +26,7 @@ import fcntl  # Unix-only; PACT supports macOS/Linux. No Windows compat shim.
 import os
 import re
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -179,6 +180,67 @@ _BOUNDARY_ALT = "|".join(PACT_BOUNDARY_PREFIXES)
 _STALE_ORCHESTRATOR_LINE_RE = re.compile(
     r"^The global PACT Orchestrator is loaded from `~/\.claude/CLAUDE\.md`\.?\s*$",
 )
+
+
+def _atomic_write_text(target: Path, content: str) -> None:
+    """Replace `target`'s contents with `content` atomically.
+
+    `Path.write_text` truncates the file and THEN writes, so a crash, a full
+    disk, or a kill between those two steps leaves a TRUNCATED CLAUDE.md. That
+    file is gitignored and untracked in the projects this runs in, so there is
+    no recovery path -- the user's pinned context is simply gone.
+
+    Writing to a sibling temp file and renaming makes the replacement atomic: a
+    reader sees either the whole old file or the whole new one, never a partial
+    write. The temp file is created in the TARGET'S OWN DIRECTORY because
+    `os.replace` is only atomic within a single filesystem.
+
+    The mode is set on the TEMP file before the rename, so the target is never
+    momentarily visible with the wrong permissions -- unlike a chmod after the
+    write, which leaves exactly such a window on a file holding user content.
+
+    Callers should already hold `file_lock` for the target. The lock closes the
+    concurrent-writer window; this closes the crash/truncation window. They are
+    different hazards and neither fix subsumes the other. Note the lock is a
+    separate sidecar file, so replacing the target's inode does not disturb it.
+
+    Requires write permission on the target's DIRECTORY (to create the temp),
+    where a bare `write_text` needed only permission on the file itself. A
+    read-only directory holding a writable CLAUDE.md would now fail the write
+    rather than truncate it -- a safe direction, but a real behaviour change.
+
+    NOTE: a deliberate duplicate of `_atomic_write_text` in
+    `skills/pact-memory/scripts/working_memory.py`, which cannot import from
+    `hooks/shared/` (separate package). Unlike the `file_lock` twin, the two
+    copies are NOT drift-gated: atomicity has no cross-process invariant, so
+    each copy is independently correct and may legitimately diverge.
+
+    Args:
+        target: Path to replace. Its parent directory must already exist.
+        content: Full file contents to write.
+    """
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            # Without the fsync the rename can be persisted while the data
+            # behind it is not, which reintroduces the empty-file failure this
+            # function exists to prevent.
+            os.fsync(handle.fileno())
+        # mkstemp already creates 0o600; setting it explicitly keeps the mode a
+        # property of this function rather than of the stdlib's default.
+        os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, target)
+    except BaseException:
+        # Never leave a stray temp file behind next to the user's CLAUDE.md.
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def _strip_legacy_lines(content: str) -> str:
@@ -392,8 +454,7 @@ def strip_orphan_kernel_block() -> str | None:
                 new_content = ""
 
             try:
-                target_file.write_text(new_content, encoding="utf-8")
-                os.chmod(str(target_file), 0o600)
+                _atomic_write_text(target_file, new_content)
                 return (
                     "Removed obsolete PACT kernel block from "
                     "~/.claude/CLAUDE.md"
@@ -491,8 +552,9 @@ def ensure_dot_claude_parent(path: Path) -> None:
     Raises early with a clear message when the parent path exists but is
     a regular file (e.g., a local attacker deliberately blocking mkdir
     by creating a file where `.claude/` should be). Without this guard
-    the code path would fall through to the subsequent write_text call
-    and surface a less-clear late-stage OSError.
+    the code path would fall through to the subsequent `_atomic_write_text`
+    call and surface a less-clear OSError from `tempfile.mkstemp`, which
+    needs the parent to be a writable directory.
 
     Args:
         path: The target CLAUDE.md path (e.g. /proj/.claude/CLAUDE.md).
@@ -579,8 +641,7 @@ def ensure_project_memory_md() -> str | None:
             if target_file.exists():
                 return None
             try:
-                target_file.write_text(memory_template, encoding="utf-8")
-                os.chmod(str(target_file), 0o600)
+                _atomic_write_text(target_file, memory_template)
                 return "Created project CLAUDE.md with memory sections"
             except OSError as e:
                 return f"Project CLAUDE.md failed: {str(e)[:50]}"
@@ -657,8 +718,7 @@ def migrate_to_managed_structure() -> str | None:
             new_content = _build_migrated_content(content)
 
             try:
-                target_file.write_text(new_content, encoding="utf-8")
-                os.chmod(str(target_file), 0o600)
+                _atomic_write_text(target_file, new_content)
                 return "Migrated project CLAUDE.md to managed structure (#404)"
             except OSError as e:
                 return f"Migration failed: {str(e)[:50]}"

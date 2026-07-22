@@ -198,14 +198,23 @@ class TestEnsureProjectMemoryMdErrorPaths:
         """Should return truncated error message when write fails."""
         from shared.claude_md_manager import ensure_project_memory_md
 
-        # Point to a directory where we can't write
-        read_only = tmp_path / "readonly"
-        read_only.mkdir()
+        # A WRITABLE project dir: the failure is injected, not environmental.
+        # An unwritable directory cannot be used to reach this code path --
+        # file_lock creates its sidecar in the same directory the write needs,
+        # so the lock raises first and the write is never attempted. The
+        # mocked failure is unreachable in production; only injection gets here.
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(read_only))
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
 
+        # Patch the write helper, not Path.write_text -- the code writes via
+        # _atomic_write_text (temp + rename), so patching write_text would
+        # no-op silently and the test would pass without exercising anything.
         from unittest.mock import patch
-        with patch.object(Path, "write_text", side_effect=OSError("No space left")):
+
+        import shared.claude_md_manager as cmm
+        with patch.object(cmm, "_atomic_write_text", side_effect=OSError("No space left")):
             result = ensure_project_memory_md()
 
         assert result is not None
@@ -1870,8 +1879,11 @@ class TestMigrateToManagedStructure:
         claude_md.write_text("# Project Memory\n\n## Working Memory\n")
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
 
+        # The migration writes via _atomic_write_text (temp + rename), not
+        # Path.write_text -- patching write_text here would no-op silently.
+        import shared.claude_md_manager as cmm
         with mock_patch.object(
-            type(claude_md), "write_text", side_effect=OSError("disk full")
+            cmm, "_atomic_write_text", side_effect=OSError("disk full")
         ):
             result = migrate_to_managed_structure()
 

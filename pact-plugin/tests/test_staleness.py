@@ -484,8 +484,11 @@ class TestStalenessErrorPaths:
             "- Details\n\n"
         ))
 
-        # Let read_text work normally, but make write_text fail
-        with patch.object(type(claude_md), "write_text", side_effect=IOError("read-only fs")):
+        # Let read_text work normally, but make the write fail. staleness.py
+        # writes via claude_md_manager._atomic_write_text (temp + rename), not
+        # Path.write_text -- patching write_text here would no-op silently.
+        import shared.claude_md_manager as cmm
+        with patch.object(cmm, "_atomic_write_text", side_effect=IOError("read-only fs")):
             result = check_pinned_staleness(claude_md_path=claude_md)
 
         # Should return an error message string (not None)
@@ -507,7 +510,8 @@ class TestStalenessErrorPaths:
             "- Details\n\n"
         ))
 
-        with patch.object(type(claude_md), "write_text", side_effect=OSError("permission denied")):
+        import shared.claude_md_manager as cmm
+        with patch.object(cmm, "_atomic_write_text", side_effect=OSError("permission denied")):
             result = check_pinned_staleness(claude_md_path=claude_md)
 
         assert result is not None

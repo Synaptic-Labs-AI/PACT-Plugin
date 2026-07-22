@@ -185,10 +185,26 @@ def _atomic_write_text(target: Path, content: str) -> None:
     write. The temp file is created in the TARGET'S OWN DIRECTORY because
     `os.replace` is only atomic within a single filesystem.
 
+    The mode is set on the TEMP file before the rename, so the target is never
+    momentarily visible with the wrong permissions -- unlike a chmod after the
+    write, which leaves exactly such a window on a file holding user content.
+
     Callers must already hold `file_lock` for the target. The lock closes the
     concurrent-writer window; this closes the crash/truncation window. They are
     different hazards, and neither fix subsumes the other. Note the lock is a
     separate sidecar file, so replacing the target's inode does not disturb it.
+
+    Requires write permission on the target's DIRECTORY (to create the temp),
+    where a bare `write_text` needed only permission on the file itself. A
+    read-only directory holding a writable CLAUDE.md would now fail the write
+    rather than truncate it -- a safe direction, but a real behaviour change.
+
+    NOTE: a deliberate duplicate of `_atomic_write_text` in
+    `hooks/shared/claude_md_manager.py`. This module cannot import from
+    `hooks/shared/` (separate package), the same constraint that produced the
+    `file_lock` twin above. Unlike that twin, the two copies are NOT
+    drift-gated: atomicity has no cross-process invariant, so each copy is
+    independently correct and may legitimately diverge.
 
     Args:
         target: Path to replace. Its parent directory must already exist.

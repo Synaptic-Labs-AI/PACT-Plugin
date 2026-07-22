@@ -28,6 +28,7 @@ from shared.claude_md_manager import (
     MANAGED_TITLE,
     MEMORY_END_MARKER,
     MEMORY_START_MARKER,
+    _atomic_write_text,
     ensure_dot_claude_parent,
     file_lock,
     resolve_project_claude_md_path,
@@ -194,8 +195,7 @@ def update_session_info(
                         "\n"
                         f"{MANAGED_END_MARKER}\n"
                     )
-                    target_file.write_text(new_content, encoding="utf-8")
-                    os.chmod(str(target_file), 0o600)
+                    _atomic_write_text(target_file, new_content)
                     return "Session info created in new project CLAUDE.md"
 
                 content = target_file.read_text(encoding="utf-8")
@@ -217,8 +217,7 @@ def update_session_info(
                         flags=re.DOTALL,
                     )
                     if new_content != content:
-                        target_file.write_text(new_content, encoding="utf-8")
-                        os.chmod(str(target_file), 0o600)
+                        _atomic_write_text(target_file, new_content)
                         return "Session info updated in project CLAUDE.md"
                     return None
 
@@ -270,8 +269,7 @@ def update_session_info(
                             content += "\n"
                         new_content = content + "\n" + session_block + "\n"
 
-                target_file.write_text(new_content, encoding="utf-8")
-                os.chmod(str(target_file), 0o600)
+                _atomic_write_text(target_file, new_content)
                 return "Session info added to project CLAUDE.md"
 
             except Exception as e:
