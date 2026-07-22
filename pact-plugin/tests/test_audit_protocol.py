@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 PROTOCOLS_DIR = Path(__file__).parent.parent / "protocols"
 COMMANDS_DIR = Path(__file__).parent.parent / "commands"
 AGENTS_DIR = Path(__file__).parent.parent / "agents"
+SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
 AUDIT_PROTOCOL = PROTOCOLS_DIR / "pact-audit.md"
 ORCHESTRATE_CMD = COMMANDS_DIR / "orchestrate.md"
@@ -508,3 +509,72 @@ class TestStructuralVerificationDiscipline:
             "extracts sync gate would silently no-op (skip) without it, "
             "leaving SSOT/extract drift undetected."
         )
+
+
+class TestTeachbackBlockingSemanticGuard:
+    """Semantic-regression guard for the teachback-doc reconciliation to ONE
+    blocking model.
+
+    The byte-mirror gate (test_verify_protocol_extracts_* above) guards
+    extract<->SSOT BYTE-IDENTITY: it catches a DESYNC of a mirrored pair but is
+    BLIND to the blocking-vs-non-blocking SEMANTIC. A future edit that
+    re-introduces GEN-1 non-blocking phrasing IDENTICALLY on both the extract and
+    its SSOT mirror stays byte-identical and passes the byte-gate. This guard
+    asserts the reconciled teachback surface does not re-introduce the specific
+    GEN-1 phrases the reconciliation removed.
+
+    False-positive safety: this is a DENYLIST of high-specificity phrases
+    distinctive to the removed GEN-1 teachback prose (each verified to appear
+    NOWHERE in the current sources). It deliberately does NOT denylist the
+    generic word "non-blocking", which legitimately occurs in these files (e.g.
+    pact-protocols.md: "The auditor is **non-blocking**", plus hook fail-open /
+    HANDOFF-processing contexts) and would false-positive. Phrase-specificity is
+    what lets this assert file-wide without region-bounding the multi-topic SSOT.
+
+    Bounded-completeness residual (intentional): a phrase denylist catches a
+    copy-paste REVERT to the old GEN-1 wording (the likely regression) but NOT a
+    re-worded non-blocking model expressed in fresh prose. Guarding the latter
+    would require the generic word + region-bounding + context exclusions, which
+    is fragile and false-positive-prone; that completeness is out of scope by
+    design (copy-paste-revert is the valuable, false-positive-safe coverage).
+    """
+
+    # The reconciled teachback surface (the reconciliation's edited file set).
+    RECONCILED_FILES = [
+        PROTOCOLS_DIR / "pact-ct-teachback.md",
+        PROTOCOLS_DIR / "pact-protocols.md",
+        PROTOCOLS_DIR / "pact-completion-authority.md",
+        SKILLS_DIR / "pact-teachback" / "SKILL.md",
+        AGENTS_DIR / "pact-orchestrator.md",
+        COMMANDS_DIR / "peer-review.md",
+    ]
+
+    # High-specificity GEN-1 (non-blocking) phrases the reconciliation removed.
+    # Distinctive enough that legitimate current prose never contains them, so a
+    # match means a GEN-1 regression re-entered the teachback surface. Matched
+    # case-insensitively so a re-cased revert is still caught. Note: "stays
+    # hidden" is the least-specific entry (it guards the corrected false
+    # blockedBy-visibility claim); the other three are unmistakably GEN-1
+    # teachback prose. The generic word "non-blocking" is intentionally EXCLUDED
+    # (it occurs legitimately, e.g. the auditor description in pact-protocols.md).
+    GEN1_REGRESSION_PHRASES = [
+        "Why Non-Blocking",                 # removed section heading
+        "Proceeding unless corrected",      # removed proceed-optimistically clause
+        "proceed with work after sending",  # removed non-blocking flow line
+        "stays hidden",                     # corrected false blockedBy claim
+    ]
+
+    def test_no_gen1_nonblocking_phrase_in_reconciled_surface(self):
+        for path in self.RECONCILED_FILES:
+            assert path.is_file(), f"reconciled surface file missing: {path}"
+            text = path.read_text(encoding="utf-8").lower()
+            for phrase in self.GEN1_REGRESSION_PHRASES:
+                assert phrase.lower() not in text, (
+                    f"GEN-1 non-blocking phrase {phrase!r} re-introduced into "
+                    f"{path.name} — the teachback surface reconciliation moved it "
+                    f"to ONE blocking model. The byte-mirror gate cannot catch "
+                    f"this (it guards byte-identity, not blocking-vs-non-blocking "
+                    f"semantics). If this phrasing is intentionally returning, the "
+                    f"reconciliation is being reverted; update this guard "
+                    f"deliberately."
+                )
