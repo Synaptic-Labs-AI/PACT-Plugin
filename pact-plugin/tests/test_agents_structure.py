@@ -570,12 +570,24 @@ class TestTeachbackMicroSkillExtraction:
         'TaskUpdate(taskId, metadata={"teachback_submit":',  # Storage literal
     ]
 
-    # Lines that indicate full protocol content (not a stub).
-    # If pact-agent-teams contains these, the extraction is incomplete.
+    # Teachback MESSAGE-FORMAT / content-writing phrases the full teachback
+    # protocol carries but a pointer-stub never would. If pact-agent-teams
+    # contains any of these, the full protocol has leaked back into the stub
+    # (the extraction is incomplete). These deliberately avoid the
+    # intentional_wait / lifecycle vocabulary that pact-agent-teams
+    # legitimately owns as a stub (awaiting_lead_completion, the acceptance
+    # ordering TaskUpdate(A, status="completed")) — that territory is a muddy
+    # discriminator; teachback message-authoring guidance is not.
     FULL_PROTOCOL_MARKERS = [
         "Send as your **first message**",
         "Keep concise: 3-6 bullet points",
-        "Non-blocking: proceed with work after sending",
+        # Live teachback-template bullet from the current (blocking-era) full
+        # protocol: protocols/pact-ct-teachback.md "Teachback Format" plus its
+        # pact-protocols.md SSOT mirror. Replaces a dead non-blocking-era fossil
+        # ("Non-blocking: proceed with work after sending") that, after the
+        # reconciliation to the blocking model, appears nowhere and so could no
+        # longer catch a full-protocol dump.
+        "Building: {what I understand I'm building}",
     ]
 
     @pytest.fixture
