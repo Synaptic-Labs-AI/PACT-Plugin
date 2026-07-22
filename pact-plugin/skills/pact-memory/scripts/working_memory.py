@@ -109,7 +109,12 @@ def file_lock(target_file: Path):
     would alter this body and trip the drift test; the OS-level non-re-entrancy
     plus the callers' fail-open already bound the worst case).
     """
-    lock_path = target_file.parent / f".{target_file.name}.lock"
+    # Resolve the WHOLE target, not just its parent: fcntl.flock serialises on
+    # the sidecar's inode, so two spellings of one file must produce one sidecar
+    # name. Resolving only the parent still keys a symlinked FILE by its alias
+    # (two names, one inode -> two sidecars -> no mutual exclusion).
+    resolved_target = target_file.resolve()
+    lock_path = resolved_target.parent / f".{resolved_target.name}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     # 0o600: the lock file is adjacent to user-private CLAUDE.md content;
     # match the same permissions to avoid leaving a world-readable sidecar.
