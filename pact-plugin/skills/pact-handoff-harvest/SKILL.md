@@ -268,9 +268,13 @@ Review all memories saved during this session by listing recent pact-memory entr
 - Prune superseded memories (update or delete entries replaced by newer information)
 - **Prune stale `## team=` sections** in `~/.claude/agent-memory/pact-secretary/session_processed_tasks.md`: drop any `## team=` section older than ~30 days (judge by the section's `Last processed` timestamp) or whose team is known-complete (the session has wrapped/paused and will not resume). This is safe — the session journal's `agent_handoff` events are the authoritative dedup source, so a pruned-then-resurrected team re-derives its processed set from its own journal. Prune only stale/complete sections; never touch an active team's section. (Pruning happens only in this deep-clean Consolidation pass — the Standard/Incremental hot paths leave the file untouched apart from your own section.)
 
-### Step 4: Sync Working Memory
+### Step 4: Reconcile Working Memory
 
-Sync Working Memory to CLAUDE.md. The auto-sync mechanism handles individual saves, but consolidation may have merged/pruned entries that require a refresh.
+**No command syncs Working Memory, and consolidation does not refresh it.** The section is written only as a side effect of `save`; `update` and `delete` do not touch CLAUDE.md at all. So the merges and prunes you performed in Step 3 are **not** reflected in the Working Memory section — it still shows the pre-consolidation entries, and it will keep showing them until the next `save` rewrites it.
+
+Do not look for a sync or reconcile command; the CLI has none, and attempting one wastes a turn. If consolidation superseded or deleted a memory that the section still displays, the only way to correct it now is to **rewrite the Working Memory section directly**, exactly as the spawn-time stale-entry cleanup does.
+
+**But a hand rewrite is not durable, so do not record it as the fix.** The next `save` prepends its own entry and re-applies the token budget to whatever text is already in the section, so anything you rewrote is compressed or dropped by the same rules as any other older entry — and because a typical full entry alone exceeds the budget, the next `save` usually erases the rewrite entirely. The section also never re-reads the store, so correcting a record with `update` or `delete` fixes the record but never propagates into the display on its own. **The durable correction lives in the store; the rewrite is a stopgap for the current session only.** Report both in Step 6 — what you rewrote, and that the section will not hold it — so the team-lead reads the display as transient rather than repaired.
 
 ### Step 5: Save Orchestration Retrospective
 
