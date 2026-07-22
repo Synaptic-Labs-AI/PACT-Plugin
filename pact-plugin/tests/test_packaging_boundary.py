@@ -526,8 +526,14 @@ def test_premise_marketplace_maps_only_the_pact_plugin_subtree():
         "here they are not — so an exclusion-shaped NAME in a marketplace entry "
         "is not evidence of exclusion BEHAVIOUR. That asymmetry is exactly why "
         "this check does not filter by key shape.\n\n"
-        "WHAT TO DO: establish the key's real semantics, then either relax this "
-        "assertion or move it to the exclusion tripwire in the sibling test."
+        "WHAT TO DO — establish the key's real semantics, then act on the "
+        "branch that resolves. These are not a menu; each branch above has ONE "
+        "correct action. If the key CAN name paths outside the declared source, "
+        "this check stops being precautionary: KEEP it here and rewrite this "
+        "message as a demonstrated mechanism. If it only REMOVES paths, MOVE it "
+        "to the exclusion tripwire in the sibling test — do NOT simply delete "
+        "it, or marketplace entries lose the model-changed tripwire that "
+        "plugin.json keeps, and the two manifests fall out of parity again."
     )
 
 
