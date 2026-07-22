@@ -29,6 +29,7 @@ the file-size advisory threshold):
 Used by: pytest (the working_memory edge-path gate).
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -64,10 +65,19 @@ class TestLockReleaseOnException:
     def test_chmod_failure_mid_window_releases_lock_and_fails_open(
         self, tmp_path, monkeypatch
     ):
-        """If os.chmod raises AFTER write_text but INSIDE the `with file_lock`
-        block, sync_to_claude_md must (a) return False (fail-open via the outer
+        """If os.chmod raises INSIDE the `with file_lock` block,
+        sync_to_claude_md must (a) return False (fail-open via the outer
         try/except) and (b) leave the lock RE-ACQUIRABLE — proving the lock was
         released on the exception path, not leaked.
+
+        Mid-window failure SITE (post-atomicity, C2/C3a): the sync now writes via
+        _atomic_write_text, which calls os.chmod on the TEMP file (before
+        os.replace), not on the target after a bare write_text. So a boom on
+        os.chmod is still a reachable mid-window exception — it fires inside
+        _atomic_write_text, propagates out through the file_lock contextmanager's
+        `finally`, and is caught by the outer try/except. The assertions below
+        (fail-open + lock re-acquirable) are what this test pins; the exact chmod
+        site moved with the atomicity refactor but the exception path did not.
 
         A leaked lock would force the next acquirer to block until the 5s
         timeout (then fail open), degrading every subsequent sync. We prove
@@ -79,7 +89,8 @@ class TestLockReleaseOnException:
         claude_md = _seed_claude_md(tmp_path)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
-        # Raise inside the with-block, after write_text, at os.chmod.
+        # Raise at the os.chmod inside _atomic_write_text (chmod-the-temp step,
+        # before os.replace), exercising the mid-window exception path.
         def boom_chmod(*args, **kwargs):
             raise OSError("simulated chmod failure mid-window")
 
@@ -101,16 +112,24 @@ class TestLockReleaseOnException:
         with wm.file_lock(target):
             pass  # acquisition must succeed — if the lock had leaked this raises
 
-    def test_mid_window_exception_leaves_no_torn_write(self, tmp_path, monkeypatch):
-        """The file must remain well-formed (no partial/torn content) after a
-        mid-window exception. os.chmod runs AFTER write_text, so write_text may
-        have already replaced the file — assert it is still a complete,
-        parseable document with its Working Memory section intact, not a
-        truncated fragment.
+    def test_mid_window_exception_leaves_target_byte_identical(self, tmp_path, monkeypatch):
+        """After a mid-window exception the target must be BYTE-IDENTICAL to its
+        pre-sync content — the failed write rolled back completely, not merely
+        "not torn".
+
+        Post-atomicity (C2/C3a) this is a stronger and now-true guarantee than
+        the old "structurally complete" check. _atomic_write_text writes a temp,
+        chmods the TEMP, then os.replace()s it onto the target. os.chmod is boomed
+        here, so the exception fires BEFORE os.replace — the target inode is never
+        swapped and retains its exact original bytes. (Under the OLD write_text-
+        then-chmod path the target would already hold the NEW content when chmod
+        boomed, so `final == before` would FAIL — which is exactly why this
+        assertion is coupled to the atomic-replace rollback and not vacuous.)
         """
         import working_memory as wm
 
         claude_md = _seed_claude_md(tmp_path)
+        before = claude_md.read_text(encoding="utf-8")
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
         def boom_chmod(*args, **kwargs):
@@ -118,17 +137,92 @@ class TestLockReleaseOnException:
 
         monkeypatch.setattr(wm.os, "chmod", boom_chmod)
 
-        wm.sync_to_claude_md({"context": "TORN-CHECK", "goal": "g"}, None, "id")
+        result = wm.sync_to_claude_md({"context": "TORN-CHECK", "goal": "g"}, None, "id")
 
+        assert result is False, "a mid-window failure must fail open"
         final = claude_md.read_text(encoding="utf-8")
-        # write_text is atomic at the Python level (single write of the full
-        # new content), so the file is either the old or the new full document
-        # — never a fragment. Assert structural completeness.
-        assert final.startswith("# Project"), "file head was truncated"
-        assert "## Working Memory" in final, "section was lost"
-        # No dangling half-entry: every entry header has a body marker. (The
-        # write either fully landed the new entry or did not; both are whole.)
-        assert final.count("## Working Memory") == 1
+        # Rollback is total: the atomic replace never ran, so not one byte of the
+        # attempted new content reached the always-loaded file.
+        assert final == before, "target was mutated despite a pre-replace failure"
+        assert "TORN-CHECK" not in final, "partial/new content leaked into the target"
+
+
+# ---------------------------------------------------------------------------
+# 1b. Read-only target directory — atomic-write dir-permission fail-safe.
+# ---------------------------------------------------------------------------
+
+class TestReadOnlyDirectoryFailSafe:
+    """The atomicity refactor (C2/C3a) requires write permission on the target's
+    DIRECTORY — _atomic_write_text creates its temp there via mkstemp — where the
+    old bare write_text needed only permission on the file. On a read-only
+    directory holding a writable CLAUDE.md the sync now REFUSES the write (fails
+    safe) instead of truncating. Narrow config (bind mounts, restrictive umask)
+    but real."""
+
+    def test_readonly_dir_refuses_atomic_write_at_write_site_and_leaves_file_intact(
+        self, tmp_path, monkeypatch
+    ):
+        """A 0o500 directory holding a writable CLAUDE.md makes the atomic write
+        fail; sync returns False and the file is byte-unchanged.
+
+        The FAILURE SITE is asserted, not just the outcome — because two distinct
+        steps create a file in the target directory and they fail at DIFFERENT
+        sites: file_lock creates its `.CLAUDE.md.lock` sidecar (os.open O_CREAT),
+        and _atomic_write_text creates its temp (mkstemp). On a read-only dir with
+        NO sidecar the LOCK fails first and the atomic write is never reached — a
+        test that stopped at "returns False" would certify the lock's permission
+        check, not the atomic-write behaviour change it names. So this test
+        PRE-CREATES the sidecar, making the lock acquirable (opening an existing
+        file RDWR needs file-write + dir-search, not dir-create), so the failure
+        lands at mkstemp inside _atomic_write_text. Empirically verified: without
+        the pre-created sidecar the PermissionError comes from file_lock; with it,
+        from mkstemp.
+        """
+        import working_memory as wm
+
+        claude_md = _seed_claude_md(tmp_path)
+        before = claude_md.read_text(encoding="utf-8")
+        claude_dir = claude_md.parent
+
+        # Pre-create the lock sidecar so file_lock acquires without needing to
+        # CREATE a file in the soon-to-be read-only directory.
+        sidecar = claude_dir / f".{claude_md.name}.lock"
+        sidecar.write_text("", encoding="utf-8")
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        # Instrument the SITE: record that _atomic_write_text was reached (proving
+        # the lock was passed) and let the REAL read-only dir make its mkstemp
+        # raise. The failure is a genuine filesystem PermissionError, not a stub.
+        reached = {"atomic_write": False}
+        real_atomic = wm._atomic_write_text
+
+        def spy_atomic(target, content):
+            reached["atomic_write"] = True
+            return real_atomic(target, content)
+
+        monkeypatch.setattr(wm, "_atomic_write_text", spy_atomic)
+
+        os.chmod(str(claude_dir), 0o500)
+        try:
+            result = wm.sync_to_claude_md(
+                {"context": "READONLY-DIR", "goal": "g"}, None, "id"
+            )
+        finally:
+            os.chmod(str(claude_dir), 0o700)  # restore so tmp cleanup can run
+
+        # Fail-safe: the sync declined and the always-loaded file is untouched.
+        assert result is False, "read-only dir must make the sync fail open"
+        assert claude_md.read_text(encoding="utf-8") == before, (
+            "target was mutated on a read-only dir — the write did not fail safe"
+        )
+        # SITE: execution reached _atomic_write_text (past the lock), so the
+        # failure is the atomic-write dir-write requirement, not the lock's.
+        assert reached["atomic_write"], (
+            "sync failed before reaching _atomic_write_text — the sidecar "
+            "precondition is not holding, so this exercises the lock's permission "
+            "check, not the dir-write behaviour change it exists to pin"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -131,6 +131,34 @@ def clean_env(monkeypatch):
     return monkeypatch
 
 
+def _install_find_spy(monkeypatch):
+    """Spy scripts.working_memory._find_existing_claude_md, recording each call's
+    (base, result) so a test can assert WHICH resolver branch produced the answer.
+
+    _resolve_display_claude_md_path carries no branch tag, log line, or return
+    enum: it distinguishes branches only by which _find_existing_claude_md(base)
+    call first returns non-None. So the call sequence IS the branch trace — branch
+    2 passes the `--show-toplevel` worktree root, branch 3 passes the
+    `--git-common-dir` main-repo root. Spying the function itself (not a durable
+    side effect like the lock sidecar, which outlives the call and would measure
+    its own residue) is the seam the backend-coder used for the same distinction.
+
+    Returns a list of (Path(base), result) tuples in call order; monkeypatch tears
+    the spy down at test teardown so it never leaks into a sibling test.
+    """
+    import scripts.working_memory as wm
+    calls = []
+    real = wm._find_existing_claude_md
+
+    def spy(base):
+        result = real(base)
+        calls.append((Path(base), result))
+        return result
+
+    monkeypatch.setattr(wm, "_find_existing_claude_md", spy)
+    return calls
+
+
 # ---------------------------------------------------------------------------
 # Display-target resolver — _resolve_display_claude_md_path
 # ---------------------------------------------------------------------------
@@ -145,6 +173,86 @@ class TestDisplayTargetResolver:
         _main, worktree = worktree_repo
         resolved = _resolve_display_claude_md_path()
         assert resolved == worktree / ".claude" / "CLAUDE.md"
+
+    def test_worktree_without_own_file_resolves_main_via_branch_3(
+        self, tmp_path, clean_env
+    ):
+        """Option C branch 3: a PACT-convention worktree with NO own CLAUDE.md
+        whose MAIN repo HAS one resolves to the MAIN file.
+
+        Pre-Option-C this returned None and the write was silently lost — the
+        worktree had no file and no branch could see the main one. Branch 3
+        (`--git-common-dir`.parent) closes that gap. This is the SOLE behavioral
+        guard for branch 3: reverting that branch makes this test fail, because the
+        worktree cwd has no CLAUDE.md so the resolver falls through to None
+        (verified by revert-and-fail, not merely watched pass).
+
+        A path-only assertion cannot prove branch 3 fired rather than branch 2
+        landing on the same file, so the call SEQUENCE is asserted: branch 2
+        (worktree root) was attempted and returned None BEFORE branch 3 (main root)
+        returned the file. Order matters — a change that made branch 2 wrongly
+        succeed must not read as a branch-3 hit.
+        """
+        main = tmp_path / "mainproj"
+        worktree = tmp_path / "wt-feature"
+        _init_main_repo(main)                                 # main HAS .claude/CLAUDE.md
+        _add_worktree(main, worktree, with_dot_claude=False)  # worktree has NONE
+        calls = _install_find_spy(clean_env)
+
+        prev = Path.cwd()
+        os.chdir(str(worktree))
+        try:
+            resolved = _resolve_display_claude_md_path()
+        finally:
+            os.chdir(str(prev))
+
+        # VALUE: the concrete MAIN file. Compare resolved forms — branch 3 calls
+        # Path.resolve(), so on a symlinked tmp (/var -> /private/var) a bare ==
+        # against the unresolved main path would false-fail.
+        assert resolved is not None
+        assert resolved.resolve() == (main / ".claude" / "CLAUDE.md").resolve()
+
+        # MECHANISM: branch 2 (worktree root) probed and MISSED, THEN branch 3
+        # (main root) returned the file. The sequence, not mere membership.
+        assert len(calls) == 2, f"expected branch-2-then-branch-3, got {calls}"
+        (b2_base, b2_res), (b3_base, b3_res) = calls
+        assert b2_base.resolve() == worktree.resolve() and b2_res is None
+        assert b3_base.resolve() == main.resolve() and b3_res is not None
+
+    def test_worktree_with_own_file_resolves_via_branch_2_not_shadowed_by_branch_3(
+        self, tmp_path, clean_env
+    ):
+        """#935 non-regression: a worktree that IS a session root (has its OWN
+        CLAUDE.md) still resolves to its own file via branch 2 — branch 3 must not
+        shadow it.
+
+        Both main and worktree carry a CLAUDE.md here, so a resolver that consulted
+        the main repo first would return the wrong file. Certified by revert-and-
+        fail on branch 2: with branch 2 removed the resolver falls to branch 3 and
+        returns the MAIN file, failing this test — so it is coupled to branch 2, not
+        merely to the worktree path.
+        """
+        main = tmp_path / "mainproj"
+        worktree = tmp_path / "wt-feature"
+        _init_main_repo(main)                                # main HAS a file
+        _add_worktree(main, worktree, with_dot_claude=True)  # worktree ALSO has one
+        calls = _install_find_spy(clean_env)
+
+        prev = Path.cwd()
+        os.chdir(str(worktree))
+        try:
+            resolved = _resolve_display_claude_md_path()
+        finally:
+            os.chdir(str(prev))
+
+        assert resolved is not None
+        assert resolved.resolve() == (worktree / ".claude" / "CLAUDE.md").resolve()
+
+        # MECHANISM: branch 2 returned the file on the FIRST probe; branch 3 (main
+        # root) was never reached, proving it does not shadow branch 2.
+        assert len(calls) == 1, f"branch 3 should not be reached; calls={calls}"
+        (b2_base, b2_res), = calls
+        assert b2_base.resolve() == worktree.resolve() and b2_res is not None
 
     def test_worktree_session_resolves_worktree_file_when_env_is_worktree(
         self, worktree_repo, monkeypatch
@@ -552,29 +660,99 @@ class TestEndToEndParity:
         worktree_text = (dot / "CLAUDE.md").read_text(encoding="utf-8")
         assert "Recalled worktree note" in _retrieved_context_block(worktree_text)
 
-    def test_save_succeeds_when_display_file_missing(self, tmp_path, clean_env):
-        """A missing display file must never fail the save.
+    def test_worktree_save_with_no_own_file_lands_in_main_via_branch_3(
+        self, tmp_path, clean_env
+    ):
+        """A worktree-rooted save() with NO own CLAUDE.md, whose MAIN repo HAS
+        one, lands the Working Memory entry in the MAIN file via Option C
+        branch 3 — and the save still succeeds and persists the row.
 
-        The resolver returns None when no CLAUDE.md exists; save() still returns
-        a memory_id and persists the database row.
+        Renamed + strengthened from a former test that claimed "the resolver
+        returns None when no CLAUDE.md exists" while its fixture created
+        main/.claude/CLAUDE.md via _init_main_repo's with_dot_claude=True default.
+        That is the branch-3 scenario mislabeled as the None scenario; the old
+        `assert memory_id is not None` was insensitive to WHERE the sync landed,
+        so it passed without pinning resolution at all. The genuine no-file-
+        anywhere None case is the separate test below.
+
+        END-TO-END companion to the resolver-unit branch-3 guard
+        (test_worktree_without_own_file_resolves_main_via_branch_3): that pins the
+        resolver in isolation; this pins that save() actually routes its sync
+        through the resolver and writes the resolved file. Both fail on a branch-3
+        revert, at different levels — defense in depth.
         """
         main = tmp_path / "mainproj"
-        worktree = tmp_path / "wt-no-display"
-        _init_main_repo(main)
-        _add_worktree(main, worktree, with_dot_claude=False)
+        worktree = tmp_path / "wt-no-own-file"
+        _init_main_repo(main)                                 # main HAS .claude/CLAUDE.md
+        _add_worktree(main, worktree, with_dot_claude=False)  # worktree has NONE
         prev = Path.cwd()
         os.chdir(str(worktree))
         try:
             db_path = tmp_path / "memory.db"
             mem = PACTMemory(db_path=db_path)
-            memory_id = mem.save({"context": "No display file present"})
+            # Install the spy AFTER init so only the save()-time resolution is
+            # captured (empirically 2 calls: branch-2 miss then branch-3 hit).
+            calls = _install_find_spy(clean_env)
+            memory_id = mem.save({"context": "Branch-3 e2e entry"})
         finally:
             os.chdir(str(prev))
 
+        # Save succeeded and the row persisted — the original valid guarantee.
         assert memory_id is not None
         stored = mem.get(memory_id)
         assert stored is not None
-        assert stored.context == "No display file present"
+        assert stored.context == "Branch-3 e2e entry"
+
+        # VALUE: the entry physically landed in the MAIN file (branch 3); the
+        # worktree has no file at all, so the sync could not have gone elsewhere.
+        main_text = (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "Branch-3 e2e entry" in _working_memory_block(main_text)
+        assert not (worktree / ".claude" / "CLAUDE.md").exists()
+        assert not (worktree / "CLAUDE.md").exists()
+
+        # MECHANISM: save()'s sync resolved via branch 2 (worktree, None) THEN
+        # branch 3 (main, file) — confirms save() routes through the Option C
+        # branch, not merely that some file was written.
+        assert len(calls) == 2, f"expected branch-2-then-branch-3, got {calls}"
+        (b2_base, b2_res), (b3_base, b3_res) = calls
+        assert b2_base.resolve() == worktree.resolve() and b2_res is None
+        assert b3_base.resolve() == main.resolve() and b3_res is not None
+
+    def test_save_succeeds_when_no_display_file_anywhere(self, tmp_path, clean_env):
+        """The genuine no-file case: NEITHER the worktree NOR the main repo has a
+        CLAUDE.md, so the resolver returns None, save() skips the sync, and still
+        returns a memory_id and persists the row — creating NO file anywhere.
+
+        This is what the former test_save_succeeds_when_display_file_missing
+        docstring described but never built (its _init_main_repo default seeded
+        main). Constructed explicitly with with_dot_claude=False so the None path
+        is actually exercised. Branch-3-INDEPENDENT: unaffected by a branch-3
+        revert (main has no file either way), so it is not an Option-C guard.
+        """
+        main = tmp_path / "mainproj"
+        worktree = tmp_path / "wt-bare"
+        _init_main_repo(main, with_dot_claude=False, with_legacy=False)  # main: NO file
+        _add_worktree(main, worktree, with_dot_claude=False)             # worktree: NONE
+        prev = Path.cwd()
+        os.chdir(str(worktree))
+        try:
+            db_path = tmp_path / "memory.db"
+            mem = PACTMemory(db_path=db_path)
+            memory_id = mem.save({"context": "No display file anywhere"})
+        finally:
+            os.chdir(str(prev))
+
+        # Save still succeeds and persists.
+        assert memory_id is not None
+        stored = mem.get(memory_id)
+        assert stored is not None
+        assert stored.context == "No display file anywhere"
+
+        # Resolver returned None → sync skipped → NO CLAUDE.md created anywhere.
+        assert not (main / ".claude" / "CLAUDE.md").exists()
+        assert not (main / "CLAUDE.md").exists()
+        assert not (worktree / ".claude" / "CLAUDE.md").exists()
+        assert not (worktree / "CLAUDE.md").exists()
 
     def test_save_succeeds_when_sync_raises(self, worktree_repo, clean_env):
         """An exception inside the sync must be swallowed and never fail save()."""

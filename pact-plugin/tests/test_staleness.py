@@ -972,17 +972,24 @@ class TestCheckPinnedStalenessHardening:
                 return concurrent_content
             return original_read_text(self, *args, **kwargs)
 
-        # Track writes so we can assert no write occurred
+        # Track writes so we can assert no write occurred. The managed-path write
+        # goes through _atomic_write_text (temp + rename), NOT Path.write_text, so
+        # tracking Path.write_text would never fire and the "no write" assertion
+        # would pass vacuously whether or not the write was skipped. Track the REAL
+        # write seam. staleness.check_pinned_staleness imports _atomic_write_text
+        # from shared.claude_md_manager at call time, so patching the module
+        # attribute is what its local `from ... import` binds to.
+        import shared.claude_md_manager as cmm
         write_calls = []
-        original_write_text = Path.write_text
+        real_atomic = cmm._atomic_write_text
 
-        def tracking_write_text(self, content, *args, **kwargs):
-            if str(self) == str(claude_md):
+        def tracking_atomic(target, content, *args, **kwargs):
+            if str(target) == str(claude_md):
                 write_calls.append(content)
-            return original_write_text(self, content, *args, **kwargs)
+            return real_atomic(target, content, *args, **kwargs)
 
         monkeypatch.setattr(Path, "read_text", fake_read_text)
-        monkeypatch.setattr(Path, "write_text", tracking_write_text)
+        monkeypatch.setattr(cmm, "_atomic_write_text", tracking_atomic)
 
         with patch("session_init._get_project_claude_md_path", return_value=claude_md), \
              patch("staleness._get_project_claude_md_path", return_value=claude_md):
@@ -995,8 +1002,7 @@ class TestCheckPinnedStalenessHardening:
         assert write_calls == [], (
             f"Expected zero writes when content changed under the writer, "
             f"but {len(write_calls)} write(s) occurred. The inside-lock "
-            f"re-read guard at staleness.py L386-388 is not protecting the "
-            f"concurrent writer's content."
+            f"re-read guard is not protecting the concurrent writer's content."
         )
         # Both reads happened (outer + inner re-read), confirming the lock
         # path was actually entered.
