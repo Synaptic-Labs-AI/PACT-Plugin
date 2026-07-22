@@ -187,7 +187,7 @@ If you are dispatched as an owner in `TEACHBACK_EXEMPT_AGENT_TYPES` (currently `
 
 You must store your teachback (`metadata.teachback_submit` write) before any Edit/Write/Bash call used for implementation work. Reading files to understand the task (Read, Glob, Grep) is permitted before teachback; those are understanding actions, not implementation actions.
 
-Under the Task A + Task B dispatch shape, this ordering is structurally reinforced: Task B is hidden behind `blockedBy=[A]` until Task A's status transitions to `completed`. The `metadata.teachback_submit` write IS your teachback delivery; the team-lead's `TaskUpdate(A, status="completed")` paired with a wake-signal SendMessage IS approval.
+Under the Task A + Task B dispatch shape, this ordering is structurally reinforced: Task B is gated behind `blockedBy=[A]` (visible but not claimable) until Task A's status transitions to `completed`. The `metadata.teachback_submit` write IS your teachback delivery; the team-lead's `TaskUpdate(A, status="completed")` paired with a wake-signal SendMessage IS approval.
 
 ## Post-store behavior
 

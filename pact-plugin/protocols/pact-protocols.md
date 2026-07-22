@@ -420,7 +420,7 @@ When a downstream agent receives an upstream handoff (via `TaskGet`), their firs
 
 #### Why Blocking
 
-Blocking teachback — the teammate idles on `awaiting_lead_completion` until the lead accepts — catches a misunderstanding BEFORE the teammate burns context on a wrong implementation. The task graph makes this structural: Task B is `blockedBy=[A]`, so work cannot begin until the lead completes the teachback gate. This trades a short serialization delay for elimination of the most dangerous failure mode: misunderstanding disguised as agreement, otherwise undetected until TEST. Enforcement is blocking-by-protocol (the `blockedBy` edge) with advisory runtime hooks.
+Blocking teachback — the teammate idles on `awaiting_lead_completion` until the lead accepts — catches a misunderstanding BEFORE the teammate burns context on a wrong implementation. The task graph makes this structural: Task B is `blockedBy=[A]`, so it is not claimable until the lead completes the teachback gate. This trades a short serialization delay for elimination of the most dangerous failure mode: misunderstanding disguised as agreement, otherwise undetected until TEST. Enforcement is blocking-by-protocol (the `blockedBy` edge) with advisory runtime hooks.
 
 #### Teachback Format
 
