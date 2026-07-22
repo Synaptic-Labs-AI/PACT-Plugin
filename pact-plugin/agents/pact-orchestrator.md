@@ -492,7 +492,7 @@ Each specialist dispatch is a Task A (TEACHBACK) + Task B (work) pair with `bloc
 
 #### Validating Incoming Teachbacks
 
-When an agent sends a TEACHBACK, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase.
+When an agent sends a TEACHBACK, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, do NOT accept: write `metadata.teachback_rejection` with the correction and send a correction `SendMessage`. The agent is idling on `awaiting_lead_completion` (blocked, not yet working), so the block holds until you accept — there is no proceed-race; reject and let the agent revise on Task A. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase.
 
 **Then validate `variety_acknowledgment`** (5th canonical field per [pact-variety §variety_acknowledgment](../protocols/pact-variety.md#variety_acknowledgment--teammate-verification-workflow)). The teammate has judged your per-dimension variety rationales on Task B against THIS dispatch's actual work. Read `metadata.teachback_submit.variety_acknowledgment.rationale_articulates_this_dispatch`:
 

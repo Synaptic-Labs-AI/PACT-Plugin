@@ -60,9 +60,11 @@ team-lead can catch misunderstandings early, before you burn context on a
 wrong implementation.
 
 Under the Task A + Task B dispatch shape, your teachback is the deliverable
-of Task A. Task B (the primary work) is `blockedBy=[A]` and stays hidden
-in your TaskList until the team-lead accepts your teachback by transitioning
-Task A to `completed`.
+of Task A. Task B (the primary work) is `blockedBy=[A]`: it remains VISIBLE and
+readable in your TaskList (annotated as blocked) but is not claimable — the
+`blockedBy` edge filters it from the claimable set, it does not hide or lock it —
+until the team-lead accepts your teachback by transitioning Task A to `completed`,
+which makes Task B claimable.
 
 The 5 canonical fields (Step 1) are the L1 (procedure-level) gate; the optional `reasoning_reconstruction` nested field enables the L1.5 (method-level) gate at high-variety dispatches — see [pact-ct-teachback.md §When to Method-Reconstruct](../../protocols/pact-ct-teachback.md#when-to-method-reconstruct). Variety-band thresholds live at the SSOT in `hooks/shared/variety_scorer.py` (`COMPACT_MAX` / `ORCHESTRATE_MAX` / `PLAN_MODE_MAX` + `route_workflow`); do not hard-code the 6 / 10 / 14 thresholds.
 
