@@ -155,7 +155,7 @@ The status flip is the load-bearing approval action; the SendMessage is the load
 
 ### Validating Incoming Teachbacks
 
-When an agent sends a TEACHBACK, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase. Once decided, follow the [Acceptance or Rejection two-call atomic pair](#completion-authority).
+When an agent sends a TEACHBACK, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, do NOT accept: write `metadata.teachback_rejection` with the correction and send a correction `SendMessage`. The agent is idling on `awaiting_lead_completion` (blocked, not yet working), so the block holds until you accept — there is no proceed-race; reject and let the agent revise on Task A. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase. Once decided, follow the [Acceptance or Rejection two-call atomic pair](#completion-authority).
 
 ### Directive-Reflection Check
 

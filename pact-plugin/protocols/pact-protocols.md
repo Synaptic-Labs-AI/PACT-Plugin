@@ -405,17 +405,22 @@ When a downstream agent receives an upstream handoff (via `TaskGet`), their firs
 #### Flow
 
 ```
-1. Agent dispatched with upstream task reference (e.g., "Architect task: #5")
-2. Agent reads upstream handoff via `TaskGet(#5)`
-3. Agent sends teachback to team-lead via `SendMessage`:
-   "[{sender}→team-lead] Teachback: My understanding is... [key decisions restated]. Proceeding unless corrected."
-4. Agent proceeds with work (non-blocking)
-5. If orchestrator spots misunderstanding, they must `SendMessage` to agent to correct it
+1. Agent dispatched as a Task A (TEACHBACK gate) + Task B (primary work, blockedBy=[A]) pair
+2. Agent claims Task A, reads the upstream handoff/mission via `TaskGet`
+3. Agent writes its teachback to Task A metadata (`metadata.teachback_submit`, 5 canonical
+   fields) and sends a wake-signal `SendMessage` to team-lead:
+   "[{sender}→team-lead] Teachback submitted on Task #A. Idling on awaiting_lead_completion."
+4. Agent SETs `intentional_wait{reason=awaiting_lead_completion}` and idles — it does NOT
+   begin Task B (blocking)
+5. Team-lead reviews the teachback. On acceptance: wake-`SendMessage` FIRST, then
+   `TaskUpdate(A, status="completed")`, which unblocks Task B. On misunderstanding: write
+   `metadata.teachback_rejection` + a correction `SendMessage`; the agent revises on Task A.
+   The block holds until acceptance.
 ```
 
-#### Why Non-Blocking
+#### Why Blocking
 
-Blocking teachback (wait for confirmation before working) would serialize everything. Non-blocking gives the orchestrator a window to catch misunderstandings while the agent starts work. Most teachbacks will be correct — we're catching exceptions, not gatekeeping the norm.
+Blocking teachback — the teammate idles on `awaiting_lead_completion` until the lead accepts — catches a misunderstanding BEFORE the teammate burns context on a wrong implementation. The task graph makes this structural: Task B is `blockedBy=[A]`, so work cannot begin until the lead completes the teachback gate. This trades a short serialization delay for elimination of the most dangerous failure mode: misunderstanding disguised as agreement, otherwise undetected until TEST. Enforcement is blocking-by-protocol (the `blockedBy` edge) with advisory runtime hooks.
 
 #### Teachback Format
 
@@ -429,7 +434,7 @@ Blocking teachback (wait for confirmation before working) would serialize everyt
     - Decision attribution: "I understand {upstream agent} chose {decision} because {their stated reason}"
     - Assumption trace: "This reasoning depends on {assumption A}, {assumption B}, ..."
     - Contingency clause: "If {assumption A or B} changes, the decision should change to {alternative}"
-Proceeding unless corrected.
+Idling on awaiting_lead_completion until accepted.
 ```
 
 Keep teachbacks concise — 3-6 bullet points (or 4-7 when method reconstruction is included). The goal is to surface misunderstandings, not to restate the entire handoff. The method-reconstruction bullet is **optional below variety 11** and **required at variety ≥ 11**; see [When to Method-Reconstruct](#when-to-method-reconstruct) for the variety-band gate.
@@ -2227,7 +2232,7 @@ The status flip is the load-bearing approval action; the SendMessage is the load
 
 ### Validating Incoming Teachbacks
 
-When an agent sends a TEACHBACK, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase. Once decided, follow the [Acceptance or Rejection two-call atomic pair](#completion-authority).
+When an agent sends a TEACHBACK, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, do NOT accept: write `metadata.teachback_rejection` with the correction and send a correction `SendMessage`. The agent is idling on `awaiting_lead_completion` (blocked, not yet working), so the block holds until you accept — there is no proceed-race; reject and let the agent revise on Task A. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase. Once decided, follow the [Acceptance or Rejection two-call atomic pair](#completion-authority).
 
 ### Directive-Reflection Check
 
