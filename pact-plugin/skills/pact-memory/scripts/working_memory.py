@@ -349,14 +349,21 @@ def _resolve_display_claude_md_path() -> Optional[Path]:
          (preferred) or ./CLAUDE.md (legacy).
       2. Git worktree root via `git rev-parse --show-toplevel` -> the same
          .claude/-then-legacy probe under the worktree root.
-      3. Current working directory -> the same probe.
+      3. Main repo root via `git rev-parse --git-common-dir`.parent -> the
+         same probe. Reached only when the worktree is NOT a session root
+         (branch 2 found nothing): under the PACT `.worktrees/` convention no
+         session is rooted in the worktree, so the file the session reads is
+         the main repo's. Without this branch that write is lost (returns
+         None); with it the write lands where the session reads.
+      4. Current working directory -> the same probe.
 
-    Unlike _get_claude_md_path (which anchors to the MAIN repo via
-    --git-common-dir so it can find a single shared CLAUDE.md), this anchors
-    to the WORKTREE root via --show-toplevel so a worktree-rooted session
-    updates its OWN display file — the same file session_init/session_resume
-    create and read. In a non-worktree checkout the two anchors coincide, so
-    the resolved path is identical to _get_claude_md_path's.
+    Branch 2 anchors the WORKTREE root (--show-toplevel) so a worktree that IS
+    a session root updates its OWN display file; branch 3 falls back to
+    _get_claude_md_path's MAIN-repo anchor (--git-common-dir) for the common
+    case where it is not. Because branch 2 precedes branch 3, the two resolvers
+    now differ ONLY in that worktree-root branch: in a non-worktree checkout
+    both branches resolve the same directory, so this function's result is
+    identical to _get_claude_md_path's.
 
     This never CREATES a CLAUDE.md (the orchestrator manages the file's
     lifecycle); it only probes for an existing one and returns its Path, or
@@ -388,6 +395,37 @@ def _resolve_display_claude_md_path() -> Optional[Path]:
             if result.returncode == 0 and result.stdout.strip():
                 worktree_root = Path(result.stdout.strip())
                 found = _find_existing_claude_md(worktree_root)
+                if found is not None:
+                    return found
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
+        # Main-repo root via --git-common-dir. Under the PACT `.worktrees/`
+        # convention no session is ever rooted in the worktree, so branch 2
+        # found nothing and the file the session actually reads is the MAIN
+        # repo's. --git-common-dir points at the shared .git dir whether run
+        # from the main repo or a linked worktree, so its parent is the main
+        # repo root in both. This is _get_claude_md_path's exact anchor.
+        #
+        # The is_absolute() guard is load-bearing, not decoration: git returns
+        # a RELATIVE path (".git", "../.git") when run at a repo root or subdir,
+        # and _find_existing_claude_md does a bare `base / "CLAUDE.md"` with no
+        # normalisation, so a relative base would yield a cwd-relative Path and
+        # a cwd-relative lock sidecar (the exact divergence D2 just closed).
+        # Reused verbatim from _get_claude_md_path.
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--git-common-dir"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                common_dir = Path(result.stdout.strip())
+                if not common_dir.is_absolute():
+                    common_dir = Path.cwd() / common_dir
+                repo_root = common_dir.resolve().parent
+                found = _find_existing_claude_md(repo_root)
                 if found is not None:
                     return found
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):

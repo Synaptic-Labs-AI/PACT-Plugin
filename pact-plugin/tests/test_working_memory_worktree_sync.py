@@ -188,9 +188,17 @@ class TestDisplayTargetResolver:
     def test_returns_none_when_no_display_file_exists(self, tmp_path, clean_env):
         """When neither display location exists, the resolver returns None so the
         caller skips the sync rather than creating a file."""
+        # The main repo must have NO CLAUDE.md either, or the scenario in the
+        # title does not hold. Before Option C added the --git-common-dir
+        # fallback (branch 3), _init_main_repo's default with_dot_claude=True
+        # created main/.claude/CLAUDE.md, yet this test still passed asserting
+        # None -- because the old resolver had no branch that could SEE that
+        # file from a worktree cwd. It was green for a reason unrelated to its
+        # assertion (a pre-Option-C phantom-green); branch 3 now finds that
+        # file, so the fixture must actually construct the empty case.
         main = tmp_path / "mainproj"
         worktree = tmp_path / "wt-bare"
-        _init_main_repo(main)
+        _init_main_repo(main, with_dot_claude=False, with_legacy=False)
         _add_worktree(main, worktree, with_dot_claude=False)
         prev = Path.cwd()
         os.chdir(str(worktree))
