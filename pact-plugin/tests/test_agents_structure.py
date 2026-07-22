@@ -578,17 +578,40 @@ class TestTeachbackMicroSkillExtraction:
     # legitimately owns as a stub (awaiting_lead_completion, the acceptance
     # ordering TaskUpdate(A, status="completed")) — that territory is a muddy
     # discriminator; teachback message-authoring guidance is not.
-    FULL_PROTOCOL_MARKERS = [
+    #
+    # The markers are PARTITIONED into LIVE (present in the current protocol
+    # source) and HISTORICAL (pre-extraction fossils that appear nowhere in the
+    # current source). LIVE markers get BOTH guards — absent-from-stub AND
+    # present-in-source (drift-rot: if a live marker's source phrasing drifts it
+    # silently rots to a dead fossil and stops guarding, the exact failure the
+    # canary refresh in this PR fixed). HISTORICAL markers get ONLY the absent-
+    # from-stub guard — asserting their presence would fail, since they are
+    # intentionally dead in the source and retained purely to detect a re-dump
+    # of the OLD (pre-extraction) full protocol into the stub.
+
+    # marker -> the full-protocol source file (relative to the plugin root) that
+    # must contain it. pact-agent-teams stubs this source, so a full-protocol
+    # re-dump into the stub would carry the marker. The "Building:" bullet is the
+    # teachback-template line from pact-ct-teachback.md "Teachback Format" (also
+    # byte-mirrored into pact-protocols.md); it replaced a dead non-blocking-era
+    # fossil that appeared nowhere after the reconciliation to the blocking model.
+    LIVE_PROTOCOL_MARKERS = {
+        "Building: {what I understand I'm building}": "protocols/pact-ct-teachback.md",
+    }
+
+    # Pre-extraction phrasings that appear NOWHERE in the current source
+    # (verified 0-hit). Retained purely as leak-detectors for a re-dump of the
+    # OLD full protocol into the stub, so they are exempt from present-in-source.
+    HISTORICAL_PROTOCOL_MARKERS = [
         "Send as your **first message**",
         "Keep concise: 3-6 bullet points",
-        # Live teachback-template bullet from the current (blocking-era) full
-        # protocol: protocols/pact-ct-teachback.md "Teachback Format" plus its
-        # pact-protocols.md SSOT mirror. Replaces a dead non-blocking-era fossil
-        # ("Non-blocking: proceed with work after sending") that, after the
-        # reconciliation to the blocking model, appears nowhere and so could no
-        # longer catch a full-protocol dump.
-        "Building: {what I understand I'm building}",
     ]
+
+    # Canonical union consumed by the absent-from-stub canary (behavior
+    # unchanged). Deriving it from LIVE + HISTORICAL construction-enforces that
+    # every marker is classified — a new marker cannot enter FULL without a
+    # conscious live-vs-fossil decision (see test_protocol_markers_partition).
+    FULL_PROTOCOL_MARKERS = list(LIVE_PROTOCOL_MARKERS) + HISTORICAL_PROTOCOL_MARKERS
 
     @pytest.fixture
     def teachback_skill(self):
@@ -748,6 +771,47 @@ class TestTeachbackMicroSkillExtraction:
         assert "pact-teachback" in text, (
             "pact-agent-teams should reference pact-teachback skill "
             "as a pointer so agents know where the protocol lives."
+        )
+
+    def test_live_protocol_markers_present_in_source(self):
+        """T7 (drift-rot guard): each LIVE marker must still appear in its
+        full-protocol source. A marker only asserted `not in stub` (the T5
+        canary) silently rots to a dead fossil if the source phrasing drifts —
+        it keeps passing while guarding nothing. That is exactly the failure the
+        canary refresh in this PR corrected (the prior GEN-1 marker had rotted to
+        a phrase present nowhere after the blocking reconciliation). Asserting
+        present-in-source turns that silent rot into a red test.
+        """
+        plugin_root = Path(__file__).parent.parent
+        for marker, rel_source in self.LIVE_PROTOCOL_MARKERS.items():
+            source = plugin_root / rel_source
+            assert source.is_file(), f"live-marker source missing: {rel_source}"
+            text = source.read_text(encoding="utf-8")
+            assert marker in text, (
+                f"LIVE protocol marker {marker!r} no longer appears in its "
+                f"source {rel_source} — it has rotted to a dead fossil and no "
+                f"longer guards against a full-protocol dump. Refresh it to a "
+                f"live phrase from the current protocol, or reclassify it as "
+                f"HISTORICAL if the phrasing was intentionally removed."
+            )
+
+    def test_protocol_markers_partition(self):
+        """T8 (classification guard): every FULL_PROTOCOL_MARKERS entry is
+        classified as exactly one of LIVE (present-in-source, drift-rot-guarded)
+        or HISTORICAL (fossil, absent-from-stub only). Forces a future marker
+        addition to make the live-vs-fossil decision consciously; an unclassified
+        live marker would silently skip the present-in-source guard.
+        """
+        live = set(self.LIVE_PROTOCOL_MARKERS)
+        historical = set(self.HISTORICAL_PROTOCOL_MARKERS)
+        assert live.isdisjoint(historical), (
+            f"markers classified as BOTH live and historical: "
+            f"{sorted(live & historical)}"
+        )
+        assert set(self.FULL_PROTOCOL_MARKERS) == live | historical, (
+            "FULL_PROTOCOL_MARKERS must equal LIVE union HISTORICAL so every "
+            "marker is classified; an unclassified marker would skip the "
+            "present-in-source drift-rot guard"
         )
 
 
