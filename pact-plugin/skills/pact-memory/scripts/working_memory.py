@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -169,6 +170,52 @@ def file_lock(target_file: Path):
 #     fallbacks diverged between processes, the sidecars would differ and the
 #     lock would not serialize — accepted as out-of-contract (no safe fallback
 #     action exists if the paths genuinely diverge).
+
+
+def _atomic_write_text(target: Path, content: str) -> None:
+    """Replace `target`'s contents with `content` atomically.
+
+    `Path.write_text` truncates the file and THEN writes, so a crash, a full
+    disk, or a kill between those two steps leaves a TRUNCATED CLAUDE.md. In the
+    projects this runs in that file is gitignored and untracked, so there is no
+    recovery path -- the user's pinned context is simply gone.
+
+    Writing to a sibling temp file and renaming makes the replacement atomic: a
+    reader sees either the whole old file or the whole new one, never a partial
+    write. The temp file is created in the TARGET'S OWN DIRECTORY because
+    `os.replace` is only atomic within a single filesystem.
+
+    Callers must already hold `file_lock` for the target. The lock closes the
+    concurrent-writer window; this closes the crash/truncation window. They are
+    different hazards, and neither fix subsumes the other. Note the lock is a
+    separate sidecar file, so replacing the target's inode does not disturb it.
+
+    Args:
+        target: Path to replace. Its parent directory must already exist.
+        content: Full file contents to write.
+    """
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            # Without the fsync the rename can be persisted while the data
+            # behind it is not, which reintroduces the empty-file failure this
+            # function exists to prevent.
+            os.fsync(handle.fileno())
+        # mkstemp already creates 0o600; setting it explicitly keeps the mode a
+        # property of this function rather than of the stdlib's default.
+        os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, target)
+    except BaseException:
+        # Never leave a stray temp file behind next to the user's CLAUDE.md.
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def extract_managed_region(content: str) -> Optional[Tuple[str, int]]:
@@ -736,9 +783,9 @@ def sync_to_claude_md(
                     content += "\n"
                 new_content = content + "\n" + section_text
 
-            # Write back to file
-            claude_md_path.write_text(new_content, encoding="utf-8")
-            os.chmod(str(claude_md_path), 0o600)
+            # Write back to file (atomic: temp + rename, so a crash mid-write
+            # cannot leave the always-loaded CLAUDE.md truncated)
+            _atomic_write_text(claude_md_path, new_content)
 
         logger.info("Synced memory to CLAUDE.md Working Memory section")
         return True
@@ -966,9 +1013,9 @@ def sync_retrieved_to_claude_md(
                         content += "\n"
                     new_content = content + "\n" + section_text
 
-            # Write back to file
-            claude_md_path.write_text(new_content, encoding="utf-8")
-            os.chmod(str(claude_md_path), 0o600)
+            # Write back to file (atomic: temp + rename, so a crash mid-write
+            # cannot leave the always-loaded CLAUDE.md truncated)
+            _atomic_write_text(claude_md_path, new_content)
 
         logger.info("Synced retrieved memories to CLAUDE.md Retrieved Context section")
         return True
