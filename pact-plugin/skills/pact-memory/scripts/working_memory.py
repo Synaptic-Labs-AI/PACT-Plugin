@@ -347,12 +347,14 @@ def _get_claude_md_path() -> Optional[Path]:
     return _find_existing_claude_md(Path.cwd())
 
 
-def _resolve_display_claude_md_path() -> Optional[Path]:
+def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Path]]:
     """
-    Resolve the CLAUDE.md the CURRENT SESSION displays, so Working Memory /
-    Retrieved Context syncs land in the file the session actually reads.
+    Resolve the display CLAUDE.md AND the trusted base directory it was found
+    under, so a write caller can containment-check the target against the base
+    the resolver actually used (#1247).
 
-    Resolution order:
+    Same resolution order as `_resolve_display_claude_md_path` (which is now a
+    thin wrapper returning `[0]`):
       1. CLAUDE_PROJECT_DIR env var, if set -> that dir's .claude/CLAUDE.md
          (preferred) or ./CLAUDE.md (legacy).
       2. Git worktree root via `git rev-parse --show-toplevel` -> the same
@@ -370,25 +372,33 @@ def _resolve_display_claude_md_path() -> Optional[Path]:
     _get_claude_md_path's MAIN-repo anchor (--git-common-dir) for the common
     case where it is not. Because branch 2 precedes branch 3, the two resolvers
     now differ ONLY in that worktree-root branch: in a non-worktree checkout
-    both branches resolve the same directory, so this function's result is
+    both branches resolve the same directory, so the [0] of this result is
     identical to _get_claude_md_path's.
 
+    The returned `base` is the branch's directory captured BEFORE descending
+    into `.claude` (the arg passed to `_find_existing_claude_md`), NOT the
+    returned path and NOT a re-derivation. That is the trusted pre-resolve
+    anchor that makes the #1247 containment check non-vacuous: an F1
+    symlinked-parent `.claude` perturbs the target's resolve() but not the
+    base's, so containment catches the escape.
+
     This never CREATES a CLAUDE.md (the orchestrator manages the file's
-    lifecycle); it only probes for an existing one and returns its Path, or
-    None when none exists at the resolved base (callers skip the sync).
+    lifecycle); it only probes for an existing one.
 
     Returns:
-        Path to the existing display CLAUDE.md, or None if none exists.
+        (path, base) where path is the existing display CLAUDE.md and base is
+        the directory it was found under; (None, None) if none exists.
     """
     # Resolution must never raise into the sync path; on any failure (a bad
     # CLAUDE_PROJECT_DIR value, an inaccessible probe target, or a deleted cwd)
-    # return None so the caller skips the sync and the save still succeeds.
+    # return (None, None) so the caller skips the sync and the save still succeeds.
     try:
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
         if project_dir:
-            found = _find_existing_claude_md(Path(project_dir))
+            base = Path(project_dir)
+            found = _find_existing_claude_md(base)
             if found is not None:
-                return found
+                return found, base
 
         # Worktree root: --show-toplevel returns the worktree directory when run
         # inside a worktree (and the main repo root otherwise), matching the
@@ -404,7 +414,7 @@ def _resolve_display_claude_md_path() -> Optional[Path]:
                 worktree_root = Path(result.stdout.strip())
                 found = _find_existing_claude_md(worktree_root)
                 if found is not None:
-                    return found
+                    return found, worktree_root
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             pass
 
@@ -435,15 +445,33 @@ def _resolve_display_claude_md_path() -> Optional[Path]:
                 repo_root = common_dir.resolve().parent
                 found = _find_existing_claude_md(repo_root)
                 if found is not None:
-                    return found
+                    return found, repo_root
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             pass
 
         # Last resort: current working directory
-        return _find_existing_claude_md(Path.cwd())
+        cwd = Path.cwd()
+        found = _find_existing_claude_md(cwd)
+        return (found, cwd) if found is not None else (None, None)
     except Exception as e:
         logger.debug("display CLAUDE.md resolution failed, skipping sync: %s", e)
-        return None
+        return None, None
+
+
+def _resolve_display_claude_md_path() -> Optional[Path]:
+    """
+    Resolve the CLAUDE.md the CURRENT SESSION displays (path only).
+
+    Thin wrapper over `_resolve_display_claude_md_with_base` (added for #1247);
+    read-only callers and the resolver-parity lint use this Path-only name,
+    while the 2 write callers use the with-base variant to get the containment
+    anchor. See that function for the full resolution order and the base
+    semantics.
+
+    Returns:
+        Path to the existing display CLAUDE.md, or None if none exists.
+    """
+    return _resolve_display_claude_md_with_base()[0]
 
 
 def _estimate_tokens(text: str) -> int:
