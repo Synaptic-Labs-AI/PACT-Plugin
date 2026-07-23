@@ -608,15 +608,15 @@ class TestEndToEndParity:
         prev = Path.cwd()
         os.chdir(str(worktree))
         try:
-            with patch("scripts.working_memory._resolve_display_claude_md_path",
-                       return_value=worktree / ".claude" / "CLAUDE.md"):
+            with patch("scripts.working_memory._resolve_display_claude_md_with_base",
+                       return_value=(worktree / ".claude" / "CLAUDE.md", worktree)):
                 sync_to_claude_md(dict(memory), memory_id="shared-id")
         finally:
             os.chdir(str(prev))
 
         # Render in the main session.
-        with patch("scripts.working_memory._resolve_display_claude_md_path",
-                   return_value=main / ".claude" / "CLAUDE.md"):
+        with patch("scripts.working_memory._resolve_display_claude_md_with_base",
+                   return_value=(main / ".claude" / "CLAUDE.md", main)):
             sync_to_claude_md(dict(memory), memory_id="shared-id")
 
         worktree_entry = _working_memory_block(

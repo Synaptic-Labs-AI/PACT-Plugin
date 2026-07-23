@@ -177,8 +177,23 @@ def file_lock(target_file: Path):
 #     action exists if the paths genuinely diverge).
 
 
-def _atomic_write_text(target: Path, content: str) -> None:
-    """Replace `target`'s contents with `content` atomically.
+class ContainmentError(OSError):
+    """A CLAUDE.md write target escaped its project containment boundary (#1247).
+
+    Subclasses OSError so a caller that does not name it explicitly still
+    catches it via `except OSError`. Callers convert it to an OPAQUE skip
+    message that does not leak the resolved victim path.
+
+    Twin of ContainmentError in `hooks/shared/claude_md_manager.py` (this module
+    cannot import from hooks/shared). The two class defs are trivial markers;
+    the load-bearing logic is the containment CHECK inside `_atomic_write_text`,
+    drift-gated by TestAtomicWriteTwinCopyDrift.
+    """
+
+
+def _atomic_write_text(target: Path, content: str, project_root: Path) -> None:
+    """Replace `target`'s contents with `content` atomically, iff `target` is
+    contained within `project_root` (#1247).
 
     `Path.write_text` truncates the file and THEN writes, so a crash, a full
     disk, or a kill between those two steps leaves a TRUNCATED CLAUDE.md. In the
@@ -194,10 +209,18 @@ def _atomic_write_text(target: Path, content: str) -> None:
     momentarily visible with the wrong permissions -- unlike a chmod after the
     write, which leaves exactly such a window on a file holding user content.
 
+    #1247 CONTAINMENT: before creating the temp, refuse (fail-CLOSED) unless the
+    RESOLVED target is inside the RESOLVED `project_root`. `project_root` MUST be
+    the trusted base the target's OWN resolver used (never a re-derivation) -- a
+    symlinked-parent `.claude` (F1) perturbs `target.resolve()` but not the
+    base's, so the escape is caught. `commonpath` (not `Path.is_relative_to`,
+    3.9+ vs the repo's 3.7 floor; not `str.startswith`, which wrongly allows the
+    sibling-prefix `/abc` vs `/ab`). Any resolution/commonpath error fails closed.
+
     Callers must already hold `file_lock` for the target. The lock closes the
-    concurrent-writer window; this closes the crash/truncation window. They are
-    different hazards, and neither fix subsumes the other. Note the lock is a
-    separate sidecar file, so replacing the target's inode does not disturb it.
+    concurrent-writer window; this closes the crash/truncation window; the
+    containment check runs inside the lock by construction (callers hold it),
+    preserving the TOCTOU defense the replaced leaf `is_symlink` guards had.
 
     Requires write permission on the target's DIRECTORY (to create the temp),
     where a bare `write_text` needed only permission on the file itself. A
@@ -207,14 +230,32 @@ def _atomic_write_text(target: Path, content: str) -> None:
     NOTE: a deliberate duplicate of `_atomic_write_text` in
     `hooks/shared/claude_md_manager.py`. This module cannot import from
     `hooks/shared/` (separate package), the same constraint that produced the
-    `file_lock` twin above. Unlike that twin, the two copies are NOT
-    drift-gated: atomicity has no cross-process invariant, so each copy is
-    independently correct and may legitimately diverge.
+    `file_lock` twin above. This twin IS drift-gated by
+    TestAtomicWriteTwinCopyDrift: the containment CHECK is a security invariant
+    that must not silently diverge between the hook and skill copies.
 
     Args:
         target: Path to replace. Its parent directory must already exist.
         content: Full file contents to write.
+        project_root: The trusted base directory `target` must be contained in.
+
+    Raises:
+        ContainmentError: `target` resolves outside `project_root`.
     """
+    # #1247 containment guard, fail-CLOSED, BEFORE creating the temp file.
+    try:
+        resolved_target = str(target.resolve())
+        resolved_root = str(project_root.resolve())
+        contained = (
+            os.path.commonpath([resolved_root, resolved_target]) == resolved_root
+        )
+    except (ValueError, OSError):
+        contained = False
+    if not contained:
+        raise ContainmentError(
+            "refusing write: target escapes the project containment boundary"
+        )
+
     fd, tmp_name = tempfile.mkstemp(
         dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
     )
@@ -826,7 +867,7 @@ def sync_to_claude_md(
     Returns:
         True if sync succeeded, False otherwise.
     """
-    claude_md_path = _resolve_display_claude_md_path()
+    claude_md_path, project_root = _resolve_display_claude_md_with_base()
 
     if claude_md_path is None:
         logger.debug("CLAUDE.md not found, skipping working memory sync")
@@ -880,7 +921,7 @@ def sync_to_claude_md(
 
             # Write back to file (atomic: temp + rename, so a crash mid-write
             # cannot leave the always-loaded CLAUDE.md truncated)
-            _atomic_write_text(claude_md_path, new_content)
+            _atomic_write_text(claude_md_path, new_content, project_root)
 
         logger.info("Synced memory to CLAUDE.md Working Memory section")
         return True
@@ -1033,7 +1074,7 @@ def sync_retrieved_to_claude_md(
     if not memories:
         return False
 
-    claude_md_path = _resolve_display_claude_md_path()
+    claude_md_path, project_root = _resolve_display_claude_md_with_base()
 
     if claude_md_path is None:
         logger.debug("CLAUDE.md not found, skipping retrieved context sync")
@@ -1110,7 +1151,7 @@ def sync_retrieved_to_claude_md(
 
             # Write back to file (atomic: temp + rename, so a crash mid-write
             # cannot leave the always-loaded CLAUDE.md truncated)
-            _atomic_write_text(claude_md_path, new_content)
+            _atomic_write_text(claude_md_path, new_content, project_root)
 
         logger.info("Synced retrieved memories to CLAUDE.md Retrieved Context section")
         return True

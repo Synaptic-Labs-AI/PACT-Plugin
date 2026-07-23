@@ -20,6 +20,7 @@ import os
 import re
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from shared.claude_md_manager import (
@@ -28,6 +29,7 @@ from shared.claude_md_manager import (
     MANAGED_TITLE,
     MEMORY_END_MARKER,
     MEMORY_START_MARKER,
+    ContainmentError,
     _atomic_write_text,
     ensure_dot_claude_parent,
     file_lock,
@@ -158,13 +160,9 @@ def update_session_info(
     # Fail-open on timeout — next session start will retry.
     try:
         with file_lock(target_file):
-            # Symlink guard INSIDE the lock (TOCTOU defense): is_symlink
-            # uses lstat (does not follow the link). Inside the lock so an
-            # attacker cannot swap the target between an outside-lock
-            # check and the write.
-            if target_file.is_symlink():
-                return "Session info skipped: path precondition not met."
-
+            # #1247: containment (in _atomic_write_text) REPLACES the former
+            # leaf is_symlink guard -- inside the lock (TOCTOU-safe), and it
+            # dominates is_symlink (catches a symlinked-parent escape too).
             try:
                 # Case 0: File doesn't exist -- create it with the full canonical
                 # PACT_MANAGED structure so the orchestrator has a stable Current
@@ -195,7 +193,7 @@ def update_session_info(
                         "\n"
                         f"{MANAGED_END_MARKER}\n"
                     )
-                    _atomic_write_text(target_file, new_content)
+                    _atomic_write_text(target_file, new_content, Path(project_dir))
                     return "Session info created in new project CLAUDE.md"
 
                 content = target_file.read_text(encoding="utf-8")
@@ -217,7 +215,7 @@ def update_session_info(
                         flags=re.DOTALL,
                     )
                     if new_content != content:
-                        _atomic_write_text(target_file, new_content)
+                        _atomic_write_text(target_file, new_content, Path(project_dir))
                         return "Session info updated in project CLAUDE.md"
                     return None
 
@@ -269,9 +267,12 @@ def update_session_info(
                             content += "\n"
                         new_content = content + "\n" + session_block + "\n"
 
-                _atomic_write_text(target_file, new_content)
+                _atomic_write_text(target_file, new_content, Path(project_dir))
                 return "Session info added to project CLAUDE.md"
 
+            except ContainmentError:
+                # Opaque skip, matching the removed is_symlink guard's message.
+                return "Session info skipped: path precondition not met."
             except Exception as e:
                 return f"Session info failed: {str(e)[:50]}"
     except TimeoutError:

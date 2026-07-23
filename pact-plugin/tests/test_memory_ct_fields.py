@@ -709,7 +709,7 @@ class TestSyncToClaudeMdWithCTFields:
         }
 
         # Mock the display-target resolver to return our temp file
-        with patch("scripts.working_memory._resolve_display_claude_md_path", return_value=claude_md):
+        with patch("scripts.working_memory._resolve_display_claude_md_with_base", return_value=(claude_md, claude_md.parent)):
             result = sync_to_claude_md(memory, memory_id="test-ct-sync")
 
         assert result is True

@@ -187,8 +187,26 @@ _STALE_ORCHESTRATOR_LINE_RE = re.compile(
 )
 
 
-def _atomic_write_text(target: Path, content: str) -> None:
-    """Replace `target`'s contents with `content` atomically.
+class ContainmentError(OSError):
+    """A CLAUDE.md write target escaped its project containment boundary (#1247).
+
+    Subclasses OSError so a caller that does not name it explicitly still
+    catches it via `except OSError`. Callers convert it to an OPAQUE skip
+    message ("path precondition not met") that does not leak the resolved
+    victim path -- matching what the leaf `is_symlink` guards returned before
+    containment replaced them.
+
+    Twin of ContainmentError in
+    `skills/pact-memory/scripts/working_memory.py` (skills cannot import from
+    hooks/shared). The two class defs are trivial markers; the load-bearing
+    logic is the containment CHECK inside `_atomic_write_text`, drift-gated by
+    TestAtomicWriteTwinCopyDrift.
+    """
+
+
+def _atomic_write_text(target: Path, content: str, project_root: Path) -> None:
+    """Replace `target`'s contents with `content` atomically, iff `target` is
+    contained within `project_root` (#1247).
 
     `Path.write_text` truncates the file and THEN writes, so a crash, a full
     disk, or a kill between those two steps leaves a TRUNCATED CLAUDE.md. That
@@ -204,10 +222,18 @@ def _atomic_write_text(target: Path, content: str) -> None:
     momentarily visible with the wrong permissions -- unlike a chmod after the
     write, which leaves exactly such a window on a file holding user content.
 
+    #1247 CONTAINMENT: before creating the temp, refuse (fail-CLOSED) unless the
+    RESOLVED target is inside the RESOLVED `project_root`. `project_root` MUST be
+    the trusted base the target's OWN resolver used (never a re-derivation) -- a
+    symlinked-parent `.claude` (F1) perturbs `target.resolve()` but not the
+    base's, so the escape is caught. `commonpath` (not `Path.is_relative_to`,
+    3.9+ vs the repo's 3.7 floor; not `str.startswith`, which wrongly allows the
+    sibling-prefix `/abc` vs `/ab`). Any resolution/commonpath error fails closed.
+
     Callers must already hold `file_lock` for the target. The lock closes the
-    concurrent-writer window; this closes the crash/truncation window. They are
-    different hazards and neither fix subsumes the other. Note the lock is a
-    separate sidecar file, so replacing the target's inode does not disturb it.
+    concurrent-writer window; this closes the crash/truncation window; the
+    containment check runs inside the lock by construction (callers hold it),
+    preserving the TOCTOU defense the replaced leaf `is_symlink` guards had.
 
     Requires write permission on the target's DIRECTORY (to create the temp),
     where a bare `write_text` needed only permission on the file itself. A
@@ -216,14 +242,33 @@ def _atomic_write_text(target: Path, content: str) -> None:
 
     NOTE: a deliberate duplicate of `_atomic_write_text` in
     `skills/pact-memory/scripts/working_memory.py`, which cannot import from
-    `hooks/shared/` (separate package). Unlike the `file_lock` twin, the two
-    copies are NOT drift-gated: atomicity has no cross-process invariant, so
-    each copy is independently correct and may legitimately diverge.
+    `hooks/shared/` (separate package). This twin IS drift-gated by
+    TestAtomicWriteTwinCopyDrift (mirroring TestFileLockTwinCopyDrift): the
+    containment CHECK is a security invariant that must not silently diverge
+    between the hook and skill copies (#1118-class hazard).
 
     Args:
         target: Path to replace. Its parent directory must already exist.
         content: Full file contents to write.
+        project_root: The trusted base directory `target` must be contained in.
+
+    Raises:
+        ContainmentError: `target` resolves outside `project_root`.
     """
+    # #1247 containment guard, fail-CLOSED, BEFORE creating the temp file.
+    try:
+        resolved_target = str(target.resolve())
+        resolved_root = str(project_root.resolve())
+        contained = (
+            os.path.commonpath([resolved_root, resolved_target]) == resolved_root
+        )
+    except (ValueError, OSError):
+        contained = False
+    if not contained:
+        raise ContainmentError(
+            "refusing write: target escapes the project containment boundary"
+        )
+
     fd, tmp_name = tempfile.mkstemp(
         dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
     )
@@ -398,17 +443,12 @@ def strip_orphan_kernel_block() -> str | None:
     # Fail-open on timeout — next session start will retry.
     try:
         with file_lock(target_file):
-            # Symlink guard INSIDE the lock (TOCTOU defense): is_symlink
-            # uses lstat under the hood which does NOT follow the link, so
-            # this is safe even if the link target is itself a malicious
-            # file. Inside the lock so an attacker cannot swap the target
-            # between an outside-lock check and the write.
-            if target_file.is_symlink():
-                return (
-                    "Migration skipped: ~/.claude/CLAUDE.md path "
-                    "precondition not met."
-                )
-
+            # #1247: the containment check in _atomic_write_text REPLACES the
+            # former leaf is_symlink guard. It runs inside this lock (TOCTOU-
+            # safe, since callers hold file_lock) and strictly DOMINATES
+            # is_symlink -- it catches a symlinked-PARENT escape (which
+            # is_symlink missed) as well as a leaf symlink, via
+            # resolve()-then-commonpath against the anchor below.
             try:
                 content = target_file.read_text(encoding="utf-8")
             except OSError:
@@ -467,10 +507,23 @@ def strip_orphan_kernel_block() -> str | None:
                 new_content = ""
 
             try:
-                _atomic_write_text(target_file, new_content)
+                # anchor: GLOBAL config dir, NOT a project root -- do not unify
+                # onto CLAUDE_PROJECT_DIR / a project root (R4). This file lives
+                # at ~/.claude/CLAUDE.md, a different trust boundary; project-
+                # rooting it would over-block every invocation.
+                _atomic_write_text(
+                    target_file, new_content, get_claude_config_dir()
+                )
                 return (
                     "Removed obsolete PACT kernel block from "
                     "~/.claude/CLAUDE.md"
+                )
+            except ContainmentError:
+                # Opaque skip, matching the message the removed is_symlink
+                # guard returned -- do not leak the resolved victim path.
+                return (
+                    "Migration skipped: ~/.claude/CLAUDE.md path "
+                    "precondition not met."
                 )
             except OSError as e:
                 return (
@@ -655,18 +708,19 @@ def ensure_project_memory_md() -> str | None:
     try:
         ensure_dot_claude_parent(target_file)
         with file_lock(target_file):
-            # Symlink guard: the resolver returned "new_default" (neither
-            # location exists), but the preferred path could still be a
-            # dangling symlink. is_symlink uses lstat and returns True even
-            # for dangling links. Re-check inside the lock so a concurrent
-            # writer that just created the file is detected.
-            if target_file.is_symlink():
-                return "Project CLAUDE.md skipped: path precondition not met."
+            # #1247: containment (in _atomic_write_text) REPLACES the former
+            # leaf is_symlink guard -- it runs inside the lock (TOCTOU-safe)
+            # and dominates is_symlink (catches a symlinked-parent escape as
+            # well as a leaf symlink, via resolve()-then-commonpath).
             if target_file.exists():
                 return None
             try:
-                _atomic_write_text(target_file, memory_template)
+                _atomic_write_text(
+                    target_file, memory_template, Path(project_dir)
+                )
                 return "Created project CLAUDE.md with memory sections"
+            except ContainmentError:
+                return "Project CLAUDE.md skipped: path precondition not met."
             except OSError as e:
                 return f"Project CLAUDE.md failed: {str(e)[:50]}"
     except TimeoutError:
@@ -727,9 +781,8 @@ def migrate_to_managed_structure() -> str | None:
 
     try:
         with file_lock(target_file):
-            if target_file.is_symlink():
-                return "Migration skipped: project CLAUDE.md path precondition not met."
-
+            # #1247: containment (in _atomic_write_text) REPLACES the former
+            # leaf is_symlink guard -- inside the lock, dominates is_symlink.
             try:
                 content = target_file.read_text(encoding="utf-8")
             except OSError:
@@ -742,8 +795,12 @@ def migrate_to_managed_structure() -> str | None:
             new_content = _build_migrated_content(content)
 
             try:
-                _atomic_write_text(target_file, new_content)
+                _atomic_write_text(
+                    target_file, new_content, Path(project_dir)
+                )
                 return "Migrated project CLAUDE.md to managed structure (#404)"
+            except ContainmentError:
+                return "Migration skipped: project CLAUDE.md path precondition not met."
             except OSError as e:
                 return f"Migration failed: {str(e)[:50]}"
     except TimeoutError:
