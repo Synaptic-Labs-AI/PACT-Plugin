@@ -280,6 +280,15 @@ def update_session_info(
             "(another session_init hook may be running concurrently). "
             "Session info update skipped; will retry on next session start."
         )
+    except OSError:
+        # #1245: lock ACQUISITION PermissionError escapes `except TimeoutError`;
+        # catch it at the same skip-and-retry level (the inner except Exception
+        # handles only post-acquisition failures, inside the `with file_lock`).
+        # Opaque, matching the sibling TimeoutError message -- no path leak.
+        return (
+            "Could not acquire lock on project CLAUDE.md "
+            "(path precondition not met); session info update skipped."
+        )
 
 
 def restore_last_session(

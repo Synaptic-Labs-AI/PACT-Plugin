@@ -483,6 +483,17 @@ def strip_orphan_kernel_block() -> str | None:
             "Kernel-block migration skipped; will retry on next session "
             "start."
         )
+    except OSError:
+        # #1245: file_lock ACQUISITION (sidecar mkdir/open) can raise
+        # PermissionError etc., which is not a TimeoutError and would escape
+        # uncaught. The inner except handles post-acquisition write failures;
+        # this catches acquisition failures at the same skip-and-retry level.
+        # Opaque (no str(e)) so the sidecar path is not leaked into a status
+        # string -- matches the sibling TimeoutError message's non-disclosure.
+        return (
+            "Could not acquire lock on ~/.claude/CLAUDE.md "
+            "(path precondition not met); kernel-block migration skipped."
+        )
 
 
 def extract_managed_region(content: str) -> tuple[str, int] | None:
@@ -740,6 +751,15 @@ def migrate_to_managed_structure() -> str | None:
             "Failed to acquire lock on project CLAUDE.md within 5s "
             "(another session_init hook may be running concurrently). "
             "CLAUDE.md migration skipped; will retry on next session start."
+        )
+    except OSError:
+        # #1245: lock ACQUISITION PermissionError escapes `except TimeoutError`;
+        # catch it at the same skip-and-retry level (inner except handles the
+        # post-acquisition write). Opaque, matching the sibling TimeoutError
+        # message -- do not leak the sidecar path into a status string.
+        return (
+            "Could not acquire lock on project CLAUDE.md "
+            "(path precondition not met); CLAUDE.md migration skipped."
         )
 
 
