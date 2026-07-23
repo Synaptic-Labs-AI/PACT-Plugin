@@ -28,6 +28,11 @@ import pytest
 
 from helpers import create_test_schema, make_cli_memory_dict
 
+# Reused rather than re-implemented: the canonical minimal-CLAUDE.md seeder.
+# The isolation fixture below needs a real file at the env-var root, because
+# the display resolver treats "no CLAUDE.md here" as "keep looking".
+from test_working_memory_concurrency_comprehensive import _seed_claude_md
+
 # Add pact-memory skill root to path so `from scripts.cli import ...` works
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'skills', 'pact-memory'))
 
@@ -94,6 +99,70 @@ def cli_script_path():
         Path(__file__).resolve().parent.parent
         / "skills" / "pact-memory" / "scripts" / "cli.py"
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_claude_md_target(tmp_path, monkeypatch):
+    """Redirect every CLAUDE.md resolution in this module to a per-test tmp tree.
+
+    The subprocess sites in this file pass neither ``env=`` nor ``cwd=``, so each
+    child inherits this process's ``os.environ`` and cwd. Without this fixture the
+    display resolver walks git from the inherited cwd and lands on the DEVELOPER'S
+    REAL project CLAUDE.md, and the ``save`` and ``search`` sites then write
+    Working Memory entries into it. That file is gitignored and untracked, so the
+    damage is invisible to ``git status`` and has no git recovery path.
+
+    BOTH halves are required, and this is the part that makes the obvious fix a
+    silent no-op: setting ``CLAUDE_PROJECT_DIR`` alone does NOT isolate, because
+    ``_resolve_display_claude_md_path`` probes the env dir and CONTINUES when no
+    CLAUDE.md is found there, falling through to the git walk and back onto the
+    live file. Seeding a CLAUDE.md at the env dir is what makes the first probe
+    succeed and terminate resolution before the walk.
+
+    Autouse rather than opt-in: a test that simply does not request the fixture
+    would be unprotected with nothing to see in review, and invisible non-coverage
+    is the exact failure mode this fixture exists to prevent. Scoped to this module
+    by placement -- a global autouse would break files that legitimately exercise
+    the resolver's fallback branches.
+    """
+    _seed_claude_md(tmp_path)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+
+class TestSubprocessClaudeMdIsolation:
+    """Proof that the autouse isolation reaches a SPAWNED CHILD, not just this process."""
+
+    def test_spawned_subprocess_resolves_claude_md_under_tmp(self, tmp_path):
+        """A child spawned the way every E2E site spawns one must resolve the
+        display CLAUDE.md inside the per-test tmp tree.
+
+        Asserts the resolved path REPORTED BY THE CHILD rather than that the
+        fixture ran. The chain under test is monkeypatch.setenv -> os.environ ->
+        subprocess inheritance -> resolver, and only a child process can witness
+        all four links; asserting on the parent's environ would prove none of them.
+        Spawned with no ``env=`` and no ``cwd=`` so it inherits exactly what the
+        other subprocess sites in this module inherit.
+        """
+        scripts_dir = (
+            Path(__file__).resolve().parent.parent
+            / "skills" / "pact-memory" / "scripts"
+        )
+        code = (
+            "import sys; sys.path.insert(0, {!r});"
+            "import working_memory as wm;"
+            "print(wm._resolve_display_claude_md_path())".format(str(scripts_dir))
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        resolved = Path(result.stdout.strip())
+        assert resolved.resolve() == (tmp_path / ".claude" / "CLAUDE.md").resolve()
+        # Containment is the property that matters: anything under tmp_path is
+        # disposable, anything outside it is somebody's real file.
+        resolved.resolve().relative_to(tmp_path.resolve())
 
 
 # ---------------------------------------------------------------------------

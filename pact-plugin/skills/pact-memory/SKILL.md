@@ -352,7 +352,7 @@ right purpose.
 | Layer | Storage | Content | Who Writes | Auto-Loaded |
 |-------|---------|---------|------------|-------------|
 | **Auto-memory** (MEMORY.md) | `~/.claude/projects/{hash}/memory/` | Free-form session learnings, user preferences, general patterns | Platform (automatic) | Yes (first 200 lines) |
-| **pact-memory** (SQLite) | `~/.claude/pact-memory/memory.db` | Structured institutional knowledge: context, goals, decisions, lessons, entities | Agents via this skill | Via Working Memory sync to CLAUDE.md |
+| **pact-memory** (SQLite) | `~/.claude/pact-memory/memory.db` | Structured institutional knowledge: context, goals, decisions, lessons, entities | Agents via this skill | Partially — newest entries only, via Working Memory sync to CLAUDE.md |
 | **Agent persistent memory** | `~/.claude/agent-memory/<name>/` | Per-agent domain expertise accumulated across sessions | Individual agents (automatic) | Yes (first 200 lines, per agent) |
 
 **pact-memory's unique value**: Structured fields (context, goal, decisions,
@@ -362,9 +362,13 @@ markdown does not provide.
 
 **Coexistence model**: Auto-memory captures broad session context automatically.
 pact-memory captures deliberate, structured knowledge at PACT phase boundaries.
-The Working Memory section in CLAUDE.md shows the 3 most recent pact-memory
-entries, providing structured context that complements auto-memory's general
-learnings.
+The Working Memory section in CLAUDE.md shows the most recent pact-memory
+entries — capped at 3, then reduced further by a token budget, so it commonly
+shows fewer and often only one. The newest entry is kept in full and is the only
+one guaranteed to carry its Memory ID; older entries are compressed to a one-line
+summary and lose theirs. What survives provides structured context that
+complements auto-memory's general learnings, and the full history stays
+searchable via the `search` command.
 
 ## Integration with PACT
 

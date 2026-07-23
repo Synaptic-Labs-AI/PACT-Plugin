@@ -462,7 +462,7 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
             # imports from shared.claude_md_manager — a module-level
             # import here would create a staleness → claude_md_manager →
             # (indirectly) staleness cycle on some Python versions.
-            from shared.claude_md_manager import file_lock
+            from shared.claude_md_manager import _atomic_write_text, file_lock
             with file_lock(claude_md_path):
                 # Symlink guard INSIDE the lock (TOCTOU defense). is_symlink
                 # uses lstat so it does not follow the link. Status string is
@@ -478,11 +478,19 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
                 current = claude_md_path.read_text(encoding="utf-8")
                 if current != content:
                     return None
-                claude_md_path.write_text(new_content, encoding="utf-8")
+                # Atomic (temp + rename) so a crash mid-write cannot truncate
+                # the always-loaded CLAUDE.md. NOTE: unlike the other CLAUDE.md
+                # write sites this one never set a mode, so `write_text` left
+                # the file's existing permissions alone; the helper normalises
+                # it to 0o600, matching every other writer in the plugin.
+                _atomic_write_text(claude_md_path, new_content)
         except TimeoutError:
             return "Pinned staleness update skipped: lock contention."
         except OSError as e:
-            logger_msg = f"Failed to update pinned staleness: {e}"
+            # Truncate like the sibling write sites (session_resume, cli): the
+            # raw exception embeds the absolute CLAUDE.md path, which should not
+            # leak into a status string.
+            logger_msg = f"Failed to update pinned staleness: {str(e)[:50]}"
             return logger_msg
 
     if stale_count > 0:

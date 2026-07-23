@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -108,7 +109,12 @@ def file_lock(target_file: Path):
     would alter this body and trip the drift test; the OS-level non-re-entrancy
     plus the callers' fail-open already bound the worst case).
     """
-    lock_path = target_file.parent / f".{target_file.name}.lock"
+    # Resolve the WHOLE target, not just its parent: fcntl.flock serialises on
+    # the sidecar's inode, so two spellings of one file must produce one sidecar
+    # name. Resolving only the parent still keys a symlinked FILE by its alias
+    # (two names, one inode -> two sidecars -> no mutual exclusion).
+    resolved_target = target_file.resolve()
+    lock_path = resolved_target.parent / f".{resolved_target.name}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     # 0o600: the lock file is adjacent to user-private CLAUDE.md content;
     # match the same permissions to avoid leaving a world-readable sidecar.
@@ -169,6 +175,76 @@ def file_lock(target_file: Path):
 #     fallbacks diverged between processes, the sidecars would differ and the
 #     lock would not serialize — accepted as out-of-contract (no safe fallback
 #     action exists if the paths genuinely diverge).
+
+
+def _atomic_write_text(target: Path, content: str) -> None:
+    """Replace `target`'s contents with `content` atomically.
+
+    `Path.write_text` truncates the file and THEN writes, so a crash, a full
+    disk, or a kill between those two steps leaves a TRUNCATED CLAUDE.md. In the
+    projects this runs in that file is gitignored and untracked, so there is no
+    recovery path -- the user's pinned context is simply gone.
+
+    Writing to a sibling temp file and renaming makes the replacement atomic: a
+    reader sees either the whole old file or the whole new one, never a partial
+    write. The temp file is created in the TARGET'S OWN DIRECTORY because
+    `os.replace` is only atomic within a single filesystem.
+
+    The mode is set on the TEMP file before the rename, so the target is never
+    momentarily visible with the wrong permissions -- unlike a chmod after the
+    write, which leaves exactly such a window on a file holding user content.
+
+    Callers must already hold `file_lock` for the target. The lock closes the
+    concurrent-writer window; this closes the crash/truncation window. They are
+    different hazards, and neither fix subsumes the other. Note the lock is a
+    separate sidecar file, so replacing the target's inode does not disturb it.
+
+    Requires write permission on the target's DIRECTORY (to create the temp),
+    where a bare `write_text` needed only permission on the file itself. A
+    read-only directory holding a writable CLAUDE.md would now fail the write
+    rather than truncate it -- a safe direction, but a real behaviour change.
+
+    NOTE: a deliberate duplicate of `_atomic_write_text` in
+    `hooks/shared/claude_md_manager.py`. This module cannot import from
+    `hooks/shared/` (separate package), the same constraint that produced the
+    `file_lock` twin above. Unlike that twin, the two copies are NOT
+    drift-gated: atomicity has no cross-process invariant, so each copy is
+    independently correct and may legitimately diverge.
+
+    Args:
+        target: Path to replace. Its parent directory must already exist.
+        content: Full file contents to write.
+    """
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
+    )
+    try:
+        # os.fdopen takes ownership of fd only on success; if it raises, the
+        # raw fd mkstemp opened would leak (the outer cleanup unlinks the temp
+        # FILE but cannot close a descriptor it never received a handle for).
+        try:
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            os.close(fd)
+            raise
+        with handle:
+            handle.write(content)
+            handle.flush()
+            # Without the fsync the rename can be persisted while the data
+            # behind it is not, which reintroduces the empty-file failure this
+            # function exists to prevent.
+            os.fsync(handle.fileno())
+        # mkstemp already creates 0o600; setting it explicitly keeps the mode a
+        # property of this function rather than of the stdlib's default.
+        os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, target)
+    except BaseException:
+        # Never leave a stray temp file behind next to the user's CLAUDE.md.
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def extract_managed_region(content: str) -> Optional[Tuple[str, int]]:
@@ -281,14 +357,21 @@ def _resolve_display_claude_md_path() -> Optional[Path]:
          (preferred) or ./CLAUDE.md (legacy).
       2. Git worktree root via `git rev-parse --show-toplevel` -> the same
          .claude/-then-legacy probe under the worktree root.
-      3. Current working directory -> the same probe.
+      3. Main repo root via `git rev-parse --git-common-dir`.parent -> the
+         same probe. Reached only when the worktree is NOT a session root
+         (branch 2 found nothing): under the PACT `.worktrees/` convention no
+         session is rooted in the worktree, so the file the session reads is
+         the main repo's. Without this branch that write is lost (returns
+         None); with it the write lands where the session reads.
+      4. Current working directory -> the same probe.
 
-    Unlike _get_claude_md_path (which anchors to the MAIN repo via
-    --git-common-dir so it can find a single shared CLAUDE.md), this anchors
-    to the WORKTREE root via --show-toplevel so a worktree-rooted session
-    updates its OWN display file — the same file session_init/session_resume
-    create and read. In a non-worktree checkout the two anchors coincide, so
-    the resolved path is identical to _get_claude_md_path's.
+    Branch 2 anchors the WORKTREE root (--show-toplevel) so a worktree that IS
+    a session root updates its OWN display file; branch 3 falls back to
+    _get_claude_md_path's MAIN-repo anchor (--git-common-dir) for the common
+    case where it is not. Because branch 2 precedes branch 3, the two resolvers
+    now differ ONLY in that worktree-root branch: in a non-worktree checkout
+    both branches resolve the same directory, so this function's result is
+    identical to _get_claude_md_path's.
 
     This never CREATES a CLAUDE.md (the orchestrator manages the file's
     lifecycle); it only probes for an existing one and returns its Path, or
@@ -320,6 +403,37 @@ def _resolve_display_claude_md_path() -> Optional[Path]:
             if result.returncode == 0 and result.stdout.strip():
                 worktree_root = Path(result.stdout.strip())
                 found = _find_existing_claude_md(worktree_root)
+                if found is not None:
+                    return found
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
+        # Main-repo root via --git-common-dir. Under the PACT `.worktrees/`
+        # convention no session is ever rooted in the worktree, so branch 2
+        # found nothing and the file the session actually reads is the MAIN
+        # repo's. --git-common-dir points at the shared .git dir whether run
+        # from the main repo or a linked worktree, so its parent is the main
+        # repo root in both. This is _get_claude_md_path's exact anchor.
+        #
+        # The is_absolute() guard is load-bearing, not decoration: git returns
+        # a RELATIVE path (".git", "../.git") when run at a repo root or subdir,
+        # and _find_existing_claude_md does a bare `base / "CLAUDE.md"` with no
+        # normalisation, so a relative base would yield a cwd-relative Path and
+        # a cwd-relative lock sidecar (the exact divergence D2 just closed).
+        # Reused verbatim from _get_claude_md_path.
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--git-common-dir"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                common_dir = Path(result.stdout.strip())
+                if not common_dir.is_absolute():
+                    common_dir = Path.cwd() / common_dir
+                repo_root = common_dir.resolve().parent
+                found = _find_existing_claude_md(repo_root)
                 if found is not None:
                     return found
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -736,9 +850,9 @@ def sync_to_claude_md(
                     content += "\n"
                 new_content = content + "\n" + section_text
 
-            # Write back to file
-            claude_md_path.write_text(new_content, encoding="utf-8")
-            os.chmod(str(claude_md_path), 0o600)
+            # Write back to file (atomic: temp + rename, so a crash mid-write
+            # cannot leave the always-loaded CLAUDE.md truncated)
+            _atomic_write_text(claude_md_path, new_content)
 
         logger.info("Synced memory to CLAUDE.md Working Memory section")
         return True
@@ -966,9 +1080,9 @@ def sync_retrieved_to_claude_md(
                         content += "\n"
                     new_content = content + "\n" + section_text
 
-            # Write back to file
-            claude_md_path.write_text(new_content, encoding="utf-8")
-            os.chmod(str(claude_md_path), 0o600)
+            # Write back to file (atomic: temp + rename, so a crash mid-write
+            # cannot leave the always-loaded CLAUDE.md truncated)
+            _atomic_write_text(claude_md_path, new_content)
 
         logger.info("Synced retrieved memories to CLAUDE.md Retrieved Context section")
         return True
