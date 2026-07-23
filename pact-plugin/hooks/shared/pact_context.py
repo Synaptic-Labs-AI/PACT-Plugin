@@ -309,10 +309,109 @@ def get_pact_context() -> dict:
         return _cache
 
 
+def _task_store_mtime(tasks_root: Path | None, name: str) -> float:
+    """Max child-mtime of the task store ``tasks_root/<name>/`` — a liveness
+    proxy for "the harness is actively routing TaskCreate into this team."
+
+    TOTAL / never-raises: an absent store dir, an empty store, a stat that
+    raises (OSError), or an unresolvable ``tasks_root`` (None) all DEGRADE to
+    ``0.0`` — the neutral floor that makes this candidate lose the recency
+    tier without disturbing the never-raises contract of the caller. Only ever
+    used to compare genuine same-``leadSessionId`` collision candidates, so a
+    uniform ``0.0`` simply hands the decision to the next tier (createdAt,
+    then name).
+    """
+    if tasks_root is None:
+        return 0.0
+    try:
+        store = tasks_root / name
+        mtimes = [child.stat().st_mtime for child in store.iterdir()]
+        return max(mtimes) if mtimes else 0.0
+    except Exception:
+        return 0.0
+
+
+def _safe_created_at(data: dict) -> int:
+    """Parse ``config.json['createdAt']`` (epoch millis) as a secondary
+    liveness proxy. TOTAL / never-raises: a missing key (``None``), a
+    non-numeric string, or any malformed value DEGRADES to ``0`` so the
+    candidate loses the createdAt tier and falls to the name tie-break."""
+    try:
+        return int(data.get("createdAt"))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _disambiguate_collision(
+    matches: list[tuple[str, dict]],
+    session_id: str,
+    default: str | None,
+    tasks_root: Path | None,
+) -> str:
+    """Pick the LIVE team among >=2 genuine ``leadSessionId`` collisions.
+
+    Applied ONLY when two-or-more team dirs pass the (unchanged) identity
+    predicate ``config.json['leadSessionId'] == session_id``. Ranks those
+    already-matched candidates by an IDENTITY-anchored, LIVENESS-ordered
+    ladder — it never promotes a foreign-id dir (the predicate stays the hard
+    filter upstream). ``matches`` arrives in name-sorted (ascending) order.
+
+    Ladder (first decisive tier wins):
+      (1) ANCHOR — the caller-threaded ``default`` (the session's
+          harness-announced / persisted identity) when it is itself a genuine
+          match. The dominant ``--resume`` case; also the guarantee that an
+          active sub-team (which never shares the lead's own announced name)
+          cannot steal the lead's team even with a fresher task store.
+      (2) OWN-CANONICAL-NAME — a dir named one of this session's canonical
+          forms ``{session_id, "session-<id8>", "pact-<id8>"}`` (id8 reuses
+          ``generate_team_name``'s sanitizer). Recognizes the session's own
+          dir structurally in the divergent-launch case where ``default`` (a
+          ``session-<id8>``) is not among the matches (real dir == full UUID).
+      (3)+(4)+(5) — among genuinely ambiguous siblings, prefer max
+          task-store recency, then max ``createdAt``, then SMALLEST name.
+
+    Tie-break DIRECTION (team-lead ruling): tier (5) is SMALLER-name-first,
+    matching today's ``sorted(...)[0]`` behavior byte-for-byte in the
+    all-signals-absent case. Implemented by iterating the name-ASCENDING
+    ``matches`` and replacing the incumbent ONLY on a STRICTLY-greater
+    (mtime, createdAt) key — so equal keys retain the earliest (smallest)
+    name. Pure / FS-read-only; every disk read is wrapped in the helpers
+    above to degrade, never raise.
+    """
+    names = [m[0] for m in matches]
+    # (1) ANCHOR — honor the session's own announced/persisted identity.
+    if default is not None and default in names:
+        return default
+    # (2) OWN-CANONICAL-NAME — reuse generate_team_name's exact id8 sanitizer
+    # so the candidate matches the platform's dir name byte-for-byte.
+    id8 = re.sub(r"[^a-f0-9-]", "", (session_id or "")[:8])
+    canonical = (
+        {session_id, f"session-{id8}", f"pact-{id8}"} if id8 else {session_id}
+    )
+    for name, _data in matches:  # name-ascending -> deterministic first hit
+        if name in canonical:
+            return name
+    # (3)+(4)+(5) — liveness-ordered argmax with a SMALLER-name-first tie-break.
+    # Iterate name-ascending; replace only on a STRICTLY-greater recency key so
+    # a full (mtime, createdAt) tie keeps the earliest (smallest) name.
+    best_name = matches[0][0]
+    best_key = (
+        _task_store_mtime(tasks_root, matches[0][0]),
+        _safe_created_at(matches[0][1]),
+    )
+    for name, data in matches[1:]:
+        key = (_task_store_mtime(tasks_root, name), _safe_created_at(data))
+        if key > best_key:
+            best_key = key
+            best_name = name
+    return best_name
+
+
 def _resolve_aligned_team_name(
     session_id: str,
     teams_dir: str | None = None,
     default: str | None = None,
+    tasks_dir: str | None = None,
 ) -> str:
     """Resolve the REAL platform team name for ``session_id`` by IDENTITY MATCH.
 
@@ -332,6 +431,19 @@ def _resolve_aligned_team_name(
     first-class. A stale/foreign dir from another session carries a DIFFERENT
     ``leadSessionId`` and is rejected, so an ``id8`` collision cannot
     mis-resolve.
+
+    GENUINE-COLLISION DISAMBIGUATION (the split-brain fix): a single PACT
+    session mints MANY sibling team dirs (every ``Agent``/comPACT/orchestrate
+    call), and the platform stamps EVERY one with the lead's ``leadSessionId``.
+    So the predicate above is routinely satisfied by 2+ dirs. Rather than
+    returning the first NAME-sorted match (which is unrelated to which team the
+    harness actually routes tasks into — the historical bug), this collects ALL
+    genuine matches and, when there are >=2, delegates to
+    ``_disambiguate_collision`` which ranks them by an IDENTITY-anchored,
+    LIVENESS-ordered ladder (anchor on ``default`` -> own-canonical-name ->
+    task-store recency -> ``createdAt`` -> smallest name). The len==0 and len==1
+    paths are byte-unchanged (zero regression); disambiguation is gated strictly
+    behind len>=2 and mutates NO disk state.
 
     FAIL-SAFE DEFAULT: on no identity match (the team dir is half-formed —
     ``inboxes/`` present but ``config.json`` not yet written — or simply
@@ -390,7 +502,12 @@ def _resolve_aligned_team_name(
         teams_dir: Override the teams directory (for testing). Defaults to
             ``<claude-config-dir>/teams``.
         default: Fail-safe return on no match / error. Defaults to the
-            persisted-context team_name when None.
+            persisted-context team_name when None. Also the tier-1 ANCHOR of
+            genuine-collision disambiguation (the session's announced identity).
+        tasks_dir: Override the task-store directory (for testing), symmetric
+            with ``teams_dir``. Defaults to ``<claude-config-dir>/tasks``. Read
+            ONLY on the >=2-collision path as the task-store-recency liveness
+            signal; a read failure degrades that tier to 0.0, never raises.
 
     Returns:
         The identity-matched team dir name, else ``default`` (or the
@@ -409,8 +526,13 @@ def _resolve_aligned_team_name(
             teams_root = Path(teams_dir)
         else:
             teams_root = get_claude_config_dir() / "teams"
-        # Sorted iteration -> deterministic resolution if (pathologically)
-        # two dirs claimed the same leadSessionId.
+        # Sorted iteration -> the matches list is built in name-ascending order,
+        # so name is the deterministic FINAL tie-break inside disambiguation.
+        # COLLECT every genuine match instead of returning the first: a single
+        # session routinely stamps its leadSessionId onto MANY sibling dirs, and
+        # returning the alphabetically-first one is the split-brain bug. The
+        # predicate itself is UNCHANGED.
+        matches: list[tuple[str, dict]] = []
         for entry in sorted(teams_root.iterdir()):
             try:
                 if not entry.is_dir():
@@ -419,17 +541,39 @@ def _resolve_aligned_team_name(
                 data = json.loads(config_path.read_text(encoding="utf-8"))
                 if data.get("leadSessionId") != session_id:
                     continue
-                # Path-safety the matched dir name BEFORE returning it — a
+                # Path-safety the matched dir name BEFORE accepting it — a
                 # tampered config could name a path-unsafe dir. On failure,
                 # skip this entry and keep scanning (do not abort the search).
                 name = entry.name
                 if not is_safe_path_component(name):
                     continue
-                return name
+                # Carry the parsed config so disambiguation reads createdAt
+                # without a second read_text of the same file.
+                matches.append((name, data))
             except (OSError, json.JSONDecodeError, ValueError, TypeError, AttributeError):
                 # This dir is unreadable / malformed — skip it, keep scanning
                 # the rest. A single bad sibling must not abort detection.
                 continue
+        if len(matches) == 1:
+            # FAST PATH — exactly one genuine match: byte-identical to the old
+            # return-first behavior, zero regression.
+            return matches[0][0]
+        if len(matches) >= 2:
+            # GENUINE COLLISION — disambiguate by the identity-anchored,
+            # liveness-ordered ladder. Resolve tasks_root lazily and ONLY here
+            # (the common len<=1 paths never touch the tasks tree). Wrap the
+            # resolution so a home-unresolvable RuntimeError degrades the
+            # recency tier to 0.0 rather than escaping into the outer except
+            # (which would drop us to `default` and lose the collision winner).
+            try:
+                if tasks_dir is not None:
+                    tasks_root: Path | None = Path(tasks_dir)
+                else:
+                    tasks_root = get_claude_config_dir() / "tasks"
+            except Exception:
+                tasks_root = None
+            return _disambiguate_collision(matches, session_id, fallback, tasks_root)
+        # len(matches) == 0 -> fall through to branch-2 / fallback UNCHANGED.
         # Branch-2: config-less full-UUID divergence (Desktop child / older-CLI
         # / print). The identity-match loop above missed because no team dir
         # carries a config.json with this leadSessionId — but the platform may

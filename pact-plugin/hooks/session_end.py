@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -798,6 +799,121 @@ def _prune_registry_dead_teams(
     return pruned
 
 
+def _atomic_write_config(target: Path, data: dict) -> None:
+    """Atomically rewrite ``target`` (a team ``config.json``) with ``data``.
+
+    Temp file in the SAME directory + ``os.rename`` (crash-safe atomic replace),
+    0o600 — mirrors ``pact_context.persist_context``. Raises on any failure so
+    the caller's per-dir guard counts the dir as a skip rather than a retirement
+    (a partial/failed write must never be recorded as success). The temp file is
+    cleaned up on failure. Not fail-safe by itself BY DESIGN — the caller owns
+    the never-raises boundary.
+    """
+    parent = target.parent
+    fd, tmp_path = tempfile.mkstemp(dir=str(parent), prefix=".config-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.chmod(tmp_path, 0o600)
+        os.rename(tmp_path, str(target))
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _retire_session_leadsessionid_claims(
+    current_session_id: str,
+    current_team_name: str,
+    teams_dir: Path | None = None,
+) -> int:
+    """Retire (``leadSessionId = None``) the ENDING session's claim on its
+    NON-LIVE sibling team dirs — the SessionEnd hygiene half of the
+    resume-path split-brain fix (issue: dispatch-gate stale-team split-brain).
+
+    A single PACT session stamps its ``leadSessionId`` onto MANY team dirs
+    (every Agent/comPACT/orchestrate mints one). Nothing retires those claims
+    today, so the collision corpus the resolver must disambiguate grows every
+    session. This pass mirrors ``pact-align.py`` step 4: when THIS session ends,
+    null out its ``leadSessionId`` on every sibling dir EXCEPT the live team —
+    collapsing the collision toward a single claimant for the next resume.
+
+    Predicate for retiring a dir ``D`` (ALL must hold):
+      * ``D`` is a real directory (symlinks skipped — lstat semantics — so a
+        planted link cannot redirect the rewrite outside the teams root);
+      * ``D/config.json`` exists and parses;
+      * ``data['leadSessionId'] == current_session_id`` — ONLY this session's
+        claims. A dir claimed by a DIFFERENT (foreign) session is left
+        untouched; an already-retired ``None`` claim is likewise ``!=`` our id
+        and skipped, making a re-run a no-op (idempotent);
+      * ``D.name.lower() != current_team_name.lower()`` — the LIVE team KEEPS
+        its claim (pact-align step 3 parity), so the collision collapses to
+        exactly one live claimant.
+
+    Action on a match: read-modify-write ``config.json`` setting
+    ``leadSessionId = None`` (JSON null), preserving all other fields, via an
+    atomic temp-file rename. NO ``rmtree`` — the platform owns dir teardown; we
+    retire the CLAIM, not the DIR (leaves ``session-*`` / random-named dirs in
+    place). A SEPARATE pass from ``_prune_registry_dead_teams`` (registry JSONL)
+    and ``cleanup_old_teams`` (TTL rmtree) — it touches only ``config.json``.
+
+    FAIL-CLOSED: without BOTH ``current_session_id`` AND ``current_team_name``
+    we cannot guarantee we would SKIP the live team, so we retire NOTHING (never
+    risk nulling the live team's own claim). Best-effort / never raises: a
+    per-dir ``try/except`` swallows unreadable/malformed configs and write races
+    so a retirement failure can never block session termination.
+
+    Args:
+        current_session_id: the ending session's id (the claim to retire).
+        current_team_name: the live team dir name to PRESERVE (skip).
+        teams_dir: the live-teams root. Defaults to ``~/.claude/teams``.
+
+    Returns:
+        Number of dirs whose ``leadSessionId`` was retired (0 on fail-closed
+        no-op, absent teams root, or nothing to retire).
+    """
+    # FAIL-CLOSED guard (belt-and-suspenders with the main() callsite check).
+    if not current_session_id or not current_team_name:
+        return 0
+    if teams_dir is None:
+        teams_dir = get_claude_config_dir() / "teams"
+    base = Path(teams_dir)
+    if not base.exists():
+        return 0
+
+    live_name = current_team_name.lower()
+    retired = 0
+    try:
+        for entry in base.iterdir():
+            try:
+                # Skip symlinks (lstat) and non-dirs; skip the LIVE team.
+                if entry.is_symlink() or not entry.is_dir():
+                    continue
+                if entry.name.lower() == live_name:
+                    continue
+                config_path = entry / "config.json"
+                data = json.loads(config_path.read_text(encoding="utf-8"))
+                # Only OUR session's claims — foreign ids and already-retired
+                # (None) claims are both != our id, so both are skipped.
+                if not isinstance(data, dict):
+                    continue
+                if data.get("leadSessionId") != current_session_id:
+                    continue
+                data["leadSessionId"] = None
+                _atomic_write_config(config_path, data)
+                retired += 1
+            except (OSError, json.JSONDecodeError, ValueError, TypeError,
+                    AttributeError):
+                # Unreadable / malformed / write race → skip this dir, keep
+                # going. A retirement failure must NEVER block termination.
+                continue
+    except OSError:
+        pass  # iterdir race on the teams root → best-effort, never raise
+    return retired
+
+
 def main():
     try:
         try:
@@ -860,6 +976,22 @@ def main():
 
         _prune_registry_dead_teams()
 
+        # Retire this session's leadSessionId claims on its NON-LIVE sibling
+        # team dirs (forward-hygiene for the resume-path split-brain fix). A
+        # SEPARATE pass from cleanup_old_teams (TTL rmtree) and
+        # _prune_registry_dead_teams (registry JSONL) — it rewrites only
+        # config.json's leadSessionId field, never rmtree's a dir, and keeps
+        # the LIVE team's claim intact. FAIL-CLOSED: run ONLY when BOTH our own
+        # session id and live team name are known, else we cannot guarantee we
+        # would SKIP the live team, so we retire nothing. Best-effort: the
+        # helper never raises; the count feeds the cleanup_summary audit.
+        leadsession_claims_retired = 0
+        if current_session_id and current_team_name:
+            leadsession_claims_retired = _retire_session_leadsessionid_claims(
+                current_session_id=current_session_id,
+                current_team_name=current_team_name,
+            )
+
         # Assemble skip-set via the module-level helper — see
         # `_assemble_tasks_skip_set` for the full rationale on the three
         # platform-key channels and the positive-regex allowlist. The
@@ -899,6 +1031,7 @@ def main():
                 tasks_ttl_days=_SESSION_MAX_AGE_DAYS,
                 teams_ran=teams_reaper_ran,
                 tasks_ran=tasks_reaper_ran,
+                leadsession_claims_retired=leadsession_claims_retired,
             ))
         except Exception as e:
             print(f"Hook warning (cleanup_summary journal): {e}", file=sys.stderr)

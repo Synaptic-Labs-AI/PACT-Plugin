@@ -1023,3 +1023,165 @@ class TestNonVacuity:
 
         monkeypatch.setattr(pc, "_resolve_aligned_team_name", _boom)
         assert ctx_module.get_team_name() == first  # served from cache, no re-call
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 10. GENUINE-COLLISION DISAMBIGUATION — the split-brain fix (CODE-phase smoke)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# These are SMOKE tests written by the backend-coder to confirm the ladder picks
+# correctly and to PIN the two team-lead rulings (tasks_root via tasks_dir
+# injection; tier-5 SMALLER-name-first parity with today's sorted()[0]). The
+# COMPREHENSIVE §6 regression matrix (including the both-topologies integration
+# test) is the test-engineer's deliverable — this class is intentionally small.
+
+
+def _seed_collision_dir(teams_root, dir_name, *, lead_session_id, created_at=None):
+    """Seed teams/<dir_name>/config.json with a MATCHING leadSessionId and an
+    optional createdAt (epoch millis). Mirrors _seed_team_dir but lets a test
+    set createdAt for the tier-4 probe."""
+    team_dir = teams_root / dir_name
+    team_dir.mkdir(parents=True, exist_ok=True)
+    config = {"name": dir_name, "leadSessionId": lead_session_id, "members": []}
+    if created_at is not None:
+        config["createdAt"] = created_at
+    (team_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    return team_dir
+
+
+def _touch_task_store(tasks_root, team_name, *, mtime):
+    """Create tasks/<team_name>/1.json and stamp its mtime — the tier-3
+    task-store-recency signal (max child-mtime of the store)."""
+    store = tasks_root / team_name
+    store.mkdir(parents=True, exist_ok=True)
+    task_file = store / "1.json"
+    task_file.write_text("{}", encoding="utf-8")
+    os.utime(task_file, (mtime, mtime))
+    return store
+
+
+class TestGenuineCollisionDisambiguation:
+    """>=2 dirs share the session's leadSessionId — the resolver must return the
+    LIVE team, not the alphabetically-first sibling (the historical bug)."""
+
+    def test_anchor_default_wins(self, ctx):
+        """(tier 1) When the caller-threaded `default` is itself a genuine match,
+        it wins outright — the dominant --resume case."""
+        import shared.pact_context as pc
+        _ctx_module, teams_root = ctx
+        # 'aaa-first' sorts before the default; the OLD code would return it.
+        _seed_collision_dir(teams_root, "aaa-first", lead_session_id=LEAD_SID)
+        _seed_collision_dir(teams_root, SESSION_ID8_DIR, lead_session_id=LEAD_SID)
+        resolved = pc._resolve_aligned_team_name(
+            LEAD_SID, teams_dir=str(teams_root), default=SESSION_ID8_DIR
+        )
+        assert resolved == SESSION_ID8_DIR
+
+    def test_anchor_beats_fresher_subteam_taskstore(self, ctx, tmp_path):
+        """(tier 1 > tier 3) Lead edge case #4: a sibling with a FRESHER task
+        store must NOT steal the lead's own announced team. Identity anchor
+        precedes the liveness heuristic."""
+        import shared.pact_context as pc
+        _ctx_module, teams_root = ctx
+        tasks_root = tmp_path / ".claude" / "tasks"
+        _seed_collision_dir(teams_root, SESSION_ID8_DIR, lead_session_id=LEAD_SID)
+        _seed_collision_dir(teams_root, "zzz-subteam", lead_session_id=LEAD_SID)
+        # The sub-team has the freshest task store — irrelevant, anchor wins.
+        _touch_task_store(tasks_root, SESSION_ID8_DIR, mtime=1000.0)
+        _touch_task_store(tasks_root, "zzz-subteam", mtime=9999.0)
+        resolved = pc._resolve_aligned_team_name(
+            LEAD_SID, teams_dir=str(teams_root), default=SESSION_ID8_DIR,
+            tasks_dir=str(tasks_root),
+        )
+        assert resolved == SESSION_ID8_DIR
+
+    def test_own_canonical_name_wins_when_default_absent(self, ctx):
+        """(tier 2) Divergent-launch: default ('session-<id8>') is NOT among the
+        matches; the dir named the full-UUID (a canonical form) is recognized
+        structurally among random-named siblings."""
+        import shared.pact_context as pc
+        _ctx_module, teams_root = ctx
+        _seed_collision_dir(teams_root, "aaa-random", lead_session_id=LEAD_SID)
+        _seed_collision_dir(teams_root, FULL_UUID_DIR, lead_session_id=LEAD_SID)
+        # default is a name that does NOT exist on disk -> tier 1 misses.
+        resolved = pc._resolve_aligned_team_name(
+            LEAD_SID, teams_dir=str(teams_root), default="session-0001639f"
+        )
+        assert resolved == FULL_UUID_DIR
+
+    def test_taskstore_recency_breaks_tie(self, ctx, tmp_path):
+        """(tier 3) No anchor, no canonical match — the dir whose task store has
+        the freshest child-mtime wins (the team the harness routes tasks into)."""
+        import shared.pact_context as pc
+        _ctx_module, teams_root = ctx
+        tasks_root = tmp_path / ".claude" / "tasks"
+        _seed_collision_dir(teams_root, "aaa-random", lead_session_id=LEAD_SID)
+        _seed_collision_dir(teams_root, "bbb-random", lead_session_id=LEAD_SID)
+        _touch_task_store(tasks_root, "aaa-random", mtime=1000.0)
+        _touch_task_store(tasks_root, "bbb-random", mtime=5000.0)  # freshest
+        resolved = pc._resolve_aligned_team_name(
+            LEAD_SID, teams_dir=str(teams_root), default="not-a-match",
+            tasks_dir=str(tasks_root),
+        )
+        assert resolved == "bbb-random"
+
+    def test_createdat_is_secondary(self, ctx, tmp_path):
+        """(tier 4) Task stores absent/tied -> max createdAt wins."""
+        import shared.pact_context as pc
+        _ctx_module, teams_root = ctx
+        tasks_root = tmp_path / ".claude" / "tasks"  # empty -> tier-3 all 0.0
+        _seed_collision_dir(teams_root, "aaa-random", lead_session_id=LEAD_SID,
+                            created_at=100)
+        _seed_collision_dir(teams_root, "bbb-random", lead_session_id=LEAD_SID,
+                            created_at=999)  # newest
+        resolved = pc._resolve_aligned_team_name(
+            LEAD_SID, teams_dir=str(teams_root), default="not-a-match",
+            tasks_dir=str(tasks_root),
+        )
+        assert resolved == "bbb-random"
+
+    def test_name_tiebreak_is_smaller_first(self, ctx, tmp_path):
+        """(tier 5, LEAD RULING) All signals absent/tied -> SMALLER name wins,
+        byte-for-byte parity with today's sorted()[0]. Pins the tie-break
+        DIRECTION."""
+        import shared.pact_context as pc
+        _ctx_module, teams_root = ctx
+        tasks_root = tmp_path / ".claude" / "tasks"  # empty
+        # No createdAt, no task stores -> pure name determinism.
+        _seed_collision_dir(teams_root, "aaa-first", lead_session_id=LEAD_SID)
+        _seed_collision_dir(teams_root, "zzz-last", lead_session_id=LEAD_SID)
+        resolved = pc._resolve_aligned_team_name(
+            LEAD_SID, teams_dir=str(teams_root), default="not-a-match",
+            tasks_dir=str(tasks_root),
+        )
+        assert resolved == "aaa-first"  # smaller name, NOT zzz-last
+
+    def test_unreadable_taskstore_never_raises(self, ctx, tmp_path):
+        """(tier 6 totality) A task store whose stat raises must DEGRADE the
+        recency tier to 0.0, never raise — the ladder falls to createdAt/name."""
+        import shared.pact_context as pc
+        _ctx_module, teams_root = ctx
+        _seed_collision_dir(teams_root, "aaa-random", lead_session_id=LEAD_SID,
+                            created_at=100)
+        _seed_collision_dir(teams_root, "bbb-random", lead_session_id=LEAD_SID,
+                            created_at=999)
+        # Point tasks_dir at a FILE (not a dir) so iterdir() raises NotADirectory.
+        bogus = tmp_path / "not-a-tasks-dir"
+        bogus.write_text("x", encoding="utf-8")
+        resolved = pc._resolve_aligned_team_name(
+            LEAD_SID, teams_dir=str(teams_root), default="not-a-match",
+            tasks_dir=str(bogus),
+        )
+        # Did not raise; degraded to createdAt -> newest wins.
+        assert resolved == "bbb-random"
+
+    def test_single_match_zero_regression(self, ctx):
+        """Exactly one genuine match -> unchanged return (fast path)."""
+        import shared.pact_context as pc
+        _ctx_module, teams_root = ctx
+        _seed_collision_dir(teams_root, FULL_UUID_DIR, lead_session_id=LEAD_SID)
+        _seed_collision_dir(teams_root, "foreign", lead_session_id=TMUX_SID)
+        resolved = pc._resolve_aligned_team_name(
+            LEAD_SID, teams_dir=str(teams_root), default="ctx-default"
+        )
+        assert resolved == FULL_UUID_DIR
