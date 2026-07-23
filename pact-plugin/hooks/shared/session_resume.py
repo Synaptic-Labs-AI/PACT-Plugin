@@ -161,8 +161,10 @@ def update_session_info(
     try:
         with file_lock(target_file):
             # #1247: containment (in _atomic_write_text) REPLACES the former
-            # leaf is_symlink guard -- inside the lock (TOCTOU-safe), and it
-            # dominates is_symlink (catches a symlinked-parent escape too).
+            # leaf is_symlink guard -- inside the lock (TOCTOU-safe). It
+            # catches the symlinked-PARENT escape the leaf guard MISSED (F1)
+            # and safely ALLOWS a benign in-project leaf redirect; it does NOT
+            # dominate is_symlink (overlapping-but-different sets).
             try:
                 # Case 0: File doesn't exist -- create it with the full canonical
                 # PACT_MANAGED structure so the orchestrator has a stable Current

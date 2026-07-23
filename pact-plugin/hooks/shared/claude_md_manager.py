@@ -445,10 +445,13 @@ def strip_orphan_kernel_block() -> str | None:
         with file_lock(target_file):
             # #1247: the containment check in _atomic_write_text REPLACES the
             # former leaf is_symlink guard. It runs inside this lock (TOCTOU-
-            # safe, since callers hold file_lock) and strictly DOMINATES
-            # is_symlink -- it catches a symlinked-PARENT escape (which
-            # is_symlink missed) as well as a leaf symlink, via
-            # resolve()-then-commonpath against the anchor below.
+            # safe, since callers hold file_lock) and is the RIGHT control
+            # here: resolve()-then-commonpath against the anchor below catches
+            # the symlinked-PARENT escape the leaf is_symlink guard MISSED
+            # (F1). It does NOT dominate is_symlink -- the two catch
+            # overlapping-but-different sets: containment safely ALLOWS a
+            # benign in-project leaf redirect (os.replace swaps the leaf, no
+            # write-through) that the old blanket guard refused.
             try:
                 content = target_file.read_text(encoding="utf-8")
             except OSError:
@@ -710,8 +713,10 @@ def ensure_project_memory_md() -> str | None:
         with file_lock(target_file):
             # #1247: containment (in _atomic_write_text) REPLACES the former
             # leaf is_symlink guard -- it runs inside the lock (TOCTOU-safe)
-            # and dominates is_symlink (catches a symlinked-parent escape as
-            # well as a leaf symlink, via resolve()-then-commonpath).
+            # and catches the symlinked-PARENT escape the leaf guard MISSED
+            # (F1), via resolve()-then-commonpath. It does NOT dominate
+            # is_symlink: it safely ALLOWS a benign in-project leaf redirect
+            # (os.replace leaf-swap, no write-through) the old guard refused.
             if target_file.exists():
                 return None
             try:
@@ -782,7 +787,10 @@ def migrate_to_managed_structure() -> str | None:
     try:
         with file_lock(target_file):
             # #1247: containment (in _atomic_write_text) REPLACES the former
-            # leaf is_symlink guard -- inside the lock, dominates is_symlink.
+            # leaf is_symlink guard -- inside the lock. It catches the
+            # symlinked-PARENT escape the leaf guard MISSED (F1) and safely
+            # ALLOWS a benign in-project leaf redirect; it does NOT dominate
+            # is_symlink (the two catch overlapping-but-different sets).
             try:
                 content = target_file.read_text(encoding="utf-8")
             except OSError:
