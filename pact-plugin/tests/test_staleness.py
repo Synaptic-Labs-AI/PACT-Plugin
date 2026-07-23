@@ -517,6 +517,57 @@ class TestStalenessErrorPaths:
         assert result is not None
         assert "Failed to update pinned staleness" in result
 
+    def test_successful_update_normalizes_file_mode_to_0o600(self, tmp_path):
+        """A successful staleness update clamps the file mode to 0o600.
+
+        staleness.py's write site calls _atomic_write_text, which chmods the temp
+        to 0o600 before os.replace, so a pre-existing 0o644 file is clamped to
+        0o600 on update. This pins the SITE behaviour (that check_pinned_staleness
+        actually invokes the clamp) — distinct from the helper's clamp (covered by
+        test_claude_md_manager.py's migration test) and the create path
+        (test_created_file_has_secure_permissions). Before this site switched from
+        bare write_text to _atomic_write_text it left the existing mode alone, so
+        the site normalization was asserted only in a commit message.
+
+        The explicit chmod 0o644 (NOT an ambient-umask default) is load-bearing:
+        it proves the update CHANGES 0o644 -> 0o600. A test relying on the umask
+        to make the pre-file non-0o600 would pass trivially under umask 077 —
+        itself a latent phantom-green.
+
+        Revert-coupled: reverting the write site to bare write_text leaves the
+        0o644 mode untouched and turns this test RED.
+        """
+        import stat
+        from staleness import check_pinned_staleness, PINNED_STALENESS_DAYS
+        from datetime import datetime, timedelta
+
+        old_date = (datetime.now() - timedelta(days=PINNED_STALENESS_DAYS + 10)).strftime("%Y-%m-%d")
+
+        claude_md = self._create_claude_md(tmp_path, (
+            "# Project Memory\n\n"
+            "## Pinned Context\n\n"
+            f"### Old Feature (PR #50, merged {old_date})\n"
+            "- Details\n\n"
+        ))
+        # Explicit non-0o600 starting mode so the post-update assertion proves a
+        # CLAMP, not an ambient-umask coincidence.
+        claude_md.chmod(0o644)
+        assert stat.S_IMODE(claude_md.stat().st_mode) == 0o644, (
+            "precondition: the seeded file must start at 0o644"
+        )
+
+        result = check_pinned_staleness(claude_md_path=claude_md)
+
+        # The stale pin triggered a real update (the write path ran), not a
+        # no-op skip — so the mode assertion below observes a write, not the seed.
+        assert result is not None
+        # SITE behaviour: the successful update landed the file at 0o600, clamping
+        # the 0o644 it started with.
+        final_mode = stat.S_IMODE(claude_md.stat().st_mode)
+        assert final_mode == 0o600, (
+            f"staleness update must clamp the file mode to 0o600, got {oct(final_mode)}"
+        )
+
 
 class TestStalenessModuleDirect:
     """Tests for staleness.py called directly (not via session_init wrapper)."""
