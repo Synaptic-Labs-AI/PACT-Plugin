@@ -73,7 +73,9 @@ class TestCheckPinnedStaleness:
         from session_init import check_pinned_staleness
 
         with patch("session_init._get_project_claude_md_path", return_value=None), \
-             patch("staleness._get_project_claude_md_path", return_value=None):
+             patch("staleness._get_project_claude_md_path", return_value=None), \
+             patch("staleness._resolve_project_claude_md_with_base",
+                   return_value=(None, None)):
             result = check_pinned_staleness()
 
         assert result is None
@@ -926,51 +928,118 @@ class TestCheckPinnedStalenessHardening:
         )
 
     def test_symlink_target_rejected_with_opaque_status(self, tmp_path):
-        """If the project CLAUDE.md is a symlink, check_pinned_staleness
-        returns an opaque 'precondition not met' string and does NOT touch
-        the symlink target.
+        """If the project CLAUDE.md is a symlink whose target ESCAPES the
+        project root, check_pinned_staleness returns an opaque 'precondition
+        not met' string and does NOT touch the attacker-chosen target.
 
-        Pre-fix, the function would call write_text on the symlink path,
-        which would follow the link and clobber the attacker-chosen target.
-        Post-fix, the inside-lock symlink guard refuses to operate.
+        This is the F1 write-through threat: a symlink (leaf here, or via a
+        symlinked parent) redirecting the write to an out-of-project victim
+        (e.g. the user's global ~/.claude/CLAUDE.md). The #1247 containment
+        guard resolves the target and refuses when it escapes the anchor.
+        (An IN-PROJECT redirect is contained and allowed — see
+        test_in_project_symlink_redirect_allowed_containment_supersedes_ban.)
         """
         from session_init import check_pinned_staleness
 
-        # Plant a regular file as the symlink target
-        symlink_target = tmp_path / "external_target.md"
-        original_target_content = "# External file (must not be modified)\n"
-        symlink_target.write_text(original_target_content, encoding="utf-8")
+        # Project root is proj_dir (the lexical base of proj_dir/CLAUDE.md).
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
 
-        # Replace the project CLAUDE.md with a symlink to the external target
-        managed_path = tmp_path / "CLAUDE.md"
-        os.symlink(str(symlink_target), str(managed_path))
+        # Plant the attacker-chosen target OUTSIDE the project root, seeded
+        # with stale content so the read-through drives modified=True (the
+        # gate into the file_lock write path).
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        escaping_target = outside_dir / "external_target.md"
+        escaping_target.write_text(self._stale_pinned_content(), encoding="utf-8")
+
+        # project CLAUDE.md is a symlink escaping to that out-of-project target.
+        managed_path = proj_dir / "CLAUDE.md"
+        os.symlink(str(escaping_target), str(managed_path))
         assert managed_path.is_symlink()
-
-        # The symlink itself reads through to stale content (so the inner
-        # read_text + parse + apply_staleness_markings path runs and
-        # produces modified=True, which is what gates the file_lock entry)
-        symlink_target.write_text(
-            self._stale_pinned_content(), encoding="utf-8"
-        )
 
         with patch("session_init._get_project_claude_md_path", return_value=managed_path), \
              patch("staleness._get_project_claude_md_path", return_value=managed_path):
             result = check_pinned_staleness()
 
-        # Status string is opaque — does not reveal the internal symlink
+        # Status string is opaque — does not reveal the internal containment
         # check to a local attacker reading hook stderr.
         assert result is not None
         assert "skipped" in result.lower()
         assert "symlink" not in result.lower()
         assert "refusing" not in result.lower()
 
-        # Critical: the symlink TARGET is byte-identical to what we wrote
-        # last (the stale content). The function did not append a STALE
-        # marker, did not insert a budget warning, did not write at all.
-        assert symlink_target.read_text(encoding="utf-8") == self._stale_pinned_content()
-        # The symlink itself is still a symlink (was not replaced with a
-        # regular file by a bypassing write).
+        # Critical: the out-of-project target is byte-identical to what we
+        # wrote (the stale content). The guard refused before any write — no
+        # STALE marker, no budget warning, no write-through to the victim.
+        assert escaping_target.read_text(encoding="utf-8") == self._stale_pinned_content()
+        # The symlink itself is untouched (refusal happened before os.replace).
         assert managed_path.is_symlink()
+
+    def test_in_project_symlink_redirect_allowed_containment_supersedes_ban(self, tmp_path):
+        """#1247 deliberate behavior change: an IN-PROJECT symlink redirect is
+        ALLOWED. Containment refuses only ESCAPES; an in-project target is
+        contained. The former blunt leaf-is_symlink guard refused ALL symlinks
+        (an over-block on benign in-project symlinks) — containment removes
+        that over-block while still closing the F1 escape.
+
+        Security-engineer-signed-off residual: os.replace REPLACES the symlink
+        entry, it does NOT write through it, so even a crafted in-project
+        redirect cannot overwrite its pointed-to file. This pins that safety:
+        the pointed-to in-project file is byte-unchanged and CLAUDE.md becomes
+        a regular file carrying the staleness update.
+        """
+        from session_init import check_pinned_staleness
+
+        # Both the symlink and its target are IN-PROJECT (project root =
+        # tmp_path, the lexical base of tmp_path/CLAUDE.md) -> contained.
+        sibling = tmp_path / "sib.md"
+        sibling.write_text(self._stale_pinned_content(), encoding="utf-8")
+        sibling_before = sibling.read_text(encoding="utf-8")
+
+        managed_path = tmp_path / "CLAUDE.md"
+        os.symlink(str(sibling), str(managed_path))
+        assert managed_path.is_symlink()
+
+        with patch("session_init._get_project_claude_md_path", return_value=managed_path), \
+             patch("staleness._get_project_claude_md_path", return_value=managed_path):
+            result = check_pinned_staleness()
+
+        # ALLOWED: the write proceeded (a detection message, not the opaque skip).
+        assert result is not None
+        assert "skipped" not in result.lower()
+
+        # os.replace does NOT write through the leaf symlink: the pointed-to
+        # in-project file is byte-unchanged...
+        assert sibling.read_text(encoding="utf-8") == sibling_before
+        # ...and CLAUDE.md is now a real file carrying the staleness marker.
+        assert not managed_path.is_symlink()
+        assert "<!-- STALE:" in managed_path.read_text(encoding="utf-8")
+
+    def test_containment_refusal_attributed_not_lock_contention(self, tmp_path):
+        """A containment refusal must surface the CONTAINMENT status, never the
+        lock-contention status. ContainmentError subclasses OSError, so if the
+        `except ContainmentError` arm were ordered after `except OSError` (or
+        dropped), an escape would be silently misattributed to a lock failure.
+        This pins the arm ordering end-to-end via the real write path.
+        """
+        from session_init import check_pinned_staleness
+
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        escaping_target = outside_dir / "victim.md"
+        escaping_target.write_text(self._stale_pinned_content(), encoding="utf-8")
+        managed_path = proj_dir / "CLAUDE.md"
+        os.symlink(str(escaping_target), str(managed_path))
+
+        with patch("session_init._get_project_claude_md_path", return_value=managed_path), \
+             patch("staleness._get_project_claude_md_path", return_value=managed_path):
+            result = check_pinned_staleness()
+
+        assert result == "Pinned staleness skipped: path precondition not met."
+        assert "lock contention" not in result.lower()
 
     def test_concurrent_content_change_skips_write(self, tmp_path, monkeypatch):
         """If content changes between the outer read at L348 and the
@@ -1343,4 +1412,103 @@ class TestFileLockTwinCopyDrift:
         assert cmm._LOCK_POLL_INTERVAL == wm._LOCK_POLL_INTERVAL, (
             "_LOCK_POLL_INTERVAL drift between claude_md_manager.py and "
             "working_memory.py — update both in the same commit"
+        )
+
+
+class TestStalenessLexicalBaseParity:
+    """#1247: the lexical base recovered from a SUPPLIED path (option D in
+    check_pinned_staleness, via staleness._lexical_base_of) MUST equal the base
+    the resolver itself used. session_init passes staleness a resolved PATH
+    (not a base), so the containment anchor is recovered by inverting the
+    resolver's construction; if _resolve_project_claude_md_with_base ever grows
+    a THIRD path shape, that lexical formula would silently diverge and the
+    guard would anchor on the wrong root. This test turns that divergence into
+    a RED -- the single-source-of-truth safeguard the architect mandated
+    (twin-drift discipline applied to anchor derivation). It exercises the REAL
+    production formula (_lexical_base_of), not a test copy.
+    """
+
+    def test_lexical_base_matches_resolver_base_dot_claude(self, tmp_path, monkeypatch):
+        import staleness as st
+
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".claude" / "CLAUDE.md").write_text("# x\n", encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        path, base = st._resolve_project_claude_md_with_base()
+        assert path is not None and base is not None
+        assert st._lexical_base_of(path) == base, (
+            "lexical base recovery diverged from the resolver's base for the "
+            ".claude/CLAUDE.md shape — option D would anchor containment on the "
+            "wrong root"
+        )
+
+    def test_lexical_base_matches_resolver_base_legacy(self, tmp_path, monkeypatch):
+        import staleness as st
+
+        (tmp_path / "CLAUDE.md").write_text("# x\n", encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        path, base = st._resolve_project_claude_md_with_base()
+        assert path is not None and base is not None
+        assert st._lexical_base_of(path) == base, (
+            "lexical base recovery diverged from the resolver's base for the "
+            "legacy ./CLAUDE.md shape — option D would anchor containment on "
+            "the wrong root"
+        )
+
+
+class TestAtomicWriteTwinCopyDrift:
+    """Drift detection for the _atomic_write_text twin (#1247).
+
+    _atomic_write_text is twin-copied from hooks/shared/claude_md_manager into
+    skills/pact-memory/scripts/working_memory (skills/ cannot import from
+    hooks/shared/). Since #1247 it carries the CONTAINMENT SECURITY CHECK, so
+    the function BODY must stay byte-identical across the two copies -- a
+    silent divergence in the security check between the hook and skill copies
+    is the #1118-class hazard this gate exists to prevent. The docstring may
+    differ (each copy points at the other); the executable logic may not.
+    """
+
+    @staticmethod
+    def _extract_body(source: str) -> str:
+        """Return the executable body: skip leading decorators + the def line,
+        strip a leading docstring, dedent, normalize. Same extractor as
+        TestFileLockTwinCopyDrift (docstring-tolerant, logic-pinning)."""
+        lines = source.split("\n")
+        idx = 0
+        while idx < len(lines) and lines[idx].lstrip().startswith("@"):
+            idx += 1
+        body_lines = lines[idx + 1:]
+        body_text = textwrap.dedent("\n".join(body_lines)).strip()
+        for quote in ['"""', "'''"]:
+            if body_text.startswith(quote):
+                end_idx = body_text.find(quote, len(quote))
+                if end_idx != -1:
+                    body_text = body_text[end_idx + len(quote):].strip()
+                break
+        return body_text
+
+    def test_atomic_write_text_bodies_are_identical(self):
+        """The _atomic_write_text body MUST be byte-identical across the twins.
+
+        The body carries the #1247 containment check (commonpath, fail-closed);
+        a divergence would let the hook and skill write paths enforce different
+        containment, silently defeating the guard on one side. Compares logic
+        only -- docstrings are allowed to differ.
+        """
+        from shared.claude_md_manager import _atomic_write_text as canonical
+        from working_memory import _atomic_write_text as twin
+
+        canonical_body = self._extract_body(inspect.getsource(canonical))
+        twin_body = self._extract_body(inspect.getsource(twin))
+
+        assert canonical_body == twin_body, (
+            "_atomic_write_text twin drift between "
+            "hooks/shared/claude_md_manager.py and "
+            "skills/pact-memory/scripts/working_memory.py — the #1247 "
+            "containment check must stay identical; update both in the SAME "
+            "commit.\n"
+            f"canonical body:\n{canonical_body}\n\n"
+            f"twin body:\n{twin_body}"
         )

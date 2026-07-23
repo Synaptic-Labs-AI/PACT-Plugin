@@ -197,9 +197,9 @@ class TestReadOnlyDirectoryFailSafe:
         reached = {"atomic_write": False}
         real_atomic = wm._atomic_write_text
 
-        def spy_atomic(target, content):
+        def spy_atomic(target, content, project_root):
             reached["atomic_write"] = True
-            return real_atomic(target, content)
+            return real_atomic(target, content, project_root)
 
         monkeypatch.setattr(wm, "_atomic_write_text", spy_atomic)
 

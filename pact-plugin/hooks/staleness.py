@@ -68,9 +68,11 @@ def _find_existing_claude_md(base: Path) -> Optional[Path]:
     return None
 
 
-def get_project_claude_md_path() -> Optional[Path]:
+def _resolve_project_claude_md_with_base() -> Tuple[Optional[Path], Optional[Path]]:
     """
-    Get the path to the project-level CLAUDE.md.
+    Resolve the project-level CLAUDE.md AND the trusted base directory it was
+    found under, so a write caller can containment-check the target against the
+    base the resolver actually used (#1247).
 
     Honors both supported locations:
       - $base/.claude/CLAUDE.md  (preferred / new default)
@@ -82,14 +84,23 @@ def get_project_claude_md_path() -> Optional[Path]:
          the worktree path, which often does not contain CLAUDE.md)
       3. Current working directory
 
+    The returned `base` is the branch's directory captured BEFORE descending
+    into `.claude` (the arg to `_find_existing_claude_md`), NOT the returned
+    path and NOT a re-derivation -- the trusted pre-resolve anchor that makes
+    the #1247 containment check non-vacuous. `get_project_claude_md_path` is
+    now a thin wrapper returning `[0]`, so read-only callers and the
+    resolver-parity lint are unaffected.
+
     Returns:
-        Path to an existing project CLAUDE.md if found, None otherwise.
+        (path, base) where path is an existing project CLAUDE.md and base is
+        the directory it was found under; (None, None) if none exists.
     """
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
     if project_dir:
-        found = _find_existing_claude_md(Path(project_dir))
+        base = Path(project_dir)
+        found = _find_existing_claude_md(base)
         if found is not None:
-            return found
+            return found, base
 
     # Fallback: detect git root (worktree-safe)
     # Uses --git-common-dir instead of --show-toplevel because the latter
@@ -116,12 +127,50 @@ def get_project_claude_md_path() -> Optional[Path]:
             repo_root = common_dir.resolve().parent
             found = _find_existing_claude_md(repo_root)
             if found is not None:
-                return found
+                return found, repo_root
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         pass
 
     # Last resort: current working directory
-    return _find_existing_claude_md(Path.cwd())
+    cwd = Path.cwd()
+    found = _find_existing_claude_md(cwd)
+    return (found, cwd) if found is not None else (None, None)
+
+
+def _lexical_base_of(claude_md_path: Path) -> Path:
+    """Recover the pre-`.claude` base of a resolver-produced CLAUDE.md path by
+    INVERTING the resolver's construction (base/.claude/CLAUDE.md | base/
+    CLAUDE.md) -- #1247 option D, for a caller-SUPPLIED path with no separate
+    base (session_init's production flow passes the path, not the base).
+
+    Purely lexical (pathlib `.parent` never follows symlinks), so an F1
+    symlinked-parent `.claude` still escapes on the target's resolve() and is
+    refused. Locked to the resolver's own base by TestStalenessLexicalBaseParity
+    -- if _resolve_project_claude_md_with_base ever grows a third path shape,
+    that test turns this formula's divergence into a RED.
+
+    Edge (adversarial-only UNDER-block, tolerated per the good-faith model): a
+    project dir literally named ".claude" using the LEGACY layout lands one
+    level too high. Requires deliberate construction; not a bug.
+    """
+    if claude_md_path.parent.name == ".claude":
+        return claude_md_path.parent.parent
+    return claude_md_path.parent
+
+
+def get_project_claude_md_path() -> Optional[Path]:
+    """
+    Get the path to the project-level CLAUDE.md (path only).
+
+    Thin wrapper over `_resolve_project_claude_md_with_base` (added for #1247);
+    read-only callers, session_init, and the resolver-parity lint use this
+    Path-only name, while the write caller (check_pinned_staleness) uses the
+    with-base variant to get the containment anchor.
+
+    Returns:
+        Path to an existing project CLAUDE.md if found, None otherwise.
+    """
+    return _resolve_project_claude_md_with_base()[0]
 
 
 # Backward-compatible alias (tests and session_init patch the underscore name)
@@ -427,7 +476,15 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
         Informational message about stale pins found, or None.
     """
     if claude_md_path is None:
-        claude_md_path = _get_project_claude_md_path()
+        claude_md_path, project_root = _resolve_project_claude_md_with_base()
+    else:
+        # A caller-supplied path came from a TRUSTED resolver -- session_init
+        # resolves via _get_project_claude_md_path() and PASSES it here, so
+        # production DOES supply the param. Recover its pre-.claude base by
+        # inverting the resolver's construction (see _lexical_base_of): the
+        # SAME base the resolver used, not a re-derived root, and F1-safe
+        # (purely lexical, no symlink follow) + parity-locked.
+        project_root = _lexical_base_of(claude_md_path)
     if claude_md_path is None:
         return None
 
@@ -462,13 +519,18 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
             # imports from shared.claude_md_manager — a module-level
             # import here would create a staleness → claude_md_manager →
             # (indirectly) staleness cycle on some Python versions.
-            from shared.claude_md_manager import _atomic_write_text, file_lock
+            from shared.claude_md_manager import (
+                ContainmentError,
+                _atomic_write_text,
+                file_lock,
+            )
             with file_lock(claude_md_path):
-                # Symlink guard INSIDE the lock (TOCTOU defense). is_symlink
-                # uses lstat so it does not follow the link. Status string is
-                # deliberately opaque to avoid revealing the internal guard.
-                if claude_md_path.is_symlink():
-                    return "Pinned staleness skipped: path precondition not met."
+                # #1247: containment (in _atomic_write_text) REPLACES the
+                # former leaf is_symlink guard -- inside the lock (TOCTOU-safe).
+                # It catches the symlinked-PARENT escape the leaf guard MISSED
+                # (F1) and safely ALLOWS a benign in-project leaf redirect; it
+                # does NOT dominate is_symlink (overlapping-but-different sets).
+                # Status string stays opaque.
                 # Re-read inside the lock — a concurrent update_session_info
                 # may have landed between our outer
                 # read at L348 and the lock acquisition. If content changed,
@@ -483,7 +545,9 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
                 # write sites this one never set a mode, so `write_text` left
                 # the file's existing permissions alone; the helper normalises
                 # it to 0o600, matching every other writer in the plugin.
-                _atomic_write_text(claude_md_path, new_content)
+                _atomic_write_text(claude_md_path, new_content, project_root)
+        except ContainmentError:
+            return "Pinned staleness skipped: path precondition not met."
         except TimeoutError:
             return "Pinned staleness update skipped: lock contention."
         except OSError as e:
