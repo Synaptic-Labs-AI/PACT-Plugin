@@ -219,7 +219,15 @@ def _atomic_write_text(target: Path, content: str) -> None:
         dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
     )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        # os.fdopen takes ownership of fd only on success; if it raises, the
+        # raw fd mkstemp opened would leak (the outer cleanup unlinks the temp
+        # FILE but cannot close a descriptor it never received a handle for).
+        try:
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            os.close(fd)
+            raise
+        with handle:
             handle.write(content)
             handle.flush()
             # Without the fsync the rename can be persisted while the data

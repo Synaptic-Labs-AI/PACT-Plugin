@@ -487,7 +487,10 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
         except TimeoutError:
             return "Pinned staleness update skipped: lock contention."
         except OSError as e:
-            logger_msg = f"Failed to update pinned staleness: {e}"
+            # Truncate like the sibling write sites (session_resume, cli): the
+            # raw exception embeds the absolute CLAUDE.md path, which should not
+            # leak into a status string.
+            logger_msg = f"Failed to update pinned staleness: {str(e)[:50]}"
             return logger_msg
 
     if stale_count > 0:

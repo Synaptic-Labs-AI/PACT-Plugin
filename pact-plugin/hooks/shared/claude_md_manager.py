@@ -204,7 +204,7 @@ def _atomic_write_text(target: Path, content: str) -> None:
     momentarily visible with the wrong permissions -- unlike a chmod after the
     write, which leaves exactly such a window on a file holding user content.
 
-    Callers should already hold `file_lock` for the target. The lock closes the
+    Callers must already hold `file_lock` for the target. The lock closes the
     concurrent-writer window; this closes the crash/truncation window. They are
     different hazards and neither fix subsumes the other. Note the lock is a
     separate sidecar file, so replacing the target's inode does not disturb it.
@@ -228,7 +228,15 @@ def _atomic_write_text(target: Path, content: str) -> None:
         dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
     )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        # os.fdopen takes ownership of fd only on success; if it raises, the
+        # raw fd mkstemp opened would leak (the outer cleanup unlinks the temp
+        # FILE but cannot close a descriptor it never received a handle for).
+        try:
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            os.close(fd)
+            raise
+        with handle:
             handle.write(content)
             handle.flush()
             # Without the fsync the rename can be persisted while the data
