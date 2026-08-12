@@ -152,3 +152,18 @@ Tell the user:
 
 Configuration file: `~/.claude/pact-telegram/.env`
 To reconfigure later: `/PACT:telegram-setup`
+
+---
+
+## Optional: Meta-Orchestrator
+
+After completing the base setup, offer the meta-orchestrator:
+
+Tell the user:
+
+> **Want an always-on Telegram concierge?** The PACT Meta-Orchestrator is a persistent Claude Code session that runs in the background on your Mac. It receives all your Telegram messages and can:
+> - Route messages to the right project session conversationally
+> - Spawn new project sessions from Telegram ("start a landing page for X")
+> - Report status across all running sessions ("what's everyone working on?")
+>
+> To set it up, run: `/PACT:meta-orchestrator-setup`
