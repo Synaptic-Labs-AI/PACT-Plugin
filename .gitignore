@@ -18,5 +18,8 @@ __pycache__/
 CLAUDE.md
 .worktrees/
 
+# Cloud Agent bootstrap venv (created by .cursor/install.sh)
+.venv/
+
 # Sidecar lock files created by file_lock() helper
 .*.lock
