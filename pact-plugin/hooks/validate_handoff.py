@@ -239,13 +239,16 @@ def is_pact_agent(agent_identifier: str) -> bool:
             harness-set ``agent_type`` (e.g. ``"pact-preparer"``). The ``pact-``
             prefix family below matches ``agent_type`` values directly, so the
             same prefix-check answers the role-class question against the field
-            that is actually present at SubagentStop.
+            that is actually present at SubagentStop. The namespaced
+            spelling (``"PACT:pact-preparer"``) is checked without its ``PACT:``.
 
     Returns:
         True if this is a PACT agent that should be validated
     """
     if not agent_identifier:
         return False
+    if isinstance(agent_identifier, str):
+        agent_identifier = pact_context.strip_pact_namespace(agent_identifier)
 
     pact_prefixes = ["pact-", "PACT-", "pact_", "PACT_"]
     return any(agent_identifier.startswith(prefix) for prefix in pact_prefixes)

@@ -310,6 +310,19 @@ def test_a_non_teammate_pact_subagent_is_still_refused_without_a_handoff(tmp_pat
     assert "PACT Handoff Refusal" in out["reason"]
 
 
+def test_validate_handoff_refuses_a_namespaced_pact_subagent_without_a_handoff(tmp_path):
+    """The Agent tool accepts the namespaced spelling, and its subagent is refused alike."""
+    world = World(tmp_path)
+    transcript = write_metadata(world, SUBAGENT_ID, {"agentType": "PACT:pact-preparer"})
+    frame = subagent_frame(
+        "PACT:pact-preparer", SUBAGENT_ID, transcript, last_assistant_message=POOR_CLOSING
+    )
+
+    out = only_decision(run(world, frame))
+    assert out["decision"] == "block"
+    assert "PACT Handoff Refusal" in out["reason"]
+
+
 def test_lead_process_crons_do_not_silence_an_in_process_teammate(tmp_path):
     """A SubagentStop frame carries the lead process's crons. They wake the
     lead, not the teammate, so they are not a flag for the teammate's job."""

@@ -1243,6 +1243,18 @@ def resolve_agent_name(
 # orchestrator with a specialist AND miss the qualified `PACT:` spelling.
 LEAD_AGENT_TYPES = frozenset({"PACT:pact-orchestrator", "pact-orchestrator"})
 
+# The platform spells a plugin agent `<plugin name>:<agent>`, and this plugin
+# is named PACT.
+PACT_NAMESPACE = "PACT:"
+
+
+def strip_pact_namespace(value: str) -> str:
+    """``value`` without one leading ``PACT:``. Case-sensitive; no other
+    namespace is stripped."""
+    if value.startswith(PACT_NAMESPACE):
+        return value[len(PACT_NAMESPACE):]
+    return value
+
 
 def is_lead(input_data: dict) -> bool:
     """Return True iff this hook frame belongs to the PACT team-lead.

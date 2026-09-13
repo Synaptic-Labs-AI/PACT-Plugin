@@ -102,6 +102,7 @@ from shared.pact_context import (
     get_session_id,
     is_lead,
     persist_context,
+    strip_pact_namespace,
 )
 from shared.dispatch_helpers import is_registered_pact_specialist
 from shared.session_journal import append_event, make_event
@@ -251,7 +252,7 @@ def _should_warn_unknown_role(input_data: dict) -> bool:
         # Present-but-non-string (unhashable/odd) agent_type: not lead, not a
         # resolvable specialist spelling → treat as unrecognized → fire.
         return True
-    stripped = agent_type.removeprefix("PACT:")
+    stripped = strip_pact_namespace(agent_type)
     plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
     return not is_registered_pact_specialist(stripped, plugin_root=plugin_root)
 
