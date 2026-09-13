@@ -32,6 +32,7 @@ from shared.claude_md_manager import (
     extract_managed_region,
 )
 from shared.failure_cause import failure_cause
+from shared.project_scope import git_env_without_location
 from pin_caps import (
     PIN_STALE_BLOCK_THRESHOLD,
     CapViolation,
@@ -274,7 +275,8 @@ def _resolve_project_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
             ["git", "rev-parse", "--git-common-dir"],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=5,
+            env=git_env_without_location(),
         )
         if result.returncode == 0 and result.stdout.strip():
             common_dir = Path(result.stdout.strip())

@@ -1110,12 +1110,17 @@ def _get_claude_md_path() -> Optional[Path]:
     # result against the cwd before taking its parent.
     # NOTE: Twin pattern in memory_api.py (_detect_project_id) and
     #       hooks/staleness.py (get_project_claude_md_path) -- keep in sync.
+    # Function-level: the shared package is importable only after
+    # pact_session's sys.path bootstrap has run at module import.
+    from shared.project_scope import git_env_without_location
+
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--git-common-dir"],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=5,
+            env=git_env_without_location(),
         )
         if result.returncode == 0 and result.stdout.strip():
             common_dir = Path(result.stdout.strip())
@@ -1206,12 +1211,17 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
         # Worktree root: --show-toplevel returns the worktree directory when run
         # inside a worktree (and the main repo root otherwise), matching the
         # directory session_init/session_resume target for the session's CLAUDE.md.
+        # Function-level: the shared package is importable only after
+        # pact_session's sys.path bootstrap has run at module import.
+        from shared.project_scope import git_env_without_location
+
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=5,
+                env=git_env_without_location(),
             )
             if result.returncode == 0 and result.stdout.strip():
                 worktree_root = Path(result.stdout.strip())
@@ -1239,7 +1249,8 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
                 ["git", "rev-parse", "--git-common-dir"],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=5,
+                env=git_env_without_location(),
             )
             if result.returncode == 0 and result.stdout.strip():
                 common_dir = Path(result.stdout.strip())

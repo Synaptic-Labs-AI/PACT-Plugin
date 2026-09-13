@@ -186,6 +186,9 @@ def main_repo_root(start: Optional[str] = None) -> Optional[Path]:
     if start is not None:
         command += ["-C", str(start)]
     command += ["rev-parse", "--git-common-dir"]
+    # Function-level: the shared package is importable once pact_session's
+    # sys.path bootstrap has run, which this module's import of it does.
+    from shared.project_scope import git_env_without_location
 
     try:
         result = subprocess.run(
@@ -193,6 +196,7 @@ def main_repo_root(start: Optional[str] = None) -> Optional[Path]:
             capture_output=True,
             text=True,
             timeout=5,
+            env=git_env_without_location(),
         )
         if result.returncode != 0 or not result.stdout.strip():
             return None

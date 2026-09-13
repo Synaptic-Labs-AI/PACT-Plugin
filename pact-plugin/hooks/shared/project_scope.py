@@ -30,11 +30,25 @@ from typing import Optional, Set
 from .git_helpers import run_git
 from .paths import get_claude_config_dir
 
-# Git LOCATES the repository from these instead of discovering it from `-C`.
-# Inherited -- a git hook runs with GIT_DIR exported for its own repository --
-# they make every directory report that one repository, so an unrelated
-# directory compares equal to it. Every git call below runs without them.
+# Git LOCATES the repository from these instead of discovering it from `-C` or
+# the working directory. Inherited -- a git hook runs with GIT_DIR exported for
+# its own repository -- they make every directory report that one repository,
+# so an unrelated directory compares equal to it.
 _GIT_LOCATION_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
+
+
+def git_env_without_location() -> dict:
+    """Return this process's environment without the git location variables.
+
+    Every git call that decides which project a directory belongs to runs with
+    it -- this module's guard and the CLAUDE.md resolvers alike -- so the
+    guard and the resolvers judge the same repository.
+    """
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key not in _GIT_LOCATION_VARIABLES
+    }
 
 
 def _git_output(directory: Path, *args: str) -> Optional[str]:
@@ -43,17 +57,14 @@ def _git_output(directory: Path, *args: str) -> Optional[str]:
     None on a git error, a timeout, a non-repo directory or an OSError, so
     every rule built on it fails toward refusal.
     """
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in _GIT_LOCATION_VARIABLES
-    }
     # `run_git` absorbs TimeoutExpired and FileNotFoundError only. The original
     # predicate caught OSError entire, and that breadth is load-bearing here:
     # a PermissionError reaching a caller as an exception instead of a refusal
     # would turn a fail-safe into a crash on a write path.
     try:
-        result = run_git(["-C", str(directory), *args], timeout=5, env=env)
+        result = run_git(
+            ["-C", str(directory), *args], timeout=5, env=git_env_without_location()
+        )
     except OSError:
         return None
     if result is None or result.returncode != 0 or not result.stdout.strip():
