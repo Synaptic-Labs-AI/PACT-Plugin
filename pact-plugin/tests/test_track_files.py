@@ -13,9 +13,10 @@ Tests cover:
 """
 import io
 import json
+import os
 import sys
 from datetime import datetime
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -153,101 +154,77 @@ class TestTrackFilesCycle:
 
 
 class TestTrackFilesLocking:
-    """H5: Verify file locking is used to prevent TOCTOU race conditions."""
+    """H5: writes hold the state-file sidecar lock; reads take none."""
 
-    def test_save_uses_flock(self, tmp_path):
-        """save_tracked_files must acquire exclusive lock via fcntl.flock."""
+    @staticmethod
+    def _spy_flock(monkeypatch):
+        from shared import state_file
+
+        calls = []
+        real_flock = state_file.fcntl.flock
+
+        def spy(fd, op):
+            calls.append((op, os.fstat(fd).st_ino))
+            return real_flock(fd, op)
+
+        monkeypatch.setattr(state_file.fcntl, "flock", spy)
+        return calls
+
+    def test_save_uses_flock(self, tmp_path, monkeypatch):
+        """save_tracked_files holds LOCK_EX on the sidecar and releases it."""
+        import fcntl
         import track_files
 
         tracking_file = tmp_path / "test-session.json"
-
+        calls = self._spy_flock(monkeypatch)
         with patch.object(track_files, "get_session_tracking_file", return_value=tracking_file):
-            # Mock fcntl to verify locking behavior
-            mock_fcntl = MagicMock()
-            with patch.object(track_files, "HAS_FLOCK", True), \
-                 patch.object(track_files, "fcntl", mock_fcntl, create=True):
-                track_files.save_tracked_files({"files": [], "session_id": "test"})
+            track_files.save_tracked_files({"files": [], "session_id": "test"})
 
-        # Verify flock was called with LOCK_EX (acquire) and LOCK_UN (release)
-        flock_calls = mock_fcntl.flock.call_args_list
-        assert len(flock_calls) >= 2, f"Expected at least 2 flock calls, got {len(flock_calls)}"
-        # First call should be LOCK_EX
-        assert flock_calls[0][0][1] == mock_fcntl.LOCK_EX
-        # Last call should be LOCK_UN
-        assert flock_calls[-1][0][1] == mock_fcntl.LOCK_UN
+        sidecar = (tmp_path / "test-session.json.lock").stat().st_ino
+        assert [op for op, _ in calls] == [fcntl.LOCK_EX, fcntl.LOCK_UN]
+        assert all(inode == sidecar for _, inode in calls)
 
-    def test_load_uses_flock(self, tmp_path):
-        """load_tracked_files must acquire shared lock via fcntl.flock."""
+    def test_load_takes_no_lock(self, tmp_path, monkeypatch):
+        """load_tracked_files reads without a lock: writers swap in a complete file."""
         import track_files
 
         tracking_file = tmp_path / "test-session.json"
         tracking_file.write_text(json.dumps({"files": [], "session_id": "test"}))
-
+        calls = self._spy_flock(monkeypatch)
         with patch.object(track_files, "get_session_tracking_file", return_value=tracking_file):
-            mock_fcntl = MagicMock()
-            with patch.object(track_files, "HAS_FLOCK", True), \
-                 patch.object(track_files, "fcntl", mock_fcntl, create=True):
-                track_files.load_tracked_files()
+            assert track_files.load_tracked_files() == {"files": [], "session_id": "test"}
+        assert calls == []
 
-        flock_calls = mock_fcntl.flock.call_args_list
-        assert len(flock_calls) >= 2, f"Expected at least 2 flock calls, got {len(flock_calls)}"
-
-    def test_track_file_uses_single_lock(self, tmp_path):
-        """track_file must hold exactly one LOCK_EX for the entire read-modify-write.
-
-        This verifies the TOCTOU fix: a single lock acquisition covers read,
-        modify, and write — not separate locks for load and save.
-        """
+    def test_track_file_uses_single_lock(self, tmp_path, monkeypatch):
+        """track_file holds exactly one sidecar lock for the whole read-modify-write."""
+        import fcntl
         import track_files
 
         tracking_file = tmp_path / "test-session.json"
+        calls = self._spy_flock(monkeypatch)
         with patch.object(track_files, "get_session_tracking_file", return_value=tracking_file):
-            mock_fcntl = MagicMock()
-            with patch.object(track_files, "HAS_FLOCK", True), \
-                 patch.object(track_files, "fcntl", mock_fcntl, create=True):
-                track_files.track_file("/src/app.py", "Edit")
-            flock_calls = mock_fcntl.flock.call_args_list
-            # Exactly 2 flock calls: one LOCK_EX, one LOCK_UN (single lock cycle)
-            assert len(flock_calls) == 2, (
-                f"Expected exactly 2 flock calls (1 lock + 1 unlock), got {len(flock_calls)}: {flock_calls}"
-            )
-            assert flock_calls[0][0][1] == mock_fcntl.LOCK_EX
-            assert flock_calls[1][0][1] == mock_fcntl.LOCK_UN
-
-    def test_flock_released_on_exception(self, tmp_path):
-        """Lock must be released even when an exception occurs (finally block)."""
-        import track_files
-
-        tracking_file = tmp_path / "test-session.json"
-
-        with patch.object(track_files, "get_session_tracking_file", return_value=tracking_file):
-            mock_fcntl = MagicMock()
-            # Make json.dumps raise to simulate error during write
-            with patch.object(track_files, "HAS_FLOCK", True), \
-                 patch.object(track_files, "fcntl", mock_fcntl, create=True), \
-                 patch("json.dump", side_effect=ValueError("test error")):
-                try:
-                    track_files.save_tracked_files({"files": [], "session_id": "test"})
-                except (ValueError, IOError):
-                    pass
-
-            # Lock should still be released via finally block
-            flock_calls = mock_fcntl.flock.call_args_list
-            unlock_calls = [c for c in flock_calls if c[0][1] == mock_fcntl.LOCK_UN]
-            assert len(unlock_calls) >= 1, "Lock was not released after exception"
-
-    def test_fallback_without_flock(self, tmp_path):
-        """When fcntl is unavailable, operations still work without locking."""
-        import track_files
-
-        tracking_file = tmp_path / "test-session.json"
-        with patch.object(track_files, "get_session_tracking_file", return_value=tracking_file), \
-             patch.object(track_files, "HAS_FLOCK", False):
             track_files.track_file("/src/app.py", "Edit")
 
-        data = json.loads(tracking_file.read_text())
-        assert len(data["files"]) == 1
-        assert data["files"][0]["path"] == "/src/app.py"
+        sidecar = (tmp_path / "test-session.json.lock").stat().st_ino
+        assert [op for op, _ in calls] == [fcntl.LOCK_EX, fcntl.LOCK_UN], calls
+        assert all(inode == sidecar for _, inode in calls)
+
+    def test_flock_released_on_exception(self, tmp_path, monkeypatch):
+        """The sidecar lock is released when the update raises inside the lock."""
+        import fcntl
+        import track_files
+
+        tracking_file = tmp_path / "test-session.json"
+        # An existing file, so the update runs under the lock rather than in
+        # the unlocked no-op check an absent file gets first.
+        tracking_file.write_text(json.dumps({"files": [], "session_id": "test"}))
+        calls = self._spy_flock(monkeypatch)
+        with patch.object(track_files, "get_session_tracking_file", return_value=tracking_file), \
+             patch("track_files.json.dumps", side_effect=ValueError("test error")):
+            with pytest.raises(ValueError):
+                track_files.track_file("/src/app.py", "Edit")
+
+        assert [op for op, _ in calls] == [fcntl.LOCK_EX, fcntl.LOCK_UN], calls
 
 
 class TestUpdateData:
@@ -306,19 +283,22 @@ class TestTrackFileAtomicity:
         import track_files
 
         tracking_file = tmp_path / "test-session.json"
+        # An existing file, so the failing update runs under the sidecar lock.
+        tracking_file.write_text(json.dumps({"files": [], "session_id": "test"}))
 
         with patch.object(track_files, "get_session_tracking_file", return_value=tracking_file):
-            with patch("json.dump", side_effect=RuntimeError("boom")):
+            with patch("track_files.json.dumps", side_effect=RuntimeError("boom")):
                 try:
                     track_files.track_file("/src/app.py", "Edit")
                 except (RuntimeError, IOError):
                     pass
 
-        # If the lock was properly released via finally, we can acquire it
-        if tracking_file.exists():
-            with open(tracking_file, "r") as f:
-                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                fcntl.flock(f, fcntl.LOCK_UN)
+        # If the sidecar lock was released, it can be taken without blocking
+        sidecar = tmp_path / "test-session.json.lock"
+        assert sidecar.exists()
+        with open(sidecar, "r") as f:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(f, fcntl.LOCK_UN)
 
     def test_track_file_handles_corrupted_json(self, tmp_path):
         """track_file recovers from corrupted JSON in the tracking file."""

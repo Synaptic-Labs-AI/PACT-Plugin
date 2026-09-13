@@ -185,9 +185,8 @@ class TestLockRelease:
             with pytest.raises(RuntimeError, match="boom"):
                 track_edit("/tmp/test.ts", "agent-a", "Edit", str(tracking_file))
 
-        # If the lock was properly released via finally, we should be able
-        # to acquire it again without blocking
-        with open(tracking_file, "r") as f:
+        # If the sidecar lock was released, it can be taken without blocking
+        with open(tmp_path / "file-edits.json.lock", "r") as f:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
             fcntl.flock(f, fcntl.LOCK_UN)
 

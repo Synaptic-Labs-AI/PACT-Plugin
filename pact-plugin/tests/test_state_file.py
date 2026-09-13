@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -102,6 +103,9 @@ def test_a_write_that_fails_midway_leaves_the_previous_registry_intact(
 STATE_WRITER_MODULES = (
     "shared/state_file.py",
     "shared/background_work.py",
+    "teammate_idle.py",
+    "track_files.py",
+    "file_tracker.py",
 )
 
 
@@ -314,3 +318,169 @@ def test_a_file_directly_in_its_root_still_writes(tmp_path):
     root = tmp_path / "session-tracking"
     state_file.write_text(root / "session.json", '{"files": []}', root)
     assert state_file.read_text(root / "session.json", root) == '{"files": []}'
+
+
+# ---------------------------------------------------------------------------
+# The older state writers: all-or-nothing writes, and production containment.
+# ---------------------------------------------------------------------------
+
+OLDER_WRITER_SEEDS = {
+    "write_idle_counts": '{"seed": 1}',
+    "_atomic_update_idle_counts": '{"seed": 1}',
+    "save_tracked_files": '{"files": [], "session_id": "seed"}',
+    "track_file": '{"files": [], "session_id": "seed"}',
+    "track_edit": "[]",
+}
+
+
+def _json_that_cannot_serialise():
+    """A `json` stand-in whose loads is real and whose dump/dumps raise."""
+
+    def refuse(*_args, **_kwargs):
+        raise ValueError("simulated serialiser fault")
+
+    return types.SimpleNamespace(
+        loads=json.loads,
+        load=json.load,
+        JSONDecodeError=json.JSONDecodeError,
+        dump=refuse,
+        dumps=refuse,
+    )
+
+
+@pytest.mark.parametrize("writer", sorted(OLDER_WRITER_SEEDS))
+def test_a_serialisation_failure_leaves_the_previous_file_intact(writer, tmp_path, monkeypatch):
+    """A writer whose serialiser fails must leave the file exactly as it was.
+
+    Truncating in place empties the file before the new content is produced,
+    so a serialiser fault leaves nothing behind.
+    """
+    import file_tracker
+    import teammate_idle
+    import track_files
+
+    path = tmp_path / "state.json"
+    path.write_text(OLDER_WRITER_SEEDS[writer], encoding="utf-8")
+    stand_in = _json_that_cannot_serialise()
+    if writer == "write_idle_counts":
+        monkeypatch.setattr(teammate_idle, "json", stand_in)
+        call = lambda: teammate_idle.write_idle_counts(str(path), {"coder": 1})  # noqa: E731
+    elif writer == "_atomic_update_idle_counts":
+        monkeypatch.setattr(teammate_idle, "json", stand_in)
+        call = lambda: teammate_idle._atomic_update_idle_counts(  # noqa: E731
+            str(path), lambda counts: {**counts, "coder": 1}
+        )
+    elif writer in ("save_tracked_files", "track_file"):
+        monkeypatch.setattr(track_files, "get_session_tracking_file", lambda: path)
+        monkeypatch.setattr(track_files, "json", stand_in)
+        if writer == "save_tracked_files":
+            call = lambda: track_files.save_tracked_files({"files": [], "session_id": "x"})  # noqa: E731
+        else:
+            call = lambda: track_files.track_file("/src/app.py", "Edit")  # noqa: E731
+    else:
+        monkeypatch.setattr(file_tracker, "json", stand_in)
+        call = lambda: file_tracker.track_edit("/src/app.py", "coder", "Edit", str(path))  # noqa: E731
+    try:
+        call()
+    except ValueError:
+        pass
+    assert path.read_text(encoding="utf-8") == OLDER_WRITER_SEEDS[writer], (
+        f"{writer} changed the file when its serialiser failed"
+    )
+
+
+# Functions that write or read the older state files through a caller-owned
+# path. Their `root` defaults to the path's own directory, so a production call
+# that omits `root=` would silently give up containment.
+OLDER_WRITER_HELPERS = frozenset({
+    "write_idle_counts",
+    "_atomic_update_idle_counts",
+    "read_idle_counts",
+    "check_idle_cleanup",
+    "reset_idle_count",
+    "track_edit",
+    "check_conflict",
+    "get_environment_delta",
+})
+
+
+def _older_writer_calls():
+    """(file:line name, passes_root) for every call to an older-writer helper under hooks/."""
+    calls = []
+    for path in sorted(HOOKS_DIR.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = (
+                func.id if isinstance(func, ast.Name)
+                else func.attr if isinstance(func, ast.Attribute)
+                else None
+            )
+            if name in OLDER_WRITER_HELPERS:
+                site = f"{path.relative_to(HOOKS_DIR)}:{node.lineno} {name}"
+                calls.append((site, any(k.arg == "root" for k in node.keywords)))
+    return calls
+
+
+def test_every_production_call_to_an_older_state_writer_passes_a_root():
+    """Production code must pass `root=`, so the tests-only default never ships."""
+    calls = _older_writer_calls()
+    assert len(calls) >= 5, f"found only {len(calls)} production calls; the scan is not seeing hooks/"
+    missing = [site for site, passes_root in calls if not passes_root]
+    assert missing == [], (
+        "these production calls omit root=, so their writes are not contained "
+        f"to the config root: {missing}"
+    )
+
+
+def test_file_tracker_main_writes_nothing_through_a_symlinked_team_directory(
+    config_root, monkeypatch, capsys
+):
+    """The production entry point refuses a team directory linked outside teams/,
+    exits 0 and prints no traceback."""
+    import io
+
+    import file_tracker
+
+    outside = _link_team_outside(config_root)
+    monkeypatch.setattr(file_tracker.pact_context, "init", lambda _data: None)
+    monkeypatch.setattr(file_tracker, "get_team_name", lambda: TEAM)
+    monkeypatch.setattr(file_tracker, "resolve_agent_name", lambda _data: "coder")
+    monkeypatch.setattr(file_tracker, "get_session_id", lambda: "sid")
+    frame = {"tool_name": "Edit", "tool_input": {"file_path": "/src/app.py"}, "session_id": "sid"}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(frame)))
+    with pytest.raises(SystemExit) as exc:
+        file_tracker.main()
+    assert exc.value.code == 0
+    assert "Traceback" not in capsys.readouterr().err
+    assert sorted(p.name for p in outside.iterdir()) == [], (
+        "file_tracker.main wrote through a symlinked team directory"
+    )
+
+
+def test_teammate_idle_main_writes_nothing_through_a_symlinked_team_directory(
+    config_root, monkeypatch
+):
+    """The production entry point refuses idle counts in a team directory linked outside teams/."""
+    import io
+
+    import teammate_idle
+
+    outside = _link_team_outside(config_root)
+    monkeypatch.setattr(teammate_idle.pact_context, "init", lambda _data: None)
+    monkeypatch.setattr(teammate_idle, "get_team_name", lambda: TEAM)
+    monkeypatch.setattr(
+        teammate_idle, "get_task_list",
+        lambda: [{"id": "3", "status": "completed", "owner": "coder"}],
+    )
+    frame = {"hook_event_name": "TeammateIdle", "teammate_name": "coder"}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(frame)))
+    with pytest.raises(SystemExit) as exc:
+        teammate_idle.main()
+    assert exc.value.code == 0
+    assert sorted(p.name for p in outside.iterdir()) == [], (
+        "teammate_idle.main wrote idle counts through a symlinked team directory"
+    )

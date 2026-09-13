@@ -250,6 +250,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     "file_tracker": frozenset({
         "constants", "pact_context", "paths", "session_journal",
         "session_registry", "session_state",
+        "state_file",
     }),
     "peer_inject": frozenset({
         "constants", "pact_context", "paths", "peer_context", "plugin_manifest",

@@ -23,12 +23,7 @@ from pathlib import Path
 import shared.pact_context as pact_context
 from shared.pact_context import get_session_id, get_team_name, resolve_agent_name
 from shared.paths import get_claude_config_dir
-
-try:
-    import fcntl
-    HAS_FLOCK = True
-except ImportError:
-    HAS_FLOCK = False
+from shared import state_file
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -44,12 +39,22 @@ def _normalize_path(file_path: str) -> str:
     return os.path.realpath(file_path)
 
 
+def _state_root(tracking_file: Path, root: Path | None) -> Path:
+    """The directory the edit-tracking file must stay under.
+
+    None is for callers that own their path (tests); production entry points
+    pass the config root, so containment applies to the path main() builds.
+    """
+    return root if root is not None else tracking_file.parent
+
+
 def track_edit(
     file_path: str,
     agent_name: str,
     tool_name: str,
     tracking_path: str,
     session_id: str = "",
+    root: Path | None = None,
 ) -> None:
     """Append a file edit record to the tracking file.
 
@@ -65,7 +70,6 @@ def track_edit(
     """
     file_path = _normalize_path(file_path)
     tracking_file = Path(tracking_path)
-    tracking_file.parent.mkdir(parents=True, exist_ok=True)
 
     new_entry = {
         "file": file_path,
@@ -75,32 +79,17 @@ def track_edit(
         "ts": int(time.time()),
     }
 
-    # Use file locking to prevent concurrent write corruption
-    if HAS_FLOCK:
-        with open(tracking_file, "a+") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            try:
-                f.seek(0)
-                content = f.read()
-                try:
-                    entries = json.loads(content) if content.strip() else []
-                except (json.JSONDecodeError, IOError):
-                    entries = []
-                entries.append(new_entry)
-                f.seek(0)
-                f.truncate()
-                f.write(json.dumps(entries))
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
-    else:
-        entries = []
-        if tracking_file.exists():
-            try:
-                entries = json.loads(tracking_file.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, IOError):
-                entries = []
+    # One locked read-modify-write; the new list is swapped in whole, so a
+    # failure part-way leaves the previous file intact.
+    def _apply(content: str):
+        try:
+            entries = json.loads(content) if content.strip() else []
+        except json.JSONDecodeError:
+            entries = []
         entries.append(new_entry)
-        tracking_file.write_text(json.dumps(entries), encoding="utf-8")
+        return json.dumps(entries), True, None
+
+    state_file.locked_update(tracking_file, _apply, _state_root(tracking_file, root))
 
 
 def check_conflict(
@@ -108,6 +97,7 @@ def check_conflict(
     agent_name: str,
     tracking_path: str,
     session_id: str = "",
+    root: Path | None = None,
 ) -> str | None:
     """Check if another EDITOR INSTANCE has edited this file.
 
@@ -129,12 +119,11 @@ def check_conflict(
         return None
 
     tracking_file = Path(tracking_path)
-    if not tracking_file.exists():
-        return None
-
     try:
-        entries = json.loads(tracking_file.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, IOError):
+        entries = json.loads(
+            state_file.read_text(tracking_file, _state_root(tracking_file, root))
+        )
+    except (json.JSONDecodeError, OSError):
         return None
 
     self_key = (agent_name, session_id)
@@ -176,6 +165,7 @@ def get_environment_delta(
     since_ts: int,
     requesting_agent: str,
     tracking_path: str,
+    root: Path | None = None,
 ) -> dict[str, str]:
     """Return files modified by OTHER agents since the given timestamp.
 
@@ -186,12 +176,11 @@ def get_environment_delta(
     Note: Uses inclusive boundary (>=) — entries AT exactly since_ts are included.
     """
     tracking_file = Path(tracking_path)
-    if not tracking_file.exists():
-        return {}
-
     try:
-        entries = json.loads(tracking_file.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, IOError):
+        entries = json.loads(
+            state_file.read_text(tracking_file, _state_root(tracking_file, root))
+        )
+    except (json.JSONDecodeError, OSError):
         return {}
 
     delta: dict[str, str] = {}
@@ -231,20 +220,25 @@ def main():
     # resolve_agent_name is KEPT for the human-readable label.
     session_id = get_session_id()
 
-    tracking_path = str(
-        get_claude_config_dir() / "teams" / team_name / "file-edits.json"
-    )
+    teams_root = get_claude_config_dir() / "teams"
+    tracking_path = str(teams_root / team_name / "file-edits.json")
 
     # Check for conflict BEFORE recording this edit. Pass the same
     # (agent_name, session_id) composite so this instance's own prior edits are
     # excluded but a different instance's are detected.
-    conflict = check_conflict(file_path, agent_name, tracking_path, session_id)
-
-    # Record this edit
-    track_edit(
-        file_path, agent_name or "orchestrator", tool_name, tracking_path,
-        session_id,
+    conflict = check_conflict(
+        file_path, agent_name, tracking_path, session_id, root=teams_root
     )
+
+    # Record this edit. A refused or failed write skips tracking rather than
+    # failing the hook: this PostToolUse hook must still exit 0.
+    try:
+        track_edit(
+            file_path, agent_name or "orchestrator", tool_name, tracking_path,
+            session_id, root=teams_root,
+        )
+    except OSError:
+        pass
 
     # Warn if conflict
     if conflict:

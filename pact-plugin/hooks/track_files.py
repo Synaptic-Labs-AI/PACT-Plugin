@@ -27,16 +27,10 @@ from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
 from shared.pact_context import get_session_id
 from shared.paths import get_claude_config_dir
+from shared import state_file
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
-
-try:
-    import fcntl
-    HAS_FLOCK = True
-except ImportError:
-    HAS_FLOCK = False
-
 
 # Directory for tracking data. Accessor (B1) — resolves $CLAUDE_CONFIG_DIR at
 # CALL time via the shared resolver, so a non-default config dir is honored and
@@ -60,66 +54,48 @@ def get_session_tracking_file() -> Path:
     return get_tracking_dir() / f"{session_id}.json"
 
 
+def _tracking_root(tracking_file: Path) -> Path:
+    """The directory the session tracking file must stay under: its own.
+
+    The file sits directly in the tracking directory, so in production this IS
+    `get_tracking_dir()`, and containment for a file directly in its root
+    compares that directory with itself.
+    """
+    return tracking_file.parent
+
+
 def load_tracked_files() -> dict:
     """Load existing tracked files for this session.
 
-    Uses shared (LOCK_SH) file locking on platforms that support fcntl
-    to prevent reading while another process is mid-write.
+    Reads without a lock: writers swap in a complete file, so a reader sees
+    the whole previous file or the whole new one.
     """
     default = {"files": [], "session_id": get_session_id() or "unknown"}
     tracking_file = get_session_tracking_file()
-    if not tracking_file.exists():
+    try:
+        content = state_file.read_text(tracking_file, _tracking_root(tracking_file))
+    except OSError:
         return default
-
-    if HAS_FLOCK:
-        try:
-            with open(tracking_file, "r") as f:
-                fcntl.flock(f, fcntl.LOCK_SH)
-                try:
-                    content = f.read()
-                    return json.loads(content) if content.strip() else default
-                except json.JSONDecodeError:
-                    return default
-                finally:
-                    fcntl.flock(f, fcntl.LOCK_UN)
-        except IOError:
-            return default
-    else:
-        try:
-            with open(tracking_file, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return default
+    try:
+        return json.loads(content) if content.strip() else default
+    except json.JSONDecodeError:
+        return default
 
 
 def save_tracked_files(data: dict):
     """Save tracked files for this session.
 
-    Uses exclusive (LOCK_EX) file locking on platforms that support fcntl
-    to prevent concurrent write corruption. Unlock is in a finally block
-    to ensure release even on exceptions.
+    Replaces the file under its state-file lock: the new content is written to
+    a temp file and swapped in, so a failure part-way leaves the previous file
+    intact.
     """
-    ensure_tracking_dir()
     tracking_file = get_session_tracking_file()
-
-    if HAS_FLOCK:
-        try:
-            with open(tracking_file, "a+") as f:
-                fcntl.flock(f, fcntl.LOCK_EX)
-                try:
-                    f.seek(0)
-                    f.truncate()
-                    json.dump(data, f, indent=2)
-                finally:
-                    fcntl.flock(f, fcntl.LOCK_UN)
-        except IOError as e:
-            print(f"Warning: Could not save tracking data: {e}", file=sys.stderr)
-    else:
-        try:
-            with open(tracking_file, "w") as f:
-                json.dump(data, f, indent=2)
-        except IOError as e:
-            print(f"Warning: Could not save tracking data: {e}", file=sys.stderr)
+    try:
+        state_file.write_text(
+            tracking_file, json.dumps(data, indent=2), _tracking_root(tracking_file)
+        )
+    except OSError as e:
+        print(f"Warning: Could not save tracking data: {e}", file=sys.stderr)
 
 
 def extract_file_path(tool_input: dict) -> str:
@@ -160,33 +136,23 @@ def track_file(file_path: str, tool_name: str):
     if not file_path:
         return
 
-    ensure_tracking_dir()
     tracking_file = get_session_tracking_file()
-    default = {"files": [], "session_id": get_session_id() or "unknown"}
+    session_id = get_session_id() or "unknown"
 
-    if HAS_FLOCK:
+    def _apply(content: str):
         try:
-            with open(tracking_file, "a+") as f:
-                fcntl.flock(f, fcntl.LOCK_EX)
-                try:
-                    f.seek(0)
-                    content = f.read()
-                    try:
-                        data = json.loads(content) if content.strip() else default
-                    except json.JSONDecodeError:
-                        data = default
-                    data = _update_data(data, file_path, tool_name)
-                    f.seek(0)
-                    f.truncate()
-                    json.dump(data, f, indent=2)
-                finally:
-                    fcntl.flock(f, fcntl.LOCK_UN)
-        except IOError as e:
-            print(f"Warning: Could not track file: {e}", file=sys.stderr)
-    else:
-        data = load_tracked_files()
+            data = json.loads(content) if content.strip() else None
+        except json.JSONDecodeError:
+            data = None
+        if data is None:
+            data = {"files": [], "session_id": session_id}
         data = _update_data(data, file_path, tool_name)
-        save_tracked_files(data)
+        return json.dumps(data, indent=2), True, None
+
+    try:
+        state_file.locked_update(tracking_file, _apply, _tracking_root(tracking_file))
+    except OSError as e:
+        print(f"Warning: Could not track file: {e}", file=sys.stderr)
 
 
 # The token that identifies the archive command inside a Bash payload. The
