@@ -1284,6 +1284,14 @@ def record_background_launch(input_data: Any, now: datetime | None = None) -> bo
     if bound is None:
         return False
     agent_name, session_id, task_ids, anchor_completed = bound
+    # The harness's own id for this job, which lets the turn-end gate match a
+    # running job to the teammate that launched it. Every tool_response key is
+    # optional: a shell `&` launch carries none, and `_sanitize_record` keeps
+    # the field only when it is a non-empty string.
+    tool_response = input_data.get("tool_response")
+    harness_task_id = (
+        tool_response.get("backgroundTaskId") if isinstance(tool_response, dict) else None
+    )
     return append_record(
         {
             "agent_name": agent_name,
@@ -1297,6 +1305,7 @@ def record_background_launch(input_data: Any, now: datetime | None = None) -> bo
             # separates those two.
             "anchor_completed": anchor_completed,
             "command": command,
+            "harness_task_id": harness_task_id,
             # Every clock on this path takes `now`. A bare iso_now() here
             # falls through to canonical_since(), which reads datetime.now
             # DIRECTLY and is not reachable from this module's utc_now — so an

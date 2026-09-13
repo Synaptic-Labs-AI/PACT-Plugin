@@ -13,11 +13,11 @@ pointed at the test's own root, so no arm can read the real ~/.claude.
 
 REVERT-CARDINALITY NON-VACUITY GATE, MEASURED. Run against the hooks as they
 were before the teammate predicate and the team resolver existed, this file
-reports 8 failed, 3 passed. The three that pass are the guards that a teammate
+reports 9 failed, 3 passed. The three that pass are the guards that a teammate
 keeps its advisory (in-process, separate-process through the registry, and
-`name@team` in `agent_id`), which held before the change as well. The eight
+`name@team` in `agent_id`), which held before the change as well. The nine
 that fail are the subagent, non-member and lead-session advisories, the
-subagent record, the separate-process record, and the three resolver arms,
+subagent record, the separate-process record, and the four direct-call arms,
 which fail on import. If that revert ever reports 0 failed, this file has
 stopped measuring the seam.
 """
@@ -251,3 +251,21 @@ def test_the_lead_session_resolves_its_team_from_its_context(in_this_process):
     frame = captured_pretooluse_lead_inprocess()
     frame["session_id"] = LEAD_SESSION
     assert frame_team_and_name(frame) == (TEAM, "")
+
+
+def test_a_registry_entry_for_another_team_does_not_make_a_teammate(in_this_process):
+    """Step 4 checks the registry entry's team against the team being asked about,
+    so a caller that brings its own team never gets a teammate from another
+    team's registration. The same frame asked about the registry's own team is
+    the positive control."""
+    from shared.background_work import is_teammate_launch_frame
+
+    _write(in_this_process / ".claude" / "teams" / "other-team" / "config.json",
+           {"leadSessionId": "other-lead-session", "members": []})
+    _register(in_this_process, SEPARATE_SESSION, SEPARATE_MEMBER)
+    frame = _launch(captured_pretooluse_teammate_tmux())
+    assert "agent_id" not in frame
+    assert is_teammate_launch_frame(frame, TEAM) is True
+    assert is_teammate_launch_frame(frame, "other-team") is False, (
+        "a registry entry for one team made the frame a teammate of another team"
+    )

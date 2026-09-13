@@ -16,8 +16,10 @@ exactly how the feature this replaces shipped inert.
 REVERT-CARDINALITY NON-VACUITY GATE — MEASURED, not asserted. Source-revert
 the Layer 1 call in `hooks/track_files.py` (replace the guarded
 `record_background_launch(input_data)` block with `pass`) and this file
-reports **3 failed, 5 passed**. The three kills are the arms that assert a
+reports **5 failed, 5 passed**. The five kills are the arms that assert a
 record IS written: `test_a_background_launch_lands_a_real_record_on_disk`,
+`test_layer_1_records_the_harness_task_id`,
+`test_a_launch_without_a_string_harness_id_records_none`,
 `test_a_SHELL_backgrounded_launch_with_NO_FLAG_lands_a_record` and
 `test_a_LONG_RUNNING_command_IS_recorded_now`. The other five pin fail-open and
 negative behaviour and correctly survive a feature that does nothing. If a
@@ -25,10 +27,11 @@ future edit makes that ablation report **0 failed**, this file has stopped
 measuring the seam and the number above is the tripwire.
 
 A SECOND ABLATION IS ALREADY PINNED BY THE FIXTURE: omitting the
-`pact-session-context.json` write also reports 3 failed, 5 passed, on the same
-three positive-record arms, for a DIFFERENT reason: `get_team_name()`
-fail-closes on an empty SSOT. Two distinct single-point ablations, same
-cardinality, different cause; see the fixture docstring.
+`pact-session-context.json` write also reports 5 failed, 5 passed, on the same
+five positive-record arms, for a DIFFERENT reason: with no session context and
+no registry entry, the frame's team cannot be resolved. Two distinct
+single-point ablations, same cardinality, different cause; see the fixture
+docstring.
 
 NO module-level sys.path.insert: path setup is conftest-owned.
 """
@@ -167,6 +170,29 @@ class TestTrackFilesBackgroundSeam:
         )
         assert records[0]["agent_name"] == "seam-coder"
         assert records[0]["task_ids"] == ["7"]
+
+    def test_layer_1_records_the_harness_task_id(self, seam):
+        """The turn-end gate matches a running job to its launcher by this id, so
+        the record carries the harness's `backgroundTaskId` from tool_response."""
+        frame = _frame(tool_response={"backgroundTaskId": "bg-seam-1", "stdout": ""})
+        assert _run(seam, frame).returncode == 0
+        records = _registry(seam)
+        assert len(records) == 1
+        assert records[0].get("harness_task_id") == "bg-seam-1", (
+            "the launch record carries no harness_task_id, so the turn-end gate "
+            "cannot tell this teammate's job from anyone else's"
+        )
+
+    def test_a_launch_without_a_string_harness_id_records_none(self, seam):
+        """Every tool_response key is optional: a shell `&` launch carries no
+        `backgroundTaskId`, and a non-string value is not an id."""
+        shell = _frame(tool_response={"stdout": ""})
+        shell["tool_input"] = {"command": "nohup ./gate.sh &"}
+        assert _run(seam, shell).returncode == 0
+        assert _run(seam, _frame(tool_response={"backgroundTaskId": 17})).returncode == 0
+        records = _registry(seam)
+        assert len(records) == 2
+        assert all("harness_task_id" not in r for r in records)
 
     def test_a_SHELL_backgrounded_launch_with_NO_FLAG_lands_a_record(self, seam):
         """ARM 5 — THE COMPOSITION ARM. It proves the gate CONSULTS the
