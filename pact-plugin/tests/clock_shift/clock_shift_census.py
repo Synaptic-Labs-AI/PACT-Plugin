@@ -23,6 +23,10 @@ deliberately run unshifted or without the shim, and a guard arm there pins that.
 Launches are seen through the `subprocess.Popen` and `os.posix_spawn` audit
 events. The suite launches nothing through os.system, os.exec* or os.spawn*,
 which raise other events, so a launch added through one of those is not seen.
+
+Each problem line names its test from PYTEST_CURRENT_TEST at launch time. A test
+that deletes that variable, to reach a refusal it gates, prints as "<outside a
+test>"; the lines around it follow launch order and place it.
 """
 import os
 import sys
@@ -82,7 +86,7 @@ def _check(executable, argv, cwd, env):
     else:
         problem = _pythonpath_problem(env.get("PYTHONPATH", ""), os.fsdecode(cwd) if cwd else None)
     if problem:
-        _record("%s: %s -- %s" % (current or "<outside a test>", " ".join(argv)[:160], problem))
+        _record("%s: %s -- %s" % (current or "<outside a test>", " ".join(" ".join(argv).split())[:160], problem))
 
 
 def _pythonpath_problem(pythonpath, cwd):

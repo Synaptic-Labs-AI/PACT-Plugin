@@ -92,6 +92,15 @@ def test_launch():
 
 NODE = "test_synthetic.py::test_launch"
 
+MULTI_LINE_LAUNCH = '''\
+import os
+import subprocess
+
+
+def test_launch():
+    subprocess.run(["python3", "-c", "pass\\npass"], env={"PATH": os.environ["PATH"]})
+'''
+
 STAT_ROUTES = """\
 import importlib._bootstrap_external
 import os
@@ -314,3 +323,11 @@ def test_an_unshifted_run_installs_nothing(tmp_path, shift):
     MUTANT: gate the install on the variable being set rather than non-zero."""
     rc, out = _run_child(tmp_path, IDENTITY, shift=shift)
     assert (rc, "6 passed" in out) == (0, True), out
+
+
+def test_a_multi_line_argument_stays_on_one_census_line(tmp_path):
+    """MUTANT: the census prints argv unflattened, so the problem spans two lines
+    and this exact line is absent."""
+    rc, out = _run_child(tmp_path, MULTI_LINE_LAUNCH)
+    line = "%s (call): python3 -c pass pass -- its env drops PACT_TEST_CLOCK_SHIFT_SECONDS" % NODE
+    assert (rc != 0, line in out) == (True, True), out
