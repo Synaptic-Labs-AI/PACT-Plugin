@@ -32,7 +32,9 @@ with its measured cardinality so a future reader can re-run it.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import tempfile
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -44,7 +46,6 @@ import teammate_idle as ti
 from fixtures.role_frames import (
     captured_lead_userpromptsubmit_qualified,
     captured_pretooluse_lead_inprocess,
-    captured_pretooluse_teammate_inprocess_subagent,
     captured_pretooluse_teammate_tmux,
 )
 from shared import background_work as bw
@@ -745,6 +746,29 @@ _COMMANDS = [
 
 _TEAMMATE = object()
 
+_GATE_TEAM = "session-gate-adversarial"
+
+
+def _gate_seam(root: Path) -> dict:
+    """Write a team config and a registry entry for the default teammate; return the env."""
+    teammate = captured_pretooluse_teammate_tmux()
+    config = root / ".claude"
+    (config / "teams" / _GATE_TEAM).mkdir(parents=True)
+    (config / "teams" / _GATE_TEAM / "config.json").write_text(json.dumps({
+        "leadSessionId": captured_pretooluse_lead_inprocess()["session_id"],
+        "members": [{"name": "gate-teammate", "agentId": f"gate-teammate@{_GATE_TEAM}",
+                     "agentType": teammate["agent_type"], "backendType": "tmux"}],
+    }))
+    registry = config / "pact-sessions" / ".teammate-registry.jsonl"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(json.dumps({
+        "session_id": teammate["session_id"], "value": f"gate-teammate@{_GATE_TEAM}",
+    }) + "\n")
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("CLAUDE_CONFIG_DIR", "CLAUDE_PROJECT_DIR", "CLAUDE_CODE_SESSION_ID")}
+    env.update(HOME=str(root), CLAUDE_CONFIG_DIR=str(config))
+    return env
+
 
 def _gate(command: str, background, frame=_TEAMMATE) -> tuple:
     """Run the real gate as a subprocess: (returncode, decision, advisory shown).
@@ -755,6 +779,11 @@ def _gate(command: str, background, frame=_TEAMMATE) -> tuple:
     The default is the captured tmux-teammate PreToolUse frame with its tool
     call replaced by this Bash command. Pass another frame to send a different
     identity, or None for a frame with no identity at all.
+
+    Every run gets its own config root. The gate resolves a teammate's team
+    before advising, so the root holds a team config and a session-registry
+    entry for the default teammate's session, and HOME and CLAUDE_CONFIG_DIR
+    point there. No run reads the real ~/.claude.
     """
     if frame is _TEAMMATE:
         frame = captured_pretooluse_teammate_tmux()
@@ -764,11 +793,12 @@ def _gate(command: str, background, frame=_TEAMMATE) -> tuple:
         tool_input["run_in_background"] = background
     frame["tool_name"] = "Bash"
     frame["tool_input"] = tool_input
-    proc = subprocess.run(
-        [sys.executable, str(GATE)],
-        input=json.dumps(frame),
-        capture_output=True, text=True, timeout=30,
-    )
+    with tempfile.TemporaryDirectory() as root:
+        proc = subprocess.run(
+            [sys.executable, str(GATE)],
+            input=json.dumps(frame),
+            capture_output=True, text=True, timeout=30, env=_gate_seam(Path(root)),
+        )
     try:
         out = json.loads(proc.stdout or "{}")
     except ValueError:
@@ -813,7 +843,7 @@ class TestAdvisoryNeverAltersTheVerdict:
 
 
 class TestTheLaunchAdvisoryReachesTeammateFramesOnly:
-    """Who receives the launch advisory, keyed on stdin `agent_type` alone.
+    """Who receives the launch advisory, judged on the frame's identity.
 
     The advisory tells its reader that nothing will wake it and that it must
     flag the wait. That is true for a teammate and false for the lead, which is
@@ -823,8 +853,10 @@ class TestTheLaunchAdvisoryReachesTeammateFramesOnly:
 
     Each negative sends the same Bash launch as the teammate positive and
     changes only the identity, so a silent result is attributable to the
-    identity rather than to the command. The lead and subagent frames are real
-    captures; the other identities change one field of a real capture.
+    identity rather than to the command. The lead frame is a real capture; the
+    other identities change one field of a real capture. The Agent-tool subagent
+    case needs a lead session context, so it is pinned in
+    test_launch_advisory_population.py.
     """
 
     LAUNCH = ("echo hi", True)
@@ -869,23 +901,6 @@ class TestTheLaunchAdvisoryReachesTeammateFramesOnly:
         assert (rc, advisory) == (0, False), (
             "an empty agent_type drew the advisory; an empty string is not an "
             "identity"
-        )
-
-    def test_KNOWN_LIMIT_an_agent_tool_subagent_frame_ALSO_gets_the_advisory(self):
-        """🔴 PINS A LIMITATION, NOT A REQUIREMENT.
-
-        An Agent-tool subagent carries a non-lead `agent_type` too, and stdin
-        has no field that separates it from a teammate, so it receives the
-        advisory. IF THE GATE LEARNS TO TELL THEM APART, DELETE THIS ARM: its
-        failure is the improvement landing, not a regression.
-        """
-        rc, _decision, advisory = _gate(
-            *self.LAUNCH, frame=captured_pretooluse_teammate_inprocess_subagent())
-        assert (rc, advisory) == (0, True), (
-            "KNOWN LIMIT: a subagent frame is indistinguishable from a teammate "
-            "frame on stdin. If the advisory no longer reaches it, the gate has "
-            "learned to tell them apart; delete this arm rather than restore "
-            "the old behaviour"
         )
 
 

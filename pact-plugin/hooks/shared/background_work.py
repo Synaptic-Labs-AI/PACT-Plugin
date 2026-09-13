@@ -6,7 +6,8 @@ Summary: Team-scoped registry of outstanding teammate background Bash
          predicate.
          Pure helpers and fail-open loaders — no hook I/O, no registration.
 Used by: track_files.py (Layer 1 writer), teammate_idle.py (Layer 2
-         advisory), missed_wake_scan.py (Layer 3 lead surface).
+         advisory), missed_wake_scan.py (Layer 3 lead surface),
+         wait_filler_gate.py (who receives the launch advisory).
 
 A teammate who backgrounds Bash and ends the turn with no valid
 intentional_wait is recorded here. Detection requires a registry row PLUS
@@ -41,7 +42,9 @@ followed, files are created 0o600, undecodable bytes read as empty and are
 rewritten on the next change, and a no-op update creates no file. Read-time
 24h TTL drops stale rows. Team path uses
 pact_context.get_team_name() after init() — the same identity-aligned
-resolver teammate_idle and get_task_list use.
+resolver teammate_idle and get_task_list use. The launch path resolves the
+team through `frame_team_and_name`, which also finds a separate-process
+teammate's team, since that teammate has no session context of its own.
 
 TWO team-scoped state files, and they must stay separate. The registry
 (background_work.json) holds outstanding launches. The idle counter
@@ -1006,6 +1009,103 @@ def agent_type_names_a_member(agent_type: Any, team_name: str) -> bool:
     )
 
 
+def _names_a_member(name: Any, team: str) -> bool:
+    """True iff `name` is a member in `team`'s config. `team` may come from stdin."""
+    from .pact_context import _iter_members
+    from .session_state import is_safe_path_component
+
+    if not isinstance(name, str) or not name or not is_safe_path_component(team):
+        return False
+    return any(m.get("name") == name for m in _iter_members(team))
+
+
+def frame_team_and_name(input_data: Any) -> "tuple[str, str]":
+    """(team, member name) for the frame's own session, "" for each part unresolved.
+
+    Never raises.
+
+    The team comes from the first route that resolves:
+      1. `get_team_name()`, when the session has a PACT context: the lead, and
+         in-process teammates, which share the lead's session.
+      2. The session registry entry for the frame's `session_id`.
+         `session_registry.resolve` has already checked the name against that
+         team's members. A separate-process teammate has no session context of
+         its own, so this is the route that finds its team.
+      3. An `agent_id` of the form `name@team` whose name is a member of that
+         team.
+    The name comes from route 2 or 3. Route 1 returns "": a context names the
+    session's team, not which member is acting in it.
+    """
+    try:
+        if not isinstance(input_data, dict):
+            return "", ""
+        from .pact_context import init as init_context
+        from .session_registry import resolve as registry_resolve
+
+        init_context(input_data)
+        team = get_team_name()
+        if team:
+            return team, ""
+        session_id = input_data.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            name, _, team = (registry_resolve(session_id) or "").partition("@")
+            if name and team:
+                return team, name
+        agent_id = input_data.get("agent_id")
+        if isinstance(agent_id, str):
+            name, _, team = agent_id.partition("@")
+            if team and _names_a_member(name, team):
+                return team, name
+    except Exception:
+        pass
+    return "", ""
+
+
+def is_teammate_launch_frame(input_data: Any, team_name: str) -> bool:
+    """True iff the frame is a teammate of `team_name`: not the lead, and not an
+    Agent-tool subagent.
+
+    The launch advisory and Layer 1 both use this, so the advisory and the
+    registry cover the same population. In order:
+      1. No `agent_type`, or a lead spelling: not a teammate.
+      2. `agent_type` names a member: an in-process teammate, whose frame
+         carries its own name in that field.
+      3. An `agent_id` is present. `name@<this team>` is a separate-process
+         teammate launched with `--agent-id name@team`. Any other id, such as
+         a bare hex id, is an Agent-tool subagent, because an in-process
+         teammate already matched at step 2.
+      4. No `agent_id`, a `session_id` that is not the lead's, and a session
+         registry entry for this team: a separate-process teammate.
+    Anything else is not a teammate.
+
+    A separate-process teammate frame carrying a hex `agent_id` would be
+    refused at step 3. No captured frame has shown that shape.
+    """
+    if not isinstance(input_data, dict) or not isinstance(team_name, str) or not team_name:
+        return False
+    from .pact_context import LEAD_AGENT_TYPES, _read_lead_session_id
+    from .session_registry import resolve as registry_resolve
+
+    agent_type = input_data.get("agent_type")
+    if not isinstance(agent_type, str) or not agent_type or agent_type in LEAD_AGENT_TYPES:
+        return False
+    if agent_type_names_a_member(agent_type, team_name):
+        return True
+    agent_id = input_data.get("agent_id")
+    if agent_id:
+        if not isinstance(agent_id, str):
+            return False
+        name, _, id_team = agent_id.partition("@")
+        return bool(name) and id_team.lower() == team_name.lower()
+    session_id = input_data.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return False
+    if session_id == _read_lead_session_id(team_name):
+        return False
+    name, _, registry_team = (registry_resolve(session_id) or "").partition("@")
+    return bool(name) and registry_team.lower() == team_name.lower()
+
+
 def bind_launcher_identity(
     input_data: Any, team_name: str
 ) -> "tuple[str, str, list[str], bool] | None":
@@ -1148,11 +1248,15 @@ def record_background_launch(input_data: Any, now: datetime | None = None) -> bo
     Fail-open on every path — the host calls this for its side effect only and
     must not be disturbed by anything that happens here.
     """
-    from .pact_context import classify_session_role
-
     if not is_background_launch(input_data):
         return False
-    if classify_session_role(input_data) != "teammate":
+    # One predicate decides who is a teammate, here and in the launch advisory,
+    # so the two cover the same population. It refuses the lead and an
+    # Agent-tool subagent. A subagent would otherwise reach the session
+    # registry on the lead's session id and be recorded against whichever
+    # member that id names.
+    team_name, _name = frame_team_and_name(input_data)
+    if not team_name or not is_teammate_launch_frame(input_data, team_name):
         return False
     command = command_from_frame(input_data)
     # NO DURABILITY FILTER HERE, DELIBERATELY. A predicate over command text
@@ -1176,9 +1280,6 @@ def record_background_launch(input_data: Any, now: datetime | None = None) -> bo
     #
     # The durability question IS answerable, just not here: `intentional_wait`
     # carries it later, when the agent says what it is waiting for.
-    team_name = get_team_name()
-    if not team_name:
-        return False
     bound = bind_launcher_identity(input_data, team_name)
     if bound is None:
         return False

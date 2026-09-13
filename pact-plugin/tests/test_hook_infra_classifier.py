@@ -359,6 +359,10 @@ COVERED_L2 = {
     # would ship an untested seam, which is the inert-feature shape this
     # classifier exists to prevent.
     "track_files": "test_track_files_background_integration.py",
+    # wait_filler_gate joined SEAM_DEPENDENT_HOOKS when its launch advisory began
+    # reading team config and the session registry. COVERED, not BACKLOG, for
+    # the same reason as track_files above.
+    "wait_filler_gate": "test_launch_advisory_population.py",
 }
 
 # Documented forward-only BACKLOG: seam hooks whose non-mocked L2 test is a named
@@ -565,8 +569,8 @@ def _scan_hook_modules(predicate) -> list[tuple[str, int, str]]:
 
 # Dynamic imports the static oracle cannot follow, allowed line by line.
 # wait_filler_gate.py loads hooks/shared/background_launch.py BY FILE PATH, so
-# the gate, which runs before every Bash call, never imports the `shared`
-# package. The oracle cannot see that edge. It hides nothing from the closure
+# a Bash call that is not a teammate's background launch never imports the
+# `shared` package. The oracle cannot see that edge. It hides nothing from the closure
 # only while background_launch.py itself imports nothing outside the stdlib and
 # nothing from `shared`, which the arm below pins.
 _ALLOWED_DYNAMIC_IMPORT_LINES = frozenset({

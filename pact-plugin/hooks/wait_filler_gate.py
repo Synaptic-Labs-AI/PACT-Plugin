@@ -68,14 +68,15 @@ _TRAILING_COMMENT = re.compile(r"\s+#.*\Z")
 # wake me" and ends the turn without flagging. A later idle-time reminder
 # reaches that agent only after they have already stalled.
 #
-# IT FIRES ON TEAMMATE FRAMES ONLY, keyed on stdin `agent_type` alone: present,
-# non-empty, and not a lead spelling. No identity, team config or task store is
-# read, so it still works where identity cannot be resolved. A lead frame gets
+# IT FIRES ON TEAMMATE FRAMES ONLY. The cheap stdin test runs first:
+# `agent_type` present, non-empty and not a lead spelling. A lead frame gets
 # nothing, because a lead IS re-invoked when its background job finishes and
 # holds no task wait to flag. A plain non-PACT frame carries no `agent_type`
-# and gets nothing. An Agent-tool subagent carries a non-lead `agent_type`
-# too, and stdin has no field that separates it from a teammate, so it also
-# receives the advisory.
+# and gets nothing. An Agent-tool subagent also carries a non-lead
+# `agent_type`, so for a background launch the gate then resolves the team and
+# asks `shared.background_work.is_teammate_launch_frame`, which reads team
+# config and the session registry. A subagent gets nothing, and so does a frame
+# whose team cannot be resolved.
 #
 # IT IS NOT A TERM IN THE DENY VERDICT AND MUST NEVER BECOME ONE. It rides
 # the ALLOW branch only. `_is_filler_command` and its inputs are untouched by
@@ -102,9 +103,10 @@ _BACKGROUND_ADVISORY = (
 def _load_launch_predicate():
     """`background_launch.is_background_launch`, loaded by file path, or None.
 
-    Loaded by PATH, not imported, so this hook never runs the `shared`
-    package's `__init__`, which costs tens of milliseconds on a call that
-    happens before every Bash. The module is not registered in `sys.modules`.
+    Loaded by PATH, not imported, so a Bash call that is not a teammate's
+    background launch never runs the `shared` package's `__init__`, which
+    costs tens of milliseconds on a call that happens before every Bash. The
+    module is not registered in `sys.modules`.
     Any failure returns None, and the caller then emits no advisory: the
     advisory is optional, and the deny verdict never reaches this call.
     """
@@ -140,7 +142,8 @@ def is_background_launch(input_data) -> bool:
 
 # The lead's `agent_type` spellings. Mirrors `shared.pact_context.LEAD_AGENT_TYPES`,
 # which is the source of truth; held locally because this hook runs before every
-# Bash call and imports the standard library only.
+# Bash call and imports only the standard library until a teammate-shaped frame
+# launches background work.
 _LEAD_AGENT_TYPES = frozenset({"PACT:pact-orchestrator", "pact-orchestrator"})
 
 
@@ -154,6 +157,24 @@ def is_teammate_frame(input_data) -> bool:
         and bool(agent_type)
         and agent_type not in _LEAD_AGENT_TYPES
     )
+
+
+def launch_advisory_applies(input_data) -> bool:
+    """True iff a teammate is launching background work. False on any error.
+
+    Cheapest first: the stdin `agent_type` test, then the launch predicate. Only
+    a teammate-shaped background launch imports `shared` and reads team config
+    and the session registry.
+    """
+    if not is_teammate_frame(input_data) or not is_background_launch(input_data):
+        return False
+    try:
+        from shared.background_work import frame_team_and_name, is_teammate_launch_frame
+
+        team_name, _name = frame_team_and_name(input_data)
+        return bool(team_name) and is_teammate_launch_frame(input_data, team_name)
+    except Exception:
+        return False
 
 
 def _is_filler_command(command: str) -> bool:
@@ -198,9 +219,7 @@ def main() -> None:
         if not isinstance(command, str) or not _is_filler_command(command):
             # ALLOW. The background advisory rides this branch and only this
             # branch; it did not participate in reaching it.
-            # The role test runs first, so a lead or plain frame never loads
-            # the launch predicate.
-            if is_teammate_frame(input_data) and is_background_launch(input_data):
+            if launch_advisory_applies(input_data):
                 print(json.dumps({
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",

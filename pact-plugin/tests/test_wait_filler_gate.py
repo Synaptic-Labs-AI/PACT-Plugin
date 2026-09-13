@@ -40,11 +40,11 @@ Registration pins:
   S2  registered under PreToolUse matcher "Bash" in hooks.json with no
       async:true (the MUST_BE_SYNC entry in test_hooks_json.py is the
       sibling pin — an async flip would otherwise pass silently).
-  S3  stdlib-only imports, no shared.* (AST scan — keeps per-Bash consumer
-      cost minimal and the hook out of every classifier closure).
-  S4  non-membership: "wait_filler_gate" not in SEAM_DEPENDENT_HOOKS
-      (decision pin for the seam classification — the hook reads only the
-      stdin input contract, no integration seam).
+  S3  module-level imports are stdlib only, and the `shared` package loads
+      only for a teammate-shaped background launch (subprocess probe, with a
+      positive control) — keeps the per-Bash consumer cost minimal.
+  S4  membership: "wait_filler_gate" is in SEAM_DEPENDENT_HOOKS, because the
+      launch advisory reads team config and the session registry.
   S5  parity: the gate's local copy of the lead `agent_type` spellings
       equals shared.pact_context.LEAD_AGENT_TYPES, which the hook cannot
       import.
@@ -364,42 +364,83 @@ def test_s2_registered_under_pretooluse_bash_no_async():
 _STDLIB_ALLOWLIST = frozenset({"__future__", "importlib", "json", "os", "re", "sys"})
 
 
-def test_s3_stdlib_only_imports():
-    """The hook imports stdlib only and never shared.* — one subprocess per
-    Bash call in every consumer session keeps import cost minimal, and
-    staying out of the shared closure keeps it out of every classifier
-    sweep. The membership check is an explicit allowlist rather than
-    sys.stdlib_module_names (3.10+): the CI matrix runs this suite on
-    Python 3.9, where that attribute does not exist.
+def test_s3_module_level_imports_are_stdlib_only():
+    """Module-level imports are stdlib only and never shared.*. The membership
+    check is an explicit allowlist rather than sys.stdlib_module_names (3.10+):
+    the CI matrix runs this suite on Python 3.9, where that attribute does not
+    exist.
 
     `os` and `importlib` are allowed because the hook loads the shared launch
     predicate BY FILE PATH (`importlib.util` with an `os.path` join) instead of
-    importing it. That keeps the `shared` package out of the import graph, so
-    its `__init__` never runs on a call made before every Bash, which is the
-    property this arm protects. The allowlist is still a bound: any other
-    module, stdlib or not, fails it."""
+    importing it. The one `shared` import sits inside `launch_advisory_applies`;
+    the next arm pins when it runs."""
     tree = ast.parse(HOOK_PATH.read_text(encoding="utf-8"))
     imported = set()
-    for node in ast.walk(tree):
+    for node in tree.body:
         if isinstance(node, ast.Import):
             imported.update(alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module.split(".")[0])
-    assert "shared" not in imported, f"shared.* import found: {imported}"
+    assert "shared" not in imported, f"module-level shared.* import found: {imported}"
     assert imported <= _STDLIB_ALLOWLIST, (
         f"imports outside the stdlib allowlist: "
         f"{sorted(imported - _STDLIB_ALLOWLIST)}"
     )
 
 
-def test_s4_not_seam_dependent():
-    """The hook reads only the PreToolUse stdin input contract — no
-    task-dir, team-config, journal, or inbox seam — so it must NOT enter
-    SEAM_DEPENDENT_HOOKS (decision pin; the L2 integration-test requirement
-    does not apply to a stdin-contract hook)."""
+_SHARED_LOADED_PROBE = """
+import io, json, runpy, sys
+sys.stdin = io.StringIO(sys.argv[2])
+try:
+    runpy.run_path(sys.argv[1], run_name="__main__")
+except SystemExit:
+    pass
+sys.stderr.write("SHARED_LOADED=%s" % any(m == "shared" or m.startswith("shared.") for m in sys.modules))
+"""
+
+
+def _shared_loaded_for(frame: dict, tmp_path) -> bool:
+    """Run the gate as a script in a fresh interpreter; report whether `shared` loaded."""
+    import os
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CONFIG_DIR", "CLAUDE_PROJECT_DIR")}
+    env.update(HOME=str(tmp_path), CLAUDE_CONFIG_DIR=str(tmp_path / ".claude"))
+    proc = subprocess.run(
+        [sys.executable, "-c", _SHARED_LOADED_PROBE, str(HOOK_PATH), json.dumps(frame)],
+        capture_output=True, text=True, timeout=30, env=env, cwd=str(HOOK_PATH.parent),
+    )
+    assert "SHARED_LOADED=" in proc.stderr, proc.stderr
+    return proc.stderr.rsplit("SHARED_LOADED=", 1)[1].startswith("True")
+
+
+def test_s3_shared_loads_only_for_a_teammate_background_launch(tmp_path):
+    """The gate runs before every Bash call in every consumer session, so the
+    `shared` package, and the team config and registry reads behind it, load
+    only for a teammate-shaped frame launching background work. The positive
+    control proves the probe can see the import at all."""
+    launch = {"command": "echo hi", "run_in_background": True}
+    plain = {"command": "echo hi"}
+    teammate = {"agent_type": "probe-coder", "session_id": "sid", "tool_name": "Bash"}
+    lead = {"agent_type": "PACT:pact-orchestrator", "session_id": "sid", "tool_name": "Bash"}
+
+    assert _shared_loaded_for({**teammate, "tool_input": launch}, tmp_path) is True, (
+        "positive control: a teammate background launch did not load `shared`, "
+        "so the probe cannot see the import it is meant to rule out"
+    )
+    assert _shared_loaded_for({**teammate, "tool_input": plain}, tmp_path) is False
+    assert _shared_loaded_for({**lead, "tool_input": launch}, tmp_path) is False
+    assert _shared_loaded_for({"tool_name": "Bash", "tool_input": launch}, tmp_path) is False
+
+
+def test_s4_seam_dependent():
+    """The launch advisory reads team config and the session registry to tell
+    a teammate from an Agent-tool subagent, so the hook is seam-dependent and
+    needs a non-mocked L2 test (decision pin)."""
     from shared.hook_infra_classifier import SEAM_DEPENDENT_HOOKS
 
-    assert "wait_filler_gate" not in SEAM_DEPENDENT_HOOKS
+    assert "wait_filler_gate" in SEAM_DEPENDENT_HOOKS
 
 
 def test_s5_lead_spellings_match_the_source_set():

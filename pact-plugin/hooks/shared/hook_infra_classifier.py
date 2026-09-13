@@ -72,6 +72,10 @@ SEAM_DEPENDENT_HOOKS: frozenset[str] = frozenset({
     # ~/.claude/teams/<team>/background_work.json — task-dir resolution AND
     # team config, so it meets the criterion above outright.
     "track_files",
+    # wait_filler_gate: the background-launch advisory reads team config and the
+    # session registry to tell a teammate from an Agent-tool subagent. That path
+    # never denies and fails open, so it is L2-only.
+    "wait_filler_gate",
 })
 
 # Hooks confirmed to FAIL SILENTLY on a broken seam (a consequential effect that
@@ -272,6 +276,11 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "tool_response",
     }),  # post additionally reaches error_output (fail-loud alert) and
          # tool_response (the canonical-envelope extractor).
+    "wait_filler_gate": frozenset({
+        "background_launch", "background_work", "constants", "intentional_wait",
+        "pact_context", "paths", "session_journal", "session_registry",
+        "session_state", "state_file", "task_utils"
+    }),
 }
 
 # Every helper module (top-level OR shared) transitively reachable from at least
