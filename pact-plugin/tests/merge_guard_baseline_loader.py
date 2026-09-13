@@ -357,6 +357,13 @@ _VENDORED = {
     "51e6c5a5": ("merge_guard_common_51e6c5a5.py", "9a351309358c3f196995a106f1216b437bd151f1"),
     "72bacaf8": ("merge_guard_common_72bacaf8.py", "86f3d93d6f20757ed781bba519d781869a2246fb"),
     "b313ecaa": ("merge_guard_common_b313ecaa.py", "93e6f56d905b6b0326940ccabe5eaac775691d98"),
+    "f6e3639a": ("merge_guard_common_f6e3639a.py", "cb24d0b883f092126e2714865c1b1d8ce89e9572"),
+    "2d7fcd07": ("merge_guard_common_2d7fcd07.py", "b07f06c0c57ad9c966d637e4ac50e8beed7609ca"),
+    "b6418727": ("merge_guard_common_b6418727.py", "f080051af6f9c6e9427d4dbaad886203b1276a5c"),
+    "3972bb5f": ("merge_guard_common_3972bb5f.py", "2c29f088ff5fc03626a7ad5e31c976cc15d8012a"),
+    "bf7c8786": ("merge_guard_common_bf7c8786.py", "66e1a48e33604ff98903d1624914af3cace24f7a"),
+    "a62703f1": ("merge_guard_common_a62703f1.py", "8f67b82deb254e2ceff9532ab639f5012fadcf9f"),
+    "a542e21b": ("merge_guard_common_a542e21b.py", "0d4be274af969a69f7053d343b8a81813115920a"),
 }
 
 _cached_vendored = {}

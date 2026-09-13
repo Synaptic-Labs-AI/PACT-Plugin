@@ -28,6 +28,7 @@ _CERT_FILES = [
     "test_merge_guard_1118_recert.py",
     "test_merge_guard_1129_r2_cert.py",
     "test_merge_guard_1129_r3_cert.py",
+    "test_merge_guard_1140_carrier5_cert.py",
 ]
 
 
@@ -64,8 +65,9 @@ def _loaded_shas(tree):
 
 
 def _history_and_skip_sites(tree):
-    """Line-tagged skip markers, pytest.skip calls, and subprocess calls whose
-    argument names git."""
+    """Line-tagged skip markers, pytest.skip calls, subprocess calls whose
+    argument names git, and `if` tests that compare a baseline classifier
+    (a `D_` name) with None, which skip a row as silently as a marker."""
     sites = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "skipif":
@@ -78,6 +80,12 @@ def _history_and_skip_sites(tree):
                 argv = ast.unparse(node.args[0]) if node.args else ""
                 if "'git'" in argv or '"git"' in argv:
                     sites.append("L%d %s(%s)" % (node.lineno, func, argv[:60]))
+        if isinstance(node, ast.If):
+            test = ast.unparse(node.test)
+            if "None" in test and any(
+                isinstance(n, ast.Name) and n.id.startswith("D_") for n in ast.walk(node.test)
+            ):
+                sites.append("L%d if %s" % (node.lineno, test[:60]))
     return sites
 
 

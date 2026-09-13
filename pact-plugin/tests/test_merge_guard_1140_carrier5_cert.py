@@ -35,7 +35,7 @@ Summary: BIDIRECTIONAL certification for #1140 — carrier-5 (`git commit -m/--m
 
 NON-VACUITY (base-vs-HEAD, in-test + permanent): the OVER-BLOCK and UNDER-BLOCK rows load
 the PRE-FIX parent classifier (f6e3639a = 2d7fcd07^, the `-m`-only inline arms) via
-`git show` + exec and assert the discrimination IN-TEST (base=True), so a future strip
+vendored fixtures and assert the discrimination IN-TEST (base=True), so a future strip
 regression that re-breaks carrier-5 flips a HEAD column back and reds the row, and the
 base column proves each form was a genuine vector (never a vacuous green). This baked-
 classifier discriminator is crash-atomic (NO working-tree mutation — the fix is COMMITTED,
@@ -57,18 +57,18 @@ docs/preparation/1140-carrier5.md Appendix A (global-flag-prefix under-block map
 Destructive verbs are assembled at runtime (BD/BDR/PF/M5) so this file carries no raw
 force-delete / force-push / merge literal and stays inert to the live guard.
 """
-import subprocess
 import types
 from pathlib import Path
 
 import pytest  # noqa: E402
 
 import shared.merge_guard_common as mgc  # noqa: E402
+from merge_guard_baseline_loader import load_vendored  # noqa: E402
 
 D = mgc.is_dangerous_command
 STRIP = mgc._strip_non_executable_content
 
-# --- Baked PRE-FIX classifier loaded from git ONCE for in-test base-vs-HEAD non-vacuity.
+# --- Baked PRE-FIX classifier loaded from a vendored fixture ONCE for in-test base-vs-HEAD non-vacuity.
 #     BASE = the fix commit's PARENT (the `-m`-only inline arms carrier-5). The over-block
 #     residuals are is_dangerous=True on BASE and False on HEAD; the under-block canaries
 #     are True on both. Loading the parent as a module (NOT a working-tree checkout) keeps
@@ -76,55 +76,10 @@ STRIP = mgc._strip_non_executable_content
 _BASE_SHA = "f6e3639a"  # 2d7fcd07^ — pre-carrier-5-fix (v4.6.4)
 
 
-_WHY = {}  # sha -> what actually failed, for the skip reason
 
 
-def _why_for(*shas):
-    """Recorded failures for exactly `shas`, in the order given.
-
-    Reads only the shas its caller's skipif gates on, so a later load recording
-    into `_WHY` cannot appear in an earlier guard's reason. The whole-dict form
-    this replaces was correct only while every later load sat below the guard.
-    """
-    return "; ".join("%s: %s" % (sha, _WHY[sha]) for sha in shas if sha in _WHY)
-
-
-def _load_classifier(sha):
-    """Load merge_guard_common as it existed at `sha`, or None if unavailable.
-
-    Returns None on any git/exec failure — git missing, or the commit not present in this checkout — so collection SUCCEEDS and the base-vs-HEAD
-    differential rows self-SKIP (@requires_history) instead of aborting the file. Mirrors
-    test_merge_guard_1129_r2_cert._load_classifier.
-    """
-    wt = Path(__file__).resolve().parents[2]  # worktree root (tests/../../)
-    try:
-        src = subprocess.check_output(
-            ["git", "-C", str(wt), "show",
-             sha + ":pact-plugin/hooks/shared/merge_guard_common.py"],
-            stderr=subprocess.PIPE,
-        ).decode()
-    except subprocess.CalledProcessError as exc:
-        _WHY[sha] = "git show failed: " + (exc.stderr or b"").decode().strip()
-        return None
-    except (FileNotFoundError, OSError) as exc:
-        _WHY[sha] = "git not runnable: %r" % (exc,)
-        return None
-    mod = types.ModuleType("merge_guard_common_1140_" + sha)
-    mod.__file__ = str(wt / "pact-plugin/hooks/shared/merge_guard_common.py")
-    mod.__package__ = "shared"  # so its `from shared.x import ...` resolve on sys.path
-    try:
-        exec(compile(src, mod.__file__, "exec"), mod.__dict__)
-    except Exception as exc:
-        _WHY[sha] = "source loaded (%d bytes) but exec failed: %r" % (len(src), exc)
-        return None
-    return mod
-
-
-_BASE = _load_classifier(_BASE_SHA)
-# None-safe: a bare `_BASE.is_dangerous_command` would AttributeError at import when the
-# parent source is unavailable (unreachable base commit), re-aborting collection. D_BASE is only ever
-# called by the @requires_history-guarded differential rows.
-D_BASE = _BASE.is_dangerous_command if _BASE is not None else None
+_BASE = load_vendored(_BASE_SHA)
+D_BASE = _BASE.is_dangerous_command
 
 # --- REMEDIATION baselines (#1176). The first carrier-5 fix (2d7fcd07) shipped a BLOCKING
 #     under-block that an independent review caught; two follow-up fixes now sit on top:
@@ -152,19 +107,11 @@ D_BASE = _BASE.is_dangerous_command if _BASE is not None else None
 #         Discriminator = D_BASE (f6e3639a) is False -> HEAD True.
 _FIRSTFIX_SHA = "2d7fcd07"  # the flawed first fix (naive body; introduced the commit under-block)
 _FIXR_SHA = "b6418727"      # FIX-R bash-faithful body (closed the under-block; pre-C4-anchor)
-_FIRSTFIX = _load_classifier(_FIRSTFIX_SHA)
-_FIXR = _load_classifier(_FIXR_SHA)
-D_FIRSTFIX = _FIRSTFIX.is_dangerous_command if _FIRSTFIX is not None else None
-D_FIXR = _FIXR.is_dangerous_command if _FIXR is not None else None
+_FIRSTFIX = load_vendored(_FIRSTFIX_SHA)
+_FIXR = load_vendored(_FIXR_SHA)
+D_FIRSTFIX = _FIRSTFIX.is_dangerous_command
+D_FIXR = _FIXR.is_dangerous_command
 
-# All three baked baselines come from the same merged history, so one skipif covers them:
-# a checkout lacking any of them self-SKIPS every differential row (the HEAD-only rows
-# — faithful controls, the gobbling mutant, both drift-detectors, ReDoS — still run).
-requires_history = pytest.mark.skipif(
-    _BASE is None or _FIRSTFIX is None or _FIXR is None,
-    reason="base-vs-firstfix-vs-fixR differentials did not run: %s"
-           % (_why_for(_BASE_SHA, _FIRSTFIX_SHA, _FIXR_SHA) or "no failure recorded"),
-)
 
 # --- FOLD-ALL-4 baseline (#1176 remediation cycle 2). A FRESH independent adversarial re-review of
 #     the FIX-R+C4 HEAD found FOUR MORE pre-existing over-blocks on the message-value strip surface;
@@ -189,13 +136,8 @@ requires_history = pytest.mark.skipif(
 #     set begins at `--me` (a trailing char after the `m` is what breaks the short arm). This boundary
 #     was found EMPIRICALLY by ground-truthing every vector's {pre-fold, HEAD} polarity before codifying.
 _PREFOLD_SHA = "3972bb5f"  # 6a3a86b7^ — FIX-R+C4 HEAD, source byte-identical to f7f370a3 (pre-fold)
-_PREFOLD = _load_classifier(_PREFOLD_SHA)
-D_PREFOLD = _PREFOLD.is_dangerous_command if _PREFOLD is not None else None
-requires_prefold = pytest.mark.skipif(
-    _PREFOLD is None,
-    reason="fold-all-4 pre-fold differential did not run: %s"
-           % _WHY.get(_PREFOLD_SHA, "no failure recorded"),
-)
+_PREFOLD = load_vendored(_PREFOLD_SHA)
+D_PREFOLD = _PREFOLD.is_dangerous_command
 
 # --- CARRIER-4 EQUALS-FORM baseline (#1176 remediation cycle 3). The final adversarial re-review's
 #     completeness critic caught an attached-equals over-block: a double-quoted variable-assignment
@@ -214,13 +156,8 @@ requires_prefold = pytest.mark.skipif(
 #     was byte-identical there — but conflates it with the whole remediation arc; bf7c8786 is the per-fix
 #     discriminator.) Polarities were EMPIRICALLY ground-truthed at both baselines before codifying.
 _PREFIX_C4_SHA = "bf7c8786"  # 00195c1a^ — immediate pre-fix parent (span-scope not yet in _strip_var_dq)
-_PREFIX_C4 = _load_classifier(_PREFIX_C4_SHA)
-D_PREFIX_C4 = _PREFIX_C4.is_dangerous_command if _PREFIX_C4 is not None else None
-requires_prefix_c4 = pytest.mark.skipif(
-    _PREFIX_C4 is None,
-    reason="carrier-4 equals-form pre-fix differential did not run: %s"
-           % _WHY.get(_PREFIX_C4_SHA, "no failure recorded"),
-)
+_PREFIX_C4 = load_vendored(_PREFIX_C4_SHA)
+D_PREFIX_C4 = _PREFIX_C4.is_dangerous_command
 
 # --- F-C1 4-CARRIER baseline (#1176 remediation cycle 4 — the FINAL coarse-substitution-preserve cure).
 #     The adversarial re-review found the same benign-$()-preserves-whole pathology latent in the LAST 4
@@ -241,13 +178,8 @@ requires_prefix_c4 = pytest.mark.skipif(
 #     classifier where all 4 carriers still coarse-preserve — the SHARP per-fix discriminator. Each closure
 #     asserts D_PREFIX_FC1(cmd) is True -> D(cmd) is False. Polarities EMPIRICALLY ground-truthed first.
 _PREFIX_FC1_SHA = "a62703f1"  # 3f25c8ea^ — pre-F-C1 classifier (the 4 carriers still coarse-preserve)
-_PREFIX_FC1 = _load_classifier(_PREFIX_FC1_SHA)
-D_PREFIX_FC1 = _PREFIX_FC1.is_dangerous_command if _PREFIX_FC1 is not None else None
-requires_prefix_fc1 = pytest.mark.skipif(
-    _PREFIX_FC1 is None,
-    reason="F-C1 4-carrier pre-fix differential did not run: %s"
-           % _WHY.get(_PREFIX_FC1_SHA, "no failure recorded"),
-)
+_PREFIX_FC1 = load_vendored(_PREFIX_FC1_SHA)
+D_PREFIX_FC1 = _PREFIX_FC1.is_dangerous_command
 
 # --- ECHO/PRINTF CARVE-OUT baseline (#1176 remediation cycle 5b — the bounded echo/printf multi-arg fold).
 #     The anchor-coverage audit found that carrier-3 (echo/printf) matched ONLY the FIRST quoted arg, so a
@@ -264,13 +196,8 @@ requires_prefix_fc1 = pytest.mark.skipif(
 #     ground-truthed (a single-arg backtick case was reclassified OUT — it was already closed by F-C1, so it
 #     is False==False vs this baseline, NOT a carve-out closure; only 2nd+ arg cases flip here).
 _PREFIX_ECHO_SHA = "a542e21b"  # e2145b44^ — post-F-C1 pre-carve-out (echo/printf strips only the 1st arg)
-_PREFIX_ECHO = _load_classifier(_PREFIX_ECHO_SHA)
-D_PREFIX_ECHO = _PREFIX_ECHO.is_dangerous_command if _PREFIX_ECHO is not None else None
-requires_prefix_echo = pytest.mark.skipif(
-    _PREFIX_ECHO is None,
-    reason="echo/printf carve-out pre-fix differential did not run: %s"
-           % _WHY.get(_PREFIX_ECHO_SHA, "no failure recorded"),
-)
+_PREFIX_ECHO = load_vendored(_PREFIX_ECHO_SHA)
+D_PREFIX_ECHO = _PREFIX_ECHO.is_dangerous_command
 
 
 # --- Destructive verbs assembled at runtime — this file carries no raw literal.
@@ -327,7 +254,6 @@ class TestOverBlockClosure:
         ("d --message",      'git commit --message "fix: describe %s in prose"' % BD),
         ("e git -C commit",  'git -C /some/repo commit -m "fix: describe %s in prose"' % BD),
     ])
-    @requires_history
     def test_over_block_closed_base_true_head_false(self, label, cmd):
         assert D_BASE(cmd) is True, \
             "%s: expected a BASE over-block vector (else the closure row is vacuous): %r" % (label, cmd)
@@ -357,8 +283,7 @@ class TestFaithfulNeverBlocked:
         # ANSI-C, adjacent-concat, --message, -C). Documenting base=False keeps the faithful
         # controls honest: they are not silently over-block-closure rows in disguise.
         cmd = 'git commit -m "fix: describe %s in prose"' % BD
-        if D_BASE is not None:
-            assert D_BASE(cmd) is False
+        assert D_BASE(cmd) is False
 
 
 # ===========================================================================
@@ -377,7 +302,6 @@ class TestUnderBlockRetained:
         ("u7 >(bash) procsub", 'git commit -m "run %s" > >(bash)' % BD),
         ("u8 adversarial",    'git commit -m "x";%s;git commit -m "y"' % M5),
     ])
-    @requires_history
     def test_under_block_stays_gated_base_and_head(self, label, cmd):
         assert D_BASE(cmd) is True, "%s: must be gated on base (else vacuous): %r" % (label, cmd)
         assert D(cmd) is True, "%s: the fix must NOT open an under-block here: %r" % (label, cmd)
@@ -395,7 +319,6 @@ class TestWidenedPrefixUnderBlock:
         ("w2 -C ... && tail", 'git -C /repo commit -m "msg" && %s' % BDR),
         ("w3 -C ... ; tail",  'git -C /repo commit -m "x";%s' % M5),
     ])
-    @requires_history
     def test_widened_prefix_stays_gated_base_and_head(self, label, cmd):
         assert D_BASE(cmd) is True, "%s: must be gated on base (else vacuous): %r" % (label, cmd)
         assert D(cmd) is True, "%s: the global-flag prefix must NOT open an under-block: %r" % (label, cmd)
@@ -462,7 +385,6 @@ class TestExistingPinCompatibility:
         # commit + merge + tag in one command (the #1129 R2 cross-carrier pin).
         ("commit;merge;tag",            'git commit -m "x";gh pr merge 5;git tag v1'),
     ])
-    @requires_history
     def test_pin_stays_gated_base_and_head(self, label, cmd):
         assert D_BASE(cmd) is True and D(cmd) is True, \
             "%s: existing behavioral pin must be unchanged by the fix: %r" % (label, cmd)
@@ -549,7 +471,6 @@ class TestC4OverBlockClosure:
         ("tag -am",               'git tag -am "run %s later" v1' % BD),
         ("tag attached -m\"\"",    'git tag -m"run %s later" v1' % BD),
     ])
-    @requires_history
     def test_c4_closes_bundled_attached(self, label, cmd):
         assert D_FIXR(cmd) is True, \
             "%s: must STILL be over-blocked at FIX-R (b6418727) — else the row does not isolate C4: %r" % (label, cmd)
@@ -584,7 +505,6 @@ class TestFixROverBlockClosure:
         ("tag esc-idiom prose",    "git tag -m %s v1" % _ESC_PROSE),
         ("tag ANSI-C prose",       "git tag -m %s v1" % _ANSI_PROSE),
     ])
-    @requires_history
     def test_fixr_closes_esc_ansi_over_block(self, label, cmd):
         assert D_FIRSTFIX(cmd) is True, \
             "%s: must STILL be over-blocked at the first fix (2d7fcd07) — else does not isolate FIX-R: %r" % (label, cmd)
@@ -600,7 +520,6 @@ class TestFirstFixOverBlockRetained:
         ("locale $\"...\" prose", 'git commit -m $"run %s later"' % BD),
         ("adjacent-concat prose", 'git commit -m "run ""%s"' % BD),
     ])
-    @requires_history
     def test_stays_closed_from_pre_baseline(self, label, cmd):
         assert D_BASE(cmd) is True, "%s: expected a pre-#1140 over-block (non-vacuity): %r" % (label, cmd)
         assert D(cmd) is False, "%s: must stay closed at HEAD: %r" % (label, cmd)
@@ -627,7 +546,6 @@ class TestFixRCommitUnderBlock:
     # the trailing quoted leg (load-bearing — see TestNoTrailingQuotedLegNotTheDefect).
     @pytest.mark.parametrize("sep,tail", [("&&", BD), (";", M5), ("|", BDR)])
     @pytest.mark.parametrize("mlabel,msg", [("esc-idiom", _ESC_MSG), ("ANSI-C", _ANSI_MSG)])
-    @requires_history
     def test_commit_underblock_closed_by_fixr(self, sep, tail, mlabel, msg):
         cmd = "git commit -m %s %s %s %s git commit -m 'x'" % (msg, sep, tail, sep)
         assert D_BASE(cmd) is True, \
@@ -644,7 +562,6 @@ class TestFixRTagUnderBlock:
     # the tag under-block already existed at f6e3639a (and at 2d7fcd07). FIX-R closes it -> HEAD True.
     @pytest.mark.parametrize("sep,tail", [("&&", BD), (";", M5)])
     @pytest.mark.parametrize("mlabel,msg", [("esc-idiom", _ESC_MSG), ("ANSI-C", _ANSI_MSG)])
-    @requires_history
     def test_tag_underblock_closed_by_fixr(self, sep, tail, mlabel, msg):
         cmd = "git tag -m %s v1 %s %s %s git tag -m 'x' v2" % (msg, sep, tail, sep)
         assert D_BASE(cmd) is False, \
@@ -660,7 +577,6 @@ class TestNoTrailingQuotedLegNotTheDefect:
     # WHY the original 26-vector matrix stayed green while a real under-block existed — it never
     # combined esc-idiom/ANSI + executing tail + a trailing quoted leg.
     @pytest.mark.parametrize("mlabel,msg", [("esc-idiom", _ESC_MSG), ("ANSI-C", _ANSI_MSG)])
-    @requires_history
     def test_no_tql_was_caught_even_by_first_fix(self, mlabel, msg):
         cmd = "git commit -m %s && %s" % (msg, BD)
         assert D_FIRSTFIX(cmd) is True, \
@@ -681,7 +597,6 @@ class TestBundledAttachedUnderBlockRetained:
         ("tag -am && tail",        'git tag -am "x" v1 && %s' % BDR),
         ("absurd cluster && tail", 'git commit -%sm "x" && %s' % ("a" * 24, BDR)),
     ])
-    @requires_history
     def test_bundled_attached_tail_caught(self, label, cmd):
         assert D_BASE(cmd) is True, "%s: was always caught (non-vacuity): %r" % (label, cmd)
         assert D(cmd) is True, "%s: C4 must NOT open an under-block on the executing tail: %r" % (label, cmd)
@@ -700,7 +615,6 @@ class TestA3ValueFlagCluster:
         ("-Cm HEAD ; merge",   'git commit -Cm HEAD ; %s' % M5),
         ("-Fm file && delete", 'git commit -Fm file && %s' % BDR),
     ])
-    @requires_history
     def test_a3_executing_tail_still_caught(self, label, cmd):
         assert D_BASE(cmd) is True and D(cmd) is True, \
             "%s: the executing tail after a value-flag cluster must stay caught: %r" % (label, cmd)
@@ -713,11 +627,8 @@ class TestCarrier4NonRegression:
         # C4 anchor. It was False before #1140 and the anchor widening must not break it.
         cmd = 'git commit --message="run %s later"' % BD
         assert D(cmd) is False, "carrier-4 --message= must stay False at HEAD: %r" % cmd
-        # Gate on ALL three baselines (mirrors `requires_history`, L149): D_FIRSTFIX/D_FIXR are
-        # squashed-away non-ancestors -> None in a clean/CI clone; the HEAD control above always runs.
-        if None not in (D_BASE, D_FIRSTFIX, D_FIXR):
-            assert D_BASE(cmd) is False and D_FIRSTFIX(cmd) is False and D_FIXR(cmd) is False, \
-                "carrier-4 --message= must be non-regressed across ALL baselines: %r" % cmd
+        assert D_BASE(cmd) is False and D_FIRSTFIX(cmd) is False and D_FIXR(cmd) is False, \
+            "carrier-4 --message= must be non-regressed across ALL baselines: %r" % cmd
 
 
 # --- C4 ANCHOR char-class DRIFT-DETECTOR (design-intent, deliberately NOT brittle).
@@ -844,7 +755,6 @@ class TestF1CommitAbbreviationClosure:
         ("--messag", 'git commit --messag "run %s later"' % BD),
         ("--mess sq", "git commit --mess 'run %s later'" % BD),
     ])
-    @requires_prefold
     def test_commit_abbrev_closed(self, label, cmd):
         assert D_PREFOLD(cmd) is True, \
             "%s: must be over-blocked at pre-fold (else the closure is vacuous): %r" % (label, cmd)
@@ -860,7 +770,6 @@ class TestF1TagAbbreviationClosure:
         ("--mess",  'git tag --mess "run %s later" v1' % BD),
         ("--messa", 'git tag --messa "run %s later" v1' % BD),
     ])
-    @requires_prefold
     def test_tag_abbrev_closed(self, label, cmd):
         assert D_PREFOLD(cmd) is True, "%s: must be over-blocked at pre-fold: %r" % (label, cmd)
         assert D(cmd) is False, "%s: F1 must CLOSE the tag abbreviated-message over-block: %r" % (label, cmd)
@@ -884,7 +793,6 @@ class TestF1AbbreviationControls:
     def test_faithful_abbrev_stays_false(self, label, cmd):
         assert D(cmd) is False, "%s: a faithful message-abbreviation click must NEVER be blocked: %r" % (label, cmd)
 
-    @requires_prefold
     def test_dashm_boundary_was_false_prefold(self):
         # Documents WHERE the closure set starts: `--m` was NOT over-blocked pre-fold (the C4 short
         # arm already handled it), so it is a control, not a closure — the empirical basis for the
@@ -901,12 +809,10 @@ class TestF1AbbreviationUnderBlock:
         ("tag --mess && tail",     'git tag --mess "ok" v1 && %s' % BDR),
         ("tag --merged && tail",   'git tag --merged mainbranch && %s' % BDR),
     ])
-    @requires_prefold
     def test_abbrev_tail_caught(self, label, cmd):
         assert D_PREFOLD(cmd) is True and D(cmd) is True, \
             "%s: the executing tail after an abbreviated-message flag must stay caught: %r" % (label, cmd)
 
-    @requires_prefold
     def test_nonfaithful_multiword_documented(self):
         # `git commit --mess <BD>` UNQUOTED (multi-word) stays True at BOTH — NOT a regression: an
         # unquoted git message is a SINGLE word, so `--mess git` takes `git` as the message and the
@@ -917,7 +823,6 @@ class TestF1AbbreviationUnderBlock:
 
 
 class TestF1AbbreviationTruePositive:
-    @requires_prefold
     def test_abbrev_substitution_still_caught(self):
         # An abbreviated flag carrying a REAL $(destructive) still executes -> stays caught (True both).
         cmd = 'git commit --mess "$(%s)"' % BD
@@ -943,7 +848,6 @@ class TestF2SiblingVerbClosure:
         ("notes --ref add -m",   'git notes --ref refs/notes/x add -m "run %s later"' % BD),
         ("merge -m F2xF3 sub",   'git merge -m "as of $(date): run %s later" feat' % BD),
     ])
-    @requires_prefold
     def test_sibling_verb_closed(self, label, cmd):
         assert D_PREFOLD(cmd) is True, \
             "%s: must be over-blocked at pre-fold (no carrier existed): %r" % (label, cmd)
@@ -965,7 +869,6 @@ class TestF2Exclusions:
         ("cherry-pick tail", 'git cherry-pick -m 1 abc123 && %s' % BD),
         ("revert tail",      'git revert -m 1 HEAD ; %s' % M5),
     ])
-    @requires_prefold
     def test_exclusion_tail_caught(self, label, cmd):
         assert D_PREFOLD(cmd) is True and D(cmd) is True, \
             "%s: the executing tail after an EXCLUDED verb must stay caught: %r" % (label, cmd)
@@ -995,7 +898,6 @@ class TestF2UnderBlock:
         ("stash save ; merge", 'git stash save "ok" ; %s' % M5),
         ("notes add | tail",   'git notes add -m "ok" | %s' % BD),
     ])
-    @requires_prefold
     def test_sibling_tail_caught(self, label, cmd):
         assert D_PREFOLD(cmd) is True and D(cmd) is True, \
             "%s: the executing tail after a new carrier must stay caught: %r" % (label, cmd)
@@ -1006,7 +908,6 @@ class TestF2TruePositive:
         ("merge $(mal)",      'git merge -m "$(%s)" feat' % BD),
         ("stash save $(mal)", 'git stash save "$(%s)"' % BD),
     ])
-    @requires_prefold
     def test_sibling_substitution_caught(self, label, cmd):
         assert D_PREFOLD(cmd) is True and D(cmd) is True, \
             "%s: a REAL $(destructive) via a new carrier must stay caught: %r" % (label, cmd)
@@ -1029,7 +930,6 @@ class TestF3SubstitutionClosure:
         ("tag sub",                    'git tag -m "built $(date), see %s" v1' % BD),
         ("escaped-quote OUTside span", 'git commit -m "use \\"$(date)\\" then %s"' % BD),
     ])
-    @requires_prefold
     def test_substitution_closed(self, label, cmd):
         assert D_PREFOLD(cmd) is True, \
             "%s: must be over-blocked at pre-fold (whole-value preserve): %r" % (label, cmd)
@@ -1058,7 +958,6 @@ class TestF3TruePositive:
         ("backtick mal", 'git commit -m "`%s`"' % BD),
         ("tag $(mal)",   'git tag -m "$(%s)" v1' % BD),
     ])
-    @requires_prefold
     def test_substitution_truepositive_caught(self, label, cmd):
         assert D_PREFOLD(cmd) is True and D(cmd) is True, \
             "%s: a preserved $(destructive) span must stay caught: %r" % (label, cmd)
@@ -1072,7 +971,6 @@ class TestF3UnderBlock:
         ("apostrophe val + tail", 'git commit -m "it\'s ok $(date)" && %s' % BD),
         ("benign sub ; merge",    'git commit -m "the $(date) build" ; %s' % M5),
     ])
-    @requires_prefold
     def test_substitution_tail_caught(self, label, cmd):
         assert D_PREFOLD(cmd) is True and D(cmd) is True, \
             "%s: the executing tail after a benign substitution must stay caught: %r" % (label, cmd)
@@ -1085,12 +983,10 @@ class TestF3GhSharedCarrierClosure:
         ("gh issue create", 'gh issue create --title "as of $(date): %s"' % BD),
         ("gh pr create",    'gh pr create --title "$(date) release; drop %s"' % BD),
     ])
-    @requires_prefold
     def test_gh_carrier_substitution_closed(self, label, cmd):
         assert D_PREFOLD(cmd) is True, "%s: must be over-blocked at pre-fold: %r" % (label, cmd)
         assert D(cmd) is False, "%s: F3 must CLOSE the shared gh-carrier over-block: %r" % (label, cmd)
 
-    @requires_prefold
     def test_gh_carrier_truepositive_kept(self):
         cmd = 'gh issue create --title "$(%s)"' % BD
         assert D_PREFOLD(cmd) is True and D(cmd) is True, "gh-carrier $(destructive) must stay caught: %r" % cmd
@@ -1105,7 +1001,6 @@ class TestF3FailSafeResidual:
         ("escaped inner-quote span", 'git commit -m "fix $(basename \\"$d\\") then %s"' % BD),
         ("raw inner-quote span",     'git commit -m "fix $(basename "$d") then %s"' % BD),
     ])
-    @requires_prefold
     def test_failsafe_residual_true_at_both(self, label, cmd):
         assert D_PREFOLD(cmd) is True and D(cmd) is True, \
             "%s: the fail-safe residual must be True==base (no regression, no under-block): %r" % (label, cmd)
@@ -1194,7 +1089,6 @@ class TestC4EqualsFormClosure:
         ("notes add --message=", 'git notes add --message="$(date) %s"' % BD),
         ("general FOO=",        'FOO="$(date) note %s"' % BD),
     ])
-    @requires_prefix_c4
     def test_equals_form_closed(self, label, cmd):
         assert D_PREFIX_C4(cmd) is True, \
             "%s: must be over-blocked at pre-fix bf7c8786 (else the closure is vacuous): %r" % (label, cmd)
@@ -1217,14 +1111,12 @@ class TestC4EquivalenceAxis:
     def test_axis_i_nosub_literal_false_both(self, label, cmd):
         # (i) status quo: carrier-4's no-$() strip removes the whole inert literal at EVERY baseline.
         assert D(cmd) is False, "%s: no-$() literal must be stripped -> False: %r" % (label, cmd)
-        if D_PREFIX_C4 is not None:
-            assert D_PREFIX_C4(cmd) is False, "%s: (i) must be False at pre-fix too (status quo): %r" % (label, cmd)
+        assert D_PREFIX_C4(cmd) is False, "%s: (i) must be False at pre-fix too (status quo): %r" % (label, cmd)
 
     @pytest.mark.parametrize("label,cmd", [
         ("(ii) FOO= $()+literal",       'FOO="$(date) just note %s"' % BD),
         ("(ii) --message= $()+literal", 'git commit --message="$(date) just note %s"' % BD),
     ])
-    @requires_prefix_c4
     def test_axis_ii_sub_plus_literal_closes(self, label, cmd):
         # (ii): the literal gets the SAME disposition as (i) (stripped) + the span preserved -> False.
         # It was an over-block at pre-fix (whole-value revert) -> a genuine closure.
@@ -1237,7 +1129,6 @@ class TestC4EquivalenceAxis:
         ("(iii) eval no-$()",      'FOO="drop %s" ; eval $FOO' % BD),
         ("(iii) eval has-$()",     'FOO="$(date) %s" ; eval $FOO' % BD),
     ])
-    @requires_prefix_c4
     def test_axis_iii_expanded_eval_true_both(self, label, cmd):
         # (iii): a bare $VAR expansion / eval executes the WHOLE value -> preserve whole -> caught at
         # BOTH baselines (the _var_is_expanded / _has_eval-FIRST guards, unchanged by the fix).
@@ -1256,7 +1147,6 @@ class TestC4TruePositive:
         ("FOO= + && tail",    'FOO="note wip" && %s' % BD),
         ("=value + && tail",  'git commit --message="ok $(date)" && %s' % BD),
     ])
-    @requires_prefix_c4
     def test_equals_truepositive_caught(self, label, cmd):
         assert D_PREFIX_C4(cmd) is True and D(cmd) is True, \
             "%s: a real $(destructive)/executing tail must stay caught at both: %r" % (label, cmd)
@@ -1275,7 +1165,6 @@ class TestC4DotGuardStatusQuo:
         ("#11 gap no-$()",      'git -c core.pager="%s" commit' % BD, False),          # carrier-4 no-$() strip
         ("preserved $(danger)", 'git -c core.pager="$(%s)" commit' % BD, True),
     ])
-    @requires_prefix_c4
     def test_c_config_patch_equals_base(self, label, cmd, expected):
         assert D(cmd) is expected, "%s: -c status-quo expected %s at HEAD: %r" % (label, expected, cmd)
         assert D_PREFIX_C4(cmd) is expected, \
@@ -1361,7 +1250,6 @@ class TestFC1EchoPrintfCarrier:
         ("echo apostrophe",   'echo "it\'s $(date); %s"' % BD),
         ("echo two-sub",      'echo "$(date) $(whoami): %s"' % BD),
     ])
-    @requires_prefix_fc1
     def test_closure(self, label, cmd):
         assert D_PREFIX_FC1(cmd) is True, "%s: must be over-blocked at pre-fix (else vacuous): %r" % (label, cmd)
         assert D(cmd) is False, "%s: F-C1 must CLOSE the echo/printf coarse-substitution over-block: %r" % (label, cmd)
@@ -1372,7 +1260,6 @@ class TestFC1EchoPrintfCarrier:
         ("echo backtick mal", 'echo "`%s`"' % BD),
         ("echo + tail",       'echo "ok $(date)" && %s' % BD),
     ])
-    @requires_prefix_fc1
     def test_truepositive(self, label, cmd):
         assert D_PREFIX_FC1(cmd) is True and D(cmd) is True, \
             "%s: a real substitution / executing tail must stay caught at BOTH (native-dq): %r" % (label, cmd)
@@ -1394,7 +1281,6 @@ class TestFC1HereStringCarrier:
         ("herestr $()+danger", 'cat <<< "as of $(date): note %s"' % BD),
         ("herestr backtick",   'cat <<< "ran `hostname`: %s"' % BD),
     ])
-    @requires_prefix_fc1
     def test_closure(self, label, cmd):
         assert D_PREFIX_FC1(cmd) is True, "%s: must be over-blocked at pre-fix (else vacuous): %r" % (label, cmd)
         assert D(cmd) is False, "%s: F-C1 must CLOSE the here-string coarse-substitution over-block: %r" % (label, cmd)
@@ -1405,7 +1291,6 @@ class TestFC1HereStringCarrier:
         ("herestr shell-preceding", 'bash <<< "$(date) %s"' % BD),  # shell reads stdin -> preserve whole -> True
         ("herestr + tail",       'cat <<< "ok $(date)" ; %s' % BD),
     ])
-    @requires_prefix_fc1
     def test_truepositive(self, label, cmd):
         assert D_PREFIX_FC1(cmd) is True and D(cmd) is True, \
             "%s: real substitution / shell-preceding / tail must stay caught at BOTH: %r" % (label, cmd)
@@ -1428,7 +1313,6 @@ class TestFC1CurlDataCarrier:
         ("curl -d $()+danger",   'curl -d "as of $(date): note %s" %s' % (BD, _FC1_URL)),
         ("curl --data $()+danger", 'curl --data "$(date) drop %s" %s' % (BD, _FC1_URL)),
     ])
-    @requires_prefix_fc1
     def test_closure(self, label, cmd):
         assert D_PREFIX_FC1(cmd) is True, "%s: must be over-blocked at pre-fix (else vacuous): %r" % (label, cmd)
         assert D(cmd) is False, "%s: F-C1 must CLOSE the curl -d coarse-substitution over-block: %r" % (label, cmd)
@@ -1438,7 +1322,6 @@ class TestFC1CurlDataCarrier:
         ("curl -d embedded", 'curl -d "pre $(%s) post" %s' % (BD, _FC1_URL)),
         ("curl -d + tail",   'curl -d "ok $(date)" %s && %s' % (_FC1_URL, BD)),
     ])
-    @requires_prefix_fc1
     def test_truepositive(self, label, cmd):
         assert D_PREFIX_FC1(cmd) is True and D(cmd) is True, \
             "%s: real substitution in a curl -d value must stay caught at BOTH (native-dq): %r" % (label, cmd)
@@ -1460,7 +1343,6 @@ class TestFC1GhApiSelectorCarrier:
         ("gh -q $()+danger",   'gh api repos/o/r -q "as of $(date): %s"' % BD),
         ("gh --jq $()+danger", 'gh api repos/o/r --jq "$(date) %s"' % BD),
     ])
-    @requires_prefix_fc1
     def test_closure(self, label, cmd):
         assert D_PREFIX_FC1(cmd) is True, "%s: must be over-blocked at pre-fix (else vacuous): %r" % (label, cmd)
         assert D(cmd) is False, "%s: F-C1 must CLOSE the gh-api selector coarse-substitution over-block: %r" % (label, cmd)
@@ -1470,7 +1352,6 @@ class TestFC1GhApiSelectorCarrier:
         ("gh --jq $(mal)", 'gh api repos/o/r --jq "$(%s)"' % BD),
         ("gh -q + tail",   'gh api repos/o/r -q "ok $(date)" && %s' % BD),
     ])
-    @requires_prefix_fc1
     def test_truepositive(self, label, cmd):
         assert D_PREFIX_FC1(cmd) is True and D(cmd) is True, \
             "%s: real substitution in a gh-api selector must stay caught at BOTH (native-dq): %r" % (label, cmd)
@@ -1493,13 +1374,11 @@ class TestEchoPrintfMultiArgClosure:
     # Non-vacuity flips against the carve-out's OWN sharp immediate parent (D_PREFIX_ECHO = e2145b44^ =
     # a542e21b, where echo/printf still stripped only the first arg) per the per-fix-discriminator
     # discipline. The no-substitution form flips too (the carve-out strips args regardless of $()).
-    @requires_prefix_echo
     def test_printf_multiarg_has_sub_closed(self):
         cmd = 'printf "%%s\\n" "note $(date) %s"' % BD
         assert D_PREFIX_ECHO(cmd) is True, "must be over-blocked at pre-carve a542e21b (else vacuous): %r" % cmd
         assert D(cmd) is False, "the carve-out must CLOSE the printf multi-arg over-block: %r" % cmd
 
-    @requires_prefix_echo
     def test_printf_multiarg_no_sub_closed(self):
         # The no-substitution form ALSO flips True->False: the carve-out strips every positional arg
         # regardless of $(), so the 2nd-arg danger literal is now stripped.
@@ -1570,7 +1449,6 @@ class TestEchoPrintfCarveoutClosure:
         ("printf fmt+data + sub",  'printf "%%s" "note $(date) %s"' % BD),
         ("printf fmt+data no-sub", 'printf "%%s" "note %s"' % BD),
     ])
-    @requires_prefix_echo
     def test_multiarg_closed(self, label, cmd):
         assert D_PREFIX_ECHO(cmd) is True, \
             "%s: must be over-blocked at pre-carve a542e21b (else vacuous): %r" % (label, cmd)
@@ -1592,7 +1470,6 @@ class TestEchoPrintfCarveoutUnderBlock:
         ("inline $() 1st arg",  'echo "$(%s)"' % BD),
         ("inline $() 2nd arg",  'echo "a" "$(%s)"' % BD),
     ])
-    @requires_prefix_echo
     def test_underblock_stays_caught(self, label, cmd):
         assert D_PREFIX_ECHO(cmd) is True and D(cmd) is True, \
             "%s: the carve-out must NOT open an under-block (True at both): %r" % (label, cmd)
@@ -1622,7 +1499,6 @@ class TestEchoPrintfDeferredBoundary:
     @pytest.mark.parametrize("label,cmd", [
         ("C8 curl -H header", 'curl -H "X-Note: %s" %s' % (BD, _FC1_URL)),
     ])
-    @requires_prefix_echo
     def test_deferred_positional_stays_true_both(self, label, cmd):
         assert D_PREFIX_ECHO(cmd) is True and D(cmd) is True, \
             "%s: PERMANENT http-client-excluded positional residual must be True==both: %r" % (label, cmd)
