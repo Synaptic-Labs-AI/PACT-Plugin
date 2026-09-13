@@ -120,6 +120,17 @@ def test_validate_handoff_blocks_an_in_process_teammate_ending_over_its_recorded
     assert world.told(LEAD_SID) == ["bmate1"]
 
 
+def test_an_in_process_teammate_subagentstop_keeps_the_teammate_text(tmp_path):
+    world = World(tmp_path)
+    recorded_mate_job(world)
+    frame = subagent_frame(MATE, MATE_AGENT_ID, teammate_metadata(world), jobs=[job("bmate1")])
+
+    out = only_decision(run(world, frame))
+    assert out["decision"] == "block"
+    assert "will not wake you" in out["reason"]
+    assert "can go undelivered" not in out["reason"]
+
+
 def test_the_metadata_alone_identifies_the_teammate(tmp_path):
     """agent_type names neither a member nor a PACT type; only the metadata says teammate."""
     world = World(tmp_path)

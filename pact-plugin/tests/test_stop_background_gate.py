@@ -311,7 +311,7 @@ def teammate_frame(jobs) -> dict:
     return stop_frame(session_id=MATE_SID, jobs=jobs, agent_type="pact-backend-coder")
 
 
-def test_a_teammate_without_a_wait_is_blocked_with_the_teammate_text(tmp_path):
+def test_a_separate_process_teammate_without_a_wait_is_blocked(tmp_path):
     world = World(tmp_path)
     world.register_teammate(MATE_SID, MATE)
     world.add_task(7, MATE)
@@ -319,7 +319,6 @@ def test_a_teammate_without_a_wait_is_blocked_with_the_teammate_text(tmp_path):
 
     out = output(proc)
     assert out["decision"] == "block"
-    assert "background work you started" in out["reason"]
     assert not (world.session_dir(MATE_SID) / "pact-session-context.json").exists()
     assert world.told(MATE_SID) == ["bmate1"]
     assert [(t["role"], t["verdict"]) for t in world.traces(MATE_SID)] == [("teammate", "block")]
@@ -461,6 +460,30 @@ def test_the_lead_text_does_not_say_a_notice_cannot_start_a_turn(tmp_path):
     assert out["decision"] == "block"
     assert "does not start one" not in out["reason"]
     assert "can go undelivered" in out["reason"]
+
+
+def test_a_tmux_teammate_stop_uses_the_separate_process_text(tmp_path):
+    world = World(tmp_path)
+    world.register_teammate(MATE_SID, MATE)
+    world.add_task(7, MATE)
+
+    out = output(world.run(teammate_frame([job("bmate1")])))
+    assert out["decision"] == "block"
+    assert "Background work you started is still running" in out["reason"]
+    assert "can go undelivered" in out["reason"]
+    assert "will not wake you" not in out["reason"]
+
+
+@pytest.mark.parametrize("role, event, text", [
+    ("ROLE_LEAD", "Stop", "LEAD_BLOCK_TEXT"),
+    ("ROLE_TEAMMATE", "Stop", "SEPARATE_PROCESS_TEAMMATE_BLOCK_TEXT"),
+    ("ROLE_TEAMMATE", "SubagentStop", "TEAMMATE_BLOCK_TEXT"),
+])
+def test_each_role_and_event_gets_its_block_text(role, event, text):
+    from shared import turn_end_gate
+
+    chosen = turn_end_gate._block_text_for(getattr(turn_end_gate, role), event)
+    assert chosen is getattr(turn_end_gate, text)
 
 
 def test_a_separate_process_teammate_is_told_about_its_own_monitor(tmp_path):

@@ -69,6 +69,14 @@ TEAMMATE_BLOCK_TEXT = (
     "metadata.intentional_wait on every task the wait covers, naming this "
     "job, so the lead knows to wake you. Each job is reported once."
 )
+SEPARATE_PROCESS_TEAMMATE_BLOCK_TEXT = (
+    "Background work you started is still running and no wait covers it: "
+    "{jobs}. Its completion notice usually starts your next turn, but a notice "
+    "can go undelivered. Before ending this turn, do one of these: wait for it "
+    "to finish, schedule a wake with CronCreate, stop it if it is no longer "
+    "needed, or SET metadata.intentional_wait on every task the wait covers, "
+    "naming this job. Each job is reported once."
+)
 
 
 @dataclass
@@ -120,6 +128,15 @@ def _job_types_for(role: str, event: Any) -> frozenset:
     return turn_end_jobs.OWN_PROCESS_JOB_TYPES
 
 
+def _block_text_for(role: str, event: Any) -> str:
+    """The block text for this role on this turn-end event."""
+    if role == ROLE_LEAD:
+        return LEAD_BLOCK_TEXT
+    if event == "SubagentStop":
+        return TEAMMATE_BLOCK_TEXT
+    return SEPARATE_PROCESS_TEAMMATE_BLOCK_TEXT
+
+
 def _decide(input_data: dict, running: list) -> Verdict:
     pact_context.init(input_data)
     role, name, team = resolve_role(input_data)
@@ -156,7 +173,7 @@ def _decide(input_data: dict, running: list) -> Verdict:
             role, VERDICT_ALLOW_ALREADY_TOLD, count,
             ids=[e["id"] for e in candidates], session_dir=session_dir,
         )
-    text = LEAD_BLOCK_TEXT if role == ROLE_LEAD else TEAMMATE_BLOCK_TEXT
+    text = _block_text_for(role, event)
     return Verdict(
         role, VERDICT_BLOCK, count,
         ids=[e["id"] for e in new],
