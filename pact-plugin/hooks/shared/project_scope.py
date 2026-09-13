@@ -36,6 +36,10 @@ from .paths import get_claude_config_dir
 # so an unrelated directory compares equal to it.
 _GIT_LOCATION_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
 
+# Written by session_init into a session's own folder when the session starts
+# inside a linked worktree; read back by the working-memory write guard.
+WORKTREE_IDENTITY_FILE = "worktree-identity.json"
+
 
 def git_env_without_location() -> dict:
     """Return this process's environment without the git location variables.
@@ -150,12 +154,24 @@ def _listed_worktrees(checkout: Path) -> Set[Path]:
     return listed
 
 
+def _recorded_common_dir(identity: Optional[dict], declared: Path) -> Optional[str]:
+    """The common dir a session record names, when it was written for exactly `declared`."""
+    if not isinstance(identity, dict) or identity.get("declared") != os.path.realpath(declared):
+        return None
+    common_dir = identity.get("common_dir")
+    return common_dir if isinstance(common_dir, str) and os.path.isabs(common_dir) else None
+
+
 def stays_in_declared_project(
-    declared: Path, resolved_root: Path, claude_md: Path
+    declared: Path,
+    resolved_root: Path,
+    claude_md: Path,
+    worktree_identity: Optional[dict] = None,
 ) -> bool:
     """True when resolution that started at `declared` ended in the same project.
 
     `resolved_root` is the directory the resolver found `claude_md` under.
+    `worktree_identity` is this session's worktree record, or None.
 
     THE DISCRIMINATOR BETWEEN A LEGITIMATE FALL-THROUGH AND A WRONG-PROJECT
     ONE. A resolver that probes a declared directory and finds no CLAUDE.md
@@ -177,28 +193,35 @@ def stays_in_declared_project(
          the common dir's parent is not the root they landed on. Judging by
          one anchor alone refused those same-project writes.
 
-    A DECLARATION THAT NO LONGER EXISTS is judged two ways. If the resolved
-    repository still lists it as a worktree, that record proves identity and
-    it is admitted. Otherwise it is judged from its nearest existing ancestor,
-    so a removed worktree or subdirectory still maps to the repository it was
-    in; rules 2 and 3 still require the resolution to land in that repository.
-    That includes a removed INDEPENDENT repository that was nested inside
-    another: its nearest ancestor lies in the enclosing repository, so a
-    resolution into the enclosing repository is admitted, because nothing this
-    check reads separates it from a removed subdirectory, which must stay
-    admitted. (A removed submodule leaves a record under the enclosing
-    repository's .git/modules, which this check does not read.) The ancestor
-    stands in for a directory git can no longer see, so it NEVER admits a
-    resolution at the home directory or into the config root's own CLAUDE.md:
-    every project under the user loads those files, and a deleted project
-    under a git-versioned home would otherwise project into them. A live
-    declaration that resolves there is not affected.
+    A DECLARATION THAT NO LONGER EXISTS is judged three ways, in order. If the
+    resolved repository still lists it as a worktree, that record proves
+    identity and it is admitted. Otherwise, a session record written while this
+    exact declaration existed decides before the ancestor walk: the resolution
+    is admitted only at a checkout root of the repository the record names, and
+    refused otherwise, including when git cannot answer. A record for any other
+    declaration is ignored. Otherwise it is judged from its nearest existing
+    ancestor, so a removed worktree or subdirectory still maps to the
+    repository it was in; rules 2 and 3 still require the resolution to land in
+    that repository. That includes a removed INDEPENDENT repository that was
+    nested inside another: its nearest ancestor lies in the enclosing
+    repository, so a resolution into the enclosing repository is admitted when
+    no session record names it, because nothing else this check reads
+    separates it from a removed subdirectory, which must stay admitted. (A
+    removed submodule leaves a record under the enclosing repository's
+    .git/modules, which this check does not read.) The ancestor stands in for a
+    directory git can no longer see, so it NEVER admits a resolution at the
+    home directory or into the config root's own CLAUDE.md: every project under
+    the user loads those files, and a deleted project under a git-versioned
+    home would otherwise project into them. A live declaration that resolves
+    there is not affected.
 
     REFUSED: a SUBDIRECTORY that is not a checkout root (a path below a root is
     containment, not identity — a nested directory can be its own project), a
     different repository nested inside or around a LIVE declaration, a worktree
-    removed with `git worktree remove` from outside its repository's tree, and
-    any non-git layout other than the declaration itself.
+    removed with `git worktree remove` from outside its repository's tree when
+    no session record names it, a removed declaration whose session record
+    names a different repository, and any non-git layout other than the
+    declaration itself.
 
     FAIL-SAFE IS FALSE, WHICH MEANS REFUSE.
     """
@@ -216,6 +239,12 @@ def stays_in_declared_project(
         try:
             if declared.resolve() in _listed_worktrees(resolved):
                 return True
+            recorded_common_dir = _recorded_common_dir(worktree_identity, declared)
+            if recorded_common_dir is not None:
+                return _rev_parse_path(resolved, "--show-toplevel") == resolved and (
+                    _rev_parse_path(resolved, "--git-common-dir")
+                    == Path(recorded_common_dir)
+                )
             if resolved == Path.home().resolve():
                 return False
             config_claude_md = (get_claude_config_dir() / "CLAUDE.md").resolve()

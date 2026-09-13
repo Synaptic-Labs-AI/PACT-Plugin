@@ -43,6 +43,7 @@ from shared.pact_context import (  # noqa: E402  # requires the sys.path bootstr
     _build_session_path,
     project_slug,
 )
+from shared.project_scope import WORKTREE_IDENTITY_FILE  # noqa: E402  # requires the sys.path bootstrap above
 
 
 def _context_file_path(session_id: str, project_dir: str) -> Path | None:
@@ -82,8 +83,10 @@ _discovered_session_id = _DISCOVERY_UNSET
 _discovered_for_env = None
 
 
-def _context_record_on_disk(env_session: str) -> dict:
-    """Find the one context file naming this session id, and parse it.
+def _context_record_on_disk(
+    env_session: str, filename: str = "pact-session-context.json"
+) -> dict:
+    """Find the one session record `filename` under this session id's folder, and parse it.
 
     The shared glob+parse half of discovery, split out so the session-id
     reader and the project_dir reader share one derivation (and one set of
@@ -99,7 +102,7 @@ def _context_record_on_disk(env_session: str) -> dict:
         sessions_root = get_claude_config_dir() / "pact-sessions"
         # The writers collapsed unsafe characters in the id; match that name.
         safe_session = _UNSAFE_SLUG_CHARS_RE.sub("_", env_session)
-        matches = list(sessions_root.glob(f"*/{safe_session}/pact-session-context.json"))
+        matches = list(sessions_root.glob(f"*/{safe_session}/{filename}"))
     except OSError:
         return {}
 
@@ -228,6 +231,40 @@ def get_project_dir_from_session_record() -> str:
     ):
         return ""
     return found
+
+
+_WORKTREE_IDENTITY_PATHS = ("declared", "worktree", "common_dir")
+
+
+def get_worktree_identity_from_session_record() -> dict:
+    """Return the worktree identity session_init recorded for this session, or {}.
+
+    session_init writes it into the session's own folder, for every role, when
+    the session starts inside a linked worktree. The working-memory write guard
+    passes it to `stays_in_declared_project`, which reads it only when the
+    declared directory no longer exists.
+
+    Discovery is `_context_record_on_disk`'s, behind the same two guards as
+    `_discover_context_record`. Nothing is cached.
+
+    Returns {} unless the record's `session_id` equals CLAUDE_CODE_SESSION_ID
+    and `declared`, `worktree` and `common_dir` are all absolute path strings.
+    Never raises.
+    """
+    # Twin guard pair of _discover_session_id's -- keep in sync.
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return {}
+    env_session = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    if not env_session:
+        return {}
+    record = _context_record_on_disk(env_session, WORKTREE_IDENTITY_FILE)
+    if record.get("session_id") != env_session:
+        return {}
+    for key in _WORKTREE_IDENTITY_PATHS:
+        value = record.get(key)
+        if not isinstance(value, str) or not os.path.isabs(value):
+            return {}
+    return record
 
 
 class ProjectScopeDisagreementError(RuntimeError):

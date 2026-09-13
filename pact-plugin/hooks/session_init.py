@@ -111,6 +111,8 @@ from shared.pact_config import llm_options
 from shared.peer_context import get_peer_context
 from shared.session_registry import resolve as _registry_resolve
 from shared.paths import get_claude_config_dir
+from shared import state_file
+from shared.project_scope import WORKTREE_IDENTITY_FILE, _rev_parse_path
 from shared import backlog_store
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
@@ -1182,6 +1184,45 @@ def _persist_project_dir_env(project_dir: str) -> None:
         pass
 
 
+def _record_worktree_identity(session_id: str, project_dir: str) -> None:
+    """Record which repository this session's linked worktree belongs to.
+
+    Writes `<session_dir>/worktree-identity.json` when `project_dir` lies inside
+    a linked worktree (its git dir and common dir differ), including a
+    subdirectory of one. The working-memory write guard reads it back once that
+    worktree is removed and git can no longer say which repository the declared
+    directory was in. Runs for every role, so a separate-process teammate
+    records its own session.
+
+    Fail-open: any error leaves no record.
+    """
+    try:
+        directory = Path(project_dir)
+        if not directory.is_dir():
+            return
+        git_dir = _rev_parse_path(directory, "--git-dir")
+        common_dir = _rev_parse_path(directory, "--git-common-dir")
+        if git_dir is None or common_dir is None or git_dir == common_dir:
+            return
+        worktree = _rev_parse_path(directory, "--show-toplevel")
+        if worktree is None:
+            return
+        record = {
+            "session_id": session_id,
+            "declared": os.path.realpath(project_dir),
+            "worktree": str(worktree),
+            "common_dir": str(common_dir),
+        }
+        state_file.write_text(
+            build_session_path(project_slug(project_dir), session_id)
+            / WORKTREE_IDENTITY_FILE,
+            json.dumps(record),
+            root=get_claude_config_dir() / "pact-sessions",
+        )
+    except Exception:
+        return
+
+
 def main():
     """
     Main entry point for the SessionStart hook.
@@ -1676,6 +1717,9 @@ def main():
         # both writers agree → the per-prompt write-back becomes a true no-op.
         if not session_id_was_missing:
             team_name = _resolve_aligned_team_name(session_id, default=team_name)
+
+        if not session_id_was_missing:
+            _record_worktree_identity(session_id, project_dir)
 
         # Lead-role gate (#877). is_lead is total (never raises) and reads only
         # the harness-set agent_type. Computed once and reused for both Class-A

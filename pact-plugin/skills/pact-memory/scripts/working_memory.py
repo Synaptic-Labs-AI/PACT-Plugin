@@ -55,6 +55,7 @@ try:
         env_record_project_dir_disagreement,
         format_project_dir_disagreement,
         get_project_dir_from_session_record,
+        get_worktree_identity_from_session_record,
     )
 except ImportError:
     from pact_session import (
@@ -62,6 +63,7 @@ except ImportError:
         env_record_project_dir_disagreement,
         format_project_dir_disagreement,
         get_project_dir_from_session_record,
+        get_worktree_identity_from_session_record,
     )
 
 # Configure logging
@@ -2219,7 +2221,10 @@ def _refuse_ambient_sync_on_declared_scope_escape(
     from shared.project_scope import stays_in_declared_project
 
     if stays_in_declared_project(
-        Path(declared), Path(resolved_root), Path(claude_md_path)
+        Path(declared),
+        Path(resolved_root),
+        Path(claude_md_path),
+        worktree_identity=get_worktree_identity_from_session_record(),
     ):
         return
     raise AmbientSyncRefused(

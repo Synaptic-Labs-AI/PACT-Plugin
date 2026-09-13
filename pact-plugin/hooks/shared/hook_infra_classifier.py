@@ -181,7 +181,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "merge_guard_common", "pact_config", "pact_context", "paths",
         "peer_context", "pin_caps", "plugin_manifest", "project_scope",
         "session_journal", "session_registry", "session_resume",
-        "session_state", "staleness", "symlinks", "task_utils", "teammate_mode",
+        "session_state", "staleness", "state_file", "symlinks", "task_utils", "teammate_mode",
     }),  # backlog_store reached via `from shared import backlog_store`, an edge
          # the oracle resolves since it reads modules named in the import alias.
          # pact_config reached via the SessionStart runtime-config injection
