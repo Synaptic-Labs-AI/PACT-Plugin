@@ -41,6 +41,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from clock_shift.clock_shift_env import carry_clock_shift
 
 HOOK = Path(__file__).resolve().parents[1] / "hooks" / "track_files.py"
 TEAM = "session-consultseam"
@@ -105,7 +106,7 @@ def _launch(config: Path) -> None:
         "CLAUDE_PROJECT_DIR": PROJECT_DIR,
     }
     result = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(frame),
-                            capture_output=True, text=True, env=env, timeout=30)
+                            capture_output=True, text=True, env=carry_clock_shift(env), timeout=30)
     assert result.returncode == 0, result.stderr
 
 

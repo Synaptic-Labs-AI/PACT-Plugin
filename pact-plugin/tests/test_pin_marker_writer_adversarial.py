@@ -133,6 +133,7 @@ from shared.pin_markers import (
     plan_insertion,
 )
 from staleness import _parse_pinned_section
+from clock_shift.clock_shift_env import carry_clock_shift
 
 PLUGIN_ROOT = Path(__file__).parent.parent
 HOOK_SCRIPT = PLUGIN_ROOT / "hooks" / "pin_marker_writer.py"
@@ -774,7 +775,7 @@ def _run_rotation(start_marker: str, marker_above_gap: bool = False) -> dict:
         }
         proc = subprocess.run(
             [sys.executable, "-c", _ROTATION_RUNNER],
-            capture_output=True, text=True, cwd=str(fixture_dir), env=env,
+            capture_output=True, text=True, cwd=str(fixture_dir), env=carry_clock_shift(env),
             timeout=180,
         )
         assert proc.returncode == 0, (
@@ -1301,7 +1302,7 @@ def _run_hook_with_journal(pinned_body: str, prompt: str) -> tuple[int, list, st
                 "session_id": session_id,
                 "cwd": str(fixture_dir),
             }),
-            capture_output=True, text=True, cwd=str(fixture_dir), env=env,
+            capture_output=True, text=True, cwd=str(fixture_dir), env=carry_clock_shift(env),
             timeout=60,
         )
         journal = session_dir / "session-journal.jsonl"
@@ -1571,7 +1572,7 @@ class TestNonDenialOverTheEnvironment:
         return subprocess.run(
             [sys.executable, str(HOOK_SCRIPT)],
             input=json.dumps(self.PIN_FRAME), capture_output=True, text=True,
-            cwd=str(fixture_dir), env=env, timeout=60,
+            cwd=str(fixture_dir), env=carry_clock_shift(env), timeout=60,
         )
 
     def test_claude_md_is_a_directory(self, tmp_path):

@@ -47,6 +47,7 @@ from scripts.working_memory import (  # noqa: E402
     _refuse_ambient_sync_from_a_redirected_store,
     _target_is_inside_the_declared_project_dir,
 )
+from clock_shift.clock_shift_env import carry_clock_shift
 
 _CLI = (
     Path(__file__).resolve().parent.parent
@@ -113,7 +114,7 @@ def _run_cli(env: dict, cwd: Path, *args: str) -> subprocess.CompletedProcess:
     )
     return subprocess.run(
         [sys.executable, str(_CLI), *args],
-        env=env,
+        env=carry_clock_shift(env),
         cwd=str(cwd),
         capture_output=True,
         text=True,

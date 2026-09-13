@@ -37,6 +37,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from clock_shift.clock_shift_env import carry_clock_shift
 
 SKILL_FILE = (
     Path(__file__).resolve().parents[1]
@@ -336,7 +337,7 @@ class TestExistenceCountSurvivesTruncation:
 
         done = subprocess.run(
             ["/bin/sh", "-c", command],
-            capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"},
+            capture_output=True, text=True, env=carry_clock_shift({"PATH": "/usr/bin:/bin"}),
         )
         assert done.returncode in (0, 1), done.stderr
         assert done.stdout.strip() == "1", (

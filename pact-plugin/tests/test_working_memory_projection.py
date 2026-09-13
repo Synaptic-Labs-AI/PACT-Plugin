@@ -32,6 +32,7 @@ from scripts.working_memory import (  # noqa: E402
     _record_timestamp,
     project_memories_to_claude_md,
 )
+from clock_shift.clock_shift_env import carry_clock_shift
 
 _SCAFFOLD = (
     "# Probe\n\n"
@@ -261,7 +262,7 @@ _CLI = (
 def _run_cli(env: dict, cwd: Path, *args: str) -> dict:
     proc = subprocess.run(
         [sys.executable, str(_CLI), *args],
-        env=env, cwd=str(cwd), capture_output=True, text=True, timeout=180,
+        env=carry_clock_shift(env), cwd=str(cwd), capture_output=True, text=True, timeout=180,
     )
     assert proc.returncode == 0, f"rc={proc.returncode}\n{proc.stderr[:600]}"
     payload = json.loads(proc.stdout)

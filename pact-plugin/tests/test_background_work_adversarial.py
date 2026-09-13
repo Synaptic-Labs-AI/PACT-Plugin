@@ -49,6 +49,7 @@ from fixtures.role_frames import (
     captured_pretooluse_teammate_tmux,
 )
 from shared import background_work as bw
+from clock_shift.clock_shift_env import carry_clock_shift
 
 HOOKS_DIR = Path(__file__).resolve().parents[1] / "hooks"
 GATE = HOOKS_DIR / "wait_filler_gate.py"
@@ -683,7 +684,7 @@ class TestRegistryUnderConcurrentProcesses:
             subprocess.Popen(
                 [sys.executable, str(script), str(tmp_path), tag,
                  str(self.PER_PROC), str(rendezvous)],
-                env=env,
+                env=carry_clock_shift(env),
             )
             for tag in ("alpha", "beta")
         ]
@@ -797,7 +798,7 @@ def _gate(command: str, background, frame=_TEAMMATE) -> tuple:
         proc = subprocess.run(
             [sys.executable, str(GATE)],
             input=json.dumps(frame),
-            capture_output=True, text=True, timeout=30, env=_gate_seam(Path(root)),
+            capture_output=True, text=True, timeout=30, env=carry_clock_shift(_gate_seam(Path(root))),
         )
     try:
         out = json.loads(proc.stdout or "{}")

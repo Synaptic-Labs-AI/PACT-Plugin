@@ -48,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).parent / "fixtures"))
 
 import task_claim_gate as gate  # noqa: E402
 import role_frames  # noqa: E402  — committed real-frame fixtures (§12.3 fidelity)
+from clock_shift.clock_shift_env import carry_clock_shift
 
 TEAM = "test-team"
 LEAD_QUALIFIED = "PACT:pact-orchestrator"      # is_lead True (qualified spelling)
@@ -694,7 +695,7 @@ def test_T10_subprocess_malformed_stdin_exits_zero_no_traceback(tmp_path):
     proc = subprocess.run(
         [sys.executable, str(_HOOK_PATH)],
         input="{not json",
-        text=True, capture_output=True, env=env, timeout=30,
+        text=True, capture_output=True, env=carry_clock_shift(env), timeout=30,
     )
     assert proc.returncode == 0
     assert json.loads(proc.stdout.strip()) == {"suppressOutput": True}
@@ -1124,7 +1125,7 @@ def test_subprocess_full_evaluate_path_exits_zero_no_traceback(tmp_path):
     proc = subprocess.run(
         [sys.executable, str(_HOOK_PATH)],
         input=json.dumps(frame),
-        text=True, capture_output=True, env=env, timeout=30,
+        text=True, capture_output=True, env=carry_clock_shift(env), timeout=30,
     )
     assert proc.returncode == 0
     assert "Traceback" not in proc.stderr

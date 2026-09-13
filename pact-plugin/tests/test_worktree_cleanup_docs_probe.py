@@ -36,6 +36,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from clock_shift.clock_shift_env import carry_clock_shift
 
 SKILL_FILE = (
     Path(__file__).resolve().parents[1] / "skills" / "worktree-cleanup" / "SKILL.md"
@@ -93,7 +94,7 @@ def probe():
         def shell(command):
             done = subprocess.run(
                 [str(BASH), "-c", command.replace("{abs_worktree}", str(worktree))],
-                capture_output=True, text=True, env={"PATH": SAFE_PATH},
+                capture_output=True, text=True, env=carry_clock_shift({"PATH": SAFE_PATH}),
                 # Deliberately NOT the worktree: the step specifies an absolute
                 # path precisely so a wrong CWD cannot produce a false empty,
                 # and running from elsewhere is how that gets measured.

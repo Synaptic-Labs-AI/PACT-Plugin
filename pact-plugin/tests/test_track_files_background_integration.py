@@ -44,6 +44,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from clock_shift.clock_shift_env import carry_clock_shift
 
 HOOK = Path(__file__).resolve().parents[1] / "hooks" / "track_files.py"
 TEAM = "session-seamtest"
@@ -124,7 +125,7 @@ def _run(seam_root: Path, frame: dict) -> subprocess.CompletedProcess:
         input=json.dumps(frame),
         capture_output=True,
         text=True,
-        env=env,
+        env=carry_clock_shift(env),
         timeout=30,
     )
 

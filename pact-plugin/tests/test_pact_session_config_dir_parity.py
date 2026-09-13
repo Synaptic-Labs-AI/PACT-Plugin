@@ -41,6 +41,7 @@ import sys
 from pathlib import Path
 
 from scripts import pact_session
+from clock_shift.clock_shift_env import carry_clock_shift
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "skills" / "pact-memory" / "scripts"
 
@@ -112,7 +113,7 @@ def test_import_reaches_resolver_from_direct_script_context(tmp_path):
 
     result = subprocess.run(
         [sys.executable, "-c", probe, str(SCRIPTS_DIR)],
-        cwd=tmp_path, env=env, capture_output=True, text=True,
+        cwd=tmp_path, env=carry_clock_shift(env), capture_output=True, text=True,
     )
 
     assert result.returncode == 0, f"import failed as production would:\n{result.stderr}"
