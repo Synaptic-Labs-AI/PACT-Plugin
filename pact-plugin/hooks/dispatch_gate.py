@@ -311,6 +311,10 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
         tool_input = {}
 
     subagent_type = tool_input.get("subagent_type", "") or ""
+    # The namespaced spelling (`PACT:pact-architect`) is checked as its bare
+    # stem by every rule below. The journal keeps the spelling the caller used.
+    if isinstance(subagent_type, str):
+        subagent_type = pact_context.strip_pact_namespace(subagent_type)
     name = tool_input.get("name", "") or ""
     prompt = tool_input.get("prompt", "") or ""
     # NOTE (#979): the spawn-arg team_name is intentionally NOT bound to a

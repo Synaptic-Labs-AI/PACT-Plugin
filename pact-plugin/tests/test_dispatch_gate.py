@@ -748,6 +748,55 @@ def test_non_pact_subagent_type_passes_through(tmp_path, monkeypatch, capsys):
 
 
 # =============================================================================
+# The PACT: namespace — a namespaced spawn gets its bare spelling's verdict
+# =============================================================================
+
+_NAMESPACE_CASES = {
+    "no-name": ({"subagent_type": "pact-architect", "name": ""}, ("DENY", "name_required")),
+    "registered": ({"subagent_type": "pact-architect"}, ("ALLOW", None)),
+    "unregistered": ({"subagent_type": "pact-nonexistent"}, ("DENY", "specialist_not_registered")),
+    "not-pact": ({"subagent_type": "custom-agent"}, ("ALLOW", None)),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_NAMESPACE_CASES))
+def test_a_namespaced_spawn_gets_the_bare_spellings_verdict(case, tmp_path, monkeypatch):
+    from dispatch_gate import evaluate_dispatch
+
+    fields, expected = _NAMESPACE_CASES[case]
+    _full_setup(monkeypatch, tmp_path)
+    bare = _make_input(**fields)["tool_input"]
+    namespaced = {**bare, "subagent_type": "PACT:" + bare["subagent_type"]}
+
+    verdicts = [evaluate_dispatch(spawn) for spawn in (bare, namespaced)]
+    assert [(decision, rule) for decision, _reason, rule in verdicts] == [expected, expected]
+
+
+def test_a_namespaced_spawns_journal_row_names_the_rule(tmp_path, monkeypatch, capsys):
+    captured = _capture_journal(monkeypatch)
+    _full_setup(monkeypatch, tmp_path)
+    _run_main(_make_input(subagent_type="PACT:pact-architect", name=""), capsys)
+
+    rows = [e for e in captured if e.get("type") == "dispatch_decision"]
+    assert [(row["decision"], row["rule"]) for row in rows] == [("DENY", "name_required")]
+
+
+def test_the_journal_keeps_the_spelling_the_caller_used(tmp_path, monkeypatch, capsys):
+    captured = _capture_journal(monkeypatch)
+    _full_setup(monkeypatch, tmp_path)
+    _run_main(_make_input(subagent_type="PACT:pact-architect"), capsys)
+
+    rows = [e for e in captured if e.get("type") == "dispatch_decision"]
+    assert [row["subagent_type"] for row in rows] == ["PACT:pact-architect"]
+
+
+def test_a_non_string_subagent_type_still_falls_through():
+    from dispatch_gate import evaluate_dispatch
+
+    assert evaluate_dispatch({"subagent_type": 123, "name": ""}) == ("ALLOW", None, None)
+
+
+# =============================================================================
 # journal emit on every gate decision
 # =============================================================================
 
