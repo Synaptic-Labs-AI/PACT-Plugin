@@ -447,7 +447,7 @@ def test_file_tracker_main_writes_nothing_through_a_symlinked_team_directory(
 
     outside = _link_team_outside(config_root)
     monkeypatch.setattr(file_tracker.pact_context, "init", lambda _data: None)
-    monkeypatch.setattr(file_tracker, "get_team_name", lambda: TEAM)
+    monkeypatch.setattr(file_tracker, "frame_team_and_name", lambda _data: (TEAM, ""))
     monkeypatch.setattr(file_tracker, "resolve_agent_name", lambda _data: "coder")
     monkeypatch.setattr(file_tracker, "get_session_id", lambda: "sid")
     frame = {"tool_name": "Edit", "tool_input": {"file_path": "/src/app.py"}, "session_id": "sid"}
@@ -471,10 +471,10 @@ def test_teammate_idle_main_writes_nothing_through_a_symlinked_team_directory(
 
     outside = _link_team_outside(config_root)
     monkeypatch.setattr(teammate_idle.pact_context, "init", lambda _data: None)
-    monkeypatch.setattr(teammate_idle, "get_team_name", lambda: TEAM)
+    monkeypatch.setattr(teammate_idle, "frame_team_and_name", lambda _data: (TEAM, ""))
     monkeypatch.setattr(
-        teammate_idle, "get_task_list",
-        lambda: [{"id": "3", "status": "completed", "owner": "coder"}],
+        teammate_idle, "iter_team_task_jsons",
+        lambda _team: iter([{"id": "3", "status": "completed", "owner": "coder"}]),
     )
     frame = {"hook_event_name": "TeammateIdle", "teammate_name": "coder"}
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(frame)))
