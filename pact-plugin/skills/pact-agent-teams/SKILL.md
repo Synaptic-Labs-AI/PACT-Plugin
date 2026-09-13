@@ -382,9 +382,9 @@ unconditional: it does not depend on any wake channel.
 
 **Layer 3 — Escalate what you cannot hold.** Work that genuinely exceeds the
 timeout must not sit invisibly in a backgrounded process. Do not background it
-and end the turn expecting the completion notification to re-invoke you — a
-teammate's background-task notification is wake-on-read (it surfaces only
-inside a message-driven wake), so the team-lead's channel is the only push.
+and end the turn relying on the completion notification to re-invoke you: when
+you run in-process it surfaces only when something else starts your next turn,
+so the team-lead's channel is the only push you can count on.
 Either split the work into timeout-sized chunks run in-turn, or transfer the
 watch explicitly: stage the current state, `SendMessage` the team-lead the
 pending-work description, and flag the wait with `expected_resolver=lead`.

@@ -215,7 +215,7 @@ Idle on `awaiting_lead_completion` until the team-lead's wake-signal arrives. Do
 
 If you have other claimable, unblocked tasks unrelated to this dispatch (a separate Task A from a different mission), you may claim and work them. The wait is per-task, not per-agent.
 
-**If you background work, flag the wait before you end the turn.** A `Bash` call with `run_in_background`, or a command a shell `&` sends to the background, leaves work no tool will wake you for — SET `metadata.intentional_wait` naming it, on every task the wait covers.
+**If you background work, flag the wait before you end the turn.** A `Bash` call with `run_in_background`, or a command a shell `&` sends to the background, may finish while you are idle, and when you run in-process its completion does not wake you — SET `metadata.intentional_wait` naming it, on every task the wait covers.
 
 ## Exception
 
