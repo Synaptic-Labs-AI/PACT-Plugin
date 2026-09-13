@@ -82,6 +82,8 @@
     "tests/test_archive_pin_resolver.py": {
       "archive_pin": "scripts/archive_pin.py",
       "pathlib.Path": null,
+      "scripts": "skills/pact-memory/scripts/__init__.py",
+      "scripts.pact_session": "skills/pact-memory/scripts/pact_session.py",
       "shared": "hooks/shared/__init__.py",
       "shared.project_scope": "hooks/shared/project_scope.py",
       "shared.project_scope.same_repository": null
@@ -108,11 +110,18 @@
       "pathlib.Path": null,
       "task_lifecycle_gate": "hooks/task_lifecycle_gate.py"
     },
+    "tests/test_background_wait_instruction_pins.py": {
+      "__future__.annotations": null,
+      "pathlib.Path": null,
+      "session_init": "hooks/session_init.py"
+    },
     "tests/test_background_work.py": {
       "__future__.annotations": null,
       "datetime.datetime": null,
       "datetime.timedelta": null,
       "datetime.timezone": null,
+      "pathlib.Path": null,
+      "shared": "hooks/shared/__init__.py",
       "shared.background_work": "hooks/shared/background_work.py",
       "shared.background_work.LEAD_STALE_MINUTES": null,
       "shared.background_work.LEAD_UNIDLED_STALE_MINUTES": null,
@@ -120,26 +129,35 @@
       "shared.background_work._sanitize_record": null,
       "shared.background_work.agent_type_names_a_member": null,
       "shared.background_work.any_listed_task_flagged": null,
-      "shared.background_work.append_record": null,
       "shared.background_work.bind_launcher_identity": null,
       "shared.background_work.classify_wait": null,
-      "shared.background_work.discharge_acknowledged": null,
+      "shared.background_work.discharge_acknowledged_for_owner": null,
       "shared.background_work.effective_since": null,
+      "shared.background_work.is_shell_backgrounded_bash": null,
       "shared.background_work.lead_stale": null,
       "shared.background_work.load_records_for_discharge": null,
       "shared.background_work.matching_outstanding": null,
       "shared.background_work.outstanding_unflagged": null,
       "shared.background_work.record_task_ids": null,
+      "shared.background_work.save_records": null,
       "shared.background_work.unflagged_fire": null,
-      "shared.background_work.wait_covers_record": null
+      "shared.background_work.wait_covers_record": null,
+      "shared.pact_context": "hooks/shared/pact_context.py",
+      "shared.pact_context.project_slug": null,
+      "shared.state_file": "hooks/shared/state_file.py",
+      "teammate_idle": "hooks/teammate_idle.py"
     },
     "tests/test_background_work_adversarial.py": {
       "__future__.annotations": null,
+      "clock_shift.clock_shift_env": "tests/clock_shift/clock_shift_env.py",
+      "clock_shift.clock_shift_env.carry_clock_shift": null,
       "datetime.datetime": null,
       "datetime.timedelta": null,
       "datetime.timezone": null,
       "fixtures.role_frames": "tests/fixtures/role_frames.py",
       "fixtures.role_frames.captured_lead_userpromptsubmit_qualified": null,
+      "fixtures.role_frames.captured_pretooluse_lead_inprocess": null,
+      "fixtures.role_frames.captured_pretooluse_teammate_tmux": null,
       "missed_wake_scan": "hooks/missed_wake_scan.py",
       "pathlib.Path": null,
       "shared": "hooks/shared/__init__.py",
@@ -298,6 +316,18 @@
       "unittest.mock.MagicMock": null,
       "unittest.mock.patch": null
     },
+    "tests/test_claim_extends_launch_record.py": {
+      "__future__.annotations": null,
+      "datetime.timedelta": null,
+      "shared.background_work": "hooks/shared/background_work.py",
+      "shared.background_work.classify_wait": null,
+      "shared.background_work.load_unflagged_idle_counts": null,
+      "shared.background_work.save_records": null,
+      "shared.background_work.utc_now": null,
+      "task_lifecycle_gate": "hooks/task_lifecycle_gate.py",
+      "teammate_idle": "hooks/teammate_idle.py",
+      "unittest.mock.patch": null
+    },
     "tests/test_claude_md_manager.py": {
       "__future__.annotations": null,
       "contextlib.contextmanager": null,
@@ -337,6 +367,16 @@
       "pathlib.Path": null
     },
     "tests/test_cli_output_purity.py": {
+      "pathlib.Path": null
+    },
+    "tests/test_clock_shift_env.py": {
+      "clock_shift.clock_shift_env": "tests/clock_shift/clock_shift_env.py",
+      "clock_shift.clock_shift_env.LEDGER_ENV": null,
+      "clock_shift.clock_shift_env.SHIFT_ENV": null,
+      "clock_shift.clock_shift_env.SHIM_DIR": null,
+      "clock_shift.clock_shift_env.carry_clock_shift": null
+    },
+    "tests/test_clock_shift_instrument.py": {
       "pathlib.Path": null
     },
     "tests/test_commands_structure.py": {
@@ -427,6 +467,21 @@
       "shared.background_work.has_live_listed_task": null,
       "shared.background_work.owner_anchor_tasks": null
     },
+    "tests/test_consultant_background_seam.py": {
+      "__future__.annotations": null,
+      "clock_shift.clock_shift_env": "tests/clock_shift/clock_shift_env.py",
+      "clock_shift.clock_shift_env.carry_clock_shift": null,
+      "datetime.timedelta": null,
+      "pathlib.Path": null,
+      "shared.background_work": "hooks/shared/background_work.py",
+      "shared.background_work.outstanding_unflagged": null,
+      "shared.background_work.parse_iso": null,
+      "shared.pact_context": "hooks/shared/pact_context.py",
+      "shared.pact_context.project_slug": null,
+      "teammate_idle": "hooks/teammate_idle.py",
+      "teammate_idle.main": null,
+      "unittest.mock.patch": null
+    },
     "tests/test_containment_certification.py": {
       "__future__.annotations": null,
       "pathlib.Path": null,
@@ -461,6 +516,18 @@
       "hooks.shared.variety_divergence": "hooks/shared/variety_divergence.py",
       "hooks.shared.variety_divergence.extract_final_dispatch_coverage": null,
       "pathlib.Path": null
+    },
+    "tests/test_covers_since_instruction_pins.py": {
+      "__future__.annotations": null,
+      "datetime.datetime": null,
+      "datetime.timedelta": null,
+      "datetime.timezone": null,
+      "fixtures.role_frames": "tests/fixtures/role_frames.py",
+      "fixtures.role_frames.captured_lead_userpromptsubmit_qualified": null,
+      "missed_wake_scan": "hooks/missed_wake_scan.py",
+      "pathlib.Path": null,
+      "shared": "hooks/shared/__init__.py",
+      "shared.pact_context": "hooks/shared/pact_context.py"
     },
     "tests/test_create_ingress_guard.py": {
       "__future__.annotations": null,
@@ -949,6 +1016,8 @@
       "unittest.mock.patch": null
     },
     "tests/test_harvest_ledger_read_contract.py": {
+      "clock_shift.clock_shift_env": "tests/clock_shift/clock_shift_env.py",
+      "clock_shift.clock_shift_env.carry_clock_shift": null,
       "pathlib.Path": null
     },
     "tests/test_harvest_prune_foreign_root.py": {
@@ -1048,6 +1117,20 @@
       "shared.pact_context.classify_session_role": null,
       "shared.pact_context.is_lead": null
     },
+    "tests/test_launch_advisory_population.py": {
+      "__future__.annotations": null,
+      "fixtures.role_frames": "tests/fixtures/role_frames.py",
+      "fixtures.role_frames.captured_posttooluse_teammate_inprocess_bash_background": null,
+      "fixtures.role_frames.captured_pretooluse_lead_inprocess": null,
+      "fixtures.role_frames.captured_pretooluse_teammate_inprocess_subagent": null,
+      "fixtures.role_frames.captured_pretooluse_teammate_tmux": null,
+      "pathlib.Path": null,
+      "shared.background_work": "hooks/shared/background_work.py",
+      "shared.background_work.frame_team_and_name": null,
+      "shared.background_work.is_teammate_launch_frame": null,
+      "shared.pact_context": "hooks/shared/pact_context.py",
+      "shared.pact_context.project_slug": null
+    },
     "tests/test_lazy_load_cross_references.py": {
       "pathlib.Path": null
     },
@@ -1060,6 +1143,18 @@
       "pathlib.Path": null,
       "shared.pact_context": "hooks/shared/pact_context.py",
       "task_lifecycle_gate": "hooks/task_lifecycle_gate.py"
+    },
+    "tests/test_lead_surface_clock.py": {
+      "__future__.annotations": null,
+      "datetime.datetime": null,
+      "datetime.timedelta": null,
+      "datetime.timezone": null,
+      "fixtures.role_frames": "tests/fixtures/role_frames.py",
+      "fixtures.role_frames.captured_lead_userpromptsubmit_qualified": null,
+      "missed_wake_scan": "hooks/missed_wake_scan.py",
+      "pathlib.Path": null,
+      "shared": "hooks/shared/__init__.py",
+      "shared.pact_context": "hooks/shared/pact_context.py"
     },
     "tests/test_learning_ii.py": {
       "pathlib.Path": null
@@ -1414,7 +1509,8 @@
       "shared.merge_guard_common.is_dangerous_command": null
     },
     "tests/test_merge_guard_1118_recert.py": {
-      "pathlib.Path": null,
+      "merge_guard_baseline_loader": "tests/merge_guard_baseline_loader.py",
+      "merge_guard_baseline_loader.load_vendored": null,
       "shared.merge_guard_common": "hooks/shared/merge_guard_common.py",
       "typing.Any": null
     },
@@ -1438,16 +1534,18 @@
       "unittest.mock.patch": null
     },
     "tests/test_merge_guard_1129_r2_cert.py": {
+      "merge_guard_baseline_loader": "tests/merge_guard_baseline_loader.py",
+      "merge_guard_baseline_loader.load_vendored": null,
       "merge_guard_post": "hooks/merge_guard_post.py",
       "merge_guard_post.main": null,
       "merge_guard_pre": "hooks/merge_guard_pre.py",
       "merge_guard_pre.main": null,
-      "pathlib.Path": null,
       "shared.merge_guard_common": "hooks/shared/merge_guard_common.py",
       "unittest.mock.patch": null
     },
     "tests/test_merge_guard_1129_r3_cert.py": {
-      "pathlib.Path": null,
+      "merge_guard_baseline_loader": "tests/merge_guard_baseline_loader.py",
+      "merge_guard_baseline_loader.load_vendored": null,
       "shared.merge_guard_common": "hooks/shared/merge_guard_common.py"
     },
     "tests/test_merge_guard_1134_cert.py": {
@@ -1471,6 +1569,8 @@
       "unittest.mock.patch": null
     },
     "tests/test_merge_guard_1140_carrier5_cert.py": {
+      "merge_guard_baseline_loader": "tests/merge_guard_baseline_loader.py",
+      "merge_guard_baseline_loader.load_vendored": null,
       "pathlib.Path": null,
       "shared.merge_guard_common": "hooks/shared/merge_guard_common.py"
     },
@@ -1491,6 +1591,8 @@
       "shared.merge_guard_common": "hooks/shared/merge_guard_common.py"
     },
     "tests/test_merge_guard_1178_f2_cert.py": {
+      "merge_guard_baseline_loader": "tests/merge_guard_baseline_loader.py",
+      "merge_guard_baseline_loader.load_vendored": null,
       "pathlib.Path": null,
       "shared.merge_guard_common": "hooks/shared/merge_guard_common.py"
     },
@@ -1664,6 +1766,10 @@
       "shared.merge_guard_common.extract_command_context": null,
       "unittest.mock.patch": null
     },
+    "tests/test_merge_guard_vendored_baselines.py": {
+      "merge_guard_baseline_loader": "tests/merge_guard_baseline_loader.py",
+      "pathlib.Path": null
+    },
     "tests/test_merge_guard_why_oracle.py": {
       "pathlib.Path": null
     },
@@ -1811,6 +1917,8 @@
       "pathlib.Path": null
     },
     "tests/test_pact_session_config_dir_parity.py": {
+      "clock_shift.clock_shift_env": "tests/clock_shift/clock_shift_env.py",
+      "clock_shift.clock_shift_env.carry_clock_shift": null,
       "pathlib.Path": null,
       "scripts": "skills/pact-memory/scripts/__init__.py",
       "scripts.pact_session": "skills/pact-memory/scripts/pact_session.py"
@@ -2004,6 +2112,8 @@
     },
     "tests/test_pin_marker_writer.py": {
       "__future__.annotations": null,
+      "clock_shift.clock_shift_env": "tests/clock_shift/clock_shift_env.py",
+      "clock_shift.clock_shift_env.carry_clock_shift": null,
       "pathlib.Path": null,
       "pin_marker_writer": "hooks/pin_marker_writer.py",
       "scripts": "skills/pact-memory/scripts/__init__.py",
@@ -2042,6 +2152,8 @@
     },
     "tests/test_pin_marker_writer_adversarial.py": {
       "__future__.annotations": null,
+      "clock_shift.clock_shift_env": "tests/clock_shift/clock_shift_env.py",
+      "clock_shift.clock_shift_env.carry_clock_shift": null,
       "pathlib.Path": null,
       "pin_caps": "hooks/pin_caps.py",
       "pin_caps.PIN_COUNT_CAP": null,
@@ -2175,6 +2287,8 @@
     },
     "tests/test_project_dir_resolution.py": {
       "__future__.annotations": null,
+      "clock_shift.clock_shift_env": "tests/clock_shift/clock_shift_env.py",
+      "clock_shift.clock_shift_env.carry_clock_shift": null,
       "fixtures.project_dir": "tests/fixtures/project_dir.py",
       "fixtures.project_dir.child_env": null,
       "fixtures.project_dir.enable_record_discovery": null,
@@ -2240,6 +2354,34 @@
       "pathlib.Path": null,
       "scripts": "skills/pact-memory/scripts/__init__.py",
       "scripts.working_memory": "skills/pact-memory/scripts/working_memory.py"
+    },
+    "tests/test_removed_worktree_record.py": {
+      "__future__.annotations": null,
+      "archive_pin": "scripts/archive_pin.py",
+      "fixtures.role_frames": "tests/fixtures/role_frames.py",
+      "fixtures.role_frames.teammate_frame": null,
+      "pathlib.Path": null,
+      "scripts": "skills/pact-memory/scripts/__init__.py",
+      "scripts.pact_session": "skills/pact-memory/scripts/pact_session.py",
+      "scripts.working_memory": "skills/pact-memory/scripts/working_memory.py",
+      "scripts.working_memory.AmbientSyncRefused": null,
+      "scripts.working_memory.SyncResult": null,
+      "scripts.working_memory._refuse_ambient_sync_on_declared_scope_escape": null,
+      "session_init": "hooks/session_init.py",
+      "session_init.main": null,
+      "shared.pact_context": "hooks/shared/pact_context.py",
+      "shared.pact_context._build_session_path": null,
+      "shared.pact_context.project_slug": null,
+      "shared.paths": "hooks/shared/paths.py",
+      "shared.paths.get_claude_config_dir": null,
+      "shared.project_scope": "hooks/shared/project_scope.py",
+      "unittest.mock.patch": null
+    },
+    "tests/test_resolver_git_env.py": {
+      "pathlib.Path": null,
+      "scripts.memory_api": "skills/pact-memory/scripts/memory_api.py",
+      "scripts.working_memory": "skills/pact-memory/scripts/working_memory.py",
+      "staleness": "hooks/staleness.py"
     },
     "tests/test_resume_team_realign_1507.py": {
       "dispatch_gate": "hooks/dispatch_gate.py",
@@ -2801,6 +2943,24 @@
       "unittest.mock.MagicMock": null,
       "unittest.mock.patch": null
     },
+    "tests/test_state_file.py": {
+      "__future__.annotations": null,
+      "file_tracker": "hooks/file_tracker.py",
+      "pathlib.Path": null,
+      "shared": "hooks/shared/__init__.py",
+      "shared.background_work": "hooks/shared/background_work.py",
+      "shared.state_file": "hooks/shared/state_file.py",
+      "teammate_idle": "hooks/teammate_idle.py",
+      "track_files": "hooks/track_files.py"
+    },
+    "tests/test_stop_background_gate.py": {
+      "datetime.datetime": null,
+      "datetime.timedelta": null,
+      "datetime.timezone": null,
+      "pathlib.Path": null,
+      "shared": "hooks/shared/__init__.py",
+      "shared.turn_end_gate": "hooks/shared/turn_end_gate.py"
+    },
     "tests/test_store_access_bar_presence.py": {
       "__future__.annotations": null,
       "pathlib.Path": null
@@ -2827,6 +2987,8 @@
       "scripts.working_memory.SyncResult": null
     },
     "tests/test_task_claim_gate.py": {
+      "clock_shift.clock_shift_env": "tests/clock_shift/clock_shift_env.py",
+      "clock_shift.clock_shift_env.carry_clock_shift": null,
       "pathlib.Path": null,
       "role_frames": "tests/fixtures/role_frames.py",
       "task_claim_gate": "hooks/task_claim_gate.py",
@@ -2985,6 +3147,10 @@
     },
     "tests/test_teammate_idle.py": {
       "pathlib.Path": null,
+      "shared": "hooks/shared/__init__.py",
+      "shared.background_work": "hooks/shared/background_work.py",
+      "shared.pact_context": "hooks/shared/pact_context.py",
+      "shared.pact_context.project_slug": null,
       "teammate_idle": "hooks/teammate_idle.py",
       "teammate_idle.check_idle_cleanup": null,
       "teammate_idle.find_teammate_task": null,
@@ -3197,12 +3363,15 @@
     },
     "tests/test_track_files.py": {
       "datetime.datetime": null,
+      "shared": "hooks/shared/__init__.py",
+      "shared.state_file": "hooks/shared/state_file.py",
       "track_files": "hooks/track_files.py",
-      "unittest.mock.MagicMock": null,
       "unittest.mock.patch": null
     },
     "tests/test_track_files_background_integration.py": {
       "__future__.annotations": null,
+      "clock_shift.clock_shift_env": "tests/clock_shift/clock_shift_env.py",
+      "clock_shift.clock_shift_env.carry_clock_shift": null,
       "pathlib.Path": null,
       "shared.pact_context": "hooks/shared/pact_context.py",
       "shared.pact_context.project_slug": null
@@ -3221,6 +3390,21 @@
       "shared.session_journal": "hooks/shared/session_journal.py",
       "shared.session_journal.read_events": null,
       "unittest.mock.patch": null,
+      "validate_handoff": "hooks/validate_handoff.py"
+    },
+    "tests/test_validate_handoff_turn_end.py": {
+      "shared": "hooks/shared/__init__.py",
+      "shared.turn_end_gate": "hooks/shared/turn_end_gate.py",
+      "stop_background_gate": "hooks/stop_background_gate.py",
+      "test_stop_background_gate": "tests/test_stop_background_gate.py",
+      "test_stop_background_gate.HOOKS_DIR": null,
+      "test_stop_background_gate.LEAD_SID": null,
+      "test_stop_background_gate.MATE": null,
+      "test_stop_background_gate.TEAM": null,
+      "test_stop_background_gate.World": null,
+      "test_stop_background_gate.job": null,
+      "test_stop_background_gate.probe_env": null,
+      "test_stop_background_gate.valid_wait": null,
       "validate_handoff": "hooks/validate_handoff.py"
     },
     "tests/test_variety_divergence.py": {
@@ -3340,6 +3524,8 @@
       "pathlib.Path": null,
       "shared.hook_infra_classifier": "hooks/shared/hook_infra_classifier.py",
       "shared.hook_infra_classifier.SEAM_DEPENDENT_HOOKS": null,
+      "shared.pact_context": "hooks/shared/pact_context.py",
+      "shared.pact_context.LEAD_AGENT_TYPES": null,
       "unittest.mock.patch": null,
       "wait_filler_gate": "hooks/wait_filler_gate.py",
       "wait_filler_gate.main": null
@@ -3420,6 +3606,8 @@
       "shared.claude_md_manager.migrate_to_managed_structure": null
     },
     "tests/test_working_memory_projection.py": {
+      "clock_shift.clock_shift_env": "tests/clock_shift/clock_shift_env.py",
+      "clock_shift.clock_shift_env.carry_clock_shift": null,
       "datetime.datetime": null,
       "datetime.timedelta": null,
       "datetime.timezone": null,
@@ -3437,6 +3625,8 @@
     },
     "tests/test_working_memory_redirected_store_refusal.py": {
       "archive_pin": "scripts/archive_pin.py",
+      "clock_shift.clock_shift_env": "tests/clock_shift/clock_shift_env.py",
+      "clock_shift.clock_shift_env.carry_clock_shift": null,
       "fixtures.project_dir": "tests/fixtures/project_dir.py",
       "fixtures.project_dir.enable_record_discovery": null,
       "fixtures.project_dir.write_session_context": null,
@@ -3477,6 +3667,8 @@
       "unittest.mock.patch": null
     },
     "tests/test_worktree_cleanup_docs_probe.py": {
+      "clock_shift.clock_shift_env": "tests/clock_shift/clock_shift_env.py",
+      "clock_shift.clock_shift_env.carry_clock_shift": null,
       "pathlib.Path": null
     },
     "tests/test_worktree_guard.py": {
