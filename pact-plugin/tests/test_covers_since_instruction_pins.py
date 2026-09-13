@@ -137,8 +137,14 @@ class TestTheMissingAnchorSurfaceAssertsNoRoute:
 def lead_scan(tmp_path, monkeypatch):
     """Run `run_surface` as a lead over one wait, with a real registry record
     launched 100 minutes ago that the wait, SET 90 minutes ago, covers."""
+    import importlib
+
     from shared import pact_context
 
+    # background_work copies pact_context.get_team_name when it is first
+    # imported. Load it before the patch below, so a copy taken while the
+    # patch is active cannot outlive this test.
+    importlib.import_module("shared.background_work")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
     team_dir = tmp_path / "teams" / LEAD_TEAM
     team_dir.mkdir(parents=True)

@@ -71,8 +71,14 @@ def lead(tmp_path, monkeypatch):
     The config root is tmp_path, journal writes are captured rather than
     written, and a team name is set only once a test seeds a registry.
     """
+    import importlib
+
     from shared import pact_context
 
+    # background_work copies pact_context.get_team_name when it is first
+    # imported. Load it before the patch below, so a copy taken while the
+    # patch is active cannot outlive this test.
+    importlib.import_module("shared.background_work")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
     state = {"team": None, "events": []}
     monkeypatch.setattr(pact_context, "get_team_name", lambda: state["team"])
