@@ -644,7 +644,7 @@ class TestMainDrivesTheUnflaggedAdvisoryThroughARealStore:
     PROJECT_DIR = "/idle-arm/project"
     TEAMMATE = "idle-coder"
     TASK_ID = "13"
-    ADVISORY_FRAGMENT = "outstanding background work and no flagged wait"
+    ADVISORY_FRAGMENT = "background work and have no flagged wait"
 
     @pytest.fixture
     def store(self, tmp_path, monkeypatch):

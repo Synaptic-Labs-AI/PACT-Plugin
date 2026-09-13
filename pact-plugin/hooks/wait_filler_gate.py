@@ -93,7 +93,8 @@ _TRAILING_COMMENT = re.compile(r"\s+#.*\Z")
 # is the decision it addresses. It is advice, not enforcement: nothing
 # downstream may assume the agent acted on it.
 _BACKGROUND_ADVISORY = (
-    "This Bash call runs in the background. NOTHING WILL WAKE YOU when it "
+    "This Bash call runs in the background. As an in-process teammate, "
+    "NOTHING WILL WAKE YOU when it "
     "finishes — the result waits for you to collect it. Before you end this "
     "turn, either collect the result or SET metadata.intentional_wait on "
     "every task the wait covers, naming what you are waiting for. "

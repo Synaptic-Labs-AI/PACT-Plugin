@@ -401,10 +401,11 @@ def build_unflagged_surface(stale: list) -> "str | None":
     if not lines:
         return None
     return (
-        "UNFLAGGED BACKGROUND WORK — these teammates have outstanding "
-        "recorded background launches and no flagged wait: "
+        "UNFLAGGED BACKGROUND WORK — these teammates launched background work "
+        "and have no flagged wait: "
         + "; ".join(lines)
-        + ". SendMessage each one to collect its result or SET "
+        + ". The job may already have finished. SendMessage each one to "
+        "collect its result or SET "
         "metadata.intentional_wait. This is NOT a missed wake — nobody is "
         "waiting on you; they failed to flag their own wait. "
         "These teammates are not woken by their own job finishing. "

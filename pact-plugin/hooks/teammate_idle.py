@@ -273,7 +273,8 @@ def check_idle_cleanup(
 
 
 UNFLAGGED_ADVISORY = (
-    "You have outstanding background work and no flagged wait. Either collect "
+    "You launched background work and have no flagged wait; it may already "
+    "have finished. Either collect "
     "the result now, or SET metadata.intentional_wait on the task, naming what "
     "you are waiting for. validate_wait accepts a free-form reason."
 )

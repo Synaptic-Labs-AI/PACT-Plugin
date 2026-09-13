@@ -49,7 +49,7 @@ SESSION_ID = "consult-seam-session"
 PROJECT_DIR = "/consult-seam/project"
 CONSULTANT = "seam-consultant"
 ANCHOR_ID = "20"
-ADVISORY_FRAGMENT = "outstanding background work and no flagged wait"
+ADVISORY_FRAGMENT = "background work and have no flagged wait"
 
 
 def _write(path: Path, payload) -> None:
