@@ -29,6 +29,7 @@ _CERT_FILES = [
     "test_merge_guard_1129_r2_cert.py",
     "test_merge_guard_1129_r3_cert.py",
     "test_merge_guard_1140_carrier5_cert.py",
+    "test_merge_guard_1178_f2_cert.py",
 ]
 
 

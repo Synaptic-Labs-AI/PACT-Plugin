@@ -364,6 +364,7 @@ _VENDORED = {
     "bf7c8786": ("merge_guard_common_bf7c8786.py", "66e1a48e33604ff98903d1624914af3cace24f7a"),
     "a62703f1": ("merge_guard_common_a62703f1.py", "8f67b82deb254e2ceff9532ab639f5012fadcf9f"),
     "a542e21b": ("merge_guard_common_a542e21b.py", "0d4be274af969a69f7053d343b8a81813115920a"),
+    "89061755": ("merge_guard_common_89061755.py", "c0ea2ed08980ce3bde81c160bf94d7023b7e5b71"),
 }
 
 _cached_vendored = {}
