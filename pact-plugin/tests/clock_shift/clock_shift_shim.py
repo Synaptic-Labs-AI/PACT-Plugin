@@ -15,8 +15,14 @@ that changes directory resolves a relative PYTHONPATH entry against its own cwd:
 
 Shifted: datetime.datetime.now, utcnow and today; datetime.date.today;
 time.time and time.time_ns; the no-argument forms of time.localtime,
-time.gmtime, time.ctime and time.strftime. Not shifted: time.monotonic and
-time.perf_counter, which measure intervals, not dates.
+time.gmtime, time.ctime and time.strftime; and file timestamps. os.stat,
+os.lstat, os.fstat and os.scandir's DirEntry.stat return atime, mtime, ctime
+(and birthtime) shifted, and os.utime subtracts the shift from explicit times,
+so a file written now reads as shifted-now and an explicit utime reads back
+what it set. Not shifted: time.monotonic and time.perf_counter, which measure
+intervals, not dates. The posix module is left alone: importlib holds
+posix.stat, so bytecode validation stays on the real clock. A zero or unset
+shift installs nothing.
 
 datetime.datetime and datetime.date are replaced by subclasses whose isinstance
 and issubclass checks accept the real classes, so a value built by C code still
@@ -28,13 +34,13 @@ SHIFT_ENV = "PACT_TEST_CLOCK_SHIFT_SECONDS"
 LEDGER_ENV = "PACT_TEST_CLOCK_SHIFT_LEDGER"
 
 _SHIFT = os.environ.get(SHIFT_ENV)
+_SECONDS = float(_SHIFT) if _SHIFT else 0.0
 
-if _SHIFT:
+if _SECONDS:
     import datetime
     import sys
     import time
 
-    _SECONDS = float(_SHIFT)
     _DELTA = datetime.timedelta(seconds=_SECONDS)
     _real_time = time.time
     _real_time_ns = time.time_ns
@@ -90,6 +96,90 @@ if _SHIFT:
         def today(cls):
             return cls.fromtimestamp(_time())
 
+    # File timestamps move with the clock. stat_result is rebuilt through its
+    # pickle form, which carries every platform field by name.
+    _NS = int(_SECONDS * 1_000_000_000)
+    _TIME_FIELDS = ("st_atime", "st_mtime", "st_ctime", "st_birthtime")
+    _real_stat, _real_lstat, _real_fstat = os.stat, os.lstat, os.fstat
+    _real_scandir, _real_utime = os.scandir, os.utime
+
+    def _shift_stat(st):
+        cls, (seq, extras) = st.__reduce__()
+        seq = list(seq)
+        for index in (7, 8, 9):  # the integer atime, mtime and ctime
+            seq[index] += int(_SECONDS)
+        for field in _TIME_FIELDS:
+            if field in extras:
+                extras[field] += _SECONDS
+            if field + "_ns" in extras:
+                extras[field + "_ns"] += _NS
+        return cls(seq, extras)
+
+    def _stat(*args, **kwargs):
+        return _shift_stat(_real_stat(*args, **kwargs))
+
+    def _lstat(*args, **kwargs):
+        return _shift_stat(_real_lstat(*args, **kwargs))
+
+    def _fstat(*args, **kwargs):
+        return _shift_stat(_real_fstat(*args, **kwargs))
+
+    class _ShiftedDirEntry:
+        """A DirEntry whose stat() is shifted. Not an os.DirEntry instance, so
+        callers that branch on isinstance fall back to os.stat, which is shifted too."""
+
+        __slots__ = ("_entry",)
+
+        def __init__(self, entry):
+            self._entry = entry
+
+        def __getattr__(self, name):
+            return getattr(self._entry, name)
+
+        def __fspath__(self):
+            return self._entry.__fspath__()
+
+        def __repr__(self):
+            return repr(self._entry)
+
+        def stat(self, *, follow_symlinks=True):
+            return _shift_stat(self._entry.stat(follow_symlinks=follow_symlinks))
+
+    class _ShiftedScandir:
+        def __init__(self, iterator):
+            self._iterator = iterator
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return _ShiftedDirEntry(next(self._iterator))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._iterator.close()
+
+        def close(self):
+            self._iterator.close()
+
+    def _scandir(*args, **kwargs):
+        return _ShiftedScandir(_real_scandir(*args, **kwargs))
+
+    def _utime(path, times=None, *, ns=None, **kwargs):
+        # times=None means the real now, which already reads back shifted.
+        if times is not None:
+            times = (times[0] - _SECONDS, times[1] - _SECONDS)
+        if ns is not None:
+            kwargs["ns"] = (ns[0] - _NS, ns[1] - _NS)
+        return _real_utime(path, times, **kwargs)
+
+    os.stat = _stat
+    os.lstat = _lstat
+    os.fstat = _fstat
+    os.scandir = _scandir
+    os.utime = _utime
     datetime.datetime = ShiftedDatetime
     datetime.date = ShiftedDate
     time.time = _time

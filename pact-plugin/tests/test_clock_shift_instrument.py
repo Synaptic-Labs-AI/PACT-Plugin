@@ -17,6 +17,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 SHIM_DIR = Path(__file__).resolve().parent / "clock_shift"
 # Set on a launch that runs unshifted or without the shim on purpose, so a real
@@ -89,6 +91,102 @@ def test_launch():
 '''
 
 NODE = "test_synthetic.py::test_launch"
+
+STAT_ROUTES = """\
+import importlib._bootstrap_external
+import os
+import posix
+
+import pytest
+
+LOW, HIGH = float(os.environ["CLOCK_LOW"]), float(os.environ["CLOCK_HIGH"])
+ROUTES = ("os.stat", "os.lstat", "os.fstat", "os.scandir", "pathlib")
+
+
+def _read(path, route):
+    if route == "os.stat":
+        return os.stat(path)
+    if route == "os.lstat":
+        return os.lstat(path)
+    if route == "os.fstat":
+        with open(path, "rb") as fh:
+            return os.fstat(fh.fileno())
+    if route == "os.scandir":
+        with os.scandir(path.parent) as entries:
+            return [e for e in entries if e.name == path.name][0].stat()
+    return path.stat()
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_a_fresh_file_reads_shifted(tmp_path, route):
+    path = tmp_path / "fresh"
+    path.write_text("x")
+    st = _read(path, route)
+    fields = ["st_atime", "st_mtime", "st_ctime"] + (["st_birthtime"] if hasattr(st, "st_birthtime") else [])
+    for field in fields:
+        assert LOW <= getattr(st, field) <= HIGH, (route, field, getattr(st, field))
+        if hasattr(st, field + "_ns"):
+            assert LOW <= getattr(st, field + "_ns") / 1e9 <= HIGH, (route, field + "_ns")
+
+
+@pytest.mark.parametrize("getter", ["getmtime", "getatime", "getctime"])
+def test_os_path_getters_read_shifted(tmp_path, getter):
+    path = tmp_path / "fresh"
+    path.write_text("x")
+    assert LOW <= getattr(os.path, getter)(path) <= HIGH, getter
+
+
+def test_importlib_still_holds_the_real_stat():
+    assert importlib._bootstrap_external._os is posix
+    assert type(posix.stat).__name__ == "builtin_function_or_method"
+"""
+
+UTIME_READBACK = """\
+import os
+
+LOW, HIGH = float(os.environ["CLOCK_LOW"]), float(os.environ["CLOCK_HIGH"])
+
+
+def test_explicit_times_read_back(tmp_path):
+    path = tmp_path / "f"
+    path.write_text("x")
+    os.utime(path, (1_000_000_000, 1_000_000_000))
+    st = os.stat(path)
+    assert (st.st_atime, st.st_mtime) == (1_000_000_000, 1_000_000_000)
+
+
+def test_explicit_ns_read_back(tmp_path):
+    path = tmp_path / "f"
+    path.write_text("x")
+    os.utime(path, ns=(1_000_000_000_123_456_789, 1_000_000_000_123_456_789))
+    assert os.stat(path).st_mtime_ns == 1_000_000_000_123_456_789
+
+
+def test_a_bare_utime_reads_as_shifted_now(tmp_path):
+    path = tmp_path / "f"
+    path.write_text("x")
+    os.utime(path)
+    assert LOW <= os.stat(path).st_mtime <= HIGH
+"""
+
+IDENTITY = """\
+import datetime
+import os
+import posix
+import time
+
+import pytest
+
+
+@pytest.mark.parametrize("name", ["stat", "lstat", "fstat", "scandir", "utime"])
+def test_the_os_function_is_the_real_one(name):
+    assert getattr(os, name) is getattr(posix, name)
+
+
+def test_the_clock_is_the_real_one():
+    assert type(time.time).__name__ == "builtin_function_or_method"
+    assert datetime.datetime.__module__ == "datetime"
+"""
 
 
 def _launch(argv, site=None):
@@ -194,3 +292,25 @@ def test_the_census_exemption_is_used_only_by_the_instrument_arms():
                 users.add(path.relative_to(PLUGIN_ROOT).as_posix())
                 break
     assert users == {"tests/test_clock_shift_instrument.py", "tests/clock_shift/clock_shift_census.py"}, users
+
+
+def test_a_fresh_file_reads_as_shifted_now_through_every_stat_route(tmp_path):
+    """MUTANTS: unwrap os.stat, unwrap os.scandir, or shift one _ns field only.
+    Each leaves one route or field on the real clock, ten years below the window."""
+    rc, out = _run_child(tmp_path, STAT_ROUTES)
+    assert (rc, "9 passed" in out) == (0, True), out
+
+
+def test_an_explicit_utime_reads_back_what_it_set(tmp_path):
+    """MUTANT: os.utime stops subtracting the shift. The explicit times and ns
+    then read back ten years late; a bare utime is unaffected."""
+    rc, out = _run_child(tmp_path, UTIME_READBACK)
+    assert (rc, "3 passed" in out) == (0, True), out
+
+
+@pytest.mark.parametrize("shift", [None, 0])
+def test_an_unshifted_run_installs_nothing(tmp_path, shift):
+    """GUARD. Unset and zero both leave os and the clocks as the real functions.
+    MUTANT: gate the install on the variable being set rather than non-zero."""
+    rc, out = _run_child(tmp_path, IDENTITY, shift=shift)
+    assert (rc, "6 passed" in out) == (0, True), out
