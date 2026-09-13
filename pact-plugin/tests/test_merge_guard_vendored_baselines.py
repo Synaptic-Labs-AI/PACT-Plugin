@@ -1,16 +1,115 @@
 """
 Location: pact-plugin/tests/test_merge_guard_vendored_baselines.py
-Summary: pins load_vendored, which loads the vendored merge_guard_common.py
-         bases that the baked-SHA certification files certify against.
+Summary: pins the vendored merge_guard_common.py bases that the baked-SHA
+         certification files load through `load_vendored`.
 Used by: the suite. Path setup is conftest-owned; see tests/test_path_setup_pin.py.
 
-A fixture whose bytes drifted from its pinned git blob id is no longer the
-commit the cert names, so load_vendored must fail loudly on it, never load it.
+A certification file certifies nothing unless three things hold:
+  1. each vendored fixture still has the git blob id it was pinned with, so the
+     base under test is the commit the cert names;
+  2. every commit a cert file loads is in the vendored table, so no cert reaches
+     for a base that is not stored;
+  3. no cert file reads git history or carries a skip marker, so a missing base
+     is a failure and never a silent pass.
 """
+
+import ast
+from pathlib import Path
 
 import pytest
 
 import merge_guard_baseline_loader as loader
+
+TESTS_DIR = Path(__file__).resolve().parent
+
+# Certification files that load their bases through load_vendored. A file joins
+# this list in the same commit that removes its skips and its git calls.
+_CERT_FILES = [
+    "test_merge_guard_1118_recert.py",
+]
+
+
+def _cert_tree(name):
+    return ast.parse((TESTS_DIR / name).read_text(encoding="utf-8"))
+
+
+def _loaded_shas(tree):
+    """Every commit a module passes to load_vendored, resolving module-level
+    string constants. An argument it cannot resolve is reported, not dropped."""
+    constants = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    constants[target.id] = node.value.value
+    shas = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+        if name != "load_vendored":
+            continue
+        arg = node.args[0]
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            shas.add(arg.value)
+        elif isinstance(arg, ast.Name) and arg.id in constants:
+            shas.add(constants[arg.id])
+        else:
+            shas.add("<unresolved: %s>" % ast.unparse(arg))
+    return shas
+
+
+def _history_and_skip_sites(tree):
+    """Line-tagged skip markers, pytest.skip calls, and subprocess calls whose
+    argument names git."""
+    sites = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "skipif":
+            sites.append("L%d skipif" % node.lineno)
+        if isinstance(node, ast.Call):
+            func = ast.unparse(node.func)
+            if func in ("pytest.skip", "skip"):
+                sites.append("L%d %s()" % (node.lineno, func))
+            if "subprocess" in func or func in ("check_output", "run", "Popen"):
+                argv = ast.unparse(node.args[0]) if node.args else ""
+                if "'git'" in argv or '"git"' in argv:
+                    sites.append("L%d %s(%s)" % (node.lineno, func, argv[:60]))
+    return sites
+
+
+@pytest.mark.parametrize("sha8", sorted(loader._VENDORED))
+def test_each_vendored_file_matches_its_blob_id(sha8):
+    name, blob_id = loader._VENDORED[sha8]
+    path = loader._VENDORED_DIR / name
+    assert path.is_file(), "vendored fixture %s is missing" % path
+    got = loader._git_blob_id(path.read_bytes())
+    assert got == blob_id, (
+        "%s has git blob id %s, pinned %s: its bytes are no longer the commit "
+        "%s's merge_guard_common.py" % (name, got, blob_id, sha8)
+    )
+
+
+@pytest.mark.parametrize("cert", _CERT_FILES)
+def test_every_sha_a_cert_file_loads_is_vendored(cert):
+    shas = _loaded_shas(_cert_tree(cert))
+    assert shas, "%s loads no base through load_vendored" % cert
+    missing = sorted(s for s in shas if s not in loader._VENDORED)
+    assert not missing, (
+        "%s loads bases with no vendored fixture: %s. Vendor each one, or the "
+        "cert fails at import" % (cert, missing)
+    )
+
+
+@pytest.mark.parametrize("cert", _CERT_FILES)
+def test_no_cert_file_reads_git_history_or_skips(cert):
+    sites = _history_and_skip_sites(_cert_tree(cert))
+    assert not sites, (
+        "%s still reads git history or skips: %s. A certification file must load "
+        "its bases through load_vendored and fail, never skip, when one is "
+        "missing" % (cert, sites)
+    )
 
 
 def _copy_fixture(tmp_path, key, change_one_byte):

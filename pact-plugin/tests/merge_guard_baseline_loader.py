@@ -349,7 +349,10 @@ def load_baseline_5017d1f2():
 _VENDORED_DIR = Path(__file__).parent / "fixtures" / "merge_guard_baseline"
 
 # commit sha8 -> (fixture file name, git blob id of the fixture's bytes)
-_VENDORED = {}
+_VENDORED = {
+    "c5e9b324": ("merge_guard_common_c5e9b324.py", "57eee4410e0a6ef2dae3e9021bdbb32bb7ce7d69"),
+    "38f76965": ("merge_guard_common_38f76965.py", "745cbfe8adb4c303e83402fa5e2093fd51d718ed"),
+}
 
 _cached_vendored = {}
 
