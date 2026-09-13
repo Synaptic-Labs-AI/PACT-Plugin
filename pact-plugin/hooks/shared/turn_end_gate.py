@@ -56,11 +56,11 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 LEAD_BLOCK_TEXT = (
     "Background work is still running in this session and nothing is "
-    "scheduled to wake you: {jobs}. Its completion notice is delivered when "
-    "this session next takes a turn; it does not start one. Before ending "
-    "this turn, do one of these: wait for it to finish, schedule a wake with "
-    "CronCreate, or stop it if it is no longer needed. If a job listed here "
-    "belongs to a teammate, end the turn again. Each job is reported once."
+    "scheduled to wake you: {jobs}. Its completion notice usually starts your "
+    "next turn, but a notice can go undelivered. Before ending this turn, do "
+    "one of these: wait for it to finish, schedule a wake with CronCreate, or "
+    "stop it if it is no longer needed. If a job listed here belongs to a "
+    "teammate, end the turn again. Each job is reported once."
 )
 TEAMMATE_BLOCK_TEXT = (
     "You are ending your turn while background work you started is still "

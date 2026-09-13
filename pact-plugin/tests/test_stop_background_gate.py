@@ -454,6 +454,15 @@ def test_a_lead_is_told_only_about_its_shell(tmp_path):
     assert [t["ids"] for t in world.traces(LEAD_SID)] == [["bshell1"]]
 
 
+def test_the_lead_text_does_not_say_a_notice_cannot_start_a_turn(tmp_path):
+    world = World(tmp_path)
+
+    out = output(world.run(stop_frame(jobs=[job("bshell1")], agent_type=LEAD_TYPE)))
+    assert out["decision"] == "block"
+    assert "does not start one" not in out["reason"]
+    assert "can go undelivered" in out["reason"]
+
+
 def test_a_separate_process_teammate_is_told_about_its_own_monitor(tmp_path):
     world = World(tmp_path)
     world.register_teammate(MATE_SID, MATE)
