@@ -359,6 +359,25 @@ def test_team_name_unavailable_deny_unaugmented_when_no_mismatch(
     assert _AUGMENT_MARKER not in reason, f"[{mode_label}] NOT augmented (healthy)"
 
 
+def test_team_name_unavailable_teammate_deny_carries_no_stale_hint(
+    tmp_path, monkeypatch, capsys
+):
+    """A teammate in its own process never matches the lead session recorded in
+    CLAUDE.md, so a stale hint on its rule-⑥ deny would always be false."""
+    _setup_empty_team_name(monkeypatch, tmp_path)
+    _seed_team_with_lead(tmp_path, _TEAM, _MODES[1][1])
+    _write_project_claude_md(monkeypatch, tmp_path, _RECORDED_STALE_ID)
+    frame = {**_make_input(), "agent_type": "pact-test-engineer"}
+
+    code, out = _run_main(frame, capsys)
+
+    assert code == 2
+    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert _AUGMENT_MARKER not in reason
+    assert _REALIGN_MARKER not in reason
+    assert "spawned by the team-lead" in reason
+
+
 # =============================================================================
 # Non-symptom deny rules are NOT augmented (avoid misdirecting recovery)
 # =============================================================================

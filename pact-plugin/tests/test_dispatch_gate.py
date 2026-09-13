@@ -10,6 +10,8 @@ Rule coverage:
     length/NFKC/regex/reserved-token violations → DENY
   - specialist_not_registered — subagent_type not in agent registry → DENY
   - team_name_unavailable — SSOT session team empty (fail-closed) → DENY.
+    A teammate's frame gets the ask-the-team-lead text instead of the
+    bootstrap text, with no context or stale-session suffix.
     (#979: team_name_required + team_name_mismatch were DROPPED — the
     Agent(team_name=) arg is platform-ignored, so the session team is
     resolved solely from the SSOT, never matched against the spawn arg.)
@@ -51,6 +53,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+from fixtures.role_frames import captured_pretooluse_teammate_tmux
 
 
 _SUPPRESS_EXPECTED = {"suppressOutput": True}
@@ -520,6 +524,58 @@ def test_deny_when_session_team_unavailable(tmp_path, monkeypatch, capsys):
     assert code == 2
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
     assert "session team_name is unavailable" in reason
+
+
+_TEAMMATE_REFUSAL = (
+    "PACT dispatch_gate: PACT specialists are spawned by the team-lead. This "
+    "session is not the team-lead's, so this spawn is refused; ask the "
+    "team-lead to spawn it."
+)
+
+
+def _deny_with_no_context(monkeypatch, tmp_path, capsys, frame):
+    """Run the gate with no context file and the plugin root from the env, so
+    rule ⑥ fires. Returns the deny reason."""
+    import shared.pact_context as ctx_module
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    plugin_root = tmp_path / "plugin"
+    _seed_plugin(plugin_root)
+    monkeypatch.setattr(ctx_module, "_context_path", tmp_path / "pact-session-context.json")
+    monkeypatch.setattr(ctx_module, "_cache", None)
+    monkeypatch.setattr(ctx_module, "init", lambda input_data: None)
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    _seed_team(tmp_path, members=(), tasks=((_NAME, "pending"),))
+
+    code, out = _run_main(frame, capsys)
+    assert code == 2
+    return out["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_rule_6_tells_a_lead_to_rerun_bootstrap(tmp_path, monkeypatch, capsys):
+    frame = {**_make_input(), "agent_type": "PACT:pact-orchestrator"}
+
+    reason = _deny_with_no_context(monkeypatch, tmp_path, capsys, frame)
+    assert "session team_name is unavailable" in reason
+    assert "Re-run /PACT:bootstrap" in reason
+
+
+def test_rule_6_tells_a_teammate_to_ask_the_team_lead(tmp_path, monkeypatch, capsys):
+    captured = _capture_journal(monkeypatch)
+    frame = captured_pretooluse_teammate_tmux()
+    frame.update(tool_name="Agent", tool_input=_make_input()["tool_input"])
+
+    reason = _deny_with_no_context(monkeypatch, tmp_path, capsys, frame)
+    assert reason == _TEAMMATE_REFUSAL
+    rows = [e for e in captured if e.get("type") == "dispatch_decision"]
+    assert [(row["decision"], row["rule"]) for row in rows] == [("DENY", "team_name_unavailable")]
+
+
+def test_rule_6_keeps_the_bootstrap_text_for_a_frame_with_no_role(tmp_path, monkeypatch, capsys):
+    reason = _deny_with_no_context(monkeypatch, tmp_path, capsys, _make_input())
+    assert "Re-run /PACT:bootstrap" in reason
+    assert str(tmp_path / "pact-session-context.json") in reason
 
 
 # =============================================================================

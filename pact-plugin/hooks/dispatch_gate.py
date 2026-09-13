@@ -293,8 +293,23 @@ def _team_member_names(team_name: str) -> set[str]:
 
 # ─── pure rule-eval composition (testable without stdin/stdout) ────────────
 
-def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
+# Rule ⑥'s refusal in a teammate's own process. That process never has
+# session context, so the context-failure suffix and the stale-session hint
+# are withheld: both would send its reader to repair the lead's state.
+_TEAMMATE_SPAWN_REFUSAL = (
+    "PACT dispatch_gate: PACT specialists are spawned by the team-lead. "
+    "This session is not the team-lead's, so this spawn is refused; ask "
+    "the team-lead to spawn it."
+)
+
+
+def evaluate_dispatch(
+    tool_input: dict, input_data: dict | None = None,
+) -> tuple[str, str | None, str | None]:
     """Single composition function. Returns ``(decision, reason, rule)``.
+
+    ``input_data`` is the full hook frame when the caller has it. Rule ⑥ reads
+    its role to word the refusal; without it, rule ⑥ keeps the bootstrap text.
 
     decision ∈ {``"ALLOW"``, ``"DENY"``, ``"WARN"``}.
     reason: human-readable explanation (None for ALLOW).
@@ -417,6 +432,9 @@ def evaluate_dispatch(tool_input: dict) -> tuple[str, str | None, str | None]:
     # depend on session_team being a non-empty path segment.
     session_team = pact_context.get_team_name()
     if not session_team:
+        if (isinstance(input_data, dict)
+                and pact_context.classify_session_role(input_data) == "teammate"):
+            return ("DENY", _TEAMMATE_SPAWN_REFUSAL, "team_name_unavailable")
         message = ("PACT dispatch_gate: session team_name is unavailable "
                    "(pact-session-context.json missing or unreadable). "
                    "Re-run /PACT:bootstrap to restore session context.")
@@ -526,7 +544,9 @@ def _journal_decision(decision: str, reason: str | None, rule: str | None,
 # ``team_name_unavailable`` (rule ⑥) and ``no_task_assigned`` (rule ⑧) — that
 # never name the real cause. Other deny rules (name validation, plugin-install,
 # registry) are NOT restart-symptoms, so they are deliberately excluded: a
-# stale-session note on them would misdirect recovery.
+# stale-session note on them would misdirect recovery. Rule ⑥'s refusal in a
+# teammate's own process is not a restart symptom either, so the composer
+# returns ``_TEAMMATE_SPAWN_REFUSAL`` verbatim.
 _STALE_DIAGNOSABLE_RULES = frozenset({"team_name_unavailable", "no_task_assigned"})
 
 # Actionable re-align guidance appended after the shared detector's stale-block
@@ -734,8 +754,9 @@ _MISSING_DENY_REASON = (
 def _compose_deny_diagnosis(
     rule: str | None, message: str | None, input_data: dict,
 ) -> str:
-    """Return the user-facing deny text: the incumbent stale-team diagnosis if
-    it fired, ELSE the cause enumeration on rule ⑧, ELSE ``message`` unchanged.
+    """Return the user-facing deny text: ``_TEAMMATE_SPAWN_REFUSAL`` verbatim,
+    ELSE the incumbent stale-team diagnosis if it fired, ELSE the cause
+    enumeration on rule ⑧, ELSE ``message`` unchanged.
 
     A-xor-B BY CONSTRUCTION — the two blocks are mutually exclusive, and the
     precedence lives HERE, in one dispatcher, rather than as a call-order
@@ -794,6 +815,8 @@ def _compose_deny_diagnosis(
     """
     if not isinstance(message, str):
         return _MISSING_DENY_REASON
+    if message == _TEAMMATE_SPAWN_REFUSAL:
+        return message
 
     augmented = _augment_deny_with_stale_diagnosis(rule, message, input_data)
     if augmented != message:
@@ -828,7 +851,7 @@ def main() -> None:
     tool_input = input_data.get("tool_input", {}) or {}
 
     try:
-        decision, reason, rule = evaluate_dispatch(tool_input)
+        decision, reason, rule = evaluate_dispatch(tool_input, input_data)
     except Exception as e:
         # Runtime fail-closed: a runtime exception in the rule logic is
         # the same defect class as #658 — must DENY, must include
