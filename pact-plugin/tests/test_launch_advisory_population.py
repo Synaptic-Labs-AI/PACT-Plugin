@@ -78,7 +78,10 @@ def seam(tmp_path):
             {"name": IN_PROCESS_MEMBER, "agentId": f"{IN_PROCESS_MEMBER}@{TEAM}",
              "agentType": "pact-backend-coder", "backendType": "in-process"},
             {"name": SEPARATE_MEMBER, "agentId": f"{SEPARATE_MEMBER}@{TEAM}",
-             "agentType": "pact-test-engineer", "backendType": "tmux"},
+             "agentType": "pact-test-engineer"},
+            # No backendType: these arms pin identity routing, and an absent
+            # signal keeps the advisory. The tmux split is pinned in
+            # test_teammate_process_mode.py.
         ],
     })
     _write(_context_file(tmp_path, LEAD_SESSION),

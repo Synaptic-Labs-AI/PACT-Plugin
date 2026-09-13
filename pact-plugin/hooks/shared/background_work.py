@@ -1105,49 +1105,83 @@ def frame_team_and_name(input_data: Any) -> "tuple[str, str]":
     return "", ""
 
 
-def is_teammate_launch_frame(input_data: Any, team_name: str) -> bool:
-    """True iff the frame is a teammate of `team_name`: not the lead, and not an
-    Agent-tool subagent.
+def teammate_is_separate_process(team_name: Any, member_name: Any) -> bool:
+    """True iff `member_name`'s `backendType` in `team_name`'s config is exactly "tmux".
 
-    The launch advisory and Layer 1 both use this, so the advisory and the
-    registry cover the same population. In order:
+    A separate-process teammate is the main session of its own process, so its
+    own background completion starts its next turn; an in-process teammate's
+    does not. The stall layers (the launch advisory, Layer 2 and Layer 3's
+    unflagged surface) exist for a teammate that is not woken, and skip a
+    teammate this returns True for.
+
+    FALSE IS THE SAFE ANSWER, and every doubt returns it: "in-process",
+    "iterm2", any other value or spelling, a missing key, a missing member, or
+    an unreadable config. A wrong False sends a woken teammate one extra
+    advisory; a wrong True silences the layers for a teammate that stalls.
+    "iterm2" stays False until its wake behaviour is measured.
+    """
+    if not isinstance(team_name, str) or not isinstance(member_name, str) or not member_name:
+        return False
+    from .pact_context import _iter_members
+    from .session_state import is_safe_path_component
+
+    if not is_safe_path_component(team_name):
+        return False
+    return any(
+        m.get("name") == member_name and m.get("backendType") == "tmux"
+        for m in _iter_members(team_name)
+    )
+
+
+def teammate_launch_name(input_data: Any, team_name: str) -> str:
+    """The member name of the teammate of `team_name` acting in this frame, or "".
+
+    "" means the frame is not a teammate: the lead, an Agent-tool subagent, or
+    a plain frame. The launch advisory and Layer 1 both decide through this
+    (Layer 1 via `is_teammate_launch_frame`), so the advisory and the registry
+    cover the same population. In order:
       1. No `agent_type`, or a lead spelling: not a teammate.
       2. `agent_type` names a member: an in-process teammate, whose frame
-         carries its own name in that field.
-      3. An `agent_id` is present. `name@<this team>` is a separate-process
-         teammate launched with `--agent-id name@team`. Any other id, such as
-         a bare hex id, is an Agent-tool subagent, because an in-process
-         teammate already matched at step 2.
+         carries its own name in that field. Returns that name.
+      3. An `agent_id` is present. `name@<this team>` returns `name`. Any other
+         id, such as a bare hex id, is an Agent-tool subagent, because an
+         in-process teammate already matched at step 2. No captured frame has
+         the `name@team` shape: a measured separate-process teammate frame
+         carries no `agent_id` and resolves at step 4.
       4. No `agent_id`, a `session_id` that is not the lead's, and a session
-         registry entry for this team: a separate-process teammate.
+         registry entry for this team: a separate-process teammate. Returns
+         the registry's name.
     Anything else is not a teammate.
-
-    A separate-process teammate frame carrying a hex `agent_id` would be
-    refused at step 3. No captured frame has shown that shape.
     """
     if not isinstance(input_data, dict) or not isinstance(team_name, str) or not team_name:
-        return False
+        return ""
     from .pact_context import LEAD_AGENT_TYPES, _read_lead_session_id
     from .session_registry import resolve as registry_resolve
 
     agent_type = input_data.get("agent_type")
     if not isinstance(agent_type, str) or not agent_type or agent_type in LEAD_AGENT_TYPES:
-        return False
+        return ""
     if agent_type_names_a_member(agent_type, team_name):
-        return True
+        return agent_type
     agent_id = input_data.get("agent_id")
     if agent_id:
         if not isinstance(agent_id, str):
-            return False
+            return ""
         name, _, id_team = agent_id.partition("@")
-        return bool(name) and id_team.lower() == team_name.lower()
+        return name if name and id_team.lower() == team_name.lower() else ""
     session_id = input_data.get("session_id")
     if not isinstance(session_id, str) or not session_id:
-        return False
+        return ""
     if session_id == _read_lead_session_id(team_name):
-        return False
+        return ""
     name, _, registry_team = (registry_resolve(session_id) or "").partition("@")
-    return bool(name) and registry_team.lower() == team_name.lower()
+    return name if name and registry_team.lower() == team_name.lower() else ""
+
+
+def is_teammate_launch_frame(input_data: Any, team_name: str) -> bool:
+    """True iff the frame is a teammate of `team_name`: not the lead, and not an
+    Agent-tool subagent. `teammate_launch_name` holds the steps."""
+    return bool(teammate_launch_name(input_data, team_name))
 
 
 def bind_launcher_identity(

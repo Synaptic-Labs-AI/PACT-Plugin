@@ -304,6 +304,7 @@ def check_unflagged_background(
         UNFLAGGED_IDLE_THRESHOLD,
         discharge_acknowledged_for_owner,
         stamp_idled_at,
+        teammate_is_separate_process,
         unflagged_fire,
         update_unflagged_idle_counts,
     )
@@ -338,6 +339,14 @@ def check_unflagged_background(
     # that flags never accumulates toward the threshold, and one that keeps
     # working does not tick at all.
     discharge_acknowledged_for_owner(tasks, teammate_name, team_name=team_name, now=now)
+
+    # A separate-process (tmux) teammate is woken by its own background
+    # completion and collects the result on that turn, so the record outlives
+    # the job and an idle-count advisory would name work it already has. The
+    # discharge above still runs for it; only the advisory is skipped.
+    if teammate_is_separate_process(team_name, teammate_name):
+        _clear_unflagged_idle(teammate_name, team_name)
+        return None
 
     task = find_teammate_task(tasks, teammate_name)
     if not task or task.get("status") != "in_progress":

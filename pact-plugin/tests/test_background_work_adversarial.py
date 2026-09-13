@@ -751,14 +751,18 @@ _GATE_TEAM = "session-gate-adversarial"
 
 
 def _gate_seam(root: Path) -> dict:
-    """Write a team config and a registry entry for the default teammate; return the env."""
+    """Write a team config and a registry entry for the default teammate; return the env.
+
+    The member carries no backendType, so the gate does not skip it as it
+    skips a separate-process (tmux) teammate.
+    """
     teammate = captured_pretooluse_teammate_tmux()
     config = root / ".claude"
     (config / "teams" / _GATE_TEAM).mkdir(parents=True)
     (config / "teams" / _GATE_TEAM / "config.json").write_text(json.dumps({
         "leadSessionId": captured_pretooluse_lead_inprocess()["session_id"],
         "members": [{"name": "gate-teammate", "agentId": f"gate-teammate@{_GATE_TEAM}",
-                     "agentType": teammate["agent_type"], "backendType": "tmux"}],
+                     "agentType": teammate["agent_type"]}],
     }))
     registry = config / "pact-sessions" / ".teammate-registry.jsonl"
     registry.parent.mkdir(parents=True)

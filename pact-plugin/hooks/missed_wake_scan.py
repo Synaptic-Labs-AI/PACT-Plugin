@@ -319,13 +319,21 @@ def find_stale_unflagged_background(
     prompt reads it once; without it the list is read here.
     """
     try:
-        from shared.background_work import lead_stale, outstanding_unflagged
+        from shared.background_work import (
+            lead_stale,
+            outstanding_unflagged,
+            teammate_is_separate_process,
+        )
 
         if tasks is None:
             tasks = get_task_list()
+        # A separate-process (tmux) teammate is woken by its own completion and
+        # collects the result on that turn, so its records are omitted from the
+        # surface and from its forensic event.
         return [
             r for r in outstanding_unflagged(tasks, team_name, now=now)
             if lead_stale(r, now=now)
+            and not teammate_is_separate_process(team_name, r.get("agent_name"))
         ]
     except Exception:
         return []
@@ -399,6 +407,7 @@ def build_unflagged_surface(stale: list) -> "str | None":
         + ". SendMessage each one to collect its result or SET "
         "metadata.intentional_wait. This is NOT a missed wake — nobody is "
         "waiting on you; they failed to flag their own wait. "
+        "These teammates are not woken by their own job finishing. "
         "This list covers recorded shell launches only: a teammate waiting "
         "on a monitor, a subagent, an MCP task, a workflow or a scheduled "
         "wakeup will not appear, and neither will a shell launch "

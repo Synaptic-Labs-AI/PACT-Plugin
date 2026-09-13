@@ -74,9 +74,11 @@ _TRAILING_COMMENT = re.compile(r"\s+#.*\Z")
 # holds no task wait to flag. A plain non-PACT frame carries no `agent_type`
 # and gets nothing. An Agent-tool subagent also carries a non-lead
 # `agent_type`, so for a background launch the gate then resolves the team and
-# asks `shared.background_work.is_teammate_launch_frame`, which reads team
-# config and the session registry. A subagent gets nothing, and so does a frame
-# whose team cannot be resolved.
+# asks `shared.background_work.teammate_launch_name`, which reads team config
+# and the session registry. A subagent gets nothing, and so does a frame whose
+# team cannot be resolved. A separate-process (tmux) teammate gets nothing
+# either: its own completion starts its next turn, and the harness already
+# tells it so, so an advisory saying nothing will wake it would contradict it.
 #
 # IT IS NOT A TERM IN THE DENY VERDICT AND MUST NEVER BECOME ONE. It rides
 # the ALLOW branch only. `_is_filler_command` and its inputs are untouched by
@@ -160,7 +162,8 @@ def is_teammate_frame(input_data) -> bool:
 
 
 def launch_advisory_applies(input_data) -> bool:
-    """True iff a teammate is launching background work. False on any error.
+    """True iff a teammate that is not a separate-process (tmux) teammate is
+    launching background work. False on any error.
 
     Cheapest first: the stdin `agent_type` test, then the launch predicate. Only
     a teammate-shaped background launch imports `shared` and reads team config
@@ -169,10 +172,15 @@ def launch_advisory_applies(input_data) -> bool:
     if not is_teammate_frame(input_data) or not is_background_launch(input_data):
         return False
     try:
-        from shared.background_work import frame_team_and_name, is_teammate_launch_frame
+        from shared.background_work import (
+            frame_team_and_name,
+            teammate_is_separate_process,
+            teammate_launch_name,
+        )
 
         team_name, _name = frame_team_and_name(input_data)
-        return bool(team_name) and is_teammate_launch_frame(input_data, team_name)
+        member = teammate_launch_name(input_data, team_name) if team_name else ""
+        return bool(member) and not teammate_is_separate_process(team_name, member)
     except Exception:
         return False
 
