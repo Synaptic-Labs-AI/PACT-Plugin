@@ -352,6 +352,8 @@ _VENDORED_DIR = Path(__file__).parent / "fixtures" / "merge_guard_baseline"
 _VENDORED = {
     "c5e9b324": ("merge_guard_common_c5e9b324.py", "57eee4410e0a6ef2dae3e9021bdbb32bb7ce7d69"),
     "38f76965": ("merge_guard_common_38f76965.py", "745cbfe8adb4c303e83402fa5e2093fd51d718ed"),
+    "023ee2c3": ("merge_guard_common_023ee2c3.py", "9f7f155bdac0012858701bd24e8f638d06bdadbb"),
+    "6f404f2e": ("merge_guard_common_6f404f2e.py", "4c39097504d008ebe4d4ec61bc2e0d843afbaff4"),
 }
 
 _cached_vendored = {}

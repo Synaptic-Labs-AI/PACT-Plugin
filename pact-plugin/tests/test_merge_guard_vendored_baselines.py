@@ -26,6 +26,7 @@ TESTS_DIR = Path(__file__).resolve().parent
 # this list in the same commit that removes its skips and its git calls.
 _CERT_FILES = [
     "test_merge_guard_1118_recert.py",
+    "test_merge_guard_1129_r2_cert.py",
 ]
 
 
