@@ -354,6 +354,9 @@ _VENDORED = {
     "38f76965": ("merge_guard_common_38f76965.py", "745cbfe8adb4c303e83402fa5e2093fd51d718ed"),
     "023ee2c3": ("merge_guard_common_023ee2c3.py", "9f7f155bdac0012858701bd24e8f638d06bdadbb"),
     "6f404f2e": ("merge_guard_common_6f404f2e.py", "4c39097504d008ebe4d4ec61bc2e0d843afbaff4"),
+    "51e6c5a5": ("merge_guard_common_51e6c5a5.py", "9a351309358c3f196995a106f1216b437bd151f1"),
+    "72bacaf8": ("merge_guard_common_72bacaf8.py", "86f3d93d6f20757ed781bba519d781869a2246fb"),
+    "b313ecaa": ("merge_guard_common_b313ecaa.py", "93e6f56d905b6b0326940ccabe5eaac775691d98"),
 }
 
 _cached_vendored = {}
