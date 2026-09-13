@@ -394,7 +394,8 @@ class TestTheRefusalMessage:
     """A MESSAGE PIN, and it supplements the document arms rather than replacing them.
 
     The document arms above prove the write did not happen. They cannot see WHY,
-    because both guards report the same `sync_status`. This arm reads the text a
+    because the redirected-store refusal and the PYTEST_CURRENT_TEST refusal
+    report the same `sync_status`. This arm reads the text a
     caller and a log line receive, so a refusal keeps naming its own cause.
     """
 

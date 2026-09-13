@@ -383,7 +383,7 @@ class TestARefusedSaveLeavesNoOrphanVector:
 # PAIR 4. The stderr guard and the store scope.
 # ---------------------------------------------------------------------------
 
-class TestTheTwoGuardsUnwindWithoutLeaking:
+class TestTheStderrGuardAndStoreScopeUnwindWithoutLeaking:
     """The nested guards must each release, on the success and the raise path.
 
     THE AST ORDER ASSERTION CANNOT SEE THIS. It proves the refusal guard is
@@ -414,14 +414,16 @@ class TestTheTwoGuardsUnwindWithoutLeaking:
         seen = {}
 
         def probe(args, db_path=None):
-            # INSIDE the handler both guards are active, so the resolver must
+            # INSIDE the handler the stderr guard and the store scope are active,
+            # so the resolver must
             # report the caller file. A green here with a red assertion below
             # would mean the scope binds and does not release.
             seen["resolved"] = resolve_db_path()
 
         assert _STORE_DB_PATH.get() is None, "a previous test leaked a scope"
         # The probe returns rather than calling `_success`, so `main` returns
-        # normally. That is the SUCCESS path of the two guards, and it is the
+        # normally. That is the SUCCESS path of the stderr guard and the store
+        # scope, and it is the
         # path on which a missing reset leaks quietly rather than loudly.
         self._run_main(["status", "--db-path", str(target)], probe)
 
@@ -443,7 +445,7 @@ class TestTheTwoGuardsUnwindWithoutLeaking:
 
         def exploding(args, db_path=None):
             raised["yes"] = True
-            raise RuntimeError("the handler failed inside both guards")
+            raise RuntimeError("the handler failed inside the stderr guard and the store scope")
 
         assert _STORE_DB_PATH.get() is None, "a previous test leaked a scope"
         # `main` converts the exception into the error envelope and exits 2.

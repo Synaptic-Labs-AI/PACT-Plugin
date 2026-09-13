@@ -560,8 +560,8 @@ class TestDescriptionParamPresentInEverySpawnLiteral:
         The fixtures are SYNTHETIC and deliberately so (same reasoning as
         test_a_prompt_without_the_role_prelude_is_not_a_spawn_literal): a
         fixture taken from a live template can be drained by an edit to the
-        document; these cannot. MEASURED at the time of writing: all 13
-        canonical templates across the 7 SPAWN_PROMPT_SURFACES carry a
+        document; these cannot. MEASURED at the time of writing: every
+        canonical template across SPAWN_PROMPT_SURFACES carries a
         non-empty description=, so no document supplies a missing-description
         fixture.
 

@@ -8,7 +8,7 @@ Summary: Verification tests for rebuilding the Working Memory section of
 
          Every write in this file goes to a file under `tmp_path`. The
          child-process arms resolve ambiently on purpose, inside a declared
-         tmp project, to reach the two ambient guards.
+         tmp project, to reach the ambient guards.
 Used by: pytest.
 """
 import json
@@ -270,9 +270,10 @@ def _run_cli(env: dict, cwd: Path, *args: str) -> dict:
 
 
 class TestSyncVerbReachesTheGuards:
-    """`cli.py sync` in a CHILD, so the two ambient refusals can fire.
+    """`cli.py sync` in a CHILD, so the ambient refusals can fire.
 
-    In-process, `pytest` in `sys.modules` exempts both guards, so only a
+    In-process, `pytest` in `sys.modules` exempts the PYTEST_CURRENT_TEST
+    refusal and the redirected-store refusal, so only a
     child can show that the replace arm runs through them. The store is
     redirected with `--db-path` in every arm, and it holds one record.
     """
@@ -334,7 +335,8 @@ class TestSyncVerbReachesTheGuards:
         THE RECORD IS SAVED UNDER THE SAME DECLARED DIRECTORY. The project id
         derives from it, and `sync` projects only this project's records; a
         record saved under another id leaves nothing to project, and the
-        `empty` return precedes both guards. That is correct, and it would
+        `empty` return precedes the PYTEST_CURRENT_TEST refusal and the
+        redirected-store refusal. That is correct, and it would
         make this arm pass without reaching the guard, so the store is
         stocked under the escaping id and the envelope is pinned to `refused`.
         """

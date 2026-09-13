@@ -1,5 +1,5 @@
 """
-Cross-reference link validity across all 13 agent bodies (12 teammates + orchestrator).
+Cross-reference link validity across every agent body under agents/ (the teammates and the orchestrator).
 
 Under v4.0.0 lazy-load via markdown cross-references (Option F), every
 plugin-relative link to ../protocols/*.md or ../skills/*/SKILL.md in any
@@ -56,8 +56,8 @@ def _resolve(agent_path: Path, href: str) -> Path:
     return (agent_path.parent / href).resolve()
 
 
-def test_all_13_agent_files_present():
-    """All 13 agent files (12 teammates + orchestrator) must exist."""
+def test_every_expected_agent_file_is_present():
+    """Every file in EXPECTED_AGENT_FILES exists, and no other agent file does."""
     actual = {p.name for p in AGENTS_DIR.glob("*.md")}
     missing = EXPECTED_AGENT_FILES - actual
     extra = actual - EXPECTED_AGENT_FILES
