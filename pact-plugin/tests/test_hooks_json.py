@@ -44,6 +44,7 @@ MUST_BE_SYNC = {
     # residual fail-closed backstop.)
     "worktree_guard.py",  # Blocks edits outside worktree
     "validate_handoff.py",  # Validates agent output
+    "stop_background_gate.py",  # Refuses a turn end over unacknowledged background work
     "agent_handoff_emitter.py",  # Writes agent_handoff journal event on TaskCompleted
     "git_commit_check.py",  # Checks git commit conventions
     "wait_filler_gate.py",  # Denies bare true/sleep filler commands
@@ -562,7 +563,8 @@ class TestMissedWakeSurfacerRegistration:
     UserPromptSubmit (turn-start additionalContext) + SessionStart (cross-session
     recovery) — the record-only Stop carrier was DROPPED (Stop fired at turn-END
     and could only suppressOutput, so it never surfaced). Pins the post-B1
-    registration so a regression to the record-only Stop shape is caught."""
+    registration so a regression to the record-only Stop shape is caught: Stop
+    now binds only the background-work turn-end gate, never the surfacer."""
 
     def test_missed_wake_scan_on_user_prompt_submit(self, hooks_config):
         commands = [
@@ -586,11 +588,18 @@ class TestMissedWakeSurfacerRegistration:
             "(the #903 cross-session recovery backstop)."
         )
 
-    def test_stop_event_not_registered(self, hooks_config):
-        assert "Stop" not in hooks_config["hooks"], (
-            "Stop must NOT be registered — the #903 record-only Stop carrier was "
-            "dropped in the B1 surfacing remediation; UserPromptSubmit + "
-            "SessionStart now carry the surfacer."
+    def test_stop_binds_only_stop_background_gate(self, hooks_config):
+        commands = [
+            c["command"]
+            for entry in hooks_config["hooks"].get("Stop", [])
+            for c in entry["hooks"]
+        ]
+        assert len(commands) == 1 and commands[0].endswith(
+            '/hooks/stop_background_gate.py"'
+        ), (
+            "Stop must bind only stop_background_gate.py — the #903 record-only "
+            "Stop carrier stays dropped (UserPromptSubmit + SessionStart carry the "
+            f"surfacer); actual: {commands}"
         )
 
 

@@ -3612,6 +3612,14 @@ class TestValidateEventSchemaPerType:
             # in_progress task its launcher holds.
             "task_ids": ["1", "2"],
         },
+        # Required fields only — `ids` and `cause` are optional (see
+        # TestValidateOptionalFieldTypes), and this harness treats every
+        # sample key as required.
+        "background_stop_gate": {
+            "role": "lead",
+            "verdict": "block",
+            "running": 1,
+        },
         "s2_state_seeded": {
             "worktree": "/tmp/wt",
             "agents": ["c1", "c2"],
@@ -4133,6 +4141,36 @@ class TestValidateOptionalFieldTypes:
         from shared.session_journal import _OPTIONAL_FIELDS_BY_TYPE
 
         assert _OPTIONAL_FIELDS_BY_TYPE.get("session_start") == {"source": str}
+
+    def test_background_stop_gate_optional_fields_are_typed(self):
+        """background_stop_gate's `ids` must be a list and `cause` a string.
+
+        The turn-end gate writes the trace on every verdict; a wrong-typed
+        optional field is rejected rather than landing on disk.
+        """
+        from shared.session_journal import (
+            _OPTIONAL_FIELDS_BY_TYPE,
+            _validate_event_schema,
+            make_event,
+        )
+
+        assert _OPTIONAL_FIELDS_BY_TYPE.get("background_stop_gate") == {
+            "ids": list,
+            "cause": str,
+        }
+        base = {"role": "teammate", "verdict": "allow_flagged", "running": 2}
+        ok, _ = _validate_event_schema(
+            make_event("background_stop_gate", ids=["b1"], cause="session_cron", **base)
+        )
+        assert ok
+        bad_ids, _ = _validate_event_schema(
+            make_event("background_stop_gate", ids="b1", **base)
+        )
+        assert not bad_ids
+        bad_cause, _ = _validate_event_schema(
+            make_event("background_stop_gate", cause=3, **base)
+        )
+        assert not bad_cause
 
     def test_variety_assessed_scope_declared_optional(self):
         """variety_assessed has `scope: str` in _OPTIONAL_FIELDS_BY_TYPE.
