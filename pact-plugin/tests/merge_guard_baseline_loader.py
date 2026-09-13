@@ -335,3 +335,65 @@ def load_baseline_5017d1f2():
 
     _cached_baseline_5017d1f2 = module
     return module
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Vendored certification bases. One table-driven loader for the baked-SHA
+# certification files, which read these blobs with `git show` and skipped
+# wherever the commit was unreachable. Each fixture holds the exact bytes of
+# hooks/shared/merge_guard_common.py at that commit, pinned by git blob id: the
+# value `git show` printed and `git hash-object` recomputes. This loader adds no
+# discriminator rows; each consuming cert keeps its own rows asserting that its
+# base still exhibits the bug it certifies.
+# ─────────────────────────────────────────────────────────────────────────────
+_VENDORED_DIR = Path(__file__).parent / "fixtures" / "merge_guard_baseline"
+
+# commit sha8 -> (fixture file name, git blob id of the fixture's bytes)
+_VENDORED = {}
+
+_cached_vendored = {}
+
+
+def _git_blob_id(data):
+    """The id git gives these bytes as a blob: sha1 over a `blob <len>\\0` header."""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def load_vendored(commit_sha8):
+    """Load the vendored merge_guard_common.py at `commit_sha8` (cached per SHA).
+
+    Fails loudly and never skips. An unknown SHA, a missing fixture, or bytes
+    whose git blob id differs from the pin is a pytest.fail, so a certification
+    file cannot pass without running its differential. Imported under the
+    `shared` package so the module's relative `from .paths import ...` resolves
+    against the live package, exactly as load_baseline() does.
+    """
+    if commit_sha8 in _cached_vendored:
+        return _cached_vendored[commit_sha8]
+    entry = _VENDORED.get(commit_sha8)
+    if entry is None:
+        pytest.fail(
+            "no vendored merge_guard_common.py for commit %s: add its fixture and "
+            "its _VENDORED row" % commit_sha8
+        )
+    name, blob_id = entry
+    path = _VENDORED_DIR / name
+    if not path.is_file():
+        pytest.fail("vendored fixture missing (%s): the cert cannot run" % path)
+    got = _git_blob_id(path.read_bytes())
+    if got != blob_id:
+        pytest.fail(
+            "vendored fixture %s git blob id mismatch: got %s, pinned %s. The "
+            "bytes drifted; re-vendor with `git show %s:pact-plugin/hooks/shared/"
+            "merge_guard_common.py`" % (name, got, blob_id, commit_sha8)
+        )
+    spec = importlib.util.spec_from_file_location(
+        "shared._merge_guard_baseline_%s" % commit_sha8, path
+    )
+    if spec is None or spec.loader is None:
+        pytest.fail("vendored fixture spec unloadable: %s" % path)
+    module = importlib.util.module_from_spec(spec)
+    module.__package__ = "shared"
+    spec.loader.exec_module(module)
+    _cached_vendored[commit_sha8] = module
+    return module
