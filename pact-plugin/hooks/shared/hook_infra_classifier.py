@@ -264,13 +264,15 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # is the SOURCE edge that also grows bootstrap_gate's closure (which
          # imports bootstrap_marker_writer).
     "file_tracker": frozenset({
-        "constants", "pact_context", "paths", "session_journal",
-        "session_registry", "session_state",
-        "state_file",
+        "background_launch", "background_work", "constants", "intentional_wait",
+        "pact_context", "paths", "session_journal", "session_registry",
+        "session_state", "state_file", "task_utils",
     }),
     "peer_inject": frozenset({
-        "constants", "pact_context", "paths", "peer_context", "plugin_manifest",
-        "session_journal", "session_registry", "session_state",
+        "background_launch", "background_work", "constants", "intentional_wait",
+        "pact_context", "paths", "peer_context", "plugin_manifest",
+        "session_journal", "session_registry", "session_state", "state_file",
+        "task_utils",
     }),
     "validate_handoff": frozenset({
         "background_launch", "background_work", "constants", "error_output",

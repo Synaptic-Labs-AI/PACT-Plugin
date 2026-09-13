@@ -1325,3 +1325,53 @@ class TestCompletionAuthorityLiteralPhraseRegressionGuard:
         assert "Task A" in _COMPLETION_AUTHORITY_NOTE
         assert "Task B" in _COMPLETION_AUTHORITY_NOTE
 
+
+
+class TestPeerInjectInASeparateProcess:
+    """`python3 hooks/peer_inject.py` with no pact-session-context.json.
+
+    A separate-process teammate's own process has no PACT context, so the team
+    of a PACT subagent it spawns comes from the teammate's session-registry
+    entry, found through the SubagentStart frame's `session_id`.
+    """
+
+    TEAM = "session-piframe"
+
+    def test_a_separate_process_teammates_pact_subagent_gets_the_peer_list(self, tmp_path):
+        """REVERT PROOF. The output lists the team's other members; with the team
+        unresolved it lists none."""
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        config = tmp_path / ".claude"
+        (config / "teams" / self.TEAM).mkdir(parents=True)
+        (config / "teams" / self.TEAM / "config.json").write_text(json.dumps({
+            "leadSessionId": "pi-lead-session",
+            "members": [
+                {"name": "tmux-spawner", "agentId": f"tmux-spawner@{self.TEAM}",
+                 "agentType": "pact-backend-coder"},
+                {"name": "peer-frontend", "agentId": f"peer-frontend@{self.TEAM}",
+                 "agentType": "pact-frontend-coder"},
+            ],
+        }), encoding="utf-8")
+        registry = config / "pact-sessions" / ".teammate-registry.jsonl"
+        registry.parent.mkdir(parents=True)
+        registry.write_text(json.dumps({
+            "session_id": "pi-teammate-session", "value": f"tmux-spawner@{self.TEAM}",
+        }) + "\n", encoding="utf-8")
+
+        hook = Path(__file__).resolve().parents[1] / "hooks" / "peer_inject.py"
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_CONFIG_DIR", "CLAUDE_PROJECT_DIR", "CLAUDE_CODE_SESSION_ID")}
+        env.update(HOME=str(tmp_path), CLAUDE_CONFIG_DIR=str(config),
+                   CLAUDE_PROJECT_DIR="/pi-frame/project")
+        frame = {"hook_event_name": "SubagentStart", "session_id": "pi-teammate-session",
+                 "agent_type": "pact-architect", "agent_id": "a0123456789abcdef"}
+        proc = subprocess.run([sys.executable, str(hook)], input=json.dumps(frame),
+                              capture_output=True, text=True, timeout=30, env=env)
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout or "{}")
+        context = out.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert "peer-frontend" in context and "tmux-spawner" in context, context

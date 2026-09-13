@@ -13,7 +13,7 @@ defaults to passthrough (exit 0 with suppressOutput). A hook bug must
 never block a SubagentStart event. Mirrors the fail-open contract
 documented in bootstrap_gate.py and bootstrap_prompt_gate.py.
 
-Input: JSON from stdin with agent_id, agent_type
+Input: JSON from stdin with agent_type, agent_name and session_id
 Output: JSON with hookSpecificOutput.additionalContext
 """
 
@@ -24,7 +24,6 @@ import sys
 from pathlib import Path  # noqa: F401  # re-export: corpus patches peer_inject.Path.home
 
 import shared.pact_context as pact_context
-from shared.pact_context import get_team_name
 from shared.plugin_manifest import (  # noqa: F401  # re-export: static-import guard + corpus introspection
     format_plugin_banner,
 )
@@ -68,7 +67,12 @@ def main():
         # unreachable. Leave agent_name empty when absent so get_peer_context's
         # agentType fallback fires as originally designed.
         agent_name = input_data.get("agent_name", "")
-        team_name = get_team_name()
+        # A separate-process teammate's own process has no PACT context, so its
+        # team comes from its session-registry entry; imported here so a
+        # failure stays inside this fail-open block.
+        from shared.background_work import frame_team_and_name
+
+        team_name, _member = frame_team_and_name(input_data)
 
         context = get_peer_context(
             agent_type=agent_type,

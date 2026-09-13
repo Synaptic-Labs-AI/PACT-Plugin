@@ -21,7 +21,8 @@ import time
 from pathlib import Path
 
 import shared.pact_context as pact_context
-from shared.pact_context import get_session_id, get_team_name, resolve_agent_name
+from shared.background_work import frame_team_and_name
+from shared.pact_context import get_session_id, resolve_agent_name
 from shared.paths import get_claude_config_dir
 from shared import state_file
 
@@ -63,10 +64,12 @@ def track_edit(
     same-``agent_type`` siblings (e.g. two ``backend-coder`` instances)
     collapse to the same ``resolve_agent_name`` value, so an agent-name-only
     key cannot tell them apart and conflict detection false-negatives. The
-    ``session_id`` (already in stdin via ``pact_context.init``) supplies the
-    per-instance uniqueness in BOTH modes. ``agent_name`` is retained as the
-    human-readable LABEL (the friendly-name recovery for the label under tmux
-    is a deferred follow-up; detection-uniqueness is what this fix restores).
+    ``session_id`` supplies the per-instance uniqueness in BOTH modes:
+    ``main()`` reads it from the PACT context, or from the frame's own
+    ``session_id`` in a separate-process teammate's process, which has no
+    context. ``agent_name`` is retained as the human-readable LABEL; for a
+    separate-process teammate ``resolve_agent_name`` recovers the member name
+    from its session-registry entry.
     """
     file_path = _normalize_path(file_path)
     tracking_file = Path(tracking_path)
@@ -203,7 +206,7 @@ def main():
         sys.exit(0)
 
     pact_context.init(input_data)
-    team_name = get_team_name()
+    team_name, _member = frame_team_and_name(input_data)
     if not team_name:
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
@@ -215,10 +218,12 @@ def main():
 
     agent_name = resolve_agent_name(input_data)
     tool_name = input_data.get("tool_name", "")
-    # NEW-1 (#878): session_id is the per-instance uniqueness component of the
-    # composite editor key. Available via pact_context after init() above.
-    # resolve_agent_name is KEPT for the human-readable label.
-    session_id = get_session_id()
+    # session_id is the per-instance uniqueness component of the composite
+    # editor key. A separate-process teammate's own process has no PACT context,
+    # so get_session_id() is empty there, and the frame's own session_id is that
+    # teammate's session.
+    frame_session = input_data.get("session_id")
+    session_id = get_session_id() or (frame_session if isinstance(frame_session, str) else "")
 
     teams_root = get_claude_config_dir() / "teams"
     tracking_path = str(teams_root / team_name / "file-edits.json")

@@ -997,7 +997,7 @@ class TestFileTrackerSuppressOutput:
         """Missing team name outputs suppressOutput."""
         from file_tracker import main
 
-        with patch("file_tracker.get_team_name", return_value=""), \
+        with patch("file_tracker.frame_team_and_name", return_value=("", "")), \
              patch("sys.stdin", io.StringIO("{}")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -1010,7 +1010,7 @@ class TestFileTrackerSuppressOutput:
         """JSONDecodeError path outputs suppressOutput."""
         from file_tracker import main
 
-        with patch("file_tracker.get_team_name", return_value="pact-test"), \
+        with patch("file_tracker.frame_team_and_name", return_value=("pact-test", "")), \
              patch("sys.stdin", io.StringIO("bad json")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -1024,7 +1024,7 @@ class TestFileTrackerSuppressOutput:
         from file_tracker import main
 
         input_data = json.dumps({"tool_input": {}})
-        with patch("file_tracker.get_team_name", return_value="pact-test"), \
+        with patch("file_tracker.frame_team_and_name", return_value=("pact-test", "")), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -1041,7 +1041,7 @@ class TestFileTrackerSuppressOutput:
             "tool_input": {"file_path": "/tmp/test.py"},
             "tool_name": "Edit",
         })
-        with patch("file_tracker.get_team_name", return_value="pact-test"), \
+        with patch("file_tracker.frame_team_and_name", return_value=("pact-test", "")), \
              patch("file_tracker.resolve_agent_name", return_value="coder"), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("pathlib.Path.home", return_value=tmp_path):

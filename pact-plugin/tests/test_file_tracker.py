@@ -199,7 +199,7 @@ class TestMainEntryPoint:
 
         input_data = json.dumps({"tool_name": "Edit"})
 
-        with patch("file_tracker.get_team_name", return_value=""), \
+        with patch("file_tracker.frame_team_and_name", return_value=("", "")), \
              patch("file_tracker.pact_context.init"), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
@@ -215,7 +215,7 @@ class TestMainEntryPoint:
             "tool_name": "Edit",
         })
 
-        with patch("file_tracker.get_team_name", return_value="pact-test"), \
+        with patch("file_tracker.frame_team_and_name", return_value=("pact-test", "")), \
              patch("file_tracker.pact_context.init"), \
              patch("file_tracker.resolve_agent_name", return_value="backend-coder"), \
              patch("file_tracker.check_conflict", return_value=None), \
@@ -240,7 +240,7 @@ class TestMainEntryPoint:
 
         input_data = json.dumps({"tool_input": {}})
 
-        with patch("file_tracker.get_team_name", return_value="pact-test"), \
+        with patch("file_tracker.frame_team_and_name", return_value=("pact-test", "")), \
              patch("file_tracker.pact_context.init"), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
@@ -257,7 +257,7 @@ class TestMainEntryPoint:
         })
 
         conflict_msg = "File conflict: src/auth.ts was also edited by backend-coder."
-        with patch("file_tracker.get_team_name", return_value="pact-test"), \
+        with patch("file_tracker.frame_team_and_name", return_value=("pact-test", "")), \
              patch("file_tracker.pact_context.init"), \
              patch("file_tracker.resolve_agent_name", return_value="frontend-coder"), \
              patch("file_tracker.check_conflict", return_value=conflict_msg), \
@@ -370,3 +370,85 @@ class TestFileTrackerCompositeKey:
         assert conflict is not None
         assert "frontend-coder" in conflict
         assert "session" not in conflict  # unambiguous single editor → no suffix
+
+
+# ---------------------------------------------------------------------------
+# A separate-process teammate's own process: no PACT context
+# ---------------------------------------------------------------------------
+
+
+class TestFileTrackerInASeparateProcess:
+    """`python3 hooks/file_tracker.py` with no pact-session-context.json.
+
+    A separate-process teammate's own process has no PACT context, so its team
+    and member name come from its session-registry entry, and the session half
+    of the editor key comes from the frame's own `session_id`.
+    """
+
+    TEAM = "session-ftframe"
+    PROJECT = "/ft-frame/project"
+
+    def _root(self, tmp_path, members):
+        config = tmp_path / ".claude"
+        (config / "teams" / self.TEAM).mkdir(parents=True)
+        (config / "teams" / self.TEAM / "config.json").write_text(json.dumps({
+            "leadSessionId": "ft-lead-session",
+            "members": [{"name": m, "agentId": f"{m}@{self.TEAM}",
+                         "agentType": "pact-backend-coder"} for m in members],
+        }), encoding="utf-8")
+        return config
+
+    def _register(self, config, session_id, member):
+        registry = config / "pact-sessions" / ".teammate-registry.jsonl"
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        with registry.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"session_id": session_id, "value": f"{member}@{self.TEAM}"}) + "\n")
+
+    def _edit(self, tmp_path, session_id, file_path) -> str:
+        """One PostToolUse Edit through the real hook process; returns additionalContext."""
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        hook = Path(__file__).resolve().parents[1] / "hooks" / "file_tracker.py"
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_CONFIG_DIR", "CLAUDE_PROJECT_DIR", "CLAUDE_CODE_SESSION_ID")}
+        env.update(HOME=str(tmp_path), CLAUDE_CONFIG_DIR=str(tmp_path / ".claude"),
+                   CLAUDE_PROJECT_DIR=self.PROJECT)
+        frame = {"hook_event_name": "PostToolUse", "session_id": session_id,
+                 "agent_type": "pact-backend-coder", "tool_name": "Edit",
+                 "tool_input": {"file_path": file_path}}
+        proc = subprocess.run([sys.executable, str(hook)], input=json.dumps(frame),
+                              capture_output=True, text=True, timeout=30, env=env)
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout or "{}")
+        return out.get("hookSpecificOutput", {}).get("additionalContext", "")
+
+    def test_a_separate_process_teammate_edit_is_tracked_and_warned(self, tmp_path):
+        """REVERT PROOF. The first editor's edit lands in the team's file-edits.json
+        under its member name, and a second editor's edit to the same file draws
+        the conflict warning naming it."""
+        config = self._root(tmp_path, ["tmux-editor", "other-editor"])
+        self._register(config, "ft-session-a", "tmux-editor")
+        self._register(config, "ft-session-b", "other-editor")
+        target = str(tmp_path / "shared.py")
+        assert self._edit(tmp_path, "ft-session-a", target) == ""
+        tracking = config / "teams" / self.TEAM / "file-edits.json"
+        assert tracking.exists(), "the separate-process teammate's edit was not tracked"
+        edits = json.loads(tracking.read_text())
+        assert [(e["agent"], e["session_id"]) for e in edits] == [("tmux-editor", "ft-session-a")]
+        warning = self._edit(tmp_path, "ft-session-b", target)
+        assert "File conflict" in warning and "tmux-editor" in warning, warning
+
+    def test_two_same_name_separate_process_editors_draw_the_conflict_warning(self, tmp_path):
+        """REVERT PROOF. Two instances with one member name are separate editors
+        only through their sessions; without the frame's session_id both keys
+        would be (name, "") and the second edit would look like the first."""
+        config = self._root(tmp_path, ["tmux-editor"])
+        self._register(config, "ft-session-a", "tmux-editor")
+        self._register(config, "ft-session-b", "tmux-editor")
+        target = str(tmp_path / "shared.py")
+        assert self._edit(tmp_path, "ft-session-a", target) == ""
+        warning = self._edit(tmp_path, "ft-session-b", target)
+        assert "File conflict" in warning, warning
