@@ -55,7 +55,8 @@ def _load_classifier(sha):
 
     Returns None on any git/exec failure — git missing, or the commit not present in this checkout — so collection SUCCEEDS and the
     base-vs-HEAD differential rows self-SKIP (@requires_history) instead of aborting
-    the whole file. Mirrors test_merge_guard_1118_recert._load_module_at.
+    the whole file. The source comes from `git show <sha>:...merge_guard_common.py` and
+    is executed as a module under package `shared`, so its relative imports resolve.
     """
     wt = Path(__file__).resolve().parents[2]
     try:
@@ -92,9 +93,10 @@ D = mgc.is_dangerous_command
 
 # Skip the base-vs-HEAD differential (non-vacuity) rows when the base source is
 # unavailable (unreachable base commit); the HEAD-side + absolute rows still
-# run. With fetch-depth:0 in CI THIS FILE's base (9256c93c) is present, so its
-# differentials run there. That is a fact about this file, not about CI: other cert
-# files bake SHAs that no origin ref reaches, and those skip.
+# run. With fetch-depth:0 in CI this file's base (9256c93c) is present, so its
+# differentials run there. This file still reads its base from git history; the
+# certification files whose bases are vendored under
+# tests/fixtures/merge_guard_baseline/ read no history and never skip.
 requires_history = pytest.mark.skipif(
     _BASE is None,
     reason="base-vs-HEAD differential did not run: %s"
