@@ -276,7 +276,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "background_launch", "background_work", "constants", "error_output",
         "intentional_wait", "pact_context", "paths", "session_journal",
         "session_registry", "session_state", "state_file", "task_utils",
-        "turn_end_gate",
+        "turn_end_gate", "turn_end_jobs",
     }),  # regenerated from the live derivation: the SubagentStop background
          # check imports turn_end_gate, which reaches background_work and
          # state_file and their helpers.
@@ -284,6 +284,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "background_launch", "background_work", "constants", "intentional_wait",
         "pact_context", "paths", "session_journal", "session_registry",
         "session_state", "state_file", "task_utils", "turn_end_gate",
+        "turn_end_jobs",
     }),  # regenerated from the live derivation.
     "merge_guard_pre": frozenset({
         "constants", "merge_guard_common", "pact_context", "paths",

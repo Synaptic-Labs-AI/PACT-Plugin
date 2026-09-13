@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import background_work, pact_context, state_file
+from . import background_work, pact_context, state_file, turn_end_jobs
 from .paths import get_claude_config_dir
 from .session_journal import append_event_checked, make_event
 from .task_utils import iter_team_task_jsons
@@ -45,6 +45,7 @@ VERDICT_ALLOW_ALREADY_TOLD = "allow_already_told"
 VERDICT_ALLOW_LOOP_GUARD = "allow_loop_guard"
 VERDICT_ALLOW_ROLE_UNRESOLVED = "allow_role_unresolved"
 VERDICT_ALLOW_ERROR = "allow_error"
+VERDICT_ALLOW_NO_JOB = "allow_no_job"
 
 MAX_LISTED_JOBS = 5
 JOB_LABEL_MAX_CHARS = 80
@@ -87,31 +88,15 @@ class Verdict:
         return self.verdict == VERDICT_BLOCK
 
 
-def running_entries(input_data: Any) -> list:
-    """The running background jobs listed on a hook frame; [] for anything else."""
-    if not isinstance(input_data, dict):
-        return []
-    entries = input_data.get("background_tasks")
-    if not isinstance(entries, list):
-        return []
-    return [
-        e for e in entries
-        if isinstance(e, dict)
-        and e.get("status") == "running"
-        and isinstance(e.get("id"), str)
-        and e["id"]
-    ]
-
-
 def evaluate(input_data: Any) -> "Verdict | None":
-    """The verdict for one turn end, or None when no background job is running.
+    """The verdict for one turn end, or None when no job of any counted type is running.
 
     Reads only, and never raises: an exception becomes `allow_error`. While
     `stop_hook_active` is set the verdict is `allow_loop_guard`, but its ids
     and reason are kept, so a caller degrading several reasons can still
     report this one.
     """
-    running = running_entries(input_data)
+    running = turn_end_jobs.running_jobs(input_data)
     if not running or input_data.get("hook_event_name") not in TURN_END_EVENTS:
         return None
     try:
@@ -126,24 +111,39 @@ def evaluate(input_data: Any) -> "Verdict | None":
     return verdict
 
 
+def _job_types_for(role: str, event: Any) -> frozenset:
+    """The job types this role counts on this turn-end event."""
+    if role == ROLE_LEAD:
+        return turn_end_jobs.LEAD_JOB_TYPES
+    if event == "SubagentStop":
+        return turn_end_jobs.IN_PROCESS_TEAMMATE_JOB_TYPES
+    return turn_end_jobs.OWN_PROCESS_JOB_TYPES
+
+
 def _decide(input_data: dict, running: list) -> Verdict:
     pact_context.init(input_data)
-    count = len(running)
     role, name, team = resolve_role(input_data)
     if role == ROLE_UNRESOLVED:
         # Only an existing session context names a directory here, so an
         # unidentified session never has a session folder created for it.
         return Verdict(
-            role, VERDICT_ALLOW_ROLE_UNRESOLVED, count,
+            role, VERDICT_ALLOW_ROLE_UNRESOLVED, len(running),
             session_dir=pact_context.get_session_dir(),
         )
+    event = input_data.get("hook_event_name")
     session_dir = session_dir_for(input_data)
+    jobs = turn_end_jobs.running_jobs(input_data, _job_types_for(role, event))
+    count = len(jobs)
+    if not jobs:
+        return Verdict(role, VERDICT_ALLOW_NO_JOB, count, session_dir=session_dir)
     crons = input_data.get("session_crons")
-    if isinstance(crons, list) and crons:
+    # Stop only: a SubagentStop frame carries the lead process's crons, which
+    # wake the lead, not the in-process teammate ending its turn.
+    if event == "Stop" and isinstance(crons, list) and crons:
         return Verdict(
             role, VERDICT_ALLOW_FLAGGED, count, cause="session_cron", session_dir=session_dir
         )
-    candidates = _candidates(input_data, role, name, team, running)
+    candidates = _candidates(input_data, role, name, team, jobs)
     if not candidates:
         return Verdict(role, VERDICT_ALLOW_FLAGGED, count, session_dir=session_dir)
     if not session_dir:

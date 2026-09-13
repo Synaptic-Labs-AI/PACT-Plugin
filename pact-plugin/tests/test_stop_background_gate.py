@@ -397,6 +397,130 @@ def test_a_wait_older_than_a_layer_1_launch_does_not_cover_it(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# Which entries count as jobs, per role. background_tasks lists live
+# teammates and subagents as running entries beside real work.
+# --------------------------------------------------------------------------
+
+
+def live_teammates(count: int = 14) -> list:
+    return [job(f"bmate{i}", type="teammate", description=f"member {i}") for i in range(count)]
+
+
+# A fresh lead's first Stop frame from the live pre-fix baseline, refused over
+# exactly these two entries (fields as captured).
+LIVE_BASELINE_ENTRIES = [
+    {"id": "tbbgxyxjp", "status": "running", "type": "teammate"},
+    {"id": "tztw4cwv5", "status": "running", "type": "teammate"},
+]
+
+
+@pytest.mark.parametrize(
+    "entries", [live_teammates(), LIVE_BASELINE_ENTRIES], ids=["fourteen", "live-baseline"]
+)
+def test_a_lead_with_live_teammates_and_no_shell_is_not_blocked(tmp_path, entries):
+    world = World(tmp_path)
+    frame = stop_frame(jobs=entries, agent_type=LEAD_TYPE)
+
+    stdout, loaded = _loaded_plugin_modules(world, frame)
+    assert stdout == ""
+    assert loaded == []
+    assert world.traces(LEAD_SID) == []
+
+
+def test_a_leads_live_subagent_passes_the_fast_path_and_does_not_block(tmp_path):
+    """`subagent` counts for a separate-process teammate, so the role-blind
+    fast path lets it through; the lead's own set then counts nothing."""
+    world = World(tmp_path)
+    frame = stop_frame(
+        jobs=live_teammates() + [job("bsub1", type="subagent")], agent_type=LEAD_TYPE
+    )
+
+    assert output(world.run(frame)) == SUPPRESS
+    assert [(t["verdict"], t["running"]) for t in world.traces(LEAD_SID)] == [("allow_no_job", 0)]
+    assert world.told(LEAD_SID) is None
+
+
+def test_a_lead_is_told_only_about_its_shell(tmp_path):
+    world = World(tmp_path)
+    frame = stop_frame(
+        jobs=live_teammates() + [job("bsub1", type="subagent"), job("bshell1")],
+        agent_type=LEAD_TYPE,
+    )
+
+    out = output(world.run(frame))
+    assert out["decision"] == "block"
+    assert "`bshell1`" in out["reason"]
+    assert "`bmate" not in out["reason"] and "`bsub1`" not in out["reason"]
+    assert [t["ids"] for t in world.traces(LEAD_SID)] == [["bshell1"]]
+
+
+def test_a_separate_process_teammate_is_told_about_its_own_monitor(tmp_path):
+    world = World(tmp_path)
+    world.register_teammate(MATE_SID, MATE)
+    world.add_task(7, MATE)
+
+    out = output(world.run(teammate_frame([job("bmon1", type="monitor")])))
+    assert out["decision"] == "block"
+    assert "`bmon1`" in out["reason"]
+
+
+def test_a_leads_own_cron_still_allows_its_stop(tmp_path):
+    world = World(tmp_path)
+    frame = stop_frame(
+        jobs=live_teammates(2) + [job("bshell1")], agent_type=LEAD_TYPE,
+        session_crons=[{"id": "c1", "cron": "*/5 * * * *", "prompt": "check"}],
+    )
+
+    assert output(world.run(frame)) == SUPPRESS
+    assert [(t["verdict"], t.get("cause")) for t in world.traces(LEAD_SID)] == [
+        ("allow_flagged", "session_cron")
+    ]
+
+
+def test_a_separate_process_teammates_own_cron_still_allows(tmp_path):
+    world = World(tmp_path)
+    world.register_teammate(MATE_SID, MATE)
+    world.add_task(7, MATE)
+    frame = teammate_frame([job("bmate1")])
+    frame["session_crons"] = [{"id": "c1", "cron": "*/5 * * * *", "prompt": "check"}]
+
+    assert output(world.run(frame)) == SUPPRESS
+    assert [(t["role"], t["verdict"], t.get("cause")) for t in world.traces(MATE_SID)] == [
+        ("teammate", "allow_flagged", "session_cron")
+    ]
+
+
+def test_nothing_counted_for_the_role_traces_allow_no_job(tmp_path):
+    world = World(tmp_path)
+    proc = world.run(stop_frame(jobs=[job("bmon1", type="monitor")], agent_type=LEAD_TYPE))
+
+    assert output(proc) == SUPPRESS
+    assert [(t["role"], t["verdict"], t["running"]) for t in world.traces(LEAD_SID)] == [
+        ("lead", "allow_no_job", 0)
+    ]
+    assert world.told(LEAD_SID) is None
+
+
+def test_the_entry_scripts_share_one_job_filter():
+    """The job-type sets live only in turn_end_jobs.py: neither entry script
+    keeps its own copy of the running-job test or names a job type."""
+    import ast
+
+    labels = {"shell", "subagent", "monitor", "workflow", "MCP task", "teammate"}
+    for script in ("stop_background_gate.py", "validate_handoff.py"):
+        tree = ast.parse((HOOKS_DIR / script).read_text(encoding="utf-8"))
+        functions = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+        assert "_has_running_job" not in functions, script
+        named = {
+            n.value for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value in labels
+        }
+        assert named == set(), (script, named)
+    source = (HOOKS_DIR / "shared" / "turn_end_jobs.py").read_text(encoding="utf-8")
+    assert "LEAD_JOB_TYPES" in source and "OWN_PROCESS_JOB_TYPES" in source
+
+
+# --------------------------------------------------------------------------
 # Trace
 # --------------------------------------------------------------------------
 
@@ -419,6 +543,11 @@ _VERDICT_CASES = {
     ),
     # A directory where the told-once file belongs cannot be read as a file.
     "allow_error": (lambda w: _prepare_told(w, as_directory=True), {"agent_type": LEAD_TYPE}),
+    # A monitor passes the fast path's union but is not a job the lead counts.
+    "allow_no_job": (
+        lambda w: None,
+        {"agent_type": LEAD_TYPE, "background_tasks": [job("bjob1", type="monitor")]},
+    ),
 }
 
 

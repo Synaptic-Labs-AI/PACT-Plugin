@@ -299,26 +299,20 @@ def test_a_non_teammate_pact_subagent_is_still_refused_without_a_handoff(tmp_pat
     assert "PACT Handoff Refusal" in out["reason"]
 
 
-def test_the_running_job_tests_agree():
-    """The two entry points' import-free copies match the gate's own test."""
-    import stop_background_gate
-    import validate_handoff
-    from shared import turn_end_gate
-
-    cases = [
-        {},
-        {"background_tasks": None},
-        {"background_tasks": "running"},
-        {"background_tasks": []},
-        {"background_tasks": [{"id": "b1", "status": "completed"}]},
-        {"background_tasks": [{"id": "", "status": "running"}]},
-        {"background_tasks": [{"id": 3, "status": "running"}]},
-        {"background_tasks": ["b1"]},
-        {"background_tasks": [{"id": "b1", "status": "running"}]},
-        {"background_tasks": [{"status": "completed", "id": "a"}, {"id": "b", "status": "running"}]},
+def test_lead_process_crons_do_not_silence_an_in_process_teammate(tmp_path):
+    """A SubagentStop frame carries the lead process's crons. They wake the
+    lead, not the teammate, so they are not a flag for the teammate's job."""
+    world = World(tmp_path)
+    recorded_mate_job(world)
+    transcript = teammate_metadata(world)
+    crons = [
+        {"id": "c1", "cron": "*/5 * * * *", "prompt": "lead check"},
+        {"id": "c2", "cron": "0 * * * *", "prompt": "lead hourly"},
     ]
-    for frame in cases:
-        expected = bool(turn_end_gate.running_entries(frame))
-        assert stop_background_gate._has_running_job(frame) is expected, frame
-        assert validate_handoff._has_running_job(frame) is expected, frame
-    assert any(bool(turn_end_gate.running_entries(f)) for f in cases)
+    frame = subagent_frame(
+        MATE, MATE_AGENT_ID, transcript, jobs=[job("bmate1")], session_crons=crons
+    )
+
+    out = only_decision(run(world, frame))
+    assert out["decision"] == "block"
+    assert [(t["role"], t["verdict"]) for t in world.traces(LEAD_SID)] == [("teammate", "block")]

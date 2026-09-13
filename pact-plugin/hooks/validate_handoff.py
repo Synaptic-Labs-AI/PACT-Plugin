@@ -60,6 +60,7 @@ import re
 import shared.pact_context as pact_context
 from shared.error_output import hook_error_json
 from shared.session_journal import append_event, make_event
+from shared.turn_end_jobs import running_jobs
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -250,26 +251,14 @@ def is_pact_agent(agent_identifier: str) -> bool:
     return any(agent_identifier.startswith(prefix) for prefix in pact_prefixes)
 
 
-def _has_running_job(input_data: dict) -> bool:
-    """turn_end_gate.running_entries's test, without importing the gate."""
-    entries = input_data.get("background_tasks")
-    return isinstance(entries, list) and any(
-        isinstance(e, dict)
-        and e.get("status") == "running"
-        and isinstance(e.get("id"), str)
-        and e["id"]
-        for e in entries
-    )
-
-
 def _background_verdict(input_data: dict):
     """The turn-end background-work verdict, or None.
 
-    The gate is imported only when a job is running, so an ordinary
-    SubagentStop pays nothing for it. Any error yields None, and the handoff
-    decision stands on its own.
+    The gate is imported only when a job of a counted type is running, so an
+    ordinary SubagentStop pays nothing for it. Any error yields None, and the
+    handoff decision stands on its own.
     """
-    if not _has_running_job(input_data):
+    if not running_jobs(input_data):
         return None
     try:
         from shared import turn_end_gate

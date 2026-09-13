@@ -12,7 +12,9 @@ Used by: hooks.json Stop (synchronous). The decision is shared with
 # is set, so a turn end the agent cannot satisfy is not refused again.
 
 This runs at every turn end of every session with the plugin installed, so
-no plugin module is imported until a running job is found.
+the `shared` package is not imported until a running job of a counted type is
+found. Before that, only the importless job filter, shared/turn_end_jobs.py,
+is loaded, by file path.
 
 Input: JSON on stdin; reads hook_event_name, background_tasks, session_crons,
        stop_hook_active, session_id, agent_type and agent_id.
@@ -28,16 +30,16 @@ import sys
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 
-def _has_running_job(input_data: dict) -> bool:
-    """turn_end_gate.running_entries's test, without importing the plugin."""
-    entries = input_data.get("background_tasks")
-    return isinstance(entries, list) and any(
-        isinstance(e, dict)
-        and e.get("status") == "running"
-        and isinstance(e.get("id"), str)
-        and e["id"]
-        for e in entries
-    )
+def _job_filter():
+    """shared/turn_end_jobs.py, loaded by file path so `shared` is not imported."""
+    import importlib.util
+    import os
+
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared", "turn_end_jobs.py")
+    spec = importlib.util.spec_from_file_location("_turn_end_jobs", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def main() -> None:
@@ -47,7 +49,11 @@ def main() -> None:
         return
     if not isinstance(input_data, dict) or input_data.get("hook_event_name") != "Stop":
         return
-    if not _has_running_job(input_data):
+    try:
+        jobs = _job_filter()
+    except Exception:
+        return
+    if not jobs.running_jobs(input_data):
         return
     try:
         from shared import turn_end_gate

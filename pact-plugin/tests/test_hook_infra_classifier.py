@@ -574,16 +574,22 @@ def _scan_hook_modules(predicate) -> list[tuple[str, int, str]]:
 
 
 # Dynamic imports the static oracle cannot follow, allowed line by line.
-# wait_filler_gate.py loads hooks/shared/background_launch.py BY FILE PATH, so
-# a Bash call that is not a teammate's background launch never imports the
-# `shared` package. The oracle cannot see that edge. It hides nothing from the closure
-# only while background_launch.py itself imports nothing outside the stdlib and
-# nothing from `shared`, which the arm below pins.
+# Two hooks load a shared helper BY FILE PATH so their common path never
+# imports the `shared` package: wait_filler_gate.py loads background_launch.py
+# for a Bash call that is not a teammate's background launch, and
+# stop_background_gate.py loads turn_end_jobs.py at a turn end with no counted
+# job. The oracle cannot see either edge. Each hides nothing from the closure
+# only while the loaded helper imports nothing outside the stdlib and nothing
+# from `shared`, which the arm below pins for both.
 _ALLOWED_DYNAMIC_IMPORT_LINES = frozenset({
     ("wait_filler_gate.py", "import importlib.util"),
     ("wait_filler_gate.py",
      'spec = importlib.util.spec_from_file_location("_pact_background_launch", path)'),
     ("wait_filler_gate.py", "module = importlib.util.module_from_spec(spec)"),
+    ("stop_background_gate.py", "import importlib.util"),
+    ("stop_background_gate.py",
+     'spec = importlib.util.spec_from_file_location("_turn_end_jobs", path)'),
+    ("stop_background_gate.py", "module = importlib.util.module_from_spec(spec)"),
 })
 
 
@@ -602,9 +608,11 @@ class TestOracleStaticImportBoundBackstop:
             f"oracle. Offending: {hits}"
         )
 
-    def test_the_by_path_loaded_helper_imports_only_the_stdlib(self):
-        """background_launch.py is loaded by file path, an edge the oracle
-        cannot see. The edge hides nothing only while the file imports nothing
+    @pytest.mark.parametrize("helper", ["background_launch.py", "turn_end_jobs.py"])
+    def test_the_by_path_loaded_helper_imports_only_the_stdlib(self, helper):
+        """A helper loaded by file path (background_launch.py by
+        wait_filler_gate, turn_end_jobs.py by stop_background_gate) is an edge
+        the oracle cannot see. The edge hides nothing only while the file imports nothing
         but the stdlib: a `shared` or relative import reaches back into the
         hooks tree, and a third-party import is a dependency no consumer
         session is promised.
@@ -618,7 +626,7 @@ class TestOracleStaticImportBoundBackstop:
 
         paths = sysconfig.get_paths()
         site = (paths["purelib"], paths["platlib"])
-        source = (HOOKS / "shared" / "background_launch.py").read_text(encoding="utf-8")
+        source = (HOOKS / "shared" / helper).read_text(encoding="utf-8")
         offending = []
         for node in ast.walk(ast.parse(source)):
             if isinstance(node, ast.ImportFrom) and node.level:
@@ -640,9 +648,9 @@ class TestOracleStaticImportBoundBackstop:
                 if not in_stdlib:
                     offending.append(name)
         assert not offending, (
-            "hooks/shared/background_launch.py imports %r. wait_filler_gate loads "
-            "that file by path, an edge the closure oracle cannot see, so it must "
-            "import nothing outside the stdlib and nothing from `shared`" % (offending,)
+            "hooks/shared/%s imports %r. A hook loads that file by path, an edge "
+            "the closure oracle cannot see, so it must import nothing outside the "
+            "stdlib and nothing from `shared`" % (helper, offending)
         )
 
     def test_no_refresh_subpackage_edge_in_hooks(self):
