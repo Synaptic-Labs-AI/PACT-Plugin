@@ -302,7 +302,7 @@ def check_unflagged_background(
     """
     from shared.background_work import (
         UNFLAGGED_IDLE_THRESHOLD,
-        discharge_acknowledged,
+        discharge_acknowledged_for_owner,
         stamp_idled_at,
         unflagged_fire,
         update_unflagged_idle_counts,
@@ -312,15 +312,15 @@ def check_unflagged_background(
     # flagged a wait covering its launch has demonstrably associated the two,
     # so the record has done its job and must not outlive the acknowledgment.
     #
-    # It runs for EVERY task this teammate owns, whatever its status. A
-    # teammate owning no in_progress task still has records (anchored on its
-    # most recently completed task) and still idles, so a discharge placed
-    # behind the status gate below would never retire them. And a record lists
-    # the tasks held at LAUNCH, which need not include the task resolved here:
-    # a teammate holding two tasks may flag the other one, and a consultant
-    # may have completed a newer task since. Each call drops only records
-    # listing that task whose launch its wait covers, so a task with no
-    # covering wait drops nothing.
+    # It covers EVERY task this teammate owns, whatever its status, in ONE
+    # registry update. A teammate owning no in_progress task still has records
+    # (anchored on its most recently completed task) and still idles, so a
+    # discharge placed behind the status gate below would never retire them.
+    # And a record lists the tasks held at LAUNCH, which need not include the
+    # task resolved here: a teammate holding two tasks may flag the other one,
+    # and a consultant may have completed a newer task since. A record is
+    # dropped only when a task it lists is owned here and that task's wait
+    # covers its launch, so a teammate with no covering wait drops nothing.
     #
     # WHAT THIS BUYS, STATED AT ITS ACTUAL SIZE: an ACCURATE CITATION, not the
     # removal of a false alarm. Without it, a teammate that flagged, collected
@@ -337,9 +337,7 @@ def check_unflagged_background(
     # cleared on every tick where the fire predicate is false, so a teammate
     # that flags never accumulates toward the threshold, and one that keeps
     # working does not tick at all.
-    for owned in tasks:
-        if isinstance(owned, dict) and owned.get("owner") == teammate_name:
-            discharge_acknowledged(owned, team_name=team_name, now=now)
+    discharge_acknowledged_for_owner(tasks, teammate_name, team_name=team_name, now=now)
 
     task = find_teammate_task(tasks, teammate_name)
     if not task or task.get("status") != "in_progress":

@@ -632,7 +632,7 @@ def outstanding_unflagged(
       still meaningful; we are declining to surface it RIGHT NOW because the
       teammate has flagged. That is a property of the MOMENT, not of the
       record. Move it into any read the discharge uses and
-      `discharge_acknowledged` never sees a flagged record to retire — the
+      `discharge_acknowledged_for_owner` never sees a flagged record to retire — the
       mechanism dies silently, green, because every gate test still passes.
 
     So expiry filters the READ and suppression filters the SURFACE. Do not
@@ -696,12 +696,18 @@ def wait_covers_record(task: Any, record: Any) -> bool:
     return anchor >= registered
 
 
-def discharge_acknowledged(
-    task: Any,
+def discharge_acknowledged_for_owner(
+    tasks: Any,
+    owner: Any,
     team_name: str | None = None,
     now: datetime | None = None,
 ) -> int:
-    """Drop every record this task's valid wait acknowledges. Returns the count.
+    """Drop every record that a valid wait on one of `owner`'s tasks acknowledges.
+    Returns the count.
+
+    A record is dropped iff some task owned by `owner` is listed on it and that
+    task's wait covers the record's launch (`wait_covers_record`). The whole
+    pass is ONE registry update, however many tasks the owner holds.
 
     RESIDUAL, AND IT IS NOT EMPTY. Discharge needs a TeammateIdle between the
     flag and the clear, because this runs on that event. A teammate that
@@ -711,12 +717,15 @@ def discharge_acknowledged(
     you are about to end a turn, and ending a turn is an idle — but it is
     real and is pinned by a test rather than claimed away.
     """
-    if not isinstance(task, dict):
+    if not isinstance(tasks, list) or not owner:
         return 0
-    task_id = task.get("id")
-    if task_id is None:
+    owned = {
+        str(t.get("id")): t
+        for t in tasks
+        if isinstance(t, dict) and t.get("owner") == owner and t.get("id") is not None
+    }
+    if not owned:
         return 0
-    task_id = str(task_id)
     dropped = 0
 
     def _apply(records: list[dict]) -> tuple[list[dict], bool]:
@@ -725,7 +734,10 @@ def discharge_acknowledged(
         dropped = 0
         kept = []
         for record in records:
-            if task_id in record_task_ids(record) and wait_covers_record(task, record):
+            if any(
+                task_id in owned and wait_covers_record(owned[task_id], record)
+                for task_id in record_task_ids(record)
+            ):
                 dropped += 1
                 continue
             kept.append(record)

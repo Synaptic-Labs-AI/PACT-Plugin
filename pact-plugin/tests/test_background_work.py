@@ -31,7 +31,7 @@ from shared.background_work import (
     agent_type_names_a_member,
     bind_launcher_identity,
     classify_wait,
-    discharge_acknowledged,
+    discharge_acknowledged_for_owner,
     effective_since,
     is_shell_backgrounded_bash,
     lead_stale,
@@ -297,7 +297,7 @@ class TestDischargeSequences:
         """The whole point. A teammate that did everything right stays silent."""
         self._seed()
         flagged = _task(wait=_wait(T0 + timedelta(minutes=1)))
-        assert discharge_acknowledged(flagged, team_name=TEAM, now=T0) == 1
+        assert discharge_acknowledged_for_owner([flagged], "probe-coder", team_name=TEAM, now=T0) == 1
         assert load_records_for_discharge(TEAM, now=T0) == []
         # later it clears the wait and keeps working the same task
         assert unflagged_fire(_task(), team_name=TEAM, now=T0)[0] is False
@@ -305,7 +305,7 @@ class TestDischargeSequences:
     def test_2_never_flag_then_idle_FIRES(self):
         """The target case must be untouched by the discharge."""
         self._seed()
-        assert discharge_acknowledged(_task(), team_name=TEAM, now=T0) == 0
+        assert discharge_acknowledged_for_owner([_task()], "probe-coder", team_name=TEAM, now=T0) == 0
         assert unflagged_fire(_task(), team_name=TEAM, now=T0)[0] is True, (
             "a teammate that never flagged a wait must still draw the advisory: "
             "a discharge with nothing to acknowledge leaves the record firing"
@@ -326,7 +326,7 @@ class TestDischargeSequences:
         self._seed({"registered_at": _iso(T0)},
                    {"registered_at": _iso(T0 + timedelta(minutes=10))})
         flagged = _task(wait=_wait(T0 + timedelta(minutes=1)))
-        assert discharge_acknowledged(flagged, team_name=TEAM, now=T0) == 1, (
+        assert discharge_acknowledged_for_owner([flagged], "probe-coder", team_name=TEAM, now=T0) == 1, (
             "exactly one record — job 1 — may be discharged by a wait flagged "
             "before job 2 was launched"
         )
@@ -349,7 +349,7 @@ class TestDischargeSequences:
         than discovered.
         """
         self._seed()
-        # no idle occurs, so discharge_acknowledged is never called
+        # no idle occurs, so discharge_acknowledged_for_owner is never called
         assert unflagged_fire(_task(), team_name=TEAM, now=T0)[0] is True, (
             "with no idle between setting and clearing the flag, nothing observed "
             "the flag, so the record must still fire"
@@ -414,7 +414,7 @@ class TestSuppressionIsTemporaryNotPermanent:
             team_name=TEAM,
         ) is True
         flagged = _task(wait=_wait(T0 + timedelta(minutes=1)))
-        assert discharge_acknowledged(flagged, team_name=TEAM, now=T0) == 1
+        assert discharge_acknowledged_for_owner([flagged], "probe-coder", team_name=TEAM, now=T0) == 1
         return flagged
 
     def test_job2_is_SILENT_while_the_job1_wait_is_still_open(self):
@@ -549,7 +549,7 @@ class TestOutstandingUnflagged:
     def test_the_discharge_read_stays_RAW_so_it_can_still_see_a_flag(self):
         """Gate B must NOT move into any read the discharge uses.
 
-        `discharge_acknowledged` retires a record BY observing that a valid
+        `discharge_acknowledged_for_owner` retires a record BY observing that a valid
         wait covers it. If the loader pre-filtered flagged records away, the
         discharge would never see one and the fix would die silently — green,
         because every test of the gates would still pass.
@@ -947,7 +947,7 @@ class TestTheClockIsNotDecorative:
     # the one open path that writes; `state_file.read_text` only reads. The
     # clockless writers are the functions in THIS module that reach that path
     # with no `now=` and no clock read. Writers that DO take a clock
-    # (`_atomic_update_records`, `append_record`, `discharge_acknowledged`,
+    # (`_atomic_update_records`, `append_record`, `discharge_acknowledged_for_owner`,
     # `stamp_idled_at`, `record_background_launch`) are outside this list on
     # purpose. Listed as a DECISION rather than as an inventory: if the write
     # path is restructured, re-derive it.
@@ -1127,3 +1127,62 @@ class TestTheLaunchPathThreadsOneClock:
             "the new row was stamped %r, not the injected clock %r, so the "
             "stamp ran on the real clock" % (new, self.NOW.isoformat(timespec="seconds"))
         )
+
+
+
+class TestOneDischargePassPerIdle:
+    """An idle retires every acknowledged record in ONE registry update."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_team(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+
+    def test_an_idle_discharges_every_owned_task_in_one_registry_write(self, monkeypatch):
+        """30 owned tasks, each with a covering wait and its own record: one write drops all 30."""
+        from shared import background_work as bw
+        from shared import state_file
+
+        import teammate_idle
+
+        owner = "probe-coder"
+        tasks = [
+            _task(task_id=str(i), wait=_wait(T0 + timedelta(minutes=1)))
+            for i in range(30)
+        ]
+        assert bw.save_records(
+            [_record(task_ids=[str(i)], registered_at=_iso(T0)) for i in range(30)],
+            team_name=TEAM,
+        ) is True
+        registry = bw.registry_path(TEAM)
+        registry_writes = []
+        real_locked_update = state_file.locked_update
+
+        def counting_locked_update(path, apply, root, *args, **kwargs):
+            if Path(path) == registry:
+                registry_writes.append(path)
+            return real_locked_update(path, apply, root, *args, **kwargs)
+
+        monkeypatch.setattr(state_file, "locked_update", counting_locked_update)
+        teammate_idle.check_unflagged_background(tasks, owner, TEAM, now=T0)
+
+        assert len(registry_writes) == 1, (
+            f"the idle made {len(registry_writes)} registry updates for 30 owned "
+            "tasks; the discharge must be one pass"
+        )
+        assert load_records_for_discharge(TEAM, now=T0) == []
+
+    def test_one_pass_drops_only_covered_records(self):
+        """Guard arm: a wait anchored before its record's launch does not discharge it."""
+        from shared import background_work as bw
+
+        covered = _task(task_id="A", wait=_wait(T0 + timedelta(minutes=1)))
+        not_covered = _task(task_id="B", wait=_wait(T0 - timedelta(minutes=1)))
+        assert bw.save_records(
+            [_record(task_ids=["A"], registered_at=_iso(T0)),
+             _record(task_ids=["B"], registered_at=_iso(T0))],
+            team_name=TEAM,
+        ) is True
+        assert discharge_acknowledged_for_owner(
+            [covered, not_covered], "probe-coder", team_name=TEAM, now=T0
+        ) == 1
+        assert [r["task_ids"] for r in load_records_for_discharge(TEAM, now=T0)] == [["B"]]
