@@ -92,6 +92,59 @@ def test_launch():
 
 NODE = "test_synthetic.py::test_launch"
 
+CLASS_ATTRIBUTE = """\
+import os
+
+LOW, HIGH = float(os.environ["CLOCK_LOW"]), float(os.environ["CLOCK_HIGH"])
+
+
+class Holder:
+    stat = os.stat
+    lstat = os.lstat
+    fstat = os.fstat
+    scandir = os.scandir
+    utime = os.utime
+
+
+def test_a_class_attribute_call_is_unbound_and_shifted(tmp_path):
+    path = tmp_path / "f"
+    path.write_text("x")
+    holder = Holder()
+    assert LOW <= holder.stat(str(path)).st_mtime <= HIGH
+    assert LOW <= holder.lstat(str(path)).st_mtime <= HIGH
+    with open(path, "rb") as fh:
+        assert LOW <= holder.fstat(fh.fileno()).st_mtime <= HIGH
+    with holder.scandir(str(tmp_path)) as entries:
+        assert LOW <= [e for e in entries][0].stat().st_mtime <= HIGH
+    holder.utime(str(path), (1_000_000_000, 1_000_000_000))
+    assert os.stat(path).st_mtime == 1_000_000_000
+"""
+
+SUPPORTS_PARITY = """\
+import os
+import posix
+
+import pytest
+
+SETS = ("supports_dir_fd", "supports_fd", "supports_follow_symlinks", "supports_effective_ids")
+
+
+@pytest.mark.parametrize("name", ["stat", "lstat", "fstat", "scandir", "utime"])
+def test_the_wrapper_is_in_every_set_its_real_function_is_in(name):
+    assert getattr(os, name) is not getattr(posix, name), "the shim is not installed"
+    for support in SETS:
+        members = getattr(os, support)
+        assert (getattr(os, name) in members) == (getattr(posix, name) in members), (name, support)
+"""
+
+FD_PARITY = """\
+import shutil
+
+
+def test_shutil_takes_the_same_rmtree_path():
+    assert shutil._use_fd_functions is @EXPECTED@
+"""
+
 MULTI_LINE_LAUNCH = '''\
 import os
 import subprocess
@@ -331,3 +384,25 @@ def test_a_multi_line_argument_stays_on_one_census_line(tmp_path):
     rc, out = _run_child(tmp_path, MULTI_LINE_LAUNCH)
     line = "%s (call): python3 -c pass pass -- its env drops PACT_TEST_CLOCK_SHIFT_SECONDS" % NODE
     assert (rc != 0, line in out) == (True, True), out
+
+
+def test_a_class_attribute_call_is_unbound_and_shifted(tmp_path):
+    """MUTANT: install plain functions. A class holding one binds it as a method
+    and passes itself as the path, as 3.9's pathlib accessor does."""
+    rc, out = _run_child(tmp_path, CLASS_ATTRIBUTE)
+    assert (rc, "1 passed" in out) == (0, True), out
+
+
+def test_supports_membership_matches_the_real_functions(tmp_path):
+    """MUTANT: the wrappers do not join the os.supports_* sets."""
+    rc, out = _run_child(tmp_path, SUPPORTS_PARITY)
+    assert (rc, "5 passed" in out) == (0, True), out
+
+
+def test_shutil_takes_the_same_rmtree_path_as_unshifted(tmp_path):
+    """shutil fixes _use_fd_functions from the os.supports_* sets when it is
+    imported. MUTANTS: skip joining the sets, or join them after shutil is imported."""
+    import shutil
+
+    rc, out = _run_child(tmp_path, FD_PARITY.replace("@EXPECTED@", repr(shutil._use_fd_functions)))
+    assert (rc, "1 passed" in out) == (0, True), out

@@ -21,7 +21,10 @@ os.lstat, os.fstat and os.scandir's DirEntry.stat return atime, mtime, ctime
 so a file written now reads as shifted-now and an explicit utime reads back
 what it set. Not shifted: time.monotonic and time.perf_counter, which measure
 intervals, not dates. The posix module is left alone: importlib holds
-posix.stat, so bytecode validation stays on the real clock. A zero or unset
+posix.stat, so bytecode validation stays on the real clock. The wrappers are
+callable instances, not functions, so a class holding one as an attribute calls
+it unbound, and each joins the os.supports_* sets its real function is in, so
+stdlib takes the same branches shifted as unshifted. A zero or unset
 shift installs nothing.
 
 datetime.datetime and datetime.date are replaced by subclasses whose isinstance
@@ -100,8 +103,6 @@ if _SECONDS:
     # pickle form, which carries every platform field by name.
     _NS = int(_SECONDS * 1_000_000_000)
     _TIME_FIELDS = ("st_atime", "st_mtime", "st_ctime", "st_birthtime")
-    _real_stat, _real_lstat, _real_fstat = os.stat, os.lstat, os.fstat
-    _real_scandir, _real_utime = os.scandir, os.utime
 
     def _shift_stat(st):
         cls, (seq, extras) = st.__reduce__()
@@ -115,14 +116,8 @@ if _SECONDS:
                 extras[field + "_ns"] += _NS
         return cls(seq, extras)
 
-    def _stat(*args, **kwargs):
-        return _shift_stat(_real_stat(*args, **kwargs))
-
-    def _lstat(*args, **kwargs):
-        return _shift_stat(_real_lstat(*args, **kwargs))
-
-    def _fstat(*args, **kwargs):
-        return _shift_stat(_real_fstat(*args, **kwargs))
+    def _stat_call(real, *args, **kwargs):
+        return _shift_stat(real(*args, **kwargs))
 
     class _ShiftedDirEntry:
         """A DirEntry whose stat() is shifted. Not an os.DirEntry instance, so
@@ -164,22 +159,51 @@ if _SECONDS:
         def close(self):
             self._iterator.close()
 
-    def _scandir(*args, **kwargs):
-        return _ShiftedScandir(_real_scandir(*args, **kwargs))
+    def _scandir_call(real, *args, **kwargs):
+        return _ShiftedScandir(real(*args, **kwargs))
 
-    def _utime(path, times=None, *, ns=None, **kwargs):
+    def _utime_call(real, path, times=None, *, ns=None, **kwargs):
         # times=None means the real now, which already reads back shifted.
         if times is not None:
             times = (times[0] - _SECONDS, times[1] - _SECONDS)
         if ns is not None:
             kwargs["ns"] = (ns[0] - _NS, ns[1] - _NS)
-        return _real_utime(path, times, **kwargs)
+        return real(path, times, **kwargs)
 
-    os.stat = _stat
-    os.lstat = _lstat
-    os.fstat = _fstat
-    os.scandir = _scandir
-    os.utime = _utime
+    class _Shifted:
+        """A shifted os function. An instance rather than a function, so a class
+        that stores it as an attribute calls it unbound, as it would the builtin."""
+
+        def __init__(self, real, call):
+            self._real, self._call = real, call
+            self.__name__ = real.__name__
+            self.__doc__ = real.__doc__
+
+        def __call__(self, *args, **kwargs):
+            return self._call(self._real, *args, **kwargs)
+
+        def __repr__(self):
+            return "<clock-shifted os.%s>" % self.__name__
+
+    _CALLS = {
+        "stat": _stat_call,
+        "lstat": _stat_call,
+        "fstat": _stat_call,
+        "scandir": _scandir_call,
+        "utime": _utime_call,
+    }
+    # Stdlib branches on membership in these sets (shutil fixes its rmtree path
+    # from them when it is imported), so each wrapper joins every set its real
+    # function is in.
+    _SUPPORTS = [getattr(os, n) for n in ("supports_dir_fd", "supports_fd", "supports_follow_symlinks",
+                                          "supports_effective_ids") if hasattr(os, n)]
+    for _name, _call in _CALLS.items():
+        _real = getattr(os, _name)
+        _wrapper = _Shifted(_real, _call)
+        setattr(os, _name, _wrapper)
+        for _support in _SUPPORTS:
+            if _real in _support:
+                _support.add(_wrapper)
     datetime.datetime = ShiftedDatetime
     datetime.date = ShiftedDate
     time.time = _time
