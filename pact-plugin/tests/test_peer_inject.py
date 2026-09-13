@@ -1,7 +1,7 @@
 # pact-plugin/tests/test_peer_inject.py
 """
-Tests for peer_inject.py — SubagentStart hook that injects peer teammate
-list into newly spawned PACT agents.
+Tests for peer_inject.py — SubagentStart hook that injects the peer teammate
+list into every subagent started while a team resolves.
 
 Tests cover:
 1. Injects peer names when team has multiple members (+ teachback reminder)

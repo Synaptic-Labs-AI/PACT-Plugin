@@ -10,7 +10,7 @@ Tests cover:
 5. TeammateIdle hook entry exists (new in SDK optimization)
 6. SessionEnd is async (new in SDK optimization)
 7. Matcher patterns use valid pipe syntax
-8. SubagentStart matcher covers all PACT agent types
+8. SubagentStart registration selects every spawnable PACT agent type
 """
 import json
 import re

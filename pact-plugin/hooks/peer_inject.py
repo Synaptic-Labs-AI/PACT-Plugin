@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/peer_inject.py
-Summary: SubagentStart hook that injects peer teammate list into newly
-         spawned PACT agents via additionalContext.
-Used by: hooks.json SubagentStart hook (matcher: pact-* agent types)
+Summary: SubagentStart hook that injects the peer teammate list into every
+         subagent started while a PACT team resolves, via additionalContext.
+Used by: hooks.json SubagentStart hook. It runs for every subagent start,
+         including non-PACT types such as Explore, general-purpose and Plan,
+         and emits nothing when no team config resolves.
 
 Replaces the manual pattern of listing peer names in task descriptions.
 Agents automatically know who else is on the team.
