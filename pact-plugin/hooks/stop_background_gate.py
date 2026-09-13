@@ -12,13 +12,15 @@ Used by: hooks.json Stop (synchronous). The decision is shared with
 # is set, so a turn end the agent cannot satisfy is not refused again.
 
 This runs at every turn end of every session with the plugin installed, so
-nothing but json and sys is imported until a running job is found.
+no plugin module is imported until a running job is found.
 
 Input: JSON on stdin; reads hook_event_name, background_tasks, session_crons,
        stop_hook_active, session_id, agent_type and agent_id.
 Output: {"decision": "block", "reason": ...} to refuse the stop; nothing when
         no job is running; {"suppressOutput": true} otherwise. Always exit 0.
 """
+
+from __future__ import annotations
 
 import json
 import sys
