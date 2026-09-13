@@ -625,7 +625,8 @@ from pathlib import Path
 os.environ["CLAUDE_CONFIG_DIR"] = os.sys.argv[1]
 from shared import background_work as bw
 if os.environ.get("ADV_NO_FLOCK"):
-    bw.HAS_FLOCK = False
+    from shared import state_file
+    state_file.fcntl.flock = lambda *args, **kwargs: None
 tag, n, rv = os.sys.argv[2], int(os.sys.argv[3]), Path(os.sys.argv[4])
 (rv / tag).write_text("ready")
 deadline = time.time() + 30
@@ -657,7 +658,7 @@ class TestRegistryUnderConcurrentProcesses:
     single-process test: the file stays well-formed and merely holds fewer
     records than were written, which no schema or fail-open arm can see.
 
-    NON-VACUITY, MEASURED. The identical probe with `HAS_FLOCK` disabled as
+    NON-VACUITY, MEASURED. The identical probe with the lock disabled as
     the only change kept 1, 9 and 15 records of 80 across three runs; the
     locked path kept 80/80 across three runs. The control ships below rather
     than living in the docstring, because a number in prose is not a tripwire.
@@ -695,7 +696,6 @@ class TestRegistryUnderConcurrentProcesses:
         except (ValueError, KeyError, TypeError):
             return 0
 
-    @pytest.mark.skipif(not bw.HAS_FLOCK, reason="no fcntl on this platform")
     def test_no_append_is_lost_when_two_processes_write_at_once(self, tmp_path):
         assert self._run(tmp_path, no_flock=False) == 2 * self.PER_PROC
 
@@ -717,7 +717,7 @@ class TestRegistryUnderConcurrentProcesses:
     # assertion on it belongs nowhere near a merge gate.
     #
     # TO RE-VERIFY THE POSITIVE ARM IS NON-VACUOUS, run it by hand with
-    # `bw.HAS_FLOCK = False` injected into the helper and the count raised:
+    # `state_file.fcntl.flock` replaced with a no-op (ADV_NO_FLOCK=1) and the count raised:
     #
     #     PER_PROC=200, ADV_NO_FLOCK=1  -> expect heavy loss, repeated over
     #     several runs; ANY run that keeps 400/400 means the lock is being

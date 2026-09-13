@@ -86,20 +86,32 @@ def _direct_hook_imports(
 ) -> set[str]:
     """hooks/ module stems imported DIRECTLY by `path` — resolves top-level
     (`import X` / `from X import`), shared (`from shared.X import` /
-    `import shared.X`), AND relative (`from .X import`, level>0) edges, and
+    `import shared.X`), relative (`from .X import`, level>0), AND
+    module-in-the-alias (`from . import X` / `from shared import X`) edges, and
     descends into function/try-nested imports via ast.walk (e.g. session_init's
     function-level `from pin_staleness_gate import ...`).
+
+    The module-in-the-alias forms name the MODULE after `import`, not after
+    `from`, so reading only `node.module` misses them: `from . import X` has
+    no module at all, and `from shared import X` names only the package. An
+    alias that is a function or constant rather than a module is not in `idx`
+    and adds nothing.
 
     `shared_only` models the BUG the architect caught — a derivation that only
     follows hooks/shared/ edges and never traverses top-level helper modules."""
     out: set[str] = set()
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            parts = node.module.split(".")
-            cand = parts[1] if parts[0] == "shared" and len(parts) > 1 else parts[0]
-            if cand in idx:
-                out.add(cand)
+        if isinstance(node, ast.ImportFrom):
+            if node.module:
+                parts = node.module.split(".")
+                cand = parts[1] if parts[0] == "shared" and len(parts) > 1 else parts[0]
+                if cand in idx:
+                    out.add(cand)
+            if node.module is None or node.module == "shared":
+                for alias in node.names:
+                    if alias.name in idx:
+                        out.add(alias.name)
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 parts = alias.name.split(".")
@@ -169,6 +181,27 @@ class TestClosureMatchesLiveImportGraph:
     def test_seam_reading_helpers_is_the_union(self):
         union = frozenset().union(*_SEAM_HOOK_HELPER_CLOSURE.values())
         assert SEAM_READING_HELPERS == union
+
+    def test_the_oracle_sees_a_module_named_in_the_import_alias(self, tmp_path):
+        """`from . import X` and `from shared import X` are edges to module X.
+
+        Both forms put the module after `import`. An oracle reading only the
+        `from` part sees no module in the first and only the package in the
+        second, so a helper imported either way drops out of every derived
+        closure and the literal can omit it while the drift arm stays green.
+        A function or constant named the same way is not a module and adds
+        nothing.
+        """
+        idx = _module_index()
+        probe = tmp_path / "probe.py"
+        probe.write_text(
+            "from . import state_file\n"
+            "def f():\n"
+            "    from shared import pact_context, get_team_name\n",
+            encoding="utf-8",
+        )
+        assert {"state_file", "pact_context"} <= _direct_hook_imports(probe, idx)
+        assert "get_team_name" not in _direct_hook_imports(probe, idx)
 
 
 # The TOP-LEVEL helpers (hooks/*.py, NOT hooks/shared/*.py) that session_init

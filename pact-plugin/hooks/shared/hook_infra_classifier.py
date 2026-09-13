@@ -144,20 +144,21 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "background_launch", "background_work",
         "constants", "intentional_wait", "pact_context",
         "paths",
-        "session_journal", "session_registry", "session_state", "task_utils",
-    }),
+        "session_journal", "session_registry", "session_state", "state_file",
+        "task_utils",
+    }),  # state_file reached via background_work's state-file reads and writes.
     "teammate_idle": frozenset({
         "background_launch", "background_work",
         "constants", "error_output", "intentional_wait",
         "pact_context", "paths", "session_journal",
-        "session_registry", "session_state", "task_utils",
+        "session_registry", "session_state", "state_file", "task_utils",
     }),
     "track_files": frozenset({
         "background_launch", "background_work",
         "claude_md_manager", "constants", "error_output",
         "failure_cause", "intentional_wait", "pact_context", "paths",
         "pin_caps", "session_journal", "session_registry", "session_state",
-        "staleness", "task_utils",
+        "staleness", "state_file", "task_utils",
     }),  # regenerated from the live derivation, not hand-listed: the Layer 1
          # fold adds background_work + intentional_wait, and the rest were
          # already reached through the pin-staleness clear this hook carries.
@@ -170,13 +171,16 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # seam (emit_task_metadata_snapshot); its own transitive edges
          # (agent_handoff_marker, session_journal) were already here.
     "session_init": frozenset({
+        "backlog_store",
         "claude_md_manager", "constants", "dispatch_helpers", "failure_cause",
         "failure_log", "handoff_schema",
         "merge_guard_common", "pact_config", "pact_context", "paths",
         "peer_context", "pin_caps", "plugin_manifest",
         "session_journal", "session_registry", "session_resume",
         "session_state", "staleness", "symlinks", "task_utils", "teammate_mode",
-    }),  # pact_config reached via the SessionStart runtime-config injection
+    }),  # backlog_store reached via `from shared import backlog_store`, an edge
+         # the oracle resolves since it reads modules named in the import alias.
+         # pact_config reached via the SessionStart runtime-config injection
          # (session_init -> shared.pact_config.llm_options); stdlib-only, so it
          # adds no further transitive shared edges.
          # top-level helpers (pin_caps, staleness) reached here:

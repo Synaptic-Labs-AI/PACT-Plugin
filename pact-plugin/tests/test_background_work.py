@@ -943,15 +943,15 @@ class TestTheClockIsNotDecorative:
         )
 
     # MEASURED FROM SOURCE, NOT COPIED FROM A LIST. Every state-file write in
-    # the module goes through `_locked_update`, the one open path that writes.
-    # The clockless writers are that helper plus each function that reaches it
+    # the module goes through `state_file.locked_update` (or its `write_text`),
+    # the one open path that writes; `state_file.read_text` only reads. The
+    # clockless writers are the functions in THIS module that reach that path
     # with no `now=` and no clock read. Writers that DO take a clock
     # (`_atomic_update_records`, `append_record`, `discharge_acknowledged`,
     # `stamp_idled_at`, `record_background_launch`) are outside this list on
-    # purpose, and `_read_text_shared` only reads. Listed as a DECISION rather
-    # than as an inventory: if the write path is restructured, re-derive it.
+    # purpose. Listed as a DECISION rather than as an inventory: if the write
+    # path is restructured, re-derive it.
     CLOCKLESS_WRITERS = (
-        "_locked_update",
         "save_records",
         "update_unflagged_idle_counts",
         "save_unflagged_idle_counts",
