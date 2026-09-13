@@ -7,7 +7,8 @@ Summary: Team-scoped registry of outstanding teammate background Bash
          Pure helpers and fail-open loaders — no hook I/O, no registration.
 Used by: track_files.py (Layer 1 writer), teammate_idle.py (Layer 2
          advisory), missed_wake_scan.py (Layer 3 lead surface),
-         wait_filler_gate.py (who receives the launch advisory).
+         wait_filler_gate.py (who receives the launch advisory),
+         task_lifecycle_gate.py (adds a claimed task to its owner's records).
 
 A teammate who backgrounds Bash and ends the turn with no valid
 intentional_wait is recorded here. Detection requires a registry row PLUS
@@ -748,6 +749,49 @@ def discharge_acknowledged_for_owner(
 
     _atomic_update_records(_apply, team_name=team_name, now=now)
     return dropped
+
+
+def extend_records_for_claim(
+    owner: Any,
+    task_id: Any,
+    team_name: str | None = None,
+    now: datetime | None = None,
+) -> int:
+    """Add a task its owner just claimed to every live record that owner launched.
+    Returns the number of records extended.
+
+    A record lists the tasks its launcher held at LAUNCH. A task claimed later
+    is not on it, so a wait flagged on that task could neither silence the
+    record nor discharge it. Listing the task lets it do both.
+
+    `registered_at` and `anchor_completed` stay as written, so a wait still
+    clears only launches older than its anchor (`wait_covers_record`). Expired
+    records are pruned by the read inside the update, so only live records
+    gain the task. An absent registry creates no file.
+    """
+    if not isinstance(owner, str) or not owner or task_id is None:
+        return 0
+    task_id = str(task_id)
+    if not task_id:
+        return 0
+    extended = 0
+
+    def _apply(records: list[dict]) -> tuple[list[dict], bool]:
+        nonlocal extended
+        # Reset per call: the state-file writer may call this twice.
+        extended = 0
+        out = []
+        for record in records:
+            listed = record_task_ids(record)
+            if record.get("agent_name") == owner and task_id not in listed:
+                record = dict(record)
+                record["task_ids"] = listed + [task_id]
+                extended += 1
+            out.append(record)
+        return out, extended > 0
+
+    ok = _atomic_update_records(_apply, team_name=team_name, now=now)
+    return extended if ok else 0
 
 
 def unflagged_fire(

@@ -214,6 +214,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "intentional_wait", "pact_context", "paths", "session_journal",
         "session_registry", "session_state", "task_metadata_snapshot",
         "task_utils", "teachback_schema", "tool_response", "variety_scorer",
+        "background_launch", "background_work", "state_file",
     }),  # task_metadata_snapshot reached via the lead-completion +
          # post-completion-backstop snapshot seams; its transitive edges
          # were already in this closure.
