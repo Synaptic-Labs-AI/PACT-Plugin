@@ -541,3 +541,98 @@ class TestEveryResolverCallerCallsTheEscapeGuard:
         callers, unguarded = _unguarded_callers(source, _DISPLAY_RESOLVER, _DISPLAY_GUARD)
         assert callers == ["unguarded", "misordered", "guarded"]
         assert unguarded == ["unguarded", "misordered"]
+
+
+# ---------------------------------------------------------------------------
+# Every production call of the scope predicate passes the worktree record
+# ---------------------------------------------------------------------------
+
+_SCOPE_PREDICATE = "stays_in_declared_project"
+_KNOWN_PREDICATE_CALLERS = {
+    "_refuse_ambient_sync_on_declared_scope_escape",
+    "resolve_claude_md",
+}
+
+
+def _predicate_calls_without_record(source):
+    """Return (callers, missing): the functions that call the scope predicate,
+    under its own name, an imported alias or a module attribute, and those among
+    them with a call that passes no worktree record."""
+    import ast
+
+    tree = ast.parse(source)
+    names = {_SCOPE_PREDICATE}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            names |= {a.asname or a.name for a in node.names if a.name == _SCOPE_PREDICATE}
+    callers, missing = [], []
+    for function in ast.walk(tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        calls = [
+            call for call in ast.walk(function)
+            if isinstance(call, ast.Call) and (
+                (isinstance(call.func, ast.Name) and call.func.id in names)
+                or (isinstance(call.func, ast.Attribute) and call.func.attr == _SCOPE_PREDICATE)
+            )
+        ]
+        if not calls:
+            continue
+        callers.append(function.name)
+        if any(
+            len(call.args) < 4 and not any(k.arg == "worktree_identity" for k in call.keywords)
+            for call in calls
+        ):
+            missing.append(function.name)
+    return callers, missing
+
+
+class TestEveryScopePredicateCallPassesTheRecord:
+    """The worktree record decides a removed declaration only where a caller
+    passes it, so a caller that omits it judges that layout differently from
+    the others."""
+
+    def test_every_production_call_of_the_scope_predicate_passes_the_worktree_record(self):
+        """MUTANT that reddens this arm: drop `worktree_identity=` from the call
+        in `_refuse_ambient_sync_on_declared_scope_escape` or in
+        `archive_pin.resolve_claude_md`. The failure names that caller."""
+        members, missing = [], []
+        for path in _production_files():
+            callers, lacking = _predicate_calls_without_record(path.read_text(encoding="utf-8"))
+            rel = path.relative_to(_PLUGIN_ROOT)
+            members += [f"{rel}::{name}" for name in callers]
+            missing += [f"{rel}::{name}" for name in lacking]
+
+        found = {member.split("::")[1] for member in members}
+        assert _KNOWN_PREDICATE_CALLERS <= found, (
+            f"the scan found {members}; it must reach every known caller, "
+            "or it is not reading the files it claims to"
+        )
+        assert missing == [], (
+            f"these callers judge project scope without the worktree record: {missing}"
+        )
+
+    def test_the_scan_catches_a_call_without_the_record_under_any_name(self):
+        """The live control: the scan above finds an aliased and an attribute
+        call, and tells a call that passes the record from one that does not."""
+        import textwrap
+
+        source = textwrap.dedent(f"""
+            from shared.project_scope import {_SCOPE_PREDICATE} as _renamed
+            import shared.project_scope as scope
+
+            def aliased():
+                _renamed(a, b, c)
+
+            def attribute():
+                scope.{_SCOPE_PREDICATE}(a, b, c)
+
+            def by_keyword():
+                _renamed(a, b, c, worktree_identity=record)
+
+            def by_position():
+                scope.{_SCOPE_PREDICATE}(a, b, c, record)
+        """)
+        callers, missing = _predicate_calls_without_record(source)
+        assert callers == ["aliased", "attribute", "by_keyword", "by_position"]
+        assert missing == ["aliased", "attribute"]

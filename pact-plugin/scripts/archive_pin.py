@@ -494,13 +494,16 @@ def extract_pin_block(pinned_content: str, index: int, pins) -> str:
     return pinned_content[block_start:block_end]
 
 
-# The project-identity predicate lives in hooks/shared/project_scope.py, where
-# the working-memory projection uses the same one, so the two refusals cannot
+# The project-identity predicate, and the reader for the session's worktree
+# record it takes, live in hooks/shared/project_scope.py, where the
+# working-memory projection uses the same ones, so the two refusals cannot
 # drift apart. Imported through the `shared` PACKAGE, which the hooks directory
 # appended to sys.path above makes importable, so this module and every other
-# importer hold ONE module object. Re-exported, never wrapped: a wrapper could
-# acquire behaviour and become a second definition.
+# importer hold ONE module object -- and skills/ stays reached by subprocess
+# only. Re-exported, never wrapped: a wrapper could acquire behaviour and
+# become a second definition.
 from shared.project_scope import (  # noqa: E402
+    get_worktree_identity_from_session_record as _get_worktree_identity_from_session_record,
     stays_in_declared_project as _stays_in_declared_project,
 )
 
@@ -544,7 +547,10 @@ def resolve_claude_md():
     if env_dir:
         env_path = Path(env_dir)
         if (_find_existing_claude_md(env_path) is None
-                and not _stays_in_declared_project(env_path, base, path)):
+                and not _stays_in_declared_project(
+                    env_path, base, path,
+                    worktree_identity=_get_worktree_identity_from_session_record(),
+                )):
             raise _Unevaluable(
                 f"CLAUDE_PROJECT_DIR={env_dir} contains no CLAUDE.md, and "
                 f"resolution fell through to {path} in a different project. "

@@ -1,11 +1,17 @@
 """
 Location: pact-plugin/hooks/shared/project_scope.py
-Summary: Predicates answering "are these two directories the same project?".
+Summary: Predicates answering "are these two directories the same project?",
+         and the reader for the session record that answers it for a declared
+         worktree that no longer exists.
 Used by: scripts/archive_pin.py (pin archival resolution) and
          skills/pact-memory/scripts/working_memory.py (working-memory
          projection), both of which resolve a CLAUDE.md and must tell a
          legitimate fall-through from a wrong-project one. Both call
-         `stays_in_declared_project`; `same_repository` is one of its rules.
+         `stays_in_declared_project` with
+         `get_worktree_identity_from_session_record()`; `same_repository` is
+         one of its rules. hooks/session_init.py writes the record
+         (`WORKTREE_IDENTITY_FILE`); skills/pact-memory/scripts/pact_session.py
+         re-exports the reader and shares `_session_record_on_disk`.
 
 WHY THIS IS NOT IN git_helpers.py. That module is a narrow subprocess
 wrapper whose docstring scopes it to "try/except + subprocess boilerplate
@@ -23,11 +29,13 @@ consumer would acquire a global namespace mutation to borrow one predicate.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Optional, Set
 
 from .git_helpers import run_git
+from .pact_context import _UNSAFE_SLUG_CHARS_RE
 from .paths import get_claude_config_dir
 
 # Git LOCATES the repository from these instead of discovering it from `-C` or
@@ -261,3 +269,70 @@ def stays_in_declared_project(
     return anchor_common_dir is not None and anchor_common_dir == _rev_parse_path(
         resolved, "--git-common-dir"
     )
+
+
+def _session_record_on_disk(env_session: str, filename: str) -> dict:
+    """Find the one `filename` in this session id's folder, and parse it.
+
+    Session folders sit under `pact-sessions/<project slug>/<session id>/`, and
+    a reader that knows only the session id cannot know the slug, so it globs
+    every project for the id.
+
+    Returns the parsed mapping, or {} on any failure: the glob raised, the
+    match count was not exactly one (uniqueness was measured on one machine,
+    not guaranteed, so picking the first would be a coin toss over which
+    project's session this is), the file did not parse, or the payload was
+    not a mapping. Fail-open by posture: callers land on their own fallback.
+    """
+    try:
+        sessions_root = get_claude_config_dir() / "pact-sessions"
+        # The writers collapsed unsafe characters in the id; match that name.
+        safe_session = _UNSAFE_SLUG_CHARS_RE.sub("_", env_session)
+        matches = list(sessions_root.glob(f"*/{safe_session}/{filename}"))
+    except OSError:
+        return {}
+
+    if len(matches) != 1:
+        return {}
+
+    try:
+        data = json.loads(matches[0].read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+    return data if isinstance(data, dict) else {}
+
+
+_WORKTREE_IDENTITY_PATHS = ("declared", "worktree", "common_dir")
+
+
+def get_worktree_identity_from_session_record() -> dict:
+    """Return the worktree identity session_init recorded for this session, or {}.
+
+    session_init writes it into the session's own folder, for every role, when
+    the session starts inside a linked worktree. The working-memory write guard
+    and archive_pin pass it to `stays_in_declared_project`, which reads it only
+    when the declared directory no longer exists. Both hold this one object:
+    pact_session re-exports it, and archive_pin imports it from here.
+
+    A test process reads no record, and neither does a process without
+    CLAUDE_CODE_SESSION_ID. Nothing is cached.
+
+    Returns {} unless the record's `session_id` equals CLAUDE_CODE_SESSION_ID
+    and `declared`, `worktree` and `common_dir` are all absolute path strings.
+    Never raises.
+    """
+    # Same guard pair as pact_session._discover_session_id -- keep in sync.
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return {}
+    env_session = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    if not env_session:
+        return {}
+    record = _session_record_on_disk(env_session, WORKTREE_IDENTITY_FILE)
+    if record.get("session_id") != env_session:
+        return {}
+    for key in _WORKTREE_IDENTITY_PATHS:
+        value = record.get(key)
+        if not isinstance(value, str) or not os.path.isabs(value):
+            return {}
+    return record
