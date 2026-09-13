@@ -2,6 +2,7 @@
 Location: pact-plugin/hooks/shared/state_file.py
 Summary: The one write path for PACT's small JSON state files: a sidecar lock,
          a temp file, fsync, and an atomic replace. Readers take no lock.
+         Every read and write must stay inside a caller-supplied root.
 Used by: shared/background_work.py (the background-work registry and the
          unflagged idle counter).
 
@@ -16,6 +17,17 @@ read-modify-write.
 
 A READER NEEDS NO LOCK. `os.replace` swaps the name in one step, so a reader
 opens either the whole previous file or the whole new one, never a torn one.
+
+CONTAINMENT. The file's directory is resolved with `os.path.realpath` and must
+stay inside the resolved `root`, so a symlinked team directory pointing outside
+`teams/` is refused rather than followed. Both sides are resolved, so a
+symlinked config root, or a team link to another folder inside `teams/`, still
+works. Every open then uses the resolved directory, so the check and the open
+name the same place. A refused write raises OSError; a refused read raises
+FileNotFoundError, which callers already treat as "no file".
+Remaining, and adversarial-only: a process swapping a path component between
+the resolve and the open can redirect one write. That needs a deliberate race
+inside the user's own config root by something already able to write there.
 
 Stdlib only, and nothing from `shared`: a hook that needs a state file pays
 for this module and nothing else.
@@ -36,17 +48,35 @@ _LOCK_FLAGS = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
 _TEMP_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
+def _contained_directory(path: Path, root: Path) -> Path:
+    """The resolved directory of `path`, or OSError if it leaves the resolved `root`.
+
+    The directory may equal the root: a file directly inside its root is allowed.
+    """
+    real_root = os.path.realpath(root)
+    real_directory = os.path.realpath(path.parent)
+    if os.path.commonpath([real_directory, real_root]) != real_root:
+        raise OSError(f"state file {path} resolves outside its root {root}")
+    return Path(real_directory)
+
+
 def read_text(path: Path, root: Path) -> str:
     """Return a state file's text, reading without a lock.
 
-    `root` is the directory the file must stay under.
+    `root` is the directory the file must stay under; a file whose directory
+    resolves outside it reads as absent (FileNotFoundError).
 
     Opens with O_NOFOLLOW, so a symlink at the path raises OSError rather than
     reading its target. Undecodable bytes are replaced rather than raised, so
     a corrupt file parses as empty and the next write rewrites it clean.
     Raises FileNotFoundError when the file does not exist.
     """
-    fd = os.open(str(path), _READ_FLAGS)
+    path = Path(path)
+    try:
+        directory = _contained_directory(path, root)
+    except OSError as refused:
+        raise FileNotFoundError(str(refused)) from refused
+    fd = os.open(str(directory / path.name), _READ_FLAGS)
     with os.fdopen(fd, "rb") as f:
         data = f.read()
     return data.decode("utf-8", errors="replace")
@@ -94,7 +124,8 @@ def locked_update(
     callers catch it and fail open.
 
     `apply(text) -> (new_text, changed, result)`; `result` is returned. `root`
-    is the directory the file must stay under.
+    is the directory the file must stay under; a file whose directory resolves
+    outside it is refused with OSError before anything is opened.
 
     NO FILE IS CREATED FOR A NO-OP. When the file is absent, `apply` runs on
     empty text first, and if that changes nothing its result is returned
@@ -113,13 +144,14 @@ def locked_update(
         if not changed:
             return result
     path.parent.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
-    lock_fd = os.open(str(path.with_name(path.name + ".lock")), _LOCK_FLAGS, FILE_MODE)
+    target = _contained_directory(path, root) / path.name
+    lock_fd = os.open(str(target.with_name(target.name + ".lock")), _LOCK_FLAGS, FILE_MODE)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         try:
-            new_text, changed, result = apply(_current_text(path))
+            new_text, changed, result = apply(_current_text(target))
             if changed:
-                _replace(path, new_text)
+                _replace(target, new_text)
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
     finally:

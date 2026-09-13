@@ -253,3 +253,64 @@ def test_a_no_op_update_on_an_absent_file_creates_nothing(tmp_path):
     result = state_file.locked_update(target, lambda text: (text, False, "untouched"), tmp_path / "teams")
     assert result == "untouched"
     assert not (tmp_path / "teams").exists()
+
+
+# ---------------------------------------------------------------------------
+# Containment: a state file must stay inside its root.
+# ---------------------------------------------------------------------------
+
+
+def _link_team_outside(config: Path) -> Path:
+    """Make teams/<TEAM> a symlink to a directory outside teams/; return that directory."""
+    outside = config / "outside"
+    outside.mkdir()
+    (config / "teams").mkdir()
+    (config / "teams" / TEAM).symlink_to(outside, target_is_directory=True)
+    return outside
+
+
+def test_a_symlinked_team_directory_refuses_the_write(config_root):
+    """A team directory linked outside teams/ is refused, and nothing lands outside."""
+    outside = _link_team_outside(config_root)
+    assert bw.append_record(_record("1"), team_name=TEAM) is False
+    assert sorted(p.name for p in outside.iterdir()) == [], (
+        "a write through a symlinked team directory reached a directory outside teams/"
+    )
+
+
+def test_a_symlinked_team_directory_reads_nothing(config_root):
+    """A registry reached through a team directory linked outside teams/ reads as absent."""
+    outside = _link_team_outside(config_root)
+    (outside / bw.REGISTRY_FILENAME).write_text(
+        json.dumps({"records": [_record("1")]}), encoding="utf-8"
+    )
+    assert bw.load_records_for_discharge(TEAM) == [], (
+        "a read followed a symlinked team directory to a registry outside teams/"
+    )
+
+
+def test_a_symlinked_config_root_still_writes(tmp_path, monkeypatch):
+    """Guard arm: resolving both sides keeps a linked config directory working."""
+    real_config = tmp_path / "real-config"
+    real_config.mkdir()
+    linked_config = tmp_path / "linked-config"
+    linked_config.symlink_to(real_config, target_is_directory=True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(linked_config))
+    assert bw.append_record(_record("1"), team_name=TEAM) is True
+    assert (real_config / "teams" / TEAM / bw.REGISTRY_FILENAME).is_file()
+
+
+def test_a_team_link_to_a_folder_inside_teams_still_writes(config_root):
+    """Guard arm: a team directory linked to another folder inside teams/ is allowed."""
+    real_team = config_root / "teams" / "real-team"
+    real_team.mkdir(parents=True)
+    (config_root / "teams" / TEAM).symlink_to(real_team, target_is_directory=True)
+    assert bw.append_record(_record("1"), team_name=TEAM) is True
+    assert (real_team / bw.REGISTRY_FILENAME).is_file()
+
+
+def test_a_file_directly_in_its_root_still_writes(tmp_path):
+    """Guard arm: a file whose directory IS the root is inside it."""
+    root = tmp_path / "session-tracking"
+    state_file.write_text(root / "session.json", '{"files": []}', root)
+    assert state_file.read_text(root / "session.json", root) == '{"files": []}'
