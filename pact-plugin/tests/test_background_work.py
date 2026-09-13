@@ -1186,3 +1186,69 @@ class TestOneDischargePassPerIdle:
             [covered, not_covered], "probe-coder", team_name=TEAM, now=T0
         ) == 1
         assert [r["task_ids"] for r in load_records_for_discharge(TEAM, now=T0)] == [["B"]]
+
+
+# ---------------------------------------------------------- frame route
+
+
+class TestFrameTeamAndNameReadsATeammateIdleFrame:
+    """The frame route: a TeammateIdle frame's own `team_name` and
+    `teammate_name`, trusted only when that name is a member of that team."""
+
+    TEAM = "session-frameroute"
+    MEMBER = "frame-coder"
+
+    @pytest.fixture
+    def config(self, tmp_path, monkeypatch):
+        import json
+
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        team_dir = tmp_path / "teams" / self.TEAM
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text(json.dumps({
+            "leadSessionId": "frame-lead-session",
+            "members": [{"name": self.MEMBER, "agentId": f"{self.MEMBER}@{self.TEAM}",
+                         "agentType": "pact-backend-coder"}],
+        }))
+        return tmp_path
+
+    def _frame(self, team=None, name=None, session_id="frame-idle-session"):
+        return {"hook_event_name": "TeammateIdle", "session_id": session_id,
+                "team_name": team if team is not None else self.TEAM,
+                "teammate_name": name if name is not None else self.MEMBER}
+
+    def test_frame_team_and_name_resolves_a_teammate_idle_frame_without_context(self, config):
+        """REVERT PROOF. No context and no registry entry, so only the frame route
+        can resolve it."""
+        from shared.background_work import frame_team_and_name
+
+        assert frame_team_and_name(self._frame()) == (self.TEAM, self.MEMBER)
+
+    def test_frame_route_rejects_an_unsafe_team_name(self, config):
+        """GUARD. A traversal team name resolves nothing, even with a member name."""
+        from shared.background_work import frame_team_and_name
+
+        assert frame_team_and_name(self._frame(team="../" + self.TEAM)) == ("", "")
+
+    def test_frame_route_rejects_a_non_member_name(self, config):
+        """GUARD. A non-member name falls through to the registry route, which
+        names the real member for this session."""
+        import json
+
+        from shared.background_work import frame_team_and_name
+
+        registry = config / "pact-sessions" / ".teammate-registry.jsonl"
+        registry.parent.mkdir(parents=True)
+        registry.write_text(json.dumps({
+            "session_id": "frame-idle-session", "value": f"{self.MEMBER}@{self.TEAM}",
+        }) + "\n")
+        assert frame_team_and_name(self._frame(name="stranger")) == (self.TEAM, self.MEMBER)
+
+    def test_context_route_stays_first(self, config, pact_context):
+        """GUARD. A session with a PACT context resolves its context team, whatever
+        team the frame names."""
+        from shared.background_work import frame_team_and_name
+
+        pact_context(team_name="context-team", session_id="context-session")
+        assert frame_team_and_name(self._frame()) == ("context-team", "")

@@ -473,9 +473,9 @@ class TestMain:
 
         mock_tasks = tasks if tasks is not None else []
 
-        with patch("teammate_idle.get_team_name", return_value=team_name), \
+        with patch("teammate_idle.frame_team_and_name", return_value=(team_name, "")), \
              patch("sys.stdin", io.StringIO(json.dumps(input_data))), \
-             patch("teammate_idle.get_task_list", return_value=mock_tasks):
+             patch("teammate_idle.iter_team_task_jsons", return_value=mock_tasks):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -485,7 +485,7 @@ class TestMain:
         import io
         from teammate_idle import main
 
-        with patch("teammate_idle.get_team_name", return_value=""), \
+        with patch("teammate_idle.frame_team_and_name", return_value=("", "")), \
              patch("sys.stdin", io.StringIO("{}")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -511,9 +511,9 @@ class TestMain:
 
         tasks = [make_task(status="in_progress", owner="coder-a")]
 
-        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
+        with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
              patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "coder-a"}))), \
-             patch("teammate_idle.get_task_list", return_value=tasks), \
+             patch("teammate_idle.iter_team_task_jsons", return_value=tasks), \
              patch("teammate_idle.Path.home", return_value=tmp_path):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -531,9 +531,9 @@ class TestMain:
 
         tasks = [make_task(status="completed", owner="coder-a")]
 
-        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
+        with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
              patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "coder-a"}))), \
-             patch("teammate_idle.get_task_list", return_value=tasks), \
+             patch("teammate_idle.iter_team_task_jsons", return_value=tasks), \
              patch("teammate_idle.Path.home", return_value=tmp_path):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -548,7 +548,7 @@ class TestMain:
         import io
         from teammate_idle import main
 
-        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
+        with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
              patch("sys.stdin", io.StringIO("not json")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -559,13 +559,13 @@ class TestMain:
 class TestMainEdgeCases:
     """Additional edge cases for main() entry point."""
 
-    def test_get_task_list_returns_none(self):
+    def test_an_empty_team_task_list_exits(self):
         import io
         from teammate_idle import main
 
-        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
+        with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
              patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "coder-a"}))), \
-             patch("teammate_idle.get_task_list", return_value=None):
+             patch("teammate_idle.iter_team_task_jsons", return_value=[]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -583,9 +583,9 @@ class TestMainEdgeCases:
         idle_dir.mkdir(parents=True)
         write_idle_counts(str(idle_dir / "idle_counts.json"), {"coder-a": 4})
 
-        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
+        with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
              patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "coder-a"}))), \
-             patch("teammate_idle.get_task_list", return_value=tasks), \
+             patch("teammate_idle.iter_team_task_jsons", return_value=tasks), \
              patch("pathlib.Path.home", return_value=tmp_path):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -775,3 +775,166 @@ class TestMainDrivesTheUnflaggedAdvisoryThroughARealStore:
             "instead of exactly the third; an unreadable count must restart the "
             "ramp at zero, not stop it" % (fired,)
         )
+
+
+# ---------------------------------------------------------------------------
+# A separate-process teammate's own process: no PACT context
+# ---------------------------------------------------------------------------
+
+HOOK = Path(__file__).resolve().parents[1] / "hooks" / "teammate_idle.py"
+FRAME_TEAM = "session-tiframe"
+LEAD_SESSION = "ti-lead-session"
+TMUX_SESSION = "ti-tmux-session"
+MEMBER = "tmux-subject"
+FRAME_PROJECT = "/ti-frame/project"
+
+
+class TestIdleInASeparateProcessWithoutContext:
+    """`python3 hooks/teammate_idle.py` with no pact-session-context.json.
+
+    A separate-process teammate's TeammateIdle fires in its own process, which
+    has no PACT context, so the team comes from the frame's `team_name` and
+    `teammate_name`. No session registry entry is written, so only the frame
+    route can resolve it.
+    """
+
+    @pytest.fixture
+    def root(self, tmp_path):
+        return tmp_path
+
+    def _config(self, root, backend_type, lead_session=LEAD_SESSION):
+        config = root / ".claude"
+        (config / "teams" / FRAME_TEAM).mkdir(parents=True, exist_ok=True)
+        (config / "teams" / FRAME_TEAM / "config.json").write_text(json.dumps({
+            "leadSessionId": lead_session,
+            "members": [{"name": MEMBER, "agentId": f"{MEMBER}@{FRAME_TEAM}",
+                         "agentType": "pact-backend-coder", "backendType": backend_type}],
+        }), encoding="utf-8")
+        (config / "tasks" / FRAME_TEAM).mkdir(parents=True, exist_ok=True)
+        return config
+
+    def _task(self, config, status, covering_wait=False, registered_at=None):
+        task = {"id": "7", "status": status, "owner": MEMBER, "subject": "CODE: frame arm"}
+        if covering_wait:
+            task["metadata"] = {"intentional_wait": {
+                "reason": "awaiting_blocker_resolution", "expected_resolver": "lead",
+                "since": registered_at, "covers_since": registered_at,
+            }}
+        (config / "tasks" / FRAME_TEAM / "7.json").write_text(json.dumps(task), encoding="utf-8")
+
+    def _record(self, config):
+        from shared.background_work import iso_now
+
+        registered_at = iso_now()
+        (config / "teams" / FRAME_TEAM / "background_work.json").write_text(json.dumps({
+            "records": [{"agent_name": MEMBER, "session_id": TMUX_SESSION,
+                         "task_ids": ["7"], "registered_at": registered_at}],
+        }), encoding="utf-8")
+        return registered_at
+
+    def _idle(self, root, session_id=TMUX_SESSION) -> str:
+        """One TeammateIdle through the real hook process; returns the systemMessage."""
+        import os
+        import subprocess
+        import sys
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_CONFIG_DIR", "CLAUDE_PROJECT_DIR", "CLAUDE_CODE_SESSION_ID")}
+        env.update(HOME=str(root), CLAUDE_CONFIG_DIR=str(root / ".claude"),
+                   CLAUDE_PROJECT_DIR=FRAME_PROJECT)
+        frame = {"hook_event_name": "TeammateIdle", "session_id": session_id,
+                 "team_name": FRAME_TEAM, "teammate_name": MEMBER}
+        proc = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(frame),
+                              capture_output=True, text=True, timeout=30, env=env)
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout or "{}")
+        return out.get("systemMessage", "")
+
+    def _records(self, config):
+        path = config / "teams" / FRAME_TEAM / "background_work.json"
+        return json.loads(path.read_text(encoding="utf-8"))["records"]
+
+    def test_a_separate_process_idle_runs_the_teammate_layer_without_context(self, root):
+        """REVERT PROOF. The tmux-member shape: a covering wait discharges the
+        record, and no advisory, unflagged count or idle count is written."""
+        import teammate_idle
+
+        config = self._config(root, "tmux")
+        registered_at = self._record(config)
+        self._task(config, "in_progress", covering_wait=True, registered_at=registered_at)
+        message = self._idle(root)
+        assert self._records(config) == [], "the covering wait did not discharge the record"
+        assert teammate_idle.UNFLAGGED_ADVISORY not in message
+        unflagged = config / "teams" / FRAME_TEAM / "unflagged_background_idle.json"
+        assert not unflagged.exists() or MEMBER not in json.loads(unflagged.read_text())
+        assert not (config / "teams" / FRAME_TEAM / "idle_counts.json").exists()
+
+    def test_a_separate_process_idle_advises_on_the_third_unflagged_idle(self, root):
+        """REVERT PROOF. The in-process-member shape, where the stall split does
+        not skip: the advisory arrives on the third idle and the record gains
+        idled_at."""
+        import teammate_idle
+
+        config = self._config(root, "in-process")
+        self._record(config)
+        self._task(config, "in_progress")
+        messages = [self._idle(root) for _ in range(3)]
+        assert [teammate_idle.UNFLAGGED_ADVISORY in m for m in messages] == [False, False, True]
+        (record,) = self._records(config)
+        assert record.get("idled_at"), record
+
+    def test_the_teammate_process_never_emits_the_shutdown_recommendation(self, root):
+        """GUARD. Idle cleanup addresses the lead; in the teammate's own process
+        five idles on a completed task show neither shutdown text nor TaskStop."""
+        config = self._config(root, "tmux")
+        self._task(config, "completed")
+        messages = [self._idle(root) for _ in range(5)]
+        assert not any("shutting down" in m or "TaskStop" in m for m in messages), messages
+        assert not (config / "teams" / FRAME_TEAM / "idle_counts.json").exists()
+
+    def test_a_lead_with_a_missing_context_file_still_runs_the_idle_cleanup(self, root):
+        """The frame's session is the lead's, so this is the lead's process even
+        without a context file: the cleanup still runs. Red at HEAD, which exits
+        on the missing context, and red under a scope check that ignores the
+        session."""
+        from teammate_idle import write_idle_counts
+
+        config = self._config(root, "in-process")
+        self._task(config, "completed")
+        write_idle_counts(str(config / "teams" / FRAME_TEAM / "idle_counts.json"), {MEMBER: 4})
+        message = self._idle(root, session_id=LEAD_SESSION)
+        assert "ACTION REQUIRED" in message and f'TaskStop("{MEMBER}")' in message, message
+
+    def test_the_lead_process_idle_is_unchanged(self, root):
+        """GUARD. With the lead's context file present, idle cleanup behaves as
+        before for an in-process teammate."""
+        from shared.pact_context import project_slug
+        from teammate_idle import write_idle_counts
+
+        config = self._config(root, "in-process")
+        context = config / "pact-sessions" / project_slug(FRAME_PROJECT) / LEAD_SESSION
+        context.mkdir(parents=True)
+        (context / "pact-session-context.json").write_text(json.dumps({
+            "session_id": LEAD_SESSION, "project_dir": FRAME_PROJECT, "team_name": FRAME_TEAM,
+        }), encoding="utf-8")
+        self._task(config, "completed")
+        write_idle_counts(str(config / "teams" / FRAME_TEAM / "idle_counts.json"), {MEMBER: 4})
+        message = self._idle(root, session_id=LEAD_SESSION)
+        assert "ACTION REQUIRED" in message and f'TaskStop("{MEMBER}")' in message, message
+
+
+def test_teammate_idle_takes_its_team_from_frame_team_and_name():
+    """REVERT PROOF. main() takes its team from frame_team_and_name and its tasks
+    from iter_team_task_jsons, never from the context-only get_team_name or
+    get_task_list."""
+    import ast
+
+    tree = ast.parse(HOOK.read_text(encoding="utf-8"))
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    called = {
+        getattr(node.func, "id", getattr(node.func, "attr", None))
+        for node in ast.walk(main) if isinstance(node, ast.Call)
+    }
+    assert {"frame_team_and_name", "iter_team_task_jsons"} <= called, called
+    assert not called & {"get_team_name", "get_task_list"}, called
+

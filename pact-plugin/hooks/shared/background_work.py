@@ -1071,13 +1071,17 @@ def frame_team_and_name(input_data: Any) -> "tuple[str, str]":
     The team comes from the first route that resolves:
       1. `get_team_name()`, when the session has a PACT context: the lead, and
          in-process teammates, which share the lead's session.
-      2. The session registry entry for the frame's `session_id`.
+      2. The frame's own `team_name` and `teammate_name`, when that name is a
+         member of that team. A TeammateIdle frame carries both, and a
+         separate-process teammate's own process has no PACT context, so this
+         is how its idle hook finds its team.
+      3. The session registry entry for the frame's `session_id`.
          `session_registry.resolve` has already checked the name against that
          team's members. A separate-process teammate has no session context of
-         its own, so this is the route that finds its team.
-      3. An `agent_id` of the form `name@team` whose name is a member of that
+         its own, so this is the route its other hooks use.
+      4. An `agent_id` of the form `name@team` whose name is a member of that
          team.
-    The name comes from route 2 or 3. Route 1 returns "": a context names the
+    The name comes from routes 2 to 4. Route 1 returns "": a context names the
     session's team, not which member is acting in it.
     """
     try:
@@ -1090,6 +1094,10 @@ def frame_team_and_name(input_data: Any) -> "tuple[str, str]":
         team = get_team_name()
         if team:
             return team, ""
+        frame_team = input_data.get("team_name")
+        frame_name = input_data.get("teammate_name")
+        if isinstance(frame_team, str) and _names_a_member(frame_name, frame_team):
+            return frame_team, frame_name
         session_id = input_data.get("session_id")
         if isinstance(session_id, str) and session_id:
             name, _, team = (registry_resolve(session_id) or "").partition("@")

@@ -44,9 +44,9 @@ if str(_hooks_dir) not in sys.path:
 
 from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
-from shared.pact_context import get_team_name
+from shared.background_work import frame_team_and_name
 from shared.paths import get_claude_config_dir
-from shared.task_utils import get_task_list
+from shared.task_utils import iter_team_task_jsons
 from shared import state_file
 
 
@@ -70,7 +70,7 @@ def find_teammate_task(
     in_progress task if one exists, otherwise the most recently completed one.
 
     Args:
-        tasks: List of all tasks from get_task_list()
+        tasks: The team's tasks, as main() reads them
         teammate_name: Name of the idle teammate
 
     Returns:
@@ -415,6 +415,26 @@ def reset_idle_count(
     _atomic_update_idle_counts(idle_counts_path, _remove, root=root)
 
 
+def _in_teammate_process(input_data: dict, team_name: str) -> bool:
+    """True iff this call runs in a separate-process teammate's own process.
+
+    All three must hold: no PACT context (only the lead's session gets one), a
+    frame `session_id`, and a team-config `leadSessionId` that differs from it.
+    A lead whose context file is missing still matches its own session, so it
+    keeps the idle cleanup, and any value that cannot be read keeps it too.
+    """
+    if pact_context.get_team_name():
+        return False
+    session_id = input_data.get("session_id")
+    lead_session_id = pact_context._read_lead_session_id(team_name)
+    return (
+        isinstance(session_id, str)
+        and bool(session_id)
+        and bool(lead_session_id)
+        and session_id != lead_session_id
+    )
+
+
 def main():
     try:
         try:
@@ -424,7 +444,7 @@ def main():
             sys.exit(0)
 
         pact_context.init(input_data)
-        team_name = get_team_name()
+        team_name, _name = frame_team_and_name(input_data)
         if not team_name:
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
@@ -434,7 +454,7 @@ def main():
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
-        tasks = get_task_list()
+        tasks = list(iter_team_task_jsons(team_name))
         if not tasks:
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
@@ -443,9 +463,15 @@ def main():
         idle_counts_path = str(teams_root / team_name / "idle_counts.json")
 
         messages = []
-        cleanup_msg, should_shutdown = check_idle_cleanup(
-            tasks, teammate_name, idle_counts_path, root=teams_root
-        )
+        cleanup_msg, should_shutdown = None, False
+        # Idle cleanup addresses the lead ("Consider shutting down", TaskStop).
+        # In a separate-process teammate's own process this hook's output
+        # reaches the teammate itself, so only the teammate-facing Layer 2
+        # check below runs there.
+        if not _in_teammate_process(input_data, team_name):
+            cleanup_msg, should_shutdown = check_idle_cleanup(
+                tasks, teammate_name, idle_counts_path, root=teams_root
+            )
         if cleanup_msg:
             messages.append(cleanup_msg)
 

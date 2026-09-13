@@ -332,8 +332,8 @@ class TestTeammateIdleErrorOutput:
         })
 
         with patch("sys.stdin", io.StringIO(input_data)), \
-             patch("teammate_idle.get_team_name", return_value="pact-test"), \
-             patch("teammate_idle.get_task_list",
+             patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
+             patch("teammate_idle.iter_team_task_jsons",
                    side_effect=RuntimeError("test error")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -351,8 +351,8 @@ class TestTeammateIdleErrorOutput:
         })
 
         with patch("sys.stdin", io.StringIO(input_data)), \
-             patch("teammate_idle.get_team_name", return_value="pact-test"), \
-             patch("teammate_idle.get_task_list",
+             patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
+             patch("teammate_idle.iter_team_task_jsons",
                    side_effect=RuntimeError("boom")):
             with pytest.raises(SystemExit):
                 main()
@@ -786,7 +786,7 @@ class TestTeammateIdleSuppressOutput:
         """Missing team name outputs suppressOutput."""
         from teammate_idle import main
 
-        with patch("teammate_idle.get_team_name", return_value=""), \
+        with patch("teammate_idle.frame_team_and_name", return_value=("", "")), \
              patch("sys.stdin", io.StringIO("{}")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -799,7 +799,7 @@ class TestTeammateIdleSuppressOutput:
         """JSONDecodeError path outputs suppressOutput."""
         from teammate_idle import main
 
-        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
+        with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
              patch("sys.stdin", io.StringIO("bad json")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -813,9 +813,9 @@ class TestTeammateIdleSuppressOutput:
         from teammate_idle import main
 
         input_data = json.dumps({"teammate_name": "coder"})
-        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
+        with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch("teammate_idle.get_task_list", return_value=[]):
+             patch("teammate_idle.iter_team_task_jsons", return_value=[]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -828,9 +828,9 @@ class TestTeammateIdleSuppressOutput:
         from teammate_idle import main
 
         input_data = json.dumps({"teammate_name": ""})
-        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
+        with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch("teammate_idle.get_task_list", return_value=[{"id": "1"}]):
+             patch("teammate_idle.iter_team_task_jsons", return_value=[{"id": "1"}]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -845,9 +845,9 @@ class TestTeammateIdleSuppressOutput:
         # Completed task with no stall and below idle threshold -> no messages
         tasks = [{"id": "1", "subject": "test", "status": "completed", "owner": "other-agent"}]
         input_data = json.dumps({"teammate_name": "coder"})
-        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
+        with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch("teammate_idle.get_task_list", return_value=tasks), \
+             patch("teammate_idle.iter_team_task_jsons", return_value=tasks), \
              patch("pathlib.Path.home", return_value=tmp_path):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -861,9 +861,9 @@ class TestTeammateIdleSuppressOutput:
         from teammate_idle import main
 
         input_data = json.dumps({"teammate_name": "coder"})
-        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
+        with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch("teammate_idle.get_task_list",
+             patch("teammate_idle.iter_team_task_jsons",
                    side_effect=RuntimeError("boom")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
