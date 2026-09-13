@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/validate_handoff.py
-Summary: SubagentStop hook that validates PACT agent/teammate handoff format.
-Used by: Claude Code hooks.json SubagentStop hook (fires for both background
-         Task agents and Agent Teams teammates)
+Summary: SubagentStop hook. Validates the prose HANDOFF of Agent-tool PACT
+         subagents, and refuses an in-process teammate's turn end over its
+         unacknowledged background work (shared/turn_end_gate.py).
+Used by: Claude Code hooks.json, as the only SubagentStop hook, so each
+         subagent turn end gets one decision.
 
-Validates that PACT agents complete with proper handoff information
-(produced, decisions, next steps) in their transcript text.
+Validated population: Agent-tool subagents whose agent_type carries a PACT
+prefix must complete with proper handoff information (produced, decisions,
+next steps) in their transcript text. In-process Agent Teams teammates are
+excluded from that check on purpose: a teammate's HANDOFF is its task
+metadata, which the task gates validate, and its turn ends are ordinary
+idles, so a prose check would refuse every idle. Teammates get only the
+background-work check.
 
 Note: Task protocol compliance (status, metadata) is NOT validated here.
 Task state may still be in flux at SubagentStop time (agents self-manage
@@ -15,17 +22,17 @@ fires), so Task state cannot be reliably checked here.
 
 CANONICAL STRUCTURED HANDOFF (do NOT relocate this hook): this hook
 validates the PROSE form of a HANDOFF in the agent transcript and is a
-legacy, IN-PROCESS-only convenience. The STRUCTURED 6-field handoff lives in
+legacy convenience for Agent-tool subagents. The STRUCTURED 6-field handoff lives in
 `metadata.handoff`, and its PRESENCE is handled lead-side at acceptance-commit
 by `_emit_lead_side_agent_handoff` in task_lifecycle_gate.py — its
 emit-eligibility short-circuits on an absent handoff — and therefore fires in
 BOTH teammate modes (in-process AND separate-process). (A completion-time
 advisory branch that once emitted `handoff_missing` / `handoff_schema_invalid`
 there was permanently dormant under the bare-owner convention and has been
-retired.) This SubagentStop prose check does NOT fire for a separate-process
-(e.g. tmux/iTerm2) teammate — such a teammate fires its OWN Stop/SessionEnd,
-never a SubagentStop in the lead's process — so the prose refusal is simply
-absent there. That absence is intentional and acceptable: the lead-side
+retired.) This prose check runs for NO teammate: an in-process teammate is
+excluded in main (see _is_teammate_frame), and a separate-process (e.g.
+tmux/iTerm2) teammate fires its OWN Stop/SessionEnd, never a SubagentStop in
+the lead's process. That absence is intentional and acceptable: the lead-side
 presence handling above already covers both modes. Do NOT "restore" this prose
 check onto a teammate end-of-life surface believing validation was lost — it
 was not.
@@ -33,9 +40,12 @@ was not.
 Input: JSON from stdin with `last_assistant_message` (preferred, SDK v2.1.47+),
        `transcript` (fallback), `agent_type` (the role-class gate field, #812),
        `stop_hook_active` (loop guard, see main()), and `session_id` (telemetry
-       journal resolution, see main())
+       journal resolution, see main()); the background-work check also reads
+       `background_tasks`, `session_crons`, `agent_id`, `agent_transcript_path`
+       and `transcript_path`
 Output: JSON `{"decision": "block", "reason": ...}` refusing the stop when the
-        handoff is missing/low-quality; `systemMessage` warning instead when
+        handoff is missing/low-quality or a teammate's background job is
+        unacknowledged, with every reason in one block; `systemMessage` warning instead when
         `stop_hook_active` is set; `{"suppressOutput": true}` on every
         pass/skip path; an internal error prints `hook_error_json`'s
         `systemMessage` instead (fail-open, exit 0)
@@ -240,20 +250,99 @@ def is_pact_agent(agent_identifier: str) -> bool:
     return any(agent_identifier.startswith(prefix) for prefix in pact_prefixes)
 
 
+def _has_running_job(input_data: dict) -> bool:
+    """turn_end_gate.running_entries's test, without importing the gate."""
+    entries = input_data.get("background_tasks")
+    return isinstance(entries, list) and any(
+        isinstance(e, dict)
+        and e.get("status") == "running"
+        and isinstance(e.get("id"), str)
+        and e["id"]
+        for e in entries
+    )
+
+
+def _background_verdict(input_data: dict):
+    """The turn-end background-work verdict, or None.
+
+    The gate is imported only when a job is running, so an ordinary
+    SubagentStop pays nothing for it. Any error yields None, and the handoff
+    decision stands on its own.
+    """
+    if not _has_running_job(input_data):
+        return None
+    try:
+        from shared import turn_end_gate
+
+        return turn_end_gate.evaluate(input_data)
+    except Exception:
+        return None
+
+
+def _is_teammate_frame(input_data: dict) -> bool:
+    """True iff this SubagentStop belongs to an in-process Agent Teams teammate.
+
+    A teammate skips the prose HANDOFF check even when its agent_type carries
+    a PACT prefix: its HANDOFF is its task metadata, which the task gates
+    validate, and its turn ends are ordinary idles, so a prose check here
+    would refuse every idle. Any error yields False, which keeps the check.
+    """
+    try:
+        from shared import turn_end_gate
+
+        pact_context.init(input_data)
+        team = pact_context.get_team_name()
+        return bool(turn_end_gate.teammate_identity(input_data, team))
+    except Exception:
+        return False
+
+
+def _handoff_refusals(agent_type: str, transcript: str) -> tuple:
+    """(refusal texts, refusal classes) for a PACT agent's closing message."""
+    refusals = []
+    refusal_classes = []
+
+    # Skip transcript validation if very short (likely an error case)
+    if len(transcript) >= 100:
+        is_valid, missing, lossless_missing = validate_handoff(transcript)
+
+        if not is_valid and missing:
+            refusal_classes.append("missing_handoff")
+            refusals.append(
+                f"PACT Handoff Refusal: Agent '{agent_type}' completed without "
+                f"proper handoff. Missing: {', '.join(missing)}. "
+                "Include in your closing response: what was produced, key "
+                "decisions, and next steps."
+            )
+
+        if lossless_missing:
+            refusal_classes.append("lossless_fields")
+            refusals.append(
+                f"PACT Lossless Field Refusal: Agent '{agent_type}' HANDOFF "
+                f"section is missing: {', '.join(lossless_missing)}. "
+                "Add these subsections to the HANDOFF — they preserve "
+                "information that would otherwise be lost."
+            )
+
+    return refusals, refusal_classes
+
+
 def main():
     """
     Main entry point for the SubagentStop hook.
 
-    Reads agent/teammate transcript from stdin and validates handoff format
-    (prose) for PACT agents. Fires for both background Task agents and
-    Agent Teams teammates. Refuses the stop (decision: block) when the
-    handoff is missing or low-quality; the reason is fed back to the agent
-    so it completes the HANDOFF before stopping. When `stop_hook_active` is
-    set — the agent is already continuing from a stop-hook block — the
-    refusal degrades to a `systemMessage` warning so an agent that cannot
-    satisfy the check is not looped forever. The degrade also appends a
-    `handoff_refusal_degraded` event to the session journal (fail-open
-    telemetry — a journal failure never blocks the stop).
+    Reads the subagent's stop frame from stdin and makes ONE decision from two
+    checks: the prose HANDOFF check for PACT Agent-tool subagents, and the
+    background-work check (shared/turn_end_gate.py), which refuses an
+    in-process teammate's turn end over its unacknowledged recorded jobs.
+    Their reasons are joined into a single `decision: block`, fed back to the
+    agent. When `stop_hook_active` is set — the agent is already continuing
+    from a stop-hook block — the refusal degrades to a `systemMessage`
+    warning so an agent that cannot satisfy the check is not looped forever.
+    A degraded HANDOFF refusal also appends a `handoff_refusal_degraded`
+    event (fail-open telemetry — a journal failure never blocks the stop).
+    Every background verdict is journaled as `background_stop_gate`, and a
+    job is marked reported only when a block naming it is printed.
     """
     try:
         # Read input from stdin
@@ -267,47 +356,28 @@ def main():
         # Prefer last_assistant_message (SDK v2.1.47+), fall back to transcript
         transcript = input_data.get("last_assistant_message", "") or input_data.get("transcript", "")
         # #812 role-class gate: key on the harness-set ``agent_type``, NOT
-        # ``agent_id``. agent_id is ABSENT under the separate-process teammate
-        # model (v4.4.0), so the prior agent_id-keyed check was DORMANT for all
-        # teammates — this hook fires on SubagentStop (teammate-only) and the
-        # teammate's agent_type (e.g. "pact-preparer") matches the pact- prefix.
-        # The lead's "PACT:"-prefixed agent_type never reaches this hook
-        # (SubagentStop is teammate-only). The refusal below only fires for
-        # PACT agents; every other agent_type exits clean.
+        # ``agent_id``. The prose check below runs only for PACT agents, and
+        # never for an in-process teammate (see _is_teammate_frame).
         agent_type = input_data.get("agent_type", "")
 
-        # Only validate PACT agents
-        if not is_pact_agent(agent_type):
-            print(_SUPPRESS_OUTPUT)
-            sys.exit(0)
+        # Evaluated before the PACT-agent gate: an in-process teammate's frame
+        # can carry its member name rather than a PACT type, and it still gets
+        # the background-work check.
+        background = _background_verdict(input_data)
 
         refusals = []
         refusal_classes = []
+        # The teammate test imports the gate, so it runs only where its answer
+        # changes the output: for a frame the prose check would otherwise see.
+        if is_pact_agent(agent_type) and not _is_teammate_frame(input_data):
+            refusals, refusal_classes = _handoff_refusals(agent_type, transcript)
 
-        # Skip transcript validation if very short (likely an error case)
-        if len(transcript) >= 100:
-            is_valid, missing, lossless_missing = validate_handoff(transcript)
+        reasons = list(refusals)
+        if background is not None and background.reason:
+            reasons.append(background.reason)
 
-            if not is_valid and missing:
-                refusal_classes.append("missing_handoff")
-                refusals.append(
-                    f"PACT Handoff Refusal: Agent '{agent_type}' completed without "
-                    f"proper handoff. Missing: {', '.join(missing)}. "
-                    "Include in your closing response: what was produced, key "
-                    "decisions, and next steps."
-                )
-
-            if lossless_missing:
-                refusal_classes.append("lossless_fields")
-                refusals.append(
-                    f"PACT Lossless Field Refusal: Agent '{agent_type}' HANDOFF "
-                    f"section is missing: {', '.join(lossless_missing)}. "
-                    "Add these subsections to the HANDOFF — they preserve "
-                    "information that would otherwise be lost."
-                )
-
-        if refusals:
-            detail = " | ".join(refusals)
+        if reasons:
+            detail = " | ".join(reasons)
             if input_data.get("stop_hook_active"):
                 # Loop guard: the agent is already continuing from a stop-hook
                 # block. Refusing again can loop an agent that cannot satisfy
@@ -326,16 +396,17 @@ def main():
                 # absent, append_event returns False on any error, and the
                 # try/except covers anything past those guards — telemetry
                 # never breaks the exit-0 contract.
-                try:
-                    pact_context.init(input_data)
-                    append_event(make_event(
-                        "handoff_refusal_degraded",
-                        agent_type=agent_type,
-                        detail=detail,
-                        classes=refusal_classes,
-                    ))
-                except Exception:
-                    pass
+                if refusals:
+                    try:
+                        pact_context.init(input_data)
+                        append_event(make_event(
+                            "handoff_refusal_degraded",
+                            agent_type=agent_type,
+                            detail=" | ".join(refusals),
+                            classes=refusal_classes,
+                        ))
+                    except Exception:
+                        pass
             else:
                 # Platform-recognized SubagentStop refusal shape: top-level
                 # decision/reason on stdout with exit 0; reason is fed back to
@@ -343,6 +414,15 @@ def main():
                 print(json.dumps({"decision": "block", "reason": detail}))
         else:
             print(_SUPPRESS_OUTPUT)
+
+        if background is not None:
+            from shared import turn_end_gate
+
+            # mark_told acts only on a verdict that blocks, and such a verdict
+            # always reaches the block print above: under stop_hook_active the
+            # gate has already turned it into allow_loop_guard.
+            turn_end_gate.mark_told(background)
+            turn_end_gate.write_trace(background)
 
         sys.exit(0)
 

@@ -348,10 +348,12 @@ COVERED_L2 = {
     # exit(2) (fail-LOUD), so they are L2-only / never-L3 (no live-probe).
     "merge_guard_pre": "test_merge_guard_seam_integration.py",
     "merge_guard_post": "test_merge_guard_seam_integration.py",
-    # validate_handoff's exit-0/stdout contract is seam-independent, but its
-    # degrade-path handoff_refusal_degraded telemetry is fail-open (silent on
-    # loss), so the journal seam gets a real composition test: real init ->
-    # session-dir resolution -> real append -> read_events over a tmp root.
+    # validate_handoff's degrade-path handoff_refusal_degraded telemetry is
+    # fail-open (silent on loss), so the journal seam gets a real composition
+    # test: real init -> session-dir resolution -> real append -> read_events
+    # over a tmp root. Its turn-end background block, a seam-dependent decision
+    # since it was composed in, is driven for real by
+    # test_validate_handoff_turn_end.py.
     "validate_handoff": "test_validate_handoff_integration.py",
     # track_files joined SEAM_DEPENDENT_HOOKS with Layer 1 of the
     # background-work registry (task-dir resolution + team config). It goes in
@@ -363,6 +365,10 @@ COVERED_L2 = {
     # reading team config and the session registry. COVERED, not BACKLOG, for
     # the same reason as track_files above.
     "wait_filler_gate": "test_launch_advisory_population.py",
+    # stop_background_gate joined SEAM_DEPENDENT_HOOKS with the Stop turn-end
+    # gate. Its non-mocked L2 test drives the production hook against a real
+    # team config, task store, background-work registry and session registry.
+    "stop_background_gate": "test_stop_background_gate.py",
 }
 
 # Documented forward-only BACKLOG: seam hooks whose non-mocked L2 test is a named

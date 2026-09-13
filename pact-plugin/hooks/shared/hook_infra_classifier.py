@@ -76,6 +76,11 @@ SEAM_DEPENDENT_HOOKS: frozenset[str] = frozenset({
     # session registry to tell a teammate from an Agent-tool subagent. That path
     # never denies and fails open, so it is L2-only.
     "wait_filler_gate",
+    # stop_background_gate: the Stop turn-end gate resolves the team from the
+    # session context or the session registry, reads the task store and the
+    # background-work registry, and writes a told-once file and a journal
+    # trace. Its block fails silent on a broken seam: see L3_LIVE_PROBE_HOOKS.
+    "stop_background_gate",
 })
 
 # Hooks confirmed to FAIL SILENTLY on a broken seam (a consequential effect that
@@ -92,9 +97,17 @@ SEAM_DEPENDENT_HOOKS: frozenset[str] = frozenset({
 # broken team_name/task-read seam, read_task_json returns None -> the gate
 # returns False -> that emit silently no-ops. The b2 emit is teammateMode/
 # timing-sensitive, the residual gap an L2 test cannot close.
+#
+# stop_background_gate and validate_handoff joined with the turn-end gate. Each
+# prints a block refusing a turn end over unacknowledged background work, and
+# decides it by resolving the team, the task store and the background-work
+# registry (validate_handoff also reads the platform's subagent metadata). On a
+# broken seam the role resolves to nothing and the stop is allowed with no
+# error, so the block silently never fires. validate_handoff was promoted from
+# L3_CANDIDATE_HOOKS for that reason.
 L3_LIVE_PROBE_HOOKS: frozenset[str] = frozenset({
     "missed_wake_scan", "teammate_idle", "agent_handoff_emitter",
-    "task_lifecycle_gate",
+    "task_lifecycle_gate", "stop_background_gate", "validate_handoff",
 })
 
 # Seam-dependent hooks ASSESSED in the CODE-phase fails-silent check and HELD at
@@ -105,12 +118,10 @@ L3_LIVE_PROBE_HOOKS: frozenset[str] = frozenset({
 #   - peer_inject:     a silent peer-context injection failure is consequential
 #                      but more VISIBLE (the spawned subagent misbehaves), so it
 #                      does not meet the silent-inert bar; watch-candidate.
-#   - validate_handoff: its exit-0/stdout contract never depends on a seam —
-#                      the degrade path's journal append (handoff_refusal_degraded)
-#                      is fail-open telemetry, so it cannot go inert the
-#                      inert-ship way; held at L2.
+# (validate_handoff was held here until its turn-end background block made it
+#  fail silently on a broken seam; it is now in L3_LIVE_PROBE_HOOKS.)
 L3_CANDIDATE_HOOKS: frozenset[str] = frozenset({
-    "file_tracker", "peer_inject", "validate_handoff",
+    "file_tracker", "peer_inject",
 })  # assessed, held at L2-only
 
 # dispatch_gate + bootstrap_gate are fail-CLOSED (their decision-domain
@@ -262,9 +273,18 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "session_journal", "session_registry", "session_state",
     }),
     "validate_handoff": frozenset({
-        "constants", "error_output", "pact_context", "paths",
-        "session_journal", "session_registry", "session_state",
-    }),
+        "background_launch", "background_work", "constants", "error_output",
+        "intentional_wait", "pact_context", "paths", "session_journal",
+        "session_registry", "session_state", "state_file", "task_utils",
+        "turn_end_gate",
+    }),  # regenerated from the live derivation: the SubagentStop background
+         # check imports turn_end_gate, which reaches background_work and
+         # state_file and their helpers.
+    "stop_background_gate": frozenset({
+        "background_launch", "background_work", "constants", "intentional_wait",
+        "pact_context", "paths", "session_journal", "session_registry",
+        "session_state", "state_file", "task_utils", "turn_end_gate",
+    }),  # regenerated from the live derivation.
     "merge_guard_pre": frozenset({
         "constants", "merge_guard_common", "pact_context", "paths",
         "session_journal", "session_registry", "session_state",
