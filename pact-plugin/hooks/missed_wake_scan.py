@@ -101,7 +101,7 @@ _MISSED_WAKE_REASON = "awaiting_lead_completion"
 _SURFACE_EVENTS = ("UserPromptSubmit", "SessionStart")
 
 
-def find_stale_missed_wakes(tasks: list) -> list:
+def find_stale_missed_wakes(tasks: list, now: "datetime | None" = None) -> list:
     """Return the tasks idling on awaiting_lead_completion past the staleness threshold.
 
     A task qualifies iff: status == "in_progress" AND metadata.intentional_wait
@@ -127,7 +127,7 @@ def find_stale_missed_wakes(tasks: list) -> list:
             continue
         if wait.get("reason") != _MISSED_WAKE_REASON:
             continue
-        if not wait_stale(wait):
+        if not wait_stale(wait, _now=now):
             continue
         stale.append(task)
     return stale
@@ -163,7 +163,7 @@ def _emitted_keys() -> set:
     return keys
 
 
-def emit_forensic(stale: list) -> None:
+def emit_forensic(stale: list, now: "datetime | None" = None) -> None:
     """Write a once-per-(task,since) forensic `missed_wake` journal event for each
     stale wait NOT already recorded (JOURNAL-READ dedup — no marker).
 
@@ -209,6 +209,8 @@ def emit_forensic(stale: list) -> None:
             if safe_subject:
                 fields["task_subject"] = safe_subject
             fields["reason"] = _MISSED_WAKE_REASON
+            if now is not None:
+                fields["ts"] = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             append_event(make_event("missed_wake", **fields))
             # Track within this fire so two stale waits sharing a (task_id, since)
             # — impossible in practice, but cheap — cannot double-emit.
@@ -296,7 +298,9 @@ def _unflagged_emitted_keys() -> set:
     return keys
 
 
-def find_stale_unflagged_background(team_name: str, tasks: "list | None" = None) -> list:
+def find_stale_unflagged_background(
+    team_name: str, tasks: "list | None" = None, now: "datetime | None" = None
+) -> list:
     """Records past their own staleness window. Never raises.
 
     SHARES A PROCESS WITH THE MISSED-WAKE ALARM, NOT A VOCABULARY. This keeps
@@ -319,12 +323,15 @@ def find_stale_unflagged_background(team_name: str, tasks: "list | None" = None)
 
         if tasks is None:
             tasks = get_task_list()
-        return [r for r in outstanding_unflagged(tasks, team_name) if lead_stale(r)]
+        return [
+            r for r in outstanding_unflagged(tasks, team_name, now=now)
+            if lead_stale(r, now=now)
+        ]
     except Exception:
         return []
 
 
-def emit_unflagged_forensic(stale: list) -> None:
+def emit_unflagged_forensic(stale: list, now: "datetime | None" = None) -> None:
     """Once-per-(agent, registered_at) forensic event. Best-effort, never raises."""
     try:
         if not stale or not get_journal_path():
@@ -348,6 +355,8 @@ def emit_unflagged_forensic(stale: list) -> None:
             command = record.get("command")
             if isinstance(command, str) and command:
                 payload["command"] = _sanitize_member_name(command)
+            if now is not None:
+                payload["ts"] = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             append_event(make_event(_UNFLAGGED_EVENT, **payload))
             emitted.add((agent, registered))
     except Exception:
@@ -398,7 +407,7 @@ def build_unflagged_surface(stale: list) -> "str | None":
     )
 
 
-def find_mutual_waits(tasks: list) -> list:
+def find_mutual_waits(tasks: list, now: "datetime | None" = None) -> list:
     """Distinct owners each idling on `peer`, all aged past the threshold.
 
     WHAT THIS DETECTS IS A CANDIDATE, NOT A PROVEN CYCLE, AND THE SURFACE MUST
@@ -453,7 +462,7 @@ def find_mutual_waits(tasks: list) -> list:
             continue
         # Reuse wait_stale for BOTH the threshold and the staleness logic,
         # evaluated against the anchor rather than the re-stampable clock.
-        if not wait_stale({**wait, "since": anchor.isoformat()}):
+        if not wait_stale({**wait, "since": anchor.isoformat()}, _now=now):
             continue
         waiting.append(task)
     owners = {
@@ -491,7 +500,9 @@ def build_mutual_surface(mutual: list) -> "str | None":
     )
 
 
-def find_unanchored_waits(tasks: list, team_name: "str | None" = None) -> list:
+def find_unanchored_waits(
+    tasks: list, team_name: "str | None" = None, now: "datetime | None" = None
+) -> list:
     """Unanchored waits that are ACTIVELY DISCHARGING a record on the fallback.
 
     Agents are instructed to write `covers_since` on every SET, so a wait
@@ -532,7 +543,9 @@ def find_unanchored_waits(tasks: list, team_name: "str | None" = None) -> list:
     except Exception:
         return []
     try:
-        records = load_records_for_discharge(team_name) if team_name else []
+        records = (
+            load_records_for_discharge(team_name, now=now) if team_name else []
+        )
     except Exception:
         return []
     if not records:
@@ -592,7 +605,7 @@ def build_unanchored_surface(unanchored: list) -> "str | None":
     )
 
 
-def run_surface(input_data: dict) -> "str | None":
+def run_surface(input_data: dict, now: "datetime | None" = None) -> "str | None":
     """Lead-side missed-wake surface + forensic emit. is_lead-gated; teammate /
     plain frames no-op (the structural fail-safe default).
 
@@ -600,9 +613,13 @@ def run_surface(input_data: dict) -> "str | None":
     wait exists, else None. The SAME live re-scan feeds both the forensic emit and
     the surface text — current-stale-state is the dedup, so the notice
     auto-clears when the lead resolves the wait.
+
+    `now` is the one clock every alarm below is measured against. Omitted, it
+    is read from the wall clock here, once; tests pass a fixed time.
     """
     if not is_lead(input_data):
         return None
+    now = now if now is not None else datetime.now(timezone.utc)
 
     # INDEPENDENT ALARMS SHARING ONE SUBPROCESS. Each is computed and
     # emitted separately, and NONE early-returns on another's absence — an
@@ -615,13 +632,13 @@ def run_surface(input_data: dict) -> "str | None":
 
     tasks = get_task_list()
     if tasks:
-        stale = find_stale_missed_wakes(tasks)
+        stale = find_stale_missed_wakes(tasks, now=now)
         if stale:
-            emit_forensic(stale)
-            surface = build_surface(stale)
+            emit_forensic(stale, now=now)
+            surface = build_surface(stale, now=now)
             if surface:
                 parts.append(surface)
-        mutual = find_mutual_waits(tasks)
+        mutual = find_mutual_waits(tasks, now=now)
         if mutual:
             surface = build_mutual_surface(mutual)
             if surface:
@@ -632,15 +649,15 @@ def run_surface(input_data: dict) -> "str | None":
 
         team_name = get_team_name()
         if team_name:
-            unflagged = find_stale_unflagged_background(team_name, tasks)
+            unflagged = find_stale_unflagged_background(team_name, tasks, now=now)
             if unflagged:
-                emit_unflagged_forensic(unflagged)
+                emit_unflagged_forensic(unflagged, now=now)
                 surface = build_unflagged_surface(unflagged)
                 if surface:
                     parts.append(surface)
             # Needs the team name to read the registry, so it lives here rather
             # than with the task-only alarms above.
-            unanchored = find_unanchored_waits(tasks, team_name)
+            unanchored = find_unanchored_waits(tasks, team_name, now=now)
             if unanchored:
                 surface = build_unanchored_surface(unanchored)
                 if surface:
