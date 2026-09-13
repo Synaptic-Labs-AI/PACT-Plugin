@@ -61,7 +61,11 @@ BLOCKED_IMPORTS = ("pysqlite3", "sqlite_vec", "model2vec")
 # interpreter start-up. That places the hook genuinely ON THE IMPORT PATH,
 # before the CLI runs, which is where a real offending library would sit.
 _BLOCKER_SOURCE = '''\
+import os
 import sys
+
+if os.environ.get("PACT_TEST_CLOCK_SHIFT_SECONDS"):
+    import clock_shift_shim  # noqa: F401  (chains the clock-shift sitecustomize this file shadows)
 
 _BLOCKED = {blocked!r}
 

@@ -44,6 +44,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "pact-coding-st
 # Add plugin-level scripts to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
+# The clock-shift census; tests/ is on sys.path from the insert above.
+from clock_shift import clock_shift_census  # noqa: E402
+
 
 # Name of the environment variable that relocates the PACT memory store.
 #
@@ -108,6 +111,15 @@ def pytest_configure(config):
     # would point the whole suite at the very store this exists to protect. The
     # fail direction of `setdefault` here is ALLOW, and it is silent.
     os.environ[_MEMORY_DIR_ENV] = _SESSION_MEMORY_DIR
+
+    # CLOCK-SHIFT CENSUS. Inert unless PACT_TEST_CLOCK_SHIFT_SECONDS is set; the
+    # sweep command is in tests/clock_shift/clock_shift_shim.py.
+    clock_shift_census.install()
+
+
+def pytest_sessionfinish(session):
+    """Fail a clock-shift sweep in which a child ran on the real clock."""
+    clock_shift_census.finish(session)
 
 
 @pytest.fixture
