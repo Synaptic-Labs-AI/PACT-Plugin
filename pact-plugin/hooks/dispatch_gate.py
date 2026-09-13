@@ -293,7 +293,7 @@ def _team_member_names(team_name: str) -> set[str]:
 
 # ─── pure rule-eval composition (testable without stdin/stdout) ────────────
 
-# Rule ⑥'s refusal in a teammate's own process. That process never has
+# Rule ⑥'s refusal in a registered teammate's own process. That process never has
 # session context, so the context-failure suffix and the stale-session hint
 # are withheld: both would send its reader to repair the lead's state.
 _TEAMMATE_SPAWN_REFUSAL = (
@@ -303,13 +303,30 @@ _TEAMMATE_SPAWN_REFUSAL = (
 )
 
 
+def _resolves_a_registered_team(input_data: dict) -> bool:
+    """True iff the frame's own session resolves a team membership.
+
+    A teammate in its own process is registered in its team; a solo specialist
+    session is not. The import lives here so a failure to import or resolve
+    counts as not registered, and rule ⑥ keeps its bootstrap text.
+    """
+    try:
+        from shared.background_work import frame_team_and_name
+
+        team, _name = frame_team_and_name(input_data)
+        return bool(team)
+    except Exception:
+        return False
+
+
 def evaluate_dispatch(
     tool_input: dict, input_data: dict | None = None,
 ) -> tuple[str, str | None, str | None]:
     """Single composition function. Returns ``(decision, reason, rule)``.
 
     ``input_data`` is the full hook frame when the caller has it. Rule ⑥ reads
-    its role to word the refusal; without it, rule ⑥ keeps the bootstrap text.
+    its role and registered team membership to word the refusal; without it,
+    rule ⑥ keeps the bootstrap text.
 
     decision ∈ {``"ALLOW"``, ``"DENY"``, ``"WARN"``}.
     reason: human-readable explanation (None for ALLOW).
@@ -433,7 +450,8 @@ def evaluate_dispatch(
     session_team = pact_context.get_team_name()
     if not session_team:
         if (isinstance(input_data, dict)
-                and pact_context.classify_session_role(input_data) == "teammate"):
+                and pact_context.classify_session_role(input_data) == "teammate"
+                and _resolves_a_registered_team(input_data)):
             return ("DENY", _TEAMMATE_SPAWN_REFUSAL, "team_name_unavailable")
         message = ("PACT dispatch_gate: session team_name is unavailable "
                    "(pact-session-context.json missing or unreadable). "

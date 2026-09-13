@@ -209,9 +209,10 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "session_registry", "session_state", "task_utils",
     }),
     "dispatch_gate": frozenset({
-        "constants", "dispatch_helpers", "pact_config", "pact_context", "paths",
-        "session_journal", "session_registry", "session_state",
-        "stale_session", "task_utils",
+        "background_launch", "background_work", "constants",
+        "dispatch_helpers", "intentional_wait", "pact_config", "pact_context",
+        "paths", "session_journal", "session_registry", "session_state",
+        "stale_session", "state_file", "task_utils",
     }),  # pact_config reached here via the *_MODE resolver edge
          # (dispatch_gate -> shared.pact_config.get_enum for
          # PACT_DISPATCH_INLINE_MISSION_MODE); pact_config is stdlib-only, so it
@@ -219,6 +220,10 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # stale_session reached here via the deny-message self-diagnosis
          # (dispatch_gate -> shared.stale_session.detect_stale_session_block);
          # its own transitive pact_context edge was already in this closure.
+         # background_work reached via rule ⑥'s registered-teammate check
+         # (dispatch_gate -> shared.background_work.frame_team_and_name, imported
+         # inside a function); background_launch, intentional_wait and
+         # state_file are its transitive edges.
     "task_lifecycle_gate": frozenset({
         "agent_handoff_marker", "canonical_json", "constants",
         "dispatch_helpers", "handoff_schema",

@@ -362,10 +362,15 @@ def test_team_name_unavailable_deny_unaugmented_when_no_mismatch(
 def test_team_name_unavailable_teammate_deny_carries_no_stale_hint(
     tmp_path, monkeypatch, capsys
 ):
-    """A teammate in its own process never matches the lead session recorded in
-    CLAUDE.md, so a stale hint on its rule-⑥ deny would always be false."""
+    """A registered teammate in its own process never matches the lead session
+    recorded in CLAUDE.md, so a stale hint on its rule-⑥ deny would always be false."""
     _setup_empty_team_name(monkeypatch, tmp_path)
-    _seed_team_with_lead(tmp_path, _TEAM, _MODES[1][1])
+    _seed_team_with_lead(tmp_path, _TEAM, _MODES[1][1], members=("tmux-subject",))
+    registry = tmp_path / ".claude" / "pact-sessions" / ".teammate-registry.jsonl"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    line = {"session_id": _LIVE_SESSION_ID, "value": f"tmux-subject@{_TEAM}"}
+    registry.write_text(json.dumps(line) + "\n", encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
     _write_project_claude_md(monkeypatch, tmp_path, _RECORDED_STALE_ID)
     frame = {**_make_input(), "agent_type": "pact-test-engineer"}
 

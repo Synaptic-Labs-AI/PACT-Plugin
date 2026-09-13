@@ -10,8 +10,8 @@ Rule coverage:
     length/NFKC/regex/reserved-token violations → DENY
   - specialist_not_registered — subagent_type not in agent registry → DENY
   - team_name_unavailable — SSOT session team empty (fail-closed) → DENY.
-    A teammate's frame gets the ask-the-team-lead text instead of the
-    bootstrap text, with no context or stale-session suffix.
+    A registered teammate's frame gets the ask-the-team-lead text instead of
+    the bootstrap text, with no context or stale-session suffix.
     (#979: team_name_required + team_name_mismatch were DROPPED — the
     Agent(team_name=) arg is platform-ignored, so the session team is
     resolved solely from the SSOT, never matched against the spawn arg.)
@@ -533,9 +533,10 @@ _TEAMMATE_REFUSAL = (
 )
 
 
-def _deny_with_no_context(monkeypatch, tmp_path, capsys, frame):
+def _deny_with_no_context(monkeypatch, tmp_path, capsys, frame, registered_as=""):
     """Run the gate with no context file and the plugin root from the env, so
-    rule ⑥ fires. Returns the deny reason."""
+    rule ⑥ fires. ``registered_as`` is the member name the frame's session is
+    registered under, or "" for no registry entry. Returns the deny reason."""
     import shared.pact_context as ctx_module
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -546,7 +547,14 @@ def _deny_with_no_context(monkeypatch, tmp_path, capsys, frame):
     monkeypatch.setattr(ctx_module, "init", lambda input_data: None)
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
-    _seed_team(tmp_path, members=(), tasks=((_NAME, "pending"),))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    members = (registered_as,) if registered_as else ()
+    _seed_team(tmp_path, members=members, tasks=((_NAME, "pending"),))
+    if registered_as:
+        registry = tmp_path / ".claude" / "pact-sessions" / ".teammate-registry.jsonl"
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        line = {"session_id": frame["session_id"], "value": f"{registered_as}@{_TEAM}"}
+        registry.write_text(json.dumps(line) + "\n", encoding="utf-8")
 
     code, out = _run_main(frame, capsys)
     assert code == 2
@@ -566,10 +574,39 @@ def test_rule_6_tells_a_teammate_to_ask_the_team_lead(tmp_path, monkeypatch, cap
     frame = captured_pretooluse_teammate_tmux()
     frame.update(tool_name="Agent", tool_input=_make_input()["tool_input"])
 
-    reason = _deny_with_no_context(monkeypatch, tmp_path, capsys, frame)
+    reason = _deny_with_no_context(
+        monkeypatch, tmp_path, capsys, frame, registered_as="tmux-subject"
+    )
     assert reason == _TEAMMATE_REFUSAL
     rows = [e for e in captured if e.get("type") == "dispatch_decision"]
     assert [(row["decision"], row["rule"]) for row in rows] == [("DENY", "team_name_unavailable")]
+
+
+def test_rule_6_keeps_the_bootstrap_text_for_a_solo_specialist(tmp_path, monkeypatch, capsys):
+    """A specialist's own main session has a teammate role but no registered team."""
+    frame = {**_make_input(), "agent_type": "pact-backend-coder"}
+
+    reason = _deny_with_no_context(monkeypatch, tmp_path, capsys, frame)
+    assert "Re-run /PACT:bootstrap" in reason
+    assert str(tmp_path / "pact-session-context.json") in reason
+
+
+def test_rule_6_keeps_the_bootstrap_text_when_team_resolution_raises(
+    tmp_path, monkeypatch, capsys
+):
+    import shared.background_work as background_work
+
+    def _raise(_input_data):
+        raise RuntimeError("team resolution failed")
+
+    monkeypatch.setattr(background_work, "frame_team_and_name", _raise)
+    frame = captured_pretooluse_teammate_tmux()
+    frame.update(tool_name="Agent", tool_input=_make_input()["tool_input"])
+
+    reason = _deny_with_no_context(
+        monkeypatch, tmp_path, capsys, frame, registered_as="tmux-subject"
+    )
+    assert "Re-run /PACT:bootstrap" in reason
 
 
 def test_rule_6_keeps_the_bootstrap_text_for_a_frame_with_no_role(tmp_path, monkeypatch, capsys):
