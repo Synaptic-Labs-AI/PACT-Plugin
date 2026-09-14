@@ -47,10 +47,25 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 # The clock-shift census; tests/ is on sys.path from the insert above.
 from clock_shift import clock_shift_census  # noqa: E402
 
-# These copy functions from other shared modules at first import; loading them here keeps a test patch from being copied.
+# These copy names from shared modules at first import; loading them here keeps a test patch from being copied.
+# tests/test_conftest_import_guard.py derives which modules need a line here.
+import agent_handoff_emitter  # noqa: E402, F401
+import bootstrap_gate  # noqa: E402, F401
+import bootstrap_marker_writer  # noqa: E402, F401
+import file_tracker  # noqa: E402, F401
+import merge_guard_post  # noqa: E402, F401
+import merge_guard_pre  # noqa: E402, F401
+import missed_wake_scan  # noqa: E402, F401
+import postcompact_archive  # noqa: E402, F401
+import session_end  # noqa: E402, F401
+import session_init  # noqa: E402, F401
 import shared.background_work  # noqa: E402, F401
 import shared.task_metadata_snapshot  # noqa: E402, F401
 import shared.task_utils  # noqa: E402, F401
+import task_lifecycle_gate  # noqa: E402, F401
+import teammate_idle  # noqa: E402, F401
+import track_files  # noqa: E402, F401
+import validate_handoff  # noqa: E402, F401
 
 
 # Name of the environment variable that relocates the PACT memory store.

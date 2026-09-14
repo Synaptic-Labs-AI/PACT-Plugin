@@ -615,6 +615,57 @@ def test_rule_6_keeps_the_bootstrap_text_for_a_frame_with_no_role(tmp_path, monk
     assert str(tmp_path / "pact-session-context.json") in reason
 
 
+def test_rule_6_tells_a_registered_teammate_to_ask_the_team_lead_in_a_fresh_process(tmp_path):
+    """A fresh interpreter runs hooks/dispatch_gate.py as __main__ for a registered
+    separate-process teammate with no context file.
+
+    Rule ⑥ imports background_work inside a function and treats any failure
+    there as "not registered", so a broken import silently swaps in the bootstrap
+    text while the verdict stays DENY. The arms above run after conftest has
+    already imported background_work, so they cannot see that break. The gate's
+    journal needs a session directory this process does not have, so the harness
+    records the journaled decision itself.
+    """
+    import os
+    import subprocess
+    import sys
+
+    plugin = Path(__file__).resolve().parents[1]
+    hook = plugin / "hooks" / "dispatch_gate.py"
+    _seed_team(tmp_path, members=("tmux-subject",), tasks=((_NAME, "pending"),))
+    frame = captured_pretooluse_teammate_tmux()
+    frame.update(tool_name="Agent", tool_input=_make_input()["tool_input"])
+    registry = tmp_path / ".claude" / "pact-sessions" / ".teammate-registry.jsonl"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(
+        json.dumps({"session_id": frame["session_id"], "value": f"tmux-subject@{_TEAM}"}) + "\n",
+        encoding="utf-8",
+    )
+    harness = (
+        "import runpy, sys\n"
+        f"sys.path.insert(0, {str(plugin / 'hooks')!r})\n"
+        "import shared.session_journal as journal\n"
+        "def record(event, *_):\n"
+        "    print('JOURNALED', event.get('decision'), event.get('rule'), file=sys.stderr)\n"
+        "    return True\n"
+        "journal.append_event_checked = record\n"
+        "print('COLD', 'shared.background_work' not in sys.modules, file=sys.stderr)\n"
+        f"runpy.run_path({str(hook)!r}, run_name='__main__')\n"
+    )
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+    env.update(HOME=str(tmp_path), CLAUDE_CONFIG_DIR=str(tmp_path / ".claude"),
+               CLAUDE_PLUGIN_ROOT=str(plugin))
+
+    proc = subprocess.run([sys.executable, "-c", harness], input=json.dumps(frame),
+                          capture_output=True, text=True, timeout=60, env=env)
+
+    assert "COLD True" in proc.stderr, proc.stderr
+    assert proc.returncode == 2, proc.stderr
+    reason = json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+    assert reason == _TEAMMATE_REFUSAL
+    assert "JOURNALED DENY team_name_unavailable" in proc.stderr, proc.stderr
+
+
 # =============================================================================
 # no_task_assigned — spawn before TaskCreate
 # =============================================================================
