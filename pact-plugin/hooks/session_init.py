@@ -2081,16 +2081,25 @@ def main():
                 # the top of this function). Interpolating it blind would emit an
                 # instruction naming an empty directory — no error, just a
                 # confidently wrong sentence — so fall back to the briefing.
+                #
+                # A session-scoped summary that no transcript attributes to this
+                # session is parked and never written to that path, so the file
+                # can also be absent without an archive. The lead then continues
+                # from the summary in its own context. The instruction never
+                # names a parked file: it may hold a teammate's summary. The root
+                # singleton is written directly, so only an archive empties it.
                 if session_dir:
                     _summary_path = Path(session_dir) / COMPACT_SUMMARY_NAME
                     _archive_clause = (
-                        f'(if it is gone, the secretary archived it into '
-                        f'{session_dir} as compact-summary-<timestamp>.txt)'
+                        f'(if it is absent, either the secretary archived it into '
+                        f'{session_dir} as compact-summary-<timestamp>.txt, or it was '
+                        f'not attributed to this session and you continue from the '
+                        f'summary already in your context)'
                     )
                 else:
                     _summary_path = get_compact_summary_path()
                     _archive_clause = (
-                        '(if it is gone, the secretary archived it into the '
+                        '(if it is absent, the secretary archived it into the '
                         'session directory and names the path in its briefing)'
                     )
                 context_parts.insert(0, (

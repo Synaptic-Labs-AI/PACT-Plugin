@@ -223,10 +223,13 @@ def test_an_unmatched_summary_younger_than_expiry_stays_staged(tree, seconds):
     assert tree.attributions() == []
 
 
-def test_an_expired_summary_becomes_the_summary_file_when_there_is_none(tree):
-    tree.stage()
+def test_an_expired_summary_is_parked_even_when_there_is_no_summary_file(tree):
+    """A summary no transcript records may be a teammate's, so it never becomes
+    compact-summary.txt, even when that file does not exist."""
+    ns = staged_ns(tree.stage())
     assert tree.settle(later(co.EXPIRE_S + 1)) == [(co.UNKNOWN, co.EXPIRED)]
-    assert tree.canonical.read_text(encoding="utf-8") == SUMMARY
+    assert not tree.canonical.exists()
+    assert (tree.session / f"compact-summary.unattributed-{ns}.txt").read_text(encoding="utf-8") == SUMMARY
 
 
 def test_an_expired_summary_never_replaces_an_existing_summary_file(tree):

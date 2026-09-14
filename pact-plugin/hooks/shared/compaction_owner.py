@@ -29,8 +29,9 @@ The lead's transcript is the staged frame's transcript_path, and a teammate's is
 <transcript dir>/<session_id>/subagents/agent-*.jsonl. A match in the lead's
 promotes the summary to compact-summary.txt. A match in a teammate's keeps it
 beside that file, which stays as it is. A summary no transcript records within
-EXPIRE_S becomes compact-summary.txt only when there is none, because a
-teammate's summary must never replace the lead's.
+EXPIRE_S is parked as unattributed and never becomes compact-summary.txt, even
+when there is none, because it may be a teammate's; the lead still holds its own
+summary in its context.
 """
 
 from __future__ import annotations
@@ -231,13 +232,12 @@ def _resolve_claim(folder, pending, claim, staged_ns, wait_s, now, monotonic, sl
         return _STOP
     basis = EXPIRED if verdict is None else CONTENT
     verdict = verdict or UNKNOWN
-    canonical = folder / COMPACT_SUMMARY_NAME
     if record is None:
         os.replace(claim, folder / f"{_UNATTRIBUTED_PREFIX}{staged_ns}.txt")
     elif verdict == TEAMMATE:
         _write_atomic(folder / f"{_TEAMMATE_PREFIX}{staged_ns}.txt", record["summary"])
-    elif verdict == LEAD or not canonical.exists():
-        _write_atomic(canonical, record["summary"])
+    elif verdict == LEAD:
+        _write_atomic(folder / COMPACT_SUMMARY_NAME, record["summary"])
     else:
         _write_atomic(folder / f"{_UNATTRIBUTED_PREFIX}{staged_ns}.txt", record["summary"])
     fields = {"verdict": verdict, "basis": basis}

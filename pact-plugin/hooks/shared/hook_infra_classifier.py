@@ -114,8 +114,8 @@ SEAM_DEPENDENT_HOOKS: frozenset[str] = frozenset({
 # session_init, postcompact_archive and bootstrap_gate settle staged compaction
 # summaries by reading the platform's transcripts. On a broken seam, such as a
 # changed transcript layout, every staged summary expires unmatched: it is
-# journaled, but a lead summary is then parked beside an existing
-# compact-summary.txt instead of replacing it, and the lead reads the older file.
+# journaled as {unknown, expired}, but the lead's own summary is then parked as
+# unattributed and never becomes compact-summary.txt.
 L3_LIVE_PROBE_HOOKS: frozenset[str] = frozenset({
     "missed_wake_scan", "teammate_idle", "agent_handoff_emitter",
     "task_lifecycle_gate", "stop_background_gate", "validate_handoff",

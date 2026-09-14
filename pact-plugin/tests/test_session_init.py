@@ -3422,7 +3422,7 @@ class TestRecoveryFrameNamesAReadableSurface:
             re.compile(
                 r"\S After bootstrap, recover session state: "
                 r"\(1\) Read .+? for prior context "
-                r"\(if it is gone, .+?\), "
+                r"\(if it is absent, .+?\), "
                 r"\(2\) Run TaskList to find in-progress work, "
                 r"\(3\) read the task files of in-progress tasks for "
                 r"details \(TaskGet does not surface metadata\)\. \S"
