@@ -329,6 +329,64 @@ def test_a_summary_another_settler_claimed_first_is_skipped(tree, monkeypatch):
     assert tree.names() == ["compact-summary.txt", "session-journal.jsonl"]
 
 
+@pytest.mark.parametrize("error", [OSError("no space left on device"), KeyboardInterrupt()],
+                         ids=["os-error", "keyboard-interrupt"])
+def test_anything_raised_after_the_claim_returns_it_to_pending(tree, monkeypatch, error):
+    pending = tree.stage()
+    tree.summary(tree.lead)
+    real_write = co._write_atomic
+
+    def fail(path, text):
+        raise error
+
+    monkeypatch.setattr(co, "_write_atomic", fail)
+    if isinstance(error, Exception):
+        assert tree.settle(later(9)) == []
+    else:
+        with pytest.raises(KeyboardInterrupt):
+            tree.settle(later(9))
+    assert tree.names() == [pending.name]
+    monkeypatch.setattr(co, "_write_atomic", real_write)
+    assert tree.settle(later(9)) == [(co.LEAD, co.CONTENT)]
+    assert tree.canonical.read_text(encoding="utf-8") == SUMMARY
+
+
+def _claim(pending, claimed_at, pid=4242):
+    """Rename a pending the way a settler claims it, stamped at claimed_at."""
+    claim_ns = int(claimed_at.timestamp()) * 1_000_000_000 + claimed_at.microsecond * 1_000
+    claim = pending.with_name(f"{pending.name}.claimed-{pid}-{claim_ns}")
+    os.replace(pending, claim)
+    return claim
+
+
+def test_a_claim_older_than_fresh_is_returned_and_settles_on_the_next_pass(tree):
+    """A settler killed while it held a claim leaves the claim behind."""
+    pending = tree.stage()
+    tree.summary(tree.lead)
+    _claim(pending, STAGED + timedelta(seconds=9))
+    assert tree.settle(later(9 + co.FRESH_S + 1)) == [(co.LEAD, co.CONTENT)]
+    assert tree.canonical.read_text(encoding="utf-8") == SUMMARY
+    assert not list(tree.session.glob("*.claimed-*"))
+
+
+@pytest.mark.parametrize("stamp", ["4242", "4242-", "4242-soon", "pid-123"],
+                         ids=["no-claim-time", "empty-claim-time", "word-claim-time", "word-pid"])
+def test_a_claim_whose_name_does_not_parse_counts_as_stale(tree, stamp):
+    pending = tree.stage()
+    tree.summary(tree.lead)
+    os.replace(pending, pending.with_name(f"{pending.name}.claimed-{stamp}"))
+    assert tree.settle(later(9)) == [(co.LEAD, co.CONTENT)]
+    assert not list(tree.session.glob("*.claimed-*"))
+
+
+def test_a_claim_younger_than_fresh_is_left_to_its_settler(tree):
+    pending = tree.stage()
+    tree.summary(tree.lead)
+    claim = _claim(pending, STAGED + timedelta(seconds=9))
+    assert tree.settle(later(9 + co.FRESH_S - 1)) == []
+    assert tree.names() == [claim.name]
+
+
 def test_a_record_that_lands_during_the_poll_is_found(tree):
     tree.stage()
     clock = later(2, on_sleep={2: lambda: tree.summary(tree.lead)})

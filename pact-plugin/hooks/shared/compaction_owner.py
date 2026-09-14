@@ -75,6 +75,7 @@ TEAMMATE, LEAD, UNKNOWN = "teammate", "lead", "unknown"
 CONTENT, EXPIRED = "content", "expired"
 
 _PENDING_PREFIX = "compact-summary.pending-"
+_CLAIM_MARK = ".claimed-"
 _TEAMMATE_PREFIX = "compact-summary.teammate-"
 _UNATTRIBUTED_PREFIX = "compact-summary.unattributed-"
 _STOP = object()
@@ -135,20 +136,25 @@ def settle(
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> "list[tuple[str, str]]":
-    """Resolve the staged summaries in session_dir, oldest first. Never raises.
+    """Resolve the staged summaries in session_dir, oldest first.
 
     Returns the (verdict, basis) of each summary resolved in this pass. A pass
-    stops at the first summary that is unmatched and younger than EXPIRE_S, so a
-    newer one is never resolved ahead of it. wait_s bounds a poll for a summary
-    younger than FRESH_S whose record has not landed yet. Keeps the newest
-    KEEP_SETTLED teammate and unattributed summaries and removes older ones.
-    On an exception, the files stay where they are.
+    first returns to pending every claim older than FRESH_S, measured from the
+    claim time in its name, and every claim whose name does not parse, so a
+    settler that was killed cannot strand a summary. It then stops at the first
+    summary that is unmatched and younger than EXPIRE_S, so a newer one is never
+    resolved ahead of it. wait_s bounds a poll for a summary younger than FRESH_S
+    whose record has not landed yet. Keeps the newest KEEP_SETTLED teammate and
+    unattributed summaries and removes older ones. Anything raised after a claim,
+    BaseException included, first returns that claim to pending. An Exception is
+    then swallowed; any other BaseException, such as KeyboardInterrupt, is raised.
     """
     resolved: "list[tuple[str, str]]" = []
     if not session_dir:
         return resolved
     try:
         folder = Path(session_dir)
+        _reclaim_stale(folder, now)
         for staged_ns, pending in _stamped(folder, _PENDING_PREFIX, ".json"):
             outcome = _settle_one(folder, pending, staged_ns, wait_s, now, monotonic, sleep)
             if outcome is _STOP:
@@ -164,12 +170,49 @@ def settle(
     return resolved
 
 
+def _reclaim_stale(folder: Path, now: Callable[[], datetime]) -> None:
+    """Return to pending each claim older than FRESH_S, or whose name does not parse.
+
+    A claim is named <pending>.claimed-<pid>-<claim_ns>. Its age is measured from
+    claim_ns, never from the file's mtime, which the claiming rename keeps from
+    the pending file. A live claim is held for at most READ_WAIT_S plus one capped
+    read pass, far below FRESH_S.
+    """
+    now_ns = _epoch_ns(now())
+    for claim in folder.glob(f"{_PENDING_PREFIX}*.json{_CLAIM_MARK}*"):
+        pending_name, _, stamp = claim.name.partition(_CLAIM_MARK)
+        pid, _, claim_ns = stamp.partition("-")
+        if pid.isdigit() and claim_ns.isdigit() and abs(now_ns - int(claim_ns)) <= FRESH_S * 1_000_000_000:
+            continue
+        with contextlib.suppress(OSError):
+            os.replace(claim, folder / pending_name)
+
+
+def _epoch_ns(moment: datetime) -> int:
+    return int(moment.timestamp()) * 1_000_000_000 + moment.microsecond * 1_000
+
+
 def _settle_one(folder, pending, staged_ns, wait_s, now, monotonic, sleep):
-    claim = pending.with_name(f"{pending.name}.claimed-{os.getpid()}")
+    """Claim one staged summary and resolve it; None when another settler holds it.
+
+    The claim renames the pending to <pending>.claimed-<pid>-<claim_ns>. Anything
+    raised after the claim, BaseException included, returns the claim to its
+    pending name and is re-raised.
+    """
+    claim = pending.with_name(f"{pending.name}{_CLAIM_MARK}{os.getpid()}-{_epoch_ns(now())}")
     try:
         os.replace(pending, claim)
     except FileNotFoundError:
         return None
+    try:
+        return _resolve_claim(folder, pending, claim, staged_ns, wait_s, now, monotonic, sleep)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.replace(claim, pending)
+        raise
+
+
+def _resolve_claim(folder, pending, claim, staged_ns, wait_s, now, monotonic, sleep):
     record = _load(claim)
     verdict = _owner(record)
     if verdict is None and record is not None and wait_s > 0 and _age(record, now) < FRESH_S:
