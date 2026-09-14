@@ -525,6 +525,16 @@ def test_a_summary_that_mentions_the_analysis_closing_tag_still_matches(tree):
     assert tree.settle(later(9)) == [(co.TEAMMATE, co.CONTENT)]
 
 
+def test_a_body_quoting_the_summary_closing_tag_early_still_matches(tree):
+    """A body that quotes </summary> near its start leaves a shortest reading too
+    short to match, so the longest reading of the summary block is tried too."""
+    body = "1. Primary Request: say why a reply quoting the literal </summary> tag early still parses. " + BODY
+    assert len(body.split("</summary>")[0].strip()) < co.MIN_BODY_CHARS
+    tree.stage(_analysed("Working notes that are not kept.", body=body))
+    tree.summary(tree.lead, body=body)
+    assert tree.settle(later(9)) == [(co.LEAD, co.CONTENT)]
+
+
 _EXCERPT = ("An earlier compaction listed the files read, the counts sent to the team-lead "
             "and the tasks still pending, one item per line. ") * 3
 
@@ -546,7 +556,7 @@ def test_a_quoted_excerpt_in_a_teammate_transcript_does_not_take_the_lead_summar
     """A candidate counts only directly after a summary record's first "Summary:"
     line. The teammate's record is on disk first; the lead's lands during the poll."""
     summary, body = _quoting_summary()
-    assert co._summary_bodies(summary)[1:] == (_EXCERPT.strip(),), "the excerpt must be a candidate"
+    assert _EXCERPT.strip() in co._summary_bodies(summary), "the excerpt must be a candidate"
     tree.stage(summary)
     teammate_record(tree)
     clock = later(2, on_sleep={2: lambda: tree.summary(tree.lead, body=body)})

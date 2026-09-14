@@ -17,10 +17,9 @@ from a hook that runs after the record has landed.
 
 The transcript first drops the <analysis> block, then renders the text inside
 <summary> stripped, after a "Summary:" line, with runs of newlines collapsed to
-one blank line, so both sides are compared in that form. An analysis that
-quotes its own closing tag has no single end, so the body is taken under both
-the shortest and the longest reading of the block, and a record holding either
-one matches. A body counts only in a record marked isCompactSummary and only
+one blank line, so both sides are compared in that form. Either block may quote
+its own closing tag and then has no single end, so each is read at its shortest
+and at its longest, and a record holding any resulting body matches. A body counts only in a record marked isCompactSummary and only
 directly after its first "Summary:" line, so text quoted in an ordinary message,
 or part-way through another summary, never matches. Each transcript is read
 from its size at stage time, so a summary recorded before the compaction never
@@ -80,7 +79,11 @@ _TEAMMATE_PREFIX = "compact-summary.teammate-"
 _UNATTRIBUTED_PREFIX = "compact-summary.unattributed-"
 _STOP = object()
 
-_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
+# The shortest and the longest reading of the summary block.
+_SUMMARY_RES = (
+    re.compile(r"<summary>(.*?)</summary>", re.DOTALL),
+    re.compile(r"<summary>(.*)</summary>", re.DOTALL),
+)
 # The shortest and the longest reading of the analysis block.
 _ANALYSIS_RES = (
     re.compile(r"<analysis>.*?</analysis>", re.DOTALL),
@@ -310,19 +313,21 @@ def _owner(record: "dict | None") -> "str | None":
 def _summary_bodies(summary: Any) -> "tuple[str, ...]":
     """The text inside <summary>...</summary> once the analysis block is removed.
 
-    One body per reading of the analysis block, without duplicates or bodies too
-    short to match on; empty when there is none.
+    One body per reading of the analysis block and of the summary block, without
+    duplicates or bodies too short to match on; empty when there is none.
     """
     if not isinstance(summary, str):
         return ()
     bodies: list[str] = []
     for analysis in _ANALYSIS_RES:
-        match = _SUMMARY_RE.search(analysis.sub("", summary))
-        if match is None:
-            continue
-        body = _collapse_newlines(match.group(1).strip())
-        if len(body) >= MIN_BODY_CHARS and body not in bodies:
-            bodies.append(body)
+        remainder = analysis.sub("", summary)
+        for reading in _SUMMARY_RES:
+            match = reading.search(remainder)
+            if match is None:
+                continue
+            body = _collapse_newlines(match.group(1).strip())
+            if len(body) >= MIN_BODY_CHARS and body not in bodies:
+                bodies.append(body)
     return tuple(bodies)
 
 
