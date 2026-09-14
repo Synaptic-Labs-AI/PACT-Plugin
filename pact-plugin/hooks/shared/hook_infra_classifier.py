@@ -168,7 +168,7 @@ L3_CANDIDATE_HOOKS: frozenset[str] = frozenset({
 # derivation).
 _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     "missed_wake_scan": frozenset({
-        "background_launch", "background_work",
+        "background_launch", "background_work", "compaction_owner",
         "constants", "intentional_wait", "pact_context",
         "paths",
         "session_journal", "session_registry", "session_state", "state_file",

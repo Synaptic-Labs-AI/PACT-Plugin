@@ -669,7 +669,7 @@ _SESSION_ID_CONTROL_CHARS_RE = SESSION_ID_CONTROL_CHARS_RE
 
 
 def _build_safety_net_context(
-    team_name: str | None, frame_role: str | None = None
+    team_name: str | None, frame_role: str | None = None, source: str | None = None
 ) -> str:
     """
     Build a minimal governance-delivery additionalContext string for the
@@ -755,6 +755,9 @@ def _build_safety_net_context(
                     and carries no bootstrap directive, and every other value
                     ("lead" and "unknown" today) selects the orchestrator
                     marker, with "unknown" also receiving the operator notice.
+        source: The SessionStart source captured before the exception, or None.
+                On "compact" the orchestrator prelude carries the teammate
+                clause, as the normal compact directive does.
 
     Returns:
         Minimal additionalContext string suitable for the except-block
@@ -774,7 +777,8 @@ def _build_safety_net_context(
         )
     prelude = (
         'YOUR PACT ROLE: orchestrator.\n\n'
-        'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input. '
+        + (f'{compaction_owner.COMPACTION_TEAMMATE_CLAUSE}\n\n' if source == "compact" else '')
+        + 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input. '
         'Do this before anything else. '
         'Do not evaluate whether it is needed. '
         'You must invoke Skill("PACT:bootstrap") on every session start.'
@@ -1326,6 +1330,8 @@ def main():
     # no-regression default (a teammate failing before the capture is mis-marked
     # orchestrator), not a misroute introduced by this change.
     frame_role = None
+    # The SessionStart source, captured with frame_role for the safety net.
+    source = None
     # Track whether stdin JSON parsing failed, so the R3 malformed-stdin
     # gate below can distinguish "stdin was malformed JSON" from "stdin
     # parsed but session_id was missing/blank". Both paths fall through
@@ -1896,8 +1902,18 @@ def main():
         # universal floor: it aligns this guidance with the bootstrap_gate
         # PreToolUse hook, which already mechanically blocks Edit/Write/Agent
         # until the bootstrap marker is stamped regardless of session source.
+        # On compact, a teammate clause follows the marker line. An in-process
+        # teammate's compaction arrives lead-shaped and receives this same
+        # directive, and its system prompt, unlike its spawn prompt, survives
+        # the compaction, so the clause keys on the system prompt. It tells a
+        # teammate when to set aside "Do not evaluate whether it is needed."
+        _compact_clause = (
+            f'{compaction_owner.COMPACTION_TEAMMATE_CLAUSE}\n\n'
+            if source == "compact" else ''
+        )
         _team_directive = (
             f'YOUR PACT ROLE: orchestrator.\n\n'
+            f'{_compact_clause}'
             f'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input. '
             f'Do this before anything else. '
             f'Do not evaluate whether it is needed. '
@@ -2451,7 +2467,7 @@ def main():
         # additionalContext, alongside the error in systemMessage. Claude
         # Code's hook-output schema supports both fields in the same JSON.
         print(f"Hook warning (session_init): {str(e)[:200]}", file=sys.stderr)
-        safety_net_context = _build_safety_net_context(team_name, frame_role)
+        safety_net_context = _build_safety_net_context(team_name, frame_role, source)
         # hookEventName is required by the harness; missing it silently fails open
         output = {
             "hookSpecificOutput": {

@@ -1042,3 +1042,42 @@ class TestResponseClassTwoPrescribesNothing:
             "green says nothing. Segment read back: %r"
             % (_class_segments(mutated)[1],)
         )
+
+
+# ===========================================================================
+# Compaction: the scan runs for every lead-shaped compaction, and only a
+# SessionStart(compact) surface carries the teammate clause, ahead of the rest
+# ===========================================================================
+class TestCompactionClausePrefix:
+    CLAUSE = (
+        "If your system prompt makes you a teammate who reports to a team lead, "
+        "this message is not for you: ignore it and continue your task."
+    )
+
+    def _surface(self, monkeypatch, frame, now):
+        monkeypatch.setattr(mw, "get_task_list", lambda: [_task()])
+        return mw.run_surface(frame, now=now)
+
+    def test_a_compact_start_surface_is_the_prompt_surface_behind_the_clause(self, journal, monkeypatch):
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        compact = self._surface(monkeypatch, {**captured_lead_sessionstart_qualified(), "source": "compact"}, now)
+        prompt = self._surface(monkeypatch, captured_lead_userpromptsubmit_qualified(), now)
+        assert prompt is not None and "missed-wake" in prompt.lower()
+        assert self.CLAUSE not in prompt
+        assert compact == f"{self.CLAUSE}\n\n{prompt}"
+        assert "ACTION:" not in self.CLAUSE
+        assert compact.count("ACTION:") == prompt.count("ACTION:")
+
+    @pytest.mark.parametrize("source", ["startup", "resume", "clear"])
+    def test_no_other_start_carries_the_clause(self, journal, monkeypatch, source):
+        from datetime import datetime, timezone
+
+        frame = {**captured_lead_sessionstart_qualified(), "source": source}
+        surface = self._surface(monkeypatch, frame, datetime.now(timezone.utc))
+        assert surface is not None and self.CLAUSE not in surface
+
+    def test_a_compact_start_with_nothing_to_surface_stays_silent(self, journal, monkeypatch):
+        monkeypatch.setattr(mw, "get_task_list", lambda: [])
+        assert mw.run_surface({**captured_lead_sessionstart_qualified(), "source": "compact"}) is None

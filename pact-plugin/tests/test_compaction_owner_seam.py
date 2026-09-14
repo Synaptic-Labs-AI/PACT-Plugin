@@ -11,8 +11,9 @@ summary file settles it through bootstrap_gate. Nothing is patched.
 REVERT CARDINALITY, measured on this file alone: with the settle call removed
 from bootstrap_gate's main, both arms fail (2 failed); with postcompact_archive
 writing compact-summary.txt directly instead of staging, both arms fail (2
-failed); with build_context_cache recording now on a compaction, the teammate
-arm fails and the lead arm passes (1 failed).
+failed); with the clause removed from session_init's compact directive, or with
+build_context_cache recording now on a compaction, the teammate arm fails and
+the lead arm passes (1 failed each).
 """
 
 import json
@@ -32,6 +33,10 @@ from shared.pact_context import project_slug
 
 HOOKS = Path(__file__).resolve().parents[1] / "hooks"
 SID = "4ec31948-bbe5-4ef4-841c-631d1ef31e61"
+CLAUSE = (
+    "If your system prompt makes you a teammate who reports to a team lead, "
+    "this message is not for you: ignore it and continue your task."
+)
 STARTED_AT = "2026-01-01T00:00:00+00:00"
 
 
@@ -106,8 +111,9 @@ def test_a_teammate_compaction_never_replaces_the_lead_summary(tmp_path):
     session = Session(tmp_path)
     post = captured_compaction_teammate_postcompact()
 
-    session.compact(captured_compaction_teammate_sessionstart(), post)
+    context = session.compact(captured_compaction_teammate_sessionstart(), post)
 
+    assert context.startswith(f"YOUR PACT ROLE: orchestrator.\n\n{CLAUSE}\n\n")
     assert json.loads(session.context.read_text(encoding="utf-8"))["started_at"] == STARTED_AT
     assert session.canonical.read_text(encoding="utf-8") == "THE LEAD'S OWN SUMMARY"
     [pending] = session.staged()

@@ -7316,12 +7316,18 @@ class TestAdoptOldSlugSessionDir:
 
 
 class TestCompactionSeats:
-    """session_init on a compaction. The recorded start is kept, and staged
-    summaries are settled before either clear. Nothing here decides whose
-    compaction it was."""
+    """session_init on a compaction. The directive carries the teammate clause on
+    the line after the marker, the recorded start is kept, and staged summaries
+    are settled before either clear. Nothing here decides whose compaction it was."""
 
     SID = "4ec31948-bbe5-4ef4-841c-631d1ef31e61"
     LEAD = "PACT:pact-orchestrator"
+    CLAUSE = (
+        "If your system prompt makes you a teammate who reports to a team lead, "
+        "this message is not for you: ignore it and continue your task."
+    )
+    MARKER = "YOUR PACT ROLE: orchestrator.\n\n"
+    INVOKE = 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.'
 
     def _project(self, tmp_path):
         project = tmp_path / "cmp-lead"
@@ -7333,7 +7339,7 @@ class TestCompactionSeats:
 
         return _build_session_path(project_slug(str(self._project(tmp_path))), self.SID)
 
-    def _run(self, monkeypatch, tmp_path, *, source="compact"):
+    def _run(self, monkeypatch, tmp_path, *, source="compact", patches=()):
         from contextlib import ExitStack
 
         import session_init
@@ -7351,12 +7357,43 @@ class TestCompactionSeats:
         with ExitStack() as stack:
             for target in quiet:
                 stack.enter_context(patch(target, return_value=None))
+            for target, kwargs in patches:
+                stack.enter_context(patch(target, **kwargs))
             stack.enter_context(patch("sys.stdin", io.StringIO(json.dumps(payload))))
             out = stack.enter_context(patch("sys.stdout", new_callable=io.StringIO))
             with pytest.raises(SystemExit) as exc:
                 session_init.main()
         assert exc.value.code == 0
         return json.loads(out.getvalue())
+
+    def test_the_clause_is_the_module_constant(self):
+        from shared import compaction_owner
+
+        assert compaction_owner.COMPACTION_TEAMMATE_CLAUSE == self.CLAUSE
+
+    def test_the_compact_directive_carries_the_clause_on_the_line_after_the_marker(self, monkeypatch, tmp_path):
+        context = self._run(monkeypatch, tmp_path)["hookSpecificOutput"]["additionalContext"]
+        assert context.startswith(f"{self.MARKER}{self.CLAUSE}\n\n{self.INVOKE}")
+        assert context.count(self.CLAUSE) == 1
+
+    @pytest.mark.parametrize("source", ["startup", "resume", "clear"])
+    def test_no_other_source_carries_the_clause(self, monkeypatch, tmp_path, source):
+        context = self._run(monkeypatch, tmp_path, source=source)["hookSpecificOutput"]["additionalContext"]
+        assert context.startswith(f"{self.MARKER}{self.INVOKE}")
+        assert self.CLAUSE not in context
+
+    @pytest.mark.parametrize("source", ["compact", "startup"])
+    def test_the_safety_net_carries_the_clause_only_on_compact(self, monkeypatch, tmp_path, source):
+        output = self._run(monkeypatch, tmp_path, source=source, patches=[
+            ("session_init._adopt_old_slug_session_dir", {"side_effect": RuntimeError("boom")}),
+        ])
+        context = output["hookSpecificOutput"]["additionalContext"]
+        assert "boom" in output["systemMessage"]
+        if source == "compact":
+            assert context.startswith(f"{self.MARKER}{self.CLAUSE}\n\n{self.INVOKE}")
+        else:
+            assert context.startswith(f"{self.MARKER}{self.INVOKE}")
+            assert self.CLAUSE not in context
 
     def test_a_compaction_keeps_the_recorded_start_and_rewrites_both_files_byte_identically(self, monkeypatch, tmp_path):
         self._run(monkeypatch, tmp_path, source="startup")
