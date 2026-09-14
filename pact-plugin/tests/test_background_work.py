@@ -823,6 +823,26 @@ class TestTheAgentIdShapeDecidesBeforeTheTypeChecks:
         assert [m["name"] for m in _iter_members("..")] == ["claude"], "control: the path resolves"
         assert agent_type_names_a_member("claude", "..", agent_id=f"aclaude-{HEX16}") is False
 
+    @pytest.mark.parametrize(
+        "team, config_under_root",
+        [(".", "teams/config.json"), ("..", "config.json"), ("a/b", "teams/a/b/config.json"),
+         ("", None)],
+        ids=["dot", "dotdot", "slash", "empty"],
+    )
+    def test_the_type_checks_refuse_an_unsafe_team(self, team, config_under_root):
+        """REVERT PROOF for the non-empty names. Each resolves to a real config
+        naming the member, so only the team-name check refuses it. An empty
+        team reads no config at all, so that case is a guard, not a proof."""
+        import json
+        from shared.pact_context import _iter_members
+
+        if config_under_root:
+            path = self.root / config_under_root
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"members": [{"name": "claude"}]}))
+            assert [m["name"] for m in _iter_members(team)] == ["claude"], "control: the path resolves"
+        assert agent_type_names_a_member("claude", team) is False
+
     @pytest.mark.parametrize("agent_id", [{"id": "x"}, 12345, [f"a{HEX16}"]])
     def test_a_non_string_id_keeps_the_type_checks(self, agent_id):
         assert agent_type_names_a_member("claude", TEAM, agent_id=agent_id) is True

@@ -1061,6 +1061,10 @@ def agent_type_names_a_member(
             return False
         if re.fullmatch(re.escape(f"a{agent_type}-") + "[0-9a-f]{16}", agent_id):
             return _names_a_member(agent_type, team_name)
+    from .session_state import is_safe_path_component
+
+    if not is_safe_path_component(team_name):
+        return False
     if agent_type in _PLATFORM_AGENT_TYPES:
         return False
     if agent_type in _known_agent_types():
